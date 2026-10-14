@@ -141,6 +141,10 @@ import { ChatMessageHistoryControls } from "./ChatMessageHistoryControls";
 import { useStudioSearchReturn } from "./StudioSearchReturnContext";
 import { useOctoSilenceHint } from "./useOctoSilenceHint";
 import { ChatTypingRows } from "./ChatTypingRows";
+import { useChatRunStop } from "./useChatRunStop";
+import { resolveChatRunStopTargets } from "./chatRunStopTargets";
+import { ChatRunStopNoticeProvider } from "./ChatRunStopNotice";
+import { useChatRunStopContinuation } from "./useChatRunStopContinuation";
 import {
   AssistantMessageEntry,
   extractChatAttachments,
@@ -3405,6 +3409,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     }
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") {
+        event.preventDefault();
         closeMessageMenu();
       }
     };
@@ -3423,6 +3428,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     }
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") {
+        event.preventDefault();
         setImageLightbox(null);
       }
     };
@@ -4294,7 +4300,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     })();
   }, [currentRuntime?.isLikelyLocal, ensureDesktopRuntime, ensureHostedRuntime]);
 
-  const { handleCancelActiveTerminalCommand, submissionPending, submitMessage } = useChatSubmitFlow({
+  const { submissionPending, submitMessage } = useChatSubmitFlow({
     activeConversationEntry,
     activeConversationId,
     activeConversationMessages: Array.isArray(activeConversation?.messages) ? activeConversation.messages : [],
@@ -5178,6 +5184,36 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   ]);
   onGithubImportSuccessRef.current = dismissGettingStarted;
 
+  // Cancellation authority comes from controller job state, not a preview's
+  // animation, activity timeout, command history, or lingering typing snapshot.
+  const stopConversationId = activeConversationEntry?.controllerId ?? null;
+  const stopTargets = useMemo(() => resolveChatRunStopTargets(
+    Object.values(runs ?? {}).filter((run) => run.conversationId === stopConversationId),
+    messages,
+    { getAgentDisplayName: (handle) => agentByHandle.get(handle)?.displayName },
+  ), [agentByHandle, messages, runs, stopConversationId]);
+  const canStopRuns = projectCapabilitiesResolved === true && canWriteProject === true
+    && !projectAccessPending && Boolean(currentUserId) && !jobThread;
+  const runStop = useChatRunStop({
+    conversationId: stopConversationId,
+    targets: stopTargets,
+    canStop: canStopRuns,
+    viewerUserId: currentUserId,
+    active: chatVisible && !jobThread,
+    escapeBlocked: Boolean(messageMenu || imageLightbox || invitePrompt || connectSheetOpen
+      || addMenuOpen || skillsImport.addSkillModalOpen || agentProfileModal || browserVisible),
+  });
+  const runStopNoticeContext = useChatRunStopContinuation({
+    conversationId: stopConversationId,
+    viewerUserId: currentUserId,
+    humanLabelByUserId,
+    canWrite: canStopRuns,
+    busy: stopTargets.length > 0 || activeConversationRuns.length > 0,
+    messages,
+    queuedSends: combinedChatSendQueue,
+    submitMessage,
+  });
+
   const {
     composerActionIconClass,
     composerGhostActionClass,
@@ -5500,7 +5536,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     defaultPlanExpanded={false}
                     onRequestActions={handleMessageActionsRequest}
                     onRequestActionsAtPoint={handleMessageActionsAtPoint}
-                    onCancelTerminalCommand={handleCancelActiveTerminalCommand}
                     conversationLocalId={activeConversationId ?? null}
                     conversationControllerId={activeConversationEntry?.controllerId ?? null}
                     mentionableAgentHandles={mentionableAgentHandles}
@@ -5771,7 +5806,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                   onOpenImage={openImageLightbox}
                   onRequestActions={handleMessageActionsRequest}
                   onRequestActionsAtPoint={handleMessageActionsAtPoint}
-                  onCancelTerminalCommand={handleCancelActiveTerminalCommand}
                   onMessageContextMenu={handleMessageContextMenu}
                 />,
               );
@@ -5960,6 +5994,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   </>;
 
   return (
+    <ChatRunStopNoticeProvider value={runStopNoticeContext}>
     <RunFailureRetryProvider value={runFailureRetryContextValue}>
     <ConversationFileContext.Provider value={openSurfaceFile}>
     <ChatRuntimeActivityContext.Provider value={chatRuntimeActivityValue}>
@@ -6019,6 +6054,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       <CredentialsConnectModal {...gettingStartedConnectModalProps} />
 
       <ChatComposerSurface
+        composerRunStopController={runStop}
         viewNavigation={hasComposerViewNavigation ? conversationWorkspace ? <ConversationWorkspaceViews placement="composer" /> : <ConversationSurfaceTabs
           presentation="composer" chatPanelId={chatPanelId} resources={resourceTabs}
           activeId={activeSurfaceId} resourceId={resourceId} split={false} wide={false} ratio={surfaces.ratio}
@@ -6293,6 +6329,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     </ChatRuntimeActivityContext.Provider>
     </ConversationFileContext.Provider>
     </RunFailureRetryProvider>
+    </ChatRunStopNoticeProvider>
       );
   }
 

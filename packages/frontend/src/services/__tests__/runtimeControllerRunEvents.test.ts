@@ -677,6 +677,60 @@ describe("runtime controller run event streaming", () => {
     });
   });
 
+  it("keeps an authoritative canceled snapshot when a late lease envelope says it is working", async () => {
+    const { subscribeToRunsFromController } = await import("../runtimeController/runs");
+    const runId = "22222222-2222-4222-8222-222222222222";
+    const projectId = "11111111-1111-4111-8111-111111111111";
+    const stoppedAt = "2026-10-13T12:00:00.000Z";
+    const onRun = vi.fn();
+    const unsubscribe = subscribeToRunsFromController({ projectId, quietErrors: true, onRun, onRunPatch: vi.fn() });
+    try {
+      await vi.waitFor(() => expect(streamingRequests).toHaveLength(1));
+      streamingRequests[0].write(`data: ${JSON.stringify({
+        kind: "run.progress", project_id: projectId, run_id: runId,
+        timestamp: "2026-10-13T12:00:15.000Z",
+        data: { status: "in_progress", stage: "agent:leased", percent: 1, message: "Working",
+          run: { id: runId, project_id: projectId, run_type: "prompt", status: "canceled",
+            progress: 100, progress_stage: "canceled", last_message: "Stop requested", updated_at: stoppedAt } },
+      })}\n\n`);
+      await vi.waitFor(() => expect(onRun).toHaveBeenCalledOnce());
+      expect(onRun).toHaveBeenCalledWith(expect.objectContaining({
+        status: "canceled", progress: 100, progressStage: "canceled", lastMessage: "Stop requested", updatedAt: stoppedAt,
+      }), "UPDATE");
+    } finally { unsubscribe(); }
+  });
+
+  it("does not reopen a canceled run from stale progress published after the cancellation", async () => {
+    const { subscribeToRunsFromController } = await import("../runtimeController/runs");
+    const runId = "22222222-2222-4222-8222-222222222222";
+    const projectId = "11111111-1111-4111-8111-111111111111";
+    let state = createInitialRuntimeStoreState();
+    const onRun = vi.fn((run: RunRecord) => { state = runtimeReducer(state, { type: "upsertRun", run }); });
+    const onRunPatch = vi.fn((patch: RunRecordPatch) => { state = runtimeReducer(state, { type: "patchRun", patch }); });
+    const unsubscribe = subscribeToRunsFromController({ projectId, quietErrors: true, onRun, onRunPatch });
+    try {
+      await vi.waitFor(() => expect(streamingRequests).toHaveLength(1));
+      streamingRequests[0].write(`data: ${JSON.stringify({
+        kind: "run.completed", project_id: projectId, run_id: runId,
+        timestamp: "2026-10-13T12:00:00.000Z", data: { status: "canceled", stage: "canceled", percent: 100 },
+      })}\n\n`);
+      await vi.waitFor(() => expect(state.runs[runId]?.status).toBe("canceled"));
+      const canceled = state.runs[runId];
+      streamingRequests[0].write(`data: ${JSON.stringify({
+        kind: "run.progress", project_id: projectId, run_id: runId,
+        timestamp: "2026-10-13T12:00:15.000Z", data: { status: "in_progress", stage: "agent:leased", percent: 1 },
+      })}\n\n`);
+      streamingRequests[0].write(`data: ${JSON.stringify({
+        kind: "run.progress", project_id: projectId, run_id: runId,
+        timestamp: "2026-10-13T12:00:16.000Z", data: { status: "in_progress",
+          run: { id: runId, status: "in_progress", updated_at: "2026-10-13T11:59:59.000Z" } },
+      })}\n\n`);
+      await vi.waitFor(() => expect(onRunPatch).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect(onRun).toHaveBeenCalledOnce());
+      expect(state.runs[runId]).toEqual(canceled);
+    } finally { unsubscribe(); }
+  });
+
   it("finishes a turn whose completion is stamped a moment before its last progress", async () => {
     const { subscribeToRunsFromController } = await import("../runtimeController/runs");
     const runId = "22222222-2222-4222-8222-222222222222";

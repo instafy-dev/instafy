@@ -463,6 +463,10 @@ pub(crate) fn router() -> Router<AppState> {
             "/conversations/:conversation_id/interrupt",
             post(interrupt_conversation_runs),
         )
+        .route(
+            "/conversations/:conversation_id/stop",
+            post(crate::conversation_stop::stop_conversation_jobs),
+        )
         .route("/jobs/:job_id/cancel", post(cancel_agent_job))
         .route(
             "/jobs/plan-groups/:group_id/cancel",
@@ -1845,6 +1849,28 @@ pub(crate) async fn cancel_jobs_within_transaction(
     jobs: &[(Uuid, Option<Uuid>)],
     reason: &str,
 ) -> Result<JobCancellationSet, (StatusCode, Json<ApiError>)> {
+    cancel_jobs_with_notice(
+        transaction,
+        project_id,
+        conversation_id,
+        session_id,
+        jobs,
+        reason,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn cancel_jobs_with_notice(
+    transaction: &tokio_postgres::Transaction<'_>,
+    project_id: &Uuid,
+    conversation_id: &Uuid,
+    session_id: Option<Uuid>,
+    jobs: &[(Uuid, Option<Uuid>)],
+    reason: &str,
+    notice: Option<InterruptionNotice>,
+) -> Result<JobCancellationSet, (StatusCode, Json<ApiError>)> {
     let mut job_ids: Vec<Uuid> = Vec::new();
     let mut run_ids: Vec<Uuid> = Vec::new();
     let mut pairs: Vec<(Uuid, Uuid)> = Vec::new();
@@ -1903,7 +1929,8 @@ pub(crate) async fn cancel_jobs_within_transaction(
         persist_canceled_run_metadata(transaction, &run_ids, reason).await?;
     }
 
-    let interruption_notice = build_interruption_notice(reason, &job_ids, &run_ids);
+    let interruption_notice =
+        notice.unwrap_or_else(|| build_interruption_notice(reason, &job_ids, &run_ids));
     let notice = record_controller_assistant_message(
         transaction,
         project_id,

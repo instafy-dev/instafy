@@ -891,18 +891,22 @@ function handleControllerEvent(
       if (typeof event.conversation_id === "string") {
         runRecord.conversationId = event.conversation_id;
       }
-      if (typeof data.percent === "number") {
+      // A callback may load the already-canceled authoritative snapshot but
+      // still publish its earlier lease/progress envelope. Keep the stop's
+      // fields and database time instead of reviving it with that envelope.
+      const canceledSnapshot = runRecord.status === "canceled";
+      if (!canceledSnapshot && typeof data.percent === "number") {
         runRecord.progress = data.percent;
       }
-      if (typeof data.stage === "string") {
+      if (!canceledSnapshot && typeof data.stage === "string") {
         runRecord.progressStage = data.stage || null;
       }
-      if (typeof data.message === "string") {
+      if (!canceledSnapshot && typeof data.message === "string") {
         runRecord.lastMessage = data.message || null;
       }
       const statusOverride = data.runStatus ?? data.finalStatus ?? data.status;
       if (
-        typeof statusOverride === "string" &&
+        !canceledSnapshot && typeof statusOverride === "string" &&
         statusOverride.trim().length > 0
       ) {
         runRecord.status = normalizeRunStatus(statusOverride) ?? runRecord.status;
@@ -910,7 +914,7 @@ function handleControllerEvent(
       if (typeof data.previewUrl === "string") {
         runRecord.previewUrl = data.previewUrl;
       }
-      if (event.timestamp && typeof event.timestamp === "string") {
+      if (!canceledSnapshot && event.timestamp && typeof event.timestamp === "string") {
         runRecord.updatedAt = event.timestamp;
       }
     }

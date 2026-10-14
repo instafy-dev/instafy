@@ -58,6 +58,39 @@ own opt-in transport.
 Run-thread tabs use their displayed message count and wait for their parent chat's initial
 history. Explicit chat-history retries start a new timing attempt after a failed navigation.
 
+The compact run-activity rail reads oldest to newest from left to right. A trailing spinner
+marks a pending run without a running activity status; once activity arrives, the newest
+event carries the live ring. New circles begin appearing immediately, without a delay based
+on the number of earlier events. In a multi-event rail, removing the spinner keeps existing
+circles in place; long histories roll older events into the leading overflow chip.
+The current-activity caption aligns with the first circle and sits directly below the rail.
+The caption stays compact on wide screens; long captions truncate within a readable width
+and expose the full status on hover. The rail and captions contain no cancellation controls.
+
+A writable chat has one square Stop icon in the composer while jobs are live, including thinking
+before any command runs. With an empty draft it replaces the primary send/voice action; with text
+or attachments it sits beside Send. Active voice recording keeps its own controls. The icon has an
+accessible label and tooltip, with the same touch target as the other composer controls. With
+multiple agents it opens an agent choice and **Stop both** (or **Stop all**).
+Escape stops the current set only when no dialog, menu, preview, or other interface owns the key.
+Stopping a turn owned by someone else, or whose owner is unknown, asks for confirmation. Read-only
+viewers and historical/lingering previews have no Stop action.
+
+Stop targets the captured job IDs, never the whole conversation as a fallback. It immediately
+shows a pending indicator, then a disabled Stop icon until updated job state arrives; accessible
+labels distinguish **Stopping…** and **Stop requested**. Controller acceptance
+is not a physical executor shutdown acknowledgment; failures and timeouts remain visible with a
+retry for the same jobs. Separately queued messages are preserved and remain eligible for normal
+delivery; Stop does not pause the chat's queue. It suppresses the selected plan's follow-up when
+all remaining workers were stopped. A muted persisted notice identifies who asked
+the agent to stop. **Continue**, when the chat is idle and writable, sends a fresh targeted request
+to check existing work before proceeding; it does not replay the original turn or consume a draft.
+
+For local interaction review without credentials or real cancellations, run:
+`pnpm --filter @instafy/frontend exec vite --config tests/fixtures/run-stop-control/vite.config.ts --host 127.0.0.1 --port 5208`
+and open `/tests/fixtures/run-stop-control/index.html`. The playground uses the real controls with
+simulated jobs and transport, including multiple agents, read-only access, failures, and delays.
+
 Settings lists keep their current-space rows visible during refresh. Automation refresh failures
 keep previously loaded rows with a persistent Retry notice; explicit access denial removes the
 cached rows. Secret and guest directories withhold protected records after a failed access check

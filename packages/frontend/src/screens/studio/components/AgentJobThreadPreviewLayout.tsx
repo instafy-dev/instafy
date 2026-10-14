@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import type { CSSProperties, ComponentType, MouseEvent, MutableRefObject, ReactNode } from "react";
 import {
   Activity,
@@ -13,14 +13,11 @@ import {
   OpenNewWindow,
   Terminal,
   WarningTriangle,
-  Xmark,
 } from "iconoir-react";
 import { IconButton } from "../../../components/Button";
 import { OctoCoin } from "../../../components/OctoCoin";
 import { Spinner } from "../../../components/Spinner";
 import { Text } from "../../../components/Text";
-import { isUuid } from "../../../conversations/conversationMessageUtils";
-import { cancelAgentJob } from "../../../services/runtimeController/jobs";
 import {
   OCTO_AVATAR_SRC,
   resolveAgentAvatarGradient,
@@ -131,12 +128,6 @@ function resolveCommandResultStatusLabel(status: string | null | undefined): str
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-// extractAgentJobId can surface run ids or "thread:"-prefixed thread ids;
-// only real job ids (UUIDs) are cancelable through the per-job endpoint.
-function isCancelableAgentJobId(jobId: string | null): jobId is string {
-  return Boolean(jobId && !jobId.startsWith("thread:") && isUuid(jobId));
 }
 
 function normalizeAgentHandle(value: unknown): string | null {
@@ -464,8 +455,6 @@ export function AgentJobThreadPreviewLayout({
   singleCompactEvent,
   singleCompactEventLabel,
   showSingleCompactEventStatusSweep,
-  canCancelTerminalRun,
-  cancelPending,
   compactRailStatusText,
   shouldSweepCompactRailStatusText,
   showCollapsedCompactRailStatus,
@@ -510,8 +499,6 @@ export function AgentJobThreadPreviewLayout({
   onToggleThreadPreview,
   onToggleCommandOutput,
   onToggleUpdateExpanded,
-  onCancelRun,
-  onCancelTerminalCommand,
   onMessageContextMenu,
   MessageContent,
   ChatFileChangeList,
@@ -519,40 +506,7 @@ export function AgentJobThreadPreviewLayout({
   const metadata = isRecord(message.metadata) ? message.metadata : null;
   const agentMetadata = metadata && isRecord(metadata.agent) ? metadata.agent : null;
   const jobId = extractAgentJobId(message);
-  const [jobCancelPending, setJobCancelPending] = useState(false);
-  const cancelRunPending = cancelPending || jobCancelPending;
   const copyLatestCommandOutput = useCopyCommandOutput(latestCommandExecution?.output ?? "");
-  const handleCancelRun = useCallback(() => {
-    if (!isCancelableAgentJobId(jobId)) {
-      onCancelRun();
-      return;
-    }
-    if (jobCancelPending) {
-      return;
-    }
-    setJobCancelPending(true);
-    void (async () => {
-      try {
-        let result: Awaited<ReturnType<typeof cancelAgentJob>> = null;
-        try {
-          result = await cancelAgentJob(jobId, "Agent job cancelled by user");
-        } catch (error) {
-          console.warn("[chat] failed to cancel agent job", error);
-        }
-        const canceledAnything =
-          result !== null &&
-          (result.canceledJobIds.length > 0 || result.canceledRunIds.length > 0);
-        if (!canceledAnything) {
-          // The per-job cancel failed, was unavailable, or matched nothing;
-          // fall back to the conversation interrupt so the run does not stay
-          // uncancelable.
-          onCancelRun();
-        }
-      } finally {
-        setJobCancelPending(false);
-      }
-    })();
-  }, [jobCancelPending, jobId, onCancelRun]);
   const headerIdentityVisible = showHeaderIdentity && showHeaderAvatar;
   const threadOwnerHandle = normalizeAgentHandle(agentMetadata?.handle);
   const ownerBadge = showHeaderIdentity ? threadOwnerHandle : null;
@@ -693,6 +647,10 @@ export function AgentJobThreadPreviewLayout({
     !useTightThreadPreviewLayout &&
     !terminalStatusDominatesCompactRail &&
     hasCompactRailVisualContent;
+  const compactRailHasCaption =
+    showCompactIconRail &&
+    !shouldCollapseSingleCompactEvent &&
+    showCollapsedCompactRailStatus;
   const hasThreadPreviewHeaderContent = headerIdentityVisible || Boolean(ownerBadge);
   const showThreadPreviewHeader = useTightTerminalSummaryLayout
     ? false
@@ -907,36 +865,22 @@ export function AgentJobThreadPreviewLayout({
   const runDetailSections = (
     <>
       {!useTightThreadPreviewLayout && showCollapsedCompactRailStatus ? (
-        <div className={runDetailSectionClass}>
-          {renderRunDetailSectionNotch()}
+        <div className={compactRailHasCaption ? "relative pb-1" : runDetailSectionClass}>
+          {compactRailHasCaption ? null : renderRunDetailSectionNotch()}
           <Text
             as="div"
             variant="caption"
             tone="muted"
-            className="flex min-w-0 items-center gap-1.5 pl-1 text-xs"
+            className="flex w-fit min-w-0 max-w-[min(100%,32rem)] items-center gap-1.5 pl-0.5 pr-1"
           >
             {commandActorBadgeElement}
             <span
               className={`${shouldSweepCompactRailStatusText ? "instafy-status-sweep" : ""} min-w-0 truncate`}
               data-sweep-text={compactRailStatusText}
+              title={compactRailStatusText}
             >
               {compactRailStatusText}
             </span>
-            {canCancelTerminalRun ? (
-              <IconButton
-                aria-label="Stop run"
-                variant="ghost"
-                size="xs"
-                radius="full"
-                onPress={handleCancelRun}
-                isDisabled={cancelRunPending}
-                data-testid="chat-command-stop-button"
-                tone="danger"
-                className="ml-1"
-              >
-                <Xmark aria-hidden="true" className="h-3.5 w-3.5" />
-              </IconButton>
-            ) : null}
           </Text>
         </div>
       ) : null}
@@ -982,7 +926,6 @@ export function AgentJobThreadPreviewLayout({
               output={latestCommandExecution?.output ?? ""}
               status={latestCommandExecution?.status ?? null}
               compact
-              onCancel={onCancelTerminalCommand ?? null}
             />
           </div>
         </div>
@@ -1005,21 +948,7 @@ export function AgentJobThreadPreviewLayout({
             >
               {summarizeActiveCommandForPreview(latestCommandExecution?.command ?? "", 120) || "Running command…"}
             </span>
-            {canCancelTerminalRun ? (
-              <IconButton
-                aria-label="Stop run"
-                variant="ghost"
-                size="xs"
-                radius="full"
-                onPress={handleCancelRun}
-                isDisabled={cancelRunPending}
-                data-testid="chat-command-stop-button"
-                tone="danger"
-                className="ml-1"
-              >
-                <Xmark aria-hidden="true" className="h-3.5 w-3.5" />
-              </IconButton>
-            ) : null}
+
           </Text>
         </div>
       ) : null}
@@ -1055,8 +984,7 @@ export function AgentJobThreadPreviewLayout({
                   output={latestCommandExecution?.output ?? ""}
                   status={latestCommandExecution?.status ?? null}
                   compact
-                  onCancel={onCancelTerminalCommand ?? null}
-                />
+                    />
               </div>
             ) : null}
           </div>
@@ -1421,7 +1349,7 @@ export function AgentJobThreadPreviewLayout({
         ) : null}
 
         {showCompactIconRail && !shouldCollapseSingleCompactEvent ? (
-          <div className="group relative py-1">
+          <div className={`group relative pt-1 ${compactRailHasCaption ? "pb-0" : "pb-1"}`}>
             {renderThreadPreviewNotch(THREAD_SPINE_COMPACT_NOTCH_OFFSET_PX)}
             <div className="flex min-w-0 w-full items-center gap-2 rounded-lg py-0.5 pr-1">
               {/* Chip buttons are the keyboard path into the rail; the row
@@ -1454,16 +1382,17 @@ export function AgentJobThreadPreviewLayout({
                         ariaLabel={formatHiddenUpdateLabel(overflowCompactCount, "earlier run update")}
                         className={`instafy-compact-overflow-indicator relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-dashed border-slate-200 bg-white text-slate-400 shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-500 ${COMPACT_EVENT_PILL_FOCUS_CLASS}`}
                         dataCount={String(overflowCompactCount)}
-                        style={{ animationDelay: "0ms" }}
                       >
                         <Activity aria-hidden="true" className="h-3 w-3" />
                       </ThreadRailChipButton>
                     ) : null}
-                    {visibleCompactEvents.map((event, index) => {
+                    {visibleCompactEvents.map((event) => {
                       const badgeLabel = resolveCompactEventLabel(event, ownerBadge, isThreadUnresolved);
-                      // While a command is in flight the trailing spinner pill
-                      // is the single live indicator; otherwise the newest chip
-                      // carries the subtle running ring.
+                      // The waiting spinner is the single live indicator until
+                      // running activity arrives; then the newest chip carries
+                      // the ring. Start each entrance immediately: staggering by
+                      // history position leaves a blank tail after the spinner
+                      // disappears, and retimes chips when older events overflow.
                       const isLiveEventPill =
                         isThreadUnresolved &&
                         !showCompactRailWaitingSpinner &&
@@ -1477,7 +1406,6 @@ export function AgentJobThreadPreviewLayout({
                           className={`instafy-compact-event-pill ${
                             isLiveEventPill ? "instafy-compact-event-pill-live" : ""
                           } inline-flex h-6 w-6 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 ${COMPACT_EVENT_PILL_FOCUS_CLASS}`}
-                          style={{ animationDelay: `${Math.min(index + (overflowCompactCount > 0 ? 1 : 0), 16) * 36}ms` }}
                         >
                           {renderCompactEventContent(event, ownerBadge)}
                         </ThreadRailChipButton>
@@ -1490,12 +1418,6 @@ export function AgentJobThreadPreviewLayout({
                         } inline-flex h-6 w-6 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300`}
                         title={compactRailInFlightLabel}
                         aria-label={compactRailInFlightLabel}
-                        style={{
-                          animationDelay: `${Math.min(
-                            visibleCompactEvents.length + (overflowCompactCount > 0 ? 1 : 0),
-                            16,
-                          ) * 36}ms`,
-                        }}
                       >
                         <Spinner size="xs" tone="slate" className="h-3.5 w-3.5" />
                       </span>
@@ -1596,20 +1518,6 @@ export function AgentJobThreadPreviewLayout({
                       <span aria-hidden="true">→ </span>
                       {collapsedCommandResultHint}
                     </span>
-                  ) : null}
-                  {canCancelTerminalRun ? (
-                    <IconButton
-                      aria-label="Stop run"
-                      variant={singleCompactEventIsCommand ? "text" : "ghost"}
-                      size="xs"
-                      radius="full"
-                      onPress={handleCancelRun}
-                      isDisabled={cancelRunPending}
-                      data-testid="chat-command-stop-button"
-                      tone="danger"
-                    >
-                      <Xmark aria-hidden="true" className="h-3.5 w-3.5" />
-                    </IconButton>
                   ) : null}
                   {showCommandPanelCopy ? (
                     <IconButton

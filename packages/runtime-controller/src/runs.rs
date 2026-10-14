@@ -64,7 +64,10 @@ pub(crate) struct RunSnapshot {
     pub(crate) updated_at: DateTime<Utc>,
 }
 
-pub(crate) const RUN_SELECT_BASE: &str = "select id, project_id, session_id, conversation_id, prompt_id, run_type, status, progress, progress_stage, preview_url, last_message, metadata, created_at, updated_at from runs";
+pub(crate) const RUN_SELECT_BASE: &str = "select id, project_id, session_id, conversation_id, prompt_id, run_type, status, progress, progress_stage, preview_url, last_message, metadata, created_at, updated_at,
+    (select job.payload->>'user_id' from agent_jobs job
+     where job.run_id = runs.id and job.project_id = runs.project_id
+     order by job.created_at asc, job.id asc limit 1) as initiating_user_id from runs";
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
@@ -298,7 +301,13 @@ async fn ensure_run_conversation_access(
 
 pub(crate) fn map_run_row(row: &tokio_postgres::Row) -> RunSnapshot {
     let progress: Option<f64> = row.get("progress");
-    let metadata: Option<JsonValue> = row.get("metadata");
+    let metadata = metadata_with_initiating_user(
+        row.get("metadata"),
+        row.try_get::<_, Option<String>>("initiating_user_id")
+            .ok()
+            .flatten()
+            .as_deref(),
+    );
 
     RunSnapshot {
         id: row.get("id"),
@@ -315,6 +324,50 @@ pub(crate) fn map_run_row(row: &tokio_postgres::Row) -> RunSnapshot {
         metadata,
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
+    }
+}
+
+fn metadata_with_initiating_user(
+    metadata: Option<JsonValue>,
+    user_id: Option<&str>,
+) -> Option<JsonValue> {
+    let mut metadata = metadata;
+    // This field is a controller claim. Never pass through a caller-authored
+    // value, including on legacy reads that cannot resolve the initiating job.
+    if let Some(map) = metadata.as_mut().and_then(JsonValue::as_object_mut) {
+        map.remove("initiatingUserId");
+    }
+    if let Some(user_id) = user_id.and_then(|id| Uuid::parse_str(id).ok()) {
+        let value = metadata.get_or_insert_with(|| json!({}));
+        if !value.is_object() {
+            *value = json!({});
+        }
+        value["initiatingUserId"] = json!(user_id);
+    }
+    metadata
+}
+
+#[cfg(test)]
+mod initiating_user_tests {
+    use super::*;
+
+    #[test]
+    fn run_initiating_user_is_derived_and_never_trusts_metadata() {
+        let spoofed = Uuid::new_v4();
+        let owner = Uuid::new_v4();
+        let metadata = Some(json!({"initiatingUserId":spoofed,"keep":true}));
+        assert_eq!(
+            metadata_with_initiating_user(metadata.clone(), None),
+            Some(json!({"keep":true}))
+        );
+        assert_eq!(
+            metadata_with_initiating_user(metadata.clone(), Some("invalid")),
+            Some(json!({"keep":true}))
+        );
+        assert_eq!(
+            metadata_with_initiating_user(metadata, Some(&owner.to_string())),
+            Some(json!({"initiatingUserId":owner,"keep":true}))
+        );
     }
 }
 

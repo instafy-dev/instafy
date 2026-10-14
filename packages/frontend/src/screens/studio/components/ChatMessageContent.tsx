@@ -928,6 +928,7 @@ function WorkspaceFileReferenceChip({
     // floating surface answers the keyboard.
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") {
+        event.preventDefault();
         setPreviewOpen(false);
       }
     };
@@ -955,6 +956,7 @@ function WorkspaceFileReferenceChip({
     };
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") {
+        event.preventDefault();
         setActionMenuPosition(null);
       }
     };

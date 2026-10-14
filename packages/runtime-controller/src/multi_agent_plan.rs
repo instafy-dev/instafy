@@ -635,14 +635,10 @@ async fn checkpoint_plan_group(
         .transaction()
         .await
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
-    let lock_key = format!("lead-checkpoint:{group_id}");
-    transaction
-        .execute(
-            "select pg_advisory_xact_lock(hashtextextended($1, 0))",
-            &[&lock_key],
-        )
-        .await
-        .map_err(|error| internal_error(format!("failed to acquire checkpoint lock: {error}")))?;
+    lock_plan_group_checkpoint(&transaction, group_id).await?;
+    if plan_group_was_stopped(&transaction, project_id, conversation_id, group_id).await? {
+        return Ok(false);
+    }
 
     let snapshot = load_plan_group_snapshot(
         &mut transaction,
@@ -708,6 +704,45 @@ async fn checkpoint_plan_group(
         .await
         .map_err(|error| internal_error(format!("failed to release checkpoint lock: {error}")))?;
     Ok(dispatched)
+}
+
+pub(crate) async fn lock_plan_group_checkpoint(
+    transaction: &tokio_postgres::Transaction<'_>,
+    group_id: &str,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    let lock_key = format!("lead-checkpoint:{group_id}");
+    transaction
+        .execute(
+            "select pg_advisory_xact_lock(hashtextextended($1, 0))",
+            &[&lock_key],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to acquire checkpoint lock: {error}")))?;
+    Ok(())
+}
+
+pub(crate) async fn plan_group_was_stopped(
+    transaction: &tokio_postgres::Transaction<'_>,
+    project_id: Uuid,
+    conversation_id: Uuid,
+    group_id: &str,
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    // These notices are written by the controller. Client-recorded messages
+    // strip reserved claims; runtime messages always carry source="agent".
+    // Keeping the intent with the durable notice also survives late callbacks,
+    // controller restarts, and the periodic failed-worker checkpoint sweep.
+    transaction
+        .query_one(
+            "select exists(select 1 from conversation_messages
+          where project_id = $1 and conversation_id = $2 and created_by is null
+            and metadata->>'source' = 'controller' and metadata->>'kind' = 'run_cancellation'
+            and metadata #> '{details,stopRequested}' = 'true'::jsonb
+            and metadata #> '{details,suppressedPlanGroupIds}' @> $3::jsonb)",
+            &[&project_id, &conversation_id, &PgJson(json!([group_id]))],
+        )
+        .await
+        .map(|row| row.get(0))
+        .map_err(|error| internal_error(format!("failed to inspect plan Stop intent: {error}")))
 }
 
 /// Cancellation is terminal too: canceling the last running lane must still

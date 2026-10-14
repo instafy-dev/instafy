@@ -159,7 +159,7 @@ pub(super) async fn announce_interrupted_runs_on(
             "select r.id, r.project_id, r.session_id, r.conversation_id, r.prompt_id,
                     r.run_type, r.status, r.progress, r.progress_stage, r.preview_url,
                     r.last_message, r.metadata, r.created_at, r.updated_at,
-                    j.id as job_id
+                    j.id as job_id, j.payload->>'user_id' as initiating_user_id
              from runtimes rt
              join agent_jobs j on j.project_id = rt.project_id
              join runs r on r.id = j.run_id

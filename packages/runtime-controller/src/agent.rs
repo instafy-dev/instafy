@@ -1019,6 +1019,11 @@ pub(crate) async fn agent_lease(
             let (event_session, event_conversation, run_payload) =
                 match load_run_snapshot(&mut *connection, &run_uuid).await {
                     Ok(Some(snapshot)) => {
+                        // Stop may have committed after the lease transaction.
+                        // Do not announce its canceled job as newly running.
+                        if snapshot.status == "canceled" {
+                            continue;
+                        }
                         let session = snapshot.session_id;
                         let conversation = snapshot.conversation_id.or(job.conversation_id);
                         let run_json = run_snapshot_to_json(&snapshot);

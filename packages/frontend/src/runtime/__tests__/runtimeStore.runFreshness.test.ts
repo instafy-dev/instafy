@@ -119,10 +119,25 @@ describe("runtime store run freshness", () => {
     const tick = run({ progress: 20, lastMessage: "Running tests", updatedAt: "2026-10-08T12:00:03.990Z" });
     expect(upsert(stateWith(run({ progress: 10, updatedAt: LEASED_AT })), tick).runs[RUN_ID]).toEqual(tick);
 
-    // From one end to another is not a step back either.
-    const canceled = run({ status: "canceled", updatedAt: LEASED_AT });
+    // A final correction can update a failed run; an explicit cancellation
+    // is immutable for its run ID and is covered separately below.
+    const failed = run({ status: "failed", updatedAt: LEASED_AT });
     const success = run({ status: "success", updatedAt: STOPPED_AT });
-    expect(upsert(stateWith(canceled), success).runs[RUN_ID]).toEqual(success);
+    expect(upsert(stateWith(failed), success).runs[RUN_ID]).toEqual(success);
+  });
+
+  it("never revives a canceled run from a later-published snapshot or sparse patch", () => {
+    const canceled = run({ status: "canceled", progressStage: "canceled", updatedAt: STOPPED_AT });
+    const state = stateWith(canceled);
+    for (const status of ["queued", "in_progress", "awaiting_approval", "success", "failed"] as const) {
+      for (const updatedAt of [LEASED_AT, null]) {
+        expect(upsert(state, run({ status, updatedAt })), `${status}, ${updatedAt}`).toBe(state);
+        expect(runtimeReducer(state, { type: "patchRun", patch: { id: RUN_ID, status, updatedAt } })).toBe(state);
+      }
+    }
+    // Other fields can still be hydrated, and a new turn has its own ID.
+    expect(runtimeReducer(state, { type: "patchRun", patch: { id: RUN_ID, lastMessage: "Stop requested" } }).runs[RUN_ID].lastMessage).toBe("Stop requested");
+    expect(upsert(state, run({ id: "continued-run", updatedAt: LEASED_AT })).runs["continued-run"].status).toBe("in_progress");
   });
 
   it("refuses an older record that would reopen a finished turn", () => {

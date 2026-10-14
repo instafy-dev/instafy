@@ -686,4 +686,25 @@ describe("resolveTypingIndicatorState", () => {
       ),
     ).toBe(fallback);
   });
+  it("never renders or lingers a legacy Stop slot and preserves status-label expansion", async () => {
+    const stop = vi.fn();
+    const toggle = vi.fn();
+    const props = {
+      peerTypingLabel: null, isAssistantTyping: true, isAssistantTypingCoveredByJobThreadPreview: false,
+      typingAgents: [], hasMultipleTypingAgents: false, typingAgentHandle: "octo", typingAgentAvatarSeed: "octo",
+      typingIndicatorState: { phase: "thinking" as const, label: "Thinking…" },
+      typingStatusLabel: "Thinking…", typingStatusAriaLabel: "Octo is thinking", isThinkingLabelExpanded: false,
+      onToggleThinkingLabel: toggle, latestDisplayedMessageId: "message-1", renderAssistantAvatar: () => <span />,
+      runStopAction: <button data-testid="stop" onClick={stop}>Stop</button>,
+    };
+    await act(async () => root.render(<ChatTypingRows {...props} />));
+    expect(container.querySelector('[data-testid="stop"]')).toBeNull();
+    await act(async () => (container.querySelector('[data-testid="assistant-typing-indicator"]') as HTMLDivElement).click());
+    expect(stop).not.toHaveBeenCalled();
+    expect(toggle).toHaveBeenCalledTimes(1);
+    await act(async () => root.render(<ChatTypingRows {...props} isAssistantTyping={false} />));
+    expect(container.querySelector('[data-testid="assistant-typing-indicator"]')?.getAttribute("aria-hidden")).toBe("true");
+    expect(container.querySelector('[data-testid="stop"]')).toBeNull();
+  });
+
 });

@@ -32,6 +32,8 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
       "mobile-thumb-navigation.spec.ts",
       "notification-preferences.spec.ts",
       "organization-rail-reorder.spec.ts",
+      "run-icon-rail.spec.ts",
+      "run-stop-control.spec.ts",
       "studio-history-navigation.spec.ts",
       "settings-history-scroll.spec.ts",
       "segmented-control-responsive.spec.ts",

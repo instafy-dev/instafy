@@ -1,0 +1,13 @@
+.chat-composer-surface {
+  --chat-composer-radius: 1.5rem;
+  border-radius: var(--chat-composer-radius);
+}
+
+.chat-composer-surface[data-compact-navigation="true"] {
+  --chat-composer-radius: 1.75rem;
+}
+
+/* Follow the field's curve inside its 6px padding and 1px border. */
+.chat-composer-surface .chat-composer-action {
+  border-radius: calc(var(--chat-composer-radius) - 0.375rem - 1px);
+}

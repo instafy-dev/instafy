@@ -380,6 +380,13 @@ function isStaleRunRecord(
   if (stored === null) {
     return false;
   }
+  // Cancel is final for this run ID. A lease/progress callback can publish
+  // after the stop committed and carry a newer send timestamp; it must not
+  // revive the turn or replace cancel with success. Continue creates a new
+  // run, while a machine stop uses the separate queued/requeued lifecycle.
+  if (stored.status === "canceled" && incoming.status !== "canceled") {
+    return true;
+  }
   const stale = stopAnnouncementIsStale(write, stored);
   if (stale !== null) {
     return stale;
