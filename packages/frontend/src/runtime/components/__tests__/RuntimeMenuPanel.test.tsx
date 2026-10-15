@@ -140,6 +140,26 @@ describe("RuntimeMenuPanel", () => {
     expect(onRetryHosted).not.toHaveBeenCalled();
   });
 
+  it("announces a retry failure while keeping reconnect available", async () => {
+    await renderPanel({
+      runtimeEnsureError: "provider offline",
+      onRetryHosted: vi.fn(async () => false),
+      runtimeOptions: [runtimeOption()],
+    });
+
+    const reconnect = container.querySelector<HTMLButtonElement>(
+      '[data-testid="runtime-reconnect-cloud"]',
+    );
+    await act(async () => {
+      reconnect?.click();
+    });
+
+    const error = container.querySelector('[data-testid="runtime-action-error"]');
+    expect(error?.getAttribute("role")).toBe("alert");
+    expect(error?.textContent).toContain("Runtime retry did not complete.");
+    expect(reconnect?.disabled).toBe(false);
+  });
+
   it("does not promote an offline runtime while another runtime is usable", async () => {
     await renderPanel({
       onRetryHosted: vi.fn(async () => true),

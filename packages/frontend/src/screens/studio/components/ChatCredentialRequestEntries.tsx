@@ -744,7 +744,7 @@ export function SecretRequestEntry({
       radius="full"
       isDisabled={!canOpen}
       data-testid="secret-request-open"
-      className="px-2.5 text-sm text-primary-700 hover:bg-primary-50 data-[hovered]:bg-primary-50 dark:text-primary-300 dark:hover:bg-primary-400/10 dark:data-[hovered]:bg-primary-400/10"
+      tone="accent"
     >
       Manage secrets
     </Button>
@@ -867,7 +867,7 @@ export function SecretRequestEntry({
             size="sm"
             radius="full"
             data-testid="secret-request-replace"
-            className="px-2.5 text-sm text-primary-700 hover:bg-primary-50 data-[hovered]:bg-primary-50 dark:text-primary-300 dark:hover:bg-primary-400/10 dark:data-[hovered]:bg-primary-400/10"
+            tone="accent"
           >
             Enter a different value
           </Button>
@@ -1629,7 +1629,6 @@ export function IntegrationRequestEntry({
                     radius="full"
                     isDisabled={githubDeviceAuthBusy || retryBusy || disconnectBusy}
                     data-testid="integration-request-retry"
-                    className="px-3 py-1.5 text-sm"
                   >
                     {retryBusy
                       ? "Retrying..."
@@ -1647,7 +1646,6 @@ export function IntegrationRequestEntry({
                   radius="full"
                   aria-label="Disconnect GitHub"
                   isDisabled={githubDeviceAuthBusy || retryBusy || disconnectBusy}
-                  className="px-3 py-1.5 text-sm"
                 >
                   {disconnectBusy
                     ? resumeAction?.kind === "github_import" && !justConnectedHere
@@ -1788,11 +1786,11 @@ export function IntegrationRequestEntry({
               <Button
                 onPress={() => void beginGithubDeviceAuth()}
                 variant="primary"
-                size="sm"
+                size="md"
                 radius="full"
                 isDisabled={githubDeviceAuthBusy || retryBusy || disconnectBusy}
                 data-testid="integration-request-connect-github"
-                className="justify-center bg-primary-600 px-5 py-2 text-sm shadow-lg shadow-primary-600/20 hover:bg-primary-700 data-[hovered]:bg-primary-700 dark:shadow-primary-950/40 sm:justify-start"
+                className="justify-center sm:justify-start"
               >
                 <GitHubIcon className="h-4 w-4" />
                 Connect GitHub account
@@ -1807,7 +1805,7 @@ export function IntegrationRequestEntry({
               radius="full"
               isDisabled={!canOpenSecrets}
               data-testid="integration-request-open-secrets"
-              className="px-2.5 py-2 text-sm text-primary-700 hover:bg-primary-50 data-[hovered]:bg-primary-50 dark:text-primary-300 dark:hover:bg-primary-400/10 dark:data-[hovered]:bg-primary-400/10"
+              tone="accent"
             >
               {defaultSecretName
                 ? remainingSecretNames.length > 0
@@ -1884,7 +1882,7 @@ export function IntegrationRequestEntry({
                 radius="full"
                 isDisabled={!canOpenSecrets}
                 data-testid="integration-request-open-secrets"
-                className="px-2.5 py-2 text-sm text-primary-700 hover:bg-primary-50 data-[hovered]:bg-primary-50 dark:text-primary-300 dark:hover:bg-primary-400/10 dark:data-[hovered]:bg-primary-400/10"
+                tone="accent"
               >
                 {defaultSecretName
                   ? remainingSecretNames.length > 0

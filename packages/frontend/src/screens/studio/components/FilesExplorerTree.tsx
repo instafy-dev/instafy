@@ -6,7 +6,6 @@ import { Input } from "../../../components/Input";
 import { Spinner } from "../../../components/Spinner";
 import { TreeDisclosureButton, TreeRowMarkerSlot } from "../../../components/TreeDisclosureButton";
 import {
-  DRAWER_ICON_BUTTON_TONE_CLASS,
   DRAWER_LIST_ROW_TEXT_CLASS,
   LIST_ROW_SURFACE_BASE,
   LIST_ROW_FOCUS_WITHIN_RING,
@@ -412,7 +411,7 @@ export function FilesExplorerTree({
                   title="Create file"
                   onPress={onCreateFileCommit}
                   isDisabled={createFile?.busy === true}
-                  className={DRAWER_ICON_BUTTON_TONE_CLASS}
+                  tone="muted"
                 >
                   <Check className="h-4 w-4" aria-hidden="true" />
                 </IconButton>
@@ -424,7 +423,7 @@ export function FilesExplorerTree({
                   title="Cancel"
                   onPress={onCreateFileCancel}
                   isDisabled={createFile?.busy === true}
-                  className={DRAWER_ICON_BUTTON_TONE_CLASS}
+                  tone="muted"
                 >
                   <Xmark className="h-4 w-4" aria-hidden="true" />
                 </IconButton>

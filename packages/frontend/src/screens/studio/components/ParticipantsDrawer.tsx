@@ -11,7 +11,6 @@ import { AgentProfilePopoverCard } from "./AssistantAvatarPopover";
 import { AgentAvatar } from "../../../components/AgentAvatar";
 import { Button, IconButton } from "../../../components/Button";
 import { DrawerHeader } from "../../../components/DrawerHeader";
-import { DRAWER_ICON_BUTTON_TONE_CLASS } from "../../../components/listRowStyles";
 import { Text } from "../../../components/Text";
 import { Toggle } from "../../../components/Toggle";
 import {
@@ -660,7 +659,7 @@ export function ParticipantsDrawer({
             radius="full"
             onPress={onClose}
             aria-label="Close participants"
-            className={`max-[899px]:h-11 max-[899px]:w-11 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
+            tone="muted"
           >
             <Xmark className="h-4 w-4" aria-hidden="true" />
           </IconButton>

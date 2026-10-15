@@ -195,10 +195,10 @@ export function ProjectSettingsSections({
                   onPress={onRefreshProjectDefaults}
                   isDisabled={!canWriteProject || !activeProjectId || !runtimeControllerEnabled || projectDefaultsRefreshPending}
                   variant="outline"
-                  size="sm"
+                  size="md"
                   radius="xl"
                   data-testid="project-defaults-refresh"
-                  className="min-h-11 shrink-0 whitespace-nowrap sm:pointer-fine:min-h-9"
+                  className="shrink-0 whitespace-nowrap"
                 >
                   {projectDefaultsRefreshPending ? "Refreshing…" : "Refresh defaults"}
                 </Button>}

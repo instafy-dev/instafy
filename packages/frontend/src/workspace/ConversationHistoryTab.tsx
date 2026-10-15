@@ -16,7 +16,6 @@ import { MenuItemContent } from "../components/MenuItemContent";
 import { StudioPopover } from "../components/aria/StudioPopover";
 import { StudioMenu, StudioMenuItem, StudioMenuSeparator } from "../components/aria/StudioMenu";
 import {
-  DRAWER_ICON_BUTTON_TONE_CLASS,
   PICKER_LIST_ROW_ACTIVE_CLASS,
   PICKER_LIST_ROW_GEOMETRY_CLASS,
   pickerListRowTextClassName,
@@ -440,12 +439,12 @@ export function ConversationHistoryTab({
     <MenuTrigger isOpen={filterMenuOpen} onOpenChange={setFilterMenuOpen}>
       <IconButton
         variant="ghost"
-        size={compactDrawer ? "sm" : "lg"}
+        size="sm"
         radius="lg"
         aria-label={`Filter chats: ${selectedFilter.label}`}
         title={`Filter chats: ${selectedFilter.label}`}
         data-testid="conversation-history-filter"
-        className={`${DRAWER_ICON_BUTTON_TONE_CLASS} ${isLargeScreen ? "" : "!h-11 !w-11"}`}
+        tone="muted"
       >
         <span className="relative h-4 w-4">
           <Filter className="h-4 w-4" aria-hidden="true" />
@@ -494,7 +493,7 @@ export function ConversationHistoryTab({
         <IconButton
           ref={searchToggleRef}
           variant={showSearch ? "secondary" : "ghost"}
-          size={compactDrawer ? "sm" : "lg"}
+          size="sm"
           radius="full"
           aria-label={searchToggleLabel}
           title={searchToggleLabel}
@@ -502,7 +501,7 @@ export function ConversationHistoryTab({
           aria-controls={showSearch ? "conversation-history-search" : undefined}
           onPress={toggleSearch}
           data-testid="conversation-history-search-toggle"
-          className={`${DRAWER_ICON_BUTTON_TONE_CLASS} ${isLargeScreen ? "" : "!h-11 !w-11"}`}
+          tone="muted"
         >
           <Search className="h-4 w-4" aria-hidden="true" />
         </IconButton>
@@ -511,7 +510,7 @@ export function ConversationHistoryTab({
       {onStartNewConversation ? (
         <IconButton
           variant="ghost"
-          size={compactDrawer ? "sm" : "lg"}
+          size="sm"
           radius="full"
           aria-label="New chat"
           title="New chat"
@@ -525,7 +524,7 @@ export function ConversationHistoryTab({
             }
           }}
           data-testid="conversation-history-new-chat"
-          className={`${DRAWER_ICON_BUTTON_TONE_CLASS} ${isLargeScreen ? "" : "!h-11 !w-11"}`}
+          tone="muted"
         >
           <Plus className="h-4 w-4" aria-hidden="true" />
         </IconButton>
@@ -533,13 +532,13 @@ export function ConversationHistoryTab({
       {isLargeScreen && onRequestClose ? (
         <IconButton
           variant="ghost"
-          size={compactDrawer ? "sm" : "lg"}
+          size="sm"
           radius="full"
           aria-label="Close chat history"
           title="Close chat history"
           onPress={onRequestClose}
           data-testid="conversation-history-close"
-          className={DRAWER_ICON_BUTTON_TONE_CLASS}
+          tone="muted"
         >
           <Xmark className="h-4 w-4" aria-hidden="true" />
         </IconButton>
@@ -726,11 +725,11 @@ export function ConversationHistoryTab({
                           <IconButton
                             variant="ghost"
                             radius="full"
-                            size={compactDrawer ? "sm" : "lg"}
+                            size="sm"
                             aria-label={`Manage ${conversation.title}`}
                             data-testid={`conversation-history-menu-${conversation.localId}`}
                             title={`Manage ${conversation.title}`}
-                            className={`max-[900px]:min-h-11 max-[900px]:min-w-11 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
+                            tone="muted"
                           >
                             <MoreHoriz className="h-4 w-4" aria-hidden="true" />
                           </IconButton>

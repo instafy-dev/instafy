@@ -1,5 +1,5 @@
 import { useRef, useState, type ReactNode } from "react";
-import { Copy, NavArrowDown, Play, Square, Trash } from "iconoir-react";
+import { Check, Copy, NavArrowDown, Play, Square, Trash } from "iconoir-react";
 import { MenuTrigger } from "react-aria-components";
 import { StudioMenu, StudioMenuItem } from "../../components/aria/StudioMenu";
 import { StudioPopover } from "../../components/aria/StudioPopover";
@@ -120,7 +120,7 @@ function RuntimeValueRow({
 }: RuntimeValueRowProps) {
   return (
     <>
-      <Text as="span" variant="caption" tone="muted" className="text-right text-xxs">
+      <Text as="span" variant="caption" tone="muted">
         {label}
       </Text>
       <span className="flex min-w-0 items-center gap-1.5">
@@ -128,7 +128,7 @@ function RuntimeValueRow({
           as="span"
           variant={mono ? "mono" : "caption"}
           tone="secondary"
-          className="min-w-0 flex-1 truncate text-xxs tabular-nums"
+          className="min-w-0 flex-1 truncate tabular-nums"
           title={value}
         >
           {displayValue ?? value}
@@ -143,7 +143,8 @@ function RuntimeValueRow({
             aria-label={copyLabel}
             title={copyLabel}
             data-testid={copyTestId}
-            className="shrink-0 text-slate-500 hover:text-slate-700 data-[hovered]:text-slate-700 dark:text-slate-300 dark:hover:text-slate-50 dark:data-[hovered]:text-slate-50"
+            tone="muted"
+            className="shrink-0"
           >
             <Copy className="h-3.5 w-3.5" aria-hidden="true" />
           </IconButton>
@@ -235,7 +236,7 @@ function RuntimeSizePickerRow() {
   // block. Specs and cost stay visible in the menu BEFORE choosing.
   return (
     <div className="flex items-center gap-3" data-testid="runtime-size-picker">
-      <Text as="span" variant="caption" tone="muted" className="w-14 shrink-0 text-right text-xxs">
+      <Text as="span" variant="caption" tone="muted" className="w-14 shrink-0">
         Size
       </Text>
       <MenuTrigger isOpen={sizeMenuOpen} onOpenChange={setSizeMenuOpen}>
@@ -251,7 +252,7 @@ function RuntimeSizePickerRow() {
           onPress={() => {
             if (!sizeMenuOpen) setSizeMenuOpen(true);
           }}
-          className="justify-between gap-1 bg-slate-50 px-2 text-xxs shadow-none hover:bg-slate-100 data-[hovered]:bg-slate-100 dark:bg-[var(--color-studio-dark-raised-control)] dark:hover:bg-[var(--color-studio-dark-control-hover)] dark:data-[hovered]:bg-[var(--color-studio-dark-control-hover)]"
+          className="justify-between gap-1"
         >
           <span className="min-w-0 truncate">{triggerLabel}</span>
           <NavArrowDown className="shrink-0 text-xs text-slate-400" aria-hidden="true" />
@@ -279,11 +280,11 @@ function RuntimeSizePickerRow() {
                 id={choice.id}
                 data-testid={`runtime-size-${choice.id}`}
               >
-                <span className="flex min-w-0 flex-col leading-tight">
+                <span className="flex min-w-0 flex-col">
                   <span>{choice.label}</span>
-                  <span className="text-3xs font-normal text-slate-500 dark:text-slate-400">
+                  <Text as="span" variant="caption" tone="muted" className="font-normal">
                     {[choice.specs, choice.costNote].filter(Boolean).join(" · ")}
-                  </span>
+                  </Text>
                 </span>
               </StudioMenuItem>
             ))}
@@ -307,7 +308,7 @@ export function RuntimeMenuOptionsList({
   onShowSelfHostHelp,
   className = "mt-1 max-h-64 overflow-auto",
   optionClassName = DEFAULT_OPTION_CLASS,
-  selectedOptionClassName = "bg-slate-100 font-medium text-slate-900",
+  selectedOptionClassName = "bg-slate-100 text-slate-900",
   emptyStateMessage = "No runtimes connected.",
   onCopyTunnel,
   copyDisabled = false,
@@ -341,9 +342,11 @@ export function RuntimeMenuOptionsList({
           radius="xl"
           shadow="none"
           padding="sm"
-          className="py-2 text-xs text-slate-500"
+          className="py-2"
         >
-          {emptyStateMessage}
+          <Text as="p" variant="caption" tone="muted">
+            {emptyStateMessage}
+          </Text>
         </Card>
       </div>
     );
@@ -459,10 +462,11 @@ export function RuntimeMenuOptionsList({
             {/* The pressable selection surface and the disclosure toggle are
                 siblings: interactive elements must not nest inside the
                 header's role="button". */}
-            <div className="flex w-full items-start gap-1">
+            <div className="flex w-full items-center gap-1">
               <div
                 role="button"
                 tabIndex={0}
+                aria-pressed={isSelected}
                 onClick={() => onSelectOption(option.id)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" || event.key === " ") {
@@ -477,12 +481,12 @@ export function RuntimeMenuOptionsList({
                 <span className="flex h-5 flex-none items-center" aria-hidden="true">
                   <RuntimeStateIndicator option={option} />
                 </span>
-                <div className="flex min-w-0 flex-col gap-0.5">
+                <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                   <RuntimeOptionMeta
                     option={option}
                     showDetail={false}
                     showProviderBadge={false}
-                    // The header badge IS the machine's id (full value on
+                    // The header includes the machine's id (full value on
                     // hover); the details grid carries no separate ID row.
                     showRuntimeIdBadge
                     className="flex min-w-0 flex-col gap-0.5"
@@ -494,13 +498,18 @@ export function RuntimeMenuOptionsList({
                       as="span"
                       variant="caption"
                       tone="muted"
-                      className="block break-words pr-1 text-xxs leading-tight"
+                      className="block break-words pr-1"
                       title={resources.title}
                     >
                       {resources.summary}
                     </Text>
                   ) : null}
                 </div>
+                {isSelected ? (
+                  <span className="flex h-5 shrink-0 items-center" title="Selected">
+                    <Check className="h-3.5 w-3.5" aria-hidden="true" />
+                  </span>
+                ) : null}
               </div>
               {headerActions && canStart ? (
                 <IconButton
@@ -510,7 +519,8 @@ export function RuntimeMenuOptionsList({
                   aria-label={`Start ${option.label}`}
                   title="Start"
                   onPress={() => onStartRuntime?.(option.id ?? null)}
-                  className="mt-1 shrink-0 text-primary-500 hover:text-primary-600 data-[hovered]:text-primary-600 dark:text-primary-400"
+                  tone="neutral"
+                  className="shrink-0"
                 >
                   <Play className="h-4 w-4" aria-hidden="true" />
                 </IconButton>
@@ -523,7 +533,8 @@ export function RuntimeMenuOptionsList({
                   aria-label={`Stop ${option.label}`}
                   title="Stop"
                   onPress={() => onTerminateRuntime?.(option.id ?? null)}
-                  className="mt-1 shrink-0 text-slate-500 hover:text-slate-700 data-[hovered]:text-slate-700 dark:text-slate-300 dark:hover:text-slate-100 dark:data-[hovered]:text-slate-100"
+                  tone="neutral"
+                  className="shrink-0"
                 >
                   <Square className="h-4 w-4" aria-hidden="true" />
                 </IconButton>
@@ -541,7 +552,8 @@ export function RuntimeMenuOptionsList({
                     setExpandedOptionId(optionKey);
                     setRemoveConfirmOptionId(optionKey);
                   }}
-                  className="mt-1 shrink-0 text-rose-500 hover:text-rose-600 data-[hovered]:text-rose-600 dark:text-rose-400"
+                  tone="danger"
+                  className="shrink-0"
                 >
                   <Trash className="h-4 w-4" aria-hidden="true" />
                 </IconButton>
@@ -551,7 +563,8 @@ export function RuntimeMenuOptionsList({
                   variant="ghost"
                   size="xs"
                   radius="full"
-                  className="mt-1 shrink-0 text-slate-500 hover:text-slate-700 data-[hovered]:text-slate-700 dark:text-slate-300 dark:hover:text-slate-50 dark:data-[hovered]:text-slate-50"
+                  tone="muted"
+                  className="shrink-0"
                   aria-label={isExpanded ? "Hide runtime details" : "Show runtime details"}
                   aria-expanded={isExpanded}
                   title={isExpanded ? "Hide runtime details" : "Show runtime details"}
@@ -574,7 +587,7 @@ export function RuntimeMenuOptionsList({
                 className={`mx-2.5 mt-1 flex flex-col gap-2.5 border-t border-slate-200/70 pb-1 pl-4.5 pt-2.5 text-xs text-slate-600 dark:text-slate-300 ${DARK_DIVIDER_BORDER_CLASS}`}
               >
                 {shouldShowDetailText ? (
-                  <Text as="p" variant="caption" tone="muted" className="break-words text-xxs">
+                  <Text as="p" variant="caption" tone="muted" className="break-words">
                     {option.detail}
                   </Text>
                 ) : null}
@@ -593,7 +606,7 @@ export function RuntimeMenuOptionsList({
                 {runtimeImageValue || shouldShowEndpoint || shouldShowHost || lifecycleRow ? (
                   // Fixed label column so these rows share a content edge with
                   // the trend plots above (page variant sizes its labels to
-                  // match); the machine id lives in the header badge only.
+                  // match); the machine id lives in the header only.
                   <div className="grid grid-cols-[3.5rem_minmax(0,1fr)] items-center gap-x-3 gap-y-1">
                     {runtimeImageValue ? (
                       <RuntimeValueRow
@@ -647,18 +660,19 @@ export function RuntimeMenuOptionsList({
                 ) : null}
                 {canShowSelfHostHelp ? (
                   <div className="flex flex-col gap-1.5">
-                    <p className="text-xxs text-slate-500 dark:text-slate-400">
+                    <Text as="p" variant="caption" tone="muted">
                       Self-hosted machines start from the computer they run on.
-                    </p>
+                    </Text>
                     <div>
                       <Button
                         onPress={() => onShowSelfHostHelp?.()}
                         variant="outline"
                         size="xs"
                         radius="full"
-                        className="gap-1.5 text-xxs"
+                        tone="neutral"
+                        className="gap-1.5"
                       >
-                        <Play className="h-3.5 w-3.5 text-primary-500" aria-hidden="true" />
+                        <Play className="h-3.5 w-3.5" aria-hidden="true" />
                         How to start it
                       </Button>
                     </div>
@@ -672,9 +686,10 @@ export function RuntimeMenuOptionsList({
                         variant="outline"
                         size="xs"
                         radius="full"
-                        className="gap-1.5 text-xxs"
+                        tone="neutral"
+                        className="gap-1.5"
                       >
-                        <Play className="h-3.5 w-3.5 text-primary-500" aria-hidden="true" />
+                        <Play className="h-3.5 w-3.5" aria-hidden="true" />
                         Start
                       </Button>
                     ) : null}
@@ -684,9 +699,10 @@ export function RuntimeMenuOptionsList({
                         variant="outline"
                         size="xs"
                         radius="full"
-                        className="gap-1.5 text-xxs"
+                        tone="neutral"
+                        className="gap-1.5"
                       >
-                        <Square className="h-3.5 w-3.5 text-secondary-500" aria-hidden="true" />
+                        <Square className="h-3.5 w-3.5" aria-hidden="true" />
                         Stop
                       </Button>
                     ) : null}
@@ -696,9 +712,10 @@ export function RuntimeMenuOptionsList({
                         variant="ghost"
                         size="xs"
                         radius="full"
-                        className="ml-auto gap-1.5 text-xxs text-rose-700 hover:bg-rose-50 data-[hovered]:bg-rose-50 dark:text-rose-300 dark:hover:bg-rose-500/10 dark:data-[hovered]:bg-rose-500/10"
+                        tone="danger"
+                        className="ml-auto gap-1.5"
                       >
-                        <Trash className="h-3.5 w-3.5 text-rose-500" aria-hidden="true" />
+                        <Trash className="h-3.5 w-3.5" aria-hidden="true" />
                         Remove
                       </Button>
                     ) : null}
@@ -706,7 +723,7 @@ export function RuntimeMenuOptionsList({
                 ) : null}
                 {canRemove && isConfirmingRemove ? (
                   <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-rose-200/80 bg-rose-50/50 px-2 py-1.5 dark:border-rose-500/40 dark:bg-rose-500/10">
-                    <Text as="span" variant="caption" tone="muted" className="text-xxs">
+                    <Text as="span" variant="caption" tone="muted">
                       Remove “{option.label}”?
                     </Text>
                     <div className="flex items-center gap-1.5">
@@ -718,7 +735,6 @@ export function RuntimeMenuOptionsList({
                         size="xs"
                         radius="full"
                         autoFocus
-                        className="text-xxs"
                       >
                         Cancel
                       </Button>
@@ -730,7 +746,6 @@ export function RuntimeMenuOptionsList({
                         variant="danger"
                         size="xs"
                         radius="full"
-                        className="text-xxs"
                       >
                         Remove
                       </Button>

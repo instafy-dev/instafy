@@ -164,9 +164,9 @@ export function RuntimeResourceSparklines({
               as="span"
               variant="caption"
               tone="muted"
-              // Right-aligned like every label column in the card, so each
-              // label ends the same fixed gap short of the shared content edge.
-              className={`${isPage ? "w-14" : "w-7"} shrink-0 text-right text-xxs`}
+              // Labels share the title/details edge; only numerical values
+              // are right-aligned for comparison.
+              className={`${isPage ? "w-14" : "w-7"} shrink-0`}
             >
               {metric.label}
             </Text>
@@ -203,7 +203,7 @@ export function RuntimeResourceSparklines({
               as="span"
               variant="caption"
               tone="secondary"
-              className={`${isPage ? "w-24 shrink-0" : "min-w-0 flex-1"} truncate text-right text-xxs tabular-nums`}
+              className={`${isPage ? "w-24 shrink-0" : "min-w-0 flex-1"} truncate text-right tabular-nums`}
             >
               {metric.valueLabel}
             </Text>

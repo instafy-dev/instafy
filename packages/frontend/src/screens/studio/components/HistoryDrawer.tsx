@@ -5,7 +5,6 @@ import { Button, IconButton } from "../../../components/Button";
 import { DrawerHeader } from "../../../components/DrawerHeader";
 import { Text } from "../../../components/Text";
 import {
-  DRAWER_ICON_BUTTON_TONE_CLASS,
   LIST_ROW_FOCUS_RING,
   LIST_ROW_SURFACE_BASE,
 } from "../../../components/listRowStyles";
@@ -599,7 +598,7 @@ export function HistoryDrawer({
               // native disabled button would drop it.
               isPending={ready ? refreshing : probe.running === "refresh"}
               isDisabled={Boolean(workspaceIssue) || (ready ? !refreshing && history.status === "loading" : probe.running === "retry")}
-              className={`max-[899px]:h-11 max-[899px]:w-11 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
+              tone="muted"
             >
               <Refresh className="h-4 w-4" aria-hidden="true" />
             </IconButton>
@@ -612,7 +611,7 @@ export function HistoryDrawer({
                 title="Close"
                 data-testid="source-control-close"
                 onPress={onRequestClose}
-                className={`max-[899px]:h-11 max-[899px]:w-11 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
+                tone="muted"
               >
                 <Xmark className="h-4 w-4" aria-hidden="true" />
               </IconButton>
@@ -817,7 +816,7 @@ export function HistoryDrawer({
                             aria-expanded={isExpanded}
                             aria-label={isExpanded ? "Collapse saved version details" : "Expand saved version details"}
                             title={isExpanded ? "Collapse" : "Expand"}
-                            className={DRAWER_ICON_BUTTON_TONE_CLASS}
+                            tone="muted"
                           >
                             <NavArrowRight
                               className={`h-4 w-4 shrink-0 text-slate-400 transition-transform dark:text-slate-500 ${

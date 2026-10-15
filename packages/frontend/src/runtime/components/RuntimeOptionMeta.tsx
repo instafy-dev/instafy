@@ -37,15 +37,16 @@ export function RuntimeOptionMeta({
 
   return (
     <div className={containerClass}>
-      <Text
-        as="span"
-        variant="bodyStrong"
-        tone="secondary"
-        className="flex min-w-0 flex-wrap items-center gap-2"
-      >
-        <span className="min-w-0 flex-1 truncate" title={option.label}>
+      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
+        <Text
+          as="span"
+          variant="bodyStrong"
+          tone="secondary"
+          className="min-w-0 max-w-full truncate"
+          title={option.label}
+        >
           {option.label}
-        </span>
+        </Text>
         {showProviderBadge && providerBadge ? (
           <Badge size="xs" className="border-transparent bg-slate-100 text-slate-700">
             {providerBadge}
@@ -65,17 +66,19 @@ export function RuntimeOptionMeta({
           </Badge>
         ) : null}
         {showRuntimeIdBadge && runtimeIdShort ? (
-          // The badge is the machine's one visible identity (the details grid
-          // carries no separate ID row); hover reveals the full id.
-          <Badge
-            size="xs"
+          // Keep the technical identifier secondary to the machine name;
+          // hover reveals the full id without a second details row.
+          <Text
+            as="span"
+            variant="mono"
+            tone="muted"
             title={option.id ?? undefined}
-            className="border-transparent bg-slate-100 text-slate-600"
+            className="shrink-0"
           >
             rt:{runtimeIdShort}
-          </Badge>
+          </Text>
         ) : null}
-      </Text>
+      </div>
       {showDetail && option.detail ? (
         <Text as="span" variant="caption" tone="muted" className={detailClass}>
           {option.detail}

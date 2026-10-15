@@ -35,9 +35,6 @@ export function pickerListRowTextClassName(active: boolean): string {
 
 export const DRAWER_LIST_ROW_META_CLASS = "text-xs text-slate-500 dark:text-slate-400";
 
-export const DRAWER_ICON_BUTTON_TONE_CLASS =
-  "text-slate-500 hover:bg-slate-100 data-[hovered]:bg-slate-100 dark:text-slate-400 dark:hover:bg-[var(--color-studio-dark-rail-hover)] dark:data-[hovered]:bg-[var(--color-studio-dark-rail-hover)]";
-
 export function listRowSurfaceToneClassName(active: boolean): string {
   return active ? LIST_ROW_SURFACE_ACTIVE : LIST_ROW_SURFACE_IDLE;
 }
