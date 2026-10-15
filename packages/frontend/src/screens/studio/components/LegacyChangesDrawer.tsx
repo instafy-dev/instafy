@@ -21,7 +21,6 @@ import { Text } from "../../../components/Text";
 import { DrawerHeader } from "../../../components/DrawerHeader";
 import { useStudioDesktopLayout } from "../useStudioDesktopLayout";
 import {
-  DRAWER_ICON_BUTTON_TONE_CLASS,
   DRAWER_LIST_ROW_META_CLASS,
   LIST_ROW_FOCUS_RING,
   LIST_ROW_SURFACE_BASE,
@@ -1271,7 +1270,7 @@ export function LegacyChangesDrawer({
               data-testid="source-control-refresh"
               onPress={() => refresh({ silent: false })}
               isDisabled={!activeProjectId || loading || Boolean(workspaceIssue)}
-              className={`max-[899px]:h-11 max-[899px]:w-11 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
+              tone="muted"
             >
               <Refresh className="h-4 w-4" aria-hidden="true" />
             </IconButton>
@@ -1284,7 +1283,7 @@ export function LegacyChangesDrawer({
                 title="Close"
                 data-testid="source-control-close"
                 onPress={onRequestClose}
-                className={`max-[899px]:h-11 max-[899px]:w-11 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
+                tone="muted"
               >
                 <Xmark className="h-4 w-4" aria-hidden="true" />
               </IconButton>
@@ -1450,7 +1449,7 @@ export function LegacyChangesDrawer({
                       data-testid="source-control-select-all"
                       aria-label="Select visible files"
                       title="Select visible files"
-                      className={DRAWER_ICON_BUTTON_TONE_CLASS}
+                      tone="muted"
                     >
                       <CheckSquare className="h-4 w-4" aria-hidden="true" />
                     </IconButton>
@@ -1463,7 +1462,7 @@ export function LegacyChangesDrawer({
                       data-testid="source-control-select-none"
                       aria-label="Clear selection"
                       title="Clear selection"
-                      className={DRAWER_ICON_BUTTON_TONE_CLASS}
+                      tone="muted"
                     >
                       <MinusSquare className="h-4 w-4" aria-hidden="true" />
                     </IconButton>
@@ -1625,7 +1624,7 @@ export function LegacyChangesDrawer({
                                     data-testid="source-control-history-toggle"
                                     aria-label={expanded ? "Collapse saved version details" : "Expand saved version details"}
                                     title={expanded ? "Collapse" : "Expand"}
-                                    className={DRAWER_ICON_BUTTON_TONE_CLASS}
+                                    tone="muted"
                                   >
                                     <NavArrowRight
                                       className={`h-4 w-4 shrink-0 text-slate-400 transition-transform dark:text-slate-500 ${
@@ -1707,7 +1706,7 @@ export function LegacyChangesDrawer({
                 aria-label="Close all changes review"
                 onPress={() => setReviewMode("focused")}
                 data-testid="source-control-rolling-diff-close"
-                className={DRAWER_ICON_BUTTON_TONE_CLASS}
+                tone="muted"
               >
                 <Xmark className="h-4 w-4" aria-hidden="true" />
               </IconButton>

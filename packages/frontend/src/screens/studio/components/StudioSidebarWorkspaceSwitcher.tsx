@@ -10,7 +10,6 @@ import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu"
 import { Text } from "../../../components/Text";
 import { LoadingStatus } from "../../../components/LoadingStatus";
 import {
-  DRAWER_ICON_BUTTON_TONE_CLASS,
   DRAWER_LIST_ROW_TEXT_CLASS,
   PICKER_LIST_ROW_ACTIVE_CLASS,
   PICKER_LIST_ROW_GEOMETRY_CLASS,
@@ -22,7 +21,6 @@ import { OrgIdentity } from "../../../components/OrgIdentity";
 import { AttentionBadge } from "../../../components/AttentionBadge";
 import { useStudioPerformanceContent } from "../../../telemetry/useStudioPerformanceContent";
 
-const WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS = `h-8 w-8 ${DRAWER_ICON_BUTTON_TONE_CLASS}`;
 const WORKSPACE_SWITCHER_ACTION_ICON_CLASS = "h-4 w-4";
 
 export const SIDEBAR_WORKSPACE_SWITCHER_DEFAULT_VISIBLE_LIMIT = 40;
@@ -254,7 +252,7 @@ export function StudioSidebarWorkspaceSwitcher({
           aria-label={showProjectSearch ? "Clear space search" : "Search spaces"}
           data-testid="sidebar-project-search-toggle"
           onPress={onToggleProjectSearch}
-          className={WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS}
+          tone="muted"
         >
           <Search className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" />
         </IconButton>
@@ -267,7 +265,7 @@ export function StudioSidebarWorkspaceSwitcher({
           aria-label="Current space settings"
           data-testid="sidebar-project-settings"
           onPress={onOpenProjectSettings}
-          className={WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS}
+          tone="muted"
         >
           <Settings className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" />
         </IconButton>
@@ -280,7 +278,7 @@ export function StudioSidebarWorkspaceSwitcher({
           aria-label="New space"
           data-testid="sidebar-project-new"
           onPress={onCreateProject}
-          className={WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS}
+          tone="muted"
         >
           <Plus className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" />
         </IconButton>
@@ -295,7 +293,7 @@ export function StudioSidebarWorkspaceSwitcher({
         headerClassName="pr-0"
         actions={
           <div className="flex items-center gap-1">
-            {onOpenOrgOverview ? <IconButton variant="ghost" size="sm" radius="full" aria-label="Team overview" data-testid="sidebar-org-overview-button" onPress={onOpenOrgOverview} className={WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS}><Group className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" /></IconButton> : null}
+            {onOpenOrgOverview ? <IconButton variant="ghost" size="sm" radius="full" aria-label="Team overview" data-testid="sidebar-org-overview-button" onPress={onOpenOrgOverview} tone="muted"><Group className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" /></IconButton> : null}
             <IconButton
               variant="ghost"
               size="sm"
@@ -304,7 +302,8 @@ export function StudioSidebarWorkspaceSwitcher({
               data-testid="sidebar-org-settings-button"
               isDisabled={!onOpenOrgSettings}
               onPress={onOpenOrgSettings}
-              className={`shrink-0 ${WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS}`}
+              className="shrink-0"
+              tone="muted"
             >
               <Settings className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" />
             </IconButton>
@@ -318,7 +317,8 @@ export function StudioSidebarWorkspaceSwitcher({
                 aria-label="New team"
                 data-testid="sidebar-org-new"
                 onPress={onCreateOrg}
-                className={`shrink-0 ${WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS}`}
+                className="shrink-0"
+                tone="muted"
               >
                 <Plus className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" />
               </IconButton>

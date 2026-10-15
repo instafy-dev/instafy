@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Play, Refresh, WarningTriangle, Xmark } from "iconoir-react";
+import { Play, Refresh, Xmark } from "iconoir-react";
 import type { RuntimeMenuOption } from "../useRuntimeMenu";
 import { RuntimeMenuOptionsList } from "./RuntimeMenuOptionsList";
 import type { TunnelCopyMode } from "./RuntimeTunnelDetails";
@@ -15,6 +15,7 @@ import {
 import { useStudioNavigation } from "../../navigation/useStudioNavigation";
 import { Button, IconButton } from "../../components/Button";
 import { Card } from "../../components/Card";
+import { InlineNotice } from "../../components/InlineNotice";
 import { Spinner } from "../../components/Spinner";
 import { Text } from "../../components/Text";
 
@@ -41,10 +42,11 @@ function OpenBlockerSpaceButton({ projectId }: { projectId: string }) {
   return (
     <Button
       onPress={() => navigateToDestination(blockerSpaceMachinesDestination(projectId))}
-      variant="ghost"
+      variant="text"
+      tone="accent"
       size="xs"
       radius="full"
-      className="mt-1 px-0 text-xxs text-rose-700 underline decoration-rose-300 underline-offset-4 hover:bg-transparent hover:text-rose-800 data-[hovered]:bg-transparent dark:text-rose-100"
+      className="mt-1"
       data-testid="runtime-open-blocker-space"
     >
       Open space
@@ -268,7 +270,7 @@ export function RuntimeMenuPanel({
     <div>
       {showHeader ? (
         <div className="flex items-center justify-between gap-2 px-1">
-          <Text as="div" variant="caption" tone="subtle" className="text-xxs font-medium">
+          <Text as="div" variant="captionStrong" tone="secondary">
             {title}
           </Text>
           {onClose ? (
@@ -278,7 +280,7 @@ export function RuntimeMenuPanel({
               radius="full"
               onPress={onClose}
               aria-label="Close runtimes menu"
-              className="text-slate-400 hover:text-slate-700 data-[hovered]:text-slate-700 dark:text-slate-500 dark:hover:text-slate-200 dark:data-[hovered]:text-slate-200"
+              tone="muted"
             >
               <Xmark className="h-4 w-4" aria-hidden="true" />
             </IconButton>
@@ -286,67 +288,60 @@ export function RuntimeMenuPanel({
         </div>
       ) : null}
       {displayedRuntimeEnsureError ? (
-        <Card
-          tone="warning"
-          radius="xl"
-          shadow="none"
-          padding="sm"
-          className="mt-2 flex items-start gap-2 py-2 text-xs text-secondary-800"
-        >
-          <WarningTriangle className="mt-0.5 h-4 w-4 text-secondary-500" aria-hidden="true" />
-          <div className="flex-1">
-            <Text as="p" variant="caption" tone="inherit" className="font-medium">
+        <InlineNotice tone="warning" className="mt-2">
+          <div>
+            <Text as="p" variant="captionStrong" tone="inherit">
               {errorHeadline}
             </Text>
-            <Text as="p" variant="caption" tone="inherit" className="text-xxs leading-snug">
+            <Text as="p" variant="caption" tone="inherit">
               {errorSummary}
             </Text>
             {limitReached ? (
               <>
                 {blockerProjectLabel ? (
-                  <Text as="p" variant="caption" tone="inherit" className="mt-1 text-xxs leading-snug">
+                  <Text as="p" variant="caption" tone="inherit" className="mt-1">
                     Blocking runtime: {blockerRuntimeLabel ?? "active runtime"}.
                   </Text>
                 ) : null}
-                <Text as="p" variant="caption" tone="inherit" className="mt-1 text-xxs leading-snug">
+                <Text as="p" variant="caption" tone="inherit" className="mt-1">
                   Stop a stale runtime or retry after cleanup. Stopping a blocker can interrupt work on that runtime.
                 </Text>
               </>
             ) : null}
-            {displayedRuntimeEnsureError ? (
+            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
               <Button
                 onPress={() => setShowErrorDetails((current) => !current)}
-                variant="ghost"
+                variant="text"
+                tone="accent"
                 size="xs"
                 radius="full"
-                className="mt-2 px-0 text-xxs text-secondary-700 underline decoration-secondary-400 underline-offset-4 hover:bg-transparent hover:text-secondary-800 data-[hovered]:bg-transparent"
               >
                 {showErrorDetails ? "Hide details" : "View details"}
               </Button>
-            ) : null}
+              {limitReached && hasTakeoverBlocker && onTakeOverHostedRuntimeLimit ? (
+                <Button
+                  onPress={handleTakeOverHostedRuntimeLimit}
+                  variant="text"
+                  tone="danger"
+                  size="xs"
+                  radius="full"
+                  isDisabled={hostedRuntimeTakeoverInProgress}
+                >
+                  {hostedRuntimeTakeoverInProgress
+                    ? "Stopping blocker..."
+                    : "Stop blocker and retry"}
+                </Button>
+              ) : null}
+            </div>
             {displayedRuntimeEnsureError && showErrorDetails ? (
               <Text
                 as="pre"
                 variant="mono"
                 tone="inherit"
-                className="mt-2 overflow-x-auto whitespace-pre-wrap break-words rounded-md bg-secondary-100/80 p-2 text-3xs leading-snug text-secondary-900 dark:bg-secondary-950/40 dark:text-secondary-100"
+                className="mt-2 overflow-x-auto whitespace-pre-wrap break-words"
               >
                 {displayedRuntimeEnsureError}
               </Text>
-            ) : null}
-            {limitReached && hasTakeoverBlocker && onTakeOverHostedRuntimeLimit ? (
-              <Button
-                onPress={handleTakeOverHostedRuntimeLimit}
-                variant="ghost"
-                size="xs"
-                radius="full"
-                isDisabled={hostedRuntimeTakeoverInProgress}
-                className="mt-2 px-0 text-xxs text-secondary-700 underline decoration-secondary-400 underline-offset-4 hover:bg-transparent hover:text-secondary-800 data-[hovered]:bg-transparent"
-              >
-                {hostedRuntimeTakeoverInProgress
-                  ? "Stopping blocker..."
-                  : "Stop blocker and retry"}
-              </Button>
             ) : null}
             {onRetryHosted ? (
               <Button
@@ -378,63 +373,61 @@ export function RuntimeMenuPanel({
               </Button>
             ) : null}
             {runtimeActionError ? (
-              <Text
-                as="p"
-                variant="caption"
-                tone="inherit"
-                className="mt-2 rounded-xl border border-rose-200 bg-rose-50 px-2 py-1.5 text-xxs leading-snug text-rose-700 dark:border-rose-500/40 dark:bg-rose-950/30 dark:text-rose-100"
+              <InlineNotice
+                tone="danger"
+                role="alert"
+                className="mt-2"
                 data-testid="runtime-action-error"
               >
                 {runtimeActionError}
-              </Text>
+              </InlineNotice>
             ) : null}
             {limitReached && blockerSpaceNotice ? (
-              <div
-                className="mt-2 rounded-xl border border-rose-200 bg-rose-50 px-2 py-1.5 text-rose-700 dark:border-rose-500/40 dark:bg-rose-950/30 dark:text-rose-100"
+              <InlineNotice
+                tone="danger"
+                role="alert"
+                className="mt-2"
                 data-testid="runtime-blocker-space-notice"
               >
-                <Text as="p" variant="caption" tone="inherit" className="text-xxs leading-snug">
+                <Text as="p" variant="caption" tone="inherit">
                   {blockerSpaceNotice.message}
                 </Text>
                 {blockerSpaceNotice.projectId ? (
                   <OpenBlockerSpaceButton projectId={blockerSpaceNotice.projectId} />
                 ) : null}
-              </div>
+              </InlineNotice>
             ) : null}
           </div>
-        </Card>
+        </InlineNotice>
       ) : null}
       {connectionWarning ? (
-        <Card
+        <InlineNotice
           tone="warning"
-          radius="xl"
-          shadow="none"
-          padding="sm"
-          className="mt-2 flex items-start gap-2 py-2 text-xs text-secondary-800"
+          className="mt-2"
           data-testid="runtime-connection-warning"
         >
-          <WarningTriangle className="mt-0.5 h-4 w-4 text-secondary-500" aria-hidden="true" />
-          <div className="flex-1">
-            <Text as="p" variant="caption" tone="inherit" className="font-medium">
+          <div>
+            <Text as="p" variant="captionStrong" tone="inherit">
               Live runtime status is temporarily stale
             </Text>
-            <Text as="p" variant="caption" tone="inherit" className="text-xxs leading-snug">
+            <Text as="p" variant="caption" tone="inherit">
               {connectionWarning}
             </Text>
           </div>
-        </Card>
+        </InlineNotice>
       ) : null}
       {pinnedRuntimeLabel ? (
         <div className="mt-2 flex items-center justify-between gap-2 px-1">
-          <Text as="div" variant="caption" tone="muted" className="min-w-0 truncate text-xxs">
+          <Text as="div" variant="caption" tone="muted" className="min-w-0 truncate">
             {selectionPinnedPrefix} {pinnedRuntimeLabel}
           </Text>
           <Button
             onPress={() => onSelectOption(null)}
-            variant="ghost"
+            variant="text"
+            tone="muted"
             size="xs"
             radius="full"
-            className="shrink-0 px-0 text-xxs text-slate-600 underline decoration-slate-300 underline-offset-4 hover:bg-transparent hover:text-slate-800 data-[hovered]:bg-transparent dark:text-slate-300 dark:hover:text-slate-100"
+            className="shrink-0"
           >
             Use best available
           </Button>
@@ -464,7 +457,7 @@ export function RuntimeMenuPanel({
           onStartRuntime={onStartRuntime}
           onShowSelfHostHelp={onShowSelfHostHelp}
           className={listClassName}
-          selectedOptionClassName="bg-slate-100 font-medium text-slate-900 dark:bg-[var(--color-studio-dark-active)] dark:text-slate-50"
+          selectedOptionClassName="bg-slate-100 text-slate-900 dark:bg-[var(--color-studio-dark-active)] dark:text-slate-50"
           emptyStateMessage={emptyStateMessage}
           onCopyTunnel={onCopyTunnel}
           copyDisabled={false}
@@ -479,9 +472,9 @@ export function RuntimeMenuPanel({
           radius="xl"
           shadow="none"
           padding="sm"
-          className="mt-2 border-dashed py-4 text-center text-xs text-slate-500 dark:text-slate-300"
+          className="mt-2 border-dashed py-4 text-center"
         >
-          <Text as="p" variant="caption" tone="inherit" className="leading-relaxed">
+          <Text as="p" variant="caption" tone="muted">
             {emptyStateMessage}
           </Text>
           {!displayedRuntimeEnsureError && onRetryHosted ? (

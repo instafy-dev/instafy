@@ -137,7 +137,7 @@ function SpaceIdentityForm({ projectId, name, canWrite, enabled }: SpaceIdentity
         disabled={disabled || !dirty} saveTestId="space-identity-save"
         onCancel={() => { setIcon(normalizeSpaceIcon(saved.projectIcon)); setColor(normalizeSpaceColor(saved.projectColor)); setAvatarUrl(normalizeSpaceAvatarUrl(saved.projectAvatarUrl)); setImageFile(null); setError(null); }}
         cancelDisabled={disabled || !dirty}
-        secondary={<Button onPress={() => { setIcon(null); setColor(null); setAvatarUrl(null); setImageFile(null); }} isDisabled={disabled || (icon === null && color === null && !avatarUrl && !imageFile)} variant="ghost" size="sm" radius="xl" className="min-h-11 sm:pointer-fine:min-h-9">Clear appearance</Button>} />
+        secondary={<Button onPress={() => { setIcon(null); setColor(null); setAvatarUrl(null); setImageFile(null); }} isDisabled={disabled || (icon === null && color === null && !avatarUrl && !imageFile)} variant="ghost" size="md" radius="xl">Clear appearance</Button>} />
       {loading ? <p role="status" className="mt-2 text-xs text-slate-500">Loading appearance…</p> : null}
       {error ? <p role="alert" className="mt-2 text-sm text-rose-600 dark:text-rose-400">{error}</p> : null}
       {loadFailed ? <Button onPress={() => setLoadAttempt((value) => value + 1)} variant="ghost" size="sm">Retry</Button> : null}

@@ -3,7 +3,6 @@ import { Search } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { DrawerHeader } from "../../../components/DrawerHeader";
 import { SearchInput } from "../../../components/SearchInput";
-import { DRAWER_ICON_BUTTON_TONE_CLASS } from "../../../components/listRowStyles";
 import type { MobilePageHeader } from "./MobileStudioNavigationHeader";
 import { useStudioDesktopLayout } from "../useStudioDesktopLayout";
 
@@ -46,7 +45,7 @@ export function FilesExplorerToolbar({
       aria-expanded={showSearch} aria-controls={showSearch ? "code-search" : undefined}
       data-testid="files-explorer-search-toggle"
       onPress={() => showSearch ? closeSearch() : setSearchOpen(true)}
-      className={`max-[899px]:h-11 max-[899px]:w-11 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
+      tone="muted"
     ><Search className="h-4 w-4" aria-hidden="true" /></IconButton>
     {actions}
   </>;

@@ -15,7 +15,6 @@ export function PersonalAppearanceSettings() {
             value={themeMode}
             onChange={setThemeMode}
             size="sm"
-            className="[&_label]:min-h-11"
             options={[
               { value: "system", label: "System", testId: "profile-preference-theme-system" },
               { value: "light", label: "Light", testId: "profile-preference-theme-light" },

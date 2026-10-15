@@ -2,7 +2,6 @@ import { NavArrowLeft } from "iconoir-react";
 import { useId, useLayoutEffect, useRef, type ReactNode, type Ref, type RefObject } from "react";
 import { IconButton } from "../../../components/Button";
 import { Text } from "../../../components/Text";
-import { DRAWER_ICON_BUTTON_TONE_CLASS } from "../../../components/listRowStyles";
 import { DARK_RAIL_SURFACE_CLASS } from "../../../theme/darkSurfaces";
 
 type StudioSidebarMobileDrillInProps = {
@@ -85,7 +84,7 @@ export function StudioSidebarMobileDrillIn({
           aria-label={backLabel}
           data-testid={backTestId}
           onPress={goBack}
-          className={DRAWER_ICON_BUTTON_TONE_CLASS}
+          tone="muted"
         >
           <NavArrowLeft className="text-base" aria-hidden="true" />
         </IconButton>

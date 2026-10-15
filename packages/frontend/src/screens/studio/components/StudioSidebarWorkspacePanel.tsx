@@ -3,7 +3,6 @@ import { createPortal } from "react-dom";
 import { Xmark } from "iconoir-react";
 import { IconButton } from "../../../components/Button";
 import { DrawerHeader } from "../../../components/DrawerHeader";
-import { DRAWER_ICON_BUTTON_TONE_CLASS } from "../../../components/listRowStyles";
 import { DARK_DIVIDER_BORDER_CLASS } from "../../../theme/darkSurfaces";
 import { StudioSidebarMobileDrillIn } from "./StudioSidebarMobileDrillIn";
 
@@ -103,7 +102,7 @@ export function StudioSidebarWorkspacePanel({
               radius="full"
               aria-label={mode === "spaces" ? "Close spaces" : "Close team and spaces"}
               data-testid="sidebar-project-switcher-close"
-              className={DRAWER_ICON_BUTTON_TONE_CLASS}
+              tone="muted"
               onPress={dismiss}
             >
               <Xmark className="h-4 w-4" aria-hidden="true" />

@@ -160,7 +160,7 @@ export function AgentProfileModal({
           </SettingsIdentityRow>
           <div className="flex flex-wrap items-center justify-between gap-2">
             <Text as="p" variant="caption" tone="muted">PNG, JPEG or WebP, up to 2 MB.</Text>
-            {avatarImageUrl || avatarFile ? <Button variant="ghost" size="sm" radius="xl" className="min-h-11 sm:pointer-fine:min-h-9" isDisabled={pending}
+            {avatarImageUrl || avatarFile ? <Button variant="ghost" size="md" radius="xl" isDisabled={pending}
               onPress={() => { onAvatarFileChange?.(null); onAvatarImageUrlChange(""); setPhotoError(null); }}>
               Remove picture
             </Button> : null}

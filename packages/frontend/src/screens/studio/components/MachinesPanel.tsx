@@ -260,7 +260,7 @@ export function MachinesPanel() {
           as="span"
           variant="caption"
           tone="muted"
-          className="w-14 shrink-0 pt-1 text-right text-xxs"
+          className="w-14 shrink-0 pt-1"
         >
           Agents
         </Text>
@@ -272,7 +272,7 @@ export function MachinesPanel() {
               return (
                 <span
                   key={agent.id}
-                  className="inline-flex items-center gap-1 rounded-full bg-slate-100 py-0.5 pl-0.5 pr-2 text-xxs text-slate-600 dark:bg-white/[0.07] dark:text-slate-300"
+                  className="inline-flex items-center gap-1 rounded-full bg-slate-100 py-0.5 pl-0.5 pr-2 text-slate-600 dark:bg-white/[0.07] dark:text-slate-300"
                   data-testid={`machines-agent-chip-${agent.handle}`}
                   title={
                     pinnedHere
@@ -296,9 +296,9 @@ export function MachinesPanel() {
                         }}
                         size="2xs"
                       />
-                      <span className="max-w-[9rem] truncate">
+                      <Text as="span" variant="caption" className="max-w-[9rem] truncate">
                         @{agent.handle}
-                      </span>
+                      </Text>
                     </AriaButton>
                     <AgentProfilePopoverCard
                       placement="bottom start"
@@ -350,7 +350,7 @@ export function MachinesPanel() {
               as="p"
               variant="caption"
               tone="danger"
-              className="pt-1 text-xxs"
+              className="pt-1"
               data-testid="machines-pin-error"
             >
               {pinError}

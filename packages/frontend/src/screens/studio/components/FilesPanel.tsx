@@ -8,7 +8,7 @@ import { Badge } from "../../../components/Badge";
 import { Button, IconButton } from "../../../components/Button";
 import { Card } from "../../../components/Card";
 import { InlineNotice } from "../../../components/InlineNotice";
-import { DRAWER_ICON_BUTTON_TONE_CLASS, LIST_ROW_SURFACE_BASE, LIST_ROW_FOCUS_RING, listRowSurfaceToneClassName } from "../../../components/listRowStyles";
+import { LIST_ROW_SURFACE_BASE, LIST_ROW_FOCUS_RING, listRowSurfaceToneClassName } from "../../../components/listRowStyles";
 import type { MobilePageHeader } from "./MobileStudioNavigationHeader";
 import { FilesExplorerToolbar } from "./FilesExplorerToolbar";
 import { Heading } from "../../../components/Heading";
@@ -1793,7 +1793,7 @@ export function FilesPanel({
               data-testid="files-explorer-new-file"
               onPress={() => void handleStartCreateFile(resolveCreateEntryParentPath())}
               isDisabled={projectWriteDisabled || !writeReady || createFileState?.busy === true || createFolderState?.busy === true}
-              className={`max-[899px]:h-11 max-[899px]:w-11 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
+              tone="muted"
             >
               <PagePlus className="h-4 w-4" aria-hidden="true" />
             </IconButton>
@@ -1806,7 +1806,7 @@ export function FilesPanel({
               title="More"
               data-testid={touchExplorer ? "files-explorer-touch-actions" : "files-explorer-actions"}
               onPress={handleOpenRootExplorerMenu}
-              className={`max-[899px]:h-11 max-[899px]:w-11 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
+              tone="muted"
             >
               <MoreHoriz className="h-4 w-4" aria-hidden="true" />
             </IconButton> : null}
@@ -1820,7 +1820,7 @@ export function FilesPanel({
               title="Close"
               data-testid="files-explorer-close"
               onPress={onRequestCloseExplorer}
-              className={`max-[899px]:h-11 max-[899px]:w-11 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
+              tone="muted"
             >
               <Xmark className="h-4 w-4" aria-hidden="true" />
             </IconButton>

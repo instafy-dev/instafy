@@ -45,6 +45,22 @@ themes, widths, control states and a scrolling editor together. The component br
 sizes, selection/focus, interaction palettes and pending states. Extend those contracts when
 adding a shared variant rather than locking a one-off screen override into a test.
 
+The companion `/tests/fixtures/control-surfaces/index.html` mounts the Files filter,
+Appearance settings, settings footer and machine menu directly. Its callbacks are inert;
+use it to review consumer alignment, wrapping and recovery actions. The
+`control-surfaces-responsive.spec.ts` and `credential-entry-appearance.spec.ts` browser
+checks cover mouse/touch targets at narrow and wide widths in both themes. These are
+component checks, not authenticated backend or physical-device tests.
+
+Machine menus and the Machines page share a compact hierarchy: `bodyStrong` names,
+`caption` descriptions and facts, and `captionStrong` section or warning headings.
+Technical identifiers and image names use `mono`. Details and fact labels align with
+the machine name; the status dot stays in the gutter. Identifiers wrap below names
+when space is tight rather than forcing a short name to truncate beside touch actions.
+Machine selection uses a neutral fill and checkmark, independent of expansion and the
+runtime status dot. Start and Stop use the shared neutral button tone; Remove uses
+danger. Reserve accent treatments for primary calls to action and links.
+
 ## Navigation
 
 Settings pages use `SettingsShell` so their navigation follows the available content width,
