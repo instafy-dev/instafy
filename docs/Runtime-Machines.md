@@ -560,6 +560,18 @@ No `runtime.stopped` is published for these stops. A tab would read an
 unknown reason as an unexpected stop and start the machine again; the
 space's deletion is what tells open tabs.
 
+From the delete on, a machine of the space is refused with code
+`space_deleted`, whether it was stopped yet or not: `410 Gone` for
+registration (and an agent login that raced the delete), lease polls, every
+other agent call, its origin's runtime capabilities and its tunnel requests
+and status reports, and `409 Conflict` for a heartbeat, so the agent ends the
+turn it is running. Its own `/runtime/stop` and that stop's release retries,
+a revoke of its own tunnel, and the receipt of a planning job the controller
+already ended still get through. The tunnel broker's credit hook refuses the
+space without charging it. Its hosted machines are not billed and do not
+count against the organization's hosted runtime limit while they wait to be
+released; the platform-wide cap still counts them.
+
 The idle sweep finishes what that task did not, for example after a
 controller restart, a failed release or a tunnel revoke the broker refused.
 It takes spaces deleted more than 30 seconds ago, up to five of their

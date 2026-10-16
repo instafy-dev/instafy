@@ -154,3 +154,113 @@ async fn hosted_runtime_sweep_bills_each_bucket_once() -> anyhow::Result<()> {
     })
     .await
 }
+
+/// A hosted runtime of a deleted space runs on only until its stop releases
+/// it, and is not billed for that; a runtime of a live space of the same
+/// organization still is.
+#[tokio::test]
+async fn hosted_runtime_sweep_skips_a_deleted_space() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("hosted_runtime_sweep_skips_a_deleted_space").await?;
+    let org_id = Uuid::new_v4();
+    let live_project_id = Uuid::new_v4();
+    let deleted_project_id = Uuid::new_v4();
+    let fixture = SharedDbFixture {
+        organizations: vec![org_id],
+        projects: vec![live_project_id, deleted_project_id],
+    };
+    with_shared_db_fixture(fixture, async {
+        {
+            let connection = pool.get().await?;
+            connection
+                .execute(
+                    "insert into organizations (id, slug, name) values ($1, $2, 'hosted billing')",
+                    &[&org_id, &format!("hosted-billing-{org_id}")],
+                )
+                .await?;
+            connection
+                .execute(
+                    "insert into org_credit_balances (org_id, balance, credit_limit)
+                     values ($1, $2, 0)
+                     on conflict (org_id) do update
+                       set balance = excluded.balance, credit_limit = excluded.credit_limit",
+                    &[&org_id, &STARTING_BALANCE],
+                )
+                .await?;
+            for project_id in [&live_project_id, &deleted_project_id] {
+                let runtime_id = Uuid::new_v4();
+                let lease_id = Uuid::new_v4();
+                connection
+                    .execute(
+                        "insert into projects (id, org_id, project_type, status)
+                         values ($1, $2, 'customer', 'active')",
+                        &[project_id, &org_id],
+                    )
+                    .await?;
+                connection
+                    .execute(
+                        "insert into runtimes (id, project_id, provider, status, idle_ttl_seconds)
+                         values ($1, $2, 'instafy-cloud', 'ready', 600)",
+                        &[&runtime_id, project_id],
+                    )
+                    .await?;
+                connection
+                    .execute(
+                        "insert into runtime_leases (id, project_id, runtime_id, status, requested_at, launched_at)
+                         values ($1, $2, $3, 'active', now() - interval '1 minute', now() - interval '1 minute')",
+                        &[&lease_id, project_id, &runtime_id],
+                    )
+                    .await?;
+                connection
+                    .execute(
+                        "update runtimes set active_lease_id = $2 where id = $1",
+                        &[&runtime_id, &lease_id],
+                    )
+                    .await?;
+            }
+            connection
+                .execute(
+                    "update projects set status = 'deleted' where id = $1",
+                    &[&deleted_project_id],
+                )
+                .await?;
+        }
+
+        let mut config = build_app_config(
+            test_origin_private_key(),
+            test_origin_public_key(),
+            "hosted-runtime-billing-deleted-space",
+        );
+        config.hosted_runtime_credit_burn_amount = 1;
+        config.hosted_runtime_credit_burn_interval_seconds = 600;
+        let provider = RuntimeProviderConfig {
+            id: "instafy-cloud".to_string(),
+            display_name: "Instafy Cloud".to_string(),
+            kind: "noop".to_string(),
+            owner_org_id: None,
+            allowed_org_ids: vec![],
+            endpoint: None,
+            auth_token: None,
+            metadata: None,
+        };
+        config.runtime_providers = vec![provider.clone()];
+        let state = build_test_state(pool.clone(), config);
+        let (burn, _) = crate::credits::resolve_hosted_runtime_credit_burn_config_for_provider(
+            &state, &provider,
+        );
+        assert!(burn > 0, "the test provider must burn credits");
+
+        runtime::sweep_hosted_runtime_credit_usage(&state).await?;
+        assert_eq!(
+            billed(&pool, &org_id, &live_project_id).await?,
+            (STARTING_BALANCE - burn, 1),
+            "the live space's runtime is billed, and only it"
+        );
+        assert_eq!(
+            billed(&pool, &org_id, &deleted_project_id).await?.1,
+            0,
+            "the deleted space's runtime is not billed"
+        );
+        Ok(())
+    })
+    .await
+}

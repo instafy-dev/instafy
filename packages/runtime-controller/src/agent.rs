@@ -34,6 +34,7 @@ use crate::credits::{
     reconcile_managed_ai_usage_charge, ManagedAiRefundOutcome, ManagedAiTokenUsage,
 };
 use crate::dispatch::DispatchPromptNormalized;
+use crate::projects::{ensure_project_not_deleted, space_deleted};
 use crate::redaction::RedactedHeaders;
 use crate::runs::{load_run_snapshot, run_snapshot_to_json};
 use crate::state::RuntimeResourceUsagePayload;
@@ -631,6 +632,11 @@ pub(crate) async fn agent_login(
         true,
     )
     .await?;
+    // The access check above read the space without a lock. Read it again
+    // under a share lock now that the new runtime row is held, as
+    // registration does: a delete that raced the login is refused here, or
+    // waits for it and then stops the runtime it made ready.
+    ensure_project_not_deleted(&transaction, &project_id, true, StatusCode::GONE).await?;
 
     let runtime = runtime::mark_runtime_ready(&transaction, &runtime.id, idle_ttl_seconds).await?;
 
@@ -877,7 +883,7 @@ pub(crate) async fn agent_lease(
         token_lease_id,
         token_runtime_generation,
     )
-    .await
+    .await?
     {
         info!(project_id = %project_id, "agent lease returned no jobs");
         return Ok(Json(AgentLeaseResponse { jobs: Vec::new() }));
@@ -1178,6 +1184,12 @@ struct LeasingRuntime {
 /// transaction. Every lease and every refusal therefore still happens under
 /// the row lock that orders it with a stop, and `last_seen_at` is written
 /// exactly when it was before.
+///
+/// The one exception is a runtime whose space was deleted, refused here with
+/// [`space_deleted`] once its token matches the runtime, work or none: nothing
+/// brings a deleted space back, so that refusal needs no lock, and a machine
+/// of a deleted space that keeps polling costs one read a poll, not a
+/// transaction.
 async fn idle_lease_poll_finds_no_work(
     state: &AppState,
     client: &tokio_postgres::Client,
@@ -1185,10 +1197,11 @@ async fn idle_lease_poll_finds_no_work(
     runtime_id: &Uuid,
     token_lease_id: Option<Uuid>,
     token_runtime_generation: Option<Uuid>,
-) -> bool {
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
     let row = match client
         .query_opt(
             "select r.provider, r.status, r.capabilities, r.active_lease_id,
+                    p.status as project_status,
                     r.last_seen_at is not null
                       and r.last_seen_at >= now() - ($3::bigint * interval '1 second')
                       as seen_recently,
@@ -1205,6 +1218,7 @@ async fn idle_lease_poll_finds_no_work(
                           )
                     ) as has_queued_work
              from runtimes r
+             join projects p on p.id = r.project_id
              where r.id = $1 and r.project_id = $2",
             &[
                 runtime_id,
@@ -1215,38 +1229,43 @@ async fn idle_lease_poll_finds_no_work(
         .await
     {
         Ok(Some(row)) => row,
-        Ok(None) => return false,
+        Ok(None) => return Ok(false),
         Err(error) => {
             warn!(
                 ?error,
                 runtime_id = %runtime_id,
                 "idle lease check failed; leasing in a transaction"
             );
-            return false;
+            return Ok(false);
         }
     };
-    let seen_recently = row.get::<_, Option<bool>>("seen_recently").unwrap_or(false);
-    let has_queued_work = row
-        .get::<_, Option<bool>>("has_queued_work")
-        .unwrap_or(true);
-    if !seen_recently || has_queued_work {
-        return false;
-    }
     let provider: String = row.get("provider");
     let status: String = row.get("status");
     let capabilities: JsonValue = row.get("capabilities");
     let active_lease_id: Option<Uuid> = row.get("active_lease_id");
+    let project_status: String = row.get("project_status");
     let is_private_self_hosted =
         runtime::runtime_is_private_self_hosted(state, &provider, &capabilities);
-    ensure_agent_token_runtime_binding_matches(
+    let token_matches = ensure_agent_token_runtime_binding_matches(
         &capabilities,
         token_lease_id,
         active_lease_id,
         token_runtime_generation,
         is_private_self_hosted,
     )
-    .is_ok()
-        && runtime_record_can_lease(&provider, &status, &capabilities, is_private_self_hosted)
+    .is_ok();
+    if token_matches && project_status == "deleted" {
+        return Err(space_deleted(StatusCode::GONE));
+    }
+    let seen_recently = row.get::<_, Option<bool>>("seen_recently").unwrap_or(false);
+    let has_queued_work = row
+        .get::<_, Option<bool>>("has_queued_work")
+        .unwrap_or(true);
+    if !seen_recently || has_queued_work {
+        return Ok(false);
+    }
+    Ok(token_matches
+        && runtime_record_can_lease(&provider, &status, &capabilities, is_private_self_hosted))
 }
 
 /// Validate that the runtime may lease jobs, and return whether it is a
@@ -1259,12 +1278,16 @@ async fn ensure_runtime_can_lease(
     token_lease_id: Option<Uuid>,
     token_runtime_generation: Option<Uuid>,
 ) -> Result<LeasingRuntime, (StatusCode, Json<ApiError>)> {
+    // `of r`: a lock on the project row too would make every poll hold up a
+    // delete of the space.
     let row = transaction
         .query_opt(
-            "select provider, status, capabilities, active_lease_id
-             from runtimes
-             where id = $1 and project_id = $2
-             for share",
+            "select r.provider, r.status, r.capabilities, r.active_lease_id,
+                    p.status as project_status
+             from runtimes r
+             join projects p on p.id = r.project_id
+             where r.id = $1 and r.project_id = $2
+             for share of r",
             &[runtime_id, project_id],
         )
         .await
@@ -1278,6 +1301,7 @@ async fn ensure_runtime_can_lease(
     let status: String = row.get("status");
     let capabilities: JsonValue = row.get("capabilities");
     let active_lease_id: Option<Uuid> = row.get("active_lease_id");
+    let project_status: String = row.get("project_status");
     let is_private_self_hosted =
         runtime::runtime_is_private_self_hosted(state, &provider, &capabilities);
     ensure_agent_token_runtime_binding_matches(
@@ -1287,6 +1311,9 @@ async fn ensure_runtime_can_lease(
         token_runtime_generation,
         is_private_self_hosted,
     )?;
+    if project_status == "deleted" {
+        return Err(space_deleted(StatusCode::GONE));
+    }
     if !runtime_record_can_lease(&provider, &status, &capabilities, is_private_self_hosted) {
         return Err(forbidden("runtime is not eligible to lease jobs"));
     }
@@ -1322,12 +1349,16 @@ pub(crate) async fn ensure_runtime_can_heartbeat(
     // transaction gets the runtime lock first therefore wins cleanly: a live
     // heartbeat renews before stop checks the lease, or a completed stop makes
     // the waiting heartbeat observe the terminal status and reject renewal.
+    // Only the runtime row (`of r`): a delete of the space never waits on a
+    // heartbeat.
     let row = transaction
         .query_opt(
-            "select provider, status, capabilities, active_lease_id
-             from runtimes
-             where id = $1 and project_id = $2
-             for share",
+            "select r.provider, r.status, r.capabilities, r.active_lease_id,
+                    p.status as project_status
+             from runtimes r
+             join projects p on p.id = r.project_id
+             where r.id = $1 and r.project_id = $2
+             for share of r",
             &[runtime_id, project_id],
         )
         .await
@@ -1344,6 +1375,7 @@ pub(crate) async fn ensure_runtime_can_heartbeat(
     let provider: String = row.get("provider");
     let capabilities: JsonValue = row.get("capabilities");
     let active_lease_id: Option<Uuid> = row.get("active_lease_id");
+    let project_status: String = row.get("project_status");
     ensure_agent_token_runtime_binding_matches(
         &capabilities,
         token_lease_id,
@@ -1351,6 +1383,12 @@ pub(crate) async fn ensure_runtime_can_heartbeat(
         token_runtime_generation,
         runtime::runtime_is_private_self_hosted(state, &provider, &capabilities),
     )?;
+    // A conflict, as for a runtime that is no longer active: the agent ends
+    // the turn on it, where it would renew its token on any other refusal and
+    // keep the turn running.
+    if project_status == "deleted" {
+        return Err(space_deleted(StatusCode::CONFLICT));
+    }
     if !runtime_status_can_heartbeat(&status) {
         return Err((
             StatusCode::CONFLICT,
@@ -1392,26 +1430,44 @@ fn ensure_agent_token_runtime_binding_matches(
     Ok(())
 }
 
+/// What a runtime-scoped agent token is checked for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AgentTokenUse {
+    /// Any general agent capability. Refused for a deleted space.
+    General,
+    /// Completing a job. As [`AgentTokenUse::General`], except that
+    /// `agent_complete` refuses a deleted space itself, after the receipt of
+    /// a planning job the controller already ended, so that its usage is
+    /// still billed.
+    Completion,
+    /// The agent's own stop, and the release retries of a stop quarantined
+    /// in `cleanup_pending`. Open for a deleted space, whose stop they finish.
+    Stop,
+}
+
 /// Validate that a runtime-scoped agent token belongs to the runtime's current
 /// launch generation. Hosted runtime IDs can be reused across launches, so the
 /// runtime ID alone is not sufficient authorization after a lease rotates.
-async fn ensure_agent_token_matches_runtime_lease_with_cleanup_retry(
+async fn ensure_agent_token_matches_runtime_lease_for_use(
     state: &AppState,
     transaction: &tokio_postgres::Transaction<'_>,
     context: &TokenContext,
     runtime_id: &Uuid,
-    allow_cleanup_pending_retry: bool,
+    token_use: AgentTokenUse,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
     if context.runtime_id != Some(*runtime_id) {
         return Err(unauthorized("agent token runtime scope mismatch"));
     }
 
+    // `of r`: no agent call holds up a delete of the space.
     let row = transaction
         .query_opt(
-            "select provider, status, capabilities, active_lease_id
-             from runtimes
-             where id = $1 and project_id = $2
-             for share",
+            "select r.provider, r.status, r.capabilities, r.active_lease_id,
+                    p.status as project_status
+             from runtimes r
+             join projects p on p.id = r.project_id
+             where r.id = $1 and r.project_id = $2
+             for share of r",
             &[runtime_id, &context.project_id],
         )
         .await
@@ -1429,6 +1485,7 @@ async fn ensure_agent_token_matches_runtime_lease_with_cleanup_retry(
     let status: String = row.get("status");
     let capabilities: JsonValue = row.get("capabilities");
     let active_lease_id: Option<Uuid> = row.get("active_lease_id");
+    let project_status: String = row.get("project_status");
     ensure_agent_token_runtime_binding_matches(
         &capabilities,
         context.lease_id,
@@ -1436,8 +1493,11 @@ async fn ensure_agent_token_matches_runtime_lease_with_cleanup_retry(
         context.runtime_generation,
         runtime::runtime_is_private_self_hosted(state, &provider, &capabilities),
     )?;
+    if token_use == AgentTokenUse::General && project_status == "deleted" {
+        return Err(space_deleted(StatusCode::GONE));
+    }
 
-    if allow_cleanup_pending_retry && status == "requested" {
+    if token_use == AgentTokenUse::Stop && status == "requested" {
         if let Some(active_lease_id) = active_lease_id {
             let cleanup_pending = transaction
                 .query_opt(
@@ -1474,12 +1534,12 @@ pub(crate) async fn ensure_agent_token_matches_runtime_lease(
     context: &TokenContext,
     runtime_id: &Uuid,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
-    ensure_agent_token_matches_runtime_lease_with_cleanup_retry(
+    ensure_agent_token_matches_runtime_lease_for_use(
         state,
         transaction,
         context,
         runtime_id,
-        false,
+        AgentTokenUse::General,
     )
     .await
 }
@@ -1487,19 +1547,20 @@ pub(crate) async fn ensure_agent_token_matches_runtime_lease(
 /// Stop/remove retries are the only operation retained by an exact runtime
 /// generation after provider cleanup is quarantined. The runtime is no longer
 /// generally active, but its unreleased `cleanup_pending` lease must remain
-/// callable so the provider acknowledgement can finish the fenced stop.
+/// callable so the provider acknowledgement can finish the fenced stop. A
+/// deleted space's runtime keeps them too.
 pub(crate) async fn ensure_agent_token_matches_runtime_lease_for_stop(
     state: &AppState,
     transaction: &tokio_postgres::Transaction<'_>,
     context: &TokenContext,
     runtime_id: &Uuid,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
-    ensure_agent_token_matches_runtime_lease_with_cleanup_retry(
+    ensure_agent_token_matches_runtime_lease_for_use(
         state,
         transaction,
         context,
         runtime_id,
-        true,
+        AgentTokenUse::Stop,
     )
     .await
 }
@@ -2795,8 +2856,14 @@ pub(crate) async fn agent_complete(
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
 
     if let Some(runtime_uuid) = runtime_scope.as_ref() {
-        ensure_agent_token_matches_runtime_lease(&state, &transaction, &claims, runtime_uuid)
-            .await?;
+        ensure_agent_token_matches_runtime_lease_for_use(
+            &state,
+            &transaction,
+            &claims,
+            runtime_uuid,
+            AgentTokenUse::Completion,
+        )
+        .await?;
     }
 
     let artifacts_value =
@@ -2845,6 +2912,11 @@ pub(crate) async fn agent_complete(
         }
         return Ok(Json(AgentCompleteResponseBody { ok: true }));
     }
+
+    // Past the planning receipt, which a deleted space still takes so that
+    // its usage is billed. Its delete canceled every other job, so this only
+    // answers what the job update below would refuse anyway.
+    ensure_project_not_deleted(&transaction, &project_id, false, StatusCode::GONE).await?;
 
     let row = match runtime_scope {
         Some(runtime_uuid) => {
@@ -5602,6 +5674,10 @@ fn extract_multi_agent_plan_details(value: &JsonValue) -> Option<&JsonValue> {
     }
     None
 }
+
+#[cfg(test)]
+#[path = "agent/deleted_space_fence_tests.rs"]
+mod deleted_space_fence_tests;
 
 #[cfg(test)]
 mod tests {

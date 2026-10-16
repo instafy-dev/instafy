@@ -22,8 +22,15 @@ impl ReclaimFixture {
     async fn ensure_for_waiting_space(
         &self,
     ) -> Result<RuntimeEnsureResponse, (StatusCode, Json<ApiError>)> {
+        self.ensure_for_waiting_space_with(&self.state).await
+    }
+
+    async fn ensure_for_waiting_space_with(
+        &self,
+        state: &AppState,
+    ) -> Result<RuntimeEnsureResponse, (StatusCode, Json<ApiError>)> {
         ensure_runtime_launch(
-            &self.state,
+            state,
             self.waiting_project_id,
             None,
             self.provider_id.clone(),
@@ -616,6 +623,195 @@ async fn reclaim_that_requeues_work_leaves_the_reclaimed_space_waiting() -> anyh
             .0;
         assert_eq!(request["runtimeId"], json!(fixture.blocker_runtime_id));
         assert_eq!(request["provider"], json!(fixture.provider_id));
+        Ok(())
+    })
+    .await
+}
+
+impl ReclaimFixture {
+    async fn delete_space(&self, project_id: &Uuid) -> anyhow::Result<()> {
+        self.pool
+            .get()
+            .await?
+            .execute(
+                "update projects set status = 'deleted' where id = $1",
+                &[project_id],
+            )
+            .await?;
+        Ok(())
+    }
+}
+
+/// A deleted space's hosted runtime holds no slot of its organization while
+/// its stop releases it: a space waiting for the slot launches at once,
+/// without a reclaim, and the deleted space's runtime is left to its stop.
+#[tokio::test]
+async fn a_deleted_space_holds_no_hosted_runtime_slot() -> anyhow::Result<()> {
+    let fixture =
+        require_setup_at_hosted_runtime_limit("hosted-limit-deleted-space", 0, 3_600).await?;
+    let cleanup = crate::tests::SharedDbFixture {
+        organizations: vec![fixture.org_id],
+        projects: vec![fixture.waiting_project_id, fixture.blocker_project_id],
+    };
+    crate::tests::with_shared_db_fixture(cleanup, async {
+        let refused = fixture
+            .ensure_for_waiting_space()
+            .await
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("the live blocker must hold the organization's slot"))?;
+        assert_eq!(
+            limit_refusal_code(&refused).as_deref(),
+            Some("runtime_limit_reached")
+        );
+
+        fixture.delete_space(&fixture.blocker_project_id).await?;
+        let response = fixture
+            .ensure_for_waiting_space()
+            .await
+            .map_err(|(status, body)| {
+                anyhow::anyhow!("waiting space was refused ({status}): {}", body.0.message)
+            })?;
+        assert_eq!(response.provider, fixture.provider_id);
+        assert_eq!(fixture.blocker_status().await?, "ready");
+        assert!(!fixture.provider_events.lock().await.contains(&"release"));
+        Ok(())
+    })
+    .await
+}
+
+/// A refusal on the organization's limit names a live space's runtime as
+/// what holds the slot, never a deleted space's, however recently that one
+/// was touched.
+#[tokio::test]
+async fn the_hosted_limit_refusal_never_names_a_deleted_space() -> anyhow::Result<()> {
+    let fixture =
+        require_setup_at_hosted_runtime_limit("hosted-limit-blocker-deleted-space", 0, 3_600)
+            .await?;
+    let deleted_project_id = Uuid::new_v4();
+    let cleanup = crate::tests::SharedDbFixture {
+        organizations: vec![fixture.org_id],
+        projects: vec![
+            fixture.waiting_project_id,
+            fixture.blocker_project_id,
+            deleted_project_id,
+        ],
+    };
+    crate::tests::with_shared_db_fixture(cleanup, async {
+        let runtime_id = Uuid::new_v4();
+        let lease_id = Uuid::new_v4();
+        {
+            let connection = fixture.pool.get().await?;
+            connection
+                .execute(
+                    "insert into projects (id, org_id, project_type, status)
+                     values ($1, $2, 'customer', 'active')",
+                    &[&deleted_project_id, &fixture.org_id],
+                )
+                .await?;
+            connection
+                .execute(
+                    "insert into runtimes
+                        (id, project_id, provider, status, idle_ttl_seconds, last_seen_at,
+                         endpoint_url, updated_at)
+                     values ($1, $2, $3, 'ready', 600, now(), 'http://runtime.test',
+                             now() + interval '1 hour')",
+                    &[&runtime_id, &deleted_project_id, &fixture.provider_id],
+                )
+                .await?;
+            connection
+                .execute(
+                    "insert into runtime_leases
+                        (id, project_id, runtime_id, status, requested_at, launched_at)
+                     values ($1, $2, $3, 'active', now(), now())",
+                    &[&lease_id, &deleted_project_id, &runtime_id],
+                )
+                .await?;
+            connection
+                .execute(
+                    "update runtimes
+                     set active_lease_id = $2, updated_at = now() + interval '1 hour'
+                     where id = $1",
+                    &[&runtime_id, &lease_id],
+                )
+                .await?;
+        }
+        fixture.delete_space(&deleted_project_id).await?;
+
+        let refused = fixture
+            .ensure_for_waiting_space()
+            .await
+            .err()
+            .ok_or_else(|| {
+                anyhow::anyhow!("the live blocker must still hold the organization's slot")
+            })?;
+        assert_eq!(
+            limit_refusal_code(&refused).as_deref(),
+            Some("runtime_limit_reached")
+        );
+        let details = refused.1 .0.details.clone().unwrap_or_default();
+        assert_eq!(details["activeCount"], json!(1), "{details}");
+        assert_eq!(
+            details["blockerProjectId"],
+            json!(fixture.blocker_project_id.to_string()),
+            "{details}"
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// The platform-wide cap still counts a deleted space's hosted runtime: it
+/// runs on the host until its stop releases it.
+#[tokio::test]
+async fn the_platform_cap_still_counts_a_deleted_space() -> anyhow::Result<()> {
+    let fixture =
+        require_setup_at_hosted_runtime_limit("hosted-platform-cap-deleted-space", 0, 3_600)
+            .await?;
+    let cleanup = crate::tests::SharedDbFixture {
+        organizations: vec![fixture.org_id],
+        projects: vec![fixture.waiting_project_id, fixture.blocker_project_id],
+    };
+    crate::tests::with_shared_db_fixture(cleanup, async {
+        fixture.delete_space(&fixture.blocker_project_id).await?;
+        // Every hosted runtime the cap counts, the deleted space's included.
+        let counted: i64 = fixture
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select count(*)::bigint
+                 from runtimes r
+                 join runtime_leases rl on rl.id = r.active_lease_id
+                 where (
+                     r.provider = 'instafy_cloud'
+                     or r.provider like 'instafy\\_cloud\\_%'
+                     or r.provider = 'instafy-cloud'
+                     or r.provider like 'instafy-cloud-%'
+                   )
+                   and r.status not in ('stopped', 'removed')
+                   and rl.released_at is null
+                   and rl.status <> 'failed'",
+                &[],
+            )
+            .await?
+            .get(0);
+        assert!(counted >= 1);
+        let mut config = fixture.state.config.clone();
+        config.max_active_hosted_runtimes_global = counted;
+        let state = crate::tests::build_test_state(fixture.pool.clone(), config);
+
+        let refused = fixture
+            .ensure_for_waiting_space_with(&state)
+            .await
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("the platform is at its cap"))?;
+        assert_eq!(
+            refused.0,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{}",
+            refused.1 .0.message
+        );
+        assert_eq!(refused.1 .0.code.as_deref(), Some("platform_at_capacity"));
         Ok(())
     })
     .await

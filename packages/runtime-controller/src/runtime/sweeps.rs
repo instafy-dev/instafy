@@ -1563,6 +1563,9 @@ pub(crate) async fn sweep_hosted_runtime_credit_usage(state: &AppState) -> AnyRe
              join projects p on p.id = r.project_id
              left join runtime_leases rl on rl.id = r.active_lease_id
              where p.org_id is not null
+               -- A deleted space's machine runs on only until its stop
+               -- releases it, and is not billed for that.
+               and p.status <> 'deleted'
                and r.active_lease_id is not null
                and (
                  replace(lower(r.provider), '-', '_') = 'instafy_cloud'

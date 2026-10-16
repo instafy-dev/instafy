@@ -320,6 +320,52 @@ pub(crate) async fn load_project_record(
     Ok(map_project_row(&row))
 }
 
+/// The code of [`space_deleted`]'s refusal.
+pub(crate) const SPACE_DELETED_CODE: &str = "space_deleted";
+
+/// The refusal a runtime agent, an origin or a tunnel gets for a space that
+/// was deleted, with `status`. Its code is used by no other refusal, so a
+/// caller can tell it from a credential to renew.
+pub(crate) fn space_deleted(status: StatusCode) -> (StatusCode, Json<ApiError>) {
+    (
+        status,
+        Json(ApiError {
+            message: "This space was deleted.".to_string(),
+            code: Some(SPACE_DELETED_CODE.to_string()),
+            details: None,
+        }),
+    )
+}
+
+/// Refuse with [`space_deleted`] when `project_id` is deleted or gone.
+///
+/// Nothing brings a deleted space back, so a plain read that says deleted is
+/// always right. `lock_for_share` also share-locks the project row until the
+/// transaction ends: a delete that comes later waits for the caller to
+/// commit, and one that came first is what the caller reads. A caller that
+/// holds a runtime or lease row lock takes this one after them, the order
+/// launch and registration use.
+pub(crate) async fn ensure_project_not_deleted(
+    transaction: &tokio_postgres::Transaction<'_>,
+    project_id: &Uuid,
+    lock_for_share: bool,
+    status: StatusCode,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    let query = if lock_for_share {
+        "select status from projects where id = $1 for share"
+    } else {
+        "select status from projects where id = $1"
+    };
+    let row = transaction
+        .query_opt(query, &[project_id])
+        .await
+        .map_err(|error| internal_error(format!("failed to check the project: {error}")))?;
+    match row {
+        Some(row) if row.get::<_, String>("status") != "deleted" => Ok(()),
+        _ => Err(space_deleted(status)),
+    }
+}
+
 pub(crate) async fn resolve_effective_project_access(
     transaction: &tokio_postgres::Transaction<'_>,
     project: &ProjectRecord,

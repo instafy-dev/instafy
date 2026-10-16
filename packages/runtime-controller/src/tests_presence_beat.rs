@@ -280,6 +280,38 @@ async fn a_presence_beat_keeps_each_refusal() -> anyhow::Result<()> {
     .await
 }
 
+/// A machine of a deleted space is told the space is gone, online or
+/// offline: not a 401 or 403, on which its origin would renew its token on
+/// every beat.
+#[tokio::test]
+async fn a_presence_beat_of_a_deleted_space_is_gone() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("a_presence_beat_of_a_deleted_space_is_gone").await?;
+    let project_id = Uuid::new_v4();
+    let fixture = SharedDbFixture {
+        projects: vec![project_id],
+        ..SharedDbFixture::default()
+    };
+    with_shared_db_fixture(fixture, async {
+        let machine = seed_machine(&pool, project_id).await?;
+        let state = test_state(&pool, "presence-beat-deleted-space");
+        pool.get()
+            .await?
+            .execute(
+                "update projects set status = 'deleted' where id = $1",
+                &[&project_id],
+            )
+            .await?;
+
+        for status in ["online", "offline"] {
+            let (code, body) = beat(&state, &machine, &machine.origin_id, status).await?;
+            assert_eq!(code, StatusCode::GONE, "{status} beat: {body}");
+            assert_eq!(body["code"], crate::projects::SPACE_DELETED_CODE);
+        }
+        Ok(())
+    })
+    .await
+}
+
 async fn set_instance_origin(
     pool: &PgPool,
     machine: &Machine,
