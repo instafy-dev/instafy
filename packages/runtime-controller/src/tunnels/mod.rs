@@ -1591,25 +1591,7 @@ pub(crate) async fn revoke_tunnels_for_scope(
             continue;
         }
 
-        let mut metadata_override = grant.metadata.clone();
-        if !metadata_override
-            .as_ref()
-            .map(|value| value.is_object())
-            .unwrap_or(false)
-        {
-            metadata_override = Some(JsonValue::Object(JsonMap::new()));
-        }
-        if let Some(JsonValue::Object(map)) = metadata_override.as_mut() {
-            map.insert(
-                "autoRevokedSource".to_string(),
-                JsonValue::String(source.to_string()),
-            );
-            map.insert(
-                "autoRevokedAt".to_string(),
-                JsonValue::String(Utc::now().to_rfc3339()),
-            );
-        }
-
+        let metadata_override = auto_revoked_metadata(&grant, source);
         if let Err(error) = revoke_tunnel_record(state, grant, metadata_override.as_ref()).await {
             return Err(error);
         }
@@ -1617,6 +1599,81 @@ pub(crate) async fn revoke_tunnels_for_scope(
     }
 
     Ok(revoked)
+}
+
+/// Revoke every grant of a deleted space that is still active, whatever
+/// runtime or lease it was issued for, if any. Unlike
+/// [`revoke_tunnels_for_scope`], a failed revoke does not end the pass: the
+/// grant stays active for the idle sweep's next one, and the error is
+/// returned once every other grant was tried. Publishes nothing, since no
+/// stream may follow a deleted space any more.
+pub(crate) async fn revoke_tunnels_of_deleted_project(
+    state: &AppState,
+    project_id: &Uuid,
+    source: &str,
+) -> Result<usize, (StatusCode, Json<ApiError>)> {
+    let grants = fetch_active_tunnel_grants_of_deleted_project(&state.pool, project_id).await?;
+    let mut revoked = 0usize;
+    let mut failed = None;
+    for grant in grants {
+        let metadata_override = auto_revoked_metadata(&grant, source);
+        match revoke_tunnel_grant(state, grant, metadata_override.as_ref()).await {
+            Ok(_) => revoked += 1,
+            Err(error) => failed = Some(error),
+        }
+    }
+    match failed {
+        Some(error) => Err(error),
+        None => Ok(revoked),
+    }
+}
+
+/// The active grants of `project_id` when it is deleted: none for a space
+/// that is not.
+async fn fetch_active_tunnel_grants_of_deleted_project(
+    pool: &PgPool,
+    project_id: &Uuid,
+) -> Result<Vec<RuntimeTunnelGrantRecord>, (StatusCode, Json<ApiError>)> {
+    let connection = pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to acquire connection: {error}")))?;
+    let rows = connection
+        .query(
+            "select g.* from runtime_tunnel_grants g
+             join projects p on p.id = g.project_id
+             where g.project_id = $1
+               and p.status = 'deleted'
+               and lower(btrim(g.status)) not in ('revoked', 'expired', 'failed')
+             order by g.created_at desc",
+            &[project_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to query tunnel grants: {error}")))?;
+    Ok(rows.iter().map(runtime_tunnel_grant_from_row).collect())
+}
+
+/// The grant's metadata with who revoked it on its own, and when.
+fn auto_revoked_metadata(grant: &RuntimeTunnelGrantRecord, source: &str) -> Option<JsonValue> {
+    let mut metadata_override = grant.metadata.clone();
+    if !metadata_override
+        .as_ref()
+        .map(|value| value.is_object())
+        .unwrap_or(false)
+    {
+        metadata_override = Some(JsonValue::Object(JsonMap::new()));
+    }
+    if let Some(JsonValue::Object(map)) = metadata_override.as_mut() {
+        map.insert(
+            "autoRevokedSource".to_string(),
+            JsonValue::String(source.to_string()),
+        );
+        map.insert(
+            "autoRevokedAt".to_string(),
+            JsonValue::String(Utc::now().to_rfc3339()),
+        );
+    }
+    metadata_override
 }
 
 fn normalize_tunnel_status(raw: &str) -> String {
@@ -1725,6 +1782,27 @@ async fn revoke_tunnel_record(
     record: RuntimeTunnelGrantRecord,
     metadata_override: Option<&JsonValue>,
 ) -> Result<RuntimeTunnelGrantRecord, (StatusCode, Json<ApiError>)> {
+    let updated = revoke_tunnel_grant(state, record, metadata_override).await?;
+
+    publish_controller_event(
+        &state.events,
+        "tunnel.grant_revoked",
+        Some(updated.project_id),
+        None,
+        None,
+        None,
+        tunnel_event_payload(&updated),
+    );
+
+    Ok(updated)
+}
+
+/// [`revoke_tunnel_record`] without its `tunnel.grant_revoked` event.
+async fn revoke_tunnel_grant(
+    state: &AppState,
+    record: RuntimeTunnelGrantRecord,
+    metadata_override: Option<&JsonValue>,
+) -> Result<RuntimeTunnelGrantRecord, (StatusCode, Json<ApiError>)> {
     if let Some(broker) = state.tunnel_broker.clone() {
         if let Err(error) = broker
             .revoke_tunnel(&record.tunnel_id, record.metadata.as_ref())
@@ -1742,26 +1820,14 @@ async fn revoke_tunnel_record(
         }
     }
 
-    let updated = update_runtime_tunnel_grant_status(
+    update_runtime_tunnel_grant_status(
         &state.pool,
         &record.id,
         &record.project_id,
         "revoked",
         metadata_override,
     )
-    .await?;
-
-    publish_controller_event(
-        &state.events,
-        "tunnel.grant_revoked",
-        Some(record.project_id),
-        None,
-        None,
-        None,
-        tunnel_event_payload(&updated),
-    );
-
-    Ok(updated)
+    .await
 }
 
 fn tunnel_status_is_active(status: &str) -> bool {

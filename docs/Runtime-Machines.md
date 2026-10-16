@@ -538,6 +538,39 @@ went out when the stop committed). Only a 4xx refusal, such as 409
 "provider-managed runtime is missing its active lease generation", 403 or 404,
 lifts the hold, since the machine is as it was.
 
+## Deleting a space
+
+`DELETE /projects/:id` answers once the space is marked deleted and its work
+is canceled. Its machines are stopped after that, in the background, since a
+hosted release can take minutes:
+
+- The space's workspace leases are released, and so are its tenant leases
+  on other spaces' machines, which keep running for their own space.
+- Every runtime of the space that holds a lease generation, or still runs
+  without one, is stopped with reason `space_deleted`, one at a time. A
+  hosted machine goes through the usual quarantine, provider release and
+  finalization; a Desktop or self-hosted runtime is stopped in the database
+  only. Nothing is flushed first: nobody can open the space again, and its
+  origin cannot get `git.write` for it. After each stop, work its quarantine
+  requeued, or that reached the space after the delete, is canceled.
+- Every tunnel grant the space still has is revoked, whatever runtime it was
+  issued for, if any.
+
+No `runtime.stopped` is published for these stops. A tab would read an
+unknown reason as an unexpected stop and start the machine again; the
+space's deletion is what tells open tabs.
+
+The idle sweep finishes what that task did not, for example after a
+controller restart, a failed release or a tunnel revoke the broker refused.
+It takes spaces deleted more than 30 seconds ago, up to five of their
+runtimes per tick, and only runtimes that still hold a lease generation. A
+runtime whose stop or failed launch quarantined it within the last
+`QUARANTINE_RELEASE_GRACE_SECONDS` is left to the release that may still
+run. It also revokes the live tunnel grants of deleted spaces until they
+expire. The launch-timeout, heartbeat-timeout and idle sweeps leave deleted
+spaces' runtimes to this step, which runs last in the tick. A repeated
+service-role `DELETE` answers 204 and runs the background stop again.
+
 ## Caches
 
 `/workspace/.cache` is a per-project host mount

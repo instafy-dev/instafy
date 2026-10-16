@@ -32,6 +32,10 @@
 //! recovery refs, the checkout is kept on the node while they exist, and the
 //! next start pushes them.
 //!
+//! The runtimes of a deleted space are never flushed, whatever stops them:
+//! nobody can open the space again, and its origin could not exchange any
+//! credential for `git.write` there.
+//!
 //! A runtime registers its own origin endpoint with its machine credential:
 //! a hosted runtime's is a public tunnel host, and any runtime could name
 //! any address. The controller never sends a credential there. It asks the
@@ -422,7 +426,9 @@ struct OriginFlushPublish {
 /// The runtime's hosted origin and what the flush needs to know about it,
 /// read inside the caller's stop-planning transaction. `None` when the
 /// runtime has no online hosted (or EFS) origin for its current generation:
-/// Desktop folders and self-hosted machines are never flushed.
+/// Desktop folders and self-hosted machines are never flushed. `None` too
+/// when its space is deleted: there is nobody left to save for, and the
+/// origin could not get `git.write` for it anyway.
 /// `policy.owner_grant`: the controller stops this runtime on its own (never
 /// for a user or runtime request), so without a lease holder the space
 /// owner's save-only permission may be used. `policy.turn_interrupted`: the
@@ -441,12 +447,14 @@ pub(super) async fn find_target(
              join workspace_origins o
                on o.id = oi.origin_id
               and o.project_id = oi.project_id
+             join projects p on p.id = oi.project_id
              where oi.project_id = $1
                and oi.runtime_id = $2
                and oi.lease_id = $3
                and oi.status = 'online'
                and oi.mode in ('hosted', 'efs')
                and (cardinality(oi.protocols) = 0 or 'http' = any(oi.protocols))
+               and p.status is distinct from 'deleted'
              order by oi.updated_at desc
              limit 1",
             &[&runtime.project_id, &runtime.id, runtime_lease_id],

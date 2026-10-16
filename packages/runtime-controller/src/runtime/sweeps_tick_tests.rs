@@ -40,7 +40,7 @@ const MACHINE_TEST_PROVIDER: &str = "sweep_tick_test_machines";
 
 /// Every step's candidate query starts from one of these tables, so a tick
 /// on empty copies of them has nothing to do.
-const SWEEP_TABLES: [&str; 2] = ["runtimes", "agent_jobs"];
+const SWEEP_TABLES: [&str; 3] = ["runtimes", "agent_jobs", "runtime_tunnel_grants"];
 
 /// A tick with nothing to do takes one pool checkout for all of its steps,
 /// where each step used to take its own.
@@ -140,6 +140,7 @@ struct Spaces {
     stuck_queued: Uuid,
     terminal: Uuid,
     stranded: Uuid,
+    deleted: Uuid,
 }
 
 impl Spaces {
@@ -154,6 +155,7 @@ impl Spaces {
             stuck_queued: Uuid::new_v4(),
             terminal: Uuid::new_v4(),
             stranded: Uuid::new_v4(),
+            deleted: Uuid::new_v4(),
         }
     }
 
@@ -168,6 +170,7 @@ impl Spaces {
             self.stuck_queued,
             self.terminal,
             self.stranded,
+            self.deleted,
         ]
     }
 }
@@ -185,6 +188,7 @@ struct Seeded {
     terminal_runtime: Uuid,
     stranded_job: Uuid,
     stranded_run: Uuid,
+    deleted_runtime: Uuid,
 }
 
 async fn insert_runtime(
@@ -299,10 +303,15 @@ async fn insert_job(
 
 async fn seed(client: &tokio_postgres::Client, spaces: &Spaces) -> anyhow::Result<Seeded> {
     for project_id in spaces.all() {
+        // The deleted space was deleted five minutes ago, past the grace
+        // that leaves it to its delete's own stop.
         client
             .execute(
-                "insert into projects (id, project_type, status) values ($1, 'customer', 'active')",
-                &[&project_id],
+                "insert into projects (id, project_type, status, updated_at)
+                 values ($1, 'customer',
+                         case when $2 then 'deleted' else 'active' end,
+                         case when $2 then now() - interval '5 minutes' else now() end)",
+                &[&project_id, &(project_id == spaces.deleted)],
             )
             .await?;
     }
@@ -477,6 +486,26 @@ async fn seed(client: &tokio_postgres::Client, spaces: &Spaces) -> anyhow::Resul
     )
     .await?;
 
+    // A hosted runtime still up in a space deleted five minutes ago.
+    let deleted_runtime = insert_runtime(
+        client,
+        spaces.deleted,
+        HOSTED_TEST_PROVIDER,
+        "ready",
+        600,
+        Some(5),
+        2 * 60 * 60,
+    )
+    .await?;
+    attach_lease(
+        client,
+        spaces.deleted,
+        deleted_runtime,
+        "active",
+        2 * 60 * 60,
+    )
+    .await?;
+
     Ok(Seeded {
         tracker_job,
         orphan_requested_runtime,
@@ -489,6 +518,7 @@ async fn seed(client: &tokio_postgres::Client, spaces: &Spaces) -> anyhow::Resul
         terminal_runtime,
         stranded_job,
         stranded_run,
+        deleted_runtime,
     })
 }
 
@@ -606,6 +636,7 @@ async fn a_sweep_tick_on_a_pool_of_one_acts_on_every_step_with_work() -> anyhow:
                 "stopped",
             ),
             ("terminal cleanup", seeded.terminal_runtime, "removed"),
+            ("deleted space stop", seeded.deleted_runtime, "stopped"),
         ] {
             assert_eq!(
                 runtime_status(&client, runtime_id).await?,
@@ -613,6 +644,19 @@ async fn a_sweep_tick_on_a_pool_of_one_acts_on_every_step_with_work() -> anyhow:
                 "{step} did not act"
             );
         }
+        let deleted_stop_reason: Option<String> = client
+            .query_one(
+                "select data ->> 'reason' from runtime_events
+                 where runtime_id = $1 and kind = 'stopped'",
+                &[&seeded.deleted_runtime],
+            )
+            .await?
+            .get(0);
+        assert_eq!(
+            deleted_stop_reason.as_deref(),
+            Some("space_deleted"),
+            "another step took the deleted space's runtime"
+        );
         assert_eq!(
             job_status(&client, seeded.requeued_job).await?,
             ("failed".to_string(), Some("expired".to_string())),

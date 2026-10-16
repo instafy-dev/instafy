@@ -2099,6 +2099,10 @@ async fn delete_project(
         crate::chat_attachments::StorageAccess::from_config(&state.http_client, &state.config),
         vec![project_id],
     );
+    // Stops and releases the space's machines without holding up the answer:
+    // a hosted release can take minutes. A repeated delete runs it again,
+    // so a service-role retry also retries the stop.
+    crate::runtime::spawn_stop_runtimes_of_deleted_project(state, project_id);
 
     Ok(StatusCode::NO_CONTENT)
 }

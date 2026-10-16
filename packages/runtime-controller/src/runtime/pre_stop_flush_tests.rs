@@ -1646,6 +1646,114 @@ async fn remove_and_project_stops_flush_before_the_release() -> anyhow::Result<(
     Ok(())
 }
 
+/// Whether a stop of the fixture's runtime would find a flush target, with
+/// the owner's save-only permission allowed.
+async fn has_flush_target(fx: &Fixture) -> anyhow::Result<bool> {
+    let mut connection = fx.pool.get().await?;
+    let transaction = connection.transaction().await?;
+    let runtime = super::super::db::fetch_runtime_for_update(&transaction, &fx.runtime_id)
+        .await
+        .map_err(|(status, body)| anyhow::anyhow!("{status}: {}", body.0.message))?;
+    let target = super::find_target(
+        &fx.state,
+        &transaction,
+        &runtime,
+        &fx.runtime_lease_id,
+        super::FlushPolicy::CONTROLLER,
+    )
+    .await
+    .map_err(|(status, body)| anyhow::anyhow!("{status}: {}", body.0.message))?;
+    transaction.rollback().await?;
+    Ok(target.is_some())
+}
+
+/// A deleted space's runtime is never flushed: with a workspace lease held
+/// and an online hosted origin, `find_target` finds a target while the
+/// space is live and none once it is deleted. The delete's stop then mints
+/// nothing, asks neither the provider nor the origin where or what to save,
+/// and records no `workspace_flush`: it releases the machine, under
+/// `space_deleted`, and the workspace lease with it.
+#[tokio::test]
+async fn a_deleted_spaces_runtime_is_released_without_a_flush() -> anyhow::Result<()> {
+    let pool = crate::tests::require_origin_test_pool("pre-stop flush deleted space test").await?;
+    let project_id = Uuid::new_v4();
+    let owner_user_id = Uuid::new_v4();
+    let fixture = SharedDbFixture {
+        projects: vec![project_id],
+        ..Default::default()
+    };
+    let result = with_shared_db_fixture(fixture, async {
+        let fx = Fixture::new(
+            pool.clone(),
+            project_id,
+            owner_user_id,
+            json!({ "unpushedRefs": 0 }),
+        )
+        .await?;
+        let held = fx.hold_owner_lease().await?;
+        assert!(has_flush_target(&fx).await?, "a live space's runtime");
+
+        fx.pool
+            .get()
+            .await?
+            .execute(
+                "update projects set status = 'deleted' where id = $1",
+                &[&fx.project_id],
+            )
+            .await?;
+        assert!(!has_flush_target(&fx).await?, "a deleted space's runtime");
+
+        assert_eq!(
+            super::super::deleted_project_stop::stop_runtimes_of_deleted_project(
+                &fx.state,
+                fx.project_id,
+            )
+            .await,
+            1
+        );
+
+        assert_eq!(fx.order(), vec!["release"]);
+        assert!(fx.flush_calls().is_empty());
+        assert!(fx.origin_asks.lock().unwrap().is_empty());
+        assert!(fx.flush_events().await?.is_empty());
+        let (runtime_status, active_lease, lease_status) = fx.runtime_state().await?;
+        assert_eq!(runtime_status, "stopped");
+        assert!(active_lease.is_none());
+        assert_eq!(lease_status, "released");
+        assert_eq!(
+            fx.workspace_leases().await?,
+            vec![(
+                held,
+                Some(fx.owner_user_id),
+                Some(fx.runtime_id),
+                "released".to_string()
+            )]
+        );
+        let connection = fx.pool.get().await?;
+        let origin_status: String = connection
+            .query_one(
+                "select status from origin_instances where runtime_id = $1",
+                &[&fx.runtime_id],
+            )
+            .await?
+            .get(0);
+        assert_eq!(origin_status, "released");
+        let quarantine_reason: Option<String> = connection
+            .query_one(
+                "select data ->> 'reason' from runtime_events
+                 where runtime_id = $1 and kind = 'provider_release_cleanup_pending'",
+                &[&fx.runtime_id],
+            )
+            .await?
+            .get(0);
+        assert_eq!(quarantine_reason.as_deref(), Some("space_deleted"));
+        Ok(())
+    })
+    .await;
+    delete_users(&[owner_user_id]).await?;
+    result
+}
+
 fn idle_reaper_stop() -> super::super::stop::StopOptions {
     super::super::stop::StopOptions {
         source: "idle_reaper",
