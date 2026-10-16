@@ -64,6 +64,7 @@ mod org_limits;
 mod origins;
 mod ota;
 mod project_memory_origin;
+mod project_work_cancellation;
 mod projects;
 mod provider_devices;
 mod provider_identifiers;

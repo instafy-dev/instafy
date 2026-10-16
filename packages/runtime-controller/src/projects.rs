@@ -2031,7 +2031,7 @@ async fn delete_project(
         .get()
         .await
         .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
-    let transaction = connection.transaction().await.map_err(|error| {
+    let mut transaction = connection.transaction().await.map_err(|error| {
         internal_error(format!(
             "failed to start project delete transaction: {error}"
         ))
@@ -2043,13 +2043,28 @@ async fn delete_project(
         require_project_deleter(&transaction, &record, &context).await?;
     }
 
-    transaction
+    let tombstoned = transaction
         .execute(
             "update projects set status = 'deleted', updated_at = now() where id = $1 and status <> 'deleted'",
             &[&project_id],
         )
         .await
-        .map_err(|error| internal_error(format!("failed to delete project: {error}")))?;
+        .map_err(|error| internal_error(format!("failed to delete project: {error}")))?
+        > 0;
+
+    // The delete that tombstones the space cancels its work with it. Work
+    // that reaches the space later is left to `cancel_deleted_project_work`.
+    let canceled_work = if tombstoned {
+        Some(
+            crate::project_work_cancellation::cancel_project_work_in_transaction(
+                &mut transaction,
+                project_id,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
 
     transaction
         .execute(
@@ -2066,6 +2081,17 @@ async fn delete_project(
             "failed to finalize project delete transaction: {error}"
         ))
     })?;
+
+    if let Some(work) = canceled_work.as_ref() {
+        crate::project_work_cancellation::publish_project_work_cancellation(
+            &state,
+            &*connection,
+            project_id,
+            work,
+        )
+        .await;
+    }
+    drop(connection);
 
     // Browsers already lost access with the status change; this frees the
     // space's chat attachments and never fails the delete.

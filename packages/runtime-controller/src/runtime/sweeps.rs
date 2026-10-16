@@ -271,25 +271,26 @@ fn api_error_to_anyhow(context: &str, error: (StatusCode, Json<crate::ApiError>)
     anyhow::anyhow!("{context} ({status}): {}", body.message)
 }
 
-/// Refund the managed-AI reserve of a requeued job that expired without ever
-/// having run. A runtime stop requeues leased jobs too (`payload.requeuedAt`
-/// is stamped on both), and a job that was leased may already have spent a
-/// model turn, so the refund is gated on the same evidence `agent_complete`
-/// uses: never leased, no visible assistant message, no tool updates, and no
-/// usage adjustment on the ledger. Idempotent through the ledger key; runs in
-/// a savepoint so a ledger failure is logged and the expiry sweep still
-/// completes. Returns the org id when this call wrote the refund, for a
-/// `credits.updated` once the sweep commits.
-async fn refund_managed_ai_reserve_for_expired_job(
+/// Refund the managed-AI reserve of a job that is ending without ever having
+/// run: a requeued job that expired (`refund_reason` "runtime_not_ready") or
+/// a queued job of a deleted space ("space_deleted"). A runtime stop requeues
+/// leased jobs too (`payload.requeuedAt` is stamped on both), and a job that
+/// was leased may already have spent a model turn, so the refund is gated on
+/// the same evidence `agent_complete` uses: never leased, no visible
+/// assistant message, no tool updates, and no usage adjustment on the ledger.
+/// Idempotent through the ledger key; runs in a savepoint so a ledger failure
+/// is logged and the caller's transaction still completes. Returns the org id
+/// when this call wrote the refund, for a `credits.updated` once the caller
+/// commits.
+pub(crate) async fn refund_managed_ai_reserve_for_expired_job(
     transaction: &mut tokio_postgres::Transaction<'_>,
     project_id: &Uuid,
     job_id: &Uuid,
     run_id: Option<Uuid>,
     lease_attempts: i32,
     payload: &serde_json::Value,
+    refund_reason: &str,
 ) -> AnyResult<Option<Uuid>> {
-    const REFUND_REASON: &str = "runtime_not_ready";
-
     let managed_ai_used = payload
         .pointer("/metadata/managedAiUsed")
         .and_then(serde_json::Value::as_bool)
@@ -313,7 +314,8 @@ async fn refund_managed_ai_reserve_for_expired_job(
             job_id = %job_id,
             prompt_id = %prompt_id,
             lease_attempts,
-            "expired requeued job was leased before; keeping its managed AI reserve"
+            refund_reason,
+            "job was leased before; keeping its managed AI reserve"
         );
         return Ok(None);
     }
@@ -348,7 +350,7 @@ async fn refund_managed_ai_reserve_for_expired_job(
             &org_id,
             None,
             &prompt_id,
-            REFUND_REASON,
+            refund_reason,
         )
         .await
         .map_err(|error| api_error_to_anyhow("refund managed AI prompt", error))?;
@@ -368,7 +370,7 @@ async fn refund_managed_ai_reserve_for_expired_job(
             if let Some(map) = refund_trace.as_object_mut() {
                 map.insert(
                     "refundReason".to_string(),
-                    serde_json::Value::String(REFUND_REASON.to_string()),
+                    serde_json::Value::String(refund_reason.to_string()),
                 );
             }
             crate::dispatch::persist_run_managed_ai_credit_metadata(
@@ -396,7 +398,8 @@ async fn refund_managed_ai_reserve_for_expired_job(
                 run_id = ?run_id,
                 ledger_id = %refund.ledger_id,
                 delta = refund.delta,
-                "refunded managed AI prompt reserve for an expired requeued job"
+                refund_reason,
+                "refunded managed AI prompt reserve for a job that never ran"
             );
             return Ok(refunded_org_id);
         }
@@ -424,8 +427,9 @@ async fn refund_managed_ai_reserve_for_expired_job(
                 project_id = %project_id,
                 prompt_id = %prompt_id,
                 run_id = ?run_id,
+                refund_reason,
                 ?error,
-                "managed AI refund failed for an expired requeued job; leaving the reserve charged"
+                "managed AI refund failed for a job that never ran; leaving the reserve charged"
             );
             savepoint
                 .rollback()
@@ -520,6 +524,7 @@ pub(super) async fn settle_expired_queued_jobs(
             run_id,
             lease_attempts,
             &payload,
+            "runtime_not_ready",
         )
         .await?
         {

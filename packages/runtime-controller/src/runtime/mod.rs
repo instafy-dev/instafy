@@ -57,7 +57,8 @@ pub(crate) use stop::{
     RuntimeStopResponse,
 };
 pub(crate) use sweeps::{
-    prune_expired_runtime_events, reset_hosted_runtime_credit_sweep_pool_pressure,
+    prune_expired_runtime_events, refund_managed_ai_reserve_for_expired_job,
+    reset_hosted_runtime_credit_sweep_pool_pressure,
     should_report_hosted_runtime_credit_sweep_error, sweep_hosted_runtime_credit_usage,
     sweep_idle_activity, REQUESTED_RUNTIME_LAUNCH_TIMEOUT_SECONDS,
 };

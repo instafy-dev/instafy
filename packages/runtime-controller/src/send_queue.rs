@@ -1025,6 +1025,30 @@ where
     }))
 }
 
+/// Cancel, with `message`, every entry still `queued` in any conversation of
+/// `project_id`, as a user cancel would, and return how many. For a deleted
+/// space: a canceled entry is never sent and offers its owner nothing to
+/// retry. A claim already in flight (`dispatched`) is left to finish; its
+/// dispatch into the deleted space fails. Publishes nothing.
+pub(crate) async fn cancel_queued_entries_for_project<C>(
+    connection: &C,
+    project_id: Uuid,
+    message: &str,
+) -> Result<u64, tokio_postgres::Error>
+where
+    C: tokio_postgres::GenericClient + Sync,
+{
+    connection
+        .execute(
+            "update conversation_send_queue
+             set status = 'canceled', error_message = $2, updated_at = now()
+             where status = 'queued'
+               and conversation_id in (select id from conversations where project_id = $1)",
+            &[&project_id, &message],
+        )
+        .await
+}
+
 /// Tell the owners of entries [`fail_queued_entries_queued_by`] failed, once
 /// the transaction that failed them has committed.
 pub(crate) fn publish_failed_queued_entries(state: &AppState, failed: FailedQueuedEntries) {
