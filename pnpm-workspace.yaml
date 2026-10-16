@@ -70,7 +70,8 @@ overrides:
   'xcode>uuid': '^11.1.1'
   # shell-quote command injection in quote() (GHSA-pqg4-j6r4-53mv, critical) —
   # launch-editor via @changesets/cli; dev-only, and launch-editor only calls
-  # parse(). Held on 1.11.x deliberately: 1.12.0 shipped 2026-10-02 and has not
-  # aged. Relax to '^1.11.0' once it has, and drop the entry once launch-editor
-  # requires >= 1.11.0 itself.
-  'shell-quote@<1.11.0': '~1.11.0'
+  # parse(). Drop the entry once launch-editor requires >= 1.11.0 itself.
+  'shell-quote@<1.11.0': '^1.11.0'
+  # source-map-js indexed source-map DoS (GHSA-68fv-2mgg-jv7q, high), via
+  # postcss and @tailwindcss/node; build/test tooling only.
+  'source-map-js@>=1.0.0 <1.2.2': '^1.2.2'
