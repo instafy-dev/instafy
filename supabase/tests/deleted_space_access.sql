@@ -2,21 +2,25 @@
 -- A deleted space (projects.status = 'deleted') is hidden from direct Supabase
 -- reads: as the signed-in role, through the row-level security policies, its
 -- owner, a member and a team member read the space and its chat rows while it
--- is live and nothing once it is deleted, while another live space of the team
--- stays readable and the service role still reads the deleted one. Everything
--- here runs in one transaction that is rolled back.
+-- is live and nothing once it is deleted, and so does the author of a prompt
+-- outside any chat, while another live space of the team stays readable and
+-- the service role still reads the deleted one. Everything here runs in one
+-- transaction that is rolled back.
 begin;
 create function deleted_space_test_assert(ok boolean, label text) returns void language plpgsql as $$
 begin if ok is not true then raise exception 'deleted space test failed: %',label; end if; end; $$;
 
 -- 01 owns both spaces and the team, 02 is a builder of both spaces, 03 is a
--- builder of the team and 04 is in neither. Space 11 is deleted below and
--- space 12 stays live. Each space has one public conversation (31 and 32).
+-- builder of the team and 04 is in neither. 05 is not in either, but wrote a
+-- prompt outside any chat in each space and one in no space. Space 11 is
+-- deleted below and space 12 stays live. Each space has one public
+-- conversation (31 and 32).
 insert into auth.users(id,email) values
   ('70000000-0000-0000-0000-000000000001','deleted-space-owner@example.invalid'),
   ('70000000-0000-0000-0000-000000000002','deleted-space-member@example.invalid'),
   ('70000000-0000-0000-0000-000000000003','deleted-space-team@example.invalid'),
-  ('70000000-0000-0000-0000-000000000004','deleted-space-outsider@example.invalid');
+  ('70000000-0000-0000-0000-000000000004','deleted-space-outsider@example.invalid'),
+  ('70000000-0000-0000-0000-000000000005','deleted-space-author@example.invalid');
 insert into organizations(id,slug,name) values
   ('70000000-0000-0000-0000-000000000021','deleted-space-fixture','Deleted space');
 insert into org_memberships(org_id,user_id,role) values
@@ -36,14 +40,16 @@ insert into user_agents(id,user_id,handle,avatar_seed) values
   ('70000000-0000-0000-0000-000000000042','70000000-0000-0000-0000-000000000002','deleted-space-fixture','fixture'),
   ('70000000-0000-0000-0000-000000000043','70000000-0000-0000-0000-000000000003','deleted-space-fixture','fixture');
 
--- One row of each project-wide table, and for each of 01, 02 and 03 one row of
--- each table that only its owner reads.
+-- One row of each project-wide table, for each of 01, 02 and 03 one row of
+-- each table that only its owner reads, and 05's prompt outside any chat.
 create function deleted_space_test_seed(space uuid, conversation uuid) returns void language sql as $$
   insert into project_environments(project_id,environment) values (space,'preview');
   insert into conversation_messages(id,conversation_id,project_id,role,content,created_by)
     values (gen_random_uuid(),conversation,space,'user','fixture','70000000-0000-0000-0000-000000000001');
   insert into prompts(id,project_id,user_id,conversation_id,prompt_text)
     values (gen_random_uuid(),space,'70000000-0000-0000-0000-000000000001',conversation,'fixture');
+  insert into prompts(id,project_id,user_id,prompt_text)
+    values (gen_random_uuid(),space,'70000000-0000-0000-0000-000000000005','fixture');
   insert into runs(project_id,conversation_id,run_type) values (space,conversation,'prompt');
   insert into build_runs(project_id,repo_owner,repo_name,workflow,branch)
     values (space,'fixture','fixture','fixture','main');
@@ -64,9 +70,12 @@ create function deleted_space_test_seed(space uuid, conversation uuid) returns v
 $$;
 select deleted_space_test_seed('70000000-0000-0000-0000-000000000011','70000000-0000-0000-0000-000000000031');
 select deleted_space_test_seed('70000000-0000-0000-0000-000000000012','70000000-0000-0000-0000-000000000032');
+insert into prompts(id,user_id,prompt_text)
+  values (gen_random_uuid(),'70000000-0000-0000-0000-000000000005','fixture');
 
--- The rows of a space that the current role and user read, table by table, and
--- the same line for a given count of project-wide and of own rows.
+-- The rows of a space that the current role and user read, table by table
+-- (prompts in a chat only), and the same line for a given count of
+-- project-wide and of own rows.
 create function deleted_space_test_visible(space uuid) returns text language sql as $$
   select format('projects=%s environments=%s conversations=%s messages=%s prompts=%s runs=%s '
       || 'build_runs=%s jobs=%s automations=%s context_cards=%s send_queue=%s stashes=%s',
@@ -74,7 +83,7 @@ create function deleted_space_test_visible(space uuid) returns text language sql
     (select count(*) from project_environments where project_id = space),
     (select count(*) from conversations where project_id = space),
     (select count(*) from conversation_messages where project_id = space),
-    (select count(*) from prompts where project_id = space),
+    (select count(*) from prompts where project_id = space and conversation_id is not null),
     (select count(*) from runs where project_id = space),
     (select count(*) from build_runs where project_id = space),
     (select count(*) from agent_jobs where project_id = space),
@@ -107,9 +116,26 @@ begin
     raise exception 'deleted space test failed: % (read %, expected %)', label, actual, expected;
   end if;
 end; $$;
+-- Signs in as 01 to 05 in turn and checks what each reads of the prompts
+-- outside any chat of a space, or of those in no space when space is null.
+create function deleted_space_test_own_prompt_reads(space uuid, expected text, label text)
+returns void language plpgsql as $$
+declare actual text := '';
+begin
+  for reader in 1..5 loop
+    perform deleted_space_test_sign_in(('70000000-0000-0000-0000-00000000000' || reader)::uuid);
+    actual := actual || format(' %s=%s', lpad(reader::text, 2, '0'), (select count(*) from prompts
+      where project_id is not distinct from space and conversation_id is null));
+  end loop;
+  actual := ltrim(actual);
+  if actual is distinct from expected then
+    raise exception 'deleted space test failed: % (read %, expected %)', label, actual, expected;
+  end if;
+end; $$;
 grant execute on function deleted_space_test_assert(boolean,text), deleted_space_test_visible(uuid),
   deleted_space_test_rows(integer,integer), deleted_space_test_sign_in(uuid),
-  deleted_space_test_reads(uuid,uuid,text,text) to authenticated, service_role;
+  deleted_space_test_reads(uuid,uuid,text,text), deleted_space_test_own_prompt_reads(uuid,text,text)
+  to authenticated, service_role;
 
 -- Hosted Supabase grants these to the browser and service roles and scopes rows
 -- with RLS; mirror that here so the reads below go through the policies exactly
@@ -135,6 +161,10 @@ select deleted_space_test_reads('70000000-0000-0000-0000-000000000003','70000000
   deleted_space_test_rows(1,1),'a team member reads a live space');
 select deleted_space_test_reads('70000000-0000-0000-0000-000000000004','70000000-0000-0000-0000-000000000011',
   deleted_space_test_rows(0,0),'someone outside the space reads none of it');
+-- The author of a prompt outside any chat reads it without access to the
+-- space, as the space's readers do.
+select deleted_space_test_own_prompt_reads('70000000-0000-0000-0000-000000000011','01=1 02=1 03=1 04=0 05=1',
+  'the author and the space''s readers read a live space''s prompt outside any chat');
 
 -- The owner settles the onboarding choice and may change the space's picture,
 -- as may the member.
@@ -172,6 +202,14 @@ select deleted_space_test_reads('70000000-0000-0000-0000-000000000002','70000000
   deleted_space_test_rows(1,1),'a member still reads the team''s live space');
 select deleted_space_test_reads('70000000-0000-0000-0000-000000000003','70000000-0000-0000-0000-000000000012',
   deleted_space_test_rows(1,1),'a team member still reads the team''s live space');
+-- Nor does the author read their prompt outside any chat of the deleted space,
+-- while they still read theirs of the live space and the one in no space.
+select deleted_space_test_own_prompt_reads('70000000-0000-0000-0000-000000000011','01=0 02=0 03=0 04=0 05=0',
+  'nobody, the author included, reads a deleted space''s prompt outside any chat');
+select deleted_space_test_own_prompt_reads('70000000-0000-0000-0000-000000000012','01=1 02=1 03=1 04=0 05=1',
+  'the author and the space''s readers still read a live space''s prompt outside any chat');
+select deleted_space_test_own_prompt_reads(null,'01=0 02=0 03=0 04=0 05=1',
+  'the author still reads their prompt in no space');
 
 -- The helpers behind the policies agree, and the functions built on them refuse
 -- the deleted space: the onboarding choice reads as unsettled and cannot be
@@ -211,7 +249,9 @@ set local request.jwt.claim.sub = '';
 set local request.jwt.claim.role = 'service_role';
 set local request.jwt.claims = '{"role":"service_role"}';
 select deleted_space_test_assert(deleted_space_test_visible('70000000-0000-0000-0000-000000000011')
-    = deleted_space_test_rows(1,3),
+    = deleted_space_test_rows(1,3)
+    and (select count(*) from prompts where project_id = '70000000-0000-0000-0000-000000000011'
+      and conversation_id is null) = 1,
   'the service role reads every row of a deleted space');
 select deleted_space_test_assert(public.has_project_access('70000000-0000-0000-0000-000000000011')
     and public.has_conversation_access('70000000-0000-0000-0000-000000000031'),

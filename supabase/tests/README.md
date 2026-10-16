@@ -68,9 +68,11 @@ from direct Supabase reads. As the signed-in role, through the row-level securit
 space's owner, a member and a team member read the space and its environments, conversations,
 messages, prompts, runs, build runs, jobs, and their own automations, context cards, queued sends
 and stashes while it is live, and none of them once it is deleted, while the team's other live
-space stays readable. `has_project_access` and `has_conversation_access` refuse the deleted space,
-its onboarding AI choice reads as unsettled and cannot be settled, and nobody may change its
-picture. The service role still reads every row. It also rolls back.
+space stays readable. The author of a prompt outside any chat reads it without access to the space
+while the space is live, but not once it is deleted, and still reads their prompt in no space.
+`has_project_access` and `has_conversation_access` refuse the deleted space, its onboarding AI
+choice reads as unsettled and cannot be settled, and nobody may change its picture. The service
+role still reads every row. It also rolls back.
 
 The cluster has no Supabase Storage, so the replay also proves that
 `20261003120000_chat_attachments.sql` succeeds without it and only reports a notice. The

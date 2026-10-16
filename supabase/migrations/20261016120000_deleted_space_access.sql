@@ -4,7 +4,8 @@
 -- no longer read it, or its chats, runs, prompts, jobs and other rows, through
 -- row-level security. The service-role branch is unchanged. Everything that
 -- goes through has_project_access follows it: has_conversation_access, the
--- onboarding choice functions and the chat attachment policies.
+-- onboarding choice functions and the chat attachment policies. The author's
+-- own read of a prompt outside any chat does not, and is fenced below.
 
 create or replace function public.has_project_access(target_project_id uuid)
 returns boolean
@@ -96,3 +97,48 @@ begin
   ));
 end;
 $$;
+
+-- The author of a prompt outside any chat reads it without access to its
+-- space, but not once the space is deleted. The projects policy hides a space
+-- from an author outside it, so its status is read here, and only for one of
+-- the caller's own prompts.
+create or replace function public.can_read_own_prompt(target_prompt_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+  select exists (
+    select 1
+    from prompts pr
+    left join projects p on p.id = pr.project_id
+    where pr.id = target_prompt_id
+      and pr.user_id = auth.uid()
+      and (pr.project_id is null or p.status <> 'deleted')
+  );
+$$;
+
+-- The policy statements lock prompts. Fail fast and retry rather than queue
+-- every prompt read behind a long transaction.
+set local lock_timeout = '5s';
+
+drop policy if exists "prompts read" on public.prompts;
+create policy "prompts read" on public.prompts
+  for select using (
+    auth.uid() is not null
+    and (
+      (
+        conversation_id is null
+        and (
+          (project_id is not null and public.has_project_access(project_id))
+          or (user_id = auth.uid() and public.can_read_own_prompt(id))
+        )
+      )
+      or (
+        conversation_id is not null
+        and (project_id is null or public.has_project_access(project_id))
+        and public.has_conversation_access(conversation_id)
+      )
+    )
+  );
