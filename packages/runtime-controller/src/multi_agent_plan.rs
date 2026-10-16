@@ -18,8 +18,25 @@ use crate::{
     bad_request, internal_error, publish_controller_event_with_conversation, ApiError, AppState,
 };
 
-const MAX_PLAN_AGENTS: usize = 8;
+const MAX_PLAN_AGENTS: usize = runtime_contracts::multi_agent::MAX_AGENTS_PER_PLAN as usize;
 const MULTI_AGENT_PLAN_MESSAGE_TYPE: &str = "multi_agent_plan";
+
+/// Captured while agent_message holds the validated runtime and job locks.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PlanningReceiptFence {
+    pub(crate) claims: crate::agent::TokenContext,
+    pub(crate) lease_attempt: i32,
+}
+
+impl PlanningReceiptFence {
+    fn marker(self) -> JsonValue {
+        json!({
+            "state": "pending", "runtimeId": self.claims.runtime_id,
+            "leaseAttempt": self.lease_attempt, "runtimeLeaseId": self.claims.lease_id,
+            "runtimeGeneration": self.claims.runtime_generation,
+        })
+    }
+}
 
 #[derive(Debug, Clone)]
 struct SkillMultiAgentPlan {
@@ -98,12 +115,12 @@ pub(crate) async fn maybe_execute_multi_agent_plan_message(
     run_id: Option<Uuid>,
     message_metadata: &JsonValue,
     content: &str,
+    message_id: Option<Uuid>,
+    receipt_fence: Option<PlanningReceiptFence>,
 ) -> Result<bool, (StatusCode, Json<ApiError>)> {
     let Some(plan_value) = extract_multi_agent_plan_value(message_metadata) else {
         return Ok(false);
     };
-    ensure_parent_job_allows_multi_agent_plan(job_payload)?;
-    let plan = parse_skill_multi_agent_plan(plan_value)?;
     let group_id = Uuid::new_v4();
     let project_id = extract_uuid(job_payload, &["project_id"])
         .ok_or_else(|| bad_request("multi_agent_plan job payload is missing project_id"))?;
@@ -111,6 +128,50 @@ pub(crate) async fn maybe_execute_multi_agent_plan_message(
         .ok_or_else(|| bad_request("multi_agent_plan requires a conversation-bound parent job"))?;
     let session_id = extract_uuid(job_payload, &["session_id"]);
     let user_id = extract_uuid(job_payload, &["user_id"]);
+
+    let settings =
+        {
+            let mut connection = state.pool.get().await.map_err(|error| {
+                internal_error(format!("failed to load team settings: {error}"))
+            })?;
+            let transaction = connection.transaction().await.map_err(|error| {
+                internal_error(format!("failed to load team settings: {error}"))
+            })?;
+            crate::multi_agent_settings::load(&transaction, &project_id).await?
+        };
+    let plan = ensure_parent_job_allows_multi_agent_plan(job_payload)
+        .and_then(|_| parse_skill_multi_agent_plan(plan_value))
+        .and_then(|mut plan| {
+            apply_plan_capacity(&mut plan, settings)?;
+            Ok(plan)
+        });
+    let plan = match plan {
+        Ok(plan) => plan,
+        Err((StatusCode::BAD_REQUEST, Json(error))) => {
+            // Validation happens before any worker dispatch. Settle the parent
+            // with a visible refusal instead of swallowing the plan error or
+            // asking the runtime to retry an action that already posted a card.
+            finish_parent_plan_job(
+                state,
+                project_id,
+                conversation_id,
+                session_id,
+                job_id,
+                run_id,
+                content,
+                ParentPlanOutcome::Refused {
+                    group_id,
+                    reason: &error.message,
+                    code: "multi_agent_plan_invalid",
+                },
+                message_id.map(|id| (id, group_id)),
+                receipt_fence,
+            )
+            .await?;
+            return Ok(true);
+        }
+        Err(error) => return Err(error),
+    };
 
     let preferred_parent_runtime_id = extract_runtime_preference_id(job_payload);
     let parent_runtime_id = load_parent_job_leased_runtime_id(state, job_id)
@@ -163,13 +224,29 @@ pub(crate) async fn maybe_execute_multi_agent_plan_message(
         // runs platform AI jobs. They stay in the parent's workspace, so the
         // plan cannot run: the planning turn fails with the reason instead of
         // ending as if its workers were on their way.
-        Err(error) if is_managed_ai_hosted_runtime_refusal(&error) => {
-            let reason = format!("The plan's agents could not start. {}", error.1 .0.message);
+        Err(error)
+            if is_managed_ai_hosted_runtime_refusal(&error)
+                || error.1 .0.code.as_deref() == Some("multi_agent_plan_invalid") =>
+        {
+            // Dispatch validates capacity again in its transaction, so a
+            // settings change after parsing is refused before workers commit.
+            let code = error
+                .1
+                 .0
+                .code
+                .as_deref()
+                .unwrap_or(MANAGED_AI_HOSTED_RUNTIME_REQUIRED_CODE);
+            let reason = if code == "multi_agent_plan_invalid" {
+                error.1 .0.message.clone()
+            } else {
+                format!("The plan's agents could not start. {}", error.1 .0.message)
+            };
             info!(
                 group_id = %group_id,
                 parent_job_id = %job_id,
                 parent_runtime_id = ?parent_runtime_id,
-                "refused skill-authored multi-agent plan pinned to a private runtime"
+                code,
+                "refused skill-authored multi-agent plan dispatch"
             );
             finish_parent_plan_job(
                 state,
@@ -182,7 +259,10 @@ pub(crate) async fn maybe_execute_multi_agent_plan_message(
                 ParentPlanOutcome::Refused {
                     group_id,
                     reason: &reason,
+                    code,
                 },
+                message_id.map(|id| (id, group_id)),
+                receipt_fence,
             )
             .await?;
             return Ok(true);
@@ -208,6 +288,8 @@ pub(crate) async fn maybe_execute_multi_agent_plan_message(
         run_id,
         content,
         ParentPlanOutcome::Dispatched,
+        message_id.map(|id| (id, group_id)),
+        receipt_fence,
     )
     .await?;
     maybe_ensure_parallel_runtime_slots(
@@ -251,7 +333,11 @@ enum ParentPlanOutcome<'a> {
     /// The workers were refused. The planning turn fails with `reason`, which
     /// is also written to the conversation, so the plan does not end in
     /// silence.
-    Refused { group_id: Uuid, reason: &'a str },
+    Refused {
+        group_id: Uuid,
+        reason: &'a str,
+        code: &'a str,
+    },
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -264,6 +350,8 @@ async fn finish_parent_plan_job(
     run_id: Option<Uuid>,
     content: &str,
     outcome: ParentPlanOutcome<'_>,
+    plan_message: Option<(Uuid, Uuid)>,
+    receipt_fence: Option<PlanningReceiptFence>,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
     let summary = content.trim();
     let summary = if summary.is_empty() {
@@ -273,9 +361,13 @@ async fn finish_parent_plan_job(
     };
     let refusal = match outcome {
         ParentPlanOutcome::Dispatched => None,
-        ParentPlanOutcome::Refused { group_id, reason } => Some((group_id, reason)),
+        ParentPlanOutcome::Refused {
+            group_id,
+            reason,
+            code,
+        } => Some((group_id, reason, code)),
     };
-    let error_message = refusal.map(|(_, reason)| reason);
+    let error_message = refusal.map(|(_, reason, _)| reason);
     let (job_status, job_outcome, run_status) = if refusal.is_some() {
         ("failed", "failed", "failed")
     } else {
@@ -291,6 +383,7 @@ async fn finish_parent_plan_job(
         .await
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
 
+    let receipt_marker = receipt_fence.map(PlanningReceiptFence::marker);
     let completed_row = transaction
         .query_opt(
             "update agent_jobs
@@ -304,10 +397,15 @@ async fn finish_parent_plan_job(
                  active_input_ready_expires_at = null,
                  active_input_ready_turn_id = null,
                  heartbeat_at = now(),
-                 updated_at = now()
+                 updated_at = now(),
+                 planning_receipt_state = $7::jsonb
              where id = $1
                and project_id = $2
                and status in ('queued','leased')
+               and ($7::jsonb is null or (
+                 leased_by_runtime_id::text = $7->>'runtimeId'
+                 and lease_attempts = ($7->>'leaseAttempt')::integer
+               ))
              returning run_id,
                        prompt_id,
                        leased_by_runtime_id,
@@ -322,6 +420,7 @@ async fn finish_parent_plan_job(
                 &job_status,
                 &job_outcome,
                 &error_message,
+                &receipt_marker.map(PgJson),
             ],
         )
         .await
@@ -331,6 +430,10 @@ async fn finish_parent_plan_job(
             ))
         })?;
 
+    // Do not settle a replacement attempt/run or repeat refusal side effects.
+    if completed_row.is_none() {
+        return Ok(());
+    }
     let job_input_state_updates = if completed_row.is_some() {
         crate::send_intents::reject_unacknowledged_inputs_for_job(
             &transaction,
@@ -399,14 +502,13 @@ async fn finish_parent_plan_job(
         .await;
     }
 
-    // A refused plan is written to the conversation whether or not the
-    // planning turn was still open: its agents never start either way. The
-    // message names the plan's group but no plan role. The Studio keeps a
+    // A refused plan is written once when its issuing attempt is settled.
+    // The message names the plan's group but no plan role. The Studio keeps a
     // "worker" message out of the root transcript and, since this one
     // carries the planning job's id, would drop the plan's announcement with
     // it, leaving the refused plan with nothing to show.
     let refusal_message = match refusal {
-        Some((group_id, reason)) => Some(
+        Some((group_id, reason, code)) => Some(
             crate::conversations::record_controller_assistant_message(
                 &transaction,
                 &project_id,
@@ -419,7 +521,7 @@ async fn finish_parent_plan_job(
                 reason,
                 &json!({
                     "source": "controller",
-                    "kind": MANAGED_AI_HOSTED_RUNTIME_REQUIRED_CODE,
+                    "kind": code,
                     "outcome": "failed",
                     "messageType": "error",
                     "jobId": job_id,
@@ -434,10 +536,47 @@ async fn finish_parent_plan_job(
         None => None,
     };
 
+    // Stamp the exact original plan card with the durable group identity.
+    // Re-publish that row after commit instead of inserting a second plan.
+    let plan_message_row = if let Some((message_id, group_id)) = plan_message {
+        let mut plan_status = json!({ "groupId": group_id, "status": "dispatched" });
+        if let Some((_, reason, _)) = refusal {
+            plan_status["status"] = json!("refused");
+            plan_status["refusalReason"] = json!(reason);
+        }
+        transaction
+            .query_opt(
+                "update conversation_messages
+             set metadata = jsonb_set(metadata, '{multiAgentPlan}',
+                 coalesce(metadata->'multiAgentPlan', '{}'::jsonb) || $5::jsonb, true)
+             where id = $1 and project_id = $2 and conversation_id = $3
+               and created_by is null and metadata->>'source' = 'agent'
+               and metadata->>'jobId' = $4
+             returning *",
+                &[
+                    &message_id,
+                    &project_id,
+                    &conversation_id,
+                    &job_id.to_string(),
+                    &PgJson(plan_status),
+                ],
+            )
+            .await
+            .map_err(|error| {
+                internal_error(format!("failed to attach plan group to message: {error}"))
+            })?
+            .map(|row| crate::conversations::map_conversation_message_row(&row))
+    } else {
+        None
+    };
+
     transaction.commit().await.map_err(|error| {
         internal_error(format!("failed to commit planning job completion: {error}"))
     })?;
     crate::send_intents::publish_job_input_state_updates(state, &job_input_state_updates);
+    if let Some(message) = plan_message_row {
+        crate::conversations::publish_conversation_message_event(&state.events, &message);
+    }
     if let Some(message) = refusal_message {
         crate::conversations::publish_conversation_message_event(&state.events, &message);
         crate::notifications::enqueue_message_push_notifications(state.clone(), message);
@@ -507,7 +646,17 @@ async fn finish_parent_plan_job(
             }),
         );
     }
+    drop(connection);
     if refusal.is_some() {
+        // A worker that tried an invalid nested plan still needs the normal
+        // failure checkpoint. Explicit group cancellation is suppressed by
+        // the shared checkpoint guard, including late completion callbacks.
+        if let Err((status, Json(error))) =
+            maybe_enqueue_lead_continuation_after_completion(state, job_id, &job_payload).await
+        {
+            warn!(job_id = %job_id, status = status.as_u16(), error = %error.message,
+                "failed to checkpoint refused planning job");
+        }
         // The failed planning turn no longer holds the lane: whatever was
         // queued behind it may go now.
         crate::send_queue::spawn_send_queue_drain(state.clone(), conversation_id);
@@ -1276,7 +1425,13 @@ fn parse_skill_multi_agent_plan(
         .ok_or_else(|| bad_request("multi_agent_plan agents must be an array"))?;
     let mut agents = Vec::new();
     let mut seen = HashSet::new();
-    for value in agents_value.iter().take(MAX_PLAN_AGENTS) {
+    if agents_value.len() > MAX_PLAN_AGENTS {
+        return Err(bad_request(format!(
+            "multi_agent_plan contains {} agents; the maximum is {MAX_PLAN_AGENTS}. Split the work into separate plans; no agents were dispatched.",
+            agents_value.len()
+        )));
+    }
+    for value in agents_value {
         let Some(agent_map) = value.as_object() else {
             continue;
         };
@@ -1660,6 +1815,25 @@ fn build_worker_dispatch_metadata(
     metadata
 }
 
+fn apply_plan_capacity(
+    plan: &mut SkillMultiAgentPlan,
+    settings: runtime_contracts::multi_agent::MultiAgentSettings,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    crate::multi_agent_settings::validate_plan_size(settings, plan.agents.len())?;
+    if let Some(routing) = plan.runtime_routing.as_mut() {
+        if routing.strategy == RuntimeRoutingStrategy::Spread {
+            routing.desired_slots = Some(
+                routing
+                    .desired_slots
+                    .unwrap_or(plan.agents.len())
+                    .min(plan.agents.len())
+                    .clamp(1, settings.max_concurrent_agents as usize),
+            );
+        }
+    }
+    Ok(())
+}
+
 fn runtime_routing_metadata(plan: &SkillMultiAgentPlan) -> Option<JsonValue> {
     let routing = plan.runtime_routing.as_ref()?;
     let mut value = json!({
@@ -1708,6 +1882,11 @@ async fn maybe_ensure_parallel_runtime_slots(
     let provider = runtime_provider
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| state.provider_registry.default_provider_id());
+    // Self-hosted runtimes register themselves. Creating requested records here cannot
+    // start them, and those empty slots must never hold useful work in the queue.
+    if crate::runtime::provider_is_private_self_hosted_or_quarantined(state, &provider) {
+        return;
+    }
     for index in 0..extra_slots {
         let runtime_id = Uuid::new_v4();
         let metadata = json!({
@@ -2383,8 +2562,47 @@ fn normalize_agent_handle(raw: &str) -> Option<String> {
 }
 
 #[cfg(test)]
+#[path = "multi_agent_plan/completion_tests.rs"]
+mod completion_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plan_capacity_preserves_ten_workers_and_rejects_oversized_plans() {
+        let value = |count: usize| {
+            json!({
+                "agents": (0..count).map(|i| json!({"handle":format!("worker-{i}"),"prompt":"Write a poem"})).collect::<Vec<_>>(),
+                "runtimeRouting": {"strategy":"spread","desiredSlots":count}
+            })
+        };
+        let mut plan = parse_skill_multi_agent_plan(&value(10)).unwrap();
+        apply_plan_capacity(
+            &mut plan,
+            runtime_contracts::multi_agent::MultiAgentSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(plan.agents.len(), 10);
+        assert_eq!(
+            runtime_routing_metadata(&plan).unwrap()["desiredSlots"],
+            json!(8)
+        );
+        let (status, Json(error)) = apply_plan_capacity(
+            &mut plan,
+            runtime_contracts::multi_agent::MultiAgentSettings {
+                max_agents_per_plan: 9,
+                max_concurrent_agents: 2,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("No agents were dispatched"));
+        assert_eq!(plan.agents.len(), 10);
+        let (_, Json(error)) =
+            parse_skill_multi_agent_plan(&value(MAX_PLAN_AGENTS + 1)).unwrap_err();
+        assert!(error.message.contains("no agents were dispatched"));
+    }
 
     #[test]
     fn browser_bound_parent_jobs_cannot_execute_multi_agent_plans() {

@@ -1852,6 +1852,8 @@ async fn plan_workers_pinned_to_a_private_runtime_fail_the_planning_run() -> any
             Some(run_id),
             &plan_message,
             plan_text,
+            None,
+            None,
         )
         .await
         .map_err(|error| controller_error("refused plan", error))?;
@@ -1948,6 +1950,8 @@ async fn plan_workers_pinned_to_a_private_runtime_fail_the_planning_run() -> any
             None,
             &plan_message,
             plan_text,
+            None,
+            None,
         )
         .await
         .map_err(|error| controller_error("hosted plan", error))?;
@@ -1992,6 +1996,8 @@ async fn plan_workers_pinned_to_a_private_runtime_fail_the_planning_run() -> any
             None,
             &plan_message,
             plan_text,
+            None,
+            None,
         )
         .await
         .map_err(|error| controller_error("plan on the stopped desktop", error))?;
@@ -2272,6 +2278,8 @@ async fn spread_plan_workers_on_a_private_parent_fail_the_planning_run() -> anyh
             Some(run_id),
             &plan_message,
             plan_text,
+            None,
+            None,
         )
         .await
         .map_err(|error| controller_error("refused spread plan", error))?;
@@ -2328,6 +2336,8 @@ async fn spread_plan_workers_on_a_private_parent_fail_the_planning_run() -> anyh
             None,
             &plan_message,
             plan_text,
+            None,
+            None,
         )
         .await
         .map_err(|error| controller_error("spread plan on acme-cloud", error))?;
@@ -2448,6 +2458,8 @@ async fn refused_plan_sends_the_message_queued_behind_the_planning_turn() -> any
             Some(run_id),
             &scout_plan_message(false),
             "Two scouts will read the README and the docs.",
+            None,
+            None,
         )
         .await
         .map_err(|error| controller_error("refused plan", error))?;

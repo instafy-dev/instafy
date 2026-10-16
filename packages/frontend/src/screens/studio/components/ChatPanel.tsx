@@ -13,7 +13,7 @@ import {
 } from "react";
 import { Globe, Page } from "iconoir-react";
 import { useWorkspaceStore } from "../../../store";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useLocation } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import { Capacitor } from "@capacitor/core";
@@ -166,6 +166,7 @@ import {
   ChatMessageMenuOverlay,
 } from "./ChatPanelOverlays";
 import { ConversationMessageRows } from "./ConversationMessageRows";
+import { MultiAgentRunsContext } from "./MultiAgentPlanEntry";
 import { useConversationPreviewThreads } from "./useConversationPreviewThreads";
 import { buildHumanLabelByUserId } from "./chatHumanLabels";
 import {
@@ -180,6 +181,7 @@ import {
 } from "./assistantMessageGrouping";
 import {
   COMPACTION_STATUS_LABEL,
+  resolveMultiAgentTypingStatus,
   resolveTypingIndicatorState,
   type TypingIndicatorPhase,
 } from "./typingIndicatorState";
@@ -491,7 +493,6 @@ function hasVisibleConversationAnchor(messages: ChatMessage[]): boolean {
 
 export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null } = {}) {
   const location = useLocation();
-  const navigate = useNavigate();
   const { user } = useAuth();
   const currentUserId = user?.id ?? null;
   const runtimeMenu = useRuntimeMenuOptions();
@@ -719,6 +720,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   });
   const { conversationWorkspace, conversationSurfaces, setConversationBrowser, openConversationTab: openSurfaceConversation } = useWorkspaceTabs();
   const surfaceScope = conversationSurfaceScope(currentUserId, activeProjectId ?? null, activeConversationId);
+  const multiAgentRunContext = useMemo(() => ({ runs, scopeKey: surfaceScope }), [runs, surfaceScope]);
   const { read: readSurfaces, update: updateSurfaces } = conversationSurfaces;
   const surfaces = readSurfaces(surfaceScope);
   const dirtyFilePaths = useWorkspaceStore(store => store.state.code.files
@@ -2942,8 +2944,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     if (!isAssistantTyping) {
       return null;
     }
-    return resolveTypingIndicatorState(messages, typingIndicatorFallback);
-  }, [isAssistantTyping, messages, typingIndicatorFallback]);
+    return resolveTypingIndicatorState(messages, typingIndicatorFallback, activeConversationRun);
+  }, [activeConversationRun, isAssistantTyping, messages, typingIndicatorFallback]);
   const typingAgentIdentity = useMemo<AssistantAgentIdentity | null>(() => {
     const activeRunMetadata =
       activeConversationRun?.metadata && isRecord(activeConversationRun.metadata)
@@ -3034,20 +3036,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     });
   }, [activeConversationRuns, agentByHandle, typingAgentHandle]);
   const hasMultipleTypingAgents = typingAgents.length > 1;
-  const multiTypingPhase = useMemo<"waiting" | "thinking">(() => {
-    if (!hasMultipleTypingAgents) {
-      return "thinking";
-    }
-    for (const run of activeConversationRuns) {
-      if (run.status === "in_progress") {
-        return "thinking";
-      }
-    }
-    if (typingIndicatorState?.phase === "waiting") {
-      return "waiting";
-    }
-    return "thinking";
-  }, [activeConversationRuns, hasMultipleTypingAgents, typingIndicatorState?.phase]);
+  const multiTypingStatus = useMemo(() => resolveMultiAgentTypingStatus(activeConversationRuns.map(run => {
+    const handle = extractAgentIdentityFromMetadata(run.metadata)?.handle;
+    return { status: run.status, displayName: typingAgents.find(agent => agent.handle === handle)?.displayName ?? "Agent" };
+  })), [activeConversationRuns, typingAgents]);
   const workspaceStarting =
     waitingForPreferredRuntime ||
     hostedRuntimeEnsuring ||
@@ -3108,7 +3100,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         : null,
   });
   const typingStatusLabel = hasMultipleTypingAgents
-    ? (multiTypingPhase === "waiting" ? waitingActivityCopy.label : "Thinking…")
+    ? (workspaceStarting ? waitingActivityCopy.label : multiTypingStatus.label)
     : (typingIndicatorState?.label ??
       (typingIndicatorState?.phase === "finalizing"
         ? "Finalizing…"
@@ -3120,9 +3112,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
             ? waitingActivityCopy.label
             : "Typing…"));
   const typingStatusAriaLabel = hasMultipleTypingAgents
-    ? multiTypingPhase === "waiting"
+    ? workspaceStarting
       ? waitingActivityCopy.ariaLabel
-      : `${typingAgents.map((agent) => agent.displayName).join(", ")} are thinking`
+      : multiTypingStatus.ariaLabel
     : typingIndicatorState?.label
       ? `${typingAgentDisplayName} status: ${typingIndicatorState.label}`
       : typingIndicatorState?.phase === "finalizing"
@@ -5347,19 +5339,13 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     if (!normalizedJobThread) {
       return;
     }
-    const params = new URLSearchParams(location.search);
-    params.delete("jobId");
-    params.set("conversationId", normalizedJobThread.conversationId);
-    const search = params.toString();
-    navigate(
-      {
-        pathname: location.pathname,
-        search: search ? `?${search}` : "",
-      },
-      { replace: false },
-    );
+    // Use the same surface/tab transition as the Chat tab. A partial URL
+    // edit leaves chatView pointing at this trace and route hydration wins.
+    requestUrlPush();
+    const scope = conversationSurfaceScope(currentUserId, activeProjectId ?? null, normalizedJobThread.conversationId);
+    updateSurfaces(scope, state => selectConversationView(state, "chat"));
     openConversationTab(normalizedJobThread.conversationId);
-  }, [location.pathname, location.search, navigate, normalizedJobThread, openConversationTab]);
+  }, [activeProjectId, currentUserId, normalizedJobThread, openConversationTab, requestUrlPush, updateSurfaces]);
 
   if (normalizedJobThread) {
     const isLoadingConversation = activeConversationId !== normalizedJobThread.conversationId;
@@ -5377,6 +5363,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           ];
 
         return (
+          <MultiAgentRunsContext.Provider value={multiAgentRunContext}>
           <ChatScrollSnapshotBoundary identity={chatScrollMutationIdentity} messages={messages} capture={recordScrollPosition}>
           <div ref={rootRef} className="flex h-full min-h-0 flex-col overflow-hidden">
             <div
@@ -5596,6 +5583,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         </div>
       </div>
       </ChatScrollSnapshotBoundary>
+      </MultiAgentRunsContext.Provider>
     );
   }
 
@@ -5862,7 +5850,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
               hasMultipleTypingAgents={hasMultipleTypingAgents}
               typingAgentHandle={typingAgentHandle}
               typingAgentAvatarSeed={typingAgentAvatarSeed}
-              typingIndicatorState={typingIndicatorState}
+              typingIndicatorState={hasMultipleTypingAgents
+                ? { phase: workspaceStarting ? "waiting" : multiTypingStatus.phase, label: null }
+                : typingIndicatorState}
               typingStatusLabel={typingStatusLabel}
               typingStatusAriaLabel={typingStatusAriaLabel}
               suppressAssistantStatus={
@@ -5994,6 +5984,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   </>;
 
   return (
+    <MultiAgentRunsContext.Provider value={multiAgentRunContext}>
     <ChatRunStopNoticeProvider value={runStopNoticeContext}>
     <RunFailureRetryProvider value={runFailureRetryContextValue}>
     <ConversationFileContext.Provider value={openSurfaceFile}>
@@ -6330,6 +6321,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     </ConversationFileContext.Provider>
     </RunFailureRetryProvider>
     </ChatRunStopNoticeProvider>
+    </MultiAgentRunsContext.Provider>
       );
   }
 

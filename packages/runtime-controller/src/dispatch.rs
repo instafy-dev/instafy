@@ -1033,6 +1033,11 @@ pub(crate) async fn process_dispatch_prompt(
     let project = ensure_project_org(&transaction, &project).await?;
     crate::ensure_project_access(&transaction, &project, context, request.session_id).await?;
     ensure_project_prompt_access(&transaction, &project, context, request.session_id).await?;
+    // This snapshot informs the planner; admission still checks current controller policy.
+    // Always replace client-authored metadata rather than trusting a requested limit.
+    let team_settings = crate::multi_agent_settings::load(&transaction, &project.id).await?;
+    ensure_object(&mut request.metadata)
+        .insert("multiAgentSettings".to_string(), json!(team_settings));
 
     let strict_browser_runtime_record = if let Some(runtime_id) = strict_personal_browser_runtime_id
     {
@@ -1469,6 +1474,18 @@ pub(crate) async fn process_dispatch_prompt(
     let default_credential_id =
         credentials::load_default_credential_id(&transaction, context.user_id).await?;
     let agent_handles = extract_agent_selection_handles(&request.metadata);
+    if request.intent == "multi_agent_plan"
+        || request
+            .metadata
+            .get("multiAgentPlan")
+            .or_else(|| request.metadata.get("multi_agent_plan"))
+            .and_then(|plan| plan.get("role"))
+            .and_then(JsonValue::as_str)
+            .map(str::trim)
+            == Some("worker")
+    {
+        crate::multi_agent_settings::validate_plan_size(team_settings, agent_handles.len())?;
+    }
     if strict_shared_browser_runtime_id.is_some() && agent_handles.len() != 1 {
         return Err(bad_request(
             "Shared Browser requests must target exactly one agent",

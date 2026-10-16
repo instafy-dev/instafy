@@ -2,19 +2,24 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use codex_config::{DEFAULT_MCP_SERVER_ENVIRONMENT_ID, McpServerConfig, McpServerTransportConfig};
-use codex_core::config::{Config, ConfigBuilder, ConfigOverrides, set_project_trust_level};
+use codex_core::config::{
+    Config, ConfigBuilder, ConfigOverrides, PermissionProfileSnapshot, set_project_trust_level,
+};
 use codex_core::test_support::EmptyUserInstructionsProvider;
 use codex_core::{
     CodexAppsToolsCache, CodexThread, NewThread, StartThreadOptions, ThreadManager,
     build_models_manager, init_state_db, local_agent_graph_store_from_state_db,
     resolve_installation_id, thread_store_from_config,
 };
-use codex_exec_server::{EnvironmentManager, LOCAL_ENVIRONMENT_ID, LOCAL_FS};
+use codex_exec_server::{
+    EnvironmentManager, ExecServerRuntimeOptions, LOCAL_ENVIRONMENT_ID, LOCAL_FS,
+};
 use codex_extension_api::{
     ExtensionData, ExtensionFuture, ExtensionRegistry, ExtensionRegistryBuilder,
     TurnLifecycleContributor, TurnStartInput, TurnStartPhase,
@@ -31,9 +36,13 @@ use codex_protocol::error::{CodexErr, CodexErrorDetails, Result as CodexResult};
 use codex_protocol::items::{AgentMessageContent, AgentMessageDelivery, TurnItem};
 use codex_protocol::models::{
     ContentItem, FunctionCallOutputBody, FunctionCallOutputContentItem, FunctionCallOutputPayload,
-    MessagePhase, ResponseItem,
+    MessagePhase, PermissionProfile, ResponseItem,
 };
 use codex_protocol::openai_models::{InputModality, ReasoningEffort};
+use codex_protocol::permissions::{
+    FileSystemAccessMode, FileSystemPath, FileSystemSandboxEntry, FileSystemSandboxPolicy,
+    FileSystemSpecialPath, NetworkSandboxPolicy,
+};
 use codex_protocol::protocol::{
     AskForApproval, CodexErrorInfo, EnvironmentConfigState, Event, EventMsg, Op, SandboxPolicy,
     SessionSource, StreamErrorEvent, ThreadHistoryMode, ThreadSettingsOverrides, TokenUsage,
@@ -88,6 +97,14 @@ const DEFAULT_CODEX_MAX_RUN_RETRIES: usize = 1;
 const PROXY_STREAM_MAX_RETRIES: u64 = 1;
 const DEFAULT_CODEX_RETRY_BASE_DELAY_MS: u64 = 1500;
 const DEFAULT_CODEX_CANCEL_SHUTDOWN_TIMEOUT_SECONDS: u64 = 5;
+static CODEX_CLEANUP_UNCONFIRMED: LazyLock<Arc<AtomicBool>> =
+    LazyLock::new(|| Arc::new(AtomicBool::new(false)));
+
+/// A run with an unconfirmed native thread lifetime must not share job state again.
+pub(crate) fn runtime_reuse_is_safe() -> bool {
+    !CODEX_CLEANUP_UNCONFIRMED.load(Ordering::Acquire)
+}
+
 const THREAD_WRITER_RELEASE_WAIT: Duration = Duration::from_secs(3);
 const THREAD_WRITER_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(25);
 const THREAD_WRITER_RETRY_MAX_DELAY: Duration = Duration::from_millis(400);
@@ -644,6 +661,9 @@ pub struct CodexExecutionError {
 
 #[derive(Debug, Clone, Default)]
 pub struct CodexRunOptions {
+    /// Controller-admitted tool worker in a private workspace. Keep writes in that root,
+    /// and do not create unaccounted native agents or project MCP processes.
+    pub isolated_tool_worker: bool,
     /// Optional content-free diagnostic accounting, independent of event streaming.
     pub usage_observer: Option<UsageCall>,
     /// Authorized job scope for current shared defaults. Absent on routing preflight and non-project calls.
@@ -828,10 +848,13 @@ pub(crate) fn runtime_base_instructions(
 }
 
 async fn start_codex_thread(
+    registration: &CodexThreadRegistration,
     thread_manager: Arc<ThreadManager>,
     config: Config,
 ) -> CodexResult<NewThread> {
+    let startup = registration.startup();
     run_on_fresh_task(async move {
+        let _startup = startup;
         thread_manager
             .start_thread(StartThreadOptions {
                 // Kept for resume, not for old rollouts: runtime-agent restores a thread from its
@@ -846,12 +869,15 @@ async fn start_codex_thread(
 }
 
 async fn resume_codex_thread(
+    registration: &CodexThreadRegistration,
     thread_manager: Arc<ThreadManager>,
     config: Config,
     rollout_path: PathBuf,
     auth_manager: Arc<AuthManager>,
 ) -> CodexResult<NewThread> {
+    let startup = registration.startup();
     run_on_fresh_task(async move {
+        let _startup = startup;
         thread_manager
             .resume_legacy_thread_from_rollout(
                 config,
@@ -870,6 +896,7 @@ async fn resume_codex_thread(
 /// bound, so the lock is about to be released. Wait for it instead of replacing the thread,
 /// which would drop the conversation's native history.
 async fn resume_codex_thread_after_writer_release(
+    registration: &CodexThreadRegistration,
     thread_manager: Arc<ThreadManager>,
     config: &Config,
     rollout_path: &Path,
@@ -879,6 +906,7 @@ async fn resume_codex_thread_after_writer_release(
     let mut delay = THREAD_WRITER_RETRY_INITIAL_DELAY;
     loop {
         let result = resume_codex_thread(
+            registration,
             Arc::clone(&thread_manager),
             config.clone(),
             rollout_path.to_path_buf(),
@@ -945,8 +973,12 @@ impl CodexClient {
         mut on_event: Option<&mut (dyn FnMut(&JsonValue) -> Result<()> + Send)>,
         options: CodexRunOptions,
     ) -> Result<CodexRunOutput> {
+        anyhow::ensure!(
+            runtime_reuse_is_safe(),
+            "Codex thread cleanup is unconfirmed; runtime restart required"
+        );
         let run_timeout = resolve_codex_run_timeout();
-        let max_retries = if uses_bounded_proxy_retries(&options) {
+        let max_retries = if options.isolated_tool_worker || uses_bounded_proxy_retries(&options) {
             // Codex recovers within the same session, preserving completed tool receipts.
             // Replaying execute_inner would reset that budget and could repeat side effects.
             0
@@ -981,7 +1013,7 @@ impl CodexClient {
                 None
             };
             let shared_browser_shutdown_confirmation = shared_browser_cancel_signal.clone();
-            let kept_thread = KeptCodexThread::default();
+            let mut attempt_threads = AttemptCodexThreads::default();
             let result = if on_event.is_none() {
                 // Callback-free production runs own every input needed by execute_inner, so they
                 // can use a fresh task stack. Callback-bearing runs retain the direct path because
@@ -990,7 +1022,7 @@ impl CodexClient {
                 let prompt = prompt.to_string();
                 let options = attempt_options;
                 let attempt_observation = usage_attempt.clone();
-                let attempt_kept_thread = kept_thread.clone();
+                let owned_attempt_threads = attempt_threads.registration();
                 run_on_fresh_task(async move {
                     let mut no_event_callback = None;
                     if let Some(cancel_signal) = shared_browser_cancel_signal {
@@ -1003,7 +1035,7 @@ impl CodexClient {
                                 &mut no_event_callback,
                                 options,
                                 attempt_observation,
-                                attempt_kept_thread,
+                                owned_attempt_threads,
                             ),
                         )
                         .await)
@@ -1015,7 +1047,7 @@ impl CodexClient {
                                 &mut no_event_callback,
                                 options,
                                 attempt_observation,
-                                attempt_kept_thread,
+                                owned_attempt_threads,
                             ),
                         )
                         .await
@@ -1033,7 +1065,7 @@ impl CodexClient {
                             &mut on_event,
                             attempt_options,
                             usage_attempt.clone(),
-                            kept_thread.clone(),
+                            attempt_threads.registration(),
                         ),
                     )
                     .await)
@@ -1045,12 +1077,16 @@ impl CodexClient {
                             &mut on_event,
                             attempt_options,
                             usage_attempt.clone(),
-                            kept_thread.clone(),
+                            attempt_threads.registration(),
                         ),
                     )
                     .await
                 }
             };
+            // Outside the run deadline: every attempt owns its tracked native thread tree,
+            // including children still working after the parent returned or was cancelled.
+            // Drain it before the job's process-wide credentials can be replaced.
+            let cleanup_result = attempt_threads.shut_down().await;
             if let Some(observation) = usage_attempt.as_ref() {
                 let cancelled = options
                     .cancel_signal
@@ -1061,7 +1097,7 @@ impl CodexClient {
                     .is_some_and(|signal| !signal.shared_browser_shutdown_is_confirmed());
                 let outcome = if cancelled {
                     UsageOutcome::Cancelled
-                } else if unconfirmed_shutdown {
+                } else if unconfirmed_shutdown || cleanup_result.is_err() {
                     UsageOutcome::Error
                 } else {
                     match &result {
@@ -1072,9 +1108,7 @@ impl CodexClient {
                 };
                 observation.finish(outcome);
             }
-            // Outside the run deadline: a turn that finished in time keeps its result, and a
-            // timed-out attempt still releases its thread before the retry resumes it.
-            kept_thread.shut_down().await;
+            cleanup_result?;
             if shared_browser_shutdown_confirmation
                 .as_ref()
                 .is_some_and(|signal| !signal.shared_browser_shutdown_is_confirmed())
@@ -1156,7 +1190,7 @@ impl CodexClient {
         on_event: &mut Option<&mut (dyn FnMut(&JsonValue) -> Result<()> + Send)>,
         options: CodexRunOptions,
         usage_attempt: Option<UsageAttempt>,
-        kept_thread: KeptCodexThread,
+        attempt_threads: CodexThreadRegistration,
     ) -> Result<CodexRunOutput> {
         let browser_mode = options.expect_browser_session;
         let personal_browser_mode =
@@ -1228,6 +1262,9 @@ impl CodexClient {
 
         let runtime_codex_home = match ensure_runtime_codex_home(self.workspace_dir()) {
             Ok(codex_home) => codex_home,
+            Err(error) if options.isolated_tool_worker => {
+                return Err(error).context("isolated worker Codex home is unavailable");
+            }
             Err(error) => {
                 tracing::warn!(
                     error = %error,
@@ -1326,7 +1363,11 @@ impl CodexClient {
             review_model: None,
             cwd: Some(self.config.workspace_dir.clone()),
             approval_policy: Some(AskForApproval::Never),
-            sandbox_mode: Some(resolve_sandbox_mode()),
+            sandbox_mode: Some(if options.isolated_tool_worker {
+                SandboxMode::WorkspaceWrite
+            } else {
+                resolve_sandbox_mode()
+            }),
             personality: default_personality,
             model_provider: optional_env("CODEX_MODEL_PROVIDER"),
             codex_linux_sandbox_exe: optional_env_path("CODEX_LINUX_SANDBOX_EXE"),
@@ -1346,14 +1387,33 @@ impl CodexClient {
             }
         }
 
-        let mut config = match load_runtime_codex_config(
-            &runtime_codex_home,
-            cli_overrides.clone(),
-            overrides.clone(),
-        )
-        .await
-        {
+        let loaded_config = if options.isolated_tool_worker {
+            ConfigBuilder::default()
+                .codex_home(runtime_codex_home.clone())
+                .cli_overrides(cli_overrides.clone())
+                .harness_overrides(overrides.clone())
+                .loader_overrides(codex_config::LoaderOverrides {
+                    ignore_user_config: true,
+                    ignore_project_config: true,
+                    ignore_user_and_project_exec_policy_rules: true,
+                    ..Default::default()
+                })
+                .strict_config(true)
+                .build()
+                .await
+        } else {
+            load_runtime_codex_config(
+                &runtime_codex_home,
+                cli_overrides.clone(),
+                overrides.clone(),
+            )
+            .await
+        };
+        let mut config = match loaded_config {
             Ok(config) => config,
+            Err(error) if options.isolated_tool_worker => {
+                return Err(error).context("isolated worker configuration failed");
+            }
             Err(error) => {
                 let repaired = match repair_codex_config_file(self.workspace_dir()) {
                     Ok(changed) => changed,
@@ -1418,6 +1478,9 @@ impl CodexClient {
         };
 
         if let Err(error) = ensure_codex_home_writable(config.codex_home.as_path()) {
+            if options.isolated_tool_worker {
+                return Err(error).context("isolated worker Codex home is not writable");
+            }
             tracing::warn!(
                 error = %error,
                 codex_home = %config.codex_home.display(),
@@ -1437,6 +1500,42 @@ impl CodexClient {
 
         let bounded_proxy_retries = uses_bounded_proxy_retries(&options);
         apply_runtime_proxy_model_provider_overrides(&mut config, bounded_proxy_retries);
+        if options.isolated_tool_worker {
+            // Never execute credential helpers or inherit custom headers/catalog routes from
+            // another provider. The controller's scoped proxy envelope is the only model route.
+            let base = optional_env("OPENAI_BASE_URL")
+                .context("isolated worker proxy endpoint is missing")?;
+            let mut provider =
+                codex_model_provider_info::ModelProviderInfo::create_openai_provider(Some(base));
+            provider.env_key = Some("CODEX_API_KEY".to_string());
+            provider.requires_openai_auth = false;
+            provider.env_http_headers = None;
+            provider.supports_websockets = false;
+            provider.supports_standalone_web_search = false;
+            provider.request_max_retries = Some(0);
+            provider.stream_max_retries = Some(PROXY_STREAM_MAX_RETRIES);
+            config.model_provider = provider.clone();
+            config
+                .model_providers
+                .insert(config.model_provider_id.clone(), provider);
+            // A project cannot add external processes to this bounded execution lane.
+            config
+                .mcp_servers
+                .set(HashMap::new())
+                .map_err(|error| anyhow!(error))?;
+            for key in ["OPENAI_API_KEY", "CODEX_API_KEY"] {
+                config
+                    .permissions
+                    .shell_environment_policy
+                    .r#set
+                    .remove(key);
+                config
+                    .permissions
+                    .shell_environment_policy
+                    .exclude
+                    .push(EnvironmentVariablePattern::new_case_insensitive(key));
+            }
+        }
         scope_runtime_model_shell_environment(&mut config.permissions.shell_environment_policy);
         let mut shared_browser_process_groups = install_browser_mcp_servers(
             &mut config,
@@ -1476,6 +1575,21 @@ impl CodexClient {
             &mut config,
             personal_browser_mode || shared_browser_mode,
         )?;
+        if options.isolated_tool_worker {
+            config.agents_enabled = false;
+            let _ = config.features.disable(Feature::Collab);
+            let _ = config.features.disable(Feature::MultiAgentV2);
+            let _ = config.features.disable(Feature::Apps);
+            let _ = config.features.disable(Feature::Plugins);
+            let _ = config.features.disable(Feature::CodexHooks);
+            let _ = config.features.disable(Feature::PluginHooks);
+            config
+                .permissions
+                .set_permission_profile_from_session_snapshot(PermissionProfileSnapshot::legacy(
+                    isolated_tool_worker_permissions(self.workspace_dir())?,
+                ))
+                .map_err(|error| anyhow!(error))?;
+        }
         apply_bounded_browser_security_overrides(
             &mut config,
             personal_browser_mode || shared_browser_mode,
@@ -1568,11 +1682,25 @@ impl CodexClient {
         }
         let code_mode_host = crate::code_mode_host::host_program()?;
         crate::code_mode_host::ensure_host_for_model(&code_mode_host, &model_info, &config)?;
-        // Fragile hook: runtime-agent embeds Codex as a library, so there is no Codex CLI
-        // executable to back exec-server helper re-entry points. This and
-        // `EmptyUserInstructionsProvider` come from Codex's test support; recheck both on
-        // every Codex bump.
-        let environment_manager = Arc::new(EnvironmentManager::default_for_tests());
+        // Restricted reads and writes must use Codex's sandboxed filesystem helpers. The
+        // one-shot runtime entry point already dispatches those modes through arg0_dispatch.
+        let environment_manager = Arc::new(if options.isolated_tool_worker {
+            let runtime_paths = ExecServerRuntimeOptions::new(
+                std::env::current_exe()?,
+                config.codex_linux_sandbox_exe.clone(),
+            )?;
+            EnvironmentManager::from_codex_home(
+                &config.codex_home,
+                Some(runtime_paths),
+                config.http_client_factory(),
+            )
+            .await
+            .context("failed to initialize isolated worker execution environment")?
+        } else {
+            // Existing embedded turns retain their execution environment. This and the
+            // EmptyUserInstructionsProvider test-support bridge require review on Codex bumps.
+            EnvironmentManager::default_for_tests()
+        });
         let state_db = init_state_db(&config).await;
         let thread_store = thread_store_from_config(&config, state_db.clone());
         let installation_id = resolve_installation_id(&config.codex_home)
@@ -1606,6 +1734,7 @@ impl CodexClient {
                 code_mode_host,
             )),
         );
+        attempt_threads.keep(&thread_manager);
         let thread_mode_key = thread_mode_key(browser_mode);
         let mut active_thread_id = extract_thread_id_from_provider_state(
             options.provider_conversation_state.as_ref(),
@@ -1640,6 +1769,7 @@ impl CodexClient {
                         if let Some(rollout_path) = active_rollout_path.clone() {
                             if rollout_path.exists() {
                                 match resume_codex_thread_after_writer_release(
+                                    &attempt_threads,
                                     Arc::clone(&thread_manager),
                                     &config,
                                     &rollout_path,
@@ -1666,6 +1796,7 @@ impl CodexClient {
                                         thread_restore_failed = true;
                                         thread_restore_source = "failed_new".to_string();
                                         let new_thread = start_codex_thread(
+                                            &attempt_threads,
                                             Arc::clone(&thread_manager),
                                             config.clone(),
                                         )
@@ -1690,6 +1821,7 @@ impl CodexClient {
                                 thread_restore_failed = true;
                                 thread_restore_source = "failed_new".to_string();
                                 let new_thread = start_codex_thread(
+                                    &attempt_threads,
                                     Arc::clone(&thread_manager),
                                     config.clone(),
                                 )
@@ -1712,6 +1844,7 @@ impl CodexClient {
                             thread_restore_failed = true;
                             thread_restore_source = "failed_new".to_string();
                             let new_thread = start_codex_thread(
+                                &attempt_threads,
                                 Arc::clone(&thread_manager),
                                 config.clone(),
                             )
@@ -1728,9 +1861,13 @@ impl CodexClient {
                     }
                 }
             } else {
-                let new_thread = start_codex_thread(Arc::clone(&thread_manager), config.clone())
-                    .await
-                    .context("failed to create Codex thread")?;
+                let new_thread = start_codex_thread(
+                    &attempt_threads,
+                    Arc::clone(&thread_manager),
+                    config.clone(),
+                )
+                .await
+                .context("failed to create Codex thread")?;
                 active_rollout_path = new_thread.session_configured.rollout_path.clone();
                 session_configured_event = Some(new_thread.session_configured.clone());
                 active_thread_id = Some(new_thread.thread_id);
@@ -1738,19 +1875,19 @@ impl CodexClient {
                 new_thread.thread
             }
         } else {
-            let new_thread = start_codex_thread(Arc::clone(&thread_manager), config.clone())
-                .await
-                .context("failed to create Codex thread")?;
+            let new_thread = start_codex_thread(
+                &attempt_threads,
+                Arc::clone(&thread_manager),
+                config.clone(),
+            )
+            .await
+            .context("failed to create Codex thread")?;
             active_rollout_path = new_thread.session_configured.rollout_path.clone();
             session_configured_event = Some(new_thread.session_configured.clone());
             active_thread_id = Some(new_thread.thread_id);
             thread_restore_source = "ephemeral".to_string();
             new_thread.thread
         };
-        if options.persist_conversation_thread && !options.shared_browser {
-            kept_thread.keep(&conversation);
-        }
-
         let run_result = async {
             let mut aggregator =
                 CodexEventStreamAdapter::with_turn_start_token_usage(turn_start_token_usage)
@@ -1785,7 +1922,16 @@ impl CodexClient {
         let default_cwd = config.cwd.clone();
         // Runtime agent runs in a trusted, non-interactive mode (no approvals).
         let approval_policy = AskForApproval::Never;
-        let sandbox_policy = SandboxPolicy::DangerFullAccess;
+        let sandbox_policy = if options.isolated_tool_worker {
+            SandboxPolicy::WorkspaceWrite {
+                writable_roots: Vec::new(),
+                network_access: true,
+                exclude_tmpdir_env_var: false,
+                exclude_slash_tmp: true,
+            }
+        } else {
+            SandboxPolicy::DangerFullAccess
+        };
         let model = config
             .model
             .clone()
@@ -1836,8 +1982,8 @@ impl CodexClient {
                     profile_workspace_roots: None,
                     approval_policy: Some(approval_policy),
                     approvals_reviewer: None,
-                    sandbox_policy: Some(sandbox_policy),
-                    permission_profile: None,
+                    sandbox_policy: (!options.isolated_tool_worker).then_some(sandbox_policy),
+                    permission_profile: options.isolated_tool_worker.then(|| isolated_tool_worker_permissions(self.workspace_dir())).transpose()?,
                     active_permission_profile: None,
                     windows_sandbox_level: None,
                     model: Some(model),
@@ -1900,16 +2046,12 @@ impl CodexClient {
                     event = next_codex_event(
                         &conversation,
                         cancel_signal.as_ref(),
-                        options.shared_browser,
-                        &kept_thread,
                     ) => event?,
                 }
             } else {
                 next_codex_event(
                     &conversation,
                     cancel_signal.as_ref(),
-                    options.shared_browser,
-                    &kept_thread,
                 )
                 .await?
             };
@@ -1932,6 +2074,19 @@ impl CodexClient {
             }
 
             collect_events(&mut aggregator, &event, &mut events, on_event)?;
+            // The process supervisor must retain exact counts even if this child later
+            // crashes or must be killed. RawResponseCompleted is the same authoritative
+            // observation used by TaskUsage, not a restored/estimated TokenCount total.
+            if options.isolated_tool_worker
+                && matches!(&event.msg, EventMsg::RawResponseCompleted(_))
+                && let Some(artifact) = options.usage_observer.as_ref().and_then(UsageCall::artifact)
+                && let Some(callback) = on_event.as_deref_mut()
+            {
+                callback(&json!({
+                    "type": "runtime.task_usage_snapshot",
+                    "artifact": artifact,
+                }))?;
+            }
 
             match &event.msg {
                 EventMsg::TurnComplete(turn) => {
@@ -2243,16 +2398,10 @@ async fn confirm_shared_browser_shutdown(conversation: &CodexThread) -> Result<(
 async fn next_codex_event(
     conversation: &CodexThread,
     cancel_signal: Option<&JobCancelSignal>,
-    require_complete_shutdown: bool,
-    kept_thread: &KeptCodexThread,
 ) -> Result<Event> {
     if let Some(signal) = cancel_signal {
         tokio::select! {
             _ = signal.cancelled() => {
-                if !require_complete_shutdown {
-                    request_codex_shutdown(conversation).await;
-                    kept_thread.shutdown_already_awaited();
-                }
                 Err(anyhow!("lease lost"))
             }
             event = conversation.next_event() => event.context("failed to read Codex event"),
@@ -2272,96 +2421,139 @@ fn codex_shutdown_timeout_seconds() -> u64 {
         .unwrap_or(DEFAULT_CODEX_CANCEL_SHUTDOWN_TIMEOUT_SECONDS)
 }
 
-/// The conversation thread one attempt keeps for the conversation's next run, which resumes it
-/// from its rollout because every run builds its own `ThreadManager`. Codex flushes that rollout
-/// and releases the thread's writer lock only when the thread shuts down; dropping the thread
-/// leaves that to a background task, and a follow-up run that starts first cannot resume the
-/// thread. The attempt registers the thread here as soon as it exists, and the caller shuts it
-/// down after the attempt's run deadline, so the wait neither eats into the turn's timeout nor
-/// is skipped when the attempt times out.
+/// Retains every native thread in an attempt beyond its execution deadline. Parent-only
+/// shutdown is insufficient for tool-capable children, especially code-mode sessions. The
+/// manager also owns persisted roots whose rollout writers must close before a follow-up.
+struct AttemptCodexThreads {
+    registration: CodexThreadRegistration,
+    cleanup_unconfirmed: Arc<AtomicBool>,
+    shutdown_confirmed: bool,
+}
+
+impl Default for AttemptCodexThreads {
+    fn default() -> Self {
+        Self::new(Arc::clone(&CODEX_CLEANUP_UNCONFIRMED))
+    }
+}
+
+impl Drop for AttemptCodexThreads {
+    fn drop(&mut self) {
+        if !self.shutdown_confirmed {
+            // Latch when the owning caller drops, even if a spawned task still holds a
+            // registration handle and has not created its manager yet. Waiting for the last
+            // Arc to drop would allow the next job to replace credentials in that interval.
+            self.cleanup_unconfirmed.store(true, Ordering::Release);
+        }
+    }
+}
+
 #[derive(Clone, Default)]
-struct KeptCodexThread {
-    state: Arc<std::sync::Mutex<KeptCodexThreadState>>,
+struct CodexThreadRegistration {
+    state: Arc<CodexThreadRegistrationState>,
 }
 
 #[derive(Default)]
-struct KeptCodexThreadState {
-    thread: Option<Arc<CodexThread>>,
-    shutdown_awaited: bool,
+struct CodexThreadRegistrationState {
+    manager: std::sync::Mutex<Option<Arc<ThreadManager>>>,
+    pending_startups: AtomicUsize,
+    startup_finished: tokio::sync::Notify,
 }
 
-impl KeptCodexThread {
-    fn lock(&self) -> std::sync::MutexGuard<'_, KeptCodexThreadState> {
+struct CodexThreadStartup {
+    state: Arc<CodexThreadRegistrationState>,
+}
+
+impl Drop for CodexThreadStartup {
+    fn drop(&mut self) {
+        self.state.pending_startups.fetch_sub(1, Ordering::AcqRel);
+        self.state.startup_finished.notify_waiters();
+    }
+}
+
+impl CodexThreadRegistration {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<Arc<ThreadManager>>> {
         self.state
+            .manager
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn keep(&self, thread: &Arc<CodexThread>) {
-        self.lock().thread = Some(Arc::clone(thread));
+    fn keep(&self, manager: &Arc<ThreadManager>) {
+        *self.lock() = Some(Arc::clone(manager));
     }
 
-    /// A cancellation already waited one shutdown bound for this thread; a Stop does not wait
-    /// for a second one. If that shutdown overran, the next run waits for the writer instead.
-    fn shutdown_already_awaited(&self) {
-        self.lock().shutdown_awaited = true;
+    fn startup(&self) -> CodexThreadStartup {
+        self.state.pending_startups.fetch_add(1, Ordering::AcqRel);
+        CodexThreadStartup {
+            state: Arc::clone(&self.state),
+        }
     }
 
-    async fn shut_down(&self) {
-        let thread = {
-            let mut state = self.lock();
-            let thread = state.thread.take();
-            if state.shutdown_awaited { None } else { thread }
-        };
-        let Some(thread) = thread else {
-            return;
-        };
-        let timeout_seconds = codex_shutdown_timeout_seconds();
-        match timeout(
-            Duration::from_secs(timeout_seconds),
-            thread.shutdown_and_wait(),
-        )
-        .await
-        {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                tracing::warn!(%error, "kept Codex thread did not shut down cleanly");
+    async fn wait_for_startups(&self) {
+        loop {
+            let finished = self.state.startup_finished.notified();
+            tokio::pin!(finished);
+            finished.as_mut().enable();
+            if self.state.pending_startups.load(Ordering::Acquire) == 0 {
+                return;
             }
-            Err(_) => {
-                tracing::warn!(
-                    timeout_seconds,
-                    "kept Codex thread shutdown timed out; the next run waits for its writer"
-                );
-            }
+            finished.await;
         }
     }
 }
 
-async fn request_codex_shutdown(conversation: &CodexThread) {
-    let timeout_seconds = codex_shutdown_timeout_seconds();
-    match timeout(Duration::from_secs(timeout_seconds), async {
-        conversation.submit(Op::Shutdown).await?;
-        loop {
-            let event = conversation.next_event().await?;
-            if matches!(event.msg, EventMsg::ShutdownComplete) {
-                return Ok::<(), anyhow::Error>(());
+impl AttemptCodexThreads {
+    fn new(cleanup_unconfirmed: Arc<AtomicBool>) -> Self {
+        Self {
+            registration: CodexThreadRegistration::default(),
+            cleanup_unconfirmed,
+            shutdown_confirmed: false,
+        }
+    }
+
+    fn registration(&self) -> CodexThreadRegistration {
+        self.registration.clone()
+    }
+
+    async fn shut_down(&mut self) -> Result<()> {
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_secs(codex_shutdown_timeout_seconds());
+        let result = tokio::time::timeout_at(deadline, async {
+            // Aborting a spawned startup only schedules its cancellation. Wait for its
+            // future to stop before inspecting the manager, so it cannot register a root
+            // after an empty shutdown snapshot has been acknowledged.
+            self.registration.wait_for_startups().await;
+            let manager = self.registration.lock().clone();
+            let Some(manager) = manager else {
+                return Ok(());
+            };
+            loop {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                let report = manager.shutdown_all_threads_bounded(remaining).await;
+                anyhow::ensure!(
+                    report.submit_failed.is_empty() && report.timed_out.is_empty(),
+                    "Codex thread shutdown was not confirmed ({} submit failures, {} timeouts)",
+                    report.submit_failed.len(),
+                    report.timed_out.len()
+                );
+                // A child may have registered while the first shutdown snapshot was taken.
+                // Repeat within the same deadline, after all issuing sessions have stopped.
+                if manager.list_thread_ids().await.is_empty() {
+                    return Ok::<(), anyhow::Error>(());
+                }
             }
-        }
-    })
-    .await
-    {
-        Ok(Ok(())) => {
-            tracing::info!("codex shutdown completed after cancellation");
-        }
-        Ok(Err(error)) => {
-            tracing::warn!(%error, "codex shutdown request failed after cancellation");
-        }
-        Err(_) => {
-            tracing::warn!(
-                timeout_seconds,
-                "codex shutdown timed out after cancellation"
+        })
+        .await
+        .unwrap_or_else(|_| Err(anyhow!("Codex thread shutdown exceeded its deadline")));
+        if let Err(error) = result {
+            self.cleanup_unconfirmed.store(true, Ordering::Release);
+            return Err(
+                error.context("Codex thread cleanup is unconfirmed; runtime restart required")
             );
         }
+        self.registration.lock().take();
+        self.shutdown_confirmed = true;
+        Ok(())
     }
 }
 
@@ -4944,6 +5136,67 @@ mod tests {
     };
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Mutex, OnceLock};
+
+    #[test]
+    fn abandoned_codex_attempt_rejects_reuse_before_registration_handles_drop() {
+        let unsafe_reuse = Arc::new(AtomicBool::new(false));
+        let attempt = AttemptCodexThreads::new(Arc::clone(&unsafe_reuse));
+        let delayed_registration = attempt.registration();
+
+        drop(attempt);
+
+        assert!(unsafe_reuse.load(Ordering::Acquire));
+        drop(delayed_registration);
+    }
+
+    #[tokio::test]
+    async fn completed_codex_attempt_allows_reuse_after_registration_handles_drop() {
+        let unsafe_reuse = Arc::new(AtomicBool::new(false));
+        let mut attempt = AttemptCodexThreads::new(Arc::clone(&unsafe_reuse));
+        drop(attempt.registration());
+        assert!(!unsafe_reuse.load(Ordering::Acquire));
+
+        attempt
+            .shut_down()
+            .await
+            .expect("no native threads were created");
+        drop(attempt);
+
+        assert!(!unsafe_reuse.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn codex_cleanup_waits_for_pending_startup_before_acknowledging_empty_manager() {
+        let unsafe_reuse = Arc::new(AtomicBool::new(false));
+        let mut attempt = AttemptCodexThreads::new(Arc::clone(&unsafe_reuse));
+        let startup = attempt.registration().startup();
+        let cleanup = attempt.shut_down();
+        tokio::pin!(cleanup);
+        tokio::select! {
+            result = &mut cleanup => panic!("startup still owns a future: {result:?}"),
+            _ = tokio::task::yield_now() => {}
+        }
+
+        drop(startup);
+        cleanup.await.expect("finished startup can be acknowledged");
+        assert!(!unsafe_reuse.load(Ordering::Acquire));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn codex_cleanup_deadline_rejects_reuse_while_startup_remains_alive() {
+        let unsafe_reuse = Arc::new(AtomicBool::new(false));
+        let mut attempt = AttemptCodexThreads::new(Arc::clone(&unsafe_reuse));
+        let pending_startup = attempt.registration().startup();
+
+        let error = attempt
+            .shut_down()
+            .await
+            .expect_err("startup never stopped");
+
+        assert!(error.to_string().contains("runtime restart required"));
+        assert!(unsafe_reuse.load(Ordering::Acquire));
+        drop(pending_startup);
+    }
 
     struct DropMarker(Arc<AtomicBool>);
 
@@ -8200,4 +8453,43 @@ required = true
 
 fn resolve_sandbox_mode() -> SandboxMode {
     SandboxMode::DangerFullAccess
+}
+
+fn isolated_tool_worker_permissions(workspace: &Path) -> Result<PermissionProfile> {
+    let path_entry = |path: PathBuf, access| -> Result<FileSystemSandboxEntry> {
+        let canonical =
+            fs::canonicalize(path).context("isolated worker permission path is missing")?;
+        Ok(FileSystemSandboxEntry::new(
+            FileSystemPath::Path {
+                path: PathUri::from_abs_path(&AbsolutePathBuf::from_absolute_path(canonical)?),
+            },
+            access,
+        ))
+    };
+    let mut entries = vec![
+        FileSystemSandboxEntry::new(
+            FileSystemPath::Special {
+                value: FileSystemSpecialPath::Minimal,
+            },
+            FileSystemAccessMode::Read,
+        ),
+        path_entry(workspace.to_path_buf(), FileSystemAccessMode::Write)?,
+        path_entry(
+            optional_env_path("TMPDIR").context("isolated worker TMPDIR is missing")?,
+            FileSystemAccessMode::Write,
+        )?,
+        path_entry(
+            optional_env_path("HOME").context("isolated worker HOME is missing")?,
+            FileSystemAccessMode::Read,
+        )?,
+        path_entry(std::env::current_exe()?, FileSystemAccessMode::Read)?,
+    ];
+    let host = crate::code_mode_host::host_program()?;
+    if host.exists() {
+        entries.push(path_entry(host, FileSystemAccessMode::Read)?);
+    }
+    Ok(PermissionProfile::from_runtime_permissions(
+        &FileSystemSandboxPolicy::restricted(entries),
+        NetworkSandboxPolicy::Enabled,
+    ))
 }

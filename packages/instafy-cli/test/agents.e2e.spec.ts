@@ -70,6 +70,109 @@ async function readAll(stream: NodeJS.ReadableStream) {
 }
 
 describe("agents command", () => {
+  it("reads shared settings and patches only explicitly selected fields", async () => {
+    const projectId = randomUUID();
+    const settings = {
+      maxAgentsPerPlan: 64,
+      maxConcurrentAgents: 8,
+      canManage: true,
+      limits: {
+        maxAgentsPerPlan: { min: 1, max: 256, default: 64 },
+        maxConcurrentAgents: { min: 1, max: 64, default: 8 },
+      },
+    };
+    const { server, captured } = startMockController((req) => ({
+      status: 200,
+      body: { ...settings, ...(req.body as object ?? {}) },
+    }));
+    await once(server, "listening");
+    const address = server.address() as { port: number };
+    const args = ["agents", "settings", "--space", projectId, "--server-url", `http://127.0.0.1:${address.port}`, "--access-token", "settings-token"];
+    try {
+      const read = await execCli([...args, "--json"]);
+      expect(read.code, read.stderr).toBe(0);
+      expect(JSON.parse(read.stdout)).toEqual(settings);
+      expect(captured).toHaveLength(1);
+      expect(captured[0]).toMatchObject({ method: "GET", url: `/projects/${projectId}/multi-agent-settings`, auth: "Bearer settings-token", body: null });
+
+      const update = await execCli([...args, "--max-concurrent-agents", "12", "--json"]);
+      expect(update.code, update.stderr).toBe(0);
+      expect(JSON.parse(update.stdout)).toMatchObject({ maxAgentsPerPlan: 64, maxConcurrentAgents: 12 });
+      expect(captured).toHaveLength(3);
+      expect(captured[2]).toMatchObject({ method: "PATCH", url: `/projects/${projectId}/multi-agent-settings`, auth: "Bearer settings-token", body: { maxConcurrentAgents: 12 } });
+    } finally {
+      server.close();
+    }
+  });
+
+  it("rejects invalid setting values without mutation and respects controller bounds", async () => {
+    const { server, captured } = startMockController(() => ({
+      status: 200,
+      body: {
+        maxAgentsPerPlan: 64,
+        maxConcurrentAgents: 8,
+        canManage: true,
+        limits: {
+          maxAgentsPerPlan: { min: 1, max: 256, default: 64 },
+          maxConcurrentAgents: { min: 1, max: 16, default: 8 },
+        },
+      },
+    }));
+    await once(server, "listening");
+    const address = server.address() as { port: number };
+    const args = ["agents", "settings", "--space", randomUUID(), "--server-url", `http://127.0.0.1:${address.port}`, "--access-token", "settings-token"];
+    try {
+      for (const value of ["0", "-1", "1.5", "8agents", "1e2", "9007199254740992"]) {
+        const result = await execCli([...args, "--max-concurrent-agents", value]);
+        expect(result.code, value).toBe(1);
+        expect(result.stderr).toContain("positive whole number");
+      }
+      expect(captured).toHaveLength(0);
+
+      const result = await execCli([...args, "--max-concurrent-agents", "17"]);
+      expect(result.code).toBe(1);
+      expect(result.stderr).toContain("between 1 and 16");
+      expect(captured.map((req) => req.method)).toEqual(["GET"]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("allows read-only settings inspection but does not attempt an unauthorized update", async () => {
+    const { server, captured } = startMockController(() => ({
+      status: 200,
+      body: {
+        maxAgentsPerPlan: 64,
+        maxConcurrentAgents: 8,
+        canManage: false,
+        limits: {
+          maxAgentsPerPlan: { min: 1, max: 256, default: 64 },
+          maxConcurrentAgents: { min: 1, max: 64, default: 8 },
+        },
+      },
+    }));
+    await once(server, "listening");
+    const address = server.address() as { port: number };
+    const args = ["agents", "settings", "--space", randomUUID(), "--server-url", `http://127.0.0.1:${address.port}`, "--access-token", "viewer-token"];
+    try {
+      const read = await execCli(args);
+      expect(read.code, read.stderr).toBe(0);
+      expect(read.stdout).toContain("Read-only");
+      const update = await execCli([...args, "--max-agents-per-plan", "100"]);
+      expect(update.code).toBe(1);
+      expect(update.stderr).toContain("do not have permission");
+      expect(captured.map((req) => req.method)).toEqual(["GET", "GET"]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("requires a terminal for interactive settings instead of hanging in automation", async () => {
+    const result = await execCli(["agents", "settings", "--interactive", "--space", randomUUID()]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("--interactive requires a terminal");
+  });
+
   it("lists scoped agent context cards with filters", async () => {
     const projectId = randomUUID();
     const agentId = randomUUID();

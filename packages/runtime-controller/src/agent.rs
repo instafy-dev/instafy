@@ -43,6 +43,9 @@ use crate::tokens::{
 };
 use crate::workspace;
 
+#[path = "agent/planning_receipts.rs"]
+mod planning_receipts;
+
 const AGENT_CONVERSATION_HISTORY_LIMIT: i64 = 80;
 /// How many of a conversation's latest skill setup openers a job carries. A
 /// person rarely sends more than one or two, so a few is enough to keep a
@@ -1790,6 +1793,15 @@ pub(crate) async fn agent_heartbeat(
     .await?;
     runtime::touch_runtime_last_seen(&transaction, &runtime_uuid).await?;
 
+    // Runtime -> capacity -> job is the same lock order used by lease admission.
+    // Late heartbeats must not restore an expired worker after another poll has
+    // already consumed its slot. Existing active work can finish after a limit is lowered.
+    let worker_capacity_available = crate::multi_agent_settings::worker_slot_available(
+        &transaction,
+        &project_id,
+        Some(&job_uuid),
+    )
+    .await?;
     let extend_interval = extend_seconds
         .map(|value| value as f64)
         .unwrap_or(60.0)
@@ -1798,17 +1810,26 @@ pub(crate) async fn agent_heartbeat(
     let row = transaction
         .query_opt(
             "update agent_jobs
-             set heartbeat_at = now(),
+             set heartbeat_at = statement_timestamp(),
                  lease_expires_at = greatest(
-                     now() + interval '1 second' * $4,
-                     coalesce(lease_expires_at, now())
+                     statement_timestamp() + interval '1 second' * $4,
+                     coalesce(lease_expires_at, statement_timestamp())
                  )
              where id = $1
                and project_id = $2
                and status = 'leased'
                and coalesce(leased_by_runtime_id, $3::uuid) = $3
+               and ($5::bool
+                    or coalesce(agent_role, payload #>> '{metadata,multiAgentPlan,role}', '') <> 'worker'
+                    or lease_expires_at > statement_timestamp())
              returning lease_expires_at",
-            &[&job_uuid, &project_id, &runtime_uuid, &extend_interval],
+            &[
+                &job_uuid,
+                &project_id,
+                &runtime_uuid,
+                &extend_interval,
+                &worker_capacity_available,
+            ],
         )
         .await
         .map_err(|error| internal_error(format!("failed to update heartbeat: {error}")))?;
@@ -2075,6 +2096,14 @@ pub(crate) async fn agent_message(
         metadata_value,
     )
     .await?;
+    let multi_agent_plan_receipt_fence = claims
+        .runtime_id
+        .filter(|id| Some(*id) == row.get::<_, Option<Uuid>>("leased_by_runtime_id"))
+        .map(|_| crate::multi_agent_plan::PlanningReceiptFence {
+            claims,
+            lease_attempt: row.get("lease_attempts"),
+        });
+    let multi_agent_plan_message_id = message_row.id;
     let multi_agent_plan_metadata = message_row.metadata.clone();
     let multi_agent_plan_content = message_row.content.clone();
     let multi_agent_plan_job_payload = job_payload.clone();
@@ -2109,6 +2138,8 @@ pub(crate) async fn agent_message(
             run_id,
             &multi_agent_plan_metadata,
             multi_agent_plan_content.as_str(),
+            Some(multi_agent_plan_message_id),
+            multi_agent_plan_receipt_fence,
         )
         .await
     {
@@ -2788,6 +2819,33 @@ pub(crate) async fn agent_complete(
     let error_ref = error_message.as_deref();
     let artifacts_count = artifacts_value.as_array().map(|arr| arr.len());
 
+    if let Some(receipt) = planning_receipts::store(
+        &state,
+        &transaction,
+        &claims,
+        job_uuid,
+        &artifacts_value,
+        stored_artifacts.as_ref(),
+        task_usage_receipt.as_ref(),
+        &proxy_metadata,
+    )
+    .await?
+    {
+        transaction.commit().await.map_err(|error| {
+            internal_error(format!("failed to commit planning receipt: {error}"))
+        })?;
+        if let Some(org_id) = receipt.credit_org_id {
+            crate::credits::publish_credits_updated(
+                &state,
+                &*connection,
+                org_id,
+                crate::credits::CREDITS_UPDATED_LEDGER,
+            )
+            .await;
+        }
+        return Ok(Json(AgentCompleteResponseBody { ok: true }));
+    }
+
     let row = match runtime_scope {
         Some(runtime_uuid) => {
             transaction
@@ -3124,159 +3182,20 @@ pub(crate) async fn agent_complete(
             && !run_has_visible_assistant_message(&transaction, &project_id, run_id).await?;
 
         if let Some(usage) = extract_turn_usage_from_artifacts(&artifacts_value) {
-            let managed_ai_metadata = job_payload.get("metadata").and_then(JsonValue::as_object);
-            let managed_ai_used = managed_ai_metadata
-                .and_then(|metadata| metadata.get("managedAiUsed"))
-                .and_then(JsonValue::as_bool)
-                .unwrap_or(false);
-            if managed_ai_used {
-                let prompt_id_for_billing = run_prompt_id.or(job_prompt_id);
-                if let Some(prompt_uuid) = prompt_id_for_billing {
-                    let project = load_project_record(&transaction, &project_id).await?;
-                    let org_id = project
-                        .org_id
-                        .ok_or_else(|| internal_error("managed AI project missing organization"))?;
-                    let managed_ai_label = managed_ai_metadata
-                        .and_then(|metadata| metadata.get("managedAiLabel"))
-                        .and_then(JsonValue::as_str)
-                        .map(|value| value.trim().to_string())
-                        .filter(|value| !value.is_empty());
-                    match reconcile_managed_ai_usage_charge(
-                        &transaction,
-                        &state.config,
-                        &project_id,
-                        &org_id,
-                        leased_runtime_id,
-                        &prompt_uuid,
-                        provider_value.as_deref(),
-                        managed_ai_label.as_deref(),
-                        ManagedAiTokenUsage {
-                            input_tokens: usage.input_tokens,
-                            cached_input_tokens: usage.cached_input_tokens,
-                            output_tokens: usage.output_tokens,
-                        },
-                    )
-                    .await
-                    {
-                        Ok(charge) => {
-                            // A zero adjustment only merges metadata into the
-                            // reserve row, and a replayed one writes nothing.
-                            if charge.ledger_row_written {
-                                completion_credit_org_id = Some(org_id);
-                            }
-                            if let Some(run_uuid) = run_id {
-                                let reserve_key = format!("managed-ai-prompt:{prompt_uuid}");
-                                let adjustment_key = format!("managed-ai-adjustment:{prompt_uuid}");
-                                let reserve = crate::credits::load_credit_ledger_reference_by_idempotency_key(
-                                    &transaction,
-                                    &org_id,
-                                    &project_id,
-                                    &reserve_key,
-                                )
-                                .await;
-                                let adjustment = crate::credits::load_credit_ledger_reference_by_idempotency_key(
-                                    &transaction,
-                                    &org_id,
-                                    &project_id,
-                                    &adjustment_key,
-                                )
-                                .await;
-                                let reserve = match reserve {
-                                    Ok(value) => {
-                                        value.map(|entry| json!(entry)).unwrap_or_else(|| {
-                                            json!({
-                                                "ledgerId": JsonValue::Null,
-                                                "idempotencyKey": reserve_key,
-                                                "reason": "managed_ai_prompt",
-                                                "delta": -(charge.reserve_units.abs()),
-                                            })
-                                        })
-                                    }
-                                    Err((status, Json(api_error))) => {
-                                        warn!(
-                                            project_id = %project_id,
-                                            prompt_id = %prompt_uuid,
-                                            status = status.as_u16(),
-                                            error = %api_error.message,
-                                            "failed to resolve managed AI reserve ledger reference"
-                                        );
-                                        json!({
-                                            "ledgerId": JsonValue::Null,
-                                            "idempotencyKey": reserve_key,
-                                            "reason": "managed_ai_prompt",
-                                            "delta": -(charge.reserve_units.abs()),
-                                        })
-                                    }
-                                };
-                                let adjustment = match adjustment {
-                                    Ok(value) => {
-                                        value.map(|entry| json!(entry)).unwrap_or_else(|| {
-                                            json!({
-                                                "ledgerId": JsonValue::Null,
-                                                "idempotencyKey": adjustment_key,
-                                                "reason": "managed_ai_adjustment",
-                                                "delta": charge.adjustment_units,
-                                            })
-                                        })
-                                    }
-                                    Err((status, Json(api_error))) => {
-                                        warn!(
-                                            project_id = %project_id,
-                                            prompt_id = %prompt_uuid,
-                                            status = status.as_u16(),
-                                            error = %api_error.message,
-                                            "failed to resolve managed AI adjustment ledger reference"
-                                        );
-                                        json!({
-                                            "ledgerId": JsonValue::Null,
-                                            "idempotencyKey": adjustment_key,
-                                            "reason": "managed_ai_adjustment",
-                                            "delta": charge.adjustment_units,
-                                        })
-                                    }
-                                };
-                                let managed_ai_credit = json!({
-                                    "promptId": prompt_uuid,
-                                    "reserve": reserve,
-                                    "adjustment": adjustment,
-                                    "charge": {
-                                        "reservedUnits": charge.reserve_units,
-                                        "chargedUnits": charge.charged_units,
-                                        "adjustmentUnits": charge.adjustment_units,
-                                        "inputUsdMicros": charge.input_cost_usd_micros,
-                                        "cachedInputUsdMicros": charge.cached_input_cost_usd_micros,
-                                        "outputUsdMicros": charge.output_cost_usd_micros,
-                                        "estimatedUsdMicros": charge.total_cost_usd_micros,
-                                    }
-                                });
-                                if let Err((status, Json(api_error))) =
-                                    crate::dispatch::persist_run_managed_ai_credit_metadata(
-                                        &transaction,
-                                        &[run_uuid],
-                                        &managed_ai_credit,
-                                    )
-                                    .await
-                                {
-                                    warn!(
-                                        project_id = %project_id,
-                                        prompt_id = %prompt_uuid,
-                                        status = status.as_u16(),
-                                        error = %api_error.message,
-                                        "failed to persist managed AI credit trace onto run"
-                                    );
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            warn!(
-                                project_id = %project_id,
-                                prompt_id = %prompt_uuid,
-                                ?error,
-                                "failed to attach managed AI usage metadata to credit ledger entry"
-                            );
-                        }
-                    }
-                }
+            if let Some(org_id) = reconcile_completion_usage(
+                &state,
+                &transaction,
+                &project_id,
+                &job_payload,
+                run_id,
+                run_prompt_id.or(job_prompt_id),
+                leased_runtime_id,
+                provider_value.as_deref(),
+                usage,
+            )
+            .await?
+            {
+                completion_credit_org_id = Some(org_id);
             }
 
             if !should_swallow_evaluation_decline {
@@ -3472,6 +3391,174 @@ pub(crate) async fn agent_complete(
     }
 
     Ok(Json(AgentCompleteResponseBody { ok: true }))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn reconcile_completion_usage(
+    state: &AppState,
+    transaction: &tokio_postgres::Transaction<'_>,
+    project_id: &Uuid,
+    job_payload: &JsonValue,
+    run_id: Option<Uuid>,
+    prompt_id: Option<Uuid>,
+    leased_runtime_id: Option<Uuid>,
+    provider: Option<&str>,
+    usage: TurnUsage,
+) -> Result<Option<Uuid>, (StatusCode, Json<ApiError>)> {
+    let mut completion_credit_org_id = None;
+    let managed_ai_metadata = job_payload.get("metadata").and_then(JsonValue::as_object);
+    let managed_ai_used = managed_ai_metadata
+        .and_then(|metadata| metadata.get("managedAiUsed"))
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false);
+    if managed_ai_used {
+        let prompt_id_for_billing = prompt_id;
+        if let Some(prompt_uuid) = prompt_id_for_billing {
+            let project = load_project_record(transaction, project_id).await?;
+            let org_id = project
+                .org_id
+                .ok_or_else(|| internal_error("managed AI project missing organization"))?;
+            let managed_ai_label = managed_ai_metadata
+                .and_then(|metadata| metadata.get("managedAiLabel"))
+                .and_then(JsonValue::as_str)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            match reconcile_managed_ai_usage_charge(
+                transaction,
+                &state.config,
+                project_id,
+                &org_id,
+                leased_runtime_id,
+                &prompt_uuid,
+                provider,
+                managed_ai_label.as_deref(),
+                ManagedAiTokenUsage {
+                    input_tokens: usage.input_tokens,
+                    cached_input_tokens: usage.cached_input_tokens,
+                    output_tokens: usage.output_tokens,
+                },
+            )
+            .await
+            {
+                Ok(charge) => {
+                    // A zero adjustment only merges metadata into the
+                    // reserve row, and a replayed one writes nothing.
+                    if charge.ledger_row_written {
+                        completion_credit_org_id = Some(org_id);
+                    }
+                    if let Some(run_uuid) = run_id {
+                        let reserve_key = format!("managed-ai-prompt:{prompt_uuid}");
+                        let adjustment_key = format!("managed-ai-adjustment:{prompt_uuid}");
+                        let reserve =
+                            crate::credits::load_credit_ledger_reference_by_idempotency_key(
+                                transaction,
+                                &org_id,
+                                project_id,
+                                &reserve_key,
+                            )
+                            .await;
+                        let adjustment =
+                            crate::credits::load_credit_ledger_reference_by_idempotency_key(
+                                transaction,
+                                &org_id,
+                                project_id,
+                                &adjustment_key,
+                            )
+                            .await;
+                        let reserve = match reserve {
+                            Ok(value) => value.map(|entry| json!(entry)).unwrap_or_else(|| {
+                                json!({
+                                    "ledgerId": JsonValue::Null,
+                                    "idempotencyKey": reserve_key,
+                                    "reason": "managed_ai_prompt",
+                                    "delta": -(charge.reserve_units.abs()),
+                                })
+                            }),
+                            Err((status, Json(api_error))) => {
+                                warn!(
+                                    project_id = %project_id,
+                                    prompt_id = %prompt_uuid,
+                                    status = status.as_u16(),
+                                    error = %api_error.message,
+                                    "failed to resolve managed AI reserve ledger reference"
+                                );
+                                json!({
+                                    "ledgerId": JsonValue::Null,
+                                    "idempotencyKey": reserve_key,
+                                    "reason": "managed_ai_prompt",
+                                    "delta": -(charge.reserve_units.abs()),
+                                })
+                            }
+                        };
+                        let adjustment = match adjustment {
+                            Ok(value) => value.map(|entry| json!(entry)).unwrap_or_else(|| {
+                                json!({
+                                    "ledgerId": JsonValue::Null,
+                                    "idempotencyKey": adjustment_key,
+                                    "reason": "managed_ai_adjustment",
+                                    "delta": charge.adjustment_units,
+                                })
+                            }),
+                            Err((status, Json(api_error))) => {
+                                warn!(
+                                    project_id = %project_id,
+                                    prompt_id = %prompt_uuid,
+                                    status = status.as_u16(),
+                                    error = %api_error.message,
+                                    "failed to resolve managed AI adjustment ledger reference"
+                                );
+                                json!({
+                                    "ledgerId": JsonValue::Null,
+                                    "idempotencyKey": adjustment_key,
+                                    "reason": "managed_ai_adjustment",
+                                    "delta": charge.adjustment_units,
+                                })
+                            }
+                        };
+                        let managed_ai_credit = json!({
+                            "promptId": prompt_uuid,
+                            "reserve": reserve,
+                            "adjustment": adjustment,
+                            "charge": {
+                                "reservedUnits": charge.reserve_units,
+                                "chargedUnits": charge.charged_units,
+                                "adjustmentUnits": charge.adjustment_units,
+                                "inputUsdMicros": charge.input_cost_usd_micros,
+                                "cachedInputUsdMicros": charge.cached_input_cost_usd_micros,
+                                "outputUsdMicros": charge.output_cost_usd_micros,
+                                "estimatedUsdMicros": charge.total_cost_usd_micros,
+                            }
+                        });
+                        if let Err((status, Json(api_error))) =
+                            crate::dispatch::persist_run_managed_ai_credit_metadata(
+                                transaction,
+                                &[run_uuid],
+                                &managed_ai_credit,
+                            )
+                            .await
+                        {
+                            warn!(
+                                project_id = %project_id,
+                                prompt_id = %prompt_uuid,
+                                status = status.as_u16(),
+                                error = %api_error.message,
+                                "failed to persist managed AI credit trace onto run"
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        project_id = %project_id,
+                        prompt_id = %prompt_uuid,
+                        ?error,
+                        "failed to attach managed AI usage metadata to credit ledger entry"
+                    );
+                }
+            }
+        }
+    }
+    Ok(completion_credit_org_id)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3843,6 +3930,10 @@ pub(crate) async fn lease_next_agent_job(
     batch_multi_agent_group_id: Option<&str>,
     exclude_platform_ai_jobs: bool,
 ) -> Result<Option<AgentJob>, (StatusCode, Json<ApiError>)> {
+    // Admission must be serialized across runtime polls and controller processes.
+    // Root/lead jobs are exempt so a full worker pool cannot block coordination.
+    let worker_capacity_available =
+        crate::multi_agent_settings::worker_slot_available(transaction, project_id, None).await?;
     let runtime_uuid: Option<Uuid> = runtime_id.cloned();
     let batch_conversation_uuid: Option<Uuid> = batch_conversation_id.cloned();
     let batch_multi_agent_group: Option<String> = batch_multi_agent_group_id.map(str::to_string);
@@ -3900,6 +3991,7 @@ pub(crate) async fn lease_next_agent_job(
                 from agent_jobs aj
                 where aj.project_id = $1
                   and status = 'queued'
+                  and ($11::bool or coalesce(aj.agent_role, aj.payload #>> '{metadata,multiAgentPlan,role}', '') <> 'worker')
                   and not (
                         $10::bool
                         and aj.credential_id is null
@@ -4027,7 +4119,7 @@ pub(crate) async fn lease_next_agent_job(
                             where busy.project_id = $1
                               and busy.status = 'leased'
                               and busy.leased_by_runtime_id = $2
-                              and busy.lease_expires_at > now()
+                              and busy.lease_expires_at > statement_timestamp()
                         )
                       )
                   and not (
@@ -4055,7 +4147,8 @@ pub(crate) async fn lease_next_agent_job(
                               on group_runtime_lease.id = group_runtime.active_lease_id
                             where group_runtime.id <> $2
                               and group_runtime.project_id = $1
-                              and group_runtime.status not in ('stopped', 'offline', 'removed')
+                              and group_runtime.status in ('ready', 'running')
+                              and group_runtime.last_seen_at >= statement_timestamp() - interval '90 seconds'
                               and group_runtime_lease.released_at is null
                               and group_runtime_lease.metadata #>> '{groupId}' = multi_agent_group_id
                               and not exists (
@@ -4080,14 +4173,14 @@ pub(crate) async fn lease_next_agent_job(
              )
              update agent_jobs aj
              set status = 'leased',
-                 leased_at = now(),
-                 lease_expires_at = now() + interval '1 second' * greatest($3::int, 30),
+                 leased_at = statement_timestamp(),
+                 lease_expires_at = statement_timestamp() + interval '1 second' * greatest($3::int, 30),
                  lease_attempts = lease_attempts + 1,
                  leased_by_runtime_id = $2,
                  active_input_ready_runtime_id = null,
                  active_input_ready_expires_at = null,
                  active_input_ready_turn_id = null,
-                 heartbeat_at = now(),
+                 heartbeat_at = statement_timestamp(),
                  payload = aj.payload - 'requeuedAt' - 'requeuedReason'
              from candidate
              where aj.id = candidate.id
@@ -4103,6 +4196,7 @@ pub(crate) async fn lease_next_agent_job(
                 &batch_conversation_uuid,
                 &batch_multi_agent_group,
                 &exclude_platform_ai_jobs,
+                &worker_capacity_available,
             ],
         )
         .await

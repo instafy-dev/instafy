@@ -3,6 +3,7 @@ pub mod proto {
 }
 
 pub use proto::*;
+pub mod multi_agent;
 pub mod types;
 pub use types::{AccessTokenClaims, CreditSnapshotPayload, ProxyEnvelopePayload};
 

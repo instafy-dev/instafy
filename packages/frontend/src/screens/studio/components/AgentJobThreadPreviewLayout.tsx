@@ -1056,7 +1056,7 @@ export function AgentJobThreadPreviewLayout({
                     projectId={projectId ?? null}
                   />
                 ) : null}
-                <MultiAgentPlanEntry details={updateDetails} />
+                <MultiAgentPlanEntry details={updateDetails} planMessage={update} />
               </div>
             </div>
           );

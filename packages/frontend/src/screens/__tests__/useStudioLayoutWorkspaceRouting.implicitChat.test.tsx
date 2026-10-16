@@ -17,6 +17,7 @@ const chatTab: Tab = { id: "chat-tab", kind: "conversation", panel: null, jobId:
 const projectsTab: Tab = { id: "projects-tab", kind: "panel", panel: "projects", jobId: null };
 const reviewTab: Tab = { id: "review-tab", kind: "gitReview", panel: null, jobId: null };
 const jobTab: Tab = { id: "job-tab", kind: "jobThread", panel: null, jobId: "job-a" };
+const ownedJobTab: Tab = { ...jobTab, id: "owned-job-tab", workspaceOwner: { userId: "user", projectId: PROJECT, conversationId: LOCAL } };
 const diffTab: Tab = { id: "diff-tab", kind: "gitDiff", panel: null, jobId: null, workspaceOwner: { userId: "user", projectId: PROJECT, conversationId: LOCAL } };
 
 describe("implicit chat route rendered-tab reconciliation", () => {
@@ -59,7 +60,7 @@ describe("implicit chat route rendered-tab reconciliation", () => {
       activeWorkspaceTabKind: tab?.kind ?? null, activeWorkspaceTabPanel: tab?.panel ?? null,
       conversationTabsReady: true,
       consumeUrlNavigation: consume, conversations: [{ ...conversation, controllerId: selectedControllerId }], conversationsProjectKey,
-      focusWorkspaceTab: id => { focusedTabs(id); if (id === diffTab.id) { setTab(diffTab); setPanel("chat"); } }, isLargeScreen: false, leftDrawer,
+      focusWorkspaceTab: id => { focusedTabs(id); const owned = [diffTab, ownedJobTab].find(candidate => candidate.id === id); if (owned) { setTab(owned); setPanel("chat"); } }, isLargeScreen: false, leftDrawer,
       locationPathname: location.pathname, locationSearch: location.search,
       locationKey: location.key, locationState: location.state,
       navigate: (to, options) => { navigations(to, options); void navigate(to, options); },
@@ -68,7 +69,7 @@ describe("implicit chat route rendered-tab reconciliation", () => {
       requestUrlNavigation: mode => { pendingIntent = mode ?? "push"; }, restoreGitReviewTab: restoredReviews,
       selectConversation: selectedConversations, setConversationControllerId: vi.fn(),
       setIsProjectLauncherOpen: vi.fn(), setLeftDrawer, setMobileSidebarOpen: vi.fn(),
-      workspaceTabs: [chatTab, projectsTab, reviewTab, jobTab, diffTab],
+      workspaceTabs: [chatTab, projectsTab, reviewTab, jobTab, ownedJobTab, diffTab],
     });
     return <div data-testid="rendered-tab">{tab ? tab.kind === "panel" ? tab.panel : tab.kind : "pending"}</div>;
   }
@@ -99,6 +100,24 @@ describe("implicit chat route rendered-tab reconciliation", () => {
     pendingIntent = "push"; await act(async () => restoreTab(chatTab, "chat"));
     expect(new URLSearchParams(window.location.search).has("chatView")).toBe(false);
     expect(rendered()).toBe("conversation");
+  });
+
+  it("leaves an owned worker trace through a Chat tab transition without restoring either worker selector", async () => {
+    const params = new URLSearchParams(window.location.search);
+    params.set("chatView", ownedJobTab.id); params.set("jobId", ownedJobTab.jobId!);
+    window.history.replaceState(window.history.state, "", `/studio?${params}`);
+    initialTab = ownedJobTab;
+    await render();
+    expect(rendered()).toBe("jobThread");
+    // Continue in chat uses the same intent + tab transition as Chat selection,
+    // never a partial URL edit leaving the owned chatView behind.
+    pendingIntent = "push";
+    await act(async () => restoreTab(chatTab, "chat"));
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+    expect(rendered()).toBe("conversation");
+    expect(new URLSearchParams(window.location.search).has("chatView")).toBe(false);
+    expect(new URLSearchParams(window.location.search).has("jobId")).toBe(false);
+    expect(openedJobs).not.toHaveBeenCalled();
   });
 
   it("rejects a view belonging to a different chat or space and tolerates an expired reference", async () => {

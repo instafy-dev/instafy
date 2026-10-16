@@ -6,7 +6,136 @@ Instafy has three different agent execution lanes:
 - Top-level Instafy agents represented by normal conversations and optional linked agent threads.
 - Multiple runtimes leasing top-level agent jobs in parallel.
 
-Do not treat these as the same thing. A prompt can fan out into multiple top-level jobs while still running wall-clock serially if only one runtime process is available. The bundled runtime-agent requests a small batch by default, and the controller fills additional batch slots only with `read_only` jobs. A single runtime process still keeps Codex/proxy/tool credentials and job secrets process-scoped, so env-sensitive execution is serialized for correctness. Wall-clock acceleration comes from runtime spread: multiple runtime processes can run on one machine or many machines, and skill-authored plans can request `runtimeRouting.strategy = "spread"` when independent sibling lanes are worth parallel slots.
+Do not treat these as the same thing. A prompt can fan out into multiple top-level jobs while still running wall-clock serially. The controller leases batches of at most five jobs (one in strict mode). Additional slots require compatible read-only or exact write-scoped siblings. The default scoped file-generation lane uses concurrent tool-free model requests. Ordinary native jobs that depend on process-wide environment remain serialized. An experimental isolated subprocess lane can execute eligible workers with disjoint write scopes and real tools concurrently on one runtime. Skill-authored plans can also request `runtimeRouting.strategy = "spread"` across runtime processes on one or many machines.
+
+## Choosing a Delegation Lane
+
+The pinned `instafy-agent-collaboration` skill owns the soft choice between direct work,
+temporary native helpers, and durable Instafy workstreams. A generic request for parallel
+inspection does not require a controller-managed team. Ordinary parent turns receive a small
+delegation-choice excerpt even when broader workspace memory is omitted or the provider
+thread is restored. Tool availability, permissions and capacity remain runtime constraints;
+skill-selection metadata does not grant capabilities.
+
+Use direct work when coordination would add more cost than benefit. Exposed native subagent
+tools can support bounded independent subtasks within the same parent job. Use top-level
+Instafy worker plans when separate job tracking, independent worker context or personas, a
+lead checkpoint, or other runtimes are useful or explicitly requested. Creating or continuing
+one linked conversation uses ordinary conversation tools; it does not itself require a worker
+plan. Preserve an explicit mechanism or worker count; report an unavailable mechanism instead
+of silently substituting another.
+
+Native helpers share their parent's workspace, permissions and scoped proxy envelope. They
+do not acquire separate controller worker leases or independently enforced owned-file scopes;
+asking helpers to use separate files is coordination, not isolation. The parent remains
+responsible for waiting for helpers and integrating their results. Native capacity comes
+from the pinned Codex configuration and exposed tool surface, independently of the space's
+top-level team settings. Bounded browser turns and experimental isolated tool workers disable
+native subdelegation.
+
+The `ai/task-usage` diagnostic artifact explicitly covers `root_turns_only`; it must not be
+presented as the combined cost of a parent and its native helpers. Child requests use the same
+job-scoped Instafy proxy path, where authoritative request metering belongs. Native helper
+activity is not a separate Team plan card or durable worker status stream.
+
+Before returning from a native attempt or retrying it, the runtime waits for its pending session
+startups and registered Codex threads to shut down, including unfinished helpers. Cleanup runs outside the model-run
+deadline and uses `CODEX_CANCEL_SHUTDOWN_TIMEOUT_SECONDS` (five seconds by default). It must
+finish before another job can replace process-wide credentials. Unconfirmed cleanup fails
+the attempt and prevents runtime reuse; abruptly dropping the caller also prevents reuse
+unless cleanup was already acknowledged. Shared Browser retains its additional confirmed
+tool-process shutdown requirement.
+
+The deterministic `native_subagents` proxy integration fixtures exercise both pinned native
+APIs with real shell commands and a scripted local provider. They cover simultaneous tool
+barriers, capacity rejection, the shared scoped proxy route, root-only diagnostic accounting,
+and child writes after cancellation or early parent return. They do not measure live-model
+routing quality, latency, token savings, or hosted UI behavior.
+
+The tests cover already registered helpers and ordinary shell descendants. Cancellation
+during native child admission remains an upstream validation gap: Codex's `PendingSpawn`
+cleanup removes the child from its manager before awaiting shutdown in a detached task.
+An empty manager therefore does not prove that this pending cleanup has finished. The
+runtime does not claim complete process containment or a verified barrier for that case.
+
+## Shared Team Capacity
+
+A space defaults to 64 agents per plan and eight concurrently leased team workers across
+all its conversations and runtimes. These are separate limits: a ten-agent plan is retained
+in full while excess workers wait in the queue. Root and lead turns do not consume the worker
+budget, and each runtime's smaller batch and safety limits still apply. Lowering concurrency
+does not cancel active work; new worker leases wait until capacity is available.
+
+Space managers can inspect or update these controller-owned settings with
+`instafy agents settings --space <id> --interactive`, or use `--max-agents-per-plan` and
+`--max-concurrent-agents`. The supported ranges are 1–256 agents per plan and 1–64 concurrent
+team workers. Read-only members can inspect settings; runtime tokens cannot change them.
+See [CLI](CLI.md). The controller validates the complete plan before dispatch, so an oversized
+plan produces a visible error instead of silently omitting agents. Planning prompts receive
+the current limits; changing a setting does not expand tool, credential, or filesystem access.
+
+Self-hosted runtimes must register themselves; a spread request cannot start more of them.
+Spread fairness yields work only to ready/running group runtimes with a recent heartbeat,
+so requested or stale slots do not strand a sibling in the queue.
+
+Canceling a whole group records a durable stop, cancels its active lead as well as workers,
+and suppresses later lead checkpoints. Canceling one worker retains the normal checkpoint
+behavior. Studio distinguishes queued, working, waiting for approval, and canceled work;
+terminal rows reload from persisted runs, with a bounded group-status lookup for older cards.
+Historical cards with no recoverable group identity cannot use that fallback.
+
+The controller settles a planning job when it dispatches or refuses its plan. The originating
+runtime may subsequently submit its fenced, one-time usage and artifact receipt without
+changing that terminal result, posting another answer, or scheduling another continuation.
+
+Apply migrations `20261015120000_project_multi_agent_settings.sql` and
+`20261015120100_multi_agent_planning_receipts.sql` before starting the updated controller.
+Its scheduling and completion paths require the new table and receipt column.
+
+## Experimental Tool Workers
+
+`INSTAFY_EXPERIMENTAL_ISOLATED_TOOL_WORKERS=1` opts a runtime into concurrent native
+Codex workers with explicit, disjoint exact owned paths (no globs). It is off by default and
+currently supports Linux and macOS only; other platforms fail before spawning a worker
+until their filesystem sandbox backend is wired and verified. Each worker has a
+private source copy, home and Codex state directory. Model requests still use the job's
+Instafy proxy envelope; the runtime keeps registration, origin and publication credentials.
+The runtime's temporary directory must be outside every Git repository; workers reject
+repository ancestors so pre-turn Git discovery cannot inspect an unrelated host checkout.
+The parent streams native tool events and retains task usage, then checks the entire result
+against the write scope and verifies that the original owned files have not changed before
+applying and saving it. Publication requires the controller to select this runtime’s local
+origin. Source validation, writes and the scoped local commit share the origin’s
+process-independent workspace lock. Publication then uses the normal policy/recovery
+path with an empty file selection, preserving later Studio edits without uploading or
+staging them; previously committed work may publish alongside the worker commit.
+Conflicts fail visibly without rerunning the model. Completed and
+failed publication attempts retain usage artifacts. The existing lease-loss path does not
+submit a canceled job's returned usage artifact; cancellation therefore does not yet provide
+a complete durable per-worker usage receipt.
+
+This initial lane is for bounded source/file tasks. It omits existing dependencies, build
+outputs, VCS/runtime metadata and secret files using the origin publication policy; custom
+`.gitignore` rules are not evaluated. The snapshot limits are 20,000 entries, 128 MiB total,
+20 MiB per file and 64 directory levels. Included symlinks, unsupported entries and oversized
+trees fail visibly. Every new or modified file must be owned, including tool-generated caches;
+put disposable tool output in the worker's private temporary directory. Empty-directory-only
+changes and file/directory replacements are unsupported. Browser, MCP and attachment inputs
+are unsupported in this lane; opted-in scoped jobs requiring them fail explicitly before
+executing instead of silently dropping capabilities. Native subdelegation and active-turn steering are disabled
+inside this experimental lane; controller group/worker cancellation remains authoritative.
+
+Shell tools receive a restricted filesystem policy, not the runtime's normal full-access
+policy. Cancellation first asks Codex to stop, then terminates the observed process tree;
+normal shell/background processes are covered. An unconfirmed shutdown stops the runtime
+from taking more work. Descendant polling on macOS is not an
+OS-enforced containment guarantee against intentionally detached double-forks. Local apply
+can roll back ordinary write failures but is not crash-atomic across multiple files. These
+limitations are reasons to keep the lane experimental.
+
+The default file-generation shortcut remains unchanged until the new lane is validated. It
+has no execution tools: asking it to wait does not execute a timer. Prior poem-generation
+timings measured that shortcut and do not benchmark the experimental native lane.
 
 ## Signals To Capture
 
@@ -59,7 +188,15 @@ Before a normal root turn enters detailed planning, the runtime asks for one sma
 
 The preflight receives sanitized user/assistant history under the normal stateless conversation budget. History metadata and non-conversational roles are excluded; quoted history supplies evidence, not permissions. Compaction metrics record included, summarized and omitted turns.
 
-The runtime uses that metadata to decide whether to load the focused collaboration skill, inject cross-chat lookup guidance, or keep the turn direct. This keeps policy in the pinned skill while still giving the runtime a deterministic, inspectable branch point.
+`direct` selects ordinary parent execution and may use exposed native helpers. It does not
+mean that all work must run on one model thread. `multi_agent_candidate` selects durable
+Instafy planning, with its separate plan schema and lead checkpoint. Generic parallel wording
+alone does not choose that route.
+
+The runtime uses the route and evidence requirements to load focused planning or lookup
+guidance while preserving ordinary execution otherwise. `selectedSkills` is diagnostic
+metadata, not a tool-capability or permission gate. This keeps policy in the pinned skill
+while giving the runtime a deterministic, inspectable branch point.
 
 Keep the shape small. BAML-style typed prompt/output definitions could be a good future home for these schemas if the number of structured actions grows, but this slice intentionally avoids a new toolchain. TOON-style compact encodings are more interesting for large repeated context payloads than for this tiny routing object; the runtime currently persists and validates JSON.
 
@@ -111,12 +248,14 @@ The intended memory model is explicit recovery, not global agent memory.
 | One prompt mixes inline and explicit linked-thread wording | Only the explicitly split agent gets a linked thread. | `chat-assistant-toggle.spec.ts` |
 | Prompt says not to create a thread | Negated thread wording stays inline. | `agentCollaborationPolicy.test.ts` |
 | One runtime leases read-only fanout | Controller can lease a read-only batch together, but runtime-agent serializes process-env-sensitive Codex/tool execution inside that runtime. | runtime-agent unit tests, controller lease filter tests, manual Studio smoke |
-| One runtime encounters write-capable fanout | Controller leases write-capable jobs one at a time by default; runtime-agent also keeps mixed/write batches serial. | runtime-agent unit tests, controller lease filter tests |
+| One runtime encounters write-capable fanout | Exact write-scoped siblings can share a batch; eligible direct-proxy workers with disjoint scopes run concurrently. Other writes retain their serialized path. | runtime-agent batch/direct-worker unit tests, controller lease filter tests |
 | Skill-authored plan requests `runtimeRouting.strategy = "spread"` | Worker jobs are not pinned to the parent runtime, can bypass preferred-runtime lease restriction, and are excluded from read-only batch slots so one runtime cannot grab the whole spread. The controller may request additional runtime slots from the provider. | controller/runtime-agent unit tests; 2026-05-26 Studio smokes |
 | Two runtimes lease fanout with spread-safe jobs | Jobs split across runtimes; `leaseMetrics` identifies each runtime. | `multi-agent-dispatch.spec.ts`; 2026-05-26 Studio smokes |
 | One sibling succeeds and one fails | Each agent posts its own final outcome; one failure does not suppress sibling success. | `multi-agent-dispatch.spec.ts` |
 | Agents have distinct handles but no stable agent id | History/provider state stays scoped by handle. | controller unit tests |
-| User explicitly asks for team/parallel/sibling-agent split and lead synthesis | The lead emits a generic `multi_agent_plan` before substantive inspection or edits unless the request is clearly trivial. | skill/runtime contract tests and manual Studio smoke |
+| User requests bounded parallel inspection within one parent task | The skill may choose exposed native helpers under the ordinary parent execution contract; a durable plan is not forced by parallel wording. | runtime prompt contract tests; live policy evaluation pending |
+| Native helpers execute inside one parent job | Real child tools can overlap within the native limit, inherit the parent proxy scope, and stop before the parent job releases its execution environment. Root diagnostics retain their narrower coverage label. | `native_subagents` proxy integration tests for V1 and V2/code-mode; live-model performance evaluation pending |
+| User explicitly requests separately tracked Instafy workers and a lead checkpoint | The lead emits a generic `multi_agent_plan` before substantive inspection or edits, preserving the requested mechanism and worker count. | skill/runtime contract tests and manual Studio smoke |
 | Skill emits a generic `multi_agent_plan` for broad read-only work | Controller creates sibling top-level jobs from skill-authored handles, prompt segments, and `writeScope.mode = read_only`; there is no security-specific frontend fanout. | runtime-agent action tests, controller `multi_agent_plan` tests, frontend policy test, manual Studio smoke |
 | Skill emits `multi_agent_plan` with write-scoped siblings | Controller passes per-agent `writeScope` metadata through normal dispatch; disjoint scopes run normally and overlapping/missing scopes become `coordination_required`. | controller write-scope tests plus `multi_agent_plan` metadata tests |
 | Skill-authored siblings reach mixed terminal states | Controller queues a lead continuation checkpoint after all worker siblings complete, fail, cancel, or expire. A worker the controller fails before any runtime ran it (the idle sweep's stranded platform jobs, a runtime limit wait's give-up or refusal) counts like a canceled one: it never wakes the lead early, and failing the last live worker runs the checkpoint, once per plan however many sweeps fail its workers. A limit wait's refusal ends the wait, so the lead it queues that way fails with the same reason in the same tick. The checkpoint reports durable sibling status; the lead decides whether to synthesize, delegate follow-up work, answer directly, or ask the user. | controller `multi_agent_plan`, `self_hosted_platform_lane_tests` and limit-wait tests; integration coverage pending |

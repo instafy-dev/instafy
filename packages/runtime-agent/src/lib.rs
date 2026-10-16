@@ -12,6 +12,7 @@ mod codex_policy;
 pub mod config;
 pub mod controller;
 pub mod controller_tokens;
+pub mod isolated_tool_worker;
 pub mod job_cancel;
 pub mod jobs;
 pub mod local_browser;

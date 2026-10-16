@@ -157,7 +157,31 @@ instafy chat --conversation <threadId> "@octo can you summarize what you know ab
 This is the preferred agent-to-agent coordination model. The current/default agent can act as coordinator, but it should coordinate by creating/reusing normal child threads, posting normal `@agent` messages, and referencing useful results with inline references:
 `[[conversation:<conversationId>|<label>]]` for an ordinary prior chat, `[[thread:<conversationId>|<label>]]` for a linked agent lane, and `[[message:<conversationId>/<messageId>|<label>]]` for exact evidence.
 When this command is run from inside an active runtime agent turn, keep peer posts non-blocking (`--no-wait`) so the current turn can finish and the target agent can pick up the child-thread job.
-For actual top-level parallel execution, run multiple available runtimes; one runtime may process leased agent jobs serially.
+Actual parallelism depends on available runtime capacity and compatible workspace write scopes.
+
+Inspect or change the linked space's shared multi-agent limits:
+
+```bash
+instafy agents settings
+instafy agents settings --interactive
+instafy agents settings --max-agents-per-plan 64 --max-concurrent-agents 8
+instafy agents settings --space <spaceId> --json
+```
+
+The maximum agents per plan defaults to **64** (range **1–256**). The concurrent limit defaults
+to **8** (range **1–64**) and counts running team workers across all plans in the space. Lead
+and root jobs are excluded. A plan can contain more workers than can run simultaneously; the
+remaining workers wait for capacity. These controls apply to Instafy's team-worker jobs, not
+native provider subagents inside a single job. Runtime capacity and workspace permissions still
+apply and can reduce parallelism further.
+
+These settings are stored by the controller for everyone in the space, rather than in local CLI
+configuration. Reading requires space access; changes require permission to manage the space.
+Runtime job tokens cannot change the settings. A setting flag updates only that field.
+`--interactive` edits both values in a terminal and cannot be combined with setting flags or
+`--json`; canceling before it finishes leaves both values unchanged. Lowering the concurrent
+limit prevents additional workers from starting until capacity is available; it does not cancel
+already running jobs. The per-plan limit applies when a new plan is accepted.
 
 Inspect available agents and their compact scoped context cards:
 

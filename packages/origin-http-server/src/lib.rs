@@ -38,3 +38,4 @@ pub mod working_state;
 pub mod workspace_fs;
 pub mod workspace_git;
 mod workspace_lock;
+pub use workspace_lock::{acquire_workspace_apply_lock_within, WorkspaceApplyLock};

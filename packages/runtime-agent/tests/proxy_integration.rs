@@ -34,10 +34,16 @@ use uuid::Uuid;
 
 static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "proxy_integration/isolated_tool_workers.rs"]
+mod isolated_tool_workers;
 #[path = "proxy_integration/native_compaction.rs"]
 mod native_compaction;
 #[path = "proxy_integration/native_images.rs"]
 mod native_images;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "proxy_integration/native_subagents.rs"]
+mod native_subagents;
 
 async fn env_guard() -> tokio::sync::MutexGuard<'static, ()> {
     ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().await

@@ -75,9 +75,9 @@ fn parse_env_bool(key: &str) -> Option<bool> {
 fn normalize_lease_max_jobs(raw: Option<&str>, strict_mode: bool) -> u32 {
     let lease_max_jobs = raw
         .and_then(|value| value.parse::<u32>().ok())
-        // Read-only multi-agent fanout can run concurrently inside one runtime. The controller
-        // still leases write-capable jobs one at a time, so this default does not let one runtime
-        // hoard sibling edits that should be distributed across runtimes or coordinated manually.
+        // The controller batches compatible read-only or disjoint exact-write-scoped siblings.
+        // This per-runtime ceiling also remains subject to the shared space worker budget;
+        // other write-capable jobs retain their single-job coordination rules.
         .unwrap_or(5)
         .clamp(1, 5);
 

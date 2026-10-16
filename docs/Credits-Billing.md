@@ -229,6 +229,13 @@ controller's lease or the proxy's static credentials, with their kind and pinned
 
 The controller now reserves units at prompt dispatch and then reconciles the final charge after completion from actual input/cached/output token usage. Cached tokens are a subset of the reported input tokens, so only the uncached remainder is billed at the input rate and the cached prefix is billed once at the cached rate. The shared ledger keeps both the usage metadata and any follow-up adjustment row when the final charge differs from the reserve.
 
+A multi-agent planning turn becomes terminal when the controller dispatches or refuses its plan,
+before the runtime submits its completion receipt. The controller accepts that receipt once from
+the original runtime, job attempt and runtime generation, retaining the planning calls' usage and
+artifacts without reopening the job or dispatching workers again. It uses the same managed-AI
+reconciliation as ordinary completion; repeated delivery does not charge again or add completion
+events. Task-usage diagnostics remain separate from the primary run-log usage used for billing.
+
 Known gap, recorded only: until the proxy metering cutover, this reconciliation charges the token
 counts codex reports, and codex multi-agent v2 subagent requests never get one, so legacy billing
 under-charges them. The proxy sees their upstream usage, so its meter charges them once metering

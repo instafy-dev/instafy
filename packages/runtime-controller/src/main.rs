@@ -55,6 +55,7 @@ mod message_search;
 mod message_stashes;
 mod model_defaults;
 mod multi_agent_plan;
+mod multi_agent_settings;
 mod notification_platform;
 mod notifications;
 mod operator_admin;
@@ -477,6 +478,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(automations::router())
         .merge(recommendations::router())
         .merge(projects::router())
+        .merge(multi_agent_settings::router())
         .merge(browser_shares::router())
         .merge(imports::router())
         .merge(integrations::router())

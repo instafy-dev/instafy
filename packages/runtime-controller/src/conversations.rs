@@ -2199,6 +2199,7 @@ pub(crate) async fn cancel_plan_group_jobs(
     let group_id_raw = group_id_raw.trim().to_string();
     let group_id = Uuid::from_str(group_id_raw.as_str())
         .map_err(|_| bad_request("groupId must be a valid UUID"))?;
+    let group_id_raw = group_id.to_string();
     let reason = body
         .as_ref()
         .and_then(|body| body.reason.as_deref())
@@ -2232,37 +2233,28 @@ pub(crate) async fn cancel_plan_group_jobs(
         .map(ActiveJobAuthorization::subject_context)
         .unwrap_or_else(|| context.clone());
 
-    // Prefer the indexed column; only fall back to the payload path for rows
-    // that predate the hierarchy columns.
+    // Serialize explicit group cancellation with checkpoint dispatch. The
+    // snapshot includes a checkpoint that won the lock before us; after this
+    // transaction's durable Stop notice, late worker callbacks cannot spawn one.
+    crate::multi_agent_plan::lock_plan_group_checkpoint(&transaction, &group_id_raw).await?;
+
+    // Include legacy rows even when newer members have indexed hierarchy fields.
     let mut rows = transaction
         .query(
             "select id, project_id, run_id, conversation_id
              from agent_jobs
              where plan_group_id = $1
-               and status in ('queued','leased')
+                or (plan_group_id is null and (
+                       payload #>> '{metadata,multiAgentPlan,groupId}' = $2
+                    or payload #>> '{metadata,multiAgentPlan,group_id}' = $2
+                    or payload #>> '{metadata,multi_agent_plan,groupId}' = $2
+                    or payload #>> '{metadata,multi_agent_plan,group_id}' = $2
+                ))
              order by created_at asc",
-            &[&group_id],
+            &[&group_id, &group_id_raw],
         )
         .await
         .map_err(|error| internal_error(format!("failed to load plan-group jobs: {error}")))?;
-    if rows.is_empty() {
-        rows = transaction
-            .query(
-                "select id, project_id, run_id, conversation_id
-                 from agent_jobs
-                 where (
-                       payload #>> '{metadata,multiAgentPlan,groupId}' = $1
-                    or payload #>> '{metadata,multiAgentPlan,group_id}' = $1
-                    or payload #>> '{metadata,multi_agent_plan,groupId}' = $1
-                    or payload #>> '{metadata,multi_agent_plan,group_id}' = $1
-                 )
-                   and status in ('queued','leased')
-                 order by created_at asc",
-                &[&group_id_raw],
-            )
-            .await
-            .map_err(|error| internal_error(format!("failed to load plan-group jobs: {error}")))?;
-    }
 
     if let Some(active_job) = active_job.as_ref() {
         rows.retain(|row| {
@@ -2305,17 +2297,14 @@ pub(crate) async fn cancel_plan_group_jobs(
         ensure_conversation_access(&transaction, &conversation, &access_context).await?;
     }
 
-    let jobs: Vec<(Uuid, Option<Uuid>)> = rows
-        .iter()
-        .filter(|row| row.get::<_, Option<Uuid>>("conversation_id") == Some(conversation.id))
-        .map(|row| (row.get("id"), row.get("run_id")))
-        .collect();
-
-    if jobs.is_empty() {
-        transaction
-            .commit()
-            .await
-            .map_err(|error| internal_error(format!("failed to finalize cancel: {error}")))?;
+    if crate::multi_agent_plan::plan_group_was_stopped(
+        &transaction,
+        conversation.project_id,
+        conversation.id,
+        &group_id_raw,
+    )
+    .await?
+    {
         return Ok(Json(ConversationInterruptResponse {
             ok: true,
             canceled_run_ids: Vec::new(),
@@ -2323,13 +2312,41 @@ pub(crate) async fn cancel_plan_group_jobs(
         }));
     }
 
-    let cancellation = cancel_jobs_within_transaction(
+    let ids: Vec<Uuid> = rows
+        .iter()
+        .filter(|row| row.get::<_, Option<Uuid>>("conversation_id") == Some(conversation.id))
+        .map(|row| row.get("id"))
+        .collect();
+    // Re-read under row locks: a worker that completed during authorization
+    // stays completed, while a leased/queued worker cannot race cancellation.
+    let rows = transaction
+        .query(
+            "select id, run_id from agent_jobs
+         where id = any($1) and project_id = $2 and status in ('queued','leased')
+         order by id for update",
+            &[&ids, &conversation.project_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to lock canceled group jobs: {error}")))?;
+    let jobs: Vec<(Uuid, Option<Uuid>)> = rows
+        .iter()
+        .map(|row| (row.get("id"), row.get("run_id")))
+        .collect();
+    let job_ids: Vec<Uuid> = jobs.iter().map(|(id, _)| *id).collect();
+    let run_ids: Vec<Uuid> = jobs.iter().filter_map(|(_, id)| *id).collect();
+    let mut notice = build_interruption_notice(&reason, &job_ids, &run_ids);
+    notice.metadata["details"]["stopRequested"] = json!(true);
+    notice.metadata["details"]["suppressedPlanGroupIds"] = json!([group_id_raw]);
+    // Record intent even if the last worker just finished: its pending callback
+    // must not start new compute after the user canceled the whole group.
+    let cancellation = cancel_jobs_with_notice(
         &transaction,
         &conversation.project_id,
         &conversation.id,
         conversation.session_id,
         &jobs,
-        reason.as_str(),
+        &reason,
+        Some(notice),
     )
     .await?;
 
@@ -2349,10 +2366,6 @@ pub(crate) async fn cancel_plan_group_jobs(
     .await;
 
     crate::send_queue::spawn_send_queue_drain(state.clone(), conversation.id);
-    crate::multi_agent_plan::spawn_plan_group_checkpoints_after_cancellation(
-        state.clone(),
-        cancellation.job_ids.clone(),
-    );
 
     Ok(Json(ConversationInterruptResponse {
         ok: true,
