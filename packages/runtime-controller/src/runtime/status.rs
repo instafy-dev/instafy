@@ -1361,6 +1361,8 @@ pub(super) async fn release_leases_for_project(
         .await
         .context("failed to start lease release transaction")?;
 
+    // Locks the jobs in id order, as a space delete and a conversation's
+    // stop lock theirs, so it cannot deadlock with either.
     let rows = transaction
         .query(
             "with expired_jobs as (
@@ -1369,6 +1371,7 @@ pub(super) async fn release_leases_for_project(
                  where project_id = $1
                    and status = 'leased'
                    and (lease_expires_at is null or lease_expires_at < now())
+                 order by id
                  for update
              ), released_jobs as (
                  update agent_jobs jobs

@@ -15,11 +15,14 @@ use uuid::Uuid;
 
 use crate::background_loops::TickConnection;
 use crate::config::PgPool;
-use crate::runtime::run_interruptions::db_tests::{drain, RunningTurn, RuntimeShape};
+use crate::runtime::run_interruptions::db_tests::{
+    drain, RunningTurn, RuntimeShape, PROVIDER_ID as RUNNING_TURN_PROVIDER,
+};
 use crate::tests::{
     build_app_config, build_test_state, require_origin_test_pool, test_origin_private_key,
     test_origin_public_key, with_shared_db_fixture, SharedDbFixture,
 };
+use crate::tests_managed_ai_refund::seed_reserved_managed_ai_prompt;
 use crate::tunnels::{TunnelAssignment, TunnelBroker, TunnelProvider, TunnelRequestContext};
 use crate::AppState;
 
@@ -120,6 +123,38 @@ async fn wait_for_runtime_status(
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+async fn runtime_status(pool: &PgPool, runtime_id: Uuid) -> anyhow::Result<String> {
+    Ok(pool
+        .get()
+        .await?
+        .query_one("select status from runtimes where id = $1", &[&runtime_id])
+        .await?
+        .get(0))
+}
+
+/// The status of each `(table, id)` row.
+async fn statuses(pool: &PgPool, rows: &[(&str, Uuid)]) -> anyhow::Result<Vec<String>> {
+    let connection = pool.get().await?;
+    let mut statuses = Vec::new();
+    for (table, id) in rows {
+        let status: String = connection
+            .query_one(&format!("select status from {table} where id = $1"), &[id])
+            .await?
+            .get(0);
+        statuses.push(status);
+    }
+    Ok(statuses)
+}
+
+/// One tick of the idle sweep's deleted-space step.
+async fn sweep_deleted_spaces(state: &AppState) -> anyhow::Result<()> {
+    super::super::sweeps::stop_runtimes_of_deleted_projects(
+        state,
+        &mut TickConnection::new(&state.pool),
+    )
+    .await
 }
 
 /// The `(kind, reason, source)` of the runtime's stop events, oldest first.
@@ -315,7 +350,7 @@ async fn deleting_a_space_stops_and_releases_its_machine() -> anyhow::Result<()>
         );
         wait_for_runtime_status(&turn.pool, turn.runtime_id, "stopped").await?;
 
-        assert_eq!(turn.releases(), 1);
+        assert_eq!(turn.releases_of(turn.runtime_id), 1);
         assert_eq!(
             runtime_and_lease(&turn.pool, turn.runtime_id, turn.runtime_lease_id).await?,
             ("stopped".to_string(), None, "released".to_string())
@@ -350,7 +385,11 @@ async fn deleting_a_space_stops_and_releases_its_machine() -> anyhow::Result<()>
             super::stop_runtimes_of_deleted_project(&turn.state, project_id).await,
             0
         );
-        assert_eq!(turn.releases(), 1, "nothing was left to release");
+        assert_eq!(
+            turn.releases_of(turn.runtime_id),
+            1,
+            "nothing was left to release"
+        );
         Ok(())
     })
     .await
@@ -541,7 +580,11 @@ async fn the_sweep_stops_a_deleted_spaces_machine_after_the_grace() -> anyhow::R
             &mut TickConnection::new(&deleted.state.pool),
         )
         .await?;
-        assert_eq!(deleted.releases(), 0, "a delete just now is its own stop's");
+        assert_eq!(
+            deleted.releases_of(deleted.runtime_id),
+            0,
+            "a delete just now is its own stop's"
+        );
         assert_eq!(
             runtime_and_lease(&pool, deleted.runtime_id, deleted.runtime_lease_id)
                 .await?
@@ -556,14 +599,14 @@ async fn the_sweep_stops_a_deleted_spaces_machine_after_the_grace() -> anyhow::R
         )
         .await?;
 
-        assert_eq!(deleted.releases(), 1);
+        assert_eq!(deleted.releases_of(deleted.runtime_id), 1);
         assert_eq!(
             runtime_and_lease(&pool, deleted.runtime_id, deleted.runtime_lease_id).await?,
             ("stopped".to_string(), None, "released".to_string())
         );
         assert_eq!(deleted.job(deleted.job_id).await?.0, "canceled");
         assert_eq!(deleted.run(deleted.run_id).await?.status, "canceled");
-        assert_eq!(live.releases(), 0);
+        assert_eq!(live.releases_of(live.runtime_id), 0);
         assert_eq!(
             runtime_and_lease(&pool, live.runtime_id, live.runtime_lease_id).await?,
             (
@@ -628,4 +671,239 @@ async fn the_sweep_retries_a_deleted_spaces_tunnel_grant() -> anyhow::Result<()>
         Ok(())
     })
     .await
+}
+
+/// A Desktop or self-hosted runtime of a deleted space that still runs
+/// without a lease generation, which the delete's own stop missed, is
+/// stopped by the sweep, in the database alone, once the delete is older
+/// than the grace. A provider-managed one in that state is left as it was:
+/// it has nothing to release, and its stop would be refused.
+#[tokio::test]
+async fn the_sweep_stops_a_deleted_spaces_unleased_local_runtime() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("deleted space unleased runtime sweep test").await?;
+    let project_id = Uuid::new_v4();
+    with_shared_db_fixture(fixture(vec![project_id]), async {
+        insert_project(&pool, project_id, "active").await?;
+        let (local, _) = insert_runtime(&pool, project_id, "self-hosted", "ready", None).await?;
+        let (hosted, _) = insert_runtime(&pool, project_id, "instafy_cloud", "ready", None).await?;
+        tombstone(&pool, project_id, 0).await?;
+        let state = state_without_providers(&pool, None);
+
+        sweep_deleted_spaces(&state).await?;
+        assert_eq!(
+            runtime_status(&pool, local).await?,
+            "ready",
+            "a delete just now is its own stop's"
+        );
+
+        tombstone(&pool, project_id, 5 * 60).await?;
+        sweep_deleted_spaces(&state).await?;
+        assert_eq!(runtime_status(&pool, local).await?, "stopped");
+        assert_eq!(
+            stop_events(&pool, local).await?,
+            vec![(
+                "stopped".to_string(),
+                Some("space_deleted".to_string()),
+                None
+            )]
+        );
+        assert_eq!(runtime_status(&pool, hosted).await?, "ready");
+        assert!(stop_events(&pool, hosted).await?.is_empty());
+        Ok(())
+    })
+    .await
+}
+
+/// A runtime of a deleted space a provider release may still be in flight
+/// for (here a person's Stop) is left to that release. The sweep leaves
+/// every runtime of the space alone meanwhile, since the delete's own stop
+/// goes through them one at a time; that stop checks each runtime just
+/// before stopping it. Once a release could no longer be running, the sweep
+/// stops what is left, and each machine is released once.
+#[tokio::test]
+async fn a_release_in_flight_is_left_to_itself() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("deleted space release in flight test").await?;
+    let project_id = Uuid::new_v4();
+    with_shared_db_fixture(fixture(vec![project_id]), async {
+        let turn = RunningTurn::start(
+            pool.clone(),
+            project_id,
+            RuntimeShape::Hosted,
+            StatusCode::NO_CONTENT,
+        )
+        .await?;
+        // A second machine of the space, from the same provider.
+        let (sibling, sibling_lease) = insert_runtime(
+            &pool,
+            project_id,
+            RUNNING_TURN_PROVIDER,
+            "ready",
+            Some("exclusive"),
+        )
+        .await?;
+        let sibling_lease = sibling_lease.expect("lease");
+        pool.get()
+            .await?
+            .execute(
+                "insert into runtime_events (runtime_id, project_id, kind, data)
+                 values ($1, $2, 'provider_release_cleanup_pending',
+                         '{\"reason\": \"user_requested\"}'::jsonb)",
+                &[&turn.runtime_id, &project_id],
+            )
+            .await?;
+        tombstone(&pool, project_id, 5 * 60).await?;
+
+        sweep_deleted_spaces(&turn.state).await?;
+        assert_eq!(turn.releases_of(turn.runtime_id), 0);
+        assert_eq!(
+            turn.releases_of(sibling),
+            0,
+            "the delete's own stop may be on its way to the sibling"
+        );
+        assert_eq!(runtime_status(&pool, sibling).await?, "ready");
+
+        assert_eq!(
+            super::stop_runtimes_of_deleted_project(&turn.state, project_id).await,
+            1
+        );
+        assert_eq!(
+            turn.releases_of(turn.runtime_id),
+            0,
+            "the release in flight is left to itself"
+        );
+        assert_eq!(turn.releases_of(sibling), 1);
+        assert_eq!(
+            runtime_and_lease(&pool, sibling, sibling_lease).await?,
+            ("stopped".to_string(), None, "released".to_string())
+        );
+        assert_eq!(
+            runtime_and_lease(&pool, turn.runtime_id, turn.runtime_lease_id).await?,
+            (
+                "ready".to_string(),
+                Some(turn.runtime_lease_id),
+                "active".to_string()
+            )
+        );
+
+        // Both releases are now older than one could run.
+        pool.get()
+            .await?
+            .execute(
+                "update runtime_events
+                 set created_at = now() - interval '5 minutes'
+                 where runtime_id = any($1)",
+                &[&vec![turn.runtime_id, sibling]],
+            )
+            .await?;
+        sweep_deleted_spaces(&turn.state).await?;
+        assert_eq!(turn.releases_of(turn.runtime_id), 1);
+        assert_eq!(turn.releases_of(sibling), 1);
+        assert_eq!(
+            runtime_and_lease(&pool, turn.runtime_id, turn.runtime_lease_id).await?,
+            ("stopped".to_string(), None, "released".to_string())
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// Work that reached a deleted space after its delete's last cancel (here a
+/// space deleted with no runtime, whose queued turn a dispatch committed
+/// after that cancel) is canceled by the sweep once the delete is older than
+/// the grace, and the managed-AI reserve of that turn, which no runtime ever
+/// held, is refunded. A space deleted just now and a live space keep theirs.
+#[tokio::test]
+async fn the_sweep_cancels_the_work_a_deleted_space_still_has() -> anyhow::Result<()> {
+    let Some(seeded) = seed_reserved_managed_ai_prompt("deleted-space-sweep-work").await? else {
+        eprintln!("skipping deleted space work sweep test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let deleted_id = seeded.project_id;
+    let live_id = Uuid::new_v4();
+    let outcome = with_shared_db_fixture(
+        SharedDbFixture {
+            organizations: vec![seeded.org_id],
+            projects: Vec::new(),
+        },
+        async {
+            let pool = &seeded.pool;
+            let connection = pool.get().await?;
+            connection
+                .execute(
+                    "insert into projects (id, org_id, project_type, status)
+                     values ($1, $2, 'customer', 'active')",
+                    &[&live_id, &seeded.org_id],
+                )
+                .await?;
+            let live_run = Uuid::new_v4();
+            connection
+                .execute(
+                    "insert into runs (id, project_id, run_type, status)
+                     values ($1, $2, 'prompt', 'queued')",
+                    &[&live_run, &live_id],
+                )
+                .await?;
+            let live_job = Uuid::new_v4();
+            connection
+                .execute(
+                    "insert into agent_jobs (id, project_id, run_id, status, payload)
+                     values ($1, $2, $3, 'queued', '{}'::jsonb)",
+                    &[&live_job, &live_id, &live_run],
+                )
+                .await?;
+            drop(connection);
+            let work = [
+                ("agent_jobs", seeded.job_id),
+                ("runs", seeded.run_id),
+                ("agent_jobs", live_job),
+                ("runs", live_run),
+            ];
+            let queued = vec!["queued".to_string(); 4];
+            assert_eq!(statuses(pool, &work).await?, queued);
+
+            tombstone(pool, deleted_id, 0).await?;
+            sweep_deleted_spaces(&seeded.state).await?;
+            assert_eq!(
+                statuses(pool, &work).await?,
+                queued,
+                "a delete just now is its own stop's"
+            );
+
+            tombstone(pool, deleted_id, 5 * 60).await?;
+            sweep_deleted_spaces(&seeded.state).await?;
+            assert_eq!(
+                statuses(pool, &work).await?,
+                vec!["canceled", "canceled", "queued", "queued"]
+            );
+            let refunds: Vec<Option<String>> = pool
+                .get()
+                .await?
+                .query(
+                    "select metadata ->> 'refundReason' from org_credit_ledger
+                     where project_id = $1 and reason = $2",
+                    &[&deleted_id, &crate::credits::MANAGED_AI_REFUND_REASON],
+                )
+                .await?
+                .iter()
+                .map(|row| row.get(0))
+                .collect();
+            assert_eq!(refunds, vec![Some("space_deleted".to_string())]);
+            Ok(())
+        },
+    )
+    .await;
+    let cleanup = async {
+        seeded
+            .pool
+            .get()
+            .await?
+            .execute(
+                "delete from runs where project_id = any($1)",
+                &[&vec![deleted_id, live_id]],
+            )
+            .await?;
+        seeded.cleanup().await
+    }
+    .await;
+    outcome.and(cleanup)
 }

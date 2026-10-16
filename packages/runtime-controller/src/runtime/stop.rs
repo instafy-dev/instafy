@@ -2823,15 +2823,22 @@ fn provider_runtime_missing_release_generation(state: &AppState, runtime: &Runti
 }
 
 fn runtime_requires_provider_release(state: &AppState, runtime: &RuntimeDetails) -> bool {
+    provider_release_required(state, &runtime.provider, &runtime.capabilities)
+}
+
+/// [`runtime_requires_provider_release`] for a runtime of `provider` with
+/// `capabilities` that was not loaded in full.
+pub(super) fn provider_release_required(
+    state: &AppState,
+    provider: &str,
+    capabilities: &JsonValue,
+) -> bool {
     // Unknown provider ids are private for human access, but that quarantine
     // must not be interpreted as proof that no external allocation exists.
     // Only a positive provider classification or protected runtime identity
     // can bypass provider-release fencing.
-    !(super::provider::provider_is_self_hosted(state, &runtime.provider)
-        || super::access::runtime_has_private_self_hosted_identity(
-            &runtime.provider,
-            &runtime.capabilities,
-        ))
+    !(super::provider::provider_is_self_hosted(state, provider)
+        || super::access::runtime_has_private_self_hosted_identity(provider, capabilities))
 }
 
 #[cfg(test)]

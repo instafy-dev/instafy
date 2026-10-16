@@ -16,8 +16,8 @@ use crate::{publish_controller_event, AppState};
 
 use super::db::{fetch_runtime_for_update, release_origin_instances_for_runtime};
 use super::deleted_project_stop::{
-    release_leases_of_deleted_project, revoke_tunnels_of_deleted_project,
-    stop_runtime_of_deleted_project,
+    cancel_work_of_deleted_project, release_leases_of_deleted_project,
+    revoke_tunnels_of_deleted_project, stop_runtime_of_deleted_project,
 };
 use super::ensure::ensure_runtime_for_requeued_jobs;
 use super::provider::{
@@ -46,9 +46,33 @@ const QUARANTINE_RELEASE_GRACE_SECONDS: i64 =
 /// How long after a space is deleted `stop_runtimes_of_deleted_projects`
 /// leaves it to the stop its delete started.
 const DELETED_PROJECT_STOP_GRACE_SECONDS: i64 = 30;
-/// The runtimes, and the spaces with tunnel grants, of deleted spaces one
-/// tick takes. Each hosted stop may wait out a provider release.
+/// The runtimes holding a lease generation, the spaces with tunnel grants and
+/// the spaces with work left, of deleted spaces, that one tick takes. Each
+/// hosted stop may wait out a provider release.
 const DELETED_PROJECT_STOP_BATCH_SIZE: i64 = 5;
+/// The runtimes without a lease generation, of deleted spaces, one tick
+/// looks at. Only the Desktop and self-hosted ones are stopped, in the
+/// database alone, so the scan is wider than the batch above: the odd
+/// provider-managed one it passes over cannot hold them back.
+const DELETED_PROJECT_LOCAL_STOP_SCAN_SIZE: i64 = 50;
+
+/// A condition on `runtime_id` (a column or a parameter): a provider release
+/// may still be in flight for it, because a stop quarantined it
+/// (`provider_release_cleanup_pending`) or its launch failed
+/// (`launch_cleanup_pending`) within the last
+/// `QUARANTINE_RELEASE_GRACE_SECONDS`. A deleted space's stops leave such a
+/// runtime to that release, so the machine is not released twice.
+pub(super) fn provider_release_in_flight(runtime_id: &str) -> String {
+    format!(
+        "exists (
+           select 1 from runtime_events e
+           where e.runtime_id = {runtime_id}
+             and e.kind in ('provider_release_cleanup_pending', 'launch_cleanup_pending')
+             and e.created_at > now() - interval '{QUARANTINE_RELEASE_GRACE_SECONDS} seconds'
+         )"
+    )
+}
+
 /// How long a launch may go without its runtime registering before a
 /// person's explicit retry (`replaceStalledLaunch` on `/runtime/ensure`)
 /// replaces it instead of reusing it. The Studio offers that retry after the
@@ -65,16 +89,21 @@ const STUCK_QUEUED_RECOVERY_BATCH_SIZE: i64 = 20;
 // live runtime whose Electron parent disappeared from one killed immediately
 // after its final drain renewal.
 pub(crate) const DRAIN_RECOVERY_HEARTBEAT_WINDOW_SECONDS: i64 = 70;
-/// Deleted spaces' runtimes are left to `stop_runtimes_of_deleted_projects`,
-/// as in the launch-timeout and idle sweeps.
+/// A deleted space's runtime that holds a lease generation is left to
+/// `stop_runtimes_of_deleted_projects`, as in the launch-timeout and idle
+/// sweeps. One without, a Desktop or self-hosted runtime, is still stopped
+/// here once its heartbeat stops, as that step may also do.
 const AUTO_STOP_STALE_RUNTIMES_QUERY: &str = "select id from runtimes
      where status not in ('stopped', 'offline', 'removed')
        and idle_ttl_seconds > 0
        and last_seen_at is not null
        and (last_seen_at + interval '1 second' * idle_ttl_seconds) < now()
-       and not exists (
-         select 1 from projects p
-         where p.id = runtimes.project_id and p.status = 'deleted'
+       and not (
+         active_lease_id is not null
+         and exists (
+           select 1 from projects p
+           where p.id = runtimes.project_id and p.status = 'deleted'
+         )
        )";
 /// How long a stop-requeued job may wait for a runtime before it expires
 /// instead of silently re-running whenever a runtime next appears.
@@ -2568,20 +2597,29 @@ async fn cleanup_terminal_runtime_records(
     Ok(())
 }
 
-/// What deleted spaces still run or hold when the stop their delete started
-/// did not finish it (see [`super::deleted_project_stop`]): the controller
-/// restarted first, a provider release failed, or the tunnel broker refused
-/// a revoke. It takes runtimes of deleted spaces that still hold a lease
-/// generation, and deleted spaces with a live tunnel grant, once the delete
-/// is `DELETED_PROJECT_STOP_GRACE_SECONDS` old. A runtime without a lease
-/// generation is not retried: there is nothing to release, and a hosted one
-/// would refuse the stop (409) on every tick. Neither is a runtime whose
-/// release may still be in flight: a stop's quarantine
-/// (`provider_release_cleanup_pending`) or a failed launch's
-/// (`launch_cleanup_pending`) from the last `QUARANTINE_RELEASE_GRACE_SECONDS`,
-/// so a release that keeps failing is retried every four minutes, not every
-/// tick. The launch-timeout, heartbeat-timeout and idle sweeps leave deleted
-/// spaces' runtimes to this step.
+/// What deleted spaces still run, hold or have queued when the stop their
+/// delete started did not finish it (see [`super::deleted_project_stop`]):
+/// the controller restarted first, a load or a provider release failed, the
+/// tunnel broker refused a revoke, or a dispatch committed work after the
+/// delete's last cancel. Once the delete is `DELETED_PROJECT_STOP_GRACE_SECONDS`
+/// old, it takes:
+///
+/// - runtimes that still hold a lease generation;
+/// - Desktop and self-hosted runtimes that still run without one, stopped in
+///   the database alone. A provider-managed runtime without one is not
+///   retried: there is nothing to release, and its stop would be refused
+///   (409) on every tick;
+/// - spaces with a live tunnel grant;
+/// - spaces with work left: queued or leased jobs, open runs, queued
+///   send-queue entries or active automations, canceled as the delete would.
+///
+/// A runtime is left alone while a provider release may still be in flight
+/// for any runtime of its space (see [`provider_release_in_flight`]): the
+/// delete's own stop, which goes through them one at a time, or a person's
+/// Stop. A release that keeps failing is therefore retried every four
+/// minutes, not every tick. The launch-timeout and idle sweeps leave deleted
+/// spaces' runtimes to this step, and so does the heartbeat-timeout sweep
+/// for those that hold a lease generation.
 pub(super) async fn stop_runtimes_of_deleted_projects(
     state: &AppState,
     tick: &mut TickConnection<'_>,
@@ -2589,30 +2627,51 @@ pub(super) async fn stop_runtimes_of_deleted_projects(
     let client = tick
         .client("failed to acquire connection for deleted space sweep")
         .await?;
-    let runtimes = client
+    let release_in_flight_in_space = format!(
+        "exists (select 1 from runtimes s where s.project_id = r.project_id and {})",
+        provider_release_in_flight("s.id")
+    );
+    let leased = client
         .query(
-            "select r.id, r.project_id
-             from runtimes r
-             join projects p on p.id = r.project_id
-             where p.status = 'deleted'
-               and p.updated_at < now() - ($1::bigint * interval '1 second')
-               and r.active_lease_id is not null
-               and not exists (
-                 select 1 from runtime_events e
-                 where e.runtime_id = r.id
-                   and e.kind in ('provider_release_cleanup_pending', 'launch_cleanup_pending')
-                   and e.created_at > now() - ($2::bigint * interval '1 second')
-               )
-             order by r.updated_at asc
-             limit $3",
+            &format!(
+                "select r.id, r.project_id
+                 from runtimes r
+                 join projects p on p.id = r.project_id
+                 where p.status = 'deleted'
+                   and p.updated_at < now() - ($1::bigint * interval '1 second')
+                   and r.active_lease_id is not null
+                   and not {release_in_flight_in_space}
+                 order by r.updated_at asc
+                 limit $2"
+            ),
             &[
                 &DELETED_PROJECT_STOP_GRACE_SECONDS,
-                &QUARANTINE_RELEASE_GRACE_SECONDS,
                 &DELETED_PROJECT_STOP_BATCH_SIZE,
             ],
         )
         .await
         .context("failed to select runtimes of deleted spaces")?;
+    let unleased = client
+        .query(
+            &format!(
+                "select r.id, r.project_id, r.provider, r.capabilities
+                 from runtimes r
+                 join projects p on p.id = r.project_id
+                 where p.status = 'deleted'
+                   and p.updated_at < now() - ($1::bigint * interval '1 second')
+                   and r.active_lease_id is null
+                   and r.status not in ('stopped', 'offline', 'removed')
+                   and not {release_in_flight_in_space}
+                 order by r.updated_at asc
+                 limit $2"
+            ),
+            &[
+                &DELETED_PROJECT_STOP_GRACE_SECONDS,
+                &DELETED_PROJECT_LOCAL_STOP_SCAN_SIZE,
+            ],
+        )
+        .await
+        .context("failed to select unleased runtimes of deleted spaces")?;
     // A grant the broker keeps refusing is retried until it expires.
     let granted = client
         .query(
@@ -2631,16 +2690,65 @@ pub(super) async fn stop_runtimes_of_deleted_projects(
         )
         .await
         .context("failed to select deleted spaces with tunnel grants")?;
-    if runtimes.is_empty() && granted.is_empty() {
+    let with_work = client
+        .query(
+            "select p.id
+             from projects p
+             where p.status = 'deleted'
+               and p.updated_at < now() - ($1::bigint * interval '1 second')
+               and (
+                 exists (
+                   select 1 from agent_jobs j
+                   where j.project_id = p.id and j.status in ('queued', 'leased')
+                 )
+                 or exists (
+                   select 1 from runs r
+                   where r.project_id = p.id
+                     and r.status in ('queued', 'in_progress', 'awaiting_approval')
+                 )
+                 or exists (
+                   select 1 from conversation_send_queue q
+                   where q.project_id = p.id and q.status = 'queued'
+                 )
+                 or exists (
+                   select 1 from automations a
+                   where a.project_id = p.id and a.status = 'active'
+                 )
+               )
+             limit $2",
+            &[
+                &DELETED_PROJECT_STOP_GRACE_SECONDS,
+                &DELETED_PROJECT_STOP_BATCH_SIZE,
+            ],
+        )
+        .await
+        .context("failed to select deleted spaces with work left")?;
+    // Only those whose stop is a database change: the provider-managed rest
+    // has nothing to release.
+    let local: Vec<(Uuid, Uuid)> = unleased
+        .iter()
+        .filter(|row| {
+            !super::stop::provider_release_required(
+                state,
+                row.get::<_, String>("provider").as_str(),
+                &row.get::<_, serde_json::Value>("capabilities"),
+            )
+        })
+        .map(|row| (row.get("id"), row.get("project_id")))
+        .collect();
+    let mut to_stop: Vec<(Uuid, Uuid)> = leased
+        .iter()
+        .map(|row| (row.get("id"), row.get("project_id")))
+        .collect();
+    to_stop.extend(local);
+    if to_stop.is_empty() && granted.is_empty() && with_work.is_empty() {
         return Ok(());
     }
     // Each stop, cancel, release and revoke takes its own connection.
     tick.release();
 
     let mut project_ids: Vec<Uuid> = Vec::new();
-    for row in runtimes {
-        let runtime_id: Uuid = row.get("id");
-        let project_id: Uuid = row.get("project_id");
+    for (runtime_id, project_id) in to_stop {
         match stop_runtime_of_deleted_project(state, &project_id, &runtime_id).await {
             Ok(SafeRuntimeStop { outcome, .. }) => {
                 if outcome.status_changed {
@@ -2670,6 +2778,13 @@ pub(super) async fn stop_runtimes_of_deleted_projects(
         }
         if !project_ids.contains(&project_id) {
             project_ids.push(project_id);
+        }
+    }
+    // Each stop above already canceled its space's work.
+    for row in with_work {
+        let project_id: Uuid = row.get("id");
+        if !project_ids.contains(&project_id) {
+            cancel_work_of_deleted_project(state, &project_id).await;
         }
     }
     for row in granted {
@@ -4462,16 +4577,20 @@ mod tests {
         .await
     }
 
-    /// A deleted space's runtime whose heartbeat stopped long ago is not the
-    /// heartbeat-timeout sweep's to stop: its space's own stop takes it.
+    /// A runtime whose heartbeat stopped long ago is the heartbeat-timeout
+    /// sweep's to stop in a deleted space too when it holds no lease
+    /// generation, as a Desktop or self-hosted runtime does: the delete's own
+    /// stop may have missed it. One that holds a lease generation is left to
+    /// the deleted-space step.
     #[tokio::test]
-    async fn stale_runtime_selector_leaves_deleted_spaces_alone() -> anyhow::Result<()> {
+    async fn stale_runtime_selector_leaves_deleted_spaces_leased_runtimes_alone(
+    ) -> anyhow::Result<()> {
         let pool =
             crate::tests::require_origin_test_pool("stale runtime selector deleted test").await?;
         let mut connection = pool.get().await?;
         let transaction = connection.transaction().await?;
         let mut runtimes = Vec::new();
-        for status in ["active", "deleted"] {
+        for (status, leased) in [("active", false), ("deleted", false), ("deleted", true)] {
             let project_id = Uuid::new_v4();
             let runtime_id = Uuid::new_v4();
             transaction
@@ -4489,17 +4608,37 @@ mod tests {
                     &[&runtime_id, &project_id],
                 )
                 .await?;
+            if leased {
+                let lease_id = Uuid::new_v4();
+                transaction
+                    .execute(
+                        "insert into runtime_leases
+                            (id, project_id, runtime_id, status, requested_at, launched_at)
+                         values ($1, $2, $3, 'active', now(), now())",
+                        &[&lease_id, &project_id, &runtime_id],
+                    )
+                    .await?;
+                transaction
+                    .execute(
+                        "update runtimes set active_lease_id = $2 where id = $1",
+                        &[&runtime_id, &lease_id],
+                    )
+                    .await?;
+            }
             runtimes.push(runtime_id);
         }
 
-        let selected: Vec<Uuid> = transaction
+        let mut selected: Vec<Uuid> = transaction
             .query(AUTO_STOP_STALE_RUNTIMES_QUERY, &[])
             .await?
             .into_iter()
             .map(|row| row.get::<_, Uuid>("id"))
             .filter(|runtime_id| runtimes.contains(runtime_id))
             .collect();
-        assert_eq!(selected, vec![runtimes[0]]);
+        selected.sort();
+        let mut expected = vec![runtimes[0], runtimes[1]];
+        expected.sort();
+        assert_eq!(selected, expected);
 
         transaction.rollback().await?;
         Ok(())
@@ -4554,7 +4693,7 @@ mod tests {
                 .await,
                 0
             );
-            assert_eq!(turn.releases(), 1);
+            assert_eq!(turn.releases_of(turn.runtime_id), 1);
             assert_eq!(
                 runtime_and_lease_status(&turn).await?,
                 ("requested".to_string(), "cleanup_pending".to_string())
@@ -4567,7 +4706,11 @@ mod tests {
                 &mut super::TickConnection::new(&turn.state.pool),
             )
             .await?;
-            assert_eq!(turn.releases(), 1, "the release may still be running");
+            assert_eq!(
+                turn.releases_of(turn.runtime_id),
+                1,
+                "the release may still be running"
+            );
 
             // Both the quarantine and the lease's last change are now older
             // than a release could run.
@@ -4608,14 +4751,18 @@ mod tests {
                 &mut super::TickConnection::new(&turn.state.pool),
             )
             .await?;
-            assert_eq!(turn.releases(), 1, "the launch-timeout sweep took it");
+            assert_eq!(
+                turn.releases_of(turn.runtime_id),
+                1,
+                "the launch-timeout sweep took it"
+            );
 
             super::stop_runtimes_of_deleted_projects(
                 &turn.state,
                 &mut super::TickConnection::new(&turn.state.pool),
             )
             .await?;
-            assert_eq!(turn.releases(), 2);
+            assert_eq!(turn.releases_of(turn.runtime_id), 2);
             assert_eq!(
                 runtime_and_lease_status(&turn).await?,
                 ("stopped".to_string(), "released".to_string())

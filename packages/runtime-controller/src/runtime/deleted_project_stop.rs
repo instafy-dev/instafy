@@ -17,11 +17,16 @@
 //! open tab takes a reason it does not know for an unexpected stop and
 //! starts the machine again, and the space's deletion already told every
 //! tab. After every stop, the work its quarantine requeued, or that reached
-//! the space after the delete, is canceled.
+//! the space after the delete, is canceled. A runtime a provider release may
+//! still be in flight for (a person's Stop, or the stop of a repeated
+//! delete) is left to that release.
 //!
-//! The idle sweep finishes what this task did not: after a restart, a
-//! release that failed, or a grant the tunnel broker would not revoke (see
-//! `stop_runtimes_of_deleted_projects` in [`super::sweeps`]).
+//! The idle sweep finishes what this task did not: after a restart or a
+//! failed load, a release that failed, a grant the tunnel broker would not
+//! revoke, or work a dispatch committed after the last cancel here. It takes
+//! the runtimes that hold a lease generation, the Desktop and self-hosted
+//! ones that still run without one, and the spaces with grants or work left
+//! (see `stop_runtimes_of_deleted_projects` in [`super::sweeps`]).
 
 use anyhow::Context;
 use axum::http::StatusCode;
@@ -48,8 +53,9 @@ pub(crate) fn spawn_stop_runtimes_of_deleted_project(state: AppState, project_id
 /// Release the leases of the deleted space `project_id`, stop each of its
 /// runtimes that holds a lease generation or still runs, one after another,
 /// and revoke its tunnel grants. Failures are logged, not returned: the idle
-/// sweep retries them. Nothing happens to a space that is not deleted.
-/// Returns how many runtimes it stopped.
+/// sweep retries them, and takes the whole space when its runtimes cannot be
+/// loaded. Nothing happens to a space that is not deleted. Returns how many
+/// runtimes it stopped.
 pub(crate) async fn stop_runtimes_of_deleted_project(state: &AppState, project_id: Uuid) -> usize {
     release_leases_of_deleted_project(state, &project_id).await;
 
@@ -59,13 +65,37 @@ pub(crate) async fn stop_runtimes_of_deleted_project(state: &AppState, project_i
             warn!(
                 project_id = %project_id,
                 error = %format!("{error:#}"),
-                "failed to load the runtimes of a deleted space"
+                "failed to load the runtimes of a deleted space; leaving it to the idle sweep"
             );
-            Vec::new()
+            return 0;
         }
     };
     let mut stopped = 0;
+    let mut stops = 0;
     for runtime_id in &runtime_ids {
+        // Checked just before each stop: an earlier one here may have taken
+        // minutes.
+        match release_in_flight(state, runtime_id).await {
+            Ok(false) => {}
+            Ok(true) => {
+                info!(
+                    runtime_id = %runtime_id,
+                    project_id = %project_id,
+                    "left a runtime of a deleted space to the release in flight"
+                );
+                continue;
+            }
+            Err(error) => {
+                warn!(
+                    runtime_id = %runtime_id,
+                    project_id = %project_id,
+                    error = %format!("{error:#}"),
+                    "failed to check a runtime of a deleted space for a release in flight; leaving it to the idle sweep"
+                );
+                continue;
+            }
+        }
+        stops += 1;
         match stop_runtime_of_deleted_project(state, &project_id, runtime_id).await {
             Ok(SafeRuntimeStop { outcome, .. }) => {
                 if outcome.status_changed {
@@ -90,7 +120,7 @@ pub(crate) async fn stop_runtimes_of_deleted_project(state: &AppState, project_i
             }
         }
     }
-    if runtime_ids.is_empty() {
+    if stops == 0 {
         // No stop canceled what a dispatch queued after the delete.
         cancel_work_of_deleted_project(state, &project_id).await;
     }
@@ -160,6 +190,25 @@ async fn load_runtimes_to_stop(state: &AppState, project_id: &Uuid) -> anyhow::R
         .await
         .context("failed to select a deleted space's runtimes")?;
     Ok(rows.iter().map(|row| row.get("id")).collect())
+}
+
+/// Whether a provider release may still be in flight for `runtime_id` (see
+/// [`super::sweeps::provider_release_in_flight`]). Read on a connection given
+/// back before the stop.
+async fn release_in_flight(state: &AppState, runtime_id: &Uuid) -> anyhow::Result<bool> {
+    let connection = state
+        .pool
+        .get()
+        .await
+        .context("failed to get a connection to check for a release in flight")?;
+    let row = connection
+        .query_one(
+            &format!("select {}", super::sweeps::provider_release_in_flight("$1")),
+            &[runtime_id],
+        )
+        .await
+        .context("failed to check for a release in flight")?;
+    Ok(row.get(0))
 }
 
 /// Release the workspace leases of the deleted space `project_id`, so no
@@ -238,7 +287,9 @@ pub(super) async fn revoke_tunnels_of_deleted_project(state: &AppState, project_
     }
 }
 
-async fn cancel_work_of_deleted_project(state: &AppState, project_id: &Uuid) {
+/// Cancel the work of the deleted space `project_id` that reached it after
+/// its delete. Logs a failure; the idle sweep retries a space with work left.
+pub(super) async fn cancel_work_of_deleted_project(state: &AppState, project_id: &Uuid) {
     if let Err(error) =
         crate::project_work_cancellation::cancel_deleted_project_work(state, *project_id).await
     {

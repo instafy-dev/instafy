@@ -1435,6 +1435,11 @@ fn ensure_agent_token_runtime_binding_matches(
 enum AgentTokenUse {
     /// Any general agent capability. Refused for a deleted space.
     General,
+    /// A call about one of the runtime's jobs: its messages, its active-turn
+    /// inputs and its secrets. Refused for a deleted space with a conflict,
+    /// as a heartbeat is: the agent ends the turn on a conflict, where on a
+    /// 410 it keeps the turn running until the next heartbeat.
+    Job,
     /// Completing a job. As [`AgentTokenUse::General`], except that
     /// `agent_complete` refuses a deleted space itself, after the receipt of
     /// a planning job the controller already ended, so that its usage is
@@ -1493,8 +1498,12 @@ async fn ensure_agent_token_matches_runtime_lease_for_use(
         context.runtime_generation,
         runtime::runtime_is_private_self_hosted(state, &provider, &capabilities),
     )?;
-    if token_use == AgentTokenUse::General && project_status == "deleted" {
-        return Err(space_deleted(StatusCode::GONE));
+    if project_status == "deleted" {
+        match token_use {
+            AgentTokenUse::General => return Err(space_deleted(StatusCode::GONE)),
+            AgentTokenUse::Job => return Err(space_deleted(StatusCode::CONFLICT)),
+            AgentTokenUse::Completion | AgentTokenUse::Stop => {}
+        }
     }
 
     if token_use == AgentTokenUse::Stop && status == "requested" {
@@ -1540,6 +1549,24 @@ pub(crate) async fn ensure_agent_token_matches_runtime_lease(
         context,
         runtime_id,
         AgentTokenUse::General,
+    )
+    .await
+}
+
+/// [`ensure_agent_token_matches_runtime_lease`] for a call about one of the
+/// runtime's jobs (see [`AgentTokenUse::Job`]).
+pub(crate) async fn ensure_agent_token_matches_runtime_lease_for_job(
+    state: &AppState,
+    transaction: &tokio_postgres::Transaction<'_>,
+    context: &TokenContext,
+    runtime_id: &Uuid,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    ensure_agent_token_matches_runtime_lease_for_use(
+        state,
+        transaction,
+        context,
+        runtime_id,
+        AgentTokenUse::Job,
     )
     .await
 }
@@ -2011,8 +2038,13 @@ pub(crate) async fn agent_message(
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
 
     if let Some(runtime_uuid) = runtime_scope.as_ref() {
-        ensure_agent_token_matches_runtime_lease(&state, &transaction, &claims, runtime_uuid)
-            .await?;
+        ensure_agent_token_matches_runtime_lease_for_job(
+            &state,
+            &transaction,
+            &claims,
+            runtime_uuid,
+        )
+        .await?;
     }
 
     let row = match runtime_scope {

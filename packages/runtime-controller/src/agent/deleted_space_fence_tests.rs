@@ -1,7 +1,8 @@
 //! The agent routes of a runtime whose space was deleted, on the migrated
 //! database: a lease poll and every general agent call are gone, a heartbeat
-//! conflicts so that the agent ends its turn, and only the agent's own stop
-//! and a planning job's receipt still get through.
+//! and every call about one of its jobs conflict so that the agent ends its
+//! turn, and only the agent's own stop and a planning job's receipt still
+//! get through.
 
 use axum::body::{to_bytes, Body};
 use axum::http::Request;
@@ -142,7 +143,17 @@ async fn post(
     bearer: &str,
     body: JsonValue,
 ) -> anyhow::Result<(StatusCode, JsonValue)> {
-    let response = router()
+    post_on(router(), state, path, bearer, body).await
+}
+
+async fn post_on(
+    routes: axum::Router<AppState>,
+    state: &AppState,
+    path: &str,
+    bearer: &str,
+    body: JsonValue,
+) -> anyhow::Result<(StatusCode, JsonValue)> {
+    let response = routes
         .with_state(state.clone())
         .oneshot(
             Request::builder()
@@ -302,8 +313,10 @@ async fn a_deleted_space_heartbeat_conflicts() -> anyhow::Result<()> {
     .await
 }
 
-/// Every general agent call of a deleted space is gone, a message among
-/// them, while the agent's own stop and its release retries stay open: a
+/// Every general agent call of a deleted space is gone, and every call about
+/// one of its jobs, a message among them, conflicts: on a conflict the agent
+/// ends the turn at once, where on a 410 it would run on until its next
+/// heartbeat. The agent's own stop and its release retries stay open: a
 /// runtime quarantined in `cleanup_pending` still finishes its stop.
 #[tokio::test]
 async fn a_deleted_space_refuses_general_agent_calls_but_not_its_stop() -> anyhow::Result<()> {
@@ -327,7 +340,16 @@ async fn a_deleted_space_refuses_general_agent_calls_but_not_its_stop() -> anyho
             json!({ "job_id": job_id, "content": "still here" }),
         )
         .await?;
-        assert_space_deleted(&message, StatusCode::GONE, "agent message");
+        assert_space_deleted(&message, StatusCode::CONFLICT, "agent message");
+        let input_poll = post_on(
+            crate::send_intents::router(),
+            &state,
+            &format!("/agent/jobs/{job_id}/inputs"),
+            &bearer,
+            json!({ "activeTurnId": "turn-1" }),
+        )
+        .await?;
+        assert_space_deleted(&input_poll, StatusCode::CONFLICT, "active-turn input poll");
 
         let context = TokenContext {
             project_id,
@@ -340,6 +362,13 @@ async fn a_deleted_space_refuses_general_agent_calls_but_not_its_stop() -> anyho
         let general =
             ensure_agent_token_matches_runtime_lease(&state, &transaction, &context, &runtime_id)
                 .await;
+        let job = ensure_agent_token_matches_runtime_lease_for_job(
+            &state,
+            &transaction,
+            &context,
+            &runtime_id,
+        )
+        .await;
         let stop = ensure_agent_token_matches_runtime_lease_for_stop(
             &state,
             &transaction,
@@ -349,6 +378,7 @@ async fn a_deleted_space_refuses_general_agent_calls_but_not_its_stop() -> anyho
         .await;
         transaction.rollback().await?;
         assert_refusal_is_space_deleted(general, StatusCode::GONE, "general agent call");
+        assert_refusal_is_space_deleted(job, StatusCode::CONFLICT, "agent call about a job");
         stop.map_err(|(status, error)| {
             anyhow::anyhow!(
                 "the agent's own stop was refused: {status} {}",

@@ -2080,56 +2080,101 @@ async fn delete_project(
         .get()
         .await
         .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
-    let mut transaction = connection.transaction().await.map_err(|error| {
-        internal_error(format!(
-            "failed to start project delete transaction: {error}"
-        ))
-    })?;
+    // Run once more if Postgres ends the cancel as one side of a deadlock
+    // (see `CANCEL_DEADLOCKED_CODE`): everything was rolled back, the
+    // tombstone only changes a space that is not deleted yet, and the cancel
+    // is idempotent.
+    let mut retried_deadlock = false;
+    let canceled_work = loop {
+        let mut transaction = connection.transaction().await.map_err(|error| {
+            internal_error(format!(
+                "failed to start project delete transaction: {error}"
+            ))
+        })?;
 
-    let record = load_project_record(&transaction, &project_id).await?;
-    if !context.is_service_role {
-        ensure_project_write_access(&transaction, &record, &context, None).await?;
-        require_project_deleter(&transaction, &record, &context).await?;
-    }
+        let record = load_project_record(&transaction, &project_id).await?;
+        if !context.is_service_role {
+            ensure_project_write_access(&transaction, &record, &context, None).await?;
+            require_project_deleter(&transaction, &record, &context).await?;
+        }
 
-    let tombstoned = transaction
-        .execute(
-            "update projects set status = 'deleted', updated_at = now() where id = $1 and status <> 'deleted'",
-            &[&project_id],
-        )
-        .await
-        .map_err(|error| internal_error(format!("failed to delete project: {error}")))?
-        > 0;
+        let tombstoned = transaction
+            .execute(
+                "update projects set status = 'deleted', updated_at = now() where id = $1 and status <> 'deleted'",
+                &[&project_id],
+            )
+            .await
+            .map_err(|error| internal_error(format!("failed to delete project: {error}")))?
+            > 0;
 
-    // The delete that tombstones the space cancels its work with it. Work
-    // that reaches the space later is left to `cancel_deleted_project_work`.
-    let canceled_work = if tombstoned {
-        Some(
-            crate::project_work_cancellation::cancel_project_work_in_transaction(
+        // The delete that tombstones the space cancels its work with it.
+        // Work that reaches the space later is left to
+        // `cancel_deleted_project_work`.
+        let canceled_work = if tombstoned {
+            match crate::project_work_cancellation::cancel_project_work_in_transaction(
                 &mut transaction,
                 project_id,
             )
-            .await?,
-        )
-    } else {
-        None
-    };
+            .await
+            {
+                Ok(work) => Some(work),
+                Err((status, Json(error)))
+                    if error.code.as_deref()
+                        == Some(crate::project_work_cancellation::CANCEL_DEADLOCKED_CODE) =>
+                {
+                    let _ = transaction.rollback().await;
+                    if retried_deadlock {
+                        tracing::error!(
+                            project_id = %project_id,
+                            error = %error.message,
+                            "a space delete deadlocked on its work again"
+                        );
+                        return Err((status, Json(error)));
+                    }
+                    tracing::warn!(
+                        project_id = %project_id,
+                        error = %error.message,
+                        "a space delete deadlocked on its work; running it once more"
+                    );
+                    retried_deadlock = true;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        };
 
-    transaction
-        .execute(
-            "delete from project_browser_profiles where project_id = $1",
-            &[&project_id],
-        )
-        .await
-        .map_err(|error| {
-            internal_error(format!("failed to delete project browser profile: {error}"))
+        transaction
+            .execute(
+                "delete from project_browser_profiles where project_id = $1",
+                &[&project_id],
+            )
+            .await
+            .map_err(|error| {
+                internal_error(format!("failed to delete project browser profile: {error}"))
+            })?;
+
+        transaction.commit().await.map_err(|error| {
+            internal_error(format!(
+                "failed to finalize project delete transaction: {error}"
+            ))
         })?;
+        break canceled_work;
+    };
+    let tombstoned = canceled_work.is_some();
 
-    transaction.commit().await.map_err(|error| {
-        internal_error(format!(
-            "failed to finalize project delete transaction: {error}"
-        ))
-    })?;
+    // Spawned before anything else is awaited, so a client that goes away
+    // now cannot skip them. Browsers already lost access with the status
+    // change; the purge frees the space's chat attachments and never fails
+    // the delete. The stop releases the space's machines without holding up
+    // the answer: a hosted release can take minutes. A repeated delete runs
+    // it again, so a service-role retry also retries the stop.
+    crate::chat_attachments::spawn_projects_purge(
+        crate::chat_attachments::StorageAccess::from_config(&state.http_client, &state.config),
+        vec![project_id],
+    );
+    crate::runtime::spawn_stop_runtimes_of_deleted_project(state.clone(), project_id);
 
     if let Some(work) = canceled_work.as_ref() {
         crate::project_work_cancellation::publish_project_work_cancellation(
@@ -2161,17 +2206,6 @@ async fn delete_project(
     for user_id in audience {
         publish_project_deleted(&state.events, project_id, user_id);
     }
-
-    // Browsers already lost access with the status change; this frees the
-    // space's chat attachments and never fails the delete.
-    crate::chat_attachments::spawn_projects_purge(
-        crate::chat_attachments::StorageAccess::from_config(&state.http_client, &state.config),
-        vec![project_id],
-    );
-    // Stops and releases the space's machines without holding up the answer:
-    // a hosted release can take minutes. A repeated delete runs it again,
-    // so a service-role retry also retries the stop.
-    crate::runtime::spawn_stop_runtimes_of_deleted_project(state, project_id);
 
     Ok(StatusCode::NO_CONTENT)
 }

@@ -12,7 +12,8 @@ use tokio_postgres::types::Json as PgJson;
 use uuid::Uuid;
 
 use crate::agent::{
-    ensure_agent_token_matches_runtime_lease, extract_agent_token, verify_agent_token_with_scopes,
+    ensure_agent_token_matches_runtime_lease_for_job, extract_agent_token,
+    verify_agent_token_with_scopes,
 };
 use crate::auth::authenticate_request;
 use crate::conversations::{
@@ -1032,7 +1033,8 @@ async fn claim_next_agent_job_input(
         .transaction()
         .await
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
-    ensure_agent_token_matches_runtime_lease(&state, &transaction, &claims, &runtime_id).await?;
+    ensure_agent_token_matches_runtime_lease_for_job(&state, &transaction, &claims, &runtime_id)
+        .await?;
 
     let job = transaction
         .query_opt(
@@ -1168,7 +1170,8 @@ async fn clear_agent_job_input_readiness(
         .transaction()
         .await
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
-    ensure_agent_token_matches_runtime_lease(&state, &transaction, &claims, &runtime_id).await?;
+    ensure_agent_token_matches_runtime_lease_for_job(&state, &transaction, &claims, &runtime_id)
+        .await?;
     let cleared_job = transaction
         .query_opt(
             "update agent_jobs
@@ -1274,7 +1277,8 @@ async fn acknowledge_agent_job_input(
         .transaction()
         .await
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
-    ensure_agent_token_matches_runtime_lease(&state, &transaction, &claims, &runtime_id).await?;
+    ensure_agent_token_matches_runtime_lease_for_job(&state, &transaction, &claims, &runtime_id)
+        .await?;
 
     let existing = transaction
         .query_opt(

@@ -30,7 +30,7 @@ use crate::AppState;
 
 use super::REQUEUED_JOB_EXPIRY_SECONDS;
 
-const PROVIDER_ID: &str = "run_interruptions_test";
+pub(crate) const PROVIDER_ID: &str = "run_interruptions_test";
 const LAST_MESSAGE: &str = "Reading the repository";
 
 /// The runtime a turn runs on.
@@ -55,7 +55,9 @@ pub(crate) struct RunningTurn {
     pub(crate) runtime_lease_id: Uuid,
     pub(crate) job_id: Uuid,
     pub(crate) run_id: Uuid,
-    releases: Arc<Mutex<usize>>,
+    /// The runtime each release asked for, in order (`None` for a body that
+    /// names none).
+    releases: Arc<Mutex<Vec<Option<Uuid>>>>,
     /// What the stand-in provider answers a release with.
     release_answer: Arc<Mutex<StatusCode>>,
     /// Whether the stand-in provider answers a release; while it is `false`
@@ -86,7 +88,7 @@ impl RunningTurn {
         shape: RuntimeShape,
         release: StatusCode,
     ) -> anyhow::Result<Self> {
-        let releases = Arc::new(Mutex::new(0));
+        let releases = Arc::new(Mutex::new(Vec::new()));
         let release_answer = Arc::new(Mutex::new(release));
         let (releases_open, open) = watch::channel(true);
         let release_asked = Arc::new(Notify::new());
@@ -96,13 +98,21 @@ impl RunningTurn {
                 let releases = releases.clone();
                 let release_answer = release_answer.clone();
                 let release_asked = release_asked.clone();
-                move || {
+                move |body: axum::body::Bytes| {
                     let releases = releases.clone();
                     let release_answer = release_answer.clone();
                     let release_asked = release_asked.clone();
                     let mut open = open.clone();
                     async move {
-                        *releases.lock().unwrap() += 1;
+                        let runtime_id =
+                            serde_json::from_slice::<JsonValue>(&body)
+                                .ok()
+                                .and_then(|body| {
+                                    body["runtime_id"]
+                                        .as_str()
+                                        .and_then(|value| Uuid::parse_str(value).ok())
+                                });
+                        releases.lock().unwrap().push(runtime_id);
                         release_asked.notify_one();
                         let _ = open.wait_for(|open| *open).await;
                         let answer = *release_answer.lock().unwrap();
@@ -222,9 +232,21 @@ impl RunningTurn {
         })
     }
 
-    /// Provider releases so far.
+    /// Provider releases so far, of any runtime.
     pub(crate) fn releases(&self) -> usize {
-        *self.releases.lock().unwrap()
+        self.releases.lock().unwrap().len()
+    }
+
+    /// Provider releases of `runtime_id` so far. A test that runs a global
+    /// sweep counts these, since the sweep may also release what an earlier,
+    /// aborted run left in a long-lived test database.
+    pub(crate) fn releases_of(&self, runtime_id: Uuid) -> usize {
+        self.releases
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|released| **released == Some(runtime_id))
+            .count()
     }
 
     /// Have the stand-in provider answer every later release with `release`.

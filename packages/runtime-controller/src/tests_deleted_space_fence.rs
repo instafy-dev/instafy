@@ -1,7 +1,8 @@
 //! What a deleted space refuses outside the agent routes, on the migrated
 //! database: registration and agent login, including one that raced the
-//! delete, a fs.read workspace lease read, a runtime machine's tunnels, and
-//! the tunnel broker's credit hook.
+//! delete, a fs.read workspace lease read, an origin token's reads through
+//! the origin proxy, a runtime machine's tunnels, and the tunnel broker's
+//! credit hook.
 
 use std::time::Duration;
 
@@ -16,8 +17,8 @@ use crate::config::{AppConfig, PgPool, RuntimeProviderConfig};
 use crate::projects::{ensure_project_not_deleted, space_deleted, SPACE_DELETED_CODE};
 use crate::runtime::RUNTIME_TOKEN_REQUIRED_SCOPES;
 use crate::tests::{
-    build_app_config, build_test_state, require_origin_test_pool, test_origin_private_key,
-    test_origin_public_key, with_shared_db_fixture, SharedDbFixture,
+    build_app_config, build_test_state, require_origin_test_pool, spawn_aborting,
+    test_origin_private_key, test_origin_public_key, with_shared_db_fixture, SharedDbFixture,
 };
 use crate::tokens::{mint_scoped_token, ScopedTokenRequest};
 use crate::AppState;
@@ -484,6 +485,98 @@ async fn a_fs_read_token_reads_no_lease_of_a_deleted_space() -> anyhow::Result<(
         let (status, body) = read().await?;
         assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
         assert_eq!(body["message"], "project not found");
+        Ok(())
+    })
+    .await
+}
+
+/// An origin token minted before the delete is still valid until it
+/// expires, and a hosted gateway checks the token alone, so the controller's
+/// origin proxy refuses the deleted space itself: the token reads the
+/// space's files through its hosted gateway origin until the delete, and
+/// gets the space's 404 after it, without the request reaching the gateway.
+#[tokio::test]
+async fn an_origin_token_reads_nothing_of_a_deleted_space() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("an_origin_token_reads_nothing_of_a_deleted_space").await?;
+    let project_id = Uuid::new_v4();
+    let fixture = SharedDbFixture {
+        projects: vec![project_id],
+        ..SharedDbFixture::default()
+    };
+    with_shared_db_fixture(fixture, async {
+        seed_project(&pool, &project_id, None).await?;
+        // A stand-in hosted gateway that serves every file and counts reads.
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let gateway = axum::Router::new().fallback({
+            let reads = reads.clone();
+            move || {
+                let reads = reads.clone();
+                async move {
+                    reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Json(json!({ "content": "# Notes" }))
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let _gateway = spawn_aborting(async move {
+            axum::serve(listener, gateway)
+                .await
+                .expect("serve the stand-in gateway");
+        });
+        let mut config = config("deleted-space-origin-proxy");
+        config.hosted_origin_endpoint = Some(endpoint.clone());
+        let state = build_test_state(pool.clone(), config.clone());
+        let origin_id = crate::origins::hosted_origin_id_for_project(&project_id);
+        pool.get()
+            .await?
+            .execute(
+                "insert into workspace_origins (id, project_id, mode, endpoint, protocols)
+                 values ($1, $2, 'hosted', $3, array['http'])",
+                &[&origin_id, &project_id, &endpoint],
+            )
+            .await?;
+        let bearer = mint(
+            &config,
+            ScopedTokenRequest {
+                audience: origin_id.to_string(),
+                subject: Uuid::new_v4().to_string(),
+                project_id: project_id.to_string(),
+                origin_id: Some(origin_id.to_string()),
+                runtime_id: None,
+                protocol: Some("http".to_string()),
+                scopes: vec!["fs.read".to_string()],
+                lease_id: None,
+                run_id: None,
+                prefer_runtime: None,
+                ttl_seconds: None,
+            },
+        )?;
+        let path = format!("/origin/{origin_id}/files/NOTES.md");
+        let read = || {
+            send(
+                crate::origins::router().with_state(state.clone()),
+                "GET",
+                &path,
+                &bearer,
+                None,
+            )
+        };
+
+        let (status, body) = read().await?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["content"], "# Notes");
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        mark_deleted(&pool, &project_id).await?;
+        let (status, body) = read().await?;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(body["message"], "project not found");
+        assert_eq!(
+            reads.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the gateway was not asked"
+        );
         Ok(())
     })
     .await

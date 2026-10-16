@@ -15,7 +15,8 @@ use crate::active_job_auth::{
     authorize_active_job_if_scoped, ActiveJobAuthorization, ActiveJobProjectAccess,
 };
 use crate::agent::{
-    ensure_agent_token_matches_runtime_lease, extract_agent_token, verify_agent_token_with_scopes,
+    ensure_agent_token_matches_runtime_lease_for_job, extract_agent_token,
+    verify_agent_token_with_scopes,
 };
 use crate::auth::authenticate_request;
 use crate::config::PgPool;
@@ -1255,7 +1256,8 @@ async fn agent_secrets(
         .await
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
 
-    ensure_agent_token_matches_runtime_lease(&state, &transaction, &claims, &runtime_id).await?;
+    ensure_agent_token_matches_runtime_lease_for_job(&state, &transaction, &claims, &runtime_id)
+        .await?;
 
     let row = transaction
         .query_opt(

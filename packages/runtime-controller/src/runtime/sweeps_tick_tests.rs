@@ -5,6 +5,7 @@
 //! for another.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::http::StatusCode;
@@ -38,9 +39,17 @@ const HOSTED_TEST_PROVIDER: &str = "instafy_cloud_sweep_tick_test";
 /// own step can stop them.
 const MACHINE_TEST_PROVIDER: &str = "sweep_tick_test_machines";
 
-/// Every step's candidate query starts from one of these tables, so a tick
-/// on empty copies of them has nothing to do.
-const SWEEP_TABLES: [&str; 3] = ["runtimes", "agent_jobs", "runtime_tunnel_grants"];
+/// Every step's candidate query starts from one of these tables, or finds a
+/// deleted space only through a row in one, so a tick on empty copies of
+/// them has nothing to do.
+const SWEEP_TABLES: [&str; 6] = [
+    "runtimes",
+    "agent_jobs",
+    "runtime_tunnel_grants",
+    "runs",
+    "conversation_send_queue",
+    "automations",
+];
 
 /// A tick with nothing to do takes one pool checkout for all of its steps,
 /// where each step used to take its own.
@@ -559,10 +568,30 @@ async fn a_sweep_tick_on_a_pool_of_one_acts_on_every_step_with_work() -> anyhow:
         ..SharedDbFixture::default()
     };
     with_shared_db_fixture(fixture, async {
+        // The runtime of each release, so the assertions below count only
+        // this test's own: a step may also release what an earlier, aborted
+        // run left in a long-lived test database.
+        let released: Arc<Mutex<Vec<Option<Uuid>>>> = Arc::default();
         let provider_app = axum::Router::new()
             .route(
                 "/runtime/release",
-                axum::routing::post(|| async { StatusCode::NO_CONTENT }),
+                axum::routing::post({
+                    let released = released.clone();
+                    move |body: axum::body::Bytes| {
+                        let released = released.clone();
+                        async move {
+                            let runtime_id = serde_json::from_slice::<serde_json::Value>(&body)
+                                .ok()
+                                .and_then(|body| {
+                                    body["runtime_id"]
+                                        .as_str()
+                                        .and_then(|value| Uuid::parse_str(value).ok())
+                                });
+                            released.lock().unwrap().push(runtime_id);
+                            StatusCode::NO_CONTENT
+                        }
+                    }
+                }),
             )
             .route(
                 "/runtime/inspect",
@@ -656,6 +685,16 @@ async fn a_sweep_tick_on_a_pool_of_one_acts_on_every_step_with_work() -> anyhow:
             deleted_stop_reason.as_deref(),
             Some("space_deleted"),
             "another step took the deleted space's runtime"
+        );
+        let deleted_releases = released
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|runtime_id| **runtime_id == Some(seeded.deleted_runtime))
+            .count();
+        assert_eq!(
+            deleted_releases, 1,
+            "the deleted space's machine was released once"
         );
         assert_eq!(
             job_status(&client, seeded.requeued_job).await?,

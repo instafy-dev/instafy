@@ -552,7 +552,9 @@ hosted release can take minutes:
   finalization; a Desktop or self-hosted runtime is stopped in the database
   only. Nothing is flushed first: nobody can open the space again, and its
   origin cannot get `git.write` for it. After each stop, work its quarantine
-  requeued, or that reached the space after the delete, is canceled.
+  requeued, or that reached the space after the delete, is canceled. A
+  runtime a provider release may still be running for, from a person's Stop
+  or a repeated delete, is left to that release.
 - Every tunnel grant the space still has is revoked, whatever runtime it was
   issued for, if any.
 
@@ -567,25 +569,51 @@ is on (see the controller's
 From the delete on, a machine of the space is refused with code
 `space_deleted`, whether it was stopped yet or not: `410 Gone` for
 registration (and an agent login that raced the delete), lease polls, every
-other agent call, its origin's runtime capabilities and its tunnel requests
-and status reports, and `409 Conflict` for a heartbeat, so the agent ends the
-turn it is running. Its own `/runtime/stop` and that stop's release retries,
-a revoke of its own tunnel, and the receipt of a planning job the controller
-already ended still get through. The tunnel broker's credit hook refuses the
-space without charging it. Its hosted machines are not billed and do not
-count against the organization's hosted runtime limit while they wait to be
+other general agent call, its origin's runtime capabilities and its tunnel
+requests and status reports, and `409 Conflict` for a heartbeat and every
+call about one of its jobs (its messages, its active-turn inputs and its
+secrets), so the agent ends the turn it is running at the first refused
+call. Its own `/runtime/stop` and that stop's release retries, a revoke of
+its own tunnel, and the receipt of a planning job the controller already
+ended still get through. The tunnel broker's credit hook refuses the space
+without charging it. Its hosted machines are not billed and do not count
+against the organization's hosted runtime limit while they wait to be
 released; the platform-wide cap still counts them.
 
+The controller's origin proxy answers `404` for the space, so an origin
+access token minted before the delete reads nothing more through it, even
+for a hosted gateway origin, whose gateway checks only the token. Two
+things still end on their own:
+
+- A git token already minted for Git Edge stays valid until it expires,
+  bounded by its TTL, since Git Edge checks only the token's claims.
+- A Desktop or self-hosted agent keeps polling, refused every time, until
+  the app or the container is stopped. Its runtime is marked stopped, but
+  nothing tells the agent to exit yet.
+
 The idle sweep finishes what that task did not, for example after a
-controller restart, a failed release or a tunnel revoke the broker refused.
-It takes spaces deleted more than 30 seconds ago, up to five of their
-runtimes per tick, and only runtimes that still hold a lease generation. A
-runtime whose stop or failed launch quarantined it within the last
-`QUARANTINE_RELEASE_GRACE_SECONDS` is left to the release that may still
-run. It also revokes the live tunnel grants of deleted spaces until they
-expire. The launch-timeout, heartbeat-timeout and idle sweeps leave deleted
-spaces' runtimes to this step, which runs last in the tick. A repeated
-service-role `DELETE` answers 204 and runs the background stop again.
+controller restart or a failed load, a failed release, a tunnel revoke the
+broker refused, or a dispatch that committed work into the space after the
+task's last cancel. For spaces deleted more than 30 seconds ago, each tick
+takes:
+
+- up to five runtimes that still hold a lease generation;
+- the Desktop and self-hosted runtimes that still run without one, stopped
+  in the database only;
+- up to five spaces with live tunnel grants, which it revokes until they
+  expire;
+- up to five spaces with work left (queued or leased jobs, open runs,
+  queued messages or active automations), which it cancels as the delete
+  does.
+
+While a stop or a failed launch quarantined any runtime of the space within
+the last `QUARANTINE_RELEASE_GRACE_SECONDS`, it leaves the space's runtimes
+to the release that may still run. The launch-timeout and idle sweeps leave
+deleted spaces' runtimes to this step, which runs last in the tick, and so
+does the heartbeat-timeout sweep for those that hold a lease generation. A
+repeated service-role `DELETE` answers 204 and runs the background stop
+again. A delete that Postgres ends in a deadlock with another writer of the
+space's jobs runs once more.
 
 ## Caches
 

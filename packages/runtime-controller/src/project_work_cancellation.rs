@@ -5,7 +5,10 @@
 //! queued send-queue entries, and pauses its active automations. Work that
 //! reaches the space after that commit (a dispatch that raced the delete, or
 //! a job a runtime stop requeued) is canceled the same way by
-//! [`cancel_deleted_project_work`].
+//! [`cancel_deleted_project_work`]: after each stop of the space's runtimes,
+//! and by the idle sweep's deleted-space step for a space deleted a while
+//! ago that still has some, so a dispatch that commits after the last of
+//! those stops is canceled too.
 //!
 //! Nothing here dispatches: no send-queue drain and no plan checkpoint, since
 //! dispatch into a deleted space is refused. Nothing about the space's own
@@ -19,6 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::Context;
 use axum::{http::StatusCode, Json};
 use serde_json::{json, Value};
+use tokio_postgres::error::SqlState;
 use tokio_postgres::types::Json as PgJson;
 use uuid::Uuid;
 
@@ -30,6 +34,31 @@ pub(crate) const SPACE_DELETED_REASON: &str = "space_deleted";
 
 const SPACE_DELETED_NOTICE: &str =
     "This space was deleted, so its running and queued work was canceled.";
+
+/// The code of a cancel Postgres ended as one side of a deadlock. The cancel
+/// locks the space's live jobs in id order, as a conversation's stop does,
+/// but a steer locks a conversation's jobs in creation order and several
+/// stops and sweeps update many jobs in no set order. The whole transaction
+/// is rolled back, so the caller may run it again.
+pub(crate) const CANCEL_DEADLOCKED_CODE: &str = "deadlock_detected";
+
+/// The failure of one of the cancel's statements, `context` first. A
+/// deadlock carries [`CANCEL_DEADLOCKED_CODE`] and is left for the caller to
+/// log, since it may retry.
+fn cancel_failure(context: &str, error: tokio_postgres::Error) -> (StatusCode, Json<ApiError>) {
+    let message = format!("{context}: {}", crate::errors::describe_db_error(&error));
+    if error.code() == Some(&SqlState::T_R_DEADLOCK_DETECTED) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                message,
+                code: Some(CANCEL_DEADLOCKED_CODE.to_string()),
+                details: None,
+            }),
+        );
+    }
+    internal_error(message)
+}
 
 /// What canceling a deleted space's work changed.
 #[derive(Debug, Default)]
@@ -84,9 +113,7 @@ pub(crate) async fn cancel_project_work_in_transaction(
             &[&project_id],
         )
         .await
-        .map_err(|error| {
-            internal_error(format!("failed to lock the space's live jobs: {error}"))
-        })?;
+        .map_err(|error| cancel_failure("failed to lock the space's live jobs", error))?;
 
     let mut by_conversation: BTreeMap<Uuid, Vec<LiveJob>> = BTreeMap::new();
     let mut without_conversation: Vec<(Uuid, Option<Uuid>)> = Vec::new();
@@ -218,9 +245,7 @@ pub(crate) async fn cancel_project_work_in_transaction(
             &[&project_id, &SPACE_DELETED_REASON],
         )
         .await
-        .map_err(|error| {
-            internal_error(format!("failed to cancel the space's open runs: {error}"))
-        })?
+        .map_err(|error| cancel_failure("failed to cancel the space's open runs", error))?
         .iter()
         .map(|row| row.get("id"))
         .collect();
@@ -976,6 +1001,127 @@ mod tests {
             let repeat = cancel_deleted_project_work(&fixture.state, project).await?;
             assert!(repeat.is_empty(), "nothing is left to cancel: {repeat:?}");
             assert_eq!(refunds(&*connection, project).await?.len(), 1);
+            Ok(())
+        })
+        .await
+    }
+
+    /// A delete Postgres ends as one side of a deadlock runs once more: here
+    /// a steer, which locks a conversation's jobs in creation order, holds
+    /// the space's last job in id order and then reaches for its first,
+    /// which the delete, locking in id order, already holds. The delete
+    /// waited first, so it is the side Postgres ends; it then waits for the
+    /// steer and deletes the space with all of its work canceled.
+    #[tokio::test]
+    async fn a_delete_that_deadlocks_on_the_spaces_jobs_runs_once_more() -> anyhow::Result<()> {
+        let Some(fixture) = seed_reserved_managed_ai_prompt("space-delete-deadlock").await? else {
+            eprintln!("skipping space delete deadlock test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        with_seeded_space(&fixture, &[], async {
+            let pool = &fixture.pool;
+            let project = fixture.project_id;
+            let mut jobs = vec![fixture.job_id];
+            {
+                let connection = pool.get().await?;
+                for _ in 0..2 {
+                    let (job, _) = insert_job(
+                        &*connection,
+                        project,
+                        None,
+                        "leased",
+                        1,
+                        "in_progress",
+                        json!({}),
+                        None,
+                    )
+                    .await?;
+                    jobs.push(job);
+                }
+            }
+            jobs.sort();
+            let (first, last) = (jobs[0], jobs[2]);
+            // The space's machine is gone already, so the stop the delete
+            // starts has nothing to do while the fixture is cleaned up.
+            pool.get()
+                .await?
+                .execute(
+                    "update runtimes set status = 'stopped', active_lease_id = null
+                     where project_id = $1",
+                    &[&project],
+                )
+                .await?;
+
+            let observer = pool.get().await?;
+            let mut steer_connection = pool.get().await?;
+            let steer = steer_connection.transaction().await?;
+            let steer_pid: i32 = steer
+                .query_one("select pg_backend_pid()", &[])
+                .await?
+                .get(0);
+            steer
+                .query_one(
+                    "select id from agent_jobs where id = $1 for update",
+                    &[&last],
+                )
+                .await?;
+
+            let state = build_test_state(pool.clone(), fixture.config.clone());
+            let delete = crate::tests::spawn_aborting({
+                let state = state.clone();
+                async move { delete_space(&state, project, "service-role-token").await }
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    let blocked: i64 = observer
+                        .query_one(
+                            "select count(*) from pg_stat_activity
+                             where $1 = any(pg_blocking_pids(pid))
+                               and query like '%from agent_jobs%for update%'",
+                            &[&steer_pid],
+                        )
+                        .await?
+                        .get(0);
+                    if blocked > 0 {
+                        return anyhow::Ok(());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                }
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("the delete never waited on the steer"))??;
+            drop(observer);
+            // Postgres checks a lock wait for a deadlock once, a second into
+            // it, and ends the wait whose check finds one: the delete's,
+            // which began half a second before the steer's.
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+            steer
+                .query_one(
+                    "select id from agent_jobs where id = $1 for update",
+                    &[&first],
+                )
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!("the steer, not the delete, was ended: {error:?}")
+                })?;
+            steer.commit().await?;
+            drop(steer_connection);
+
+            assert_eq!(delete.await??, StatusCode::NO_CONTENT);
+            let connection = pool.get().await?;
+            let status: String = connection
+                .query_one("select status from projects where id = $1", &[&project])
+                .await?
+                .get(0);
+            assert_eq!(status, "deleted");
+            let job_statuses: Vec<String> = connection
+                .query("select status from agent_jobs where id = any($1)", &[&jobs])
+                .await?
+                .iter()
+                .map(|row| row.get(0))
+                .collect();
+            assert_eq!(job_statuses, vec!["canceled".to_string(); 3]);
             Ok(())
         })
         .await
