@@ -40,6 +40,8 @@ Run Instafy spaces locally and connect them back to Instafy Studio — from any 
 - `instafy chat --conversation <threadId> "@octo ..." --no-wait` — involve another agent by posting a normal message into a normal conversation/thread. Use non-blocking posts from inside an active runtime turn.
   - Like an ordinary Studio chat, the CLI marks the turn as potentially workspace-writing. Controller and member permissions still apply, and read-only questions do not require a file change.
 - `instafy agents list` — list available top-level agents.
+- `instafy agents settings` — inspect the linked space's shared multi-agent limits. Add `--interactive` to edit them, or use `--max-agents-per-plan <n>` and/or `--max-concurrent-agents <n>`.
+  - Plans default to at most 64 team workers (range 1–256); at most 8 team workers run concurrently across the space (range 1–64), subject to runtime capacity. Lead/root jobs and native provider subagents are outside the concurrent team-worker count. Changing settings requires permission to manage the space; runtime job tokens cannot change them.
 - `instafy agents context list --query "<topic>"` — inspect optional compact scoped context-card hints for cross-agent coordination.
 - `instafy agents context put --agent @octo "<summary>"` — save/update a compact context card for the current conversation when `INSTAFY_CONVERSATION_ID` is set.
 - `instafy automations create --name "Octo check-in" --mode space_review --schedule-kind hourly --interval-hours 24` — explicitly opt in to private, quiet space reviews; no custom prompt is needed.

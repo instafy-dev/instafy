@@ -44,6 +44,7 @@ import {
   agentContextsList,
   agentJobsCancel,
   agentPlanGroupStatus,
+  agentSettings,
   agentsList,
 } from "./agents.js";
 import { chatPrompt } from "./chat.js";
@@ -886,9 +887,39 @@ for (const operation of ["current", "dismiss", "remind"] as const) {
 
 const agentsCommand = program
   .command("agents")
-  .description("Inspect agents and scoped agent context");
+  .description("Inspect agents, shared multi-agent settings, and scoped agent context");
 
 failWithGroupHelp(agentsCommand);
+
+const agentsSettingsCommand = agentsCommand
+  .command("settings")
+  .description("Inspect or change the space's shared multi-agent planning and concurrency limits");
+
+addSpaceOption(agentsSettingsCommand, "Space UUID (defaults to .instafy/space.json or SPACE_ID)");
+addServerUrlOptions(agentsSettingsCommand);
+addAccessTokenOptions(agentsSettingsCommand, "Instafy access token");
+
+agentsSettingsCommand
+  .option("--max-agents-per-plan <n>", "Set the maximum team workers in one plan (default: 64; range: 1–256)")
+  .option("--max-concurrent-agents <n>", "Set the maximum running team workers across this space (default: 8; range: 1–64)")
+  .option("--interactive", "Interactively edit both shared settings")
+  .option("--json", "Output JSON (noninteractive)")
+  .action(async (opts) => {
+    try {
+      await agentSettings({
+        project: resolveSpaceIdOption(opts),
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
+        maxAgentsPerPlan: opts.maxAgentsPerPlan,
+        maxConcurrentAgents: opts.maxConcurrentAgents,
+        interactive: opts.interactive,
+        json: opts.json,
+      });
+    } catch (error) {
+      console.error(kleur.red(String(error)));
+      process.exit(1);
+    }
+  });
 
 const agentsListCommand = agentsCommand
   .command("list")

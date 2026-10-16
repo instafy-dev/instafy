@@ -44,6 +44,21 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(exit_code);
     }
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if args.as_slice() == [OsString::from("--isolated-tool-worker")] {
+        // Read and install only the scoped job environment before creating any threads.
+        let request = runtime_agent::isolated_tool_worker::prepare_cli()?;
+        let _path_entry = arg0_dispatch();
+        if let Some(path) = _path_entry
+            .as_ref()
+            .and_then(|entry| entry.paths().codex_linux_sandbox_exe.as_ref())
+        {
+            // SAFETY: the private worker has not created any threads. The path comes from
+            // our own executable's dispatch aliases, never the request or workspace config.
+            unsafe { std::env::set_var("CODEX_LINUX_SANDBOX_EXE", path) };
+        }
+        let runtime = build_tokio_runtime()?;
+        return runtime.block_on(runtime_agent::isolated_tool_worker::run_cli(request));
+    }
     if args.as_slice() == [OsString::from("--version")] {
         println!("runtime-agent {}", env!("CARGO_PKG_VERSION"));
         return Ok(());

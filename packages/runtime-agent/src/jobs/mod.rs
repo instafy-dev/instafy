@@ -49,6 +49,10 @@ mod routing_recovery;
 mod save_report;
 
 mod handoff;
+mod isolated_worker;
+#[cfg(test)]
+mod isolated_worker_tests;
+mod isolated_workspace;
 mod learn;
 mod mcp;
 mod project_preferences;
@@ -99,6 +103,7 @@ const AGENT_CONTEXT_CARD_LIMIT: usize = 4;
 const AGENT_CONTEXT_CARD_MAX_CHARS: usize = 1_200;
 const COLLABORATION_SKILL_PLANNING_MAX_CHARS: usize = 3_200;
 const COLLABORATION_SKILL_ROUTING_MAX_CHARS: usize = 1_400;
+const COLLABORATION_SKILL_DELEGATION_MAX_CHARS: usize = 1_600;
 const ROUTING_PRE_OBSERVATION_OUTPUT_MAX_CHARS: usize = 4_000;
 const ROUTING_PRE_OBSERVATION_TIMEOUT_SECS: u64 = 10;
 const DEFAULT_DIRECT_WORKER_MODEL: &str = "gpt-5.6-sol";
@@ -134,6 +139,8 @@ pub struct JobProcessor {
     /// Workspace sync uses it to keep byte transfers off the tunnel when the
     /// controller-selected origin is the one this process hosts (#153).
     local_origin_sync: Mutex<Option<LocalOriginSync>>,
+    isolated_workers: isolated_worker::IsolatedWorkerSettings,
+    isolated_apply: AsyncMutex<()>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4474,6 +4481,8 @@ impl JobProcessor {
             terminal_sessions: Mutex::new(HashMap::new()),
             controller_tokens,
             local_origin_sync: Mutex::new(None),
+            isolated_workers: isolated_worker::IsolatedWorkerSettings::from_env(),
+            isolated_apply: AsyncMutex::new(()),
         }
     }
 
@@ -4577,7 +4586,7 @@ impl JobProcessor {
         }
     }
 
-    pub(crate) fn parallel_direct_write_scope_paths(&self, job: &LeaseJob) -> Option<Vec<String>> {
+    pub(crate) fn parallel_scoped_scope_paths(&self, job: &LeaseJob) -> Option<Vec<String>> {
         if !is_multi_agent_worker_job(job)
             || !metadata_requests_write_scoped_workspace(job.payload.get("metadata"))
         {
@@ -4585,7 +4594,7 @@ impl JobProcessor {
         }
 
         let project_id = self.project_id_for_job(job).ok()?;
-        let workspace_dir = self.prepare_workspace(&project_id).ok()?;
+        let workspace_dir = self.config.project_workspace_dir(&project_id);
         direct_owned_write_scopes(&workspace_dir, job).map(|paths| {
             paths
                 .into_iter()
@@ -4594,12 +4603,41 @@ impl JobProcessor {
         })
     }
 
+    pub(crate) fn can_run_parallel_scoped_worker(
+        &self,
+        registration: &Registration,
+        job: &LeaseJob,
+    ) -> bool {
+        if self.isolated_workers.enabled {
+            self.can_run_isolated_scoped_worker(registration, job)
+        } else {
+            self.can_run_parallel_direct_write_scoped_worker(registration, job)
+        }
+    }
+
+    pub async fn run_parallel_scoped_worker_job(
+        &self,
+        registration: &Registration,
+        job: &LeaseJob,
+        progress: Option<JobProgress>,
+        cancel: Option<JobCancelSignal>,
+        environment: HashMap<String, String>,
+    ) -> Result<JobExecution> {
+        if self.isolated_workers.enabled {
+            self.run_isolated_scoped_worker_job(registration, job, progress, cancel, environment)
+                .await
+        } else {
+            self.run_parallel_direct_write_scoped_worker_job(registration, job, progress, cancel)
+                .await
+        }
+    }
+
     pub(crate) fn can_run_parallel_direct_write_scoped_worker(
         &self,
         registration: &Registration,
         job: &LeaseJob,
     ) -> bool {
-        self.parallel_direct_write_scope_paths(job).is_some()
+        self.parallel_scoped_scope_paths(job).is_some()
             && direct_worker_proxy_config(job.proxy.as_ref().or(registration.proxy.as_ref()))
                 .is_ok()
     }
@@ -5675,6 +5713,14 @@ impl JobProcessor {
         cancel_signal: Option<JobCancelSignal>,
         active_turn_input: Option<ActiveTurnInputReceiver>,
     ) -> Result<JobExecution> {
+        if self.isolated_workers.enabled
+            && is_multi_agent_worker_job(job)
+            && metadata_requests_write_scoped_workspace(job.payload.get("metadata"))
+        {
+            bail!(
+                "Experimental scoped tool workers require the isolated worker dispatch path; this task has unsupported inputs, capabilities, or scope."
+            );
+        }
         let task_usage = TaskUsage::default();
         let result = self
             .run_apply_job_observed(
@@ -6205,6 +6251,7 @@ impl JobProcessor {
             cancel_signal: cancel_signal.clone(),
             active_turn_input,
             input_images: Vec::new(),
+            isolated_tool_worker: false,
         };
 
         let routing_pre_observation = if should_run_routing_pre_observation_before_main(
@@ -6350,6 +6397,11 @@ impl JobProcessor {
             && metadata_requests_write_scoped_workspace(job.payload.get("metadata"))
             && let Some(owned_paths) = direct_owned_write_scopes(&workspace_dir, job)
         {
+            if self.isolated_workers.enabled {
+                bail!(
+                    "This scoped task requires capabilities unavailable in the experimental isolated worker lane. Use the ordinary runtime configuration or split the task's inputs and capabilities."
+                );
+            }
             let proxy_config = direct_worker_proxy_config(proxy_envelope)?;
             let (execution, files) = execute_write_scoped_worker_direct(
                 &workspace_dir,
@@ -8338,6 +8390,48 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             );
         }
 
+        // Ordinary root turns get the small choice policy even when broader memory
+        // is omitted for direct writes or a restored provider thread. Skill selection
+        // metadata is descriptive, never a permission or native-tool capability grant.
+        if !multi_agent_planning_turn
+            && !lead_continuation_checkpoint
+            && !multi_agent_worker
+            && !crate::personal_browser::payload_requests_personal_browser(&job.payload)
+            && !crate::shared_browser::payload_requests_shared_browser(&job.payload)
+            && let Some(section) = format_collaboration_delegation_snapshot(workspace_dir)
+        {
+            append_prompt_section(
+                &mut prompt,
+                &mut prompt_section_metrics,
+                "delegationChoice",
+                &section,
+            );
+        }
+
+        if multi_agent_planning_turn || lead_continuation_checkpoint {
+            let settings = job
+                .payload
+                .get("metadata")
+                .and_then(|metadata| metadata.get("multiAgentSettings"))
+                .and_then(|value| {
+                    serde_json::from_value::<runtime_contracts::multi_agent::MultiAgentSettings>(
+                        value.clone(),
+                    )
+                    .ok()
+                })
+                .and_then(|settings| settings.validate().ok())
+                .unwrap_or_default();
+            append_prompt_section(
+                &mut prompt,
+                &mut prompt_section_metrics,
+                "teamCapacity",
+                &format!(
+                    "\nTeam capacity: at most {} agents per plan; at most {} team workers run concurrently across this space, also subject to runtime capacity. Include every requested worker in the plan; extra workers queue. A worker is not a separate runtime. Split work exceeding the plan limit into separate plans; only a space manager may change these settings.\n",
+                    settings.max_agents_per_plan, settings.max_concurrent_agents
+                ),
+            );
+        }
+
         if let Some(observation) = scoped_worker_path_observation {
             append_prompt_section(
                 &mut prompt,
@@ -8516,7 +8610,6 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 - If a newly requested goal explicitly requires separate assistant turns, do the next useful step in `summary` and emit `goal_update` with status `active`; do not block just because this response is one final JSON object.\n\
                 - For a newly requested goal, do not block only because evidence has not been gathered yet. If safe read-only tools or project context can materially advance the goal, use them before deciding status.\n\
                 - Block a newly requested goal only when required evidence, permissions, runtime access, or user input cannot be obtained with the available safe tools. Explain the concrete blocker in `summary` and emit one blocked `goal_update`.\n\
-                - When the latest request explicitly asks for team/parallel/sibling-agent/split investigation with lead synthesis, follow the pinned collaboration skill and emit `multi_agent_plan` before substantive inspection or edits unless the task is clearly trivial.\n\
                 - If task success depends on current workspace/runtime state, use tools before answering and report concrete observations. For command execution, call the available runtime command tool (`exec_command` or `shell`); if neither is callable, return that concrete blocker in `summary`. Do not treat missing command tools as a blocker for file-only create/edit/delete requests when you can return inline `files[]` content.\n",
                 ]
                 .concat(),
@@ -8623,7 +8716,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 - Declare exact paths/globs in `multi_agent_plan.handoffPaths`, worker prompts, and `writeScope.readOnlyPaths`; avoid private scratch paths.\n\
                 - `multi_agent_plan` shape: { type, rationale, thresholdReason, mode, handoffPaths?, agents[], lead, runtimeRouting?, presentation? }.\n\
                 - Before broad/cross-chat planning, search soft context/cards and prior conversations when overlap is plausible.\n\
-                - Use at least two useful sibling lanes, preserve exact source locators, and keep each lane compact, self-contained, and scoped.\n\
+                - Preserve explicit worker counts and exact source locators; keep each durable lane compact, self-contained, and scoped.\n\
                 - Save/update one compact context card for durable team focus, inputs, open questions, or prior thread. Do not create an ownership ledger.\n\
                 - For writes, prefer exact disjoint `write_scoped.ownedPaths`. Use `ownedPathGlobs` for unsafe one-machine parallel edits only with explicit `writeScope.advisoryLock` metadata and worker instructions to acquire/release the matching visible `tmp/instafy-locks/<scope>.lock` directory.\n\
                 - If scope overlaps and no advisory-lock convention is explicitly accepted, ask one coordination question instead of racing.\n",
@@ -8634,7 +8727,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 "studioRuntimeInvariants",
                 "\nPlanning invariants:\n\
                 - The controller is only the durable queue/status substrate. The lead agent owns the plan and the later checkpoint decision.\n\
-                - Hidden Codex subagents are internal helpers; top-level Instafy agents are user-facing sibling jobs/threads; multiple runtimes are what can make top-level jobs physically parallel.\n\
+                - Native helpers belong to their parent turn; top-level Instafy workers have durable jobs/threads. Actual parallel execution depends on the admitted runtime capabilities.\n\
                 - Keep the parent chat lead-centric. Worker evidence should attach to compact workstream refs unless the user asks to inspect it or a lane fails.\n",
             );
         } else {
@@ -8670,7 +8763,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
               - { type: 'request_integration', provider: string, optional description: string, optional requiredScopes: string[], optional capabilities: string[], optional authMethods: string[], optional suggestedSecretNames: string[], optional suggestedSecrets: { name: string, optional description: string }[], optional agentHandles: string[] }\n\
               - { type: 'request_location', optional precision: 'approximate' | 'precise', optional description: string }\n\
               - { type: 'request_browser', task: string, optional browserLocation: 'auto' | 'device' | 'workspace' }\n\
-              - { type: 'multi_agent_plan', rationale: string, thresholdReason: string, mode: 'read_only' | 'write_scoped', optional handoffPaths: string[], agents: [{ handle: string, label: string, prompt: string, scopeSummary: string, optional writeScope: object }, ...at least 2 useful sibling lanes], lead: { leadHandle: string, continuationPrompt: string, expectedReportFormat: string }, optional runtimeRouting: { strategy: 'reuse' | 'spread', optional desiredSlots: number, optional rationale: string }, optional presentation: { optional workerEvidenceVisibility: 'hidden' | 'compact' | 'expanded' | 'surface_on_failure', optional leadSummaryVisibility: 'hidden' | 'compact', optional showThresholdReason: boolean } }\n\
+              - { type: 'multi_agent_plan', rationale: string, thresholdReason: string, mode: 'read_only' | 'write_scoped', optional handoffPaths: string[], agents: [{ handle: string, label: string, prompt: string, scopeSummary: string, optional writeScope: object }, ...the selected durable worker lanes], lead: { leadHandle: string, continuationPrompt: string, expectedReportFormat: string }, optional runtimeRouting: { strategy: 'reuse' | 'spread', optional desiredSlots: number, optional rationale: string }, optional presentation: { optional workerEvidenceVisibility: 'hidden' | 'compact' | 'expanded' | 'surface_on_failure', optional leadSummaryVisibility: 'hidden' | 'compact', optional showThresholdReason: boolean } }\n\
               - { type: 'goal_update', status: 'active' | 'paused' | 'completed' | 'blocked' | 'canceled', optional objective: string, optional progressSummary: string, optional doneWhen: string, optional stopWhen: string, optional operation: 'clear' }\n\
               - Emit `goal_update` when the latest user request explicitly asks to create, set, start, update, pause, resume, complete, block, cancel, or clear a conversation goal, or when an active conversation goal is included and this turn has concrete evidence that the goal changed. Use status `active` with `objective` to create or update a goal. Do not infer goals from ordinary questions or small one-off requests.\n\
               - A request to create/start a goal also authorizes starting the work now. Do not respond with only a goal-created acknowledgement or a suggestion to start later.\n\
@@ -8678,11 +8771,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
               - If a newly requested goal explicitly requires separate assistant turns, do the next useful step in `summary` and emit `goal_update` with status `active`; do not block just because this response is one final JSON object.\n\
               - For a newly requested goal, do not block only because evidence has not been gathered yet. If safe read-only tools or project context can materially advance the goal, use them before deciding status.\n\
               - Block a newly requested goal only when required evidence, permissions, runtime access, or user input cannot be obtained with the available safe tools. The `summary` must name that blocker and `actions` must include `goal_update` with status `blocked`.\n\
-              - Emit `multi_agent_plan` only when the pinned collaboration skill says the work merits top-level sibling agents. Do not use it for small Q&A, single-file fixes, or obvious single-agent edits.\n\
-              - Do not emit a one-agent `multi_agent_plan`. If only one focused lane is useful, stay single-agent or use one linked work thread instead.\n\
               - Sibling lanes must be self-contained at start. Do not create a preparation sibling plus dependent review siblings in the same plan; prepare shared inputs first with normal runtime tools, then emit the plan with exact paths.\n\
-              - When the latest request names multiple independent domains/surfaces, create separate compact lanes for those named scopes unless you explicitly exclude a scope as out of bounds.\n\
-              - When the latest request explicitly asks for team/parallel/sibling-agent/split investigation with lead synthesis, treat that as crossing the collaboration threshold unless clearly trivial. Emit `multi_agent_plan` before substantive inspection or edits; do not do one sibling's work inline first.\n\
               - In `multi_agent_plan.lead`, describe the lead continuation checkpoint you want after sibling jobs finish. The controller only persists/leases jobs and reports statuses; the lead agent decides whether to answer, synthesize, spawn follow-ups, or ask the user.\n\
               - Use `runtimeRouting.strategy = 'spread'` when the request explicitly values wall-clock acceleration or asks for separate/different runtimes, and sibling lanes are read-only or have clear disjoint write scope. `reuse` means sibling jobs may stay pinned to the same runtime, so never pair `strategy: 'reuse'` with a rationale that says separate runtimes are preferred.\n\
               - Preserve exact source locators. If the user supplied URLs, commit SHAs, PR/issue links, or repo names, copy the exact locator into every worker prompt that needs it.\n\
@@ -9672,8 +9761,6 @@ fn parse_codex_actions(value: &JsonValue) -> Vec<CodexAction> {
 fn parse_codex_multi_agent_plan_action(
     map: &serde_json::Map<String, JsonValue>,
 ) -> Option<(JsonValue, usize, Option<String>)> {
-    const MAX_PLAN_AGENTS: usize = 8;
-
     let plan_map = map
         .get("plan")
         .and_then(JsonValue::as_object)
@@ -9788,9 +9875,6 @@ fn parse_codex_multi_agent_plan_action(
             agent_out.insert("writeScope".to_string(), read_only_paths);
         }
         agents.push(JsonValue::Object(agent_out));
-        if agents.len() >= MAX_PLAN_AGENTS {
-            break;
-        }
     }
 
     if agents.is_empty() {
@@ -13351,6 +13435,20 @@ fn parse_model_json_object(text: &str) -> Result<JsonValue> {
     Ok(value)
 }
 
+fn format_collaboration_delegation_snapshot(workspace_dir: &Path) -> Option<String> {
+    let path = ".agents/skills/instafy-agent-collaboration/SKILL.md";
+    let content = read_workspace_file_utf8(workspace_dir, path)?;
+    let section = extract_markdown_h2_section(&content, "Delegation choice")?;
+    let excerpt = strip_markdown_fenced_blocks(&section);
+    let snippet = excerpt
+        .chars()
+        .take(COLLABORATION_SKILL_DELEGATION_MAX_CHARS)
+        .collect::<String>();
+    Some(format!(
+        "\nCurrent delegation policy from `{path}` (use this choice policy for the current turn):\n```markdown\n{snippet}\n```\n"
+    ))
+}
+
 fn format_collaboration_skill_snapshot(workspace_dir: &Path) -> Option<String> {
     let path = ".agents/skills/instafy-agent-collaboration/SKILL.md";
     let content = read_workspace_file_utf8(workspace_dir, path)?;
@@ -13473,7 +13571,7 @@ fn build_agent_routing_preflight_prompt(
 ) -> String {
     let skill_snapshot = format_collaboration_routing_preflight_snapshot(workspace_dir)
         .unwrap_or_else(|| {
-            "\nFocused collaboration routing skill snapshot unavailable. Prefer `direct` unless the latest request explicitly asks for team/parallel/sibling-agent work that is not clearly trivial.\n".to_string()
+            "\nFocused collaboration routing skill snapshot unavailable. Prefer `direct`; use `multi_agent_candidate` only for durable Instafy workstreams, not merely generic parallel work.\n".to_string()
         });
     let plan_group_guidance = active_plan_group_id
         .map(|group_id| {
@@ -13486,11 +13584,11 @@ fn build_agent_routing_preflight_prompt(
         "\nInstafy routing preflight.\n\
         Decide only how the latest user request should enter the runtime. Do not answer the user request. Do not inspect files or run tools.\n\
         Routes:\n\
-        - `direct`: normal single-agent answer/work.\n\
-        - `multi_agent_candidate`: enter focused multi-agent planning; use only when the skill threshold is crossed and at least two useful sibling lanes are likely.\n\
-        - `cross_chat_lookup`: answer/recover from existing conversation or context evidence without creating a new team.\n\
+        - `direct`: normal parent turn, including permitted native helpers when their tools are exposed.\n\
+        - `multi_agent_candidate`: enter durable top-level Instafy team planning under the collaboration skill; this is not the route for native helpers.\n\
+        - `cross_chat_lookup`: retrieve required prior conversation or context evidence missing from supplied history and refs, without creating a new team.\n\
         - `write_coordination_required`: the request asks for concurrent writes to the same target and needs a safer split first.\n\
-        Prefer current-conversation evidence for follow-ups. Requests about this chat, the latest run, the current team/workstream, or evidence above are `direct` unless the user explicitly refers to another/different/prior chat or the current history is insufficient.\n\
+        Prefer current-conversation evidence for follow-ups. Apply the collaboration skill to choose the execution lane; mentioning another chat alone does not require retrieving evidence already supplied.\n\
         Set `requiresContextLookup = true` only when required prior conversation/context evidence is absent from the latest request and supplied current-conversation evidence and must be retrieved. Referring to prior work or supplying links alone neither requires nor satisfies retrieval; use the actual supplied evidence. This flag independently requires a read-only Instafy context/conversation lookup, regardless of `requiresCommandExecution`.\n\
         Set `requiresCommandExecution = true` when a correct final answer needs a separate fresh observation of current filesystem, Git, process, repo, runtime, server, or tool state. Prior-conversation retrieval belongs only in `requiresContextLookup`; the fact that its transport uses a CLI does not set this flag. Leave it false when supplied current evidence is enough. Both flags may be true when both kinds of evidence are needed.\n\
         Set `requiresWorkspaceFileChanges = true` when the latest request requires creating, overwriting, editing, moving, deleting, committing, or syncing workspace files as part of success; leave it false for read-only review, Q&A, planning, or requests that only mention files as evidence.\n\
@@ -16013,9 +16111,9 @@ fn resolve_exact_owned_write_scope_path(workspace_dir: &Path, raw: &str) -> Opti
         return None;
     }
     Some(ExactOwnedPath {
+        display_path,
         target_path: workspace_dir.join(&relative_path),
         relative_path,
-        display_path,
     })
 }
 
@@ -17733,9 +17831,10 @@ mod tests {
     }
 
     #[test]
-    fn exact_owned_worker_can_use_parallel_direct_write_path() {
+    fn exact_owned_worker_can_use_parallel_scoped_path() {
         let tmp = tempdir().expect("temp dir");
-        let processor = test_job_processor(tmp.path());
+        let mut processor = test_job_processor(tmp.path());
+        processor.isolated_workers.enabled = false;
         let registration = test_registration_with_proxy();
         let mut job = test_lease_job(
             Some("feature"),
@@ -17756,16 +17855,17 @@ mod tests {
         job.project_id = Some(Uuid::new_v4());
 
         assert_eq!(
-            processor.parallel_direct_write_scope_paths(&job),
+            processor.parallel_scoped_scope_paths(&job),
             Some(vec!["tmp/alpha.txt".to_string()])
         );
-        assert!(processor.can_run_parallel_direct_write_scoped_worker(&registration, &job));
+        assert!(processor.can_run_parallel_scoped_worker(&registration, &job));
     }
 
     #[test]
-    fn glob_owned_worker_without_advisory_lock_stays_out_of_parallel_direct_write_path() {
+    fn glob_owned_worker_without_advisory_lock_stays_out_of_parallel_scoped_path() {
         let tmp = tempdir().expect("temp dir");
-        let processor = test_job_processor(tmp.path());
+        let mut processor = test_job_processor(tmp.path());
+        processor.isolated_workers.enabled = false;
         let registration = test_registration_with_proxy();
         let mut job = test_lease_job(
             Some("feature"),
@@ -17785,14 +17885,15 @@ mod tests {
         );
         job.project_id = Some(Uuid::new_v4());
 
-        assert_eq!(processor.parallel_direct_write_scope_paths(&job), None);
-        assert!(!processor.can_run_parallel_direct_write_scoped_worker(&registration, &job));
+        assert_eq!(processor.parallel_scoped_scope_paths(&job), None);
+        assert!(!processor.can_run_parallel_scoped_worker(&registration, &job));
     }
 
     #[test]
-    fn advisory_locked_glob_worker_can_use_parallel_direct_write_path() {
+    fn advisory_locked_glob_worker_can_use_parallel_scoped_path() {
         let tmp = tempdir().expect("temp dir");
-        let processor = test_job_processor(tmp.path());
+        let mut processor = test_job_processor(tmp.path());
+        processor.isolated_workers.enabled = false;
         let registration = test_registration_with_proxy();
         let mut job = test_lease_job(
             Some("feature"),
@@ -17817,10 +17918,10 @@ mod tests {
         job.project_id = Some(Uuid::new_v4());
 
         assert_eq!(
-            processor.parallel_direct_write_scope_paths(&job),
+            processor.parallel_scoped_scope_paths(&job),
             Some(vec!["docs/**".to_string()])
         );
-        assert!(processor.can_run_parallel_direct_write_scoped_worker(&registration, &job));
+        assert!(processor.can_run_parallel_scoped_worker(&registration, &job));
     }
 
     #[tokio::test]
@@ -17852,7 +17953,8 @@ mod tests {
         tokio::spawn(async move { axum::serve(listener, app).await.expect("serve stub") });
 
         let tmp = tempdir().expect("temp dir");
-        let processor = test_job_processor(tmp.path());
+        let mut processor = test_job_processor(tmp.path());
+        processor.isolated_workers.enabled = false;
         let mut registration = test_registration_with_proxy();
         registration.proxy = Some(ProxyEnvelopePayload {
             url: base.clone(),
@@ -19362,7 +19464,7 @@ mod tests {
         let job = test_lease_job(
             Some("feature"),
             json!({
-                "prompt_text": "Use exactly 2 AI agents to review AGENTS.md in parallel.",
+                "prompt_text": "Create exactly 2 durable Instafy worker jobs to review AGENTS.md.",
                 "metadata": {
                     "agentSelection": {
                         "active": ["octo"],
@@ -21173,7 +21275,6 @@ mod tests {
         assert!(prompt.contains("do not block only because evidence has not been gathered yet"));
         assert!(prompt.contains("cannot be obtained with the available safe tools"));
         assert!(prompt.contains("emit one blocked `goal_update`"));
-        assert!(prompt.contains("emit `multi_agent_plan` before substantive inspection or edits"));
         assert!(prompt.contains("Treat read-only as no workspace mutation"));
         assert!(prompt.contains("instafy agents context list --json --query"));
         assert!(prompt.contains("Agent-to-agent conversations are first-class conversations"));
@@ -21361,6 +21462,7 @@ mod tests {
                     { "role": "assistant", "content": "Old failed smoke context should not be replayed into a fresh explicit team plan." }
                 ],
                 "metadata": {
+                    "multiAgentSettings": {"maxAgentsPerPlan": 48, "maxConcurrentAgents": 3},
                     "agentCollaboration": {
                         "requested": true,
                         "mode": "team_plan"
@@ -21392,12 +21494,12 @@ mod tests {
             .expect("prompt should build");
 
         assert!(prompt.contains("Focused collaboration skill snapshot"));
+        assert!(prompt.contains("at most 48 agents per plan; at most 3 team workers"));
+        assert!(prompt.contains("extra workers queue"));
         assert!(prompt.contains("Skill-authored workstreams"));
         assert!(!prompt.contains("Broad workspace memory should not be loaded"));
         assert!(!prompt.contains("Old failed smoke context should not be replayed"));
         assert!(prompt.contains("Multi-agent planning response contract"));
-        assert!(prompt.contains("Use at least two useful sibling lanes"));
-        assert!(prompt.contains("preserve exact source locators"));
         assert!(prompt.contains("Prepare any shared inputs before the plan"));
         assert!(prompt.contains("Declared coordination inputs under any clear non-hidden"));
         assert!(prompt.contains("Declare exact paths/globs"));
@@ -21585,10 +21687,6 @@ mod tests {
         assert!(!prompt.contains("Focused collaboration skill snapshot"));
         assert!(!prompt.contains("Skill-authored workstreams"));
         assert!(!prompt.contains("Multi-agent planning response contract"));
-        assert!(
-            prompt
-                .contains("Emit `multi_agent_plan` only when the pinned collaboration skill says")
-        );
         assert!(prompt.contains("prefer the most recent matching user-visible evidence"));
         assert!(prompt.contains(EARLIER_TURNS_DO_NOT_OUTRANK_THE_WORKSPACE));
         // Every conversation's full contract says the workspace it runs in is
@@ -21787,18 +21885,18 @@ mod tests {
         fs::create_dir_all(&skill_dir).expect("create skill dir");
         fs::write(
             skill_dir.join("SKILL.md"),
-            "# Agent collaboration policy\n\n## Routing preflight\nUse `multi_agent_candidate` for explicit parallel work.\n\n## Skill-authored workstreams\nDetailed plan rules should not be loaded in preflight.\n",
+            "# Agent collaboration policy\n\n## Routing preflight\nUse `multi_agent_candidate` for durable Instafy workers.\n\n## Skill-authored workstreams\nDetailed plan rules should not be loaded in preflight.\n",
         )
         .expect("write skill");
 
         let prompt = build_agent_routing_preflight_prompt(
             tmp.path(),
-            "Use exactly 2 AI agents to review AGENTS.md in parallel.",
+            "Create exactly 2 durable Instafy worker jobs to review AGENTS.md.",
             None,
         );
 
         assert!(prompt.contains("Focused collaboration routing skill snapshot"));
-        assert!(prompt.contains("Use `multi_agent_candidate` for explicit parallel work."));
+        assert!(prompt.contains("Use `multi_agent_candidate` for durable Instafy workers."));
         assert!(!prompt.contains("Detailed plan rules should not be loaded in preflight."));
         assert!(prompt.contains("Prefer current-conversation evidence for follow-ups"));
         assert!(prompt.contains("requiresWorkspaceFileChanges"));
@@ -21807,11 +21905,139 @@ mod tests {
     }
 
     #[test]
+    fn delegation_choice_preserves_ordinary_root_execution_modes() {
+        let tmp = tempdir().expect("temp dir");
+        let skill_dir = tmp
+            .path()
+            .join(".agents/skills/instafy-agent-collaboration");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "# Policy\n\n## Delegation choice\nROOT_CHOICE_FROM_SKILL\n\n## Skill-authored workstreams\nDURABLE_DETAILS_NOT_NEEDED_HERE\n",
+        )
+        .unwrap();
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        for (writes, restored) in [(false, false), (true, false), (false, true), (true, true)] {
+            let mut job = test_lease_job(
+                Some("feature"),
+                json!({
+                    "prompt_text": "Use two helpers in parallel for this bounded task.",
+                    "conversation_history": [{"role":"user", "content":"Retain current-turn evidence."}],
+                    "metadata": {},
+                }),
+            );
+            job.project_id = Some(project_id);
+            let mut preflight =
+                test_agent_routing_preflight(AgentRoutingPreflightRoute::Direct, false, false);
+            preflight.requires_workspace_file_changes = writes;
+            // Skill selection describes the route; it cannot turn a direct task into
+            // durable dispatch or grant native tools by itself.
+            preflight.selected_skills = vec!["instafy-agent-collaboration".to_string()];
+            let job = job_with_agent_routing_preflight(&job, &preflight);
+            assert!(!is_explicit_team_planning_job(&job));
+            assert!(job.payload["metadata"].get("agentCollaboration").is_none());
+            let expected_mode = if writes {
+                RuntimeFinalOutputMode::PlainTextWrite
+            } else {
+                RuntimeFinalOutputMode::StrictStructured
+            };
+            assert_eq!(
+                final_output_mode_for_runtime_job(
+                    &job,
+                    false,
+                    runtime_job_expectations(&job.payload)
+                ),
+                expected_mode
+            );
+            let provider_state =
+                json!({"defaultThreadId":"existing-parent", "historyReplayRequired":false});
+            let (prompt, _, metrics) = processor
+                .build_prompt_with_text(
+                    &project_id,
+                    &job,
+                    tmp.path(),
+                    job.payload["prompt_text"].as_str().unwrap(),
+                    false,
+                    restored.then_some(&provider_state),
+                    &[],
+                    None,
+                    None,
+                )
+                .unwrap();
+            assert!(prompt.contains("ROOT_CHOICE_FROM_SKILL"));
+            assert!(!prompt.contains("DURABLE_DETAILS_NOT_NEEDED_HERE"));
+            assert!(
+                metrics["promptSections"]["delegationChoice"]["chars"]
+                    .as_u64()
+                    .unwrap()
+                    > 0
+            );
+            assert!(metrics["promptSections"].get("teamCapacity").is_none());
+            assert_eq!(
+                metrics["statefulThreadRestored"].as_bool().unwrap_or(false),
+                restored
+            );
+        }
+    }
+
+    #[test]
+    fn delegation_choice_does_not_replace_dedicated_lane_contracts() {
+        let tmp = tempdir().expect("temp dir");
+        let skill_dir = tmp
+            .path()
+            .join(".agents/skills/instafy-agent-collaboration");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "# Policy\n\n## Delegation choice\nROOT_ONLY_POLICY\n\n## Execution model\nDEDICATED_TEAM_POLICY\n",
+        )
+        .unwrap();
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        for metadata in [
+            json!({"agentCollaboration":{"mode":"team_plan", "requested":true}}),
+            json!({"multiAgentPlan":{"role":"worker"}}),
+            json!({"multiAgentPlan":{"role":"lead_continuation"}}),
+            json!({"browserTransport":"desktop-personal"}),
+            json!({"browserTransport":"shared"}),
+        ] {
+            let mut job = test_lease_job(Some("feature"), json!({"metadata":metadata}));
+            job.project_id = Some(project_id);
+            let (_, _, metrics) = processor
+                .build_prompt_with_text(
+                    &project_id,
+                    &job,
+                    tmp.path(),
+                    "Complete the assigned work.",
+                    false,
+                    None,
+                    &[],
+                    None,
+                    None,
+                )
+                .unwrap();
+            assert!(metrics["promptSections"].get("delegationChoice").is_none());
+            if is_explicit_team_planning_job(&job) {
+                assert_eq!(
+                    final_output_mode_for_runtime_job(
+                        &job,
+                        false,
+                        runtime_job_expectations(&job.payload)
+                    ),
+                    RuntimeFinalOutputMode::SchemaFreeStructured
+                );
+                assert_eq!(metrics["skillSelectionStrategy"], "focused_team_planning");
+            }
+        }
+    }
+
+    #[test]
     fn model_preflight_route_marks_job_as_focused_team_planning() {
         let job = test_lease_job(
             Some("feature"),
             json!({
-                "prompt_text": "Use exactly 2 AI agents to review AGENTS.md in parallel.",
+                "prompt_text": "Create exactly 2 durable Instafy worker jobs to review AGENTS.md.",
                 "metadata": {
                     "runtimeExpectations": {
                         "workspaceFileChanges": false
@@ -21824,7 +22050,8 @@ mod tests {
             false,
             false,
         );
-        preflight.reason = "The user explicitly asked for two parallel AI agents.".to_string();
+        preflight.reason =
+            "The user explicitly asked for two durable Instafy worker jobs.".to_string();
         preflight.confidence = 92;
 
         assert!(!is_explicit_team_planning_job(&job));
@@ -27183,6 +27410,26 @@ mod tests {
                 assert_eq!(plan["synthesis"]["leadHandle"], json!("octo"));
             }
             _ => panic!("expected multi-agent plan action"),
+        }
+    }
+
+    #[test]
+    fn multi_agent_plan_keeps_all_workers_for_controller_capacity_validation() {
+        for count in [10, 64, 257] {
+            let payload = json!({"actions":[{"type":"multi_agent_plan","agents":
+                (0..count).map(|i| json!({"handle":format!("poet-{i}"),"prompt":"Write a poem"})).collect::<Vec<_>>()
+            }]});
+            let actions = parse_codex_actions(&payload);
+            let [
+                CodexAction::MultiAgentPlan {
+                    plan, agent_count, ..
+                },
+            ] = actions.as_slice()
+            else {
+                panic!("expected one complete plan");
+            };
+            assert_eq!(*agent_count, count);
+            assert_eq!(plan["agents"].as_array().unwrap().len(), count);
         }
     }
 

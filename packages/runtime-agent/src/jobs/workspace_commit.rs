@@ -553,6 +553,134 @@ pub(crate) struct LaneCheckpoint<'a> {
     pub(crate) local_origin: Option<LocalOriginSync>,
 }
 
+/// A scoped local commit, captured before releasing the workspace mutation lock.
+pub(crate) struct IsolatedScopeCommit {
+    pub(crate) rev: Option<String>,
+    pub(crate) base_rev: Option<String>,
+}
+
+/// Authorize the local origin before mutating source, then publish committed
+/// work through the normal policy/recovery path without staging any live files.
+/// A person may already have saved newer bytes after releasing the workspace lock.
+pub(crate) async fn checkpoint_isolated_scope<F>(
+    checkpoint: LaneCheckpoint<'_>,
+    paths: Vec<String>,
+    apply_and_commit: F,
+) -> Result<CommitToOriginResult>
+where
+    F: FnOnce() -> Result<IsolatedScopeCommit> + Send + 'static,
+{
+    let token = checkpoint
+        .workspace_token
+        .context("isolated worker workspace token missing")?;
+    let local = checkpoint
+        .local_origin
+        .as_ref()
+        .context("isolated workers require a local origin")?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()?;
+    let lease_id = acquire_workspace_lease(
+        &client,
+        checkpoint.controller_base_url,
+        token,
+        checkpoint.project_id,
+        checkpoint.runtime_id,
+        checkpoint.job_id,
+        checkpoint.run_id,
+    )
+    .await?;
+    let result = async {
+        let access = origin_write_access(
+            &client,
+            checkpoint.controller_base_url,
+            token,
+            checkpoint.project_id,
+            checkpoint.runtime_id,
+            lease_id,
+            Some(local),
+            "isolated worker checkpoint",
+        )
+        .await?;
+        anyhow::ensure!(
+            access.token.origin_id == local.origin_id,
+            "isolated worker publication requires this runtime's local origin"
+        );
+        // The callback acquires and owns the cross-process workspace guard.
+        // Detaching a canceled request cannot release it before mutation ends.
+        let commit = tokio::task::spawn_blocking(apply_and_commit)
+            .await
+            .context("isolated worker apply task failed")??;
+        let attempted = checkpoint
+            .auto_sync_after_apply_override
+            .unwrap_or_else(git_sync_enabled);
+        let mut result = CommitToOriginResult {
+            origin_id: access.token.origin_id,
+            origin_endpoint: access.endpoint.clone(),
+            origin_mode: access.token.mode,
+            lease_id,
+            apply_rev: commit.rev.clone(),
+            apply_base_rev: commit.base_rev,
+            git_rev: None,
+            git_base_rev: None,
+            git_sync_attempted: attempted,
+            git_sync_error: None,
+            save: SaveReport::default(),
+            paths,
+        };
+        if attempted {
+            let sync = match commit.rev {
+                // An explicit empty selection publishes existing commits without
+                // staging later edits, and retains the origin's stopping fence.
+                Some(_) => {
+                    try_git_sync(
+                        &client,
+                        &access.endpoint,
+                        &access.token.token,
+                        checkpoint.project_id,
+                        &[],
+                    )
+                    .await
+                }
+                None => Err(anyhow!(
+                    "workspace is not a Git checkout; files remain local"
+                )),
+            };
+            match sync {
+                Ok(synced) if synced.is_not_saved() => {
+                    result.git_base_rev = synced.base_rev.clone();
+                    result.save = synced.save_report();
+                    result.git_sync_error = synced
+                        .error
+                        .or(synced.failure)
+                        .or_else(|| Some("Not saved".into()));
+                }
+                Ok(synced) => {
+                    result.save = synced.save_report();
+                    result.git_rev = synced.rev;
+                    result.git_base_rev = synced.base_rev;
+                }
+                Err(error) => result.git_sync_error = Some(error.to_string()),
+            }
+        }
+        Ok::<_, anyhow::Error>(result)
+    }
+    .await;
+    if let Err(error) = release_workspace_lease(
+        &client,
+        checkpoint.controller_base_url,
+        token,
+        checkpoint.project_id,
+        checkpoint.runtime_id,
+        lease_id,
+    )
+    .await
+    {
+        warn!(?error, %lease_id, "isolated worker workspace lease was not released cleanly");
+    }
+    result
+}
+
 /// Hand files a command lane wrote itself, such as a skill folder from `/skills import`, to
 /// the protected checkpoint a model turn's files go through, behind the same gates: the job
 /// commits to the workspace, its write scope is not read-only and it has a verified
@@ -1380,14 +1508,13 @@ async fn try_git_sync(
     project_id: Uuid,
     paths: &[String],
 ) -> Result<OriginSaveResponse> {
-    let url = format!("{}/git/sync", endpoint.trim_end_matches('/'));
     let message = format!("instafy: agent sync (project {} )", project_id);
     let body = OriginGitSyncRequest {
         message: Some(message),
         paths: Some(paths.to_vec()),
-        mode: None,
+        ..Default::default()
     };
-
+    let url = format!("{}/git/sync", endpoint.trim_end_matches('/'));
     let response = client
         .post(url)
         .bearer_auth(origin_token)
@@ -2842,6 +2969,224 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    #[tokio::test]
+    async fn isolated_checkpoint_rejects_a_different_origin_before_source_mutation() -> Result<()> {
+        let workspace = tempfile::tempdir()?;
+        let (controller_address, _) =
+            spawn_stub_controller(Uuid::new_v4(), "http://127.0.0.1:9".into()).await;
+        let controller = reqwest::Url::parse(&format!("http://{controller_address}"))?;
+        let mut checkpoint =
+            lane_checkpoint(&controller, Some("workspace-token"), workspace.path());
+        checkpoint.local_origin = Some(LocalOriginSync {
+            origin_id: Uuid::new_v4(),
+            endpoint: "http://127.0.0.1:9".into(),
+            read_only_refresh: None,
+            working_state: None,
+        });
+        let result = super::checkpoint_isolated_scope(checkpoint, vec!["owned.txt".into()], || {
+            panic!("a remote origin must not authorize local mutation")
+        })
+        .await;
+        ensure!(
+            result
+                .err()
+                .context("remote origin was accepted")?
+                .to_string()
+                .contains("this runtime's local origin")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn isolated_checkpoint_preserves_a_studio_save_after_the_scoped_commit() -> Result<()> {
+        use super::super::isolated_worker::commit_isolated_changes;
+        use super::super::isolated_workspace::{
+            IsolatedFileChange, IsolatedWorkspace, SnapshotLimits,
+        };
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let remote = root.join("remote.git");
+        let seed = root.join("seed");
+        std::fs::create_dir_all(&seed)?;
+        git(
+            &root,
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                remote.to_str().unwrap(),
+            ],
+        );
+        git(&seed, &["init", "-q", "-b", "main"]);
+        std::fs::write(seed.join("README.md"), "original\n")?;
+        std::fs::write(seed.join("delete.txt"), "delete me\n")?;
+        git(&seed, &["add", "-A"]);
+        git(&seed, &["commit", "-q", "-m", "seed"]);
+        git(&seed, &["push", "-q", remote.to_str().unwrap(), "main"]);
+        let workspace = root.join("ws");
+        std::fs::create_dir_all(&workspace)?;
+        let origin_id = Uuid::new_v4();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let origin_port = listener.local_addr()?.port();
+        drop(listener);
+        let endpoint = format!("http://127.0.0.1:{origin_port}");
+        let project_id = Uuid::new_v4();
+        let controller_address =
+            spawn_controller_for_real_origin(project_id, origin_id, endpoint.clone()).await;
+        let controller = reqwest::Url::parse(&format!("http://{controller_address}/"))?;
+        let mut checkpoint = lane_checkpoint(&controller, Some("workspace-token"), &workspace);
+        checkpoint.project_id = project_id;
+        checkpoint.local_origin = Some(LocalOriginSync {
+            origin_id,
+            endpoint: endpoint.clone(),
+            read_only_refresh: None,
+            working_state: None,
+        });
+        let mut server = origin_http_server::server::OriginHttpServer::new(
+            origin_http_server::config::ServerConfig {
+                project_id,
+                origin_id,
+                workspace_root: workspace.clone(),
+                git_remote_url: Some(format!("file://{}", remote.display())),
+                git_remote_base_url: None,
+                git_branch: "main".into(),
+                git_remote_name: "origin".into(),
+                git_author_name: "Instafy Origin".into(),
+                git_author_email: "origin@instafy.dev".into(),
+                bind_host: "127.0.0.1".into(),
+                bind_port: origin_port,
+                controller_base_url: controller.clone(),
+                controller_internal_token: None,
+                controller_token_source: None,
+                jwks_url: controller.join("/.well-known/jwks.json")?,
+                skip_auth: false,
+                enable_presence_heartbeat: false,
+                presence_interval: Duration::from_secs(60),
+                max_archive_bytes: 1024 * 1024,
+                staging_base: None,
+                multi_tenant: false,
+                hosted_checkout: true,
+            },
+        )?;
+        server.start().await?;
+        let snapshot = IsolatedWorkspace::snapshot(&workspace, SnapshotLimits::default())?;
+        let changes = vec![
+            IsolatedFileChange {
+                path: "README.md".into(),
+                contents: Some(b"worker\n".to_vec()),
+                executable: false,
+            },
+            IsolatedFileChange {
+                path: "delete.txt".into(),
+                contents: None,
+                executable: false,
+            },
+        ];
+        let client = reqwest::Client::new();
+        let access: serde_json::Value = client
+            .post(controller.join("/access_token")?)
+            .send()
+            .await?
+            .json()
+            .await?;
+        let origin_token = access["token"]
+            .as_str()
+            .context("fixture token")?
+            .to_owned();
+        let archive = build_zip_archive(&[
+            UploadEntry {
+                path: "README.md".into(),
+                bytes: b"Studio save\n".to_vec(),
+                encoding: "utf8".into(),
+            },
+            UploadEntry {
+                path: "later.txt".into(),
+                bytes: b"later edit\n".to_vec(),
+                encoding: "utf8".into(),
+            },
+        ])?;
+        let manifest = serde_json::to_vec(&serde_json::json!({
+            "projectId": project_id, "leaseId": access["leaseId"], "files": [{"path":"README.md"},{"path":"later.txt"}],
+            "expected": {"README.md": origin_http_server::workspace_git::blob_oid(b"worker\n"), "later.txt": null}
+        }))?;
+        let (committed, commit_ready) = tokio::sync::oneshot::channel();
+        let (saved, save_ready) = std::sync::mpsc::channel();
+        let apply_workspace = workspace.clone();
+        let publish = super::checkpoint_isolated_scope(
+            checkpoint,
+            vec!["README.md".into(), "delete.txt".into()],
+            move || {
+                let commit = commit_isolated_changes(
+                    &snapshot,
+                    &changes,
+                    &crate::job_cancel::JobCancelSignal::new(),
+                    &apply_workspace,
+                    |path| matches!(path, "README.md" | "delete.txt"),
+                )?;
+                let _ = committed.send(());
+                save_ready
+                    .recv_timeout(Duration::from_secs(10))
+                    .context("Studio save did not finish")?;
+                Ok(commit)
+            },
+        );
+        let save = async {
+            commit_ready.await?;
+            // The real origin /apply must acquire the same workspace lock, and
+            // must finish before the worker's publication request is sent.
+            let outcome = send_origin_apply_with_retry(
+                &client,
+                &format!("{endpoint}/apply"),
+                &origin_token,
+                &manifest,
+                &archive,
+            )
+            .await;
+            let _ = saved.send(());
+            outcome
+        };
+        let (published, saved) = tokio::join!(publish, save);
+        let result = async {
+            saved?;
+            let published = published?;
+            ensure!(
+                published.git_sync_error.is_none(),
+                "{:?}",
+                published.git_sync_error
+            );
+            ensure!(git(&remote, &["show", "main:README.md"]) == "worker");
+            let tree = git(&remote, &["ls-tree", "-r", "--name-only", "main"]);
+            ensure!(
+                !tree
+                    .lines()
+                    .any(|path| matches!(path, "delete.txt" | "later.txt")),
+                "{tree}"
+            );
+            ensure!(std::fs::read_to_string(workspace.join("README.md"))? == "Studio save\n");
+            ensure!(std::fs::read_to_string(workspace.join("later.txt"))? == "later edit\n");
+            ensure!(!workspace.join("delete.txt").exists());
+            let pending = git(
+                &workspace,
+                &[
+                    "--git-dir=.instafy/.git",
+                    "--work-tree=.",
+                    "status",
+                    "--porcelain",
+                ],
+            );
+            ensure!(
+                pending.contains("README.md") && pending.contains("later.txt"),
+                "{pending}"
+            );
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        server.stop().await?;
+        result
     }
 
     /// Selection (a), end to end against a real single-tenant origin: an

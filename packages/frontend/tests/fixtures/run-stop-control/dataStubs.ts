@@ -10,6 +10,7 @@ export const RUN_STOP_FIXTURE_STUBS: Record<string, string> = {
   "/src/services/runtimeController/jobs.ts": `
     export const cancelAgentJob = async () => { throw new Error("The playground must use its injected cancel transport"); };
     export const cancelPlanGroup = cancelAgentJob;
+    export const fetchPlanGroupStatus = async () => { throw new Error("Historical workstream lookups are disabled in this playground"); };
   `,
   "/src/screens/studio/components/ChatCredentialRequestEntries.tsx": `
     export const IntegrationRequestEntry = () => null;

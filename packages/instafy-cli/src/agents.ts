@@ -13,6 +13,19 @@ type AgentCommonOptions = {
 
 export type AgentListOptions = AgentCommonOptions;
 
+export type AgentSettingsOptions = AgentCommonOptions & {
+  maxAgentsPerPlan?: string;
+  maxConcurrentAgents?: string;
+  interactive?: boolean;
+};
+
+type AgentSettingKey = "maxAgentsPerPlan" | "maxConcurrentAgents";
+
+type ControllerAgentSettings = Record<AgentSettingKey, number> & {
+  limits: Record<AgentSettingKey, { min: number; max: number; default: number }>;
+  canManage: boolean;
+};
+
 export type AgentContextListOptions = AgentCommonOptions & {
   agent?: string;
   agentId?: string;
@@ -244,6 +257,100 @@ export async function agentsList(options: AgentListOptions): Promise<void> {
     );
     console.log(`  id: ${agent.id}`);
   }
+}
+
+const agentSettingFields = [
+  { key: "maxAgentsPerPlan", flag: "--max-agents-per-plan", label: "Maximum agents per plan" },
+  { key: "maxConcurrentAgents", flag: "--max-concurrent-agents", label: "Maximum concurrent team workers across this space" },
+] as const;
+
+function parseAgentSetting(value: string, label: string): number {
+  if (!/^[1-9]\d*$/.test(value.trim()) || !Number.isSafeInteger(Number(value))) {
+    throw new Error(`${label} must be a positive whole number.`);
+  }
+  return Number(value);
+}
+
+export async function agentSettings(options: AgentSettingsOptions): Promise<void> {
+  const patch: Partial<Record<AgentSettingKey, number>> = {};
+  for (const field of agentSettingFields) {
+    if (options[field.key] !== undefined) {
+      patch[field.key] = parseAgentSetting(options[field.key]!, field.flag);
+    }
+  }
+  if (options.interactive) {
+    if (options.json || Object.keys(patch).length) {
+      throw new Error("Use --interactive without --json or setting flags.");
+    }
+    if (!process.stdin.isTTY || !process.stdout.isTTY || process.env.CI === "true") {
+      throw new Error("--interactive requires a terminal. Use --max-agents-per-plan or --max-concurrent-agents instead.");
+    }
+  }
+
+  const projectId = resolveProjectId(options.project);
+  const request = {
+    path: `/projects/${encodeURIComponent(projectId)}/multi-agent-settings`,
+    controllerUrl: options.controllerUrl,
+    accessToken: options.accessToken,
+    serviceToken: options.serviceToken,
+  };
+  let settings = await requestControllerApiJson<ControllerAgentSettings>({ ...request, method: "GET" });
+  if ((options.interactive || Object.keys(patch).length) && !settings.canManage) {
+    throw new Error("You do not have permission to manage this space's multi-agent settings.");
+  }
+
+  if (options.interactive) {
+    const { isCancel, text } = await import("@clack/prompts");
+    console.log("These settings are shared by everyone in this space. Runtime capacity can limit concurrency further; lead and root jobs are excluded.");
+    for (const field of agentSettingFields) {
+      const bounds = settings.limits[field.key];
+      const entered = await text({
+        message: `${field.label} (${bounds.min}–${bounds.max}; default ${bounds.default})`,
+        placeholder: String(settings[field.key]),
+        defaultValue: String(settings[field.key]),
+        validate(value) {
+          try {
+            const parsed = parseAgentSetting(value || String(settings[field.key]), field.label);
+            if (parsed < bounds.min || parsed > bounds.max) {
+              return `Enter a whole number from ${bounds.min} to ${bounds.max}.`;
+            }
+          } catch (error) {
+            return (error as Error).message;
+          }
+        },
+      });
+      if (isCancel(entered)) throw new Error("Cancelled. No settings were changed.");
+      const value = parseAgentSetting(String(entered), field.label);
+      if (value !== settings[field.key]) patch[field.key] = value;
+    }
+  }
+
+  for (const field of agentSettingFields) {
+    const value = patch[field.key];
+    const bounds = settings.limits[field.key];
+    if (value !== undefined && (value < bounds.min || value > bounds.max)) {
+      throw new Error(`${field.flag} must be between ${bounds.min} and ${bounds.max}.`);
+    }
+  }
+  if (Object.keys(patch).length) {
+    settings = await requestControllerApiJson<ControllerAgentSettings>({
+      ...request,
+      method: "PATCH",
+      jsonBody: patch,
+    });
+  }
+
+  if (options.json) {
+    console.log(JSON.stringify(settings, null, 2));
+    return;
+  }
+  console.log(kleur.bold(`Multi-agent settings for space ${projectId}`));
+  for (const field of agentSettingFields) {
+    const bounds = settings.limits[field.key];
+    console.log(`${field.label}: ${settings[field.key]} (range ${bounds.min}–${bounds.max}; default ${bounds.default})`);
+  }
+  console.log("Shared across this space. Lead/root jobs are excluded from the concurrent worker limit; runtime capacity can limit concurrency further.");
+  if (!settings.canManage) console.log("Read-only: your role cannot change these settings.");
 }
 
 export async function agentContextsList(options: AgentContextListOptions): Promise<void> {

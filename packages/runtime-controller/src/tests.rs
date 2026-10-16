@@ -73,6 +73,8 @@ mod conversation_notification_http_tests;
 #[path = "notification_conversation_read_tests.rs"]
 mod notification_conversation_read_tests;
 
+#[path = "multi_agent_settings/tests.rs"]
+mod multi_agent_settings_tests;
 #[path = "org_accent_tests.rs"]
 mod org_accent_tests;
 #[path = "participation_billing_tests.rs"]
@@ -1922,13 +1924,20 @@ async fn connect_test_db() -> anyhow::Result<Option<(tokio_postgres::Client, Joi
 async fn create_runtime_spread_scope_tables(client: &tokio_postgres::Client) -> anyhow::Result<()> {
     client
         .batch_execute(
-            "CREATE TEMP TABLE runtimes (
+            "ALTER TABLE agent_jobs ADD COLUMN IF NOT EXISTS agent_role text;
+            CREATE TEMP TABLE project_multi_agent_settings (
+                project_id uuid PRIMARY KEY,
+                max_agents_per_plan integer NOT NULL DEFAULT 64,
+                max_concurrent_agents integer NOT NULL DEFAULT 8
+            );
+            CREATE TEMP TABLE runtimes (
                 id uuid PRIMARY KEY,
                 project_id uuid NOT NULL,
                 provider text NOT NULL DEFAULT 'instafy-cloud',
                 status text NOT NULL,
                 capabilities jsonb NOT NULL DEFAULT '{}'::jsonb,
-                active_lease_id uuid
+                active_lease_id uuid,
+                last_seen_at timestamptz DEFAULT now()
             );
             CREATE TEMP TABLE runtime_leases (
                 id uuid PRIMARY KEY,
@@ -14003,13 +14012,20 @@ async fn lease_next_agent_job_scopes_grouped_runtime_spread_to_plan_runtimes() -
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now()
             );
+            ALTER TABLE agent_jobs ADD COLUMN agent_role text;
+            CREATE TEMP TABLE project_multi_agent_settings (
+                project_id uuid PRIMARY KEY,
+                max_agents_per_plan integer NOT NULL DEFAULT 64,
+                max_concurrent_agents integer NOT NULL DEFAULT 8
+            );
             CREATE TEMP TABLE runtimes (
                 id uuid PRIMARY KEY,
                 project_id uuid NOT NULL,
                 provider text NOT NULL DEFAULT 'instafy-cloud',
                 status text NOT NULL,
                 capabilities jsonb NOT NULL DEFAULT '{}'::jsonb,
-                active_lease_id uuid
+                active_lease_id uuid,
+                last_seen_at timestamptz DEFAULT now()
             );
             CREATE TEMP TABLE runtime_leases (
                 id uuid PRIMARY KEY,
@@ -14215,6 +14231,36 @@ async fn lease_next_agent_job_yields_spread_group_to_unused_group_runtime() -> a
                 &parent_runtime_id,
                 &queued_job_id,
             ],
+        )
+        .await?;
+
+    // Nonexistent or stale capacity must not reserve the queued sibling.
+    for (status, stale) in [("requested", false), ("ready", true)] {
+        client.execute("update runtimes set status=$2, last_seen_at=now()-make_interval(secs=>$3) where id=$1",
+            &[&group_runtime_id, &status, &(if stale { 180.0_f64 } else { 0.0_f64 })]).await?;
+        let transaction = client.transaction().await?;
+        let leased = agent::lease_next_agent_job(
+            &transaction,
+            &project_id,
+            Some(&parent_runtime_id),
+            120,
+            false,
+            false,
+            false,
+            false,
+            None,
+            None,
+            false,
+        )
+        .await
+        .map_err(|error| controller_error("ignore unavailable spread slot", error))?;
+        assert_eq!(leased.map(|job| job.id), Some(queued_job_id));
+        transaction.rollback().await?;
+    }
+    client
+        .execute(
+            "update runtimes set status='ready',last_seen_at=now() where id=$1",
+            &[&group_runtime_id],
         )
         .await?;
 

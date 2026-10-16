@@ -237,37 +237,42 @@ impl AgentExecutor {
         result
     }
 
-    pub async fn run_parallel_direct_write_scoped_with_progress(
+    pub async fn run_parallel_scoped_with_progress(
         &self,
         client: Arc<ControllerClient>,
         registration: &Registration,
         job: &LeaseJob,
         lease_lost_signal: Option<JobCancelSignal>,
     ) -> Result<JobExecution> {
+        // The subprocess receives only this job's scoped secrets. Never install
+        // them into the parent environment shared by sibling workers.
+        let environment = if self
+            .processor
+            .can_run_isolated_scoped_worker(registration, job)
+        {
+            let secrets = client.fetch_job_secrets(registration, job.id, true).await?;
+            crate::agent::resolved_job_environment(&secrets)
+        } else {
+            HashMap::new()
+        };
         let (progress_tx, progress_status, progress_task) =
             spawn_progress_dispatch(client, registration, job.id, lease_lost_signal.clone());
         let progress_handle = JobProgress {
             sender: progress_tx.clone(),
             status: progress_status,
         };
-
-        let saves = self.processor.rolling_saves_for(registration, job).await;
-        let ticker = saves
-            .as_ref()
-            .map(rolling_saves::RollingSaves::start_ticker);
-        let mut result = self
+        // Private copies are published only after scope/conflict validation.
+        // A rolling whole-checkout save must not collect a sibling's edits.
+        let result = self
             .processor
-            .run_parallel_direct_write_scoped_worker_job(
+            .run_parallel_scoped_worker_job(
                 registration,
                 job,
                 Some(progress_handle),
-                lease_lost_signal.clone(),
+                lease_lost_signal,
+                environment,
             )
             .await;
-        if let Some(saves) = saves.as_ref() {
-            rolling_saves::finish_job(saves, ticker, &mut result).await;
-        }
-
         finish_progress_dispatch(progress_tx, progress_task, job.id).await;
         result
     }

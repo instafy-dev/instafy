@@ -10,6 +10,35 @@ export interface ControllerJobCancelResult {
   canceledJobIds: string[];
 }
 
+export interface ControllerPlanWorkerStatus {
+  jobId: string;
+  handle: string;
+  status: string;
+  summary?: string | null;
+  lastMessage?: string | null;
+  leaseMetrics?: Record<string, unknown> | null;
+}
+
+export interface ControllerPlanGroupStatus {
+  groupId: string;
+  workers: ControllerPlanWorkerStatus[];
+}
+
+/** A bounded historical lookup; live progress continues through the run feed. */
+export async function fetchPlanGroupStatus(groupId: string, signal?: AbortSignal): Promise<ControllerPlanGroupStatus | null> {
+  if (!runtimeControllerEnabled) return null;
+  const context = await resolveControllerRequestContext(null);
+  if (!context.accessToken) return null;
+  const response = await fetch(`${context.baseUrl}/agent/plan-groups/${encodeURIComponent(groupId)}/status`, {
+    headers: { authorization: `Bearer ${context.accessToken}` }, signal,
+  });
+  if (!response.ok) throw new Error(await readControllerError(response, "Could not load workstream status.", context));
+  const value = await response.json() as ControllerPlanGroupStatus;
+  if (value.groupId !== groupId || !Array.isArray(value.workers)) throw new Error("Invalid workstream status response.");
+  return { groupId, workers: value.workers.filter(worker => worker && typeof worker.jobId === "string"
+    && typeof worker.handle === "string" && typeof worker.status === "string") };
+}
+
 function normalizeCanceledIds(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0)

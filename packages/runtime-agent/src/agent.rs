@@ -33,6 +33,10 @@ use crate::tunnels::{TunnelLifecycle, request_tunnel_assignment};
 
 static JOB_PROCESS_ENV_LOCK: Lazy<AsyncMutex<()>> = Lazy::new(|| AsyncMutex::new(()));
 
+fn runtime_reuse_is_safe() -> bool {
+    crate::isolated_tool_worker::runtime_reuse_is_safe() && crate::codex::runtime_reuse_is_safe()
+}
+
 pub struct RuntimeAgent {
     config: Config,
     shutdown: ShutdownSignal,
@@ -900,7 +904,12 @@ impl RuntimeAgent {
                 .await;
         }
 
-        let shutdown_triggered = lease_result?;
+        let shutdown_triggered = if !runtime_reuse_is_safe() {
+            warn!("AI worker shutdown could not be confirmed; stopping this runtime before reuse");
+            true
+        } else {
+            lease_result?
+        };
 
         if shutdown_triggered {
             // Prefer the freshest tokens for the final calls: the original agent
@@ -952,6 +961,10 @@ impl RuntimeAgent {
         let heartbeat_seconds = client.heartbeat_seconds().max(30);
 
         loop {
+            if !runtime_reuse_is_safe() {
+                warn!("AI worker cleanup requires attention; no more jobs will be leased");
+                return Ok(true);
+            }
             let jobs = tokio::select! {
                 _ = shutdown.cancelled() => {
                     info!("shutdown requested; exiting lease loop");
@@ -1075,7 +1088,7 @@ impl RuntimeAgent {
         // A batch's jobs share their conversation's chat attachments until
         // the last of them is done.
         let _batch_attachments = processor.hold_batch_attachments(&jobs);
-        if should_run_batch_as_parallel_direct_write_group(&processor, registration, &jobs) {
+        if should_run_batch_as_parallel_scoped_group(&processor, registration, &jobs) {
             info!(
                 job_count = jobs.len(),
                 "handling exact write-scoped leased job batch in parallel on one runtime"
@@ -1195,6 +1208,11 @@ impl RuntimeAgent {
         heartbeat_seconds: u32,
         secret_env_keys: Arc<Mutex<HashSet<String>>>,
     ) -> Result<()> {
+        if !runtime_reuse_is_safe() {
+            return Err(anyhow!(
+                "AI worker cleanup is unconfirmed; runtime restart required"
+            ));
+        }
         // Fail Personal Browser jobs before heartbeats, secrets, or any executor
         // path can make a hosted/shared browser fallback possible.
         if let Err(error) = validate_personal_browser_job_capability(&job.payload, job.project_id) {
@@ -1245,16 +1263,26 @@ impl RuntimeAgent {
         // Job secrets, controller access tokens, and Codex proxy credentials are process-wide
         // environment variables today. Start heartbeats first so queued sibling jobs keep their
         // lease, then serialize the env-sensitive part of each job inside one runtime process.
-        // Exact write-scoped direct worker lanes use per-job proxy config and no process env
-        // mutation, so one runtime can safely execute disjoint owned-path lanes concurrently.
-        let parallel_direct_write = executor
+        // Isolated scoped workers receive per-job credentials through private IPC, so
+        // disjoint workers can execute concurrently without mutating this process environment.
+        let parallel_scoped = executor
             .processor()
-            .can_run_parallel_direct_write_scoped_worker(registration, &job);
-        let _job_process_env_guard = if parallel_direct_write {
+            .can_run_parallel_scoped_worker(registration, &job);
+        let _job_process_env_guard = if parallel_scoped {
             None
         } else {
             Some(JOB_PROCESS_ENV_LOCK.lock().await)
         };
+        // Another leased job may have waited for this lock while its predecessor failed
+        // cleanup. Recheck before exposing this job's secrets or starting any work.
+        if !runtime_reuse_is_safe() {
+            if let Some(task) = periodic_heartbeat.take() {
+                task.shutdown().await;
+            }
+            return Err(anyhow!(
+                "AI worker cleanup is unconfirmed; runtime restart required"
+            ));
+        }
         if let Some(end) = TurnEnd::before_run(&lease_lost_signal) {
             info!(
                 job_id = %job.id,
@@ -1267,7 +1295,7 @@ impl RuntimeAgent {
             return Ok(());
         }
 
-        if !parallel_direct_write {
+        if !parallel_scoped {
             match client.fetch_job_secrets(registration, job.id, true).await {
                 Ok(secrets) => {
                     apply_job_secrets(&secret_env_keys, &secrets);
@@ -1285,7 +1313,7 @@ impl RuntimeAgent {
         }
 
         let secrets_refresh_seconds = resolve_secrets_refresh_interval_seconds();
-        if secrets_refresh_seconds > 0 && !parallel_direct_write {
+        if secrets_refresh_seconds > 0 && !parallel_scoped {
             periodic_secrets_refresh = Some(SecretsRefreshTask::spawn(
                 client.clone(),
                 registration.clone(),
@@ -1299,10 +1327,13 @@ impl RuntimeAgent {
         let (mut job_input_task, mut active_turn_input): (
             Option<JobInputTask>,
             Option<ActiveTurnInputReceiver>,
-        ) = if registration
-            .agent_token_scopes
-            .iter()
-            .any(|scope| scope == "agent.input")
+        ) = if !executor
+            .processor()
+            .can_run_isolated_scoped_worker(registration, &job)
+            && registration
+                .agent_token_scopes
+                .iter()
+                .any(|scope| scope == "agent.input")
         {
             let (sender, receiver, cancellation) = active_turn_input_channel(1);
             (
@@ -1318,7 +1349,7 @@ impl RuntimeAgent {
         } else {
             debug!(
                 job_id = %job.id,
-                "controller did not grant agent.input; active-turn steering is disabled for this job"
+                "active-turn steering is unavailable for this job or execution lane"
             );
             (None, None)
         };
@@ -1356,9 +1387,9 @@ impl RuntimeAgent {
                     )
                     .await;
                 } else {
-                    let execution_result = if parallel_direct_write {
+                    let execution_result = if parallel_scoped {
                         executor
-                            .run_parallel_direct_write_scoped_with_progress(
+                            .run_parallel_scoped_with_progress(
                                 client.clone(),
                                 registration,
                                 &job,
@@ -1395,7 +1426,7 @@ impl RuntimeAgent {
                                 if let Some(task) = periodic_secrets_refresh.take() {
                                     task.shutdown().await;
                                 }
-                                if !parallel_direct_write {
+                                if !parallel_scoped {
                                     let empty = JobSecrets {
                                         env: HashMap::new(),
                                         inventory: Vec::new(),
@@ -1495,7 +1526,7 @@ impl RuntimeAgent {
             task.shutdown().await;
         }
 
-        if !parallel_direct_write {
+        if !parallel_scoped {
             let empty = JobSecrets {
                 env: HashMap::new(),
                 inventory: Vec::new(),
@@ -1621,7 +1652,7 @@ fn should_run_batch_as_read_only_group(jobs: &[LeaseJob]) -> bool {
         })
 }
 
-fn should_run_batch_as_parallel_direct_write_group(
+fn should_run_batch_as_parallel_scoped_group(
     processor: &JobProcessor,
     registration: &Registration,
     jobs: &[LeaseJob],
@@ -1633,11 +1664,11 @@ fn should_run_batch_as_parallel_direct_write_group(
     let mut owned_paths: HashSet<String> = HashSet::new();
     jobs.iter().all(|job| {
         if job_requests_runtime_spread(job)
-            || !processor.can_run_parallel_direct_write_scoped_worker(registration, job)
+            || !processor.can_run_parallel_scoped_worker(registration, job)
         {
             return false;
         }
-        let Some(paths) = processor.parallel_direct_write_scope_paths(job) else {
+        let Some(paths) = processor.parallel_scoped_scope_paths(job) else {
             return false;
         };
         for path in paths {
@@ -1852,7 +1883,7 @@ impl RuntimeAgent {
     }
 }
 
-fn apply_job_secrets(managed_keys: &Mutex<HashSet<String>>, secrets: &JobSecrets) {
+pub(crate) fn resolved_job_environment(secrets: &JobSecrets) -> HashMap<String, String> {
     const SECRET_INVENTORY_ENV_KEY: &str = "INSTAFY_PROJECT_SECRET_INVENTORY";
 
     let mut resolved_env = secrets.env.clone();
@@ -1861,6 +1892,11 @@ fn apply_job_secrets(managed_keys: &Mutex<HashSet<String>>, secrets: &JobSecrets
         resolved_env.insert(SECRET_INVENTORY_ENV_KEY.to_string(), serialized_inventory);
     }
 
+    resolved_env
+}
+
+fn apply_job_secrets(managed_keys: &Mutex<HashSet<String>>, secrets: &JobSecrets) {
+    let resolved_env = resolved_job_environment(secrets);
     let mut guard = managed_keys.lock();
 
     let previous: Vec<String> = guard.iter().cloned().collect();

@@ -1,6 +1,6 @@
 ---
 name: instafy-agent-collaboration
-description: "Keep top-level agent work free but bounded: decide when to stay inline, when to emit skill-authored multi-agent plans, when to spin linked threads, and how to hand off without transcript bleed."
+description: "Choose direct work, available native helpers, or durable Instafy workstreams, and hand off with clear scope and context boundaries."
 context_kind: meta
 context_parent: instafy-persistent-contexts
 always_include: true
@@ -20,14 +20,24 @@ Goal: let top-level agents work freely in the same project while keeping memory 
 - Hidden subagents are internal helpers only. They are not separate user-facing personas.
 - Soft work focus, current direction, and prior lane responsibility live in compact context cards and conversation/thread references. Do not invent a separate first-class claim/ownership object for topic focus.
 
+## Delegation choice
+
+Choose the least coordination that completes the task well:
+
+- Work directly when splitting adds little. Create or reuse one linked conversation through ordinary conversation tools when that lane is wanted; this alone needs no worker plan or lookup of already supplied evidence.
+- Use native helpers for bounded subtasks only when their tools are available directly or through supported tool discovery. They share parent workspace, permissions and proxy identity, without controller write scopes or team job cards. Native limits differ from project team capacity: respect exposed limit semantics, batch requested helpers when slots are reusable, and disclose a hard total limit rather than silently reducing the count. The parent integrates results, waits for needed helpers, and stops unfinished helpers using the available tools before finishing. Helpers are not separate personas or durable threads.
+- Use `multi_agent_plan` for selected durable controller worker jobs and a lead checkpoint when that coordination is useful or requested. This differs from continuing or creating one linked conversation; an explicitly requested one-worker plan is valid.
+
+Parallel wording alone does not choose durable workers. Preserve explicit mechanisms, personas, machines, threads and agent counts. If unavailable, explain the limitation instead of silently substituting. Do not claim delegation ran without tool/job evidence. Delegation does not expand permissions or writable scope.
+
 ## Execution model
 
-There are three different "agent" lanes. Choose deliberately:
+Choose the agent execution lane deliberately:
 
 - **Hidden Codex subagents inside one runtime turn**: use only as internal helpers for bounded read/research/implementation subtasks when the active Codex runtime supports them. They share the current turn's outcome and should not be represented as separate personas or linked user-facing threads.
 - **Top-level Instafy agents in conversation threads**: use linked `threadKind=agent` conversations when a user-facing peer agent needs durable context, its own reply stream, or a handoff lane. Coordinate with normal `@agent` messages and inline thread/message references.
 - **Multiple runtimes**: use when top-level agent work should actually run in parallel. One runtime may lease an all-read-only batch together, but its Codex/proxy/tool environment is process-scoped and may serialize actual execution for correctness. Write-heavy or unscoped work should still be treated as conservative unless multiple runtimes pick up separate jobs.
-- **Single runtime direct write lanes**: when each sibling is a top-level worker with `writeScope.mode = "owned"` and exact, non-overlapping `ownedPaths` (no globs), one runtime may run those direct write-scoped lanes concurrently. This is for simple owned-file outputs/edits; normal shell/tool/Codex jobs still serialize inside one runtime.
+- **Experimental isolated tool workers**: an opted-in runtime can run bounded top-level workers with disjoint owned paths in private source copies and native tool sessions. Do not assume this capability is enabled. These workers have no shared process state, browser/MCP tools or native subdelegation. Use real commands for timers and observations; model text alone is not execution evidence. Without that opt-in, the scoped file-generation shortcut remains tool-free; asking it to wait does not execute a real timer. Ordinary native jobs serialize on one runtime.
 
 Do not assume that mentioning multiple top-level agents means same-runtime parallel execution. If only one runtime is available, expect batched but possibly serialized progress for read-only work and queued/serial progress for write-capable work. Use controller `leaseMetrics` (`queuedAt`, `leasedAt`, `queueWaitMs`, `leasedByRuntimeId`, `agentHandle`) plus wall-clock timing when you need to evaluate whether work actually ran in parallel. For write-heavy work, split the writable file/module scope explicitly before sending peer messages.
 
@@ -50,32 +60,28 @@ Write-scope rules for top-level agents:
 
 ## Routing preflight
 
-The preflight decision is a small model-authored route, not a domain rule and not frontend text matching. Classify the latest request before loading detailed planning behavior:
+Route the latest request by coordination needs, without granting tools or permissions:
 
-- Use `direct` for ordinary Q&A, trivial math, single-file edits, obvious bug fixes, narrow reviews, and work where coordination overhead is higher than benefit.
-- Use `multi_agent_candidate` when the user explicitly asks for team/parallel/sibling-agent/split work, or when the work is broad, high-risk, cross-domain, long-running, or clearly benefits from independent lanes before a lead decision.
-- Use `cross_chat_lookup` when the user asks about another/prior/recent chat, existing workstream, previous lane, or recovered context and explicitly does not want a new team.
-- Use `write_coordination_required` when multiple agents are asked to write the same file/path/target concurrently and the request needs an explicit serialized or disjoint split before edits.
+- `direct`: a normal parent turn, alone, with exposed native helpers, or using ordinary conversation tools to create/reuse a linked lane. Known-thread continuation needs no lookup when supplied evidence suffices.
+- `multi_agent_candidate`: create a durable controller-worker plan with selected workers and a lead checkpoint. An explicit one-worker plan is valid; a linked conversation alone stays direct.
+- `cross_chat_lookup`: retrieve required prior conversation/context evidence missing from supplied history and refs, without creating a new team.
+- `write_coordination_required`: concurrent writes overlap and need a serialized or disjoint split first.
 
-Also decide the lookup requirements in the same structured route:
+Preserve explicit mechanisms and counts. Parallel wording alone does not select a durable plan.
 
-- Set `requiresContextLookup = true` when answering depends on old conversation/thread/context evidence rather than only the current prompt and current conversation history.
-- Set `requiresCommandExecution = true` when the runtime should run Instafy CLI conversation/context lookup before the final answer. Use this for vague cross-chat recovery such as “another recent chat” when no stable refs are already supplied.
-- Set both flags false for direct answers, trivial tasks, current-chat answers where the visible conversation history is enough, and requests that already provide sufficient `[[conversation:...]]`, `[[thread:...]]`, or `[[message:...]]` refs.
-
-Do not route to `multi_agent_candidate` for one useful lane. If the request is clearly trivial, answer directly even if it mentions agents. If the route is `multi_agent_candidate`, the focused planning turn will load the detailed workstream rules and decide whether to emit `multi_agent_plan`.
+Set `requiresContextLookup` only for missing prior conversation/context evidence that must be retrieved. Set `requiresCommandExecution` for a separate fresh filesystem, Git, process or runtime observation; context lookup using a CLI does not itself require it. Both may be true; supplied sufficient evidence needs neither. Detailed observation/output contracts come from the runtime.
 
 ## Skill-authored workstreams
 
 The product provides generic coordination primitives; this skill decides when to use them. Do not hard-code domain workflows in frontend or controller behavior.
 
-Use a `multi_agent_plan` action for top-level sibling agents when the work is broad, high-risk, cross-domain, long-running, explicitly parallel, or likely to benefit from independent investigation before a lead decision. Stay single-agent for small Q&A, single-file edits, obvious bug fixes, narrow reviews, and requests where coordination overhead is higher than benefit.
+Use a `multi_agent_plan` for durable controller worker jobs and their lead checkpoint when separate job tracking, independent worker context/personas or runtime placement is useful or requested. Creating or continuing one linked conversation uses ordinary conversation tools instead; it does not itself require a worker plan. Broad work can still use native helpers inside the parent turn.
 
-If the user explicitly asks for a team, parallel work, sibling agents, split investigation, scoped agents, lead synthesis, or an org-like workflow, treat that as crossing the threshold unless the request is clearly trivial. In that case, emit `multi_agent_plan` before substantive inspection or edits; do not do the first sibling's work inline and then summarize it as if a team had run.
+When durable sibling workers are selected, emit `multi_agent_plan` before doing their substantive inspection or edits. Prepare shared inputs when needed, but do not do a sibling's work inline and then summarize it as if that worker had run.
 
 The overlap guardrail overrides the explicit-team threshold. If the latest request asks multiple agents to write the same file/path concurrently, do not emit a `multi_agent_plan` merely because the user requested multiple agents. Answer with the coordination requirement or ask for a serialized/disjoint split first.
 
-Only emit `multi_agent_plan` when there are at least two useful sibling lanes. A one-worker "team" is attention noise: stay single-agent, create/reuse one linked work thread, or ask a clarifying question instead.
+Without an explicit worker count, prefer at least two useful durable lanes; a bounded subtask usually fits direct work or a native helper. Preserve explicit durable worker counts, including one. The supplied per-plan limit bounds the plan size; the separate active-worker limit queues excess workers. Never trim a plan to its concurrency limit or emit a plan exceeding its per-plan limit.
 
 Before starting broad or cross-chat work, do a soft coordination lookup:
 
@@ -97,7 +103,7 @@ Recovered/inverted coordination:
 - If recovered lanes are now tightly coupled, continue as one coordinator thread. If they remain independent, state the orthogonal split and let each lane continue separately.
 - If coordination needs both old lanes and new missing work, use the `Workstreams:` line for old lanes and emit `multi_agent_plan` only for the genuinely new sibling jobs.
 
-When the latest request names multiple independent domains, surfaces, packages, or boundaries, preserve that split in the plan unless you explicitly state why a named domain is out of scope. Prefer two to four compact sibling lanes over one broad catch-all lane. Each lane should have a distinct scope summary and either exact read-only paths/globs or a bounded discovery instruction inside that scope.
+Once durable workers are selected, preserve named independent domains, surfaces, packages or boundaries in their scopes unless a domain is out of scope. When no worker count is specified, prefer a few compact lanes over one broad catch-all lane. Each lane should have a distinct scope summary and either exact read-only paths/globs or a bounded discovery instruction inside that scope.
 
 Preserve source locators when delegating. If the user provided a URL, commit SHA, pull request, issue, repo path, branch name, or other locator, copy the exact locator into every sibling prompt that needs it and into the lead continuation prompt. Do not reduce a URL to only a shorthand, hash, or inferred repo name.
 
@@ -188,9 +194,9 @@ When source structure is needed before delegated workstreams, prepare it with no
 }
 ```
 
-Security audit is an example pattern, not a product special case:
+When durable workers are selected, security audit is an example pattern, not an automatic reason to create a plan:
 
-- A broad read-only request like “find security issues in this project” can justify sibling agents by domain/subpath.
+- A selected durable audit can split its workers by domain/subpath.
 - Keep the plan `read_only` unless the user explicitly asks for fixes.
 - Example scopes: frontend/client surfaces, controller/API authorization, runtime/tool execution boundaries, and secrets/configuration.
 - If the user names several security domains such as runtime/tool execution, conversation/context handling, and secrets/config, create separate lanes for those domains rather than reviewing only the first one.
@@ -223,9 +229,9 @@ Emit the action in the final JSON `actions` array when a lead agent should creat
     "expectedReportFormat": "severity-ranked findings, evidence, residual risk, and next actions"
   },
   "runtimeRouting": {
-    "strategy": "spread",
-    "desiredSlots": 3,
-    "rationale": "The user asked for accelerated independent investigation across disjoint read-only lanes."
+    "strategy": "reuse",
+    "desiredSlots": 1,
+    "rationale": "One explicitly requested durable worker can reuse the current runtime."
   },
   "presentation": {
     "workerEvidenceVisibility": "surface_on_failure",
@@ -255,7 +261,7 @@ For `mode = "write_scoped"`:
 
 - Every writing sibling needs explicit, disjoint `writeScope.ownedPaths` or `ownedPathGlobs`.
 - Prefer exact `ownedPaths` whenever the intended files are known. For independent file creation, assign one or more exact file paths to each lane, repeat those paths in the worker prompt, and avoid globs unless the lane truly owns an open-ended module.
-- If the plan is safe to run on one machine, omit `runtimeRouting` or set `runtimeRouting.strategy = "reuse"`; exact disjoint `ownedPaths` can still run as direct parallel worker lanes inside one runtime. Use `spread` only when multiple runtimes/machines are desired or the work is too slow for one runtime.
+- If the plan is safe to run on one machine, omit `runtimeRouting` or set `runtimeRouting.strategy = "reuse"`; exact disjoint `ownedPaths` support concurrent tool-free file generation by default. Concurrent workers that execute real tools on one runtime require its experimental isolated tool-worker capability. Use `spread` only when multiple runtimes/machines are desired or the work is too slow for one runtime.
 - For unsafe one-machine parallel edits over broad modules, use `ownedPathGlobs` only with an `advisoryLock` declaration and a worker prompt that starts by acquiring the matching `tmp/instafy-locks/<scope>.lock` directory, writes `owner.json`, and releases or marks it resolved after the edit. This can accelerate work, but it is not a hard correctness guarantee.
 - Include a short rationale for each write-scope declaration.
 - If write scope is unclear, missing, or overlapping, do not emit the plan yet; ask for coordination or produce a single-agent plan. Do not rely on file names mentioned in prose as editable scope.

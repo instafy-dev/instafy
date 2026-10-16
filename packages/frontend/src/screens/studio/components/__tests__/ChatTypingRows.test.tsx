@@ -5,9 +5,10 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RETRYING_STATUS_DISPLAY_TEXT } from "../../../../conversations/runFailurePresentation";
 import type { ChatMessage } from "../../types";
+import type { RunRecord } from "../../../../types";
 import { ChatMessageAvatar } from "../ChatMessageAvatar";
 import { ChatTypingRows } from "../ChatTypingRows";
-import { resolveTypingIndicatorState } from "../typingIndicatorState";
+import { resolveMultiAgentTypingStatus, resolveTypingIndicatorState } from "../typingIndicatorState";
 import { expectCanonicalOctoCoin } from "../../../../components/__tests__/octoCoinExpectations";
 
 // The face is Octo's coin (OctoCoin, docs/Brand.md): white with the shared
@@ -597,6 +598,11 @@ describe("ChatTypingRows", () => {
 });
 
 describe("resolveTypingIndicatorState", () => {
+  const activeRun = (status: RunRecord["status"] = "in_progress"): RunRecord => ({
+    id: "run-current", status, projectId: "project", conversationId: "conversation", sessionId: null, promptId: null,
+    runType: "prompt", progress: 0, progressStage: null, previewUrl: null, lastMessage: null,
+    createdAt: null, updatedAt: null, metadata: { jobId: "job-current", agent: { handle: "poet10" } },
+  });
   // What the runtime agent stores while Codex waits out a rate-limited request.
   const rawStreamRetry =
     "Retrying: stream disconnected before completion: 429 Too Many Requests: The upstream provider rate limit was reached.";
@@ -613,6 +619,34 @@ describe("resolveTypingIndicatorState", () => {
     timestamp: 2,
     messageType: "status",
     metadata: { messageType: "status", ...metadata },
+  });
+
+  it("keeps a queued worker waiting instead of attributing its completed sibling's warning", () => {
+    const waiting = { phase: "waiting" as const, label: null };
+    expect(resolveTypingIndicatorState([userMessage,
+      status("sibling", "Workspace updated, but auto-save failed", { runId: "run-sibling", agent: { handle: "poet09" } }),
+    ], waiting, activeRun("queued"))).toEqual(waiting);
+  });
+
+  it("selects only the current execution's status, including when handles are reused", () => {
+    const fallback = { phase: "thinking" as const, label: "Thinking…" };
+    const previous = status("previous", "Saving an old poem", { runId: "old-run", jobId: "old-job", agent: { handle: "poet10" } });
+    const current = status("current", "Writing the requested poem", { jobId: "job-current" });
+    const sibling = status("sibling", "Retrying another worker", { runId: "run-sibling" });
+    expect(resolveTypingIndicatorState([userMessage, previous, current, sibling], fallback, activeRun()).label).toBe(current.content);
+    expect(resolveTypingIndicatorState([userMessage, previous, sibling], fallback, activeRun())).toEqual(fallback);
+    expect(resolveTypingIndicatorState([userMessage, status("unscoped", "Unknown worker")], fallback, activeRun())).toEqual(fallback);
+    expect(resolveTypingIndicatorState([userMessage, status("old-job", "Stale attempt", { runId: "run-current", jobId: "old-job" })], fallback, activeRun())).toEqual(fallback);
+  });
+
+  it("describes mixed execution and queued states separately", () => {
+    const agents = Array.from({ length: 8 }, (_, index) => ({ displayName: `@poet${index + 1}`, status: index < 5 ? "in_progress" as const : "queued" as const }));
+    const result = resolveMultiAgentTypingStatus(agents);
+    expect(result.label).toBe("5 working · 3 queued");
+    expect(result.ariaLabel).toBe("@poet1, @poet2, @poet3, @poet4, @poet5 are working; @poet6, @poet7, @poet8 are queued");
+    expect(resolveMultiAgentTypingStatus([{ displayName: "@poet", status: "awaiting_approval" }])).toEqual({
+      phase: "waiting", label: "1 waiting for approval", ariaLabel: "@poet is waiting for approval",
+    });
   });
 
   let container: HTMLDivElement;

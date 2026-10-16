@@ -1398,6 +1398,46 @@ fn maybe_migrate_legacy_git_dir(
     Ok(())
 }
 
+/// Commit an ordinary scoped writer's files under the caller's workspace apply
+/// lock. Unlike trusted imports, this must not force newly ignored files into
+/// history. Tracked files remain editable even if an ignore pattern matches.
+pub fn commit_visible_paths_locally(
+    workspace_root: &Path,
+    applied_paths: &[String],
+    deleted_paths: &[String],
+    message: &str,
+) -> Result<Option<String>, OriginError> {
+    if is_git_repo(workspace_root) && !applied_paths.is_empty() {
+        let input = applied_paths
+            .iter()
+            .flat_map(|path| path.bytes().chain(std::iter::once(0)))
+            .collect::<Vec<_>>();
+        let output = crate::workspace_git::WorkspaceGit::new(workspace_root, None)
+            .run_opts(
+                &["check-ignore", "-z", "--stdin"],
+                &crate::workspace_git::RunOpts {
+                    stdin: Some(&input),
+                    ..Default::default()
+                },
+            )
+            .map_err(|error| OriginError::internal(error.to_string()))?;
+        match output.status.code() {
+            Some(1) => {}
+            Some(0) => {
+                return Err(OriginError::conflict(
+                    "scoped local commit contains ignored files",
+                ))
+            }
+            _ => {
+                return Err(OriginError::internal(
+                    "could not verify ignored paths before scoped local commit",
+                ))
+            }
+        }
+    }
+    commit_apply_locally(workspace_root, applied_paths, deleted_paths, message)
+}
+
 /// Commit an apply's `applied_paths` and `deleted_paths` (and nothing else
 /// staged) on the checkout, with `message`. Every command it runs is local,
 /// so it takes no credential: a caller's bearer never reaches git here.
@@ -3224,6 +3264,40 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(paths, vec!["README.md"]);
+        Ok(())
+    }
+
+    #[test]
+    fn scoped_local_commit_rejects_new_ignored_files_but_allows_tracked_files() -> anyhow::Result<()>
+    {
+        let workspace = tempdir()?;
+        init_repo(workspace.path(), "main")?;
+        run_git(workspace.path(), &["config", "user.name", "Instafy Test"])?;
+        run_git(
+            workspace.path(),
+            &["config", "user.email", "playwright@instafy.dev"],
+        )?;
+        fs::write(workspace.path().join("tracked.txt"), "original")?;
+        run_git(workspace.path(), &["add", "tracked.txt"])?;
+        run_git(workspace.path(), &["commit", "-m", "seed"])?;
+        fs::create_dir(workspace.path().join(".instafy"))?;
+        fs::rename(
+            workspace.path().join(".git"),
+            workspace.path().join(".instafy/.git"),
+        )?;
+        fs::write(workspace.path().join(".gitignore"), "*.txt\n")?;
+        fs::write(workspace.path().join("new.txt"), "ignored")?;
+        let before = head_rev(workspace.path(), None);
+        assert!(
+            commit_visible_paths_locally(workspace.path(), &["new.txt".into()], &[], "worker")
+                .is_err()
+        );
+        assert_eq!(head_rev(workspace.path(), None), before);
+        fs::write(workspace.path().join("tracked.txt"), "worker")?;
+        let commit =
+            commit_visible_paths_locally(workspace.path(), &["tracked.txt".into()], &[], "worker")?;
+        assert!(commit.is_some());
+        assert_ne!(commit, before);
         Ok(())
     }
 

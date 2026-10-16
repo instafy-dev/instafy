@@ -1,14 +1,22 @@
-import { Fragment, useMemo, useState } from "react";
-import { CheckCircle, GitBranch, MoreHoriz, WarningTriangle } from "iconoir-react";
+import { createContext, Fragment, useContext, useEffect, useMemo, useState } from "react";
+import { CheckCircle, GitBranch, MoreHoriz, WarningTriangle, Xmark } from "iconoir-react";
 import { MenuTrigger } from "react-aria-components";
 import { Button, IconButton } from "../../../components/Button";
 import { MenuItemContent } from "../../../components/MenuItemContent";
 import { StudioMenu, StudioMenuItem, StudioMenuSeparator } from "../../../components/aria/StudioMenu";
 import { StudioPopover } from "../../../components/aria/StudioPopover";
 import { writeClipboardText } from "../../../runtime/runtimeMenuShared";
-import { cancelPlanGroup } from "../../../services/runtimeController/jobs";
+import { cancelPlanGroup, fetchPlanGroupStatus, type ControllerPlanGroupStatus } from "../../../services/runtimeController/jobs";
 import type { ChatMessage } from "../types";
+import type { RunRecord } from "../../../types";
 import { extractAgentJobId } from "./chatMessagePresentation";
+
+// Supplied by the chat's existing hydrated run feed. Message bodies do not
+// need to subscribe to composer/history providers or start separate polling.
+export const MultiAgentRunsContext = createContext<{
+  runs: Readonly<Record<string, RunRecord>>;
+  scopeKey: string | null;
+}>({ runs: {}, scopeKey: null });
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -41,7 +49,7 @@ type MultiAgentPlanView = {
   presentation: MultiAgentPlanPresentation;
 };
 
-type TeamActivityStatus = "queued" | "working" | "done" | "failed";
+type TeamActivityStatus = "queued" | "working" | "waiting" | "done" | "failed" | "canceled";
 
 type TeamActivity = {
   key: string;
@@ -202,7 +210,7 @@ function parseMultiAgentPlan(details: Record<string, unknown> | null): MultiAgen
   };
 }
 
-function extractMetadata(message?: ChatMessage | null): Record<string, unknown> | null {
+function extractMetadata(message?: Pick<ChatMessage, "metadata"> | null): Record<string, unknown> | null {
   if (!message) {
     return null;
   }
@@ -274,18 +282,18 @@ function extractNestedRecord(metadata: Record<string, unknown> | null, key: stri
   return isRecord(fallback) ? fallback : null;
 }
 
-function extractAgentHandle(message: ChatMessage): string {
+function extractAgentHandle(message: Pick<ChatMessage, "metadata">): string {
   const metadata = extractMetadata(message);
   const agent = extractNestedRecord(metadata, "agent", "agent");
   return normalizeHandleKey(agent?.handle);
 }
 
-function extractMultiAgentPlanMeta(message: ChatMessage): Record<string, unknown> | null {
+function extractMultiAgentPlanMeta(message: Pick<ChatMessage, "metadata">): Record<string, unknown> | null {
   const metadata = extractMetadata(message);
   return extractNestedRecord(metadata, "multiAgentPlan", "multi_agent_plan");
 }
 
-function extractLeaseMetrics(message: ChatMessage): TeamLeaseMetrics | null {
+function extractLeaseMetrics(message: Pick<ChatMessage, "metadata">): TeamLeaseMetrics | null {
   const metadata = extractMetadata(message);
   const raw = isRecord(metadata?.leaseMetrics)
     ? metadata.leaseMetrics
@@ -333,6 +341,10 @@ function isFailedMessage(message: ChatMessage): boolean {
     outcome === "canceled" ||
     outcome === "cancelled"
   );
+}
+
+function isCanceledMessage(message: ChatMessage): boolean {
+  return ["canceled", "cancelled"].includes(extractMessageOutcome(message));
 }
 
 function isWorkingMessage(message: ChatMessage): boolean {
@@ -539,16 +551,31 @@ function copyText(value: string) {
 function collectTeamActivity({
   planMessage,
   conversationMessages,
+  runs,
+  declaredGroupId,
+  snapshot,
 }: {
   planMessage?: ChatMessage | null;
   conversationMessages?: ChatMessage[] | null;
+  runs: Readonly<Record<string, RunRecord>>;
+  declaredGroupId: string;
+  snapshot: ControllerPlanGroupStatus | null;
 }) {
   const planJobId = planMessage ? extractAgentJobId(planMessage) : null;
-  const groupIds = new Set<string>();
+  const groupIds = new Set<string>(declaredGroupId ? [declaredGroupId] : []);
   const workerJobIds = new Set<string>();
   const workerHandleByJobId = new Map<string, string>();
   const workerMessagesByHandle = new Map<string, ChatMessage[]>();
   const leadMessages: ChatMessage[] = [];
+  const planRuns = Object.values(runs).filter(run => {
+    const planMeta = extractMultiAgentPlanMeta(run);
+    return declaredGroupId ? stringField(planMeta?.groupId) === declaredGroupId
+      : Boolean(planJobId && stringField(planMeta?.parentJobId) === planJobId);
+  }).sort((a, b) => Date.parse(a.createdAt ?? "") - Date.parse(b.createdAt ?? ""));
+  for (const run of planRuns) {
+    const groupId = stringField(extractMultiAgentPlanMeta(run)?.groupId);
+    if (groupId) groupIds.add(groupId);
+  }
 
   for (const message of conversationMessages ?? []) {
     const planMeta = extractMultiAgentPlanMeta(message);
@@ -558,10 +585,13 @@ function collectTeamActivity({
     const role = stringField(planMeta.role).toLowerCase();
     const groupId = stringField(planMeta.groupId);
     const parentJobId = stringField(planMeta.parentJobId);
-    if (role === "worker" && planJobId && parentJobId === planJobId) {
+    const matchesParent = Boolean(planJobId && parentJobId === planJobId && (!declaredGroupId || groupId === declaredGroupId));
+    if (matchesParent) {
       if (groupId) {
         groupIds.add(groupId);
       }
+    }
+    if (role === "worker" && matchesParent) {
       const jobId = extractAgentJobId(message);
       if (jobId) {
         workerJobIds.add(jobId);
@@ -592,7 +622,7 @@ function collectTeamActivity({
     const groupId = stringField(planMeta.groupId);
     const parentJobId = stringField(planMeta.parentJobId);
     const belongsToPlan =
-      Boolean(planJobId && parentJobId === planJobId) || Boolean(groupId && groupIds.has(groupId));
+      Boolean(planJobId && parentJobId === planJobId && (!declaredGroupId || groupId === declaredGroupId)) || Boolean(groupId && groupIds.has(groupId));
     if (!belongsToPlan) {
       continue;
     }
@@ -641,9 +671,9 @@ function collectTeamActivity({
     const evidenceSource = terminalEvidence ?? latest;
     let status: TeamActivityStatus;
     if (terminalEvidence) {
-      status = isFailedMessage(terminalEvidence) ? "failed" : "done";
+      status = isCanceledMessage(terminalEvidence) ? "canceled" : isFailedMessage(terminalEvidence) ? "failed" : "done";
     } else if (isFailedMessage(latest)) {
-      status = "failed";
+      status = isCanceledMessage(latest) ? "canceled" : "failed";
     } else if (isWorkingMessage(latest)) {
       status = "working";
     } else if (isDoneMessage(latest) || latest.content.trim()) {
@@ -675,9 +705,55 @@ function collectTeamActivity({
     }
   }
 
+  let leadActivity = buildActivity("lead", leadMessages);
+  for (const worker of snapshot?.workers ?? []) {
+    const key = normalizeHandleKey(worker.handle);
+    const evidence = workerActivityByHandle.get(key);
+    const status: TeamActivityStatus = worker.status === "leased" ? "working"
+      : worker.status === "completed" ? "done"
+      : worker.status === "canceled" || worker.status === "cancelled" ? "canceled"
+      : worker.status === "failed" || worker.status === "expired" ? "failed" : "queued";
+    workerActivityByHandle.set(key, {
+      key, status, jobId: worker.jobId,
+      summary: evidence?.summary || summarizeEvidence(worker.summary ?? worker.lastMessage ?? ""),
+      evidence: evidence?.evidence || formatEvidence(worker.summary ?? worker.lastMessage ?? ""),
+      leaseMetrics: extractLeaseMetrics({ metadata: { leaseMetrics: worker.leaseMetrics } }) ?? evidence?.leaseMetrics ?? null,
+      toolUpdateCount: evidence?.toolUpdateCount ?? 0,
+    });
+  }
+  const workerRunHandles = new Set<string>();
+  // Narrative evidence may arrive later, be compacted, or never exist for a
+  // job canceled before its first lease. The persisted run is authoritative
+  // for lifecycle and job identity, including after a page reload.
+  for (const run of planRuns) {
+    const role = stringField(extractMultiAgentPlanMeta(run)?.role).toLowerCase();
+    const key = role === "worker" ? extractAgentHandle(run) : "lead";
+    if (!key || (role !== "worker" && role !== "lead_continuation")) continue;
+    const evidence = role === "worker" ? workerActivityByHandle.get(key) : leadActivity;
+    const jobId = stringField(run.metadata?.jobId ?? run.metadata?.job_id);
+    const status: TeamActivityStatus = run.status === "in_progress" ? "working"
+      : run.status === "awaiting_approval" ? "waiting"
+      : run.status === "success" || run.status === "merged" ? "done"
+      : run.status === "failed" ? "failed"
+      : run.status === "canceled" ? "canceled" : "queued";
+    const activity: TeamActivity = {
+      key, status, jobId: jobId || evidence?.jobId || "",
+      summary: evidence?.summary || summarizeEvidence(run.lastMessage ?? ""),
+      evidence: evidence?.evidence || formatEvidence(run.lastMessage ?? ""),
+      leaseMetrics: extractLeaseMetrics(run) ?? evidence?.leaseMetrics ?? null,
+      toolUpdateCount: evidence?.toolUpdateCount ?? 0,
+    };
+    if (role === "worker") {
+      workerActivityByHandle.set(key, activity);
+      workerRunHandles.add(key);
+    }
+    else leadActivity = activity;
+  }
+
   return {
     workerActivityByHandle,
-    leadActivity: buildActivity("lead", leadMessages),
+    workerRunHandles,
+    leadActivity,
     groupId: [...groupIds][0] ?? null,
   };
 }
@@ -690,6 +766,10 @@ function statusLabel(status: TeamActivityStatus): string {
       return "done";
     case "failed":
       return "failed";
+    case "canceled":
+      return "canceled";
+    case "waiting":
+      return "waiting for approval";
     case "queued":
     default:
       return "queued";
@@ -707,6 +787,8 @@ function statusChipClassName(status: TeamActivityStatus, interactive: boolean): 
       return `bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-200 dark:ring-emerald-400/25 ${interactionClassName}`;
     case "failed":
       return `bg-rose-50 text-rose-700 ring-rose-200 dark:bg-rose-500/10 dark:text-rose-200 dark:ring-rose-400/25 ${interactionClassName}`;
+    case "waiting":
+      return `bg-amber-50 text-amber-700 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-200 dark:ring-amber-400/25 ${interactionClassName}`;
     case "queued":
     default:
       return `bg-slate-50 text-slate-500 ring-slate-200 dark:bg-slate-900/60 dark:text-slate-300 dark:ring-slate-700 ${interactionClassName}`;
@@ -714,6 +796,9 @@ function statusChipClassName(status: TeamActivityStatus, interactive: boolean): 
 }
 
 function StatusGlyph({ status }: { status: TeamActivityStatus }) {
+  if (status === "canceled") {
+    return <Xmark aria-hidden="true" className="h-3.5 w-3.5" />;
+  }
   if (status === "done") {
     return <CheckCircle aria-hidden="true" className="h-3.5 w-3.5" />;
   }
@@ -744,7 +829,20 @@ function formatTeamStatusSummary({
   const failed = statuses.filter((status) => status === "failed").length;
   const done = statuses.filter((status) => status === "done").length;
   const working = statuses.filter((status) => status === "working").length;
-  const queued = Math.max(0, plan.agents.length - failed - done - working);
+  const queued = statuses.filter((status) => status === "queued").length;
+  const canceled = statuses.filter((status) => status === "canceled").length;
+  const waiting = statuses.filter((status) => status === "waiting").length;
+  if (canceled || waiting) {
+    return [
+      leadStatus === "done" ? "Lead ready" : leadStatus === "working" ? "Lead active" : null,
+      failed ? `${failed} need attention` : null,
+      working ? `${working} active` : null,
+      queued ? `${queued} queued` : null,
+      waiting ? `${waiting} waiting for approval` : null,
+      `${done}/${plan.agents.length} done`,
+      canceled ? `${canceled} canceled` : null,
+    ].filter(Boolean).join(" · ");
+  }
   if (failed > 0) {
     const parts = [`${failed} need attention`];
     if (working > 0) {
@@ -788,6 +886,7 @@ export function MultiAgentPlanEntry({
   conversationLocalId?: string | null;
   onOpenWorkerRunTrace?: (params: { jobId: string; title: string }) => void;
 }) {
+  const { runs, scopeKey } = useContext(MultiAgentRunsContext);
   const planDetails = normalizeMultiAgentPlanDetails(details) ?? normalizeMultiAgentPlanDetails(extractMetadata(planMessage));
   const plan = parseMultiAgentPlan(planDetails);
   const [expandedRows, setExpandedRows] = useState<Set<string>>(() => {
@@ -798,29 +897,65 @@ export function MultiAgentPlanEntry({
   });
   const [expandedFullEvidenceRows, setExpandedFullEvidenceRows] = useState<Set<string>>(() => new Set());
   const [cancelGroupPending, setCancelGroupPending] = useState(false);
-  const teamActivity = useMemo(
-    () => collectTeamActivity({ planMessage, conversationMessages }),
-    [conversationMessages, planMessage],
+  const [groupSnapshot, setGroupSnapshot] = useState<{ key: string; value: ControllerPlanGroupStatus } | null>(null);
+  const planMetadata = planMessage ? extractMultiAgentPlanMeta(planMessage) : null;
+  const planRefused = stringField(planMetadata?.status) === "refused";
+  const declaredGroupId = stringField(planMetadata?.groupId ?? planDetails?.groupId);
+  const liveActivity = useMemo(
+    () => collectTeamActivity({ planMessage, conversationMessages, runs, declaredGroupId, snapshot: null }),
+    [conversationMessages, planMessage, runs, declaredGroupId],
   );
+  const groupId = liveActivity.groupId;
+  const scopedSnapshot = groupSnapshot?.key === `${scopeKey}:${groupId}` ? groupSnapshot.value : null;
+  const teamActivity = useMemo(() => scopedSnapshot
+    ? collectTeamActivity({ planMessage, conversationMessages, runs, declaredGroupId, snapshot: scopedSnapshot })
+    : liveActivity, [planMessage, conversationMessages, runs, declaredGroupId, scopedSnapshot, liveActivity]);
+  const missingRuns = !planRefused && (plan?.agents.some(agent => !teamActivity.workerRunHandles.has(normalizeHandleKey(agent.handle || agent.label))) ?? false);
+  useEffect(() => {
+    if (!scopeKey || !groupId || !missingRuns) return;
+    const abort = new AbortController();
+    void fetchPlanGroupStatus(groupId, abort.signal).then(value => {
+      if (!abort.signal.aborted && value) setGroupSnapshot({ key: `${scopeKey}:${groupId}`, value });
+    }).catch(() => { /* Keep available history; an inaccessible group is never synthesized. */ });
+    return () => abort.abort();
+  }, [groupId, missingRuns, scopeKey]);
+  if (planRefused) {
+    return <div data-testid="multi-agent-plan-refused" role="status"
+      className="mt-2 flex items-start gap-1.5 text-xs text-amber-700 dark:text-amber-300">
+      <WarningTriangle aria-hidden="true" className="h-4 w-4 shrink-0" />
+      <div><div className="font-medium">Workstreams did not start</div>
+        <div>{stringField(planMetadata?.refusalReason) || "The requested workstream plan could not be started."}</div>
+      </div>
+    </div>;
+  }
   if (!plan) {
     return null;
   }
 
   const leadLabel = plan.leadHandle;
   const leadStatus = teamActivity.leadActivity?.status ?? "queued";
-  const groupId = teamActivity.groupId;
   const hasActiveWorkers = plan.agents.some((agent) => {
     const handleKey = normalizeHandleKey(agent.handle || agent.label);
     const status = teamActivity.workerActivityByHandle.get(handleKey)?.status ?? "queued";
-    return status === "queued" || status === "working";
+    return status === "queued" || status === "working" || status === "waiting";
   });
-  const showCancelGroup = Boolean(groupId) && (hasActiveWorkers || leadStatus === "working");
+  const showCancelGroup = Boolean(groupId) && (hasActiveWorkers || leadStatus === "working" || leadStatus === "waiting");
   const handleCancelGroup = () => {
     if (!groupId || cancelGroupPending) {
       return;
     }
     setCancelGroupPending(true);
     void cancelPlanGroup(groupId)
+      .then(result => {
+        if (!result?.ok) return;
+        // Successful cancellation also settles historical rows whose jobs
+        // were outside the recent run feed. Reload reads the durable group.
+        const canceled = new Set(result.canceledJobIds);
+        setGroupSnapshot(current => current?.key === `${scopeKey}:${groupId}` ? {
+          ...current, value: { ...current.value, workers: current.value.workers.map(worker => canceled.has(worker.jobId)
+            ? { ...worker, status: "canceled" } : worker) },
+        } : current);
+      })
       .catch((error) => {
         console.warn("[chat] failed to cancel plan group", error);
       })
@@ -987,6 +1122,7 @@ export function MultiAgentPlanEntry({
               >
                 <StatusGlyph status={status} />
                 <span className="min-w-0 truncate">{label}</span>
+                {status === "canceled" ? <span>canceled</span> : null}
               </button>
               <span className="pointer-events-none absolute -right-2 -top-2 z-10 opacity-0 transition group-focus-within/agent-chip:opacity-100 group-hover/agent-chip:opacity-100">
                 <MenuTrigger>

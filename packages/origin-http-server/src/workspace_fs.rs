@@ -133,6 +133,27 @@ impl WorkspaceDir {
         directory.list_current()
     }
 
+    /// Enumerate direct names through this pinned directory, including symlinks
+    /// and special files. Security-sensitive tree validators must observe and
+    /// reject those entries rather than silently omitting them as `list` does.
+    /// Names alone grant no traversal: use `entry_kind`, `open_dir` and
+    /// `open_file` to validate/open each entry without following links.
+    /// Exceeding the bound is an error, never a truncated listing.
+    pub fn list_names(&self, max_entries: usize) -> io::Result<Vec<OsString>> {
+        let mut output = Vec::new();
+        let mut directory = Dir::read_from(self.fd.as_ref()).map_err(to_io_error)?;
+        for entry in &mut directory {
+            let entry = entry.map_err(to_io_error)?;
+            let bytes = entry.file_name().to_bytes();
+            if bytes == b"." || bytes == b".." {
+                continue;
+            }
+            check_list_bound(output.len(), max_entries)?;
+            output.push(OsString::from_vec(bytes.to_vec()));
+        }
+        Ok(output)
+    }
+
     /// Atomically replace a workspace file. The payload is copied into a
     /// fresh temporary leaf in the already-open destination parent and then
     /// renamed, so neither an ancestor nor an existing final symlink is ever
@@ -173,6 +194,14 @@ impl WorkspaceDir {
             let _ = fs::unlinkat(&parent, &temp_name, AtFlags::empty());
         }
         result
+    }
+
+    /// Unlink one leaf without following links or recursively removing a
+    /// directory. Scoped file writers must use this instead of `remove`.
+    pub fn remove_file(&self, relative: &str) -> io::Result<()> {
+        let components = validated_components(relative, false)?;
+        let (parent, leaf) = self.open_parent(&components, false)?;
+        fs::unlinkat(&parent, &leaf, AtFlags::empty()).map_err(to_io_error)
     }
 
     /// Remove one file, symlink, or directory tree without following any
@@ -408,6 +437,18 @@ impl WorkspaceDir {
         directory.list_current()
     }
 
+    /// Like the Unix implementation, includes unsupported entry names so a
+    /// caller can reject them, and never returns a silently truncated listing.
+    pub fn list_names(&self, max_entries: usize) -> io::Result<Vec<OsString>> {
+        let mut output = Vec::new();
+        for entry in self.dir.entries()? {
+            let entry = entry?;
+            check_list_bound(output.len(), max_entries)?;
+            output.push(entry.file_name());
+        }
+        Ok(output)
+    }
+
     pub fn replace_file<R: Read>(
         &self,
         relative: &str,
@@ -447,6 +488,13 @@ impl WorkspaceDir {
         let components = validated_components(relative, false)?;
         let (parent, leaf) = self.open_parent(&components, false)?;
         remove_entry_windows(&parent.dir, &leaf)
+    }
+
+    /// Remove only a file leaf. Never recursively remove a substituted directory.
+    pub fn remove_file(&self, relative: &str) -> io::Result<()> {
+        let components = validated_components(relative, false)?;
+        let (parent, leaf) = self.open_parent(&components, false)?;
+        parent.dir.remove_file(&leaf)
     }
 
     pub fn rename(&self, from: &str, to: &str) -> io::Result<()> {
@@ -579,6 +627,16 @@ fn has_visible_children_windows(directory: &CapabilityDir) -> io::Result<bool> {
         }
     }
     Ok(false)
+}
+
+fn check_list_bound(count: usize, maximum: usize) -> io::Result<()> {
+    if count >= maximum {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "workspace directory exceeds entry limit",
+        ));
+    }
+    Ok(())
 }
 
 fn validated_components(path: &str, allow_empty: bool) -> io::Result<Vec<OsString>> {
@@ -719,6 +777,47 @@ mod tests {
             root.entry_kind("a/b/file.txt").expect("file kind"),
             WorkspaceEntryKind::File
         );
+    }
+
+    #[test]
+    fn bounded_names_fail_instead_of_truncating_and_can_list_empty_directories() {
+        let workspace = TempDir::new().unwrap();
+        let root = WorkspaceDir::open(workspace.path()).unwrap();
+        assert!(root.list_names(0).unwrap().is_empty());
+        fs::write(workspace.path().join("one"), b"1").unwrap();
+        fs::create_dir(workspace.path().join("two")).unwrap();
+        assert!(root.list_names(1).is_err());
+        let mut names = root.list_names(2).unwrap();
+        names.sort();
+        assert_eq!(names, vec!["one", "two"]);
+    }
+
+    #[test]
+    fn file_only_delete_refuses_a_substituted_directory() {
+        let workspace = TempDir::new().unwrap();
+        fs::create_dir(workspace.path().join("target")).unwrap();
+        fs::write(workspace.path().join("target/sibling.txt"), b"keep").unwrap();
+        let root = WorkspaceDir::open(workspace.path()).unwrap();
+        assert!(root.remove_file("target").is_err());
+        assert_eq!(
+            fs::read(workspace.path().join("target/sibling.txt")).unwrap(),
+            b"keep"
+        );
+        root.remove_file("target/sibling.txt").unwrap();
+        assert!(workspace.path().join("target").is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_names_expose_links_for_validation_without_following_them() {
+        let workspace = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        fs::write(outside.path().join("secret"), b"secret").unwrap();
+        symlink(outside.path(), workspace.path().join("linked")).unwrap();
+        let root = WorkspaceDir::open(workspace.path()).unwrap();
+        assert_eq!(root.list_names(1).unwrap(), vec!["linked"]);
+        assert!(root.entry_kind("linked").is_err());
+        assert!(root.list(None).unwrap().is_empty());
     }
 
     #[test]

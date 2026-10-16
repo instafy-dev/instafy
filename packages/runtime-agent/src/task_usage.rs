@@ -119,6 +119,10 @@ pub struct UsageCall {
 }
 
 impl UsageCall {
+    pub(crate) fn artifact(&self) -> Option<Value> {
+        self.task.artifact()
+    }
+
     /// Options may be cloned and reused by callers. Every actual execution gets a fresh
     /// invocation identity, while its internal retries keep that identity.
     pub(crate) fn new_invocation(&self) -> Self {

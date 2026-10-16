@@ -20,6 +20,14 @@ Rust binary that runs inside the hosted runtime container. Responsibilities:
 - Plan / approval flows are unimplemented placeholders and will be wired once Codex events feed into progress reporting.
 - Credits are handled by the controller; the runtime will forward proxy metadata when those APIs land.
 
+Ordinary jobs may use native Codex helpers within the parent job. The collaboration skill
+chooses between direct work, available helpers and durable Instafy workers. Native helpers
+share the parent workspace, permissions and proxy identity; space team-worker limits do not
+set their capacity. Each attempt shuts down registered native threads before returning or retrying.
+Unconfirmed cleanup prevents runtime reuse. See [Multi-Agent Evaluation](../../docs/Multi-Agent-Evaluation.md)
+for delegation boundaries, usage coverage, deterministic proxy integration tests and the
+remaining upstream child-admission cleanup gap.
+
 ## Runtime images (base vs webdev)
 
 The canonical `docker/runtime/Dockerfile` defines multiple runtime image targets so we can keep the default image small and opt into heavier toolchains only when needed:
@@ -83,6 +91,7 @@ tags from a sealed manifest is a follow-up (see
 - Runtime configuration is loaded from `CODEX_HOME` when explicitly configured, otherwise from the workspace's `.codex` directory. Desktop jobs do not implicitly load the computer owner's Codex configuration, plugins, or MCP connections. Configure runtime integrations in that runtime home.
 - `CODEX_SANDBOX_MODE` — choose `read-only`, `workspace-write` (default), or `danger-full-access` when overriding the sandbox.
 - `CODEX_LINUX_SANDBOX_EXE` — optional path to the hardened sandbox binary (mirrors the CLI flag).
+- `INSTAFY_EXPERIMENTAL_ISOLATED_TOOL_WORKERS=1` — opt into concurrent native tool workers for disjoint owned-path jobs on Linux and macOS. Disabled by default; other platforms fail before spawning a worker. Private bounded source copies, restricted filesystem access, no browser/MCP/attachments. See [experimental worker limits](../../docs/Multi-Agent-Evaluation.md#experimental-tool-workers). The default scoped file generator remains tool-free.
 - `CODEX_BASE_INSTRUCTIONS` — inline override for the runtime's own base instructions, which ordinary runs and team plan workers send instead of the model prompt. MCP, Shared Browser and Personal Browser runs send the model's Codex prompt without its `# Apps (Connectors)`, `# Plugins` and `# Using skills` sections. Every run's prompt carries Instafy's `# Destructive Actions` section exactly once (it is appended unless the prompt already has a section with that title), because runtime agents run without approval prompts and with full filesystem access.
 - `CODEX_INCLUDE_PLAN_TOOL`, `CODEX_INCLUDE_APPLY_PATCH_TOOL`, `CODEX_INCLUDE_VIEW_IMAGE_TOOL`, `CODEX_SHOW_RAW_AGENT_REASONING`, `CODEX_ENABLE_WEB_SEARCH` — boolean toggles (`true`/`false`). Plan/apply_patch/view_image default to `true` when unset so the runtime exposes the full toolbelt out of the box.
 - `INSTAFY_NATIVE_CHAT_IMAGES`: set to `0`/`false` to stop sending a chat turn's attached images to the model as image input. The prompt then only lists them for `view_image`. On by default; see [Chat attachments](../../docs/Chat-Attachments.md#images-as-model-input).
