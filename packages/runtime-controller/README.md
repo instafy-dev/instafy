@@ -99,7 +99,11 @@ other nodes. The Studio also folds signals into one refresh about 1.2 seconds af
 and fetches nothing while its tab is hidden, catching up once it is visible.
 
 `project.access_changed` is different: it targets the affected user only, so their open clients
-refetch their own capabilities.
+refetch their own capabilities. A membership change sends `{ "reason": "membership_changed" }`.
+Deleting a space sends `{ "reason": "space_deleted", "projectId": "<space id>" }` with no
+project, once the delete commits, to each user who could see the space (its owner, its direct
+members and its org's members). It reaches every open stream of that user, whatever its space, so
+their clients drop the space from their lists and leave it if it is open.
 
 ### Conversation recipients
 

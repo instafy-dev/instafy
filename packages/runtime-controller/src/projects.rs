@@ -28,7 +28,10 @@ use crate::project_memory_origin::{
     bootstrap_write_via_origin, read_origin_snapshot, BootstrapWriteOutcome, OriginBootstrapTarget,
     OriginReadSnapshot, ProjectMemoryWriteFile,
 };
-use crate::state::{publish_project_access_changed, publish_project_signal, AppState, EventHub};
+use crate::state::{
+    publish_project_access_changed, publish_project_deleted, publish_project_signal, AppState,
+    EventHub,
+};
 use crate::tokens::{mint_scoped_token, mint_scoped_token_with_author, ScopedTokenRequest};
 
 /// Roster invalidation for a space's viewers (the targeted
@@ -2137,7 +2140,27 @@ async fn delete_project(
         )
         .await;
     }
+    // Read after the commit, so a failed read cannot fail the delete: the
+    // tombstone leaves the owner and the memberships in place.
+    let audience = if tombstoned {
+        load_project_audience(&*connection, &project_id)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    project_id = %project_id,
+                    %error,
+                    "failed to load who could see a deleted space; their tabs find out on refresh"
+                );
+                Vec::new()
+            })
+    } else {
+        Vec::new()
+    };
     drop(connection);
+    // One event per user reaches all of their open tabs, on any space.
+    for user_id in audience {
+        publish_project_deleted(&state.events, project_id, user_id);
+    }
 
     // Browsers already lost access with the status change; this frees the
     // space's chat attachments and never fails the delete.
@@ -2316,6 +2339,34 @@ pub(crate) async fn load_org_project_ids(
         )
         .await?;
     Ok(rows.into_iter().map(|row| row.get("id")).collect())
+}
+
+/// Everyone who can see `project_id` in their space lists, by the rule
+/// `list_accessible_projects` uses: its owner, its direct members and the
+/// members of its org, each once. It ignores the space's status, so it also
+/// names who could see a space that was just deleted.
+async fn load_project_audience(
+    client: &impl tokio_postgres::GenericClient,
+    project_id: &Uuid,
+) -> Result<Vec<Uuid>, tokio_postgres::Error> {
+    let rows = client
+        .query(
+            "select p.owner_user_id as user_id
+             from projects p
+             where p.id = $1 and p.owner_user_id is not null
+             union
+             select pm.user_id
+             from project_memberships pm
+             where pm.project_id = $1
+             union
+             select om.user_id
+             from org_memberships om
+             join projects p on p.org_id = om.org_id
+             where p.id = $1",
+            &[project_id],
+        )
+        .await?;
+    Ok(rows.into_iter().map(|row| row.get("user_id")).collect())
 }
 
 /// Publishes `project.members_changed` on every project stream of the org

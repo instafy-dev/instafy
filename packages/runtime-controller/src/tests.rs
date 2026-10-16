@@ -11568,7 +11568,7 @@ async fn tunnel_broker_acl_hook_burns_credits() -> anyhow::Result<()> {
         controller_event_fanout_tests::PublishProbe {
             events: state.events.subscribe(),
             kind: crate::credits::CREDITS_UPDATED_EVENT,
-            project_id,
+            project_id: Some(project_id),
             count_sql: "select count(*) from org_credit_ledger
                         where project_id = $1 and idempotency_key = 'acl-test-key-1'",
             params: vec![project_id],

@@ -558,7 +558,11 @@ hosted release can take minutes:
 
 No `runtime.stopped` is published for these stops. A tab would read an
 unknown reason as an unexpected stop and start the machine again; the
-space's deletion is what tells open tabs.
+space's deletion is what tells open tabs. Once the delete commits, each user
+who could see the space gets one `project.access_changed` with reason
+`space_deleted` and the space's id on every open stream, whatever space it
+is on (see the controller's
+[invalidation signals](../packages/runtime-controller/README.md)).
 
 From the delete on, a machine of the space is refused with code
 `space_deleted`, whether it was stopped yet or not: `410 Gone` for
