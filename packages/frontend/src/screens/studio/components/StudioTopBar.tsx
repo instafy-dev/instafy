@@ -78,6 +78,7 @@ export interface StudioTopBarProps {
     history: StudioHistory;
     visitKey: string;
     onOpenPicker: () => void;
+    onSwitchSpace?: () => void;
   };
 }
 
@@ -640,6 +641,7 @@ export function StudioTopBar({ mobileNavigation, mobilePageHeader, compactMobile
                 activeId: activeChatTabId,
                 onSelect: selectOpenChat,
                 onBrowseChats,
+                onSwitchSpace: mobileNavigation.onSwitchSpace,
               } : undefined}
               titleIcon={mobilePageHeader || compactMobileContext ? undefined : topbarLocationOverride ? topbarLocationOverride.icon : activeWorkspaceTab?.icon}
               primaryActions={mobilePageHeader?.actions ?? participantsControl}

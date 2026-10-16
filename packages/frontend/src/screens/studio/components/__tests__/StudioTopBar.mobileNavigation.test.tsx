@@ -90,6 +90,22 @@ describe("StudioTopBar mobile navigation integration", () => {
     expect(query("conversation-roster")).toBeNull();
   });
 
+  it("opens the space picker directly from the chat switcher without browsing chat history", async () => {
+    props.mobileNavigation!.onSwitchSpace = vi.fn();
+    mocks.tabs.mockReturnValue({ ...mocks.tabs(), conversationWorkspace: true });
+    mocks.controls.mockReturnValue({ ...mocks.controls(), onBrowseChats: vi.fn() });
+    await render();
+    await click("mobile-chat-switcher-trigger");
+    expect(query("mobile-chat-switcher-spaces")?.textContent).toContain("Switch space");
+    await click("mobile-chat-switcher-spaces");
+    expect(props.mobileNavigation!.onSwitchSpace).toHaveBeenCalledOnce();
+    expect(props.mobileNavigation!.onOpenPicker).not.toHaveBeenCalled();
+    expect(mocks.controls().onToggleSidebar).not.toHaveBeenCalled();
+    expect(mocks.controls().onBrowseChats).not.toHaveBeenCalled();
+    expect(mocks.tabs().openConversationTab).not.toHaveBeenCalled();
+    expect(query("mobile-chat-switcher")).toBeNull();
+  });
+
   it.each([true, false])("keeps search return and history available from the appropriate chat surface (touch=%s)", async touch => {
     mocks.posture.mockReturnValue({ isLargeScreen: false, showTouchBottomDock: touch });
     props.mobileNavigation!.history.canGoBack = true;

@@ -155,6 +155,14 @@ New chat stays available for the active accessible space when another tab, inclu
 Settings, is selected. It is unavailable on Home or when no space in the selected team is active.
 Existing saved collapse preferences are preserved.
 
+The space breadcrumb opens all accessible spaces in the selected team, including
+spaces that have never been visited in this browser. The same alphabetical picker
+appears in the top navigation drawer, the composer's bottom sheet and the desktop
+header. It names the team, marks the current space and shows unread counts. More
+than six spaces adds a name filter, and long lists scroll within the popover.
+**Browse all spaces** still opens the full directory for its management actions.
+Expanded inline sidebar shortcuts retain their bounded recent-space list.
+
 Desktop conversation shortcuts have a **+** after the last tab to start a chat
 in the current space. Its tooltip names that space, including when open chats span
 several spaces in the team. The action stays reachable at the edge when tabs overflow;
@@ -213,11 +221,11 @@ Mobile browsers show **Get the app · Soon** in the profile menu, linking to the
 availability section; iOS and Android downloads are marked coming soon. Native apps hide
 these acquisition actions and retain their existing update controls.
 
-The space chip opens an anchored picker with up to six named space shortcuts and
-**Browse all spaces**. Recent visits choose which accessible spaces appear; the selected
-set is displayed alphabetically, with the current space highlighted in its alphabetical
-position. Choosing a shortcut does not move it to the front. Visiting another space can
-replace the oldest shortcut. Recent visits are remembered per account on this device.
+The space chip opens an anchored picker of all accessible spaces in the selected team
+and **Browse all spaces**. Spaces appear alphabetically, with the current space highlighted
+in its alphabetical position. More than six spaces adds a name filter. Expanded inline
+sidebar shortcuts keep up to six spaces selected by recent visits, remembered per account
+on this device, and display that set alphabetically.
 Compact navigation provides a scrollable chat switcher and a separate Chats directory.
 
 Space icons use the same numbered unread badges as Home and the full space directory:
@@ -418,9 +426,14 @@ destination; on desktop it toggles the docked explorer. Each chat menu retains N
 Rename, lifecycle actions and, for private chats, Invite teammate.
 
 On compact screens, tapping the conversation title opens the same organization-scoped open
-chats shown in desktop tabs. The current chat is marked; space names distinguish chats from
-different spaces. Selecting a chat restores its workspace view. **Browse all chats** opens
-the current space's full Chats directory. Page titles such as Files and Chats remain plain headings.
+chats shown in desktop tabs. The picker starts directly with chats, with **Switch chat**
+as its screen-reader label. The current chat is marked; space names distinguish chats from
+different spaces, and titles can wrap to two lines. Lists longer than six chats provide a
+filter matching chat or space names. Selecting a chat restores its workspace view.
+**All chats in this space**, labelled with the current space, opens its full searchable Chats
+directory even when no open chats match the filter. **Switch space** opens the current
+organization's full space directory. Closing the picker clears the filter.
+Page titles such as Files and Chats remain plain headings.
 
 The conversation workspace uses one compact header below the desktop breakpoint, including
 Chats, Files and Changes. The page or conversation title has a small team/space caption;

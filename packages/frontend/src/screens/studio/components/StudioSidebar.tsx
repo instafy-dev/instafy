@@ -1088,6 +1088,7 @@ export function StudioSidebar({
     <StudioRecentSpaces
       key={JSON.stringify([activeTeamUserKey, activeOrgKey, activePanel, navigationPresentation, externalHeader])}
       spaces={recentSpaceCandidates}
+      teamName={activeOrgName}
       recency={projectRecency}
       attentionCounts={homeAttentionByProject}
       activeProjectId={selectedTeamHasActiveSpace ? activeProjectId : null}

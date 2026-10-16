@@ -5,6 +5,7 @@ import { AttentionBadge } from "../../../components/AttentionBadge";
 import { Button } from "../../../components/Button";
 import { ControlChevron } from "../../../components/ControlChevron";
 import { SpaceIdentity } from "../../../components/SpaceIdentity";
+import { SearchInput } from "../../../components/SearchInput";
 import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
 import { DARK_FLOATING_SELECTION_CLASS } from "../../../theme/darkSurfaces";
 import type { ProjectRecencyMap } from "../../../projects/projectRecency";
@@ -47,6 +48,7 @@ export function selectRecentSpaces(
 
 export interface StudioRecentSpacesProps {
   spaces: readonly RecentSpace[];
+  teamName?: string;
   recency: Readonly<ProjectRecencyMap>;
   activeProjectId: string | null;
   attentionCounts?: Readonly<Record<string, number>>;
@@ -65,6 +67,7 @@ export interface StudioRecentSpacesProps {
 
 export function StudioRecentSpaces({
   spaces,
+  teamName,
   recency,
   activeProjectId,
   attentionCounts,
@@ -80,7 +83,9 @@ export function StudioRecentSpaces({
   compactPath = false,
 }: StudioRecentSpacesProps) {
   const listId = useId();
+  const searchId = useId();
   const [popoverOpen, setPopoverOpen] = useState(false);
+  const [query, setQuery] = useState("");
   useEffect(() => {
     // Width changes move the anchor; external project changes replace its context.
     setPopoverOpen(false);
@@ -97,12 +102,24 @@ export function StudioRecentSpaces({
     currentSpace ? `Choose space: ${spaceName(currentSpace)}` : "Choose space",
     currentAttention > 0 ? unreadDescription(currentAttention) : null,
   ].filter(Boolean).join(", ");
-  const visibleSpaces = selectRecentSpaces(spaces, recency, activeProjectId);
+  const spacesLabel = teamName ? `Spaces in ${teamName}` : "Spaces";
+  const showSearch = usePopover && spaces.length > SIDEBAR_RECENT_SPACE_LIMIT;
+  const normalizedQuery = showSearch ? query.trim().toLocaleLowerCase() : "";
+  // Breadcrumbs are space switchers, including on a browser with no visit history.
+  // The expanded sidebar keeps its bounded recent shortcuts.
+  const visibleSpaces = usePopover
+    ? [...spaces].sort(compareSpaceNames)
+      .filter((space) => spaceName(space).toLocaleLowerCase().includes(normalizedQuery))
+    : selectRecentSpaces(spaces, recency, activeProjectId);
 
   const recentList = (
     <div id={listId} data-testid="sidebar-recent-spaces-list">
+      {showSearch ? <div className="mb-2 px-1">
+        <SearchInput id={searchId} label="Find a space" placeholder="Find a space"
+          inputTestId="sidebar-space-search" value={query} onChange={event => setQuery(event.target.value)} />
+      </div> : null}
       {visibleSpaces.length > 0 ? (
-        <ul aria-label="Recent spaces" className="flex flex-col gap-1">
+        <ul aria-label={usePopover ? spacesLabel : "Recent spaces"} className="flex flex-col gap-1">
           {visibleSpaces.map((space) => {
             const selected = space.id === activeProjectId;
             const name = spaceName(space);
@@ -138,7 +155,9 @@ export function StudioRecentSpaces({
           })}
         </ul>
       ) : (
-        <p className="px-2.5 py-3 text-xs text-slate-500 dark:text-slate-400">No recent spaces in this team.</p>
+        <p className="px-2.5 py-3 text-xs text-slate-500 dark:text-slate-400">
+          {normalizedQuery ? "No spaces match your search." : usePopover ? "No spaces in this team." : "No recent spaces in this team."}
+        </p>
       )}
       <Button
         variant="ghost"
@@ -199,16 +218,16 @@ export function StudioRecentSpaces({
 
   if (usePopover) {
     return (
-      <DialogTrigger isOpen={popoverOpen} onOpenChange={setPopoverOpen}>
+      <DialogTrigger isOpen={popoverOpen} onOpenChange={open => { setQuery(""); setPopoverOpen(open); }}>
         {trigger}
         <StudioDialogPopover
           placement={pathPresentation ? "bottom start" : "right top"}
           offset={8}
-          className="w-72 max-w-[calc(100vw-1rem)] p-2"
+          className="w-72 max-h-[min(32rem,calc(100dvh-2rem))] max-w-[calc(100vw-1rem)] p-2"
           data-testid="sidebar-recent-spaces-popover"
         >
           <div className="mb-2 px-2.5 py-1">
-            <Heading slot="title" className="text-sm font-semibold text-slate-900 dark:text-slate-100">Recent spaces</Heading>
+            <Heading slot="title" className="text-sm font-semibold text-slate-900 dark:text-slate-100">{spacesLabel}</Heading>
           </div>
           {recentList}
         </StudioDialogPopover>

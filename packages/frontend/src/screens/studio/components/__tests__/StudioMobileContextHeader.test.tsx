@@ -10,7 +10,7 @@ const mocks = vi.hoisted(() => ({
   user: { email: "reader@example.test" } as { email: string } | null,
   profile: { fullName: "Alex Morgan", avatarUrl: "https://example.test/avatar.png" } as { fullName: string; avatarUrl: string | null } | null,
   refresh: vi.fn(async () => null),
-  recency: vi.fn(() => ({ current: 100, sibling: 90, foreign: 80 })),
+  recency: vi.fn((): Record<string, number> => ({ current: 100, sibling: 90, foreign: 80 })),
 }));
 vi.mock("../../../../providers/AuthProvider", () => ({ useAuth: () => ({ user: mocks.user }) }));
 vi.mock("../../../../profile/ProfileProvider", () => ({ useProfile: () => ({ profile: mocks.profile }) }));
@@ -43,6 +43,7 @@ describe("StudioMobileContextHeader", () => {
     vi.stubGlobal("CSS", { escape: (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, "\\$&") });
     mocks.user = { email: "reader@example.test" };
     mocks.profile = { fullName: "Alex Morgan", avatarUrl: "https://example.test/avatar.png" };
+    mocks.recency.mockReturnValue({ current: 100, sibling: 90, foreign: 80 });
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -181,7 +182,7 @@ describe("StudioMobileContextHeader", () => {
     expect(container.querySelector('[data-testid="studio-mobile-home-attention"]')?.getAttribute("title")).toBe("1 unread update across teams");
   });
 
-  it("shows only the selected team's recent spaces and routes an exact selection", async () => {
+  it("shows only the selected team's spaces and routes an exact selection", async () => {
     await render();
     expect(mocks.recency).toHaveBeenCalledWith("reader@example.test");
     expect(button("sidebar-space-button").getAttribute("aria-label")).toContain("Autofix, 2 unread updates");
@@ -192,6 +193,34 @@ describe("StudioMobileContextHeader", () => {
     expect(props.onSpace).toHaveBeenCalledExactlyOnceWith("sibling");
     expect(document.querySelector('[data-testid="sidebar-recent-spaces-popover"]')).toBeNull();
     expect(props.onHome).not.toHaveBeenCalled();
+  });
+
+  it("switches to an unvisited Personal space directly from the breadcrumb in a fresh browser", async () => {
+    mocks.recency.mockReturnValue({});
+    await render({
+      ...props,
+      teamId: "personal",
+      teamName: "Personal",
+      projects: [
+        makeProject("current", "Website", null),
+        makeProject("unvisited", "Notes", null),
+        makeProject("foreign", "Team research", "team-b"),
+      ],
+    });
+    await click("sidebar-space-button");
+    const popover = document.querySelector('[data-testid="sidebar-recent-spaces-popover"]')!;
+    expect(popover.textContent).toContain("Spaces in Personal");
+    expect([...popover.querySelectorAll('button[data-testid^="sidebar-recent-space-"]')]
+      .map(row => row.getAttribute("data-testid"))).toEqual([
+      "sidebar-recent-space-unvisited", "sidebar-recent-space-current",
+    ]);
+    expect(popover.querySelector('[data-testid="sidebar-recent-space-foreign"]')).toBeNull();
+    expect(popover.querySelector('[data-testid="sidebar-recent-space-current"]')?.getAttribute("aria-current")).toBe("page");
+    await click("sidebar-recent-space-unvisited");
+    expect(props.onSpace).toHaveBeenCalledExactlyOnceWith("unvisited");
+    expect(props.onBrowseSpaces).not.toHaveBeenCalled();
+    expect(props.onSwitchTeam).not.toHaveBeenCalled();
+    expect(document.querySelector('[data-testid="sidebar-recent-spaces-popover"]')).toBeNull();
   });
 
   it("shows the saved space appearance in the mobile breadcrumb alongside its unread count", async () => {
@@ -214,7 +243,7 @@ describe("StudioMobileContextHeader", () => {
     expect(button("sidebar-space-button").textContent).not.toContain("Autofix");
     expect(document.querySelector('[data-testid="sidebar-recent-spaces-popover"]')).toBeNull();
     await click("sidebar-space-button");
-    expect(document.querySelector('[data-testid="sidebar-recent-spaces-popover"]')?.textContent).toContain("No recent spaces in this team.");
+    expect(document.querySelector('[data-testid="sidebar-recent-spaces-popover"]')?.textContent).toContain("No spaces in this team.");
     await click("sidebar-browse-all-spaces");
     expect(props.onBrowseSpaces).toHaveBeenCalledOnce();
     expect(props.onSwitchTeam).not.toHaveBeenCalled();
