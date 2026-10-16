@@ -14,7 +14,6 @@ import {
 } from "../../navigation/studioNavigation";
 import { useStudioNavigation } from "../../navigation/useStudioNavigation";
 import { Button, IconButton } from "../../components/Button";
-import { Card } from "../../components/Card";
 import { InlineNotice } from "../../components/InlineNotice";
 import { Spinner } from "../../components/Spinner";
 import { Text } from "../../components/Text";
@@ -84,6 +83,7 @@ interface RuntimeMenuPanelProps {
   sparklineVariant?: "compact" | "page";
   /** Lifecycle controls as header icon buttons (page-style hosts). */
   headerActions?: boolean;
+  interactionMode?: "picker" | "manage";
 }
 
 export function RuntimeMenuPanel({
@@ -112,6 +112,7 @@ export function RuntimeMenuPanel({
   renderOptionExtras,
   sparklineVariant = "compact",
   headerActions = false,
+  interactionMode = "picker",
 }: RuntimeMenuPanelProps) {
   const [showErrorDetails, setShowErrorDetails] = useState(false);
   const [cachedRuntimeEnsureError, setCachedRuntimeEnsureError] = useState<string | null>(null);
@@ -373,17 +374,21 @@ export function RuntimeMenuPanel({
               </Button>
             ) : null}
             {runtimeActionError ? (
-              <InlineNotice
+              <Text
+                as="p"
+                variant="caption"
                 tone="danger"
                 role="alert"
                 className="mt-2"
                 data-testid="runtime-action-error"
               >
                 {runtimeActionError}
-              </InlineNotice>
+              </Text>
             ) : null}
             {limitReached && blockerSpaceNotice ? (
-              <InlineNotice
+              <Text
+                as="div"
+                variant="caption"
                 tone="danger"
                 role="alert"
                 className="mt-2"
@@ -395,7 +400,7 @@ export function RuntimeMenuPanel({
                 {blockerSpaceNotice.projectId ? (
                   <OpenBlockerSpaceButton projectId={blockerSpaceNotice.projectId} />
                 ) : null}
-              </InlineNotice>
+              </Text>
             ) : null}
           </div>
         </InlineNotice>
@@ -465,15 +470,10 @@ export function RuntimeMenuPanel({
           renderOptionExtras={renderOptionExtras}
           sparklineVariant={sparklineVariant}
           headerActions={headerActions}
+          interactionMode={interactionMode}
         />
       ) : (
-        <Card
-          tone="raised"
-          radius="xl"
-          shadow="none"
-          padding="sm"
-          className="mt-2 border-dashed py-4 text-center"
-        >
+        <div className="mt-2 px-2.5 py-3">
           <Text as="p" variant="caption" tone="muted">
             {emptyStateMessage}
           </Text>
@@ -503,7 +503,7 @@ export function RuntimeMenuPanel({
               )}
             </Button>
           ) : null}
-        </Card>
+        </div>
       )}
     </div>
   );

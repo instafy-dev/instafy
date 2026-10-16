@@ -70,6 +70,49 @@ for (const hasTouch of [false, true]) {
           await activate(reviewMachine);
 
           const machineHeader = page.getByRole("region", { name: "Runtime header actions", exact: true });
+          const managedMachine = machineHeader.getByRole("button", { name: /^Review machine/ });
+          await expect(managedMachine).toHaveAttribute("aria-expanded", "true");
+          await activate(managedMachine);
+          await expect(managedMachine).toHaveAttribute("aria-expanded", "false");
+          await expect(machineHeader.getByText("Pinned to Review machine")).toHaveCount(0);
+          await activate(managedMachine);
+          const selectMachine = machineHeader.getByRole("button", { name: "Use this machine", exact: true });
+          await expect(selectMachine).toHaveCSS("box-shadow", "none");
+          expect(await selectMachine.evaluate(el => getComputedStyle(el).backgroundColor)).not.toBe("rgba(0, 0, 0, 0)");
+          if (!hasTouch) {
+            await selectMachine.hover();
+            await expect(selectMachine).toHaveCSS("box-shadow", "none");
+          }
+          await activate(selectMachine);
+          await expect(selectMachine).toHaveCount(0);
+          await expect(machineHeader.getByRole("button", { name: "Selected machine", exact: true })).toHaveCount(0);
+          await expect(machineHeader.getByText("Selected machine", { exact: true })).toBeVisible();
+          await expect(managedMachine).toBeFocused();
+          await expect(machineHeader.getByText("Pinned to Review machine")).toBeVisible();
+          await expect(managedMachine.locator('[title="Selected"]')).toBeVisible();
+          await expect(managedMachine).not.toHaveAttribute("aria-pressed");
+          const moreActions = machineHeader.getByRole("button", { name: "More actions for Review machine", exact: true });
+          await activate(moreActions);
+          await activate(page.getByRole("menuitem", { name: "Remove machine…", exact: true }));
+          const cancelRemoval = machineHeader.getByRole("button", { name: "Cancel", exact: true });
+          await expect(cancelRemoval).toBeVisible();
+          if (!hasTouch) await expect(cancelRemoval).toBeFocused();
+          await activate(cancelRemoval);
+          await expect(moreActions).toBeFocused();
+          await expect(machineHeader.getByText('Remove “Review machine”?')).toHaveCount(0);
+          await expect(managedMachine).toHaveAttribute("aria-expanded", "true");
+
+          // Selection owns the full row, including the separate disclosure.
+          const selectedSurface = reviewMachine.locator("..");
+          const disclosure = selectedSurface.getByRole("button", { name: "Hide runtime details", exact: true });
+          const surfaceBounds = (await selectedSurface.boundingBox())!;
+          const disclosureBounds = (await disclosure.boundingBox())!;
+          expect(disclosureBounds.x + disclosureBounds.width).toBeLessThanOrEqual(surfaceBounds.x + surfaceBounds.width);
+          expect(await selectedSurface.evaluate(el => getComputedStyle(el).backgroundColor)).not.toBe("rgba(0, 0, 0, 0)");
+          if (hasTouch) {
+            expect((await reviewMachine.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+            expect(disclosureBounds.height).toBeGreaterThanOrEqual(44);
+          }
           const neutralColor = await page.getByTestId("review-cancel").evaluate(el => getComputedStyle(el).color);
           for (const control of [
             machineList.getByRole("button", { name: "Start", exact: true }),
@@ -78,6 +121,33 @@ for (const hasTouch of [false, true]) {
           ]) {
             await expect(control).toHaveCSS("color", neutralColor);
           }
+          const close = machineHeader.getByRole("button", { name: "Close runtimes menu", exact: true });
+          const copy = machineHeader.getByRole("button", { name: "Copy runtime image", exact: true });
+          const iconControls = [close, copy, moreActions, disclosure,
+            machineHeader.getByRole("button", { name: "Start Review machine", exact: true }),
+            machineHeader.getByRole("button", { name: "Stop Running machine", exact: true })];
+          const radius = await close.evaluate(el => getComputedStyle(el).borderRadius);
+          for (const control of iconControls) {
+            const bounds = (await control.boundingBox())!;
+            expect(bounds.width).toBe(hasTouch ? 44 : 32);
+            expect(bounds.height).toBe(hasTouch ? 44 : 32);
+            await expect(control).toHaveCSS("border-radius", radius);
+          }
+          if (!hasTouch) {
+            await close.focus();
+            await page.keyboard.press("Tab");
+            await page.keyboard.press("Shift+Tab");
+            await expect(close).toBeFocused();
+            await expect(close).toHaveCSS("box-shadow", /0px 0px 0px 4px/);
+            const focusRing = await close.evaluate(el => getComputedStyle(el).boxShadow);
+            expect(focusRing).not.toBe("none");
+            await copy.focus();
+            await expect(copy).toHaveCSS("box-shadow", focusRing);
+            await copy.press("Tab");
+            await expect(machineHeader.getByRole("button", { name: /^Running machine/ })).toBeFocused();
+          }
+          await machineHeader.scrollIntoViewIfNeeded();
+          await page.screenshot({ path: testInfo.outputPath(`${mode.toLowerCase()}-machine-rows.png`) });
 
           const details = page.getByRole("button", { name: "View details", exact: true });
           const stop = page.getByRole("button", { name: "Stop blocker and retry", exact: true });
