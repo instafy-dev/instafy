@@ -129,6 +129,7 @@ export function StudioMobileContextHeader({
         <StudioRecentSpaces
           key={`spaces:${teamId}`}
           spaces={spaces} activeProjectId={selectedSpaceId}
+          teamName={teamName}
           recency={recency} attentionCounts={attentionCounts}
           collapsed={false} expanded={false} onExpandedChange={() => {}}
           presentation="path"

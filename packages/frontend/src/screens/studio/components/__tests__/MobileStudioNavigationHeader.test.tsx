@@ -40,6 +40,7 @@ describe("MobileStudioNavigationHeader", () => {
   }
 
   it("switches open chats across spaces and keeps the current chat selected without reopening it", async () => {
+    props.teamName = "Personal";
     props.conversationSwitcher = {
       tabs: [{ id: "a", title: "Current chat", spaceName: "Alpha space" }, { id: "b", title: "Other work", spaceName: "Design" }],
       activeId: "a", onSelect: vi.fn(), onBrowseChats: vi.fn(),
@@ -50,7 +51,11 @@ describe("MobileStudioNavigationHeader", () => {
     expect(trigger.getAttribute("aria-haspopup")).toBe("dialog");
     expect(trigger.classList.contains("!min-h-12")).toBe(true);
     await click("mobile-chat-switcher-trigger");
-    expect(query("mobile-chat-switcher")?.textContent).toContain("Chats");
+    const dialog = query("mobile-chat-switcher")?.querySelector('[role="dialog"]');
+    const heading = document.getElementById(dialog!.getAttribute("aria-labelledby")!);
+    expect(heading?.textContent).toBe("Switch chat");
+    expect(heading?.classList.contains("sr-only")).toBe(true);
+    expect(query("mobile-chat-switcher")?.textContent).not.toContain("Personal");
     expect(query("mobile-chat-switcher-tab-a")?.getAttribute("aria-current")).toBe("page");
     expect(query("mobile-chat-switcher-tab-a")?.textContent).toContain("Alpha space");
     expect(query("mobile-chat-switcher-tab-b")?.textContent).toContain("Design");
@@ -63,6 +68,7 @@ describe("MobileStudioNavigationHeader", () => {
     expect(trigger.getAttribute("aria-expanded")).toBe("false");
     await click("mobile-chat-switcher-trigger");
     expect(query("mobile-chat-switcher-browse")?.textContent).toContain("In Alpha space");
+    expect(query("mobile-chat-switcher-browse")?.getAttribute("aria-label")).toBe("All chats in this space, Alpha space");
     await click("mobile-chat-switcher-browse");
     expect(props.conversationSwitcher.onBrowseChats).toHaveBeenCalledOnce();
     expect(props.onOpenPicker).not.toHaveBeenCalled();

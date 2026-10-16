@@ -1851,6 +1851,7 @@ function StudioLayoutInner() {
     visitKey: getStudioVisitKey(location),
     history: mobileHistory,
     onOpenPicker: handleToggleSidebar,
+    onSwitchSpace: () => openMobileContextDirectory("spaces"),
   } : undefined;
   const hideMobileContextWhileTyping = shouldHideContextWhileTyping({
     isTouchConversation: showTouchBottomDock && isChatSurfaceVisible && !showMobileLeftDrawerOverlay,

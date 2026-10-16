@@ -55,6 +55,69 @@ describe("StudioRecentSpaces", () => {
       .map((row) => row.getAttribute("data-testid"));
   }
 
+  async function search(value: string) {
+    const input = document.querySelector<HTMLInputElement>('[data-testid="sidebar-space-search"]')!;
+    expect(input).not.toBeNull();
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
+
+  it.each([{ presentation: "path" as const }, { collapsed: true }])(
+    "shows every provided space in a fresh-browser switcher (%j)", async (presentation) => {
+      const onSelectSpace = vi.fn();
+      const spaces = Object.freeze([
+        { id: "current", name: "Website" },
+        ...Array.from({ length: 8 }, (_, index) => ({ id: `space-${index}`, name: `Space ${index}` })),
+      ]);
+      await render({ ...presentation, spaces, recency: {}, teamName: "Personal", onSelectSpace });
+      await click("sidebar-space-button");
+      expect(document.querySelector('[role="dialog"]')?.textContent).toContain("Spaces in Personal");
+      expect(rowIds()).toEqual([
+        ...Array.from({ length: 8 }, (_, index) => `sidebar-recent-space-space-${index}`),
+        "sidebar-recent-space-current",
+      ]);
+      expect(document.querySelector('[data-testid="sidebar-recent-space-current"]')?.getAttribute("aria-current")).toBe("page");
+      await click("sidebar-recent-space-space-7");
+      expect(onSelectSpace).toHaveBeenCalledExactlyOnceWith("space-7");
+      expect(document.querySelector('[data-testid="sidebar-recent-spaces-popover"]')).toBeNull();
+      expect(spaces[0].id).toBe("current");
+    },
+  );
+
+  it("lists a small team's unvisited spaces directly without a search field", async () => {
+    await render({ presentation: "path", recency: {}, activeProjectId: null });
+    await click("sidebar-space-button");
+    expect(rowIds()).toEqual(["sidebar-recent-space-recent", "sidebar-recent-space-current"]);
+    expect(document.querySelector('[data-testid="sidebar-space-search"]')).toBeNull();
+    expect(document.querySelector('[aria-current="page"]')).toBeNull();
+  });
+
+  it("filters all spaces by name and clears the filter on reopening", async () => {
+    await render({
+      presentation: "path", recency: {},
+      spaces: [
+        { id: "current", name: "Website" }, { id: "docs", name: "Documentation" },
+        ...Array.from({ length: 5 }, (_, index) => ({ id: `space-${index}`, name: `Space ${index}` })),
+      ],
+    });
+    await click("sidebar-space-button");
+    await search(" DOC ");
+    expect(rowIds()).toEqual(["sidebar-recent-space-docs"]);
+    await search("missing");
+    expect(rowIds()).toEqual([]);
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain("No spaces match your search.");
+    expect(document.querySelector('[data-testid="sidebar-browse-all-spaces"]')).not.toBeNull();
+    await act(async () => {
+      document.querySelector('[data-testid="sidebar-space-search"]')?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    expect(document.querySelector('[data-testid="sidebar-recent-spaces-popover"]')).toBeNull();
+    await click("sidebar-space-button");
+    expect(document.querySelector<HTMLInputElement>('[data-testid="sidebar-space-search"]')?.value).toBe("");
+    expect(rowIds()).toHaveLength(7);
+  });
+
   it("keeps path shortcuts in a dropdown and closes after choosing a space", async () => {
     const onSelectSpace = vi.fn();
     const onExpandedChange = vi.fn();
@@ -79,7 +142,7 @@ describe("StudioRecentSpaces", () => {
     expect(trigger.textContent).toContain("Choose space");
     expect(trigger.querySelector('[data-testid="space-identity"]')).toBeNull();
     await click("sidebar-space-button");
-    expect(document.querySelector('[data-testid="sidebar-recent-spaces-popover"]')?.textContent).toContain("No recent spaces in this team");
+    expect(document.querySelector('[data-testid="sidebar-recent-spaces-popover"]')?.textContent).toContain("No spaces in this team");
     await click("sidebar-browse-all-spaces");
     expect(onBrowseAll).toHaveBeenCalledOnce();
     expect(document.querySelector('[data-testid="sidebar-recent-spaces-popover"]')).toBeNull();
@@ -211,7 +274,7 @@ describe("StudioRecentSpaces", () => {
     expect(rowIds()).toEqual([]);
     await click("sidebar-space-button");
     expect(trigger?.getAttribute("aria-expanded")).toBe("true");
-    expect(document.querySelector('[role="dialog"]')?.textContent).toContain("Recent spaces");
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain("Spaces");
     expect(rowIds()).toEqual(["sidebar-recent-space-recent", "sidebar-recent-space-current"]);
     expect(container.querySelector('[data-testid="sidebar-recent-spaces-list"]')).toBeNull();
     expect(onExpandedChange).not.toHaveBeenCalled();

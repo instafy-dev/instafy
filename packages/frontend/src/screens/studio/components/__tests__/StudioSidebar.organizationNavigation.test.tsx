@@ -664,6 +664,32 @@ describe("StudioSidebar organization navigation", () => {
     expect(onRequestClose.mock.invocationCallOrder[0]).toBeLessThan(onActivateProject.mock.invocationCallOrder[0]);
   });
 
+  it.each([false, true])("offers unvisited current-team spaces directly in the narrow navigation breadcrumb (bottom sheet=%s)", async (mobileSheet) => {
+    fixture.desktop = false;
+    fixture.projects.push({
+      id: "space-unvisited", name: "Apps", orgId: "org-a", orgName: "Alpha", state: null, isRemoteOnly: true,
+    });
+    await render({
+      mobileOverlay: true,
+      navigationPresentation: "path",
+      mobileSheet,
+      ...(mobileSheet ? { navigationHeaderPortalTarget: headerPortal } : {}),
+    });
+    await click("sidebar-space-button");
+    const popover = document.querySelector('[data-testid="sidebar-recent-spaces-popover"]')!;
+    expect(popover.textContent).toContain("Spaces in Alpha");
+    expect([...popover.querySelectorAll('button[data-testid^="sidebar-recent-space-"]')]
+      .map(row => row.getAttribute("data-testid"))).toEqual([
+      "sidebar-recent-space-space-unvisited", "sidebar-recent-space-space-a",
+    ]);
+    expect(popover.querySelector('[data-testid="sidebar-recent-space-space-c"]')).toBeNull();
+    await click("sidebar-recent-space-space-unvisited");
+    expect(onActivateProject).toHaveBeenCalledExactlyOnceWith("space-unvisited", "org-a");
+    expect(onRequestClose.mock.invocationCallOrder[0]).toBeLessThan(onActivateProject.mock.invocationCallOrder[0]);
+    expect(onSwitcherChange).not.toHaveBeenCalled();
+    expect(document.querySelector('[data-testid="sidebar-recent-spaces-popover"]')).toBeNull();
+  });
+
   it.each([true, false])("keeps the complete team identity and actions accessible behind the path initials (desktop=%s)", async (desktop) => {
     fixture.desktop = desktop;
     await render({ navigationPresentation: "path", mobileOverlay: !desktop });
@@ -1409,7 +1435,7 @@ describe("StudioSidebar organization navigation", () => {
     await render({ collapsed: true, selectedOrgKey: "org-b", activePanel: "team" });
     expect(document.querySelector('[data-testid="sidebar-recent-spaces-popover"]')).toBeNull();
     await click("sidebar-space-button");
-    expect(document.querySelector('[data-testid="sidebar-recent-spaces-popover"]')?.textContent).toContain("No recent spaces in this team");
+    expect(document.querySelector('[data-testid="sidebar-recent-spaces-popover"]')?.textContent).toContain("No spaces in this team");
     expect(document.querySelector('[data-testid="sidebar-recent-space-space-a"]')).toBeNull();
   });
 
