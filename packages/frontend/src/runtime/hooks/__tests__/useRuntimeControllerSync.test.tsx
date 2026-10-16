@@ -64,7 +64,10 @@ vi.mock("../../utils/runtimeDebug", () => ({
 }));
 
 import { useRuntimeControllerSync } from "../useRuntimeControllerSync";
-import { MEMBERS_CHANGED_EVENT } from "../../../projects/projectAccessEvents";
+import {
+  MEMBERS_CHANGED_EVENT,
+  PROJECT_ACCESS_REFRESH_EVENT,
+} from "../../../projects/projectAccessEvents";
 import { CREDITS_UPDATED_EVENT } from "../../../credits/creditsEvents";
 import { getStudioWorkspaceOwnerKey } from "../../../screens/studio/useStudioKnownFiles";
 
@@ -802,6 +805,54 @@ describe("useRuntimeControllerSync controller access results", () => {
     } finally {
       window.removeEventListener(MEMBERS_CHANGED_EVENT, membersChanged);
       window.removeEventListener(CREDITS_UPDATED_EVENT, creditsUpdated);
+    }
+  });
+
+  it("names a deleted space on the access refresh it forwards, and nothing else", async () => {
+    const dependencies = createHookDependencies();
+    let subscription: SubscribeControllerRunsParams | null = null;
+    controllerMocks.fetchRuns.mockResolvedValue(fetchResult());
+    controllerMocks.subscribeToRuns.mockImplementation(
+      (params: SubscribeControllerRunsParams) => {
+        subscription = params;
+        return vi.fn();
+      },
+    );
+    const accessChanged = vi.fn<(event: Event) => void>();
+    window.addEventListener(PROJECT_ACCESS_REFRESH_EVENT, accessChanged);
+
+    try {
+      await act(async () => {
+        root.render(<Harness projectId="project-current" dependencies={dependencies} />);
+      });
+      await vi.waitFor(() => expect(subscription).not.toBeNull());
+
+      await act(async () => {
+        subscription?.onEvent?.({
+          kind: "project.access_changed",
+          project_id: null,
+          data: { reason: "space_deleted", projectId: "project-deleted" },
+        });
+        subscription?.onEvent?.({
+          kind: "project.access_changed",
+          project_id: null,
+          data: { reason: "membership_changed" },
+        });
+        // Only a deletion names a space to drop, whatever else a payload says.
+        subscription?.onEvent?.({
+          kind: "project.access_changed",
+          project_id: "project-current",
+          data: { reason: "membership_changed", projectId: "project-current" },
+        });
+      });
+
+      expect(accessChanged.mock.calls.map(([event]) => (event as CustomEvent).detail)).toEqual([
+        { projectId: null, deletedProjectId: "project-deleted" },
+        { projectId: null, deletedProjectId: null },
+        { projectId: "project-current", deletedProjectId: null },
+      ]);
+    } finally {
+      window.removeEventListener(PROJECT_ACCESS_REFRESH_EVENT, accessChanged);
     }
   });
 

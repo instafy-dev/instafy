@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { controllerClient } from "../../sdk/instafy";
 import type { ActivityItem, ListMyActivityResult } from "../../services/runtimeController/activity";
+import {
+  PROJECT_ACCESS_REFRESH_EVENT,
+  type ProjectAccessRefreshEventDetail,
+} from "../../projects/projectAccessEvents";
 
 const ACTIVITY_POLL_MS = 20_000;
 const CATCH_UP_MAX_PAGES = 4;
@@ -236,10 +240,20 @@ export function useHomeActivity(viewerUserId: string | null, pageSize = 24, mark
       }
     })();
     const timer = window.setInterval(() => { void poll(); }, ACTIVITY_POLL_MS);
+    // Polling only adds rows, so a deleted space's rows would stay until
+    // Home remounts, and opening one would lead into a space that is gone.
+    const dropDeletedSpace = (event: Event) => {
+      const deletedProjectId = (event as CustomEvent<ProjectAccessRefreshEventDetail>).detail?.deletedProjectId;
+      if (!deletedProjectId) return;
+      const activityItems = snapshot.activityItems.filter((item) => item.project?.id !== deletedProjectId);
+      if (activityItems.length !== snapshot.activityItems.length) update({ activityItems });
+    };
+    window.addEventListener(PROJECT_ACCESS_REFRESH_EVENT, dropDeletedSpace);
     return () => {
       cancelled = true;
       actionsRef.current = null;
       window.clearInterval(timer);
+      window.removeEventListener(PROJECT_ACCESS_REFRESH_EVENT, dropDeletedSpace);
     };
   }, [markSeen, pageSize, restorePages, viewerUserId]);
 

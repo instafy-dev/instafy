@@ -6,6 +6,7 @@ import {
   resolveControllerRequestContext,
   runtimeControllerEnabled,
 } from "./core";
+import { reportControllerProjectNotFound } from "./projectNotFound";
 import { createControllerReadBudget } from "./readBudget";
 
 export interface FetchRuntimeStatusParams {
@@ -96,6 +97,9 @@ export async function fetchRuntimeStatus(
     ));
 
     if (!response.ok) {
+      if (response.status === 404) {
+        reportControllerProjectNotFound(params.projectId);
+      }
       throw new Error(
         await budget.wait(() => readControllerError(
           response,

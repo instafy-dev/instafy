@@ -12,6 +12,7 @@ import {
   isAutomationBrowser,
   logControllerRequestError,
 } from "./logging";
+import { reportControllerProjectNotFound } from "./projectNotFound";
 
 const RUN_EVENT_KINDS = [
   "run.queued",
@@ -626,6 +627,9 @@ export function subscribeToRunsFromController(
         return;
       }
       if (!response.ok) {
+        if (response.status === 404 && params.projectId) {
+          reportControllerProjectNotFound(params.projectId);
+        }
         const responseMessage = await readControllerError(
           response,
           "event stream request failed",

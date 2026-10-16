@@ -866,6 +866,12 @@ export async function deleteControllerProject(projectId: string): Promise<boolea
         },
       },
     );
+    // Deleted already, from another tab or by someone else: the space is
+    // gone, which is what this delete asked for.
+    if (response.status === 404) {
+      void response.body?.cancel().catch(() => undefined);
+      return true;
+    }
     if (!response.ok) {
       const message = await readControllerError(
         response,

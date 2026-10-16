@@ -2,6 +2,11 @@ export const PROJECT_ACCESS_REFRESH_EVENT = "instafy:project-access-refresh";
 
 export interface ProjectAccessRefreshEventDetail {
   projectId?: string | null;
+  /**
+   * The space that was deleted, when that is the change. Older controllers
+   * never say; listeners then refresh as for any other access change.
+   */
+  deletedProjectId?: string | null;
 }
 
 // Fired when a project or organization roster changed for another viewer.

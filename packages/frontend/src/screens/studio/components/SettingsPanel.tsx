@@ -14,7 +14,11 @@ import { useAuth } from "../../../providers/AuthProvider";
 import { useProjects } from "../../../projects/useProjects";
 import { useProject } from "../../../projects/useProject";
 import { useProjectMembers } from "../../../projects/useProjectMembers";
-import { PROJECT_ACCESS_REFRESH_EVENT } from "../../../projects/projectAccessEvents";
+import {
+  PROJECT_ACCESS_REFRESH_EVENT,
+  type ProjectAccessRefreshEventDetail,
+} from "../../../projects/projectAccessEvents";
+import { markProjectDeletedHere, unmarkProjectDeletedHere } from "../../../projects/projectDeletion";
 import { realSpaceName } from "../../../projects/spaceName";
 import { useOrgMembers } from "../../../org/useOrgMembers";
 import {
@@ -1301,7 +1305,7 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
     if (typeof window !== "undefined") {
       const label = activeProject?.name ?? "this space";
       const ok = window.confirm(
-        `Delete ${label}? This can’t be undone and guests will lose access.`,
+        `Delete ${label}? This removes the space and its chats and files for everyone, and stops its machine. It can’t be undone.`,
       );
       if (!ok) {
         return;
@@ -1309,8 +1313,10 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
     }
     setProjectDeletePending(true);
     const deletedProjectId = activeProjectId;
+    markProjectDeletedHere(deletedProjectId);
     const ok = await controllerClient.projects.delete(deletedProjectId);
     if (!ok) {
+      unmarkProjectDeletedHere(deletedProjectId);
       showStatus("Unable to delete this space right now.", "error", 4000);
       setProjectDeletePending(false);
       return;
@@ -1325,15 +1331,17 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
     if (nextProject) {
       handleOpenProjectsPanel({ projectId: nextProject.id });
       switchProject(nextProject.id);
-      removeProject(deletedProjectId);
     } else {
+      // This browser knew no other space, but the account may have more:
+      // the Spaces page lists them, so the status does not say there are none.
       handleOpenProjectsPanel({ projectId: null });
       suppressProjectAutoCreate();
-      removeProject(deletedProjectId);
-      showStatus("Space deleted. Create a new space to continue.", "warning", 4000);
-      setProjectDeletePending(false);
-      return;
     }
+    removeProject(deletedProjectId);
+    // Lists cached from before the delete refresh now, not on the next focus.
+    window.dispatchEvent(new CustomEvent<ProjectAccessRefreshEventDetail>(PROJECT_ACCESS_REFRESH_EVENT, {
+      detail: { projectId: null, deletedProjectId },
+    }));
 
     showStatus("Space deleted.", "success", 2500);
     setProjectDeletePending(false);
@@ -1586,7 +1594,7 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
                       Delete space
                     </Text>
                     <Text variant="caption" tone="muted" className="mt-1">
-                      Delete this space and revoke access for guests.
+                      Removes the space and its chats and files for everyone, and stops its machine.
                     </Text>
                     {!runtimeControllerEnabled ? (
                       <Text variant="caption" tone="muted" className="mt-1">

@@ -87,7 +87,7 @@ export function filterUnavailableProjectPickerProjects<TProject extends { id: st
 export function ProjectPickerPanel({ onCreateProject, searchTerm, onSearchTermChange }: ProjectPickerPanelProps) {
   const isLargeScreen = useStudioDesktopLayout();
   const { projectList, activeProjectId, switchProject, createProject } = useProjects();
-  const { projectAccessBlocked } = useProject();
+  const { projectAccessBlocked, projectAccessDeleted } = useProject();
   const { openPanelTab } = useWorkspaceTabs();
   const { showStatus } = useStatus();
   const { runtime } = useRuntime();
@@ -555,9 +555,11 @@ export function ProjectPickerPanel({ onCreateProject, searchTerm, onSearchTermCh
               <WarningTriangle className="h-5 w-5" aria-hidden="true" />
             </span>
             <div className="min-w-0 flex-1">
-              <Heading level={3}>Space not found</Heading>
+              <Heading level={3}>{projectAccessDeleted ? "This space was deleted" : "Space not found"}</Heading>
               <Text variant="body" tone="warning" className="mt-1">
-                This space may be gone, the link may be stale, or this account no longer has access.
+                {projectAccessDeleted
+                  ? "Its chats and files are no longer available."
+                  : "This space may be gone, the link may be stale, or this account no longer has access."}
               </Text>
               {requestedProjectId ? (
                 <Text variant="caption" tone="muted" className="mt-1 block truncate text-xxs">
@@ -565,41 +567,45 @@ export function ProjectPickerPanel({ onCreateProject, searchTerm, onSearchTermCh
                 </Text>
               ) : null}
               <Text variant="caption" tone="muted" className="mt-2 block">
-                Pick another space below, or report a bug if this should still open.
+                {projectAccessDeleted
+                  ? "Pick another space below."
+                  : "Pick another space below, or report a bug if this should still open."}
               </Text>
-              <div className="mt-3 flex flex-wrap gap-2">
-                {requestedProjectId ? (
+              {projectAccessDeleted ? null : (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {requestedProjectId ? (
+                    <Button
+                      onPress={() => {
+                        void handleOpenRequestedProject();
+                      }}
+                      variant="primary"
+                      size="sm"
+                      radius="full"
+                      isDisabled={openRequestedProjectPending}
+                      data-testid="project-missing-open-requested"
+                    >
+                      {openRequestedProjectPending ? "Opening requested space…" : "Open requested space"}
+                    </Button>
+                  ) : null}
                   <Button
-                    onPress={() => {
-                      void handleOpenRequestedProject();
-                    }}
-                    variant="primary"
+                    onPress={() =>
+                      dispatchOpenBugReport({
+                        message: "This space should open, but Studio says it is unavailable.",
+                        details: requestedProjectId
+                          ? `Requested project id: ${requestedProjectId}`
+                          : undefined,
+                        projectId: requestedProjectId ?? null,
+                      })
+                    }
+                    variant="outline"
                     size="sm"
                     radius="full"
-                    isDisabled={openRequestedProjectPending}
-                    data-testid="project-missing-open-requested"
+                    data-testid="project-missing-report-bug"
                   >
-                    {openRequestedProjectPending ? "Opening requested space…" : "Open requested space"}
+                    Report issue
                   </Button>
-                ) : null}
-                <Button
-                  onPress={() =>
-                    dispatchOpenBugReport({
-                      message: "This space should open, but Studio says it is unavailable.",
-                      details: requestedProjectId
-                        ? `Requested project id: ${requestedProjectId}`
-                        : undefined,
-                      projectId: requestedProjectId ?? null,
-                    })
-                  }
-                  variant="outline"
-                  size="sm"
-                  radius="full"
-                  data-testid="project-missing-report-bug"
-                >
-                  Report issue
-                </Button>
-              </div>
+                </div>
+              )}
             </div>
           </div>
         </Card>

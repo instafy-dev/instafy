@@ -14,6 +14,10 @@ import { usePageTitleInNavigation } from "../../../components/PageTitleContext";
 import { Spinner } from "../../../components/Spinner";
 import { Text } from "../../../components/Text";
 import { useConversations } from "../../../conversations/ConversationsProvider";
+import {
+  PROJECT_ACCESS_REFRESH_EVENT,
+  type ProjectAccessRefreshEventDetail,
+} from "../../../projects/projectAccessEvents";
 import { useProjects } from "../../../projects/useProjects";
 import { useAuth } from "../../../providers/AuthProvider";
 import { controllerClient, type NotificationInboxItem } from "../../../sdk/instafy";
@@ -309,8 +313,17 @@ export function HomePanel({ canResumeConversation = true, inboxItems: sharedInbo
       return;
     }
     const bump = () => setOrgsEpoch((epoch) => epoch + 1);
+    // A team deleted or left elsewhere loses its chip. Deleting one space
+    // leaves the teams as they were; its row leaves with the store entry.
+    const bumpOnAccessChange = (event: Event) => {
+      if (!(event as CustomEvent<ProjectAccessRefreshEventDetail>).detail?.deletedProjectId) bump();
+    };
     window.addEventListener("instafy:orgs-updated", bump);
-    return () => window.removeEventListener("instafy:orgs-updated", bump);
+    window.addEventListener(PROJECT_ACCESS_REFRESH_EVENT, bumpOnAccessChange);
+    return () => {
+      window.removeEventListener("instafy:orgs-updated", bump);
+      window.removeEventListener(PROJECT_ACCESS_REFRESH_EVENT, bumpOnAccessChange);
+    };
   }, []);
 
   const currentProject = useMemo(

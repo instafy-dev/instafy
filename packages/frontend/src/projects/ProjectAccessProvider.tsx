@@ -45,6 +45,11 @@ import {
   PROJECT_ACCESS_REFRESH_EVENT,
   type ProjectAccessRefreshEventDetail,
 } from "./projectAccessEvents";
+import { isProjectDeletedHere } from "./projectDeletion";
+import {
+  CONTROLLER_PROJECT_NOT_FOUND_EVENT,
+  type ControllerProjectNotFoundDetail,
+} from "../services/runtimeController/projectNotFound";
 
 export { PROJECT_ACCESS_REFRESH_EVENT } from "./projectAccessEvents";
 
@@ -68,6 +73,11 @@ export interface ProjectAccessContextValue {
   projectInitialized: boolean;
   projectAccessPending: boolean;
   projectAccessBlocked: boolean;
+  /**
+   * The blocked space the URL names is known to have been deleted, rather
+   * than merely not found: the controller said so, or this tab deleted it.
+   */
+  projectAccessDeleted: boolean;
   projectAccessUnavailable: boolean;
   /**
    * The account has no space and one could not be made: the list came back
@@ -245,6 +255,8 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
   const [projectInitialized, setProjectInitialized] = useState(false);
   const [projectAccessPending, setProjectAccessPending] = useState(false);
   const [projectAccessBlocked, setProjectAccessBlocked] = useState(false);
+  // The last space the controller said was deleted.
+  const [lastDeletedProjectId, setLastDeletedProjectId] = useState<string | null>(null);
   const [projectAccessUnavailable, setProjectAccessUnavailable] = useState(false);
   const [projectProvisionFailed, setProjectProvisionFailed] = useState(false);
   const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
@@ -332,6 +344,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
       writeStoredProjectId(null);
       clearProjectAutoCreateSuppression();
       setProjectAccessBlocked(false);
+      setLastDeletedProjectId(null);
       setProjectAccessUnavailable(false);
       setProjectAccessPending(false);
       setProjectCapabilities(null);
@@ -545,6 +558,10 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
           lastResolvedProjectIdRef.current = null;
           writeStoredProjectId(null);
           if (isProjectAutoCreateSuppressed()) {
+            // Nothing else is looked up, so this lookup is over: a pending
+            // flag left set kept "Loading this space's chats" on screen
+            // after the last space this browser knew was deleted.
+            setProjectAccessPending(false);
             setProjectInitialized(true);
             return;
           }
@@ -906,6 +923,20 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
     let accessInvalidationVersion = 0;
     let retryTimer: number | null = null;
     let requestController: AbortController | null = null;
+    let lastNotFoundCheckAt = 0;
+
+    // Removing a blocked space moves the store on to another one while the
+    // URL still names the blocked space. This tab is not showing that other
+    // space, and checking it would unblock it: its workspace would open in
+    // place of the notice, with nothing said. Picking a space changes the URL.
+    const urlHoldsBlockedProject = () => {
+      const blockedProjectId = blockedProjectIdRef.current;
+      return (
+        blockedProjectId !== null &&
+        blockedProjectId !== targetProjectId &&
+        readUrlProjectId() === blockedProjectId
+      );
+    };
 
     const scheduleRetry = (delayMs = PROJECT_SUMMARY_RETRY_BACKOFF_MS) => {
       if (retryTimer !== null) {
@@ -920,7 +951,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
     };
 
     const refreshCapabilities = async () => {
-      if (cancelled) {
+      if (cancelled || urlHoldsBlockedProject()) {
         return;
       }
       if (refreshInFlight) {
@@ -941,6 +972,10 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
           return;
         }
         if (result.notFound || result.forbidden || result.unauthorized) {
+          if (isProjectDeletedHere(targetProjectId)) {
+            // This tab deleted it and is moving to another space already.
+            return;
+          }
           blockedProjectIdRef.current = targetProjectId;
           projectSummaryRetryBackoffRef.current = null;
           setProjectAccessUnavailable(false);
@@ -1009,6 +1044,20 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
     };
     const handleAccessChanged = (event: Event) => {
       const detail = (event as CustomEvent<ProjectAccessRefreshEventDetail>).detail;
+      const deletedProjectId = detail?.deletedProjectId ?? null;
+      if (deletedProjectId) {
+        if (isProjectDeletedHere(deletedProjectId)) {
+          // The tab that deleted it navigates away by itself.
+          return;
+        }
+        setLastDeletedProjectId(deletedProjectId);
+        if (deletedProjectId !== targetProjectId || urlHoldsBlockedProject()) {
+          // Only this tab's lists change; access to the open space did not.
+          removeProject(deletedProjectId);
+          return;
+        }
+        // The open space: the refresh below finds it gone and blocks it.
+      }
       if (detail?.projectId && detail.projectId !== targetProjectId) {
         return;
       }
@@ -1017,6 +1066,20 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
       setProjectCapabilities((current) =>
         current?.projectId === targetProjectId ? null : current,
       );
+      void refreshCapabilities();
+    };
+    const handleProjectNotFound = (event: Event) => {
+      const detail = (event as CustomEvent<ControllerProjectNotFoundDetail>).detail;
+      if (detail?.projectId !== targetProjectId) {
+        return;
+      }
+      // A read of the open space got a 404. Check the space itself, which
+      // also blocks it in a hidden tab, at most once per backoff.
+      const now = Date.now();
+      if (now - lastNotFoundCheckAt < PROJECT_SUMMARY_RETRY_BACKOFF_MS) {
+        return;
+      }
+      lastNotFoundCheckAt = now;
       void refreshCapabilities();
     };
     const handleStreamReconnected = () => {
@@ -1049,6 +1112,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
 
     window.addEventListener("focus", handleFocus);
     window.addEventListener(PROJECT_ACCESS_REFRESH_EVENT, handleAccessChanged);
+    window.addEventListener(CONTROLLER_PROJECT_NOT_FOUND_EVENT, handleProjectNotFound);
     window.addEventListener("instafy:controller-stream-reconnected", handleStreamReconnected);
     document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
@@ -1060,6 +1124,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
       }
       window.removeEventListener("focus", handleFocus);
       window.removeEventListener(PROJECT_ACCESS_REFRESH_EVENT, handleAccessChanged);
+      window.removeEventListener(CONTROLLER_PROJECT_NOT_FOUND_EVENT, handleProjectNotFound);
       window.removeEventListener("instafy:controller-stream-reconnected", handleStreamReconnected);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
@@ -1078,12 +1143,27 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
       ? projectCapabilities.value
       : null;
   const capabilitiesResolved = !hasSupabaseConfig || activeCapabilities !== null;
+  const projectAccessDeleted = useMemo(() => {
+    if (!projectAccessBlocked) {
+      return false;
+    }
+    let requestedProjectId: string | null = null;
+    try {
+      const raw = new URLSearchParams(location.search).get("projectId")?.trim() ?? "";
+      requestedProjectId = isUUID(raw) ? raw : null;
+    } catch {
+      // ignore malformed URLs
+    }
+    return requestedProjectId !== null &&
+      (requestedProjectId === lastDeletedProjectId || isProjectDeletedHere(requestedProjectId));
+  }, [lastDeletedProjectId, location.search, projectAccessBlocked]);
 
   const value = useMemo<ProjectAccessContextValue>(
     () => ({
       projectInitialized,
       projectAccessPending,
       projectAccessBlocked,
+      projectAccessDeleted,
       projectAccessUnavailable,
       projectProvisionFailed,
       retryProjectBootstrap,
@@ -1098,6 +1178,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
       activeCapabilities,
       capabilitiesResolved,
       projectAccessBlocked,
+      projectAccessDeleted,
       projectAccessUnavailable,
       projectAccessPending,
       projectInitialized,

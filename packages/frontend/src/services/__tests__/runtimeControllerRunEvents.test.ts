@@ -432,6 +432,49 @@ describe("runtime controller run event streaming", () => {
     unsubscribe();
   });
 
+  it("reports a space the stream no longer finds so its access is checked again", async () => {
+    vi.useFakeTimers();
+    fetchMock.mockImplementationOnce((input: RequestInfo | URL) =>
+      Promise.resolve({
+        body: null,
+        headers: new Headers({ "content-type": "application/json" }),
+        ok: false,
+        status: 404,
+        statusText: "Not Found",
+        text: async () => JSON.stringify({ message: "project not found" }),
+        url: String(input),
+      } as Response),
+    );
+    const { CONTROLLER_PROJECT_NOT_FOUND_EVENT } = await import(
+      "../runtimeController/projectNotFound"
+    );
+    const projectNotFound = vi.fn<(event: Event) => void>();
+    window.addEventListener(CONTROLLER_PROJECT_NOT_FOUND_EVENT, projectNotFound);
+
+    const { subscribeToRunsFromController } = await import(
+      "../runtimeController/runs"
+    );
+    const unsubscribe = subscribeToRunsFromController({
+      projectId: "11111111-1111-4111-8111-111111111111",
+      quietErrors: true,
+      onRun: vi.fn(),
+      onRunPatch: vi.fn(),
+      onError: vi.fn(),
+    });
+
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      await flushAsyncWork();
+      expect(projectNotFound).toHaveBeenCalledOnce();
+      expect((projectNotFound.mock.calls[0][0] as CustomEvent).detail).toEqual({
+        projectId: "11111111-1111-4111-8111-111111111111",
+      });
+    } finally {
+      unsubscribe();
+      window.removeEventListener(CONTROLLER_PROJECT_NOT_FOUND_EVENT, projectNotFound);
+    }
+  });
+
   it("retains the authoritative job id from a run event before snapshot hydration", async () => {
     const { subscribeToRunsFromController } = await import(
       "../runtimeController/runs"

@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const resolveControllerAccessTokenMock = vi.hoisted(() => vi.fn());
+const reportNotFoundMock = vi.hoisted(() => vi.fn());
+
+vi.mock("../projectNotFound", () => ({ reportControllerProjectNotFound: reportNotFoundMock }));
 
 vi.mock("../core", () => ({
   controllerBaseUrl: "http://controller.test",
@@ -82,6 +85,17 @@ describe("bounded project conversation discovery", () => {
     expect(vi.getTimerCount()).toBe(0);
     if (stage === "credentials") expect(fetchMock).not.toHaveBeenCalled();
     else expect(fetchMock.mock.calls[0]?.[1]?.signal.aborted).toBe(true);
+  });
+
+  it("reports a space the controller no longer finds, so its access is checked again", async () => {
+    reportNotFoundMock.mockReset();
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce(new Response("", { status: 404 }))
+      .mockResolvedValueOnce(new Response("", { status: 502 })));
+    await expect(fetchProjectConversationsFromController({ projectId: "project-1" })).resolves.toBeNull();
+    expect(reportNotFoundMock).toHaveBeenCalledExactlyOnceWith("project-1");
+    await expect(fetchProjectConversationsFromController({ projectId: "project-1" })).resolves.toBeNull();
+    expect(reportNotFoundMock).toHaveBeenCalledOnce();
   });
 
   it("forwards project-switch cancellation to the pending transport", async () => {

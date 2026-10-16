@@ -8,10 +8,11 @@ import { ProjectPickerPanel } from "../ProjectPickerPanel";
 const mocks = vi.hoisted(() => ({
   createProject: vi.fn(), switchProject: vi.fn(), openPanelTab: vi.fn(),
   projects: vi.fn(), merged: vi.fn(),
+  access: { projectAccessBlocked: false, projectAccessDeleted: false },
 }));
 vi.mock("../../../../projects/useProjects", () => ({ useProjects: mocks.projects }));
 vi.mock("../../../../projects/useMergedControllerProjects", () => ({ useMergedControllerProjects: mocks.merged }));
-vi.mock("../../../../projects/useProject", () => ({ useProject: () => ({ projectAccessBlocked: false }) }));
+vi.mock("../../../../projects/useProject", () => ({ useProject: () => mocks.access }));
 vi.mock("../../../../workspace/WorkspaceTabsProvider", () => ({ useWorkspaceTabs: () => ({ openPanelTab: mocks.openPanelTab }) }));
 vi.mock("../../../../status/useStatus", () => ({ useStatus: () => ({ showStatus: vi.fn() }) }));
 vi.mock("../../../../runtime/useRuntime", () => ({ useRuntime: () => ({ runtime: { controllerProjectMissing: false } }) }));
@@ -30,6 +31,7 @@ describe("ProjectPickerPanel overview navigation", () => {
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.clearAllMocks();
+    mocks.access = { projectAccessBlocked: false, projectAccessDeleted: false };
     window.history.replaceState({ idx: 0, key: "overview-visit" }, "", `/studio?projectId=${A}&panel=projects&conversationId=old-chat&conversationControllerId=old-controller&jobId=old-job&browserRuntimeId=old-browser`);
     mocks.merged.mockReturnValue({ mergedProjects: [alpha, beta], remoteLoading: false, remoteError: null, remoteRefreshing: false });
     container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container);
@@ -72,5 +74,22 @@ describe("ProjectPickerPanel overview navigation", () => {
     await render();
     expect(container.querySelector(`[data-testid="project-picker-card-${B}"]`)).not.toBeNull();
     expect(loadingStatus()).toBeNull();
+  });
+
+  it.each([
+    [false, "Space not found", true],
+    [true, "This space was deleted", false],
+  ])("names a blocked space deleted=%s plainly and offers only what can help", async (deleted, heading, offersActions) => {
+    mocks.access = { projectAccessBlocked: true, projectAccessDeleted: deleted };
+    mocks.projects.mockReturnValue({ projectList: [beta], activeProjectId: B,
+      createProject: mocks.createProject, switchProject: mocks.switchProject });
+    mocks.merged.mockReturnValue({ mergedProjects: [beta], remoteLoading: false, remoteError: null, remoteRefreshing: false });
+    await act(async () => root.render(<BrowserRouter><ProjectPickerPanel onCreateProject={() => {}} searchTerm="" onSearchTermChange={() => {}} /></BrowserRouter>));
+    const blocker = container.querySelector('[data-testid="project-missing-blocker"]');
+    expect(blocker?.querySelector("h3")?.textContent).toBe(heading);
+    expect(blocker?.textContent).toContain("Pick another space below");
+    expect(blocker?.querySelector('[data-testid="project-missing-open-requested"]') !== null).toBe(offersActions);
+    expect(blocker?.querySelector('[data-testid="project-missing-report-bug"]') !== null).toBe(offersActions);
+    expect(container.querySelector(`[data-testid="project-picker-card-${B}"]`)).not.toBeNull();
   });
 });
