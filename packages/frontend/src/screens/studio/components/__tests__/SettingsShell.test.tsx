@@ -4,6 +4,19 @@ import { SettingsShell } from "../SettingsShell";
 import { PageTitleInNavigationContext } from "../../../../components/PageTitleContext";
 
 describe("SettingsShell", () => {
+  it("preserves the wide default and allows a comfortable width for control lists", () => {
+    const defaultShell = renderToStaticMarkup(
+      <SettingsShell title="Settings"><p>Body</p></SettingsShell>,
+    );
+    const comfortableShell = renderToStaticMarkup(
+      <SettingsShell title="Machines" width="comfortable"><p>Body</p></SettingsShell>,
+    );
+    expect(defaultShell).toContain("max-w-6xl");
+    expect(defaultShell).not.toContain("max-w-4xl");
+    expect(comfortableShell).toContain("max-w-4xl");
+    expect(comfortableShell).not.toContain("max-w-6xl");
+  });
+
   it("uses the navigation title while preserving content, description and actions", () => {
     const panel = <SettingsShell title="Automations" subtitle="Run prompts on a schedule."
       actions={<button>Create automation</button>}><h2>Scheduled prompts</h2></SettingsShell>;

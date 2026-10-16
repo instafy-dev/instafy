@@ -43,7 +43,7 @@ function OpenBlockerSpaceButton({ projectId }: { projectId: string }) {
       onPress={() => navigateToDestination(blockerSpaceMachinesDestination(projectId))}
       variant="text"
       tone="accent"
-      size="xs"
+      size="sm"
       radius="full"
       className="mt-1"
       data-testid="runtime-open-blocker-space"
@@ -271,7 +271,7 @@ export function RuntimeMenuPanel({
     <div>
       {showHeader ? (
         <div className="flex items-center justify-between gap-2 px-1">
-          <Text as="div" variant="captionStrong" tone="secondary">
+          <Text as="div" variant="bodyStrong" tone="primary">
             {title}
           </Text>
           {onClose ? (
@@ -281,7 +281,7 @@ export function RuntimeMenuPanel({
               radius="full"
               onPress={onClose}
               aria-label="Close runtimes menu"
-              tone="muted"
+              tone="neutral"
             >
               <Xmark className="h-4 w-4" aria-hidden="true" />
             </IconButton>
@@ -289,22 +289,22 @@ export function RuntimeMenuPanel({
         </div>
       ) : null}
       {displayedRuntimeEnsureError ? (
-        <InlineNotice tone="warning" className="mt-2">
+        <InlineNotice tone="warning" density="comfortable" className="mt-2">
           <div>
-            <Text as="p" variant="captionStrong" tone="inherit">
+            <Text as="p" variant="bodyStrong" tone="primary">
               {errorHeadline}
             </Text>
-            <Text as="p" variant="caption" tone="inherit">
+            <Text as="p" variant="bodyCompact" tone="secondary">
               {errorSummary}
             </Text>
             {limitReached ? (
               <>
                 {blockerProjectLabel ? (
-                  <Text as="p" variant="caption" tone="inherit" className="mt-1">
+                  <Text as="p" variant="bodyCompact" tone="secondary" className="mt-1">
                     Blocking runtime: {blockerRuntimeLabel ?? "active runtime"}.
                   </Text>
                 ) : null}
-                <Text as="p" variant="caption" tone="inherit" className="mt-1">
+                <Text as="p" variant="bodyCompact" tone="secondary" className="mt-1">
                   Stop a stale runtime or retry after cleanup. Stopping a blocker can interrupt work on that runtime.
                 </Text>
               </>
@@ -313,8 +313,8 @@ export function RuntimeMenuPanel({
               <Button
                 onPress={() => setShowErrorDetails((current) => !current)}
                 variant="text"
-                tone="accent"
-                size="xs"
+                tone="neutral"
+                size="sm"
                 radius="full"
               >
                 {showErrorDetails ? "Hide details" : "View details"}
@@ -324,7 +324,7 @@ export function RuntimeMenuPanel({
                   onPress={handleTakeOverHostedRuntimeLimit}
                   variant="text"
                   tone="danger"
-                  size="xs"
+                  size="sm"
                   radius="full"
                   isDisabled={hostedRuntimeTakeoverInProgress}
                 >
@@ -376,7 +376,7 @@ export function RuntimeMenuPanel({
             {runtimeActionError ? (
               <Text
                 as="p"
-                variant="caption"
+                variant="bodyCompact"
                 tone="danger"
                 role="alert"
                 className="mt-2"
@@ -388,13 +388,13 @@ export function RuntimeMenuPanel({
             {limitReached && blockerSpaceNotice ? (
               <Text
                 as="div"
-                variant="caption"
+                variant="bodyCompact"
                 tone="danger"
                 role="alert"
                 className="mt-2"
                 data-testid="runtime-blocker-space-notice"
               >
-                <Text as="p" variant="caption" tone="inherit">
+                <Text as="p" variant="bodyCompact" tone="inherit">
                   {blockerSpaceNotice.message}
                 </Text>
                 {blockerSpaceNotice.projectId ? (
@@ -408,14 +408,15 @@ export function RuntimeMenuPanel({
       {connectionWarning ? (
         <InlineNotice
           tone="warning"
+          density="comfortable"
           className="mt-2"
           data-testid="runtime-connection-warning"
         >
           <div>
-            <Text as="p" variant="captionStrong" tone="inherit">
+            <Text as="p" variant="bodyStrong" tone="primary">
               Live runtime status is temporarily stale
             </Text>
-            <Text as="p" variant="caption" tone="inherit">
+            <Text as="p" variant="bodyCompact" tone="secondary">
               {connectionWarning}
             </Text>
           </div>
@@ -429,8 +430,8 @@ export function RuntimeMenuPanel({
           <Button
             onPress={() => onSelectOption(null)}
             variant="text"
-            tone="muted"
-            size="xs"
+            tone="neutral"
+            size="sm"
             radius="full"
             className="shrink-0"
           >
@@ -474,7 +475,7 @@ export function RuntimeMenuPanel({
         />
       ) : (
         <div className="mt-2 px-2.5 py-3">
-          <Text as="p" variant="caption" tone="muted">
+          <Text as="p" variant="bodyCompact" tone="secondary">
             {emptyStateMessage}
           </Text>
           {!displayedRuntimeEnsureError && onRetryHosted ? (

@@ -43,6 +43,8 @@ interface SettingsShellProps {
   activeChildCategoryId?: string | null;
   onChildCategoryChange?: (categoryId: string) => void;
   children: ReactNode;
+  /** Bound simple reading/control lists without changing wide settings layouts. */
+  width?: "comfortable" | "wide";
   className?: string;
   navLabel?: string;
   testId?: string;
@@ -66,6 +68,7 @@ export function SettingsShell({
   activeChildCategoryId,
   onChildCategoryChange,
   children,
+  width = "wide",
   className,
   navLabel = "Categories",
   testId = "settings-shell",
@@ -287,7 +290,8 @@ export function SettingsShell({
       className={[
         // One horizontal inset per breakpoint: the large-screen gutter must
         // not compete with sm:px-4 (an unprefixed px-6 always lost to it).
-        "relative mx-auto w-full max-w-6xl space-y-3 px-3 py-3 sm:space-y-4",
+        "relative mx-auto w-full space-y-3 px-3 py-3 sm:space-y-4",
+        width === "comfortable" ? "max-w-4xl" : "max-w-6xl",
         hasWideContainer ? "sm:px-6" : "sm:px-4",
         className,
       ]

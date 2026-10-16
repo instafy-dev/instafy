@@ -3,7 +3,7 @@ import { expect, test, type Locator } from "@playwright/test";
 for (const hasTouch of [false, true]) {
   test.describe(hasTouch ? "touch control surfaces" : "mouse control surfaces", () => {
     test.use({ hasTouch });
-    for (const width of [390, 1280]) {
+    for (const width of [390, 1280, 2560]) {
       for (const mode of ["Light", "Dark"]) {
         test(`shared appearances and targets at ${width}px in ${mode.toLowerCase()} mode`, async ({ page }, testInfo) => {
           const activate = (control: Locator) => hasTouch ? control.tap() : control.click();
@@ -33,8 +33,19 @@ for (const hasTouch of [false, true]) {
           await expect(input).toHaveCount(0);
           await expect(search).toBeFocused();
 
-          // Machine titles lead; secondary information stays at one size and
-          // shares the title's left edge rather than gaining nested indents.
+          const primaryColor = await page.getByRole("heading", { name: "Control surface review" }).evaluate(el => getComputedStyle(el).color);
+          // Button theme colors transition; compare their settled token color,
+          // rather than capturing an intermediate interpolated value.
+          await page.getByTestId("review-cancel").evaluate(el => Promise.all(el.getAnimations().map(animation => animation.finished)));
+          const secondaryColor = await page.getByTestId("review-cancel").evaluate(el => getComputedStyle(el).color);
+          const shell = page.getByTestId("review-machines-shell");
+          const shellBox = (await shell.boundingBox())!;
+          expect(shellBox.width).toBeLessThanOrEqual(896);
+          if (width >= 1280) expect(shellBox.width).toBe(896);
+          expect(Math.abs(shellBox.x + shellBox.width / 2 - width / 2)).toBeLessThanOrEqual(1);
+
+          // Reading text uses body size/contrast; technical metadata stays
+          // compact. Both align with the machine name and remain stable on ultrawide screens.
           for (const regionName of ["Runtime list actions", "Runtime header actions"]) {
             const region = page.getByRole("region", { name: regionName, exact: true });
             const title = region.getByText("Review machine", { exact: true });
@@ -44,7 +55,15 @@ for (const hasTouch of [false, true]) {
             await expect(title).toHaveCSS("font-size", "14px");
             await expect(title).toHaveCSS("font-weight", "500");
             expect(await title.evaluate(el => el.scrollWidth <= el.clientWidth), "short machine names fit beside controls").toBe(true);
-            for (const supporting of [description, label, value, region.locator('[title="review-runtime"]')]) {
+            await expect(title).toHaveCSS("color", primaryColor);
+            await expect(description).toHaveCSS("font-size", "14px");
+            await expect(description).toHaveCSS("font-weight", "400");
+            await expect(description).toHaveCSS("color", secondaryColor);
+            await expect(region.locator('[title="review-runtime"]')).toHaveCSS("color", secondaryColor);
+            const metadataColor = await label.evaluate(el => getComputedStyle(el).color);
+            expect(metadataColor).not.toBe(secondaryColor);
+            await expect(value).toHaveCSS("color", metadataColor);
+            for (const supporting of [label, value, region.locator('[title="review-runtime"]')]) {
               await expect(supporting).toHaveCSS("font-size", "12px");
               await expect(supporting).toHaveCSS("font-weight", "400");
             }
@@ -77,6 +96,7 @@ for (const hasTouch of [false, true]) {
           await expect(machineHeader.getByText("Pinned to Review machine")).toHaveCount(0);
           await activate(managedMachine);
           const selectMachine = machineHeader.getByRole("button", { name: "Use this machine", exact: true });
+          await expect(selectMachine).toHaveCSS("font-size", "14px");
           await expect(selectMachine).toHaveCSS("box-shadow", "none");
           expect(await selectMachine.evaluate(el => getComputedStyle(el).backgroundColor)).not.toBe("rgba(0, 0, 0, 0)");
           if (!hasTouch) {
@@ -121,7 +141,7 @@ for (const hasTouch of [false, true]) {
           ]) {
             await expect(control).toHaveCSS("color", neutralColor);
           }
-          const close = machineHeader.getByRole("button", { name: "Close runtimes menu", exact: true });
+          const close = machineList.getByRole("button", { name: "Close runtimes menu", exact: true });
           const copy = machineHeader.getByRole("button", { name: "Copy runtime image", exact: true });
           const iconControls = [close, copy, moreActions, disclosure,
             machineHeader.getByRole("button", { name: "Start Review machine", exact: true }),
@@ -147,10 +167,20 @@ for (const hasTouch of [false, true]) {
             await expect(machineHeader.getByRole("button", { name: /^Running machine/ })).toBeFocused();
           }
           await machineHeader.scrollIntoViewIfNeeded();
+          if (!hasTouch) await expect(copy).toHaveCSS("box-shadow", "none");
           await page.screenshot({ path: testInfo.outputPath(`${mode.toLowerCase()}-machine-rows.png`) });
 
           const details = page.getByRole("button", { name: "View details", exact: true });
           const stop = page.getByRole("button", { name: "Stop blocker and retry", exact: true });
+          for (const action of [details, stop, machineList.getByRole("button", { name: "Start", exact: true }), machineList.getByRole("button", { name: "Use best available", exact: true })]) {
+            await expect(action).toHaveCSS("font-size", "14px");
+          }
+          await expect(details).toHaveCSS("color", secondaryColor);
+          const recovery = page.getByRole("region", { name: "Runtime recovery actions", exact: true });
+          await expect(recovery.getByText("Instafy Cloud runtime limit reached", { exact: true })).toHaveCSS("color", primaryColor);
+          const warningCopy = recovery.getByText("Stop a stale runtime or retry after cleanup.", { exact: false });
+          await expect(warningCopy).toHaveCSS("font-size", "14px");
+          await expect(warningCopy).toHaveCSS("color", secondaryColor);
           const a = (await details.boundingBox())!;
           const b = (await stop.boundingBox())!;
           expect(b.x >= a.x + a.width + 11 || b.y >= a.y + a.height + 3).toBe(true);

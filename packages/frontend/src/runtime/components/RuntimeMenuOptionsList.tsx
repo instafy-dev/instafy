@@ -125,7 +125,7 @@ function RuntimeValueRow({
         <Text
           as="span"
           variant={mono ? "mono" : "caption"}
-          tone="secondary"
+          tone="muted"
           className="min-w-0 flex-1 truncate tabular-nums"
           title={value}
         >
@@ -141,7 +141,7 @@ function RuntimeValueRow({
             aria-label={copyLabel}
             title={copyLabel}
             data-testid={copyTestId}
-            tone="muted"
+            tone="neutral"
             className="shrink-0"
           >
             <Copy className="h-3.5 w-3.5" aria-hidden="true" />
@@ -244,7 +244,7 @@ function RuntimeSizePickerRow() {
           ref={sizeTriggerRef}
           type="button"
           variant="outline"
-          size="xs"
+          size="sm"
           radius="lg"
           aria-label="Machine size"
           aria-haspopup="menu"
@@ -350,7 +350,7 @@ export function RuntimeMenuOptionsList({
     return (
       <div className={className}>
         <div className="px-2.5 py-3">
-          <Text as="p" variant="caption" tone="muted">
+          <Text as="p" variant="bodyCompact" tone="secondary">
             {emptyStateMessage}
           </Text>
         </div>
@@ -514,7 +514,7 @@ export function RuntimeMenuOptionsList({
                       <Text
                         as="span"
                         variant="caption"
-                        tone="muted"
+                        tone="secondary"
                         className="block break-words pr-1"
                         title={resources.title}
                       >
@@ -571,7 +571,7 @@ export function RuntimeMenuOptionsList({
                     radius="full"
                     aria-label={`More actions for ${option.label}`}
                     title="More actions"
-                    tone="muted"
+                    tone="neutral"
                     className="shrink-0"
                   >
                     <MoreHoriz className="h-4 w-4" aria-hidden="true" />
@@ -594,7 +594,7 @@ export function RuntimeMenuOptionsList({
                   variant="ghost"
                   size="sm"
                   radius="full"
-                  tone="muted"
+                  tone="neutral"
                   className="shrink-0"
                   aria-label={isExpanded ? "Hide runtime details" : "Show runtime details"}
                   aria-expanded={isExpanded}
@@ -612,10 +612,10 @@ export function RuntimeMenuOptionsList({
               // indent with the dot alone in the gutter.
               <div
                 id={detailsId}
-                className="mx-2.5 mt-1 flex flex-col gap-2.5 pb-3 pl-4.5 pt-2 text-xs text-slate-600 dark:text-slate-300"
+                className="mx-2.5 mt-1 flex flex-col gap-2.5 pb-3 pl-4.5 pt-2"
               >
                 {managesMachines ? (
-                  <div className="flex min-h-6 items-center pointer-coarse:min-h-11">
+                  <div className="flex min-h-8 items-center pointer-coarse:min-h-11">
                     {isSelected ? (
                       <Text as="span" variant="caption" tone="muted">
                         Selected machine
@@ -624,7 +624,7 @@ export function RuntimeMenuOptionsList({
                       <Button
                         variant="secondary"
                         elevation="none"
-                        size="xs"
+                        size="sm"
                         radius="full"
                         onPress={() => {
                           onSelectOption(option.id);
@@ -639,7 +639,7 @@ export function RuntimeMenuOptionsList({
                   </div>
                 ) : null}
                 {shouldShowDetailText ? (
-                  <Text as="p" variant="caption" tone="muted" className="break-words">
+                  <Text as="p" variant="bodyCompact" tone="secondary" className="break-words">
                     {option.detail}
                   </Text>
                 ) : null}
@@ -712,14 +712,14 @@ export function RuntimeMenuOptionsList({
                 ) : null}
                 {canShowSelfHostHelp ? (
                   <div className="flex flex-col gap-1.5">
-                    <Text as="p" variant="caption" tone="muted">
+                    <Text as="p" variant="bodyCompact" tone="secondary">
                       Self-hosted machines start from the computer they run on.
                     </Text>
                     <div>
                       <Button
                         onPress={() => onShowSelfHostHelp?.()}
                         variant="ghost"
-                        size="xs"
+                        size="sm"
                         radius="full"
                         tone="neutral"
                         className="gap-1.5"
@@ -736,7 +736,7 @@ export function RuntimeMenuOptionsList({
                       <Button
                         onPress={() => onStartRuntime?.(option.id ?? null)}
                         variant="ghost"
-                        size="xs"
+                        size="sm"
                         radius="full"
                         tone="neutral"
                         className="gap-1.5"
@@ -749,7 +749,7 @@ export function RuntimeMenuOptionsList({
                       <Button
                         onPress={() => onTerminateRuntime?.(option.id ?? null)}
                         variant="ghost"
-                        size="xs"
+                        size="sm"
                         radius="full"
                         tone="neutral"
                         className="gap-1.5"
@@ -766,7 +766,7 @@ export function RuntimeMenuOptionsList({
                         }}
                         onPress={() => setRemoveConfirmOptionId(optionKey)}
                         variant="ghost"
-                        size="xs"
+                        size="sm"
                         radius="full"
                         tone="danger"
                         className="ml-auto gap-1.5"
@@ -779,7 +779,7 @@ export function RuntimeMenuOptionsList({
                 ) : null}
                 {canRemove && isConfirmingRemove ? (
                   <div className="flex flex-wrap items-center justify-between gap-2 py-1.5">
-                    <Text as="span" variant="caption" tone="danger">
+                    <Text as="span" variant="bodyCompact" tone="danger">
                       Remove “{option.label}”?
                     </Text>
                     <div className="flex items-center gap-1.5">
@@ -791,7 +791,7 @@ export function RuntimeMenuOptionsList({
                           setRemoveConfirmOptionId(null);
                         }}
                         variant="ghost"
-                        size="xs"
+                        size="sm"
                         radius="full"
                         autoFocus
                       >
@@ -804,7 +804,7 @@ export function RuntimeMenuOptionsList({
                         }}
                         variant="ghost"
                         tone="danger"
-                        size="xs"
+                        size="sm"
                         radius="full"
                       >
                         Remove
