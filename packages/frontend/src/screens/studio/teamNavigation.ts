@@ -26,6 +26,18 @@ export function resolveTeamNavigationScope(search: string, activeOrgKey: string)
 }
 
 /**
+ * The panel of a page no space owns: Home, a team, and team or account
+ * settings. These still open while the space the URL names is blocked. A
+ * space's own pages return null, Credits included: it bills the open space.
+ */
+export function resolveSpaceIndependentPanel(search: string): "home" | "team" | "settings" | null {
+  const { page } = resolveTeamNavigationScope(search, "personal");
+  if (page === "workspace") return null;
+  if (page === "home") return "home";
+  return new URLSearchParams(search).get("panel") === "team" ? "team" : "settings";
+}
+
+/**
  * The team name shown beside the team chip, in the mobile header and in search.
  * A cached or project name is the stored one ("Personal team"), so it goes
  * through the same display name as the sidebar ("Personal").

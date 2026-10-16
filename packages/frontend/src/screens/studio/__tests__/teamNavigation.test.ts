@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildStudioDestinationSearch } from "../../../navigation/studioNavigation";
-import { canRememberTeamWorkspace, resolveActiveTeamName, resolveStudioSearchContext, resolveTeamNavigationScope, usesGlobalNavigationContext } from "../teamNavigation";
+import { canRememberTeamWorkspace, resolveActiveTeamName, resolveSpaceIndependentPanel, resolveStudioSearchContext, resolveTeamNavigationScope, usesGlobalNavigationContext } from "../teamNavigation";
 
 const teamA = "11111111-1111-4111-8111-111111111111";
 const teamB = "22222222-2222-4222-8222-222222222222";
@@ -111,5 +111,33 @@ describe("team navigation scope", () => {
   it("supports personal scope and ignores malformed scope hints", () => {
     expect(resolveTeamNavigationScope("?panel=team&teamId=personal", teamA).orgKey).toBe("personal");
     expect(resolveTeamNavigationScope("?panel=team&teamId=garbage", teamA).orgKey).toBe(teamA);
+  });
+});
+
+describe("pages a blocked space leaves open", () => {
+  // Panel navigation keeps the blocked space in the URL, so these are the
+  // URLs the sidebar writes while that space shows "This space was deleted".
+  const blocked = "?projectId=33333333-3333-4333-8333-333333333333&panel=chat";
+  it.each([
+    [{ kind: "panel", panel: "home", teamId: teamA }, "home"],
+    [{ kind: "panel", panel: "team", teamId: teamB }, "team"],
+    [{ kind: "panel", panel: "settings", settingsTab: "profile", teamId: teamA }, "settings"],
+    [{ kind: "panel", panel: "settings", settingsTab: "org", settingsOrgId: teamB }, "settings"],
+  ] as const)("opens %o in place of the picker", (destination, panel) => {
+    expect(resolveSpaceIndependentPanel(buildStudioDestinationSearch(blocked, destination))).toBe(panel);
+  });
+  it.each([
+    { kind: "panel", panel: "chat" },
+    { kind: "panel", panel: "credits" },
+    { kind: "panel", panel: "automations" },
+    { kind: "panel", panel: "extensions" },
+    { kind: "panel", panel: "settings", settingsTab: "project" },
+  ] as const)("keeps the picker on the space's own page %o", (destination) => {
+    expect(resolveSpaceIndependentPanel(buildStudioDestinationSearch(blocked, destination))).toBeNull();
+  });
+  it("keeps the picker when the URL names no panel or settings tab", () => {
+    expect(resolveSpaceIndependentPanel(blocked)).toBeNull();
+    expect(resolveSpaceIndependentPanel("?projectId=space-a")).toBeNull();
+    expect(resolveSpaceIndependentPanel("?projectId=space-a&panel=settings")).toBeNull();
   });
 });
