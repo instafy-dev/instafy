@@ -871,18 +871,11 @@ mod tests {
             encode_frame(&WorkerFrame::Usage(usage.artifact().unwrap())).unwrap(),
         )
         .unwrap();
-        let program = scratch.path().join("worker");
-        let quoted_snapshot = snapshot.to_string_lossy().replace('\'', "'\"'\"'");
-        std::fs::write(
-            &program,
-            format!("#!/bin/sh\n/bin/cat '{quoted_snapshot}'\n"),
-        )
-        .unwrap();
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
         let request = IsolatedToolWorkerRequest {
             workspace_dir,
             state_dir,
-            prompt: "inert fixture".into(),
+            // Exceed the pipe buffer so the fixture must consume the entire request.
+            prompt: "inert fixture ".repeat(16 * 1024),
             project_id: Uuid::new_v4(),
             job_id: Uuid::new_v4(),
             conversation_id: None,
@@ -896,11 +889,30 @@ mod tests {
             model: None,
             reasoning_effort: None,
         };
+        let request_bytes = encode_frame(&request).unwrap().len();
+        let program = scratch.path().join("worker");
+        let quoted_snapshot = snapshot.to_string_lossy().replace('\'', "'\"'\"'");
+        // The real worker reads its request before producing output. Without this
+        // handshake, an early fixture exit can break the parent's request write
+        // before it reads any usage, instead of exercising EOF after received usage.
+        // bs=1 avoids platform-specific short-block behavior in dd's count limit.
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\n/bin/dd bs=1 count={request_bytes} of=/dev/null 2>/dev/null\nexec /bin/cat '{quoted_snapshot}'\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
         let error = run_with_program(&program, request, &mut |_| Ok(()), JobCancelSignal::new())
             .await
             .unwrap_err();
         let failure = error.downcast_ref::<IsolatedToolWorkerFailure>().unwrap();
-        assert!(failure.message.contains("IPC ended before a result"));
+        assert!(
+            failure.message.contains("IPC ended before a result"),
+            "unexpected worker failure: {}",
+            failure.message
+        );
         let receipt = failure.usage_artifact.as_ref().unwrap();
         assert_eq!(receipt["calls"][0]["usage"]["total_tokens"], 7);
         assert_eq!(receipt["calls"][0]["usageStatus"], "partial");
