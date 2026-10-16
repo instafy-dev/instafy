@@ -51,11 +51,24 @@ Appearance settings, settings footer and machine menu directly. Its callbacks ar
 use it to review consumer alignment, wrapping and recovery actions. The
 `control-surfaces-responsive.spec.ts` and `credential-entry-appearance.spec.ts` browser
 checks cover mouse/touch targets at narrow and wide widths in both themes. These are
-component checks, not authenticated backend or physical-device tests.
+component checks, not authenticated backend or physical-device tests. The Machines example
+uses its production `SettingsShell` at full available width, not a half-width comparison.
 
-Machine menus and the Machines page share a compact hierarchy: `bodyStrong` names,
-`caption` descriptions and facts, and `captionStrong` section or warning headings.
-Technical identifiers and image names use `mono`. Details and fact labels align with
+`SettingsShell width="comfortable"` caps a list/form surface at 56rem (896px at the default
+root size), including its gutters. Machines uses this option so controls stay near their
+content on ultrawide screens. The default `wide` shell remains 72rem for other settings.
+Both stay fluid below their cap and center within the available pane; extra viewport width
+becomes margins, not larger fonts or indefinitely stretched rows.
+
+Machine menus and the Machines page share a role-based hierarchy: `bodyStrong` names
+and headings with `primary` contrast, `bodyCompact` descriptions and instructions with
+`secondary` contrast, and `sm` text actions (14px). Facts, IDs and timestamps stay 12px
+(`caption` / `mono`). Row IDs and collapsed stats use `secondary` so they remain readable
+on the selection/hover fill; supporting metadata on the plain surface uses `muted`.
+Warnings keep the semantic icon and surface, with neutral readable prose; failures and
+destructive actions keep the shared danger tone. Typography stays stable across widths,
+and touch enlarges the hit targets rather than scaling the labels.
+Details and fact labels align with
 the machine name; the status dot stays in the gutter. Identifiers wrap below names
 when space is tight rather than forcing a short name to truncate beside touch actions.
 Machine selection uses a neutral fill and checkmark, independent of expansion and the

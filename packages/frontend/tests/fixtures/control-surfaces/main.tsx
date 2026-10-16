@@ -15,7 +15,7 @@ import "../../../src/styles/tailwind.css";
 function ControlSurfaces() {
   const [search, setSearch] = useState("");
   const [saveCount, setSaveCount] = useState(0);
-  return <main className="mx-auto max-w-5xl space-y-6 p-4 sm:p-8">
+  return <main className="mx-auto max-w-6xl space-y-6 p-4 sm:p-8">
     <header className="space-y-1">
       <Text as="h1" variant="title" tone="primary">Control surface review</Text>
       <Text variant="body" tone="muted">Actual Files, Appearance, settings actions and machine controls. Preview actions do not change your workspace.</Text>

@@ -41,7 +41,7 @@ export function RuntimeOptionMeta({
         <Text
           as="span"
           variant="bodyStrong"
-          tone="secondary"
+          tone="primary"
           className="min-w-0 max-w-full truncate"
           title={option.label}
         >
@@ -71,7 +71,7 @@ export function RuntimeOptionMeta({
           <Text
             as="span"
             variant="mono"
-            tone="muted"
+            tone="secondary"
             title={option.id ?? undefined}
             className="shrink-0"
           >
@@ -80,7 +80,7 @@ export function RuntimeOptionMeta({
         ) : null}
       </div>
       {showDetail && option.detail ? (
-        <Text as="span" variant="caption" tone="muted" className={detailClass}>
+        <Text as="span" variant="bodyCompact" tone="secondary" className={detailClass}>
           {option.detail}
         </Text>
       ) : null}

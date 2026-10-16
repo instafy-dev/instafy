@@ -70,7 +70,8 @@ function AssignAgentMenu({
         ref={triggerRef}
         type="button"
         variant="ghost"
-        size="xs"
+        size="sm"
+        tone="neutral"
         radius="full"
         isDisabled={disabledReason != null}
         aria-label={`Pin an agent to ${machine.label}`}
@@ -83,7 +84,6 @@ function AssignAgentMenu({
         onPress={() => {
           if (!open) setOpen(true);
         }}
-        className="inline-flex items-center gap-1 border-0 bg-transparent px-1.5 py-0.5 text-xxs text-slate-500 shadow-none hover:text-slate-700 data-[hovered]:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 dark:data-[hovered]:text-slate-200"
       >
         <Plus className="h-3 w-3" aria-hidden="true" />
         Pin agent
@@ -348,7 +348,7 @@ export function MachinesPanel() {
           {pinError ? (
             <Text
               as="p"
-              variant="caption"
+              variant="bodyCompact"
               tone="danger"
               className="pt-1"
               data-testid="machines-pin-error"
@@ -364,6 +364,7 @@ export function MachinesPanel() {
   return (
     <SettingsShell
       testId="machines-panel"
+      width="comfortable"
       title="Machines"
       subtitle="Status, size, resource history, and controls for the machines your agents run on."
     >
