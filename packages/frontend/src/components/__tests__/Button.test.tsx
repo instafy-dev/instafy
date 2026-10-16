@@ -6,7 +6,7 @@ import { Button, IconButton } from "../Button";
 
 const Glyph = () => <svg data-testid="glyph" aria-hidden="true" />;
 
-describe("Button pending state", () => {
+describe("Button", () => {
   let container: HTMLDivElement;
   let root: Root;
 
@@ -26,6 +26,32 @@ describe("Button pending state", () => {
     await act(async () => root.unmount());
     container.remove();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it.each(["primary", "secondary", "outline", "danger"] as const)(
+    "can flatten %s actions without changing their palette, targets or focus treatment",
+    async (variant) => {
+      const raised = await render(<Button variant={variant}>Choose</Button>);
+      const raisedClasses = [...raised.classList];
+      expect(raisedClasses).toContain("shadow-sm");
+
+      const flat = await render(<Button variant={variant} elevation="none">Choose</Button>);
+      const shadowClass = /(?:^|:)shadow-/;
+      expect([...flat.classList]).toEqual(raisedClasses.filter((name) => !shadowClass.test(name)));
+      expect(flat.hasAttribute("elevation")).toBe(false);
+
+      const explicitRaised = await render(<Button variant={variant} elevation="raised">Choose</Button>);
+      expect([...explicitRaised.classList]).toEqual(raisedClasses);
+    },
+  );
+
+  it.each(["ghost", "text"] as const)("keeps %s actions flat regardless of elevation", async (variant) => {
+    const raised = await render(<Button variant={variant} elevation="raised">Cancel</Button>);
+    const classes = [...raised.classList];
+    expect(classes.some((name) => /(?:^|:)shadow-/.test(name))).toBe(false);
+
+    const flat = await render(<Button variant={variant} elevation="none">Cancel</Button>);
+    expect([...flat.classList]).toEqual(classes);
   });
 
   it("renders the icon before the label while idle", async () => {

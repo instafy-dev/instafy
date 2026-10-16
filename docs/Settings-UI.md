@@ -13,7 +13,8 @@ determines the winner. Arbitrary layout classes remain supported.
   sizes at every width; coarse pointers keep at least 44px targets. Resizing a desktop
   window alone does not enlarge its buttons. `variant="text"` is the inline action treatment. Quiet actions (`ghost`, `outline`, `text`) use `tone`
   (`neutral`, `muted`, `accent`, `danger`) for their complete normal/hover/pressed palette.
-  Filled actions keep their existing variants. Avoid nested color spans, `!text-*` workarounds
+  Filled actions keep their existing variants. `elevation="none"` removes decorative
+  shadows from filled and outlined actions without removing their keyboard focus ring. Avoid nested color spans, `!text-*` workarounds
   and locally reconstructed destructive hover states.
 - `Input` and both native/styled `Select` share medium defaults and control size tokens.
   `Field label` plus matching `htmlFor`/control `id` also labels app-rendered selects;
@@ -60,6 +61,23 @@ when space is tight rather than forcing a short name to truncate beside touch ac
 Machine selection uses a neutral fill and checkmark, independent of expansion and the
 runtime status dot. Start and Stop use the shared neutral button tone; Remove uses
 danger. Reserve accent treatments for primary calls to action and links.
+The neutral selection surface includes the whole header, including its disclosure and
+action controls; each control retains its own focus and hit area. In pickers the name
+selects a machine and the separate chevron opens details. On the Machines page the name
+and chevron form one disclosure control; choosing a machine requires **Use this machine**
+in its details. Start/Stop stay visible in the header, while More actions opens the existing
+Remove confirmation. Inspecting a machine never changes the space's preferred machine.
+Expanded machine details use alignment and spacing, without a divider or enclosing card.
+Routine actions use the shared ghost button treatment; empty states remain plain content.
+Machine icon actions use `size="sm"` and `radius="full"`: 32px on fine pointers and
+44px on coarse pointers, including Close, Copy, Start/Stop, More and picker disclosure.
+**Use this machine** uses the flat secondary treatment (`elevation="none"`) to stay
+recognizable as an action. Once selected, it becomes plain **Selected machine** status
+text and focus returns to the stable machine row.
+Removal confirmation uses an explicit question and a danger-toned action, with no extra
+box or shadow. Recovery keeps one semantic warning surface; subsequent errors are announced
+inline within it rather than nesting more notice surfaces. The machine-size field retains
+its outline, and floating menus retain elevation.
 
 ## Navigation
 

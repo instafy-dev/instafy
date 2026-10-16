@@ -1,5 +1,5 @@
-import { useRef, useState, type ReactNode } from "react";
-import { Check, Copy, NavArrowDown, Play, Square, Trash } from "iconoir-react";
+import { useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { Check, Copy, MoreHoriz, NavArrowDown, Play, Square, Trash } from "iconoir-react";
 import { MenuTrigger } from "react-aria-components";
 import { StudioMenu, StudioMenuItem } from "../../components/aria/StudioMenu";
 import { StudioPopover } from "../../components/aria/StudioPopover";
@@ -26,9 +26,7 @@ import { RuntimeResourceSparklines } from "./RuntimeResourceSparklines";
 import type { RuntimeMenuOption } from "../useRuntimeMenu";
 import type { TunnelCopyMode } from "./RuntimeTunnelDetails";
 import { Button, IconButton } from "../../components/Button";
-import { Card } from "../../components/Card";
 import { Text } from "../../components/Text";
-import { DARK_DIVIDER_BORDER_CLASS } from "../../theme/darkSurfaces";
 
 function formatRuntimeTimestamp(value?: string | null): string | null {
   if (!value) return null;
@@ -137,7 +135,7 @@ function RuntimeValueRow({
           <IconButton
             type="button"
             variant="ghost"
-            size="xs"
+            size="sm"
             radius="full"
             onPress={() => onCopy()}
             aria-label={copyLabel}
@@ -189,6 +187,8 @@ interface RuntimeMenuOptionsListProps {
    * be tall. Remove still routes through the in-details confirm strip.
    */
   headerActions?: boolean;
+  /** Pickers select from the row; management pages expand it to inspect first. */
+  interactionMode?: "picker" | "manage";
 }
 
 /**
@@ -296,7 +296,7 @@ function RuntimeSizePickerRow() {
 }
 
 const DEFAULT_OPTION_CLASS =
-  "flex min-w-0 flex-1 cursor-pointer items-start gap-2 rounded-xl px-2.5 py-1.5 text-left transition hover:bg-slate-100 active:bg-slate-200/80 focus:outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:hover:bg-[var(--color-studio-dark-control-hover)] dark:active:bg-[var(--color-studio-dark-active)] dark:focus-visible:ring-offset-[var(--color-studio-dark-floating)]";
+  "flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-xl px-2.5 py-1.5 text-left transition pointer-coarse:min-h-11 focus:outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-[var(--color-studio-dark-floating)]";
 
 export function RuntimeMenuOptionsList({
   options,
@@ -316,10 +316,22 @@ export function RuntimeMenuOptionsList({
   renderOptionExtras,
   sparklineVariant = "compact",
   headerActions = false,
+  interactionMode = "picker",
 }: RuntimeMenuOptionsListProps) {
+  const listId = useId();
+  const managesMachines = interactionMode === "manage";
   const { showStatus } = useStatus();
   const [expandedOptionId, setExpandedOptionId] = useState<string | null>(null);
   const [removeConfirmOptionId, setRemoveConfirmOptionId] = useState<string | null>(null);
+  const removeTriggerRefs = useRef(new Map<string, HTMLButtonElement>());
+  const optionRefs = useRef(new Map<string, HTMLDivElement>());
+  const restoreRemoveFocusTo = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    if (removeConfirmOptionId === null && restoreRemoveFocusTo.current !== null) {
+      removeTriggerRefs.current.get(restoreRemoveFocusTo.current)?.focus();
+      restoreRemoveFocusTo.current = null;
+    }
+  }, [removeConfirmOptionId]);
 
   const copyWithFeedback = (value: string, message: string) => {
     void writeClipboardText(value).then(
@@ -337,25 +349,20 @@ export function RuntimeMenuOptionsList({
   if (options.length === 0) {
     return (
       <div className={className}>
-        <Card
-          tone="raised"
-          radius="xl"
-          shadow="none"
-          padding="sm"
-          className="py-2"
-        >
+        <div className="px-2.5 py-3">
           <Text as="p" variant="caption" tone="muted">
             {emptyStateMessage}
           </Text>
-        </Card>
+        </div>
       </div>
     );
   }
 
   return (
     <div className={className}>
-      {options.map((option) => {
+      {options.map((option, index) => {
         const optionKey = option.id ?? option.label;
+        const detailsId = `${listId}-details-${index}`;
         const isSelected = option.id === selectedRuntimeId;
         // "__none__" marks a deliberate collapse of the default-open option;
         // plain null still means "nothing toggled yet" so the default applies.
@@ -371,13 +378,6 @@ export function RuntimeMenuOptionsList({
           setRemoveConfirmOptionId((current) => (current === optionKey ? null : current));
         };
         const isConfirmingRemove = removeConfirmOptionId === optionKey;
-        const optionClasses = [
-          optionClassName,
-          isSelected ? selectedOptionClassName : "",
-        ]
-          .filter(Boolean)
-          .join(" ")
-          .trim();
 
         const formattedLaunch = formatRuntimeTimestamp(option.launchedAt);
         const formattedLastSeen = formatRuntimeTimestamp(option.runtimeLastSeenAt);
@@ -449,7 +449,17 @@ export function RuntimeMenuOptionsList({
         const canShowSelfHostHelp =
           Boolean(onShowSelfHostHelp) && option.isLikelyLocal && option.state === "offline";
         const hasActions =
-          hasDetails || canStart || canTerminate || canRemove || canShowSelfHostHelp;
+          managesMachines || hasDetails || canStart || canTerminate || canRemove || canShowSelfHostHelp;
+        const activateRow = () => {
+          if (managesMachines) toggleDetails();
+          else onSelectOption(option.id);
+        };
+        const disclosureIcon = (
+          <NavArrowDown
+            className={`h-4 w-4 shrink-0 transition-transform motion-reduce:transition-none ${isExpanded ? "rotate-180" : ""}`}
+            aria-hidden="true"
+          />
+        );
 
         return (
           <div
@@ -462,59 +472,69 @@ export function RuntimeMenuOptionsList({
             {/* The pressable selection surface and the disclosure toggle are
                 siblings: interactive elements must not nest inside the
                 header's role="button". */}
-            <div className="flex w-full items-center gap-1">
+            <div className={`flex w-full items-center gap-1 rounded-xl pr-1 transition hover:bg-slate-100 active:bg-slate-200/80 dark:hover:bg-[var(--color-studio-dark-control-hover)] dark:active:bg-[var(--color-studio-dark-active)] ${isSelected ? selectedOptionClassName : ""}`}>
               <div
+                ref={(node) => {
+                  if (node) optionRefs.current.set(optionKey, node);
+                  else optionRefs.current.delete(optionKey);
+                }}
                 role="button"
                 tabIndex={0}
-                aria-pressed={isSelected}
-                onClick={() => onSelectOption(option.id)}
+                aria-pressed={managesMachines ? undefined : isSelected}
+                aria-expanded={managesMachines ? isExpanded : undefined}
+                aria-controls={managesMachines ? detailsId : undefined}
+                onClick={activateRow}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" || event.key === " ") {
                     event.preventDefault();
-                    onSelectOption(option.id);
+                    activateRow();
                   }
                 }}
-                className={optionClasses}
+                className={optionClassName}
               >
-                {/* h-5 = the title's 20px line box, so the dot's midline sits
-                    on the title's midline (h-7 floated it 4px low). */}
-                <span className="flex h-5 flex-none items-center" aria-hidden="true">
-                  <RuntimeStateIndicator option={option} />
-                </span>
-                <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                  <RuntimeOptionMeta
-                    option={option}
-                    showDetail={false}
-                    showProviderBadge={false}
-                    // The header includes the machine's id (full value on
-                    // hover); the details grid carries no separate ID row.
-                    showRuntimeIdBadge
-                    className="flex min-w-0 flex-col gap-0.5"
-                  />
-                  {/* The one-line stats summary is the COLLAPSED view; expanded,
-                      the trend rows below show the same numbers. */}
-                  {resources && !isExpanded ? (
-                    <Text
-                      as="span"
-                      variant="caption"
-                      tone="muted"
-                      className="block break-words pr-1"
-                      title={resources.title}
-                    >
-                      {resources.summary}
-                    </Text>
-                  ) : null}
+                <div className="flex min-w-0 flex-1 items-start gap-2">
+                  {/* h-5 = the title's 20px line box, so the dot's midline sits
+                      on the title's midline (h-7 floated it 4px low). */}
+                  <span className="flex h-5 flex-none items-center" aria-hidden="true">
+                    <RuntimeStateIndicator option={option} />
+                  </span>
+                  <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                    <RuntimeOptionMeta
+                      option={option}
+                      showDetail={false}
+                      showProviderBadge={false}
+                      // The header includes the machine's id (full value on
+                      // hover); the details grid carries no separate ID row.
+                      showRuntimeIdBadge
+                      className="flex min-w-0 flex-col gap-0.5"
+                    />
+                    {/* The one-line stats summary is the COLLAPSED view; expanded,
+                        the trend rows below show the same numbers. */}
+                    {resources && !isExpanded ? (
+                      <Text
+                        as="span"
+                        variant="caption"
+                        tone="muted"
+                        className="block break-words pr-1"
+                        title={resources.title}
+                      >
+                        {resources.summary}
+                      </Text>
+                    ) : null}
+                  </div>
                 </div>
                 {isSelected ? (
                   <span className="flex h-5 shrink-0 items-center" title="Selected">
                     <Check className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span className="sr-only">Selected</span>
                   </span>
                 ) : null}
+                {managesMachines ? disclosureIcon : null}
               </div>
               {headerActions && canStart ? (
                 <IconButton
                   variant="ghost"
-                  size="xs"
+                  size="sm"
                   radius="full"
                   aria-label={`Start ${option.label}`}
                   title="Start"
@@ -528,7 +548,7 @@ export function RuntimeMenuOptionsList({
               {headerActions && canTerminate && !canStart ? (
                 <IconButton
                   variant="ghost"
-                  size="xs"
+                  size="sm"
                   radius="full"
                   aria-label={`Stop ${option.label}`}
                   title="Stop"
@@ -540,42 +560,49 @@ export function RuntimeMenuOptionsList({
                 </IconButton>
               ) : null}
               {headerActions && canRemove ? (
-                <IconButton
-                  variant="ghost"
-                  size="xs"
-                  radius="full"
-                  aria-label={`Remove ${option.label}`}
-                  title="Remove"
-                  onPress={() => {
-                    // Destructive stays deliberate: the header button only ARMS
-                    // the in-details confirm strip (expanding if needed).
-                    setExpandedOptionId(optionKey);
-                    setRemoveConfirmOptionId(optionKey);
-                  }}
-                  tone="danger"
-                  className="shrink-0"
-                >
-                  <Trash className="h-4 w-4" aria-hidden="true" />
-                </IconButton>
+                <MenuTrigger>
+                  <IconButton
+                    ref={(node) => {
+                      if (node) removeTriggerRefs.current.set(optionKey, node);
+                      else removeTriggerRefs.current.delete(optionKey);
+                    }}
+                    variant="ghost"
+                    size="sm"
+                    radius="full"
+                    aria-label={`More actions for ${option.label}`}
+                    title="More actions"
+                    tone="muted"
+                    className="shrink-0"
+                  >
+                    <MoreHoriz className="h-4 w-4" aria-hidden="true" />
+                  </IconButton>
+                  <StudioPopover placement="bottom end" className="min-w-40 p-1">
+                    <StudioMenu aria-label={`Actions for ${option.label}`}>
+                      <StudioMenuItem id="remove" onAction={() => {
+                        // Opening confirmation never removes the machine.
+                        setExpandedOptionId(optionKey);
+                        setRemoveConfirmOptionId(optionKey);
+                      }}>
+                        Remove machine…
+                      </StudioMenuItem>
+                    </StudioMenu>
+                  </StudioPopover>
+                </MenuTrigger>
               ) : null}
-              {hasActions ? (
+              {hasActions && !managesMachines ? (
                 <IconButton
                   variant="ghost"
-                  size="xs"
+                  size="sm"
                   radius="full"
                   tone="muted"
                   className="shrink-0"
                   aria-label={isExpanded ? "Hide runtime details" : "Show runtime details"}
                   aria-expanded={isExpanded}
+                  aria-controls={detailsId}
                   title={isExpanded ? "Hide runtime details" : "Show runtime details"}
                   onPress={toggleDetails}
                 >
-                  <NavArrowDown
-                    className={`h-4 w-4 transition-transform motion-reduce:transition-none ${
-                      isExpanded ? "rotate-180" : ""
-                    }`}
-                    aria-hidden="true"
-                  />
+                  {disclosureIcon}
                 </IconButton>
               ) : null}
             </div>
@@ -584,8 +611,33 @@ export function RuntimeMenuOptionsList({
               // the details sit exactly flush with the title text: a hanging
               // indent with the dot alone in the gutter.
               <div
-                className={`mx-2.5 mt-1 flex flex-col gap-2.5 border-t border-slate-200/70 pb-1 pl-4.5 pt-2.5 text-xs text-slate-600 dark:text-slate-300 ${DARK_DIVIDER_BORDER_CLASS}`}
+                id={detailsId}
+                className="mx-2.5 mt-1 flex flex-col gap-2.5 pb-3 pl-4.5 pt-2 text-xs text-slate-600 dark:text-slate-300"
               >
+                {managesMachines ? (
+                  <div className="flex min-h-6 items-center pointer-coarse:min-h-11">
+                    {isSelected ? (
+                      <Text as="span" variant="caption" tone="muted">
+                        Selected machine
+                      </Text>
+                    ) : (
+                      <Button
+                        variant="secondary"
+                        elevation="none"
+                        size="xs"
+                        radius="full"
+                        onPress={() => {
+                          onSelectOption(option.id);
+                          // The action becomes status text; keep keyboard focus
+                          // on the stable row rather than the removed button.
+                          optionRefs.current.get(optionKey)?.focus();
+                        }}
+                      >
+                        Use this machine
+                      </Button>
+                    )}
+                  </div>
+                ) : null}
                 {shouldShowDetailText ? (
                   <Text as="p" variant="caption" tone="muted" className="break-words">
                     {option.detail}
@@ -666,7 +718,7 @@ export function RuntimeMenuOptionsList({
                     <div>
                       <Button
                         onPress={() => onShowSelfHostHelp?.()}
-                        variant="outline"
+                        variant="ghost"
                         size="xs"
                         radius="full"
                         tone="neutral"
@@ -683,7 +735,7 @@ export function RuntimeMenuOptionsList({
                     {canStart ? (
                       <Button
                         onPress={() => onStartRuntime?.(option.id ?? null)}
-                        variant="outline"
+                        variant="ghost"
                         size="xs"
                         radius="full"
                         tone="neutral"
@@ -696,7 +748,7 @@ export function RuntimeMenuOptionsList({
                     {canTerminate && !canStart ? (
                       <Button
                         onPress={() => onTerminateRuntime?.(option.id ?? null)}
-                        variant="outline"
+                        variant="ghost"
                         size="xs"
                         radius="full"
                         tone="neutral"
@@ -708,6 +760,10 @@ export function RuntimeMenuOptionsList({
                     ) : null}
                     {canRemove && !isConfirmingRemove ? (
                       <Button
+                        ref={(node) => {
+                          if (node) removeTriggerRefs.current.set(optionKey, node);
+                          else removeTriggerRefs.current.delete(optionKey);
+                        }}
                         onPress={() => setRemoveConfirmOptionId(optionKey)}
                         variant="ghost"
                         size="xs"
@@ -722,15 +778,18 @@ export function RuntimeMenuOptionsList({
                   </div>
                 ) : null}
                 {canRemove && isConfirmingRemove ? (
-                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-rose-200/80 bg-rose-50/50 px-2 py-1.5 dark:border-rose-500/40 dark:bg-rose-500/10">
-                    <Text as="span" variant="caption" tone="muted">
+                  <div className="flex flex-wrap items-center justify-between gap-2 py-1.5">
+                    <Text as="span" variant="caption" tone="danger">
                       Remove “{option.label}”?
                     </Text>
                     <div className="flex items-center gap-1.5">
                       {/* Focus enters the strip on the safe action, never on
                           the destructive one. */}
                       <Button
-                        onPress={() => setRemoveConfirmOptionId(null)}
+                        onPress={() => {
+                          restoreRemoveFocusTo.current = optionKey;
+                          setRemoveConfirmOptionId(null);
+                        }}
                         variant="ghost"
                         size="xs"
                         radius="full"
@@ -743,7 +802,8 @@ export function RuntimeMenuOptionsList({
                           setRemoveConfirmOptionId(null);
                           onRemoveRuntime?.(option.id ?? null);
                         }}
-                        variant="danger"
+                        variant="ghost"
+                        tone="danger"
                         size="xs"
                         radius="full"
                       >

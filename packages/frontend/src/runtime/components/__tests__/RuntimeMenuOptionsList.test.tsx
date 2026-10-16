@@ -80,23 +80,34 @@ describe("RuntimeMenuOptionsList", () => {
 
   async function renderList({
     onSelectOption = vi.fn(),
+    selectedRuntimeId = null,
     onTerminateRuntime = vi.fn(),
     onRemoveRuntime = vi.fn(),
+    onStartRuntime,
+    interactionMode = "picker",
+    headerActions = false,
     options = [hostedOption()],
   }: {
     onSelectOption?: (runtimeId: string | null) => void;
+    selectedRuntimeId?: string | null;
     onTerminateRuntime?: (runtimeId: string | null) => void;
     onRemoveRuntime?: (runtimeId: string | null) => void;
+    onStartRuntime?: (runtimeId: string | null) => void;
+    interactionMode?: "picker" | "manage";
+    headerActions?: boolean;
     options?: RuntimeMenuOption[];
   } = {}) {
     await act(async () => {
       root.render(
         <RuntimeMenuOptionsList
           options={options}
-          selectedRuntimeId={null}
+          selectedRuntimeId={selectedRuntimeId}
           onSelectOption={onSelectOption}
           onTerminateRuntime={onTerminateRuntime}
           onRemoveRuntime={onRemoveRuntime}
+          onStartRuntime={onStartRuntime}
+          interactionMode={interactionMode}
+          headerActions={headerActions}
         />,
       );
     });
@@ -127,6 +138,114 @@ describe("RuntimeMenuOptionsList", () => {
     expect(onSelectOption).toHaveBeenCalledTimes(1);
     expect(onSelectOption).toHaveBeenCalledWith("cloud-runtime-1");
   });
+
+  it.each(["click", "Enter", " "])(
+    "expands and collapses a management row with %s without selecting it",
+    async (activation) => {
+      const onSelectOption = vi.fn();
+      await renderList({ onSelectOption, interactionMode: "manage", headerActions: true });
+      const header = container.querySelector<HTMLElement>('[role="button"]')!;
+      expect(header).not.toBeNull();
+      expect(header.getAttribute("aria-pressed")).toBeNull();
+      expect(header.getAttribute("aria-expanded")).toBe("false");
+
+      const activateHeader = async () => {
+        await act(async () => {
+          if (activation === "click") {
+            header.click();
+          } else {
+            header.dispatchEvent(new KeyboardEvent("keydown", {
+              key: activation,
+              bubbles: true,
+              cancelable: true,
+            }));
+          }
+        });
+      };
+
+      await activateHeader();
+      expect(header.getAttribute("aria-expanded")).toBe("true");
+      expect(document.getElementById(header.getAttribute("aria-controls")!)).not.toBeNull();
+      expect(buttonWithText("Use this machine")).not.toBeNull();
+      expect(onSelectOption).not.toHaveBeenCalled();
+
+      await activateHeader();
+      expect(header.getAttribute("aria-expanded")).toBe("false");
+      expect(buttonWithText("Use this machine")).toBeNull();
+      expect(onSelectOption).not.toHaveBeenCalled();
+    },
+  );
+
+  it("selects a managed machine only through its explicit selection action", async () => {
+    const onSelectOption = vi.fn();
+    await renderList({ onSelectOption, interactionMode: "manage", headerActions: true });
+    const header = container.querySelector<HTMLElement>('[role="button"]')!;
+    await act(async () => {
+      header.click();
+    });
+    const selectButton = buttonWithText("Use this machine");
+    expect(selectButton).not.toBeNull();
+    expect(selectButton?.closest('[role="button"]')).toBeNull();
+    expect(onSelectOption).not.toHaveBeenCalled();
+
+    await act(async () => {
+      selectButton?.click();
+    });
+
+    expect(onSelectOption).toHaveBeenCalledTimes(1);
+    expect(onSelectOption).toHaveBeenCalledWith("cloud-runtime-1");
+    expect(header.getAttribute("aria-expanded")).toBe("true");
+    expect(document.activeElement).toBe(header);
+
+    await renderList({
+      onSelectOption,
+      selectedRuntimeId: "cloud-runtime-1",
+      interactionMode: "manage",
+      headerActions: true,
+    });
+    expect(buttonWithText("Use this machine")).toBeNull();
+    expect(buttonWithText("Selected machine")).toBeNull();
+    expect(container.textContent).toContain("Selected machine");
+    expect(document.activeElement).toBe(header);
+  });
+
+  it.each([
+    { state: "offline", action: "Start" },
+    { state: "online", action: "Stop" },
+  ] as const)(
+    "keeps the management $action action independent of expansion and selection",
+    async ({ state, action }) => {
+      const onSelectOption = vi.fn();
+      const onStartRuntime = vi.fn();
+      const onTerminateRuntime = vi.fn();
+      await renderList({
+        interactionMode: "manage",
+        headerActions: true,
+        onSelectOption,
+        onStartRuntime,
+        onTerminateRuntime,
+        options: [hostedOption({ state })],
+      });
+      const header = container.querySelector<HTMLElement>('[role="button"]')!;
+      const actionButton = container.querySelector<HTMLButtonElement>(
+        `button[aria-label="${action} Instafy Cloud runtime"]`,
+      );
+      expect(actionButton).not.toBeNull();
+      expect(actionButton?.closest('[role="button"]')).toBeNull();
+
+      await act(async () => {
+        actionButton?.click();
+      });
+
+      const expectedCallback = action === "Start" ? onStartRuntime : onTerminateRuntime;
+      const otherCallback = action === "Start" ? onTerminateRuntime : onStartRuntime;
+      expect(expectedCallback).toHaveBeenCalledTimes(1);
+      expect(expectedCallback).toHaveBeenCalledWith("cloud-runtime-1");
+      expect(otherCallback).not.toHaveBeenCalled();
+      expect(onSelectOption).not.toHaveBeenCalled();
+      expect(header.getAttribute("aria-expanded")).toBe("false");
+    },
+  );
 
   it("keeps detail actions out of the selection surface", async () => {
     const onSelectOption = vi.fn();

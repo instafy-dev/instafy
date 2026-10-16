@@ -390,6 +390,7 @@ export function MachinesPanel() {
         renderOptionExtras={renderMachineAgents}
         sparklineVariant="page"
         headerActions
+        interactionMode="manage"
       />
     </SettingsShell>
   );

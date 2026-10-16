@@ -11,6 +11,7 @@ type ButtonVariant = "primary" | "secondary" | "outline" | "ghost" | "text" | "d
 type ButtonTone = "neutral" | "muted" | "danger" | "accent";
 type ButtonSize = "xs" | "sm" | "md" | "lg" | "icon";
 type ButtonRadius = "none" | "md" | "lg" | "xl" | "2xl" | "full";
+type ButtonElevation = "none" | "raised";
 
 // The press nudge is a translate. Tailwind v4 translate utilities share one
 // --tw-translate-x/--tw-translate-y pair, so it replaces any translate a caller
@@ -21,11 +22,18 @@ const BASE =
 
 const FILLED_VARIANT_CLASSES = {
   primary:
-    "bg-primary-600 text-white shadow-sm shadow-primary-600/20 hover:bg-primary-700 data-[hovered]:bg-primary-700 hover:shadow-md hover:shadow-primary-600/25 data-[hovered]:shadow-md data-[hovered]:shadow-primary-600/25 data-[pressed]:bg-primary-800 data-[pressed]:shadow-none",
+    "bg-primary-600 text-white hover:bg-primary-700 data-[hovered]:bg-primary-700 data-[pressed]:bg-primary-800",
   secondary:
-    "bg-slate-100 text-slate-700 shadow-sm shadow-slate-200/60 hover:bg-slate-200/90 data-[hovered]:bg-slate-200/90 hover:shadow-md hover:shadow-slate-200/80 data-[hovered]:shadow-md data-[hovered]:shadow-slate-200/80 data-[pressed]:bg-slate-300 data-[pressed]:shadow-none dark:bg-[var(--color-studio-dark-active)] dark:text-slate-100 dark:shadow-none dark:hover:bg-[var(--color-studio-dark-control-hover)] dark:data-[hovered]:bg-[var(--color-studio-dark-control-hover)] dark:data-[pressed]:bg-[var(--color-studio-dark-active)]",
+    "bg-slate-100 text-slate-700 hover:bg-slate-200/90 data-[hovered]:bg-slate-200/90 data-[pressed]:bg-slate-300 dark:bg-[var(--color-studio-dark-active)] dark:text-slate-100 dark:hover:bg-[var(--color-studio-dark-control-hover)] dark:data-[hovered]:bg-[var(--color-studio-dark-control-hover)] dark:data-[pressed]:bg-[var(--color-studio-dark-active)]",
   danger:
-    "bg-rose-500 text-white shadow-sm shadow-rose-500/20 hover:bg-rose-600 data-[hovered]:bg-rose-600 hover:shadow-md hover:shadow-rose-500/25 data-[hovered]:shadow-md data-[hovered]:shadow-rose-500/25 data-[pressed]:bg-rose-700 data-[pressed]:shadow-none"
+    "bg-rose-500 text-white hover:bg-rose-600 data-[hovered]:bg-rose-600 data-[pressed]:bg-rose-700"
+};
+
+const RAISED_CLASSES = {
+  primary: "shadow-sm shadow-primary-600/20 hover:shadow-md hover:shadow-primary-600/25 data-[hovered]:shadow-md data-[hovered]:shadow-primary-600/25 data-[pressed]:shadow-none",
+  secondary: "shadow-sm shadow-slate-200/60 hover:shadow-md hover:shadow-slate-200/80 data-[hovered]:shadow-md data-[hovered]:shadow-slate-200/80 data-[pressed]:shadow-none dark:shadow-none",
+  danger: "shadow-sm shadow-rose-500/20 hover:shadow-md hover:shadow-rose-500/25 data-[hovered]:shadow-md data-[hovered]:shadow-rose-500/25 data-[pressed]:shadow-none",
+  outline: "shadow-sm shadow-slate-200/40 data-[pressed]:shadow-none dark:shadow-none",
 };
 
 // Quiet actions select one complete palette rather than competing with the
@@ -42,16 +50,21 @@ const QUIET_SURFACE_CLASSES: Record<ButtonTone, string> = {
   danger: "hover:bg-rose-50 data-[hovered]:bg-rose-50 data-[pressed]:bg-rose-100 dark:hover:bg-rose-500/10 dark:data-[hovered]:bg-rose-500/10 dark:data-[pressed]:bg-rose-500/20",
   accent: "hover:bg-primary-50 data-[hovered]:bg-primary-50 data-[pressed]:bg-primary-100 dark:hover:bg-primary-400/10 dark:data-[hovered]:bg-primary-400/10 dark:data-[pressed]:bg-primary-400/20",
 };
-const OUTLINE_CLASSES = "border border-slate-200 bg-white shadow-sm shadow-slate-200/40 hover:border-slate-300 data-[hovered]:border-slate-300 data-[pressed]:border-slate-400 data-[pressed]:shadow-none dark:border-[color:var(--color-studio-dark-raised-control-border)] dark:bg-[var(--color-studio-dark-raised-control)] dark:shadow-none dark:hover:border-[color:var(--color-studio-dark-active-border)] dark:data-[hovered]:border-[color:var(--color-studio-dark-active-border)] dark:data-[pressed]:border-[color:var(--color-studio-dark-active-border)]";
+const OUTLINE_CLASSES = "border border-slate-200 bg-white hover:border-slate-300 data-[hovered]:border-slate-300 data-[pressed]:border-slate-400 dark:border-[color:var(--color-studio-dark-raised-control-border)] dark:bg-[var(--color-studio-dark-raised-control)] dark:hover:border-[color:var(--color-studio-dark-active-border)] dark:data-[hovered]:border-[color:var(--color-studio-dark-active-border)] dark:data-[pressed]:border-[color:var(--color-studio-dark-active-border)]";
 
-function appearanceClasses(variant: ButtonVariant, tone: ButtonTone): string {
+function appearanceClasses(variant: ButtonVariant, tone: ButtonTone, elevation: ButtonElevation): string {
   if (variant === "primary" || variant === "secondary" || variant === "danger") {
-    return FILLED_VARIANT_CLASSES[variant];
+    return [FILLED_VARIANT_CLASSES[variant], elevation === "raised" ? RAISED_CLASSES[variant] : ""].filter(Boolean).join(" ");
   }
   if (variant === "text") {
     return `bg-transparent underline-offset-2 hover:underline data-[hovered]:underline ${TONE_CLASSES[tone]}`;
   }
-  return [variant === "outline" ? OUTLINE_CLASSES : "bg-transparent", TONE_CLASSES[tone], QUIET_SURFACE_CLASSES[tone]].join(" ");
+  return [
+    variant === "outline" ? OUTLINE_CLASSES : "bg-transparent",
+    variant === "outline" && elevation === "raised" ? RAISED_CLASSES.outline : "",
+    TONE_CLASSES[tone],
+    QUIET_SURFACE_CLASSES[tone],
+  ].filter(Boolean).join(" ");
 }
 
 // The primary pointer owns density: fine pointers keep each size's compact
@@ -106,6 +119,8 @@ export type ButtonProps = Omit<AriaButtonProps, "className"> & {
   variant?: ButtonVariant;
   /** Palette for ghost, outline and text actions; filled variants own their tone. */
   tone?: ButtonTone;
+  /** Shadows for filled and outlined actions. Ghost and text actions are always flat. */
+  elevation?: ButtonElevation;
   size?: ButtonSize;
   radius?: ButtonRadius;
   fullWidth?: boolean;
@@ -125,6 +140,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
   {
     variant = "secondary",
     tone = "neutral",
+    elevation = "raised",
     size = "sm",
     radius = "lg",
     fullWidth = false,
@@ -160,7 +176,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       className={composeRenderProps(className, (value) =>
         [
           BASE,
-          appearanceClasses(variant, tone),
+          appearanceClasses(variant, tone, elevation),
           TARGET_CLASSES,
           variant === "text" ? TEXT_SIZE_CLASSES[size] : SIZE_CLASSES[size],
           RADIUS_CLASSES[radius],

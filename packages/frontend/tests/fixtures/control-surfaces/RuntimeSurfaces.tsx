@@ -34,7 +34,7 @@ export function RuntimeSurfaces() {
     <div className="grid items-start gap-6 lg:col-span-2 lg:grid-cols-2">
       <section aria-label="Runtime list actions">
         <RuntimeMenuPanel
-          title="Machines — list actions"
+          title="Machine picker"
           runtimeEnsureError={null}
           connectionWarning={null}
           runtimeOptions={[stoppedRuntime, runningRuntime]}
@@ -50,7 +50,7 @@ export function RuntimeSurfaces() {
       </section>
       <section aria-label="Runtime header actions">
         <RuntimeMenuPanel
-          title="Machines — header actions"
+          title="Machines page"
           runtimeEnsureError={null}
           connectionWarning={null}
           runtimeOptions={[stoppedRuntime, runningRuntime]}
@@ -62,6 +62,7 @@ export function RuntimeSurfaces() {
           onTerminateRuntime={noop}
           onRemoveRuntime={noop}
           headerActions
+          interactionMode="manage"
           listClassName="mt-2"
         />
       </section>
