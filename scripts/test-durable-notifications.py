@@ -85,6 +85,8 @@ def main():
             print('PASS: the managed credential id is reserved; ordinary credential rows still insert and update')
             sql((ROOT/'supabase/tests/agent_credential_owner.sql').read_text())
             print('PASS: an agent pins only a credential its owner holds; owners still pin, switch and clear their own')
+            sql((ROOT/'supabase/tests/deleted_space_access.sql').read_text())
+            print('PASS: a deleted space is hidden from its owner, members and team; live spaces and the service role still read')
             # The cluster has no Storage, so the chat attachments migration took its
             # notice path above. Add the Storage tables and rerun it, as an install that
             # adds Storage later does; the second run shows that a rerun changes nothing.

@@ -63,6 +63,15 @@ credential its owner does not hold, on insert, on update and when the agent move
 another user, while owners still pin, switch and clear their own credentials and
 deleting a credential still clears pins to it. It also rolls back.
 
+`deleted_space_access.sql` checks that a deleted space (`projects.status = 'deleted'`) is hidden
+from direct Supabase reads. As the signed-in role, through the row-level security policies, the
+space's owner, a member and a team member read the space and its environments, conversations,
+messages, prompts, runs, build runs, jobs, and their own automations, context cards, queued sends
+and stashes while it is live, and none of them once it is deleted, while the team's other live
+space stays readable. `has_project_access` and `has_conversation_access` refuse the deleted space,
+its onboarding AI choice reads as unsettled and cannot be settled, and nobody may change its
+picture. The service role still reads every row. It also rolls back.
+
 The cluster has no Supabase Storage, so the replay also proves that
 `20261003120000_chat_attachments.sql` succeeds without it and only reports a notice. The
 run then installs `storage_stub.sql`, the buckets and objects columns the Storage policies
