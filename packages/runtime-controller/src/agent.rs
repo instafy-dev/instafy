@@ -4353,11 +4353,33 @@ pub(crate) async fn load_conversation_history_for_agent(
     limit: i64,
 ) -> Result<Vec<JsonValue>, (StatusCode, Json<ApiError>)> {
     let clamped_limit = limit.clamp(1, 200);
+    // A turn stores every reasoning step, tool call and usage report as an
+    // assistant row of its own, and one build turn can write a hundred of
+    // them. Taking the newest rows first and dropping progress afterwards let
+    // a single turn push the earlier requests and replies out of the window:
+    // a follow-up ("dig deeper for every city") reached the agent without the
+    // itinerary it referred to. The same progress rows that
+    // `should_include_message_in_agent_history` drops are therefore left out
+    // before the limit; that filter still runs on what remains.
     let rows = transaction
         .query(
             "select id, role, content, metadata, created_at
              from conversation_messages
              where conversation_id = $1
+               and not (
+                 lower(role) = 'assistant'
+                 and lower(btrim(coalesce(metadata->>'messageType', metadata->>'message_type', '')))
+                     <> 'secret_request'
+                 and (
+                   lower(btrim(coalesce(metadata->>'messageType', metadata->>'message_type', '')))
+                     in ('reasoning', 'token_usage')
+                   or (
+                     lower(btrim(coalesce(metadata->>'source', ''))) = 'agent'
+                     and lower(btrim(coalesce(metadata->>'kind', ''))) = 'update'
+                     and lower(btrim(coalesce(metadata->>'outcome', ''))) = 'in_progress'
+                   )
+                 )
+               )
              order by created_at desc
              limit $2",
             &[conversation_id, &clamped_limit],
