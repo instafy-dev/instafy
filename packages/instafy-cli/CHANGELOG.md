@@ -1,5 +1,11 @@
 # @instafy/cli
 
+## 0.2.4
+
+### Patch Changes
+
+- e136a82: Add `instafy agents settings` to inspect and configure shared space limits for agents per plan and concurrent team workers, with an interactive editor and JSON output.
+
 ## 0.2.3
 
 ### Patch Changes
