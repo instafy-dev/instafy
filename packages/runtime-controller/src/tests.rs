@@ -27707,6 +27707,11 @@ async fn persist_run_completion_metadata_merges_provider_and_credit_snapshot() -
             "CREATE TEMP TABLE runs (
                 id uuid PRIMARY KEY,
                 metadata jsonb
+            );
+            CREATE TEMP TABLE agent_jobs (
+                id uuid PRIMARY KEY,
+                run_id uuid NOT NULL,
+                proxy_metadata jsonb NOT NULL DEFAULT '{}'::jsonb
             );",
         )
         .await?;
@@ -27730,6 +27735,12 @@ async fn persist_run_completion_metadata_merges_provider_and_credit_snapshot() -
         .await?;
 
     let job_id = Uuid::new_v4();
+    client
+        .execute(
+            "INSERT INTO agent_jobs (id, run_id) VALUES ($1, $2)",
+            &[&job_id, &run_id],
+        )
+        .await?;
     let receipt_value = crate::task_usage::tests::receipt_fixture();
     let receipt = crate::task_usage::extract(&json!([receipt_value.clone()]))
         .expect("valid fixture")
@@ -27738,6 +27749,7 @@ async fn persist_run_completion_metadata_merges_provider_and_credit_snapshot() -
     crate::agent::persist_run_completion_metadata(
         &transaction,
         &run_id,
+        &job_id,
         Some("openai"),
         None,
         Some(&json!({
@@ -27773,6 +27785,7 @@ async fn persist_run_completion_metadata_merges_provider_and_credit_snapshot() -
     crate::agent::persist_run_completion_metadata(
         &transaction,
         &run_id,
+        &job_id,
         None,
         None,
         None,
@@ -27794,121 +27807,281 @@ async fn persist_run_completion_metadata_merges_provider_and_credit_snapshot() -
     Ok(())
 }
 
-#[tokio::test]
-async fn load_previous_provider_conversation_state_prefers_matching_provider() -> anyhow::Result<()>
-{
-    let Some((mut client, connection_handle)) = connect_test_db().await? else {
-        eprintln!("skipping provider conversation state test: TEST_DATABASE_URL not set");
-        return Ok(());
-    };
-
+async fn create_provider_state_test_tables(client: &tokio_postgres::Client) -> anyhow::Result<()> {
     client
         .batch_execute(
             "CREATE TEMP TABLE runs (
                 id uuid PRIMARY KEY,
-                conversation_id uuid,
+                project_id uuid NOT NULL,
+                conversation_id uuid NOT NULL,
                 metadata jsonb,
-                created_at timestamptz not null default now()
+                created_at timestamptz NOT NULL
+            );
+            CREATE TEMP TABLE agent_jobs (
+                id uuid PRIMARY KEY,
+                run_id uuid NOT NULL,
+                project_id uuid NOT NULL,
+                conversation_id uuid NOT NULL,
+                credential_id uuid,
+                status text NOT NULL,
+                proxy_metadata jsonb NOT NULL DEFAULT '{}'::jsonb
+            );
+            CREATE TEMP TABLE ai_usage_jobs (
+                job_id uuid PRIMARY KEY,
+                project_id uuid NOT NULL,
+                run_id uuid NOT NULL
             );",
         )
         .await?;
+    Ok(())
+}
 
-    let conversation_id = Uuid::new_v4();
+async fn insert_provider_state_fixture(
+    client: &tokio_postgres::Client,
+    project_id: &Uuid,
+    conversation_id: &Uuid,
+    credential_id: Option<&Uuid>,
+    agent: serde_json::Value,
+    marker: &str,
+) -> anyhow::Result<(Uuid, Uuid, serde_json::Value)> {
+    let run_id = Uuid::new_v4();
+    let job_id = Uuid::new_v4();
+    let state = json!({"provider": "codex-embedded", "threadId": marker});
     client
         .execute(
-            "INSERT INTO runs (id, conversation_id, metadata, created_at)
-             VALUES
-               ($1, $3, $4::jsonb, '2026-01-01T00:00:00Z'::timestamptz),
-               ($2, $3, $5::jsonb, '2026-01-02T00:00:00Z'::timestamptz)",
+            "INSERT INTO runs (id, project_id, conversation_id, metadata, created_at)
+             VALUES ($1, $2, $3, $4::jsonb,
+                COALESCE((SELECT max(created_at) + interval '1 second' FROM runs),
+                         '2026-01-01T00:00:00Z'::timestamptz))",
             &[
-                &Uuid::new_v4(),
-                &Uuid::new_v4(),
-                &conversation_id,
+                &run_id,
+                project_id,
+                conversation_id,
                 &PgJson(json!({
-                    "provider": {
-                        "id": "openai",
-                        "conversation": {
-                            "responseId": "resp_openai"
-                        }
-                    }
-                })),
-                &PgJson(json!({
-                    "provider": {
-                        "id": "anthropic",
-                        "conversation": {
-                            "responseId": "resp_anthropic"
-                        }
-                    }
+                    "agent": agent,
+                    "jobId": job_id,
+                    "provider": {"id": "codex-embedded", "conversation": state}
                 })),
             ],
         )
         .await?;
+    client
+        .execute(
+            "INSERT INTO agent_jobs
+                (id, run_id, project_id, conversation_id, credential_id, status, proxy_metadata)
+             VALUES ($1, $2, $3, $4, $5, 'completed', $6::jsonb)",
+            &[
+                &job_id,
+                &run_id,
+                project_id,
+                conversation_id,
+                &credential_id,
+                &PgJson(json!({"provider": "codex-embedded", "conversation": state})),
+            ],
+        )
+        .await?;
+    Ok((run_id, job_id, state))
+}
 
+#[tokio::test]
+async fn load_previous_provider_conversation_state_restores_codex_completion() -> anyhow::Result<()>
+{
+    let Some((mut client, connection_handle)) = connect_test_db().await? else {
+        eprintln!("skipping Codex continuation regression: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    create_provider_state_test_tables(&client).await?;
+    let project_id = Uuid::new_v4();
+    let conversation_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    let credential_id = Uuid::new_v4();
+    let (run_id, job_id, _) = insert_provider_state_fixture(
+        &client,
+        &project_id,
+        &conversation_id,
+        Some(&credential_id),
+        json!({"id": agent_id, "handle": "octo"}),
+        "previous-state",
+    )
+    .await?;
+    let thread_id = Uuid::new_v4().to_string();
+    let state = json!({
+        "provider": "codex-embedded",
+        "version": 2,
+        "defaultThreadId": thread_id,
+        "threadId": thread_id,
+        "defaultRolloutPath": "/tmp/continuation-fixture/rollout.jsonl",
+        "rolloutPath": "/tmp/continuation-fixture/rollout.jsonl",
+        "defaultThreadRestoreFailed": false,
+        "defaultThreadRestoreSource": "new",
+        "lastThreadRestoreSource": "new",
+        "historyReplayRequired": false
+    });
     let transaction = client.transaction().await?;
-
-    let latest_any = crate::dispatch::load_previous_provider_conversation_state(
+    crate::agent::persist_run_completion_metadata(
         &transaction,
-        &conversation_id,
+        &run_id,
+        &job_id,
+        Some("codex-embedded"),
+        Some(&state),
+        None,
+        None,
         None,
         None,
         None,
     )
-    .await
-    .expect("load latest provider conversation state");
+    .await?;
+    transaction.commit().await?;
+    client
+        .execute(
+            "UPDATE runs SET metadata = jsonb_set(metadata, '{provider,conversation}',
+                '{\"threadId\":\"forged-run-state\"}'::jsonb) WHERE id = $1",
+            &[&run_id],
+        )
+        .await?;
+
+    // The credential names the upstream; the completion names the execution
+    // engine. Neither name may prevent restoring this credential's own job.
     assert_eq!(
-        latest_any
-            .as_ref()
-            .and_then(|value| value.get("responseId"))
-            .and_then(serde_json::Value::as_str),
-        Some("resp_anthropic")
+        crate::credentials::provider_for_credential("codex_auth_json", &json!({})),
+        "openai"
     );
-
-    let openai_state = crate::dispatch::load_previous_provider_conversation_state(
+    let transaction = client.transaction().await?;
+    let restored = crate::dispatch::load_previous_provider_conversation_state(
         &transaction,
+        &project_id,
         &conversation_id,
-        Some("openai"),
-        None,
-        None,
+        Some(&credential_id),
+        Some(&agent_id),
+        Some("octo"),
     )
     .await
-    .expect("load openai conversation state");
-    assert_eq!(
-        openai_state
-            .as_ref()
-            .and_then(|value| value.get("responseId"))
-            .and_then(serde_json::Value::as_str),
-        Some("resp_openai")
-    );
-
-    let anthropic_state = crate::dispatch::load_previous_provider_conversation_state(
-        &transaction,
-        &conversation_id,
-        Some("anthropic"),
-        None,
-        None,
-    )
-    .await
-    .expect("load anthropic conversation state");
-    assert_eq!(
-        anthropic_state
-            .as_ref()
-            .and_then(|value| value.get("responseId"))
-            .and_then(serde_json::Value::as_str),
-        Some("resp_anthropic")
-    );
-
-    let missing = crate::dispatch::load_previous_provider_conversation_state(
-        &transaction,
-        &conversation_id,
-        Some("google"),
-        None,
-        None,
-    )
-    .await
-    .expect("load missing provider conversation state");
-    assert!(missing.is_none());
-
+    .expect("load completed Codex conversation state");
+    assert_eq!(restored, Some(state));
     transaction.rollback().await?;
+
+    // A later terminal callback without state must not revive the stale copy
+    // retained in run metadata.
+    let transaction = client.transaction().await?;
+    crate::agent::persist_run_completion_metadata(
+        &transaction,
+        &run_id,
+        &job_id,
+        Some("codex-embedded"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+    transaction.commit().await?;
+    let transaction = client.transaction().await?;
+    assert!(crate::dispatch::load_previous_provider_conversation_state(
+        &transaction,
+        &project_id,
+        &conversation_id,
+        Some(&credential_id),
+        Some(&agent_id),
+        Some("octo"),
+    )
+    .await
+    .expect("do not restore state absent from the completion receipt")
+    .is_none());
+    transaction.rollback().await?;
+    connection_handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_previous_provider_conversation_state_stays_within_credential_and_job_scope(
+) -> anyhow::Result<()> {
+    let Some((mut client, connection_handle)) = connect_test_db().await? else {
+        eprintln!("skipping credential-scoped continuation test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    create_provider_state_test_tables(&client).await?;
+    let project_id = Uuid::new_v4();
+    let conversation_id = Uuid::new_v4();
+    let credential_a = Uuid::new_v4();
+    let credential_b = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    let agent = json!({"id": agent_id, "handle": "octo"});
+    let mut expected = Vec::new();
+    for (credential, marker) in [
+        (Some(&credential_a), "credential-a"),
+        (Some(&credential_b), "credential-b"),
+        (None, "managed"),
+    ] {
+        let (run_id, job_id, state) = insert_provider_state_fixture(
+            &client,
+            &project_id,
+            &conversation_id,
+            credential,
+            agent.clone(),
+            marker,
+        )
+        .await?;
+        if credential.is_none() {
+            client
+                .execute(
+                    "INSERT INTO ai_usage_jobs (job_id, project_id, run_id) VALUES ($1, $2, $3)",
+                    &[&job_id, &project_id, &run_id],
+                )
+                .await?;
+        }
+        expected.push((credential, state));
+    }
+
+    // These newer states must never eclipse a valid credential/job association.
+    // A deleted BYOC credential becomes NULL but has no managed usage record.
+    for (marker, credential, mutation) in [
+        ("deleted-credential", Some(&credential_a), "UPDATE agent_jobs SET credential_id = NULL WHERE run_id = $1 AND id = $2"),
+        ("missing-job", Some(&credential_a), "DELETE FROM agent_jobs WHERE run_id = $1 AND id = $2"),
+        ("wrong-job-project", Some(&credential_a), "UPDATE agent_jobs SET project_id = id WHERE run_id = $1 AND id = $2"),
+        ("wrong-job-conversation", Some(&credential_a), "UPDATE agent_jobs SET conversation_id = id WHERE run_id = $1 AND id = $2"),
+        ("wrong-job-run", Some(&credential_a), "UPDATE agent_jobs SET run_id = id WHERE run_id = $1 AND id = $2"),
+        ("stale-job-id", Some(&credential_a), "UPDATE runs SET metadata = jsonb_set(metadata, '{jobId}', to_jsonb(id::text)) WHERE id = $1 AND metadata->>'jobId' = $2::uuid::text"),
+        ("null-state", Some(&credential_a), "UPDATE agent_jobs SET proxy_metadata = jsonb_set(proxy_metadata, '{conversation}', 'null'::jsonb) WHERE run_id = $1 AND id = $2"),
+        ("forged-run-only-state", Some(&credential_a), "UPDATE agent_jobs SET proxy_metadata = '{}'::jsonb WHERE run_id = $1 AND id = $2"),
+        ("wrong-managed-project", None, "INSERT INTO ai_usage_jobs (job_id, project_id, run_id) VALUES ($2, $2, $1)"),
+        ("wrong-managed-run", None, "INSERT INTO ai_usage_jobs (job_id, project_id, run_id) SELECT $2, project_id, $2 FROM runs WHERE id = $1"),
+        ("wrong-managed-job", None, "INSERT INTO ai_usage_jobs (job_id, project_id, run_id) SELECT $1, project_id, $1 FROM agent_jobs WHERE id = $2 AND run_id = $1"),
+    ] {
+        let (run_id, job_id, _) = insert_provider_state_fixture(
+            &client, &project_id, &conversation_id, credential, agent.clone(), marker,
+        )
+        .await?;
+        client.execute(mutation, &[&run_id, &job_id]).await?;
+        let transaction = client.transaction().await?;
+        for (credential, state) in &expected {
+            let loaded = crate::dispatch::load_previous_provider_conversation_state(
+                &transaction,
+                &project_id,
+                &conversation_id,
+                *credential,
+                Some(&agent_id),
+                Some("octo"),
+            )
+            .await
+            .expect("load state by credential and historical job");
+            assert_eq!(loaded.as_ref(), Some(state), "after {marker}");
+        }
+        let unknown_credential = Uuid::new_v4();
+        assert!(crate::dispatch::load_previous_provider_conversation_state(
+            &transaction,
+            &project_id,
+            &conversation_id,
+            Some(&unknown_credential),
+            Some(&agent_id),
+            Some("octo"),
+        )
+        .await
+        .expect("load unknown credential")
+        .is_none());
+        transaction.rollback().await?;
+    }
     connection_handle.abort();
     Ok(())
 }
@@ -28369,96 +28542,111 @@ async fn load_previous_provider_conversation_state_stays_within_agent_scope() ->
         eprintln!("skipping scoped provider conversation state test: TEST_DATABASE_URL not set");
         return Ok(());
     };
-
-    client
-        .batch_execute(
-            "CREATE TEMP TABLE runs (
-                id uuid PRIMARY KEY,
-                conversation_id uuid,
-                metadata jsonb,
-                created_at timestamptz not null default now()
-            );",
+    create_provider_state_test_tables(&client).await?;
+    let project_id = Uuid::new_v4();
+    let conversation_id = Uuid::new_v4();
+    let credential_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    let (_, _, expected) = insert_provider_state_fixture(
+        &client,
+        &project_id,
+        &conversation_id,
+        Some(&credential_id),
+        json!({"id": agent_id, "handle": "old-handle"}),
+        "original-agent",
+    )
+    .await?;
+    for index in 0..30 {
+        insert_provider_state_fixture(
+            &client,
+            &project_id,
+            &conversation_id,
+            Some(&credential_id),
+            json!({"id": Uuid::new_v4(), "handle": "octo"}),
+            &format!("newer-sibling-{index}"),
         )
         .await?;
+    }
+    insert_provider_state_fixture(
+        &client,
+        &project_id,
+        &conversation_id,
+        Some(&credential_id),
+        json!({"id": "not-a-valid-id", "handle": "octo"}),
+        "malformed-stable-id",
+    )
+    .await?;
+    for (project, conversation) in [
+        (Uuid::new_v4(), conversation_id),
+        (project_id, Uuid::new_v4()),
+    ] {
+        insert_provider_state_fixture(
+            &client,
+            &project,
+            &conversation,
+            Some(&credential_id),
+            json!({"id": agent_id, "handle": "octo"}),
+            "another-scope",
+        )
+        .await?;
+    }
+    let transaction = client.transaction().await?;
+    for (current_id, handle) in [(Some(&agent_id), "octo"), (None, "old-handle")] {
+        let loaded = crate::dispatch::load_previous_provider_conversation_state(
+            &transaction,
+            &project_id,
+            &conversation_id,
+            Some(&credential_id),
+            current_id,
+            Some(handle),
+        )
+        .await
+        .expect("load renamed agent behind newer siblings");
+        assert_eq!(loaded.as_ref(), Some(&expected));
+    }
+    transaction.rollback().await?;
 
-    let conversation_id = Uuid::new_v4();
-    let agent_a_id = Uuid::new_v4();
-    let agent_b_id = Uuid::new_v4();
-
+    let legacy_conversation = Uuid::new_v4();
+    let (legacy_run, _, legacy_state) = insert_provider_state_fixture(
+        &client,
+        &project_id,
+        &legacy_conversation,
+        Some(&credential_id),
+        json!({"handle": " @Legacy "}),
+        "legacy-handle-only",
+    )
+    .await?;
     client
         .execute(
-            "INSERT INTO runs (id, conversation_id, metadata, created_at)
-             VALUES
-               ($1, $3, $4::jsonb, '2026-01-01T00:00:00Z'::timestamptz),
-               ($2, $3, $5::jsonb, '2026-01-02T00:00:00Z'::timestamptz)",
-            &[
-                &Uuid::new_v4(),
-                &Uuid::new_v4(),
-                &conversation_id,
-                &PgJson(json!({
-                    "agent": {
-                        "id": agent_a_id,
-                        "handle": "planner"
-                    },
-                    "provider": {
-                        "id": "openai",
-                        "conversation": {
-                            "responseId": "resp_agent_a"
-                        }
-                    }
-                })),
-                &PgJson(json!({
-                    "agent": {
-                        "id": agent_b_id,
-                        "handle": "builder"
-                    },
-                    "provider": {
-                        "id": "openai",
-                        "conversation": {
-                            "responseId": "resp_agent_b"
-                        }
-                    }
-                })),
-            ],
+            "UPDATE runs SET metadata = metadata - 'jobId' WHERE id = $1",
+            &[&legacy_run],
         )
         .await?;
-
     let transaction = client.transaction().await?;
-
-    let planner_state = crate::dispatch::load_previous_provider_conversation_state(
+    for current_id in [Some(&agent_id), None] {
+        let loaded = crate::dispatch::load_previous_provider_conversation_state(
+            &transaction,
+            &project_id,
+            &legacy_conversation,
+            Some(&credential_id),
+            current_id,
+            Some("legacy"),
+        )
+        .await
+        .expect("load legacy state by normalized handle and run association");
+        assert_eq!(loaded.as_ref(), Some(&legacy_state));
+    }
+    assert!(crate::dispatch::load_previous_provider_conversation_state(
         &transaction,
-        &conversation_id,
-        Some("openai"),
-        Some(&agent_a_id),
-        Some("planner"),
+        &project_id,
+        &legacy_conversation,
+        Some(&credential_id),
+        Some(&agent_id),
+        Some("different-agent"),
     )
     .await
-    .expect("load planner conversation state");
-    assert_eq!(
-        planner_state
-            .as_ref()
-            .and_then(|value| value.get("responseId"))
-            .and_then(serde_json::Value::as_str),
-        Some("resp_agent_a")
-    );
-
-    let builder_state = crate::dispatch::load_previous_provider_conversation_state(
-        &transaction,
-        &conversation_id,
-        Some("openai"),
-        Some(&agent_b_id),
-        Some("builder"),
-    )
-    .await
-    .expect("load builder conversation state");
-    assert_eq!(
-        builder_state
-            .as_ref()
-            .and_then(|value| value.get("responseId"))
-            .and_then(serde_json::Value::as_str),
-        Some("resp_agent_b")
-    );
-
+    .expect("reject unrelated handle")
+    .is_none());
     transaction.rollback().await?;
     connection_handle.abort();
     Ok(())
