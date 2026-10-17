@@ -584,7 +584,8 @@ fn build_system_issue_from_telemetry(
 }
 
 fn is_expected_provider_limit(message: &str) -> bool {
-    let normalized = message.to_ascii_lowercase();
+    // Codex writes its plan-limit text with a curly apostrophe ("You\u{2019}ve").
+    let normalized = message.to_ascii_lowercase().replace('\u{2019}', "'");
     normalized.contains("usage_limit_reached")
         || normalized.contains("insufficient_quota")
         || normalized.contains("rate_limit_error")
@@ -997,6 +998,7 @@ mod tests {
             r#"backend responded with 429 Too Many Requests: {"error":{"type":"rate_limit_error","message":"Rate limit reached"}}"#,
             "stream disconnected before completion: 429 Too Many Requests: The upstream provider rate limit was reached.",
             "You've hit your usage limit. Try again at 3:45 PM.",
+            "You\u{2019}ve hit your usage limit. Try again at Oct 23rd, 2026 8:40 AM.",
             "To use Codex with your ChatGPT plan, upgrade to Plus: https://chatgpt.com/explore/plus.",
         ] {
             assert!(build_system_issue_from_telemetry(
@@ -1010,6 +1012,24 @@ mod tests {
                 &JsonValue::Null,
             )
             .is_none());
+        }
+    }
+
+    #[test]
+    fn every_usage_limit_the_studio_names_is_an_expected_provider_limit() {
+        // The fixtures the Studio's provider_usage_limit kind is pinned to.
+        let parsed: JsonValue =
+            serde_json::from_str(include_str!("run_failure_fixtures.json")).expect("fixtures");
+        let limits: Vec<&str> = parsed["cases"]
+            .as_array()
+            .expect("cases")
+            .iter()
+            .filter(|case| case["providerUsageLimit"].as_bool() == Some(true))
+            .map(|case| case["text"].as_str().expect("text"))
+            .collect();
+        assert!(limits.len() >= 3);
+        for text in limits {
+            assert!(super::is_expected_provider_limit(text), "{text}");
         }
     }
 

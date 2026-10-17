@@ -137,6 +137,36 @@ describe("RunFailureMessageBody", () => {
     expect(onConnectAi).toHaveBeenCalledTimes(1);
   });
 
+  it("offers no Try again on a spent usage limit, and Manage AI only on the person's own AI", async () => {
+    const onConnectAi = vi.fn();
+    const limit = "You\u2019ve hit your usage limit. Try again at Oct 23rd, 2026 8:40 AM.";
+    const managed = createMessage({
+      ...FAILURE,
+      content: limit,
+      metadata: { ...FAILURE.metadata, aiAccessMode: "managed" },
+    });
+    await render(contextValue({ onConnectAi }), managed);
+    expect(container.textContent).toContain("Instafy AI is unavailable right now");
+    expect(container.textContent).not.toContain("Oct 23rd");
+    expect(query("run-failure-retry")).toBeNull();
+    expect(query("run-failure-manage-ai")).toBeNull();
+    expect(query("run-failure-details-toggle")).not.toBeNull();
+
+    const own = createMessage({
+      ...FAILURE,
+      content: limit,
+      metadata: { ...FAILURE.metadata, aiAccessMode: "byoc" },
+    });
+    await render(contextValue({ onConnectAi }), own);
+    expect(container.textContent).toContain("Your AI provider account has reached its usage limit");
+    expect(container.textContent).toContain("Oct 23rd, 2026 8:40 AM");
+    expect(query("run-failure-retry")).toBeNull();
+    await act(async () => {
+      query("run-failure-manage-ai")?.click();
+    });
+    expect(onConnectAi).toHaveBeenCalledTimes(1);
+  });
+
   it("shows a pending spinner on Try again while its resend is in flight", async () => {
     const requestRetry = vi.fn();
     await render(contextValue({ requestRetry, pendingRetryKey: "failure-1" }));

@@ -2105,6 +2105,21 @@ pub fn extract_job_failure_message(error: &anyhow::Error) -> Option<&str> {
         .map(|failure| failure.message.as_str())
 }
 
+/// The error a failed routing preflight ends its job with. The preflight is the turn's first
+/// model call, so its failure is the provider's (a usage limit, a 429, a refused credential),
+/// exactly as a main call's would be. It is returned as it came, so the stored failure, which
+/// is the error's outermost message, names that cause and the Studio can explain it. The
+/// phase goes to the log only: an "agent routing preflight failed" context on top used to
+/// become the whole message the person saw.
+fn routing_preflight_failure(job: &LeaseJob, error: anyhow::Error) -> anyhow::Error {
+    warn!(
+        job_id = %job.id,
+        error = %format!("{error:#}"),
+        "agent routing preflight failed"
+    );
+    error
+}
+
 fn attach_task_usage(result: Result<JobExecution>, task_usage: &TaskUsage) -> Result<JobExecution> {
     let Some(receipt) = task_usage.artifact() else {
         return result;
@@ -6140,7 +6155,7 @@ impl JobProcessor {
                     // Starting main here would silently buy another budget from the same
                     // unavailable provider. Successful but unrecognized decisions above
                     // still use the direct route.
-                    return Err(error.context("agent routing preflight failed"));
+                    return Err(routing_preflight_failure(job, error));
                 }
             }
         } else {
@@ -18694,6 +18709,32 @@ mod tests {
         assert_eq!(calls[0]["usage"]["input_tokens"], 10);
         assert_eq!(calls[1]["phase"], "recovery");
         assert_eq!(calls[1]["usageStatus"], "unknown");
+    }
+
+    #[test]
+    fn a_failed_routing_preflight_reports_the_providers_reason() {
+        let job = test_lease_job(Some("apply"), json!({}));
+        let task = TaskUsage::default();
+        task.call(UsagePhase::Routing)
+            .start_attempt(1)
+            .finish(crate::task_usage::UsageOutcome::Error);
+        let provider = anyhow!(crate::codex::CodexExecutionError {
+            message: "You\u{2019}ve hit your usage limit. Try again at Oct 23rd, 2026 8:40 AM."
+                .to_string(),
+            codex_error_info: None,
+        });
+        let error =
+            attach_task_usage(Err(routing_preflight_failure(&job, provider)), &task).unwrap_err();
+        // The stored failure is this message; it must name the provider's limit, not the step.
+        let message = extract_job_failure_message(&error).unwrap();
+        assert!(message.contains("hit your usage limit"), "{message}");
+        assert!(!message.contains("preflight"), "{message}");
+        assert!(error.to_string().contains("hit your usage limit"));
+        assert!(
+            error
+                .downcast_ref::<crate::codex::CodexExecutionError>()
+                .is_some()
+        );
     }
 
     #[test]
