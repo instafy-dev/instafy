@@ -75,6 +75,8 @@ export type DesktopRuntimeStatus = {
   projectId?: string;
   controllerUrl?: string;
   logFilePath?: string;
+  /** Set when the last runtime, of `projectId`, stopped because its space was deleted. */
+  stoppedReason?: "space_deleted";
 };
 
 export type DesktopLocalHardwareHostStatus = {

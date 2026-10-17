@@ -576,3 +576,157 @@ async fn runtime_status_shows_only_the_runtime_projects_origin() -> anyhow::Resu
     transaction.rollback().await?;
     Ok(())
 }
+
+async fn post_with_bearer(
+    app: &axum::Router,
+    uri: &str,
+    token: &str,
+) -> anyhow::Result<(StatusCode, JsonValue)> {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await?;
+    Ok((
+        status,
+        serde_json::from_slice(&body).unwrap_or(JsonValue::Null),
+    ))
+}
+
+/// A Desktop that quits after its space was deleted fences its runtime and
+/// waits for its jobs. The delete stopped that runtime and the controller
+/// refuses its job calls, so its owner gets the fence with no active job and
+/// the quit goes through. The stopped runtime is not written, nobody else
+/// learns it exists, and nothing resumes it.
+#[tokio::test]
+async fn desktop_owner_can_quit_after_its_space_was_deleted() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping deleted space drain test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    let project_id = Uuid::new_v4();
+    let owner_user_id = Uuid::new_v4();
+    let teammate_user_id = Uuid::new_v4();
+    let runtime_id = Uuid::new_v4();
+    ensure_test_user(&pool, owner_user_id).await?;
+    ensure_test_user(&pool, teammate_user_id).await?;
+
+    let connection = pool.get().await?;
+    connection
+        .execute(
+            "insert into projects (id, owner_user_id, project_type, status)
+             values ($1, $2, 'customer', 'active')",
+            &[&project_id, &owner_user_id],
+        )
+        .await?;
+    connection
+        .execute(
+            "insert into project_memberships (project_id, user_id, role)
+             values ($1, $2, 'builder')",
+            &[&project_id, &teammate_user_id],
+        )
+        .await?;
+    insert_private_runtime(&pool, project_id, runtime_id, owner_user_id, 0, 0).await?;
+    // What a delete leaves behind, with one job row still marked leased: it
+    // cannot finish either, since its heartbeats and messages are refused.
+    connection
+        .execute(
+            "update projects set status = 'deleted' where id = $1",
+            &[&project_id],
+        )
+        .await?;
+    connection
+        .execute(
+            "update runtimes set status = 'stopped' where id = $1",
+            &[&runtime_id],
+        )
+        .await?;
+    connection
+        .execute(
+            "insert into agent_jobs (
+                 id, project_id, status, payload, priority,
+                 leased_by_runtime_id, leased_at, lease_expires_at
+             ) values ($1, $2, 'leased', $3, 10, $4, now(), now() + interval '5 minutes')",
+            &[
+                &Uuid::new_v4(),
+                &project_id,
+                &PgJson(json!({ "prompt_text": "interrupted by the delete" })),
+                &runtime_id,
+            ],
+        )
+        .await?;
+    drop(connection);
+
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "deleted-space-runtime-drain",
+    );
+    let owner_token = crate::auth::issue_controller_token(&config, &owner_user_id)
+        .map_err(|error| anyhow::anyhow!("failed to issue owner token: {error:?}"))?
+        .token;
+    let teammate_token = crate::auth::issue_controller_token(&config, &teammate_user_id)
+        .map_err(|error| anyhow::anyhow!("failed to issue teammate token: {error:?}"))?
+        .token;
+    let state = build_test_state(pool.clone(), config);
+    let app = super::router().with_state(state);
+    let drain_path = format!("/projects/{project_id}/runtime/{runtime_id}/drain");
+
+    let (status, _) = post_with_bearer(&app, &drain_path, &teammate_token).await?;
+    assert_eq!(status, StatusCode::NOT_FOUND, "a teammate cannot drain it");
+    let (status, _) = post_with_bearer(
+        &app,
+        &format!("/projects/{project_id}/runtime/{}/drain", Uuid::new_v4()),
+        &owner_token,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::NOT_FOUND, "an unknown runtime");
+
+    let requested_at = chrono::Utc::now();
+    let (status, payload) = post_with_bearer(&app, &drain_path, &owner_token).await?;
+    assert_eq!(status, StatusCode::OK, "{payload}");
+    assert_eq!(payload["ok"], true);
+    assert_eq!(payload["contractVersion"], 1);
+    assert_eq!(payload["runtimeId"], runtime_id.to_string());
+    assert_eq!(payload["status"], "draining");
+    assert_eq!(payload["activeJobCount"], 0);
+    // Desktop accepts a fence only while it has at least 15 seconds left.
+    let expires_at = payload["drainExpiresAt"]
+        .as_str()
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .expect("a drain expiry");
+    assert!(expires_at > requested_at + chrono::Duration::seconds(15));
+
+    let connection = pool.get().await?;
+    let runtime = connection
+        .query_one(
+            "select status, drain_expires_at from runtimes where id = $1",
+            &[&runtime_id],
+        )
+        .await?;
+    assert_eq!(runtime.get::<_, String>("status"), "stopped");
+    assert!(runtime
+        .get::<_, Option<chrono::DateTime<chrono::Utc>>>("drain_expires_at")
+        .is_none());
+    drop(connection);
+
+    let (status, payload) = post_with_bearer(
+        &app,
+        &format!("/projects/{project_id}/runtime/{runtime_id}/resume"),
+        &owner_token,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::GONE);
+    assert_eq!(payload["code"], "space_deleted");
+
+    cleanup_visibility_test(&pool, project_id, &[owner_user_id, teammate_user_id]).await?;
+    Ok(())
+}

@@ -240,9 +240,36 @@ pub struct JobSecrets {
     pub inventory: Vec<AgentSecretInventoryItem>,
 }
 
+/// The code the controller's refusals carry once the runtime's space was
+/// deleted.
+const SPACE_DELETED_CODE: &str = "space_deleted";
+
+/// The controller refused the runtime because its space was deleted. Nothing
+/// brings a deleted space back, so the agent stops instead of retrying.
+#[derive(Debug, thiserror::Error)]
+#[error("the controller refused the runtime: its space was deleted")]
+pub struct SpaceDeleted;
+
+#[derive(Deserialize)]
+struct RefusalCode {
+    code: Option<String>,
+}
+
+/// Whether `status` and `body` are the controller's `410 Gone` for a deleted
+/// space. A `409` with the same code refuses one job's call: the job ends, and
+/// the registration or lease poll that follows is what ends the agent.
+fn is_space_deleted_refusal(status: StatusCode, body: &str) -> bool {
+    status == StatusCode::GONE
+        && serde_json::from_str::<RefusalCode>(body)
+            .ok()
+            .and_then(|refusal| refusal.code)
+            .is_some_and(|code| code == SPACE_DELETED_CODE)
+}
+
 #[derive(Debug)]
 pub enum LeaseError {
     Unauthorized,
+    SpaceDeleted,
     Other(anyhow::Error),
 }
 
@@ -425,6 +452,9 @@ impl ControllerClient {
                 );
                 break;
             }
+            if is_space_deleted_refusal(status, &text) {
+                return Err(SpaceDeleted.into());
+            }
 
             last_error = Some((status, text.clone()));
             if !matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
@@ -476,6 +506,8 @@ impl ControllerClient {
                         parsed = Some(serde_json::from_str(&text).with_context(|| {
                             format!("failed to parse register response: {}", text)
                         })?);
+                    } else if is_space_deleted_refusal(status, &text) {
+                        return Err(SpaceDeleted.into());
                     } else {
                         warn!(
                             %status,
@@ -606,6 +638,9 @@ impl ControllerClient {
 
         if status == StatusCode::UNAUTHORIZED {
             return Err(LeaseError::Unauthorized);
+        }
+        if is_space_deleted_refusal(status, &text) {
+            return Err(LeaseError::SpaceDeleted);
         }
 
         if !status.is_success() {
@@ -1271,6 +1306,24 @@ mod tests {
         assert!(job.workspace_token_expires_at.is_none());
         assert_eq!(job.lease_attempts, 0);
         assert!(!job.resumes_an_interrupted_attempt());
+    }
+
+    #[test]
+    fn only_a_gone_with_the_space_deleted_code_is_a_deleted_space() {
+        let body = r#"{"message":"This space was deleted.","code":"space_deleted"}"#;
+        assert!(is_space_deleted_refusal(StatusCode::GONE, body));
+        // A job's own calls are refused with 409; the agent stops on the
+        // lease or registration that follows.
+        assert!(!is_space_deleted_refusal(StatusCode::CONFLICT, body));
+        assert!(!is_space_deleted_refusal(
+            StatusCode::GONE,
+            r#"{"message":"gone","code":"runtime_retired"}"#
+        ));
+        assert!(!is_space_deleted_refusal(
+            StatusCode::GONE,
+            r#"{"message":"gone"}"#
+        ));
+        assert!(!is_space_deleted_refusal(StatusCode::GONE, "space_deleted"));
     }
 
     #[test]

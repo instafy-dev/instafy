@@ -145,15 +145,30 @@ export async function withDesktopRuntimeTimeout<T>(
  */
 export async function runDesktopRuntimeExitCleanup<T>(
   exited: Promise<T>,
-  cleanup: (exitError: unknown | null) => Promise<void>,
+  cleanup: (exitError: unknown | null, exit: T | null) => Promise<void>,
 ): Promise<void> {
   let exitError: unknown | null = null;
+  let exit: T | null = null;
   try {
-    await exited;
+    exit = await exited;
   } catch (error) {
     exitError = error;
   }
-  await cleanup(exitError);
+  await cleanup(exitError, exit);
+}
+
+/**
+ * The exit status runtime-agent uses when it stopped because the controller
+ * refused it for a deleted space (`SPACE_DELETED_EXIT_CODE` in
+ * packages/runtime-agent/src/agent.rs).
+ */
+export const DESKTOP_RUNTIME_SPACE_DELETED_EXIT_CODE = 3;
+
+/** Whether the runtime process exited because its space was deleted. */
+export function desktopRuntimeExitedForDeletedSpace(
+  exit: { code: number | null } | null,
+): boolean {
+  return exit?.code === DESKTOP_RUNTIME_SPACE_DELETED_EXIT_CODE;
 }
 
 export type DesktopQuitWaitAction = "force" | "cancel";
