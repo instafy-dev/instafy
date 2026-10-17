@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -7,6 +8,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(__dirname, "..");
 const modulePath = path.join(packageRoot, "dist", "desktopRuntimeActivity.js");
 const {
+  DESKTOP_RUNTIME_SPACE_DELETED_EXIT_CODE,
   DesktopRuntimeHttpError,
   assertDesktopRuntimeResumed,
   buildDesktopRuntimeDrainUrl,
@@ -14,6 +16,7 @@ const {
   buildDesktopRuntimeStopUrl,
   canResumeDesktopRuntimeAfterFailedQuit,
   createDesktopQuitWaitControl,
+  desktopRuntimeExitedForDeletedSpace,
   readDesktopRuntimeActiveJobCount,
   resolveDesktopRuntimeControllerCredentialAction,
   resolveRefreshedDesktopRuntimeAccessToken,
@@ -347,10 +350,50 @@ test("a coalesced second quit request can force or cancel one hung wait", async 
 test("a rejected child exit observation still runs process-tree cleanup", async () => {
   const exitError = new Error("spawn failed after process creation");
   const observed = [];
-  await runDesktopRuntimeExitCleanup(Promise.reject(exitError), async (error) => {
-    observed.push(error);
+  await runDesktopRuntimeExitCleanup(Promise.reject(exitError), async (error, exit) => {
+    observed.push(error, exit);
   });
-  assert.deepEqual(observed, [exitError]);
+  assert.deepEqual(observed, [exitError, null]);
+});
+
+test("exit cleanup sees how the runtime exited", async () => {
+  const observed = [];
+  await runDesktopRuntimeExitCleanup(
+    Promise.resolve({ code: DESKTOP_RUNTIME_SPACE_DELETED_EXIT_CODE, signal: null }),
+    async (error, exit) => {
+      observed.push(error, exit);
+    },
+  );
+  assert.deepEqual(observed, [
+    null,
+    { code: DESKTOP_RUNTIME_SPACE_DELETED_EXIT_CODE, signal: null },
+  ]);
+});
+
+test("the space-deleted exit status is the one runtime-agent exits with", () => {
+  const agentSource = fs.readFileSync(
+    path.resolve(packageRoot, "..", "runtime-agent", "src", "agent.rs"),
+    "utf8",
+  );
+  const declared = agentSource.match(/pub const SPACE_DELETED_EXIT_CODE: i32 = (\d+);/);
+  assert.ok(declared, "runtime-agent declares SPACE_DELETED_EXIT_CODE");
+  assert.equal(Number(declared[1]), DESKTOP_RUNTIME_SPACE_DELETED_EXIT_CODE);
+});
+
+test("only the runtime's space-deleted exit status reads as a deleted space", () => {
+  assert.equal(
+    desktopRuntimeExitedForDeletedSpace({ code: DESKTOP_RUNTIME_SPACE_DELETED_EXIT_CODE, signal: null }),
+    true,
+  );
+  for (const exit of [
+    { code: 0, signal: null },
+    { code: 1, signal: null },
+    { code: 70, signal: null },
+    { code: null, signal: "SIGTERM" },
+    null,
+  ]) {
+    assert.equal(desktopRuntimeExitedForDeletedSpace(exit), false, JSON.stringify(exit));
+  }
 });
 
 test("a failed quit resumes only before signals and while the runtime root is alive", () => {

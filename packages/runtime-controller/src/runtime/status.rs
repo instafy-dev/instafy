@@ -13,6 +13,7 @@ use tracing::{debug, instrument, warn};
 use uuid::Uuid;
 
 use crate::auth::{authenticate_request, RequestContext};
+use crate::projects::space_deleted;
 use crate::state::publish_controller_event_to_user;
 use crate::state::{RuntimePreferenceEntry, RuntimePreferenceRegistry, RuntimeResourceUsageEntry};
 use crate::tunnels::revoke_tunnels_for_scope;
@@ -667,6 +668,21 @@ async fn set_runtime_drain_state(
         .map_err(|error| database_unavailable("Runtime drain", error))?;
 
     let project = load_project_record(&transaction, &project_id).await?;
+    if project
+        ._status
+        .as_deref()
+        .is_some_and(|status| status.eq_ignore_ascii_case("deleted"))
+    {
+        return deleted_space_drain_state(
+            &state,
+            &transaction,
+            &auth_context,
+            &project_id,
+            &runtime_id,
+            should_drain,
+        )
+        .await;
+    }
     ensure_project_write_access(&transaction, &project, &auth_context, None).await?;
 
     let row = transaction
@@ -748,6 +764,65 @@ async fn set_runtime_drain_state(
         status: target_status.to_string(),
         active_job_count,
         drain_expires_at,
+    }))
+}
+
+/// The drain state of a runtime of the deleted space `project_id`, for the
+/// Desktop that runs it and is about to quit.
+///
+/// Desktop fences its runtime and waits until no job is active. A deleted
+/// space's runtime has nothing left to wait for: the delete canceled every
+/// job of the space and stopped the runtime, and the controller refuses its
+/// leases, heartbeats and job calls. So its owner gets the fence with no
+/// active job, which lets Desktop quit, and the stopped runtime is not
+/// written. A resume is refused, since nothing brings the space back. Anyone
+/// else gets the `404` every deleted space answers.
+async fn deleted_space_drain_state(
+    state: &AppState,
+    transaction: &tokio_postgres::Transaction<'_>,
+    auth_context: &RequestContext,
+    project_id: &Uuid,
+    runtime_id: &Uuid,
+    should_drain: bool,
+) -> Result<Json<RuntimeDrainResponse>, (StatusCode, Json<ApiError>)> {
+    let row = if auth_context.scoped_claims.is_some() {
+        None
+    } else {
+        transaction
+            .query_opt(
+                "select provider, capabilities
+                 from runtimes
+                 where id = $1 and project_id = $2",
+                &[runtime_id, project_id],
+            )
+            .await
+            .map_err(|error| internal_error(format!("failed to load runtime for drain: {error}")))?
+    };
+    let owned = row.is_some_and(|row| {
+        let provider: String = row.get("provider");
+        let capabilities: JsonValue = row.get("capabilities");
+        super::access::runtime_is_private_self_hosted(state, &provider, &capabilities)
+            && super::access::self_hosted_runtime_is_accessible_to_user(
+                state,
+                &provider,
+                &capabilities,
+                auth_context.user_id,
+                auth_context.is_service_role,
+            )
+    });
+    if !owned {
+        return Err(crate::not_found("project not found"));
+    }
+    if !should_drain {
+        return Err(space_deleted(StatusCode::GONE));
+    }
+    Ok(Json(RuntimeDrainResponse {
+        ok: true,
+        contract_version: 1,
+        runtime_id: runtime_id.to_string(),
+        status: "draining".to_string(),
+        active_job_count: 0,
+        drain_expires_at: Some(Utc::now() + ChronoDuration::seconds(RUNTIME_DRAIN_LEASE_SECONDS)),
     }))
 }
 

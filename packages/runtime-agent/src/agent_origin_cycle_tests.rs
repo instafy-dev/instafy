@@ -12,12 +12,18 @@ use crate::config::OriginSettings;
 /// answers, so a beat sent before the registration lands shows up first.
 const REGISTER_DELAY: Duration = Duration::from_millis(300);
 
+/// The controller's refusal of a deleted space's runtime.
+const SPACE_DELETED_BODY: &str = r#"{"message":"This space was deleted.","code":"space_deleted"}"#;
+
 /// A stand-in controller. It records, in order, each origin registration
 /// (when it arrives and when it is answered), each presence beat with its
-/// status, and each lease, and refuses every lease with 401.
+/// status, each lease and every other call, and refuses every lease with
+/// 401. For a deleted space it refuses runtime registrations and leases with
+/// the controller's 410 instead.
 #[derive(Clone, Default)]
 struct StandIn {
     events: Arc<std::sync::Mutex<Vec<String>>>,
+    space_deleted: bool,
 }
 
 impl StandIn {
@@ -52,11 +58,19 @@ async fn stand_in_controller(
     }
     if path.ends_with("agent/lease") {
         stand_in.push("lease".into());
+        if stand_in.space_deleted {
+            return (StatusCode::GONE, SPACE_DELETED_BODY.into());
+        }
         return (
             StatusCode::UNAUTHORIZED,
             r#"{"message":"agent token expired"}"#.into(),
         );
     }
+    if path == "runtime/register" && stand_in.space_deleted {
+        stand_in.push("register runtime".into());
+        return (StatusCode::GONE, SPACE_DELETED_BODY.into());
+    }
+    stand_in.push(format!("other:{path}"));
     (StatusCode::NOT_FOUND, "{}".into())
 }
 
@@ -76,7 +90,18 @@ impl Drop for Fixture {
 
 impl Fixture {
     async fn new() -> Self {
-        let stand_in = StandIn::default();
+        Self::start(StandIn::default()).await
+    }
+
+    async fn for_deleted_space() -> Self {
+        Self::start(StandIn {
+            space_deleted: true,
+            ..StandIn::default()
+        })
+        .await
+    }
+
+    async fn start(stand_in: StandIn) -> Self {
         let app = Router::new()
             .fallback(stand_in_controller)
             .with_state(stand_in.clone());
@@ -247,4 +272,90 @@ async fn a_rejected_lease_takes_the_origin_offline_before_the_cycle_ends() {
         lease.is_some() && offline > lease,
         "the origin went away without its offline beat: {events:?}"
     );
+}
+
+/// A lease refused because the space was deleted ends the cycle for good.
+/// The origin still goes offline properly, and the runtime the delete
+/// stopped is not stopped again.
+#[tokio::test]
+async fn a_deleted_space_ends_the_cycle_without_stopping_the_runtime() {
+    let fixture = Fixture::for_deleted_space().await;
+    let executor = Arc::new(AgentExecutor::new(fixture.config.clone()));
+    let client = Arc::new(ControllerClient::new(&fixture.config).unwrap());
+    let mut registration = fixture.registration.clone();
+    registration.stop_url = Some(
+        fixture
+            .config
+            .controller_base_url
+            .join("/agent/stop")
+            .unwrap(),
+    );
+    let outcome = Box::pin(RuntimeAgent::register_and_process(
+        fixture.config.clone(),
+        client,
+        executor,
+        ShutdownSignal::new(),
+        Arc::new(Mutex::new(HashSet::new())),
+        Some(registration),
+    ))
+    .await;
+    assert!(
+        matches!(outcome, Ok(RegistrationOutcome::SpaceDeleted)),
+        "a deleted space ends the cycle for good"
+    );
+
+    let events = fixture.stand_in.events();
+    let lease = events.iter().position(|event| event == "lease");
+    let offline = events.iter().position(|event| event == "beat:offline");
+    assert!(
+        lease.is_some() && offline > lease,
+        "the origin went away without its offline beat: {events:?}"
+    );
+    assert_eq!(
+        events.iter().filter(|event| *event == "lease").count(),
+        1,
+        "a refused lease is not retried: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|event| event == "other:agent/stop"),
+        "the deleted space's runtime was stopped again: {events:?}"
+    );
+}
+
+/// A registration refused because the space was deleted ends the agent at
+/// once instead of retrying every five seconds.
+#[tokio::test]
+async fn a_registration_refused_for_a_deleted_space_ends_the_agent() {
+    let fixture = Fixture::for_deleted_space().await;
+    let executor = Arc::new(AgentExecutor::new(fixture.config.clone()));
+    let client = Arc::new(ControllerClient::new(&fixture.config).unwrap());
+    let exit = tokio::time::timeout(
+        Duration::from_secs(4),
+        Box::pin(RuntimeAgent::run_registration_loop(
+            fixture.config.clone(),
+            client,
+            executor,
+            ShutdownSignal::new(),
+            Arc::new(Mutex::new(HashSet::new())),
+        )),
+    )
+    .await
+    .expect("the agent ends without waiting to register again")
+    .expect("the agent ends cleanly");
+    assert_eq!(exit, AgentExit::SpaceDeleted);
+    assert_eq!(
+        fixture.stand_in.events(),
+        vec!["register runtime".to_string()]
+    );
+}
+
+/// Only a runtime its provider launched for a lease waits for the provider
+/// to release it; everything else exits.
+#[tokio::test]
+async fn only_a_runtime_without_a_provider_lease_exits_for_a_deleted_space() {
+    let fixture = Fixture::new().await;
+    assert!(exits_when_space_deleted(&fixture.config));
+    let mut leased = (*fixture.config).clone();
+    leased.runtime_lease_id = Some(Uuid::new_v4());
+    assert!(!exits_when_space_deleted(&leased));
 }
