@@ -908,6 +908,7 @@ dependencies = [
  "jsonwebtoken",
  "native-tls",
  "reqwest",
+ "ring",
  "serde",
  "serde_json",
  "serial_test",
