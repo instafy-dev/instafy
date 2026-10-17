@@ -49,5 +49,6 @@ Files checks also exercise local edit/save, draft retention, read-only controls,
 failures, scroll restoration and a long filename at 320px. Undo/redo history is not simulated
 by the local data adapter; the production controls are present but disabled in this fixture.
 
-The `review/` directory contains representative desktop and mobile Files screenshots from
-this fixture for pull-request review. They are examples, not visual snapshot assertions.
+The browser suite writes desktop and mobile screenshots under
+`packages/frontend/test-results/workspace-surfaces` for pull-request review. They are
+generated artifacts, not checked-in visual snapshot assertions.
