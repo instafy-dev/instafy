@@ -615,6 +615,44 @@ repeated service-role `DELETE` answers 204 and runs the background stop
 again. A delete that Postgres ends in a deadlock with another writer of the
 space's jobs runs once more.
 
+## Deleting a team
+
+A team's spaces go with the team's row through foreign keys that cascade,
+and with them their runtimes, leases, tunnel grants and origin instances. So
+`DELETE /orgs/:id` releases the team's machines before it deletes that row.
+It runs in phases, in a task of its own, so a client that goes away does not
+stop the delete between two of them:
+
+1. The team's live Stripe subscription is canceled first, with no database
+   connection held while Stripe answers. A cancellation that cannot be
+   confirmed refuses the delete, and nothing is deleted.
+2. One transaction reads who could see the team and each of its spaces,
+   marks every space deleted and cancels its work, as a space delete does.
+   Once it commits, each space it marked deleted is announced with
+   `space_deleted`, as for a space delete, so open tabs drop the spaces even
+   if a later phase is refused.
+3. Holding no connection, every runtime of the team's spaces is stopped one
+   at a time through the deleted-space stop described above. That includes
+   the runtimes of spaces deleted on their own before.
+4. A second transaction deletes the team, but only while no runtime of its
+   spaces still holds a lease generation and no space was added meanwhile. A
+   hosted machine's provider release is keyed by its lease generation, and
+   only a confirmed release clears it. Each user who could see the team or
+   one of its spaces then gets one `project.access_changed` with reason
+   `team_deleted` and the team's id.
+
+When step 4 finds a machine still held, for example because its provider
+release failed, or a space that is not deleted, the delete answers
+`409 Conflict` with code `team_delete_incomplete`. The team stays, with its
+spaces deleted, and repeating the delete finishes it. A runtime whose
+release failed is left to that release for
+`QUARANTINE_RELEASE_GRACE_SECONDS` (four minutes), so a repeat in that window
+answers 409 again. Meanwhile the idle sweep's deleted-space step retries the
+release on its own. The request waits for the releases, up to the provider
+release timeout for each hosted machine, and a client that gives up sooner
+does not stop them. A repeated service-role `DELETE` of a team that is
+already gone answers 204, and a user's answers 404.
+
 ## Caches
 
 `/workspace/.cache` is a per-project host mount

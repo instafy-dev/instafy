@@ -887,6 +887,28 @@ pub(crate) fn publish_project_deleted(hub: &EventHub, project_id: Uuid, target_u
     );
 }
 
+/// Reason of the access invalidation `publish_team_deleted` sends.
+pub(crate) const ACCESS_CHANGED_TEAM_DELETED: &str = "team_deleted";
+
+/// Tells every open stream of `target_user_id`, whatever space it is on,
+/// that the team `org_id` was deleted, so the client drops the team and its
+/// spaces from its lists. Like [`publish_project_deleted`] it names no
+/// project, and its payload is exactly the reason and the team's id. Publish
+/// only after the team's row is deleted; each of its spaces' deletions was
+/// published before.
+pub(crate) fn publish_team_deleted(hub: &EventHub, org_id: Uuid, target_user_id: Uuid) {
+    publish_controller_event_to_user(
+        hub,
+        "project.access_changed",
+        None,
+        target_user_id,
+        serde_json::json!({
+            "reason": ACCESS_CHANGED_TEAM_DELETED,
+            "orgId": org_id,
+        }),
+    );
+}
+
 /// Publishes one untargeted, signal-only event per project so every open
 /// stream of those projects learns that something it can already read has
 /// changed, and refetches it through its own authorized endpoint. The events

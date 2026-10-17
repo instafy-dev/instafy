@@ -23,7 +23,9 @@ use crate::projects::{
     ensure_project_access, parse_optional_uuid_param, require_org_access, resolve_scope,
     ScopeParams, MEMBERS_CHANGED_PROJECT_MEMBERSHIP, PROJECT_MEMBERS_CHANGED_EVENT,
 };
-use crate::state::{AppState, ControllerEvent, ACCESS_CHANGED_SPACE_DELETED};
+use crate::state::{
+    AppState, ControllerEvent, ACCESS_CHANGED_SPACE_DELETED, ACCESS_CHANGED_TEAM_DELETED,
+};
 use crate::{database_unavailable, forbidden, load_project_record, too_many_requests};
 
 mod private_runtime_visibility;
@@ -312,21 +314,22 @@ fn is_canonical_access_invalidation(event: &ControllerEvent) -> bool {
         && event.channels.is_empty()
         && event.target_user_id.is_some()
         && (event.data == serde_json::json!({ "reason": "membership_changed" })
-            || is_space_deleted_invalidation(event))
+            || is_deletion_invalidation(event, ACCESS_CHANGED_SPACE_DELETED, "projectId")
+            || is_deletion_invalidation(event, ACCESS_CHANGED_TEAM_DELETED, "orgId"))
 }
 
-/// A space deletion's invalidation (`publish_project_deleted`): no project,
-/// and exactly the reason and the deleted space's id.
-fn is_space_deleted_invalidation(event: &ControllerEvent) -> bool {
+/// A deletion's invalidation (`publish_project_deleted` for a space,
+/// `publish_team_deleted` for a team): no project, and exactly `reason` and
+/// the deleted space's or team's id under `id_key`.
+fn is_deletion_invalidation(event: &ControllerEvent, reason: &str, id_key: &str) -> bool {
     event.project_id.is_none()
         && event.data.as_object().is_some_and(|data| {
             data.len() == 2
-                && data.get("reason").and_then(serde_json::Value::as_str)
-                    == Some(ACCESS_CHANGED_SPACE_DELETED)
+                && data.get("reason").and_then(serde_json::Value::as_str) == Some(reason)
                 && data
-                    .get("projectId")
+                    .get(id_key)
                     .and_then(serde_json::Value::as_str)
-                    .is_some_and(|project_id| uuid::Uuid::parse_str(project_id).is_ok())
+                    .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
         })
 }
 
@@ -831,6 +834,72 @@ mod tests {
         conversation_scoped.conversation_id = Some(Uuid::new_v4());
         assert!(!is_canonical_access_invalidation(&conversation_scoped));
         assert!(!other_space_stream.matches(&conversation_scoped));
+    }
+
+    /// A team deletion's invalidation, as published, reaches every stream of
+    /// its target user, on any space, like a space deletion's. Any other shape
+    /// of it is an ordinary event that no stream matches.
+    #[test]
+    fn team_deleted_invalidation_is_exactly_its_published_shape() {
+        let hub = crate::state::EventHub::new();
+        let mut published = hub.subscribe();
+        let target_user_id = Uuid::new_v4();
+        let deleted_org_id = Uuid::new_v4();
+        crate::state::publish_team_deleted(&hub, deleted_org_id, target_user_id);
+        let event = published.try_recv().expect("team deletion published");
+        assert_eq!(event.kind, PROJECT_ACCESS_CHANGED_EVENT);
+        assert_eq!(event.project_id, None);
+        assert_eq!(event.target_user_id, Some(target_user_id));
+        assert_eq!(
+            event.data,
+            json!({ "reason": "team_deleted", "orgId": deleted_org_id.to_string() })
+        );
+
+        assert!(is_canonical_access_invalidation(&event));
+        assert!(is_targeted_access_invalidation(
+            &event,
+            &user_context(target_user_id)
+        ));
+        assert!(!is_targeted_access_invalidation(
+            &event,
+            &user_context(Uuid::new_v4())
+        ));
+        let any_space_stream = EventFilters {
+            project_id: Uuid::new_v4(),
+            session_id: Some(Uuid::new_v4()),
+            run_id: None,
+            conversation_id: None,
+            kinds: vec![PROJECT_ACCESS_CHANGED_EVENT.to_string()],
+        };
+        assert!(any_space_stream.matches(&event));
+
+        let deleted_id = deleted_org_id.to_string();
+        let malformed_payloads = [
+            json!({ "reason": "team_deleted" }),
+            json!({ "reason": "team_deleted", "orgId": deleted_id, "name": "Old team" }),
+            json!({ "reason": "team_deleted", "orgId": "not-a-uuid" }),
+            json!({ "reason": "team_deleted", "projectId": deleted_id }),
+            json!({ "reason": "space_deleted", "orgId": deleted_id }),
+        ];
+        for data in malformed_payloads {
+            let mut malformed = event.clone();
+            malformed.data = data;
+            assert!(
+                !is_canonical_access_invalidation(&malformed),
+                "{:?}",
+                malformed.data
+            );
+            assert!(
+                !any_space_stream.matches(&malformed),
+                "{:?}",
+                malformed.data
+            );
+        }
+
+        let mut untargeted = event.clone();
+        untargeted.target_user_id = None;
+        assert!(!is_canonical_access_invalidation(&untargeted));
+        assert!(!any_space_stream.matches(&untargeted));
     }
 
     /// A stream's passed access check holds per conversation, for the window
