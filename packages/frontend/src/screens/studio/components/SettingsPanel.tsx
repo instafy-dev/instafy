@@ -68,6 +68,7 @@ import type { SettingsTab, StudioPanel } from "../types";
 import { controllerClient } from "../../../sdk/instafy";
 import { writeClipboardText } from "../../../runtime/runtimeMenuShared";
 import { suppressProjectAutoCreate } from "../../../projects/projectAutoCreate";
+import { deleteTeamFromThisTab } from "../teamDeletion";
 import {
   desktopSpeechTunnelBridgeAvailable,
 } from "../../../desktop/voiceTunnel/client";
@@ -1383,33 +1384,33 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
       }
     }
     setOrgDeletePending(true);
-    const deletedOrgId = activeOrgId;
-    const ok = await controllerClient.organizations.delete(deletedOrgId);
-    if (!ok) {
+    const outcome = await deleteTeamFromThisTab({
+      orgId: activeOrgId,
+      projects: projectList,
+      leave: (nextProjectId) => {
+        if (nextProjectId) {
+          handleOpenProjectsPanel({ projectId: nextProjectId });
+          switchProject(nextProjectId);
+        } else {
+          handleOpenProjectsPanel({ projectId: null });
+          suppressProjectAutoCreate();
+        }
+      },
+      removeTeamProjects: removeProjectsByOrgId,
+    });
+    if (outcome.status === "failed") {
       showStatus("Unable to delete this team right now.", "error", 4000);
-      setOrgDeletePending(false);
-      return;
-    }
-    window.dispatchEvent(new Event(PROJECT_ACCESS_REFRESH_EVENT));
-    const nextProject = projectList.find((project) => project.orgId !== deletedOrgId) ?? null;
-    if (nextProject) {
-      handleOpenProjectsPanel({ projectId: nextProject.id });
-      switchProject(nextProject.id);
+    } else if (outcome.status === "incomplete") {
+      showStatus(outcome.message, "warning", 8000);
+    } else if (outcome.nextProjectId) {
+      showStatus(activeOrgIsPersonal ? "Personal space deleted." : "Team deleted.", "success", 2500);
     } else {
-      handleOpenProjectsPanel({ projectId: null });
-      suppressProjectAutoCreate();
       showStatus(
         activeOrgIsPersonal ? "Personal space deleted. Create a new space to continue." : "Team deleted. Create a new space to continue.",
         "warning",
         4000,
       );
-      setOrgDeletePending(false);
-      removeProjectsByOrgId(deletedOrgId);
-      return;
     }
-
-    removeProjectsByOrgId(deletedOrgId);
-    showStatus(activeOrgIsPersonal ? "Personal space deleted." : "Team deleted.", "success", 2500);
     setOrgDeletePending(false);
   }, [
     activeOrgId,

@@ -808,7 +808,7 @@ describe("useRuntimeControllerSync controller access results", () => {
     }
   });
 
-  it("names a deleted space on the access refresh it forwards, and nothing else", async () => {
+  it("names a deleted space or team on the access refresh it forwards, and nothing else", async () => {
     const dependencies = createHookDependencies();
     let subscription: SubscribeControllerRunsParams | null = null;
     controllerMocks.fetchRuns.mockResolvedValue(fetchResult());
@@ -842,14 +842,27 @@ describe("useRuntimeControllerSync controller access results", () => {
         subscription?.onEvent?.({
           kind: "project.access_changed",
           project_id: "project-current",
-          data: { reason: "membership_changed", projectId: "project-current" },
+          data: { reason: "membership_changed", projectId: "project-current", orgId: "team-current" },
+        });
+        subscription?.onEvent?.({
+          kind: "project.access_changed",
+          project_id: null,
+          data: { reason: "team_deleted", orgId: " team-deleted " },
+        });
+        subscription?.onEvent?.({
+          kind: "project.access_changed",
+          project_id: null,
+          data: { reason: "team_deleted", orgId: 42 },
         });
       });
 
       expect(accessChanged.mock.calls.map(([event]) => (event as CustomEvent).detail)).toEqual([
-        { projectId: null, deletedProjectId: "project-deleted" },
-        { projectId: null, deletedProjectId: null },
-        { projectId: "project-current", deletedProjectId: null },
+        { projectId: null, deletedProjectId: "project-deleted", deletedOrgId: null },
+        { projectId: null, deletedProjectId: null, deletedOrgId: null },
+        { projectId: "project-current", deletedProjectId: null, deletedOrgId: null },
+        // A team's own notice has no space, so every listener still refreshes.
+        { projectId: null, deletedProjectId: null, deletedOrgId: "team-deleted" },
+        { projectId: null, deletedProjectId: null, deletedOrgId: null },
       ]);
     } finally {
       window.removeEventListener(PROJECT_ACCESS_REFRESH_EVENT, accessChanged);

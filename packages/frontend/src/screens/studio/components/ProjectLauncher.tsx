@@ -8,6 +8,7 @@ import { Select } from "../../../components/Select";
 import { Spinner } from "../../../components/Spinner";
 import { Text } from "../../../components/Text";
 import { Surface } from "../../../components/Surface";
+import { PROJECT_ACCESS_REFRESH_EVENT, readDeletedOrgId } from "../../../projects/projectAccessEvents";
 import { controllerClient } from "../../../sdk/instafy";
 import { useStatus } from "../../../status/useStatus";
 import { openExternalUrl } from "../../../utils/openExternalUrl";
@@ -151,6 +152,21 @@ export function ProjectLauncher({
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [newTeamOpen, onClose, open]);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    // A team deleted while this is open is no longer offered.
+    const dropDeletedTeam = (event: Event) => {
+      const deletedOrgId = readDeletedOrgId(event);
+      if (!deletedOrgId) return;
+      setOrgs((current) => current.filter((org) => org.id !== deletedOrgId));
+      setSelectedOrgId((current) => (current === deletedOrgId ? null : current));
+    };
+    window.addEventListener(PROJECT_ACCESS_REFRESH_EVENT, dropDeletedTeam);
+    return () => window.removeEventListener(PROJECT_ACCESS_REFRESH_EVENT, dropDeletedTeam);
+  }, [open]);
 
   const beginGithubDeviceAuth = useCallback(async () => {
     if (isProcessing) {

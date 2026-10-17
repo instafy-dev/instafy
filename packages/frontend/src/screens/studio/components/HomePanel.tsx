@@ -16,6 +16,7 @@ import { Text } from "../../../components/Text";
 import { useConversations } from "../../../conversations/ConversationsProvider";
 import {
   PROJECT_ACCESS_REFRESH_EVENT,
+  readDeletedOrgId,
   type ProjectAccessRefreshEventDetail,
 } from "../../../projects/projectAccessEvents";
 import { useProjects } from "../../../projects/useProjects";
@@ -316,7 +317,14 @@ export function HomePanel({ canResumeConversation = true, inboxItems: sharedInbo
     // A team deleted or left elsewhere loses its chip. Deleting one space
     // leaves the teams as they were; its row leaves with the store entry.
     const bumpOnAccessChange = (event: Event) => {
-      if (!(event as CustomEvent<ProjectAccessRefreshEventDetail>).detail?.deletedProjectId) bump();
+      if ((event as CustomEvent<ProjectAccessRefreshEventDetail>).detail?.deletedProjectId) return;
+      const deletedOrgId = readDeletedOrgId(event);
+      if (deletedOrgId) {
+        setMembership((current) => current?.organizations.some((org) => org.id === deletedOrgId)
+          ? { ...current, organizations: current.organizations.filter((org) => org.id !== deletedOrgId) }
+          : current);
+      }
+      bump();
     };
     window.addEventListener("instafy:orgs-updated", bump);
     window.addEventListener(PROJECT_ACCESS_REFRESH_EVENT, bumpOnAccessChange);

@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useEffect, useMemo, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { Group } from "iconoir-react";
 import { Button } from "../../../components/Button";
@@ -9,10 +9,11 @@ import { Text } from "../../../components/Text";
 import { SpaceIdentity } from "../../../components/SpaceIdentity";
 import { getOrgInitials } from "../../../org/orgNaming";
 import { useOrgMembers } from "../../../org/useOrgMembers";
+import { PROJECT_ACCESS_REFRESH_EVENT, readDeletedOrgId } from "../../../projects/projectAccessEvents";
 import { useProjects } from "../../../projects/useProjects";
 import { spaceDisplayName } from "../../../projects/spaceName";
 import { useAuth } from "../../../providers/AuthProvider";
-import { controllerClient } from "../../../sdk/instafy";
+import { controllerClient, type ControllerOrgSummary } from "../../../sdk/instafy";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
 import { formatRelativeTimestamp } from "../homeFeed";
 import { teamActivity, teamWorkHref, teamWorkStatus } from "../teamActivity";
@@ -41,6 +42,20 @@ export function TeamPanel({ organizationId: requestedOrganizationId }: TeamPanel
       return result;
     },
   });
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    // A team deleted elsewhere is gone from this page at once.
+    const dropDeletedTeam = (event: Event) => {
+      const deletedOrgId = readDeletedOrgId(event);
+      if (!deletedOrgId) return;
+      queryClient.setQueriesData<ControllerOrgSummary[]>(
+        { queryKey: ["team-overview-organizations"] },
+        (current) => current?.filter((org) => org.id !== deletedOrgId),
+      );
+    };
+    window.addEventListener(PROJECT_ACCESS_REFRESH_EVENT, dropDeletedTeam);
+    return () => window.removeEventListener(PROJECT_ACCESS_REFRESH_EVENT, dropDeletedTeam);
+  }, [queryClient]);
   const organizations = user && !orgs.isError ? orgs.data ?? [] : [];
   const selectedId = selection?.userId === user?.id ? selection?.id : null;
   const organization = requestedOrganizationId !== undefined
