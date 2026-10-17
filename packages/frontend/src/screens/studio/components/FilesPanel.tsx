@@ -1,6 +1,9 @@
 import { DARK_DIVIDER_BORDER_CLASS, DARK_DIVIDER_CLASS, DARK_PANEL_BG_CLASS, DARK_PANEL_BORDER_CLASS, DARK_RAIL_HOVER_CLASS } from "../../../theme/darkSurfaces";
 import { ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type JSX, type SetStateAction } from "react";
 import { createPortal } from "react-dom";
+import { MenuTrigger } from "react-aria-components";
+import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu";
+import { StudioPopover } from "../../../components/aria/StudioPopover";
 import Editor from "@monaco-editor/react";
 import type { Monaco } from "@monaco-editor/react";
 import { HistoryControls } from "../../../components/HistoryControls";
@@ -33,6 +36,8 @@ import { useStudioDesktopLayout } from "../useStudioDesktopLayout";
 import {
   CloudUpload,
   Collapse,
+  Code,
+  EditPencil,
   Eye,
   FloppyDisk,
   FolderPlus,
@@ -451,7 +456,7 @@ export function FilesPanel({
   onRequestCloseExplorer,
   onDirectoryEntriesLoaded,
 }: FilesPanelProps) {
-  const { workspace, setActiveFile, updateFileContent, updateWorkspace, replaceWorkspace } = useCode();
+  const { workspace, setActiveFile, updateFileContent, updateWorkspace, undo, redo, historyLength, futureLength } = useCode();
   const {
     effectiveRuntimeId,
     runtimeReady,
@@ -626,7 +631,6 @@ export function FilesPanel({
     projectId: activeProjectId ?? null,
     initialRoot: normalizePath(initialRootPath ?? "")
   });
-  const hasBootstrappedWorkspaceRef = useRef(false);
 
   const normalizedRootPath = useMemo(() => normalizePath(rootPath), [rootPath]);
   const explorerPortalEnabled = explorerPortalTarget !== null && explorerPortalTarget !== undefined;
@@ -920,7 +924,6 @@ export function FilesPanel({
         return;
       }
       if (!status || !status.supported) {
-        setActiveFileHasVersionChanges(null);
         return;
       }
 
@@ -932,6 +935,7 @@ export function FilesPanel({
   );
 
   useEffect(() => {
+    setActiveFileHasVersionChanges(null);
     void refreshActiveFileVersionStatus(activeFilePath);
   }, [activeFilePath, refreshActiveFileVersionStatus]);
 
@@ -958,41 +962,6 @@ export function FilesPanel({
       editorContainerRef.current = null;
     };
   }, []);
-
-  useEffect(() => {
-    hasBootstrappedWorkspaceRef.current = false;
-  }, [activeProjectId]);
-
-  useEffect(() => {
-    if (!activeProjectId) {
-      return;
-    }
-    if (hasBootstrappedWorkspaceRef.current || embeddedOpenRequest !== undefined) {
-      return;
-    }
-    const activeFileId = workspace.activeFileId;
-    const hasActiveFile =
-      activeFileId !== null && workspace.files.some((file) => file.id === activeFileId);
-    if (hasActiveFile) {
-      hasBootstrappedWorkspaceRef.current = true;
-      return;
-    }
-    if (workspace.files.length === 0) {
-      hasBootstrappedWorkspaceRef.current = true;
-      return;
-    }
-    replaceWorkspace(
-      {
-        ...workspace,
-        files: [],
-        activeFileId: null,
-        error: null
-      },
-      { resetHistory: true, setInitial: true }
-    );
-    hasBootstrappedWorkspaceRef.current = true;
-  }, [activeProjectId, embeddedOpenRequest, replaceWorkspace, workspace]);
-
 
   const handleEditorWillMount = useCallback((monaco: Monaco | null) => {
     ensureStudioMonacoThemes(monaco);
@@ -1519,6 +1488,7 @@ export function FilesPanel({
       await writeActiveFileToWorkspace();
       setActiveFileHasVersionChanges(true);
       void refreshActiveFileVersionStatus(activeFile.path);
+      showStatus("Draft saved to workspace", "success", 3000);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to save draft.";
       showStatus(message, "error", 4500);
@@ -1609,6 +1579,7 @@ export function FilesPanel({
         );
       }
       setActiveFileHasVersionChanges(false);
+      showStatus("Version saved", "success", 3000);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to save version.";
       showStatus(message, "error", 4500);
@@ -1652,6 +1623,7 @@ export function FilesPanel({
     presentFailure: presentWriteFailure,
   });
   const saveButtonRef = useRef<HTMLButtonElement | null>(null);
+  const saveDraftButtonRef = useRef<HTMLButtonElement | null>(null);
   // Nothing to save. The button stays focusable then (aria-disabled, not
   // native disabled): a save started from it with the keyboard would
   // otherwise drop focus to the page the moment the buffer turns clean.
@@ -1660,19 +1632,15 @@ export function FilesPanel({
     // React Aria buttons drop aria-busy and aria-disabled, so both are set on
     // the element (after every render, so a remounted button gets them too),
     // before the browser paints it: a clean Save never shows undimmed.
-    const button = saveButtonRef.current;
-    if (!button) {
-      return;
-    }
-    if (versionedSaving) {
-      button.setAttribute("aria-busy", "true");
-    } else {
-      button.removeAttribute("aria-busy");
-    }
-    if (nothingToSave) {
-      button.setAttribute("aria-disabled", "true");
-    } else {
-      button.removeAttribute("aria-disabled");
+    for (const [button, pending, clean] of [
+      [saveButtonRef.current, versionedSaving || saveMode === "version", nothingToSave && (versioned || activeFileHasVersionChanges === false)],
+      [saveDraftButtonRef.current, saveMode === "draft", nothingToSave],
+    ] as const) {
+      if (!button) continue;
+      if (pending) button.setAttribute("aria-busy", "true");
+      else button.removeAttribute("aria-busy");
+      if (clean || pending && !versioned) button.setAttribute("aria-disabled", "true");
+      else button.removeAttribute("aria-disabled");
     }
   });
 
@@ -1832,152 +1800,156 @@ export function FilesPanel({
 
   const treeContent = (
     <div
-      className="flex h-full min-h-0 flex-col px-4 pb-3"
+      className="flex h-full min-h-0 flex-col"
       data-testid="files-explorer-tree"
     >
       {explorerToolbar}
 
-      {showRootDirectoryErrorCard ? (
-        <InlineNotice
-          tone="danger"
-          role="alert"
-          className="mt-2"
-          actions={<>
-            <Button
-              onPress={() => void loadDirectory(normalizedRootPath, { force: true })}
-              variant="outline"
-              size="xs"
-              radius="full"
-            >
-              Retry
-            </Button>
-            <Button
-              onPress={handleOpenChat}
-              variant="outline"
-              size="xs"
-              radius="full"
-            >
-              Back to Assistant
-            </Button>
-          </>}
+      <div className="flex min-h-0 flex-1 flex-col px-4 pb-3">
+        {showRootDirectoryErrorCard ? (
+          <InlineNotice
+            tone="danger"
+            role="alert"
+            className="mt-2"
+            actions={<>
+              <Button
+                onPress={() => void loadDirectory(normalizedRootPath, { force: true })}
+                variant="outline"
+                size="xs"
+                radius="full"
+              >
+                Retry
+              </Button>
+              <Button
+                onPress={handleOpenChat}
+                variant="outline"
+                size="xs"
+                radius="full"
+              >
+                Back to Assistant
+              </Button>
+            </>}
+          >
+            Unable to load files right now. Retrying in the background. You can retry now, or switch back to chat.
+          </InlineNotice>
+        ) : null}
+
+        {workspaceIssue && rootEntries.length > 0 ? (
+          <Text variant="caption" tone="subtle" className="mt-2" data-testid="files-stale-notice">
+            Showing previously loaded files.
+          </Text>
+        ) : null}
+
+        {projectWriteDisabled && !workspaceIssue ? (
+          <InlineNotice
+            tone="warning"
+            className="mt-2"
+            data-testid="files-read-only-notice"
+            role="status"
+          >
+            Read-only. You can browse files, but you can’t edit, create, or delete them.
+          </InlineNotice>
+        ) : null}
+
+        <div
+          className="mt-3 min-h-0 flex-1 overflow-y-auto"
+          data-testid="files-explorer-scroll"
+          onContextMenu={(event) => {
+            event.preventDefault();
+            openExplorerMenu({ targetPath: normalizedRootPath, clientX: event.clientX, clientY: event.clientY });
+          }}
         >
-          Unable to load files right now. Retrying in the background. You can retry now, or switch back to chat.
-        </InlineNotice>
-      ) : null}
-
-      {workspaceIssue && rootEntries.length > 0 ? (
-        <Text variant="caption" tone="subtle" className="mt-2" data-testid="files-stale-notice">
-          Showing previously loaded files.
-        </Text>
-      ) : null}
-
-      {projectWriteDisabled && !workspaceIssue ? (
-        <InlineNotice
-          tone="warning"
-          className="mt-2"
-          data-testid="files-read-only-notice"
-          role="status"
-        >
-          Read-only. You can browse files, but you can’t edit, create, or delete them.
-        </InlineNotice>
-      ) : null}
-
-      <div
-        className="mt-3 min-h-0 flex-1 overflow-y-auto"
-        onContextMenu={(event) => {
-          event.preventDefault();
-          openExplorerMenu({ targetPath: normalizedRootPath, clientX: event.clientX, clientY: event.clientY });
-        }}
-      >
-        {showCenteredRootLoading ? (
-          <div className="flex h-full min-h-[220px] items-center justify-center">
-            <LoadingStatus>{rootLoadingLabel}</LoadingStatus>
-          </div>
-        ) : normalizedSearch ? (
-          <ul className={touchExplorer ? "space-y-1.5" : "space-y-1"}>
-            {searchResults.length === 0 ? (
-              <li>
-                <Card
-                  tone="muted"
-                  radius="2xl"
-                  shadow="none"
-                  padding="sm"
-                  className="py-1.5 text-xs text-slate-500"
-                >
-                  No loaded files matched “{searchTerm}”.
-                </Card>
-              </li>
-            ) : (
-                searchResults.map((entry) => (
-                  <li key={entry.path}>
-                    <Button
-                      onPress={() => handleSelectEntry(entry, { viaSearch: true })}
-                      variant="ghost"
-                      size="sm"
-                      radius="2xl"
-                      fullWidth
-                      className={`flex-col items-start justify-start gap-1 text-left ${touchExplorer ? "px-3.5 py-3 text-base" : "px-3 py-1.5"} ${listRowSurfaceToneClassName(activePath === entry.path)} ${LIST_ROW_SURFACE_BASE} ${LIST_ROW_FOCUS_RING}`}
-                      data-testid={`files-entry-${entry.path.replace(/[^a-zA-Z0-9]/g, "-")}`}
-                    >
-                      <div className="flex w-full items-center justify-between">
-                        <span>{entry.name}</span>
-                        {dirtyFileIds.has(entry.path) ? (
-                          <span className="text-xs text-rose-500" role="img" aria-label="Unsaved changes">●</span>
-                        ) : null}
-                      </div>
-                      <Text as="p" variant="caption" tone="subtle" className="w-full break-words">
-                        {entry.path}
-                      </Text>
-                    </Button>
-                  </li>
-                ))
+          {showCenteredRootLoading ? (
+            <div className="flex h-full min-h-[220px] items-center justify-center">
+              <LoadingStatus>{rootLoadingLabel}</LoadingStatus>
+            </div>
+          ) : normalizedSearch ? (
+            <ul className={touchExplorer ? "space-y-1.5" : "space-y-1"}>
+              {searchResults.length === 0 ? (
+                <li>
+                  <Card
+                    tone="muted"
+                    radius="2xl"
+                    shadow="none"
+                    padding="sm"
+                    className="py-1.5 text-xs text-slate-500"
+                  >
+                    No loaded files matched “{searchTerm}”.
+                  </Card>
+                </li>
+              ) : (
+                  searchResults.map((entry) => (
+                    <li key={entry.path}>
+                      <Button
+                        onPress={() => handleSelectEntry(entry, { viaSearch: true })}
+                        variant="ghost"
+                        size="sm"
+                        radius="2xl"
+                        fullWidth
+                        className={`flex-col items-start justify-start gap-1 text-left ${touchExplorer ? "px-3.5 py-3 text-base" : "px-3 py-1.5"} ${listRowSurfaceToneClassName(activePath === entry.path)} ${LIST_ROW_SURFACE_BASE} ${LIST_ROW_FOCUS_RING}`}
+                        data-testid={`files-entry-${entry.path.replace(/[^a-zA-Z0-9]/g, "-")}`}
+                      >
+                        <div className="flex w-full items-center justify-between">
+                          <span>{entry.name}</span>
+                          {dirtyFileIds.has(entry.path) ? (
+                            <span className="text-xs text-rose-500" role="img" aria-label="Unsaved changes">●</span>
+                          ) : null}
+                        </div>
+                        <Text as="p" variant="caption" tone="subtle" className="w-full break-words">
+                          {entry.path}
+                        </Text>
+                      </Button>
+                    </li>
+                  ))
+              )}
+            </ul>
+          ) : (
+              <FilesExplorerTree
+                rootPath={normalizedRootPath}
+                entriesMap={explorerEntries}
+                expandedDirectories={expandedDirectories}
+                expandedMarkdownPaths={expandedMarkdownPaths}
+                markdownOutlines={markdownOutlines}
+                markdownOutlineLoadingPaths={markdownOutlineLoadingPaths}
+                collapsedMarkdownSectionKeys={collapsedMarkdownSectionKeys}
+                activePath={activePath}
+                dirtyFileIds={dirtyFileIds}
+                normalizePath={normalizePath}
+                isInstafyManagedPath={isInstafyManagedPath}
+                isMarkdownWorkspacePath={isMarkdownWorkspacePath}
+                onSelect={handleSelectEntry}
+                onToggle={toggleDirectory}
+                renderDirectoryStatus={renderDirectoryStatus}
+                onToggleMarkdownOutline={handleToggleMarkdownOutline}
+                onSelectMarkdownSection={handleSelectMarkdownSection}
+                onToggleMarkdownSectionCollapse={handleToggleMarkdownSectionCollapse}
+                onFocus={focusDirectory}
+                onEntryContextMenu={handleEntryContextMenu}
+                createFile={createFileState}
+                createFileInputRef={createFileInputRef}
+                onCreateFileDraftChange={(value) =>
+                  setCreateFileState((current) => (current ? { ...current, draft: value } : current))
+                }
+                onCreateFileCommit={handleCommitCreateFile}
+                onCreateFileCancel={handleCancelCreateFile}
+                createFolder={createFolderState}
+                createFolderInputRef={createFolderInputRef}
+                onCreateFolderDraftChange={(value) =>
+                  setCreateFolderState((current) => (current ? { ...current, draft: value } : current))
+                }
+                onCreateFolderCommit={handleCommitCreateFolder}
+                onCreateFolderCancel={handleCancelCreateFolder}
+                touchDensity={touchExplorer}
+                folderBehavior={isLargeScreen ? "expand" : "navigate"}
+              />
             )}
-          </ul>
-        ) : (
-            <FilesExplorerTree
-              rootPath={normalizedRootPath}
-              entriesMap={explorerEntries}
-              expandedDirectories={expandedDirectories}
-              expandedMarkdownPaths={expandedMarkdownPaths}
-              markdownOutlines={markdownOutlines}
-              markdownOutlineLoadingPaths={markdownOutlineLoadingPaths}
-              collapsedMarkdownSectionKeys={collapsedMarkdownSectionKeys}
-              activePath={activePath}
-              dirtyFileIds={dirtyFileIds}
-              normalizePath={normalizePath}
-              isInstafyManagedPath={isInstafyManagedPath}
-              isMarkdownWorkspacePath={isMarkdownWorkspacePath}
-              onSelect={handleSelectEntry}
-              onToggle={toggleDirectory}
-              renderDirectoryStatus={renderDirectoryStatus}
-              onToggleMarkdownOutline={handleToggleMarkdownOutline}
-              onSelectMarkdownSection={handleSelectMarkdownSection}
-              onToggleMarkdownSectionCollapse={handleToggleMarkdownSectionCollapse}
-              onFocus={focusDirectory}
-              onEntryContextMenu={handleEntryContextMenu}
-              createFile={createFileState}
-              createFileInputRef={createFileInputRef}
-              onCreateFileDraftChange={(value) =>
-                setCreateFileState((current) => (current ? { ...current, draft: value } : current))
-              }
-              onCreateFileCommit={handleCommitCreateFile}
-              onCreateFileCancel={handleCancelCreateFile}
-              createFolder={createFolderState}
-              createFolderInputRef={createFolderInputRef}
-              onCreateFolderDraftChange={(value) =>
-                setCreateFolderState((current) => (current ? { ...current, draft: value } : current))
-              }
-              onCreateFolderCommit={handleCommitCreateFolder}
-              onCreateFolderCancel={handleCancelCreateFolder}
-              touchDensity={touchExplorer}
-            />
-          )}
-        </div>
-      {rootDirectoryStatusNode ? (
-        <div className={`mt-2 border-t border-slate-200/70 px-1 pt-1.5 ${DARK_DIVIDER_BORDER_CLASS}`}>
-          <div className="min-h-[1rem]">{rootDirectoryStatusNode}</div>
-        </div>
-      ) : null}
+          </div>
+        {rootDirectoryStatusNode ? (
+          <div className={`mt-2 border-t border-slate-200/70 px-1 pt-1.5 ${DARK_DIVIDER_BORDER_CLASS}`}>
+            <div className="min-h-[1rem]">{rootDirectoryStatusNode}</div>
+          </div>
+        ) : null}
+      </div>
 
       {explorerMenu ? (
           <div
@@ -2126,6 +2098,12 @@ export function FilesPanel({
       const mobileViewerBackLabel =
         mobileViewerBackTarget === "assistant" ? "Back to Assistant" : "Back to file list";
 
+      const previewingMarkdown = Boolean(activeFile && isMarkdownWorkspacePath(activeFile.path) && markdownView === "preview");
+      const modeLabel = previewingMarkdown ? (projectWriteDisabled ? "View source" : "Edit") : "Preview markdown";
+      const ModeIcon = previewingMarkdown ? (projectWriteDisabled ? Code : EditPencil) : Eye;
+      const ToolbarAction = isLargeScreen ? Button : IconButton;
+      const draftDisabled = projectWriteDisabled || workspaceWritesBlocked || !activeFile || activeFile.modified === activeFile.generated;
+
       return (
         <header className={`flex items-center justify-between gap-2 border-b border-slate-200/70 px-4 py-2.5 ${DARK_DIVIDER_BORDER_CLASS}`}>
           <div className="min-w-0 flex-1">
@@ -2156,13 +2134,14 @@ export function FilesPanel({
                   radius="full"
                   aria-label="Back to Assistant"
                   title="Back to Assistant"
-                  className="-ml-1 shrink-0 text-slate-500 hover:bg-slate-100 hover:text-slate-800 data-[hovered]:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-900 dark:hover:text-slate-100 dark:data-[hovered]:bg-slate-900"
+                  tone="muted"
+                  className="-ml-1 shrink-0"
                 >
                   <NavArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
                   Assistant
                 </Button>
               ) : null}
-              <Heading level={3} variant="subtitle" className={embeddedOpenRequest === undefined ? "truncate" : "sr-only"}>
+              <Heading level={3} variant="subtitle" title={title} className={embeddedOpenRequest === undefined ? "truncate" : "sr-only"}>
                 {title}
               </Heading>
               {projectWriteDisabled ? (
@@ -2184,43 +2163,48 @@ export function FilesPanel({
           </div>
           {viewerState.mode === "text" && activeFile ? (
             <div className="flex shrink-0 items-center justify-end gap-1.5 sm:gap-2">
-              {!projectWriteDisabled ? <HistoryControls /> : null}
+              {!projectWriteDisabled && !previewingMarkdown && isLargeScreen ? <HistoryControls /> : null}
               {isMarkdownWorkspacePath(activeFile.path) ? (
-                isLargeScreen ? (
-                  <Button
-                    onPress={() => setMarkdownView((current) => (current === "preview" ? "edit" : "preview"))}
-                    variant={markdownView === "preview" ? "secondary" : "outline"}
-                    size="sm"
-                    radius="full"
-                    title={markdownView === "preview" ? "Back to the editor" : "Preview markdown"}
-                    className="min-w-[6.5rem]"
-                  >
-                    <Eye className="h-4 w-4" aria-hidden="true" />
-                    {markdownView === "preview" ? "Edit" : "Preview"}
-                  </Button>
-                ) : (
-                  <IconButton
-                    onPress={() => setMarkdownView((current) => (current === "preview" ? "edit" : "preview"))}
-                    variant={markdownView === "preview" ? "secondary" : "outline"}
-                    size="sm"
-                    radius="full"
-                    aria-label={markdownView === "preview" ? "Back to the editor" : "Preview markdown"}
-                    title={markdownView === "preview" ? "Back to the editor" : "Preview markdown"}
-                  >
-                    <Eye className="h-4 w-4" aria-hidden="true" />
-                  </IconButton>
-                )
+                <ToolbarAction
+                  onPress={() => setMarkdownView((current) => (current === "preview" ? "edit" : "preview"))}
+                  variant="secondary"
+                  elevation="none"
+                  size="sm"
+                  radius="full"
+                  aria-label={modeLabel}
+                  title={modeLabel}
+                  data-testid="files-viewer-mode"
+                >
+                  <ModeIcon className="h-4 w-4" aria-hidden="true" />
+                  {isLargeScreen ? (previewingMarkdown ? (projectWriteDisabled ? "Source" : "Edit") : "Preview") : null}
+                </ToolbarAction>
               ) : null}
-              {versioned ? (
-                <IconButton
+              {!projectWriteDisabled && !versioned && isLargeScreen && !previewingMarkdown ? (
+                <Button
+                  ref={saveDraftButtonRef}
+                  onPress={handleSaveDraft}
+                  isDisabled={workspaceWritesBlocked || saveMode === "version"}
+                  className="aria-disabled:pointer-events-none aria-disabled:opacity-60"
+                  isPending={saveMode === "draft"}
+                  icon={<FloppyDisk className="h-4 w-4" aria-hidden="true" />}
+                  variant="ghost"
+                  tone="muted"
+                  size="sm"
+                  radius="full"
+                  data-testid="code-save-draft-button"
+                  aria-label={saveMode === "draft" ? "Saving draft" : "Save draft"}
+                  title="Save to the workspace without creating a version"
+                >
+                  Save draft
+                </Button>
+              ) : null}
+              {!projectWriteDisabled ? (versioned ? (
+                <ToolbarAction
                   ref={saveButtonRef}
-                  onPress={() => {
-                    if (isFileBufferDirty(activeFile)) {
-                      void handleSave();
-                    }
-                  }}
-                  isDisabled={projectWriteDisabled || workspaceWritesBlocked || !originAvailable}
+                  onPress={() => { if (isFileBufferDirty(activeFile)) void handleSave(); }}
+                  isDisabled={workspaceWritesBlocked || !originAvailable}
                   variant="primary"
+                  elevation="none"
                   size="sm"
                   radius="full"
                   className="aria-disabled:pointer-events-none aria-disabled:opacity-60"
@@ -2228,65 +2212,63 @@ export function FilesPanel({
                   aria-label={versionedSaving ? "Saving" : "Save"}
                   title={`Save (${SAVE_SHORTCUT_LABEL})`}
                 >
-                  {versionedSaving ? (
-                    <Refresh className="h-4 w-4 animate-spin" aria-hidden="true" />
-                  ) : (
-                    <CloudUpload className="h-4 w-4" aria-hidden="true" />
-                  )}
-                </IconButton>
+                  {versionedSaving ? <Refresh className="h-4 w-4 animate-spin" aria-hidden="true" /> : <FloppyDisk className="h-4 w-4" aria-hidden="true" />}
+                  {isLargeScreen ? "Save" : null}
+                </ToolbarAction>
               ) : (
-                <>
-                  <IconButton
-                    onPress={handleSaveDraft}
-                    isDisabled={projectWriteDisabled || workspaceWritesBlocked || activeFile.modified === activeFile.generated}
-                    variant="outline"
-                    size="sm"
-                    radius="full"
-                    data-testid="code-save-draft-button"
-                    aria-label={saveMode === "draft" ? "Saving draft" : "Save draft"}
-                    title={saveMode === "draft" ? "Saving draft…" : "Save draft"}
-                    className={saveMode === "draft" ? "pointer-events-none opacity-80" : undefined}
-                  >
-                    {saveMode === "draft" ? (
-                      <Refresh className="h-4 w-4 animate-spin" aria-hidden="true" />
-                    ) : (
-                      <FloppyDisk className="h-4 w-4" aria-hidden="true" />
-                    )}
+                <ToolbarAction
+                  ref={saveButtonRef}
+                  onPress={handleSaveVersion}
+                  isDisabled={workspaceWritesBlocked || saveMode === "draft"}
+                  className="aria-disabled:pointer-events-none aria-disabled:opacity-60"
+                  isPending={saveMode === "version"}
+                  variant="primary"
+                  elevation="none"
+                  size="sm"
+                  radius="full"
+                  data-testid="code-save-button"
+                  aria-label={saveMode === "version" ? "Saving version" : "Save version"}
+                  title="Save to the workspace and create a version"
+                >
+                  <CloudUpload className="h-4 w-4" aria-hidden="true" />
+                  {isLargeScreen ? "Save version" : null}
+                </ToolbarAction>
+              )) : null}
+              {!projectWriteDisabled && ((!isLargeScreen && !previewingMarkdown) || (!versioned && (!isLargeScreen || previewingMarkdown))) ? (
+                <MenuTrigger>
+                  <IconButton variant="ghost" tone="muted" size="sm" radius="full" isPending={saveMode === "draft"} aria-label={saveMode === "draft" ? "Saving draft" : "File editing actions"} title={saveMode === "draft" ? "Saving draft" : "File editing actions"} data-testid="files-viewer-more">
+                    <MoreHoriz className="h-4 w-4" aria-hidden="true" />
                   </IconButton>
-                  <IconButton
-                    onPress={handleSaveVersion}
-                    isDisabled={
-                      projectWriteDisabled || workspaceWritesBlocked ||
-                      (activeFile.modified === activeFile.generated && activeFileHasVersionChanges === false)
-                    }
-                    variant="primary"
-                    size="sm"
-                    radius="full"
-                    data-testid="code-save-button"
-                    aria-label={saveMode === "version" ? "Saving version" : "Save version"}
-                    title={saveMode === "version" ? "Saving version…" : "Save version"}
-                    className={saveMode === "version" ? "pointer-events-none opacity-90" : undefined}
-                  >
-                    {saveMode === "version" ? (
-                      <Refresh className="h-4 w-4 animate-spin" aria-hidden="true" />
-                    ) : (
-                      <CloudUpload className="h-4 w-4" aria-hidden="true" />
-                    )}
-                  </IconButton>
-                </>
-              )}
+                  <StudioPopover layout="menu" placement="bottom end">
+                    <StudioMenu aria-label="File editing actions">
+                      {!isLargeScreen && !previewingMarkdown ? <>
+                        <StudioMenuItem id="undo" onAction={undo} isDisabled={historyLength === 0}>Undo</StudioMenuItem>
+                        <StudioMenuItem id="redo" onAction={redo} isDisabled={futureLength === 0}>Redo</StudioMenuItem>
+                      </> : null}
+                      {!versioned ? (
+                        <StudioMenuItem id="draft" onAction={() => { void handleSaveDraft(); }} isDisabled={draftDisabled || saveMode !== null} textValue="Save draft" data-testid="code-save-draft-button">
+                          <div className="flex flex-col">
+                            <Text variant="bodyCompact">Save draft</Text>
+                            <Text variant="caption" tone="muted">Save without creating a version</Text>
+                          </div>
+                        </StudioMenuItem>
+                      ) : null}
+                    </StudioMenu>
+                  </StudioPopover>
+                </MenuTrigger>
+              ) : null}
             </div>
-          ) : (
-            <div className="flex shrink-0 items-center justify-end gap-1.5 sm:gap-2">
-              {!projectWriteDisabled ? <HistoryControls /> : null}
-            </div>
-          )}
+          ) : null}
         </header>
       );
     },
     [
       activeFile,
       activePath,
+      undo,
+      redo,
+      historyLength,
+      futureLength,
       embeddedOpenRequest,
       fileViewerReturnTarget,
       handleOpenChat,
@@ -2453,8 +2435,12 @@ export function FilesPanel({
         );
       case "error":
         return (
-          <div className="flex h-full items-center justify-center px-4 text-center text-sm text-rose-500">
-            {viewerState.error ?? "Something went wrong while opening this file."}
+          <div className="p-4">
+            <InlineNotice tone="danger" role="alert" title="Couldn't open this file" actions={viewerState.entry ? (
+              <Button variant="outline" elevation="none" onPress={() => { if (viewerState.entry) void handleSelectEntry(viewerState.entry); }}>Retry</Button>
+            ) : undefined}>
+              {viewerState.error ?? "Something went wrong while opening this file."}
+            </InlineNotice>
           </div>
         );
       default:
@@ -2464,7 +2450,7 @@ export function FilesPanel({
           </div>
         );
     }
-  }, [focusDirectory, normalizedRootPath, renderTextViewer, viewerState]);
+  }, [focusDirectory, handleSelectEntry, normalizedRootPath, renderTextViewer, viewerState]);
 
   const viewerModifiedAt = viewerState.entry?.modified ?? activeFile?.modifiedAt ?? null;
   const viewerPanel = useMemo(
@@ -2474,7 +2460,13 @@ export function FilesPanel({
         <div className={`flex-1 min-h-0 overflow-hidden bg-white ${DARK_PANEL_BG_CLASS}`}>{viewerBody}</div>
         {viewerState.entry && viewerState.entry.kind === "file" ? (
           <footer className={`border-t border-slate-200/70 px-4 py-2.5 text-xs text-slate-500 ${DARK_DIVIDER_BORDER_CLASS} dark:text-slate-400`}>
-            <div className="flex flex-wrap items-center gap-4">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+              {viewerState.mode === "text" && activeFile && !projectWriteDisabled ? (
+                <Text as="span" variant="caption" tone="secondary" role="status" data-testid="files-save-status">
+                  {versionedSaving || saveMode ? "Saving…" : isFileBufferDirty(activeFile) ? "Unsaved changes" :
+                    !versioned && activeFileHasVersionChanges ? "Draft saved · version pending" : "Saved"}
+                </Text>
+              ) : null}
               {/* Unknown facts are left out: listings without a time (the stateless gateway) have no Modified row. */}
               {describeFileViewerFacts({
                 size: viewerState.entry.size ?? activeFile?.size ?? null,
@@ -2490,7 +2482,7 @@ export function FilesPanel({
         ) : null}
       </div>
     ),
-    [activeFile, viewerBody, viewerHeader, viewerModifiedAt, viewerState.entry]
+    [activeFile, viewerBody, viewerHeader, viewerModifiedAt, viewerState.entry, viewerState.mode, projectWriteDisabled, versionedSaving, saveMode, versioned, activeFileHasVersionChanges]
   );
 
   useEffect(() => {
@@ -2530,10 +2522,10 @@ export function FilesPanel({
         tone="default"
         radius="2xl"
         shadow="none"
-        className="flex h-full flex-col gap-4 p-4 text-sm text-slate-600 dark:text-slate-300"
+        className="flex h-full flex-col text-sm text-slate-600 dark:text-slate-300"
       >
         {explorerToolbar}
-        <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center">
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 p-4 text-center">
           <Text variant="body" tone="subtle" className="max-w-[22rem]">
             Connect the runtime controller to browse space files.
           </Text>
@@ -2561,10 +2553,10 @@ export function FilesPanel({
         tone="default"
         radius="2xl"
         shadow="none"
-        className="flex h-full flex-col gap-4 p-4 text-sm text-slate-600 dark:text-slate-300"
+        className="flex h-full flex-col text-sm text-slate-600 dark:text-slate-300"
       >
         {explorerToolbar}
-        <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center">
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 p-4 text-center">
           <Text variant="body" tone="subtle" className="max-w-[22rem]">
             Select or create a space to view its files.
           </Text>
@@ -2608,7 +2600,11 @@ export function FilesPanel({
     } else {
       mainContent = (
         <div className="flex h-full min-h-0 flex-col overflow-hidden">
-          {mobileView === "tree" ? treeContent : viewerPanel}
+          {/* Keep the list mounted so Back returns to its folder and scroll position. */}
+          <div className="h-full min-h-0" hidden={mobileView !== "tree"}>
+            {treeContent}
+          </div>
+          {mobileView === "viewer" ? viewerPanel : null}
         </div>
       );
     }

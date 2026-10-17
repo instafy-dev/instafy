@@ -48,7 +48,7 @@ const IDLE_VIEWER_STATE: ViewerState = {
 };
 
 export interface OpenWorkspaceFileEventDetail {
-  /** Switching a conversation view must not replace an unsaved editor draft. */
+  /** File navigation keeps unsaved edits by default; false explicitly reloads them. */
   preserveDraft?: boolean;
   /** In-process callers may cancel an accepted open after navigation changes. */
   signal?: AbortSignal;
@@ -517,6 +517,9 @@ export function useFilesPanelViewerState({
       }
       forgetBinaryPreviewRequest(previewScopeKey);
       setViewerState({ mode: "loading", entry, error: null });
+      if (!isLargeScreen) {
+        setMobileView("viewer");
+      }
 
       const existing = workspaceFiles.find((file) => file.id === entry.path);
       const existingGenerated = existing?.generated ?? null;
@@ -524,7 +527,7 @@ export function useFilesPanelViewerState({
       const expectedSize = entry.size ?? existing?.size ?? null;
       const computedShouldForceFetch =
         !existing ||
-        (expectedSize !== null &&
+        (!isFileBufferDirty(existing) && expectedSize !== null &&
           ((existingGenerated === null && existingModified === null) ||
             (existingGenerated !== null && existingGenerated.length === 0 && expectedSize > 0) ||
             (existingModified !== null && existingModified.length === 0 && expectedSize > 0)));
@@ -607,7 +610,7 @@ export function useFilesPanelViewerState({
             // Still not in the space: keep showing the new buffer.
             shouldForceFetch = false;
           }
-          if (!result && verifyDraft && existing) {
+          if (!result && existing && (verifyDraft || (options?.preserveDraft === true && isFileBufferDirty(existing)))) {
             // The draft is shown either way; only a file that is gone from
             // the space means its base changed.
             if (read && !read.ok && read.notFound) {
@@ -636,6 +639,9 @@ export function useFilesPanelViewerState({
             runtimeId: effectiveRuntimeId ?? null,
           });
           if (!request.isCurrent()) return;
+        }
+        if (!result && existing && options?.preserveDraft === true && isFileBufferDirty(existing)) {
+          shouldForceFetch = false;
         }
         if (!result && !shouldForceFetch) {
           reuseBuffer();
@@ -739,9 +745,6 @@ export function useFilesPanelViewerState({
         label: entry.name ?? entry.path,
       });
       setViewerState({ mode: "text", entry, error: null });
-      if (!isLargeScreen) {
-        setMobileView("viewer");
-      }
     },
     [
       activeProjectId,
@@ -774,6 +777,9 @@ export function useFilesPanelViewerState({
       }
       setActiveFile(null);
       setViewerState({ mode: "loading", entry, error: null });
+      if (!isLargeScreen) {
+        setMobileView("viewer");
+      }
       try {
         const rawUrl = await controllerClient.workspace.files.getRawUrl(
           rawUrlRequest(activeProjectId, entry.path),
@@ -784,9 +790,6 @@ export function useFilesPanelViewerState({
         }
         setViewerState({ mode: "image", entry, imageUrl: rawUrl, error: null });
         rememberBinaryPreviewRequest(previewScopeKey, "image", entry);
-        if (!isLargeScreen) {
-          setMobileView("viewer");
-        }
       } catch (error) {
         if (!request.isCurrent()) return;
         forgetBinaryPreviewRequest(previewScopeKey);
@@ -814,15 +817,26 @@ export function useFilesPanelViewerState({
         return;
       }
       setActiveFile(null);
+      setViewerState({ mode: "loading", entry, error: null });
+      if (!isLargeScreen) {
+        setMobileView("viewer");
+      }
       let rawUrl: string | null;
       try {
         rawUrl = await controllerClient.workspace.files.getRawUrl(
           rawUrlRequest(activeProjectId, entry.path),
         );
+        if (!request.isCurrent()) return;
+        if (!rawUrl) {
+          throw new Error("Unable to open this file.");
+        }
       } catch (error) {
         if (!request.isCurrent()) return;
         forgetBinaryPreviewRequest(previewScopeKey);
-        throw error;
+        const message = error instanceof Error ? error.message : "Unable to open this file.";
+        setViewerState({ mode: "error", entry, error: message });
+        showStatus(message, "error");
+        return;
       }
       if (!request.isCurrent()) return;
       setViewerState({
@@ -832,9 +846,6 @@ export function useFilesPanelViewerState({
         error: "This file type is not supported for inline editing.",
       });
       rememberBinaryPreviewRequest(previewScopeKey, "unsupported", entry);
-      if (!isLargeScreen) {
-        setMobileView("viewer");
-      }
     },
     [
       activeProjectId,
@@ -845,6 +856,7 @@ export function useFilesPanelViewerState({
       setActiveFile,
       setMobileView,
       setViewerState,
+      showStatus,
     ],
   );
 
@@ -1032,7 +1044,7 @@ export function useFilesPanelViewerState({
         if (isImageEntry(entry)) {
           await openImageFile(entry, request);
         } else if (isLikelyTextEntry(entry)) {
-          await openTextFile(entry, { forceFetch: true, preserveDraft: detail.preserveDraft, request });
+          await openTextFile(entry, { forceFetch: true, preserveDraft: detail.preserveDraft !== false, request });
           if (!request.isCurrent()) return;
           if (wantsMarkdownPreview && isMarkdownWorkspacePath(normalizedPath)) {
             setMarkdownView("preview");

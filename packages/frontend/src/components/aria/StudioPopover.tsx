@@ -24,6 +24,16 @@ const POPOVER_BASE =
 
 type TriggerRefLike = { current: Element | null };
 
+export type StudioPopoverProps = PopoverProps & {
+  /** Shared geometry for anchored actions or a trigger-width field picker. */
+  layout?: "menu" | "form";
+};
+
+const POPOVER_LAYOUT_CLASSES = {
+  menu: "p-2 min-w-[min(12rem,var(--studio-popover-max-width))] max-w-[var(--studio-popover-max-width)]",
+  form: "p-2 min-w-[min(var(--trigger-width),var(--studio-popover-max-width))] max-w-[var(--studio-popover-max-width)]",
+};
+
 function isRecord(value: unknown): value is Record<PropertyKey, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -35,13 +45,18 @@ function isTriggerRefLike(value: unknown): value is TriggerRefLike {
 export function StudioPopover({
   children,
   className,
+  style,
+  layout,
+  offset,
+  containerPadding,
   isNonModal = false,
   shouldCloseOnInteractOutside,
   triggerRef,
   ...props
-}: PopoverProps) {
+}: StudioPopoverProps) {
   const popoverRef = useRef<HTMLElement | null>(null);
   const contextValue = useContext(PopoverContext);
+  const resolvedContainerPadding = containerPadding ?? (layout ? 8 : undefined);
 
   const resolvedCloseOnInteractOutside = useMemo(() => {
     const context = (() => {
@@ -75,12 +90,19 @@ export function StudioPopover({
     <Popover
       {...props}
       data-studio-popover=""
+      data-studio-popover-layout={layout}
       ref={popoverRef}
+      offset={offset ?? (layout ? 6 : undefined)}
+      containerPadding={resolvedContainerPadding}
       isNonModal={isNonModal}
       triggerRef={triggerRef}
       shouldCloseOnInteractOutside={resolvedCloseOnInteractOutside}
+      style={layout ? composeRenderProps(style, (value) => ({
+        "--studio-popover-max-width": `calc(100vw - ${(resolvedContainerPadding ?? 0) * 2}px)`,
+        ...value,
+      })) : style}
       className={composeRenderProps(className, (value) =>
-        `${POPOVER_BASE}${value ? ` ${value}` : ""}`
+        `${POPOVER_BASE}${layout ? ` ${POPOVER_LAYOUT_CLASSES[layout]}` : ""}${value ? ` ${value}` : ""}`
       )}
       children={composeRenderProps(children, (resolvedChildren) => (
         <>
@@ -110,7 +132,7 @@ export function StudioPopover({
 export function StudioDialogPopover({
   children,
   ...props
-}: PopoverProps & { children: ReactNode }) {
+}: StudioPopoverProps & { children: ReactNode }) {
   return (
     <StudioPopover {...props}>
       <Dialog className="outline-none">{children}</Dialog>

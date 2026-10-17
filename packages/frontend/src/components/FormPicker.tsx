@@ -37,17 +37,13 @@ export const FormPickerTrigger = forwardRef<HTMLButtonElement, FormPickerTrigger
   );
 });
 
-export function FormPickerPopover({ className, ...props }: PopoverProps) {
+export function FormPickerPopover(props: PopoverProps) {
   return (
     <StudioPopover
       isNonModal
       placement="bottom start"
-      offset={6}
+      layout="form"
       {...props}
-      className={composeRenderProps(className, (extra) => [
-        "min-w-[var(--trigger-width)] p-2",
-        extra,
-      ].filter(Boolean).join(" "))}
     />
   );
 }

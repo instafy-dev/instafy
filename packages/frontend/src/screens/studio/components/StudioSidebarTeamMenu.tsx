@@ -78,8 +78,8 @@ export function StudioSidebarTeamMenu({
   return (
     <MenuTrigger isOpen={open} onOpenChange={setOpen}>
       {trigger}
-      <StudioPopover placement={compact ? "right top" : mobile || path ? "bottom start" : "bottom end"} offset={6}
-        className={`${mobile ? "w-56" : "w-52"} max-w-[calc(100vw-1rem)] p-2`} data-testid="sidebar-team-menu">
+      <StudioPopover placement={compact ? "right top" : mobile || path ? "bottom start" : "bottom end"} layout="menu"
+        className={mobile ? "w-56" : "w-52"} data-testid="sidebar-team-menu">
         {path ? <div className="mb-1 break-words px-2 py-2 text-sm font-semibold text-slate-900 dark:text-slate-100">{teamName}</div> : null}
         <StudioMenu aria-label={`Team actions: ${teamName}`} className="space-y-1"
           onAction={(key) => {

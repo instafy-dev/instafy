@@ -55,10 +55,57 @@ component checks, not authenticated backend or physical-device tests. The Machin
 uses its production `SettingsShell` at full available width, not a half-width comparison.
 
 `SettingsShell width="comfortable"` caps a list/form surface at 56rem (896px at the default
-root size), including its gutters. Machines uses this option so controls stay near their
+root size), including its gutters. Skills and Machines use this option so controls stay near their
 content on ultrawide screens. The default `wide` shell remains 72rem for other settings.
 Both stay fluid below their cap and center within the available pane; extra viewport width
 becomes margins, not larger fonts or indefinitely stretched rows.
+
+### Spacing and width presets
+
+Choose width by the task, not by the size of the monitor. A readable settings list uses
+`comfortable` (896px including gutters); a denser settings workspace can use `wide`
+(1152px including gutters). `SettingsFormLayout` limits a single form to 672px inside
+that shell. The shell supplies one horizontal inset: 12px on narrow screens, 16px at
+`sm+`, and 24px when the measured pane is wide enough. Chat's 896px content measure
+excludes its outer gutters, so it is not the same box as a comfortable settings page.
+Do not increase font sizes merely because a screen is wider.
+
+For overlays, let the shared shell own the viewport clearance and use these presets:
+
+- `StudioDialogModal size="sm" | "md" | "lg"` caps width at 384 / 512 / 672px.
+  The default remains `md`. Pick the smallest size that fits the form; keep the
+  shared safe-area-aware 16px minimum viewport clearance.
+- `gutter="responsive"` opts an entire dialog into 16px horizontal padding below
+  640px and 20px above it. Header, body and `StudioDialogFooter padding="default"`
+  share that inset and use 16px vertical padding. The legacy default stays 20px
+  horizontally, so unchanged custom sections do not become misaligned. Migrate
+  header, body and footer together, removing their local padding classes. The
+  footer remains unpadded by default for callers whose actions already own padding;
+  `divider` adds a separator when fixed actions need that boundary.
+- `StudioPopover layout="menu"` supplies 8px padding, a 6px trigger gap and 8px
+  viewport clearance. Its 192px minimum width is clamped to the available viewport.
+  `layout="form"` uses the same spacing and follows the trigger's width, also clamped.
+  Explicit `offset` and `containerPadding` remain supported. Omitting `layout`
+  preserves legacy geometry; do not apply menu padding around a rich form that
+  already owns its inset.
+
+Keep work drawers resizable and mobile navigation thumb-reachable. Their current
+280–560px work-drawer range, 16px rail-header inset, and 12px mobile-navigation body
+inset serve different arrangements. Account for row hit-area padding when comparing
+text alignment, and keep safe-area/keyboard handling in the owning shell. Avoid
+introducing another wrapper merely to supply a gutter already owned by its parent.
+
+Files mounts its rail header edge-to-edge. The path and filter rows own their 16px
+horizontal inset, while the scrolling file body owns its own matching inset; the
+toolbar no longer cancels a parent's padding with negative margins. This also applies
+to the no-space and unavailable-controller views. Skills actions and the Machines
+size, pin-agent and More actions menus use the shared menu preset above.
+
+The local `/tests/fixtures/spacing-presets/index.html` review mounts these production
+shells and the real skill-import form with inert callbacks. Its browser checks cover
+390px touch and 1280/2560px mouse layouts in both themes, menu selection and focus
+return, editor draft retention, short-viewport scrolling, and navigation-sheet
+scrolling. This is component-layout coverage, not authenticated backend or device testing.
 
 Machine menus and the Machines page share a role-based hierarchy: `bodyStrong` names
 and headings with `primary` contrast, `bodyCompact` descriptions and instructions with
@@ -71,6 +118,8 @@ and touch enlarges the hit targets rather than scaling the labels.
 Details and fact labels align with
 the machine name; the status dot stays in the gutter. Identifiers wrap below names
 when space is tight rather than forcing a short name to truncate beside touch actions.
+The Agents label follows the first chip row's text baseline, including when the group
+wraps. Avoid fixed top padding or centering the label against the entire multi-row group.
 Machine selection uses a neutral fill and checkmark, independent of expansion and the
 runtime status dot. Start and Stop use the shared neutral button tone; Remove uses
 danger. Reserve accent treatments for primary calls to action and links.
@@ -447,7 +496,25 @@ Docked side panels use `DrawerHeader frame="rail"`: a 48px row with 16px horizon
 insets and a 16px semibold title. Keep path details and filters below that row so the
 heading starts immediately below the shared desktop header. Loading fallbacks use the same frame.
 Files keeps New file visible and groups New folder, Refresh and Collapse all under More;
-the path has its own row. Desktop layout follows Studio's 900px breakpoint; touch targets
+the path has its own row. On desktop, folder rows expand in place and a separate
+**Open folder** arrow enters the folder. On mobile the folder row itself enters it;
+there is no second folder action. Back from a file keeps the list mounted so its folder,
+filter and scroll position survive. File navigation retains unfinished edits (including
+empty drafts); only an explicit reload requests replacement.
+Opening a file shows the viewer immediately, including on mobile. Failed reads keep
+Back and Retry available in the viewer instead of leaving the error behind the file list.
+
+The file viewer uses a pencil for **Edit**, an eye for **Preview**, and **Source** for
+read-only Markdown. These are content-sized shared controls, with no fixed-width override.
+Preview and non-text viewers omit editor history actions. On mobile, Undo/Redo and the
+legacy **Save draft** action live in **File editing actions**, keeping the filename and
+main save action visible. Desktop editing exposes the labelled save actions directly.
+Save draft writes to the workspace without creating a version; Save version also commits
+and syncs that file. Versioned origins keep their single Save action. The footer reports
+unsaved changes, saving and saved state; read-only viewers offer no save actions.
+Viewer toolbar actions use the shared button tones and flat elevation.
+
+The path row and header use the shared spacing described above. Desktop layout follows Studio's 900px breakpoint; touch targets
 grow independently for coarse pointers. Navigation selection uses a flat fill with a
 separate keyboard-focus ring. Changes uses the shared segmented selector for Files/All
 changes. Participants is an overlay, so it keeps its shadow while model/reasoning actions

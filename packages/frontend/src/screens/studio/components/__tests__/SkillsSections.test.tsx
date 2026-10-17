@@ -118,4 +118,15 @@ describe("Skills responsive controls", () => {
     expect(query("skills-refresh")?.getAttribute("aria-disabled")).toBe("true");
   });
 
+  it.each([
+    ["togglePendingSkillId", "Updating skill state…"],
+    ["uninstallPendingSkillId", "Uninstalling skill…"],
+  ] as const)("announces %s progress without removing the skill row", async (pendingKey, message) => {
+    await render(<InstalledSkillsSection {...installedProps({ [pendingKey]: skill.id })} />);
+    const row = query("skills-item-one");
+    expect(row?.textContent).toContain(skill.title);
+    expect(row?.querySelector('[role="status"]')?.textContent).toContain(message);
+    expect(row?.querySelector('[role="status"]')?.getAttribute("aria-live")).toBe("polite");
+  });
+
 });

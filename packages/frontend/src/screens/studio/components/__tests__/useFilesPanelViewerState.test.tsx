@@ -103,6 +103,40 @@ describe("useFilesPanelViewerState request ownership", () => {
     expect(current.viewerState.mode).toBe("text");
   });
 
+  it.each(["text", "image", "unsupported"])("shows mobile %s loading and failure in the viewer", async (kind) => {
+    const read = deferred<null>();
+    vi.mocked(controllerClient.workspace.files.read).mockReturnValue(read.promise);
+    vi.mocked(controllerClient.workspace.files.getRawUrl).mockReturnValue(read.promise);
+    await render();
+    let pending!: Promise<void>;
+    await act(async () => {
+      pending = kind === "text"
+        ? current.openTextFile(entry("README.md"))
+        : kind === "image"
+          ? current.openImageFile(entry("photo.png"))
+          : current.openUnsupportedFile(entry("archive.zip"));
+    });
+    expect(options.setMobileView).toHaveBeenCalledExactlyOnceWith("viewer");
+    expect(current.viewerState.mode).toBe("loading");
+
+    await act(async () => { read.resolve(null); await pending; });
+    expect(current.viewerState.mode).toBe("error");
+    expect(current.viewerState.entry?.path).toBe(kind === "text" ? "README.md" : kind === "image" ? "photo.png" : "archive.zip");
+    expect(options.setMobileView).toHaveBeenCalledExactlyOnceWith("viewer");
+    expect(options.showStatus).toHaveBeenCalled();
+  });
+
+  it("shows a rejected download request in the mobile viewer instead of leaving it loading", async () => {
+    const raw = deferred<string | null>();
+    vi.mocked(controllerClient.workspace.files.getRawUrl).mockReturnValue(raw.promise);
+    await render();
+    let pending!: Promise<void>;
+    await act(async () => { pending = current.openUnsupportedFile(entry("archive.zip")); });
+    expect(options.setMobileView).toHaveBeenCalledExactlyOnceWith("viewer");
+    await act(async () => { raw.reject(new Error("Connection lost")); await pending; });
+    expect(current.viewerState).toMatchObject({ mode: "error", error: "Connection lost" });
+  });
+
   it.each(["parent", "root", "ancestor"])("stops before file I/O when cancelled during the %s directory read", async (stage) => {
     const directory = deferred<ControllerWorkspaceEntry[] | null>();
     const blockedPath = stage === "parent" ? "src/nested" : stage === "root" ? "" : "src";
@@ -256,6 +290,7 @@ describe("useFilesPanelViewerState request ownership", () => {
       dispatch({ path: "README.md", signal: abort.signal, handoffId: "cancelled" });
     });
     expect(options.loadDirectory).not.toHaveBeenCalled();
+    expect(options.setMobileView).not.toHaveBeenCalled();
     expect(fileWindow.__INSTAFY_OPEN_WORKSPACE_FILE_ACK__).toBeUndefined();
   });
 
@@ -289,6 +324,41 @@ describe("useFilesPanelViewerState request ownership", () => {
     expect(controllerClient.workspace.files.read).not.toHaveBeenCalled();
     expect(workspace.files[0].modified).toBe("local draft");
     expect(options.openFileTab).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps an intentionally emptied draft when reopening from the explorer", async () => {
+    const file = { id: "README.md", path: "README.md", label: "README.md", kind: "file" as const,
+      directory: null, generated: "original", modified: "", mimeType: "text/plain", size: 8, modifiedAt: null };
+    workspace = { ...workspace, files: [file] };
+    await render({ workspaceFiles: [file] });
+    await act(async () => current.openTextFile(entry("README.md")));
+    expect(controllerClient.workspace.files.read).not.toHaveBeenCalled();
+    expect(workspace.files[0].modified).toBe("");
+    expect(workspace.files[0].generated).toBe("original");
+  });
+
+  it.each(["updated", "unavailable"])("keeps a draft when a file link's read is %s", async (readState) => {
+    const file = { id: "README.md", path: "README.md", label: "README.md", kind: "file" as const,
+      directory: null, generated: "original", modified: "local draft", mimeType: "text/plain", size: 8, modifiedAt: null };
+    workspace = { ...workspace, files: [file] };
+    await render({ workspaceFiles: [file] });
+    vi.mocked(controllerClient.workspace.files.read).mockResolvedValue(readState === "unavailable" ? null : textResult);
+    const { pending } = await start({ path: "README.md" });
+    await act(async () => pending);
+    expect(workspace.files[0].modified).toBe("local draft");
+    expect(workspace.files[0].generated).toBe("original");
+    expect(current.viewerState.mode).toBe("text");
+  });
+
+  it("still replaces a draft for an explicit reload request", async () => {
+    const file = { id: "README.md", path: "README.md", label: "README.md", kind: "file" as const,
+      directory: null, generated: "original", modified: "local draft", mimeType: "text/plain", size: 8, modifiedAt: null };
+    workspace = { ...workspace, files: [file] };
+    await render({ workspaceFiles: [file] });
+    const { pending } = await start({ path: "README.md", preserveDraft: false });
+    await act(async () => pending);
+    expect(workspace.files[0].modified).toBe("loaded file");
+    expect(workspace.files[0].generated).toBe("loaded file");
   });
 
   it("restores remembered media with a fresh authorized URL after remount", async () => {

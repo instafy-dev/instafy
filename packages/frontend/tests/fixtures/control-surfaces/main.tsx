@@ -28,10 +28,10 @@ function ControlSurfaces() {
           saveTestId="review-save" cancelTestId="review-cancel" />
         <Text variant="caption" tone="muted" role="status">Preview saves: {saveCount}</Text>
       </Surface>
-      <Surface role="region" aria-label="Files controls" shadow="none" className="px-4 pb-4">
+      <Surface role="region" aria-label="Files controls" shadow="none" className="pb-4">
         <FilesExplorerToolbar rootPath="/" onFocusDirectory={() => undefined}
           searchTerm={search} onSearchTermChange={setSearch} />
-        <Text variant="caption" tone="muted" className="mt-4">Use the filter, type a path, then press Escape to return to the search button.</Text>
+        <Text variant="caption" tone="muted" className="mt-4 px-4">Use the filter, type a path, then press Escape to return to the search button.</Text>
       </Surface>
       <RuntimeSurfaces />
     </div>

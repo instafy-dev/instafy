@@ -12,7 +12,7 @@ import {
   listRowSurfaceToneClassName,
 } from "../../../components/listRowStyles";
 import { type ControllerWorkspaceEntry } from "../../../sdk/instafy";
-import { Check, Eye, Folder, Page, Xmark } from "iconoir-react";
+import { Check, Folder, NavArrowRight, Page, Xmark } from "iconoir-react";
 import type { CreateEntryDraftState } from "./useFilesPanelCreateEntries";
 
 type DirectoryEntries = Record<string, ControllerWorkspaceEntry[]>;
@@ -49,6 +49,8 @@ type FilesExplorerTreeProps = {
   onCreateFolderDraftChange: (value: string) => void;
   onCreateFolderCommit: () => void;
   onCreateFolderCancel: () => void;
+  /** Narrow layouts navigate into folders; desktop rows expand them in place. */
+  folderBehavior?: "expand" | "navigate";
   touchDensity?: boolean;
 };
 
@@ -85,6 +87,7 @@ export function FilesExplorerTree({
   onCreateFolderDraftChange,
   onCreateFolderCommit,
   onCreateFolderCancel,
+  folderBehavior = "expand",
   touchDensity = false,
 }: FilesExplorerTreeProps) {
   const [settingsExpanded, setSettingsExpanded] = useState(false);
@@ -129,9 +132,10 @@ export function FilesExplorerTree({
         const isMarkdownOutlineLoading = markdownOutlineLoadingPaths.has(normalizedEntryPath);
         const isActive = activePath === entry.path;
         const isDirty = dirtyFileIds.has(entry.path);
-        const showFocusChip = entry.kind === "directory" && (isExpanded || isActive);
+        const folderNavigates = entry.kind === "directory" && folderBehavior === "navigate";
+        const showOpenAction = entry.kind === "directory" && (isExpanded || isActive);
         const childListingStatus =
-          entry.kind === "directory" && isExpanded && entriesMap[normalizedEntryPath] === undefined
+          entry.kind === "directory" && !folderNavigates && isExpanded && entriesMap[normalizedEntryPath] === undefined
             ? renderDirectoryStatus?.(normalizedEntryPath) ?? null
             : null;
 
@@ -198,7 +202,7 @@ export function FilesExplorerTree({
               <div className="flex items-center">
                 <Button
                   onPress={() => {
-                    if (entry.kind === "directory") {
+                    if (entry.kind === "directory" && !folderNavigates) {
                       onToggle(entry);
                     }
                     onSelect(entry);
@@ -218,9 +222,10 @@ export function FilesExplorerTree({
                       : "text-slate-600 dark:text-slate-300"
                   }`}
                   data-testid={`files-entry-${entry.path.replace(/[^a-zA-Z0-9]/g, "-")}`}
+                  aria-label={folderNavigates ? `Open folder ${entry.name}` : undefined}
                   aria-expanded={
                     entry.kind === "directory"
-                      ? isExpanded
+                      ? folderNavigates ? undefined : isExpanded
                       : isMarkdownEntry
                         ? isMarkdownExpanded
                         : undefined
@@ -230,7 +235,9 @@ export function FilesExplorerTree({
                     {entry.kind === "directory" ? (
                       <span className="inline-flex min-w-0 items-center gap-1.5">
                         <TreeRowMarkerSlot className={markerClassName}>
-                          <TreeDisclosureButton expanded={isExpanded} className={disclosureClassName} />
+                          {folderNavigates ? <Folder aria-hidden="true" /> : (
+                            <TreeDisclosureButton expanded={isExpanded} className={disclosureClassName} />
+                          )}
                         </TreeRowMarkerSlot>
                         <span className="truncate">{entry.name}</span>
                       </span>
@@ -263,26 +270,28 @@ export function FilesExplorerTree({
                     {isDirty ? (
                       <span className="text-xs text-rose-500 dark:text-rose-400" role="img" aria-label="Unsaved changes">●</span>
                     ) : null}
+                    {folderNavigates ? <NavArrowRight className="h-4 w-4 shrink-0" aria-hidden="true" /> : null}
                   </div>
                 </Button>
-                {entry.kind === "directory" ? (
+                {entry.kind === "directory" && !folderNavigates ? (
                   <IconButton
                     onPress={() => onFocus(entry.path)}
-                    variant="outline"
-                    size={touchDensity ? "lg" : "xs"}
+                    variant="ghost"
+                    tone="muted"
+                    size="sm"
                     radius="full"
-                    aria-label={`Focus ${entry.name}`}
-                    title={`Focus ${entry.name}`}
+                    aria-label={`Open folder ${entry.name}`}
+                    title={`Open folder ${entry.name}`}
                     data-testid={`files-focus-${entry.path.replace(/[^a-zA-Z0-9]/g, "-")}`}
-                    className={`ml-2 text-slate-600 dark:text-slate-300 ${
-                      showFocusChip || touchDensity ? "inline-flex" : "hidden group-hover:inline-flex"
+                    className={`ml-1 shrink-0 ${
+                      showOpenAction ? "inline-flex" : "hidden group-hover:inline-flex group-focus-within:inline-flex"
                     }`}
                   >
-                    <Eye className="h-3.5 w-3.5" aria-hidden="true" />
+                    <NavArrowRight className="h-4 w-4" aria-hidden="true" />
                   </IconButton>
                 ) : null}
               </div>
-              {entry.kind === "directory" && isExpanded ? (
+              {entry.kind === "directory" && !folderNavigates && isExpanded ? (
                 <div className={touchDensity ? "mt-1.5 pl-2" : "mt-2 pl-2"}>
                   {childListingStatus ? (
                     <div
@@ -492,6 +501,7 @@ export function FilesExplorerTree({
       onToggle,
       onToggleMarkdownOutline,
       onToggleMarkdownSectionCollapse,
+      folderBehavior,
       touchDensity,
       settingsExpanded,
     ],

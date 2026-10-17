@@ -3,6 +3,7 @@ import { NavArrowLeft } from "iconoir-react";
 import { useVisualViewportBounds } from "../../hooks/useVisualViewportBounds";
 import { IconButton } from "../Button";
 import { StudioDialogModal, type StudioDialogAppearance } from "./StudioModal";
+import type { StudioDialogGutter } from "./StudioDialogSpacing";
 
 interface MobileFocusDialogProps {
   isOpen: boolean;
@@ -16,12 +17,14 @@ interface MobileFocusDialogProps {
   dismissLabel?: string;
   closeDisabled?: boolean;
   appearance?: StudioDialogAppearance;
+  /** Applied to shared body/footer sections; the mobile navigation header keeps its own layout. */
+  gutter?: StudioDialogGutter;
   "data-testid"?: string;
 }
 
 /** A focused phone task: stable header controls above a keyboard-aware scroll area. */
 export function MobileFocusDialog({
-  isOpen, onOpenChange, dialogAriaLabel, header, footer, dialogRef, children, dismissLabel = "Close", closeDisabled = false, appearance,
+  isOpen, onOpenChange, dialogAriaLabel, header, footer, dialogRef, children, dismissLabel = "Close", closeDisabled = false, appearance, gutter,
   "data-testid": testId,
 }: MobileFocusDialogProps) {
   const bounds = useVisualViewportBounds(isOpen);
@@ -53,6 +56,7 @@ export function MobileFocusDialog({
     isDismissable={!closeDisabled} isKeyboardDismissDisabled={closeDisabled}
     dialogRef={dialogRef} dialogAriaLabel={dialogAriaLabel} data-testid={testId}
     appearance={appearance}
+    gutter={gutter}
     className="!p-0"
     modalClassName="!max-w-none !rounded-none !border-0 !shadow-none overflow-hidden"
     modalStyle={{ position: "absolute", top: bounds.top, left: bounds.left, width: bounds.width, height: bounds.height,

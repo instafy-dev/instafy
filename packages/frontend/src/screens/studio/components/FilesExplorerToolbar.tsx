@@ -6,6 +6,7 @@ import { SearchInput } from "../../../components/SearchInput";
 import type { MobilePageHeader } from "./MobileStudioNavigationHeader";
 import { useStudioDesktopLayout } from "../useStudioDesktopLayout";
 
+/** Mount edge-to-edge: the rail header and its path/filter rows own their insets. */
 export function FilesExplorerToolbar({
   headerPortalTarget, renderMobileHeader, menuActions, rootPath, onFocusDirectory,
   searchTerm, onSearchTermChange, actions,
@@ -52,12 +53,11 @@ export function FilesExplorerToolbar({
   const mobileHeader = !isLargeScreen && renderMobileHeader
     ? renderMobileHeader({ title: "Files", actions: actionsWithSearch, menuActions }) : null;
   return <>
-    {mobileHeader ? <div className="-mx-4">{mobileHeader}</div> : <DrawerHeader
+    {mobileHeader ? mobileHeader : <DrawerHeader
       title="Files" pageTitle frame="rail" portalTarget={isLargeScreen ? headerPortalTarget : null}
-      className={isLargeScreen && headerPortalTarget ? undefined : "-mx-4"}
       actions={actionsWithSearch} />}
     {segments.length > 0 ? <nav aria-label="File location"
-      className="mt-2 flex min-h-8 min-w-0 items-center gap-1 overflow-hidden text-xs font-medium text-slate-500 dark:text-slate-400">
+      className="mt-2 flex min-h-8 min-w-0 items-center gap-1 overflow-hidden px-4 text-xs font-medium text-slate-500 dark:text-slate-400">
       <Button variant="ghost" size="xs" radius="full" onPress={() => onFocusDirectory("")}
         aria-label="Focus root folder" className="shrink-0 px-1">Root</Button>
       {segments.map((segment, index) => {
@@ -71,7 +71,7 @@ export function FilesExplorerToolbar({
         </span>;
       })}
     </nav> : null}
-    {showSearch ? <div className="mt-3" data-testid="files-explorer-search-row">
+    {showSearch ? <div className="mt-3 px-4" data-testid="files-explorer-search-row">
       <SearchInput ref={inputRef} id="code-search" label="Filter loaded files"
         value={searchTerm} onChange={event => onSearchTermChange(event.target.value)}
         onKeyDown={event => {

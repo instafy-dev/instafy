@@ -68,6 +68,7 @@ describe("Studio search with the real navigation pickers", () => {
     const originalInput = input();
     await click("sidebar-team-menu-trigger");
     expect(document.querySelector('[data-testid="sidebar-team-menu"]')).not.toBeNull();
+    expect(document.querySelector('[data-testid="sidebar-team-menu"]')?.getAttribute("data-studio-popover-layout")).toBe("menu");
     expect(results()).toBeNull();
     await escape();
     expect(document.querySelector('[data-testid="sidebar-team-menu"]')).toBeNull();

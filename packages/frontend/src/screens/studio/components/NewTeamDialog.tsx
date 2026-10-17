@@ -74,7 +74,7 @@ function NewTeamDialogForm({ onClose, onCreated, allowCustomSlug = false }: Omit
   return (
     <StudioDialogModal isOpen onOpenChange={(value) => { if (!value) close(); }}
       isDismissable={!pending} isKeyboardDismissDisabled={pending} dialogAriaLabel="New team"
-      data-testid="sidebar-new-team-modal" modalClassName="max-w-sm p-0">
+      data-testid="sidebar-new-team-modal" size="sm">
       <StudioDialogHeader title="New team" description="A team has its own spaces, members and credits."
         onClose={close} closeLabel="Close new team" closeButtonDisabled={pending} />
       <StudioDialogBody>

@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { Xmark } from "iconoir-react";
 import { IconButton } from "../Button";
 import { Text } from "../Text";
+import { useStudioDialogGutterClass } from "./StudioDialogSpacing";
 
 type StudioDialogHeaderProps = {
   title: ReactNode;
@@ -28,12 +29,14 @@ export function StudioDialogHeader({
   titleClassName,
   descriptionClassName,
 }: StudioDialogHeaderProps) {
+  const gutterClass = useStudioDialogGutterClass();
   const leftClassName = leading ? "flex min-w-0 items-start gap-2" : "min-w-0";
 
   return (
     <div
       className={[
-        "shrink-0 border-b border-slate-200/70 px-5 py-4 dark:border-[color:var(--color-studio-dark-divider)]",
+        "shrink-0 border-b border-slate-200/70 py-4 dark:border-[color:var(--color-studio-dark-divider)]",
+        gutterClass,
         className,
       ]
         .filter(Boolean)
@@ -95,16 +98,29 @@ type StudioDialogBodyProps = {
 };
 
 export function StudioDialogBody({ children, className, scrollable = false, padding = "default" }: StudioDialogBodyProps) {
+  const gutterClass = useStudioDialogGutterClass();
   return <div className={[
-    padding === "default" ? "px-5 py-4" : "",
+    padding === "default" ? `${gutterClass} py-4` : "",
     scrollable ? "min-h-0 flex-1 overflow-y-auto overscroll-contain" : "",
     className,
   ].filter(Boolean).join(" ")}>{children}</div>;
 }
 
 /** Actions remain outside the editor body's scroll area. */
-export function StudioDialogFooter({ children, className }: { children: ReactNode; className?: string }) {
-  return <div className={["shrink-0", className].filter(Boolean).join(" ")}>{children}</div>;
+export function StudioDialogFooter({ children, className, padding = "none", divider = false }: {
+  children: ReactNode;
+  className?: string;
+  /** Opt in when the contained actions do not already own their padding. */
+  padding?: "none" | "default";
+  divider?: boolean;
+}) {
+  const gutterClass = useStudioDialogGutterClass();
+  return <div className={[
+    "shrink-0",
+    padding === "default" ? `${gutterClass} py-4` : "",
+    divider ? "border-t border-slate-200/70 dark:border-[color:var(--color-studio-dark-divider)]" : "",
+    className,
+  ].filter(Boolean).join(" ")}>{children}</div>;
 }
 
 type StudioDialogSectionLabelProps = {

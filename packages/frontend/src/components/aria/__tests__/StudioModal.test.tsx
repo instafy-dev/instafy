@@ -69,6 +69,19 @@ describe("StudioDialogModal appearances", () => {
     expect(overlay?.className).toContain("backdrop-blur-sm");
   });
 
+  it.each([
+    ["sm", "max-w-sm"],
+    ["md", "max-w-lg"],
+    ["lg", "max-w-2xl"],
+  ] as const)("selects one width preset for size %s without leaking it to the overlay", async (size, widthClass) => {
+    await act(async () => root.render(
+      <StudioDialogModal isOpen size={size} dialogAriaLabel="Sized dialog">Content</StudioDialogModal>,
+    ));
+    const modal = document.querySelector('[role="dialog"]')!.parentElement!;
+    expect([...modal.classList].filter((value) => value.startsWith("max-w-"))).toEqual([widthClass]);
+    expect(modal.parentElement!.hasAttribute("size")).toBe(false);
+  });
+
   it("supports an opaque backdrop for immersive dark surfaces", async () => {
     await act(async () => {
       root.render(
@@ -110,5 +123,41 @@ describe("StudioDialogModal appearances", () => {
     expect(body.classList.contains("px-5")).toBe(false);
     expect(body.querySelector("input")?.value).toBe("Draft");
     expect(footer.querySelector("button")?.textContent).toBe("Save");
+  });
+
+  it("keeps the existing section gutters and unpadded footer by default", async () => {
+    await act(async () => root.render(
+      <>
+        <StudioDialogHeader title="Editor" />
+        <StudioDialogBody>Fields</StudioDialogBody>
+        <StudioDialogFooter padding="default" divider>Actions</StudioDialogFooter>
+        <StudioDialogFooter>Already padded actions</StudioDialogFooter>
+      </>,
+    ));
+    const [header, body, paddedFooter, bareFooter] = [...container.children];
+    for (const section of [header, body, paddedFooter]) {
+      expect(section.classList.contains("px-5")).toBe(true);
+      expect(section.classList.contains("px-4")).toBe(false);
+      expect(section.classList.contains("py-4")).toBe(true);
+    }
+    expect(paddedFooter.classList.contains("border-t")).toBe(true);
+    expect(bareFooter.className).toBe("shrink-0");
+  });
+
+  it("opts every shared section into responsive gutters at the dialog boundary", async () => {
+    await act(async () => root.render(
+      <StudioDialogModal isOpen gutter="responsive" dialogAriaLabel="Responsive editor">
+        <StudioDialogHeader title="Editor" />
+        <StudioDialogBody>Fields</StudioDialogBody>
+        <StudioDialogFooter padding="default" divider>Actions</StudioDialogFooter>
+      </StudioDialogModal>,
+    ));
+    const dialog = document.querySelector('[role="dialog"]')!;
+    for (const section of [...dialog.children]) {
+      expect(section.classList.contains("px-4")).toBe(true);
+      expect(section.classList.contains("sm:px-5")).toBe(true);
+      expect(section.classList.contains("px-5")).toBe(false);
+    }
+    expect(dialog.parentElement!.parentElement!.hasAttribute("gutter")).toBe(false);
   });
 });

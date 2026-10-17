@@ -873,7 +873,7 @@ export function SkillsPanel() {
   };
 
   return (
-    <SettingsShell testId="skills-panel" title="Skills">
+    <SettingsShell testId="skills-panel" title="Skills" width="comfortable">
       <InstalledSkillsSection
         hasProject={hasProject}
         loading={loading}
