@@ -5,6 +5,7 @@ use crate::AppState;
 
 mod access;
 mod db;
+mod deleted_project_stop;
 mod drain;
 mod ensure;
 mod lease;
@@ -36,6 +37,7 @@ pub(crate) use db::{
     record_runtime_event_with_conversation, touch_runtime_last_seen, RuntimeRecord,
     RUNTIME_LAST_SEEN_TOUCH_INTERVAL_SECONDS,
 };
+pub(crate) use deleted_project_stop::spawn_stop_runtimes_of_deleted_project;
 pub(crate) use drain::RuntimeDrainState;
 pub(crate) use ensure::{
     ensure_error_committed_lease_id, ensure_runtime_for_automation,
@@ -57,7 +59,8 @@ pub(crate) use stop::{
     RuntimeStopResponse,
 };
 pub(crate) use sweeps::{
-    prune_expired_runtime_events, reset_hosted_runtime_credit_sweep_pool_pressure,
+    prune_expired_runtime_events, refund_managed_ai_reserve_for_expired_job,
+    reset_hosted_runtime_credit_sweep_pool_pressure,
     should_report_hosted_runtime_credit_sweep_error, sweep_hosted_runtime_credit_usage,
     sweep_idle_activity, REQUESTED_RUNTIME_LAUNCH_TIMEOUT_SECONDS,
 };

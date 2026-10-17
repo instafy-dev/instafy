@@ -26,6 +26,7 @@ use crate::credits::process_credit_burn;
 use crate::org_limits;
 use crate::projects::{
     ensure_project_access, ensure_project_org, ensure_project_write_access, load_project_record,
+    space_deleted, SPACE_DELETED_CODE,
 };
 #[cfg(test)]
 use crate::runtime::RUNTIME_TOKEN_DEFAULT_SCOPES;
@@ -63,6 +64,8 @@ struct RuntimeTunnelGenerationState<'a> {
     lease_runtime_id: Option<Uuid>,
     lease_status: Option<&'a str>,
     lease_released: bool,
+    /// The runtime's space was deleted, for a call that refuses one.
+    space_deleted: bool,
 }
 
 #[allow(dead_code)]
@@ -671,7 +674,7 @@ async fn post_tunnel_request(
     let active_job_binding = if let Some(claims) = context.scoped_claims.as_ref() {
         if claims_have_scopes(claims, RUNTIME_TOKEN_REQUIRED_SCOPES) {
             let binding =
-                authorize_live_runtime_machine_tunnel(&state, claims, &project_id).await?;
+                authorize_live_runtime_machine_tunnel(&state, claims, &project_id, true).await?;
             ensure_runtime_machine_tunnel_target(
                 &binding,
                 requested_runtime_id,
@@ -843,9 +846,14 @@ async fn post_tunnel_revoke(
     let (active_job_binding, runtime_machine_binding) =
         if let Some(claims) = context.scoped_claims.as_ref() {
             if claims_have_scopes(claims, RUNTIME_TOKEN_REQUIRED_SCOPES) {
+                // A machine of a deleted space may still take its own tunnel
+                // down.
                 (
                     None,
-                    Some(authorize_live_runtime_machine_tunnel(&state, claims, &project_id).await?),
+                    Some(
+                        authorize_live_runtime_machine_tunnel(&state, claims, &project_id, false)
+                            .await?,
+                    ),
                 )
             } else {
                 (
@@ -927,7 +935,7 @@ async fn post_tunnel_status(
         .filter(|claims| claims_have_scopes(claims, RUNTIME_TOKEN_REQUIRED_SCOPES));
 
     let runtime_machine_binding = if let Some(claims) = scoped_claims.as_ref() {
-        Some(authorize_live_runtime_machine_tunnel(&state, claims, &project_id).await?)
+        Some(authorize_live_runtime_machine_tunnel(&state, claims, &project_id, true).await?)
     } else {
         let auth = authenticate_request(&state.config, &headers).await?;
         if !auth.is_service_role {
@@ -1017,6 +1025,15 @@ async fn post_tunnel_broker_acl_hook(
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
 
     let project = load_project_record(&transaction, &project_id).await?;
+    // Before the org is resolved, which may write, and before any burn: a
+    // deleted space gets no tunnel and pays for none.
+    if project._status.as_deref() == Some("deleted") {
+        transaction.rollback().await.ok();
+        return Ok(Json(TunnelBrokerAclResponse {
+            allowed: false,
+            reason: Some(SPACE_DELETED_CODE.to_string()),
+        }));
+    }
     let project = ensure_project_org(&transaction, &project).await?;
     let org_id = project
         .org_id
@@ -1591,25 +1608,7 @@ pub(crate) async fn revoke_tunnels_for_scope(
             continue;
         }
 
-        let mut metadata_override = grant.metadata.clone();
-        if !metadata_override
-            .as_ref()
-            .map(|value| value.is_object())
-            .unwrap_or(false)
-        {
-            metadata_override = Some(JsonValue::Object(JsonMap::new()));
-        }
-        if let Some(JsonValue::Object(map)) = metadata_override.as_mut() {
-            map.insert(
-                "autoRevokedSource".to_string(),
-                JsonValue::String(source.to_string()),
-            );
-            map.insert(
-                "autoRevokedAt".to_string(),
-                JsonValue::String(Utc::now().to_rfc3339()),
-            );
-        }
-
+        let metadata_override = auto_revoked_metadata(&grant, source);
         if let Err(error) = revoke_tunnel_record(state, grant, metadata_override.as_ref()).await {
             return Err(error);
         }
@@ -1617,6 +1616,81 @@ pub(crate) async fn revoke_tunnels_for_scope(
     }
 
     Ok(revoked)
+}
+
+/// Revoke every grant of a deleted space that is still active, whatever
+/// runtime or lease it was issued for, if any. Unlike
+/// [`revoke_tunnels_for_scope`], a failed revoke does not end the pass: the
+/// grant stays active for the idle sweep's next one, and the error is
+/// returned once every other grant was tried. Publishes nothing, since no
+/// stream may follow a deleted space any more.
+pub(crate) async fn revoke_tunnels_of_deleted_project(
+    state: &AppState,
+    project_id: &Uuid,
+    source: &str,
+) -> Result<usize, (StatusCode, Json<ApiError>)> {
+    let grants = fetch_active_tunnel_grants_of_deleted_project(&state.pool, project_id).await?;
+    let mut revoked = 0usize;
+    let mut failed = None;
+    for grant in grants {
+        let metadata_override = auto_revoked_metadata(&grant, source);
+        match revoke_tunnel_grant(state, grant, metadata_override.as_ref()).await {
+            Ok(_) => revoked += 1,
+            Err(error) => failed = Some(error),
+        }
+    }
+    match failed {
+        Some(error) => Err(error),
+        None => Ok(revoked),
+    }
+}
+
+/// The active grants of `project_id` when it is deleted: none for a space
+/// that is not.
+async fn fetch_active_tunnel_grants_of_deleted_project(
+    pool: &PgPool,
+    project_id: &Uuid,
+) -> Result<Vec<RuntimeTunnelGrantRecord>, (StatusCode, Json<ApiError>)> {
+    let connection = pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to acquire connection: {error}")))?;
+    let rows = connection
+        .query(
+            "select g.* from runtime_tunnel_grants g
+             join projects p on p.id = g.project_id
+             where g.project_id = $1
+               and p.status = 'deleted'
+               and lower(btrim(g.status)) not in ('revoked', 'expired', 'failed')
+             order by g.created_at desc",
+            &[project_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to query tunnel grants: {error}")))?;
+    Ok(rows.iter().map(runtime_tunnel_grant_from_row).collect())
+}
+
+/// The grant's metadata with who revoked it on its own, and when.
+fn auto_revoked_metadata(grant: &RuntimeTunnelGrantRecord, source: &str) -> Option<JsonValue> {
+    let mut metadata_override = grant.metadata.clone();
+    if !metadata_override
+        .as_ref()
+        .map(|value| value.is_object())
+        .unwrap_or(false)
+    {
+        metadata_override = Some(JsonValue::Object(JsonMap::new()));
+    }
+    if let Some(JsonValue::Object(map)) = metadata_override.as_mut() {
+        map.insert(
+            "autoRevokedSource".to_string(),
+            JsonValue::String(source.to_string()),
+        );
+        map.insert(
+            "autoRevokedAt".to_string(),
+            JsonValue::String(Utc::now().to_rfc3339()),
+        );
+    }
+    metadata_override
 }
 
 fn normalize_tunnel_status(raw: &str) -> String {
@@ -1725,6 +1799,27 @@ async fn revoke_tunnel_record(
     record: RuntimeTunnelGrantRecord,
     metadata_override: Option<&JsonValue>,
 ) -> Result<RuntimeTunnelGrantRecord, (StatusCode, Json<ApiError>)> {
+    let updated = revoke_tunnel_grant(state, record, metadata_override).await?;
+
+    publish_controller_event(
+        &state.events,
+        "tunnel.grant_revoked",
+        Some(updated.project_id),
+        None,
+        None,
+        None,
+        tunnel_event_payload(&updated),
+    );
+
+    Ok(updated)
+}
+
+/// [`revoke_tunnel_record`] without its `tunnel.grant_revoked` event.
+async fn revoke_tunnel_grant(
+    state: &AppState,
+    record: RuntimeTunnelGrantRecord,
+    metadata_override: Option<&JsonValue>,
+) -> Result<RuntimeTunnelGrantRecord, (StatusCode, Json<ApiError>)> {
     if let Some(broker) = state.tunnel_broker.clone() {
         if let Err(error) = broker
             .revoke_tunnel(&record.tunnel_id, record.metadata.as_ref())
@@ -1742,26 +1837,14 @@ async fn revoke_tunnel_record(
         }
     }
 
-    let updated = update_runtime_tunnel_grant_status(
+    update_runtime_tunnel_grant_status(
         &state.pool,
         &record.id,
         &record.project_id,
         "revoked",
         metadata_override,
     )
-    .await?;
-
-    publish_controller_event(
-        &state.events,
-        "tunnel.grant_revoked",
-        Some(record.project_id),
-        None,
-        None,
-        None,
-        tunnel_event_payload(&updated),
-    );
-
-    Ok(updated)
+    .await
 }
 
 fn tunnel_status_is_active(status: &str) -> bool {
@@ -1920,10 +2003,13 @@ async fn resolve_canonical_tunnel_runtime_id(
     Ok(lease_runtime_id)
 }
 
+/// `refuse_deleted_space`: refuse a runtime of a deleted space with
+/// [`space_deleted`], once its token matches the runtime's live generation.
 async fn authorize_live_runtime_machine_tunnel(
     state: &AppState,
     claims: &runtime_contracts::AccessTokenClaims,
     project_id: &Uuid,
+    refuse_deleted_space: bool,
 ) -> Result<RuntimeMachineTunnelBinding, (StatusCode, Json<ApiError>)> {
     if !claims_have_scopes(claims, RUNTIME_TOKEN_REQUIRED_SCOPES) {
         return Err(unauthorized("runtime machine token required"));
@@ -1955,11 +2041,13 @@ async fn authorize_live_runtime_machine_tunnel(
     let row = connection
         .query_opt(
             "select r.provider, r.status, r.capabilities, r.active_lease_id,
+                    p.status as project_status,
                     rl.project_id as lease_project_id,
                     rl.runtime_id as lease_runtime_id,
                     rl.status as lease_status,
                     rl.released_at as lease_released_at
              from runtimes r
+             join projects p on p.id = r.project_id
              left join runtime_leases rl on rl.id = r.active_lease_id
              where r.id = $1 and r.project_id = $2",
             &[&runtime_id, project_id],
@@ -2007,6 +2095,8 @@ async fn authorize_live_runtime_machine_tunnel(
             lease_released: row
                 .get::<_, Option<DateTime<Utc>>>("lease_released_at")
                 .is_some(),
+            space_deleted: refuse_deleted_space
+                && row.get::<_, String>("project_status") == "deleted",
         },
     )?;
 
@@ -2048,6 +2138,12 @@ fn ensure_runtime_tunnel_generation_is_live(
         return Err(unauthorized(
             "runtime token runtime lease scope is no longer active",
         ));
+    }
+
+    // Gone rather than unauthorized, which would make the agent renew its
+    // token for a space it can no longer serve.
+    if state.space_deleted {
+        return Err(space_deleted(StatusCode::GONE));
     }
 
     if !matches!(state.status, "ready" | "running" | "draining") {
@@ -2854,6 +2950,7 @@ mod tests {
             lease_runtime_id: Some(runtime_id),
             lease_status: Some("active"),
             lease_released: false,
+            space_deleted: false,
         };
 
         ensure_runtime_tunnel_generation_is_live(&project_id, &runtime_id, Some(lease_id), current)
@@ -2898,6 +2995,7 @@ mod tests {
             lease_runtime_id: Some(runtime_id),
             lease_status: Some("active"),
             lease_released: false,
+            space_deleted: false,
         };
         let stopped_error = ensure_runtime_tunnel_generation_is_live(
             &project_id,
@@ -2925,6 +3023,54 @@ mod tests {
     }
 
     #[test]
+    fn runtime_machine_tunnel_of_a_deleted_space_is_gone_once_its_token_matches() {
+        let project_id = Uuid::new_v4();
+        let runtime_id = Uuid::new_v4();
+        let lease_id = Uuid::new_v4();
+        let deleted = RuntimeTunnelGenerationState {
+            private_self_hosted: false,
+            status: "running",
+            active_lease_id: Some(lease_id),
+            lease_project_id: Some(project_id),
+            lease_runtime_id: Some(runtime_id),
+            lease_status: Some("active"),
+            lease_released: false,
+            space_deleted: true,
+        };
+
+        let (status, Json(error)) = ensure_runtime_tunnel_generation_is_live(
+            &project_id,
+            &runtime_id,
+            Some(lease_id),
+            deleted,
+        )
+        .expect_err("a deleted space's runtime must be refused");
+        assert_eq!(status, StatusCode::GONE);
+        assert_eq!(error.code.as_deref(), Some(SPACE_DELETED_CODE));
+
+        let (status, _) = ensure_runtime_tunnel_generation_is_live(
+            &project_id,
+            &runtime_id,
+            Some(lease_id),
+            RuntimeTunnelGenerationState {
+                status: "stopped",
+                ..deleted
+            },
+        )
+        .expect_err("a stopped runtime of a deleted space must be refused");
+        assert_eq!(status, StatusCode::GONE);
+
+        let (status, _) = ensure_runtime_tunnel_generation_is_live(
+            &project_id,
+            &runtime_id,
+            Some(Uuid::new_v4()),
+            deleted,
+        )
+        .expect_err("a stale generation must be refused");
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
     fn self_hosted_runtime_machine_tunnel_requires_a_live_runtime_record() {
         let project_id = Uuid::new_v4();
         let runtime_id = Uuid::new_v4();
@@ -2936,6 +3082,7 @@ mod tests {
             lease_runtime_id: None,
             lease_status: None,
             lease_released: false,
+            space_deleted: false,
         };
         ensure_runtime_tunnel_generation_is_live(&project_id, &runtime_id, None, live)
             .expect("live self-hosted runtime should be accepted");

@@ -3,11 +3,13 @@
 //! viewer learns nothing it could not already fetch. Org roster changes reach
 //! org members only, `credits.updated` is spaced per org, and a node's
 //! broadcast carries signals only for projects one of its streams watches.
+//! A space's deletion is one targeted `project.access_changed` per user who
+//! could see it, after the commit, on every stream of that user.
 
 use super::*;
 use crate::state::{
-    publish_project_signal, ControllerEvent, EventHub, ProjectWatch, SignalAdmission,
-    SignalCoalescer, CREDITS_UPDATED_INTERVAL,
+    publish_project_access_changed, publish_project_signal, ControllerEvent, EventHub,
+    ProjectWatch, SignalAdmission, SignalCoalescer, CREDITS_UPDATED_INTERVAL,
 };
 use futures_util::FutureExt;
 use hmac::{Hmac, Mac};
@@ -21,6 +23,7 @@ use tokio_postgres::types::ToSql;
 
 const MEMBERS_CHANGED: &str = "project.members_changed";
 const CREDITS_UPDATED: &str = "credits.updated";
+const ACCESS_CHANGED: &str = "project.access_changed";
 const SERVICE_ROLE: &str = "service-role-token";
 
 /// Everything published so far, waiting briefly for stragglers. Handlers
@@ -68,6 +71,34 @@ fn signal_counts(events: &[ControllerEvent], kind: &str, reason: &str) -> BTreeM
         assert!(event.channels.is_empty());
         *counts
             .entry(event.project_id.expect("signals are project scoped"))
+            .or_insert(0) += 1;
+    }
+    counts
+}
+
+/// How many access invalidations each user received, after checking every
+/// one is the deletion of `project_id`: targeted, naming no project, and
+/// carrying exactly the reason and the space's id.
+fn space_deleted_targets(events: &[ControllerEvent], project_id: Uuid) -> BTreeMap<Uuid, usize> {
+    let mut counts = BTreeMap::new();
+    for event in events.iter().filter(|event| event.kind == ACCESS_CHANGED) {
+        assert_eq!(
+            event.data,
+            json!({ "reason": "space_deleted", "projectId": project_id })
+        );
+        assert_eq!(event.project_id, None);
+        assert_eq!(event.session_id, None);
+        assert_eq!(event.conversation_id, None);
+        assert_eq!(event.run_id, None);
+        assert_eq!(event.job_id, None);
+        assert_eq!(event.channel, None);
+        assert!(event.channels.is_empty());
+        *counts
+            .entry(
+                event
+                    .target_user_id
+                    .expect("access invalidations are targeted"),
+            )
             .or_insert(0) += 1;
     }
     counts
@@ -128,7 +159,9 @@ async fn send(
 pub(crate) struct PublishProbe {
     pub(crate) events: broadcast::Receiver<ControllerEvent>,
     pub(crate) kind: &'static str,
-    pub(crate) project_id: Uuid,
+    /// The probed event's project exactly: `None` probes an event that names
+    /// no project, such as a space deletion's access invalidation.
+    pub(crate) project_id: Option<Uuid>,
     pub(crate) count_sql: &'static str,
     pub(crate) params: Vec<Uuid>,
 }
@@ -184,9 +217,7 @@ pub(crate) async fn send_probed(
         }
         while observed.is_none() {
             match probe.events.try_recv() {
-                Ok(event)
-                    if event.kind == probe.kind && event.project_id == Some(probe.project_id) =>
-                {
+                Ok(event) if event.kind == probe.kind && event.project_id == probe.project_id => {
                     observed = Some(count_while_runtime_blocked(
                         probe.count_sql,
                         probe.params.clone(),
@@ -252,6 +283,22 @@ async fn insert_project_member(
         .execute(
             "insert into project_memberships (project_id, user_id, role) values ($1, $2, $3)",
             &[&project_id, &user_id, &role],
+        )
+        .await?;
+    Ok(())
+}
+
+async fn insert_org_member(
+    pool: &PgPool,
+    org_id: Uuid,
+    user_id: Uuid,
+    role: &str,
+) -> anyhow::Result<()> {
+    pool.get()
+        .await?
+        .execute(
+            "insert into org_memberships (org_id, user_id, role) values ($1, $2, $3)",
+            &[&org_id, &user_id, &role],
         )
         .await?;
     Ok(())
@@ -496,7 +543,7 @@ async fn project_member_changes_publish_members_changed_after_commit() -> anyhow
             PublishProbe {
                 events: state.events.subscribe(),
                 kind: MEMBERS_CHANGED,
-                project_id,
+                project_id: Some(project_id),
                 count_sql: "select count(*) from project_memberships
                             where project_id = $1 and user_id = $2 and role = 'viewer'",
                 params: vec![project_id, member],
@@ -533,7 +580,7 @@ async fn project_member_changes_publish_members_changed_after_commit() -> anyhow
             PublishProbe {
                 events: state.events.subscribe(),
                 kind: MEMBERS_CHANGED,
-                project_id,
+                project_id: Some(project_id),
                 count_sql: "select count(*) from project_memberships
                             where project_id = $1 and user_id = $2",
                 params: vec![project_id, member],
@@ -596,7 +643,7 @@ async fn org_member_changes_fan_members_changed_out_to_live_org_projects() -> an
         let membership_probe = |project_id| PublishProbe {
             events: state.events.subscribe(),
             kind: MEMBERS_CHANGED,
-            project_id,
+            project_id: Some(project_id),
             count_sql: "select count(*) from org_memberships where org_id = $1 and user_id = $2",
             params: vec![org_id, newcomer],
         };
@@ -702,7 +749,7 @@ async fn credit_ledger_writes_publish_credits_updated_after_commit() -> anyhow::
             PublishProbe {
                 events: state.events.subscribe(),
                 kind: CREDITS_UPDATED,
-                project_id: live_projects[1],
+                project_id: Some(live_projects[1]),
                 count_sql: "select count(*) from org_credit_ledger
                             where org_id = $1 and idempotency_key = 'burn-' || $2::uuid::text",
                 params: vec![org_id, burn_key],
@@ -821,7 +868,7 @@ async fn stripe_checkout_publishes_credits_updated_after_commit() -> anyhow::Res
             PublishProbe {
                 events: state.events.subscribe(),
                 kind: CREDITS_UPDATED,
-                project_id: live_projects[0],
+                project_id: Some(live_projects[0]),
                 count_sql: "select count(*) from org_subscriptions
                             where org_id = $1 and billing_cycle = 'pro' and status = 'active'",
                 params: vec![org_id],
@@ -922,7 +969,7 @@ async fn stripe_subscription_update_publishes_credits_updated_after_details_pers
             PublishProbe {
                 events: state.events.subscribe(),
                 kind: CREDITS_UPDATED,
-                project_id,
+                project_id: Some(project_id),
                 count_sql: "select count(*) from org_subscriptions
                             where org_id = $1 and cancel_at_period_end
                               and current_period_end is not null",
@@ -982,7 +1029,7 @@ async fn immediate_checkout_publishes_credits_updated_after_commit() -> anyhow::
             PublishProbe {
                 events: state.events.subscribe(),
                 kind: CREDITS_UPDATED,
-                project_id,
+                project_id: Some(project_id),
                 count_sql: "select count(*) from org_subscriptions
                             where org_id = $1 and billing_cycle = 'starter'",
                 params: vec![org_id],
@@ -1214,6 +1261,195 @@ async fn event_stream_watches_its_project_until_dropped() -> anyhow::Result<()> 
             events.try_recv().is_err(),
             "the dropped stream still watches"
         );
+        Ok(())
+    })
+    .await
+}
+
+/// Deleting a space tells each user who could see it, once and only after
+/// the commit: its owner, its direct members and its org's members. The
+/// event is targeted and names no project, so it reaches their tabs on any
+/// space. A refused or repeated delete tells nobody.
+#[tokio::test]
+async fn deleting_a_space_tells_everyone_who_could_see_it_after_commit() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("space deletion access invalidation").await?;
+    let org_owner = Uuid::new_v4();
+    // Owns the space without being in its org.
+    let space_owner = Uuid::new_v4();
+    let org_builder = Uuid::new_v4();
+    let space_guest = Uuid::new_v4();
+    let sibling_guest = Uuid::new_v4();
+    let outsider = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    let other_org_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let sibling_project_id = Uuid::new_v4();
+    let foreign_project_id = Uuid::new_v4();
+    let users = [
+        org_owner,
+        space_owner,
+        org_builder,
+        space_guest,
+        sibling_guest,
+        outsider,
+    ];
+    let fixtures = Fixtures {
+        orgs: vec![org_id, other_org_id],
+        users: users.to_vec(),
+        ..Fixtures::default()
+    };
+    with_cleanup(&pool, fixtures, async {
+        for user in users {
+            ensure_test_user(&pool, &user).await?;
+        }
+        insert_org(&pool, org_id, org_owner).await?;
+        insert_org(&pool, other_org_id, outsider).await?;
+        insert_org_member(&pool, org_id, org_builder, "builder").await?;
+        insert_project(&pool, project_id, org_id, space_owner, "active").await?;
+        insert_project(&pool, sibling_project_id, org_id, org_owner, "active").await?;
+        insert_project(&pool, foreign_project_id, other_org_id, outsider, "active").await?;
+        insert_project_member(&pool, project_id, space_guest, "viewer").await?;
+        insert_project_member(&pool, sibling_project_id, sibling_guest, "builder").await?;
+
+        let config = fanout_config("space-deleted-access");
+        let owner_token = user_token(&config, &org_owner)?;
+        let builder_token = user_token(&config, &org_builder)?;
+        let state = build_test_state(pool.clone(), config);
+        let mut events = state.events.subscribe();
+        let app = projects::router().with_state(state.clone());
+        let project_uri = format!("/projects/{project_id}");
+
+        // An org builder may not delete the space: nothing changes.
+        let status = send(&app, "DELETE", &project_uri, &builder_token, None).await?;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let published = drain(&mut events).await;
+        assert!(
+            published.is_empty(),
+            "refused delete published {published:?}"
+        );
+
+        let (response, deleted_at_publish) = send_probed(
+            &app,
+            json_request("DELETE", &project_uri, &owner_token, None)?,
+            PublishProbe {
+                events: state.events.subscribe(),
+                kind: ACCESS_CHANGED,
+                project_id: None,
+                count_sql: "select count(*) from projects where id = $1 and status = 'deleted'",
+                params: vec![project_id],
+            },
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(deleted_at_publish, 1, "published before the delete commit");
+        assert_eq!(
+            space_deleted_targets(&drain(&mut events).await, project_id),
+            once_each(&[org_owner, space_owner, org_builder, space_guest]),
+            "the owner, the direct member and the org's members; no guest of \
+             another space and no other org"
+        );
+
+        // A repeat finds nothing to delete: the user is told the space is
+        // gone, and the service role's retry changes nothing.
+        let status = send(&app, "DELETE", &project_uri, &owner_token, None).await?;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let status = send(&app, "DELETE", &project_uri, SERVICE_ROLE, None).await?;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let published = drain(&mut events).await;
+        assert!(
+            published.is_empty(),
+            "repeated delete published {published:?}"
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// A space's deletion reaches the open streams of those who could see it,
+/// on another space (as Home keeps one on the last space) and on the deleted
+/// space itself, whose access check they now fail. A viewer of another
+/// space who could not see it hears nothing.
+#[tokio::test]
+async fn space_deletion_reaches_open_streams_on_every_space() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("space deletion on open streams").await?;
+    let owner = Uuid::new_v4();
+    let org_member = Uuid::new_v4();
+    let space_guest = Uuid::new_v4();
+    let sibling_guest = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let sibling_project_id = Uuid::new_v4();
+    let fixtures = Fixtures {
+        orgs: vec![org_id],
+        users: vec![sibling_guest, space_guest, org_member, owner],
+        ..Fixtures::default()
+    };
+    with_cleanup(&pool, fixtures, async {
+        for user in [owner, org_member, space_guest, sibling_guest] {
+            ensure_test_user(&pool, &user).await?;
+        }
+        insert_org(&pool, org_id, owner).await?;
+        insert_org_member(&pool, org_id, org_member, "viewer").await?;
+        insert_project(&pool, project_id, org_id, owner, "active").await?;
+        insert_project(&pool, sibling_project_id, org_id, owner, "active").await?;
+        insert_project_member(&pool, project_id, space_guest, "viewer").await?;
+        insert_project_member(&pool, sibling_project_id, sibling_guest, "viewer").await?;
+
+        let config = fanout_config("space-deleted-stream");
+        let owner_token = user_token(&config, &owner)?;
+        let member_token = user_token(&config, &org_member)?;
+        let guest_token = user_token(&config, &space_guest)?;
+        let sibling_guest_token = user_token(&config, &sibling_guest)?;
+        let state = build_test_state(pool.clone(), config);
+        let events_app = crate::events::router().with_state(state.clone());
+        let projects_app = projects::router().with_state(state.clone());
+
+        let mut member_body = open_stream(&events_app, sibling_project_id, &member_token).await?;
+        let mut guest_body = open_stream(&events_app, project_id, &guest_token).await?;
+        let mut sibling_guest_body =
+            open_stream(&events_app, sibling_project_id, &sibling_guest_token).await?;
+        let (mut member_buffer, mut guest_buffer, mut sibling_guest_buffer) =
+            (String::new(), String::new(), String::new());
+        let (mut member_seen, mut guest_seen, mut sibling_guest_seen) =
+            (Vec::new(), Vec::new(), Vec::new());
+
+        let project_uri = format!("/projects/{project_id}");
+        let status = send(&projects_app, "DELETE", &project_uri, &owner_token, None).await?;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let deleted = json!({ "reason": "space_deleted", "projectId": project_id });
+        let on_sibling = next_stream_event(
+            &mut member_body,
+            &mut member_buffer,
+            &mut member_seen,
+            ACCESS_CHANGED,
+        )
+        .await?;
+        assert_eq!(on_sibling["data"], deleted);
+        assert_eq!(on_sibling["project_id"], serde_json::Value::Null);
+        assert_eq!(on_sibling["target_user_id"], org_member.to_string());
+        let on_deleted = next_stream_event(
+            &mut guest_body,
+            &mut guest_buffer,
+            &mut guest_seen,
+            ACCESS_CHANGED,
+        )
+        .await?;
+        assert_eq!(on_deleted["data"], deleted);
+        assert_eq!(on_deleted["target_user_id"], space_guest.to_string());
+
+        // Published after the delete, so the sibling guest's stream would
+        // have carried the deletion first had it matched.
+        publish_project_access_changed(&state.events, Some(sibling_project_id), sibling_guest);
+        let marker = next_stream_event(
+            &mut sibling_guest_body,
+            &mut sibling_guest_buffer,
+            &mut sibling_guest_seen,
+            ACCESS_CHANGED,
+        )
+        .await?;
+        assert_eq!(marker["data"], json!({ "reason": "membership_changed" }));
+        assert_eq!(sibling_guest_seen.len(), 1, "{sibling_guest_seen:?}");
         Ok(())
     })
     .await

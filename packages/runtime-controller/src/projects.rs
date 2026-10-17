@@ -28,7 +28,10 @@ use crate::project_memory_origin::{
     bootstrap_write_via_origin, read_origin_snapshot, BootstrapWriteOutcome, OriginBootstrapTarget,
     OriginReadSnapshot, ProjectMemoryWriteFile,
 };
-use crate::state::{publish_project_access_changed, publish_project_signal, AppState, EventHub};
+use crate::state::{
+    publish_project_access_changed, publish_project_deleted, publish_project_signal, AppState,
+    EventHub,
+};
 use crate::tokens::{mint_scoped_token, mint_scoped_token_with_author, ScopedTokenRequest};
 
 /// Roster invalidation for a space's viewers (the targeted
@@ -318,6 +321,52 @@ pub(crate) async fn load_project_record(
     };
 
     Ok(map_project_row(&row))
+}
+
+/// The code of [`space_deleted`]'s refusal.
+pub(crate) const SPACE_DELETED_CODE: &str = "space_deleted";
+
+/// The refusal a runtime agent, an origin or a tunnel gets for a space that
+/// was deleted, with `status`. Its code is used by no other refusal, so a
+/// caller can tell it from a credential to renew.
+pub(crate) fn space_deleted(status: StatusCode) -> (StatusCode, Json<ApiError>) {
+    (
+        status,
+        Json(ApiError {
+            message: "This space was deleted.".to_string(),
+            code: Some(SPACE_DELETED_CODE.to_string()),
+            details: None,
+        }),
+    )
+}
+
+/// Refuse with [`space_deleted`] when `project_id` is deleted or gone.
+///
+/// Nothing brings a deleted space back, so a plain read that says deleted is
+/// always right. `lock_for_share` also share-locks the project row until the
+/// transaction ends: a delete that comes later waits for the caller to
+/// commit, and one that came first is what the caller reads. A caller that
+/// holds a runtime or lease row lock takes this one after them, the order
+/// launch and registration use.
+pub(crate) async fn ensure_project_not_deleted(
+    transaction: &tokio_postgres::Transaction<'_>,
+    project_id: &Uuid,
+    lock_for_share: bool,
+    status: StatusCode,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    let query = if lock_for_share {
+        "select status from projects where id = $1 for share"
+    } else {
+        "select status from projects where id = $1"
+    };
+    let row = transaction
+        .query_opt(query, &[project_id])
+        .await
+        .map_err(|error| internal_error(format!("failed to check the project: {error}")))?;
+    match row {
+        Some(row) if row.get::<_, String>("status") != "deleted" => Ok(()),
+        _ => Err(space_deleted(status)),
+    }
 }
 
 pub(crate) async fn resolve_effective_project_access(
@@ -2031,48 +2080,132 @@ async fn delete_project(
         .get()
         .await
         .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
-    let transaction = connection.transaction().await.map_err(|error| {
-        internal_error(format!(
-            "failed to start project delete transaction: {error}"
-        ))
-    })?;
-
-    let record = load_project_record(&transaction, &project_id).await?;
-    if !context.is_service_role {
-        ensure_project_write_access(&transaction, &record, &context, None).await?;
-        require_project_deleter(&transaction, &record, &context).await?;
-    }
-
-    transaction
-        .execute(
-            "update projects set status = 'deleted', updated_at = now() where id = $1 and status <> 'deleted'",
-            &[&project_id],
-        )
-        .await
-        .map_err(|error| internal_error(format!("failed to delete project: {error}")))?;
-
-    transaction
-        .execute(
-            "delete from project_browser_profiles where project_id = $1",
-            &[&project_id],
-        )
-        .await
-        .map_err(|error| {
-            internal_error(format!("failed to delete project browser profile: {error}"))
+    // Run once more if Postgres ends the cancel as one side of a deadlock
+    // (see `CANCEL_DEADLOCKED_CODE`): everything was rolled back, the
+    // tombstone only changes a space that is not deleted yet, and the cancel
+    // is idempotent.
+    let mut retried_deadlock = false;
+    let canceled_work = loop {
+        let mut transaction = connection.transaction().await.map_err(|error| {
+            internal_error(format!(
+                "failed to start project delete transaction: {error}"
+            ))
         })?;
 
-    transaction.commit().await.map_err(|error| {
-        internal_error(format!(
-            "failed to finalize project delete transaction: {error}"
-        ))
-    })?;
+        let record = load_project_record(&transaction, &project_id).await?;
+        if !context.is_service_role {
+            ensure_project_write_access(&transaction, &record, &context, None).await?;
+            require_project_deleter(&transaction, &record, &context).await?;
+        }
 
-    // Browsers already lost access with the status change; this frees the
-    // space's chat attachments and never fails the delete.
+        let tombstoned = transaction
+            .execute(
+                "update projects set status = 'deleted', updated_at = now() where id = $1 and status <> 'deleted'",
+                &[&project_id],
+            )
+            .await
+            .map_err(|error| internal_error(format!("failed to delete project: {error}")))?
+            > 0;
+
+        // The delete that tombstones the space cancels its work with it.
+        // Work that reaches the space later is left to
+        // `cancel_deleted_project_work`.
+        let canceled_work = if tombstoned {
+            match crate::project_work_cancellation::cancel_project_work_in_transaction(
+                &mut transaction,
+                project_id,
+            )
+            .await
+            {
+                Ok(work) => Some(work),
+                Err((status, Json(error)))
+                    if error.code.as_deref()
+                        == Some(crate::project_work_cancellation::CANCEL_DEADLOCKED_CODE) =>
+                {
+                    let _ = transaction.rollback().await;
+                    if retried_deadlock {
+                        tracing::error!(
+                            project_id = %project_id,
+                            error = %error.message,
+                            "a space delete deadlocked on its work again"
+                        );
+                        return Err((status, Json(error)));
+                    }
+                    tracing::warn!(
+                        project_id = %project_id,
+                        error = %error.message,
+                        "a space delete deadlocked on its work; running it once more"
+                    );
+                    retried_deadlock = true;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        };
+
+        transaction
+            .execute(
+                "delete from project_browser_profiles where project_id = $1",
+                &[&project_id],
+            )
+            .await
+            .map_err(|error| {
+                internal_error(format!("failed to delete project browser profile: {error}"))
+            })?;
+
+        transaction.commit().await.map_err(|error| {
+            internal_error(format!(
+                "failed to finalize project delete transaction: {error}"
+            ))
+        })?;
+        break canceled_work;
+    };
+    let tombstoned = canceled_work.is_some();
+
+    // Spawned before anything else is awaited, so a client that goes away
+    // now cannot skip them. Browsers already lost access with the status
+    // change; the purge frees the space's chat attachments and never fails
+    // the delete. The stop releases the space's machines without holding up
+    // the answer: a hosted release can take minutes. A repeated delete runs
+    // it again, so a service-role retry also retries the stop.
     crate::chat_attachments::spawn_projects_purge(
         crate::chat_attachments::StorageAccess::from_config(&state.http_client, &state.config),
         vec![project_id],
     );
+    crate::runtime::spawn_stop_runtimes_of_deleted_project(state.clone(), project_id);
+
+    if let Some(work) = canceled_work.as_ref() {
+        crate::project_work_cancellation::publish_project_work_cancellation(
+            &state,
+            &*connection,
+            project_id,
+            work,
+        )
+        .await;
+    }
+    // Read after the commit, so a failed read cannot fail the delete: the
+    // tombstone leaves the owner and the memberships in place.
+    let audience = if tombstoned {
+        load_project_audience(&*connection, &project_id)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    project_id = %project_id,
+                    %error,
+                    "failed to load who could see a deleted space; their tabs find out on refresh"
+                );
+                Vec::new()
+            })
+    } else {
+        Vec::new()
+    };
+    drop(connection);
+    // One event per user reaches all of their open tabs, on any space.
+    for user_id in audience {
+        publish_project_deleted(&state.events, project_id, user_id);
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -2240,6 +2373,34 @@ pub(crate) async fn load_org_project_ids(
         )
         .await?;
     Ok(rows.into_iter().map(|row| row.get("id")).collect())
+}
+
+/// Everyone who can see `project_id` in their space lists, by the rule
+/// `list_accessible_projects` uses: its owner, its direct members and the
+/// members of its org, each once. It ignores the space's status, so it also
+/// names who could see a space that was just deleted.
+async fn load_project_audience(
+    client: &impl tokio_postgres::GenericClient,
+    project_id: &Uuid,
+) -> Result<Vec<Uuid>, tokio_postgres::Error> {
+    let rows = client
+        .query(
+            "select p.owner_user_id as user_id
+             from projects p
+             where p.id = $1 and p.owner_user_id is not null
+             union
+             select pm.user_id
+             from project_memberships pm
+             where pm.project_id = $1
+             union
+             select om.user_id
+             from org_memberships om
+             join projects p on p.org_id = om.org_id
+             where p.id = $1",
+            &[project_id],
+        )
+        .await?;
+    Ok(rows.into_iter().map(|row| row.get("user_id")).collect())
 }
 
 /// Publishes `project.members_changed` on every project stream of the org

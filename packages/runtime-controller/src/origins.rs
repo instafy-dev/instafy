@@ -37,7 +37,8 @@ use crate::errors::{
 };
 use crate::projects::{
     ensure_project_access, ensure_project_scoped_write_access, ensure_project_write_access,
-    ensure_scoped_project_match, load_project_record, parse_optional_uuid_param, ProjectRecord,
+    ensure_scoped_project_match, load_project_record, parse_optional_uuid_param, space_deleted,
+    ProjectRecord,
 };
 use crate::runtime::{
     RUNTIME_TOKEN_DEFAULT_SCOPES, RUNTIME_TOKEN_GIT_MINT_SCOPE,
@@ -673,9 +674,11 @@ async fn authorize_runtime_capability_on(
     let row = connection
         .query_opt(
             "select r.provider, r.status, r.capabilities, r.active_lease_id,
+                    p.status as project_status,
                     rl.project_id as lease_project_id, rl.runtime_id as lease_runtime_id,
                     rl.status as lease_status, rl.released_at as lease_released_at
              from runtimes r
+             join projects p on p.id = r.project_id
              left join runtime_leases rl on rl.id = r.active_lease_id
              where r.id = $1 and r.project_id = $2",
             &[&runtime_id, project_id],
@@ -727,6 +730,13 @@ async fn authorize_runtime_capability_on(
         return Err(unauthorized(
             "runtime token lease scope is no longer active",
         ));
+    }
+    // Gone rather than unauthorized: an origin renews its token on a 401 or
+    // a 403, and a deleted space has nothing to renew into. Its offline beat
+    // and commit receipts are refused too; the space's stop releases its
+    // origins.
+    if row.get::<_, String>("project_status") == "deleted" {
+        return Err(space_deleted(StatusCode::GONE));
     }
     // Runtime machine capabilities are live-operation credentials. A runtime
     // in cleanup_pending is quarantined and must not mint new Git credentials
@@ -1998,6 +2008,38 @@ async fn load_origin_by_id_with(
     }
 }
 
+/// The origin `origin_id` for the controller's origin proxies, and whether
+/// its space was deleted, in one read.
+async fn load_proxied_origin(
+    pool: &PgPool,
+    origin_id: &Uuid,
+) -> Result<Option<(WorkspaceOriginRecord, bool)>> {
+    let connection = pool
+        .get()
+        .await
+        .context("failed to acquire connection for load_proxied_origin")?;
+    let row = connection
+        .query_opt(
+            "select o.*, p.status = 'deleted' as project_deleted
+             from workspace_origins o
+             left join projects p on p.id = o.project_id
+             where o.id = $1",
+            &[origin_id],
+        )
+        .await
+        .context("failed to load proxied workspace origin by id")?;
+
+    match row {
+        Some(record) => {
+            let deleted = record
+                .get::<_, Option<bool>>("project_deleted")
+                .unwrap_or(false);
+            Ok(Some((origin_from_row(&record)?, deleted)))
+        }
+        None => Ok(None),
+    }
+}
+
 async fn ensure_origin_mutation_binding(
     pool: &PgPool,
     claims: &AccessTokenClaims,
@@ -2624,7 +2666,7 @@ pub(crate) async fn resolve_origin_for_protocol(
     Ok(None)
 }
 
-fn hosted_origin_id_for_project(project_id: &Uuid) -> Uuid {
+pub(crate) fn hosted_origin_id_for_project(project_id: &Uuid) -> Uuid {
     // Stable per-project ID so we can create/update workspace_origins without storing extra state.
     let name = format!("instafy:hosted-origin:{}", project_id);
     Uuid::new_v5(&Uuid::NAMESPACE_URL, name.as_bytes())
@@ -4204,15 +4246,20 @@ async fn proxy_origin_browser_ws(
         return Err(unauthorized("insufficient origin scopes"));
     }
 
-    let origin = load_origin_by_id(&state.pool, &origin_id)
+    let origin = load_proxied_origin(&state.pool, &origin_id)
         .await
         .map_err(|error| internal_error(format!("failed to load origin: {error}")))?;
-    let Some(origin) = origin else {
+    let Some((origin, project_deleted)) = origin else {
         return Err(not_found("origin not registered"));
     };
 
     if claims.project_id != origin.project_id.to_string() {
         return Err(unauthorized("token project mismatch"));
+    }
+    // A token minted before the delete is still valid until it expires, and
+    // a hosted gateway checks the token alone.
+    if project_deleted {
+        return Err(not_found("project not found"));
     }
 
     authorize_origin_proxy_token_runtime(&state, &origin, &claims).await?;
@@ -4459,15 +4506,20 @@ async fn proxy_origin_request(
         return Err(unauthorized("insufficient origin scopes"));
     }
 
-    let origin = load_origin_by_id(&state.pool, &origin_id)
+    let origin = load_proxied_origin(&state.pool, &origin_id)
         .await
         .map_err(|error| internal_error(format!("failed to load origin: {error}")))?;
-    let Some(origin) = origin else {
+    let Some((origin, project_deleted)) = origin else {
         return Err(not_found("origin not registered"));
     };
 
     if claims.project_id != origin.project_id.to_string() {
         return Err(unauthorized("token project mismatch"));
+    }
+    // A token minted before the delete is still valid until it expires, and
+    // a hosted gateway checks the token alone.
+    if project_deleted {
+        return Err(not_found("project not found"));
     }
 
     authorize_origin_proxy_token_runtime(&state, &origin, &claims).await?;
@@ -6677,10 +6729,13 @@ async fn get_project_lease(
                 .transaction()
                 .await
                 .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
-            load_project_record(&transaction, &project_id).await?;
+            let project = load_project_record(&transaction, &project_id).await?;
             transaction.commit().await.map_err(|error| {
                 internal_error(format!("failed to finalize project lookup: {error}"))
             })?;
+            if project._status.as_deref() == Some("deleted") {
+                return Err(not_found("project not found"));
+            }
         } else {
             authorize_runtime_capability(
                 &state,

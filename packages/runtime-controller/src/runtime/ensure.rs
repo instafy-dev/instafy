@@ -724,6 +724,7 @@ async fn load_active_hosted_runtime_blocker(
              join projects p on p.id = r.project_id
              join runtime_leases rl on rl.id = r.active_lease_id
              where p.org_id = $1
+               and p.status <> 'deleted'
                and (
                  r.provider = 'instafy_cloud'
                  or r.provider like 'instafy\\_cloud\\_%'
@@ -2772,6 +2773,11 @@ async fn ensure_runtime_launch_inner(
                      join projects p on p.id = r.project_id
                      join runtime_leases rl on rl.id = r.active_lease_id
                      where p.org_id = $1
+                       -- A deleted space's machine holds no slot of its
+                       -- organization while its stop releases it. The
+                       -- platform cap above still counts it: it runs on the
+                       -- host until then.
+                       and p.status <> 'deleted'
                        and (
                          r.provider = 'instafy_cloud'
                          or r.provider like 'instafy\\_cloud\\_%'

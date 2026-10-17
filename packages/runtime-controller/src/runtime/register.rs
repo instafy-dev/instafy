@@ -14,6 +14,7 @@ use crate::auth::{
     authenticate_request, bearer_token, claims_have_scopes, issue_agent_token_for_runtime,
     issue_proxy_envelope,
 };
+use crate::projects::{ensure_project_not_deleted, space_deleted};
 use crate::tokens::{
     decode_scoped_token, mint_scoped_token_with_runtime_generation, ScopedTokenRequest,
 };
@@ -652,6 +653,9 @@ pub(crate) async fn runtime_register(
         }
         Err(err) => return Err(err),
     };
+    if project._status.as_deref() == Some("deleted") {
+        return Err(space_deleted(StatusCode::GONE));
+    }
     authorize_provider_for_project(&state, &runtime_provider, project.org_id)?;
 
     let registration_identity = lock_runtime_registration_identity(
@@ -687,6 +691,13 @@ pub(crate) async fn runtime_register(
         true,
     )
     .await?;
+    // The runtime row is locked now. Read the space again under a share lock
+    // (runtime -> lease -> project, the launch's order too): a delete that
+    // committed since the read above is refused here, and a later one waits
+    // for this registration, so the stop that follows it sees this runtime
+    // ready and stops it. Without this, a registration that raced the delete
+    // could mark a runtime the delete just stopped ready again.
+    ensure_project_not_deleted(&transaction, &project_id, true, StatusCode::GONE).await?;
     // The payload provider is client-controlled. Revalidate against the
     // locked/loaded runtime record as well, so a member token cannot label an
     // existing hosted runtime as self-hosted and upgrade itself to an agent

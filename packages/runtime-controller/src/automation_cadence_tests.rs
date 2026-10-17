@@ -611,3 +611,38 @@ async fn automation_cadence_launch_finalization_preserves_newer_schedule_and_pau
     );
     f.cleanup().await
 }
+
+/// A deleted space's automation is never claimed, so it cannot fail its
+/// launch and write a failure notice into the deleted space every period.
+#[tokio::test]
+async fn automation_cadence_claim_skips_automations_of_a_deleted_space() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    let automation = f.create("prompt").await?;
+    let db = f.state.pool.get().await?;
+    // Due long ago, so the oldest-first claim batch reaches it whatever else
+    // the shared database has due.
+    db.execute(
+        "update automations set next_run_at='2000-01-01T00:00:00Z' where id=$1",
+        &[&automation.id],
+    )
+    .await?;
+    db.execute(
+        "update projects set status='deleted' where id=$1",
+        &[&f.project],
+    )
+    .await?;
+    let claimed = claim_due_automations(&f.state).await?;
+    assert!(!claimed.iter().any(|record| record.id == automation.id));
+    assert_eq!(f.record(automation.id).await?.locked_until, None);
+
+    // The same automation is claimed while its space is live.
+    db.execute(
+        "update projects set status='active' where id=$1",
+        &[&f.project],
+    )
+    .await?;
+    let claimed = claim_due_automations(&f.state).await?;
+    assert!(claimed.iter().any(|record| record.id == automation.id));
+    drop(db);
+    f.cleanup().await
+}

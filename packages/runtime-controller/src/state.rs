@@ -864,6 +864,29 @@ pub(crate) fn publish_project_access_changed(
     });
 }
 
+/// Reason of the access invalidation `publish_project_deleted` sends.
+pub(crate) const ACCESS_CHANGED_SPACE_DELETED: &str = "space_deleted";
+
+/// Tells every open stream of `target_user_id`, whatever space it is on,
+/// that the space `project_id` was deleted, so the client drops it from its
+/// space lists and leaves it if it is open. The event names no project: one
+/// scoped to the deleted space would reach only that space's streams, and
+/// no subscriber passes an access check on a deleted space. The payload is
+/// exactly the reason and the space's id, which the user could already see.
+/// Publish only after the delete has committed.
+pub(crate) fn publish_project_deleted(hub: &EventHub, project_id: Uuid, target_user_id: Uuid) {
+    publish_controller_event_to_user(
+        hub,
+        "project.access_changed",
+        None,
+        target_user_id,
+        serde_json::json!({
+            "reason": ACCESS_CHANGED_SPACE_DELETED,
+            "projectId": project_id,
+        }),
+    );
+}
+
 /// Publishes one untargeted, signal-only event per project so every open
 /// stream of those projects learns that something it can already read has
 /// changed, and refetches it through its own authorized endpoint. The events

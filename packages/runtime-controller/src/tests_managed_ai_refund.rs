@@ -875,7 +875,7 @@ async fn managed_ai_usage_adjustment_signals_credits_after_the_completion_commit
         PublishProbe {
             events: fixture.state.events.subscribe(),
             kind: crate::credits::CREDITS_UPDATED_EVENT,
-            project_id: fixture.project_id,
+            project_id: Some(fixture.project_id),
             count_sql: "select count(*) from org_credit_ledger
                         where project_id = $1
                           and idempotency_key = 'managed-ai-adjustment:' || $2::uuid::text",

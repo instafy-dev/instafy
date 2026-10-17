@@ -642,6 +642,7 @@ async fn claim_due_automations(state: &AppState) -> anyhow::Result<Vec<Automatio
                  and next_run_at <= now()
                  and (locked_until is null or locked_until <= now())
                  and (mode <> 'space_review' or not exists (select 1 from agent_jobs j where j.conversation_id=automations.conversation_id and j.status in ('queued','leased')))
+                 and exists (select 1 from projects p where p.id = automations.project_id and p.status <> 'deleted')
                order by next_run_at asc
                limit $2
                for update skip locked
@@ -682,6 +683,26 @@ async fn claim_due_automations(state: &AppState) -> anyhow::Result<Vec<Automatio
     transaction.commit().await?;
 
     Ok(rows.iter().map(row_to_record).collect())
+}
+
+/// Pause every active automation of `project_id`, as a manual pause does:
+/// `next_run_at` and `locked_until` stay, so an attempt already in flight
+/// sees the changed status when it finalizes and leaves it paused. Returns
+/// how many were paused.
+pub(crate) async fn pause_active_automations_for_project<C>(
+    connection: &C,
+    project_id: Uuid,
+) -> Result<u64, tokio_postgres::Error>
+where
+    C: tokio_postgres::GenericClient + Sync,
+{
+    connection
+        .execute(
+            "update automations set status = 'paused', updated_at = now()
+             where project_id = $1 and status = 'active'",
+            &[&project_id],
+        )
+        .await
 }
 
 async fn execute_automation_once(

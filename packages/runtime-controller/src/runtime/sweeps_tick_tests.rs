@@ -5,6 +5,7 @@
 //! for another.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::http::StatusCode;
@@ -38,9 +39,17 @@ const HOSTED_TEST_PROVIDER: &str = "instafy_cloud_sweep_tick_test";
 /// own step can stop them.
 const MACHINE_TEST_PROVIDER: &str = "sweep_tick_test_machines";
 
-/// Every step's candidate query starts from one of these tables, so a tick
-/// on empty copies of them has nothing to do.
-const SWEEP_TABLES: [&str; 2] = ["runtimes", "agent_jobs"];
+/// Every step's candidate query starts from one of these tables, or finds a
+/// deleted space only through a row in one, so a tick on empty copies of
+/// them has nothing to do.
+const SWEEP_TABLES: [&str; 6] = [
+    "runtimes",
+    "agent_jobs",
+    "runtime_tunnel_grants",
+    "runs",
+    "conversation_send_queue",
+    "automations",
+];
 
 /// A tick with nothing to do takes one pool checkout for all of its steps,
 /// where each step used to take its own.
@@ -140,6 +149,7 @@ struct Spaces {
     stuck_queued: Uuid,
     terminal: Uuid,
     stranded: Uuid,
+    deleted: Uuid,
 }
 
 impl Spaces {
@@ -154,6 +164,7 @@ impl Spaces {
             stuck_queued: Uuid::new_v4(),
             terminal: Uuid::new_v4(),
             stranded: Uuid::new_v4(),
+            deleted: Uuid::new_v4(),
         }
     }
 
@@ -168,6 +179,7 @@ impl Spaces {
             self.stuck_queued,
             self.terminal,
             self.stranded,
+            self.deleted,
         ]
     }
 }
@@ -185,6 +197,7 @@ struct Seeded {
     terminal_runtime: Uuid,
     stranded_job: Uuid,
     stranded_run: Uuid,
+    deleted_runtime: Uuid,
 }
 
 async fn insert_runtime(
@@ -299,10 +312,15 @@ async fn insert_job(
 
 async fn seed(client: &tokio_postgres::Client, spaces: &Spaces) -> anyhow::Result<Seeded> {
     for project_id in spaces.all() {
+        // The deleted space was deleted five minutes ago, past the grace
+        // that leaves it to its delete's own stop.
         client
             .execute(
-                "insert into projects (id, project_type, status) values ($1, 'customer', 'active')",
-                &[&project_id],
+                "insert into projects (id, project_type, status, updated_at)
+                 values ($1, 'customer',
+                         case when $2 then 'deleted' else 'active' end,
+                         case when $2 then now() - interval '5 minutes' else now() end)",
+                &[&project_id, &(project_id == spaces.deleted)],
             )
             .await?;
     }
@@ -477,6 +495,26 @@ async fn seed(client: &tokio_postgres::Client, spaces: &Spaces) -> anyhow::Resul
     )
     .await?;
 
+    // A hosted runtime still up in a space deleted five minutes ago.
+    let deleted_runtime = insert_runtime(
+        client,
+        spaces.deleted,
+        HOSTED_TEST_PROVIDER,
+        "ready",
+        600,
+        Some(5),
+        2 * 60 * 60,
+    )
+    .await?;
+    attach_lease(
+        client,
+        spaces.deleted,
+        deleted_runtime,
+        "active",
+        2 * 60 * 60,
+    )
+    .await?;
+
     Ok(Seeded {
         tracker_job,
         orphan_requested_runtime,
@@ -489,6 +527,7 @@ async fn seed(client: &tokio_postgres::Client, spaces: &Spaces) -> anyhow::Resul
         terminal_runtime,
         stranded_job,
         stranded_run,
+        deleted_runtime,
     })
 }
 
@@ -529,10 +568,30 @@ async fn a_sweep_tick_on_a_pool_of_one_acts_on_every_step_with_work() -> anyhow:
         ..SharedDbFixture::default()
     };
     with_shared_db_fixture(fixture, async {
+        // The runtime of each release, so the assertions below count only
+        // this test's own: a step may also release what an earlier, aborted
+        // run left in a long-lived test database.
+        let released: Arc<Mutex<Vec<Option<Uuid>>>> = Arc::default();
         let provider_app = axum::Router::new()
             .route(
                 "/runtime/release",
-                axum::routing::post(|| async { StatusCode::NO_CONTENT }),
+                axum::routing::post({
+                    let released = released.clone();
+                    move |body: axum::body::Bytes| {
+                        let released = released.clone();
+                        async move {
+                            let runtime_id = serde_json::from_slice::<serde_json::Value>(&body)
+                                .ok()
+                                .and_then(|body| {
+                                    body["runtime_id"]
+                                        .as_str()
+                                        .and_then(|value| Uuid::parse_str(value).ok())
+                                });
+                            released.lock().unwrap().push(runtime_id);
+                            StatusCode::NO_CONTENT
+                        }
+                    }
+                }),
             )
             .route(
                 "/runtime/inspect",
@@ -606,6 +665,7 @@ async fn a_sweep_tick_on_a_pool_of_one_acts_on_every_step_with_work() -> anyhow:
                 "stopped",
             ),
             ("terminal cleanup", seeded.terminal_runtime, "removed"),
+            ("deleted space stop", seeded.deleted_runtime, "stopped"),
         ] {
             assert_eq!(
                 runtime_status(&client, runtime_id).await?,
@@ -613,6 +673,29 @@ async fn a_sweep_tick_on_a_pool_of_one_acts_on_every_step_with_work() -> anyhow:
                 "{step} did not act"
             );
         }
+        let deleted_stop_reason: Option<String> = client
+            .query_one(
+                "select data ->> 'reason' from runtime_events
+                 where runtime_id = $1 and kind = 'stopped'",
+                &[&seeded.deleted_runtime],
+            )
+            .await?
+            .get(0);
+        assert_eq!(
+            deleted_stop_reason.as_deref(),
+            Some("space_deleted"),
+            "another step took the deleted space's runtime"
+        );
+        let deleted_releases = released
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|runtime_id| **runtime_id == Some(seeded.deleted_runtime))
+            .count();
+        assert_eq!(
+            deleted_releases, 1,
+            "the deleted space's machine was released once"
+        );
         assert_eq!(
             job_status(&client, seeded.requeued_job).await?,
             ("failed".to_string(), Some("expired".to_string())),

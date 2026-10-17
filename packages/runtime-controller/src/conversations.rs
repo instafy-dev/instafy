@@ -1871,6 +1871,52 @@ pub(crate) async fn cancel_jobs_with_notice(
     reason: &str,
     notice: Option<InterruptionNotice>,
 ) -> Result<JobCancellationSet, (StatusCode, Json<ApiError>)> {
+    let CanceledJobs {
+        job_ids,
+        run_ids,
+        pairs,
+        job_input_state_updates,
+    } = cancel_jobs_and_runs(transaction, jobs, reason).await?;
+
+    let interruption_notice =
+        notice.unwrap_or_else(|| build_interruption_notice(reason, &job_ids, &run_ids));
+    let notice = record_controller_assistant_message(
+        transaction,
+        project_id,
+        conversation_id,
+        session_id,
+        None,
+        run_ids.first().copied(),
+        interruption_notice.content.as_str(),
+        &interruption_notice.metadata,
+    )
+    .await?;
+
+    Ok(JobCancellationSet {
+        job_ids,
+        pairs,
+        notice,
+        job_input_state_updates,
+    })
+}
+
+/// What [`cancel_jobs_and_runs`] canceled.
+pub(crate) struct CanceledJobs {
+    pub(crate) job_ids: Vec<Uuid>,
+    pub(crate) run_ids: Vec<Uuid>,
+    pub(crate) pairs: Vec<(Uuid, Uuid)>,
+    pub(crate) job_input_state_updates: Vec<crate::send_intents::JobInputStateUpdate>,
+}
+
+/// Cancel `jobs` and their runs with `reason` as the summary, and reject the
+/// inputs the jobs never acknowledged, without writing a notice. The update
+/// has no status guard: pass only jobs the caller locked while they were
+/// still queued or leased.
+pub(crate) async fn cancel_jobs_and_runs(
+    transaction: &tokio_postgres::Transaction<'_>,
+    jobs: &[(Uuid, Option<Uuid>)],
+    reason: &str,
+) -> Result<CanceledJobs, (StatusCode, Json<ApiError>)> {
     let mut job_ids: Vec<Uuid> = Vec::new();
     let mut run_ids: Vec<Uuid> = Vec::new();
     let mut pairs: Vec<(Uuid, Uuid)> = Vec::new();
@@ -1929,24 +1975,10 @@ pub(crate) async fn cancel_jobs_with_notice(
         persist_canceled_run_metadata(transaction, &run_ids, reason).await?;
     }
 
-    let interruption_notice =
-        notice.unwrap_or_else(|| build_interruption_notice(reason, &job_ids, &run_ids));
-    let notice = record_controller_assistant_message(
-        transaction,
-        project_id,
-        conversation_id,
-        session_id,
-        None,
-        run_ids.first().copied(),
-        interruption_notice.content.as_str(),
-        &interruption_notice.metadata,
-    )
-    .await?;
-
-    Ok(JobCancellationSet {
+    Ok(CanceledJobs {
         job_ids,
+        run_ids,
         pairs,
-        notice,
         job_input_state_updates,
     })
 }

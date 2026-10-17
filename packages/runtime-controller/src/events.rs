@@ -23,7 +23,7 @@ use crate::projects::{
     ensure_project_access, parse_optional_uuid_param, require_org_access, resolve_scope,
     ScopeParams, MEMBERS_CHANGED_PROJECT_MEMBERSHIP, PROJECT_MEMBERS_CHANGED_EVENT,
 };
-use crate::state::{AppState, ControllerEvent};
+use crate::state::{AppState, ControllerEvent, ACCESS_CHANGED_SPACE_DELETED};
 use crate::{database_unavailable, forbidden, load_project_record, too_many_requests};
 
 mod private_runtime_visibility;
@@ -311,7 +311,23 @@ fn is_canonical_access_invalidation(event: &ControllerEvent) -> bool {
         && event.channel.is_none()
         && event.channels.is_empty()
         && event.target_user_id.is_some()
-        && event.data == serde_json::json!({ "reason": "membership_changed" })
+        && (event.data == serde_json::json!({ "reason": "membership_changed" })
+            || is_space_deleted_invalidation(event))
+}
+
+/// A space deletion's invalidation (`publish_project_deleted`): no project,
+/// and exactly the reason and the deleted space's id.
+fn is_space_deleted_invalidation(event: &ControllerEvent) -> bool {
+    event.project_id.is_none()
+        && event.data.as_object().is_some_and(|data| {
+            data.len() == 2
+                && data.get("reason").and_then(serde_json::Value::as_str)
+                    == Some(ACCESS_CHANGED_SPACE_DELETED)
+                && data
+                    .get("projectId")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|project_id| uuid::Uuid::parse_str(project_id).is_ok())
+        })
 }
 
 impl EventFilters {
@@ -700,6 +716,121 @@ mod tests {
         let mut other_project_event = access_event.clone();
         other_project_event.project_id = Some(Uuid::new_v4());
         assert!(!scoped_filters.matches(&other_project_event));
+    }
+
+    /// A space deletion's invalidation, as published, reaches every stream of
+    /// its target user, on any space, past the access check. Any other shape
+    /// of it is an ordinary event that no stream of another space matches.
+    #[test]
+    fn space_deleted_invalidation_is_exactly_its_published_shape() {
+        let hub = crate::state::EventHub::new();
+        let mut published = hub.subscribe();
+        let target_user_id = Uuid::new_v4();
+        let deleted_project_id = Uuid::new_v4();
+        crate::state::publish_project_deleted(&hub, deleted_project_id, target_user_id);
+        let event = published.try_recv().expect("space deletion published");
+        assert_eq!(event.kind, PROJECT_ACCESS_CHANGED_EVENT);
+        assert_eq!(event.project_id, None);
+        assert_eq!(event.target_user_id, Some(target_user_id));
+        assert_eq!(
+            event.data,
+            json!({ "reason": "space_deleted", "projectId": deleted_project_id.to_string() })
+        );
+
+        assert!(is_canonical_access_invalidation(&event));
+        assert!(is_targeted_access_invalidation(
+            &event,
+            &user_context(target_user_id)
+        ));
+        assert!(!event_targets_context(
+            &event,
+            &user_context(Uuid::new_v4())
+        ));
+        assert!(!is_targeted_access_invalidation(
+            &event,
+            &user_context(Uuid::new_v4())
+        ));
+
+        let other_project_id = Uuid::new_v4();
+        for project_id in [deleted_project_id, other_project_id] {
+            let filters = EventFilters {
+                project_id,
+                session_id: None,
+                run_id: None,
+                conversation_id: None,
+                kinds: Vec::new(),
+            };
+            assert!(filters.matches(&event));
+            let scoped_filters = EventFilters {
+                project_id,
+                session_id: Some(Uuid::new_v4()),
+                run_id: Some(Uuid::new_v4()),
+                conversation_id: Some(Uuid::new_v4()),
+                kinds: vec![PROJECT_ACCESS_CHANGED_EVENT.to_string()],
+            };
+            assert!(scoped_filters.matches(&event));
+        }
+        let other_kinds = EventFilters {
+            project_id: other_project_id,
+            session_id: None,
+            run_id: None,
+            conversation_id: None,
+            kinds: vec!["run.completed".to_string()],
+        };
+        assert!(!other_kinds.matches(&event));
+
+        let other_space_stream = EventFilters {
+            project_id: other_project_id,
+            session_id: None,
+            run_id: None,
+            conversation_id: None,
+            kinds: Vec::new(),
+        };
+        let deleted_id = deleted_project_id.to_string();
+        let malformed_payloads = [
+            json!({ "reason": "space_deleted" }),
+            json!({ "reason": "space_deleted", "projectId": deleted_id, "name": "Old space" }),
+            json!({ "reason": "space_deleted", "projectId": "not-a-uuid" }),
+            json!({ "reason": "space_deleted", "projectId": 42 }),
+            json!({ "reason": "membership_changed", "projectId": deleted_id }),
+            json!({ "reason": "space_removed", "projectId": deleted_id }),
+            json!(["space_deleted", deleted_id]),
+        ];
+        for data in malformed_payloads {
+            let mut malformed = event.clone();
+            malformed.data = data;
+            assert!(
+                !is_canonical_access_invalidation(&malformed),
+                "{:?}",
+                malformed.data
+            );
+            assert!(
+                !other_space_stream.matches(&malformed),
+                "{:?}",
+                malformed.data
+            );
+        }
+
+        // Scoped to the deleted space, it would take the access check that
+        // space fails, and miss every other space's stream.
+        let mut scoped_to_space = event.clone();
+        scoped_to_space.project_id = Some(deleted_project_id);
+        assert!(!is_canonical_access_invalidation(&scoped_to_space));
+        assert!(!is_targeted_access_invalidation(
+            &scoped_to_space,
+            &user_context(target_user_id)
+        ));
+        assert!(!other_space_stream.matches(&scoped_to_space));
+
+        let mut untargeted = event.clone();
+        untargeted.target_user_id = None;
+        assert!(!is_canonical_access_invalidation(&untargeted));
+        assert!(!other_space_stream.matches(&untargeted));
+
+        let mut conversation_scoped = event.clone();
+        conversation_scoped.conversation_id = Some(Uuid::new_v4());
+        assert!(!is_canonical_access_invalidation(&conversation_scoped));
+        assert!(!other_space_stream.matches(&conversation_scoped));
     }
 
     /// A stream's passed access check holds per conversation, for the window

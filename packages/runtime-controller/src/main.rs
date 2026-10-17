@@ -64,6 +64,7 @@ mod org_limits;
 mod origins;
 mod ota;
 mod project_memory_origin;
+mod project_work_cancellation;
 mod projects;
 mod provider_devices;
 mod provider_identifiers;
@@ -92,6 +93,8 @@ mod tests_ai_metering_schema;
 mod tests_chat_attachment_lease;
 #[cfg(test)]
 mod tests_chat_attachment_policies;
+#[cfg(test)]
+mod tests_deleted_space_fence;
 #[cfg(test)]
 mod tests_hosted_runtime_billing;
 #[cfg(test)]
