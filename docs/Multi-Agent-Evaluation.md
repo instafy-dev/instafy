@@ -58,6 +58,36 @@ cleanup removes the child from its manager before awaiting shutdown in a detache
 An empty manager therefore does not prove that this pending cleanup has finished. The
 runtime does not claim complete process containment or a verified barrier for that case.
 
+## Worker Settings and Evidence Handoffs
+
+Scoped workers preserve the controller-resolved agent model and reasoning effort. An explicit
+agent effort overrides the runtime's launch setting, then the existing job policy. Parallel
+workers use immutable launch settings and their own proxy envelope, so another active job's
+process environment cannot supply their credentials or model selection. Controller settings
+are separated from granted secrets only when the secret inventory is present; project secrets
+cannot override reserved model/process keys. Older responses without an inventory remain
+usable by ordinary jobs, but cannot supply trusted settings to parallel scoped workers.
+
+Read-only workers can use the compact, tool-free lane when the runtime has completely read
+all declared files within the observation budgets. Truncated files, missing or invalid paths,
+directory samples and omitted paths use the existing read-only Codex tool path instead.
+Observation limits and workspace permissions are unchanged; tools can fetch relevant missing
+evidence, not broader authority. A complete preview describes only the declared files, not
+proof that the plan covered every dependency or that the review is correct.
+
+Lead checkpoints carry bounded initial-preview gap metadata separately from worker summaries,
+including for older runtime artifacts that record truncation. These are initial observations,
+not a claim that later worker reads left the gaps unresolved. The collaboration skill asks the
+lead to reconcile them with actual inspection evidence, close material gaps with existing
+read-only tools or scoped follow-up work, and disclose remaining limitations. Job completion
+alone does not establish a complete review. This can cost more than excerpt-only synthesis;
+quality, latency and returned usage must be evaluated separately.
+
+Profile selection and settings propagation are separate checks. A planner can still create an
+ephemeral worker when a request names a saved profile. Verify the controller-stamped profile ID
+before attributing a run to that profile, then inspect the effective worker settings. Correct
+settings on an explicitly selected worker do not establish reliable autonomous profile selection.
+
 ## Shared Team Capacity
 
 A space defaults to 64 agents per plan and eight concurrently leased team workers across
@@ -150,15 +180,28 @@ Every top-level agent lease should expose enough timing to tell whether work was
 
 The controller currently includes this as `leaseMetrics` in `/agent/lease` responses and `run.progress` lease events. Write-heavy fanout also carries per-job `writeScope` metadata in job metadata and run events.
 
+For filesystem checks, distinguish runtime setup from worker edits. Capture a prepared workspace
+baseline or declare exact bootstrap asset hashes before execution; do not ignore an entire
+guidance directory. Protect existing and read-only files, reject unexpected or altered support
+files, and verify proposed and published paths against the owned scope. Keep original failed
+checks intact when later analysis explains a fixture-boundary error; label a replay of retained
+evidence separately from a new live run.
+
 Write-scope metadata is explicit. The controller does not infer editable paths from
 natural-language prompt text or file names inside prompt prose.
+Structured paths do not require a recognized extension: top-level `.txt` files,
+extensionless files and supported directory/glob scopes are valid. Each path and
+scope field is validated before dispatch. Malformed explicit scopes, conflicting
+scope declarations or more than 12 unique paths in either path list become
+`coordination_required`; invalid entries are not dropped and cannot fall back to
+`unscoped`. Missing scope metadata retains the existing dispatch defaults.
 
 Write-scope modes:
 
 - `owned`: the agent may edit only the listed `ownedPaths`; other listed paths are read-only.
 - `read_only`: the agent can inspect context without writing.
 - `unscoped`: allowed only when there is no sibling writer to coordinate with.
-- `coordination_required`: missing or overlapping editable scope was detected; the runtime-agent completes with a coordination-required answer and does not edit files.
+- `coordination_required`: invalid, missing or overlapping editable scope was detected; the runtime-agent completes with a coordination-required answer and does not edit files.
 
 ## Runtime Final-Output Modes
 

@@ -47,6 +47,8 @@ mod known_safe_command;
 mod routing_evidence;
 mod routing_recovery;
 mod save_report;
+#[cfg(test)]
+mod scoped_worker_tests;
 
 mod handoff;
 mod isolated_worker;
@@ -272,6 +274,7 @@ const SCOPED_WORKER_DIRECTORY_CANDIDATE_LIMIT: usize = 240;
 
 #[derive(Debug, Clone)]
 struct ScopedWorkerPathObservation {
+    complete: bool,
     section: String,
     artifact: JsonValue,
 }
@@ -4640,14 +4643,20 @@ impl JobProcessor {
         job: &LeaseJob,
         progress: Option<JobProgress>,
         cancel: Option<JobCancelSignal>,
-        environment: HashMap<String, String>,
+        worker_config: crate::isolated_tool_worker::IsolatedWorkerJobConfig,
     ) -> Result<JobExecution> {
         if self.isolated_workers.enabled {
-            self.run_isolated_scoped_worker_job(registration, job, progress, cancel, environment)
+            self.run_isolated_scoped_worker_job(registration, job, progress, cancel, worker_config)
                 .await
         } else {
-            self.run_parallel_direct_write_scoped_worker_job(registration, job, progress, cancel)
-                .await
+            self.run_parallel_direct_write_scoped_worker_job(
+                registration,
+                job,
+                progress,
+                cancel,
+                worker_config,
+            )
+            .await
         }
     }
 
@@ -4657,8 +4666,39 @@ impl JobProcessor {
         job: &LeaseJob,
     ) -> bool {
         self.parallel_scoped_scope_paths(job).is_some()
-            && direct_worker_proxy_config(job.proxy.as_ref().or(registration.proxy.as_ref()))
+            && self
+                .parallel_direct_worker_proxy_config(
+                    job.proxy.as_ref().or(registration.proxy.as_ref()),
+                    &Default::default(),
+                )
                 .is_ok()
+    }
+
+    fn parallel_direct_worker_proxy_config(
+        &self,
+        envelope: Option<&ProxyEnvelopePayload>,
+        worker_config: &crate::isolated_tool_worker::IsolatedWorkerJobConfig,
+    ) -> Result<DirectWorkerProxyConfig> {
+        let envelope = envelope.context("parallel worker requires a job-scoped proxy envelope")?;
+        anyhow::ensure!(
+            !envelope.token.trim().is_empty(),
+            "parallel worker proxy token is missing"
+        );
+        let base = self
+            .isolated_workers
+            .proxy_base
+            .clone()
+            .or_else(|| normalize_direct_worker_proxy_base(&envelope.url))
+            .context("parallel worker proxy base URL is missing")?;
+        let (model, reasoning_effort) = self
+            .isolated_workers
+            .resolve(worker_config, Some(ReasoningEffort::High));
+        Ok(DirectWorkerProxyConfig {
+            chat_completions_endpoint: format!("{base}/v1/chat/completions"),
+            api_key: envelope.token.trim().to_string(),
+            model: resolve_direct_worker_model_id(model),
+            reasoning_effort,
+        })
     }
 
     pub async fn run_parallel_direct_write_scoped_worker_job(
@@ -4667,6 +4707,7 @@ impl JobProcessor {
         job: &LeaseJob,
         progress: Option<JobProgress>,
         cancel_signal: Option<JobCancelSignal>,
+        worker_config: crate::isolated_tool_worker::IsolatedWorkerJobConfig,
     ) -> Result<JobExecution> {
         if let Some(signal) = cancel_signal.as_ref()
             && signal.is_canceled()
@@ -4680,7 +4721,8 @@ impl JobProcessor {
         self.verified_controller_claims(registration, job).await?;
 
         let proxy_envelope = job.proxy.as_ref().or(registration.proxy.as_ref());
-        let proxy_config = direct_worker_proxy_config(proxy_envelope)?;
+        let proxy_config =
+            self.parallel_direct_worker_proxy_config(proxy_envelope, &worker_config)?;
         let project_id = self.project_id_for_job(job)?;
         let workspace_dir = self.prepare_workspace(&project_id)?;
         let prompt_text = job
@@ -6179,8 +6221,10 @@ impl JobProcessor {
             explicit_personal_browser_execution,
             explicit_shared_browser_execution,
         );
-        let scoped_worker_has_precollected_observations =
-            is_multi_agent_worker_job(job) && scoped_worker_path_observation.is_some();
+        let scoped_worker_has_precollected_observations = is_multi_agent_worker_job(job)
+            && scoped_worker_path_observation
+                .as_ref()
+                .is_some_and(|observation| observation.complete);
         let read_only_scoped_worker_preobserved = scoped_worker_has_precollected_observations
             && read_only_workspace
             && !metadata_requests_write_scoped_workspace(job.payload.get("metadata"));
@@ -6401,7 +6445,10 @@ impl JobProcessor {
             && read_only_scoped_worker_preobserved
             && let Some(observation) = scoped_worker_path_observation.as_ref()
         {
-            let proxy_config = direct_worker_proxy_config(proxy_envelope)?;
+            let proxy_config = direct_worker_proxy_config(
+                proxy_envelope,
+                codex_run_options.reasoning_effort.clone(),
+            )?;
             return execute_preobserved_scoped_worker_direct(
                 &prompt,
                 &prompt_context,
@@ -6421,7 +6468,10 @@ impl JobProcessor {
                     "This scoped task requires capabilities unavailable in the experimental isolated worker lane. Use the ordinary runtime configuration or split the task's inputs and capabilities."
                 );
             }
-            let proxy_config = direct_worker_proxy_config(proxy_envelope)?;
+            let proxy_config = direct_worker_proxy_config(
+                proxy_envelope,
+                codex_run_options.reasoning_effort.clone(),
+            )?;
             let (execution, files) = execute_write_scoped_worker_direct(
                 &workspace_dir,
                 &prompt,
@@ -6980,7 +7030,9 @@ impl JobProcessor {
                 match kind {
                     CodexFallbackSummaryKind::MissingFinalAssistantMessage => {
                         if is_multi_agent_worker_job(job)
-                            && scoped_worker_path_observation.is_some()
+                            && scoped_worker_path_observation
+                                .as_ref()
+                                .is_some_and(|observation| observation.complete)
                         {
                             codex_missing_final_scoped_worker_observation_recovery_prompt(
                                 prompt_text,
@@ -8200,7 +8252,10 @@ impl JobProcessor {
             prompt_metric_bool(&conversation_context.metrics, "statefulThreadRestored");
         let mut prompt_section_metrics = JsonMap::new();
 
-        if multi_agent_worker && let Some(observation) = scoped_worker_path_observation {
+        if multi_agent_worker
+            && let Some(observation) = scoped_worker_path_observation
+            && observation.complete
+        {
             let mut prompt = String::new();
             append_prompt_section(
                 &mut prompt,
@@ -12946,10 +13001,12 @@ struct DirectWorkerProxyConfig {
     chat_completions_endpoint: String,
     api_key: String,
     model: String,
+    reasoning_effort: ReasoningEffort,
 }
 
 fn direct_worker_proxy_config(
     envelope: Option<&ProxyEnvelopePayload>,
+    job_effort: Option<ReasoningEffort>,
 ) -> Result<DirectWorkerProxyConfig> {
     let api_key = envelope
         .map(|value| value.token.trim().to_string())
@@ -12985,6 +13042,14 @@ fn direct_worker_proxy_config(
         chat_completions_endpoint: format!("{base_url}/v1/chat/completions"),
         api_key,
         model: resolve_direct_worker_model_id(env::var("CODEX_MODEL").ok()),
+        reasoning_effort: crate::codex::resolve_runtime_reasoning_effort(
+            env::var("CODEX_RUNTIME_REASONING_EFFORT").ok().as_deref(),
+            job_effort,
+            env::var("CODEX_AGENT_REASONING_EFFORT")
+                .ok()
+                .as_deref()
+                .and_then(crate::codex::parse_agent_reasoning_effort),
+        ),
     })
 }
 
@@ -13011,9 +13076,7 @@ async fn execute_preobserved_scoped_worker_direct(
         "instructions": system_prompt,
         "tool_choice": "none",
         "tools": [],
-        "reasoning": {
-            "effort": "low"
-        },
+        "reasoning_effort": proxy_config.reasoning_effort,
         "metadata": {
             "instafyPlainTextCompletion": true
         },
@@ -13053,6 +13116,7 @@ async fn execute_preobserved_scoped_worker_direct(
             "metadata": {
                 "provider": provider,
                 "model": proxy_config.model.as_str(),
+                "reasoningEffort": proxy_config.reasoning_effort,
                 "runtimeId": runtime_id.to_string(),
                 "usage": response_json.get("usage").cloned().unwrap_or(JsonValue::Null),
             }
@@ -13167,9 +13231,7 @@ async fn execute_write_scoped_worker_direct(
         "instructions": system_prompt,
         "tool_choice": "none",
         "tools": [],
-        "reasoning": {
-            "effort": "high"
-        },
+        "reasoning_effort": proxy_config.reasoning_effort,
         "metadata": {
             "instafyPlainTextCompletion": true
         },
@@ -13258,6 +13320,7 @@ async fn execute_write_scoped_worker_direct(
             "metadata": {
                 "provider": provider,
                 "model": proxy_config.model.as_str(),
+                "reasoningEffort": proxy_config.reasoning_effort,
                 "runtimeId": runtime_id.to_string(),
                 "usage": response_json.get("usage").cloned().unwrap_or(JsonValue::Null),
                 "ownedPaths": owned_paths.iter().map(|path| path.display_path.clone()).collect::<Vec<_>>(),
@@ -13847,10 +13910,36 @@ fn build_scoped_worker_path_observation(
         }
     }
 
+    let omitted_path_count = paths
+        .len()
+        .saturating_sub(SCOPED_WORKER_MAX_OBSERVATION_PATHS);
+    let pattern_scope_count = extract_scoped_worker_read_only_paths(job)
+        .iter()
+        .filter(|path| scoped_worker_observation_token_has_glob(path))
+        .count();
+    let complete = omitted_path_count == 0
+        && pattern_scope_count == 0
+        && artifact_entries.iter().all(|entry| {
+            entry.get("status").and_then(JsonValue::as_str) == Some("read")
+                && entry.get("truncated").and_then(JsonValue::as_bool) == Some(false)
+        });
+    let coverage = json!({
+        "complete": complete,
+        "omittedPathCount": omitted_path_count,
+        "patternScopeCount": pattern_scope_count,
+    });
+    if !complete {
+        let _ = writeln!(
+            section,
+            "Initial evidence coverage is incomplete ({omitted_path_count} declared paths omitted by the path budget). Directory and pattern samples are not exhaustive. Use available read-only tools to inspect missing source or contract details relevant to your task before concluding. Report exact files actually inspected and any remaining gaps; an excerpt ending before a behavior is not evidence that the behavior is absent."
+        );
+    }
     Some(ScopedWorkerPathObservation {
+        complete,
         section,
         artifact: json!({
             "kind": "runtime/scoped-worker-path-observation",
+            "coverage": coverage,
             "paths": artifact_entries,
         }),
     })
@@ -13872,6 +13961,9 @@ fn append_scoped_worker_file_observation(
         match fs::read(target) {
             Ok(raw) => {
                 let text = String::from_utf8_lossy(&raw);
+                if matches!(text, std::borrow::Cow::Owned(_)) {
+                    status = "non_utf8";
+                }
                 let limit = (*remaining_snippet_chars).min(SCOPED_WORKER_FILE_SNIPPET_CHARS);
                 snippet = text.chars().take(limit).collect::<String>();
                 truncated = text.chars().count() > snippet.chars().count();
@@ -14266,23 +14358,19 @@ fn extract_scoped_worker_observation_paths(job: &LeaseJob) -> Vec<String> {
     let mut paths = Vec::new();
 
     for value in extract_scoped_worker_read_only_paths(job) {
-        let candidate = trim_path_token(value.trim());
-        if !is_plausible_path_token(candidate) {
-            continue;
-        }
+        // This is structured scope data, not a path extracted from prose:
+        // punctuation such as trailing '?' must retain its glob semantics.
+        let candidate = value.trim();
         let normalized = if scoped_worker_observation_token_has_glob(candidate) {
             normalize_scoped_worker_observation_glob_root(candidate)
         } else {
             normalize_scoped_worker_observation_token(candidate)
         };
-        let Some(normalized) = normalized else {
-            continue;
-        };
+        // Keep invalid/unresolvable declarations visible as evidence gaps.
+        // The resolver still rejects them before any filesystem access.
+        let normalized = normalized.unwrap_or_else(|| candidate.to_string());
         if seen.insert(normalized.clone()) {
             paths.push(normalized);
-        }
-        if paths.len() >= SCOPED_WORKER_MAX_OBSERVATION_PATHS {
-            break;
         }
     }
 
@@ -18015,13 +18103,29 @@ mod tests {
         assert!(processor.can_run_parallel_direct_write_scoped_worker(&registration, &job));
 
         processor
-            .run_parallel_direct_write_scoped_worker_job(&registration, &job, None, None)
+            .run_parallel_direct_write_scoped_worker_job(
+                &registration,
+                &job,
+                None,
+                None,
+                crate::isolated_tool_worker::IsolatedWorkerJobConfig {
+                    model: Some("saved-worker-model".into()),
+                    reasoning_effort: Some(ReasoningEffort::Low),
+                    ..Default::default()
+                },
+            )
             .await
             .expect("worker job runs");
 
         // The prompt lists only a file that is on disk, so the download came
         // first; the turn's end removed it again.
         let request = captured.lock().clone().expect("worker called the proxy");
+        assert_eq!(request["model"], "saved-worker-model");
+        assert_eq!(request["reasoning_effort"], "low");
+        assert!(
+            request.get("reasoning").is_none(),
+            "Chat Completions ignores nested reasoning"
+        );
         let worker_input = request["messages"][0]["content"]
             .as_str()
             .expect("worker input");
@@ -25213,6 +25317,7 @@ mod tests {
     #[test]
     fn scoped_worker_missing_final_retry_stays_plain_and_defensive() {
         let observation = ScopedWorkerPathObservation {
+            complete: true,
             section: "Scoped path observations collected by the runtime before model execution:\n- `src/codec.ts`: file, status=read.\n  Snippet:\n  ```text\n  parse untrusted payload\n  ```\n"
                 .to_string(),
             artifact: json!({ "kind": "runtime/scoped-worker-path-observation" }),

@@ -284,15 +284,15 @@ export function ChatTypingRows({
           avatar={(
             <div className="self-center">
               {hasMultipleTypingAgents ? (
-                <span aria-hidden="true" className="relative h-8 w-12 shrink-0">
-                  {typingAgents.slice(0, 2).map((agent, index) => (
+                <span aria-hidden="true" className="flex h-8 shrink-0 -space-x-4">
+                  {typingAgents.slice(0, 2).map((agent) => (
                     <span
                       key={`typing-agent-${agent.handle}`}
                       data-testid="assistant-typing-stack-face"
                       // The same separator the conversation roster paints on
                       // each face: a thin ring in the chat surface's own
                       // background keeps the overlapping coins apart.
-                      className={`absolute top-0 rounded-full *:ring-1 *:ring-white dark:*:ring-[var(--color-studio-dark-panel)] ${index === 0 ? "left-0" : "left-4"}`}
+                      className="shrink-0 rounded-full *:ring-1 *:ring-white dark:*:ring-[var(--color-studio-dark-panel)]"
                     >
                       <ChatMessageAvatar
                         kind="assistant"

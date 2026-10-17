@@ -1430,6 +1430,7 @@ impl RuntimeAgent {
                                     let empty = JobSecrets {
                                         env: HashMap::new(),
                                         inventory: Vec::new(),
+                                        inventory_complete: true,
                                     };
                                     apply_job_secrets(&secret_env_keys, &empty);
                                 }
@@ -1530,6 +1531,7 @@ impl RuntimeAgent {
             let empty = JobSecrets {
                 env: HashMap::new(),
                 inventory: Vec::new(),
+                inventory_complete: true,
             };
             apply_job_secrets(&secret_env_keys, &empty);
         }
@@ -1895,6 +1897,54 @@ pub(crate) fn resolved_job_environment(secrets: &JobSecrets) -> HashMap<String, 
     resolved_env
 }
 
+pub(crate) fn resolved_worker_job_config(
+    secrets: &JobSecrets,
+) -> Result<crate::isolated_tool_worker::IsolatedWorkerJobConfig> {
+    let mut environment = resolved_job_environment(secrets);
+    // The controller mixes its runtime settings and granted project secrets in
+    // the legacy env response. Inventory establishes provenance: a granted secret
+    // must never become a trusted setting, even when its name/value matches one.
+    let mut take_setting = |key: &str| {
+        if !secrets.inventory_complete
+            || secrets
+                .inventory
+                .iter()
+                .any(|secret| secret.name.eq_ignore_ascii_case(key))
+        {
+            None
+        } else {
+            environment.remove(key)
+        }
+    };
+    let model = take_setting("CODEX_MODEL");
+    let reasoning_effort = take_setting("CODEX_AGENT_REASONING_EFFORT")
+        .map(|raw| {
+            crate::codex::parse_agent_reasoning_effort(&raw)
+                .context("invalid controller-provided isolated worker reasoning effort")
+        })
+        .transpose()?;
+    // The managed lane emits this fixed provider for the configured proxy. Do
+    // not forward it as arbitrary child configuration or allow another provider.
+    if let Some(provider) = take_setting("CODEX_MODEL_PROVIDER") {
+        anyhow::ensure!(
+            provider == "openai",
+            "unsupported controller-provided isolated worker model provider"
+        );
+    }
+    if let Some(model) = &model {
+        anyhow::ensure!(
+            !model.trim().is_empty() && model.len() <= 4096 && !model.contains('\0'),
+            "invalid controller-provided isolated worker model"
+        );
+    }
+    crate::isolated_tool_worker::validate_job_environment(&environment)?;
+    Ok(crate::isolated_tool_worker::IsolatedWorkerJobConfig {
+        environment,
+        model,
+        reasoning_effort,
+    })
+}
+
 fn apply_job_secrets(managed_keys: &Mutex<HashSet<String>>, secrets: &JobSecrets) {
     let resolved_env = resolved_job_environment(secrets);
     let mut guard = managed_keys.lock();
@@ -2058,6 +2108,125 @@ fn push_unique_case_insensitive(values: &mut Vec<String>, candidate: &str) {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn scoped_worker_settings_are_separated_from_granted_secrets() {
+        let secrets = JobSecrets {
+            env: HashMap::from([
+                ("CODEX_MODEL".into(), "configured-model".into()),
+                ("CODEX_AGENT_REASONING_EFFORT".into(), "high".into()),
+                ("CODEX_MODEL_PROVIDER".into(), "openai".into()),
+                ("PROJECT_TOKEN".into(), "inert-project-secret".into()),
+            ]),
+            inventory: vec![AgentSecretInventoryItem {
+                name: "PROJECT_TOKEN".into(),
+                description: None,
+            }],
+            inventory_complete: true,
+        };
+        let mut config = resolved_worker_job_config(&secrets).unwrap();
+        assert_eq!(config.model.as_deref(), Some("configured-model"));
+        assert_eq!(
+            config.reasoning_effort,
+            Some(codex_protocol::openai_models::ReasoningEffort::High)
+        );
+        let inventory = config
+            .environment
+            .remove("INSTAFY_PROJECT_SECRET_INVENTORY")
+            .expect("scoped secret inventory");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&inventory).unwrap(),
+            json!([{ "name": "PROJECT_TOKEN", "description": null }])
+        );
+        assert_eq!(
+            config.environment,
+            HashMap::from([
+                ("PROJECT_TOKEN".into(), "inert-project-secret".into()),
+                // Preserve the ordinary secret resolver's canonical alias.
+                ("GITHUB_TOKEN".into(), "inert-project-secret".into()),
+            ])
+        );
+        assert_eq!(secrets.env["CODEX_MODEL"], "configured-model");
+    }
+
+    #[test]
+    fn scoped_worker_rejects_granted_secrets_named_like_trusted_settings() {
+        for (key, value) in [
+            ("CODEX_MODEL", "configured-model"),
+            ("CODEX_AGENT_REASONING_EFFORT", "high"),
+            ("CODEX_MODEL_PROVIDER", "openai"),
+        ] {
+            let secrets = JobSecrets {
+                env: HashMap::from([(key.into(), value.into())]),
+                inventory: vec![AgentSecretInventoryItem {
+                    // Provenance matching must not become case-sensitive.
+                    name: key.to_ascii_lowercase(),
+                    description: None,
+                }],
+                inventory_complete: true,
+            };
+            let error = resolved_worker_job_config(&secrets).err().unwrap();
+            assert!(
+                error
+                    .to_string()
+                    .contains("reserved isolated worker environment key")
+            );
+        }
+    }
+
+    #[test]
+    fn scoped_worker_does_not_promote_unknown_reserved_environment_keys() {
+        for key in [
+            "CODEX_HOME",
+            "OPENAI_BASE_URL",
+            "CONTROLLER_ACCESS_TOKEN",
+            "codeX_model",
+        ] {
+            let secrets = JobSecrets {
+                env: HashMap::from([(key.into(), "inert-value".into())]),
+                inventory: Vec::new(),
+                inventory_complete: true,
+            };
+            let error = resolved_worker_job_config(&secrets).err().unwrap();
+            assert!(
+                error
+                    .to_string()
+                    .contains("reserved isolated worker environment key")
+            );
+        }
+    }
+
+    #[test]
+    fn scoped_worker_rejects_invalid_controller_settings_without_printing_values() {
+        for (key, value) in [
+            ("CODEX_MODEL_PROVIDER", "untrusted-provider"),
+            ("CODEX_AGENT_REASONING_EFFORT", "untrusted-effort"),
+            ("CODEX_MODEL", "model\0invalid"),
+        ] {
+            let secrets = JobSecrets {
+                env: HashMap::from([(key.into(), value.into())]),
+                inventory: Vec::new(),
+                inventory_complete: true,
+            };
+            let error = resolved_worker_job_config(&secrets).err().unwrap();
+            assert!(!error.to_string().contains(value));
+        }
+    }
+
+    #[test]
+    fn scoped_worker_cannot_trust_settings_without_complete_secret_inventory() {
+        let secrets = JobSecrets {
+            env: HashMap::from([("CODEX_MODEL".into(), "unattributed-model".into())]),
+            inventory: Vec::new(),
+            inventory_complete: false,
+        };
+        let error = resolved_worker_job_config(&secrets).err().unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("reserved isolated worker environment key")
+        );
+    }
 
     #[test]
     fn redelivered_command_reuses_terminal_outcome_instead_of_resubmitting() {

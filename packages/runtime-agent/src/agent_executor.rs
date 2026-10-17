@@ -246,15 +246,8 @@ impl AgentExecutor {
     ) -> Result<JobExecution> {
         // The subprocess receives only this job's scoped secrets. Never install
         // them into the parent environment shared by sibling workers.
-        let environment = if self
-            .processor
-            .can_run_isolated_scoped_worker(registration, job)
-        {
-            let secrets = client.fetch_job_secrets(registration, job.id, true).await?;
-            crate::agent::resolved_job_environment(&secrets)
-        } else {
-            HashMap::new()
-        };
+        let secrets = client.fetch_job_secrets(registration, job.id, true).await?;
+        let worker_config = crate::agent::resolved_worker_job_config(&secrets)?;
         let (progress_tx, progress_status, progress_task) =
             spawn_progress_dispatch(client, registration, job.id, lease_lost_signal.clone());
         let progress_handle = JobProgress {
@@ -270,7 +263,7 @@ impl AgentExecutor {
                 job,
                 Some(progress_handle),
                 lease_lost_signal,
-                environment,
+                worker_config,
             )
             .await;
         finish_progress_dispatch(progress_tx, progress_task, job.id).await;

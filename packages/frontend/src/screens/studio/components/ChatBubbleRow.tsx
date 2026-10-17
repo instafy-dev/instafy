@@ -154,7 +154,9 @@ export function ChatBubbleRow({
       ) : null}
       <div className={`relative z-10 flex w-full min-w-0 gap-2 ${isLeftAligned ? "items-start" : "flex-row-reverse items-end"}`}>
         {avatar ? (
-          <div className={`h-8 w-8 flex-none ${collapseAvatarOnNarrow ? "hidden sm:block" : ""}`}>
+          // Single faces keep their 32px gutter; stacks reserve their full
+          // intrinsic width so their overlap never reaches the message text.
+          <div className={`h-8 min-w-8 flex-none ${collapseAvatarOnNarrow ? "hidden sm:block" : ""}`}>
             {avatar}
           </div>
         ) : null}

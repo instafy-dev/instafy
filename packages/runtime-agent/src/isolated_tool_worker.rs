@@ -42,6 +42,15 @@ fn mark_cleanup_unconfirmed() {
     CLEANUP_UNCONFIRMED.store(true, Ordering::Release);
 }
 
+/// Job-scoped settings separated from granted secrets by the trusted parent.
+/// Never log this object: the environment contains the job's secret values.
+#[derive(Default)]
+pub struct IsolatedWorkerJobConfig {
+    pub environment: HashMap<String, String>,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<ReasoningEffort>,
+}
+
 /// Constructed by the trusted parent after verifying the job's claims. Never log this object.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -166,22 +175,26 @@ impl IsolatedToolWorkerRequest {
                 "isolated worker controller token expired"
             );
         }
-        ensure!(
-            self.job_environment.len() <= 256,
-            "too many worker environment entries"
-        );
-        for (key, value) in &self.job_environment {
-            ensure!(
-                safe_job_environment_key(key),
-                "reserved isolated worker environment key"
-            );
-            ensure!(
-                value.len() <= 128 * 1024 && !value.contains('\0'),
-                "invalid worker environment value"
-            );
-        }
-        Ok(())
+        validate_job_environment(&self.job_environment)
     }
+}
+
+pub(crate) fn validate_job_environment(environment: &HashMap<String, String>) -> Result<()> {
+    ensure!(
+        environment.len() <= 256,
+        "too many worker environment entries"
+    );
+    for (key, value) in environment {
+        ensure!(
+            safe_job_environment_key(key),
+            "reserved isolated worker environment key"
+        );
+        ensure!(
+            value.len() <= 128 * 1024 && !value.contains('\0'),
+            "invalid worker environment value"
+        );
+    }
+    Ok(())
 }
 
 fn ensure_supported_platform(platform: &str) -> Result<()> {

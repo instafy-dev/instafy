@@ -71,6 +71,17 @@ impl AgentWriteScopeAssignment {
         }
     }
 
+    fn invalid_explicit_scope() -> Self {
+        let rationale = "explicit write scope is invalid; provide valid paths before editing";
+        let mut assignment = Self::unscoped(rationale).coordination_required(
+            "invalid_write_scope",
+            Vec::new(),
+            rationale,
+        );
+        assignment.source = "metadata".to_string();
+        assignment
+    }
+
     fn coordination_required(
         mut self,
         reason: impl Into<String>,
@@ -300,55 +311,66 @@ fn extract_explicit_agent_write_scope(
     let metadata_map = metadata.as_object()?;
     let handle = normalize_agent_handle(handle)?;
 
+    let selection = metadata_map
+        .get("agentSelection")
+        .and_then(JsonValue::as_object);
+    let mut explicit = None;
     for container in [
-        metadata_map
-            .get("agentSelection")
-            .and_then(JsonValue::as_object)
-            .and_then(|selection| {
-                selection
-                    .get("writeScopes")
-                    .or_else(|| selection.get("write_scopes"))
-            }),
-        metadata_map
-            .get("agentWriteScopes")
-            .or_else(|| metadata_map.get("agent_write_scopes")),
-        metadata_map
-            .get("writeScopes")
-            .or_else(|| metadata_map.get("write_scopes")),
+        selection.and_then(|selection| selection.get("writeScopes")),
+        selection.and_then(|selection| selection.get("write_scopes")),
+        metadata_map.get("agentWriteScopes"),
+        metadata_map.get("agent_write_scopes"),
+        metadata_map.get("writeScopes"),
+        metadata_map.get("write_scopes"),
     ]
     .into_iter()
     .flatten()
     {
-        if let Some(scope) =
-            lookup_agent_scoped_value(container, &handle).and_then(parse_agent_write_scope_value)
-        {
-            return Some(scope);
+        let Some(scopes) = container.as_object() else {
+            return Some(AgentWriteScopeAssignment::invalid_explicit_scope());
+        };
+        for (key, value) in scopes {
+            if normalize_agent_handle(key).as_deref() == Some(handle.as_str())
+                && merge_explicit_scope(&mut explicit, value).is_none()
+            {
+                return Some(AgentWriteScopeAssignment::invalid_explicit_scope());
+            }
         }
     }
 
-    if target_count == 1 {
-        metadata_map
-            .get("writeScope")
-            .or_else(|| metadata_map.get("write_scope"))
-            .and_then(parse_agent_write_scope_value)
-    } else {
-        None
+    if explicit.is_some() {
+        return explicit;
     }
+    if target_count == 1 {
+        for key in ["writeScope", "write_scope"] {
+            if let Some(value) = metadata_map.get(key) {
+                if merge_explicit_scope(&mut explicit, value).is_none() {
+                    return Some(AgentWriteScopeAssignment::invalid_explicit_scope());
+                }
+            }
+        }
+    }
+    explicit
 }
 
-fn lookup_agent_scoped_value<'a>(container: &'a JsonValue, handle: &str) -> Option<&'a JsonValue> {
-    let map = container.as_object()?;
-    for key in [handle.to_string(), format!("@{handle}")] {
-        if let Some(value) = map.get(&key) {
-            return Some(value);
+fn merge_explicit_scope(
+    explicit: &mut Option<AgentWriteScopeAssignment>,
+    value: &JsonValue,
+) -> Option<()> {
+    let scope = parse_agent_write_scope_value(value)?;
+    if let Some(previous) = explicit {
+        if previous.mode != scope.mode
+            || previous.owned_paths.iter().collect::<HashSet<_>>()
+                != scope.owned_paths.iter().collect::<HashSet<_>>()
+            || previous.read_only_paths.iter().collect::<HashSet<_>>()
+                != scope.read_only_paths.iter().collect::<HashSet<_>>()
+        {
+            return None;
         }
+    } else {
+        *explicit = Some(scope);
     }
-
-    map.iter().find_map(|(key, value)| {
-        normalize_agent_handle(key)
-            .filter(|normalized| normalized == handle)
-            .map(|_| value)
-    })
+    Some(())
 }
 
 fn parse_agent_write_scope_value(value: &JsonValue) -> Option<AgentWriteScopeAssignment> {
@@ -369,7 +391,7 @@ fn parse_agent_write_scope_value(value: &JsonValue) -> Option<AgentWriteScopeAss
             })
         }
         JsonValue::Array(_) => {
-            let paths = collect_scope_path_list(value);
+            let paths = collect_scope_path_list(value, normalize_write_scope_path)?;
             if paths.is_empty() {
                 None
             } else {
@@ -381,11 +403,41 @@ fn parse_agent_write_scope_value(value: &JsonValue) -> Option<AgentWriteScopeAss
             }
         }
         JsonValue::Object(map) => {
-            let mode = map
-                .get("mode")
-                .or_else(|| map.get("status"))
-                .and_then(JsonValue::as_str)
-                .map(|value| value.trim().to_ascii_lowercase().replace('-', "_"));
+            let mut mode = None;
+            for key in ["mode", "status"] {
+                if let Some(value) = map.get(key) {
+                    let normalized = value
+                        .as_str()?
+                        .trim()
+                        .to_ascii_lowercase()
+                        .replace('-', "_");
+                    let normalized = match normalized.as_str() {
+                        "readonly" | "read_only" => "read_only",
+                        "owned" | "write" | "write_scoped" => "owned",
+                        "coordination_required" => "coordination_required",
+                        _ => return None,
+                    };
+                    if mode.is_some_and(|previous| previous != normalized) {
+                        return None;
+                    }
+                    mode = Some(normalized);
+                }
+            }
+            let mut read_only = None;
+            for key in ["readOnly", "read_only"] {
+                if let Some(value) = map.get(key) {
+                    let value = parse_runtime_bool(value)?;
+                    if read_only.is_some_and(|previous| previous != value) {
+                        return None;
+                    }
+                    read_only = Some(value);
+                }
+            }
+            if read_only == Some(true) && mode.is_some_and(|mode| mode != "read_only")
+                || read_only == Some(false) && mode == Some("read_only")
+            {
+                return None;
+            }
             let rationale = map
                 .get("rationale")
                 .and_then(JsonValue::as_str)
@@ -404,33 +456,30 @@ fn parse_agent_write_scope_value(value: &JsonValue) -> Option<AgentWriteScopeAss
                 "owned_path_globs",
             ] {
                 if let Some(value) = map.get(key) {
-                    owned_paths.extend(collect_scope_path_list(value));
+                    owned_paths.extend(collect_scope_path_list(value, normalize_write_scope_path)?);
                 }
             }
-            owned_paths = unique_paths(owned_paths);
+            owned_paths = unique_paths(owned_paths)?;
 
             let mut read_only_paths = Vec::new();
             for key in ["readOnlyPaths", "read_only_paths"] {
                 if let Some(value) = map.get(key) {
-                    read_only_paths.extend(collect_read_only_scope_path_list(value));
+                    read_only_paths.extend(collect_scope_path_list(
+                        value,
+                        normalize_read_only_scope_path,
+                    )?);
                 }
             }
-            read_only_paths = unique_paths(read_only_paths);
+            read_only_paths = unique_paths(read_only_paths)?;
 
-            if mode.as_deref() == Some("read_only")
-                || map
-                    .get("readOnly")
-                    .or_else(|| map.get("read_only"))
-                    .and_then(parse_runtime_bool)
-                    .unwrap_or(false)
-            {
+            if mode == Some("read_only") || read_only == Some(true) {
                 let mut assignment = AgentWriteScopeAssignment::read_only(rationale);
                 assignment.read_only_paths = read_only_paths;
                 assignment.source = "metadata".to_string();
                 return Some(assignment);
             }
 
-            if mode.as_deref() == Some("coordination_required") {
+            if mode == Some("coordination_required") {
                 let mut assignment = AgentWriteScopeAssignment::unscoped(rationale.clone())
                     .coordination_required("explicit_coordination_required", Vec::new(), rationale);
                 assignment.owned_paths = owned_paths;
@@ -452,118 +501,32 @@ fn parse_agent_write_scope_value(value: &JsonValue) -> Option<AgentWriteScopeAss
     }
 }
 
-fn collect_scope_path_list(value: &JsonValue) -> Vec<String> {
+fn collect_scope_path_list(
+    value: &JsonValue,
+    normalize: fn(&str) -> Option<String>,
+) -> Option<Vec<String>> {
     match value {
-        JsonValue::String(raw) => normalize_write_scope_path(raw).into_iter().collect(),
+        JsonValue::String(raw) => Some(vec![normalize(raw)?]),
         JsonValue::Array(items) => unique_paths(
             items
                 .iter()
-                .filter_map(|item| item.as_str())
-                .filter_map(normalize_write_scope_path)
-                .collect(),
+                .map(|item| normalize(item.as_str()?))
+                .collect::<Option<Vec<_>>>()?,
         ),
-        _ => Vec::new(),
-    }
-}
-
-fn collect_read_only_scope_path_list(value: &JsonValue) -> Vec<String> {
-    match value {
-        JsonValue::String(raw) => normalize_read_only_scope_path(raw).into_iter().collect(),
-        JsonValue::Array(items) => unique_paths(
-            items
-                .iter()
-                .filter_map(|item| item.as_str())
-                .filter_map(normalize_read_only_scope_path)
-                .collect(),
-        ),
-        _ => Vec::new(),
+        _ => None,
     }
 }
 
 fn normalize_write_scope_path(raw: &str) -> Option<String> {
-    let raw_trimmed = raw.trim();
-    if raw_trimmed.starts_with("http://") || raw_trimmed.starts_with("https://") {
+    let value = normalize_scope_path(raw)?;
+    if value.starts_with('/') {
         return None;
     }
-
-    let mut value = raw
-        .trim()
-        .trim_matches(|ch: char| {
-            matches!(
-                ch,
-                ',' | ';' | ':' | '!' | '?' | '(' | ')' | '[' | ']' | '{' | '}'
-            )
-        })
-        .trim_end_matches('.')
-        .trim_start_matches("./")
-        .replace('\\', "/");
-    while value.contains("//") {
-        value = value.replace("//", "/");
-    }
-
-    if value.is_empty()
-        || value.starts_with('/')
-        || value.starts_with('@')
-        || value.starts_with("http://")
-        || value.starts_with("https://")
-        || value.starts_with("http:/")
-        || value.starts_with("https:/")
-        || value.contains("..")
-        || value.chars().any(char::is_whitespace)
-    {
-        return None;
-    }
-
-    let path_like = value.contains('/')
-        || value.contains('*')
-        || value.rsplit_once('.').is_some_and(|(_, extension)| {
-            matches!(
-                extension.to_ascii_lowercase().as_str(),
-                "js" | "jsx"
-                    | "ts"
-                    | "tsx"
-                    | "rs"
-                    | "css"
-                    | "scss"
-                    | "html"
-                    | "md"
-                    | "mdx"
-                    | "json"
-                    | "toml"
-                    | "yaml"
-                    | "yml"
-                    | "sql"
-                    | "py"
-                    | "go"
-                    | "sh"
-            )
-        });
-    if !path_like {
-        return None;
-    }
-
     Some(value)
 }
 
 fn normalize_read_only_scope_path(raw: &str) -> Option<String> {
-    let raw_trimmed = raw.trim();
-    if raw_trimmed.starts_with("http://") || raw_trimmed.starts_with("https://") {
-        return None;
-    }
-
-    let mut value = raw_trimmed
-        .trim_matches(|ch: char| {
-            matches!(
-                ch,
-                ',' | ';' | ':' | '!' | '?' | '(' | ')' | '[' | ']' | '{' | '}'
-            )
-        })
-        .trim_end_matches('.')
-        .replace('\\', "/");
-    while value.contains("//") {
-        value = value.replace("//", "/");
-    }
-
+    let value = normalize_scope_path(raw)?;
     if value.starts_with("/tmp/")
         || value.starts_with("/var/folders/")
         || value.starts_with("/workspace/")
@@ -572,21 +535,55 @@ fn normalize_read_only_scope_path(raw: &str) -> Option<String> {
         return Some(value);
     }
 
-    normalize_write_scope_path(raw)
+    (!value.starts_with('/')).then_some(value)
 }
 
-fn unique_paths(paths: Vec<String>) -> Vec<String> {
+fn normalize_scope_path(raw: &str) -> Option<String> {
+    let mut value = raw.trim().replace('\\', "/");
+    // These are structured paths, not prose. Reject spellings that the runtime
+    // would trim into a different path rather than guessing the caller's intent.
+    let trimmed = value
+        .trim_matches(|ch: char| {
+            matches!(
+                ch,
+                ',' | ';' | ':' | '!' | '?' | '(' | ')' | '[' | ']' | '{' | '}'
+            )
+        })
+        .trim_end_matches('.');
+    if trimmed != value {
+        return None;
+    }
+    while value.starts_with("./") {
+        value.drain(..2);
+    }
+    while value.contains("//") {
+        value = value.replace("//", "/");
+    }
+    if value.is_empty()
+        || value.starts_with('@')
+        || value.contains(':')
+        || value.contains("..")
+        || value
+            .chars()
+            .any(|ch| ch.is_whitespace() || ch.is_control())
+    {
+        return None;
+    }
+    Some(value)
+}
+
+fn unique_paths(paths: Vec<String>) -> Option<Vec<String>> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for path in paths {
         if seen.insert(path.clone()) {
             out.push(path);
         }
-        if out.len() >= 12 {
-            break;
+        if out.len() > 12 {
+            return None;
         }
     }
-    out
+    Some(out)
 }
 
 fn write_scopes_overlap(left: &[String], right: &[String]) -> bool {
@@ -926,8 +923,235 @@ mod tests {
             &segments,
         );
 
-        assert_eq!(plan["alpha"].mode, AgentWriteScopeMode::Unscoped);
+        assert_eq!(
+            plan["alpha"].mode,
+            AgentWriteScopeMode::CoordinationRequired
+        );
         assert!(plan["alpha"].owned_paths.is_empty());
+    }
+
+    fn scope_plan(metadata: JsonValue) -> AgentWriteScopeAssignment {
+        build_agent_write_scope_plan(
+            &metadata,
+            "The prose must not supply or repair an explicit path scope.",
+            &["alpha".to_string()],
+            &HashMap::new(),
+        )
+        .remove("alpha")
+        .expect("scope assignment")
+    }
+
+    fn assert_invalid_scope(metadata: JsonValue) {
+        let scope = scope_plan(metadata);
+        assert_eq!(scope.mode, AgentWriteScopeMode::CoordinationRequired);
+        assert!(scope.owned_paths.is_empty());
+        assert!(scope.read_only_paths.is_empty());
+        assert_eq!(scope.source, "metadata");
+        assert_eq!(scope.conflict.unwrap().reason, "invalid_write_scope");
+    }
+
+    #[test]
+    fn preserves_structured_filenames_without_extension_guesses() {
+        let scope = scope_plan(json!({
+            "writeIntent": true,
+            "agentSelection": {"writeScopes": {"alpha": {
+                "ownedPaths": ["result.txt", "LICENSE", "data.custom-extension", ".gitignore"],
+                "readOnlyPaths": ["input.txt", "Makefile", "fixtures/"]
+            }}}
+        }));
+        assert_eq!(scope.mode, AgentWriteScopeMode::Owned);
+        assert_eq!(
+            scope.owned_paths,
+            [
+                "result.txt",
+                "LICENSE",
+                "data.custom-extension",
+                ".gitignore"
+            ]
+        );
+        assert_eq!(
+            scope.read_only_paths,
+            ["input.txt", "Makefile", "fixtures/"]
+        );
+    }
+
+    #[test]
+    fn preserves_explicit_path_forms_and_supported_globs() {
+        for value in [
+            json!("result.txt"),
+            json!(["result.txt"]),
+            json!({"paths": "result.txt"}),
+        ] {
+            assert_eq!(
+                scope_plan(json!({"writeScope": value})).owned_paths,
+                ["result.txt"]
+            );
+        }
+        let scope = scope_plan(json!({"writeScope": {
+            "mode": "write-scoped",
+            "ownedPathGlobs": ["src/**", "assets/*.png"],
+            "readOnlyPaths": ["./fixtures/", "test\\input.txt", "/tmp/runtime-local/", "/var/folders/test/source/", "/workspace/project/", "/workspaces/project/"]
+        }}));
+        assert_eq!(scope.mode, AgentWriteScopeMode::Owned);
+        assert_eq!(scope.owned_paths, ["src/**", "assets/*.png"]);
+        assert_eq!(
+            scope.read_only_paths,
+            [
+                "fixtures/",
+                "test/input.txt",
+                "/tmp/runtime-local/",
+                "/var/folders/test/source/",
+                "/workspace/project/",
+                "/workspaces/project/"
+            ]
+        );
+    }
+
+    #[test]
+    fn validates_all_explicit_path_entries_and_types() {
+        for value in [
+            json!(null),
+            json!(true),
+            json!(42),
+            json!(""),
+            json!([]),
+            json!({}),
+            json!(["result.txt", "../escape.txt"]),
+            json!(["result.txt", false]),
+            json!({"ownedPaths": null}),
+            json!({"ownedPaths": {"path": "result.txt"}}),
+            json!({"ownedPaths": ["result.txt"], "readOnlyPaths": ["input.txt", 3]}),
+            json!({"ownedPaths": ["result.txt"], "owned_paths": ["../escape"]}),
+            json!({"ownedPaths": ["result.txt"], "read_only_paths": null}),
+            json!({"mode": 1, "ownedPaths": ["result.txt"]}),
+            json!({"mode": "unknown", "ownedPaths": ["result.txt"]}),
+            json!({"mode": "owned", "status": "read_only", "ownedPaths": ["result.txt"]}),
+            json!({"readOnly": "not-a-boolean", "ownedPaths": ["result.txt"]}),
+            json!({"readOnly": true, "read_only": false}),
+        ] {
+            assert_invalid_scope(json!({"writeIntent": true, "writeScope": value}));
+        }
+    }
+
+    #[test]
+    fn invalid_explicit_scopes_cannot_fall_back_to_another_scope_or_unscoped() {
+        for value in [
+            json!(null),
+            json!([]),
+            json!({"alpha": null}),
+            json!({"@Alpha": ["../escape"]}),
+        ] {
+            assert_invalid_scope(json!({
+                "writeIntent": true,
+                "agentSelection": {"writeScopes": value},
+                "writeScope": {"ownedPaths": ["fallback.txt"]}
+            }));
+        }
+        assert_eq!(
+            scope_plan(json!({"writeIntent": true})).mode,
+            AgentWriteScopeMode::Unscoped
+        );
+    }
+
+    #[test]
+    fn scope_aliases_retain_valid_paths_and_fail_closed_on_invalid_or_conflicting_values() {
+        for key in [
+            "agentWriteScopes",
+            "agent_write_scopes",
+            "writeScopes",
+            "write_scopes",
+        ] {
+            assert_eq!(
+                scope_plan(json!({key: {"@Alpha": ["result.txt"]}})).owned_paths,
+                ["result.txt"]
+            );
+            assert_invalid_scope(json!({key: {"@Alpha": ["result.txt", null]}}));
+        }
+        for key in ["writeScopes", "write_scopes"] {
+            assert_eq!(
+                scope_plan(json!({"agentSelection": {key: {"alpha": ["result.txt"]}}})).owned_paths,
+                ["result.txt"]
+            );
+            assert_invalid_scope(json!({"agentSelection": {key: {"alpha": ["result.txt", null]}}}));
+        }
+        for key in ["writeScope", "write_scope"] {
+            assert_eq!(
+                scope_plan(
+                    json!({key: {"owned_paths": ["result.txt"], "read_only_paths": ["input.txt"]}})
+                )
+                .read_only_paths,
+                ["input.txt"]
+            );
+            assert_invalid_scope(json!({key: false}));
+        }
+        assert_invalid_scope(
+            json!({"writeScopes": {"alpha": ["result.txt"], "@Alpha": ["different.txt"]}}),
+        );
+        assert_invalid_scope(
+            json!({"writeScopes": {"alpha": ["result.txt"]}, "write_scopes": {"alpha": false}}),
+        );
+        assert_invalid_scope(
+            json!({"writeScope": ["result.txt"], "write_scope": ["different.txt"]}),
+        );
+    }
+
+    #[test]
+    fn rejects_excess_scope_paths_instead_of_truncating_claims() {
+        let paths: Vec<_> = (0..13).map(|i| format!("file-{i}.txt")).collect();
+        assert_eq!(
+            scope_plan(json!({"writeScope": &paths[..12]}))
+                .owned_paths
+                .len(),
+            12
+        );
+        assert_invalid_scope(json!({"writeScope": paths}));
+        assert_invalid_scope(json!({"writeScope": {"mode": "read_only", "readOnlyPaths": paths}}));
+        assert_invalid_scope(
+            json!({"writeScope": {"ownedPaths": &paths[..7], "owned_paths": &paths[7..]}}),
+        );
+        let mut repeated = vec!["result.txt"; 13];
+        assert_eq!(
+            scope_plan(json!({"writeScope": repeated})).owned_paths,
+            ["result.txt"]
+        );
+        repeated.push("../escape");
+        assert_invalid_scope(json!({"writeScope": repeated}));
+    }
+
+    #[test]
+    fn rejects_unsafe_or_reinterpreted_paths_in_owned_and_read_only_claims() {
+        for path in [
+            "../outside",
+            "src/../../outside",
+            "file..txt",
+            "C:\\outside.txt",
+            "C:outside.txt",
+            "https://example.test/file.txt",
+            "file\0.txt",
+            "file\n.txt",
+            "has space.txt",
+            "result.txt.",
+            "(result.txt)",
+            "result.txt!",
+            ".",
+            "./",
+        ] {
+            assert_invalid_scope(json!({"writeScope": {"ownedPaths": [path]}}));
+            assert_invalid_scope(
+                json!({"writeScope": {"mode": "read_only", "readOnlyPaths": [path]}}),
+            );
+        }
+        for path in [
+            "/tmp/../secret",
+            "/workspace/project/../../secret",
+            "/var/folders/test/\0",
+            "/workspaces/project/has space",
+            "/etc/passwd",
+        ] {
+            assert_invalid_scope(
+                json!({"writeScope": {"mode": "read_only", "readOnlyPaths": [path]}}),
+            );
+        }
     }
 
     #[test]
