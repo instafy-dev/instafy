@@ -6,6 +6,7 @@ import {
   safeJson,
 } from "./core";
 import { logControllerRequestError } from "./logging";
+import { reportControllerProjectNotFound } from "./projectNotFound";
 import { createControllerReadBudget } from "./readBudget";
 
 export interface DispatchControllerPromptParams {
@@ -1264,6 +1265,9 @@ export async function fetchProjectConversationsFromController(
     ));
 
     if (!response.ok) {
+      if (response.status === 404) {
+        reportControllerProjectNotFound(params.projectId);
+      }
       const errorMessage = await budget.wait(() => readControllerError(
         response,
         "fetch project conversations failed",

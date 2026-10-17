@@ -7,7 +7,7 @@ import {
   type ControllerProjectSummary,
 } from "../sdk/instafy";
 import type { ProjectListItem } from "./useProjects";
-import { PROJECT_ACCESS_REFRESH_EVENT } from "./projectAccessEvents";
+import { PROJECT_ACCESS_REFRESH_EVENT, type ProjectAccessRefreshEventDetail } from "./projectAccessEvents";
 import { isUntitledSpaceName, UNTITLED_SPACE_NAME } from "./spaceName";
 
 const runtimeControllerEnabled = controllerClient.core.enabled;
@@ -214,7 +214,17 @@ export function useMergedControllerProjects({
       retryAttempt = 0;
       handleRefresh();
     };
-    const handleAccessChanged = () => {
+    const handleAccessChanged = (event: Event) => {
+      const deletedProjectId = (event as CustomEvent<ProjectAccessRefreshEventDetail>).detail?.deletedProjectId;
+      if (deletedProjectId) {
+        // Off the list now rather than when the refetch below answers; until
+        // then the cached list would bring it back as a remote-only space.
+        setDiscovery((current) =>
+          current?.projects.some((project) => project.projectId === deletedProjectId)
+            ? { ...current, projects: current.projects.filter((project) => project.projectId !== deletedProjectId) }
+            : current,
+        );
+      }
       if (inFlight) {
         accessRefreshRequested = true;
         return;

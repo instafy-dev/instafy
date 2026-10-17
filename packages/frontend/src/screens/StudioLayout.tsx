@@ -154,7 +154,7 @@ import { useStudioLayoutChromeState } from "./useStudioLayoutChromeState";
 import { useStudioLayoutWorkspaceRouting } from "./useStudioLayoutWorkspaceRouting";
 import { useWorkspaceVersioningBadge } from "./useWorkspaceVersioningBadge";
 import { sourceControlTitle as resolveSourceControlTitle, useActiveWorkspaceVersioning } from "../workspace/useActiveWorkspaceVersioning";
-import { canRememberTeamWorkspace, resolveActiveTeamName, resolveStudioSearchContext, resolveTeamNavigationScope, usesGlobalNavigationContext } from "./studio/teamNavigation";
+import { canRememberTeamWorkspace, resolveActiveTeamName, resolveSpaceIndependentPanel, resolveStudioSearchContext, resolveTeamNavigationScope, usesGlobalNavigationContext } from "./studio/teamNavigation";
 import { readCachedControllerOrgs } from "./studio/components/sidebarOrgSnapshot";
 import { StudioPanelPerformance } from "../telemetry/StudioPanelPerformance";
 
@@ -1639,12 +1639,17 @@ function StudioLayoutInner() {
     setLeftDrawer("files");
   }, [isLargeScreen, leftDrawer, requestHistoryPush, setLeftDrawer]);
   const projectAccessBlocked = controllerProjectMissing;
+  // The picker stands in only for a blocked space's own pages. Route
+  // hydration waits for the space the URL names, which a blocked space never
+  // becomes, so a page no space owns opens from the URL itself.
+  const blockedSpaceIndependentPanel = projectAccessBlocked ? resolveSpaceIndependentPanel(location.search) : null;
+  const visiblePanel = blockedSpaceIndependentPanel ?? activePanel;
   const sidebarActivePanel =
     leftDrawer === "files"
       ? "code"
       : leftDrawer === "sourceControl"
         ? "sourceControl"
-        : activePanel;
+        : visiblePanel;
   const shouldShowFilesWorkspace =
     !projectAccessBlocked &&
     (activeWorkspaceTab?.kind === "file" ||
@@ -1692,9 +1697,30 @@ function StudioLayoutInner() {
   const desktopPaneHeaderTarget = isLargeScreen && !sidebarCollapsed && !globalNavigationContext
     ? desktopDrawerHeaderTarget : null;
 
+  const renderSpaceIndependentPanel = (panel: StudioPanel, organizationId: string | null) => panel === "home" ? (
+    <HomePanel canResumeConversation={projectReadyForWorkspace && !controllerProjectMissing} inboxItems={homeAttentionInboxItems} refreshInbox={refreshHomeAttentionCount} notifications={notificationCenter} supportReports={bugReportController.supportUnreadReports} supportLoading={bugReportController.supportNotificationsLoading} supportError={bugReportController.supportNotificationsError} refreshSupport={() => bugReportController.refreshSupportNotifications(false)} onOpenSupport={bugReportController.onOpenBugReportInbox} />
+  ) : panel === "team" ? (
+    <TeamPanel organizationId={navigationScope.orgKey === "personal" ? null : navigationScope.orgKey} />
+  ) : panel === "settings" ? (
+    <SettingsPanel activeTab={settingsTab} organizationId={organizationId} onOrganizationChange={(id) => {
+      navigateToDestination({ kind: "panel", panel: "settings", settingsTab: "org", settingsOrgId: id,
+        settingsCategory: resolveSettingsRoute(window.location.search, "org").category });
+    }} />
+  ) : null;
+
   let workspaceContent: ReactNode;
   let workspaceContentIsLazy = false;
-  if (projectAccessBlocked) {
+  if (blockedSpaceIndependentPanel) {
+    workspaceContentIsLazy = blockedSpaceIndependentPanel !== "home";
+    const routedSettingsOrgId = routeParams.get("settingsOrgId")?.trim() ?? "";
+    workspaceContent = (
+      <div className="flex h-full flex-col overflow-hidden">
+        <div className="flex-1 overflow-y-auto" data-testid="studio-panel-scroll">
+          {renderSpaceIndependentPanel(blockedSpaceIndependentPanel, isUUID(routedSettingsOrgId) ? routedSettingsOrgId : null)}
+        </div>
+      </div>
+    );
+  } else if (projectAccessBlocked) {
     const scroller = (
       <div className="flex-1 overflow-y-auto">
         <ProjectPickerPanel
@@ -1802,19 +1828,10 @@ function StudioLayoutInner() {
       workspaceContentIsLazy = activeWorkspaceTab.panel !== "home";
       const scroller = (
         <StudioPanelScrollContainer identity={panelScrollIdentity} ready={panelScrollReady} className="flex-1 overflow-y-auto" data-testid="studio-panel-scroll">
-          {activeWorkspaceTab.panel === "home" ? (
-            <HomePanel canResumeConversation={projectReadyForWorkspace && !controllerProjectMissing} inboxItems={homeAttentionInboxItems} refreshInbox={refreshHomeAttentionCount} notifications={notificationCenter} supportReports={bugReportController.supportUnreadReports} supportLoading={bugReportController.supportNotificationsLoading} supportError={bugReportController.supportNotificationsError} refreshSupport={() => bugReportController.refreshSupportNotifications(false)} onOpenSupport={bugReportController.onOpenBugReportInbox} />
-          ) : activeWorkspaceTab.panel === "team" ? (
-            <TeamPanel organizationId={navigationScope.orgKey === "personal" ? null : navigationScope.orgKey} />
-          ) : activeWorkspaceTab.panel === "credits" ? (
+          {renderSpaceIndependentPanel(activeWorkspaceTab.panel, settingsOrgId) ?? (activeWorkspaceTab.panel === "credits" ? (
             <CreditsPanel />
           ) : activeWorkspaceTab.panel === "extensions" ? (
             <ExtensionsPanel />
-          ) : activeWorkspaceTab.panel === "settings" ? (
-            <SettingsPanel activeTab={settingsTab} organizationId={settingsOrgId} onOrganizationChange={(id) => {
-              navigateToDestination({ kind: "panel", panel: "settings", settingsTab: "org", settingsOrgId: id,
-                settingsCategory: resolveSettingsRoute(window.location.search, "org").category });
-            }} />
           ) : activeWorkspaceTab.panel === "skills" ? (
             <SkillsPanel />
           ) : activeWorkspaceTab.panel === "secrets" ? (
@@ -1825,7 +1842,7 @@ function StudioLayoutInner() {
             <AutomationsPanel />
           ) : activeWorkspaceTab.panel === "machines" ? (
             <MachinesPanel />
-          ) : null}
+          ) : null)}
         </StudioPanelScrollContainer>
       );
       workspaceContent = (
@@ -1835,7 +1852,7 @@ function StudioLayoutInner() {
       );
     }
   }
-  workspaceContent = <StudioDraftPanel value={activeWorkspaceTabPanel ?? "chat"}>{workspaceContent}</StudioDraftPanel>;
+  workspaceContent = <StudioDraftPanel value={blockedSpaceIndependentPanel ?? activeWorkspaceTabPanel ?? "chat"}>{workspaceContent}</StudioDraftPanel>;
   const mobileOverviewDock = showMobileBottomDock && mobileOverviewSection ? (
     <MobileBottomDock
       activeSlot={mobileOverviewSection}
@@ -1865,9 +1882,9 @@ function StudioLayoutInner() {
         organizationId={activeProjectSummary?.orgId ?? null}
         enabled={!activeProjectId || conversationsProjectKey === activeProjectId}
         loading={!projectReadyForWorkspace || !workspaceContent || (!activeWorkspaceTab && !projectAccessBlocked)}
-        error={projectReadyForWorkspace && projectAccessBlocked}
+        error={projectReadyForWorkspace && projectAccessBlocked && !blockedSpaceIndependentPanel}
         deferred={workspaceContentIsLazy}
-        requestedPanel={projectAccessBlocked ? "projects" : activePanel}
+        requestedPanel={blockedSpaceIndependentPanel ?? (projectAccessBlocked ? "projects" : activePanel)}
       >
         {workspaceContent}
       </StudioPanelPerformance>
@@ -1950,8 +1967,9 @@ function StudioLayoutInner() {
     if (mobileHistory.canGoBack) mobileHistory.goBack();
     else handleOpenHome();
   });
-  const compactMobileSettingsHeader = conversationWorkspace && activePanel === "settings";
-  const mobileSettingsTitle = settingsTab === "profile" ? "Your settings" : settingsTab === "project" ? "Space settings"
+  const compactMobileSettingsHeader = conversationWorkspace && visiblePanel === "settings";
+  const visibleSettingsTab = blockedSpaceIndependentPanel ? resolveSettingsRoute(location.search, settingsTab).tab : settingsTab;
+  const mobileSettingsTitle = visibleSettingsTab === "profile" ? "Your settings" : visibleSettingsTab === "project" ? "Space settings"
     : navigationScope.orgKey === "personal" ? "Personal settings" : "Team settings";
   const mobilePageTitle = topbarLocationOverride?.title ?? (compactMobileSettingsHeader ? mobileSettingsTitle : navigationScope.page === "workspace"
     ? activeWorkspaceTab?.title ?? "Space"

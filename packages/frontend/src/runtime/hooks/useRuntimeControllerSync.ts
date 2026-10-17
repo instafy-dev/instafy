@@ -30,6 +30,7 @@ import {
   MEMBERS_CHANGED_EVENT,
   PROJECT_ACCESS_REFRESH_EVENT,
   type MembersChangedEventDetail,
+  type ProjectAccessRefreshEventDetail,
 } from "../../projects/projectAccessEvents";
 import {
   CREDITS_UPDATED_EVENT,
@@ -468,11 +469,17 @@ export function useRuntimeControllerSync({
             typeof window !== "undefined"
           ) {
             window.dispatchEvent(
-              new CustomEvent(PROJECT_ACCESS_REFRESH_EVENT, {
+              new CustomEvent<ProjectAccessRefreshEventDetail>(PROJECT_ACCESS_REFRESH_EVENT, {
                 // A null project id is an org-wide access invalidation and
                 // must refresh whichever project is active now, not whichever
                 // project this stream captured before a navigation switch.
-                detail: { projectId: event.project_id ?? null },
+                // A deleted space is named, so every tab can drop it.
+                detail: {
+                  projectId: event.project_id ?? null,
+                  deletedProjectId: event.data?.reason === "space_deleted"
+                    ? sanitizeString(event.data?.projectId)
+                    : null,
+                },
               }),
             );
           }

@@ -11,10 +11,12 @@ import {
 import { ControllerApiError } from "../core";
 import { CONTROLLER_READ_BUDGET_MS } from "../readBudget";
 
-const { resolveContext, readError } = vi.hoisted(() => ({
+const { resolveContext, readError, reportNotFound } = vi.hoisted(() => ({
   resolveContext: vi.fn(),
   readError: vi.fn(),
+  reportNotFound: vi.fn(),
 }));
+vi.mock("../projectNotFound", () => ({ reportControllerProjectNotFound: reportNotFound }));
 vi.mock("../core", async () => ({
   // The error type and the reading of an error answer are the real ones.
   ...(await vi.importActual<typeof import("../core")>("../core")),
@@ -138,6 +140,17 @@ describe("fetchRuntimeStatus", () => {
     body.resolve(snapshot);
     expect(console.warn).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("reports a space the controller no longer finds, so its access is checked again", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response("", { status: 404 }));
+    await expect(fetchRuntimeStatus({ projectId: "project-1" })).resolves.toBeNull();
+    expect(reportNotFound).toHaveBeenCalledExactlyOnceWith("project-1");
+
+    reportNotFound.mockClear();
+    vi.mocked(fetch).mockResolvedValueOnce(new Response("", { status: 503 }));
+    await expect(fetchRuntimeStatus({ projectId: "project-1" })).resolves.toBeNull();
+    expect(reportNotFound).not.toHaveBeenCalled();
   });
 
   it("keeps pre-canceled and signed-out reads empty without an HTTP request", async () => {

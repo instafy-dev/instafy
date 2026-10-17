@@ -88,6 +88,9 @@ import {
   ProjectAccessProvider,
   useProjectAccess,
 } from "../ProjectAccessProvider";
+import { markProjectDeletedHere, unmarkProjectDeletedHere } from "../projectDeletion";
+import { suppressProjectAutoCreate } from "../projectAutoCreate";
+import { reportControllerProjectNotFound } from "../../services/runtimeController/projectNotFound";
 import { ProjectAccessRecoveryBanner, StudioStartupGate } from "../../screens/StudioStartup";
 
 function AccessProbe() {
@@ -100,6 +103,7 @@ function AccessProbe() {
       data-share={String(access.canShareProject)}
       data-resolved={String(access.projectCapabilitiesResolved)}
       data-blocked={String(access.projectAccessBlocked)}
+      data-deleted={String(access.projectAccessDeleted)}
       data-initialized={String(access.projectInitialized)}
       data-pending={String(access.projectAccessPending)}
       data-provision-failed={String(access.projectProvisionFailed)}
@@ -560,6 +564,115 @@ describe("ProjectAccessProvider capability refresh", () => {
       expect(probe?.getAttribute("data-resolved")).toBe("false");
       expect(mocks.removeProject).toHaveBeenCalledWith(PROJECT_ID);
     });
+  });
+
+  it("drops a space deleted elsewhere from this tab's lists without touching the open space", async () => {
+    const DELETED = "44444444-4444-4444-8444-444444444444";
+    mocks.getSummaryResult.mockResolvedValue(summaryFor("admin"));
+    await act(async () => root.render(<ProjectAccessProvider><AccessProbe /></ProjectAccessProvider>));
+    const probe = container.querySelector('[data-testid="access-probe"]');
+    expect(probe?.getAttribute("data-role")).toBe("admin");
+    mocks.getSummaryResult.mockClear();
+
+    await act(async () => window.dispatchEvent(new CustomEvent(PROJECT_ACCESS_REFRESH_EVENT, {
+      detail: { projectId: null, deletedProjectId: DELETED },
+    })));
+
+    expect(mocks.removeProject).toHaveBeenCalledExactlyOnceWith(DELETED);
+    expect(mocks.getSummaryResult).not.toHaveBeenCalled();
+    expect(probe?.getAttribute("data-role")).toBe("admin");
+    expect(probe?.getAttribute("data-write")).toBe("true");
+    expect(probe?.getAttribute("data-blocked")).toBe("false");
+  });
+
+  it("says the open space was deleted and stays on that notice instead of opening another space", async () => {
+    const FALLBACK = "55555555-5555-4555-8555-555555555555";
+    mocks.getSummaryResult.mockResolvedValueOnce(summaryFor("admin"));
+    await act(async () => root.render(<ProjectAccessProvider><AccessProbe /></ProjectAccessProvider>));
+    const probe = container.querySelector('[data-testid="access-probe"]');
+    expect(probe?.getAttribute("data-role")).toBe("admin");
+    mocks.getSummaryResult.mockClear();
+
+    // The real store activates another local space when the open one is
+    // removed; the URL still names the deleted one.
+    mocks.removeProject.mockImplementation(() => {
+      mocks.activeProjectId = FALLBACK;
+    });
+    mocks.getSummaryResult.mockImplementation(async (projectId: string) => projectId === PROJECT_ID
+      ? { summary: null, notFound: true, forbidden: false, unauthorized: false }
+      : { ...summaryFor("admin"), summary: { ...summaryFor("admin").summary, projectId } });
+
+    await act(async () => window.dispatchEvent(new CustomEvent(PROJECT_ACCESS_REFRESH_EVENT, {
+      detail: { projectId: null, deletedProjectId: PROJECT_ID },
+    })));
+    await act(async () => window.dispatchEvent(new Event("focus")));
+
+    expect(mocks.removeProject).toHaveBeenCalledWith(PROJECT_ID);
+    expect(mocks.getSummaryResult.mock.calls.map(([projectId]) => projectId)).toEqual([PROJECT_ID]);
+    expect(probe?.getAttribute("data-blocked")).toBe("true");
+    expect(probe?.getAttribute("data-deleted")).toBe("true");
+    expect(probe?.getAttribute("data-write")).toBe("false");
+    expect(mocks.switchProject).not.toHaveBeenCalled();
+    expect(mocks.navigate).not.toHaveBeenCalled();
+  });
+
+  it("leaves a space this tab is deleting to the delete, so the picker never flashes", async () => {
+    mocks.getSummaryResult.mockResolvedValueOnce(summaryFor("admin"));
+    await act(async () => root.render(<ProjectAccessProvider><AccessProbe /></ProjectAccessProvider>));
+    const probe = container.querySelector('[data-testid="access-probe"]');
+    mocks.getSummaryResult.mockResolvedValue({ summary: null, notFound: true, forbidden: false, unauthorized: false });
+    markProjectDeletedHere(PROJECT_ID);
+    try {
+      // The controller's notice can beat the DELETE response, and the
+      // confirm dialog closing focuses the window.
+      await act(async () => window.dispatchEvent(new CustomEvent(PROJECT_ACCESS_REFRESH_EVENT, {
+        detail: { projectId: null, deletedProjectId: PROJECT_ID },
+      })));
+      await act(async () => window.dispatchEvent(new Event("focus")));
+
+      expect(mocks.getSummaryResult).toHaveBeenCalledTimes(2);
+      expect(mocks.removeProject).not.toHaveBeenCalled();
+      expect(probe?.getAttribute("data-blocked")).toBe("false");
+      expect(probe?.getAttribute("data-role")).toBe("admin");
+    } finally {
+      unmarkProjectDeletedHere(PROJECT_ID);
+    }
+  });
+
+  it("checks the open space at once when one of its reads gets a 404, even in a hidden tab", async () => {
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+    mocks.getSummaryResult.mockResolvedValueOnce(summaryFor("admin"));
+    await act(async () => root.render(<ProjectAccessProvider><AccessProbe /></ProjectAccessProvider>));
+    const probe = container.querySelector('[data-testid="access-probe"]');
+    mocks.getSummaryResult.mockResolvedValue({ summary: null, notFound: true, forbidden: false, unauthorized: false });
+
+    await act(async () => reportControllerProjectNotFound("66666666-6666-4666-8666-666666666666"));
+    expect(mocks.getSummaryResult).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      reportControllerProjectNotFound(PROJECT_ID);
+      reportControllerProjectNotFound(PROJECT_ID);
+    });
+    expect(mocks.getSummaryResult).toHaveBeenCalledTimes(2);
+    expect(probe?.getAttribute("data-blocked")).toBe("true");
+    // Nothing said the space was deleted, only that it is not found.
+    expect(probe?.getAttribute("data-deleted")).toBe("false");
+    expect(mocks.removeProject).toHaveBeenCalledWith(PROJECT_ID);
+  });
+
+  it("ends the lookup when the last space this browser knew is gone and nothing replaces it", async () => {
+    mocks.locationSearch = "";
+    window.history.replaceState(null, "", "/studio");
+    suppressProjectAutoCreate();
+    mocks.getSummaryResult.mockResolvedValue({ summary: null, notFound: true, forbidden: false, unauthorized: false });
+    await act(async () => root.render(<ProjectAccessProvider><AccessProbe /></ProjectAccessProvider>));
+
+    const probe = container.querySelector('[data-testid="access-probe"]');
+    expect(mocks.removeProject).toHaveBeenCalledWith(PROJECT_ID);
+    expect(probe?.getAttribute("data-initialized")).toBe("true");
+    expect(probe?.getAttribute("data-pending")).toBe("false");
+    expect(mocks.listProjects).not.toHaveBeenCalled();
+    expect(mocks.createControllerProject).not.toHaveBeenCalled();
   });
 });
 

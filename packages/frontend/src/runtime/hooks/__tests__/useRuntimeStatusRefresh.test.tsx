@@ -358,6 +358,24 @@ describe("live origins come only from a status answer for the current project", 
     expect(mocks.fetchStatus).toHaveBeenCalledTimes(calls + 1);
   });
 
+  it("stops retrying a space's status once its access check blocks the space", async () => {
+    mocks.fetchRecovery.mockResolvedValue(list());
+    mocks.fetchStatus.mockResolvedValueOnce(answer());
+    await render({ projectId: SPACE_A, ready: true });
+
+    // Deleted elsewhere: every status request now fails, in a hidden tab too.
+    mocks.fetchStatus.mockResolvedValue(null);
+    await act(async () => {
+      await current().refresh();
+    });
+    expect(mocks.fetchStatus).toHaveBeenCalledTimes(2);
+
+    // The 404 has the access check look again; it finds the space gone.
+    await render({ projectId: SPACE_A, ready: false });
+    await advance(300_000);
+    expect(mocks.fetchStatus).toHaveBeenCalledTimes(2);
+  });
+
   it("runs a refresh the backoff skipped after a switch away and back", async () => {
     mocks.fetchRecovery.mockResolvedValue(list(rollingSave("1")));
     mocks.fetchStatus.mockResolvedValueOnce(answer(running(LIVE)));

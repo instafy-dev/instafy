@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ActivityItem, ListMyActivityResult } from "../../../services/runtimeController/activity";
 import { useHomeActivity } from "../useHomeActivity";
+import { PROJECT_ACCESS_REFRESH_EVENT } from "../../../projects/projectAccessEvents";
 
 const { list, markSeen } = vi.hoisted(() => ({ list: vi.fn(), markSeen: vi.fn() }));
 vi.mock("../../../sdk/instafy", () => ({ controllerClient: { activity: { list, markSeen } } }));
@@ -242,6 +243,28 @@ describe("useHomeActivity", () => {
     expect(current.activityItems.map((entry) => entry.id)).toEqual(["3"]);
     expect(current.activityLoadingMore).toBe(false);
     expect(current.serverLastSeenEventId).toBe("2");
+  });
+
+  it("drops a deleted space's rows as soon as the deletion is announced", async () => {
+    list.mockResolvedValueOnce(page([], { items: [
+      item("12", { project: { id: "deleted-space", name: "Gone" } }),
+      item("11", { project: { id: "kept-space", name: "Kept" } }),
+      item("10", { project: { id: "deleted-space", name: "Gone" } }),
+    ] }));
+    await render();
+    expect(current.activityItems.map((entry) => entry.id)).toEqual(["12", "11", "10"]);
+
+    // Another access change leaves the rows to the next poll.
+    await act(async () => { window.dispatchEvent(new CustomEvent(PROJECT_ACCESS_REFRESH_EVENT, { detail: { projectId: null } })); });
+    expect(current.activityItems.map((entry) => entry.id)).toEqual(["12", "11", "10"]);
+
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent(PROJECT_ACCESS_REFRESH_EVENT, {
+        detail: { projectId: null, deletedProjectId: "deleted-space" },
+      }));
+    });
+    expect(current.activityItems.map((entry) => entry.id)).toEqual(["11"]);
+    expect(list).toHaveBeenCalledTimes(1);
   });
 
   it("stops polling and exposes no activity when signed out", async () => {

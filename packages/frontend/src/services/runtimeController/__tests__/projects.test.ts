@@ -38,6 +38,7 @@ vi.mock("../logging", () => ({
 
 import {
   createControllerProject,
+  deleteControllerProject,
   getControllerProjectSummaryResult,
   importGithubProject,
   listControllerProjects,
@@ -72,6 +73,37 @@ describe("space identity updates", () => {
     await expect(updateControllerProjectIdentity({ projectId: "project-1", projectColor: "url(bad)" as never })).rejects.toThrow("Unsupported projectColor");
     expect(fetchMock).not.toHaveBeenCalled();
     await expect(updateControllerProjectIdentity({ projectId: "project-1", projectColor: "blue" })).rejects.toThrow("Write access required");
+  });
+});
+
+describe("space deletion", () => {
+  const PROJECT_ID = "11111111-1111-4111-8111-111111111111";
+  beforeEach(() => resetControllerMocks());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("treats a space that is already gone as deleted, so a second delete is not a failure", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ message: "project not found" }), { status: 404 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(deleteControllerProject(PROJECT_ID)).resolves.toBe(true);
+    expect(fetchMock).toHaveBeenCalledExactlyOnceWith(
+      `http://controller.test/projects/${PROJECT_ID}`,
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+
+  it("still reports a delete the controller refused or could not finish", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    for (const status of [403, 500]) {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ message: "no" }), { status }),
+      ));
+      await expect(deleteControllerProject(PROJECT_ID)).resolves.toBe(false);
+    }
   });
 });
 
