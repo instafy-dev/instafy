@@ -15,7 +15,7 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
     ],
   },
   "browser-ui": {
-    minimumTests: 51,
+    minimumTests: 53,
     files: [
       "browser-chrome-mobile-layout.spec.ts",
       "browser-cobrowsing-ui.spec.ts",
@@ -39,8 +39,11 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
       "segmented-control-responsive.spec.ts",
       "studio-history-controls.spec.ts",
       "thread-spine-surface.spec.ts",
+      "typing-agent-stack.spec.ts",
     ],
     titles: [
+      "typing avatar stacks keep status text clear in light on desktop and phones",
+      "typing avatar stacks keep status text clear in dark on desktop and phones",
       "Skills import keeps its title and actions reachable across keyboard resize and rotation",
       "Agent editing keeps Save reachable above the keyboard without remounting the draft",
       "conversation views preserve mounted resources, drafts and split size across narrow layouts",

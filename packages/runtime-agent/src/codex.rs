@@ -3579,7 +3579,7 @@ fn turn_environment_selections(
     TurnEnvironmentSelections::new(default_cwd, environments)
 }
 
-fn resolve_runtime_reasoning_effort(
+pub(crate) fn resolve_runtime_reasoning_effort(
     runtime_effort: Option<&str>,
     job_effort: Option<ReasoningEffort>,
     agent_effort: Option<ReasoningEffort>,
@@ -3607,7 +3607,11 @@ fn resolve_runtime_reasoning_effort(
 /// whose FromStr is case-sensitive and coerces unknown strings into a Custom variant.
 fn agent_reasoning_effort_override() -> Option<ReasoningEffort> {
     let raw = optional_env("CODEX_AGENT_REASONING_EFFORT")?;
-    match raw.to_ascii_lowercase().as_str() {
+    parse_agent_reasoning_effort(&raw)
+}
+
+pub(crate) fn parse_agent_reasoning_effort(raw: &str) -> Option<ReasoningEffort> {
+    match raw.trim().to_ascii_lowercase().as_str() {
         "minimal" => Some(ReasoningEffort::Minimal),
         "low" => Some(ReasoningEffort::Low),
         "medium" => Some(ReasoningEffort::Medium),

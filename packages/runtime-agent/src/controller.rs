@@ -238,6 +238,8 @@ pub struct AgentSecretInventoryItem {
 pub struct JobSecrets {
     pub env: HashMap<String, String>,
     pub inventory: Vec<AgentSecretInventoryItem>,
+    /// Missing/malformed legacy inventory cannot establish setting provenance.
+    pub inventory_complete: bool,
 }
 
 #[derive(Debug)]
@@ -1022,6 +1024,7 @@ impl ControllerClient {
         }
 
         let mut inventory: Vec<AgentSecretInventoryItem> = Vec::new();
+        let mut inventory_complete = parsed.inventory.is_some();
         if let Some(items) = parsed.inventory {
             for item in items {
                 let name = item
@@ -1029,6 +1032,7 @@ impl ControllerClient {
                     .map(|value| value.trim().to_string())
                     .filter(|value| !value.is_empty());
                 let Some(name) = name else {
+                    inventory_complete = false;
                     continue;
                 };
                 let description = item
@@ -1045,7 +1049,11 @@ impl ControllerClient {
             }
         }
 
-        Ok(JobSecrets { env, inventory })
+        Ok(JobSecrets {
+            env,
+            inventory,
+            inventory_complete,
+        })
     }
 
     /// Fetch the durable browser profile for this project (shared scope).

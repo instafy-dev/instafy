@@ -101,7 +101,7 @@ async fn project_preferences_reject_wrong_project_before_direct_worker_workspace
         .project_workspace_dir(&job.project_id.unwrap());
 
     let error = processor
-        .run_isolated_scoped_worker_job(&registration, &job, None, None, HashMap::new())
+        .run_isolated_scoped_worker_job(&registration, &job, None, None, Default::default())
         .await
         .err()
         .expect("mismatched signed scope must fail");

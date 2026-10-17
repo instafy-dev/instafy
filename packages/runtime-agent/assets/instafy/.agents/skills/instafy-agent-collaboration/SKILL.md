@@ -270,7 +270,7 @@ For `mode = "write_scoped"`:
 
 Sibling prompt requirements:
 
-- State the scope boundary and expected evidence.
+- State the scope boundary and expected evidence. Ask for exact files actually inspected, checks run, and remaining gaps; distinguish complete file reads from bounded previews.
 - Include exact source locators from the user request when the sibling needs external evidence.
 - Tell the sibling whether it is read-only or which paths it may edit.
 - Tell the sibling to save durable findings with `instafy agents context put` when the finding may help the lead decision or a future follow-up.
@@ -279,7 +279,8 @@ Sibling prompt requirements:
 Lead continuation requirements:
 
 - Search conversation history and compact context cards first.
-- Reference sibling outputs and failures explicitly.
+- Reference sibling outputs and failures explicitly. A completed job is not proof of complete inspection: reconcile initial preview gaps with actual files/commands cited by the worker. Resolve material missing source, contract, or test evidence with bounded read-only tools or a scoped follow-up; if blocked, state the remaining gap. Do not infer requirements from truncated contracts or present sampled directories as exhaustive coverage.
+- For a failed implementation lane, preserve the outstanding write task and its authorized scope when redispatching; a read-only inspection can diagnose it but cannot complete the requested repair.
 - Decide whether the next step is a final report, a follow-up scoped delegation, a direct answer from existing evidence, or a clarifying question.
 - Produce a final report in the parent conversation only when enough sibling evidence exists and no follow-up delegation is needed.
 - Save a compact project or conversation context card summarizing durable conclusions or unresolved coordination state.

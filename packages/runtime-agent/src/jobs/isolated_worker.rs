@@ -2,14 +2,17 @@
 
 use super::isolated_workspace::{IsolatedFileChange, IsolatedWorkspace, SnapshotLimits};
 use super::*;
-use crate::isolated_tool_worker::{self, IsolatedToolWorkerFailure, IsolatedToolWorkerRequest};
+use crate::isolated_tool_worker::{
+    self, IsolatedToolWorkerFailure, IsolatedToolWorkerRequest, IsolatedWorkerJobConfig,
+};
 use std::io::Cursor;
 use std::time::Duration;
 
 pub(super) struct IsolatedWorkerSettings {
     pub enabled: bool,
-    proxy_base: Option<String>,
+    pub(super) proxy_base: Option<String>,
     model: Option<String>,
+    reasoning_effort: Option<String>,
 }
 
 impl IsolatedWorkerSettings {
@@ -26,7 +29,23 @@ impl IsolatedWorkerSettings {
             model: env::var("CODEX_MODEL")
                 .ok()
                 .filter(|value| !value.trim().is_empty()),
+            reasoning_effort: env::var("CODEX_RUNTIME_REASONING_EFFORT").ok(),
         }
+    }
+
+    pub(super) fn resolve(
+        &self,
+        job: &IsolatedWorkerJobConfig,
+        job_effort: Option<ReasoningEffort>,
+    ) -> (Option<String>, ReasoningEffort) {
+        (
+            job.model.clone().or_else(|| self.model.clone()),
+            crate::codex::resolve_runtime_reasoning_effort(
+                self.reasoning_effort.as_deref(),
+                job_effort,
+                job.reasoning_effort.clone(),
+            ),
+        )
     }
 }
 
@@ -59,7 +78,7 @@ impl JobProcessor {
         job: &LeaseJob,
         progress: Option<JobProgress>,
         cancel_signal: Option<JobCancelSignal>,
-        job_environment: HashMap<String, String>,
+        worker_config: IsolatedWorkerJobConfig,
     ) -> Result<JobExecution> {
         let cancel = cancel_signal.unwrap_or_default();
         ensure_worker_running(&cancel)?;
@@ -127,6 +146,15 @@ impl JobProcessor {
             .clone()
             .or_else(|| normalize_direct_worker_proxy_base(&proxy.url))
             .context("worker proxy URL missing")?;
+        let (model, reasoning_effort) = self.isolated_workers.resolve(
+            &worker_config,
+            reasoning_effort_for_runtime_job(
+                job,
+                prompt_text,
+                false,
+                runtime_job_expectations(&job.payload),
+            ),
+        );
         let request = IsolatedToolWorkerRequest {
             workspace_dir: snapshot.workspace_dir().to_owned(),
             state_dir: snapshot.home_dir().to_owned(),
@@ -141,14 +169,9 @@ impl JobProcessor {
             controller_token: None,
             controller_token_scopes: Vec::new(),
             controller_token_expires_at: None,
-            job_environment,
-            model: self.isolated_workers.model.clone(),
-            reasoning_effort: reasoning_effort_for_runtime_job(
-                job,
-                prompt_text,
-                false,
-                runtime_job_expectations(&job.payload),
-            ),
+            job_environment: worker_config.environment,
+            model,
+            reasoning_effort: Some(reasoning_effort),
         };
         let mut streamed_events = Vec::new();
         let mut streamed_count = 0;
@@ -492,6 +515,45 @@ fn isolated_change_descriptors(changes: &[IsolatedFileChange]) -> Vec<CodexFileD
             ),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::*;
+
+    #[test]
+    fn scoped_worker_model_and_effort_follow_agent_runtime_job_precedence() {
+        let mut runtime = IsolatedWorkerSettings {
+            enabled: true,
+            proxy_base: None,
+            model: Some("runtime-model".into()),
+            reasoning_effort: Some("max".into()),
+        };
+        let agent = IsolatedWorkerJobConfig {
+            model: Some("agent-model".into()),
+            reasoning_effort: Some(ReasoningEffort::Low),
+            ..Default::default()
+        };
+        assert_eq!(
+            runtime.resolve(&agent, Some(ReasoningEffort::High)),
+            (Some("agent-model".into()), ReasoningEffort::Low)
+        );
+        let inherited = IsolatedWorkerJobConfig::default();
+        assert_eq!(
+            runtime.resolve(&inherited, Some(ReasoningEffort::High)),
+            (Some("runtime-model".into()), ReasoningEffort::Max)
+        );
+        runtime.reasoning_effort = None;
+        assert_eq!(
+            runtime.resolve(&inherited, Some(ReasoningEffort::High)).1,
+            ReasoningEffort::High
+        );
+        runtime.reasoning_effort = Some("misspelled".into());
+        assert_eq!(
+            runtime.resolve(&inherited, Some(ReasoningEffort::High)).1,
+            ReasoningEffort::High
+        );
+    }
 }
 
 #[cfg(test)]
