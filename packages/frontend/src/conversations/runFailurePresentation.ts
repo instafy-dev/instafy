@@ -16,6 +16,7 @@ export type RunFailureKind =
   | "missing_verification"
   | "needs_ai"
   | "provider_rate_limited"
+  | "provider_usage_limit"
   | "response_incomplete"
   | "browser_page_missing"
   | "interrupted_run_expired"
@@ -38,6 +39,10 @@ const RUN_FAILURE_FRIENDLY_TEXT: Record<RunFailureKind, string> = {
   // short throttle, so this copy cannot promise when a retry will work.
   provider_rate_limited:
     "The AI provider is limiting requests right now, so this turn stopped. Wait a little, then try again. If it keeps happening, the provider account may have reached its usage limit.",
+  // Used when the run's AI access is not known; see
+  // providerUsageLimitFriendlyText for Instafy AI and for the person's own.
+  provider_usage_limit:
+    "The AI provider account for this turn has reached its usage limit, so it stopped. Try again after the limit resets, or switch to another AI connection.",
   // Used when the provider gave a reason this copy does not name; see
   // INCOMPLETE_RESPONSE_FRIENDLY_TEXT for the ones it does.
   response_incomplete:
@@ -211,6 +216,35 @@ function interruptedRunExpiredFriendlyText(metadata: Record<string, unknown> | n
     : RUN_FAILURE_FRIENDLY_TEXT.interrupted_run_expired;
 }
 
+// A spent usage window of the provider account: Codex's own text for a ChatGPT
+// plan's limit ("You've hit your usage limit. Try again at <time>.", with a
+// straight or a curly apostrophe) and the provider's code for it. It will not
+// clear after a short wait, so it is never retried, and whose account it is
+// decides the copy: Instafy AI's is not the person's to fix.
+const PROVIDER_USAGE_LIMIT_PATTERNS = [/hit your usage limit/i, /\busage_limit_reached\b/i];
+// The time the provider names for the window to reopen.
+const USAGE_LIMIT_RESET_PATTERN = /try again at\s+([^\n]+?)\.?\s*$/im;
+
+const MANAGED_AI_USAGE_LIMIT_FRIENDLY_TEXT =
+  "Instafy AI is unavailable right now: its model provider's usage limit is reached, so this turn stopped. This is on Instafy's side, not your credits or your plan. Try again later.";
+
+function providerUsageLimitFriendlyText(
+  rawText: string,
+  metadata: Record<string, unknown> | null,
+): string {
+  const accessMode = normalizedStringField(metadata, "aiAccessMode");
+  if (accessMode === "managed") {
+    return MANAGED_AI_USAGE_LIMIT_FRIENDLY_TEXT;
+  }
+  if (accessMode !== "byoc") {
+    return RUN_FAILURE_FRIENDLY_TEXT.provider_usage_limit;
+  }
+  const resetsAt = USAGE_LIMIT_RESET_PATTERN.exec(rawText)?.[1]?.trim() ?? "";
+  return resetsAt
+    ? `Your AI provider account has reached its usage limit, so this turn stopped. The provider says to try again at ${resetsAt}, or switch to another AI connection.`
+    : "Your AI provider account has reached its usage limit, so this turn stopped. Try again after it resets, or switch to another AI connection.";
+}
+
 // A 429 that names an exhausted quota or plan limit will not clear after a
 // short wait, so it keeps its raw reason instead of the rate limit copy.
 const PROVIDER_QUOTA_EXHAUSTED_PATTERN =
@@ -233,7 +267,9 @@ const PROVIDER_QUOTA_EXHAUSTED_PATTERN =
  * `missing_verification` and `generic` are excluded because retrying rarely
  * helps and/or the underlying cause is deterministic. `needs_ai` needs a
  * credential, not a retry. A 429 that names an exhausted quota or plan limit
- * never classifies as `provider_rate_limited` (it stays `generic`).
+ * never classifies as `provider_rate_limited` (it stays `generic`), and a
+ * spent usage window is `provider_usage_limit`, which waits hours or days, so
+ * it is neither retried automatically nor offered a manual "Try again".
  * `response_incomplete` is excluded because the provider already billed the
  * cut-short answer, and the same request would most likely stop the same way.
  * `browser_page_missing` is excluded because the person has to open a page or
@@ -638,6 +674,9 @@ export function classifyRunFailureText(rawText: string): Exclude<RunFailureKind,
   if (RESPONSE_INCOMPLETE_PATTERN.test(rawText)) {
     return "response_incomplete";
   }
+  if (PROVIDER_USAGE_LIMIT_PATTERNS.some((pattern) => pattern.test(rawText))) {
+    return "provider_usage_limit";
+  }
   if (
     PROVIDER_RATE_LIMITED_PATTERNS.some((pattern) => pattern.test(rawText)) &&
     !PROVIDER_QUOTA_EXHAUSTED_PATTERN.test(rawText)
@@ -684,15 +723,26 @@ export function resolveRunFailurePresentation(params: {
   if (!kind) {
     return null;
   }
-  const friendlyText =
-    kind === "generic"
-      ? inlineGenericFailureText(rawText)
-      : kind === "response_incomplete"
-        ? incompleteResponseFriendlyText(rawText)
-        : kind === INTERRUPTED_RUN_EXPIRED_KIND
-          ? interruptedRunExpiredFriendlyText(metadata)
-          : RUN_FAILURE_FRIENDLY_TEXT[kind];
-  return { kind, friendlyText, rawText };
+  return { kind, friendlyText: runFailureFriendlyText(kind, rawText, metadata), rawText };
+}
+
+function runFailureFriendlyText(
+  kind: RunFailureKind,
+  rawText: string,
+  metadata: Record<string, unknown> | null,
+): string {
+  switch (kind) {
+    case "generic":
+      return inlineGenericFailureText(rawText);
+    case "response_incomplete":
+      return incompleteResponseFriendlyText(rawText);
+    case "provider_usage_limit":
+      return providerUsageLimitFriendlyText(rawText, metadata);
+    case INTERRUPTED_RUN_EXPIRED_KIND:
+      return interruptedRunExpiredFriendlyText(metadata);
+    default:
+      return RUN_FAILURE_FRIENDLY_TEXT[kind];
+  }
 }
 
 export type RetryingStatusPresentation = {

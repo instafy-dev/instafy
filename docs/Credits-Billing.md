@@ -241,6 +241,17 @@ counts codex reports, and codex multi-agent v2 subagent requests never get one, 
 under-charges them. The proxy sees their upstream usage, so its meter charges them once metering
 moves there; nothing changes the legacy charge before then.
 
+A managed-AI turn that failed before any model answered gives back its prompt reserve and its
+daily prompt slot (`refund_managed_ai_reserve_on_failed_completion`): when the proxy refused the
+request (auth, configuration; refund reason `proxy_auth_rejected`), or the provider refused it
+for a spent plan window or quota ("You've hit your usage limit", `usage_limit_reached`,
+`usage_not_included`, `insufficient_quota`; reason `provider_limit_rejected`), and nothing shows
+a model was reached: no completed Codex turn, no visible message or tool update, and, for a
+provider limit, no call in the job's usage receipt that did not end in an error. A throttling
+429, a 5xx or a timeout keeps the reserve: it may have cut a paid answer short. The Studio tells
+a managed-AI run that hit the limit that Instafy AI is unavailable (`aiAccessMode` on the run's
+final message), with no "Try again", since a resend before the window reopens fails the same way.
+
 Ambient multi-human evaluation turns defer the managed reserve and prompt count until
 the agent actually answers. Telemetry and explicitly hidden progress do not start a
 charge; a completion-only answer does, before usage reconciliation. Streaming followed

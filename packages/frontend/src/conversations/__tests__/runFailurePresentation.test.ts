@@ -162,7 +162,8 @@ describe("classifyRunFailureText", () => {
 
   it("does not call a 429 that names an exhausted quota or plan limit a passing rate limit", () => {
     expect(classifyRunFailureText(PROVIDER_INSUFFICIENT_QUOTA)).toBeNull();
-    expect(classifyRunFailureText(PROVIDER_USAGE_LIMIT_REACHED)).toBeNull();
+    // A spent usage window has its own kind, which is never retried.
+    expect(classifyRunFailureText(PROVIDER_USAGE_LIMIT_REACHED)).toBe("provider_usage_limit");
     expect(
       classifyRunFailureText(
         'exceeded retry limit, last status: 429 Too Many Requests: {"error":{"type":"usage_not_included"}}',
@@ -212,7 +213,7 @@ const RUN_FAILURE_FIXTURES = resolve(
   "packages/runtime-controller/src/run_failure_fixtures.json",
 );
 const runFailureFixtures = JSON.parse(readFileSync(RUN_FAILURE_FIXTURES, "utf8")) as {
-  cases: { name: string; text: string; providerRateLimited: boolean }[];
+  cases: { name: string; text: string; providerRateLimited: boolean; providerUsageLimit?: boolean }[];
 };
 
 describe("provider rate limit fixtures shared with the controller", () => {
@@ -228,6 +229,53 @@ describe("provider rate limit fixtures shared with the controller", () => {
       );
     },
   );
+});
+
+describe("provider usage limit", () => {
+  const FAILED = { source: "agent", outcome: "failed", messageType: "error", jobId: "job-1" };
+  const CODEX_PLAN_LIMIT = "You\u2019ve hit your usage limit. Try again at Oct 23rd, 2026 8:40 AM.";
+
+  it("names a spent usage window, with either apostrophe, and never retries it", () => {
+    for (const text of [
+      CODEX_PLAN_LIMIT,
+      "You've hit your usage limit. Upgrade to Pro or try again later.",
+      "upstream_rate_limit (usage_limit_reached)",
+    ]) {
+      const presentation = resolveRunFailurePresentation({ metadata: FAILED, content: text });
+      expect(presentation?.kind, text).toBe("provider_usage_limit");
+      expect(resolveRunFailureAutoRetryDelayMs({ presentation: presentation! })).toBeNull();
+    }
+  });
+
+  it("tells a managed-AI run it is Instafy's limit, without the provider's date", () => {
+    const presentation = resolveRunFailurePresentation({
+      metadata: { ...FAILED, aiAccessMode: "managed" },
+      content: CODEX_PLAN_LIMIT,
+    });
+    expect(presentation?.friendlyText).toContain("Instafy AI is unavailable right now");
+    expect(presentation?.friendlyText).toContain("not your credits");
+    expect(presentation?.friendlyText).not.toContain("Oct 23rd");
+    expect(presentation?.rawText).toBe(CODEX_PLAN_LIMIT);
+  });
+
+  it("tells a run on the person's own AI when the provider says it resets", () => {
+    const presentation = resolveRunFailurePresentation({
+      metadata: { ...FAILED, aiAccessMode: "byoc" },
+      content: CODEX_PLAN_LIMIT,
+    });
+    expect(presentation?.friendlyText).toBe(
+      "Your AI provider account has reached its usage limit, so this turn stopped. The provider says to try again at Oct 23rd, 2026 8:40 AM, or switch to another AI connection.",
+    );
+  });
+
+  it("matches the fixtures shared with the controller", () => {
+    for (const fixture of runFailureFixtures.cases) {
+      expect(
+        classifyRunFailureText(fixture.text) === "provider_usage_limit",
+        fixture.name,
+      ).toBe(fixture.providerUsageLimit === true);
+    }
+  });
 });
 
 describe("hasFailedRunMetadata", () => {
@@ -1076,16 +1124,26 @@ describe("resolveRunFailurePresentation", () => {
   });
 
   it("keeps the raw quota reason for a 429 that names an exhausted quota or plan limit", () => {
-    for (const rawText of [PROVIDER_INSUFFICIENT_QUOTA, PROVIDER_USAGE_LIMIT_REACHED]) {
-      // A standalone error bubble has no quota guard of its own, so the
-      // classifier must not hide the quota type behind the rate limit copy.
-      const presentation = resolveRunFailurePresentation({
-        metadata: { source: "agent", outcome: "failed", messageType: "error", jobId: "job-1" },
-        content: rawText,
-        assumeFailed: true,
-      });
-      expect(presentation).toEqual({ kind: "generic", friendlyText: rawText, rawText });
-    }
+    // A standalone error bubble has no quota guard of its own, so the
+    // classifier must not hide the quota type behind the rate limit copy.
+    const quota = resolveRunFailurePresentation({
+      metadata: { source: "agent", outcome: "failed", messageType: "error", jobId: "job-1" },
+      content: PROVIDER_INSUFFICIENT_QUOTA,
+      assumeFailed: true,
+    });
+    expect(quota).toEqual({
+      kind: "generic",
+      friendlyText: PROVIDER_INSUFFICIENT_QUOTA,
+      rawText: PROVIDER_INSUFFICIENT_QUOTA,
+    });
+    // A spent usage window says so, and keeps the raw reason behind Details.
+    const usage = resolveRunFailurePresentation({
+      metadata: { source: "agent", outcome: "failed", messageType: "error", jobId: "job-1" },
+      content: PROVIDER_USAGE_LIMIT_REACHED,
+      assumeFailed: true,
+    });
+    expect(usage?.kind).toBe("provider_usage_limit");
+    expect(usage?.rawText).toBe(PROVIDER_USAGE_LIMIT_REACHED);
   });
 
   it("keeps the inline generic reason to the first line and bounds its length", () => {

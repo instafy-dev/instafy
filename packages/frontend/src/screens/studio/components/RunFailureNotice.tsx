@@ -61,6 +61,16 @@ export function useRunFailureRetry(): RunFailureRetryContextValue | null {
   return useContext(RunFailureRetryContext);
 }
 
+/** The run's AI access ("managed" or "byoc") its final message names. */
+function readAiAccessMode(message: ChatMessage): string {
+  const metadata = message.metadata;
+  if (typeof metadata !== "object" || metadata === null || Array.isArray(metadata)) {
+    return "";
+  }
+  const mode = (metadata as Record<string, unknown>)["aiAccessMode"];
+  return typeof mode === "string" ? mode.trim().toLowerCase() : "";
+}
+
 /** Where focus goes once a pressed control leaves the card's actions row. */
 type FocusHandOff = { to: "details"; sawPending: boolean } | { to: "retry" };
 
@@ -154,11 +164,17 @@ export function RunFailureMessageBody({
     [isRetrySuperseded, message],
   );
   const needsAi = presentation.kind === "needs_ai";
+  // A spent usage window reopens in hours or days, so a resend now would fail
+  // the same way. Instafy AI's own limit leaves the person nothing to do; on
+  // their own account they can switch to another AI connection.
+  const usageLimit = presentation.kind === "provider_usage_limit";
+  const usageLimitOnOwnAi = usageLimit && readAiAccessMode(message) === "byoc";
   const onConnectAi = retryContext?.onConnectAi;
   const cancelAutoRetry = retryContext?.cancelAutoRetry;
   // Manual controls give way to the automatic states; a pressed "Try again"
   // keeps its pending spinner until the request settles, then reads "Retried".
-  const showManualControls = retryContext !== null && !autoRetrying && !scheduledAutoRetry && !needsAi;
+  const showManualControls =
+    retryContext !== null && !autoRetrying && !scheduledAutoRetry && !needsAi && !usageLimit;
   const showRetry = showManualControls && (retryPending || !superseded);
   const showRetried = showManualControls && superseded && !retryPending;
 
@@ -245,6 +261,17 @@ export function RunFailureMessageBody({
             onPress={onConnectAi}
           >
             Connect AI
+          </Button>
+        ) : null}
+        {usageLimitOnOwnAi && onConnectAi ? (
+          <Button
+            variant="secondary"
+            size="sm"
+            radius="xl"
+            data-testid="run-failure-manage-ai"
+            onPress={onConnectAi}
+          >
+            Manage AI
           </Button>
         ) : null}
         {scheduledAutoRetry && !autoRetrying ? (

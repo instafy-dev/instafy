@@ -1,5 +1,5 @@
 {
-  "note": "The one list both provider rate-limit classifiers are pinned to: is_provider_rate_limited_failure in packages/runtime-controller/src/agent.rs, which labels a failed run in the agent's history, and the provider_rate_limited kind of classifyRunFailureText in packages/frontend/src/conversations/runFailurePresentation.ts, which picks the Studio's failure card. A pattern changed on one side and not the other fails a test on both. `providerRateLimited` is whether the text is that kind.",
+  "note": "The one list both provider rate-limit classifiers are pinned to: is_provider_rate_limited_failure in packages/runtime-controller/src/agent.rs, which labels a failed run in the agent's history, and the provider_rate_limited kind of classifyRunFailureText in packages/frontend/src/conversations/runFailurePresentation.ts, which picks the Studio's failure card. A pattern changed on one side and not the other fails a test on both. `providerRateLimited` is whether the text is that kind. `providerUsageLimit` is whether the text is a spent usage window (the Studio's provider_usage_limit kind); the controller's telemetry treats each such text as an expected provider limit.",
   "cases": [
     {
       "name": "codex gives up after the provider answered 429",
@@ -59,7 +59,8 @@
     {
       "name": "a reached usage limit keeps its own reason",
       "text": "upstream_rate_limit (usage_limit_reached)",
-      "providerRateLimited": false
+      "providerRateLimited": false,
+      "providerUsageLimit": true
     },
     {
       "name": "a plan without the usage keeps its own reason",
@@ -115,6 +116,18 @@
       "name": "an unrelated failure",
       "text": "Workspace file bookkeeping/profile.json was not found",
       "providerRateLimited": false
+    },
+    {
+      "name": "codex's own text for a spent ChatGPT plan window",
+      "text": "You’ve hit your usage limit. Try again at Oct 23rd, 2026 8:40 AM.",
+      "providerRateLimited": false,
+      "providerUsageLimit": true
+    },
+    {
+      "name": "the same text with a straight apostrophe",
+      "text": "You've hit your usage limit. Upgrade to Pro or try again later.",
+      "providerRateLimited": false,
+      "providerUsageLimit": true
     }
   ]
 }

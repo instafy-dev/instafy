@@ -528,6 +528,158 @@ async fn managed_ai_prompt_refunds_when_completion_fails_before_upstream() -> an
     fixture.cleanup().await
 }
 
+const PROVIDER_USAGE_LIMIT_ERROR: &str =
+    "You\u{2019}ve hit your usage limit. Try again at Oct 23rd, 2026 8:40 AM.";
+
+/// A turn the provider refused for a spent usage window never reached a
+/// model: it gets its reserve back, unless its usage receipt shows a call
+/// that did not fail. A plain throttle keeps the reserve.
+#[tokio::test]
+async fn managed_ai_prompt_refunds_when_the_provider_refused_a_spent_limit() -> anyhow::Result<()> {
+    let failed_call = || {
+        let mut receipt = crate::task_usage::tests::receipt_fixture();
+        let call = &mut receipt["calls"][0];
+        call["phase"] = json!("routing");
+        call["outcome"] = json!("error");
+        call["usageStatus"] = json!("unknown");
+        call.as_object_mut().unwrap().remove("usage");
+        receipt
+    };
+    let mut answered_then_limited = crate::task_usage::tests::receipt_fixture();
+    let mut limited = failed_call()["calls"][0].clone();
+    limited["invocationId"] = json!("5f0c8a52-3f4e-4b8e-9a51-0f6f2ad1c0e1");
+    limited["phase"] = json!("main");
+    answered_then_limited["calls"]
+        .as_array_mut()
+        .unwrap()
+        .push(limited);
+
+    struct Case {
+        label: &'static str,
+        error_message: &'static str,
+        receipt: serde_json::Value,
+        refunded: bool,
+    }
+    for case in [
+        Case {
+            label: "spent-usage-limit",
+            error_message: PROVIDER_USAGE_LIMIT_ERROR,
+            receipt: failed_call(),
+            refunded: true,
+        },
+        Case {
+            label: "usage-limit-after-an-answer",
+            error_message: PROVIDER_USAGE_LIMIT_ERROR,
+            receipt: answered_then_limited.clone(),
+            refunded: false,
+        },
+        Case {
+            label: "throttled",
+            error_message: "exceeded retry limit, last status: 429 Too Many Requests",
+            receipt: failed_call(),
+            refunded: false,
+        },
+    ] {
+        let Some(fixture) = seed_reserved_managed_ai_prompt(case.label).await? else {
+            eprintln!("skipping managed AI usage-limit refund test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        // As the managed lane's dispatch leaves it.
+        fixture
+            .pool
+            .get()
+            .await?
+            .execute(
+                "update agent_jobs
+                 set payload = jsonb_set(payload, '{metadata,aiAccessMode}', '\"managed\"'::jsonb)
+                 where id = $1",
+                &[&fixture.job_id],
+            )
+            .await?;
+
+        let status = post_agent_complete(
+            &fixture,
+            json!({
+                "job_id": fixture.job_id,
+                "outcome": "failed",
+                "error_message": case.error_message,
+                "artifacts": [case.receipt],
+            }),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK, "{}", case.label);
+
+        let rows = ledger_rows(&fixture.pool, &fixture.project_id).await?;
+        let refunds = rows
+            .iter()
+            .filter(|(reason, _, _)| reason == "managed_ai_refund")
+            .count();
+        assert_eq!(
+            refunds,
+            usize::from(case.refunded),
+            "{}: got {rows:?}",
+            case.label
+        );
+        let reserve_metadata = ledger_metadata_by_key(
+            &fixture.pool,
+            &fixture.project_id,
+            &format!("managed-ai-prompt:{}", fixture.prompt_id),
+        )
+        .await?;
+        let prompt = prompt_metadata(&fixture.pool, &fixture.prompt_id).await?;
+        let (_, run_metadata) = run_row(&fixture.pool, &fixture.run_id).await?;
+        if case.refunded {
+            assert_eq!(
+                credit_balance(&fixture.pool, &fixture.org_id).await?,
+                fixture.reserved_balance + fixture.burn_amount
+            );
+            assert_eq!(
+                reserve_metadata["refundReason"],
+                json!("provider_limit_rejected")
+            );
+            assert_eq!(
+                run_metadata["managedAiCredit"]["refund"]["refundReason"],
+                json!("provider_limit_rejected")
+            );
+            assert_eq!(prompt["managedAiUsed"], json!(false));
+            assert_eq!(
+                daily_prompts_used(&fixture.pool, &fixture.owner_user_id).await?,
+                0
+            );
+        } else {
+            assert_eq!(
+                reserve_metadata["refunded"],
+                serde_json::Value::Null,
+                "{}",
+                case.label
+            );
+            assert_eq!(prompt["managedAiUsed"], json!(true), "{}", case.label);
+        }
+
+        // The final message says whose AI hit the limit, for the Studio.
+        let message: PgJson<serde_json::Value> = fixture
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select metadata from conversation_messages
+                 where metadata->>'jobId' = $1 and metadata->>'source' = 'agent'
+                 order by created_at desc limit 1",
+                &[&fixture.job_id.to_string()],
+            )
+            .await?
+            .get(0);
+        assert_eq!(
+            message.0["aiAccessMode"],
+            json!("managed"),
+            "{}",
+            case.label
+        );
+        fixture.cleanup().await?;
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn managed_ai_prompt_keeps_charge_when_failure_may_have_reached_upstream(
 ) -> anyhow::Result<()> {

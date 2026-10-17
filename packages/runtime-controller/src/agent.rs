@@ -2563,25 +2563,66 @@ async fn apply_deferred_managed_ai_billing_on_first_visible_message(
     Ok((burned && crate::credits::credit_ledger_row_written(&burn_metadata)).then_some(org_id))
 }
 
-/// Whether a failed completion's error text shows the request died at the
-/// proxy before any model was called. Kept to auth and configuration
-/// rejections on purpose: a 429, a 5xx or a timeout may already have consumed
-/// tokens upstream, and those settle through usage reconciliation instead.
-fn managed_ai_failure_never_reached_upstream(error_message: Option<&str>) -> bool {
-    const MARKERS: &[&str] = &[
+const PROXY_AUTH_REJECTED_REFUND_REASON: &str = "proxy_auth_rejected";
+const PROVIDER_LIMIT_REJECTED_REFUND_REASON: &str = "provider_limit_rejected";
+
+/// Why a failed managed-AI completion never reached a model, as the refund's
+/// reason, or None when it may have. A throttling 429, a 5xx or a timeout may
+/// already have consumed tokens upstream; those settle through usage
+/// reconciliation instead.
+///
+/// - The proxy refused the request outright (auth, configuration).
+/// - The provider refused it for a spent plan window or quota. Such a 429 is
+///   decided before any generation, unlike a throttle or a 5xx, which may
+///   have cut a paid answer short. The caller still refuses the refund when
+///   anything shows a model call succeeded.
+fn managed_ai_failure_refund_reason(error_message: Option<&str>) -> Option<&'static str> {
+    const PROXY_REJECTED: &[&str] = &[
         "proxy token missing credential_id",
         "unexpected status 401",
         "401 unauthorized",
         "proxy controller integration is not configured",
     ];
-    let Some(message) = error_message else {
-        return false;
-    };
-    let normalized = message.trim().to_lowercase();
+    // Codex's own text for a spent ChatGPT plan window (with a straight or a
+    // curly apostrophe), and the provider and proxy codes for a spent limit.
+    const LIMIT_REJECTED: &[&str] = &[
+        "hit your usage limit",
+        "usage_limit_reached",
+        "usage_not_included",
+        "insufficient_quota",
+    ];
+    let normalized = error_message?.trim().to_lowercase();
     if normalized.is_empty() {
-        return false;
+        return None;
     }
-    MARKERS.iter().any(|marker| normalized.contains(marker))
+    if PROXY_REJECTED
+        .iter()
+        .any(|marker| normalized.contains(marker))
+    {
+        return Some(PROXY_AUTH_REJECTED_REFUND_REASON);
+    }
+    if LIMIT_REJECTED
+        .iter()
+        .any(|marker| normalized.contains(marker))
+    {
+        return Some(PROVIDER_LIMIT_REJECTED_REFUND_REASON);
+    }
+    None
+}
+
+/// Whether the job's usage receipt (`ai/task-usage`) records a model call
+/// that did not end in an error: such a call may have been answered and paid.
+fn artifacts_show_a_model_call_that_did_not_fail(artifacts: &JsonValue) -> bool {
+    artifacts
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|artifact| {
+            artifact.get("kind").and_then(JsonValue::as_str) == Some("ai/task-usage")
+        })
+        .filter_map(|artifact| artifact.get("calls").and_then(JsonValue::as_array))
+        .flatten()
+        .any(|call| call.get("outcome").and_then(JsonValue::as_str) != Some("error"))
 }
 
 /// A managed-AI run that failed before reaching a model still holds the
@@ -2603,15 +2644,21 @@ async fn refund_managed_ai_reserve_on_failed_completion(
     error_message: Option<&str>,
     artifacts_value: &JsonValue,
 ) -> Result<Option<Uuid>, (StatusCode, Json<ApiError>)> {
-    const REFUND_REASON: &str = "proxy_auth_rejected";
-
     let managed_ai_used = job_payload
         .get("metadata")
         .and_then(JsonValue::as_object)
         .and_then(|metadata| metadata.get("managedAiUsed"))
         .and_then(JsonValue::as_bool)
         .unwrap_or(false);
-    if !managed_ai_used || !managed_ai_failure_never_reached_upstream(error_message) {
+    if !managed_ai_used {
+        return Ok(None);
+    }
+    let Some(refund_reason) = managed_ai_failure_refund_reason(error_message) else {
+        return Ok(None);
+    };
+    if refund_reason == PROVIDER_LIMIT_REJECTED_REFUND_REASON
+        && artifacts_show_a_model_call_that_did_not_fail(artifacts_value)
+    {
         return Ok(None);
     }
     let Some(prompt_uuid) = prompt_id else {
@@ -2647,7 +2694,7 @@ async fn refund_managed_ai_reserve_on_failed_completion(
             &org_id,
             leased_runtime_id,
             &prompt_uuid,
-            REFUND_REASON,
+            refund_reason,
         )
         .await
         {
@@ -2709,7 +2756,7 @@ async fn refund_managed_ai_reserve_on_failed_completion(
         if let Some(map) = refund_trace.as_object_mut() {
             map.insert(
                 "refundReason".to_string(),
-                JsonValue::String(REFUND_REASON.to_string()),
+                JsonValue::String(refund_reason.to_string()),
             );
         }
         if let Err((status, Json(api_error))) =
@@ -3264,16 +3311,19 @@ pub(crate) async fn agent_complete(
             });
             // Apply the runtime preference to the final assistant message as well.
             let message_metadata = attach_lease_metrics_to_metadata(
-                merge_runtime_preference_from_job_payload(
-                    build_agent_message_metadata(
-                        &outcome_lower,
-                        provider_value.as_deref(),
-                        artifacts_count,
-                        &artifacts_value,
-                        credit_snapshot_value.as_ref(),
-                        error_message.as_deref(),
-                        &job_uuid,
-                        &suggested_replies,
+                stamp_ai_access_mode_from_job_payload(
+                    merge_runtime_preference_from_job_payload(
+                        build_agent_message_metadata(
+                            &outcome_lower,
+                            provider_value.as_deref(),
+                            artifacts_count,
+                            &artifacts_value,
+                            credit_snapshot_value.as_ref(),
+                            error_message.as_deref(),
+                            &job_uuid,
+                            &suggested_replies,
+                        ),
+                        &job_payload,
                     ),
                     &job_payload,
                 ),
@@ -5230,6 +5280,31 @@ fn build_agent_job_payload(
 
 // Ensure every agent message keeps the runtime selection metadata that dispatch attached to the job,
 // so downstream consumers (UI, history, tests) can see which runtime handled the response.
+/// Copy the run's AI access decision (`aiAccessMode`: "managed" for Instafy
+/// AI, "byoc" for the person's own credential) from the job onto its final
+/// message. The Studio words a provider limit on Instafy's account differently
+/// from one on the person's own.
+fn stamp_ai_access_mode_from_job_payload(
+    metadata: JsonValue,
+    job_payload: &JsonValue,
+) -> JsonValue {
+    let mode = job_payload
+        .get("metadata")
+        .and_then(|metadata| metadata.get("aiAccessMode"))
+        .and_then(JsonValue::as_str)
+        .filter(|mode| matches!(*mode, "managed" | "byoc"));
+    match (metadata, mode) {
+        (JsonValue::Object(mut map), Some(mode)) => {
+            map.insert(
+                "aiAccessMode".to_string(),
+                JsonValue::String(mode.to_string()),
+            );
+            JsonValue::Object(map)
+        }
+        (metadata, _) => metadata,
+    }
+}
+
 fn merge_runtime_preference_from_job_payload(
     metadata: JsonValue,
     job_payload: &JsonValue,
@@ -5633,35 +5708,103 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn managed_ai_failure_reaches_no_model(error_message: Option<&str>) -> bool {
+        managed_ai_failure_refund_reason(error_message).is_some()
+    }
+
     #[test]
     fn managed_ai_failure_classifier_matches_only_proxy_rejections() {
-        assert!(managed_ai_failure_never_reached_upstream(Some(
+        assert!(managed_ai_failure_reaches_no_model(Some(
             "unexpected status 401 Unauthorized: proxy token missing credential_id for BYOC request, url: http://proxy:8789/v1/responses"
         )));
-        assert!(managed_ai_failure_never_reached_upstream(Some(
+        assert!(managed_ai_failure_reaches_no_model(Some(
             "Unexpected status 401 Unauthorized"
         )));
-        assert!(managed_ai_failure_never_reached_upstream(Some(
+        assert!(managed_ai_failure_reaches_no_model(Some(
             "proxy token missing credential_id for BYOC request"
         )));
-        assert!(managed_ai_failure_never_reached_upstream(Some(
+        assert!(managed_ai_failure_reaches_no_model(Some(
             "proxy controller integration is not configured"
         )));
 
-        assert!(!managed_ai_failure_never_reached_upstream(Some(
+        assert!(!managed_ai_failure_reaches_no_model(Some(
             "unexpected status 429 Too Many Requests"
         )));
-        assert!(!managed_ai_failure_never_reached_upstream(Some(
+        assert!(!managed_ai_failure_reaches_no_model(Some(
             "unexpected status 500 Internal Server Error"
         )));
-        assert!(!managed_ai_failure_never_reached_upstream(Some(
+        assert!(!managed_ai_failure_reaches_no_model(Some(
             "unexpected status 502 Bad Gateway: upstream request failed"
         )));
-        assert!(!managed_ai_failure_never_reached_upstream(Some(
+        assert!(!managed_ai_failure_reaches_no_model(Some(
             "request timed out after 120s"
         )));
-        assert!(!managed_ai_failure_never_reached_upstream(Some("   ")));
-        assert!(!managed_ai_failure_never_reached_upstream(None));
+        assert!(!managed_ai_failure_reaches_no_model(Some("   ")));
+        assert!(!managed_ai_failure_reaches_no_model(None));
+    }
+
+    #[test]
+    fn a_runs_final_message_says_whose_ai_it_used() {
+        let message = json!({"source": "agent", "outcome": "failed"});
+        let managed = stamp_ai_access_mode_from_job_payload(
+            message.clone(),
+            &json!({"metadata": {"aiAccessMode": "managed", "managedAiUsed": false}}),
+        );
+        assert_eq!(managed["aiAccessMode"], "managed");
+        let byoc = stamp_ai_access_mode_from_job_payload(
+            message.clone(),
+            &json!({"metadata": {"aiAccessMode": "byoc"}}),
+        );
+        assert_eq!(byoc["aiAccessMode"], "byoc");
+        assert_eq!(
+            stamp_ai_access_mode_from_job_payload(message.clone(), &json!({"metadata": {}})),
+            message
+        );
+        assert_eq!(
+            stamp_ai_access_mode_from_job_payload(
+                message.clone(),
+                &json!({"metadata": {"aiAccessMode": "<script>"}})
+            ),
+            message
+        );
+    }
+
+    #[test]
+    fn a_spent_provider_limit_never_reached_a_model() {
+        for text in [
+            "You\u{2019}ve hit your usage limit. Try again at Oct 23rd, 2026 8:40 AM.",
+            "You've hit your usage limit. Upgrade to Pro or try again later.",
+            "unexpected status 429 Too Many Requests: {\"error\":{\"type\":\"usage_limit_reached\"}}",
+            "exceeded retry limit, last status: 429 Too Many Requests: insufficient_quota",
+        ] {
+            assert_eq!(
+                managed_ai_failure_refund_reason(Some(text)),
+                Some(PROVIDER_LIMIT_REJECTED_REFUND_REASON),
+                "{text}"
+            );
+        }
+        assert_eq!(
+            managed_ai_failure_refund_reason(Some("proxy token missing credential_id")),
+            Some(PROXY_AUTH_REJECTED_REFUND_REASON)
+        );
+        // A plain throttle may have cut a paid answer short.
+        assert_eq!(
+            managed_ai_failure_refund_reason(Some(
+                "exceeded retry limit, last status: 429 Too Many Requests"
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn a_usage_receipt_with_an_answered_call_shows_the_model_was_reached() {
+        let only_failed = json!([{"kind": "ai/task-usage", "calls": [
+            {"phase": "routing", "outcome": "error"}]}]);
+        assert!(!artifacts_show_a_model_call_that_did_not_fail(&only_failed));
+        let answered = json!([{"kind": "ai/task-usage", "calls": [
+            {"phase": "routing", "outcome": "success"}, {"phase": "main", "outcome": "error"}]}]);
+        assert!(artifacts_show_a_model_call_that_did_not_fail(&answered));
+        assert!(!artifacts_show_a_model_call_that_did_not_fail(&json!([])));
     }
 
     #[test]
