@@ -28088,6 +28088,119 @@ async fn load_skill_setup_openers_finds_openers_behind_the_history_window() -> a
     Ok(())
 }
 
+/// Oct 16: one build turn wrote over a hundred progress rows (reasoning, tool
+/// calls, status), so the newest-80 window held only them plus the latest
+/// request, and "dig deeper for every city" reached the agent without the
+/// itinerary it referred to. Progress rows no longer count against the limit.
+#[tokio::test]
+async fn load_conversation_history_for_agent_limit_skips_progress_rows() -> anyhow::Result<()> {
+    let Some((mut client, connection_handle)) = connect_test_db().await? else {
+        eprintln!("skipping agent history test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    client
+        .batch_execute(
+            "CREATE TEMP TABLE conversation_messages (
+                id uuid PRIMARY KEY,
+                conversation_id uuid not null,
+                prompt_id uuid,
+                role text not null,
+                content text not null,
+                metadata jsonb,
+                created_at timestamptz not null default now()
+            );",
+        )
+        .await?;
+
+    let conversation_id = Uuid::new_v4();
+    let mut rows: Vec<(&str, String, serde_json::Value)> = vec![
+        (
+            "user",
+            "Plan two weeks in a country by train".to_string(),
+            json!({}),
+        ),
+        (
+            "assistant",
+            "Itinerary: City A, City B, City C, City D".to_string(),
+            json!({"source": "agent", "outcome": "succeeded"}),
+        ),
+        ("user", "Make it calmer".to_string(), json!({})),
+    ];
+    for index in 0..120 {
+        let message_type = ["reasoning", "command_execution", "status", "file_change"][index % 4];
+        rows.push((
+            "assistant",
+            format!("progress {index}"),
+            json!({
+                "source": "agent",
+                "kind": "update",
+                "outcome": "in_progress",
+                "messageType": message_type,
+            }),
+        ));
+    }
+    rows.push((
+        "assistant",
+        "Made it calmer".to_string(),
+        json!({"source": "agent", "outcome": "succeeded"}),
+    ));
+    rows.push((
+        "assistant",
+        "Which value should I use?".to_string(),
+        json!({"source": "agent", "kind": "update", "outcome": "in_progress", "messageType": "secret_request"}),
+    ));
+    rows.push(("user", "Dig deeper for every city".to_string(), json!({})));
+    for (minute, (role, content, metadata)) in rows.iter().enumerate() {
+        client
+            .execute(
+                "INSERT INTO conversation_messages
+                   (id, conversation_id, role, content, metadata, created_at)
+                 VALUES ($1, $2, $3, $4, $5::jsonb,
+                         '2026-01-01T00:00:00Z'::timestamptz + ($6::int * interval '1 minute'))",
+                &[
+                    &Uuid::new_v4(),
+                    &conversation_id,
+                    role,
+                    content,
+                    &PgJson(metadata),
+                    &(minute as i32),
+                ],
+            )
+            .await?;
+    }
+
+    let transaction = client.transaction().await?;
+    let history = crate::agent::load_conversation_history_for_agent(
+        &transaction,
+        &conversation_id,
+        None,
+        None,
+        80,
+    )
+    .await
+    .expect("load agent history");
+    let seen: Vec<&str> = history
+        .iter()
+        .map(|entry| entry["content"].as_str().expect("content"))
+        .collect();
+    assert_eq!(
+        seen,
+        vec![
+            "Plan two weeks in a country by train",
+            "Itinerary: City A, City B, City C, City D",
+            "Make it calmer",
+            "Made it calmer",
+            "Which value should I use?",
+            "Dig deeper for every city",
+        ]
+    );
+
+    transaction.rollback().await?;
+    connection_handle.abort();
+    Ok(())
+}
+
 /// Oct 1: the agent read the controller's startup notice and an earlier run's
 /// raw 429 error as its own replies. Its leased history now leaves the
 /// dispatch notice out and reads the failed run as a label, while a scheduled
