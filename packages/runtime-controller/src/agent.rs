@@ -3443,7 +3443,9 @@ async fn reconcile_completion_usage(
                 Ok(charge) => {
                     // A zero adjustment only merges metadata into the
                     // reserve row, and a replayed one writes nothing.
-                    if charge.ledger_row_written {
+                    // An unpaid remainder changes what the person is told
+                    // about their credits even when no row was written.
+                    if charge.ledger_row_written || charge.unpaid_units > 0 {
                         completion_credit_org_id = Some(org_id);
                     }
                     if let Some(run_uuid) = run_id {
@@ -3523,6 +3525,7 @@ async fn reconcile_completion_usage(
                                 "reservedUnits": charge.reserve_units,
                                 "chargedUnits": charge.charged_units,
                                 "adjustmentUnits": charge.adjustment_units,
+                                "unpaidUnits": charge.unpaid_units,
                                 "inputUsdMicros": charge.input_cost_usd_micros,
                                 "cachedInputUsdMicros": charge.cached_input_cost_usd_micros,
                                 "outputUsdMicros": charge.output_cost_usd_micros,

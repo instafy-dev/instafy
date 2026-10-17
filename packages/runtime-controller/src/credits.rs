@@ -341,6 +341,9 @@ pub(crate) struct ManagedAiUsageCharge {
     pub(crate) reserve_units: i32,
     pub(crate) charged_units: i32,
     pub(crate) adjustment_units: i32,
+    /// The part of a positive adjustment the org's balance could not cover;
+    /// the turn already ran, so it is recorded rather than refused.
+    pub(crate) unpaid_units: i32,
     /// Whether reconciliation wrote a new adjustment ledger row: false for a
     /// zero adjustment (metadata merge only) and for a replayed one.
     pub(crate) ledger_row_written: bool,
@@ -412,6 +415,7 @@ pub(crate) fn calculate_managed_ai_usage_charge(
         reserve_units,
         charged_units,
         adjustment_units: charged_units - reserve_units,
+        unpaid_units: 0,
         ledger_row_written: false,
         input_cost_usd_micros,
         cached_input_cost_usd_micros,
@@ -1633,6 +1637,13 @@ pub(crate) async fn merge_credit_ledger_metadata_by_idempotency_key(
     Ok(updated > 0)
 }
 
+/// What a usage charge takes when the org cannot cover all of it: its whole
+/// balance, nothing when it has none.
+pub(crate) fn partial_burn_units(units: i32, available: i32) -> Option<i32> {
+    let partial = units.min(available);
+    (partial > 0).then_some(partial)
+}
+
 pub(crate) async fn reconcile_managed_ai_usage_charge(
     transaction: &Transaction<'_>,
     config: &AppConfig,
@@ -1700,16 +1711,10 @@ pub(crate) async fn reconcile_managed_ai_usage_charge(
             "adjustmentUnits": adjustment_units,
         }
     });
-    merge_credit_ledger_metadata_by_idempotency_key(
-        transaction,
-        org_id,
-        project_id,
-        &base_idempotency_key,
-        &base_metadata_patch,
-    )
-    .await?;
+    let mut base_metadata_patch = base_metadata_patch;
 
     let mut ledger_row_written = false;
+    let mut unpaid_units = 0;
     if adjustment_units > 0 {
         let mut metadata = json!({
             "category": "ai_usage",
@@ -1731,18 +1736,73 @@ pub(crate) async fn reconcile_managed_ai_usage_charge(
                 "adjustmentUnits": adjustment_units,
             }
         });
-        process_credit_burn(
-            transaction,
-            project_id,
-            org_id,
-            runtime_id,
-            adjustment_units,
-            "managed_ai_adjustment",
-            Some(&format!("managed-ai-adjustment:{prompt_id}")),
-            &mut metadata,
-        )
-        .await?;
-        ledger_row_written = credit_ledger_row_written(&metadata);
+        let adjustment_key = format!("managed-ai-adjustment:{prompt_id}");
+        // The turn has already run, so its cost is owed whatever the balance.
+        // A refused burn used to write nothing at all: a 173-unit turn on a
+        // 75-unit balance cost its 1-unit reserve. Take what the org holds
+        // and record the rest as unpaid.
+        let mut units = adjustment_units;
+        for attempt in 0..2 {
+            transaction
+                .batch_execute("savepoint managed_ai_adjustment")
+                .await
+                .map_err(|error| {
+                    internal_error(format!("failed to open adjustment savepoint: {error}"))
+                })?;
+            match process_credit_burn(
+                transaction,
+                project_id,
+                org_id,
+                runtime_id,
+                units,
+                "managed_ai_adjustment",
+                Some(&adjustment_key),
+                &mut metadata,
+            )
+            .await
+            {
+                Ok(_) => {
+                    transaction
+                        .batch_execute("release savepoint managed_ai_adjustment")
+                        .await
+                        .map_err(|error| {
+                            internal_error(format!(
+                                "failed to release adjustment savepoint: {error}"
+                            ))
+                        })?;
+                    ledger_row_written = credit_ledger_row_written(&metadata);
+                    break;
+                }
+                Err(error) => {
+                    transaction
+                        .batch_execute(
+                            "rollback to savepoint managed_ai_adjustment;
+                             release savepoint managed_ai_adjustment",
+                        )
+                        .await
+                        .map_err(|rollback_error| {
+                            internal_error(format!(
+                                "failed to roll back adjustment savepoint: {rollback_error}"
+                            ))
+                        })?;
+                    if attempt > 0 || !error.1.message.contains("insufficient credits") {
+                        return Err(error);
+                    }
+                    let available = get_credit_snapshot(transaction, org_id).await?.balance;
+                    match partial_burn_units(units, available) {
+                        Some(partial) => {
+                            unpaid_units = units - partial;
+                            metadata["cost"]["unpaidUnits"] = json!(unpaid_units);
+                            units = partial;
+                        }
+                        None => {
+                            unpaid_units = units;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
     } else if adjustment_units < 0 {
         let mut metadata = json!({
             "category": "ai_usage",
@@ -1779,9 +1839,23 @@ pub(crate) async fn reconcile_managed_ai_usage_charge(
         ledger_row_written = credit_ledger_row_written(&metadata);
     }
 
+    // The reserve row carries the turn's whole cost; what the org could not
+    // pay is stated there too, so the ledger never claims an adjustment that
+    // was not written.
+    base_metadata_patch["cost"]["unpaidUnits"] = json!(unpaid_units);
+    merge_credit_ledger_metadata_by_idempotency_key(
+        transaction,
+        org_id,
+        project_id,
+        &base_idempotency_key,
+        &base_metadata_patch,
+    )
+    .await?;
+
     Ok(ManagedAiUsageCharge {
         reserve_units: reserved_units,
         adjustment_units,
+        unpaid_units,
         ledger_row_written,
         ..charge
     })
@@ -2924,6 +2998,138 @@ mod tests {
             refund_metadata["refundReason"],
             json!("proxy_auth_rejected")
         );
+
+        connection_handle.abort();
+        Ok(())
+    }
+
+    /// Oct 16: a 173-unit turn on a 75-unit balance wrote no adjustment at
+    /// all (the burn was refused), so it cost its 1-unit reserve. The org now
+    /// pays what it holds and the rest is recorded as unpaid.
+    #[tokio::test]
+    async fn managed_ai_adjustment_charges_what_the_balance_holds() -> anyhow::Result<()> {
+        let Some((mut client, connection_handle)) = connect_test_db().await? else {
+            eprintln!("skipping managed AI partial adjustment test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+
+        create_credit_tables(&client).await?;
+        let project_id = Uuid::new_v4();
+        let org_id = Uuid::new_v4();
+        let prompt_id = Uuid::new_v4();
+        // No credit limit, so no daily refill tops the balance up mid-test.
+        client
+            .execute(
+                "INSERT INTO org_credit_balances (org_id, credit_limit, balance) VALUES ($1, 0, 9)",
+                &[&org_id],
+            )
+            .await?;
+        client
+            .execute(
+                "INSERT INTO org_credit_ledger (org_id, project_id, delta, reason, metadata, idempotency_key)
+                 VALUES ($1, $2, -1, 'managed_ai_prompt', '{}'::jsonb, $3)",
+                &[&org_id, &project_id, &format!("managed-ai-prompt:{prompt_id}")],
+            )
+            .await?;
+        let config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "test-key",
+        );
+        // 1M uncached input tokens at 100 micros per 1K = 100 units.
+        let usage = ManagedAiTokenUsage {
+            input_tokens: 1_000_000,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+        };
+
+        let tx = client.transaction().await?;
+        let charge = reconcile_managed_ai_usage_charge(
+            &tx,
+            &config,
+            &project_id,
+            &org_id,
+            None,
+            &prompt_id,
+            None,
+            None,
+            usage,
+        )
+        .await
+        .map_err(|error| credit_error("partial adjustment", error))?;
+        assert_eq!(charge.charged_units, 100);
+        assert_eq!(charge.adjustment_units, 99);
+        assert_eq!(charge.unpaid_units, 91);
+        assert!(charge.ledger_row_written);
+        assert_eq!(
+            get_credit_snapshot(&tx, &org_id)
+                .await
+                .map_err(|error| credit_error("snapshot", error))?
+                .balance,
+            0
+        );
+        tx.commit().await?;
+
+        let adjustments = ledger_rows_for_reason(&client, &org_id, "managed_ai_adjustment").await?;
+        assert_eq!(
+            adjustments,
+            vec![(-8, Some(format!("managed-ai-adjustment:{prompt_id}")))]
+        );
+        let adjustment_metadata: Option<JsonValue> = client
+            .query_one(
+                "SELECT metadata FROM org_credit_ledger WHERE org_id = $1 AND idempotency_key = $2",
+                &[&org_id, &format!("managed-ai-adjustment:{prompt_id}")],
+            )
+            .await?
+            .get("metadata");
+        assert_eq!(
+            adjustment_metadata.unwrap_or_default()["cost"]["unpaidUnits"],
+            json!(91)
+        );
+        let reserve_metadata: Option<JsonValue> = client
+            .query_one(
+                "SELECT metadata FROM org_credit_ledger WHERE org_id = $1 AND idempotency_key = $2",
+                &[&org_id, &format!("managed-ai-prompt:{prompt_id}")],
+            )
+            .await?
+            .get("metadata");
+        let reserve_metadata = reserve_metadata.unwrap_or_default();
+        assert_eq!(reserve_metadata["cost"]["chargedUnits"], json!(100));
+        assert_eq!(reserve_metadata["cost"]["unpaidUnits"], json!(91));
+
+        // With nothing left, a later turn's whole adjustment is unpaid and
+        // the completion still succeeds.
+        let second_prompt = Uuid::new_v4();
+        client
+            .execute(
+                "UPDATE org_credit_balances SET balance = 1 WHERE org_id = $1",
+                &[&org_id],
+            )
+            .await?;
+        client
+            .execute(
+                "INSERT INTO org_credit_ledger (org_id, project_id, delta, reason, metadata, idempotency_key)
+                 VALUES ($1, $2, -1, 'managed_ai_prompt', '{}'::jsonb, $3)",
+                &[&org_id, &project_id, &format!("managed-ai-prompt:{second_prompt}")],
+            )
+            .await?;
+        let tx = client.transaction().await?;
+        let charge = reconcile_managed_ai_usage_charge(
+            &tx,
+            &config,
+            &project_id,
+            &org_id,
+            None,
+            &second_prompt,
+            None,
+            None,
+            usage,
+        )
+        .await
+        .map_err(|error| credit_error("unpaid adjustment", error))?;
+        assert_eq!(charge.unpaid_units, 99);
+        assert!(!charge.ledger_row_written);
+        tx.commit().await?;
 
         connection_handle.abort();
         Ok(())
