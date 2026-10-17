@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod client;
+mod context_controls;
 pub mod controller_client;
 mod controller_credential_source;
 pub mod controller_integration;
@@ -8,3 +9,4 @@ mod incomplete_response;
 pub mod proxy;
 pub mod proxy_auth;
 mod upstream_error;
+mod usage;

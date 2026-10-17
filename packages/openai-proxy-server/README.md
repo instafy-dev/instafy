@@ -500,3 +500,70 @@ gets for a cut-short response and for a transient rate limit on each lane.
 - Extend the proxy to handle streaming responses.
 - Support additional OpenAI options (tool calls, caching hints, etc.).
 - Add structured logging for observability.
+
+### Responses cache and context compatibility
+
+Responses upstreams preserve explicitly requested `reasoning.context` (`auto`,
+`current_turn`, `all_turns`) and `include: ["reasoning.encrypted_content"]`. These
+are native Codex context controls; the proxy does not automatically enable them
+or change the requested reasoning effort.
+
+`prompt_cache_key`, native `session-id` (also accepted as `session_id`) and
+`thread-id` are translated into deterministic UUID-shaped identities scoped to
+the authenticated project, credential, provider endpoint and resolved subscription
+account. A matching cache key and session ID keep matching after translation.
+Job, runtime and child-thread IDs do not namespace the shared root cache identity,
+so a native full-history fork can retain its parent's cache/session identity.
+Different input prefixes still do not share cached work simply because their keys
+match. The proxy signing secret stabilizes this namespace across proxy processes;
+standalone proxies without a signing secret use a private startup namespace.
+If a subscription credential has no account ID, its identity instead uses a
+private fingerprint of the access token. Replacing or refreshing that token
+conservatively loses cache/routing affinity; normal refreshes with a known
+account ID retain it. Reloading a standalone auth file replaces its full token
+snapshot, clearing an omitted account ID or refresh token.
+
+Cache identity does not enable stored conversation state. It works independently
+of the legacy `PROXY_ALLOW_CONVERSATION_ID` switch and does not set
+`conversation_id` or `previous_response_id` from session/cache metadata.
+
+API-key Responses upstreams additionally accept request-supplied
+`prompt_cache_retention` (`in_memory`, `24h`) and `prompt_cache_options` with
+`mode` (`implicit`, `explicit`), `ttl` (`30m`) and `comparison_response_id`.
+These fields are only sent when requested; model/provider support still applies.
+A comparison response ID requires an explicit bring-your-own credential or a
+standalone proxy; managed/platform requests receive 400 because the proxy cannot
+authorize an arbitrary prior response on the shared credential. Imported Codex
+login credentials use a different endpoint: requests for these public API
+retention/options fields or explicit breakpoints receive 400 there. API-key Chat
+Completions and Gemini upstreams also reject these public cache options and
+breakpoints. Their existing native request adaptation remains: native key,
+context/include and session controls are omitted on these non-Responses routes.
+
+On API-key Responses upstreams, user/assistant content blocks keep their explicit
+`prompt_cache_breakpoint: {"mode":"explicit"}` markers. The existing instruction
+normalization joins developer/system text into a leading user message, and Chat
+Completions text conversion reconstructs content blocks. Breakpoints at those
+unsupported locations receive 400 rather than silently losing the boundary.
+This change does not alter that existing instruction trust policy.
+
+Only imported Codex Responses requests round-trip `x-codex-turn-state`. The proxy
+returns a signed, bounded, one-hour opaque envelope and accepts it back only for
+the same project, credential, endpoint, account, resolved model and root session.
+Invalid, expired, foreign-scope or raw provider states are ignored. The client
+never chooses provider authorization headers; credentials continue to come from
+the existing lease. Other arbitrary client headers and `client_metadata` are not
+forwarded.
+
+Usage translation retains the provider's reported cached-read, cache-write and
+reasoning-token details, including the difference between zero and absent values.
+A Chat Completions usage object that cannot satisfy the native Responses usage
+schema is retained under `usage_metadata.metadata.instafy_provider_usage`, with
+its source format; typed `usage` is omitted rather than inventing counts or
+turning an otherwise successful completion into a decoding failure.
+It preserves `prompt_cache_diagnostics` when an upstream supplies it. These are
+observations, not billing estimates: the proxy neither invents missing counters
+nor changes Instafy's credit policy. Native Responses usage remains intact.
+Whole-task measurement must still include native children and controller workers
+and deduplicate returned response IDs. Cache compatibility alone establishes no
+latency, hit-rate or cost improvement.
