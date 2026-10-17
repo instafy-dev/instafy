@@ -24,7 +24,7 @@ const mocks = vi.hoisted(() => ({
   readAt: vi.fn(),
   write: vi.fn(),
   saveChanges: vi.fn(),
-  fetchStatus: vi.fn(async () => null),
+  fetchStatus: vi.fn<() => Promise<{ supported: boolean; dirtyPaths: Array<{ path: string }> } | null>>(async () => null),
   syncToRemote: vi.fn(),
   noteSignal: vi.fn(),
   showStatus: vi.fn(),
@@ -316,6 +316,31 @@ describe("FilesPanel one Save", () => {
     expect(seen.every((value) => value === "true")).toBe(true);
   });
 
+  it("keeps preview quiet and names the destination of the markdown action", async () => {
+    await render([buffer()]);
+    expect(query("files-viewer-mode")?.getAttribute("aria-label")).toBe("Preview markdown");
+    expect(container.querySelector('[aria-label="Undo"]')).not.toBeNull();
+    await act(async () => query("files-viewer-mode")?.click());
+    expect(query("files-viewer-mode")?.getAttribute("aria-label")).toBe("Edit");
+    expect(container.querySelector('[aria-label="Undo"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Redo"]')).toBeNull();
+    expect(container.querySelector('[data-testid="files-save-status"]')?.textContent).toBe("Unsaved changes");
+    await act(async () => query("files-viewer-mode")?.click());
+    expect(container.querySelector('[data-testid="monaco-mock"]')).not.toBeNull();
+  });
+
+  it("offers source viewing instead of Edit to a read-only member", async () => {
+    mocks.project.canWriteProject = false;
+    await render([buffer({ modified: "saved" })]);
+    await act(async () => query("files-viewer-mode")?.click());
+    expect(query("files-viewer-mode")?.getAttribute("aria-label")).toBe("View source");
+    expect(query("files-viewer-mode")?.textContent).toBe("Source");
+    expect(container.querySelector('[aria-label="Undo"]')).toBeNull();
+    expect(query("code-save-button")).toBeNull();
+    await act(async () => query("files-viewer-mode")?.click());
+    expect(container.querySelector('[data-testid="monaco-mock"]')).not.toBeNull();
+  });
+
   it("keeps both legacy saves and today's routing in legacy mode", async () => {
     mocks.versioning.mode = "legacy";
     await render([buffer({ baseRev: undefined, blobOid: undefined, originId: undefined })]);
@@ -323,6 +348,30 @@ describe("FilesPanel one Save", () => {
     expect(query("code-save-button")?.getAttribute("aria-label")).toBe("Save version");
     expect(mocks.listAt).not.toHaveBeenCalled();
     expect(mocks.list).toHaveBeenCalled();
+  });
+
+  it.each(["draft", "version"] as const)("keeps focus and announces a completed legacy %s save", async (kind) => {
+    mocks.versioning.mode = "legacy";
+    mocks.runtime.runtimeReady = true;
+    mocks.write.mockResolvedValue({ ok: true, path: "README.md", size: 6, rev: null });
+    mocks.syncToRemote.mockResolvedValue({ ok: true });
+    mocks.fetchStatus.mockResolvedValue({ supported: true, dirtyPaths: kind === "draft" ? [{ path: "README.md" }] : [] });
+    try {
+      await render([buffer({ baseRev: undefined, blobOid: undefined, originId: undefined })]);
+      const save = query(kind === "draft" ? "code-save-draft-button" : "code-save-button")!;
+      save.focus();
+      await act(async () => save.click());
+      await settle();
+      expect(file().generated).toBe("edited");
+      expect(save.disabled).toBe(false);
+      expect(save.getAttribute("aria-disabled")).toBe("true");
+      expect(document.activeElement).toBe(save);
+      expect(mocks.showStatus).toHaveBeenCalledWith(kind === "draft" ? "Draft saved to workspace" : "Version saved", "success", 3000);
+      expect(container.querySelector('[data-testid="files-save-status"]')?.textContent).toBe(kind === "draft" ? "Draft saved · version pending" : "Saved");
+    } finally {
+      mocks.runtime.runtimeReady = false;
+      mocks.fetchStatus.mockResolvedValue(null);
+    }
   });
 
   it("saves once on Cmd/Ctrl+S with the buffer's baseRev and blob, then marks it saved", async () => {
@@ -1364,10 +1413,11 @@ describe("FilesPanel one Save", () => {
     expect(footer()).toContain("Modified");
   });
 
-  it("disables Save for a read-only member", async () => {
+  it("omits save actions for a read-only member", async () => {
     mocks.project.canWriteProject = false;
     await render([buffer()]);
-    expect(query("code-save-button")?.disabled).toBe(true);
+    expect(query("code-save-button")).toBeNull();
+    expect(query("code-save-draft-button")).toBeNull();
     await pressSave();
     expect(mocks.saveChanges).not.toHaveBeenCalled();
   });
@@ -1416,6 +1466,7 @@ describe("FilesPanel one Save", () => {
         projectId: "space-a", path: "README.md", content: "edited", runtimeId: "runtime-1",
       });
       expect(mocks.noteSignal).toHaveBeenCalledWith("origin-1", "legacy_saved");
+      expect(container.querySelector('[data-testid="files-save-status"]')?.textContent).toBe("Draft saved · version pending");
     } finally {
       mocks.runtime.runtimeReady = false;
     }

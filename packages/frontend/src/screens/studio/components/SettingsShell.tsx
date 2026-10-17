@@ -456,8 +456,7 @@ function SettingsCategoryPicker({
         className="min-h-11"
         aria-label={`${navLabel}: ${activeLabel}`}
       />
-      <StudioDialogPopover triggerRef={triggerRef} placement="bottom start" offset={6}
-        className="min-w-[var(--trigger-width)] max-w-[calc(100vw-1.5rem)] p-2"
+      <StudioDialogPopover triggerRef={triggerRef} placement="bottom start" layout="form"
         data-testid={`${navTestId}-popover`}>
         <div ref={paneRef} onKeyDownCapture={event => {
           if (event.key === "Escape") {

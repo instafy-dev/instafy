@@ -53,7 +53,7 @@ export function RuntimeSurfaces() {
             onRemoveRuntime={noop}
             headerActions
             interactionMode="manage"
-            listClassName="mt-2 pr-1"
+            listClassName="mt-2"
             sparklineVariant="page"
           />
         </SettingsShell>

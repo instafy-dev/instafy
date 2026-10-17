@@ -232,16 +232,21 @@ describe("useFilesPanelViewerState in the versioned modes", () => {
     expect(workspace.files[0].baseRev).toBe(REV_2);
   });
 
-  it("shows the size limit when a file is too large to open", async () => {
+  it.each([true, false])("shows the size limit when a file is too large to open (desktop: %s)", async (isLargeScreen) => {
     vi.mocked(controllerClient.workspace.files.readAt).mockResolvedValue({
       ok: false, notFound: false, originId: "origin-1", originMode: "hosted",
       error: { status: 413, code: "too_large", message: "too large", routeUnavailable: false },
     });
-    await render();
+    await render({ isLargeScreen });
     await open(entry("big.json"));
     expect(current.viewerState).toMatchObject({
       mode: "error", error: "This file is larger than 20 MB, so it can't be opened here.",
     });
+    if (isLargeScreen) {
+      expect(options.setMobileView).not.toHaveBeenCalled();
+    } else {
+      expect(options.setMobileView).toHaveBeenCalledExactlyOnceWith("viewer");
+    }
   });
 
   it("keeps a preserved draft's read ids and reports a newer version", async () => {

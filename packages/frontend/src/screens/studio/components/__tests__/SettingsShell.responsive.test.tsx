@@ -399,6 +399,7 @@ describe("SettingsShell available-pane navigation", () => {
     await click("settings-category-nav-picker");
     await click("settings-category-voice");
     expect(get("settings-category-nav-popover")).not.toBeNull();
+    expect(get("settings-category-nav-popover")?.dataset.studioPopoverLayout).toBe("form");
     expect(get("settings-category-nav-child-picker")).toBeNull();
     expect(get("settings-category-nav-back")).not.toBeNull();
     expect(get("active-content")?.textContent).toBe("people");

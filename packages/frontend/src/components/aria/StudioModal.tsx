@@ -1,5 +1,6 @@
 import { type CSSProperties, type ReactNode, type Ref } from "react";
 import { useNativeBackButtonAction } from "../../native/useNativeBackButtonAction";
+import { StudioDialogGutterContext, type StudioDialogGutter } from "./StudioDialogSpacing";
 import {
   Dialog,
   Modal,
@@ -12,7 +13,15 @@ const OVERLAY_BASE =
   "fixed inset-0 z-[80] flex items-center justify-center pb-[max(var(--instafy-safe-area-inset-bottom),1rem)] pl-[max(var(--instafy-safe-area-inset-left),1rem)] pr-[max(var(--instafy-safe-area-inset-right),1rem)] pt-[max(var(--instafy-safe-area-inset-top),1rem)]";
 
 const MODAL_BASE =
-  "w-full max-w-lg rounded-2xl border shadow-xl outline-none";
+  "w-full rounded-2xl border shadow-xl outline-none";
+
+export type StudioDialogSize = "sm" | "md" | "lg";
+
+const MODAL_SIZE_CLASSES: Record<StudioDialogSize, string> = {
+  sm: "max-w-sm",
+  md: "max-w-lg",
+  lg: "max-w-2xl",
+};
 
 export type StudioDialogAppearance = "default" | "dark";
 
@@ -40,6 +49,10 @@ interface StudioDialogModalProps extends ModalOverlayProps {
   onNativeBack?: () => void;
   appearance?: StudioDialogAppearance;
   backdrop?: StudioDialogBackdrop;
+  /** Maximum width: 24rem, 32rem or 42rem. Viewport clearance still applies. */
+  size?: StudioDialogSize;
+  /** Shared section gutters. Responsive is 16px narrow / 20px at sm and above. */
+  gutter?: StudioDialogGutter;
   /** Bounded header/body/footer layout. Pair with a scrollable StudioDialogBody. */
   layout?: StudioDialogLayout;
   modalClassName?: ModalOverlayProps["className"];
@@ -55,6 +68,8 @@ export function StudioDialogModal({
   onNativeBack,
   appearance = "default",
   backdrop = "standard",
+  size = "md",
+  gutter = "default",
   layout = "default",
   className,
   modalClassName,
@@ -89,7 +104,7 @@ export function StudioDialogModal({
       <Modal
         style={modalStyle}
         className={composeRenderProps(modalClassName, (value) =>
-          [MODAL_BASE, MODAL_APPEARANCE_CLASSES[appearance], layout === "editor" ? EDITOR_MODAL_CLASS : "", value].filter(Boolean).join(" ")
+          [MODAL_BASE, MODAL_SIZE_CLASSES[size], MODAL_APPEARANCE_CLASSES[appearance], layout === "editor" ? EDITOR_MODAL_CLASS : "", value].filter(Boolean).join(" ")
         )}
       >
         <Dialog
@@ -98,7 +113,7 @@ export function StudioDialogModal({
           aria-label={normalizedDialogLabel}
           aria-labelledby={normalizedDialogLabelledBy}
         >
-          {children}
+          <StudioDialogGutterContext.Provider value={gutter}>{children}</StudioDialogGutterContext.Provider>
         </Dialog>
       </Modal>
     </ModalOverlay>

@@ -92,8 +92,7 @@ function AssignAgentMenu({
         triggerRef={triggerRef}
         isNonModal
         placement="bottom start"
-        offset={4}
-        className="min-w-[11rem] p-2"
+        layout="menu"
       >
         <StudioMenu
           aria-label={`Pin an agent to ${machine.label}`}
@@ -250,17 +249,17 @@ export function MachinesPanel() {
     );
     if (machineAgents.length === 0 && candidates.length === 0) return null;
     return (
-      // Labeled like the metric rows so the chips start on the card's shared
-      // content edge instead of hanging in the label column.
+      // Share the facts column and align to the first chip's text baseline.
+      // A wrapped group keeps its label with the first row, not its midpoint.
       <div
-        className="flex items-start gap-3"
+        className="flex items-baseline gap-3"
         data-testid={`machines-card-agents-${machineId}`}
       >
         <Text
           as="span"
           variant="caption"
           tone="muted"
-          className="w-14 shrink-0 pt-1"
+          className="w-14 shrink-0"
         >
           Agents
         </Text>
@@ -385,7 +384,7 @@ export function MachinesPanel() {
         onStartRuntime={(runtimeId) => void startRuntime(runtimeId)}
         onShowSelfHostHelp={showDesktopRuntimeHelp}
         onCopyTunnel={copyTunnelDetails}
-        listClassName="mt-2 pr-1"
+        listClassName="mt-2"
         emptyStateMessage="No machines are connected yet — send an agent a message and the shared cloud runtime boots on demand."
         defaultExpandedOptionId={defaultExpandedOptionId}
         renderOptionExtras={renderMachineAgents}

@@ -49,8 +49,8 @@ describe("Files explorer folder rows", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  it("toggles a folder from a click on its name, Enter or Space, and keeps Focus separate", async () => {
-    await render();
+  it.each([false, true])("expands a folder by click or keyboard and keeps Open folder separate (touch density %s)", async (touchDensity) => {
+    await render({ touchDensity });
     const row = query("files-entry-skills")!;
     expect(row.getAttribute("aria-expanded")).toBe("false");
 
@@ -65,9 +65,38 @@ describe("Files explorer folder rows", () => {
 
     await render({ expandedDirectories: new Set(["skills"]), entriesMap: { "": [folder("skills")], skills: [] } });
     expect(row.getAttribute("aria-expanded")).toBe("true");
-    await act(async () => query("files-focus-skills")!.click());
+    const openFolder = query("files-focus-skills")!;
+    expect(openFolder.getAttribute("aria-label")).toBe("Open folder skills");
+    await act(async () => openFolder.click());
     expect(props.onFocus).toHaveBeenCalledExactlyOnceWith("skills");
     expect(props.onToggle).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([false, true])("navigates folders from one row without a separate action (touch density %s)", async (touchDensity) => {
+    await render({
+      folderBehavior: "navigate", touchDensity,
+      expandedDirectories: new Set(["skills"]),
+      entriesMap: { "": [folder("skills"), file("notes.md")], skills: [file("skills/write.md")] },
+    });
+    const row = query("files-entry-skills")!;
+    expect(row.getAttribute("aria-label")).toBe("Open folder skills");
+    expect(row.hasAttribute("aria-expanded")).toBe(false);
+    expect(query("files-focus-skills")).toBeNull();
+    expect(query("files-entry-skills-write-md")).toBeNull();
+
+    await act(async () => row.click());
+    await pressKey(row, "Enter");
+    await pressKey(row, " ");
+    expect(props.onSelect).toHaveBeenCalledTimes(3);
+    expect(props.onSelect).toHaveBeenCalledWith(folder("skills"));
+    expect(props.onToggle).not.toHaveBeenCalled();
+    expect(props.onFocus).not.toHaveBeenCalled();
+
+    await render({ folderBehavior: "expand" });
+    expect(row.getAttribute("aria-expanded")).toBe("true");
+    expect(row.hasAttribute("aria-label")).toBe(false);
+    expect(query("files-focus-skills")).not.toBeNull();
+    expect(query("files-entry-skills-write-md")).not.toBeNull();
   });
 
   it("names the unsaved dot for screen readers", async () => {

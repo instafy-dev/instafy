@@ -7,12 +7,13 @@ import { SkillsImportModal } from "../SkillsImportModal";
 const layout = vi.hoisted(() => ({ desktop: true }));
 vi.mock("../../../../hooks/useBreakpoint", () => ({ useBreakpoint: () => layout.desktop }));
 const submit = vi.fn();
+const changeOpen = vi.fn();
 
-function Editor({ workspaceUnavailable }: { workspaceUnavailable: boolean }) {
+function Editor({ workspaceUnavailable, pending = false }: { workspaceUnavailable: boolean; pending?: boolean }) {
   const [source, setSource] = useState(".agents/skills/draft");
   const [name, setName] = useState("My draft");
   const [overwrite, setOverwrite] = useState(true);
-  return <SkillsImportModal isOpen onOpenChange={() => {}} importPending={false}
+  return <SkillsImportModal isOpen onOpenChange={changeOpen} importPending={pending}
     hasProject workspaceUnavailable={workspaceUnavailable}
     importSource={source} onImportSourceChange={setSource}
     importName={name} onImportNameChange={setName}
@@ -73,5 +74,55 @@ describe("skill import during workspace recovery", () => {
     expect(document.querySelector('[role="status"]')).toBeNull();
     await act(async () => button().click());
     expect(submit).toHaveBeenCalledExactlyOnceWith({ source: ".agents/skills/refined-draft", name: "My draft", overwrite: true });
+  });
+
+  it.each([true, false])("keeps pending import controls and dismissal blocked with the shared footer (desktop: %s)", async (desktop) => {
+    layout.desktop = desktop;
+    await act(async () => root.render(<Editor workspaceUnavailable={false} pending />));
+    const source = document.querySelector<HTMLInputElement>('[data-testid="skills-import-source"]')!;
+    const buttons = [...document.querySelectorAll<HTMLButtonElement>('button')];
+    const cancel = buttons.find((button) => button.textContent === "Cancel")!;
+    const add = document.querySelector<HTMLButtonElement>('[data-testid="skills-import-submit"]')!;
+    expect(source.disabled).toBe(true);
+    expect(cancel.disabled).toBe(true);
+    expect(add.disabled).toBe(true);
+    await act(async () => {
+      cancel.click();
+      add.click();
+      source.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    });
+    expect(submit).not.toHaveBeenCalled();
+    expect(changeOpen).not.toHaveBeenCalled();
+  });
+
+  it("keeps the mobile draft and footer mounted as the keyboard shortens the visual viewport", async () => {
+    layout.desktop = false;
+    await act(async () => root.render(<Editor workspaceUnavailable={false} />));
+    const source = document.querySelector<HTMLInputElement>('[data-testid="skills-import-source"]')!;
+    const add = document.querySelector<HTMLButtonElement>('[data-testid="skills-import-submit"]')!;
+    const footer = add.parentElement!.parentElement!;
+    const body = document.querySelector('[data-mobile-dialog-body]')!.firstElementChild!;
+    expect(body.classList.contains("px-4")).toBe(true);
+    expect(footer.classList.contains("px-4")).toBe(true);
+    expect(body.classList.contains("sm:px-5")).toBe(true);
+    expect(footer.classList.contains("sm:px-5")).toBe(true);
+    await act(async () => {
+      source.focus();
+      source.setSelectionRange(1, 5);
+      Object.assign(window.visualViewport!, { height: 220 });
+      window.visualViewport!.dispatchEvent(new Event("resize"));
+      await new Promise(requestAnimationFrame);
+    });
+    expect(document.querySelector('[data-testid="skills-import-source"]')).toBe(source);
+    expect(document.querySelector('[data-testid="skills-import-submit"]')).toBe(add);
+    expect(add.parentElement!.parentElement).toBe(footer);
+    expect(document.activeElement).toBe(source);
+    expect(source.selectionStart).toBe(1);
+    expect(source.selectionEnd).toBe(5);
+    expect(source.value).toBe(".agents/skills/draft");
+    expect(document.querySelector('[data-mobile-dialog-content]')?.classList.contains("overflow-y-auto")).toBe(true);
+    expect(document.querySelector('[data-mobile-dialog-body]')?.contains(footer)).toBe(false);
+    expect(changeOpen).not.toHaveBeenCalled();
+    expect(submit).not.toHaveBeenCalled();
   });
 });

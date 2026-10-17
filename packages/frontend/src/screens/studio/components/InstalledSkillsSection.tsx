@@ -4,7 +4,6 @@ import { MenuTrigger } from "react-aria-components";
 import { Button, IconButton } from "../../../components/Button";
 import { LoadingStatus } from "../../../components/LoadingStatus";
 import { MenuItemContent } from "../../../components/MenuItemContent";
-import { Spinner } from "../../../components/Spinner";
 import { Text } from "../../../components/Text";
 import { Toggle } from "../../../components/Toggle";
 import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu";
@@ -96,7 +95,7 @@ export function InstalledSkillsSection({
               aria-label="More skill actions" data-testid="skills-actions">
               <MoreHoriz className="h-5 w-5" aria-hidden="true" />
             </IconButton>
-            <StudioPopover placement="bottom end">
+            <StudioPopover placement="bottom end" layout="menu">
               <StudioMenu aria-label="Skill actions">
                 <StudioMenuItem id="import" onAction={onOpenAddSkillModal} isDisabled={workspaceUnavailable} data-testid="skills-new">
                   <MenuItemContent start={<Plus aria-hidden="true" />}>Import custom skill</MenuItemContent>
@@ -113,7 +112,7 @@ export function InstalledSkillsSection({
           </MenuTrigger>
         </div>
       </div>
-      <Text variant="caption" tone="muted">
+      <Text variant="bodyCompact" tone="secondary">
         Instructions available to the AI in this space.
       </Text>
       {loading && skills.length > 0 && !error ? <LoadingStatus>Refreshing skills…</LoadingStatus> : null}
@@ -197,7 +196,7 @@ export function InstalledSkillsSection({
                           </Text>
                         </Button>
                       )}
-                      <Text variant="caption" tone="muted" className="line-clamp-2">
+                      <Text variant="bodyCompact" tone="secondary" className="line-clamp-2">
                         {skill.description ?? skill.slug}
                       </Text>
                     </div>
@@ -260,7 +259,7 @@ export function InstalledSkillsSection({
                         >
                           <MoreHoriz className="h-4 w-4" aria-hidden="true" />
                         </IconButton>
-                        <StudioPopover placement="bottom end" offset={6} className="w-52 p-1">
+                        <StudioPopover placement="bottom end" layout="menu">
                           <StudioMenu
                             aria-label={`Actions for ${skill.title}`}
                             onAction={(key) => {
@@ -282,15 +281,9 @@ export function InstalledSkillsSection({
                 </div>
 
                 {isTogglePending ? (
-                  <div className="flex items-center gap-2 text-sm text-slate-500">
-                    <Spinner tone="primary" size="sm" aria-hidden="true" />
-                    Updating skill state…
-                  </div>
+                  <LoadingStatus>Updating skill state…</LoadingStatus>
                 ) : isUninstallPending ? (
-                  <div className="flex items-center gap-2 text-sm text-slate-500">
-                    <Spinner tone="primary" size="sm" aria-hidden="true" />
-                    Uninstalling skill…
-                  </div>
+                  <LoadingStatus>Uninstalling skill…</LoadingStatus>
                 ) : null}
               </div>
             );

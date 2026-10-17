@@ -48,11 +48,11 @@ export function SkillsImportModal({
   const isDesktop = useBreakpoint("sm", { freeze: isOpen });
   const changeOpen = (open: boolean) => { if (open || !importPending) onOpenChange(open); };
   const form = (
-      <div className="space-y-4 px-4 py-4 sm:px-5">
-        <p className="text-sm text-slate-500 dark:text-slate-400">
+      <StudioDialogBody scrollable={isDesktop} className="space-y-4">
+        <Text variant="bodyCompact" tone="secondary">
           Paste a GitHub repo or skill folder link, a SKILL.md link, or a workspace path.
           Every skill in it installs and its setup starts in chat.
-        </p>
+        </Text>
         {workspaceUnavailable ? (
           <Text as="p" variant="caption" tone="muted" role="status">
             Workspace files are unavailable. Your draft is kept; reconnect before adding this skill.
@@ -88,10 +88,10 @@ export function SkillsImportModal({
           data-testid="skills-import-overwrite"
         />
 
-      </div>
+      </StudioDialogBody>
   );
   const actions = (
-        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 px-4 py-3 dark:border-[color:var(--color-studio-dark-panel-border)] sm:px-5">
+        <StudioDialogFooter padding="default" divider className="flex flex-wrap items-center justify-between gap-2">
           {onBrowseSkills ? (
             <Button
               variant="ghost"
@@ -128,13 +128,13 @@ export function SkillsImportModal({
               Add and start
             </Button>
           </div>
-        </div>
+        </StudioDialogFooter>
   );
 
   if (!isDesktop) {
     return <MobileFocusDialog isOpen={isOpen} onOpenChange={changeOpen}
       dialogAriaLabel="Import custom skill" closeDisabled={importPending}
-      footer={actions} data-testid="skills-add-modal">
+      footer={actions} gutter="responsive" data-testid="skills-add-modal">
       {form}
     </MobileFocusDialog>;
   }
@@ -147,12 +147,13 @@ export function SkillsImportModal({
       isKeyboardDismissDisabled={importPending}
       dialogAriaLabel="Import custom skill"
       layout="editor"
+      gutter="responsive"
       data-testid="skills-add-modal"
     >
       <StudioDialogHeader title="Import custom skill" onClose={() => changeOpen(false)}
         closeLabel="Close" closeButtonDisabled={importPending} />
-      <StudioDialogBody scrollable padding="none">{form}</StudioDialogBody>
-      <StudioDialogFooter>{actions}</StudioDialogFooter>
+      {form}
+      {actions}
     </StudioDialogModal>
   );
 }

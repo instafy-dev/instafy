@@ -261,8 +261,7 @@ function RuntimeSizePickerRow() {
           triggerRef={sizeTriggerRef}
           isNonModal
           placement="bottom start"
-          offset={4}
-          className="min-w-[13rem] p-2"
+          layout="menu"
         >
           <StudioMenu
             aria-label="Machine size"
@@ -576,7 +575,7 @@ export function RuntimeMenuOptionsList({
                   >
                     <MoreHoriz className="h-4 w-4" aria-hidden="true" />
                   </IconButton>
-                  <StudioPopover placement="bottom end" className="min-w-40 p-1">
+                  <StudioPopover placement="bottom end" layout="menu">
                     <StudioMenu aria-label={`Actions for ${option.label}`}>
                       <StudioMenuItem id="remove" onAction={() => {
                         // Opening confirmation never removes the machine.

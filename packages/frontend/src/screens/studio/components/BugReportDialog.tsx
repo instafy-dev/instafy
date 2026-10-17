@@ -391,7 +391,8 @@ export function BugReportDialog({
       isDismissable={!submitting}
       dialogAriaLabel="Report issue"
       data-testid="bug-report-modal"
-      modalClassName="max-w-2xl overflow-hidden p-0"
+      size="lg"
+      modalClassName="overflow-hidden p-0"
     >
       <div className="flex max-h-[min(90dvh,48rem)] flex-col overflow-hidden" data-bug-report-overlay="true">
         <StudioDialogHeader
