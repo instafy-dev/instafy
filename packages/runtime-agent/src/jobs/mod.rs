@@ -3441,7 +3441,11 @@ fn should_run_agent_routing_preflight(job: &LeaseJob, prompt_text: &str) -> bool
                 .and_then(JsonValue::as_str)
         })
         .map(|mode| mode.trim().to_ascii_lowercase().replace('-', "_"));
-    !matches!(existing_mode.as_deref(), Some("thread" | "inline"))
+    // Only a linked agent lane ("thread") or an existing team plan is an
+    // already-decided route. "inline" says where the reply goes (this chat,
+    // e.g. after an @-mention), not how the work is routed, so a mentioned
+    // turn still gets the preflight and the skills can pick a team.
+    !matches!(existing_mode.as_deref(), Some("thread" | "team_plan"))
 }
 
 fn should_run_agent_routing_preflight_for_execution(job: &LeaseJob, prompt_text: &str) -> bool {
@@ -19478,6 +19482,63 @@ mod tests {
             &job,
             "Use exactly 2 AI agents to review AGENTS.md in parallel. Do not do the review inline before the team runs."
         ));
+    }
+
+    #[test]
+    fn routing_preflight_runs_for_mentioned_inline_turns() {
+        // A top-level "@octo ..." turn carries agentCollaboration.mode=inline
+        // (reply in this chat). That is not a routing decision, so the
+        // preflight must still run and may offer a team plan.
+        let prompt = "@octo get a few helpers to research the four cities in parallel";
+        let job = test_lease_job(
+            Some("feature"),
+            json!({
+                "prompt_text": prompt,
+                "metadata": {
+                    "agentSelection": { "active": ["octo"], "mentions": ["octo"] },
+                    "agentCollaboration": {
+                        "mode": "inline",
+                        "policySkillPath": ".agents/skills/instafy-agent-collaboration/SKILL.md"
+                    }
+                }
+            }),
+        );
+        assert!(should_run_agent_routing_preflight(&job, prompt));
+        assert!(should_run_agent_routing_preflight_for_execution(
+            &job, prompt
+        ));
+    }
+
+    #[test]
+    fn routing_preflight_skips_linked_threads_and_decided_team_plans() {
+        let prompt = "Research the four cities in parallel";
+        for mode in ["thread", "team_plan", "team-plan"] {
+            let job = test_lease_job(
+                Some("feature"),
+                json!({
+                    "prompt_text": prompt,
+                    "metadata": {
+                        "agentSelection": { "active": ["octo"], "mentions": ["octo"] },
+                        "agentCollaboration": { "mode": mode }
+                    }
+                }),
+            );
+            assert!(
+                !should_run_agent_routing_preflight(&job, prompt),
+                "mode {mode} should skip the preflight"
+            );
+        }
+        let routed = test_lease_job(
+            Some("feature"),
+            json!({
+                "prompt_text": prompt,
+                "metadata": {
+                    "agentCollaboration": { "mode": "inline" },
+                    "agentRoutingPreflight": { "route": "direct" }
+                }
+            }),
+        );
+        assert!(!should_run_agent_routing_preflight(&routed, prompt));
     }
 
     #[test]
