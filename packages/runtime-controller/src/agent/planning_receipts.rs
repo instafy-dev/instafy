@@ -76,6 +76,7 @@ pub(super) async fn store(
         persist_run_completion_metadata(
             transaction,
             &run_id,
+            &job_id,
             provider.as_deref(),
             conversation_state.as_ref(),
             credit_snapshot.as_ref(),

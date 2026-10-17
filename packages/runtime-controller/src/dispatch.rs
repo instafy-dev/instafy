@@ -2173,16 +2173,11 @@ pub(crate) async fn process_dispatch_prompt(
         }
         let provider_conversation_state = if supports_provider_state {
             if let Some(conversation_id) = request.conversation_id {
-                let expected_provider = load_target_credential_provider(
-                    &transaction,
-                    context.user_id,
-                    target.credential_id,
-                )
-                .await?;
                 load_previous_provider_conversation_state(
                     &transaction,
+                    &project.id,
                     &conversation_id,
-                    expected_provider.as_deref(),
+                    target.credential_id.as_ref(),
                     target.agent_id.as_ref(),
                     Some(target.handle.as_str()),
                 )
@@ -4889,48 +4884,6 @@ fn merge_ai_access_metadata(
     JsonValue::Object(root)
 }
 
-/// The provider of a dispatch target's credential, which is always one the
-/// requesting user holds.
-async fn load_target_credential_provider(
-    transaction: &Transaction<'_>,
-    user_id: Option<Uuid>,
-    credential_id: Option<Uuid>,
-) -> Result<Option<String>, (StatusCode, Json<ApiError>)> {
-    let (Some(user_id), Some(credential_id)) = (user_id, credential_id) else {
-        return Ok(None);
-    };
-
-    let row = transaction
-        .query_opt(
-            "select kind, metadata
-             from user_credentials
-             where id = $1 and user_id = $2 and revoked_at is null
-             limit 1",
-            &[&credential_id, &user_id],
-        )
-        .await
-        .map_err(|error| {
-            internal_error(format!(
-                "failed to load credential provider for dispatch target: {error}"
-            ))
-        })?;
-
-    let Some(row) = row else {
-        return Ok(None);
-    };
-
-    let kind: String = row.get("kind");
-    let metadata = row
-        .get::<_, Option<PgJson<JsonValue>>>("metadata")
-        .map(|json| json.0)
-        .unwrap_or_else(|| JsonValue::Object(JsonMap::new()));
-
-    Ok(Some(credentials::provider_for_credential(
-        kind.as_str(),
-        &metadata,
-    )))
-}
-
 pub(crate) async fn persist_run_runtime_alert_metadata(
     client: &mut tokio_postgres::Client,
     project_id: &Uuid,
@@ -4999,94 +4952,70 @@ fn merge_run_runtime_alert_metadata(existing: Option<&JsonValue>, alert: &JsonVa
     JsonValue::Object(root)
 }
 
+/// Restore execution-engine state only within the same controller-selected
+/// connection. `provider.id` names the engine (for example `codex-embedded`),
+/// not the credential's upstream provider (`openai`, `gemini`, ...).
+/// Agent targets have already passed credential ownership checks at dispatch.
 pub(crate) async fn load_previous_provider_conversation_state(
     transaction: &Transaction<'_>,
+    project_id: &Uuid,
     conversation_id: &Uuid,
-    expected_provider: Option<&str>,
+    credential_id: Option<&Uuid>,
     agent_id: Option<&Uuid>,
     agent_handle: Option<&str>,
 ) -> Result<Option<JsonValue>, (StatusCode, Json<ApiError>)> {
-    let rows = match expected_provider {
-        Some(provider) => {
-            transaction
-                .query(
-                    "select metadata->'provider'->'conversation' as conversation_state
-                            , metadata->'agent' as agent
-                     from runs
-                     where conversation_id = $1
-                       and metadata->'provider'->>'id' = $2
-                       and metadata->'provider'->'conversation' is not null
-                     order by created_at desc
-                     limit 25",
-                    &[conversation_id, &provider],
-                )
-                .await
-        }
-        None => {
-            transaction
-                .query(
-                    "select metadata->'provider'->'conversation' as conversation_state
-                            , metadata->'agent' as agent
-                     from runs
-                     where conversation_id = $1
-                       and metadata->'provider'->'conversation' is not null
-                     order by created_at desc
-                     limit 25",
-                    &[conversation_id],
-                )
-                .await
-        }
-    }
-    .map_err(|error| {
-        internal_error(format!(
-            "failed to load provider conversation state: {error}"
-        ))
-    })?;
-
-    for row in rows {
-        let agent_metadata = row.get::<_, Option<JsonValue>>("agent");
-        if !matches_agent_scope(agent_metadata.as_ref(), agent_id, agent_handle) {
-            continue;
-        }
-        let state = row.get::<_, Option<JsonValue>>("conversation_state");
-        if state.is_some() {
-            return Ok(state);
-        }
-    }
-
-    Ok(None)
-}
-
-fn matches_agent_scope(
-    metadata: Option<&JsonValue>,
-    agent_id: Option<&Uuid>,
-    agent_handle: Option<&str>,
-) -> bool {
-    let metadata = metadata.and_then(JsonValue::as_object);
-    let metadata_id = metadata
-        .and_then(|agent| agent.get("id"))
-        .and_then(JsonValue::as_str)
-        .and_then(|value| Uuid::parse_str(value.trim()).ok());
-    if let Some(agent_id) = agent_id {
-        if metadata_id == Some(*agent_id) {
-            return true;
-        }
-    }
-
     let normalized_handle = agent_handle
         .map(|value| value.trim().trim_start_matches('@').to_ascii_lowercase())
         .filter(|value| !value.is_empty());
-    let metadata_handle = metadata
-        .and_then(|agent| agent.get("handle"))
-        .and_then(JsonValue::as_str)
-        .map(|value| value.trim().trim_start_matches('@').to_ascii_lowercase())
-        .filter(|value| !value.is_empty());
+    // A deleted BYOC credential also leaves a NULL job credential, so only
+    // the immutable platform job record can prove the historical managed lane.
+    // Filter agent scope before LIMIT: busy siblings must not hide this agent's
+    // latest state. A present stable ID takes precedence over a reused handle.
+    let row = transaction
+        .query_opt(
+            "select j.proxy_metadata->'conversation' as conversation_state
+             from runs r
+             join agent_jobs j on j.run_id = r.id
+               and j.project_id = r.project_id
+               and j.conversation_id = r.conversation_id
+             where r.project_id = $1 and r.conversation_id = $2
+               and j.proxy_metadata->'conversation' is not null
+               and j.proxy_metadata->'conversation' <> 'null'::jsonb
+               and (r.metadata->>'jobId' is null
+                    or r.metadata->>'jobId' = j.id::text)
+               and (j.credential_id = $3::uuid
+                    or ($3::uuid is null and j.credential_id is null
+                        and exists (
+                            select 1 from ai_usage_jobs u
+                            where u.job_id = j.id
+                              and u.project_id = j.project_id
+                              and u.run_id = j.run_id
+                        )))
+               and case
+                   when $4::uuid is not null and r.metadata #>> '{agent,id}' is not null
+                       then r.metadata #>> '{agent,id}' = $4::text
+                   when $5::text is not null
+                       then lower(ltrim(btrim(r.metadata #>> '{agent,handle}'), '@')) = $5
+                   else $4::uuid is null
+               end
+             order by r.created_at desc, r.id desc, j.id desc
+             limit 1",
+            &[
+                project_id,
+                conversation_id,
+                &credential_id,
+                &agent_id,
+                &normalized_handle,
+            ],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to load provider conversation state: {error}"
+            ))
+        })?;
 
-    if let Some(expected_handle) = normalized_handle {
-        return metadata_handle.as_deref() == Some(expected_handle.as_str());
-    }
-
-    agent_id.is_none()
+    Ok(row.and_then(|row| row.get::<_, Option<JsonValue>>("conversation_state")))
 }
 
 fn normalize_repo(repo: Option<DispatchPromptRepo>) -> Option<DispatchPromptRepoNormalized> {
@@ -5594,27 +5523,6 @@ mod tests {
             metadata_map.get("writeIntent").and_then(JsonValue::as_bool),
             Some(false)
         );
-    }
-
-    #[test]
-    fn matches_agent_scope_uses_handle_when_agent_id_is_absent() {
-        assert!(matches_agent_scope(
-            Some(&json!({
-                "handle": "planner"
-            })),
-            None,
-            Some("planner"),
-        ));
-
-        assert!(!matches_agent_scope(
-            Some(&json!({
-                "handle": "builder"
-            })),
-            None,
-            Some("planner"),
-        ));
-
-        assert!(matches_agent_scope(None, None, None));
     }
 
     #[test]

@@ -467,7 +467,7 @@ async fn dispatch_security_agents_only_use_credentials_their_owner_holds() -> an
     insert_agent_pin(&transaction, &owner, "pinned", &others_credential).await?;
 
     // A stored pin to a credential the owner does not hold is no pin: with no
-    // default of its own the agent runs on the managed lane ...
+    // default of its own the agent runs on the managed lane.
     let targets = resolve_agent_targets(
         &transaction,
         &project_id,
@@ -479,15 +479,6 @@ async fn dispatch_security_agents_only_use_credentials_their_owner_holds() -> an
     .map_err(api_error)?;
     assert_eq!(targets.len(), 1);
     assert_eq!(targets[0].credential_id, None);
-    // ... and the provider lookup reads only a credential the requester holds.
-    for user_id in [Some(owner), None] {
-        assert_eq!(
-            load_target_credential_provider(&transaction, user_id, Some(others_credential))
-                .await
-                .map_err(api_error)?,
-            None
-        );
-    }
 
     // With a default of its own, the agent falls back to it, and an agent
     // pinned to a credential its owner holds keeps that credential.
@@ -510,13 +501,6 @@ async fn dispatch_security_agents_only_use_credentials_their_owner_holds() -> an
     assert_eq!(targets.len(), 2);
     assert_eq!(targets[0].credential_id, Some(own_default));
     assert_eq!(targets[1].credential_id, Some(own_pinned));
-    assert_eq!(
-        load_target_credential_provider(&transaction, Some(owner), Some(own_pinned))
-            .await
-            .map_err(api_error)?
-            .as_deref(),
-        Some("openai")
-    );
 
     transaction.rollback().await?;
     Ok(())
