@@ -267,6 +267,25 @@ describe("useHomeActivity", () => {
     expect(list).toHaveBeenCalledTimes(1);
   });
 
+  it("drops a deleted team's rows, also those of spaces whose own notice never came", async () => {
+    list.mockResolvedValueOnce(page([], { items: [
+      item("12", { org: { id: "deleted-team", name: "Gone" }, project: { id: "space-a", name: "A" } }),
+      item("11", { org: { id: "kept-team", name: "Kept" }, project: { id: "space-b", name: "B" } }),
+      item("10", { org: { id: "deleted-team", name: "Gone" }, project: { id: "space-c", name: "C" } }),
+      item("9", { org: null, project: null }),
+    ] }));
+    await render();
+    expect(current.activityItems.map((entry) => entry.id)).toEqual(["12", "11", "10", "9"]);
+
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent(PROJECT_ACCESS_REFRESH_EVENT, {
+        detail: { projectId: null, deletedOrgId: "deleted-team" },
+      }));
+    });
+    expect(current.activityItems.map((entry) => entry.id)).toEqual(["11", "9"]);
+    expect(list).toHaveBeenCalledTimes(1);
+  });
+
   it("stops polling and exposes no activity when signed out", async () => {
     list.mockResolvedValueOnce(page(["9"]));
     await render();

@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ActivityItem, ListMyActivityResult } from "../../../../services/runtimeController/activity";
 import type { ControllerOrgMember, ControllerOrgMembersPage, ControllerOrgSummary } from "../../../../services/runtimeController/projects";
 import { TeamPanel } from "../TeamPanel";
+import { PROJECT_ACCESS_REFRESH_EVENT } from "../../../../projects/projectAccessEvents";
 import { chooseSelectValue } from "../../../../test-utils/select";
 
 const mocks = vi.hoisted(() => ({
@@ -103,6 +104,20 @@ describe("TeamPanel authorized work and navigation", () => {
     container.remove();
     vi.unstubAllGlobals();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("stops showing a team deleted elsewhere without waiting for a refetch", async () => {
+    await render("team-b");
+    expect(container.querySelector("h2")?.textContent).toBe("Team B");
+    mocks.organizations.mockClear();
+
+    await act(async () => window.dispatchEvent(new CustomEvent(PROJECT_ACCESS_REFRESH_EVENT, {
+      detail: { projectId: null, deletedOrgId: "team-b" },
+    })));
+    await settle();
+    expect(container.textContent).toContain("This team is not available to your account.");
+    expect(button("Team settings")).toBeUndefined();
+    expect(mocks.organizations).not.toHaveBeenCalled();
   });
 
   it("filters the authorized feed to this team, retains the viewer's private chat, and never marks it seen", async () => {

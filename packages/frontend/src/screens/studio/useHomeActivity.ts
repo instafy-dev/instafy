@@ -242,10 +242,14 @@ export function useHomeActivity(viewerUserId: string | null, pageSize = 24, mark
     const timer = window.setInterval(() => { void poll(); }, ACTIVITY_POLL_MS);
     // Polling only adds rows, so a deleted space's rows would stay until
     // Home remounts, and opening one would lead into a space that is gone.
+    // A deleted team's rows go too, for a tab that missed its spaces' notices.
     const dropDeletedSpace = (event: Event) => {
-      const deletedProjectId = (event as CustomEvent<ProjectAccessRefreshEventDetail>).detail?.deletedProjectId;
-      if (!deletedProjectId) return;
-      const activityItems = snapshot.activityItems.filter((item) => item.project?.id !== deletedProjectId);
+      const detail = (event as CustomEvent<ProjectAccessRefreshEventDetail>).detail;
+      const deletedProjectId = detail?.deletedProjectId;
+      const deletedOrgId = detail?.deletedOrgId;
+      if (!deletedProjectId && !deletedOrgId) return;
+      const activityItems = snapshot.activityItems.filter((item) =>
+        !(deletedProjectId && item.project?.id === deletedProjectId) && !(deletedOrgId && item.org?.id === deletedOrgId));
       if (activityItems.length !== snapshot.activityItems.length) update({ activityItems });
     };
     window.addEventListener(PROJECT_ACCESS_REFRESH_EVENT, dropDeletedSpace);

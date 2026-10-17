@@ -215,13 +215,17 @@ export function useMergedControllerProjects({
       handleRefresh();
     };
     const handleAccessChanged = (event: Event) => {
-      const deletedProjectId = (event as CustomEvent<ProjectAccessRefreshEventDetail>).detail?.deletedProjectId;
-      if (deletedProjectId) {
+      const detail = (event as CustomEvent<ProjectAccessRefreshEventDetail>).detail;
+      const deletedProjectId = detail?.deletedProjectId;
+      const deletedOrgId = detail?.deletedOrgId;
+      if (deletedProjectId || deletedOrgId) {
         // Off the list now rather than when the refetch below answers; until
         // then the cached list would bring it back as a remote-only space.
+        const deleted = (project: ControllerProjectSummary) =>
+          project.projectId === deletedProjectId || (Boolean(deletedOrgId) && project.orgId === deletedOrgId);
         setDiscovery((current) =>
-          current?.projects.some((project) => project.projectId === deletedProjectId)
-            ? { ...current, projects: current.projects.filter((project) => project.projectId !== deletedProjectId) }
+          current?.projects.some(deleted)
+            ? { ...current, projects: current.projects.filter((project) => !deleted(project)) }
             : current,
         );
       }

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { PROJECT_ACCESS_REFRESH_EVENT, readDeletedOrgId } from "../../../projects/projectAccessEvents";
 import { listControllerOrganizations, type ControllerOrgSummary } from "../../../services/runtimeController/projects";
 
 /** Organization selection is independent of project membership, including empty teams. */
@@ -25,8 +26,21 @@ export function useSettingsOrganization({
   const refresh = useCallback(() => setRefreshVersion((value) => value + 1), []);
 
   useEffect(() => {
+    // A deleted team leaves the selector, and its page, without a refetch:
+    // that would show every other team's page as loading again.
+    const dropDeletedTeam = (event: Event) => {
+      const deletedOrgId = readDeletedOrgId(event);
+      if (!deletedOrgId) return;
+      setSnapshot((current) => current.organizations.some((item) => item.id === deletedOrgId)
+        ? { ...current, organizations: current.organizations.filter((item) => item.id !== deletedOrgId) }
+        : current);
+    };
     window.addEventListener("instafy:orgs-updated", refresh);
-    return () => window.removeEventListener("instafy:orgs-updated", refresh);
+    window.addEventListener(PROJECT_ACCESS_REFRESH_EVENT, dropDeletedTeam);
+    return () => {
+      window.removeEventListener("instafy:orgs-updated", refresh);
+      window.removeEventListener(PROJECT_ACCESS_REFRESH_EVENT, dropDeletedTeam);
+    };
   }, [refresh]);
 
   useEffect(() => {

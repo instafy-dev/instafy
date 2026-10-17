@@ -27,7 +27,7 @@ import { useStudioNavigation } from "../../../navigation/useStudioNavigation";
 import { studioPerformance } from "../../../telemetry/studioPerformance";
 import { useProjects } from "../../../projects/useProjects";
 import { mergeControllerProjects, useMergedControllerProjects } from "../../../projects/useMergedControllerProjects";
-import { PROJECT_ACCESS_REFRESH_EVENT } from "../../../projects/projectAccessEvents";
+import { PROJECT_ACCESS_REFRESH_EVENT, readDeletedOrgId } from "../../../projects/projectAccessEvents";
 import { mostRecentProjectId } from "../../../projects/projectRecency";
 import { useProjectRecency } from "../../../projects/useProjectRecency";
 import { spaceDisplayName } from "../../../projects/spaceName";
@@ -512,14 +512,24 @@ export function StudioSidebar({
     const onVisibilityChange = () => {
       if (document.visibilityState === "visible") bump();
     };
+    // A deleted team leaves the rail at once; the refetch only confirms it.
+    const onAccessChange = (event: Event) => {
+      const deletedOrgId = readDeletedOrgId(event);
+      if (deletedOrgId) {
+        setControllerOrgs((orgs) => orgs.some((org) => org.id === deletedOrgId)
+          ? orgs.filter((org) => org.id !== deletedOrgId)
+          : orgs);
+      }
+      bump();
+    };
     window.addEventListener("instafy:orgs-updated", bump);
     window.addEventListener("focus", bump);
-    window.addEventListener(PROJECT_ACCESS_REFRESH_EVENT, bump);
+    window.addEventListener(PROJECT_ACCESS_REFRESH_EVENT, onAccessChange);
     document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       window.removeEventListener("instafy:orgs-updated", bump);
       window.removeEventListener("focus", bump);
-      window.removeEventListener(PROJECT_ACCESS_REFRESH_EVENT, bump);
+      window.removeEventListener(PROJECT_ACCESS_REFRESH_EVENT, onAccessChange);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, []);

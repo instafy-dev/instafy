@@ -7,6 +7,17 @@ export interface ProjectAccessRefreshEventDetail {
    * never say; listeners then refresh as for any other access change.
    */
   deletedProjectId?: string | null;
+  /**
+   * The team that was deleted, when that is the change. Its spaces were
+   * announced one by one before it; this drops the team and any of its spaces
+   * a tab still lists. Older controllers never say.
+   */
+  deletedOrgId?: string | null;
+}
+
+/** The team an access refresh says was deleted, if it says so. */
+export function readDeletedOrgId(event: Event): string | null {
+  return (event as CustomEvent<ProjectAccessRefreshEventDetail | null>).detail?.deletedOrgId ?? null;
 }
 
 // Fired when a project or organization roster changed for another viewer.
