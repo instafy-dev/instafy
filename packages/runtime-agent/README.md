@@ -135,6 +135,15 @@ receipts. The existing bounded recovery attempt preserves permissions and output
 retaining evidence from the first attempt. See [Execution Evidence and Recovery](../../docs/Multi-Agent-Evaluation.md#execution-evidence-and-recovery)
 for receipt limitations and compatibility behavior.
 
+The preflight's `workspaceFileChangeRequirement` distinguishes `none` (no mutation requested),
+`conditional` (edit only when review or validation warrants it), and `required` (success needs
+an actual change). Conditional work can finish with a justified no-change result; required
+writes retain their missing-change checks. These are completion requirements, not write
+permissions: controller `writeIntent` and write scopes remain authoritative. Legacy Boolean
+decisions remain readable, and artifacts retain `requiresWorkspaceFileChanges`, true only
+for `required`. Invalid or conflicting requirements fail before the main turn. See the
+[Routing Preflight Contract](../../docs/Multi-Agent-Evaluation.md#routing-preflight-contract).
+
 ## Code-mode cell diagnostics
 
 The run log's `tool.activity` events never carry tool text, ids, names or paths. For function
