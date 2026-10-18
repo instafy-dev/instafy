@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import {
   deleteEnvFileValue,
   DEFAULT_SUPABASE_PROJECT_URL,
+  ensureDevProxySecrets,
   ensureServiceRuntimeUserId,
   recordedProviderCheckoutRoot,
   recordProviderCheckoutRoot,
@@ -4135,6 +4136,9 @@ async function runtimeComposeStatus() {
 
 // ───────────────────────── up / down / status / test ─────────────────────────
 async function up() {
+  // Before anything starts: the provider hands its environment to docker
+  // compose, which gives each space's proxy these secrets.
+  ensureDevProxySecrets(process.env);
   if ((process.env.GIT_CANONICAL || "").trim() === "") {
     process.env.GIT_CANONICAL = "1";
     console.log(
