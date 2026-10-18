@@ -9351,6 +9351,125 @@ async fn an_event_stream_rechecks_access_per_window_and_at_once_after_an_access_
     Ok(())
 }
 
+/// One user opens every stream a node allows (a tab, Desktop window or phone
+/// each); the next is refused with `Retry-After`, and a stream that closes
+/// gives its place back at once.
+#[tokio::test]
+async fn a_user_gets_the_stream_limit_and_a_closed_stream_frees_its_place() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping event stream limit test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    ensure_conversation_event_test_tables(&pool).await?;
+
+    let owner_user_id = Uuid::new_v4();
+    let member_user_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    ensure_test_user(&pool, &owner_user_id).await?;
+    ensure_test_user(&pool, &member_user_id).await?;
+    {
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "insert into organizations (id, slug, name) values ($1, $2, $3)",
+                &[
+                    &org_id,
+                    &format!("event-stream-limit-{org_id}"),
+                    &"Event stream limit test",
+                ],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into projects (id, org_id, project_type, owner_user_id, status)
+                 values ($1, $2, 'customer', $3, 'active')",
+                &[&project_id, &org_id, &owner_user_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into project_memberships (project_id, user_id, role)
+                 values ($1, $2, 'builder')",
+                &[&project_id, &member_user_id],
+            )
+            .await?;
+    }
+
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "event-stream-limit",
+    );
+    let member_token = crate::auth::issue_controller_token(&config, &member_user_id)
+        .map_err(|error| controller_error("issue member token", error))?
+        .token;
+    let state = build_test_state(pool.clone(), config);
+    let open_stream = || {
+        crate::events::router().with_state(state.clone()).oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/events?projectId={project_id}"))
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {member_token}"),
+                )
+                .body(Body::empty())
+                .expect("event stream request"),
+        )
+    };
+
+    let mut streams = Vec::new();
+    for _ in 0..crate::events::MAX_EVENT_STREAMS_PER_USER {
+        let response = open_stream().await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        streams.push(response);
+    }
+
+    let refused = open_stream().await?;
+    assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        refused
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+        Some(
+            crate::events::EVENT_STREAM_RETRY_AFTER_SECS
+                .to_string()
+                .as_str()
+        )
+    );
+    let refusal: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(refused.into_body(), 64 * 1024).await?)?;
+    assert_eq!(
+        refusal["code"],
+        json!(crate::events::TOO_MANY_EVENT_STREAMS_CODE)
+    );
+
+    // A closed tab drops its response; its place comes back.
+    drop(streams.pop());
+    let reopened = timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let response = open_stream().await?;
+            if response.status() == StatusCode::OK {
+                return Ok::<_, anyhow::Error>(response);
+            }
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("a closed stream did not give its place back"))??;
+    drop(reopened);
+    drop(streams);
+
+    cleanup_origin_project(&pool, &project_id).await?;
+    cleanup_org(&pool, &org_id).await?;
+    cleanup_test_user(&pool, &member_user_id).await?;
+    cleanup_test_user(&pool, &owner_user_id).await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn event_stream_hides_private_runtime_lifecycle_from_project_teammates() -> anyhow::Result<()>
 {

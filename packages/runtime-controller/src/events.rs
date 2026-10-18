@@ -24,11 +24,55 @@ use crate::projects::{
     ScopeParams, MEMBERS_CHANGED_PROJECT_MEMBERSHIP, PROJECT_MEMBERS_CHANGED_EVENT,
 };
 use crate::state::{AppState, ControllerEvent, ACCESS_CHANGED_SPACE_DELETED};
-use crate::{database_unavailable, forbidden, load_project_record, too_many_requests};
+use crate::{database_unavailable, forbidden, load_project_record};
 
 mod private_runtime_visibility;
 
 const PROJECT_ACCESS_CHANGED_EVENT: &str = "project.access_changed";
+
+/// Open event streams one user may hold on one controller node. Every Studio
+/// tab, Desktop window and phone holds one, so four refused the fifth tab of
+/// an ordinary session. A stream is cheap to hold: a receiver on the node's
+/// shared broadcast, a project watch count and a keep-alive every 15 s (Redis
+/// is one subscription per node, not per stream). It costs the pool when fed:
+/// an event it matches takes a connection for an access check, at most once
+/// per conversation per `EVENT_ACCESS_RECHECK_AFTER`, and on every runtime,
+/// origin, tunnel, workspace or roster event. One user's streams on one space
+/// multiply those checks, so the cap stays near the production pool (6):
+/// eight covers a handful of tabs, Desktop and a phone, plus a tab whose last
+/// stream has not closed yet, and one user's burst only queues for a moment.
+pub(crate) const MAX_EVENT_STREAMS_PER_USER: usize = 8;
+
+/// How long a stream refused for [`MAX_EVENT_STREAMS_PER_USER`] is asked to
+/// wait (`Retry-After`). The client doubles it on each refusal in a row.
+pub(crate) const EVENT_STREAM_RETRY_AFTER_SECS: u64 = 10;
+
+/// The `code` of that refusal.
+pub(crate) const TOO_MANY_EVENT_STREAMS_CODE: &str = "too_many_event_streams";
+
+fn event_stream_limit_key(user_id: uuid::Uuid) -> String {
+    format!("events:user:{user_id}")
+}
+
+/// The answer to a stream over [`MAX_EVENT_STREAMS_PER_USER`]: a 429 that
+/// says how long to wait, so a refused tab backs off instead of asking again
+/// every few seconds.
+fn too_many_event_streams() -> axum::response::Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(
+            axum::http::header::RETRY_AFTER,
+            EVENT_STREAM_RETRY_AFTER_SECS.to_string(),
+        )],
+        Json(ApiError {
+            message: "Too many open event streams. Close other Instafy tabs and try again."
+                .to_string(),
+            code: Some(TOO_MANY_EVENT_STREAMS_CODE.to_string()),
+            details: None,
+        }),
+    )
+        .into_response()
+}
 
 /// The access checks one stream has passed lately, by conversation (`None`
 /// for an event of the project as a whole), so a burst of events takes one
@@ -134,32 +178,27 @@ async fn events_stream(
     axum::extract::State(state): axum::extract::State<AppState>,
     headers: HeaderMap,
     Query(params): Query<EventsQuery>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
+) -> Result<axum::response::Response, (StatusCode, Json<ApiError>)> {
     let context = authenticate_request(&state.config, &headers).await?;
-    let filters = build_event_filters(&state, params, &context).await?;
 
-    let permit = if !state.config.dev_mode && !context.is_service_role {
-        if let Some(user_id) = context.user_id {
-            state
+    // Before any database read, so a refused tab costs a token check and
+    // nothing more each time it asks.
+    let permit = match context.user_id {
+        Some(user_id) if !state.config.dev_mode && !context.is_service_role => {
+            let Some(permit) = state
                 .connection_limiter
-                .try_acquire(format!("events:user:{user_id}"), 4)
+                .try_acquire(event_stream_limit_key(user_id), MAX_EVENT_STREAMS_PER_USER)
                 .await
-        } else {
-            None
+            else {
+                debug!(%user_id, "event stream refused: too many open streams");
+                return Ok(too_many_event_streams());
+            };
+            Some(permit)
         }
-    } else {
-        None
+        _ => None,
     };
 
-    if !state.config.dev_mode
-        && !context.is_service_role
-        && context.user_id.is_some()
-        && permit.is_none()
-    {
-        return Err(too_many_requests(
-            "Too many open event streams. Close other Instafy tabs and try again.",
-        ));
-    }
+    let filters = build_event_filters(&state, params, &context).await?;
 
     // Watch before subscribing, so no project signal published after the
     // subscription skips this node's broadcast.
@@ -284,11 +323,13 @@ async fn events_stream(
         }
     });
 
-    Ok(Sse::new(stream).keep_alive(
-        KeepAlive::new()
-            .interval(Duration::from_secs(15))
-            .text("keep-alive"),
-    ))
+    Ok(Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text("keep-alive"),
+        )
+        .into_response())
 }
 
 fn event_targets_context(event: &ControllerEvent, context: &RequestContext) -> bool {
@@ -935,5 +976,68 @@ mod tests {
             Some(StatusCode::SERVICE_UNAVAILABLE)
         );
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// A user who already holds every stream the node allows is told to wait
+    /// (429, `Retry-After`, a code) before the database is read: the pool
+    /// here cannot connect and is never asked for a connection.
+    #[tokio::test]
+    async fn a_stream_over_the_limit_is_refused_with_retry_after_before_any_database_read(
+    ) -> anyhow::Result<()> {
+        use tower::ServiceExt;
+
+        let config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "event-stream-limit",
+        );
+        assert!(!config.dev_mode);
+        let user_id = Uuid::new_v4();
+        let token = crate::auth::issue_controller_token(&config, &user_id)
+            .map_err(|(status, _)| anyhow::anyhow!("issue controller token: {status}"))?
+            .token;
+        let manager = bb8_postgres::PostgresConnectionManager::new_from_stringlike(
+            "postgresql://ignored:ignored@127.0.0.1:1/postgres",
+            crate::config::database_tls(),
+        )?;
+        let pool = bb8::Pool::builder().max_size(1).build_unchecked(manager);
+        let state = crate::tests::build_test_state(pool, config);
+
+        let mut held = Vec::new();
+        for _ in 0..MAX_EVENT_STREAMS_PER_USER {
+            held.push(
+                state
+                    .connection_limiter
+                    .try_acquire(event_stream_limit_key(user_id), MAX_EVENT_STREAMS_PER_USER)
+                    .await
+                    .expect("a place below the limit"),
+            );
+        }
+
+        let response = router()
+            .with_state(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri(format!("/events?projectId={}", Uuid::new_v4()))
+                    .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(axum::body::Body::empty())?,
+            )
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some(EVENT_STREAM_RETRY_AFTER_SECS.to_string().as_str())
+        );
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024).await?;
+        let body: serde_json::Value = serde_json::from_slice(&body)?;
+        assert_eq!(body["code"], json!(TOO_MANY_EVENT_STREAMS_CODE));
+        assert_eq!(crate::tests::pool_gets(&state.pool), 0);
+        drop(held);
+        Ok(())
     }
 }

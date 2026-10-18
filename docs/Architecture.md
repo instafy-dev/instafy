@@ -105,6 +105,11 @@ This does **not** require a dedicated public file server. Private storage stays 
   authenticated `fetch` stream and send bearer credentials in the `Authorization` header; access
   tokens must never be placed in the event-stream URL. The client requires the SSE media type and
   bounds individual lines and accumulated event data before parsing JSON.
+- Each Studio tab, Desktop window and phone holds one stream. A controller node allows one user
+  eight at once and refuses another, before reading the database, with 429, the code
+  `too_many_event_streams` and `Retry-After`. The client waits that long, doubles the wait on each
+  refusal in a row up to a minute, and adds a little jitter, so an extra tab asks about once a
+  minute instead of every few seconds. Opening a stream resets the wait.
 - Supabase is a fallback when the controller is disabled.
 
 ## Conversation delivery intents

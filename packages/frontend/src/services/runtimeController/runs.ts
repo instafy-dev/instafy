@@ -12,6 +12,7 @@ import {
   isAutomationBrowser,
   logControllerRequestError,
 } from "./logging";
+import { parseRetryAfterMs } from "./originErrors";
 import { reportControllerProjectNotFound } from "./projectNotFound";
 
 const RUN_EVENT_KINDS = [
@@ -310,6 +311,45 @@ const MAX_SERVER_SENT_EVENT_DATA_BYTES = 1024 * 1024;
 const MAX_SERVER_SENT_EVENT_LINE_BYTES =
   MAX_SERVER_SENT_EVENT_DATA_BYTES + "data: ".length + 3;
 const DEFAULT_SERVER_SENT_EVENT_RECONNECT_DELAY_MS = 3000;
+// A 429 means this user already holds every stream the controller allows, and
+// only another tab closing frees one. Retrying at the usual 3 s turned each
+// extra tab into a request every few seconds, so a refusal waits Retry-After
+// (or 10 s), doubles on each refusal in a row up to a minute, and adds up to a
+// fifth at random so refused tabs do not ask in step.
+const REFUSED_STREAM_DEFAULT_DELAY_MS = 10_000;
+const REFUSED_STREAM_MIN_DELAY_MS = 1_000;
+const REFUSED_STREAM_MAX_DELAY_MS = 60_000;
+const REFUSED_STREAM_JITTER_RATIO = 0.2;
+
+/** The wait before asking again after `refusals` 429s in a row. */
+export function refusedStreamReconnectDelayMs(
+  refusals: number,
+  retryAfterMs: number | undefined,
+  random: () => number = Math.random,
+): number {
+  const firstDelayMs = Math.min(
+    REFUSED_STREAM_MAX_DELAY_MS,
+    Math.max(
+      retryAfterMs ?? REFUSED_STREAM_DEFAULT_DELAY_MS,
+      REFUSED_STREAM_MIN_DELAY_MS,
+    ),
+  );
+  const delayMs = Math.min(
+    REFUSED_STREAM_MAX_DELAY_MS,
+    firstDelayMs * 2 ** Math.max(0, refusals - 1),
+  );
+  return Math.round(delayMs * (1 + random() * REFUSED_STREAM_JITTER_RATIO));
+}
+
+class RefusedServerSentEventError extends Error {
+  constructor(
+    message: string,
+    readonly retryAfterMs: number | undefined,
+  ) {
+    super(message);
+    this.name = "RefusedServerSentEventError";
+  }
+}
 
 class ServerSentEventProtocolError extends Error {
   constructor(message: string) {
@@ -560,6 +600,7 @@ export function subscribeToRunsFromController(
   let currentReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let reconnectDelayMs = DEFAULT_SERVER_SENT_EVENT_RECONNECT_DELAY_MS;
+  let refusalsInARow = 0;
   let lastEventId = "";
   let cancelled = false;
 
@@ -692,6 +733,12 @@ export function subscribeToRunsFromController(
           }
           throw new TerminalServerSentEventError(denial);
         }
+        if (response.status === 429) {
+          throw new RefusedServerSentEventError(
+            responseMessage,
+            parseRetryAfterMs(response.headers.get("retry-after")),
+          );
+        }
         throw new Error(responseMessage);
       }
       try {
@@ -705,6 +752,7 @@ export function subscribeToRunsFromController(
       }
 
       opened = true;
+      refusalsInARow = 0;
       if (import.meta.env.DEV && !isAutomationBrowser()) {
         console.info("[runtime-controller] sse open", { url });
       }
@@ -806,7 +854,12 @@ export function subscribeToRunsFromController(
       }
       controller.abort();
       currentController = null;
-      if (!terminalError) {
+      if (error instanceof RefusedServerSentEventError) {
+        refusalsInARow += 1;
+        scheduleReconnect(
+          refusedStreamReconnectDelayMs(refusalsInARow, error.retryAfterMs),
+        );
+      } else if (!terminalError) {
         scheduleReconnect(
           protocolError
             ? DEFAULT_SERVER_SENT_EVENT_RECONNECT_DELAY_MS
