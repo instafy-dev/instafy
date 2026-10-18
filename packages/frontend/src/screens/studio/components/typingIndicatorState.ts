@@ -2,13 +2,18 @@ import { resolveRetryingStatusPresentation } from "../../../conversations/runFai
 import type { ChatMessage } from "../types";
 import type { RunRecord } from "../../../types";
 import { extractRunIdFromMetadata } from "./chatAssistantIdentity";
-import { extractAgentJobId } from "./chatMessagePresentation";
+import { extractAgentJobId, runMatchesThreadJobId } from "./chatMessagePresentation";
 import {
   isCompactionStatusText,
   resolveAssistantStatusHeadline,
 } from "./assistantStatusHeuristics";
 import { getMessageType } from "./chatMessageMetadata";
 import { truncate } from "./chatContentHelpers";
+import {
+  coerceThreadMessages,
+  isFinalAgentOutcomeMessage,
+  resolveThreadRunStatusFromMessages,
+} from "./threadPreviewHelpers";
 
 export type TypingIndicatorPhase = "typing" | "finalizing" | "thinking" | "waiting" | "compacting";
 export type TypingIndicatorState = { phase: TypingIndicatorPhase; label: string | null };
@@ -65,6 +70,11 @@ export function resolveTypingIndicatorState(
       if (jobId && activeJobId && jobId !== activeJobId) continue;
       if (!runId && (!jobId || jobId !== activeJobId)) continue;
     }
+    // A reply ends its turn: any reasoning title before it is history, not
+    // what the agent is doing now, even while the run record catches up.
+    if (isFinalAgentOutcomeMessage(message)) {
+      break;
+    }
     const type = getMessageType(message);
     if (type !== "reasoning" && type !== "status") {
       continue;
@@ -105,4 +115,66 @@ export function resolveTypingIndicatorState(
     return fallback;
   }
   return { phase: "typing", label: null };
+}
+
+function readJobThreadMessages(message: ChatMessage): ChatMessage[] {
+  const metadata = message.metadata;
+  return coerceThreadMessages(
+    metadata && typeof metadata === "object" && !Array.isArray(metadata)
+      ? (metadata as Record<string, unknown>)["threadMessages"]
+      : null,
+  );
+}
+
+function isJobThreadRow(message: ChatMessage): boolean {
+  return (getMessageType(message) ?? "").trim().toLowerCase() === "agent_job_thread";
+}
+
+/**
+ * How the newest transcript row covers the assistant typing row.
+ *
+ * - `live`: the row is a job thread still running. It shows the run's state
+ *   itself (rail and caption), so a typing row under it would say it twice.
+ * - `answered`: the thread already holds its reply, and every run still marked
+ *   active is that thread's own run, whose record has not caught up yet. A
+ *   typing row here would bring back the turn's last reasoning title under the
+ *   finished answer, and then hold its place for seconds after.
+ * - `none`: anything else, including a different run starting after the reply.
+ */
+export type JobThreadTypingCoverage = "none" | "live" | "answered";
+
+export function resolveJobThreadTypingCoverage(
+  latestDisplayedMessage: ChatMessage | null | undefined,
+  activeRuns: readonly RunRecord[],
+): JobThreadTypingCoverage {
+  if (!latestDisplayedMessage || !isJobThreadRow(latestDisplayedMessage)) {
+    return "none";
+  }
+  const threadMessages = readJobThreadMessages(latestDisplayedMessage);
+  if (threadMessages.length === 0) {
+    return "none";
+  }
+  if (resolveThreadRunStatusFromMessages(threadMessages).phase !== "completed") {
+    return "live";
+  }
+  const jobId = extractAgentJobId(latestDisplayedMessage);
+  return jobId && activeRuns.length > 0 && activeRuns.every((run) => runMatchesThreadJobId(run, jobId))
+    ? "answered"
+    : "none";
+}
+
+/**
+ * Identifies the newest transcript content for the typing row, which drops its
+ * placeholder as soon as this changes. A job thread keeps one row id while its
+ * reply lands inside it, so the key also names the thread's newest message.
+ */
+export function resolveTranscriptTailKey(latestDisplayedMessage: ChatMessage | null | undefined): string | null {
+  if (!latestDisplayedMessage) {
+    return null;
+  }
+  if (!isJobThreadRow(latestDisplayedMessage)) {
+    return latestDisplayedMessage.id;
+  }
+  const newest = readJobThreadMessages(latestDisplayedMessage).at(-1);
+  return newest ? `${latestDisplayedMessage.id}:${newest.id}` : latestDisplayedMessage.id;
 }

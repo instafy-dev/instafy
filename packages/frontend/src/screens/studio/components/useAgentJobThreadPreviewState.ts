@@ -44,6 +44,7 @@ import {
   resolveThreadCompactUpdateKind,
   resolveThreadRunStatusFromMessages,
   shouldKeepThreadUpdateInline,
+  THREAD_ACTION_CARD_TYPES,
   THREAD_ACTIVE_STATES,
   THREAD_COMPACT_EVENT_ICON_CAP,
   THREAD_HYBRID_COMPACTION_MIN_WIDTH_PX,
@@ -154,6 +155,9 @@ export function useAgentJobThreadPreviewState({
           return false;
         }
         return true;
+      }
+      if (THREAD_ACTION_CARD_TYPES.has(type)) {
+        return false;
       }
       return ![
         "command_execution",
@@ -316,6 +320,18 @@ export function useAgentJobThreadPreviewState({
     !isCompleted &&
     !shouldShowStaleThreadStatus &&
     (isRunning || isThreadRunInFlight || hasRecentThreadActivity || runStatus.phase === "running");
+  // `isRunning` flips back and forth inside one turn: it follows the newest
+  // update's own status, so it drops each time a command finishes and returns
+  // when the next one starts. Layout that must hold still for the whole turn
+  // (how many updates show, where the spine ends) follows this instead: true
+  // from the first sign of the turn until it completes or goes stale.
+  const isThreadUnresolved = isThreadPreviewUnresolved({
+    isCompleted,
+    isRunning,
+    isThreadRunInFlight,
+    hasRecentThreadActivity,
+    runPhase: runStatus.phase,
+  });
   const finalSpineTone = terminalProxyErrorMessage
     ? "danger"
     : isActiveForPreview || isCompleted
@@ -349,7 +365,10 @@ export function useAgentJobThreadPreviewState({
         continue;
       }
       const type = (getMessageType(candidate) ?? "").trim().toLowerCase();
-      if (type && excluded.has(type)) {
+      // A card is not the reply. Taken for one, the newest card of a running
+      // turn stayed hidden until the reply arrived and the turn ended on its
+      // raw text instead of the card.
+      if (type && (excluded.has(type) || THREAD_ACTION_CARD_TYPES.has(type))) {
         continue;
       }
       if (type === "status") {
@@ -456,8 +475,9 @@ export function useAgentJobThreadPreviewState({
     });
   }, [finalSummaryMessage?.id, latestFileMessage?.id, threadMessages]);
 
+  const isLiveTurn = isRunning || isThreadUnresolved;
   const { visibleUpdates, hiddenUpdateCount } = useMemo(() => {
-    const maxVisible = isRunning ? 5 : 3;
+    const maxVisible = isLiveTurn ? 5 : 3;
     if (intermediateUpdates.length <= maxVisible) {
       return { visibleUpdates: intermediateUpdates, hiddenUpdateCount: 0 };
     }
@@ -465,7 +485,7 @@ export function useAgentJobThreadPreviewState({
       visibleUpdates: intermediateUpdates.slice(-maxVisible),
       hiddenUpdateCount: intermediateUpdates.length - maxVisible,
     };
-  }, [intermediateUpdates, isRunning]);
+  }, [intermediateUpdates, isLiveTurn]);
 
   useEffect(() => {
     const allowed = new Set(visibleUpdates.map((entry) => entry.id));
@@ -636,13 +656,6 @@ export function useAgentJobThreadPreviewState({
   const showCompactRailWaitingSpinner =
     isHybridCompactionActive && !isRunning && !isCompleted && isThreadRunInFlight;
 
-  const isThreadUnresolved = isThreadPreviewUnresolved({
-    isCompleted,
-    isRunning,
-    isThreadRunInFlight,
-    hasRecentThreadActivity,
-    runPhase: runStatus.phase,
-  });
   const shouldAnimateThreadLiveState =
     isThreadUnresolved && !shouldShowStaleThreadStatus && !hasSupersedingConversationMessage;
 
@@ -759,11 +772,13 @@ export function useAgentJobThreadPreviewState({
     showCompactIconRail,
     showCompactRailWaitingSpinner,
   });
+  // One update is one row, waiting spinner or not: the spinner comes and goes
+  // with every command, and swapping the row for a rail each time moved the
+  // turn. The row's own sweep carries the live state.
   const shouldCollapseSingleCompactEvent =
     showCompactIconRail &&
     visibleCompactEvents.length === 1 &&
-    overflowCompactCount === 0 &&
-    !showCompactRailWaitingSpinner;
+    overflowCompactCount === 0;
   const singleCompactEvent = shouldCollapseSingleCompactEvent ? visibleCompactEvents[0] ?? null : null;
   const singleCompactEventLabel = useMemo(() => {
     if (!singleCompactEvent) {
@@ -813,9 +828,6 @@ export function useAgentJobThreadPreviewState({
     showRunningPlaceholder && previewText.length > 0 && previewText.length <= 80 && !previewText.includes("\n");
   const suppressSummaryRunningStatus = shouldSuppressSummaryRunningStatus({
     showCompactRailStatus: showCollapsedCompactRailStatus,
-    showRunningSpinnerFallback,
-    useCompactRunningPreview,
-    hasRunningStatusLabel: Boolean(runningStatusLabel),
   });
   const summaryBodyPaddingTopClass =
     showCompactIconRail || showCollapsedCompactRailStatus
@@ -889,7 +901,9 @@ export function useAgentJobThreadPreviewState({
     ["--thread-spine-left" as const]: `${-CHAT_SPINE_GUTTER_PX - threadPreviewBodyInsetPx}px`,
     ["--thread-header-left" as const]: `${-threadPreviewHeaderInsetPx}px`,
   } as CSSProperties;
-  const threadPreviewRailStyle = { top: "32px", bottom: !isRunning ? "16px" : "0px" } as CSSProperties;
+  // The spine runs open to the bottom for the whole turn and gains its end
+  // cap once, when the turn settles (see isThreadUnresolved).
+  const threadPreviewRailStyle = { top: "32px", bottom: isLiveTurn ? "0px" : "16px" } as CSSProperties;
 
   return {
     message,

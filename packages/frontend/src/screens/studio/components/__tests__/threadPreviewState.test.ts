@@ -79,33 +79,11 @@ describe("threadPreviewState", () => {
     ).toBe(false);
   });
 
-  it("suppresses duplicate summary running labels when compact rail already owns the live status", () => {
-    expect(
-      shouldSuppressSummaryRunningStatus({
-        showCompactRailStatus: true,
-        showRunningSpinnerFallback: true,
-        useCompactRunningPreview: false,
-        hasRunningStatusLabel: false,
-      }),
-    ).toBe(true);
-
-    expect(
-      shouldSuppressSummaryRunningStatus({
-        showCompactRailStatus: true,
-        showRunningSpinnerFallback: false,
-        useCompactRunningPreview: true,
-        hasRunningStatusLabel: true,
-      }),
-    ).toBe(true);
-
-    expect(
-      shouldSuppressSummaryRunningStatus({
-        showCompactRailStatus: false,
-        showRunningSpinnerFallback: true,
-        useCompactRunningPreview: true,
-        hasRunningStatusLabel: true,
-      }),
-    ).toBe(false);
+  it("lets the compact rail caption be the only running status under the rail", () => {
+    // Any running summary under the caption, a short label or a multi-line
+    // preview box alike, would come and go with each command and move the rail.
+    expect(shouldSuppressSummaryRunningStatus({ showCompactRailStatus: true })).toBe(true);
+    expect(shouldSuppressSummaryRunningStatus({ showCompactRailStatus: false })).toBe(false);
   });
 
   it("treats non-recoverable quota errors as terminal thread state", () => {

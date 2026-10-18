@@ -527,11 +527,13 @@ export function AgentJobThreadPreviewLayout({
   const rowOwnerHandle =
     threadOwnerHandle ?? normalizeAgentHandle(normalizeAssistantHandleLabel(null));
   const latestCommandActorBadge = resolveDistinctActorHandle(latestCommandAgentHandle, rowOwnerHandle);
+  // One update is one row whether or not the waiting spinner is up; the
+  // spinner comes and goes with each command and must not swap the row for a
+  // rail (useAgentJobThreadPreviewState decides the same way).
   const shouldCollapseSingleCompactEvent =
     singleCompactEvent !== null &&
     visibleCompactEvents.length === 1 &&
-    overflowCompactCount === 0 &&
-    !showCompactRailWaitingSpinner;
+    overflowCompactCount === 0;
   const singleCompactEventIsCommand = singleCompactEvent?.kind === "command";
   // The in-flight pill sits at the rail's newest end; before any update chips
   // exist it reads as the run starting, afterwards as work continuing (#176).
@@ -876,11 +878,15 @@ export function AgentJobThreadPreviewLayout({
       {!useTightThreadPreviewLayout && showCollapsedCompactRailStatus ? (
         <div className={compactRailHasCaption ? "relative pb-1" : runDetailSectionClass}>
           {compactRailHasCaption ? null : renderRunDetailSectionNotch()}
+          {/* The turn's one live status line: a fixed line box that never
+              wraps, so a command, a reasoning title or an actor chip swapping
+              in cannot change the turn's height while it runs. */}
           <Text
             as="div"
             variant="caption"
             tone="muted"
-            className="flex w-fit min-w-0 max-w-[min(100%,32rem)] items-center gap-1.5 pl-0.5 pr-1"
+            data-testid="agent-thread-compact-rail-status"
+            className="flex h-4 w-fit min-w-0 max-w-[min(100%,32rem)] items-center gap-1.5 pl-0.5 pr-1 leading-4"
           >
             {commandActorBadgeElement}
             <span
@@ -1422,14 +1428,18 @@ export function AgentJobThreadPreviewLayout({
                       );
                     })}
                     {showCompactRailWaitingSpinner ? (
-                      <span
-                        className={`instafy-compact-event-pill ${
-                          isThreadUnresolved ? "instafy-compact-event-pill-live" : ""
-                        } inline-flex h-6 w-6 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300`}
-                        title={compactRailInFlightLabel}
-                        aria-label={compactRailInFlightLabel}
-                      >
-                        <Spinner size="xs" tone="slate" className="h-3.5 w-3.5" />
+                      // Same wrapper and box as a chip (ThreadRailChipButton),
+                      // so the live pill and a settled one are the same size.
+                      <span className="relative inline-flex">
+                        <span
+                          className={`instafy-compact-event-pill ${
+                            isThreadUnresolved ? "instafy-compact-event-pill-live" : ""
+                          } inline-flex h-6 w-6 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300`}
+                          title={compactRailInFlightLabel}
+                          aria-label={compactRailInFlightLabel}
+                        >
+                          <Spinner size="xs" tone="slate" className="h-3.5 w-3.5" />
+                        </span>
                       </span>
                     ) : null}
                   </div>
@@ -1626,26 +1636,36 @@ export function AgentJobThreadPreviewLayout({
                   )}
                 </div>
               ) : showRunningSpinnerFallback ? (
-                <Text
-                  as="div"
-                  variant="caption"
-                  tone="muted"
-                  className={`${shouldAnimateThreadLiveState ? "instafy-status-sweep" : ""} text-xs`}
-                  data-sweep-text={runningStatusLabel ?? "Running tasks…"}
-                  aria-live="polite"
-                >
-                  {runningStatusLabel ?? "Running tasks…"}
-                </Text>
+                // Both running lines share one fixed line box, like the rail
+                // caption: a long reasoning title truncates (the full text is
+                // its tooltip) instead of wrapping onto more lines mid-turn,
+                // and swapping one line for the other keeps the height.
+                <div className="h-5" data-testid="agent-thread-running-status">
+                  <Text
+                    as="div"
+                    variant="caption"
+                    tone="muted"
+                    className={`${shouldAnimateThreadLiveState ? "instafy-status-sweep" : ""} max-w-full truncate align-top text-xs leading-5`}
+                    data-sweep-text={runningStatusLabel ?? "Running tasks…"}
+                    title={runningStatusLabel ?? "Running tasks…"}
+                    aria-live="polite"
+                  >
+                    {runningStatusLabel ?? "Running tasks…"}
+                  </Text>
+                </div>
               ) : useCompactRunningPreview && runningStatusLabel ? (
-                <Text
-                  as="div"
-                  variant="body"
-                  tone="muted"
-                  className={`${shouldAnimateThreadLiveState ? "instafy-status-sweep" : ""} text-slate-600 dark:text-slate-300`}
-                  data-sweep-text={runningStatusLabel}
-                >
-                  {runningStatusLabel}
-                </Text>
+                <div className="h-5" data-testid="agent-thread-running-status">
+                  <Text
+                    as="div"
+                    variant="bodyCompact"
+                    tone="muted"
+                    className={`${shouldAnimateThreadLiveState ? "instafy-status-sweep" : ""} max-w-full truncate align-top text-slate-600 dark:text-slate-300`}
+                    data-sweep-text={runningStatusLabel}
+                    title={runningStatusLabel}
+                  >
+                    {runningStatusLabel}
+                  </Text>
+                </div>
               ) : (
                 <div
                   ref={runningPreviewContainerRef}
@@ -1677,8 +1697,11 @@ export function AgentJobThreadPreviewLayout({
             </div>
           </div>
         ) : null}
-        {!isRunning && showThreadPreviewSpine ? (
-          <div className="relative h-4">
+        {/* The end cap marks a settled turn. Keyed to isRunning it came and
+            went with every command (isRunning follows the newest update),
+            moving the whole rail by its height mid-turn. */}
+        {!isRunning && !isThreadUnresolved && showThreadPreviewSpine ? (
+          <div className="relative h-4" data-testid="agent-thread-spine-end">
             <ThreadSpine
               tone={finalSpineTone}
               className={`pointer-events-none absolute top-0 h-full ${threadSpineJunctionOffsetClass}`}

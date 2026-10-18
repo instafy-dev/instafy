@@ -8,7 +8,12 @@ import type { ChatMessage } from "../../types";
 import type { RunRecord } from "../../../../types";
 import { ChatMessageAvatar } from "../ChatMessageAvatar";
 import { ChatTypingRows } from "../ChatTypingRows";
-import { resolveMultiAgentTypingStatus, resolveTypingIndicatorState } from "../typingIndicatorState";
+import {
+  resolveJobThreadTypingCoverage,
+  resolveMultiAgentTypingStatus,
+  resolveTranscriptTailKey,
+  resolveTypingIndicatorState,
+} from "../typingIndicatorState";
 import { expectCanonicalOctoCoin } from "../../../../components/__tests__/octoCoinExpectations";
 
 // The face is Octo's coin (OctoCoin, docs/Brand.md): white with the shared
@@ -741,4 +746,145 @@ describe("resolveTypingIndicatorState", () => {
     expect(container.querySelector('[data-testid="stop"]')).toBeNull();
   });
 
+});
+
+// Seen on production: a turn's reply had landed inside its job thread, then a
+// status line with the turn's last reasoning title ("Analyzing output schema")
+// appeared under the answer and held its place for another twelve seconds.
+describe("the typing row after a job thread's reply", () => {
+  const JOB_ID = "job-turn";
+  const userMessage: ChatMessage = { id: "user-1", role: "user", content: "Set it up", timestamp: 1 };
+  const reasoning: ChatMessage = {
+    id: "reasoning-1",
+    role: "assistant",
+    content: "**Analyzing output schema**\n\nDetails.",
+    timestamp: 2,
+    messageType: "reasoning",
+    metadata: { messageType: "reasoning", source: "agent", kind: "update", outcome: "in_progress", jobId: JOB_ID },
+  };
+  const reply: ChatMessage = {
+    id: "reply-1",
+    role: "assistant",
+    content: "Two values are needed to finish setup.",
+    timestamp: 3,
+    metadata: { source: "agent", outcome: "success", jobId: JOB_ID },
+  };
+  const threadRow = (threadMessages: ChatMessage[]): ChatMessage => ({
+    id: `agent-job-thread:${JOB_ID}`,
+    role: "assistant",
+    content: "",
+    timestamp: 2,
+    messageType: "agent_job_thread",
+    metadata: { messageType: "agent_job_thread", jobId: JOB_ID, threadMessages },
+  });
+  const run = (id: string, jobId: string): RunRecord => ({
+    id, status: "in_progress", projectId: "project", conversationId: "conversation", sessionId: null, promptId: null,
+    runType: "prompt", progress: 0, progressStage: null, previewUrl: null, lastMessage: null,
+    createdAt: null, updatedAt: null, metadata: { jobId },
+  });
+
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    vi.useRealTimers();
+    container.remove();
+    delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("never takes a finished turn's reasoning title for the current status", () => {
+    const fallback = { phase: "thinking" as const, label: "Thinking…" };
+    expect(resolveTypingIndicatorState([userMessage, reasoning, reply], fallback, run("run-1", JOB_ID))).toBe(
+      fallback,
+    );
+    expect(resolveTypingIndicatorState([userMessage, reasoning, reply], fallback)).toBe(fallback);
+    // Before the reply the same title is the live status.
+    expect(resolveTypingIndicatorState([userMessage, reasoning], fallback, run("run-1", JOB_ID))).toEqual({
+      phase: "thinking",
+      label: "Analyzing output schema",
+    });
+  });
+
+  it("lets an answered job thread cover the run it belongs to, and only that run", () => {
+    expect(resolveJobThreadTypingCoverage(threadRow([reasoning]), [run("run-1", JOB_ID)])).toBe("live");
+    // The run record has not caught up with the reply yet.
+    expect(resolveJobThreadTypingCoverage(threadRow([reasoning, reply]), [run("run-1", JOB_ID)])).toBe("answered");
+    // A different run starting after the reply gets its own typing row.
+    expect(
+      resolveJobThreadTypingCoverage(threadRow([reasoning, reply]), [run("run-1", JOB_ID), run("run-2", "job-next")]),
+    ).toBe("none");
+    expect(resolveJobThreadTypingCoverage(threadRow([reasoning, reply]), [])).toBe("none");
+    expect(resolveJobThreadTypingCoverage(reply, [run("run-1", JOB_ID)])).toBe("none");
+    expect(resolveJobThreadTypingCoverage(undefined, [run("run-1", JOB_ID)])).toBe("none");
+  });
+
+  it("drops the status row at once when the reply lands inside the job thread", async () => {
+    // The thread keeps one row id while its reply lands inside it; the tail
+    // key names the newest message so the typing row sees the reply arrive.
+    const runningKey = resolveTranscriptTailKey(threadRow([reasoning]));
+    const answeredKey = resolveTranscriptTailKey(threadRow([reasoning, reply]));
+    expect(runningKey).not.toBe(answeredKey);
+    expect(resolveTranscriptTailKey(reply)).toBe("reply-1");
+    expect(resolveTranscriptTailKey(undefined)).toBeNull();
+
+    const props = {
+      peerTypingLabel: null,
+      isAssistantTypingCoveredByJobThreadPreview: false,
+      typingAgents: [],
+      hasMultipleTypingAgents: false,
+      typingAgentHandle: "octo",
+      typingAgentAvatarSeed: "octo",
+      typingStatusLabel: "Thinking…",
+      typingStatusAriaLabel: "Thinking",
+      isThinkingLabelExpanded: false,
+      onToggleThinkingLabel: () => undefined,
+      renderAssistantAvatar: () => <span data-testid="assistant-avatar" />,
+    };
+    vi.useFakeTimers();
+    await act(async () => {
+      root.render(
+        <ChatTypingRows
+          {...props}
+          isAssistantTyping
+          typingIndicatorState={{ phase: "thinking", label: "Analyzing output schema" }}
+          latestDisplayedMessageId={runningKey}
+        />,
+      );
+    });
+    expect(container.querySelector('[data-testid="assistant-typing-indicator"]')).toBeInstanceOf(HTMLElement);
+
+    await act(async () => {
+      root.render(
+        <ChatTypingRows
+          {...props}
+          isAssistantTyping
+          typingIndicatorState={{ phase: "thinking", label: "Analyzing output schema" }}
+          latestDisplayedMessageId={answeredKey}
+        />,
+      );
+    });
+    await act(async () => {
+      root.render(
+        <ChatTypingRows
+          {...props}
+          isAssistantTyping={false}
+          typingIndicatorState={null}
+          latestDisplayedMessageId={answeredKey}
+        />,
+      );
+    });
+
+    expect(container.querySelector('[data-testid="assistant-typing-indicator"]')).toBeNull();
+    expect(container.querySelector('[data-testid="assistant-avatar"]')).toBeNull();
+  });
 });

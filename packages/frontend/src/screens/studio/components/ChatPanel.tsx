@@ -182,7 +182,9 @@ import {
 } from "./assistantMessageGrouping";
 import {
   COMPACTION_STATUS_LABEL,
+  resolveJobThreadTypingCoverage,
   resolveMultiAgentTypingStatus,
+  resolveTranscriptTailKey,
   resolveTypingIndicatorState,
   type TypingIndicatorPhase,
 } from "./typingIndicatorState";
@@ -224,10 +226,6 @@ import { useChatAgentRoster } from "./useChatAgentRoster";
 import { useChatConversationInviteState } from "./useChatConversationInviteState";
 import { useChatOrgMembers } from "./useChatOrgMembers";
 import { useChatGithubImportFlow } from "./useChatGithubImportFlow";
-import {
-  coerceThreadMessages,
-  resolveThreadRunStatusFromMessages,
-} from "./threadPreviewHelpers";
 import { getMessageType } from "./chatMessageMetadata";
 import {
   type AssistantAgentIdentity,
@@ -3199,35 +3197,23 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     },
     [],
   );
-  const isAssistantTypingCoveredByJobThreadPreview = useMemo(() => {
-    if (!isAssistantTyping) {
-      return false;
-    }
-    const latestDisplayedMessage = displayedMessages[displayedMessages.length - 1];
-    if (!latestDisplayedMessage) {
-      return false;
-    }
-    const messageType = (getMessageType(latestDisplayedMessage) ?? "").trim().toLowerCase();
-    if (messageType !== "agent_job_thread") {
-      return false;
-    }
-    const metadata = latestDisplayedMessage.metadata;
-    const threadMessages = coerceThreadMessages(
-      metadata && isRecord(metadata) ? metadata["threadMessages"] : null,
-    );
-    if (threadMessages.length === 0) {
-      return false;
-    }
-    return resolveThreadRunStatusFromMessages(threadMessages).phase !== "completed";
-  }, [displayedMessages, isAssistantTyping]);
+  const jobThreadTypingCoverage = useMemo(
+    () =>
+      isAssistantTyping
+        ? resolveJobThreadTypingCoverage(displayedMessages[displayedMessages.length - 1], activeConversationRuns)
+        : "none",
+    [activeConversationRuns, displayedMessages, isAssistantTyping],
+  );
+  const isAssistantTypingCoveredByJobThreadPreview = jobThreadTypingCoverage !== "none";
+  const transcriptTailKey = useMemo(
+    () => resolveTranscriptTailKey(displayedMessages[displayedMessages.length - 1]),
+    [displayedMessages],
+  );
   const activeAssistantAvatarMotion = useMemo<{
     messageId: string;
     motion: AssistantAvatarMotion;
   } | null>(() => {
-    if (
-      !isAssistantTypingCoveredByJobThreadPreview ||
-      typingIndicatorState?.phase !== "thinking"
-    ) {
+    if (jobThreadTypingCoverage !== "live" || typingIndicatorState?.phase !== "thinking") {
       return null;
     }
 
@@ -3249,7 +3235,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     activeConversationRun,
     activeConversationRuns,
     displayedMessages,
-    isAssistantTypingCoveredByJobThreadPreview,
+    jobThreadTypingCoverage,
     typingIndicatorState?.phase,
   ]);
   const [isThinkingLabelExpanded, setIsThinkingLabelExpanded] = useState(false);
@@ -5862,7 +5848,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
               }
               isThinkingLabelExpanded={isThinkingLabelExpanded}
               onToggleThinkingLabel={() => setIsThinkingLabelExpanded((current) => !current)}
-              latestDisplayedMessageId={displayedMessages[displayedMessages.length - 1]?.id ?? null}
+              latestDisplayedMessageId={transcriptTailKey}
               renderAssistantAvatar={renderAssistantAvatar}
             />
             {stoppedTurnNotice ? <StoppedTurnRow text={stoppedTurnNotice} /> : null}
