@@ -91,7 +91,7 @@ use crate::shared_browser::{
 };
 use crate::task_usage::{UsageAttempt, UsageCall, UsageCounts, UsageOutcome};
 
-const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
+use crate::job_model::DEFAULT_CODEX_MODEL;
 const DEFAULT_CODEX_RUN_TIMEOUT_SECONDS: u64 = 600;
 const DEFAULT_CODEX_MAX_RUN_RETRIES: usize = 1;
 const PROXY_STREAM_MAX_RETRIES: u64 = 1;
@@ -251,30 +251,9 @@ pub(crate) fn classify_internal_codex_fallback_summary(
 }
 
 fn normalize_runtime_codex_model_id(model: &str) -> String {
-    match model.trim() {
-        "" => DEFAULT_CODEX_MODEL.to_string(),
-        // Older persisted Studio agent settings can still point at retired Codex
-        // model ids even after the frontend option list is migrated.
-        trimmed if is_retired_runtime_codex_model_id(trimmed) => DEFAULT_CODEX_MODEL.to_string(),
-        trimmed => trimmed.to_string(),
-    }
-}
-
-fn is_retired_runtime_codex_model_id(model: &str) -> bool {
-    let normalized = model.trim().to_ascii_lowercase();
-    if normalized == "gpt-5" || normalized == "gpt-5-codex" {
-        return true;
-    }
-    normalized
-        .strip_prefix("gpt-5.")
-        .and_then(|rest| {
-            let minor: String = rest
-                .chars()
-                .take_while(|character| character.is_ascii_digit())
-                .collect();
-            minor.parse::<u32>().ok()
-        })
-        .is_some_and(|minor| minor < 5)
+    // Older persisted Studio agent settings can still point at retired Codex
+    // model ids even after the frontend option list is migrated.
+    crate::job_model::normalize_model_id(model)
 }
 
 /// The decoder's grammar for the final assistant message.
@@ -1359,7 +1338,8 @@ impl CodexClient {
         );
 
         let overrides = ConfigOverrides {
-            model: optional_env("CODEX_MODEL"),
+            // Job secrets installed CODEX_MODEL; the launch value is only a logged fallback.
+            model: crate::job_model::installed_job_model_override("codex turn"),
             review_model: None,
             cwd: Some(self.config.workspace_dir.clone()),
             approval_policy: Some(AskForApproval::Never),
@@ -1369,7 +1349,7 @@ impl CodexClient {
                 resolve_sandbox_mode()
             }),
             personality: default_personality,
-            model_provider: optional_env("CODEX_MODEL_PROVIDER"),
+            model_provider: crate::job_model::installed_job_model_provider(),
             codex_linux_sandbox_exe: optional_env_path("CODEX_LINUX_SANDBOX_EXE"),
             // Runtime-scoped execution turns should not inherit external base instructions.
             base_instructions,
@@ -1559,6 +1539,11 @@ impl CodexClient {
                 to_model = %normalized_model,
                 "normalized runtime Codex model id"
             );
+        }
+        // The model this turn asks the proxy for, on the job's usage receipt: the evidence that a
+        // turn followed the controller's choice rather than a launch-time pin.
+        if let Some(observation) = usage_attempt.as_ref() {
+            observation.requested_model(&normalized_model);
         }
         config.model = Some(normalized_model);
 

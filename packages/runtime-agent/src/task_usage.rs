@@ -143,6 +143,7 @@ impl UsageCall {
             incomplete: false,
             completed: false,
             outcome: None,
+            model: None,
         })));
         let mut task = self.task.0.lock();
         if task.calls.len() < MAX_CALLS {
@@ -164,6 +165,7 @@ struct AttemptState {
     incomplete: bool,
     completed: bool,
     outcome: Option<UsageOutcome>,
+    model: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -198,6 +200,14 @@ impl UsageAttempt {
         }
     }
 
+    /// The model id this attempt asked for (an id, never content).
+    pub(crate) fn requested_model(&self, model: &str) {
+        let model = model.trim();
+        if !model.is_empty() && model.len() <= 128 {
+            self.0.lock().model = Some(model.to_string());
+        }
+    }
+
     pub(crate) fn completed(&self) {
         self.0.lock().completed = true;
     }
@@ -228,6 +238,9 @@ impl UsageAttempt {
         });
         if let Some(usage) = state.usage {
             receipt["usage"] = json!(usage);
+        }
+        if let Some(model) = state.model.as_ref() {
+            receipt["model"] = json!(model);
         }
         receipt
     }
@@ -280,6 +293,17 @@ mod tests {
         }
         assert_eq!(calls[0]["invocationId"], calls[1]["invocationId"]);
         assert_ne!(calls[1]["invocationId"], calls[2]["invocationId"]);
+    }
+
+    #[test]
+    fn a_receipt_names_the_model_the_attempt_asked_for() {
+        let task = TaskUsage::default();
+        let attempt = task.call(UsagePhase::Main).start_attempt(1);
+        attempt.requested_model("gpt-6-luna");
+        attempt.finish(UsageOutcome::Success);
+        assert_eq!(attempt.receipt()["model"], "gpt-6-luna");
+        let silent = task.call(UsagePhase::Main).start_attempt(1);
+        assert!(silent.receipt().get("model").is_none());
     }
 
     #[test]

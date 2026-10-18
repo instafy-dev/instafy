@@ -108,7 +108,6 @@ const COLLABORATION_SKILL_ROUTING_MAX_CHARS: usize = 1_400;
 const COLLABORATION_SKILL_DELEGATION_MAX_CHARS: usize = 1_600;
 const ROUTING_PRE_OBSERVATION_OUTPUT_MAX_CHARS: usize = 4_000;
 const ROUTING_PRE_OBSERVATION_TIMEOUT_SECS: u64 = 10;
-const DEFAULT_DIRECT_WORKER_MODEL: &str = "gpt-5.6-sol";
 const WORKSPACE_LEASE_WRITE_SCOPE: &str = "workspace.lease.write";
 const ORIGIN_TOKEN_MINT_SCOPE: &str = "origin.token.mint";
 const WORKSPACE_TOKEN_SEPARATED_SCOPE: &str = "job.token.workspace-separated";
@@ -4703,7 +4702,7 @@ impl JobProcessor {
         Ok(DirectWorkerProxyConfig {
             chat_completions_endpoint: format!("{base}/v1/chat/completions"),
             api_key: envelope.token.trim().to_string(),
-            model: resolve_direct_worker_model_id(model),
+            model: crate::job_model::normalize_model_id(model.as_deref().unwrap_or("")),
             reasoning_effort,
         })
     }
@@ -6454,6 +6453,7 @@ impl JobProcessor {
         {
             let proxy_config = direct_worker_proxy_config(
                 proxy_envelope,
+                crate::job_model::resolve_for_installed_job("sequential direct lane").id,
                 codex_run_options.reasoning_effort.clone(),
             )?;
             return execute_preobserved_scoped_worker_direct(
@@ -6477,6 +6477,7 @@ impl JobProcessor {
             }
             let proxy_config = direct_worker_proxy_config(
                 proxy_envelope,
+                crate::job_model::resolve_for_installed_job("sequential direct lane").id,
                 codex_run_options.reasoning_effort.clone(),
             )?;
             let (execution, files) = execute_write_scoped_worker_direct(
@@ -13013,6 +13014,7 @@ struct DirectWorkerProxyConfig {
 
 fn direct_worker_proxy_config(
     envelope: Option<&ProxyEnvelopePayload>,
+    model: String,
     job_effort: Option<ReasoningEffort>,
 ) -> Result<DirectWorkerProxyConfig> {
     let api_key = envelope
@@ -13048,7 +13050,7 @@ fn direct_worker_proxy_config(
     Ok(DirectWorkerProxyConfig {
         chat_completions_endpoint: format!("{base_url}/v1/chat/completions"),
         api_key,
-        model: resolve_direct_worker_model_id(env::var("CODEX_MODEL").ok()),
+        model,
         reasoning_effort: crate::codex::resolve_runtime_reasoning_effort(
             env::var("CODEX_RUNTIME_REASONING_EFFORT").ok().as_deref(),
             job_effort,
@@ -13145,36 +13147,6 @@ async fn execute_preobserved_scoped_worker_direct(
         messages_streamed: false,
         final_messages: Vec::new(),
     })
-}
-
-fn resolve_direct_worker_model_id(raw_model: Option<String>) -> String {
-    let model = raw_model
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_DIRECT_WORKER_MODEL.to_string());
-
-    if is_retired_direct_worker_model_id(&model) {
-        DEFAULT_DIRECT_WORKER_MODEL.to_string()
-    } else {
-        model
-    }
-}
-
-fn is_retired_direct_worker_model_id(model: &str) -> bool {
-    let normalized = model.trim().to_ascii_lowercase();
-    if normalized == "gpt-5" || normalized == "gpt-5-codex" {
-        return true;
-    }
-    normalized
-        .strip_prefix("gpt-5.")
-        .and_then(|rest| {
-            let minor: String = rest
-                .chars()
-                .take_while(|character| character.is_ascii_digit())
-                .collect();
-            minor.parse::<u32>().ok()
-        })
-        .is_some_and(|minor| minor < 5)
 }
 
 #[derive(Debug, Clone)]
@@ -25339,35 +25311,6 @@ mod tests {
         assert!(prompt.contains("keep it defensive"));
         assert!(prompt.contains("weaponized payloads"));
         assert!(!prompt.contains("Return exactly one JSON object"));
-    }
-
-    #[test]
-    fn direct_worker_model_normalizes_retired_codex_slugs() {
-        assert_eq!(resolve_direct_worker_model_id(None), "gpt-5.6-sol");
-        assert_eq!(
-            resolve_direct_worker_model_id(Some("gpt-5-codex".to_string())),
-            "gpt-5.6-sol"
-        );
-        assert_eq!(
-            resolve_direct_worker_model_id(Some("gpt-5.3-codex".to_string())),
-            "gpt-5.6-sol"
-        );
-        assert_eq!(
-            resolve_direct_worker_model_id(Some("gpt-5.3".to_string())),
-            "gpt-5.6-sol"
-        );
-        assert_eq!(
-            resolve_direct_worker_model_id(Some("gpt-5.2".to_string())),
-            "gpt-5.6-sol"
-        );
-        assert_eq!(
-            resolve_direct_worker_model_id(Some("gpt-5.4".to_string())),
-            "gpt-5.6-sol"
-        );
-        assert_eq!(
-            resolve_direct_worker_model_id(Some("gpt-5.4-mini".to_string())),
-            "gpt-5.6-sol"
-        );
     }
 
     #[test]

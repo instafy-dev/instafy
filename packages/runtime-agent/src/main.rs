@@ -91,6 +91,11 @@ fn main() -> anyhow::Result<()> {
     // SAFETY: no other thread exists yet; the Tokio runtime is built on the next line.
     unsafe { config::capture_and_scrub_launch_credentials() }
         .context("failed to capture runtime launch credentials")?;
+    // The controller sends each job's model. Keep the launch CODEX_MODEL only as a logged
+    // fallback for jobs without one, and out of the process environment so no path reads it
+    // implicitly (a stale pin in a dev template used to override the controller this way).
+    // SAFETY: no other thread exists yet.
+    unsafe { runtime_agent::job_model::capture_and_scrub_launch_model() };
     let runtime = build_tokio_runtime()?;
     runtime.block_on(async move { run_runtime_agent().await })
 }

@@ -1084,6 +1084,52 @@ fn apply_managed_ai_env_overrides(
     );
 }
 
+/// A bring-your-own AI job without an agent model still names its model: the
+/// credential's default. Otherwise the runtime would fall back to whatever
+/// model it was launched with, which no one chose for this job.
+async fn apply_credential_default_model(
+    transaction: &tokio_postgres::Transaction<'_>,
+    env: &mut JsonMap<String, JsonValue>,
+    credential_id: Option<Uuid>,
+    intent: Option<&str>,
+) {
+    let Some(credential_id) = credential_id else {
+        return;
+    };
+    if !crate::dispatch::dispatch_requires_ai_access(intent.unwrap_or_default())
+        || env
+            .get("CODEX_MODEL")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|model| !model.trim().is_empty())
+    {
+        return;
+    }
+    let row = match transaction
+        .query_opt(
+            "select kind, metadata from user_credentials where id = $1",
+            &[&credential_id],
+        )
+        .await
+    {
+        Ok(row) => row,
+        Err(error) => {
+            tracing::warn!(?error, %credential_id, "could not load the job credential's default model");
+            return;
+        }
+    };
+    let Some(row) = row else {
+        return;
+    };
+    let kind: String = row.get("kind");
+    let metadata: JsonValue = row.get::<_, PgJson<JsonValue>>("metadata").0;
+    env.insert(
+        "CODEX_MODEL".to_string(),
+        JsonValue::String(crate::credentials::credential_default_model(
+            &kind, &metadata,
+        )),
+    );
+}
+
 /// Resolved per-agent runtime overrides loaded from `user_agents`. `model` is
 /// provider-resolved; `reasoning_effort` is the raw per-agent value (one of
 /// minimal|low|medium|high, already normalized on write) or None to inherit.
@@ -1306,6 +1352,8 @@ async fn agent_secrets(
         // a platform-lane job still runs Codex on the managed model.
         let mut env = JsonMap::new();
         apply_managed_ai_env_overrides(&mut env, &state.config, credential_id, intent.as_deref());
+        apply_credential_default_model(&transaction, &mut env, credential_id, intent.as_deref())
+            .await;
         transaction
             .commit()
             .await
@@ -1466,6 +1514,7 @@ async fn agent_secrets(
     }
 
     apply_managed_ai_env_overrides(&mut env, &state.config, credential_id, intent.as_deref());
+    apply_credential_default_model(&transaction, &mut env, credential_id, intent.as_deref()).await;
 
     transaction
         .commit()
