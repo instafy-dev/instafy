@@ -1652,6 +1652,18 @@ fn usage_calls(artifacts: &[Value]) -> &[Value] {
         let invocation = call["invocationId"].as_str().expect("invocation identity");
         Uuid::parse_str(invocation).expect("opaque invocation UUID");
         let attempt = call["attempt"].as_u64().expect("attempt index");
+        if let Some(model) = call.get("model") {
+            let model = model.as_str().expect("model is a string");
+            assert!(
+                !model.is_empty()
+                    && model.len() <= 128
+                    && model
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric()
+                            || matches!(c, '-' | '_' | '.' | ':' | '/')),
+                "model must be a plain model identifier, not request content: {model:?}"
+            );
+        }
         assert!(identities.insert((invocation, attempt)), "{calls:?}");
         let fields = call.as_object().unwrap();
         assert!(
@@ -1659,6 +1671,7 @@ fn usage_calls(artifacts: &[Value]) -> &[Value] {
                 field.as_str(),
                 "invocationId"
                     | "attempt"
+                    | "model"
                     | "phase"
                     | "outcome"
                     | "usageStatus"
