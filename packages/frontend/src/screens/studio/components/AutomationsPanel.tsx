@@ -714,11 +714,11 @@ function ProjectAutomationsPanel({ activeProjectId, userId }: { activeProjectId:
                             variant="ghost"
                             size="xs"
                             radius="full"
-                            className="text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-900/60"
+                            tone="muted"
                           >
                             <MoreHoriz className="h-4 w-4" aria-hidden={true} />
                           </IconButton>
-                          <StudioPopover placement="bottom end" offset={6} className="w-56 p-2">
+                          <StudioPopover placement="bottom end" layout="menu">
                             <StudioMenu
                               aria-label="Automation actions"
                               onAction={(key) => {

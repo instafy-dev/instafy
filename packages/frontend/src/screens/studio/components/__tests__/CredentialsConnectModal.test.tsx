@@ -186,6 +186,35 @@ describe("CredentialsConnectModal", () => {
     expect(props.onClose).not.toHaveBeenCalled();
   });
 
+  it.each([true, false])("keeps the API-key action focused and prevents repeat submissions while pending (desktop=%s)", async (isDesktop) => {
+    mockDesktopWidth(isDesktop);
+    const props = createProps({
+      connectModalStep: "openai",
+      openaiApiKeyDraft: "review-key",
+      onConnectApiKey: vi.fn().mockResolvedValue(false),
+    });
+    await act(async () => root.render(<CredentialsConnectModal {...props} />));
+    const connect = document.querySelector<HTMLButtonElement>('[data-testid="credentials-openai-connect"]')!;
+    await act(async () => {
+      connect.focus();
+      connect.click();
+    });
+    expect(props.onConnectApiKey).toHaveBeenCalledOnce();
+    await act(async () => root.render(<CredentialsConnectModal {...props} apiKeyPendingProvider="openai" />));
+    expect(document.querySelector('[data-testid="credentials-openai-connect"]')).toBe(connect);
+    expect(document.activeElement).toBe(connect);
+    expect(connect.disabled).toBe(false);
+    expect(connect.getAttribute("aria-disabled")).toBe("true");
+    expect(document.querySelector<HTMLInputElement>('[data-testid="credentials-openai-api-key-input"]')?.disabled).toBe(true);
+    await act(async () => connect.click());
+    expect(props.onConnectApiKey).toHaveBeenCalledOnce();
+    expect(props.onClose).not.toHaveBeenCalled();
+    await act(async () => root.render(<CredentialsConnectModal {...props} />));
+    expect(document.activeElement).toBe(connect);
+    await act(async () => connect.click());
+    expect(props.onConnectApiKey).toHaveBeenCalledTimes(2);
+  });
+
   it("presents the private Desktop Codex auth.json path as the preferred local connection", async () => {
     await act(async () => {
       root.render(<CredentialsConnectModal {...createProps({ connectModalStep: "codex" })} />);
@@ -526,7 +555,10 @@ describe("CredentialsConnectModal", () => {
 
     expect(document.body.textContent).toContain("ABCD-EFGH");
     expect(document.body.textContent).toContain("Open auth.openai.com");
-    expect(document.body.textContent).toContain("code expires in");
+    expect(document.body.textContent).toContain("Code expires in");
+    expect(document.querySelector('[role="status"]')?.textContent).toBe("Waiting for login…");
+    // The countdown updates every second; it must not be inside the live announcement.
+    expect(document.querySelector('[role="status"]')?.textContent).not.toContain("expires");
     expect(document.body.textContent).toContain("never ask you to paste your ChatGPT password");
   });
 

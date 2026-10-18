@@ -10,6 +10,7 @@ import { MenuTrigger } from "react-aria-components";
 import { Badge } from "../../../components/Badge";
 import { Button, IconButton } from "../../../components/Button";
 import { EntityRow } from "../../../components/EntityRow";
+import { LoadingStatus } from "../../../components/LoadingStatus";
 import { MenuItemContent } from "../../../components/MenuItemContent";
 import { OctoMark } from "../../../components/OctoMark";
 import { DeepSeekIcon, GeminiIcon, OpenAIIcon, ZaiIcon } from "../../../components/ProviderIcons";
@@ -327,7 +328,6 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
   const [credentialTestPendingId, setCredentialTestPendingId] = useState<string | null>(null);
   const [credentialTestFeedback, setCredentialTestFeedback] = useState<Record<string, CredentialTestFeedback>>({});
   const [mobileCredentialMenuId, setMobileCredentialMenuId] = useState<string | null>(null);
-  const mobileCredentialMenuLastActionRef = useRef<string | null>(null);
   const reconnectFileInputRef = useRef<HTMLInputElement | null>(null);
   const reconnectCredentialIdRef = useRef<string | null>(null);
 
@@ -1267,9 +1267,9 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                 className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 px-1 text-sm"
                 data-testid="credentials-ai-mode-summary"
               >
-                <span className="font-medium text-slate-800 dark:text-slate-100">
+                <Text as="span" variant="bodyStrong" tone="primary">
                   {aiModeSummary.title}
-                </span>
+                </Text>
                 <Text variant="caption" tone="muted" className="min-w-0 max-w-3xl">
                   {aiModeSummary.detail}
                 </Text>
@@ -1278,7 +1278,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
 
             {!runtimeControllerEnabled ? (
               <div className="px-1" data-testid="credentials-empty">
-                <Text as="div" variant="body" className="font-semibold">
+                <Text as="div" variant="bodyStrong">
                   Runtime controller is not connected
                 </Text>
                 <Text as="div" variant="caption" tone="muted">
@@ -1287,7 +1287,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
               </div>
             ) : !user ? (
               <div className="px-1">
-                <Text as="div" variant="body" className="font-semibold">
+                <Text as="div" variant="bodyStrong">
                   Sign in required
                 </Text>
                 <Text as="div" variant="caption" tone="muted">
@@ -1322,15 +1322,15 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                       end={!managedAiEnabled ? null : managedAiSelected ? <span className="hidden md:inline-flex"><Badge size="xs">Default</Badge></span> : (
                         <Button
                           onPress={() => void handleUseManagedAi()}
-                          isDisabled={!canSwitchToManagedAi || Boolean(actionPendingId) || loading}
+                          isPending={actionPendingId === "managed-ai"}
+                          isDisabled={!canSwitchToManagedAi || Boolean(actionPendingId && actionPendingId !== "managed-ai") || loading}
                           variant="ghost"
                           size="xs"
                           radius="full"
-                          className="min-h-11 md:min-h-0"
                           aria-label="Make Instafy AI default"
                           data-testid="credentials-use-managed-ai"
                         >
-                          {actionPendingId === "managed-ai" ? "Switching…" : "Make default"}
+                          Make default
                         </Button>
                       )}
                       endClassName="self-center"
@@ -1383,12 +1383,12 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                   const testFeedbackLabel = testFeedbackState
                     ? resolveCredentialTestStatusLabel(testFeedbackState)
                     : null;
-                  const testFeedbackToneClass =
+                  const testFeedbackTone =
                     testFeedbackState === "ok"
-                      ? "text-emerald-700 dark:text-emerald-300"
+                      ? "success"
                       : testFeedbackState === "needs_reconnect"
-                        ? "text-secondary-700 dark:text-secondary-200"
-                      : "text-rose-600 dark:text-rose-300";
+                        ? "warning"
+                      : "danger";
                   const testFeedbackTitle =
                     testFeedbackState === "ok"
                       ? "Last test passed"
@@ -1399,11 +1399,10 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                       : testFeedbackEntry?.detail
                         ? `Last test failed: ${testFeedbackEntry.detail}`
                         : "Last test failed";
-                  const testFeedbackDetailClass =
-                    testFeedbackState === "needs_reconnect"
-                      ? "text-secondary-700 dark:text-secondary-200"
-                      : "text-rose-500 dark:text-rose-300";
-
+                  const replaceCredential = () => openConnectModalToReplace(
+                    { id: credential.id, label: label || "this connection" },
+                    connectStepForCredential(credential),
+                  );
                   return (
                     <li key={credential.id} data-testid={`credentials-connection-row-${credential.id}`}>
                       <EntityRow
@@ -1446,29 +1445,29 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                         }
                         detail={
                           testPending ? (
-                            <div className="inline-flex items-center gap-1 text-xs text-slate-500 dark:text-slate-400">
-                              <Spinner aria-hidden="true" size="xs" tone="slate" />
-                              <span>Testing...</span>
-                            </div>
+                            <LoadingStatus size="xs">Testing…</LoadingStatus>
                           ) : testFeedbackLabel ? (
                             <div
                               className="min-w-0"
+                              role="status"
+                              aria-live="polite"
+                              aria-atomic="true"
                               title={testFeedbackTitle}
                               data-testid={`credentials-connection-test-result-${credential.id}`}
                             >
-                              <span
-                                className={[
-                                  "inline-flex items-center gap-1 text-xs",
-                                  testFeedbackToneClass,
-                                ].join(" ")}
+                              <Text
+                                as="span"
+                                variant="caption"
+                                tone={testFeedbackTone}
+                                className="inline-flex items-center gap-1"
                               >
                                 <CredentialTestStatusIcon status={testFeedbackState ?? "fail"} />
                                 <span>{testFeedbackLabel}</span>
-                              </span>
+                              </Text>
                               {testFeedbackEntry?.status !== "ok" && testFeedbackEntry?.detail ? (
-                                <span className={["mt-0.5 block truncate text-xs", testFeedbackDetailClass].join(" ")}>
+                                <Text as="span" variant="caption" tone={testFeedbackTone} className="mt-0.5 block break-words">
                                   {testFeedbackEntry.detail}
-                                </span>
+                                </Text>
                               ) : null}
                             </div>
                           ) : null
@@ -1496,41 +1495,25 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
 
                               <Button
                                 onPress={() => void handleTestCredential(credential.id)}
-                                isDisabled={pending || testPending}
-                                variant="outline"
+                                isDisabled={pending}
+                                isPending={testPending}
+                                variant="ghost"
                                 size="xs"
                                 radius="full"
-                                className="gap-1.5"
                                 data-testid={`credentials-connection-test-${credential.id}`}
                               >
-                                {testPending ? <Spinner aria-hidden="true" size="xs" tone="primary" /> : null}
-                                {testPending ? "Testing…" : testFeedbackEntry ? "Retest" : "Test"}
+                                Test
                               </Button>
 
                               {canReplace ? (
                                 <Button
-                                  onPress={() =>
-                                    openConnectModalToReplace(
-                                      {
-                                        id: credential.id,
-                                        label:
-                                          resolveCredentialLabel(credential) || "this connection",
-                                      },
-                                      connectStepForCredential(credential),
-                                    )
-                                  }
+                                  onPress={replaceCredential}
                                   isDisabled={pending || testPending}
                                   variant={testFeedbackState === "needs_reconnect" ? "outline" : "ghost"}
+                                  tone={testFeedbackState === "needs_reconnect" ? "accent" : "neutral"}
+                                  elevation="none"
                                   size="xs"
                                   radius="full"
-                                  className={[
-                                    "gap-1.5",
-                                    testFeedbackState === "needs_reconnect"
-                                      ? "border-secondary-200 bg-secondary-50 text-secondary-800 hover:bg-secondary-100 dark:bg-secondary-500/10 dark:text-secondary-100 dark:hover:bg-secondary-500/15"
-                                      : null,
-                                  ]
-                                    .filter(Boolean)
-                                    .join(" ")}
                                   data-testid={`credentials-connection-replace-${credential.id}`}
                                 >
                                   Replace
@@ -1541,16 +1524,10 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                                   onPress={() => handleTriggerReconnectCredential(credential.id)}
                                   isDisabled={pending || testPending}
                                   variant={testFeedbackState === "needs_reconnect" ? "outline" : "ghost"}
+                                  tone={testFeedbackState === "needs_reconnect" ? "accent" : "neutral"}
+                                  elevation="none"
                                   size="xs"
                                   radius="full"
-                                  className={[
-                                    "gap-1.5",
-                                    testFeedbackState === "needs_reconnect"
-                                      ? "border-secondary-200 bg-secondary-50 text-secondary-800 hover:bg-secondary-100 dark:border-secondary-500/40 dark:bg-secondary-500/10 dark:text-secondary-100 dark:hover:bg-secondary-500/15"
-                                      : null,
-                                  ]
-                                    .filter(Boolean)
-                                    .join(" ")}
                                   data-testid={`credentials-connection-reconnect-${credential.id}`}
                                 >
                                   {pending ? <Spinner aria-hidden="true" size="xs" tone="primary" /> : null}
@@ -1576,18 +1553,11 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                                 isOpen={mobileCredentialMenuId === credential.id}
                                 onOpenChange={(open) => {
                                   if (!open) {
-                                    const lastAction = mobileCredentialMenuLastActionRef.current;
-                                    mobileCredentialMenuLastActionRef.current = null;
-                                    if (lastAction === "test") {
-                                      setMobileCredentialMenuId(credential.id);
-                                      return;
-                                    }
                                     setMobileCredentialMenuId((current) =>
                                       current === credential.id ? null : current,
                                     );
                                     return;
                                   }
-                                  mobileCredentialMenuLastActionRef.current = null;
                                   setMobileCredentialMenuId(credential.id);
                                 }}
                               >
@@ -1601,83 +1571,36 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                                 >
                                   <MoreHoriz className="h-4 w-4" aria-hidden="true" />
                                 </IconButton>
-                                <StudioPopover placement="left top" offset={8} className="w-56 p-1">
+                                <StudioPopover placement="left top" layout="menu" className="w-56">
                                   <StudioMenu
                                     aria-label="Connection actions"
-                                    onClose={() => {}}
                                     onAction={(key) => {
                                       const action = String(key);
-                                      mobileCredentialMenuLastActionRef.current = action;
                                       if (action === "default") {
                                         void handleMakeDefault(credential.id);
-                                        setMobileCredentialMenuId(null);
                                       } else if (action === "test") {
                                         void handleTestCredential(credential.id);
-                                        setMobileCredentialMenuId(credential.id);
                                       } else if (action === "reconnect") {
                                         handleTriggerReconnectCredential(credential.id);
-                                        setMobileCredentialMenuId(null);
+                                      } else if (action === "replace") {
+                                        replaceCredential();
                                       } else if (action === "remove") {
                                         void handleRevoke(credential.id);
-                                        setMobileCredentialMenuId(null);
                                       }
+                                      setMobileCredentialMenuId(null);
                                     }}
                                   >
                                     {!credential.isDefault ? (
                                       <StudioMenuItem id="default" isDisabled={testPending}>
                                         <MenuItemContent>Make default</MenuItemContent>
                                       </StudioMenuItem>
-                                    ) : (
-                                      <StudioMenuItem id="default" isDisabled>
-                                        <MenuItemContent>Default</MenuItemContent>
-                                      </StudioMenuItem>
-                                    )}
-                                    <StudioMenuItem id="test" isDisabled={testPending}>
-                                      <MenuItemContent
-                                        start={
-                                          testPending ? (
-                                            <Spinner aria-hidden="true" size="xs" tone="primary" />
-                                          ) : null
-                                        }
-                                      >
-                                        {testPending ? "Testing…" : "Test"}
-                                      </MenuItemContent>
-                                    </StudioMenuItem>
-                                    {testPending ? (
-                                      <StudioMenuItem
-                                        id="test-status"
-                                        isDisabled
-                                        className="py-1 data-[disabled]:cursor-default data-[disabled]:opacity-100"
-                                      >
-                                        <MenuItemContent textClassName="text-xs text-slate-500 dark:text-slate-400">
-                                          Checking this credential…
-                                        </MenuItemContent>
-                                      </StudioMenuItem>
-                                    ) : testFeedbackEntry?.status ? (
-                                      <StudioMenuItem
-                                        id="test-status"
-                                        isDisabled
-                                        className="py-1 data-[disabled]:cursor-default data-[disabled]:opacity-100"
-                                        data-testid={`credentials-connection-test-result-mobile-${credential.id}`}
-                                      >
-                                        <MenuItemContent
-                                          start={<CredentialTestStatusIcon status={testFeedbackEntry.status} />}
-                                          startClassName={["shrink-0", testFeedbackToneClass].join(" ")}
-                                          textClassName={["text-xs", testFeedbackToneClass].join(" ")}
-                                        >
-                                          {resolveCredentialTestStatusLabel(testFeedbackEntry.status)}
-                                        </MenuItemContent>
-                                      </StudioMenuItem>
                                     ) : null}
-                                    {testFeedbackEntry?.status !== "ok" && testFeedbackEntry?.detail ? (
-                                      <StudioMenuItem
-                                        id="test-status-detail"
-                                        isDisabled
-                                        className="py-1 data-[disabled]:cursor-default data-[disabled]:opacity-100"
-                                      >
-                                        <MenuItemContent textClassName={["text-xs", testFeedbackDetailClass].join(" ")}>
-                                          {testFeedbackEntry.detail}
-                                        </MenuItemContent>
+                                    <StudioMenuItem id="test" isDisabled={testPending}>
+                                      <MenuItemContent>Test</MenuItemContent>
+                                    </StudioMenuItem>
+                                    {canReplace ? (
+                                      <StudioMenuItem id="replace" isDisabled={testPending}>
+                                        <MenuItemContent>Replace…</MenuItemContent>
                                       </StudioMenuItem>
                                     ) : null}
                                     {canReconnectAuthJson ? (
@@ -1837,7 +1760,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                                 >
                                   <MoreHoriz className="h-4 w-4" aria-hidden="true" />
                                 </IconButton>
-                                <StudioPopover placement="left top" offset={8} className="w-56 p-1">
+                                <StudioPopover placement="left top" layout="menu" className="w-56">
                                   <StudioMenu
                                     aria-label="Bot actions"
                                     onAction={(key) => {

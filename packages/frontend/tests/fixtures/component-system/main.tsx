@@ -65,7 +65,7 @@ function ComponentReference() {
     <Section title="Form controls">
       <div className="grid gap-4 sm:grid-cols-2">
         <Field label="Name" htmlFor="reference-name"><Input id="reference-name" data-testid="reference-input" /></Field>
-        <Field label="Access" htmlFor="reference-access"><Select id="reference-access" data-testid="reference-select"><option value="viewer">Viewer</option><option value="editor">Editor</option></Select></Field>
+        <Field label="Access" htmlFor="reference-access"><Select id="reference-access" data-testid="reference-select"><option value="viewer">Viewer</option><option value="editor">Editor</option><option value="admin" disabled>Administrator</option></Select></Field>
         <Field label="Native access" htmlFor="reference-native"><Select native id="reference-native" data-testid="reference-native"><option value="viewer">Viewer</option><option value="editor">Editor</option></Select></Field>
         <Field label="Model" htmlFor="reference-model" labelId="reference-model-label">
           <MenuTrigger><FormPickerTrigger id="reference-model" aria-labelledby="reference-model-label" data-testid="reference-picker">{model}</FormPickerTrigger>
