@@ -475,6 +475,157 @@ describe("runtime controller run event streaming", () => {
     }
   });
 
+  it("backs a refused stream off from Retry-After, doubling up to a minute, until it opens", async () => {
+    vi.useFakeTimers();
+    const random = vi.spyOn(Math, "random").mockReturnValue(0);
+    const refusalMessage =
+      "Too many open event streams. Close other Instafy tabs and try again.";
+    const refuse = (retryAfter: string | null) => (input: RequestInfo | URL) =>
+      Promise.resolve({
+        body: null,
+        headers: new Headers({
+          "content-type": "application/json",
+          ...(retryAfter === null ? {} : { "retry-after": retryAfter }),
+        }),
+        ok: false,
+        status: 429,
+        statusText: "Too Many Requests",
+        text: async () =>
+          JSON.stringify({
+            message: refusalMessage,
+            code: "too_many_event_streams",
+          }),
+        url: String(input),
+      } as Response);
+    fetchMock
+      .mockImplementationOnce(refuse("10"))
+      .mockImplementationOnce(refuse("10"))
+      .mockImplementationOnce(refuse("10"))
+      .mockImplementationOnce(refuse("10"));
+
+    const { subscribeToRunsFromController } = await import(
+      "../runtimeController/runs"
+    );
+    const onError = vi.fn();
+    const onOpen = vi.fn();
+    const unsubscribe = subscribeToRunsFromController({
+      projectId: "11111111-1111-4111-8111-111111111111",
+      quietErrors: true,
+      onRun: vi.fn(),
+      onRunPatch: vi.fn(),
+      onError,
+      onOpen,
+    });
+
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      await flushAsyncWork();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(onError).toHaveBeenCalledWith(refusalMessage);
+
+      // 10 s, 20 s, 40 s, then 60 s: not the 3 s of an ordinary reconnect.
+      for (const [requests, waitMs] of [
+        [2, 10_000],
+        [3, 20_000],
+        [4, 40_000],
+        [5, 60_000],
+      ] as const) {
+        await vi.advanceTimersByTimeAsync(waitMs - 1);
+        await flushAsyncWork();
+        expect(fetchMock).toHaveBeenCalledTimes(requests - 1);
+        await vi.advanceTimersByTimeAsync(1);
+        await flushAsyncWork();
+        expect(fetchMock).toHaveBeenCalledTimes(requests);
+      }
+      expect(onOpen).toHaveBeenCalledOnce();
+
+      // Opening starts the count again: the next refusal waits the first
+      // delay, 10 s without Retry-After.
+      fetchMock.mockImplementationOnce(refuse(null));
+      streamingRequests[0].close();
+      await vi.advanceTimersByTimeAsync(3_000);
+      await flushAsyncWork();
+      expect(fetchMock).toHaveBeenCalledTimes(6);
+      await vi.advanceTimersByTimeAsync(9_999);
+      await flushAsyncWork();
+      expect(fetchMock).toHaveBeenCalledTimes(6);
+      await vi.advanceTimersByTimeAsync(1);
+      await flushAsyncWork();
+      expect(fetchMock).toHaveBeenCalledTimes(7);
+    } finally {
+      unsubscribe();
+      random.mockRestore();
+    }
+  });
+
+  it("reports a refusal to onRefused instead of onError and still backs off", async () => {
+    vi.useFakeTimers();
+    const refusalMessage = "Too many open event streams.";
+    fetchMock.mockImplementationOnce((input: RequestInfo | URL) =>
+      Promise.resolve({
+        body: null,
+        headers: new Headers({
+          "content-type": "application/json",
+          "retry-after": "10",
+        }),
+        ok: false,
+        status: 429,
+        statusText: "Too Many Requests",
+        text: async () =>
+          JSON.stringify({
+            message: refusalMessage,
+            code: "too_many_event_streams",
+          }),
+        url: String(input),
+      } as Response),
+    );
+
+    const { subscribeToRunsFromController } = await import(
+      "../runtimeController/runs"
+    );
+    const onError = vi.fn();
+    const onRefused = vi.fn();
+    const unsubscribe = subscribeToRunsFromController({
+      projectId: "11111111-1111-4111-8111-111111111111",
+      quietErrors: true,
+      onRun: vi.fn(),
+      onRunPatch: vi.fn(),
+      onError,
+      onRefused,
+    });
+
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      await flushAsyncWork();
+      expect(onRefused).toHaveBeenCalledExactlyOnceWith(refusalMessage);
+      expect(onError).not.toHaveBeenCalled();
+
+      // The refusal's wait, not the 3 s of an ordinary reconnect.
+      await vi.advanceTimersByTimeAsync(3_000);
+      await flushAsyncWork();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it("bounds the wait after a refused stream and spreads it with jitter", async () => {
+    const { refusedStreamReconnectDelayMs } = await import(
+      "../runtimeController/runs"
+    );
+    const noJitter = () => 0;
+    expect(refusedStreamReconnectDelayMs(1, 10_000, noJitter)).toBe(10_000);
+    expect(refusedStreamReconnectDelayMs(3, 10_000, noJitter)).toBe(40_000);
+    expect(refusedStreamReconnectDelayMs(50, 10_000, noJitter)).toBe(60_000);
+    expect(refusedStreamReconnectDelayMs(1, undefined, noJitter)).toBe(10_000);
+    // A huge Retry-After is capped; a zero one still waits a second.
+    expect(refusedStreamReconnectDelayMs(1, 3_600_000, noJitter)).toBe(60_000);
+    expect(refusedStreamReconnectDelayMs(1, 0, noJitter)).toBe(1_000);
+    // Jitter only lengthens the wait, by up to a fifth.
+    expect(refusedStreamReconnectDelayMs(1, 10_000, () => 0.5)).toBe(11_000);
+    expect(refusedStreamReconnectDelayMs(4, 10_000, () => 0.999)).toBeLessThanOrEqual(72_000);
+  });
+
   it("retains the authoritative job id from a run event before snapshot hydration", async () => {
     const { subscribeToRunsFromController } = await import(
       "../runtimeController/runs"
