@@ -35,7 +35,7 @@ import {
   isThreadPreviewRunInFlight,
   resolveThreadPreviewMessages,
 } from "./threadPreviewRunData";
-import { resolveProxyUpstreamErrorGuidance } from "./proxyError";
+import { resolveTerminalProxyErrorMessage } from "./threadPreviewProxyError";
 import {
   coerceThreadMessages,
   isGenericProgressLabel,
@@ -79,10 +79,6 @@ function extractMessageAgentHandle(message: ChatMessage): string | null {
   }
   const agent = isRecord(metadata["agent"]) ? metadata["agent"] : null;
   return normalizeAgentHandle(agent?.["handle"]);
-}
-
-function isTerminalProxyErrorMessage(message: ChatMessage): boolean {
-  return message.role === "assistant" && Boolean(resolveProxyUpstreamErrorGuidance(message.content));
 }
 
 export type AgentJobThreadPreviewState = Omit<
@@ -302,15 +298,13 @@ export function useAgentJobThreadPreviewState({
     [threadMessages],
   );
 
-  const terminalProxyErrorMessage = useMemo(() => {
-    for (let index = threadMessages.length - 1; index >= 0; index -= 1) {
-      const candidate = threadMessages[index];
-      if (isTerminalProxyErrorMessage(candidate)) {
-        return candidate;
-      }
-    }
-    return null;
-  }, [threadMessages]);
+  // Only a proxy error the run ended on fails the run. A retry notice that
+  // quotes one ("Retrying: unexpected status 502 …") is progress, and a later
+  // success supersedes any earlier error.
+  const terminalProxyErrorMessage = useMemo(
+    () => resolveTerminalProxyErrorMessage(threadMessages, runStatus),
+    [runStatus, threadMessages],
+  );
   const isStaleRunningStatus = runStatus.phase === "running" && !isThreadRunInFlight && !hasRecentThreadActivity;
   const isCompleted = runStatus.phase === "completed" || isPlanOnlyThread || terminalProxyErrorMessage !== null;
   const isRunning =

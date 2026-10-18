@@ -70,6 +70,7 @@ import {
   formatProxyUpstreamErrorSummary,
   resolveProxyUpstreamErrorGuidance,
 } from "./proxyError";
+import { isTransientThreadUpdate } from "./threadPreviewProxyError";
 
 const COMPACTION_STATUS_LABEL = "Re-organizing my thoughts";
 
@@ -166,6 +167,11 @@ function resolveTerminalStatusMarker(tone: ThreadSpineTone, isCompleted: boolean
 }
 
 function resolveProxyGuidanceContent(update: ChatMessage): string | null {
+  // A retry notice quoting a provider error is not the failure the summary
+  // stands for; it must not lend its guidance to the final row.
+  if (isTransientThreadUpdate(update)) {
+    return null;
+  }
   const updateType = (getMessageType(update) ?? "").trim().toLowerCase();
   const isActivityUpdate = updateType === "reasoning" || updateType === "status";
   const rawContent = isActivityUpdate ? normalizeActivityText(update.content) : update.content.trim();
