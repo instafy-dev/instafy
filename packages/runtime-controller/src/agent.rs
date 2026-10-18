@@ -3273,6 +3273,7 @@ pub(crate) async fn agent_complete(
         if let Err(error) = persist_run_completion_metadata(
             &transaction,
             &run_uuid,
+            &job_uuid,
             provider_value.as_deref(),
             conversation_state.as_ref(),
             credit_snapshot_value.as_ref(),
@@ -5078,6 +5079,7 @@ fn format_image_attachment_context_for_agent(metadata: &JsonValue) -> Option<Str
 pub(crate) async fn persist_run_completion_metadata(
     transaction: &tokio_postgres::Transaction<'_>,
     run_id: &Uuid,
+    job_id: &Uuid,
     provider: Option<&str>,
     conversation_state: Option<&JsonValue>,
     credit_snapshot: Option<&JsonValue>,
@@ -5086,6 +5088,21 @@ pub(crate) async fn persist_run_completion_metadata(
     artifacts_count: Option<usize>,
     task_usage: Option<(&Uuid, &crate::task_usage::TaskUsageReceipt)>,
 ) -> Result<(), tokio_postgres::Error> {
+    // Run metadata may originate in a dispatch request. Keep the resumable
+    // snapshot on the exact job, written only by its authenticated completion
+    // (including the fenced planning receipt), rather than trusting that copy.
+    let completion_state = json!({
+        "provider": provider,
+        "conversation": conversation_state,
+    });
+    transaction
+        .execute(
+            "update agent_jobs set proxy_metadata = $3::jsonb
+             where id = $1 and run_id = $2",
+            &[job_id, run_id, &PgJson(&completion_state)],
+        )
+        .await?;
+
     let row = transaction
         .query_opt(
             "select metadata from runs where id = $1 for update",

@@ -16,6 +16,7 @@ This document explains how the Instafy runtime controller is structured and how 
 - **Event streaming**: `/events` emits `ControllerEvent` payloads (run queued/progress/completed, preview updates, job output) scoped to project, session, or conversation channels.
 - **Credits & policy enforcement**: `/credits` forwards ledger calls to Supabase and enforces sandbox credit seeds.
 - **Conversation hydration**: leased jobs now include the latest conversation messages and agents should persist assistant replies back to the conversation via `/agent/complete`.
+- **Conversation continuation**: dispatch restores provider conversation state saved by an authenticated job completion within the same project, conversation, agent and AI connection. The controller matches the historical job's credential, rather than comparing an upstream provider name with an execution engine such as `codex-embedded`. Managed AI state requires the historical platform job record; changed connections and legacy jobs without a completion snapshot fall back to conversation history. After a new stateful completion, later follow-ups can resume its snapshot. A runtime still verifies that the saved local rollout is available before resuming it. State is selected at dispatch, so jobs already queued before a predecessor completes do not acquire that later snapshot automatically.
 - **Apply vs respond**: when an agent finishes without changing files, the controller marks the run as `success` immediately so question/answer flows complete without a review gate.
 
 ## Concept Map
