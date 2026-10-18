@@ -775,6 +775,17 @@ and schedules are created through the normal automation flow. Every later turn i
 including one that only saves a file the setup asked for, picks the setup up at its next
 question until the section is done. An opener the runtime answered without the model, such as
 an unknown skill name, a failed import or a chat with no AI connected, starts no setup.
+The turn that starts a setup carries each installed `SKILL.md` in its prompt, so a model with
+only a shell can start it: up to 48 KiB per file and 96 KiB per turn, UTF-8 text only, and
+never read through a symlink. A file it cannot carry is named instead, and the model reads it
+from the workspace with whatever file or shell tool it has. The carried text does not choose
+what else the prompt loads: the workspace files it mentions are not loaded, and project memory
+contexts and context cards are matched on the setup instructions alone. When the routing
+preflight reads a later turn of the setup as a file write, that alone does not make a file
+change required: a question for the person or a step they take in another product is a
+complete answer, and it is shown without a retry. Only the caller's own
+`runtimeExpectations.workspaceFileChanges` requires a file change there (see
+[Multi-Agent Evaluation](Multi-Agent-Evaluation.md)).
 `/skills start <name>` runs that section again for one installed skill, and `/skills` is listed in the typed `/` menu
 and in **Commands**. The product list is a fixed, first-party list built into Studio, and
 **Import custom skill** in Skills sends the same line into the current chat after the user

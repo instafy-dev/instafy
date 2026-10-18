@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -791,9 +792,14 @@ pub fn request_outside_carried_skill_files(request: &str) -> &str {
 /// kickoff prompt should name it instead: a path that is not plainly relative,
 /// a symlink at any step below the workspace (it could lead out of it), a file
 /// over `SKILL_START_INLINE_FILE_MAX_BYTES`, or text that is not UTF-8.
+///
+/// The steps are checked first, then the file is opened without following a
+/// link at its last step (`O_NOFOLLOW` on unix) and must be the same regular
+/// file the check saw, so a file or folder swapped for a link in between is
+/// not read. No more than the cap and one byte is ever read.
 fn read_installed_skill_file(workspace_dir: &Path, relative_path: &str) -> Option<String> {
     let mut current = workspace_dir.to_path_buf();
-    let mut metadata = None;
+    let mut checked = None;
     for component in Path::new(relative_path).components() {
         let Component::Normal(segment) = component else {
             return None;
@@ -803,13 +809,28 @@ fn read_installed_skill_file(workspace_dir: &Path, relative_path: &str) -> Optio
         if entry.file_type().is_symlink() {
             return None;
         }
-        metadata = Some(entry);
+        checked = Some(entry);
     }
-    let metadata = metadata?;
-    if !metadata.is_file() || metadata.len() > SKILL_START_INLINE_FILE_MAX_BYTES as u64 {
+    let checked = checked?;
+    if !checked.is_file() || checked.len() > SKILL_START_INLINE_FILE_MAX_BYTES as u64 {
         return None;
     }
-    let bytes = fs::read(&current).ok()?;
+    let file = super::project_preferences::open_regular_file(&current).ok()?;
+    let opened = file.metadata().ok()?;
+    if !opened.is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if opened.dev() != checked.dev() || opened.ino() != checked.ino() {
+            return None;
+        }
+    }
+    let mut bytes = Vec::new();
+    file.take(SKILL_START_INLINE_FILE_MAX_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
     if bytes.len() > SKILL_START_INLINE_FILE_MAX_BYTES {
         return None;
     }
@@ -3405,6 +3426,20 @@ mod tests {
         let none = build_skill_start_prompt(workspace.path(), Some("./pack"), &paths[3..5]);
         assert!(!none.contains("Each SKILL.md as installed"));
         assert!(!none.contains("not included here"));
+    }
+
+    /// The read stops one byte past the cap, so a file of exactly the cap is
+    /// still carried whole.
+    #[test]
+    fn build_skill_start_prompt_carries_a_file_of_exactly_the_cap() {
+        let workspace = tempdir().expect("workspace");
+        let dir = workspace.path().join(".agents/skills/edge");
+        fs::create_dir_all(&dir).expect("skill dir");
+        let text = "c".repeat(SKILL_START_INLINE_FILE_MAX_BYTES);
+        fs::write(dir.join("SKILL.md"), &text).expect("skill file");
+        let paths = [".agents/skills/edge/SKILL.md".to_string()];
+        let prompt = build_skill_start_prompt(workspace.path(), Some("./pack"), &paths);
+        assert!(prompt.contains(&format!("```markdown\n{text}\n```")));
     }
 
     /// A symlink below the workspace could lead the prompt to a file outside

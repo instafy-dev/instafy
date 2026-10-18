@@ -3696,7 +3696,35 @@ fn agent_routing_preflight_artifact(preflight: &AgentRoutingPreflight) -> JsonVa
     })
 }
 
+/// Whether the routing preflight's `requiresWorkspaceFileChanges` verdict
+/// becomes this job's workspace-file-change expectation, the one a turn that
+/// changes no file is retried once on and then failed on.
+///
+/// It does for every job except a follow-up in a conversation that began with
+/// a skill setup (`conversation_began_with_skill_setup`) whose caller did not
+/// ask for file changes itself in `runtimeExpectations.workspaceFileChanges`.
+/// There the verdict is only the preflight's guess, because interactive chat
+/// never sends that expectation, and a setup step is often a question for the
+/// person or a step they take in another product, which no file change can
+/// stand in for. Such a turn runs as any turn that need not write: it may
+/// still change files, and its first reply stands. A skill-setup kickoff never
+/// reaches the preflight, so it never carries the expectation either.
+///
+/// Oct 18: on a first-run FreeFinance setup the preflight read the follow-up
+/// "Please just set up FreeFinance for me" as a file write. The agent answered
+/// with a step the person had to take in FreeFinance and changed no file. The
+/// turn was retried, then failed with the answer hidden, and the Studio's
+/// automatic resend failed the same way.
+///
+/// Every other conversation keeps the verdict, so an ordinary edit request the
+/// agent answers without writing is still retried and then failed.
+fn routing_preflight_file_change_verdict_applies(job: &LeaseJob) -> bool {
+    runtime_job_expectations(&job.payload).workspace_file_changes
+        || !conversation_began_with_skill_setup(job)
+}
+
 fn job_with_agent_routing_preflight(job: &LeaseJob, preflight: &AgentRoutingPreflight) -> LeaseJob {
+    let file_change_verdict_applies = routing_preflight_file_change_verdict_applies(job);
     let mut routed = job.clone();
     let mut payload = routed.payload.clone();
     let Some(payload_object) = payload.as_object_mut() else {
@@ -3719,7 +3747,11 @@ fn job_with_agent_routing_preflight(job: &LeaseJob, preflight: &AgentRoutingPref
                 metadata.insert(key.clone(), value.clone());
             }
         }
-        apply_agent_routing_preflight_runtime_expectations(metadata, preflight);
+        apply_agent_routing_preflight_runtime_expectations(
+            metadata,
+            preflight,
+            file_change_verdict_applies,
+        );
     }
 
     routed.payload = payload;
@@ -3729,6 +3761,7 @@ fn job_with_agent_routing_preflight(job: &LeaseJob, preflight: &AgentRoutingPref
 fn apply_agent_routing_preflight_runtime_expectations(
     metadata: &mut JsonMap<String, JsonValue>,
     preflight: &AgentRoutingPreflight,
+    file_change_verdict_applies: bool,
 ) {
     // A rejected proposed command does not erase the need for fresh evidence.
     // The host pre-observer remains allowlisted; the main agent can make an
@@ -3749,14 +3782,18 @@ fn apply_agent_routing_preflight_runtime_expectations(
             "commandExecution".to_string(),
             JsonValue::Bool(requires_command_observation),
         );
-        expectations.insert(
-            "workspaceFileChanges".to_string(),
-            JsonValue::Bool(
-                preflight
-                    .workspace_file_change_requirement
-                    .requires_changes(),
-            ),
-        );
+        // Where the verdict does not apply, the caller's own file-change
+        // expectation, which asks for none, stands.
+        if file_change_verdict_applies {
+            expectations.insert(
+                "workspaceFileChanges".to_string(),
+                JsonValue::Bool(
+                    preflight
+                        .workspace_file_change_requirement
+                        .requires_changes(),
+                ),
+            );
+        }
     }
 }
 
@@ -6297,16 +6334,18 @@ impl JobProcessor {
         } else {
             None
         };
-        // The preflight's verdict replaces the caller's file-change flag
-        // below, so keep what the caller's own metadata asked for.
-        let caller_expects_workspace_file_changes = runtime_job_expectations_for_execution(
-            &job.payload,
-            explicit_personal_browser_execution,
-            explicit_shared_browser_execution,
-        )
-        .workspace_file_changes;
         let routed_job_storage;
         let job = if let Some(preflight) = routing_preflight.as_ref() {
+            if preflight
+                .workspace_file_change_requirement
+                .requires_changes()
+                && !routing_preflight_file_change_verdict_applies(job)
+            {
+                tracing::info!(
+                    job_id = %job.id,
+                    "skill setup follow-up: not requiring the file changes the routing preflight read into the request"
+                );
+            }
             routed_job_storage = job_with_agent_routing_preflight(job, preflight);
             &routed_job_storage
         } else {
@@ -6333,10 +6372,6 @@ impl JobProcessor {
         let expects_workspace_file_changes = commit_to_workspace
             && runtime_expectations.workspace_file_changes
             && !read_only_workspace;
-        // Only the routing preflight's reading of the request asks this turn
-        // for file changes. See `reply_stands_without_inferred_file_changes`.
-        let workspace_file_changes_only_inferred =
-            expects_workspace_file_changes && !caller_expects_workspace_file_changes;
         let expects_generic_mcp_tool_execution = runtime_expectations.generic_mcp_tool_execution;
         let browser_mode = runtime_is_browser_session
             || explicit_shared_browser_execution
@@ -6371,8 +6406,14 @@ impl JobProcessor {
             browser_mode,
             direct_write_broad_context_suppression_eligible(runtime_expectations, browser_mode),
         );
+        // A skill kickoff's carried SKILL.md text names terms the person never
+        // asked about; cards are matched on its instructions alone.
         let project_context_cards = self
-            .load_relevant_project_context_cards(job, project_id, prompt_text)
+            .load_relevant_project_context_cards(
+                job,
+                project_id,
+                skills::request_outside_carried_skill_files(prompt_text),
+            )
             .await;
         let final_output_mode = final_output_mode_for_runtime_job(
             job,
@@ -7853,24 +7894,6 @@ impl JobProcessor {
                         job_id = %job_id,
                         "accepting successful apply_patch events as workspace file-change evidence after retry"
                     );
-                } else if reply_stands_without_inferred_file_changes(
-                    workspace_file_changes_only_inferred,
-                    reported_file_changes_missing || retry_reported_file_changes_missing,
-                    retry_codex_fallback_summary_kind,
-                    &retry_outcome.summary,
-                ) {
-                    tracing::info!(
-                        job_id = %job_id,
-                        "no workspace changes after retry for a request only the routing preflight read as a write; completing with the reply"
-                    );
-                    retry_artifacts.push(json!({
-                        "kind": "codex/file-changes-missing-after-retry",
-                        "metadata": {
-                            "reason": "no_file_changes_after_retry",
-                            "expectationSource": "routing_preflight",
-                            "outcome": "completed_with_reply",
-                        }
-                    }));
                 } else {
                     return Err(JobFailureWithArtifacts {
                         message:
@@ -8505,13 +8528,15 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             );
         }
 
+        // A skill kickoff carries its SKILL.md files whole. Neither the files
+        // they name nor the contexts and learned blocks their text matches are
+        // loaded for it: what the prompt loads follows its instructions alone.
+        let request_for_selection = skills::request_outside_carried_skill_files(trimmed_prompt);
         let has_scoped_worker_observation = scoped_worker_path_observation.is_some();
         if !lead_continuation_checkpoint && !has_scoped_worker_observation {
-            // A skill kickoff carries its SKILL.md files; they are not loaded again.
-            if let Some(section) = format_prompt_referenced_files_section(
-                workspace_dir,
-                skills::request_outside_carried_skill_files(trimmed_prompt),
-            ) {
+            if let Some(section) =
+                format_prompt_referenced_files_section(workspace_dir, request_for_selection)
+            {
                 append_prompt_section(
                     &mut prompt,
                     &mut prompt_section_metrics,
@@ -8562,7 +8587,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
         } else if include_workspace_memory && !stateful_thread_restored {
             if let Some(snapshot) = format_project_memory_snapshot_with_preferences(
                 workspace_dir,
-                trimmed_prompt,
+                request_for_selection,
                 preferences,
             ) {
                 append_prompt_section(
@@ -9446,40 +9471,6 @@ fn workspace_file_changes_still_required(
     outcome: &CodexOutcome,
 ) -> bool {
     expects_workspace_file_changes && !outcome_defers_workspace_file_changes(outcome)
-}
-
-/// Whether a turn that was expected to change files, changed none and still
-/// changed none after its one recovery retry may finish with the retry's reply
-/// instead of failing.
-///
-/// Only when nothing but the routing preflight asked for file changes. The
-/// preflight reads the request and guesses, and interactive chat sends no file
-/// expectation of its own, so its guess is the only source there. A caller's
-/// own `runtimeExpectations.workspaceFileChanges`, such as a write-mode worker
-/// or a CLI run that needs a change, stays a contract and fails the turn.
-///
-/// Oct 18: a first-run FreeFinance setup asked "Please just set up FreeFinance
-/// for me". The preflight read that as a file write. The agent's answer was a
-/// step the person had to take in FreeFinance, which no file change could
-/// replace, and the direct-write retry prompt asks for exactly that: report
-/// the concrete blocker. The turn failed anyway, the answer was never shown,
-/// and the frontend's automatic resend failed the same way.
-///
-/// It never excuses a reply that claimed files: `files` entries that did not
-/// reach the disk on either attempt still fail the turn, and the retry's own
-/// claim fails it before this is asked. Nor a reply that is not one: an
-/// internal fallback summary (no final message, commentary only, invalid
-/// JSON) or an empty summary still fails.
-fn reply_stands_without_inferred_file_changes(
-    file_changes_only_inferred: bool,
-    an_attempt_reported_unwritten_files: bool,
-    retry_fallback_kind: Option<CodexFallbackSummaryKind>,
-    retry_summary: &str,
-) -> bool {
-    file_changes_only_inferred
-        && !an_attempt_reported_unwritten_files
-        && retry_fallback_kind.is_none()
-        && !retry_summary.trim().is_empty()
 }
 
 fn suppress_multi_agent_plan_actions_for_worker(job: &LeaseJob, outcome: &mut CodexOutcome) {
@@ -20229,7 +20220,14 @@ mod tests {
                 ])),
                 _ => skill_setup_test_job("Please inspect the imported repo."),
             };
-            for mode in ["write", "restored", "cross_chat", "full", "planning"] {
+            for mode in [
+                "write",
+                "write_guess",
+                "restored",
+                "cross_chat",
+                "full",
+                "planning",
+            ] {
                 let mut route = test_agent_routing_preflight(
                     match mode {
                         "cross_chat" => AgentRoutingPreflightRoute::CrossChatLookup,
@@ -20240,13 +20238,28 @@ mod tests {
                     false,
                 );
                 // A "yes" to saving the Mandant is what the preflight reads as
-                // a file write, which moves the turn into the direct-write lane.
-                route.workspace_file_change_requirement = if mode == "write" {
+                // a file write. With the caller's own file-change expectation
+                // ("write") that moves the turn into the direct-write lane.
+                // The preflight's reading alone ("write_guess") moves only a
+                // conversation that is not a setup there; a setup follow-up
+                // stays on the full contract.
+                route.workspace_file_change_requirement = if matches!(mode, "write" | "write_guess")
+                {
                     WorkspaceFileChangeRequirement::Required
                 } else {
                     WorkspaceFileChangeRequirement::None
                 };
-                let job = job_with_agent_routing_preflight(&base_job, &route);
+                let mut caller_job = base_job.clone();
+                if mode == "write" {
+                    caller_job.payload["metadata"] =
+                        json!({"runtimeExpectations": {"workspaceFileChanges": true}});
+                }
+                let lane = match mode {
+                    "write_guess" if source == "none" => "write",
+                    "write_guess" => "full",
+                    other => other,
+                };
+                let job = job_with_agent_routing_preflight(&caller_job, &route);
                 let (prompt, _, metrics) = processor
                     .build_prompt_with_text(
                         &project_id,
@@ -20262,7 +20275,7 @@ mod tests {
                     .expect("actual main prompt builder");
                 let label = format!("{mode} source={source}");
                 let sections = &metrics["promptSections"];
-                match mode {
+                match lane {
                     "write" => {
                         assert!(
                             prompt.contains("Direct workspace-change response contract"),
@@ -20300,7 +20313,7 @@ mod tests {
                 // Conversations that are not setups, and planning turns, pay
                 // nothing for it.
                 let expect_terse =
-                    source != "none" && matches!(mode, "write" | "restored" | "cross_chat");
+                    source != "none" && matches!(lane, "write" | "restored" | "cross_chat");
                 assert_eq!(
                     prompt.matches(terse_rule).count(),
                     usize::from(expect_terse),
@@ -20350,13 +20363,13 @@ mod tests {
                 // the terse section must not repeat it there.
                 assert_eq!(
                     prompt.matches(full_rule).count(),
-                    usize::from(mode == "full"),
+                    usize::from(lane == "full"),
                     "{label}"
                 );
                 // What the workspace shows now beats earlier failures. The full
                 // contract carries it for every conversation, and the setup
                 // rule carries it on every follow-up lane of a setup, once.
-                let expect_workspace_rule = expect_terse || mode == "full";
+                let expect_workspace_rule = expect_terse || lane == "full";
                 for rule in [WORKSPACE_IS_CURRENT_PROBE, SAVED_FILE_MISSING_PROBE] {
                     assert_eq!(
                         prompt.matches(rule).count(),
@@ -25275,77 +25288,149 @@ mod tests {
         assert!(!missing_final_should_retry_original_task(false, false, 0));
     }
 
-    /// Oct 18: a first-run FreeFinance setup follow-up, "Please just set up
-    /// FreeFinance for me", was read by the routing preflight as a file write.
-    /// The agent's answer was a step the person had to take in FreeFinance;
-    /// after the retry the turn failed and the answer was never shown.
+    /// Oct 18: on a first-run FreeFinance setup the routing preflight read the
+    /// follow-up "Please just set up FreeFinance for me" as a file write. The
+    /// agent's answer was a step the person had to take in FreeFinance, so it
+    /// changed no file; the turn was retried, then failed with the answer
+    /// hidden. A skill-setup follow-up now keeps only the caller's own
+    /// file-change expectation. Every other chat keeps the preflight's verdict.
     #[test]
-    fn reply_stands_without_file_changes_only_when_routing_alone_asked_for_them() {
-        let answer = "In FreeFinance, open Mein Profil, then Benutzer & Berechtigung, then Verbundene Apps. Tell me whether you see an API row.";
-        assert!(reply_stands_without_inferred_file_changes(
-            true, false, None, answer
-        ));
-        // A caller's own contract still fails the turn.
-        assert!(!reply_stands_without_inferred_file_changes(
-            false, false, None, answer
-        ));
-        // A reply that listed files that never reached the disk still fails.
-        assert!(!reply_stands_without_inferred_file_changes(
-            true, true, None, answer
-        ));
-        // So does a turn that ended without a real reply.
-        for kind in [
-            CodexFallbackSummaryKind::MissingFinalAssistantMessage,
-            CodexFallbackSummaryKind::InvalidFinalAssistantMessageJson,
-        ] {
-            assert!(!reply_stands_without_inferred_file_changes(
-                true,
-                false,
-                Some(kind),
-                answer
-            ));
-        }
-        assert!(!reply_stands_without_inferred_file_changes(
-            true, false, None, " \n "
-        ));
-    }
-
-    /// The gate tells the routing preflight's guess from a caller's contract
-    /// by reading the job as its caller sent it, before the preflight's
-    /// verdict replaces the caller's flag.
-    #[test]
-    fn routing_preflight_file_change_verdict_is_told_from_a_caller_contract() {
-        let mut route =
+    fn preflight_write_guess_is_dropped_only_for_skill_setup_follow_ups() {
+        let mut write_guess =
             test_agent_routing_preflight(AgentRoutingPreflightRoute::Direct, false, false);
-        route.requires_workspace_file_changes = true;
+        write_guess.workspace_file_change_requirement = WorkspaceFileChangeRequirement::Required;
+        let no_write_guess =
+            test_agent_routing_preflight(AgentRoutingPreflightRoute::Direct, false, false);
         let expects_changes = |job: &LeaseJob| {
             runtime_job_expectations_for_execution(&job.payload, false, false)
                 .workspace_file_changes
         };
+        // The job the controller leases for a chat message: the Studio grants
+        // write access and sends no file-change expectation of its own, and
+        // the controller adds the history window and the setup openers.
+        let chat_job =
+            |prompt: &str, history: JsonValue, openers: Option<JsonValue>, metadata: JsonValue| {
+                let mut payload = json!({
+                    "prompt_text": prompt,
+                    "conversation_history": history,
+                    "metadata": metadata,
+                });
+                if let Some(openers) = openers {
+                    payload["skill_setup_openers"] = openers;
+                }
+                test_lease_job(Some("feature"), payload)
+            };
+        let setup_history = json!([
+            {"role": "user", "content": SKILL_SETUP_TEST_OPENER},
+            {
+                "role": "assistant",
+                "content": SKILL_SETUP_TEST_QUESTION,
+                "metadata": {"source": "agent", "provider": "codex-embedded"}
+            }
+        ]);
+        let setup_openers =
+            json!([{"content": SKILL_SETUP_TEST_OPENER, "replyProvider": "codex-embedded"}]);
 
-        // Interactive chat grants write access and expects no change itself.
-        let chat = test_lease_job(
-            Some("feature"),
-            json!({
-                "prompt_text": "Please just set up FreeFinance for me.",
-                "metadata": { "writeIntent": true, "executionMode": "shared_write" }
-            }),
+        // (a) A skill-setup follow-up the preflight reads as a write: the guess
+        // is not applied, while the preflight's own record keeps it.
+        let setup = chat_job(
+            "Please just set up FreeFinance for me.",
+            setup_history.clone(),
+            Some(setup_openers.clone()),
+            json!({ "writeIntent": true }),
         );
-        let routed = job_with_agent_routing_preflight(&chat, &route);
-        assert!(expects_changes(&routed));
-        assert!(!expects_changes(&chat), "only the preflight asked");
+        assert!(!routing_preflight_file_change_verdict_applies(&setup));
+        let routed = job_with_agent_routing_preflight(&setup, &write_guess);
+        assert!(!expects_changes(&routed));
+        assert_eq!(
+            routed.payload["metadata"]["agentRoutingPreflight"]["requiresWorkspaceFileChanges"],
+            json!(true)
+        );
+        assert_eq!(routed.payload["metadata"]["writeIntent"], json!(true));
+        // The same once the opener has left the history window.
+        let later = chat_job(
+            "Please just set up FreeFinance for me.",
+            json!([{
+                "role": "assistant",
+                "content": SKILL_SETUP_TEST_QUESTION,
+                "metadata": {"source": "agent", "provider": "codex-embedded"}
+            }]),
+            Some(setup_openers.clone()),
+            json!({ "writeIntent": true }),
+        );
+        assert!(!routing_preflight_file_change_verdict_applies(&later));
+        assert!(!expects_changes(&job_with_agent_routing_preflight(
+            &later,
+            &write_guess
+        )));
 
-        // A caller that requires a change keeps its contract.
-        let required = test_lease_job(
-            Some("feature"),
-            json!({
-                "prompt_text": "Change the deployment_status in reference.txt to APPROVED.",
-                "metadata": { "runtimeExpectations": { "workspaceFileChanges": true } }
-            }),
+        // (b) An ordinary chat edit the preflight reads as a write keeps
+        // today's contract: no file change is retried, then fails.
+        let edit = chat_job(
+            "Change the title in index.html to Hello.",
+            json!([
+                {"role": "user", "content": "Make me a landing page."},
+                {
+                    "role": "assistant",
+                    "content": "I made index.html with a hero section.",
+                    "metadata": {"source": "agent", "provider": "codex-embedded"}
+                }
+            ]),
+            None,
+            json!({ "writeIntent": true }),
         );
-        let routed = job_with_agent_routing_preflight(&required, &route);
-        assert!(expects_changes(&routed));
-        assert!(expects_changes(&required), "the caller asked");
+        assert!(routing_preflight_file_change_verdict_applies(&edit));
+        assert!(!expects_changes(&edit));
+        assert!(expects_changes(&job_with_agent_routing_preflight(
+            &edit,
+            &write_guess
+        )));
+        // So does a conversation whose `/skills` opener the skills lane
+        // answered by itself: no setup began.
+        let failed_import = chat_job(
+            "Change the title in index.html to Hello.",
+            json!([
+                {"role": "user", "content": SKILL_SETUP_TEST_OPENER},
+                {
+                    "role": "assistant",
+                    "content": "Skill import failed: GitHub returned 404 Not Found",
+                    "metadata": {"source": "agent", "provider": skills::SKILLS_LANE_PROVIDER}
+                }
+            ]),
+            None,
+            json!({ "writeIntent": true }),
+        );
+        assert!(routing_preflight_file_change_verdict_applies(
+            &failed_import
+        ));
+        assert!(expects_changes(&job_with_agent_routing_preflight(
+            &failed_import,
+            &write_guess
+        )));
+
+        // (c) A skill-setup job whose caller requires a change keeps its
+        // contract, and the preflight's verdict applies to it as before.
+        let required = chat_job(
+            "Save the Mandant to freefinance.json.",
+            setup_history.clone(),
+            Some(setup_openers.clone()),
+            json!({ "runtimeExpectations": { "workspaceFileChanges": true } }),
+        );
+        assert!(routing_preflight_file_change_verdict_applies(&required));
+        assert!(expects_changes(&job_with_agent_routing_preflight(
+            &required,
+            &write_guess
+        )));
+        assert!(!expects_changes(&job_with_agent_routing_preflight(
+            &required,
+            &no_write_guess
+        )));
+
+        // A setup follow-up the preflight reads as no write stays one.
+        assert!(!expects_changes(&job_with_agent_routing_preflight(
+            &setup,
+            &no_write_guess
+        )));
     }
 
     #[test]
@@ -29946,6 +30031,61 @@ mod tests {
         // Any other request still loads the files it names.
         let (prompt, _, _) = build("What does `.agents/skills/freefinance/run.js` print?");
         assert!(prompt.contains("companion script"));
+    }
+
+    /// Nor does the carried text pick the project memory a kickoff loads. The
+    /// skill router would otherwise route the kickoff to the skill it just
+    /// installed and append that SKILL.md a second time.
+    #[test]
+    fn skill_kickoff_memory_is_selected_by_its_instructions_alone() {
+        let tmp = tempdir().expect("temp dir");
+        let processor = test_job_processor(tmp.path());
+        let skills_root = tmp.path().join(learn::SKILLS_ROOT_RELATIVE_PATH);
+        let skill_text = "Zorblat quuxifies frobnicator ledgers.";
+        for (name, text) in [
+            (
+                "instafy-skill-router",
+                "# Skill router\n\nRoutes requests to installed skills.\n".to_string(),
+            ),
+            ("zorblat", format!("# Zorblat\n\n{skill_text}\n")),
+        ] {
+            let dir = skills_root.join(name);
+            fs::create_dir_all(&dir).expect("skill dir");
+            fs::write(dir.join("SKILL.md"), text).expect("skill file");
+        }
+        let kickoff = skills::build_skill_start_prompt(
+            tmp.path(),
+            Some("https://github.com/instafy-dev/skills"),
+            &[".agents/skills/zorblat/SKILL.md".to_string()],
+        );
+        let job = test_lease_job(Some("feature"), json!({}));
+        let project_id = Uuid::new_v4();
+        let build = |prompt_text: &str| {
+            processor
+                .build_prompt_with_text(
+                    &project_id,
+                    &job,
+                    tmp.path(),
+                    prompt_text,
+                    true,
+                    None,
+                    &[],
+                    None,
+                    None,
+                )
+                .expect("main prompt")
+                .0
+        };
+
+        let prompt = build(kickoff.as_str());
+        assert!(prompt.contains("Project memory snapshot"));
+        assert!(prompt.contains("## Context: instafy-skill-router"));
+        assert!(!prompt.contains("## Context: zorblat"));
+        assert_eq!(prompt.matches(skill_text).count(), 1);
+
+        // A request about the skill still routes to it.
+        let prompt = build("How do zorblat ledgers get quuxified?");
+        assert!(prompt.contains("## Context: zorblat (.agents/skills/zorblat/SKILL.md)"));
     }
 
     #[test]
