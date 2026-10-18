@@ -2920,6 +2920,29 @@ impl ControllerTokenGuard {
     }
 }
 
+/// The turn's start and hard deadline, exported to the agent's shell so a tool that paces itself reads the host's
+/// own limit instead of guessing when the turn began and how long it lasts.
+struct TurnClockGuard {
+    _overrides: Vec<EnvOverride>,
+}
+
+impl TurnClockGuard {
+    fn start() -> Self {
+        let started = chrono::Utc::now();
+        let limit = chrono::Duration::from_std(crate::codex::resolve_codex_run_timeout())
+            .unwrap_or_else(|_| chrono::Duration::seconds(600));
+        let format = |at: chrono::DateTime<chrono::Utc>| {
+            at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        };
+        Self {
+            _overrides: vec![
+                EnvOverride::apply("INSTAFY_TURN_STARTED_AT", &format(started)),
+                EnvOverride::apply("INSTAFY_TURN_DEADLINE", &format(started + limit)),
+            ],
+        }
+    }
+}
+
 struct ClientTimezoneGuard {
     _overrides: Vec<EnvOverride>,
 }
@@ -6551,6 +6574,7 @@ impl JobProcessor {
         let runtime_id_for_messages = registration.runtime_id;
         let _client_timezone_guard =
             ClientTimezoneGuard::from_metadata(job.payload.get("metadata"));
+        let _turn_clock_guard = TurnClockGuard::start();
         let native_prompt =
             without_project_preferences(&prompt, &project_id, &project_preferences)?;
         let output_result = if streaming_context.is_some() {
@@ -7216,6 +7240,7 @@ impl JobProcessor {
                 explicit_shared_browser_execution.then(crate::shared_browser::action_log_len);
             let _client_timezone_guard =
                 ClientTimezoneGuard::from_metadata(job.payload.get("metadata"));
+            let _turn_clock_guard = TurnClockGuard::start();
             // Stream the retry like the first attempt: an invisible retry means
             // users watch a dead conversation while real work happens, and the
             // run trace loses the retry's interim evidence.
@@ -7555,6 +7580,7 @@ impl JobProcessor {
                 let codex_guard = CODEX_EXECUTION_LOCK.lock().await;
                 let _client_timezone_guard =
                     ClientTimezoneGuard::from_metadata(job.payload.get("metadata"));
+                let _turn_clock_guard = TurnClockGuard::start();
                 let native_finalization_prompt = without_project_preferences(
                     &finalization_prompt,
                     &project_id,
@@ -26597,6 +26623,29 @@ mod tests {
             assert!(!section.contains("Local timezone: UTC"));
             assert_eq!(extract_client_timezone(Some(&metadata)), None);
         }
+    }
+
+    #[tokio::test]
+    async fn a_turn_exports_its_start_and_the_hosts_deadline_to_the_shell() {
+        let _lock = JOB_PROCESS_ENV_LOCK.lock().await;
+        let _timeout = EnvOverride::apply("CODEX_RUN_TIMEOUT_SECONDS", "900");
+        let _started = EnvOverride::remove("INSTAFY_TURN_STARTED_AT");
+        let _deadline = EnvOverride::remove("INSTAFY_TURN_DEADLINE");
+        let parse = |key: &str| {
+            chrono::DateTime::parse_from_rfc3339(&env::var(key).expect(key)).expect("rfc3339")
+        };
+        {
+            let _guard = TurnClockGuard::start();
+            let span = parse("INSTAFY_TURN_DEADLINE") - parse("INSTAFY_TURN_STARTED_AT");
+            assert_eq!(span.num_seconds(), 900);
+            let started = parse("INSTAFY_TURN_STARTED_AT").with_timezone(&chrono::Utc);
+            assert!((chrono::Utc::now() - started).num_seconds().abs() <= 5);
+        }
+        assert!(
+            env::var_os("INSTAFY_TURN_STARTED_AT").is_none()
+                && env::var_os("INSTAFY_TURN_DEADLINE").is_none(),
+            "cleared when the turn ends"
+        );
     }
 
     #[test]

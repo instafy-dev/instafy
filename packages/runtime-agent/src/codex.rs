@@ -4832,7 +4832,7 @@ fn bool_from_env(key: &str) -> Option<bool> {
     })
 }
 
-fn resolve_codex_run_timeout() -> Duration {
+pub(crate) fn resolve_codex_run_timeout() -> Duration {
     optional_env("CODEX_RUN_TIMEOUT_SECONDS")
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
