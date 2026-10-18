@@ -2052,6 +2052,29 @@ describe("ChatComposerSurface", () => {
     expect(actionStatus?.textContent).toBe("Enter sends the message.");
   });
 
+  it("on touch input says Enter adds a line and the send button sends, matching the Enter behaviour", async () => {
+    const renderSurface = (primaryActionMode: "send" | "steer") =>
+      root.render(
+        <ChatComposerSurface
+          {...createProps({
+            primaryActionMode,
+            showVoicePrimaryAction: false,
+            touchLikeInput: true,
+          })}
+        />,
+      );
+
+    await act(async () => renderSurface("send"));
+    const actionStatus = container.querySelector('[data-testid="chat-primary-action-status"]');
+    expect(actionStatus?.textContent).toBe("Enter adds a new line. The send button sends the message.");
+    expect(actionStatus?.textContent).not.toContain("Enter sends");
+
+    await act(async () => renderSurface("steer"));
+    const sendButton = container.querySelector<HTMLButtonElement>('[data-testid="chat-send-button"]');
+    expect(sendButton?.getAttribute("aria-label")).toBe("Steer current reply");
+    expect(actionStatus?.textContent).toBe("Enter adds a new line. The send button steers the current reply.");
+  });
+
   it("previews Queue and Stash from desktop modifiers, then restores Steer on release", async () => {
     await act(async () => {
       root.render(

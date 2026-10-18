@@ -2,7 +2,7 @@
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StudioDialogModal } from "../StudioModal";
 import { StudioDialogBody, StudioDialogFooter, StudioDialogHeader } from "../StudioDialogLayout";
 
@@ -159,5 +159,76 @@ describe("StudioDialogModal appearances", () => {
       expect(section.classList.contains("px-5")).toBe(false);
     }
     expect(dialog.parentElement!.parentElement!.hasAttribute("gutter")).toBe(false);
+  });
+});
+
+// A control that disables itself while it works (the invite dialog's Copy)
+// drops focus to <body>. React Aria only hears Escape from inside the dialog,
+// so the dialog then ignored Escape and stayed over the page.
+describe("StudioDialogModal with focus lost to the page", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    document.body.replaceChildren();
+    delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  function loseFocus() {
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect(document.activeElement === document.body || document.activeElement === null).toBe(true);
+  }
+
+  function press(key: string) {
+    const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+    act(() => { document.body.dispatchEvent(event); });
+    return event;
+  }
+
+  it("still closes on Escape", async () => {
+    const onOpenChange = vi.fn();
+    await act(async () => {
+      root.render(<StudioDialogModal isOpen isDismissable onOpenChange={onOpenChange} dialogAriaLabel="Invite">
+        <button type="button">Copy</button>
+      </StudioDialogModal>);
+    });
+    loseFocus();
+    expect(press("Escape").defaultPrevented).toBe(true);
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("takes Tab back inside the dialog", async () => {
+    await act(async () => {
+      root.render(<StudioDialogModal isOpen onOpenChange={vi.fn()} dialogAriaLabel="Invite">
+        <button type="button">Copy</button>
+      </StudioDialogModal>);
+    });
+    loseFocus();
+    press("Tab");
+    expect(document.activeElement?.closest('[role="dialog"]')).not.toBeNull();
+  });
+
+  it("closes only the top dialog, and never one whose keyboard dismissal is off", async () => {
+    const outer = vi.fn();
+    const inner = vi.fn();
+    await act(async () => {
+      root.render(<>
+        <StudioDialogModal isOpen onOpenChange={outer} dialogAriaLabel="Outer">outer</StudioDialogModal>
+        <StudioDialogModal isOpen onOpenChange={inner} isKeyboardDismissDisabled dialogAriaLabel="Inner">inner</StudioDialogModal>
+      </>);
+    });
+    loseFocus();
+    expect(press("Escape").defaultPrevented).toBe(false);
+    expect(inner).not.toHaveBeenCalled();
+    expect(outer).not.toHaveBeenCalled();
   });
 });

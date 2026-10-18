@@ -1,4 +1,4 @@
-import { type CSSProperties, type ReactNode, type Ref } from "react";
+import { useCallback, useEffect, useRef, type CSSProperties, type ReactNode, type Ref } from "react";
 import { useNativeBackButtonAction } from "../../native/useNativeBackButtonAction";
 import { StudioDialogGutterContext, type StudioDialogGutter } from "./StudioDialogSpacing";
 import {
@@ -63,6 +63,53 @@ interface StudioDialogModalProps extends ModalOverlayProps {
   dialogAriaLabelledBy?: string;
 }
 
+// Open Studio dialogs, innermost last: only the top one answers a key.
+const openStudioDialogs: object[] = [];
+
+function focusIsLost(): boolean {
+  const active = document.activeElement;
+  return !active || active === document.body || active === document.documentElement;
+}
+
+/**
+ * React Aria closes a dialog on Escape only while focus is inside it. A
+ * control that disables itself while it works (Copy on the invite dialog)
+ * drops focus to <body>, and from then on Escape did nothing and Tab started
+ * from the page behind the backdrop. While focus is lost, the top dialog takes
+ * Escape (unless keyboard dismissal is disabled) and takes Tab back inside.
+ */
+function useDialogKeysWithoutFocus(
+  isOpen: boolean,
+  keyboardDismissable: boolean,
+  close: () => void,
+  dialogNode: () => HTMLElement | null,
+) {
+  const latest = useRef({ keyboardDismissable, close, dialogNode });
+  latest.current = { keyboardDismissable, close, dialogNode };
+  useEffect(() => {
+    if (!isOpen) return;
+    const token = {};
+    openStudioDialogs.push(token);
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing) return;
+      if (openStudioDialogs[openStudioDialogs.length - 1] !== token || !focusIsLost()) return;
+      if (event.key === "Escape") {
+        if (!latest.current.keyboardDismissable) return;
+        event.preventDefault();
+        latest.current.close();
+      } else if (event.key === "Tab") {
+        latest.current.dialogNode()?.focus({ preventScroll: true });
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      const index = openStudioDialogs.lastIndexOf(token);
+      if (index >= 0) openStudioDialogs.splice(index, 1);
+    };
+  }, [isOpen]);
+}
+
 export function StudioDialogModal({
   children,
   onNativeBack,
@@ -87,6 +134,18 @@ export function StudioDialogModal({
     if (onNativeBack) onNativeBack();
     else props.onOpenChange?.(false);
   });
+  const dialogNodeRef = useRef<HTMLElement | null>(null);
+  const setDialogNode = useCallback((node: HTMLElement | null) => {
+    dialogNodeRef.current = node;
+    if (typeof dialogRef === "function") dialogRef(node);
+    else if (dialogRef) (dialogRef as { current: HTMLElement | null }).current = node;
+  }, [dialogRef]);
+  useDialogKeysWithoutFocus(
+    Boolean(props.isOpen),
+    !props.isKeyboardDismissDisabled,
+    () => props.onOpenChange?.(false),
+    () => dialogNodeRef.current,
+  );
   const normalizedDialogLabelledBy = dialogAriaLabelledBy?.trim() || undefined;
   const normalizedDialogLabel = normalizedDialogLabelledBy
     ? undefined
@@ -108,7 +167,7 @@ export function StudioDialogModal({
         )}
       >
         <Dialog
-          ref={dialogRef}
+          ref={setDialogNode}
           className={["outline-none", layout === "editor" ? EDITOR_DIALOG_CLASS : "", dialogClassName].filter(Boolean).join(" ")}
           aria-label={normalizedDialogLabel}
           aria-labelledby={normalizedDialogLabelledBy}

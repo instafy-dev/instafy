@@ -153,7 +153,11 @@ describe("ChatSpeakerStickyOverlay", () => {
       const { overlay } = await renderOverlay(speaker);
       const pill = overlay.firstElementChild?.firstElementChild as HTMLElement;
       expect(pill.className).toContain("gap-2");
-      expect(pill.className).toContain("-ml-[3px]");
+      expect(pill.className).toContain("-left-[3px]");
+      // Not a negative margin: the overlay shrink-wraps the pill, so a -3px
+      // margin leaves the box 3px short and `max-w-full` cuts "octo" to "o…".
+      expect(pill.className).not.toMatch(/(^|\s)-m[lx]-/);
+      expect(pill.className).toContain("max-w-full");
       expect(pill.className).not.toContain("gap-1.5");
       const face = pill.firstElementChild as HTMLElement;
       expect(face.className).toContain("h-7");
