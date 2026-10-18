@@ -8,6 +8,7 @@ import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { controllerClient, type ControllerOrgSummary } from "../../../sdk/instafy";
 import { TeamAccentPicker } from "./TeamAccentPicker";
 import type { OrgAccent } from "../../../org/orgAccent";
+import { getOrgDisplayName } from "../../../org/orgNaming";
 import { TeamPicturePicker } from "./TeamPicturePicker";
 import { notifyTeamProfileUpdated, saveTeamAvatar } from "./teamAvatar";
 
@@ -32,6 +33,7 @@ function NewTeamDialogForm({ onClose, onCreated, allowCustomSlug = false }: Omit
   const [created, setCreated] = useState<ControllerOrgSummary | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const busy = useRef(false);
   const completed = useRef(false);
   const finish = (organization: ControllerOrgSummary) => {
@@ -50,11 +52,20 @@ function NewTeamDialogForm({ onClose, onCreated, allowCustomSlug = false }: Omit
     busy.current = true;
     setPending(true);
     setError(null);
+    setNotice(null);
     let organization = created;
     try {
       if (!organization) {
-        organization = await controllerClient.organizations.create({ orgName: name.trim(), ...(color ? { accentColor: color } : {}), ...(slug.trim() ? { orgSlug: slug.trim() } : {}) });
-        if (!organization) throw new Error("Couldn't create the team. Try again in a moment.");
+        const result = await controllerClient.organizations.create({ orgName: name.trim(), ...(color ? { accentColor: color } : {}), ...(slug.trim() ? { orgSlug: slug.trim() } : {}) });
+        if (!result) throw new Error("Couldn't create the team. Try again in a moment.");
+        const { created: isNew, ...resolved } = result;
+        if (isNew === false) {
+          // The name resolved to a team the user is already in, such as their
+          // personal team. Nothing was created, so its picture stays untouched.
+          setNotice(`${getOrgDisplayName(resolved.name)} is already one of your teams. Choose a different name${allowCustomSlug ? " or slug" : ""} to create a new one.`);
+          return;
+        }
+        organization = resolved;
         setCreated(organization);
         notifyTeamProfileUpdated();
       }
@@ -90,6 +101,7 @@ function NewTeamDialogForm({ onClose, onCreated, allowCustomSlug = false }: Omit
           </Field> : null}
           <TeamPicturePicker name={name} file={file} accentColor={created ? created.accentColor : color} onChange={setFile} disabled={pending} />
           <TeamAccentPicker value={created ? created.accentColor : color} onChange={setColor} disabled={pending || Boolean(created)} />
+          {notice ? <Text as="p" role="status" variant="body" data-testid="new-team-existing-notice">{notice}</Text> : null}
           {error ? <Text as="p" role="alert" variant="body" tone="danger">{error}</Text> : null}
           <div className="flex flex-wrap items-center justify-end gap-2">
             <Button type="button" variant="ghost" size="sm" radius="xl" onPress={close} isDisabled={pending}>

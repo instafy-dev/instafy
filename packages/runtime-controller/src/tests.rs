@@ -3102,6 +3102,101 @@ async fn project_member_role_changes_and_removal_publish_targeted_access_invalid
 }
 
 #[tokio::test]
+async fn create_organization_keeps_one_personal_team_per_owner() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping personal team reuse test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    let owner_user_id = Uuid::new_v4();
+    ensure_test_user(&pool, &owner_user_id).await?;
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "personal-team-reuse",
+    );
+    let owner_token = crate::auth::issue_controller_token(&config, &owner_user_id)
+        .map_err(|error| controller_error("issue personal team owner token", error))?
+        .token;
+    let app = projects::router().with_state(build_test_state(pool.clone(), config));
+
+    let named_team = format!("Bookkeeping {}", &owner_user_id.simple().to_string()[..8]);
+    let mut created = Vec::new();
+    // The stored label first, then the "Personal" label clients display for
+    // it (production minted a second team from that), then a chosen name.
+    for org_name in [
+        "Personal team",
+        "Personal",
+        " personal ",
+        named_team.as_str(),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/orgs")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .header(
+                        axum::http::header::AUTHORIZATION,
+                        format!("Bearer {owner_token}"),
+                    )
+                    .body(Body::from(json!({ "orgName": org_name }).to_string()))?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK, "create org {org_name:?}");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
+        let org_id = Uuid::parse_str(
+            payload["orgId"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("org creation response omitted orgId"))?,
+        )?;
+        let org_slug = payload["orgSlug"].as_str().unwrap_or_default().to_string();
+        let is_new = payload["created"]
+            .as_bool()
+            .ok_or_else(|| anyhow::anyhow!("org creation response omitted created"))?;
+        created.push((org_id, org_slug, is_new));
+    }
+
+    let personal_slug = format!("user-{owner_user_id}");
+    let personal_org_id = created[0].0;
+    // Only the first request mints the team; clients must not decorate the
+    // existing team when a later request resolves it.
+    for (index, (org_id, org_slug, is_new)) in created[..3].iter().enumerate() {
+        assert_eq!(
+            *org_id, personal_org_id,
+            "personal labels must reuse one team"
+        );
+        assert_eq!(org_slug, &personal_slug);
+        assert_eq!(*is_new, index == 0, "only the first request creates it");
+    }
+    let (named_org_id, named_org_slug, named_is_new) = &created[3];
+    assert_ne!(
+        *named_org_id, personal_org_id,
+        "a chosen name is a new team"
+    );
+    assert_ne!(named_org_slug, &personal_slug);
+    assert!(*named_is_new, "a chosen name reports a new team");
+
+    let owned_teams: i64 = pool
+        .get()
+        .await?
+        .query_one(
+            "select count(*) from org_memberships where user_id = $1 and role = 'owner'",
+            &[&owner_user_id],
+        )
+        .await?
+        .get(0);
+    assert_eq!(owned_teams, 2);
+
+    cleanup_org(&pool, named_org_id).await?;
+    cleanup_org(&pool, &personal_org_id).await?;
+    cleanup_test_user(&pool, &owner_user_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn org_viewers_cannot_create_projects_but_builders_can() -> anyhow::Result<()> {
     let Some(pool) = setup_origin_test_pool().await? else {
         eprintln!("skipping org project creation role test: TEST_DATABASE_URL not set");

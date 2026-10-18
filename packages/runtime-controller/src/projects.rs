@@ -732,6 +732,10 @@ struct CreateOrgResponse {
     org_slug: String,
     org_name: String,
     accent_color: Option<String>,
+    /// False when the request resolved an org the caller already belongs to
+    /// (an idempotent create, such as the pinned personal team), so clients do
+    /// not treat it as new and decorate it.
+    created: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1473,9 +1477,11 @@ async fn create_organization(
         // personal-organization/personal-team/personal-workspace orgs ended up
         // co-mingling real tenants). Pin these known defaults per-user. Any
         // other collision is still caught by the SlugTakenByOthers path below.
+        // "Personal" is the label clients display for that team, so a client
+        // echoing it back must land on the same team, not mint a second one.
         if matches!(
             candidate.as_str(),
-            "personal-organization" | "personal-team" | "personal-workspace"
+            "personal" | "personal-organization" | "personal-team" | "personal-workspace"
         ) {
             owner_user_id
                 .map(|owner| format!("user-{owner}").to_ascii_lowercase())
@@ -1618,6 +1624,7 @@ async fn create_organization(
         org_slug: final_slug,
         org_name,
         accent_color,
+        created,
     }))
 }
 
