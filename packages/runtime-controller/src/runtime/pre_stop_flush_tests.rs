@@ -2610,3 +2610,229 @@ async fn a_rolling_save_grant_holds_only_while_its_write_job_does() -> anyhow::R
     delete_users(&[owner_user_id, stranger]).await?;
     result
 }
+
+/// What a dispatch, requeue or automation start leaves for the runtime's
+/// origin: the instance an ensure that names no mode allocates.
+async fn allocate_instance_without_a_mode(
+    fx: &Fixture,
+) -> anyhow::Result<super::super::db::OriginInstanceRecord> {
+    let mut connection = fx.pool.get().await?;
+    let transaction = connection.transaction().await?;
+    let instance = super::super::db::upsert_origin_instance(
+        &transaction,
+        &fx.project_id,
+        &fx.runtime_id,
+        &fx.runtime_lease_id,
+        None,
+        vec!["http".to_string()],
+        None,
+    )
+    .await
+    .map_err(|(status, body)| anyhow::anyhow!("{status}: {}", body.0.message))?;
+    transaction.commit().await?;
+    Ok(instance)
+}
+
+async fn instance_mode_and_status(fx: &Fixture) -> anyhow::Result<(Option<String>, String)> {
+    let row = fx
+        .pool
+        .get()
+        .await?
+        .query_one(
+            "select mode, status from origin_instances
+             where runtime_id = $1 and lease_id = $2",
+            &[&fx.runtime_id, &fx.runtime_lease_id],
+        )
+        .await?;
+    Ok((row.get("mode"), row.get("status")))
+}
+
+/// A running write job of the owner's on `fx`'s runtime, and its run.
+async fn insert_leased_write_job(fx: &Fixture) -> anyhow::Result<(Uuid, Uuid)> {
+    let (job_id, run_id) = (Uuid::new_v4(), Uuid::new_v4());
+    let connection = fx.pool.get().await?;
+    connection
+        .execute(
+            "insert into runs (id, project_id, run_type, status)
+             values ($1, $2, 'prompt', 'in_progress')",
+            &[&run_id, &fx.project_id],
+        )
+        .await?;
+    connection
+        .execute(
+            "insert into agent_jobs
+                (id, project_id, run_id, status, payload, leased_by_runtime_id,
+                 leased_at, lease_expires_at)
+             values ($1, $2, $3, 'leased', $4, $5, now(), now() + interval '5 minutes')",
+            &[
+                &job_id,
+                &fx.project_id,
+                &run_id,
+                &json!({ "user_id": fx.owner_user_id, "writeIntent": true, "metadata": {} }),
+                &fx.runtime_id,
+            ],
+        )
+        .await?;
+    Ok((job_id, run_id))
+}
+
+/// The rolling save, the owner's save permission and the pre-stop flush all
+/// work for `fx`'s runtime and its online origin.
+async fn assert_saves_work(fx: &Fixture) -> anyhow::Result<()> {
+    let (job_id, run_id) = insert_leased_write_job(fx).await?;
+    let bearer = job_workspace_bearer(fx, run_id, fx.runtime_lease_id);
+    let (status, body) = send(
+        &fx.state,
+        persist_grant_request(fx.project_id, &bearer, Some(job_id)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "rolling save grant: {body}");
+    assert_eq!(body["originId"], json!(fx.origin_id));
+
+    let grant = save_grant(fx, fx.owner_user_id, fx.runtime_lease_id, 60);
+    let (status, body) = send(&fx.state, git_token_request(fx.project_id, &grant)).await;
+    assert_eq!(status, StatusCode::OK, "save permission: {body}");
+
+    fx.hold_owner_lease().await?;
+    let stopped = super::super::stop::stop_runtime_safely(
+        &fx.state,
+        &fx.runtime_id,
+        super::super::stop::StopOptions {
+            source: "pre_stop_flush_test",
+            reason: Some("credits_exhausted".to_string()),
+            skip_if_active_jobs: false,
+            require_idle_timeout: false,
+            allow_cleanup_pending_release: false,
+            expected_identity: None,
+        },
+    )
+    .await
+    .map_err(|(status, body)| anyhow::anyhow!("{status}: {}", body.0.message))?;
+    assert!(stopped.outcome.status_changed);
+    assert_eq!(fx.order(), vec!["flush", "release"]);
+    assert_eq!(fx.flush_calls().len(), 1);
+    assert_eq!(stopped.flush.status, "flushed");
+    fx.pool
+        .get()
+        .await?
+        .execute("delete from runs where project_id = $1", &[&fx.project_id])
+        .await?;
+    Ok(())
+}
+
+/// A brand-new space whose runtime is cold-started by its first message:
+/// the dispatch's ensure names no origin mode, so the instance starts with
+/// none. Its origin's registration records the mode it registers with, a
+/// later ensure that names none keeps it (and keeps the healthy origin
+/// online), and rolling saves, the save permission and the pre-stop flush
+/// all reach it. Before, the mode stayed NULL and every hosted-origin query
+/// refused the runtime: the job's rolling saves ended as "token expired".
+#[tokio::test]
+async fn a_runtime_a_dispatch_cold_starts_gets_its_origin_mode_and_its_saves() -> anyhow::Result<()>
+{
+    let pool = crate::tests::require_origin_test_pool("dispatch cold start origin mode").await?;
+    let project_id = Uuid::new_v4();
+    let owner_user_id = Uuid::new_v4();
+    let fixture = SharedDbFixture {
+        projects: vec![project_id],
+        ..Default::default()
+    };
+    let result = with_shared_db_fixture(fixture, async {
+        let mut fx = Fixture::new(
+            pool.clone(),
+            project_id,
+            owner_user_id,
+            json!({ "unpushedRefs": 0, "unpushedRefNames": [], "parkedCommits": 0 }),
+        )
+        .await?;
+        // Start over from what a cold start has: no origin yet.
+        {
+            let connection = fx.pool.get().await?;
+            connection
+                .execute(
+                    "delete from origin_instances where runtime_id = $1",
+                    &[&fx.runtime_id],
+                )
+                .await?;
+            connection
+                .execute(
+                    "delete from workspace_origins where id = $1",
+                    &[&fx.origin_id],
+                )
+                .await?;
+        }
+        let instance = allocate_instance_without_a_mode(&fx).await?;
+        assert_eq!(instance.mode, None);
+        assert_eq!(instance.status, "requested");
+        // A provider-managed runtime registers its origin under the
+        // instance's id.
+        fx.origin_id = instance.id;
+        let endpoint = fx
+            .attested
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("origin endpoint");
+        register_origin_at(&fx, &endpoint).await?;
+        assert_eq!(
+            instance_mode_and_status(&fx).await?,
+            (Some("hosted".to_string()), "online".to_string()),
+            "registration records the origin's mode"
+        );
+
+        // The next dispatch ensures the same generation, again naming no mode.
+        let again = allocate_instance_without_a_mode(&fx).await?;
+        assert_eq!(again.id, instance.id);
+        assert_eq!(again.origin_id, Some(instance.id));
+        assert_eq!(
+            instance_mode_and_status(&fx).await?,
+            (Some("hosted".to_string()), "online".to_string()),
+            "an ensure that names no mode keeps the mode and the online origin"
+        );
+
+        assert_saves_work(&fx).await
+    })
+    .await;
+    delete_users(&[owner_user_id]).await?;
+    result
+}
+
+/// Runtimes already started by a dispatch before the mode was recorded keep
+/// an online instance without a mode until their origin registers again.
+/// The hosted-origin queries read their registered origin's mode, so their
+/// rolling saves, save permission and pre-stop flush still work.
+#[tokio::test]
+async fn an_online_origin_instance_without_a_mode_still_gets_its_saves() -> anyhow::Result<()> {
+    let pool = crate::tests::require_origin_test_pool("origin instance without a mode").await?;
+    let project_id = Uuid::new_v4();
+    let owner_user_id = Uuid::new_v4();
+    let fixture = SharedDbFixture {
+        projects: vec![project_id],
+        ..Default::default()
+    };
+    let result = with_shared_db_fixture(fixture, async {
+        let fx = Fixture::new(
+            pool.clone(),
+            project_id,
+            owner_user_id,
+            json!({ "unpushedRefs": 0, "unpushedRefNames": [], "parkedCommits": 0 }),
+        )
+        .await?;
+        fx.pool
+            .get()
+            .await?
+            .execute(
+                "update origin_instances set mode = null where runtime_id = $1",
+                &[&fx.runtime_id],
+            )
+            .await?;
+        assert_eq!(
+            instance_mode_and_status(&fx).await?,
+            (None, "online".to_string())
+        );
+        assert_saves_work(&fx).await
+    })
+    .await;
+    delete_users(&[owner_user_id]).await?;
+    result
+}

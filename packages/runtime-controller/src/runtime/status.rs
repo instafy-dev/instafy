@@ -775,7 +775,13 @@ async fn load_runtime_status_response_for_viewer(
                     oi.status as origin_status,
                     oi.origin_id as origin_origin_id,
                     oi.lease_id as origin_lease_id,
-                    oi.mode as origin_mode,
+                    -- An instance a dispatch started before its mode was
+                    -- recorded reports its registered origin's mode.
+                    coalesce(
+                      oi.mode,
+                      (select o.mode from workspace_origins o
+                       where o.id = oi.origin_id and o.project_id = oi.project_id)
+                    ) as origin_mode,
                     oi.endpoint as origin_endpoint,
                     oi.protocols as origin_protocols,
                     oi.metadata as origin_metadata,

@@ -452,7 +452,9 @@ pub(super) async fn find_target(
                and oi.runtime_id = $2
                and oi.lease_id = $3
                and oi.status = 'online'
-               and oi.mode in ('hosted', 'efs')
+               -- An instance a dispatch started before its mode was recorded
+               -- has none of its own; its registered origin's mode decides.
+               and coalesce(oi.mode, o.mode) in ('hosted', 'efs')
                and (cardinality(oi.protocols) = 0 or 'http' = any(oi.protocols))
                and p.status is distinct from 'deleted'
              order by oi.updated_at desc
@@ -851,12 +853,15 @@ pub(crate) async fn authorize_pre_stop_save_grant(
                     exists(
                         select 1
                         from origin_instances oi
+                        join workspace_origins o
+                          on o.id = oi.origin_id
+                         and o.project_id = oi.project_id
                         where oi.project_id = r.project_id
                           and oi.runtime_id = r.id
                           and oi.lease_id = l.id
                           and oi.origin_id = $4
                           and oi.status = 'online'
-                          and oi.mode in ('hosted', 'efs')
+                          and coalesce(oi.mode, o.mode) in ('hosted', 'efs')
                     ) as origin_online
              from runtimes r
              join runtime_leases l on l.id = $3
