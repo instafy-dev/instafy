@@ -1878,7 +1878,14 @@ fn format_project_memory_snapshot_with_preferences(
                 }
             }
 
-            for context in selected_contexts {
+            // Contexts this prompt actually matched go first, highest score first. Always-included
+            // contexts score 0 and follow, so they can no longer use up the budget before the
+            // instructions specific to this request (an imported skill routed for the prompt was
+            // otherwise left with a few hundred bytes after the built-in meta skills).
+            let mut ordered_contexts: Vec<&SelectedContextNode> =
+                selected_contexts.iter().collect();
+            ordered_contexts.sort_by(|a, b| b.score.cmp(&a.score));
+            for context in ordered_contexts {
                 if remaining == 0 {
                     break;
                 }
@@ -29671,6 +29678,98 @@ always_include: true
                 .text
                 .contains("## Persistent context tree (selected)")
         );
+    }
+
+    #[test]
+    fn routed_context_is_loaded_before_always_included_contexts_exhaust_the_budget() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+        let skills_dir = root.join(learn::SKILLS_ROOT_RELATIVE_PATH);
+        fs::create_dir_all(&skills_dir).expect("create skills dir");
+        fs::write(root.join(learn::INSTAFY_FILENAME), "# INSTAFY\n").expect("write instafy");
+
+        let write_skill = |name: &str, body: &str| {
+            let dir = skills_dir.join(name);
+            fs::create_dir_all(&dir).expect("create skill dir");
+            fs::write(dir.join("SKILL.md"), body).expect("write skill");
+        };
+
+        write_skill(
+            "instafy-persistent-contexts",
+            r#"---
+name: instafy-persistent-contexts
+description: Root persistent context rules.
+context_kind: root
+always_include: true
+context_children: instafy-skill-router
+---
+
+# Persistent contexts
+"#,
+        );
+        write_skill(
+            "instafy-skill-router",
+            r#"---
+name: instafy-skill-router
+description: Select workflow contexts.
+context_kind: meta
+context_parent: instafy-persistent-contexts
+always_include: true
+max_children: 3
+---
+
+# Skill router
+"#,
+        );
+        // Five always-included contexts of 12 KB each: together they are larger than the whole
+        // project memory budget.
+        let filler = "Always-included guidance that does not mention the request.\n".repeat(200);
+        for index in 0..5 {
+            write_skill(
+                &format!("instafy-always-{index}"),
+                &format!(
+                    "---\nname: instafy-always-{index}\ndescription: Always included.\ncontext_kind: meta\ncontext_parent: instafy-persistent-contexts\nalways_include: true\n---\n\n# Always {index}\n{filler}"
+                ),
+            );
+        }
+        write_skill(
+            "interactive-map",
+            r#"---
+name: interactive-map
+description: Build interactive map sites.
+context_parent: instafy-skill-router
+routing_keywords: map, hotel, walk
+---
+
+# Interactive map sites
+
+Use the uw commands.
+END-OF-MAP-SKILL
+"#,
+        );
+
+        let prompt = "Make us a map that helps us choose a hotel in Taipei.";
+        let snapshot = format_project_memory_snapshot(root, prompt).expect("snapshot");
+
+        assert!(snapshot.text.len() <= PROJECT_MEMORY_MAX_TOTAL_BYTES + 4_096);
+        assert!(
+            snapshot
+                .text
+                .contains("## Context: interactive-map (.agents/skills/interactive-map/SKILL.md)")
+        );
+        assert!(
+            snapshot.text.contains("END-OF-MAP-SKILL"),
+            "the routed skill must be loaded in full, not crowded out by always-included contexts"
+        );
+        let routed_at = snapshot
+            .text
+            .find("## Context: interactive-map")
+            .expect("routed context");
+        let always_at = snapshot
+            .text
+            .find("## Context: instafy-always-0")
+            .unwrap_or(usize::MAX);
+        assert!(routed_at < always_at, "routed context is loaded first");
     }
 
     #[test]
