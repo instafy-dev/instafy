@@ -124,6 +124,8 @@ import { useRuntime } from "../runtime/useRuntime";
 import { type SubmitPromptResult } from "../prompts/usePromptActions";
 import { usePromptBootstrap } from "./studio/hooks/usePromptBootstrap";
 import { useProjectMemoryBootstrap } from "./useProjectMemoryBootstrap";
+import { useSpacesPanelForMissingProject } from "./useSpacesPanelForMissingProject";
+import { NO_SPACE_OPEN_NAME } from "../projects/spaceName";
 import { useCreatePrivateConversation } from "./studio/hooks/useCreatePrivateConversation";
 import { useConversations } from "../conversations/ConversationsProvider";
 import { isUUID } from "../utils/uuid";
@@ -379,7 +381,6 @@ function StudioLayoutInner() {
     activeWorkspaceTabKind === "gitReview" ? activeWorkspaceTabId : null;
   useWorkspaceActivity();
   const lastControllerAuthErrorRef = useRef(0);
-  const projectMissingHandledRef = useRef<string | null>(null);
   const activeConversation = useMemo(() => {
     if (!activeConversationId) {
       return null;
@@ -627,7 +628,7 @@ function StudioLayoutInner() {
   const homeAttentionFeed = useMemo(() => buildHomeFeed({
     attentionEntries: buildHomeAttentionEntries({
       conversations, inboxItems: visibleHomeAttentionInboxItems,
-      currentSpaceName: (activeProjectName ?? "").trim() || "Choose a Space",
+      currentSpaceName: (activeProjectName ?? "").trim() || NO_SPACE_OPEN_NAME,
       visibleConversationLocalId, visibleConversationControllerId,
     }),
     notifications: notificationCenter.page.items.filter(item => {
@@ -720,24 +721,13 @@ function StudioLayoutInner() {
     return () => window.removeEventListener(CONTROLLER_AUTH_ERROR_EVENT, handler);
   }, [navigate, showStatus, signOut]);
 
-  useEffect(() => {
-    if (!projectReadyForWorkspace || !activeProjectId) {
-      return;
-    }
-    if (!controllerProjectMissing) {
-      return;
-    }
-      if (projectMissingHandledRef.current === activeProjectId) {
-        return;
-      }
-      projectMissingHandledRef.current = activeProjectId;
-      openPanelTab("projects");
-    }, [
-      activeProjectId,
-      controllerProjectMissing,
-      openPanelTab,
-      projectReadyForWorkspace,
-    ]);
+  useSpacesPanelForMissingProject({
+    activeProjectId,
+    routedProjectId: searchRoute.get("projectId"),
+    controllerProjectMissing,
+    projectReadyForWorkspace,
+    openPanelTab,
+  });
 
   useProjectMemoryBootstrap({
     activeProjectId,
@@ -1919,7 +1909,7 @@ function StudioLayoutInner() {
   const overlaySearchTriggerRef = useRef<HTMLButtonElement | null>(null);
   const workspaceSearchContext = resolveStudioSearchContext(
     { id: navigationScope.orgKey, name: activeTeamName },
-    activeProjectSummary ? { id: activeProjectSummary.id, orgId: activeProjectSummary.orgId, name: activeProjectName } : null,
+    activeProjectSummary ? { id: activeProjectSummary.id, orgId: activeProjectSummary.orgId, name: activeProjectName ?? activeProjectSummary.name } : null,
     projectAccessBlocked,
   );
   const homeSearchTeam = homeListState.teamFilter === "all" ? null : {

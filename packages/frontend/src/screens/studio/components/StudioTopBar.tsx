@@ -30,7 +30,7 @@ import type { StudioHistory } from "../../../navigation/useStudioHistory";
 import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
 import { useProject } from "../../../projects/useProject";
 import { useProjects } from "../../../projects/useProjects";
-import { spaceDisplayName } from "../../../projects/spaceName";
+import { NO_SPACE_OPEN_NAME, spaceDisplayName } from "../../../projects/spaceName";
 import { useRuntime } from "../../../runtime/useRuntime";
 import { ConversationQuickTabs } from "../../../workspace/ConversationQuickTabs";
 import { WorkspaceTabs } from "../../../workspace/WorkspaceTabs";
@@ -152,7 +152,7 @@ export function StudioTopBar({ mobileNavigation, mobilePageHeader, compactMobile
     }
     return conversations.find((conversation) => conversation.controllerId === parentId || conversation.localId === parentId) ?? null;
   }, [activeConversation?.parentConversationId, conversations]);
-  const resolvedProjectName = spaceDisplayName(activeProjectName);
+  const resolvedProjectName = activeProjectId ? spaceDisplayName(activeProjectName) : NO_SPACE_OPEN_NAME;
   const workConversation = conversationWorkspace && activeWorkspaceTab?.workspaceOwner
     ? conversations.find(conversation => conversation.localId === activeWorkspaceTab.workspaceOwner?.conversationId) : null;
   const topbarLocationTitle = topbarLocationOverride?.title ?? workConversation?.title ?? activeWorkspaceTab?.title ?? resolvedProjectName;

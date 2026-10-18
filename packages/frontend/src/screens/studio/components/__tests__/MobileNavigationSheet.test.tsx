@@ -8,7 +8,7 @@ import type { ProjectListItem } from "../../../../projects/useProjects";
 import { buildStudioDestinationSearch, type StudioDestination } from "../../../../navigation/studioNavigation";
 
 const mocks = vi.hoisted(() => ({
-  project: { activeProjectId: "space-a", activeProjectName: "Alpha", projectAccessPending: false, projectAccessBlocked: false },
+  project: { activeProjectId: "space-a", activeProjectName: "Alpha" as string | null, projectAccessPending: false, projectAccessBlocked: false },
   conversations: vi.fn(), projects: vi.fn(), merged: vi.fn(), navigate: vi.fn(), nativeBack: vi.fn(),
   retryChats: vi.fn(), retrySpaces: vi.fn(), createProject: vi.fn(), switchProject: vi.fn(),
 }));
@@ -131,6 +131,13 @@ describe("MobileNavigationSheet", () => {
     expect(document.body.textContent).not.toContain("Alpha chat"); expect(document.body.textContent).toContain("Loading this space’s chats");
     mocks.project.projectAccessBlocked = true; await render();
     expect(document.body.textContent).toContain("Chat access is unavailable"); expect(document.body.textContent).not.toContain("Alpha chat");
+  });
+
+  it("names no space for loaded chats while none is open", async () => {
+    Object.assign(mocks.project, { activeProjectId: "", activeProjectName: null, projectAccessBlocked: true });
+    await render();
+    expect(document.body.textContent).not.toContain("Loaded chats in");
+    expect(document.body.textContent).toContain("Chat access is unavailable");
   });
 
   it("retains loaded chats after a refresh error and offers retry rather than false empty state", async () => {

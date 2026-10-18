@@ -170,6 +170,23 @@ function writeStoredProjectId(projectId: string | null | undefined) {
 }
 
 /**
+ * Says that no space is open to the runtime, chat and tab readers that use
+ * these window values while the store has none open. Left naming a blocked
+ * space, they kept reading it behind its notice.
+ */
+function publishNoActiveProject() {
+  if (typeof window === "undefined") {
+    return;
+  }
+  const runtimeWindow = window as typeof window & {
+    __INSTAFY_ACTIVE_PROJECT_ID__?: string | null;
+    __INSTAFY_PROJECT_INITIALIZED__?: boolean;
+  };
+  runtimeWindow.__INSTAFY_ACTIVE_PROJECT_ID__ = null;
+  runtimeWindow.__INSTAFY_PROJECT_INITIALIZED__ = true;
+}
+
+/**
  * Names the resolved space in the URL and reports whether that changed it.
  * The write goes through the router, not window.history: the studio's URL
  * writer and the chat's scroll restore read the routed location and hold
@@ -616,6 +633,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
           projectSummaryRetryBackoffRef.current = null;
           // The URL names this space, so the notice stands in for it with no
           // other space open behind it.
+          publishNoActiveProject();
           removeProject(targetProjectId, { openFallback: false });
           if (storedProjectIdRef.current === targetProjectId) {
             storedProjectIdRef.current = null;
@@ -627,12 +645,6 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
           setProjectAccessPending(false);
           setProjectAccessBlocked(true);
           setProjectCapabilities(null);
-          if (typeof window !== "undefined") {
-            const runtimeWindow = window as typeof window & {
-              __INSTAFY_PROJECT_INITIALIZED__?: boolean;
-            };
-            runtimeWindow.__INSTAFY_PROJECT_INITIALIZED__ = true;
-          }
           setProjectInitialized(true);
           return;
         }
@@ -987,7 +999,11 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
           setProjectAccessBlocked(true);
           // While the URL names it, the notice stands in for it: another space
           // opened behind it would show its name, files and chats there.
-          removeProject(targetProjectId, { openFallback: readUrlProjectId() !== targetProjectId });
+          const openFallback = readUrlProjectId() !== targetProjectId;
+          if (!openFallback) {
+            publishNoActiveProject();
+          }
+          removeProject(targetProjectId, { openFallback });
           return;
         }
 

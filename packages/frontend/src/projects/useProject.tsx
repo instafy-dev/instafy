@@ -9,8 +9,13 @@ export function useProject() {
   const { metadata } = useProjectMetadata();
   const projectAccess = useProjectAccess();
 
-  const activeProjectName = useMemo(() => {
-    const activeName = activeProjectId ? projects[activeProjectId]?.metadata.projectName : null;
+  // Null while no space is open: "Untitled space" there named a space that is
+  // not there, behind the notice for one that was deleted.
+  const activeProjectName = useMemo<string | null>(() => {
+    if (!activeProjectId) {
+      return null;
+    }
+    const activeName = projects[activeProjectId]?.metadata.projectName;
     return spaceDisplayName(activeName || metadata.projectName);
   }, [activeProjectId, metadata.projectName, projects]);
 

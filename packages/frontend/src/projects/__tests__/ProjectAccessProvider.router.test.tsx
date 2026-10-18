@@ -7,7 +7,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getStudioVisitKey } from "../../navigation/studioVisit";
 import { useWorkspaceStore } from "../../store";
 import { PROJECT_ACCESS_REFRESH_EVENT, ProjectAccessProvider, useProjectAccess } from "../ProjectAccessProvider";
+import { ProjectMetadataProvider } from "../ProjectMetadataProvider";
 import { ProjectStateProvider } from "../ProjectStateProvider";
+import { useProject } from "../useProject";
 import { markProjectDeletedHere, unmarkProjectDeletedHere } from "../projectDeletion";
 
 const PROJECT_ID = "11111111-1111-4111-8111-111111111111";
@@ -47,9 +49,19 @@ vi.mock("../../providers/AuthProvider", () => ({ useAuth: () => ({ user: { id: "
 // Unlike ProjectAccessProvider.test.tsx, nothing here mocks useLocation: the
 // provider runs inside a real router, so a URL write the router never hears
 // about shows up as a missing projectId in the routed location.
+type RuntimeWindow = typeof window & {
+  __INSTAFY_ACTIVE_PROJECT_ID__?: string | null;
+  __INSTAFY_PROJECT_INITIALIZED__?: boolean;
+};
+
+// The space the runtime, chat and tab readers fall back to when the store has
+// none open.
+const windowActiveProjectId = () => (window as RuntimeWindow).__INSTAFY_ACTIVE_PROJECT_ID__;
+
 function RouteProbe() {
   const location = useLocation();
   const access = useProjectAccess();
+  const { activeProjectName } = useProject();
   return (
     <output
       data-testid="route-probe"
@@ -60,6 +72,7 @@ function RouteProbe() {
       data-pending={String(access.projectAccessPending)}
       data-blocked={String(access.projectAccessBlocked)}
       data-deleted={String(access.projectAccessDeleted)}
+      data-project-name={String(activeProjectName)}
     />
   );
 }
@@ -90,9 +103,11 @@ describe("ProjectAccessProvider inside a real router", () => {
           path: "/studio",
           element: (
             <ProjectStateProvider>
-              <ProjectAccessProvider>
-                <RouteProbe />
-              </ProjectAccessProvider>
+              <ProjectMetadataProvider>
+                <ProjectAccessProvider>
+                  <RouteProbe />
+                </ProjectAccessProvider>
+              </ProjectMetadataProvider>
             </ProjectStateProvider>
           ),
         },
@@ -131,6 +146,8 @@ describe("ProjectAccessProvider inside a real router", () => {
     window.localStorage.clear();
     window.sessionStorage.clear();
     window.history.replaceState(null, "", "/");
+    delete (window as RuntimeWindow).__INSTAFY_ACTIVE_PROJECT_ID__;
+    delete (window as RuntimeWindow).__INSTAFY_PROJECT_INITIALIZED__;
     vi.restoreAllMocks();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
@@ -285,6 +302,7 @@ describe("ProjectAccessProvider inside a real router", () => {
     await act(async () => root.render(<RouterProvider router={router} />));
     await settle();
     expect(useWorkspaceStore.getState().activeProjectId).toBe(PROJECT_ID);
+    expect(windowActiveProjectId()).toBe(PROJECT_ID);
 
     mocks.getSummaryResult.mockClear();
     mocks.getSummaryResult.mockImplementation((projectId: string) =>
@@ -307,6 +325,11 @@ describe("ProjectAccessProvider inside a real router", () => {
     expect(useWorkspaceStore.getState().activeProjectId).toBe("");
     expect(Object.keys(useWorkspaceStore.getState().projects)).toEqual([OTHER_PROJECT_ID]);
     expect(mocks.getSummaryResult.mock.calls.map(([projectId]) => projectId)).toEqual([PROJECT_ID]);
+    // Nothing reading the window for the open space keeps reading the deleted
+    // one (runs, runtimes, chat sends), and no phantom "Untitled space" is
+    // named for the space that is not open.
+    expect(windowActiveProjectId()).toBeNull();
+    expect(probe?.getAttribute("data-project-name")).toBe("null");
 
     // Picking a space from the picker names it in the URL and opens it.
     window.history.replaceState(null, "", `/studio?projectId=${OTHER_PROJECT_ID}`);
@@ -318,6 +341,8 @@ describe("ProjectAccessProvider inside a real router", () => {
     expect(useWorkspaceStore.getState().activeProjectId).toBe(OTHER_PROJECT_ID);
     expect(probe?.getAttribute("data-blocked")).toBe("false");
     expect(mocks.getSummaryResult).toHaveBeenCalledWith(OTHER_PROJECT_ID, { signal: expect.any(AbortSignal) });
+    expect(windowActiveProjectId()).toBe(OTHER_PROJECT_ID);
+    expect(probe?.getAttribute("data-project-name")).toBe("Other space");
   });
 
   it("opens no remembered space behind a link to a space that is gone", async () => {
@@ -335,6 +360,8 @@ describe("ProjectAccessProvider inside a real router", () => {
     expect(useWorkspaceStore.getState().activeProjectId).toBe("");
     expect(Object.keys(useWorkspaceStore.getState().projects)).toEqual([PROJECT_ID]);
     expect(new Set(mocks.getSummaryResult.mock.calls.map(([projectId]) => projectId))).toEqual(new Set([OTHER_PROJECT_ID]));
+    expect(windowActiveProjectId()).toBeNull();
+    expect(probe?.getAttribute("data-project-name")).toBe("null");
   });
 
   it("still moves the tab that deleted a space on to the next one", async () => {
