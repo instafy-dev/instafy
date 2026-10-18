@@ -121,6 +121,16 @@ interface CreateProjectOptions {
   tags?: string[];
 }
 
+export interface RemoveProjectOptions {
+  /**
+   * Removing the open space opens another one this browser knows, unless this
+   * is false. A tab whose URL still names a space it cannot open shows that
+   * notice with no space open: another space's files and chats would appear
+   * behind it, as if they were the missing space's.
+   */
+  openFallback?: boolean;
+}
+
 export interface SessionStore {
   state: SiteBuilderState;
   history: HistoryEntry[];
@@ -156,7 +166,7 @@ export interface SessionStore {
   setProjectOrg: (projectId: string, org: ProjectOrgInfo) => void;
   setProjectName: (projectId: string, name: string) => void;
   setProjectIdentity: (projectId: string, identity: ProjectIdentity) => void;
-  removeProject: (projectId: string) => void;
+  removeProject: (projectId: string, options?: RemoveProjectOptions) => void;
   removeProjectsByOrgId: (orgId: string) => void;
   undo: () => void;
   redo: () => void;
@@ -585,7 +595,7 @@ export const useWorkspaceStore = create<SessionStore>()(
       state: projectId === store.activeProjectId ? clone(nextProject) : store.state,
     });
   },
-  removeProject: (projectId) => {
+  removeProject: (projectId, options) => {
     const trimmed = projectId.trim();
     if (!trimmed) {
       return;
@@ -601,8 +611,7 @@ export const useWorkspaceStore = create<SessionStore>()(
         return { projects: nextProjects };
       }
 
-      const remainingIds = Object.keys(nextProjects);
-      const fallbackId = remainingIds[0] ?? "";
+      const fallbackId = options?.openFallback === false ? "" : Object.keys(nextProjects)[0] ?? "";
       if (!fallbackId) {
         return {
           projects: nextProjects,

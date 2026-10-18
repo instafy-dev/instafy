@@ -684,13 +684,14 @@ function StudioLayoutInner() {
   }, HOME_ATTENTION_POLL_ACTIVE_MS, { idleMs: HOME_ATTENTION_POLL_IDLE_MS });
 
   useEffect(() => {
-    const projectName = (activeProjectName ?? "").trim();
+    // While the open space is blocked, or none is open, the title names none.
+    const projectName = activeProjectId && !controllerProjectMissing ? (activeProjectName ?? "").trim() : "";
     applyPageMeta({
       title: projectName ? `${projectName} · Instafy` : "Instafy",
       description: "Chat with Octo, edit files, and manage your space in Instafy.",
       image: SOCIAL_CARD_IMAGE,
     });
-  }, [activeProjectName]);
+  }, [activeProjectId, activeProjectName, controllerProjectMissing]);
 
   useEffect(() => {
     if (typeof window === "undefined") {

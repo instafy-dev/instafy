@@ -344,7 +344,7 @@ describe("ProjectAccessProvider capability refresh", () => {
     expect(probe?.getAttribute("data-initialized")).toBe("true");
     expect(probe?.getAttribute("data-blocked")).toBe("true");
     expect(probe?.getAttribute("data-write")).toBe("false");
-    expect(mocks.removeProject).toHaveBeenCalledWith(PROJECT_ID);
+    expect(mocks.removeProject).toHaveBeenCalledWith(PROJECT_ID, { openFallback: false });
     await act(async () => vi.advanceTimersByTimeAsync(5_000));
     expect(mocks.getSummaryResult).toHaveBeenCalledTimes(1);
     expect(mocks.createControllerProject).not.toHaveBeenCalled();
@@ -562,7 +562,7 @@ describe("ProjectAccessProvider capability refresh", () => {
       const probe = container.querySelector('[data-testid="access-probe"]');
       expect(probe?.getAttribute("data-blocked")).toBe("true");
       expect(probe?.getAttribute("data-resolved")).toBe("false");
-      expect(mocks.removeProject).toHaveBeenCalledWith(PROJECT_ID);
+      expect(mocks.removeProject).toHaveBeenCalledWith(PROJECT_ID, { openFallback: false });
     });
   });
 
@@ -593,10 +593,10 @@ describe("ProjectAccessProvider capability refresh", () => {
     expect(probe?.getAttribute("data-role")).toBe("admin");
     mocks.getSummaryResult.mockClear();
 
-    // The real store activates another local space when the open one is
-    // removed; the URL still names the deleted one.
-    mocks.removeProject.mockImplementation(() => {
-      mocks.activeProjectId = FALLBACK;
+    // The real store opens another local space when the open one is removed,
+    // unless told not to; the URL still names the deleted one.
+    mocks.removeProject.mockImplementation((_projectId: string, options?: { openFallback?: boolean }) => {
+      mocks.activeProjectId = options?.openFallback === false ? "" : FALLBACK;
     });
     mocks.getSummaryResult.mockImplementation(async (projectId: string) => projectId === PROJECT_ID
       ? { summary: null, notFound: true, forbidden: false, unauthorized: false }
@@ -607,7 +607,7 @@ describe("ProjectAccessProvider capability refresh", () => {
     })));
     await act(async () => window.dispatchEvent(new Event("focus")));
 
-    expect(mocks.removeProject).toHaveBeenCalledWith(PROJECT_ID);
+    expect(mocks.removeProject).toHaveBeenCalledWith(PROJECT_ID, { openFallback: false });
     expect(mocks.getSummaryResult.mock.calls.map(([projectId]) => projectId)).toEqual([PROJECT_ID]);
     expect(probe?.getAttribute("data-blocked")).toBe("true");
     expect(probe?.getAttribute("data-deleted")).toBe("true");
@@ -657,7 +657,7 @@ describe("ProjectAccessProvider capability refresh", () => {
     expect(probe?.getAttribute("data-blocked")).toBe("true");
     // Nothing said the space was deleted, only that it is not found.
     expect(probe?.getAttribute("data-deleted")).toBe("false");
-    expect(mocks.removeProject).toHaveBeenCalledWith(PROJECT_ID);
+    expect(mocks.removeProject).toHaveBeenCalledWith(PROJECT_ID, { openFallback: false });
   });
 
   it("ends the lookup when the last space this browser knew is gone and nothing replaces it", async () => {
