@@ -245,7 +245,10 @@ fn read_memory(workspace_dir: &Path) -> Result<Option<String>, &'static str> {
         .map_err(|_| "invalid_utf8")
 }
 
-fn open_regular_file(path: &Path) -> Result<File, &'static str> {
+/// Opens `path` for reading without following a symlink at its last step and
+/// without blocking on a FIFO, so the caller can check the opened descriptor
+/// is the regular file it inspected. Also used for a skill kickoff's SKILL.md.
+pub(super) fn open_regular_file(path: &Path) -> Result<File, &'static str> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
