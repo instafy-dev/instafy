@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ChatMessage } from "../../types";
 import {
+  agentJobThreadAcknowledgementIds,
   collapseLifecycleMessages,
   shouldDisplayChatMessage,
   shouldDisplayJobThreadMessage,
@@ -119,6 +120,19 @@ describe("chatMessagePresentation", () => {
         (message) => message.id,
       ),
     ).toEqual(["thinking", "status", "final"]);
+  });
+
+  it("lists the replies a synthesized job thread row presents, newest first, for read acknowledgement", () => {
+    const collapsedAll: ChatMessage[] = [
+      createMessage({ id: "command", content: "ls", messageType: "command_execution", metadata: { jobId: "job-1", messageType: "command_execution" } }),
+      createMessage({ id: "interim", content: "Looking at the files.", metadata: { jobId: "job-1" } }),
+      createMessage({ id: "empty", content: "  ", metadata: { jobId: "job-1" } }),
+      createMessage({ id: "final", content: "Done: mango added.", metadata: { jobId: "job-1" } }),
+    ];
+    const [thread] = synthesizeAgentJobThreadMessages(collapsedAll, collapsedAll);
+    expect(thread?.id).toBe("agent-job-thread:job-1");
+    expect(agentJobThreadAcknowledgementIds(thread!)).toEqual(["final", "interim"]);
+    expect(agentJobThreadAcknowledgementIds(createMessage({ id: "plain", content: "hi" }))).toEqual([]);
   });
 
   it("removes a stale runtime alert once the same run later produces agent output", () => {

@@ -221,3 +221,37 @@ it("uses the participant handback flow for native clicks, preserving control on 
   await render(true, "owner", "request-4");
   expect(dialog()).not.toBeNull();
 });
+
+it("polls incoming shares only while the chat is shown and the tab is in use", async () => {
+  const list = vi.fn().mockResolvedValue([]);
+  vi.mocked(browserShareClient).mockResolvedValue({ list } as never);
+  const setVisibility = (state: DocumentVisibilityState) => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => state });
+    document.dispatchEvent(new Event("visibilitychange"));
+  };
+  const show = (active: boolean) => act(async () => root.render(<LocalBrowserSharing projectId="project" userId="viewer" active={active} />));
+  try {
+    setVisibility("visible");
+    window.dispatchEvent(new Event("pointerdown"));
+    await show(true);
+    expect(list).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTimeAsync(5_000));
+    expect(list).toHaveBeenCalledTimes(2);
+
+    // A background tab makes no requests and refreshes once when it returns.
+    await act(async () => setVisibility("hidden"));
+    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    expect(list).toHaveBeenCalledTimes(2);
+    await act(async () => setVisibility("visible"));
+    expect(list).toHaveBeenCalledTimes(3);
+
+    // A chat surface that is not shown does not poll; showing it fetches once.
+    await show(false);
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(list).toHaveBeenCalledTimes(3);
+    await show(true);
+    expect(list).toHaveBeenCalledTimes(4);
+  } finally {
+    setVisibility("visible");
+  }
+});

@@ -5,6 +5,12 @@ import { getNotificationSession, isNotificationSessionCurrent } from "./notifica
 import { NOTIFICATION_RECEIVED_EVENT } from "./notificationPresentation";
 
 const MESSAGE_SELECTOR = "[data-chat-message-id]";
+/**
+ * A row that presents several persisted messages as one (an agent job thread
+ * renders as `agent-job-thread:<jobId>`) lists their source UUIDs here, so the
+ * replies it shows are acknowledged like any other visible message.
+ */
+export const GROUPED_MESSAGE_IDS_ATTRIBUTE = "data-chat-message-ids";
 const BATCH_SIZE = 100;
 const COALESCE_MS = 250;
 const MAX_ATTEMPTS = 3;
@@ -12,6 +18,15 @@ const MAX_ATTEMPTS = 3;
 function subscribeSession(change: () => void): () => void {
   window.addEventListener("instafy:notification-session", change);
   return () => window.removeEventListener("instafy:notification-session", change);
+}
+
+/** The persisted source message UUIDs a rendered row stands for. */
+export function acknowledgementIdsFor(element: Element): string[] {
+  const own = element.getAttribute("data-chat-message-id") ?? "";
+  const grouped = element.getAttribute(GROUPED_MESSAGE_IDS_ATTRIBUTE) ?? "";
+  return [...new Set([own, ...grouped.split(/\s+/)]
+    .map((id) => id.trim().toLowerCase())
+    .filter((id) => UUID_PATTERN.test(id)))];
 }
 
 function isRendered(element: Element): boolean {
@@ -53,7 +68,7 @@ export function useConversationNotificationRead({
     let inFlight = false;
     let failures = 0;
     let timer: number | null = null;
-    const observed = new Map<Element, string>();
+    const observed = new Map<Element, { key: string; ids: string[] }>();
     const visible = new Set<Element>();
     const acknowledged = new Set<string>();
     const current = () => !stopped && identity.current.currentUserId === currentUserId &&
@@ -80,8 +95,8 @@ export function useConversationNotificationRead({
         const topmost = document.elementFromPoint((left + right) / 2, (top + bottom) / 2);
         return topmost !== null && element.contains(topmost);
       })
-      .map((element) => observed.get(element))
-      .filter((id): id is string => Boolean(id && !acknowledged.has(id))))].slice(0, BATCH_SIZE);
+      .flatMap((element) => observed.get(element)?.ids ?? [])
+      .filter((id) => !acknowledged.has(id)))].slice(0, BATCH_SIZE);
     const schedule = (delay = COALESCE_MS) => {
       if (!current() || document.visibilityState !== "visible" || inFlight || timer !== null || visibleIds().length === 0) return;
       timer = window.setTimeout(() => { timer = null; void flush(); }, delay);
@@ -128,25 +143,26 @@ export function useConversationNotificationRead({
     }, { root: null, threshold: [0, Number.EPSILON] });
     const synchronize = () => {
       const elements = new Set(root.querySelectorAll(MESSAGE_SELECTOR));
-      for (const element of observed.keys()) {
-        if (!elements.has(element) || observed.get(element) !== element.getAttribute("data-chat-message-id")?.toLowerCase()) {
+      for (const [element, entry] of observed) {
+        if (!elements.has(element) || entry.key !== acknowledgementIdsFor(element).join(" ")) {
           observer.unobserve(element);
           observed.delete(element);
           visible.delete(element);
         }
       }
       for (const element of elements) {
-        const id = element.getAttribute("data-chat-message-id")?.toLowerCase() ?? "";
-        if (!UUID_PATTERN.test(id) || observed.has(element)) continue;
-        observed.set(element, id);
+        if (observed.has(element)) continue;
+        const ids = acknowledgementIdsFor(element);
+        if (!ids.length) continue;
+        observed.set(element, { key: ids.join(" "), ids });
         observer.observe(element);
       }
-      const renderedIds = new Set(observed.values());
+      const renderedIds = new Set([...observed.values()].flatMap((entry) => entry.ids));
       for (const id of acknowledged) if (!renderedIds.has(id)) acknowledged.delete(id);
     };
     synchronize();
     const mutations = new MutationObserver(synchronize);
-    mutations.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-chat-message-id"] });
+    mutations.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-chat-message-id", GROUPED_MESSAGE_IDS_ATTRIBUTE] });
     const refreshVisibility = () => {
       clearTimer();
       visible.clear();
