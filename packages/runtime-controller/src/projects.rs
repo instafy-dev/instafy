@@ -732,6 +732,10 @@ struct CreateOrgResponse {
     org_slug: String,
     org_name: String,
     accent_color: Option<String>,
+    /// False when the request resolved an org the caller already belongs to
+    /// (an idempotent create, such as the pinned personal team), so clients do
+    /// not treat it as new and decorate it.
+    created: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1620,6 +1624,7 @@ async fn create_organization(
         org_slug: final_slug,
         org_name,
         accent_color,
+        created,
     }))
 }
 

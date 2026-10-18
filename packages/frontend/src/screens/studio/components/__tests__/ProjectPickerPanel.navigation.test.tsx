@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   createProject: vi.fn(), switchProject: vi.fn(), openPanelTab: vi.fn(),
   projects: vi.fn(), merged: vi.fn(),
   access: { projectAccessBlocked: false, projectAccessDeleted: false },
+  controllerCore: { enabled: false },
 }));
 vi.mock("../../../../projects/useProjects", () => ({ useProjects: mocks.projects }));
 vi.mock("../../../../projects/useMergedControllerProjects", () => ({ useMergedControllerProjects: mocks.merged }));
@@ -18,7 +19,7 @@ vi.mock("../../../../status/useStatus", () => ({ useStatus: () => ({ showStatus:
 vi.mock("../../../../runtime/useRuntime", () => ({ useRuntime: () => ({ runtime: { controllerProjectMissing: false } }) }));
 vi.mock("../../workspaceControls", () => ({ useWorkspaceControls: () => ({}) }));
 vi.mock("../../useStudioDesktopLayout", () => ({ useStudioDesktopLayout: () => false }));
-vi.mock("../../../../sdk/instafy", () => ({ controllerClient: { core: { enabled: false } } }));
+vi.mock("../../../../sdk/instafy", () => ({ controllerClient: { core: mocks.controllerCore } }));
 
 const A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -32,6 +33,7 @@ describe("ProjectPickerPanel overview navigation", () => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.clearAllMocks();
     mocks.access = { projectAccessBlocked: false, projectAccessDeleted: false };
+    mocks.controllerCore.enabled = false;
     window.history.replaceState({ idx: 0, key: "overview-visit" }, "", `/studio?projectId=${A}&panel=projects&conversationId=old-chat&conversationControllerId=old-controller&jobId=old-job&browserRuntimeId=old-browser`);
     mocks.merged.mockReturnValue({ mergedProjects: [alpha, beta], remoteLoading: false, remoteError: null, remoteRefreshing: false });
     container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container);
@@ -76,6 +78,16 @@ describe("ProjectPickerPanel overview navigation", () => {
     expect(loadingStatus()).toBeNull();
   });
 
+  async function createSpaceNamed(onCreateProject: ReturnType<typeof vi.fn>, name: string) {
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="project-picker-new-project"]')!.click());
+    const nameInput = container.querySelector<HTMLInputElement>('[data-testid="project-picker-new-project-name"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(nameInput, name);
+      nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => nameInput.form!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+  }
+
   it.each([
     ["no active space", [], null, { orgId: null, orgName: null }],
     ["a space in a team", [{ ...alpha, orgId: "team-1", orgName: "Acme" }], A, { orgId: "team-1", orgName: "Acme" }],
@@ -88,13 +100,35 @@ describe("ProjectPickerPanel overview navigation", () => {
       createProject: mocks.createProject, switchProject: mocks.switchProject });
     mocks.merged.mockReturnValue({ mergedProjects: projectList, remoteLoading: false, remoteError: null, remoteRefreshing: false });
     await act(async () => root.render(<BrowserRouter><ProjectPickerPanel onCreateProject={onCreateProject} searchTerm="" onSearchTermChange={() => {}} /></BrowserRouter>));
-    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="project-picker-new-project"]')!.click());
-    const nameInput = container.querySelector<HTMLInputElement>('[data-testid="project-picker-new-project-name"]')!;
-    await act(async () => {
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(nameInput, "My bookkeeping");
-      nameInput.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    await act(async () => nameInput.form!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    await createSpaceNamed(onCreateProject, "My bookkeeping");
+    expect(onCreateProject).toHaveBeenCalledExactlyOnceWith("My bookkeeping", expectedOrg);
+  });
+
+  it.each([
+    ["all teams", null, { orgId: null, orgName: null }],
+    ["the team the filter shows", "team-2", { orgId: "team-2", orgName: "Books" }],
+    ["the filtered personal team", "team-1", { orgId: "team-1", orgName: "Personal" }],
+  ])("creates a space from the Spaces page in %s", async (_label, filter, expectedOrg) => {
+    // With no active space the heading follows the team filter, so New space
+    // lands in the team the page shows rather than a default one.
+    mocks.controllerCore.enabled = true;
+    window.history.replaceState(null, "", "/studio?panel=projects");
+    const spaces = [{ ...alpha, orgId: "team-1", orgName: "Personal team" }, { ...beta, orgId: "team-2", orgName: "Books" }];
+    const onCreateProject = vi.fn();
+    mocks.projects.mockReturnValue({ projectList: [], activeProjectId: null,
+      createProject: mocks.createProject, switchProject: mocks.switchProject });
+    mocks.merged.mockReturnValue({ mergedProjects: spaces, remoteLoading: false, remoteError: null, remoteRefreshing: false });
+    await act(async () => root.render(<BrowserRouter><ProjectPickerPanel onCreateProject={onCreateProject} searchTerm="" onSearchTermChange={() => {}} /></BrowserRouter>));
+    const orgFilter = container.querySelector<HTMLSelectElement>('select[data-testid="project-picker-org-filter"]')!;
+    expect(orgFilter.value).toBe("all");
+    if (filter) {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(orgFilter, filter);
+        orgFilter.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+    }
+    expect(container.querySelector("h2")?.textContent).toBe(expectedOrg.orgName ?? "All teams");
+    await createSpaceNamed(onCreateProject, "My bookkeeping");
     expect(onCreateProject).toHaveBeenCalledExactlyOnceWith("My bookkeeping", expectedOrg);
   });
 

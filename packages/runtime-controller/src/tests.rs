@@ -3153,24 +3153,31 @@ async fn create_organization_keeps_one_personal_team_per_owner() -> anyhow::Resu
                 .ok_or_else(|| anyhow::anyhow!("org creation response omitted orgId"))?,
         )?;
         let org_slug = payload["orgSlug"].as_str().unwrap_or_default().to_string();
-        created.push((org_id, org_slug));
+        let is_new = payload["created"]
+            .as_bool()
+            .ok_or_else(|| anyhow::anyhow!("org creation response omitted created"))?;
+        created.push((org_id, org_slug, is_new));
     }
 
     let personal_slug = format!("user-{owner_user_id}");
     let personal_org_id = created[0].0;
-    for (org_id, org_slug) in &created[..3] {
+    // Only the first request mints the team; clients must not decorate the
+    // existing team when a later request resolves it.
+    for (index, (org_id, org_slug, is_new)) in created[..3].iter().enumerate() {
         assert_eq!(
             *org_id, personal_org_id,
             "personal labels must reuse one team"
         );
         assert_eq!(org_slug, &personal_slug);
+        assert_eq!(*is_new, index == 0, "only the first request creates it");
     }
-    let (named_org_id, named_org_slug) = &created[3];
+    let (named_org_id, named_org_slug, named_is_new) = &created[3];
     assert_ne!(
         *named_org_id, personal_org_id,
         "a chosen name is a new team"
     );
     assert_ne!(named_org_slug, &personal_slug);
+    assert!(*named_is_new, "a chosen name reports a new team");
 
     let owned_teams: i64 = pool
         .get()

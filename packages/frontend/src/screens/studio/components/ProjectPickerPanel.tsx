@@ -372,13 +372,16 @@ export function ProjectPickerPanel({ onCreateProject, searchTerm, onSearchTermCh
       return;
     }
     setCreatePending(true);
+    // The team the page shows: the active space's, else the filtered team.
+    // With neither, send none: a "Personal" heading is a display label, and
+    // the create path resolves the user's own personal team.
+    const filteredOrg = !activeOrgId && showAllOrgs && orgFilterKey !== "all"
+      ? availableOrgOptions.find((org) => org.id === orgFilterKey) ?? null
+      : null;
     try {
-      // With no active team, send none: the "Personal" heading is a display
-      // label, and the create path reuses a team the user already owns.
-      await onCreateProject(trimmedName, {
-        orgId: activeOrgId,
-        orgName: activeOrgId ? activeOrgName : null
-      });
+      await onCreateProject(trimmedName, activeOrgId
+        ? { orgId: activeOrgId, orgName: activeOrgName }
+        : { orgId: filteredOrg?.id ?? null, orgName: filteredOrg?.name ?? null });
       setNewProjectName("");
       onSearchTermChange("");
       setCreateDialogOpen(false);
