@@ -14,6 +14,7 @@ pub mod controller;
 pub mod controller_tokens;
 pub mod isolated_tool_worker;
 pub mod job_cancel;
+pub mod job_model;
 pub mod jobs;
 pub mod local_browser;
 pub mod loopback_proxy;

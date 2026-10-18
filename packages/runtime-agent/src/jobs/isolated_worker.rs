@@ -26,9 +26,9 @@ impl IsolatedWorkerSettings {
             proxy_base: env::var("PROXY_BASE_URL")
                 .ok()
                 .and_then(|value| normalize_direct_worker_proxy_base(&value)),
-            model: env::var("CODEX_MODEL")
-                .ok()
-                .filter(|value| !value.trim().is_empty()),
+            // The launch CODEX_MODEL is moved out of the process environment
+            // at startup (see `job_model`), so read the captured value.
+            model: crate::job_model::launch_model().map(str::to_string),
             reasoning_effort: env::var("CODEX_RUNTIME_REASONING_EFFORT").ok(),
         }
     }

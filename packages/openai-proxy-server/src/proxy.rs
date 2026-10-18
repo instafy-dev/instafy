@@ -3692,6 +3692,13 @@ mod tests {
     }
 
     #[test]
+    fn the_last_resort_model_is_the_platforms_openai_default() {
+        // A model-less request on a credential without a default (a static
+        // auth.json) used to go upstream as the retired gpt-5.5.
+        assert_eq!(DEFAULT_MODEL, "gpt-5.6-sol");
+    }
+
+    #[test]
     fn resolve_model_falls_back_to_crate_default_without_credential_default() {
         let creds = Credentials::ApiKey {
             key: "test".to_string(),

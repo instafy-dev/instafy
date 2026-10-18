@@ -1296,20 +1296,8 @@ impl RuntimeAgent {
         }
 
         if !parallel_scoped {
-            match client.fetch_job_secrets(registration, job.id, true).await {
-                Ok(secrets) => {
-                    apply_job_secrets(&secret_env_keys, &secrets);
-                    debug!(
-                        job_id = %job.id,
-                        secret_count = secrets.env.len(),
-                        inventory_count = secrets.inventory.len(),
-                        "applied job secrets"
-                    );
-                }
-                Err(error) => {
-                    warn!(?error, job_id = %job.id, "failed to fetch job secrets");
-                }
-            }
+            let fetched = client.fetch_job_secrets(registration, job.id, true).await;
+            install_fetched_job_secrets(&secret_env_keys, fetched, job.id);
         }
 
         let secrets_refresh_seconds = resolve_secrets_refresh_interval_seconds();
@@ -1897,6 +1885,40 @@ pub(crate) fn resolved_job_environment(secrets: &JobSecrets) -> HashMap<String, 
     resolved_env
 }
 
+/// Install a sequential job's secrets. When the fetch fails, clear whatever an
+/// earlier job installed (its model and its secrets) instead of letting this
+/// job run on them; the model then falls back visibly (see `job_model`).
+fn install_fetched_job_secrets(
+    managed_keys: &Mutex<HashSet<String>>,
+    fetched: Result<JobSecrets>,
+    job_id: uuid::Uuid,
+) {
+    match fetched {
+        Ok(secrets) => {
+            apply_job_secrets(managed_keys, &secrets);
+            debug!(
+                job_id = %job_id,
+                secret_count = secrets.env.len(),
+                inventory_count = secrets.inventory.len(),
+                "applied job secrets"
+            );
+        }
+        Err(error) => {
+            warn!(
+                ?error,
+                job_id = %job_id,
+                "failed to fetch job secrets; running without an earlier job's secrets or model"
+            );
+            let empty = JobSecrets {
+                env: HashMap::new(),
+                inventory: Vec::new(),
+                inventory_complete: true,
+            };
+            apply_job_secrets(managed_keys, &empty);
+        }
+    }
+}
+
 pub(crate) fn resolved_worker_job_config(
     secrets: &JobSecrets,
 ) -> Result<crate::isolated_tool_worker::IsolatedWorkerJobConfig> {
@@ -2108,6 +2130,31 @@ fn push_unique_case_insensitive(values: &mut Vec<String>, candidate: &str) {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn a_failed_secrets_fetch_clears_the_previous_jobs_secrets_and_model() {
+        // The key stands in for CODEX_MODEL and every other managed key: a job
+        // whose own fetch failed must not run on what an earlier job installed.
+        const KEY: &str = "INSTAFY_TEST_PREVIOUS_JOB_SECRET_FETCH_FAILURE";
+        let managed = Mutex::new(HashSet::new());
+        install_fetched_job_secrets(
+            &managed,
+            Ok(JobSecrets {
+                env: HashMap::from([(KEY.to_string(), "gpt-6-luna".to_string())]),
+                inventory: Vec::new(),
+                inventory_complete: true,
+            }),
+            Uuid::new_v4(),
+        );
+        assert_eq!(std::env::var(KEY).as_deref(), Ok("gpt-6-luna"));
+        install_fetched_job_secrets(
+            &managed,
+            Err(anyhow::anyhow!("fetch failed")),
+            Uuid::new_v4(),
+        );
+        assert!(std::env::var(KEY).is_err());
+        assert!(managed.lock().is_empty());
+    }
 
     #[test]
     fn scoped_worker_settings_are_separated_from_granted_secrets() {

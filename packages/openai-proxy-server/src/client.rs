@@ -20,7 +20,10 @@ const APPLY_PATCH_GRAMMAR: &str = include_str!(concat!(
 /// Last-resort model for requests that carry no model AND resolve against a
 /// credential with no default (local/dev auth.json paths). NOT a sentinel:
 /// requests that name this id explicitly are served exactly this model.
-pub const DEFAULT_MODEL: &str = "gpt-5.5";
+/// Kept equal to the controller's OpenAI default (`DEFAULT_OPENAI_MODEL_ID`)
+/// and the runtime's `DEFAULT_CODEX_MODEL`: the retired gpt-5.5 it used to
+/// name was rejected upstream.
+pub const DEFAULT_MODEL: &str = "gpt-5.6-sol";
 pub const DEFAULT_INSTRUCTIONS: &str = include_str!("../prompt_gpt5_codex.md");
 
 #[derive(Debug, Clone)]
