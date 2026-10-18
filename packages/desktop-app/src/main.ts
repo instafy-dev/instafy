@@ -27,6 +27,7 @@ import {
   runHardwareIoAction,
 } from "@instafy/sdk/hardware-node";
 import { desktopLog, installDesktopLogging } from "./logging";
+import { externalBrowserUrl } from "./externalUrls";
 import {
   findInstafyDesktopDeepLinkArg,
   INSTAFY_DESKTOP_PROTOCOL,
@@ -637,8 +638,11 @@ function createMainWindow(initialUrl?: string) {
   studioRendererGenerations.set(mainWebContentsId, { generation: 0, acceptsIpc: false });
   personalBrowserHost?.attachWindow(mainWindow);
 
+  // Popups (including ones a framed page opens with no click) go to the
+  // default browser, and only when they are web URLs; see externalUrls.ts.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url);
+    const external = externalBrowserUrl(url);
+    if (external) void shell.openExternal(external);
     return { action: "deny" };
   });
 
@@ -710,7 +714,8 @@ function createMainWindow(initialUrl?: string) {
     const targetOrigin = new URL(navigationUrl).origin;
     if (allowedOrigin !== targetOrigin) {
       event.preventDefault();
-      void shell.openExternal(navigationUrl);
+      const external = externalBrowserUrl(navigationUrl);
+      if (external) void shell.openExternal(external);
     }
   });
 
@@ -1820,17 +1825,11 @@ app.whenReady().then(() => {
   // navigation by accident.
   ipcMain.handle("instafy:openExternalUrl", async (event, rawUrl: unknown) => {
     assertAllowedCaller(event);
-    const value = typeof rawUrl === "string" ? rawUrl.trim() : "";
-    let parsed: URL;
-    try {
-      parsed = new URL(value);
-    } catch {
-      throw new Error("openExternalUrl requires an absolute URL.");
+    const external = externalBrowserUrl(rawUrl);
+    if (!external) {
+      throw new Error("openExternalUrl requires an absolute http(s) URL.");
     }
-    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-      throw new Error(`Refusing to open ${parsed.protocol} externally.`);
-    }
-    await shell.openExternal(parsed.toString());
+    await shell.openExternal(external);
     return true;
   });
 
