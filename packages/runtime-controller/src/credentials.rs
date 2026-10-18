@@ -346,6 +346,10 @@ pub(crate) struct ManagedAiAccessResponse {
     pub(crate) enabled: bool,
     pub(crate) available: bool,
     pub(crate) label: String,
+    /// The model managed turns run on (the controller resolves every managed
+    /// job to it), so Studio shows that rather than a copy of its own.
+    pub(crate) model_id: String,
+    pub(crate) model_label: String,
     pub(crate) credit_burn_amount: i32,
     pub(crate) daily_prompt_limit: i32,
     pub(crate) daily_prompts_used: i32,
@@ -798,6 +802,8 @@ pub(crate) fn build_managed_ai_access_response(
         enabled: config.managed_ai_enabled,
         available,
         label: config.managed_ai_label.clone(),
+        model_id: config.managed_ai_model_id.clone(),
+        model_label: config.managed_ai_model_label.clone(),
         credit_burn_amount: config.managed_ai_credit_burn_amount,
         daily_prompt_limit: config.managed_ai_daily_prompt_limit,
         daily_prompts_used,
@@ -831,6 +837,8 @@ async fn get_my_credential_requirements(
             enabled: state.config.managed_ai_enabled,
             available: false,
             label: state.config.managed_ai_label.clone(),
+            model_id: state.config.managed_ai_model_id.clone(),
+            model_label: state.config.managed_ai_model_label.clone(),
             credit_burn_amount: state.config.managed_ai_credit_burn_amount,
             daily_prompt_limit: state.config.managed_ai_daily_prompt_limit,
             daily_prompts_used: 0,
@@ -3643,6 +3651,19 @@ mod requirement_tests {
         assert_eq!(managed_ai.credit_burn_amount, 1);
         assert_eq!(managed_ai.daily_prompt_limit, 20);
         assert_eq!(managed_ai.remaining_prompts, Some(17));
+        // Studio shows the model managed turns really run on (the roster
+        // showed the BYO default "gpt-5.6-sol" for a GPT-6 Luna space).
+        assert_eq!(managed_ai.model_id, config.managed_ai_model_id);
+        assert_eq!(managed_ai.model_label, config.managed_ai_model_label);
+        let wire = serde_json::to_value(&managed_ai).expect("json");
+        assert_eq!(
+            wire["modelId"],
+            serde_json::json!(config.managed_ai_model_id)
+        );
+        assert_eq!(
+            wire["modelLabel"],
+            serde_json::json!(config.managed_ai_model_label)
+        );
     }
 
     #[test]

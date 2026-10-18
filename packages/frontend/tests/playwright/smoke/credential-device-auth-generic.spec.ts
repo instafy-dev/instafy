@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { prepareStudio } from "../utils/harness.js";
+import { E2E_MODEL } from "../utils/e2eModel.js";
 
 const DEVICE_SESSION_ID = "11111111-1111-4111-8111-111111111111";
 const CREDENTIAL_ID = "22222222-2222-4222-8222-222222222222";
@@ -130,7 +131,7 @@ test.describe("Credential onboarding", () => {
           ok: true,
           provider: "openai",
           upstreamEndpoint: "https://chatgpt.com/backend-api/codex/responses",
-          model: "gpt-5.5",
+          model: E2E_MODEL,
           output: "OK",
           elapsedMs: 25,
         }),

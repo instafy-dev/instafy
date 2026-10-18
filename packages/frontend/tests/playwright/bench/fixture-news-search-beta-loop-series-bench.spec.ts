@@ -15,14 +15,15 @@ import { collectLearnRoutingSnapshot } from "./benchRoutingDebug.js";
 import { seedRepoPinnedSkillsIntoWorkspace } from "./fixtureBenchShared.js";
 import { startBenchFixtureSite, type BenchFixtureSite } from "./fixtureSiteHarness.js";
 import { runFixtureNewsTokenAttempt, type FixtureNewsTokenAttemptResult } from "./benchTasks.js";
+import { E2E_MODEL } from "../utils/e2eModel.js";
 
 const BENCH_MODEL =
   (
     process.env.PLAYWRIGHT_BENCH_MODEL ??
     process.env.PLAYWRIGHT_LEARN_MODEL ??
     process.env.PLAYWRIGHT_RETRO_MODEL ??
-    "gpt-5.5"
-  ).trim() || "gpt-5.5";
+    E2E_MODEL
+  ).trim() || E2E_MODEL;
 
 type LoopRecord = {
   loopIndex: number;

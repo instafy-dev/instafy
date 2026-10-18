@@ -684,6 +684,9 @@ export interface CredentialRequirementsResult {
     enabled: boolean;
     available: boolean;
     label: string;
+    /** The model managed turns run on, as the controller resolves it. */
+    modelId: string | null;
+    modelLabel: string | null;
     creditBurnAmount: number;
     dailyPromptLimit: number;
     dailyPromptsUsed: number;
@@ -764,6 +767,14 @@ export async function getCredentialRequirements(params?: {
               typeof managedAiPayload.label === "string" && managedAiPayload.label.trim().length > 0
                 ? managedAiPayload.label
                 : "Instafy AI",
+            modelId:
+              typeof managedAiPayload.modelId === "string" && managedAiPayload.modelId.trim()
+                ? managedAiPayload.modelId.trim()
+                : null,
+            modelLabel:
+              typeof managedAiPayload.modelLabel === "string" && managedAiPayload.modelLabel.trim()
+                ? managedAiPayload.modelLabel.trim()
+                : null,
             creditBurnAmount:
               typeof managedAiPayload.creditBurnAmount === "number"
                 ? managedAiPayload.creditBurnAmount

@@ -285,6 +285,7 @@ import { updateMyAgent } from "../../../services/runtimeController/agents";
 import { formatProviderLabel } from "./CreditsUsageRates";
 import { parseSubscriptionUsage } from "./subscriptionUsageFormat";
 import { resolveCredentialLabel } from "../../../utils/credentialFormatting";
+import { resolveRosterCredential } from "./participantCredential";
 import {
   modelOptionsForProvider,
   normalizeAiModelId,
@@ -4716,35 +4717,24 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         !providerRaw || providerRaw === "assistant"
           ? defaultCredentialProviderId
           : normalizeAiProviderId(providerRaw);
-      // Explicit model, or the provider's default (the first option in
-      // modelOptionsForProvider) when the agent pins none.
-      const model = profile ?
-        normalizeAiModelId(providerId, profile.model) ??
-        modelOptionsForProvider(providerId)[0]?.id ??
-        null : null;
-      let credentialLabel: string | null = null;
-      let credentialState: ParticipantCredentialState = "none";
-      // The credential whose live usage applies to this agent: the pinned one
-      // when it resolves, otherwise the workspace default. Stays null for the
-      // broken states (missing/revoked); there's no live snapshot to show.
-      let effectiveCredential: (typeof availableCredentials)[number] | null = null;
-      if (profile?.credentialId) {
-        const pinned = credentialsById.get(profile.credentialId) ?? null;
-        if (!pinned) {
-          credentialState = "missing";
-        } else if (pinned.revokedAt) {
-          credentialState = "revoked";
-          credentialLabel = resolveCredentialLabel(pinned);
-        } else {
-          credentialState = "pinned";
-          credentialLabel = resolveCredentialLabel(pinned);
-          effectiveCredential = pinned;
-        }
-      } else if (profile && defaultAiCredential) {
-        credentialState = "default";
-        credentialLabel = resolveCredentialLabel(defaultAiCredential);
-        effectiveCredential = defaultAiCredential;
-      }
+      // Explicit model, or the lane's default: the managed model the
+      // controller reports, else the provider's first option.
+      const resolution = profile
+        ? resolveRosterCredential({
+            pinnedCredentialId: profile.credentialId,
+            pinnedModel: normalizeAiModelId(providerId, profile.model) ?? null,
+            providerDefaultModel: modelOptionsForProvider(providerId)[0]?.id ?? null,
+            credentialsById,
+            defaultCredential: defaultAiCredential ?? null,
+            managedAi: credentialRequirements.managedAi,
+          })
+        : null;
+      const model = resolution?.model ?? null;
+      const credentialState: ParticipantCredentialState = resolution?.credentialState ?? "none";
+      const credentialLabel = resolution?.labelCredential
+        ? resolveCredentialLabel(resolution.labelCredential)
+        : resolution?.managedLabel ?? null;
+      const effectiveCredential = resolution?.credential ?? null;
       // Read `subscriptionUsage` defensively: it's a recent addition to the
       // controller payload, so tolerate its absence rather than hard-depend on
       // the field being present in the credential type.
@@ -4757,6 +4747,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         canEditProfile: Boolean(profile),
         providerId,
         model,
+        modelLabel: resolution?.modelLabel ?? null,
         reasoningEffort: profile?.reasoningEffort ?? null,
         runtime: profile ? resolveRuntime(profile.runtimeId ?? null) : null,
         providerLabel: profile ? formatProviderLabel(providerId) : null,
@@ -4771,6 +4762,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     availableAgents,
     availableCredentials,
     conversationRosterAgents,
+    credentialRequirements.managedAi,
     defaultAiCredential,
     runtimeMenu,
   ]);

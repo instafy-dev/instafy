@@ -9,6 +9,7 @@ import {
   waitForHostedRuntimeReady,
   writeWorkspaceFile,
 } from "../utils/harness.js";
+import { E2E_MODEL } from "../utils/e2eModel.js";
 
 type BenchAttemptLike = {
   attempt: number;
@@ -29,8 +30,8 @@ type BenchAiArtifactLike = {
 };
 
 export const FIXTURE_BENCH_MODEL =
-  (process.env.PLAYWRIGHT_BENCH_MODEL ?? process.env.PLAYWRIGHT_LEARN_MODEL ?? process.env.PLAYWRIGHT_RETRO_MODEL ?? "gpt-5.5").trim() ||
-  "gpt-5.5";
+  (process.env.PLAYWRIGHT_BENCH_MODEL ?? process.env.PLAYWRIGHT_LEARN_MODEL ?? process.env.PLAYWRIGHT_RETRO_MODEL ?? E2E_MODEL).trim() ||
+  E2E_MODEL;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "../../../../..");

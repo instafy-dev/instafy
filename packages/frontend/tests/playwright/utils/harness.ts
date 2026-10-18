@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { zipSync, strToU8 } from "fflate";
 import { sanitizeCodexSubscriptionAuthJson } from "./codexSubscriptionAuthJson.js";
 import { DEFAULT_CONTROLLER_URL, resolvePlaywrightControllerUrl } from "./controllerUrl.js";
+import { E2E_MODEL } from "./e2eModel.js";
 
 const DEFAULT_SUPABASE_URL = "http://127.0.0.1:54321";
 const __filename = fileURLToPath(import.meta.url);
@@ -3734,8 +3735,8 @@ export async function selectPrimaryAgentModel(page: Page, model: string): Promis
 
 export async function ensureVisionModelForImagePrompts(page: Page): Promise<string> {
   const preferred =
-    (process.env.PLAYWRIGHT_VISION_MODEL ?? process.env.PLAYWRIGHT_IMAGE_MODEL ?? "gpt-5.5").trim() ||
-    "gpt-5.5";
+    (process.env.PLAYWRIGHT_VISION_MODEL ?? process.env.PLAYWRIGHT_IMAGE_MODEL ?? E2E_MODEL).trim() ||
+    E2E_MODEL;
   await selectPrimaryAgentModel(page, preferred);
   return preferred;
 }
