@@ -29993,7 +29993,7 @@ mod tests {
         .expect("skill file");
         fs::write(
             skill_dir.join("run.js"),
-            "console.log('companion script');\n",
+            "console.log('zq-companion-sentinel');\n",
         )
         .expect("companion script");
         let kickoff = skills::build_skill_start_prompt(
@@ -30021,7 +30021,7 @@ mod tests {
 
         let (prompt, _, metrics) = build(kickoff.as_str());
         assert_eq!(prompt.matches(instruction).count(), 1);
-        assert!(!prompt.contains("companion script"));
+        assert!(!prompt.contains("zq-companion-sentinel"));
         assert!(
             metrics["promptSections"]
                 .get("referencedWorkspaceFiles")
@@ -30030,7 +30030,7 @@ mod tests {
 
         // Any other request still loads the files it names.
         let (prompt, _, _) = build("What does `.agents/skills/freefinance/run.js` print?");
-        assert!(prompt.contains("companion script"));
+        assert!(prompt.contains("zq-companion-sentinel"));
     }
 
     /// Nor does the carried text pick the project memory a kickoff loads. The
