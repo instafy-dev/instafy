@@ -6,7 +6,7 @@ export function SecretsPanel() {
   const { activeProjectId } = useProjects();
 
   return (
-    <SettingsShell testId="secrets-panel" title="Secrets" hideTitle>
+    <SettingsShell testId="secrets-panel" title="Secrets" hideTitle width="comfortable">
       <ProjectSecretsCard projectId={activeProjectId ?? null} />
     </SettingsShell>
   );

@@ -12,10 +12,12 @@ import { Button, IconButton } from "../../../components/Button";
 import { Field } from "../../../components/Field";
 import { Input } from "../../../components/Input";
 import { InlineNotice } from "../../../components/InlineNotice";
-import { Spinner } from "../../../components/Spinner";
+import { LoadingStatus } from "../../../components/LoadingStatus";
+import { Surface } from "../../../components/Surface";
 import { Text } from "../../../components/Text";
 import {
   StudioDialogBody,
+  StudioDialogFooter,
   StudioDialogHeader,
 } from "../../../components/aria/StudioDialogLayout";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
@@ -52,7 +54,10 @@ const API_KEY_CONSOLE_URL: Record<CredentialsConnectApiKeyProvider, string> = {
 
 function ApiKeyHelpLink({ provider }: { provider: CredentialsConnectApiKeyProvider }) {
   return (
-    <a
+    <Text
+      as="a"
+      variant="captionStrong"
+      tone="accent"
       href={API_KEY_CONSOLE_URL[provider]}
       target="_blank"
       rel="noreferrer"
@@ -60,10 +65,10 @@ function ApiKeyHelpLink({ provider }: { provider: CredentialsConnectApiKeyProvid
         event.preventDefault();
         void openExternalUrl(event.currentTarget.href);
       }}
-      className="text-xs font-medium text-primary-600 underline-offset-2 hover:underline dark:text-primary-400"
+      className="underline-offset-2 hover:underline"
     >
       Get a key ↗
-    </a>
+    </Text>
   );
 }
 
@@ -260,6 +265,7 @@ export function CredentialsConnectModal({
   };
 
   const handleConnectApiKeyAndClose = async (provider: CredentialsConnectApiKeyProvider) => {
+    if (modalBusy || !canManageAiConnections) return;
     const ok = await onConnectApiKey(provider);
     if (ok) {
       onClose();
@@ -278,9 +284,7 @@ export function CredentialsConnectModal({
   }, [connectModalStep, modalBusy, onBack, onClose]);
 
   const body = (
-    <StudioDialogBody className={isDesktop
-      ? "min-h-0 flex-1 touch-pan-y space-y-3 overflow-y-auto overscroll-contain"
-      : "space-y-3"}>
+    <StudioDialogBody scrollable={isDesktop} className="space-y-3">
       {connectModalStep === "picker" ? (
         <div className="space-y-2">
           <CredentialsConnectionChoices
@@ -323,9 +327,9 @@ export function CredentialsConnectModal({
           </div>
 
           {codexDeviceAuthSession ? (
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-300">
-              <div className="font-semibold text-slate-700 dark:text-slate-100">Device login</div>
-              <div className="mt-1">Open the OpenAI login page and enter this one-time code:</div>
+            <Surface tone="muted" radius="xl" shadow="none" className="p-3">
+              <Text variant="bodyStrong">Device login</Text>
+              <Text variant="caption" tone="muted" className="mt-1">Open the OpenAI login page and enter this one-time code:</Text>
               <div className="mt-3 flex flex-wrap items-center gap-2">
                 <code className="min-w-0 break-all rounded-lg bg-white px-3 py-2 text-base font-semibold tracking-widest text-slate-800 ring-1 ring-slate-200 dark:bg-slate-950 dark:text-slate-100 dark:ring-slate-700">
                   {codexDeviceAuthSession.userCode}
@@ -342,9 +346,9 @@ export function CredentialsConnectModal({
                 </Button>
               </div>
               {copyDeviceCodeFailed ? (
-                <div className="mt-2 text-xs text-rose-600 dark:text-rose-400">
+                <Text variant="caption" tone="danger" className="mt-2" role="alert">
                   Copy was blocked. Press and hold the code to copy it manually.
-                </div>
+                </Text>
               ) : null}
               <div className="mt-3 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
                 <Button
@@ -367,28 +371,28 @@ export function CredentialsConnectModal({
                   Cancel
                 </Button>
               </div>
-              <div className="mt-2 flex items-center gap-2 text-xs text-slate-500 dark:text-slate-300">
+              <div className="mt-2 flex flex-wrap items-center gap-2">
                 {codexDeviceAuthSession.status === "pending" ? (
                   <>
-                    <Spinner aria-hidden="true" tone="slate" size="xs" />
-                    {deviceAuthCompleting ? (
-                      <span>Login complete — checking the connection…</span>
-                    ) : (
-                      <span>
-                        Waiting for login{deviceCodeExpiresIn ? ` · code expires in ${deviceCodeExpiresIn}` : "…"}
-                      </span>
-                    )}
+                    <LoadingStatus size="xs">
+                      {deviceAuthCompleting
+                        ? "Login complete — checking the connection…"
+                        : "Waiting for login…"}
+                    </LoadingStatus>
+                    {!deviceAuthCompleting && deviceCodeExpiresIn ? (
+                      <Text as="span" variant="caption" tone="muted">Code expires in {deviceCodeExpiresIn}</Text>
+                    ) : null}
                   </>
                 ) : codexDeviceAuthSession.status === "failed" ? (
-                  <span className="text-rose-600 dark:text-rose-400">
+                  <Text variant="caption" tone="danger" role="alert">
                     {codexDeviceAuthSession.error ?? "Device login failed."}
-                  </span>
+                  </Text>
                 ) : null}
               </div>
-              <div className="mt-2 text-[11px] leading-relaxed text-slate-500 dark:text-slate-400">
-                Only enter this code at <span className="font-semibold">{deviceLoginHost}</span>. Instafy will
+              <Text variant="caption" tone="muted" className="mt-2">
+                Only enter this code at <Text as="span" variant="captionStrong" tone="inherit">{deviceLoginHost}</Text>. Instafy will
                 never ask you to paste your ChatGPT password here.
-              </div>
+              </Text>
               {codexDeviceAuthSession.status === "failed" ? (
                 <div className="mt-2 flex flex-wrap items-center gap-2">
                   <Button
@@ -411,40 +415,40 @@ export function CredentialsConnectModal({
                   </Button>
                 </div>
               ) : null}
-            </div>
+            </Surface>
           ) : canUseDesktopConnect ? (
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-300">
+            <Surface tone="muted" radius="xl" shadow="none" className="p-3">
               {desktopCodexAuthJsonStatus?.exists ? (
                 <>
-                  <div className="font-semibold text-slate-700 dark:text-slate-100">
+                  <Text variant="bodyStrong">
                     Desktop found your local Codex login.
-                  </div>
-                  <div className="mt-1">~/.codex/auth.json</div>
-                  <div className="mt-1">
+                  </Text>
+                  <Text variant="mono" tone="muted" className="mt-1">~/.codex/auth.json</Text>
+                  <Text variant="caption" tone="muted" className="mt-1">
                     Click once to import it into your Instafy AI connections.
-                  </div>
+                  </Text>
                 </>
               ) : shouldPromptForAuthJsonUpload ? (
                 <>
-                  <div className="font-semibold text-slate-700 dark:text-slate-100">
+                  <Text variant="bodyStrong">
                     No default Codex login found.
-                  </div>
-                  <div className="mt-1">
+                  </Text>
+                  <Text variant="caption" tone="muted" className="mt-1">
                     Desktop only checks ~/.codex/auth.json. If Codex uses your system keychain or
                     a custom CODEX_HOME, use browser login instead.
-                  </div>
+                  </Text>
                 </>
               ) : (
                 <>
-                  <div className="font-semibold text-slate-700 dark:text-slate-100">
+                  <Text variant="bodyStrong">
                     Use your local Codex login.
-                  </div>
-                  <div className="mt-1">
+                  </Text>
+                  <Text variant="caption" tone="muted" className="mt-1">
                     Desktop will import ~/.codex/auth.json when you continue.
-                  </div>
+                  </Text>
                 </>
               )}
-            </div>
+            </Surface>
           ) : (
             <ChatGptDeviceCodePrerequisite
               busy={connectPending}
@@ -521,21 +525,6 @@ export function CredentialsConnectModal({
               </Text>
               <ApiKeyHelpLink provider="openai" />
             </div>
-            <Button
-              onPress={() => void handleConnectApiKeyAndClose("openai")}
-              isDisabled={
-                !canManageAiConnections ||
-                connectPending ||
-                apiKeyPendingProvider !== null ||
-                !openaiApiKeyDraft.trim()
-              }
-              variant="outline"
-              size="xs"
-              radius="full"
-              data-testid="credentials-openai-connect"
-            >
-              {apiKeyPendingProvider === "openai" ? "Connecting…" : "Connect & test"}
-            </Button>
           </div>
 
           <div className="grid gap-2 md:grid-cols-2">
@@ -583,7 +572,7 @@ export function CredentialsConnectModal({
             </Field>
           </div>
 
-          <Text variant="caption" tone="muted" className="text-xs">
+          <Text variant="caption" tone="muted">
             Note: hosted runs may send prompt context (including file snippets) to OpenAI.
           </Text>
         </div>
@@ -596,18 +585,6 @@ export function CredentialsConnectModal({
               </Text>
               <ApiKeyHelpLink provider="deepseek" />
             </div>
-            <Button
-              onPress={() => void handleConnectApiKeyAndClose("deepseek")}
-              isDisabled={
-                !canManageAiConnections || connectPending || apiKeyPendingProvider !== null || !deepseekApiKeyDraft.trim()
-              }
-              variant="outline"
-              size="xs"
-              radius="full"
-              data-testid="credentials-deepseek-connect"
-            >
-              {apiKeyPendingProvider === "deepseek" ? "Connecting…" : "Connect & test"}
-            </Button>
           </div>
 
           <div className="grid gap-2 md:grid-cols-2">
@@ -647,7 +624,7 @@ export function CredentialsConnectModal({
             </Field>
           </div>
 
-          <Text variant="caption" tone="muted" className="text-xs">
+          <Text variant="caption" tone="muted">
             Note: hosted runs may send prompt context (including file snippets) to DeepSeek.
           </Text>
         </div>
@@ -660,16 +637,6 @@ export function CredentialsConnectModal({
               </Text>
               <ApiKeyHelpLink provider="zai" />
             </div>
-            <Button
-              onPress={() => void handleConnectApiKeyAndClose("zai")}
-              isDisabled={!canManageAiConnections || connectPending || apiKeyPendingProvider !== null || !zaiApiKeyDraft.trim()}
-              variant="outline"
-              size="xs"
-              radius="full"
-              data-testid="credentials-zai-connect"
-            >
-              {apiKeyPendingProvider === "zai" ? "Connecting…" : "Connect & test"}
-            </Button>
           </div>
 
           <div className="grid gap-2 md:grid-cols-2">
@@ -709,7 +676,7 @@ export function CredentialsConnectModal({
             </Field>
           </div>
 
-          <Text variant="caption" tone="muted" className="text-xs">
+          <Text variant="caption" tone="muted">
             Note: hosted runs may send prompt context (including file snippets) to z.ai.
           </Text>
         </div>
@@ -749,27 +716,42 @@ export function CredentialsConnectModal({
                 className="min-w-0"
               />
             </Field>
-            <Button
-              onPress={() => void handleConnectApiKeyAndClose("gemini")}
-              isDisabled={
-                !canManageAiConnections ||
-                connectPending ||
-                apiKeyPendingProvider !== null ||
-                !geminiApiKeyDraft.trim()
-              }
-              variant="outline"
-              size="sm"
-              radius="full"
-              data-testid="credentials-gemini-connect"
-              className="self-start sm:self-auto"
-            >
-              {apiKeyPendingProvider === "gemini" ? "Connecting..." : "Connect"}
-            </Button>
           </div>
         </div>
       ) : null}
     </StudioDialogBody>
   );
+
+  const apiKeyDrafts = {
+    openai: openaiApiKeyDraft,
+    deepseek: deepseekApiKeyDraft,
+    zai: zaiApiKeyDraft,
+    gemini: geminiApiKeyDraft,
+  };
+  const apiKeyProvider = connectModalStep === "picker" || connectModalStep === "codex"
+    ? null
+    : connectModalStep;
+  const footer = apiKeyProvider ? (
+    <StudioDialogFooter padding="default" divider className="flex justify-end">
+      <Button
+        onPress={() => void handleConnectApiKeyAndClose(apiKeyProvider)}
+        isPending={apiKeyPendingProvider === apiKeyProvider}
+        isDisabled={
+          !canManageAiConnections ||
+          connectPending || deviceAuthBusy || deviceAuthCompleting ||
+          (apiKeyPendingProvider !== null && apiKeyPendingProvider !== apiKeyProvider) ||
+          !apiKeyDrafts[apiKeyProvider].trim()
+        }
+        variant="primary"
+        elevation="none"
+        size="md"
+        radius="xl"
+        data-testid={`credentials-${apiKeyProvider}-connect`}
+      >
+        {apiKeyProvider === "gemini" ? "Connect" : "Connect & test"}
+      </Button>
+    </StudioDialogFooter>
+  ) : null;
 
   if (!isDesktop) {
     return (
@@ -779,9 +761,11 @@ export function CredentialsConnectModal({
         closeDisabled={modalBusy}
         dismissLabel={connectModalStep === "picker" ? "Close" : "Back"}
         dialogAriaLabel="Add AI connection"
+        gutter="responsive"
+        footer={footer}
         data-testid="credentials-connect-modal"
         header={<>
-          <h2 className="text-base font-semibold">Add AI connection</h2>
+          <Text as="h2" variant="subtitle" tone="primary">Add AI connection</Text>
           <Text variant="caption" tone="muted">Saved to your profile for hosted runs.</Text>
         </>}
       >
@@ -803,13 +787,12 @@ export function CredentialsConnectModal({
       isKeyboardDismissDisabled={modalBusy}
       dialogAriaLabel="Add AI connection"
       data-testid="credentials-connect-modal"
-      modalClassName="flex max-h-full flex-col overflow-hidden"
-      dialogClassName="flex min-h-0 flex-1 flex-col overflow-hidden"
+      layout="editor"
+      gutter="responsive"
     >
       <StudioDialogHeader
         title="Add AI connection"
         description="Saved to your profile for hosted runs."
-        descriptionClassName="text-sm leading-snug"
         leading={
           connectModalStep === "picker" ? null : (
             <IconButton
@@ -830,6 +813,7 @@ export function CredentialsConnectModal({
       />
 
       {body}
+      {footer}
     </StudioDialogModal>
   );
 }

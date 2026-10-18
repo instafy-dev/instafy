@@ -45,7 +45,7 @@ export function ChatRunStopControl({ controller, className, iconClassName = "h-[
       {controller.groups.length > 1 && !busy && !retrying ? (
         <MenuTrigger isOpen={menuOpen} onOpenChange={setMenuOpen}>
           <IconButton {...buttonProps}>{content}</IconButton>
-          <StudioPopover triggerRef={triggerRef} placement="top end" offset={4} className="min-w-40 p-1.5">
+          <StudioPopover triggerRef={triggerRef} placement="top end" layout="menu">
             <StudioMenu aria-label="Stop active turns" onAction={(key) => {
               setMenuOpen(false);
               if (key === "all") controller.requestStop(controller.targets);

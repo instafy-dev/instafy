@@ -38,6 +38,52 @@ async function expectCheckboxTouchTarget(page: Page) {
   expect(bounds.width).toBeGreaterThanOrEqual(44);
 }
 
+async function expectSelectChoices(page: Page, coarse: boolean) {
+  const trigger = page.getByTestId("reference-select");
+  await trigger.click();
+  const popover = page.locator('[data-studio-popover-layout="form"]');
+  await expect(popover).toBeVisible();
+  const triggerBounds = (await trigger.boundingBox())!;
+  const bounds = (await popover.boundingBox())!;
+  expect(bounds.width).toBeGreaterThanOrEqual(triggerBounds.width - 1);
+  expect(bounds.x).toBeGreaterThanOrEqual(8);
+  expect(bounds.x + bounds.width).toBeLessThanOrEqual(page.viewportSize()!.width - 8);
+  const disabled = popover.getByRole("option", { name: "Administrator", exact: true });
+  await expect(disabled).toHaveAttribute("aria-disabled", "true");
+  const disabledBounds = (await disabled.boundingBox())!;
+  const disabledPoint = { x: disabledBounds.x + disabledBounds.width / 2, y: disabledBounds.y + disabledBounds.height / 2 };
+  if (coarse) await page.touchscreen.tap(disabledPoint.x, disabledPoint.y);
+  else await page.mouse.click(disabledPoint.x, disabledPoint.y);
+  await expect(popover).toBeVisible();
+  await expect(trigger).not.toContainText("Administrator");
+  for (const option of await popover.getByRole("option").all()) {
+    await expect(option).toHaveCSS("outline-style", "none");
+    const height = (await option.boundingBox())!.height;
+    if (coarse) expect(height).toBeGreaterThanOrEqual(44);
+    else expect(height).toBe(32);
+  }
+  await page.keyboard.press("End");
+  await page.keyboard.press("Enter");
+  await expect(popover).toHaveCount(0);
+  await expect(trigger).toContainText("Editor");
+  await expect(trigger).toBeFocused();
+  await trigger.click();
+  const selected = popover.getByRole("option", { name: "Editor", exact: true });
+  await expect(selected).toHaveAttribute("aria-selected", "true");
+  await expect(selected.locator('svg[aria-hidden="true"]')).toBeVisible();
+  await page.keyboard.press("Home");
+  const focused = popover.getByRole("option", { name: "Viewer", exact: true });
+  await expect(focused).toHaveAttribute("data-focus-visible", "true");
+  // Inset focus remains visible even when a list clips at its first/last row.
+  await expect(focused).toHaveCSS("box-shadow", /2px inset/);
+  await expect(focused).toHaveAttribute("aria-selected", "false");
+  await expect(selected).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("Escape");
+  await expect(popover).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+  await expect(trigger).toContainText("Editor");
+}
+
 test.describe("shared control contracts with a fine pointer", () => {
   test.use({ hasTouch: false });
 
@@ -52,8 +98,18 @@ test.describe("shared control contracts with a fine pointer", () => {
     await page.getByText("Model", { exact: true }).click();
     await expect(page.getByTestId("reference-picker")).toBeFocused();
     await page.getByRole("button", { name: "Model", exact: true }).click();
-    await page.getByRole("menuitemradio", { name: "Custom", exact: true }).click();
+    const modelMenu = page.getByRole("menu");
+    await expect(modelMenu).toBeVisible();
+    for (const option of await modelMenu.getByRole("menuitemradio").all()) {
+      await expect(option).toHaveCSS("outline-style", "none");
+    }
+    await page.keyboard.press("End");
+    const modelOption = modelMenu.getByRole("menuitemradio", { name: "Custom", exact: true });
+    await expect(modelOption).toHaveAttribute("data-focus-visible", "true");
+    await expect(modelOption).toHaveCSS("box-shadow", /2px inset/);
+    await page.keyboard.press("Enter");
     await expect(page.getByTestId("reference-picker")).toContainText("Custom");
+    await expect(page.getByTestId("reference-picker")).toBeFocused();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   });
 
@@ -62,6 +118,13 @@ test.describe("shared control contracts with a fine pointer", () => {
     await expectFormSizes(page, 38);
     await expectButtonTargets(page, false);
   });
+
+  for (const width of [390, 1280]) {
+    test(`select choices fit their trigger and remain compact at ${width}px`, async ({ page }) => {
+      await openReference(page, width);
+      await expectSelectChoices(page, false);
+    });
+  }
 
   test("keyboard choice and pending action behavior survive theme changes", async ({ page }) => {
     await openReference(page, 1280);
@@ -112,6 +175,7 @@ test.describe("shared control contracts with a coarse pointer", () => {
       await expectFormSizes(page, 44);
       await expectButtonTargets(page, true);
       await expectCheckboxTouchTarget(page);
+      await expectSelectChoices(page, true);
     });
   }
 });

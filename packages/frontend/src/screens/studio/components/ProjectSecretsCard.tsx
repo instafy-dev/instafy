@@ -13,6 +13,8 @@ import { Field } from "../../../components/Field";
 import { Input } from "../../../components/Input";
 import { Text } from "../../../components/Text";
 import { LoadingStatus } from "../../../components/LoadingStatus";
+import { InlineNotice } from "../../../components/InlineNotice";
+import { Surface } from "../../../components/Surface";
 import { StudioDialogBody, StudioDialogFooter, StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
 import { Textarea } from "../../../components/Textarea";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
@@ -32,7 +34,6 @@ import {
   setPendingProjectSecretPrefill,
   type PendingProjectSecretPrefill,
 } from "./secretManagerDeepLink";
-import { SettingsSurface } from "./SettingsSurface";
 
 type SecretModalMode = "create" | "edit";
 type TextSecurityStyle = CSSProperties & {
@@ -150,152 +151,146 @@ function SecretModal({
 
   const changeOpen = (open: boolean) => { if (!open && !pending) onClose(); };
   const form = (
-    <div className="space-y-3 px-5 py-4">
-        {!isDesktop ? <Text as="p" variant="caption" tone="muted">
-          Secrets are injected into the runtime as environment variables.
-        </Text> : null}
-        <Field
-          label="Name (env var)"
-          htmlFor="project-secret-name"
-          hint={
-            <>
-              Example: <span className="font-mono">GITHUB_TOKEN</span>,{" "}
-              <span className="font-mono">CLOUDFLARE_API_TOKEN</span>
-            </>
-          }
-        >
+    <StudioDialogBody scrollable={isDesktop} className="space-y-3">
+      {!isDesktop ? <Text as="p" variant="caption" tone="muted">
+        Secrets are injected into the runtime as environment variables.
+      </Text> : null}
+      <Field
+        label="Name (env var)"
+        htmlFor="project-secret-name"
+        hint={
+          <>
+            Example: <span className="font-mono">GITHUB_TOKEN</span>,{" "}
+            <span className="font-mono">CLOUDFLARE_API_TOKEN</span>
+          </>
+        }
+      >
+        <Input
+          id="project-secret-name"
+          value={name}
+          onChange={(event) => onNameChange(event.target.value)}
+          placeholder="CLOUDFLARE_API_TOKEN"
+          size="sm"
+          radius="xl"
+          disabled={pending || Boolean(nameDisabled)}
+          name="project-secret-name"
+          autoComplete="off"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
+          data-testid="project-secret-name-input"
+        />
+      </Field>
+
+      <Field label="Description" htmlFor="project-secret-description">
+        <Textarea
+          id="project-secret-description"
+          value={description}
+          onChange={(event) => onDescriptionChange(event.target.value)}
+          placeholder="What this secret is used for (shown to humans)."
+          rows={3}
+          disabled={pending}
+          name="project-secret-description"
+          autoComplete="off"
+          data-testid="project-secret-description-input"
+        />
+      </Field>
+
+      <Field label="Value" htmlFor="project-secret-value">
+        {/* Same geometry as the card in the chat: the reveal belongs inside
+            the field, which is where the login password eye and every other
+            trailing control in the product sits. The two secrets surfaces
+            asked for the same value in two different shapes before this. */}
+        <div className="relative">
           <Input
-            id="project-secret-name"
-            value={name}
-            onChange={(event) => onNameChange(event.target.value)}
-            placeholder="CLOUDFLARE_API_TOKEN"
+            id="project-secret-value"
+            ref={valueInputRef}
+            value={value}
+            onChange={(event) => onValueChange(event.target.value)}
+            placeholder={valuePlaceholder}
+            type={valueInputType}
+            style={valueInputStyle}
             size="sm"
             radius="xl"
-            disabled={pending || Boolean(nameDisabled)}
-            name="project-secret-name"
+            className="pr-12"
+            disabled={pending}
+            name="project-secret-value"
             autoComplete="off"
             autoCapitalize="none"
             autoCorrect="off"
             spellCheck={false}
-            data-testid="project-secret-name-input"
+            data-lpignore="true"
+            data-bwignore="true"
+            data-1p-ignore="true"
+            data-testid="project-secret-value-input"
           />
-        </Field>
-
-        <Field label="Description" htmlFor="project-secret-description">
-          <Textarea
-            id="project-secret-description"
-            value={description}
-            onChange={(event) => onDescriptionChange(event.target.value)}
-            placeholder="What this secret is used for (shown to humans)."
-            rows={3}
-            disabled={pending}
-            name="project-secret-description"
-            autoComplete="off"
-            data-testid="project-secret-description-input"
-          />
-        </Field>
-
-        <Field label="Value" htmlFor="project-secret-value">
-          {/* Same geometry as the card in the chat: the reveal belongs inside
-              the field, which is where the login password eye and every other
-              trailing control in the product sits. The two secrets surfaces
-              asked for the same value in two different shapes before this. */}
-          <div className="relative">
-            <Input
-              id="project-secret-value"
-              ref={valueInputRef}
-              value={value}
-              onChange={(event) => onValueChange(event.target.value)}
-              placeholder={valuePlaceholder}
-              type={valueInputType}
-              style={valueInputStyle}
-              size="sm"
-              radius="xl"
-              className="pr-12"
-              disabled={pending}
-              name="project-secret-value"
-              autoComplete="off"
-              autoCapitalize="none"
-              autoCorrect="off"
-              spellCheck={false}
-              data-lpignore="true"
-              data-bwignore="true"
-              data-1p-ignore="true"
-              data-testid="project-secret-value-input"
-            />
-            <ToggleIconButton
-              appearance="bare"
-              isSelected={valueVisible}
-              size="sm"
-              radius="full"
-              aria-label={valueVisible ? "Hide value" : "Show value"}
-              onPress={onToggleValueVisible}
-              isDisabled={pending}
-              // Centred with auto margins, not a translate: the Button presses
-              // in with a translate that would replace -50% and drop the eye.
-              className="absolute inset-y-0 right-2 my-auto"
-              data-testid="project-secret-toggle-value"
-            >
-              {valueVisible ? (
-                <EyeClosed className="h-4 w-4" aria-hidden="true" />
-              ) : (
-                <Eye className="h-4 w-4" aria-hidden="true" />
-              )}
-            </ToggleIconButton>
-          </div>
-          <Text variant="caption" tone="muted" className="mt-1 font-normal">
-            Never paste secret values into chat.
-          </Text>
-        </Field>
-
-        <div className="space-y-2">
-          <Text as="div" variant="caption" tone="muted" className="text-xs font-semibold">
-            Allowed agents
-          </Text>
-          <div className="max-h-44 space-y-1 overflow-auto rounded-xl border border-slate-200 bg-slate-50 p-2 dark:border-slate-800 dark:bg-slate-900/40">
-            {agentsLoading ? <LoadingStatus>Loading agents…</LoadingStatus> : null}
-            {agentsError ? (
-              <div className="space-y-2">
-                <Text role="alert" tone="danger">{agentsError}</Text>
-                <Button variant="outline" size="sm" onPress={onRetryAgents} isDisabled={agentsLoading}>Retry</Button>
-              </div>
-            ) : !agentsLoading && agents.length === 0 ? (
-              <Text variant="caption" tone="muted" className="text-xs">
-                No agents found yet.
-              </Text>
+          <ToggleIconButton
+            appearance="bare"
+            isSelected={valueVisible}
+            size="sm"
+            radius="full"
+            aria-label={valueVisible ? "Hide value" : "Show value"}
+            onPress={onToggleValueVisible}
+            isDisabled={pending}
+            // Centred with auto margins, not a translate: the Button presses
+            // in with a translate that would replace -50% and drop the eye.
+            className="absolute inset-y-0 right-2 my-auto"
+            data-testid="project-secret-toggle-value"
+          >
+            {valueVisible ? (
+              <EyeClosed className="h-4 w-4" aria-hidden="true" />
             ) : (
-              agents.map((agent) => (
-                <Checkbox
-                  key={agent.id}
-                  isSelected={selectedAgentHandles.has(normalizeAgentHandle(agent.handle))}
-                  onChange={() => onToggleAgentHandle(agent.handle)}
-                  label={
-                    <span className="inline-flex items-center gap-2">
-                      <span className="font-semibold">@{agent.handle}</span>
-                      {agent.handle === "octo" ? (
-                        <Badge size="xs" tone="info">
-                          Default
-                        </Badge>
-                      ) : null}
-                    </span>
-                  }
-                  description={
-                    agent.displayName || agent.description ? (
-                      <span className="text-xxs">
-                        {agent.displayName ? agent.displayName : agent.description}
-                      </span>
-                    ) : null
-                  }
-                  data-testid={`project-secret-agent-${agent.id}`}
-                />
-              ))
+              <Eye className="h-4 w-4" aria-hidden="true" />
             )}
-          </div>
+          </ToggleIconButton>
         </div>
-      </div>
+        <Text variant="caption" tone="muted" className="mt-1">
+          Never paste secret values into chat.
+        </Text>
+      </Field>
+
+      <fieldset className="min-w-0 space-y-2">
+        <Text as="legend" variant="captionStrong" tone="muted">
+          Allowed agents
+        </Text>
+        {agentsLoading ? <LoadingStatus>Loading agents…</LoadingStatus> : null}
+        {agentsError ? (
+          <InlineNotice tone="danger" role="alert" actions={
+            <Button variant="text" tone="danger" size="sm" onPress={onRetryAgents} isDisabled={agentsLoading}>Retry</Button>
+          }>{agentsError}</InlineNotice>
+        ) : !agentsLoading && agents.length === 0 ? (
+          <Text variant="caption" tone="muted">
+            No agents found yet.
+          </Text>
+        ) : agents.length > 0 ? (
+          <Surface tone="raised" radius="xl" shadow="none" className="max-h-44 space-y-1 overflow-auto p-2">
+            {agents.map((agent) => (
+              <Checkbox
+                key={agent.id}
+                isSelected={selectedAgentHandles.has(normalizeAgentHandle(agent.handle))}
+                isDisabled={pending}
+                onChange={() => onToggleAgentHandle(agent.handle)}
+                label={
+                  <span className="inline-flex items-center gap-2">
+                    <span>@{agent.handle}</span>
+                    {agent.handle === "octo" ? (
+                      <Badge size="xs" tone="info">
+                        Default
+                      </Badge>
+                    ) : null}
+                  </span>
+                }
+                description={agent.displayName || agent.description || undefined}
+                data-testid={`project-secret-agent-${agent.id}`}
+              />
+            ))}
+          </Surface>
+        ) : null}
+      </fieldset>
+    </StudioDialogBody>
   );
   const actions = (
-    <div className={isDesktop ? "px-5 pb-4" : "px-4 pb-3"}>
+    <StudioDialogFooter padding="default">
       <SettingsFormActions
         onCancel={onClose}
         onSave={onSave}
@@ -304,13 +299,13 @@ function SecretModal({
         disabled={agentsLoading || Boolean(agentsError)}
         saveTestId="project-secret-save"
       />
-    </div>
+    </StudioDialogFooter>
   );
 
   if (!isDesktop) {
     return <MobileFocusDialog isOpen={isOpen} onOpenChange={changeOpen}
       dialogAriaLabel={title} closeDisabled={pending} dismissLabel="Close"
-      data-testid="project-secret-modal" footer={actions}>
+      gutter="responsive" data-testid="project-secret-modal" footer={actions}>
       {form}
     </MobileFocusDialog>;
   }
@@ -319,12 +314,12 @@ function SecretModal({
     <StudioDialogModal isOpen={isOpen} onOpenChange={changeOpen}
       isDismissable={!pending} isKeyboardDismissDisabled={pending}
       dialogAriaLabel={title} data-testid="project-secret-modal"
-      layout="editor">
+      layout="editor" gutter="responsive">
       <StudioDialogHeader title={title}
         description="Secrets are injected into the runtime as environment variables."
         onClose={onClose} closeButtonDisabled={pending} closeLabel="Close" />
-      <StudioDialogBody scrollable padding="none">{form}</StudioDialogBody>
-      <StudioDialogFooter>{actions}</StudioDialogFooter>
+      {form}
+      {actions}
     </StudioDialogModal>
   );
 }
@@ -678,11 +673,9 @@ function ScopedProjectSecretsCard({ projectId, userId }: { projectId: string | n
           </Button>
         </div>
         {!projectId ? (
-          <SettingsSurface>
-            <Text variant="caption" tone="muted">
-              Select a space to manage secrets.
-            </Text>
-          </SettingsSurface>
+          <Text variant="bodyCompact" tone="muted">
+            Select a space to manage secrets.
+          </Text>
         ) : null}
 
         {loading ? (
@@ -690,64 +683,65 @@ function ScopedProjectSecretsCard({ projectId, userId }: { projectId: string | n
         ) : null}
 
         {loadError ? (
-          <div className="flex flex-wrap items-center gap-3">
-            <Text role="alert" tone="danger">{loadError}</Text>
-            <Button variant="outline" size="sm" onPress={() => void loadData()} isDisabled={loading}>
+          <InlineNotice tone="danger" role="alert" actions={
+            <Button variant="text" tone="danger" size="sm" onPress={() => void loadData()} isDisabled={loading}>
               Retry
             </Button>
-          </div>
+          }>{loadError}</InlineNotice>
         ) : null}
 
         {projectId ? (
           <div className="space-y-3">
             {!loading && !loadError && activeSecrets.length === 0 ? (
-              <SettingsSurface className="space-y-1">
+              <div className="space-y-1">
                 <Text variant="bodyStrong" tone="secondary">
                   No secrets yet.
                 </Text>
-                <Text variant="body" tone="muted">
+                <Text variant="bodyCompact" tone="muted">
                   Store API keys and tokens for agents and runtimes in this space.
                 </Text>
-              </SettingsSurface>
-            ) : (
-              <SettingsSurface padding="none" className="overflow-hidden">
-                <ul className="divide-y divide-slate-200/70 dark:divide-slate-800">
+              </div>
+            ) : activeSecrets.length > 0 ? (
+              <ul className="space-y-4">
                 {activeSecrets.map((secret) => {
                   const busy = actionPendingId === secret.id;
                   return (
                     <li
                       key={secret.id}
-                      className="flex flex-wrap items-start justify-between gap-3 px-3 py-2.5"
+                      className="flex flex-wrap items-start justify-between gap-x-6 gap-y-2"
                       data-testid={`project-secret-row-${secret.id}`}
                     >
-                      <div className="min-w-0">
-                        <Text variant="bodyStrong" tone="primary" className="font-mono text-sm">
+                      <div className="min-w-0 grow basis-64">
+                        <Text variant="bodyStrong" tone="primary" className="break-all font-mono">
                           {secret.name}
                         </Text>
-                        <Text variant="caption" tone="muted" className="mt-0.5">
+                        <Text variant="caption" tone="muted" className="mt-0.5 break-words">
                           {secret.description ?? "No description"}
                         </Text>
-                        <Text variant="caption" tone="muted" className="mt-0.5 text-xxs">
+                        <Text variant="captionSmall" tone="muted" className="mt-0.5 break-words">
                           Agents: {assignedAgentsLabel(secret)}
                         </Text>
                       </div>
-                      <div className="flex items-center gap-2">
+                      <div className="flex max-w-full flex-wrap items-center gap-2">
                         <Button
                           onPress={() => openEditModal(secret)}
                           variant="ghost"
-                          size="xs"
+                          size="sm"
                           radius="full"
                           isDisabled={busy}
+                          aria-label={`Edit ${secret.name}`}
                           data-testid={`project-secret-edit-${secret.id}`}
                         >
                           Edit
                         </Button>
                         <Button
                           onPress={() => void handleRevokeSecret(secret)}
-                          variant="outline"
-                          size="xs"
+                          variant="ghost"
+                          tone="danger"
+                          size="sm"
                           radius="full"
                           isDisabled={busy}
+                          aria-label={`Revoke ${secret.name}`}
                           data-testid={`project-secret-revoke-${secret.id}`}
                         >
                           {busy ? "Working…" : "Revoke"}
@@ -756,9 +750,8 @@ function ScopedProjectSecretsCard({ projectId, userId }: { projectId: string | n
                     </li>
                   );
                 })}
-                </ul>
-              </SettingsSurface>
-            )}
+              </ul>
+            ) : null}
           </div>
         ) : null}
       </div>

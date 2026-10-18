@@ -17,6 +17,7 @@ import {
   composeRenderProps,
   type Key,
 } from "react-aria-components";
+import { Check } from "iconoir-react";
 import { ControlChevron } from "./ControlChevron";
 import { FieldLabelContext } from "./Field";
 import { StudioListBox, StudioListBoxItem } from "./aria/StudioListBox";
@@ -239,6 +240,7 @@ function StyledSelect({
       onSelectionChange={handleSelectionChange}
       isDisabled={disabled}
       isRequired={required}
+      disabledKeys={disabledKeys}
       name={name}
       aria-label={ariaLabel}
       aria-labelledby={ariaLabelledBy}
@@ -261,10 +263,9 @@ function StyledSelect({
           <ControlChevron />
         </span>
       </Button>
-      <StudioPopover placement="bottom start" offset={4} className="min-w-[--trigger-width] p-1">
+      <StudioPopover placement="bottom start" layout="form">
         <StudioListBox
           className="max-h-[inherit] overflow-y-auto"
-          disabledKeys={disabledKeys}
           items={options}
         >
           {(option) => (
@@ -272,9 +273,12 @@ function StyledSelect({
               id={option.value}
               textValue={option.label || option.value}
               data-value={option.value}
-              className="data-[selected]:bg-slate-100 dark:data-[selected]:bg-[var(--color-studio-dark-control-hover)]"
+              className="gap-2 data-[selected]:bg-slate-100 dark:data-[selected]:bg-[var(--color-studio-dark-control-hover)]"
             >
-              {option.label}
+              {({ isSelected }) => <>
+                <span className="min-w-0 break-words">{option.label}</span>
+                {isSelected ? <Check aria-hidden="true" className="h-4 w-4 shrink-0" /> : null}
+              </>}
             </StudioListBoxItem>
           )}
         </StudioListBox>

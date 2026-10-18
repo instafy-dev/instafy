@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
     "user-2": { id: "user-2", email: "second@instafy.test" },
   },
   openConnectModalAtStep: vi.fn(),
+  openConnectModalToReplace: vi.fn(),
   uploadPicture: vi.fn(),
   clearDefaultCredential: vi.fn(),
   createCodexCredential: vi.fn(),
@@ -87,6 +88,7 @@ vi.mock("../useCredentialsConnectFlow", () => ({
     canManageAiConnections: true,
     openConnectModal: vi.fn(),
     openConnectModalAtStep: mocks.openConnectModalAtStep,
+    openConnectModalToReplace: mocks.openConnectModalToReplace,
     connectModalProps: {},
   }),
 }));
@@ -135,6 +137,7 @@ describe("CredentialsSettingsCard", () => {
 
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    vi.stubGlobal("CSS", { escape: (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, "\\$&") });
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -142,6 +145,7 @@ describe("CredentialsSettingsCard", () => {
 
     mocks.userId = "user-1";
     mocks.openConnectModalAtStep.mockReset();
+    mocks.openConnectModalToReplace.mockReset();
     mocks.uploadPicture.mockReset().mockResolvedValue("https://storage.example/bot.png");
     mocks.clearDefaultCredential.mockReset();
     mocks.createCodexCredential.mockReset();
@@ -179,6 +183,7 @@ describe("CredentialsSettingsCard", () => {
       root.unmount();
     });
     container.remove();
+    vi.unstubAllGlobals();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
@@ -612,6 +617,87 @@ describe("CredentialsSettingsCard", () => {
     expect(container.textContent).toContain("Failed");
     expect(container.textContent).toContain("401 Unauthorized: session expired");
     expect(container.textContent).not.toContain("Needs reconnect");
+  });
+
+  it("keeps the Test action focused while a check is pending and blocks duplicate checks", async () => {
+    let finishTest!: (result: { success: true; ok: true }) => void;
+    mocks.testCredential.mockReturnValue(new Promise((resolve) => { finishTest = resolve; }));
+    await act(async () => {
+      root.render(<CredentialsSettingsCard />);
+      await flush();
+    });
+    const testButton = container.querySelector<HTMLButtonElement>('[data-testid="credentials-connection-test-cred-old"]')!;
+    await act(async () => {
+      testButton.focus();
+      testButton.click();
+      await flush();
+    });
+    expect(document.activeElement).toBe(testButton);
+    expect(testButton.disabled).toBe(false);
+    expect(testButton.getAttribute("aria-disabled")).toBe("true");
+    expect(container.querySelector('[role="status"]')?.textContent).toContain("Testing");
+    expect(container.querySelector<HTMLButtonElement>('[data-testid="credentials-connection-reconnect-cred-old"]')?.disabled).toBe(true);
+    await act(async () => testButton.click());
+    expect(mocks.testCredential).toHaveBeenCalledOnce();
+    await act(async () => { finishTest({ success: true, ok: true }); await flush(); });
+    expect(document.activeElement).toBe(testButton);
+    expect(testButton.hasAttribute("aria-disabled")).toBe(false);
+    expect(container.querySelector('[data-testid="credentials-connection-test-result-cred-old"]')?.textContent).toContain("Verified");
+  });
+
+  it.each(["openai", "deepseek", "zai", "gemini"])("opens the existing %s replacement flow from the mobile menu", async (provider) => {
+    mocks.listCredentials.mockResolvedValue({ success: true, credentials: [
+      { ...oldCredential, kind: "openai_api_key", label: "Review API key", metadata: { provider } },
+    ] });
+    await act(async () => { root.render(<CredentialsSettingsCard />); await flush(); });
+    const trigger = container.querySelector<HTMLButtonElement>('[data-testid="credentials-connection-menu-cred-old"]')!;
+    await act(async () => { trigger.focus(); trigger.click(); });
+    expect(Array.from(document.querySelectorAll('[role="menuitem"]')).map(item => item.textContent)).toEqual(["Test", "Replace…", "Remove…"]);
+    const replace = Array.from(document.querySelectorAll<HTMLElement>('[role="menuitem"]')).find(item => item.textContent === "Replace…")!;
+    expect(replace).toBeDefined();
+    await act(async () => replace.click());
+    expect(mocks.openConnectModalToReplace).toHaveBeenCalledExactlyOnceWith({ id: "cred-old", label: "Review API key" }, provider);
+    expect(document.querySelector('[role="menu"]')).toBeNull();
+  });
+
+  it("closes the mobile action menu for testing and keeps progress and recovery in the row", async () => {
+    let finishTest!: (result: { success: false; error: string }) => void;
+    mocks.testCredential.mockReturnValue(new Promise((resolve) => { finishTest = resolve; }));
+    mocks.listCredentials.mockResolvedValue({ success: true, credentials: [
+      { ...oldCredential, kind: "openai_api_key", isDefault: false, metadata: { provider: "openai" } },
+    ] });
+    await act(async () => { root.render(<CredentialsSettingsCard />); await flush(); });
+    const trigger = container.querySelector<HTMLButtonElement>('[data-testid="credentials-connection-menu-cred-old"]')!;
+    await act(async () => { trigger.focus(); trigger.click(); });
+    const menuItem = (name: string) => Array.from(document.querySelectorAll<HTMLElement>('[role="menuitem"]')).find(item => item.textContent === name)!;
+    const actionLabels = () => Array.from(document.querySelectorAll('[role="menuitem"]')).map(item => item.textContent);
+    expect(actionLabels()).toEqual(["Make default", "Test", "Replace…", "Remove…"]);
+    await act(async () => { menuItem("Test").focus(); menuItem("Test").click(); });
+    expect(document.querySelector('[role="menu"]')).toBeNull();
+    expect(container.querySelector('[data-testid="credentials-connection-row-cred-old"] [role="status"]')?.textContent).toBe("Testing…");
+    await act(async () => trigger.click());
+    expect(actionLabels()).toEqual(["Make default", "Test", "Replace…", "Remove…"]);
+    expect(menuItem("Test").getAttribute("aria-disabled")).toBe("true");
+    expect(menuItem("Replace…").getAttribute("aria-disabled")).toBe("true");
+    await act(async () => { menuItem("Test").click(); menuItem("Replace…").click(); });
+    expect(mocks.testCredential).toHaveBeenCalledOnce();
+    expect(mocks.openConnectModalToReplace).not.toHaveBeenCalled();
+    const guidance = "This key could not be verified. Check the account and enter a replacement key before retrying.";
+    await act(async () => { finishTest({ success: false, error: guidance }); await flush(); });
+    expect(container.querySelector('[data-testid="credentials-connection-row-cred-old"] [role="status"]')?.textContent).toContain(guidance);
+    expect(actionLabels()).toEqual(["Make default", "Test", "Replace…", "Remove…"]);
+    expect(document.querySelector('[role="menu"]')?.textContent).not.toContain(guidance);
+    expect(menuItem("Test").hasAttribute("aria-disabled")).toBe(false);
+    expect(menuItem("Replace…").hasAttribute("aria-disabled")).toBe(false);
+    await act(async () => menuItem("Replace…").click());
+    expect(mocks.openConnectModalToReplace).toHaveBeenCalledOnce();
+  });
+
+  it("keeps auth.json reconnect in the mobile menu without offering API-key replacement", async () => {
+    await act(async () => { root.render(<CredentialsSettingsCard />); await flush(); });
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="credentials-connection-menu-cred-old"]')!.click());
+    const labels = Array.from(document.querySelectorAll('[role="menuitem"]')).map(item => item.textContent);
+    expect(labels).toEqual(["Test", "Reconnect auth.json…", "Remove…"]);
   });
 
   it("shows needs-reconnect feedback for structured expired ChatGPT credentials", async () => {

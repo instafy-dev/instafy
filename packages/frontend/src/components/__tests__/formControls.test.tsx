@@ -48,6 +48,7 @@ describe("shared form controls", () => {
         }}>
           <option value="viewer">Read-only</option>
           <option value="builder">Read and write</option>
+          <option value="admin" disabled>Administrator</option>
         </Select>
       </Field>;
     }
@@ -58,6 +59,12 @@ describe("shared form controls", () => {
     expect(labelId).not.toBe("");
     expect(trigger.getAttribute("aria-labelledby")?.split(" ")).toContain(labelId);
     await act(async () => trigger.click());
+    const disabledOption = document.querySelector<HTMLElement>('[role="option"][data-value="admin"]')!;
+    expect(disabledOption.getAttribute("aria-disabled")).toBe("true");
+    await act(async () => disabledOption.click());
+    expect(changed).not.toHaveBeenCalled();
+    expect(trigger.dataset.value).toBe("viewer");
+    expect(document.querySelector('[role="listbox"]')).not.toBeNull();
     const option = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find(item => item.textContent === "Read and write")!;
     await act(async () => option.click());
     expect(changed).toHaveBeenCalledExactlyOnceWith("builder");
