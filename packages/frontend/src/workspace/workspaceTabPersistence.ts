@@ -83,12 +83,36 @@ export function loadPersistedWorkspaceTabs(): PersistedWorkspaceTabsState | null
   }
 }
 
+// Spaces removed from this tab's project store. Their saved tabs are dropped,
+// and every later write leaves them out: the tab strip keeps a copy it loaded
+// before the removal, and writing that copy back would restore them. A space
+// that returns to the store is saved again.
+const removedProjectIds = new Set<string>();
+
+export function forgetWorkspaceTabsForProjects(projectIds: readonly string[]) {
+  if (projectIds.length === 0) {
+    return;
+  }
+  projectIds.forEach((projectId) => removedProjectIds.add(projectId));
+  const persisted = loadPersistedWorkspaceTabs();
+  if (persisted && projectIds.some((projectId) => persisted.projects[projectId] !== undefined)) {
+    persistWorkspaceTabsState(persisted);
+  }
+}
+
+export function rememberWorkspaceTabsForProject(projectId: string) {
+  removedProjectIds.delete(projectId);
+}
+
 export function persistWorkspaceTabsState(state: PersistedWorkspaceTabsState) {
   if (typeof window === "undefined") {
     return;
   }
+  const projects = removedProjectIds.size === 0
+    ? state.projects
+    : Object.fromEntries(Object.entries(state.projects).filter(([projectId]) => !removedProjectIds.has(projectId)));
   try {
-    window.localStorage.setItem(WORKSPACE_TABS_STORAGE_KEY, JSON.stringify(state));
+    window.localStorage.setItem(WORKSPACE_TABS_STORAGE_KEY, JSON.stringify({ ...state, projects }));
   } catch (error) {
     console.warn("[workspace-tabs] failed to persist tabs:", error);
   }

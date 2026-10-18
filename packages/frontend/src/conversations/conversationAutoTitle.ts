@@ -239,6 +239,34 @@ export function getSkillImportConversationTitle(message: string): string | null 
   return description.firstParty ? `Connect ${description.label}` : `Set up ${description.label}`;
 }
 
+const SKILL_IMPORT_SWITCHES = new Set(["--overwrite", "--start"]);
+
+/**
+ * What a chat bubble says for a `/skills import` line ("Set up FreeFinance"),
+ * named as in the chat title. Only a line of the command and its own flags
+ * qualifies: a line with more words than that shows as written, so nothing a
+ * person typed is hidden.
+ */
+export function getSkillImportMessageLabel(message: string): string | null {
+  const trimmed = message.trim();
+  if (trimmed.includes("\n")) {
+    return null;
+  }
+  // "/skills", "import" and the source come first; only flags may follow.
+  const tokens = trimmed.split(/\s+/);
+  for (let index = 3; index < tokens.length; index += 1) {
+    if (tokens[index] === "--name" && index + 1 < tokens.length) {
+      index += 1;
+      continue;
+    }
+    if (!SKILL_IMPORT_SWITCHES.has(tokens[index] ?? "")) {
+      return null;
+    }
+  }
+  const description = describeSkillImport(trimmed);
+  return description ? `Set up ${description.label}` : null;
+}
+
 function stripLeadingFiller(text: string): string {
   let current = text.trim();
   for (let changed = true; changed;) {

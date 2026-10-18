@@ -228,6 +228,32 @@ describe("StudioSidebar organization navigation", () => {
     expect(container.querySelector('[data-testid="sidebar-team-org-c"]')).toBeNull();
   });
 
+  it("names a first space created here before either directory lists it or its new team", async () => {
+    // Both directories answered before the space existed: no teams, no spaces.
+    fixture.orgs = [];
+    fixture.discoveredProjects = [];
+    fixture.projects = [
+      { id: "space-new", name: "My bookkeeping", orgId: "org-new", orgName: "Personal team", state: null, isRemoteOnly: false },
+    ];
+    fixture.activeProjectId = "space-new";
+    await render({ navigationHeaderPortalTarget: headerPortal });
+
+    const space = headerPortal.querySelector('[data-testid="sidebar-space-button"]');
+    expect(space?.getAttribute("aria-label")).toBe("Choose space: My bookkeeping");
+    expect(space?.textContent).toContain("My bookkeeping");
+    // Both directories are asked again, once, so the new team can join the rail.
+    expect(fixture.retry).toHaveBeenCalledOnce();
+    await render({ navigationHeaderPortalTarget: headerPortal });
+    expect(fixture.retry).toHaveBeenCalledOnce();
+
+    fixture.orgs = [{ id: "org-new", name: "Personal team", slug: "personal", role: "owner", avatarUrl: null }];
+    fixture.discoveredProjects = [{ projectId: "space-new", orgId: "org-new", projectName: "My bookkeeping" }];
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    expect(container.querySelector('[data-testid="sidebar-team-org-new"]')).not.toBeNull();
+    expect(headerPortal.querySelector('[data-testid="sidebar-space-button"]')?.getAttribute("aria-label"))
+      .toBe("Choose space: My bookkeeping");
+  });
+
   it("keeps a direct project guest's team outside the selected project scope", async () => {
     fixture.orgs = fixture.orgs.filter(org => org.id !== "org-c");
     fixture.projects = fixture.projects.filter(project => project.id !== "space-c");

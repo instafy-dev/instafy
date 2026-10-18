@@ -9,6 +9,7 @@ import {
   getFallbackConversationTitle,
   getFirstUserMessage,
   getOpeningUserMessage,
+  getSkillImportMessageLabel,
   getStructuredConversationTitle,
   isDefaultConversationTitle,
   isReusableBlankConversation,
@@ -311,6 +312,21 @@ describe("conversationAutoTitle", () => {
     expect(getStructuredConversationTitle([userMessage("/skills list")])).toBeNull();
     expect(describeSkillImport(FREEFINANCE_IMPORT)).toEqual({ firstParty: true, label: "FreeFinance" });
     expect(describeSkillImport(BOOKKEEPING_PACK_IMPORT)).toEqual({ firstParty: false, label: "Bookkeeping" });
+  });
+
+  it("says what a skill import line sets up, by the title's name, and leaves other text as written", () => {
+    expect(getSkillImportMessageLabel(FREEFINANCE_IMPORT)).toBe("Set up FreeFinance");
+    expect(getSkillImportMessageLabel(`  ${BOOKKEEPING_PACK_IMPORT}  `)).toBe("Set up Bookkeeping");
+    expect(getSkillImportMessageLabel(
+      "/skills import https://github.com/acme/tools/tree/main/skills/acme-reports --overwrite --name acme-reports",
+    )).toBe("Set up Acme Reports");
+    // Words past the flags are a person's own; the bubble must not hide them.
+    expect(getSkillImportMessageLabel(`${FREEFINANCE_IMPORT} and then book March`)).toBeNull();
+    expect(getSkillImportMessageLabel(`${FREEFINANCE_IMPORT}\nThen book March`)).toBeNull();
+    expect(getSkillImportMessageLabel("/skills import https://github.com/instafy-dev/skills --name")).toBeNull();
+    expect(getSkillImportMessageLabel("/skills import --start")).toBeNull();
+    expect(getSkillImportMessageLabel("/skills list")).toBeNull();
+    expect(getSkillImportMessageLabel("Set up FreeFinance for me")).toBeNull();
   });
 
   it("builds a short sentence-case fallback title from an opening message", () => {

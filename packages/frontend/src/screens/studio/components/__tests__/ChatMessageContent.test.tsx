@@ -1843,6 +1843,33 @@ describe("ChatMessageContent", () => {
     expect(openPanelTab).not.toHaveBeenCalled();
   });
 
+  it("shows a connector chip's skill import as plain words with the command behind a disclosure", async () => {
+    const command =
+      "/skills import https://github.com/instafy-dev/skills/tree/main/packs/bookkeeping/.agents/skills/freefinance --name freefinance --start";
+    const message: ChatMessage = { id: "user-skill-import", role: "user", content: command, timestamp: Date.now() };
+
+    await act(async () => {
+      root.render(<UserMessageBubble message={message} />);
+    });
+
+    const bubble = container.querySelector('[data-testid="chat-bubble-user"]');
+    const body = bubble?.querySelector('[data-testid="chat-skill-import-message"]');
+    expect(body?.querySelector("p")?.textContent).toBe("Set up FreeFinance");
+    expect(bubble?.querySelector("a")).toBeNull();
+    const disclosure = body?.querySelector("details");
+    expect(disclosure?.open).toBe(false);
+    expect(disclosure?.querySelector("summary")?.textContent?.trim()).toBe("Show command");
+    expect(disclosure?.querySelector('[data-testid="chat-skill-import-command"]')?.textContent).toBe(command);
+    // The message itself, which the controller receives, is untouched.
+    expect(message.content).toBe(command);
+
+    await act(async () => {
+      root.render(<UserMessageBubble message={{ ...message, content: `${command} and then book March` }} />);
+    });
+    expect(container.querySelector('[data-testid="chat-skill-import-message"]')).toBeNull();
+    expect(container.querySelector('[data-testid="chat-bubble-user"]')?.textContent).toContain("and then book March");
+  });
+
   it("renders image attachments and inline references in the same user message", async () => {
     resolveConversationByController.mockImplementation((controllerId: string) => {
       if (controllerId === "thread-controller-123") {

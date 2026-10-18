@@ -13,6 +13,7 @@ import type {
 import { createDefaultCodeWorkspace } from "./code/defaults";
 import { createDefaultBillingState } from "./credits/defaults";
 import { writePendingProjectSwitch } from "./screens/pendingProjectSwitch";
+import { forgetWorkspaceTabsForProjects, rememberWorkspaceTabsForProject } from "./workspace/workspaceTabPersistence";
 import { isUUID } from "./utils/uuid";
 import { studioPerformance } from "./telemetry/studioPerformance";
 
@@ -292,6 +293,7 @@ export const useWorkspaceStore = create<SessionStore>()(
         ? hydrateProjectState(snapshot.projects[snapshot.activeProjectId])
         : createProjectState();
 
+    Object.keys(nextProjects).forEach(rememberWorkspaceTabsForProject);
     set({
       workspaceScope: scope,
       state: nextState,
@@ -484,6 +486,7 @@ export const useWorkspaceStore = create<SessionStore>()(
       throw new Error("createProject requires a valid projectId");
     }
     writePendingProjectSwitch(projectId);
+    rememberWorkspaceTabsForProject(projectId);
     set((store) => {
       const nextProjects = {
         ...store.projects,
@@ -600,6 +603,7 @@ export const useWorkspaceStore = create<SessionStore>()(
     if (!trimmed) {
       return;
     }
+    const removed = Boolean(get().projects[trimmed]);
     set((store) => {
       if (!store.projects[trimmed]) {
         return {};
@@ -629,12 +633,18 @@ export const useWorkspaceStore = create<SessionStore>()(
         future: [],
       };
     });
+    if (removed) {
+      forgetWorkspaceTabsForProjects([trimmed]);
+    }
   },
   removeProjectsByOrgId: (orgId) => {
     const trimmed = orgId.trim();
     if (!trimmed) {
       return;
     }
+    const removedIds = Object.entries(get().projects)
+      .filter(([, project]) => project.org?.id === trimmed)
+      .map(([projectId]) => projectId);
     set((store) => {
       const entries = Object.entries(store.projects);
       const nextEntries = entries.filter(([, project]) => project.org?.id !== trimmed);
@@ -663,6 +673,7 @@ export const useWorkspaceStore = create<SessionStore>()(
         future: [],
       };
     });
+    forgetWorkspaceTabsForProjects(removedIds);
   },
   undo: () => {
     const { history, state, future, projects, activeProjectId } = get();
