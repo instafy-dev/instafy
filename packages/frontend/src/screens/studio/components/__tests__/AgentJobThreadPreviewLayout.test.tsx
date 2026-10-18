@@ -88,11 +88,14 @@ const CONTROLLER_CREDENTIAL_REFRESH_INVALID_ERROR =
 function LiveAgentJobThreadPreview({
   message,
   FileChangeList = ChatFileChangeList,
+  onPreviewState,
 }: {
   message: ChatMessage;
   FileChangeList?: AgentJobThreadPreviewLayoutProps["ChatFileChangeList"];
+  onPreviewState?: (state: ReturnType<typeof useAgentJobThreadPreviewState>) => void;
 }) {
   const previewState = useAgentJobThreadPreviewState({ message, projectId: "project-1" });
+  onPreviewState?.(previewState);
   if (!previewState) {
     return null;
   }
@@ -1900,6 +1903,130 @@ describe("AgentJobThreadPreviewLayout", () => {
     );
     expect(container.textContent).not.toContain("Something went wrong finishing this run.");
     expect(container.textContent).not.toContain("controller credential fetch failed");
+  });
+
+  describe("proxy errors from the live thread", () => {
+    const retriedProxyErrorLine =
+      "Retrying: unexpected status 502 Bad Gateway: The upstream request failed., url: http://proxy:8789/v1/responses";
+
+    // Codex reconnecting after a proxy 502, as the controller stores the
+    // status update under the job.
+    function retryStatusUpdate(timestamp: number): ChatMessage {
+      return {
+        id: "00000000-0000-4000-8000-0000000000a1",
+        role: "assistant",
+        authorId: null,
+        content: retriedProxyErrorLine,
+        timestamp,
+        files: null,
+        messageType: "status",
+        metadata: {
+          jobId: JOB_ID,
+          source: "agent",
+          kind: "update",
+          outcome: "in_progress",
+          messageType: "status",
+          details: {
+            kind: "codex_stream_retry",
+            event: { type: "stream_error", message: "Reconnecting... 1/1" },
+          },
+        },
+      };
+    }
+
+    async function renderThread(threadMessages: ChatMessage[]) {
+      const baseMessage = createMessage();
+      const message = createMessage({ metadata: { ...baseMessage.metadata, threadMessages } });
+      const captured: { state: ReturnType<typeof useAgentJobThreadPreviewState> } = { state: null };
+      await act(async () => {
+        root.render(
+          <LiveAgentJobThreadPreview
+            message={message}
+            onPreviewState={(next) => {
+              captured.state = next;
+            }}
+          />,
+        );
+      });
+      return captured.state;
+    }
+
+    it("does not show a run that recovered from a retried proxy 502 as failed", async () => {
+      const now = Date.now();
+      const finalReply = "Updated the hero copy and checked the page renders.";
+      const state = await renderThread([
+        retryStatusUpdate(now - 20_000),
+        {
+          id: "00000000-0000-4000-8000-0000000000a2",
+          role: "assistant",
+          authorId: null,
+          content: finalReply,
+          timestamp: now - 10_000,
+          files: null,
+          metadata: { jobId: JOB_ID, source: "agent", kind: "result", outcome: "success" },
+        },
+      ]);
+
+      expect(state?.isCompleted).toBe(true);
+      expect(state?.finalSpineTone).not.toBe("danger");
+      expect(state?.finalSummaryMessage?.content).toBe(finalReply);
+      expect(container.querySelector('[data-testid="agent-thread-terminal-status"]')).toBeNull();
+      expect(container.textContent).not.toContain("Run failed");
+      expect(container.textContent).not.toContain("rejected the AI request");
+      expect(container.textContent).not.toContain("switch credentials");
+      expect(container.textContent).toContain(finalReply);
+    });
+
+    it("still shows a run that ended on a proxy credential error as failed", async () => {
+      const now = Date.now();
+      const state = await renderThread([
+        retryStatusUpdate(now - 20_000),
+        {
+          id: "00000000-0000-4000-8000-0000000000a3",
+          role: "assistant",
+          authorId: null,
+          content: CONTROLLER_CREDENTIAL_REFRESH_INVALID_ERROR,
+          timestamp: now - 10_000,
+          files: null,
+          messageType: "error",
+          metadata: { jobId: JOB_ID, source: "agent", outcome: "failed", messageType: "error" },
+        },
+      ]);
+
+      expect(state?.finalSpineTone).toBe("danger");
+      expect(container.querySelector('[data-testid="agent-thread-terminal-status"]')?.textContent).toBe(
+        "Run failed",
+      );
+      expect(container.textContent).toContain(
+        "ChatGPT login needs reconnecting. Reconnect AI credentials, then retry the message.",
+      );
+    });
+
+    it("shows a run that ran out of retries on a proxy 502 as failed, without blaming credentials", async () => {
+      const now = Date.now();
+      const state = await renderThread([
+        retryStatusUpdate(now - 20_000),
+        {
+          id: "00000000-0000-4000-8000-0000000000a4",
+          role: "assistant",
+          authorId: null,
+          content: retriedProxyErrorLine.replace(/^Retrying: /, ""),
+          timestamp: now - 10_000,
+          files: null,
+          messageType: "error",
+          metadata: { jobId: JOB_ID, source: "agent", outcome: "failed", messageType: "error" },
+        },
+      ]);
+
+      expect(state?.finalSpineTone).toBe("danger");
+      expect(container.querySelector('[data-testid="agent-thread-terminal-status"]')?.textContent).toBe(
+        "Run failed",
+      );
+      expect(container.textContent).toContain(
+        "Connection to the AI provider dropped. This is usually temporary.",
+      );
+      expect(container.textContent).not.toContain("switch credentials");
+    });
   });
 
   it("softens interim retry status lines while keeping the raw line as a tooltip", async () => {

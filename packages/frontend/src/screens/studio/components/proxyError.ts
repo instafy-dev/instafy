@@ -229,6 +229,74 @@ function hasUpstreamErrorToken(info: ProxyUpstreamErrorInfo, value: string): boo
   );
 }
 
+// Proxy envelope codes for failures the proxy marks retryable because the
+// provider connection, not the credential, broke (see
+// openai-proxy-server/src/upstream_error.rs). Switching credentials does not
+// help with any of them.
+const TRANSIENT_PROXY_ERROR_CODES = new Set([
+  "upstream_transport_error",
+  "upstream_timeout",
+  "upstream_stream_error",
+  "upstream_invalid_response",
+]);
+
+// The proxy's safe messages for those codes. A plain-text diagnostic such as
+// "unexpected status 502 Bad Gateway: The upstream request failed., url: …"
+// carries only the message, without the JSON envelope's code.
+const TRANSIENT_PROXY_ERROR_MESSAGES = [
+  "the upstream request failed.",
+  "the upstream request timed out.",
+  "the upstream provider reported a stream failure.",
+  "the upstream provider returned an invalid response.",
+  "the upstream provider returned an unexpected http status.",
+];
+
+function isTransientProxyErrorInfo(info: ProxyUpstreamErrorInfo, diagnosticText: string): boolean {
+  const upstreamCode = info.upstreamCode?.trim().toLowerCase() ?? "";
+  if (TRANSIENT_PROXY_ERROR_CODES.has(upstreamCode)) {
+    return true;
+  }
+  // A provider-reported status decides on its own: a 401/403/429 behind a 502
+  // is a credential or quota problem, a 5xx is the provider having a moment.
+  if (info.upstreamStatus !== null) {
+    return info.upstreamStatus >= 500;
+  }
+  if (upstreamCode) {
+    return upstreamCode === "upstream_http_error" && info.proxyStatus >= 500;
+  }
+  if (info.proxyStatus !== 502 && info.proxyStatus !== 503 && info.proxyStatus !== 504) {
+    return false;
+  }
+  const lowered = diagnosticText.toLowerCase();
+  return TRANSIENT_PROXY_ERROR_MESSAGES.some((message) => lowered.includes(message));
+}
+
+function isProxyTimeout(info: ProxyUpstreamErrorInfo, diagnosticText: string): boolean {
+  return (
+    info.proxyStatus === 504 ||
+    info.upstreamCode?.trim().toLowerCase() === "upstream_timeout" ||
+    diagnosticText.toLowerCase().includes("the upstream request timed out.")
+  );
+}
+
+function buildTransientProxyErrorGuidance(
+  info: ProxyUpstreamErrorInfo,
+  diagnosticText: string,
+  isRetrying: boolean,
+): ProxyUpstreamErrorGuidance {
+  const headline = isProxyTimeout(info, diagnosticText)
+    ? "The AI provider took too long to respond"
+    : "Connection to the AI provider dropped";
+  return {
+    summary: isRetrying ? `${headline}; retrying.` : `${headline}. This is usually temporary.`,
+    detail: isRetrying
+      ? "The request is being retried automatically. Nothing needs to change."
+      : "Requests that hit this are retried automatically. If the run stopped, send your message again.",
+    actionLabel: null,
+    actionKind: null,
+  };
+}
+
 function formatProxyUpstreamErrorStatus(info: ProxyUpstreamErrorInfo): string {
   return info.upstreamStatus ? `Upstream ${info.upstreamStatus}` : "The upstream provider";
 }
@@ -339,6 +407,14 @@ export function resolveProxyUpstreamErrorGuidance(content: string): ProxyUpstrea
   if (hasUpstreamErrorToken(info, "insufficient_quota")) {
     return buildInsufficientQuotaGuidance(upstreamLabel);
   }
+
+  const diagnosticText = extractProxyDiagnosticText(content) ?? content;
+  if (isTransientProxyErrorInfo(info, diagnosticText)) {
+    return buildTransientProxyErrorGuidance(info, diagnosticText, /^\s*retrying:/i.test(content));
+  }
+
+  // What remains is the provider refusing the request itself (auth,
+  // permission, rate limit, bad request), where another credential can help.
 
   const parts = [
     `${upstreamLabel} rejected the AI request${info.upstreamType ? ` (${info.upstreamType})` : ""}.`,

@@ -765,8 +765,13 @@ export function resolveRetryingStatusPresentation(params: {
 }): RetryingStatusPresentation | null {
   const content = params.content.trim();
   const metadata = isRecord(params.metadata) ? params.metadata : null;
-  const kind = normalizedStringField(metadata, "kind");
-  if (RETRYING_STATUS_KINDS.has(kind)) {
+  // The controller stores a runtime update under `details` and writes its own
+  // `kind` ("update") on top, so the retry kind can sit one level down.
+  const details = metadata && isRecord(metadata["details"]) ? metadata["details"] : null;
+  if (
+    RETRYING_STATUS_KINDS.has(normalizedStringField(metadata, "kind")) ||
+    RETRYING_STATUS_KINDS.has(normalizedStringField(details, "kind"))
+  ) {
     return {
       displayText: RETRYING_STATUS_DISPLAY_TEXT,
       fullText: content || RETRYING_STATUS_DISPLAY_TEXT,
