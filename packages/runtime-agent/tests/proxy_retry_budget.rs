@@ -1658,8 +1658,7 @@ async fn run_routing_job(scenario: &str) -> Result<()> {
                 artifact["kind"] == "agent/routing-preflight"
                     && artifact["requiresWorkspaceFileChanges"] == true
             }),
-            "{:?}",
-            execution.artifacts
+            "the routing preflight artifact must record its write reading"
         );
         return Ok(());
     }
