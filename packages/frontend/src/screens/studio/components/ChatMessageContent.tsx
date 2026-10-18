@@ -1942,6 +1942,64 @@ const MessageContentBody = memo(function MessageContentBody({
             </pre>
           );
         }
+        if (block.kind === "table") {
+          // A real table, not pipes in a paragraph. Cells (and the link
+          // labels in them, which chat otherwise breaks anywhere) wrap at word
+          // boundaries; when the chat column is too narrow for the columns
+          // (chat beside a pane, a phone) the table scrolls sideways inside
+          // its own frame instead of widening the bubble.
+          const cellAlign = (columnIndex: number) => block.align[columnIndex] ?? undefined;
+          return (
+            <div
+              key={`table-${blockIndex}`}
+              data-testid="chat-message-table"
+              role="region"
+              aria-label="Table"
+              tabIndex={0}
+              className={[
+                blockIndex > 0 ? "mt-3" : "",
+                "max-w-full overflow-x-auto rounded-lg border border-slate-200/80 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-400 dark:border-white/10",
+              ]
+                .filter(Boolean)
+                .join(" ")}
+            >
+              <table className="w-full border-collapse text-left text-[0.8125rem] leading-snug [overflow-wrap:normal] [&_a]:[word-break:normal]">
+                <thead className="bg-slate-50 dark:bg-white/[0.04]">
+                  <tr>
+                    {block.header.map((cell, columnIndex) => (
+                      <th
+                        key={`table-${blockIndex}-head-${columnIndex}`}
+                        scope="col"
+                        style={{ textAlign: cellAlign(columnIndex) }}
+                        className="min-w-[3.5rem] border-b border-slate-200/80 px-2 py-1.5 align-bottom font-semibold break-words dark:border-white/10"
+                      >
+                        {renderInlineTokens(cell, `table-${blockIndex}-head-${columnIndex}`)}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {block.rows.map((row, rowIndex) => (
+                    <tr
+                      key={`table-${blockIndex}-row-${rowIndex}`}
+                      className={rowIndex > 0 ? "border-t border-slate-200/70 dark:border-white/[0.07]" : ""}
+                    >
+                      {row.map((cell, columnIndex) => (
+                        <td
+                          key={`table-${blockIndex}-row-${rowIndex}-${columnIndex}`}
+                          style={{ textAlign: cellAlign(columnIndex) }}
+                          className="min-w-[3.5rem] px-2 py-1.5 align-top break-words"
+                        >
+                          {cell ? renderInlineTokens(cell, `table-${blockIndex}-row-${rowIndex}-${columnIndex}`) : null}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          );
+        }
         if (block.kind === "list") {
           return renderListLevel(
             block.items,

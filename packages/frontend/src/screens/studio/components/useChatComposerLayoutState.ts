@@ -150,12 +150,38 @@ export function useChatComposerLayoutState({
     return `${Math.ceil(composerOverlayHeight + browserSurfaceGapPx)}px`;
   }, [browserSurfaceGapPx, composerOverlayHeight, showBrowserSessionPageStrip]);
 
+  // The transcript's size at the last scroll event. When the size changed in
+  // between, the scroll event came from a reflow, not from the reader: a pane
+  // opening beside chat narrows the column, every message grows taller and the
+  // browser's scroll anchoring keeps an older row in place. Treating that as
+  // "the reader scrolled up" dropped bottom-following, so the newest reply sat
+  // under the composer and a "New messages" pill appeared over the transcript.
+  const lastScrollViewportSizeRef = useRef<{ width: number; height: number } | null>(null);
+  useLayoutEffect(() => {
+    const node = scrollContainerRef.current;
+    if (node && lastScrollViewportSizeRef.current === null) {
+      lastScrollViewportSizeRef.current = { width: node.clientWidth, height: node.clientHeight };
+    }
+  });
+
   const handleScroll = useCallback(() => {
     const node = scrollContainerRef.current;
     if (!node || autoScrollPendingRef.current) {
       return;
     }
+    const viewportSize = { width: node.clientWidth, height: node.clientHeight };
+    const previousViewportSize = lastScrollViewportSizeRef.current;
+    lastScrollViewportSizeRef.current = viewportSize;
+    const reflowed = previousViewportSize !== null
+      && (previousViewportSize.width !== viewportSize.width || previousViewportSize.height !== viewportSize.height);
     const distanceFromBottom = node.scrollHeight - (node.scrollTop + node.clientHeight);
+    if (reflowed && shouldAutoScrollRef.current && distanceFromBottom > AUTO_SCROLL_BOTTOM_THRESHOLD_PX) {
+      // Still following the latest message: put it back in view instead.
+      node.scrollTop = Math.max(0, node.scrollHeight - node.clientHeight);
+      lastScrollHeightRef.current = node.scrollHeight;
+      lastComposerScrollTopRef.current = node.scrollTop;
+      return;
+    }
     shouldAutoScrollRef.current = distanceFromBottom <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX;
     if (shouldAutoScrollRef.current) {
       lastScrollHeightRef.current = node.scrollHeight;

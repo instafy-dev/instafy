@@ -3,6 +3,7 @@ import {
   findWorkspaceFileReferenceAt,
   parseMessageContentBlocks,
   parseTeamFlowLine,
+  splitMessageTableRow,
   tokenizeChatLine,
 } from "../chatMessageDialect";
 
@@ -630,6 +631,61 @@ describe("chatMessageDialect", () => {
     expect(findWorkspaceFileReferenceAt("(/workspace/project/docs/README.md:4)", 1)).toEqual({
       end: 36,
       reference: { path: "docs/README.md", raw: "/workspace/project/docs/README.md:4", line: 4 },
+    });
+  });
+
+  describe("pipe tables", () => {
+    // The shape agents use to answer "compare these"; the chat showed it as
+    // raw "| Option | … |" text.
+    const comparison = [
+      "Here are two hosting options.",
+      "",
+      "| Option | Best for | Monthly cost | Annual cost |",
+      "|---|---|---:|---:|",
+      "| [Small](https://example.com/plans/small) | Side projects | $5 | $50.00 |",
+      "| [Medium](https://example.com/plans/medium) | Small teams | $20 | $200.00 |",
+      "",
+      "Costs can change.",
+    ].join("\n");
+
+    it("parses a header, its alignment and the body rows into one table block", () => {
+      expect(parseMessageContentBlocks(comparison)).toEqual([
+        { kind: "paragraph", line: "Here are two hosting options." },
+        {
+          kind: "table",
+          align: [null, null, "right", "right"],
+          header: ["Option", "Best for", "Monthly cost", "Annual cost"],
+          rows: [
+            ["[Small](https://example.com/plans/small)", "Side projects", "$5", "$50.00"],
+            ["[Medium](https://example.com/plans/medium)", "Small teams", "$20", "$200.00"],
+          ],
+        },
+        { kind: "paragraph", line: "Costs can change." },
+      ]);
+    });
+
+    it("takes the header from the paragraph's last line and ends at a line without pipes", () => {
+      expect(parseMessageContentBlocks("Compared:\na | b\n:-- | :-:\n1 | 2\n3\nDone.")).toEqual([
+        { kind: "paragraph", line: "Compared:" },
+        { kind: "table", align: ["left", "center"], header: ["a", "b"], rows: [["1", "2"]] },
+        { kind: "paragraph", line: "3\nDone." },
+      ]);
+    });
+
+    it("pads short rows and drops extra cells, as GFM does", () => {
+      const [table] = parseMessageContentBlocks("| a | b |\n|---|---|\n| 1 |\n| 1 | 2 | 3 |");
+      expect(table).toMatchObject({ kind: "table", rows: [["1", ""], ["1", "2"]] });
+    });
+
+    it("leaves pipes alone when there is no delimiter row, or its cell count differs", () => {
+      expect(parseMessageContentBlocks("Use a | b for now.")).toEqual([{ kind: "paragraph", line: "Use a | b for now." }]);
+      expect(parseMessageContentBlocks("| a | b |\n|---|")).toEqual([{ kind: "paragraph", line: "| a | b |\n|---|" }]);
+      expect(parseMessageContentBlocks("a | b\n- c")[0]).toEqual({ kind: "paragraph", line: "a | b" });
+    });
+
+    it("splits cells on bare pipes only: escaped pipes and pipes in code spans stay text", () => {
+      expect(splitMessageTableRow("| `a|b` | c \\| d | e |")).toEqual(["`a|b`", "c | d", "e"]);
+      expect(splitMessageTableRow("no pipes here")).toBeNull();
     });
   });
 });

@@ -88,6 +88,12 @@ type ChatComposerSurfaceProps = {
   aboveComposer?: ReactNode;
   /** Compact conversation views stay in the measured overlay above the input. */
   viewNavigation?: ReactNode;
+  /**
+   * Touch-first input: Enter adds a new line and the Send button sends
+   * (resolveComposerEnterAction), so the spoken hints must not promise that
+   * Enter sends.
+   */
+  touchLikeInput?: boolean;
   compactBrowserViewport: boolean;
   onSubmit: FormEventHandler<HTMLFormElement>;
   queueSurfaceProps: ComponentProps<typeof ChatSendQueueSurface>;
@@ -230,6 +236,7 @@ export function ChatComposerSurface({
   composerAutoHidden,
   aboveComposer,
   viewNavigation,
+  touchLikeInput = false,
   compactBrowserViewport,
   onSubmit,
   queueSurfaceProps,
@@ -448,16 +455,23 @@ export function ChatComposerSurface({
       : visibleDesktopSendModifierMode === "stash"
         ? "Stash draft (Command or Ctrl plus Shift plus Enter)"
         : primaryActionMode === "steer"
-          ? "Steer current reply (Enter)"
+          ? touchLikeInput ? "Steer current reply" : "Steer current reply (Enter)"
           : "Send message";
+  // On touch, Enter adds a line (the mobile convention, see enterBehavior.ts);
+  // the hint said "Enter sends the message" and people waited for a send that
+  // never came.
   const primaryActionStatus =
     visibleDesktopSendModifierMode === "queue"
       ? "Queue selected. Press Enter or click to queue the message."
       : visibleDesktopSendModifierMode === "stash"
         ? "Stash selected. Press Enter or click to stash the draft."
-        : primaryActionMode === "steer"
-          ? "Enter steers the current reply."
-          : "Enter sends the message.";
+        : touchLikeInput
+          ? primaryActionMode === "steer"
+            ? "Enter adds a new line. The send button steers the current reply."
+            : "Enter adds a new line. The send button sends the message."
+          : primaryActionMode === "steer"
+            ? "Enter steers the current reply."
+            : "Enter sends the message.";
   // Hold-to-talk must keep the same microphone DOM node from press through
   // release. The richer active strip is reserved for tap/continuous modes;
   // hold mode communicates activity on the stable button itself.

@@ -98,6 +98,38 @@ describe("ChatMessageContent", () => {
     vi.useRealTimers();
   });
 
+  it("renders a markdown pipe table as a table that scrolls inside its own frame", async () => {
+    await act(async () => {
+      root.render(
+        <MessageContent
+          content={[
+            "Two options:",
+            "",
+            "| Plan | Monthly cost |",
+            "|---|---:|",
+            "| [Starter](https://example.com/plans/starter) | $10 |",
+            "| **Team** | $40 |",
+          ].join("\n")}
+        />,
+      );
+    });
+
+    const frame = container.querySelector('[data-testid="chat-message-table"]');
+    expect(frame).not.toBeNull();
+    // The narrow chat column beside a pane scrolls the table, not the bubble.
+    expect(frame!.className).toContain("overflow-x-auto");
+    expect(frame!.className).toContain("max-w-full");
+    expect(container.textContent).not.toContain("|");
+    const headers = Array.from(frame!.querySelectorAll("th")).map((cell) => cell.textContent);
+    expect(headers).toEqual(["Plan", "Monthly cost"]);
+    const rows = Array.from(frame!.querySelectorAll("tbody tr"));
+    expect(rows).toHaveLength(2);
+    // Cells keep the chat's inline formatting: links and bold.
+    expect(rows[0]!.querySelector("a")?.getAttribute("href")).toBe("https://example.com/plans/starter");
+    expect(rows[1]!.querySelector("strong")?.textContent).toBe("Team");
+    expect((rows[0]!.children[1] as HTMLElement).style.textAlign).toBe("right");
+  });
+
   it("renders configured and supplied agent mentions without mounting a conversation controller", async () => {
     await act(async () => {
       root.render(<MessageContent content="Ask @custom-agent and @supplied-agent with @octo." mentionableAgentHandles={["supplied-agent"]} />);
