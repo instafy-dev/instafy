@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DEFAULT_MANAGED_AI_MODEL_LABEL } from "../../ai/modelDefaults";
 
 const resolveTokenMock = vi.hoisted(() => vi.fn());
 
@@ -210,7 +209,7 @@ describe("creditService", () => {
               provider: "openai",
               creditsPerPrompt: 1,
               dailyPromptLimit: 20,
-              modelLabel: DEFAULT_MANAGED_AI_MODEL_LABEL,
+              modelLabel: "GPT-6 Luna",
               inputUsdMicrosPer1k: 250,
               cachedInputUsdMicrosPer1k: 25,
               outputUsdMicrosPer1k: 2000
@@ -235,7 +234,7 @@ describe("creditService", () => {
       provider: "openai",
       creditsPerPrompt: 1,
       dailyPromptLimit: 20,
-      modelLabel: DEFAULT_MANAGED_AI_MODEL_LABEL,
+      modelLabel: "GPT-6 Luna",
       inputUsdMicrosPer1k: 250,
       cachedInputUsdMicrosPer1k: 25,
       outputUsdMicrosPer1k: 2000

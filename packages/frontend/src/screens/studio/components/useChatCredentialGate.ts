@@ -46,6 +46,8 @@ type CredentialRequirementState = {
     enabled: boolean;
     available: boolean;
     label: string;
+    modelId?: string | null;
+    modelLabel?: string | null;
     creditBurnAmount: number;
     dailyPromptLimit: number;
     dailyPromptsUsed: number;

@@ -11,6 +11,7 @@ import {
   createControllerOrgAndProject,
   ensureRealDefaultCodexCredentialForAccessToken,
 } from "../utils/harness.js";
+import { E2E_MODEL } from "../utils/e2eModel.js";
 
 // This API suite uses temporary bearer tokens and the Supabase service role.
 // Keep both out of retain-on-failure Playwright trace archives.
@@ -165,7 +166,7 @@ async function createAgent(
       handle: input.handle,
       displayName: input.displayName,
       provider: "assistant",
-      model: "gpt-5.5",
+      model: E2E_MODEL,
     },
   });
   expect(response.ok(), await response.text()).toBeTruthy();

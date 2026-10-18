@@ -65,7 +65,9 @@ const runtimeCodexDirName = ".codex-runtime";
 const proxyCodexRootDefault = path.join(repoRoot, "tmp", "proxy-codex");
 const proxyCodexRootByoc = path.join(repoRoot, "tmp", "proxy-codex-byoc");
 const runtimeCodexDummyKey = "runtime-dev-dummy-key";
-const defaultCodexModel = "gpt-5.5";
+// The launcher pinned this model before the controller sent each job's model.
+// Only this exact value is migrated away; an operator's own pin survives.
+const legacyLauncherCodexModel = "gpt-5.5";
 const projectRegistryPath = path.join(repoRoot, "tmp", "runtime-projects.json");
 const originSigningKeyPath = path.join(repoRoot, "tmp", "origin-signing-key.json");
 const credentialEncryptionKeyPath = path.join(
@@ -81,19 +83,6 @@ const UUID_PATTERN =
   /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const PLACEHOLDER_PROJECT_ID = "00000000-0000-0000-0000-000000000000";
 let composeEnvMigratedLegacyProjectId = false;
-
-function normalizeCodexModel(model) {
-  const value = String(model ?? "").trim();
-  if (!value) return defaultCodexModel;
-  // Floor stale OpenAI ids (anything below gpt-5.5 is no longer served
-  // upstream); a stale pin in docker/.env.local otherwise survives forever.
-  const lower = value.toLowerCase();
-  if (lower === "gpt-5" || lower === "gpt-5-codex") return defaultCodexModel;
-  if (lower.startsWith("gpt-4") || lower.startsWith("o3")) return defaultCodexModel;
-  const versioned = lower.match(/^gpt-5\.(\d+)/);
-  if (versioned && Number(versioned[1]) < 5) return defaultCodexModel;
-  return value;
-}
 
 const composeProject = process.env.COMPOSE_PROJECT_NAME ?? "instafy-runtime";
 
@@ -1433,7 +1422,8 @@ OPENAI_BASE_URL=http://proxy:8789/v1
 CODEX_API_KEY=proxy-dev-key
 CODEX_HOME=/workspace/.codex
 CODEX_AUTH_PATH=/workspace/.codex/auth.json
-CODEX_MODEL=${defaultCodexModel}
+# CODEX_MODEL is left unset: the controller sends each job's model (managed
+# default, the agent's or the credential's). Set it only to force one model.
 CODEX_INCLUDE_PLAN_TOOL=true
 CODEX_INCLUDE_APPLY_PATCH_TOOL=true
 CODEX_INCLUDE_VIEW_IMAGE_TOOL=true
@@ -1583,18 +1573,18 @@ function configureComposeRuntimeRole(role, options = {}) {
   }
 }
 
+export function isLegacyLauncherModelPin(value) {
+  return String(value ?? "").trim() === legacyLauncherCodexModel;
+}
+
 function ensureComposeCodexEntries() {
   if (!fileExists(composeEnvPath)) return;
   try {
     const content = fs.readFileSync(composeEnvPath, "utf-8");
     const envMap = parseEnv(content);
-    const codexModel = normalizeCodexModel(
-      envMap.CODEX_MODEL ?? process.env.CODEX_MODEL ?? defaultCodexModel
-    );
     const runtimeRepoHost =
       envMap.RUNTIME_REPO_HOST ?? process.env.RUNTIME_REPO_HOST ?? sandboxDir;
     const desired = {
-      CODEX_MODEL: codexModel,
       CODEX_HOME: "/workspace/.codex",
       CODEX_AUTH_PATH: "/workspace/.codex/auth.json",
       CODEX_CHATGPT_ENDPOINT: "http://proxy:8789/backend-api/codex/responses",
@@ -1608,8 +1598,15 @@ function ensureComposeCodexEntries() {
       RUNTIME_CODEX_VOLUME: runtimeCodexVolume(runtimeRepoHost),
       PROXY_BASE_URL: "http://proxy:8789",
     };
-    const lines = content.split(/\r?\n/);
+    let lines = content.split(/\r?\n/);
     let modified = false;
+    if (isLegacyLauncherModelPin(envMap.CODEX_MODEL)) {
+      lines = lines.filter((line) => !line.startsWith("CODEX_MODEL="));
+      modified = true;
+      console.log(
+        `[runtime-dev] Removed CODEX_MODEL=${legacyLauncherCodexModel} from docker/.env.local; the controller now chooses each job's model.`
+      );
+    }
     for (const [key, value] of Object.entries(desired)) {
       const idx = lines.findIndex((l) => l.startsWith(`${key}=`));
       if (idx === -1) {
@@ -2677,7 +2674,7 @@ async function clearProviderPortForPrebuiltLaunch() {
   }
 }
 
-function providerEnv(baseEnv = {}) {
+export function providerEnv(baseEnv = {}) {
   const env = { ...process.env, ...baseEnv };
   env.RUST_LOG = env.RUST_LOG || "info,runtime_provider=info";
   env.PROVIDER_ID = env.PROVIDER_ID || "instafy-cloud";
@@ -2687,7 +2684,13 @@ function providerEnv(baseEnv = {}) {
   env.PROVIDER_AUTH_TOKEN = env.PROVIDER_AUTH_TOKEN || "dev-provider-token";
   env.CONTROLLER_BASE_URL =
     env.CONTROLLER_BASE_URL || `http://host.docker.internal:${controllerPort}`;
-  env.CODEX_MODEL = normalizeCodexModel(env.CODEX_MODEL || defaultCodexModel);
+  // The provider's environment is inherited by every runtime it launches
+  // (compose interpolates CODEX_MODEL). The controller sends each job's
+  // model, so a launcher-written pin is dropped here; a deliberate operator
+  // override is passed through.
+  if (!env.CODEX_MODEL || isLegacyLauncherModelPin(env.CODEX_MODEL)) {
+    delete env.CODEX_MODEL;
+  }
   env.DOCKER_COMPOSE_FILE = env.DOCKER_COMPOSE_FILE || path.join(repoRoot, "docker", "docker-compose.runtime.yml");
   env.DOCKER_SERVICE = env.DOCKER_SERVICE || "runtime";
   env.DOCKER_PROJECT_PREFIX = env.DOCKER_PROJECT_PREFIX || "instafy-runtime-";

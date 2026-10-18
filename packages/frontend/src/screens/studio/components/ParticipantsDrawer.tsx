@@ -87,6 +87,8 @@ function notableCredentialLine(
       return { text: "Its credential was revoked", tone: "danger" };
     case "none":
       return { text: "No AI credential", tone: "warning" };
+    case "managed":
+      return { text: agent.credentialLabel ? `${agent.credentialLabel} · credits` : "Credits", tone: "muted" };
     case "pinned":
       return { text: `${descriptor} · pinned`, tone: "muted" };
     default:
@@ -306,7 +308,7 @@ function AgentInlineControls({
     >
       {modelOptions.length > 0 ? (
         <InlineMenuSelect
-          displayLabel={agent.model ?? "Default"}
+          displayLabel={agent.model ?? agent.modelLabel ?? "Default"}
           selectedKey={agent.model ?? DEFAULT_MENU_KEY}
           options={modelMenuOptions}
           ariaLabel={`Model for @${agent.handle}`}
@@ -757,7 +759,7 @@ export function ParticipantsDrawer({
                     const isEditable = editing != null && agent.agentId != null && agent.canEditProfile === true;
                     // Read-only fallback: the same sentence, as plain text.
                     const readOnlyMeta = [
-                      agent.model,
+                      agent.modelLabel ?? agent.model,
                       normalizeReasoningEffort(agent.reasoningEffort)
                         ? reasoningEffortLabel(
                             normalizeReasoningEffort(
