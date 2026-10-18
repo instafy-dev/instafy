@@ -492,7 +492,12 @@ pub(super) async fn upsert_origin_instance(
                              when origin_instances.status = 'released' then null
                              else origin_instances.origin_id
                            end,
-                           mode = excluded.mode,
+                           -- An ensure that names no mode (a dispatch, requeue or
+                           -- automation start) keeps the mode this generation already
+                           -- has. Clearing it took the instance out of every
+                           -- hosted-origin query (rolling saves, the pre-stop flush)
+                           -- and reset a healthy origin to 'requested'.
+                           mode = coalesce(excluded.mode, origin_instances.mode),
                            protocols = excluded.protocols,
                            metadata = excluded.metadata,
                            -- Preserve a healthy origin when nothing changed. Resetting the status to
@@ -505,7 +510,8 @@ pub(super) async fn upsert_origin_instance(
                              when origin_instances.status = 'online'
                                and origin_instances.origin_id is not null
                                and origin_instances.endpoint is not null
-                               and origin_instances.mode is not distinct from excluded.mode
+                               and origin_instances.mode is not distinct from
+                                 coalesce(excluded.mode, origin_instances.mode)
                                and origin_instances.protocols is not distinct from excluded.protocols
                              then origin_instances.status
                              else 'requested'
