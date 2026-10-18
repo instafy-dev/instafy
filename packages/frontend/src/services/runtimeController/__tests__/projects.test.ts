@@ -46,6 +46,7 @@ import {
   listControllerOrganizations,
   listControllerOrgMembers,
   listControllerProjectMembers,
+  pickDefaultSpaceOrg,
   updateControllerProjectIdentity,
 } from "../projects";
 
@@ -392,6 +393,12 @@ describe("project and organization request contexts", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
+        new Response(JSON.stringify({ orgs: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
         new Response(
           JSON.stringify({
             orgId: "22222222-2222-4222-8222-222222222222",
@@ -423,7 +430,7 @@ describe("project and organization request contexts", () => {
 
     expect(resolveControllerRequestContextMock).toHaveBeenCalledTimes(1);
     expect(resolveControllerRequestContextMock).toHaveBeenCalledWith(null);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(fetchMock.mock.calls[0]).toEqual([
       "https://controller-a.test/orgs",
       expect.objectContaining({
@@ -431,6 +438,13 @@ describe("project and organization request contexts", () => {
       }),
     ]);
     expect(fetchMock.mock.calls[1]).toEqual([
+      "https://controller-a.test/orgs",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({ authorization: "Bearer account-a-token" }),
+      }),
+    ]);
+    expect(fetchMock.mock.calls[2]).toEqual([
       "https://controller-a.test/orgs/22222222-2222-4222-8222-222222222222/projects",
       expect.objectContaining({
         headers: expect.objectContaining({ authorization: "Bearer account-a-token" }),
@@ -543,6 +557,99 @@ describe("project and organization request contexts", () => {
     expect(vi.getTimerCount()).toBe(0);
     await vi.advanceTimersByTimeAsync(10_000);
     expect(requestSignal?.aborted).toBe(false);
+  });
+});
+
+describe("space creation without a chosen team", () => {
+  const OWNER_ID = "624ae065-1cfe-4a2b-9c3d-0123456789ab";
+  const PERSONAL_TEAM = { id: "c8328c7e-0000-4000-8000-000000000001", slug: `user-${OWNER_ID}`, name: "Personal team", role: "owner" };
+  const STRAY_PERSONAL = { id: "9da0f8e7-0000-4000-8000-000000000002", slug: "personal-1a2b3c4d", name: "Personal", role: "owner" };
+  const ACME = { id: "acacacac-0000-4000-8000-000000000003", slug: "acme", name: "Acme", role: "owner" };
+  const INVITED = { id: "bbbbbbbb-0000-4000-8000-000000000004", slug: "studio", name: "Studio", role: "builder" };
+  const SPACE_ID = "11111111-1111-4111-8111-111111111111";
+
+  beforeEach(() => {
+    resetControllerMocks();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function stubController(orgList: Response | (() => never)) {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === "http://controller.test/orgs" && (init?.method ?? "GET") === "GET") {
+        return typeof orgList === "function" ? orgList() : orgList;
+      }
+      if (url === "http://controller.test/orgs" && init?.method === "POST") {
+        return new Response(JSON.stringify({ orgId: "dddddddd-0000-4000-8000-000000000005", orgSlug: `user-${OWNER_ID}`, orgName: "Personal team" }), { status: 200 });
+      }
+      const orgId = url.match(/\/orgs\/([^/]+)\/projects$/)?.[1] ?? null;
+      return new Response(JSON.stringify({ projectId: SPACE_ID, projectName: "My bookkeeping", orgId, orgName: null }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  const orgsResponse = (orgs: unknown[]) => new Response(JSON.stringify({ orgs }), { status: 200 });
+  const postedOrgs = (fetchMock: ReturnType<typeof stubController>) =>
+    fetchMock.mock.calls.filter(([url, init]) => url === "http://controller.test/orgs" && init?.method === "POST");
+
+  it("puts a space from the Spaces page into the personal team the user already owns", async () => {
+    // Production finding: the empty Spaces page sent its "Personal" heading
+    // as the team name, and the controller minted a second personal team.
+    const fetchMock = stubController(orgsResponse([PERSONAL_TEAM, INVITED]));
+
+    await expect(
+      createControllerProject({ projectType: "customer", projectName: "My bookkeeping", orgId: null, orgName: "Personal" }),
+    ).resolves.toMatchObject({ projectId: SPACE_ID, orgId: PERSONAL_TEAM.id });
+
+    expect(postedOrgs(fetchMock)).toEqual([]);
+    expect(fetchMock.mock.calls.at(-1)?.[0]).toBe(`http://controller.test/orgs/${PERSONAL_TEAM.id}/projects`);
+  });
+
+  it.each([
+    ["the only team they own", [ACME, INVITED], ACME],
+    ["the pinned personal team over a stray duplicate", [STRAY_PERSONAL, PERSONAL_TEAM], PERSONAL_TEAM],
+    ["the personal team beside another owned team", [ACME, STRAY_PERSONAL], STRAY_PERSONAL],
+  ])("reuses %s when no team is chosen", async (_label, orgs, expected) => {
+    const fetchMock = stubController(orgsResponse(orgs));
+
+    await expect(createControllerProject({ projectType: "customer" })).resolves.toMatchObject({ orgId: expected.id });
+    expect(postedOrgs(fetchMock)).toEqual([]);
+  });
+
+  it.each([
+    ["owns no team", () => orgsResponse([INVITED])],
+    ["owns only unrelated teams", () => orgsResponse([ACME, { ...ACME, id: "eeeeeeee-0000-4000-8000-000000000006", slug: "beta", name: "Beta" }])],
+    ["cannot list teams", () => new Response(JSON.stringify({ message: "unavailable" }), { status: 503 })],
+    ["gets an unreadable team list", () => new Response("not json", { status: 200 })],
+  ])("ensures the stored personal team label when the user %s", async (_label, orgList) => {
+    const fetchMock = stubController(orgList());
+
+    await createControllerProject({ projectType: "customer", orgName: "Personal" });
+
+    expect(postedOrgs(fetchMock).map(([, init]) => JSON.parse(String(init?.body)))).toEqual([{ orgName: "Personal team" }]);
+  });
+
+  it("keeps an explicitly named or slugged team without looking up existing ones", async () => {
+    const fetchMock = stubController(orgsResponse([PERSONAL_TEAM]));
+
+    await createControllerProject({ projectType: "customer", orgName: "Bookkeeping" });
+    await createControllerProject({ projectType: "customer", orgSlug: "books", orgName: "Personal" });
+
+    expect(fetchMock.mock.calls.some(([url, init]) => url === "http://controller.test/orgs" && !init?.method)).toBe(false);
+    expect(postedOrgs(fetchMock).map(([, init]) => JSON.parse(String(init?.body)))).toEqual([
+      { orgName: "Bookkeeping" },
+      { orgSlug: "books", orgName: "Personal team" },
+    ]);
+  });
+
+  it("never treats a team the user only belongs to as theirs", () => {
+    expect(pickDefaultSpaceOrg([INVITED])).toBeNull();
+    expect(pickDefaultSpaceOrg([{ ...PERSONAL_TEAM, role: "admin" }])).toBeNull();
+    expect(pickDefaultSpaceOrg([{ ...ACME, role: " Owner " }])).toEqual({ ...ACME, role: " Owner " });
+    expect(pickDefaultSpaceOrg([])).toBeNull();
   });
 });
 

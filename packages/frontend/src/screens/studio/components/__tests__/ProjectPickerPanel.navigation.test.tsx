@@ -77,6 +77,28 @@ describe("ProjectPickerPanel overview navigation", () => {
   });
 
   it.each([
+    ["no active space", [], null, { orgId: null, orgName: null }],
+    ["a space in a team", [{ ...alpha, orgId: "team-1", orgName: "Acme" }], A, { orgId: "team-1", orgName: "Acme" }],
+  ])("creates a space with %s without sending a display label as a team", async (_label, projectList, activeProjectId, expectedOrg) => {
+    // The empty Spaces page used to send its "Personal" heading, and the
+    // controller minted a second personal team for a user who had one.
+    window.history.replaceState(null, "", "/studio?panel=projects");
+    const onCreateProject = vi.fn();
+    mocks.projects.mockReturnValue({ projectList, activeProjectId,
+      createProject: mocks.createProject, switchProject: mocks.switchProject });
+    mocks.merged.mockReturnValue({ mergedProjects: projectList, remoteLoading: false, remoteError: null, remoteRefreshing: false });
+    await act(async () => root.render(<BrowserRouter><ProjectPickerPanel onCreateProject={onCreateProject} searchTerm="" onSearchTermChange={() => {}} /></BrowserRouter>));
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="project-picker-new-project"]')!.click());
+    const nameInput = container.querySelector<HTMLInputElement>('[data-testid="project-picker-new-project-name"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(nameInput, "My bookkeeping");
+      nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => nameInput.form!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(onCreateProject).toHaveBeenCalledExactlyOnceWith("My bookkeeping", expectedOrg);
+  });
+
+  it.each([
     [false, "Space not found", true],
     [true, "This space was deleted", false],
   ])("names a blocked space deleted=%s plainly and offers only what can help", async (deleted, heading, offersActions) => {

@@ -11,7 +11,7 @@ import {
 export { deriveGithubImportTargetPath } from "./githubImportPath";
 import { logControllerRequestError } from "./logging";
 import { CONTROLLER_READ_BUDGET_MS, createControllerReadBudget } from "./readBudget";
-import { PERSONAL_ORG_LABEL } from "../../org/orgNaming";
+import { isPersonalOrgName, PERSONAL_ORG_LABEL } from "../../org/orgNaming";
 
 export interface ControllerProjectCreateParams {
   projectType?: "sandbox" | "customer";
@@ -264,6 +264,59 @@ export async function createControllerOrganization(
   return createControllerOrganizationWithContext(params, requestContext);
 }
 
+/** The slug the controller pins every personal team to: `user-<owner id>`. */
+const PERSONAL_ORG_SLUG_PATTERN = /^user-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The team a space joins when its creator chose none: the only team they own,
+ * else the personal team they own. Null when they own neither, and only then
+ * may the personal team be minted. Teams they only belong to never qualify.
+ */
+export function pickDefaultSpaceOrg(
+  orgs: readonly ControllerOrgSummary[],
+): ControllerOrgSummary | null {
+  const owned = orgs.filter((org) => org.role?.trim().toLowerCase() === "owner");
+  if (owned.length === 1) {
+    return owned[0];
+  }
+  // The pinned personal team wins over a stray duplicate merely named like it.
+  return (
+    owned.find((org) => PERSONAL_ORG_SLUG_PATTERN.test(org.slug ?? "")) ??
+    owned.find((org) => isPersonalOrgName(org.name)) ??
+    null
+  );
+}
+
+async function findDefaultSpaceOrgWithContext(
+  requestContext: ControllerRequestContext,
+): Promise<ControllerOrgSummary | null> {
+  const budget = createControllerReadBudget();
+  try {
+    const response = await budget.wait(() => fetch(`${requestContext.baseUrl}/orgs`, {
+      signal: budget.signal,
+      headers: {
+        authorization: `Bearer ${requestContext.accessToken}`,
+      },
+    }));
+    if (!response.ok) {
+      return null;
+    }
+    const payload = (await budget.wait(() => response.json().catch(() => null))) as {
+      orgs?: ControllerOrgSummary[];
+    } | null;
+    const orgs = Array.isArray(payload?.orgs)
+      ? payload.orgs.filter((org) => typeof org.id === "string" && org.id.length > 0)
+      : [];
+    return pickDefaultSpaceOrg(orgs);
+  } catch {
+    // Without the list, fall back to ensuring the personal team, which the
+    // controller keys to one slug per owner.
+    return null;
+  } finally {
+    budget.dispose();
+  }
+}
+
 export async function createControllerProject(
   params: ControllerProjectCreateParams = {},
 ): Promise<ControllerProjectCreateResult | null> {
@@ -279,14 +332,18 @@ export async function createControllerProject(
   let resolvedOrgId = normalizedOrgId ?? null;
   let resolvedOrgName = params.orgName ?? null;
   if (!resolvedOrgId) {
-    const fallbackOrgName =
-      typeof params.orgName === "string" && params.orgName.trim().length > 0
-        ? params.orgName.trim()
-        : PERSONAL_ORG_LABEL;
-    const org = await createControllerOrganizationWithContext(
+    const requestedOrgName = params.orgName?.trim() || null;
+    // No team was chosen: join one the creator already owns before ensuring
+    // the personal team. A display label such as "Personal" is sent as the
+    // stored label, which the controller resolves to the owner's own team.
+    const personalTeamRequested = !params.orgSlug?.trim() && isPersonalOrgName(requestedOrgName);
+    const existingOrg = personalTeamRequested
+      ? await findDefaultSpaceOrgWithContext(requestContext)
+      : null;
+    const org = existingOrg ?? await createControllerOrganizationWithContext(
       {
         orgSlug: params.orgSlug ?? null,
-        orgName: fallbackOrgName,
+        orgName: isPersonalOrgName(requestedOrgName) ? PERSONAL_ORG_LABEL : requestedOrgName,
       },
       requestContext,
     );

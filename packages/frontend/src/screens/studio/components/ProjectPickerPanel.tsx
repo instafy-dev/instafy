@@ -373,9 +373,11 @@ export function ProjectPickerPanel({ onCreateProject, searchTerm, onSearchTermCh
     }
     setCreatePending(true);
     try {
+      // With no active team, send none: the "Personal" heading is a display
+      // label, and the create path reuses a team the user already owns.
       await onCreateProject(trimmedName, {
         orgId: activeOrgId,
-        orgName: activeOrgName
+        orgName: activeOrgId ? activeOrgName : null
       });
       setNewProjectName("");
       onSearchTermChange("");
