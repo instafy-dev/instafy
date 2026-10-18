@@ -83,34 +83,79 @@ export function loadPersistedWorkspaceTabs(): PersistedWorkspaceTabsState | null
   }
 }
 
-// Spaces removed from this tab's project store. Their saved tabs are dropped,
-// and every later write leaves them out: the tab strip keeps a copy it loaded
-// before the removal, and writing that copy back would restore them. A space
-// that returns to the store is saved again.
-const removedProjectIds = new Set<string>();
+// Spaces confirmed deleted. Their saved tabs are dropped, and later writes
+// from every tab of this browser leave them out: a tab strip keeps a copy it
+// loaded before the deletion, in this tab or another one, and writing that
+// copy back would restore them. The list is stored next to the tabs, so other
+// tabs read it too, and keeps the latest DELETED_SPACES_LIMIT ids. A space
+// created again in this browser is saved again.
+const DELETED_SPACES_STORAGE_KEY = "instafy.workspace.tabs.deleted-spaces";
+const DELETED_SPACES_LIMIT = 50;
 
+function loadDeletedSpaceIds(): string[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+  try {
+    const parsed: unknown = JSON.parse(window.localStorage.getItem(DELETED_SPACES_STORAGE_KEY) ?? "[]");
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function persistDeletedSpaceIds(projectIds: readonly string[]) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    if (projectIds.length === 0) {
+      window.localStorage.removeItem(DELETED_SPACES_STORAGE_KEY);
+    } else {
+      window.localStorage.setItem(
+        DELETED_SPACES_STORAGE_KEY,
+        JSON.stringify(projectIds.slice(-DELETED_SPACES_LIMIT)),
+      );
+    }
+  } catch (error) {
+    console.warn("[workspace-tabs] failed to persist deleted spaces:", error);
+  }
+}
+
+function withoutProjects(
+  projects: PersistedWorkspaceTabsState["projects"],
+  projectIds: ReadonlySet<string>,
+): PersistedWorkspaceTabsState["projects"] {
+  return projectIds.size === 0
+    ? projects
+    : Object.fromEntries(Object.entries(projects).filter(([projectId]) => !projectIds.has(projectId)));
+}
+
+/** Drops the saved tabs of spaces confirmed deleted, here and for later writes. */
 export function forgetWorkspaceTabsForProjects(projectIds: readonly string[]) {
   if (projectIds.length === 0) {
     return;
   }
-  projectIds.forEach((projectId) => removedProjectIds.add(projectId));
+  const deleted = new Set(projectIds);
+  persistDeletedSpaceIds([...loadDeletedSpaceIds().filter((projectId) => !deleted.has(projectId)), ...deleted]);
   const persisted = loadPersistedWorkspaceTabs();
   if (persisted && projectIds.some((projectId) => persisted.projects[projectId] !== undefined)) {
-    persistWorkspaceTabsState(persisted);
+    persistWorkspaceTabsState({ ...persisted, projects: withoutProjects(persisted.projects, deleted) });
   }
 }
 
 export function rememberWorkspaceTabsForProject(projectId: string) {
-  removedProjectIds.delete(projectId);
+  const deletedIds = loadDeletedSpaceIds();
+  if (deletedIds.includes(projectId)) {
+    persistDeletedSpaceIds(deletedIds.filter((id) => id !== projectId));
+  }
 }
 
 export function persistWorkspaceTabsState(state: PersistedWorkspaceTabsState) {
   if (typeof window === "undefined") {
     return;
   }
-  const projects = removedProjectIds.size === 0
-    ? state.projects
-    : Object.fromEntries(Object.entries(state.projects).filter(([projectId]) => !removedProjectIds.has(projectId)));
+  const projects = withoutProjects(state.projects, new Set(loadDeletedSpaceIds()));
   try {
     window.localStorage.setItem(WORKSPACE_TABS_STORAGE_KEY, JSON.stringify({ ...state, projects }));
   } catch (error) {

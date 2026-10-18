@@ -527,8 +527,8 @@ function ChatMessageFileAttachment({ attachment }: { attachment: ChatFileAttachm
 }
 
 /**
- * A `/skills import` line a chip or a form sent for the person: their bubble
- * says what it does, and the command itself stays one click away.
+ * A first-party connector's `/skills import` line, as its chip sends it: the
+ * bubble says what it does, and the command itself stays one click away.
  */
 function SkillImportMessageBody({ label, command }: { label: string; command: string }) {
   return (

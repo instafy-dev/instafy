@@ -242,10 +242,12 @@ export function getSkillImportConversationTitle(message: string): string | null 
 const SKILL_IMPORT_SWITCHES = new Set(["--overwrite", "--start"]);
 
 /**
- * What a chat bubble says for a `/skills import` line ("Set up FreeFinance"),
- * named as in the chat title. Only a line of the command and its own flags
- * qualifies: a line with more words than that shows as written, so nothing a
- * person typed is hidden.
+ * What a chat bubble says for a first-party connector's `/skills import` line
+ * ("Connect FreeFinance"), the words of its chip and of the chat title. Any
+ * other source shows as written: a `--name` is chosen by whoever wrote the
+ * line, so plain words could pass someone's pack off as a connector, and the
+ * source is what a person needs to see. Only a line of the command and its own
+ * flags qualifies, so nothing else a person typed is hidden.
  */
 export function getSkillImportMessageLabel(message: string): string | null {
   const trimmed = message.trim();
@@ -264,7 +266,7 @@ export function getSkillImportMessageLabel(message: string): string | null {
     }
   }
   const description = describeSkillImport(trimmed);
-  return description ? `Set up ${description.label}` : null;
+  return description?.firstParty ? `Connect ${description.label}` : null;
 }
 
 function stripLeadingFiller(text: string): string {

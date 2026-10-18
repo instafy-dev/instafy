@@ -1337,7 +1337,7 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
       handleOpenProjectsPanel({ projectId: null });
       suppressProjectAutoCreate();
     }
-    removeProject(deletedProjectId);
+    removeProject(deletedProjectId, { forgetSavedTabs: true });
     // Lists cached from before the delete refresh now, not on the next focus.
     window.dispatchEvent(new CustomEvent<ProjectAccessRefreshEventDetail>(PROJECT_ACCESS_REFRESH_EVENT, {
       detail: { projectId: null, deletedProjectId },
@@ -1404,11 +1404,11 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
         4000,
       );
       setOrgDeletePending(false);
-      removeProjectsByOrgId(deletedOrgId);
+      removeProjectsByOrgId(deletedOrgId, { forgetSavedTabs: true });
       return;
     }
 
-    removeProjectsByOrgId(deletedOrgId);
+    removeProjectsByOrgId(deletedOrgId, { forgetSavedTabs: true });
     showStatus(activeOrgIsPersonal ? "Personal space deleted." : "Team deleted.", "success", 2500);
     setOrgDeletePending(false);
   }, [

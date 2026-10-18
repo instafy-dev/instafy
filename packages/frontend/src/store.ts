@@ -130,7 +130,16 @@ export interface RemoveProjectOptions {
    * behind it, as if they were the missing space's.
    */
   openFallback?: boolean;
+  /**
+   * The space is confirmed deleted, so its saved workspace tabs go too. Off
+   * by default: a space also leaves the store when its access check gets a
+   * 401, 403 or 404, and a 401 can be a token refresh in flight, so that
+   * removal must not erase the tabs of a space that is still there.
+   */
+  forgetSavedTabs?: boolean;
 }
+
+export type RemoveProjectsByOrgIdOptions = Pick<RemoveProjectOptions, "forgetSavedTabs">;
 
 export interface SessionStore {
   state: SiteBuilderState;
@@ -168,7 +177,7 @@ export interface SessionStore {
   setProjectName: (projectId: string, name: string) => void;
   setProjectIdentity: (projectId: string, identity: ProjectIdentity) => void;
   removeProject: (projectId: string, options?: RemoveProjectOptions) => void;
-  removeProjectsByOrgId: (orgId: string) => void;
+  removeProjectsByOrgId: (orgId: string, options?: RemoveProjectsByOrgIdOptions) => void;
   undo: () => void;
   redo: () => void;
   reset: () => void;
@@ -293,7 +302,6 @@ export const useWorkspaceStore = create<SessionStore>()(
         ? hydrateProjectState(snapshot.projects[snapshot.activeProjectId])
         : createProjectState();
 
-    Object.keys(nextProjects).forEach(rememberWorkspaceTabsForProject);
     set({
       workspaceScope: scope,
       state: nextState,
@@ -603,7 +611,6 @@ export const useWorkspaceStore = create<SessionStore>()(
     if (!trimmed) {
       return;
     }
-    const removed = Boolean(get().projects[trimmed]);
     set((store) => {
       if (!store.projects[trimmed]) {
         return {};
@@ -633,11 +640,11 @@ export const useWorkspaceStore = create<SessionStore>()(
         future: [],
       };
     });
-    if (removed) {
+    if (options?.forgetSavedTabs) {
       forgetWorkspaceTabsForProjects([trimmed]);
     }
   },
-  removeProjectsByOrgId: (orgId) => {
+  removeProjectsByOrgId: (orgId, options) => {
     const trimmed = orgId.trim();
     if (!trimmed) {
       return;
@@ -673,7 +680,9 @@ export const useWorkspaceStore = create<SessionStore>()(
         future: [],
       };
     });
-    forgetWorkspaceTabsForProjects(removedIds);
+    if (options?.forgetSavedTabs) {
+      forgetWorkspaceTabsForProjects(removedIds);
+    }
   },
   undo: () => {
     const { history, state, future, projects, activeProjectId } = get();

@@ -314,12 +314,14 @@ describe("conversationAutoTitle", () => {
     expect(describeSkillImport(BOOKKEEPING_PACK_IMPORT)).toEqual({ firstParty: false, label: "Bookkeeping" });
   });
 
-  it("says what a skill import line sets up, by the title's name, and leaves other text as written", () => {
-    expect(getSkillImportMessageLabel(FREEFINANCE_IMPORT)).toBe("Set up FreeFinance");
-    expect(getSkillImportMessageLabel(`  ${BOOKKEEPING_PACK_IMPORT}  `)).toBe("Set up Bookkeeping");
+  it("says what a first-party connector's import line does, by the chip's words, and leaves other text as written", () => {
+    expect(getSkillImportMessageLabel(FREEFINANCE_IMPORT)).toBe("Connect FreeFinance");
+    expect(getSkillImportMessageLabel(`  ${FREEFINANCE_IMPORT}  `)).toBe(getStructuredConversationTitle([userMessage(FREEFINANCE_IMPORT)]));
+    // Any other source stays visible as the command itself.
+    expect(getSkillImportMessageLabel(BOOKKEEPING_PACK_IMPORT)).toBeNull();
     expect(getSkillImportMessageLabel(
       "/skills import https://github.com/acme/tools/tree/main/skills/acme-reports --overwrite --name acme-reports",
-    )).toBe("Set up Acme Reports");
+    )).toBeNull();
     // Words past the flags are a person's own; the bubble must not hide them.
     expect(getSkillImportMessageLabel(`${FREEFINANCE_IMPORT} and then book March`)).toBeNull();
     expect(getSkillImportMessageLabel(`${FREEFINANCE_IMPORT}\nThen book March`)).toBeNull();
@@ -327,6 +329,13 @@ describe("conversationAutoTitle", () => {
     expect(getSkillImportMessageLabel("/skills import --start")).toBeNull();
     expect(getSkillImportMessageLabel("/skills list")).toBeNull();
     expect(getSkillImportMessageLabel("Set up FreeFinance for me")).toBeNull();
+  });
+
+  it("never names a third-party import after the connector its --name borrows", () => {
+    const impostor = "/skills import https://github.com/attacker/evil --name freefinance --start";
+    expect(describeSkillImport(impostor)).toEqual({ firstParty: false, label: "Freefinance" });
+    expect(getSkillImportMessageLabel(impostor)).toBeNull();
+    expect(getSkillImportMessageLabel("/skills import https://github.com/attacker/evil --name freefinance")).toBeNull();
   });
 
   it("builds a short sentence-case fallback title from an opening message", () => {
