@@ -2880,6 +2880,17 @@ fn latest_completed_reasoning_message_from_events<'a>(events: &'a [JsonValue]) -
     })
 }
 
+/// Short excerpt for log lines and diagnostic fallback summaries. Never use
+/// it as the body of a reply the user is meant to read in full.
+const FINAL_MESSAGE_PREVIEW_CHARS: usize = 500;
+
+fn log_preview(text: &str) -> String {
+    text.trim()
+        .chars()
+        .take(FINAL_MESSAGE_PREVIEW_CHARS)
+        .collect::<String>()
+}
+
 fn derive_final_json(
     turn_complete_message: Option<&str>,
     completed_agent_message_item: Option<&str>,
@@ -2913,14 +2924,16 @@ fn derive_final_json(
         .or(agent_message_event)
     else {
         if let Some(commentary) = commentary_message {
-            let preview = commentary.trim().chars().take(500).collect::<String>();
+            let preview = log_preview(commentary);
             if allow_plain_text_fallback {
                 tracing::warn!(
                     message_preview = %preview,
                     "Codex completed after commentary without a final assistant message; using commentary recovery summary"
                 );
+                // The recovered text becomes the user-visible reply, so keep it
+                // whole; the controller client applies the message-size cap.
                 return Ok(json!({
-                    "summary": preview,
+                    "summary": commentary.trim(),
                     "files": [],
                 }));
             }
@@ -2942,7 +2955,7 @@ fn derive_final_json(
         // commentary-style shape keeps it classified as a missing final so
         // recovery retries still run, just with content instead of silence.
         if let Some(reasoning) = reasoning_message {
-            let preview = reasoning.trim().chars().take(500).collect::<String>();
+            let preview = log_preview(reasoning);
             tracing::warn!(
                 message_preview = %preview,
                 "Codex completed after reasoning output without a final assistant message"
@@ -2963,14 +2976,20 @@ fn derive_final_json(
             "files": [],
         }));
     };
-    let preview = fallback_source.trim().chars().take(500).collect::<String>();
+    let preview = log_preview(fallback_source);
     if allow_plain_text_fallback {
-        tracing::warn!(
+        // Plain-text final mode: a reply that is not JSON is the expected
+        // shape, not a failure. A warning on every such turn buried the real
+        // parse failures (the branch below), so this is debug only.
+        tracing::debug!(
             message_preview = %preview,
-            "failed to parse Codex final assistant message as JSON; using plain text recovery summary"
+            "Codex final assistant message is plain text; using it as the summary"
         );
+        // In plain-text final mode this is the model's actual answer, not a
+        // diagnostic: return all of it (the controller client still bounds it
+        // by MAX_AGENT_SUMMARY_CHARS). Only the log line uses the preview.
         return Ok(json!({
-            "summary": preview,
+            "summary": fallback_source.trim(),
             "files": [],
         }));
     }
@@ -6082,6 +6101,107 @@ mod tests {
 
         assert_eq!(parsed["summary"], "Plain text recovery summary.");
         assert_eq!(parsed["files"], json!([]));
+    }
+
+    fn long_plain_text_final() -> String {
+        // A normal-length plain-text reply whose 500-char cut used to land
+        // mid-word and drop the closing line.
+        let body =
+            "Here is a short guide with the options, how to reach each one and caveats. ".repeat(9);
+        let text = format!("{body}Tap “Check” on any item. Open it from the card.");
+        assert_eq!(text.chars().count(), 722);
+        text
+    }
+
+    #[test]
+    fn derive_final_json_keeps_full_plain_text_final_when_plain_text_fallback_is_allowed() {
+        let text = long_plain_text_final();
+        let raw = format!("\n  {text}\n");
+        for candidate in [
+            (Some(raw.as_str()), None, None),
+            (None, Some(raw.as_str()), None),
+            (None, None, Some(raw.as_str())),
+        ] {
+            let parsed =
+                derive_final_json(candidate.0, candidate.1, candidate.2, None, None, true).unwrap();
+            assert_eq!(parsed["summary"].as_str().unwrap(), text);
+            assert_eq!(parsed["files"], json!([]));
+        }
+    }
+
+    #[test]
+    fn derive_final_json_keeps_full_commentary_when_plain_text_fallback_is_allowed() {
+        let text = long_plain_text_final();
+        let parsed = derive_final_json(None, None, None, Some(text.as_str()), None, true).unwrap();
+        assert_eq!(parsed["summary"].as_str().unwrap(), text);
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedLog(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLog {
+        type Writer = Self;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn warnings_while(run: impl FnOnce()) -> String {
+        let log = CapturedLog::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(log.clone())
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, run);
+        let text = String::from_utf8_lossy(&log.0.lock().unwrap()).to_string();
+        text
+    }
+
+    #[test]
+    fn a_plain_text_final_in_plain_text_mode_is_not_a_warning_but_a_real_parse_failure_is() {
+        let text = long_plain_text_final();
+        let quiet = warnings_while(|| {
+            derive_final_json(Some(text.as_str()), None, None, None, None, true).unwrap();
+        });
+        assert!(!quiet.contains("WARN"), "{quiet}");
+        let loud = warnings_while(|| {
+            derive_final_json(Some(text.as_str()), None, None, None, None, false).unwrap();
+        });
+        assert!(
+            loud.contains("failed to parse Codex final assistant message as JSON"),
+            "{loud}"
+        );
+    }
+
+    #[test]
+    fn derive_final_json_still_previews_invalid_json_when_plain_text_fallback_is_off() {
+        let text = long_plain_text_final();
+        let parsed = derive_final_json(Some(text.as_str()), None, None, None, None, false).unwrap();
+        let summary = parsed["summary"].as_str().unwrap();
+        assert!(summary.starts_with(INVALID_FINAL_ASSISTANT_MESSAGE_JSON_SUMMARY_PREFIX));
+        assert!(summary.ends_with(&log_preview(&text)));
+        assert!(!summary.contains("Open it from the card."));
+    }
+
+    #[test]
+    fn derive_final_json_long_json_final_is_unchanged() {
+        let long_summary = long_plain_text_final();
+        let raw = json!({"summary": long_summary, "files": []}).to_string();
+        let parsed = derive_final_json(Some(raw.as_str()), None, None, None, None, true).unwrap();
+        assert_eq!(parsed["summary"].as_str().unwrap(), long_summary);
+        let parsed = derive_final_json(Some(raw.as_str()), None, None, None, None, false).unwrap();
+        assert_eq!(parsed["summary"].as_str().unwrap(), long_summary);
     }
 
     #[test]
