@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { useWorkspaceStore } from "../store";
+import { useWorkspaceStore, type RemoveProjectOptions } from "../store";
 import type { ProjectOrgInfo, SiteBuilderState } from "../types";
 
 interface CreateProjectOptions {
@@ -17,7 +17,7 @@ interface ProjectStateContextValue {
   switchProject: (projectId: string) => void;
   setProjectOrg: (projectId: string, org: ProjectOrgInfo) => void;
   setProjectName: (projectId: string, name: string) => void;
-  removeProject: (projectId: string) => void;
+  removeProject: (projectId: string, options?: RemoveProjectOptions) => void;
   removeProjectsByOrgId: (orgId: string) => void;
 }
 
@@ -65,8 +65,8 @@ export function ProjectStateProvider({ children }: { children: ReactNode }) {
     useWorkspaceStore.getState().setProjectName(projectId, name);
   }, []);
 
-  const removeProject = useCallback((projectId: string) => {
-    useWorkspaceStore.getState().removeProject(projectId);
+  const removeProject = useCallback((projectId: string, options?: RemoveProjectOptions) => {
+    useWorkspaceStore.getState().removeProject(projectId, options);
   }, []);
 
   const removeProjectsByOrgId = useCallback((orgId: string) => {

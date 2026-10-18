@@ -44,7 +44,7 @@ function Chats({ query, onClose, onOpenAll }: { query: string; onClose: () => vo
     .slice().sort((a, b) => b.createdAt - a.createdAt) : [], [conversations, query, scopeReady]);
   return (
     <section aria-label="Loaded chats" className="space-y-2">
-      <p className="px-2 text-xs text-slate-500 dark:text-slate-400">Loaded chats in {activeProjectName}</p>
+      {activeProjectName ? <p className="px-2 text-xs text-slate-500 dark:text-slate-400">Loaded chats in {activeProjectName}</p> : null}
       {projectAccessBlocked ? <p role="status" className="px-2 text-sm">Chat access is unavailable for this space.</p> : null}
       {!scopeReady && !projectAccessBlocked ? <p role="status" className="px-2 text-sm">Loading this space’s chats…</p> : null}
       {scopeReady && remoteConversationHistoryError ? (
