@@ -32,6 +32,7 @@ import { useProject } from "../../../projects/useProject";
 import { useProjects } from "../../../projects/useProjects";
 import { NO_SPACE_OPEN_NAME, spaceDisplayName } from "../../../projects/spaceName";
 import { useRuntime } from "../../../runtime/useRuntime";
+import { isUUID } from "../../../utils/uuid";
 import { ConversationQuickTabs } from "../../../workspace/ConversationQuickTabs";
 import { WorkspaceTabs } from "../../../workspace/WorkspaceTabs";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
@@ -101,7 +102,7 @@ export function StudioTopBar({ mobileNavigation, mobilePageHeader, compactMobile
     onBrowseChats,
     topbarLocationOverride,
   } = useWorkspaceControls();
-  const { activeProjectId } = useProjects();
+  const { activeProjectId, projectList } = useProjects();
   const { user } = useAuth();
   const currentUserId = user?.id ?? null;
   const { projectAccessBlocked } = useProject();
@@ -114,7 +115,7 @@ export function StudioTopBar({ mobileNavigation, mobilePageHeader, compactMobile
   const [desktopVoiceStatusLoading, setDesktopVoiceStatusLoading] = useState(false);
 
   const { conversationWorkspace, tabs: workspaceTabs, activeTabId, focusTab, closeTab, keepTabOpen, requestUrlPush, openConversationTab } = useWorkspaceTabs();
-  const { conversations, activeConversationId } = useConversations();
+  const { conversations, activeConversationId, projectKey: conversationsProjectKey } = useConversations();
   const participantsSnapshot = useChatParticipantsSnapshot();
   const { runtime } = useRuntime();
   const controllerProjectMissing = runtime.controllerProjectMissing || projectAccessBlocked;
@@ -143,7 +144,12 @@ export function StudioTopBar({ mobileNavigation, mobilePageHeader, compactMobile
     }
     return conversations.find((conversation) => conversation.localId === activeWorkspaceTab.conversationId) ?? null;
   }, [activeWorkspaceTab, conversations]);
-  const returnConversation = conversationWorkspace && activeWorkspaceTab?.kind !== "conversation" && !activeWorkspaceTab?.workspaceOwner
+  // With its space deleted, the chat list can stay keyed to it (the URL or
+  // the last access check still names it); a back button would open there.
+  const conversationsSpaceRemoved = isUUID(conversationsProjectKey)
+    && !projectList.some((project) => project.id === conversationsProjectKey);
+  const returnConversation = conversationWorkspace && !conversationsSpaceRemoved
+    && activeWorkspaceTab?.kind !== "conversation" && !activeWorkspaceTab?.workspaceOwner
     ? conversations.find(conversation => conversation.localId === activeConversationId && conversation.lifecycleStatus !== "deleted") : null;
   const parentConversation = useMemo(() => {
     const parentId = activeConversation?.parentConversationId?.trim() ?? "";

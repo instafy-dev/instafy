@@ -938,6 +938,9 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
     let retryTimer: number | null = null;
     let requestController: AbortController | null = null;
     let lastNotFoundCheckAt = 0;
+    // The controller said the open space was deleted, so removing it also
+    // drops its saved tabs. A failed access check alone never does.
+    let targetDeleted = false;
 
     // The store can hold another space while the URL still names a blocked
     // one. This tab is not showing that other space, and checking it would
@@ -1003,7 +1006,10 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
           if (!openFallback) {
             publishNoActiveProject();
           }
-          removeProject(targetProjectId, { openFallback });
+          removeProject(
+            targetProjectId,
+            targetDeleted ? { openFallback, forgetSavedTabs: true } : { openFallback },
+          );
           return;
         }
 
@@ -1073,10 +1079,11 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
         setLastDeletedProjectId(deletedProjectId);
         if (deletedProjectId !== targetProjectId || urlHoldsBlockedProject()) {
           // Only this tab's lists change; access to the open space did not.
-          removeProject(deletedProjectId);
+          removeProject(deletedProjectId, { forgetSavedTabs: true });
           return;
         }
         // The open space: the refresh below finds it gone and blocks it.
+        targetDeleted = true;
       }
       if (detail?.projectId && detail.projectId !== targetProjectId) {
         return;

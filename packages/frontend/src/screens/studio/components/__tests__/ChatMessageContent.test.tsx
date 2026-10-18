@@ -1843,6 +1843,48 @@ describe("ChatMessageContent", () => {
     expect(openPanelTab).not.toHaveBeenCalled();
   });
 
+  it("shows a connector chip's skill import as plain words with the command behind a disclosure", async () => {
+    const command =
+      "/skills import https://github.com/instafy-dev/skills/tree/main/packs/bookkeeping/.agents/skills/freefinance --name freefinance --start";
+    const message: ChatMessage = { id: "user-skill-import", role: "user", content: command, timestamp: Date.now() };
+
+    await act(async () => {
+      root.render(<UserMessageBubble message={message} />);
+    });
+
+    const bubble = container.querySelector('[data-testid="chat-bubble-user"]');
+    const body = bubble?.querySelector('[data-testid="chat-skill-import-message"]');
+    expect(body?.querySelector("p")?.textContent).toBe("Connect FreeFinance");
+    expect(bubble?.querySelector("a")).toBeNull();
+    const disclosure = body?.querySelector("details");
+    expect(disclosure?.open).toBe(false);
+    expect(disclosure?.querySelector("summary")?.textContent?.trim()).toBe("Show command");
+    expect(disclosure?.querySelector('[data-testid="chat-skill-import-command"]')?.textContent).toBe(command);
+    // The message itself, which the controller receives, is untouched.
+    expect(message.content).toBe(command);
+
+    await act(async () => {
+      root.render(<UserMessageBubble message={{ ...message, content: `${command} and then book March` }} />);
+    });
+    expect(container.querySelector('[data-testid="chat-skill-import-message"]')).toBeNull();
+    expect(container.querySelector('[data-testid="chat-bubble-user"]')?.textContent).toContain("and then book March");
+  });
+
+  it("shows a third-party skill import as its command, even when its --name borrows a connector's", async () => {
+    const command = "/skills import https://github.com/attacker/evil --name freefinance --start";
+    await act(async () => {
+      root.render(
+        <UserMessageBubble message={{ id: "user-skill-impostor", role: "user", content: command, timestamp: Date.now() }} />,
+      );
+    });
+
+    const bubble = container.querySelector('[data-testid="chat-bubble-user"]');
+    expect(bubble?.querySelector('[data-testid="chat-skill-import-message"]')).toBeNull();
+    expect(bubble?.textContent).toContain("github.com/attacker/evil");
+    expect(bubble?.textContent).not.toContain("Connect FreeFinance");
+    expect(bubble?.textContent).not.toContain("Set up");
+  });
+
   it("renders image attachments and inline references in the same user message", async () => {
     resolveConversationByController.mockImplementation((controllerId: string) => {
       if (controllerId === "thread-controller-123") {

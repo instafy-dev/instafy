@@ -239,6 +239,36 @@ export function getSkillImportConversationTitle(message: string): string | null 
   return description.firstParty ? `Connect ${description.label}` : `Set up ${description.label}`;
 }
 
+const SKILL_IMPORT_SWITCHES = new Set(["--overwrite", "--start"]);
+
+/**
+ * What a chat bubble says for a first-party connector's `/skills import` line
+ * ("Connect FreeFinance"), the words of its chip and of the chat title. Any
+ * other source shows as written: a `--name` is chosen by whoever wrote the
+ * line, so plain words could pass someone's pack off as a connector, and the
+ * source is what a person needs to see. Only a line of the command and its own
+ * flags qualifies, so nothing else a person typed is hidden.
+ */
+export function getSkillImportMessageLabel(message: string): string | null {
+  const trimmed = message.trim();
+  if (trimmed.includes("\n")) {
+    return null;
+  }
+  // "/skills", "import" and the source come first; only flags may follow.
+  const tokens = trimmed.split(/\s+/);
+  for (let index = 3; index < tokens.length; index += 1) {
+    if (tokens[index] === "--name" && index + 1 < tokens.length) {
+      index += 1;
+      continue;
+    }
+    if (!SKILL_IMPORT_SWITCHES.has(tokens[index] ?? "")) {
+      return null;
+    }
+  }
+  const description = describeSkillImport(trimmed);
+  return description?.firstParty ? `Connect ${description.label}` : null;
+}
+
 function stripLeadingFiller(text: string): string {
   let current = text.trim();
   for (let changed = true; changed;) {

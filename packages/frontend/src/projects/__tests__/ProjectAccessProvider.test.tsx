@@ -534,14 +534,15 @@ describe("ProjectAccessProvider capability refresh", () => {
     });
   });
 
-  it("fails closed when an explicit refresh discovers revoked access", async () => {
+  it.each(["forbidden", "unauthorized", "notFound"])("fails closed when an explicit refresh gets %s, and keeps the space's saved tabs", async (failure) => {
     mocks.getSummaryResult
       .mockResolvedValueOnce(summaryFor("admin"))
       .mockResolvedValueOnce({
         summary: null,
         notFound: false,
-        forbidden: true,
+        forbidden: false,
         unauthorized: false,
+        [failure]: true,
       });
 
     await act(async () => {
@@ -564,6 +565,8 @@ describe("ProjectAccessProvider capability refresh", () => {
       expect(probe?.getAttribute("data-resolved")).toBe("false");
       expect(mocks.removeProject).toHaveBeenCalledWith(PROJECT_ID, { openFallback: false });
     });
+    // A 401 can be a token refresh in flight: only a deletion forgets tabs.
+    expect(mocks.removeProject.mock.calls.some(([, options]) => options?.forgetSavedTabs)).toBe(false);
   });
 
   it("drops a space deleted elsewhere from this tab's lists without touching the open space", async () => {
@@ -578,7 +581,7 @@ describe("ProjectAccessProvider capability refresh", () => {
       detail: { projectId: null, deletedProjectId: DELETED },
     })));
 
-    expect(mocks.removeProject).toHaveBeenCalledExactlyOnceWith(DELETED);
+    expect(mocks.removeProject).toHaveBeenCalledExactlyOnceWith(DELETED, { forgetSavedTabs: true });
     expect(mocks.getSummaryResult).not.toHaveBeenCalled();
     expect(probe?.getAttribute("data-role")).toBe("admin");
     expect(probe?.getAttribute("data-write")).toBe("true");
@@ -607,7 +610,7 @@ describe("ProjectAccessProvider capability refresh", () => {
     })));
     await act(async () => window.dispatchEvent(new Event("focus")));
 
-    expect(mocks.removeProject).toHaveBeenCalledWith(PROJECT_ID, { openFallback: false });
+    expect(mocks.removeProject).toHaveBeenCalledWith(PROJECT_ID, { openFallback: false, forgetSavedTabs: true });
     expect(mocks.getSummaryResult.mock.calls.map(([projectId]) => projectId)).toEqual([PROJECT_ID]);
     expect(probe?.getAttribute("data-blocked")).toBe("true");
     expect(probe?.getAttribute("data-deleted")).toBe("true");

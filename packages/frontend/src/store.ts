@@ -13,6 +13,7 @@ import type {
 import { createDefaultCodeWorkspace } from "./code/defaults";
 import { createDefaultBillingState } from "./credits/defaults";
 import { writePendingProjectSwitch } from "./screens/pendingProjectSwitch";
+import { forgetWorkspaceTabsForProjects, rememberWorkspaceTabsForProject } from "./workspace/workspaceTabPersistence";
 import { isUUID } from "./utils/uuid";
 import { studioPerformance } from "./telemetry/studioPerformance";
 
@@ -129,7 +130,16 @@ export interface RemoveProjectOptions {
    * behind it, as if they were the missing space's.
    */
   openFallback?: boolean;
+  /**
+   * The space is confirmed deleted, so its saved workspace tabs go too. Off
+   * by default: a space also leaves the store when its access check gets a
+   * 401, 403 or 404, and a 401 can be a token refresh in flight, so that
+   * removal must not erase the tabs of a space that is still there.
+   */
+  forgetSavedTabs?: boolean;
 }
+
+export type RemoveProjectsByOrgIdOptions = Pick<RemoveProjectOptions, "forgetSavedTabs">;
 
 export interface SessionStore {
   state: SiteBuilderState;
@@ -167,7 +177,7 @@ export interface SessionStore {
   setProjectName: (projectId: string, name: string) => void;
   setProjectIdentity: (projectId: string, identity: ProjectIdentity) => void;
   removeProject: (projectId: string, options?: RemoveProjectOptions) => void;
-  removeProjectsByOrgId: (orgId: string) => void;
+  removeProjectsByOrgId: (orgId: string, options?: RemoveProjectsByOrgIdOptions) => void;
   undo: () => void;
   redo: () => void;
   reset: () => void;
@@ -484,6 +494,7 @@ export const useWorkspaceStore = create<SessionStore>()(
       throw new Error("createProject requires a valid projectId");
     }
     writePendingProjectSwitch(projectId);
+    rememberWorkspaceTabsForProject(projectId);
     set((store) => {
       const nextProjects = {
         ...store.projects,
@@ -629,12 +640,18 @@ export const useWorkspaceStore = create<SessionStore>()(
         future: [],
       };
     });
+    if (options?.forgetSavedTabs) {
+      forgetWorkspaceTabsForProjects([trimmed]);
+    }
   },
-  removeProjectsByOrgId: (orgId) => {
+  removeProjectsByOrgId: (orgId, options) => {
     const trimmed = orgId.trim();
     if (!trimmed) {
       return;
     }
+    const removedIds = Object.entries(get().projects)
+      .filter(([, project]) => project.org?.id === trimmed)
+      .map(([projectId]) => projectId);
     set((store) => {
       const entries = Object.entries(store.projects);
       const nextEntries = entries.filter(([, project]) => project.org?.id !== trimmed);
@@ -663,6 +680,9 @@ export const useWorkspaceStore = create<SessionStore>()(
         future: [],
       };
     });
+    if (options?.forgetSavedTabs) {
+      forgetWorkspaceTabsForProjects(removedIds);
+    }
   },
   undo: () => {
     const { history, state, future, projects, activeProjectId } = get();
