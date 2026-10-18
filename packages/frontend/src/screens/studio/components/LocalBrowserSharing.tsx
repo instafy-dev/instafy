@@ -10,6 +10,7 @@ import { Checkbox } from "../../../components/Checkbox";
 import { Select } from "../../../components/Select";
 import { Input } from "../../../components/Input";
 import { Button } from "../../../components/Button";
+import { useGatedInterval } from "../../../runtime/pollingGate";
 import { browserShareClient, publishLocalBrowserTab, type BrowserShare, type LocalTabPublication, type BrowserShareAudience, type BrowserSharePerson, type BrowserShareViewer } from "../../../services/runtimeController/browserShares";
 
 
@@ -204,8 +205,11 @@ export function LocalBrowserTabPublisher({ projectId, userId, ownerId, canShare,
   </div>;
 }
 
+export const INCOMING_SHARES_POLL_ACTIVE_MS = 5_000;
+export const INCOMING_SHARES_POLL_IDLE_MS = 60_000;
+
 /** Incoming shares belong to the conversation, not the device/browser selector. */
-export function LocalBrowserSharing({ projectId, userId }: { projectId: string; userId: string }) {
+export function LocalBrowserSharing({ projectId, userId, active = true }: { projectId: string; userId: string; active?: boolean }) {
   const [shares, setShares] = useState<BrowserShare[]>([]);
   const [watching, setWatching] = useState<BrowserShare | null>(null);
   const retired = useRef(new Set<string>());
@@ -213,19 +217,32 @@ export function LocalBrowserSharing({ projectId, userId }: { projectId: string; 
     retired.current.add(id);
     setShares(current => current.filter(share => share.id !== id));
   }, []);
+  const refreshRef = useRef<(() => void) | null>(null);
   useEffect(() => {
     let disposed = false;
-    let timer: number;
+    let inFlight = false;
     async function refresh() {
+      if (disposed || inFlight) return;
+      inFlight = true;
       try {
         const entries = await (await browserShareClient(projectId)).list();
         if (!disposed) setShares(entries.filter(share => !retired.current.has(share.id)));
       } catch { if (!disposed) setShares([]); }
-      if (!disposed) timer = window.setTimeout(() => void refresh(), 5000);
+      finally { inFlight = false; }
     }
-    void refresh();
-    return () => { disposed = true; window.clearTimeout(timer); };
+    refreshRef.current = () => void refresh();
+    return () => { disposed = true; refreshRef.current = null; };
   }, [projectId, userId]);
+  // Fetch once whenever the chat surface shows this list (and on project or
+  // account change). This used to be a plain 5 s loop per mounted chat that
+  // kept running in hidden chats, background tabs and idle windows, which made
+  // it the single largest source of Studio requests.
+  useEffect(() => {
+    if (active) refreshRef.current?.();
+  }, [active, projectId, userId]);
+  // Every 5 s while someone is using the tab, every minute once idle, never
+  // while hidden or while the chat surface is not shown; once on wake.
+  useGatedInterval(() => refreshRef.current?.(), INCOMING_SHARES_POLL_ACTIVE_MS, { idleMs: INCOMING_SHARES_POLL_IDLE_MS, enabled: active });
   if (!shares.length && !watching) return null;
   return <section aria-label="Tabs shared with you" className="shrink-0 space-y-2 px-3 py-2 sm:px-4" data-testid="local-browser-shared-tabs">
     {!watching ? <div className="flex flex-wrap items-center gap-2 text-xs">

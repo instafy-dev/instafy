@@ -9,6 +9,7 @@ import type { RunRecord } from "../../types";
 import type { ConversationHistoryData } from "../conversationHistoryPages";
 import { createInitialConversation } from "../conversationState";
 import { useConversationHistoryState } from "../useConversationHistoryState";
+import { CONVERSATION_REPLY_NOTIFIED_EVENT } from "../../notifications/openConversations";
 
 const mocks = vi.hoisted(() => ({
   listMessages: vi.fn(),
@@ -507,6 +508,28 @@ describe("useConversationHistoryState", () => {
     await advance(1);
     expect(latestHistoryState.messages[0]?.content).toBe("Recovered history");
     expect(mocks.listMessages).toHaveBeenCalledTimes(2);
+  });
+
+  it("re-reads the newest page once when the notification feed reports a reply in this conversation", async () => {
+    mocks.listMessages
+      .mockResolvedValueOnce(historyPage("conversation-a", "Saved history"))
+      .mockResolvedValue(historyPage("conversation-a", "Missed reply"));
+    await select("conversation-a");
+    expect(mocks.listMessages).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent(CONVERSATION_REPLY_NOTIFIED_EVENT, { detail: { conversationIds: ["conversation-b"] } }));
+    });
+    await advance(1);
+    expect(mocks.listMessages).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent(CONVERSATION_REPLY_NOTIFIED_EVENT, { detail: { conversationIds: ["conversation-b", "conversation-a"] } }));
+    });
+    await advance(1);
+    expect(mocks.listMessages).toHaveBeenCalledTimes(2);
+    expect(mocks.listMessages.mock.calls[1]?.[0]).toMatchObject({ conversationId: "conversation-a", cursor: undefined });
+    expect(latestHistoryState.messages[0]?.content).toBe("Missed reply");
   });
 
   it.each(["initial", "older", "latest"])("cancels a pending %s read on selection and ignores its late response", async (stage) => {

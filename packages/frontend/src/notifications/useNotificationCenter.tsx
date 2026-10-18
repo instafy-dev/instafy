@@ -6,11 +6,22 @@ import { claimNotificationPresentation, NOTIFICATION_RECEIVED_EVENT } from "./no
 import { NOTIFICATION_PREFERENCES_CHANGED_EVENT } from "./notificationPreferencesEvents";
 import { areMessageNotificationsEnabled, isAppInForeground, notifyAssistantMessage } from "./assistantMessageNotifications";
 import { useGatedInterval } from "../runtime/pollingGate";
+import { announceConversationReplies, isConversationOpen } from "./openConversations";
 
 const POLL_ACTIVE_MS = 20_000;
 const POLL_IDLE_MS = 120_000;
 
 const EMPTY_PAGE: NotificationPage = { items: [], nextCursor: null, unreadCount: 0, asOf: "" };
+
+/** The conversation a `conversation.reply` notification points at, from its canonical Studio URL. */
+export function replyConversationId(item: ProductNotification): string | null {
+  if (item.eventName !== "conversation.reply") return null;
+  try {
+    const id = new URL(item.url, "https://instafy.invalid").searchParams.get("conversationControllerId");
+    if (id) return id.toLowerCase();
+  } catch { /* canonical URLs always parse */ }
+  return item.resourceType === "conversation" && item.resourceId ? item.resourceId.toLowerCase() : null;
+}
 
 export interface HomeNotifications {
   page: NotificationPage;
@@ -43,6 +54,8 @@ export function useNotificationCenter({ userId, accessToken, navigate }: { userI
   // request it a second time on every tick.
   const latestUnread = useRef<{ session: typeof session; items: ProductNotification[] } | null>(null);
   const toastIds = useRef(new Set<string>());
+  // Reply notifications already announced to the open chat, per session.
+  const announced = useRef<{ session: typeof session; ids: Set<string> } | null>(null);
   const pollRef = useRef<(() => Promise<void>) | null>(null);
   const { showStatus, hideStatus } = useStatus();
 
@@ -139,11 +152,32 @@ export function useNotificationCenter({ userId, accessToken, navigate }: { userI
       // read. It reuses the unread page refresh() just fetched.
       const unread = latestUnread.current?.session === session ? latestUnread.current.items : null;
       if (!unread) return;
+      // The durable feed is the safety net for a missed live chat event: tell
+      // the chat about each new reply once so an open conversation re-reads
+      // its newest page instead of waiting for input to resume its own poll.
+      if (announced.current?.session !== session) announced.current = { session, ids: new Set() };
+      const announcedIds = announced.current.ids;
+      const replyConversations: string[] = [];
+      for (const item of unread) {
+        if (item.readAt || item.archivedAt || announcedIds.has(item.id)) continue;
+        const conversationId = replyConversationId(item);
+        if (!conversationId) continue;
+        announcedIds.add(item.id);
+        replyConversations.push(conversationId);
+      }
+      announceConversationReplies(replyConversations);
       for (const item of [...unread].reverse()) {
         if (item.seenAt || item.archivedAt || item.readAt) continue;
         const prefs = preferencesRef.current?.session === session ? preferencesRef.current.value : null;
         if (!prefs || prefs.preferences.some((pref) => pref.category === item.category && pref.channel === "local" && !pref.enabled)) continue;
         const foreground = isAppInForeground();
+        if (foreground && isConversationOpen(replyConversationId(item))) {
+          // The open chat is the presentation for its own replies; a banner
+          // here reads as "the chat missed it". Mark it seen so it does not
+          // toast later from another view; the chat's read hook marks it read.
+          void controllerClient.notifications.updateState({ id: item.id, action: "seen", accessToken, expectedUserId: userId, isCurrent: current }).catch(() => {});
+          continue;
+        }
         if (!foreground && !areMessageNotificationsEnabled()) continue;
         const { Capacitor } = await import("@capacitor/core");
         if (Capacitor.isNativePlatform()) {

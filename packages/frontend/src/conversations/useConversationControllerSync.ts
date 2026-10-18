@@ -37,6 +37,7 @@ import {
   type ConversationsState,
 } from "./conversationState";
 import { isUuid } from "./conversationMessageUtils";
+import { useGatedInterval } from "../runtime/pollingGate";
 import { collectInternalConversationIds } from "./internalConversations";
 import {
   CONTROLLER_CONVERSATION_LIST_LIMIT,
@@ -188,34 +189,13 @@ export function useConversationControllerSync({
     state.projectKey,
   ]);
 
-  useEffect(() => {
-    if (!runtimeControllerEnabled) {
-      return;
-    }
-    if (controllerProjectMissing || projectAccessPending || projectAccessBlocked) {
-      return;
-    }
-    if (!isUuid(state.projectKey)) {
-      return;
-    }
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    const interval = window.setInterval(() => {
-      bumpControllerConversationSyncEpoch();
-    }, CONTROLLER_CONVERSATION_BACKFILL_INTERVAL_MS);
-
-    return () => {
-      window.clearInterval(interval);
-    };
-  }, [
-    bumpControllerConversationSyncEpoch,
-    controllerProjectMissing,
-    projectAccessBlocked,
-    projectAccessPending,
-    state.projectKey,
-  ]);
+  // Backfill every 30 s while the tab is in use, every 3 min once idle, never
+  // while hidden (SSE reconnects still bump it), and once on wake. A plain
+  // interval kept two list requests per tab going in every background tab.
+  useGatedInterval(bumpControllerConversationSyncEpoch, CONTROLLER_CONVERSATION_BACKFILL_INTERVAL_MS, {
+    enabled: runtimeControllerEnabled && !controllerProjectMissing && !projectAccessPending &&
+      !projectAccessBlocked && isUuid(state.projectKey),
+  });
 
   useEffect(() => {
     if (!runtimeControllerEnabled) {

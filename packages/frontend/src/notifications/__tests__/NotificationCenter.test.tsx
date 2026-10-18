@@ -9,6 +9,7 @@ vi.mock("../notificationPresentation", () => ({ NOTIFICATION_RECEIVED_EVENT: "in
 vi.mock("../assistantMessageNotifications", () => ({ areMessageNotificationsEnabled: () => false, enableMessageNotifications: async () => true, isAppInForeground: () => mocks.foreground, notifyAssistantMessage: vi.fn() }));
 vi.mock("../webPushRegistration", () => ({ hasActiveWebPushSubscription: async () => mocks.subscription }));
 import { useNotificationCenter } from "../useNotificationCenter";
+import { CONVERSATION_REPLY_NOTIFIED_EVENT, registerOpenConversation, resetOpenConversationsForTests } from "../openConversations";
 const A = "11111111-1111-4111-8111-111111111111";
 const B = "22222222-2222-4222-8222-222222222222";
 const event = (id = A) => ({ id, eventName: "support.reply", version: 1, category: "support", resourceId: id, resourceType: "support_report", occurredAt: "2026-09-06T12:00:00Z", title: "Instafy", body: "Support replied to your report.", url: `/studio?supportReportId=${id}`, readAt: null as string | null, seenAt: null, archivedAt: null });
@@ -214,6 +215,53 @@ describe("notification center", () => {
     mocks.state.mockClear();
     await act(async () => options.onShow());
     expect(mocks.state).not.toHaveBeenCalled();
+  });
+
+  it("asks an open conversation to re-read each new reply once and leaves its banner to the chat", async () => {
+    const PROJECT = "55555555-5555-4555-8555-555555555555";
+    const OPEN = "66666666-6666-4666-8666-666666666666";
+    const ELSEWHERE = "77777777-7777-4777-8777-777777777777";
+    const C = "88888888-8888-4888-8888-888888888888";
+    const D = "99999999-9999-4999-8999-999999999999";
+    const reply = (id: string, conversation: string) => ({
+      ...event(id), eventName: "conversation.reply", category: "conversations", resourceType: "conversation", resourceId: conversation,
+      body: "There is a new reply in your conversation.", url: `/studio?projectId=${PROJECT}&conversationControllerId=${conversation}`,
+    });
+    const announced: string[][] = [];
+    const listener = (e: Event) => announced.push((e as CustomEvent<{ conversationIds: string[] }>).detail.conversationIds);
+    window.addEventListener(CONVERSATION_REPLY_NOTIFIED_EVENT, listener);
+    const release = registerOpenConversation(OPEN.toUpperCase());
+    try {
+      mocks.foreground = true;
+      mocks.list.mockResolvedValue(page([reply(C, OPEN), reply(D, ELSEWHERE)]));
+      await act(async () => {
+        window.dispatchEvent(new Event("focus"));
+        await vi.dynamicImportSettled();
+      });
+      expect(announced).toEqual([[OPEN, ELSEWHERE]]);
+      expect(mocks.show).toHaveBeenCalledTimes(1);
+      expect(mocks.show).toHaveBeenCalledWith("There is a new reply in your conversation.", "info", 10_000, expect.objectContaining({ id: `notification:${A}:${D}` }));
+      expect(mocks.state).toHaveBeenCalledWith(expect.objectContaining({ id: C, action: "seen", expectedUserId: A }));
+      await act(async () => {
+        window.dispatchEvent(new Event("focus"));
+        await vi.dynamicImportSettled();
+      });
+      expect(announced).toHaveLength(1);
+      // Once the chat is closed, a reply there is presented as a banner again.
+      release();
+      const E = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+      mocks.list.mockResolvedValue(page([reply(E, OPEN)]));
+      await act(async () => {
+        window.dispatchEvent(new Event("focus"));
+        await vi.dynamicImportSettled();
+      });
+      expect(announced).toEqual([[OPEN, ELSEWHERE], [OPEN]]);
+      expect(mocks.show).toHaveBeenCalledWith("There is a new reply in your conversation.", "info", 10_000, expect.objectContaining({ id: `notification:${A}:${E}` }));
+    } finally {
+      release();
+      resetOpenConversationsForTests();
+      window.removeEventListener(CONVERSATION_REPLY_NOTIFIED_EVENT, listener);
+    }
   });
 
 });

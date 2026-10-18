@@ -483,3 +483,41 @@ export function synthesizeAgentJobThreadMessages(
 
   return output;
 }
+
+// Timeline rows never carry a conversation.reply notification (see the
+// notification_conversation_reply trigger), so they need no acknowledgement.
+const AGENT_JOB_THREAD_TIMELINE_TYPES = new Set([
+  "command_execution",
+  "mcp_tool_call",
+  "todo_list",
+  "web_search",
+  "file_change",
+  "token_usage",
+  "reasoning",
+  "runtime_alert",
+  "run_cancellation",
+  "runtime_switch",
+  "agent_job_thread",
+]);
+
+/**
+ * Source message ids a synthesized `agent-job-thread:<jobId>` row presents,
+ * newest first. The row's own id is synthetic, so without these the replies
+ * shown inside it were never acknowledged and their notification banner
+ * appeared later for a reply that was already on screen.
+ */
+export function agentJobThreadAcknowledgementIds(message: ChatMessage): string[] {
+  const metadata = message.metadata && isRecord(message.metadata) ? message.metadata : null;
+  const threadMessages = Array.isArray(metadata?.threadMessages) ? (metadata.threadMessages as ChatMessage[]) : [];
+  const ids: string[] = [];
+  for (let index = threadMessages.length - 1; index >= 0; index -= 1) {
+    const candidate = threadMessages[index];
+    if (!candidate || typeof candidate.id !== "string") continue;
+    if (candidate.role !== "assistant" && candidate.role !== "user") continue;
+    if (typeof candidate.content !== "string" || !candidate.content.trim()) continue;
+    const type = (getMessageType(candidate) ?? "").trim().toLowerCase();
+    if (type && AGENT_JOB_THREAD_TIMELINE_TYPES.has(type)) continue;
+    ids.push(candidate.id);
+  }
+  return [...new Set(ids)];
+}

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { CSSProperties, ComponentType, MouseEvent, MutableRefObject, ReactNode } from "react";
 import {
   Activity,
@@ -46,7 +46,7 @@ import {
   resolveRunFailurePresentation,
 } from "../../../conversations/runFailurePresentation";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
-import { extractAgentJobId, shouldRenderLocalCapabilityStatusAsTimeline } from "./chatMessagePresentation";
+import { agentJobThreadAcknowledgementIds, extractAgentJobId, shouldRenderLocalCapabilityStatusAsTimeline } from "./chatMessagePresentation";
 import { RunFailureMessageBody } from "./RunFailureNotice";
 import { isCompactionStatusText } from "./assistantStatusHeuristics";
 import { normalizeAssistantHandleLabel } from "./assistantSpeakerIdentity";
@@ -512,6 +512,9 @@ export function AgentJobThreadPreviewLayout({
   const metadata = isRecord(message.metadata) ? message.metadata : null;
   const agentMetadata = metadata && isRecord(metadata.agent) ? metadata.agent : null;
   const jobId = extractAgentJobId(message);
+  // The row id is synthetic; list the replies it shows so reading them clears
+  // their notification (useConversationNotificationRead).
+  const acknowledgementIds = useMemo(() => agentJobThreadAcknowledgementIds(message).join(" "), [message]);
   const copyLatestCommandOutput = useCopyCommandOutput(latestCommandExecution?.output ?? "");
   const headerIdentityVisible = showHeaderIdentity && showHeaderAvatar;
   const threadOwnerHandle = normalizeAgentHandle(agentMetadata?.handle);
@@ -1256,6 +1259,7 @@ export function AgentJobThreadPreviewLayout({
     <div
       ref={threadPreviewRootRef}
       data-chat-message-id={message.id}
+      data-chat-message-ids={acknowledgementIds || undefined}
       data-testid="chat-bubble-assistant"
       data-message-type="agent_job_thread"
       className="w-full min-w-0 max-w-2xl overflow-hidden supports-[overflow:clip]:overflow-x-clip supports-[overflow:clip]:overflow-y-visible text-sm text-slate-700 dark:text-slate-200"
