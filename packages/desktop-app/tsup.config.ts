@@ -39,6 +39,7 @@ export default defineConfig({
     browserTabVideoWorker: "src/browserTabVideoWorker.ts",
     browserTabCapture: "src/browserTabCapture.ts",
     desktopWindows: "src/desktopWindows.ts",
+    externalUrls: "src/externalUrls.ts",
     browserTabExplore: "src/browserTabExplore.ts",
     browserTabExplorePage: "src/browserTabExplorePage.ts",
     browserTabInput: "src/browserTabInput.ts",
