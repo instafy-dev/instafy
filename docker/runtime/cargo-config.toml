@@ -1,0 +1,20 @@
+# Cargo settings for the runtime image's Rust builders (docker/runtime/Dockerfile).
+# Installed as $CARGO_HOME/config.toml, so the cargo-chef cook and the
+# application build read the same profile and the cooked dependencies stay
+# fresh for the build. Release builds are unaffected.
+
+[profile.dev]
+# Codex's own dev setting (codex/codex-rs/Cargo.toml): backtraces keep file and
+# line numbers. With full debug info, which runtime-agent got as the root
+# package, every dev link copied all ~1,000 crates' DWARF into two multi-GB
+# binaries (runtime-agent and the V8 code-mode host); that final step took
+# 24-50 minutes, and the cooked target/ was too big to survive BuildKit's
+# cache cleanup between builds.
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+# Incremental state only pays for crates edited between builds. For the
+# dependencies (registry crates and the codex-rs path crates) it roughly
+# doubled target/ (codex-core alone keeps 1.4 GB). runtime-agent, the only
+# workspace member, stays incremental.
+incremental = false

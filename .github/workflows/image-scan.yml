@@ -40,6 +40,7 @@ on:
       - "packages/provider-contract/package.json"
       - "packages/runtime-agent/Cargo.toml"
       - "packages/runtime-agent/Cargo.lock"
+      - "packages/openai-proxy-server/Cargo.toml"
       - "packages/runtime-provider-core/Cargo.toml"
       - "packages/runtime-provider-service/Cargo.toml"
       - "packages/runtime-provider-service/Cargo.lock"
