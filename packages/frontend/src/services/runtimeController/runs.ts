@@ -289,6 +289,13 @@ export interface SubscribeControllerRunsParams {
   onRunPatch: (patch: RunRecordPatch) => void;
   onAccessDenied?: (denial: ControllerStreamAccessDenied) => void;
   onError?: (message: string) => void;
+  /**
+   * The controller refused the stream for now (429: this user already holds
+   * every stream it allows). It answered, so it is reachable; the stream asks
+   * again on its own backoff. Without this callback a refusal goes to
+   * `onError`.
+   */
+  onRefused?: (message: string) => void;
   onEvent?: (event: ControllerEventPayload) => void;
   onOpen?: () => void;
 }
@@ -850,7 +857,11 @@ export function subscribeToRunsFromController(
           error,
           { suppressLikelyConnectionNoise: true },
         );
-        params.onError?.(message);
+        if (error instanceof RefusedServerSentEventError && params.onRefused) {
+          params.onRefused(message);
+        } else {
+          params.onError?.(message);
+        }
       }
       controller.abort();
       currentController = null;

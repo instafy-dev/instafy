@@ -37,10 +37,14 @@ const PROJECT_ACCESS_CHANGED_EVENT: &str = "project.access_changed";
 /// is one subscription per node, not per stream). It costs the pool when fed:
 /// an event it matches takes a connection for an access check, at most once
 /// per conversation per `EVENT_ACCESS_RECHECK_AFTER`, and on every runtime,
-/// origin, tunnel, workspace or roster event. One user's streams on one space
-/// multiply those checks, so the cap stays near the production pool (6):
-/// eight covers a handful of tabs, Desktop and a phone, plus a tab whose last
-/// stream has not closed yet, and one user's burst only queues for a moment.
+/// origin, tunnel, workspace or roster event. Streams do not share those
+/// checks, so one user's eight streams on one space can ask for eight
+/// connections for a single event: more than the pool holds (6 in
+/// production, 4 by default, `DATABASE_POOL_SIZE`). The checks past the pool
+/// wait for a connection (up to its 10 s timeout, then one retry, then the
+/// event is dropped for that stream), and other requests on the node wait
+/// behind them. Eight is sized for a handful of tabs, Desktop and a phone,
+/// plus a tab whose last stream has not closed yet, not to fit the pool.
 pub(crate) const MAX_EVENT_STREAMS_PER_USER: usize = 8;
 
 /// How long a stream refused for [`MAX_EVENT_STREAMS_PER_USER`] is asked to

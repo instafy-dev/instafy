@@ -558,6 +558,57 @@ describe("runtime controller run event streaming", () => {
     }
   });
 
+  it("reports a refusal to onRefused instead of onError and still backs off", async () => {
+    vi.useFakeTimers();
+    const refusalMessage = "Too many open event streams.";
+    fetchMock.mockImplementationOnce((input: RequestInfo | URL) =>
+      Promise.resolve({
+        body: null,
+        headers: new Headers({
+          "content-type": "application/json",
+          "retry-after": "10",
+        }),
+        ok: false,
+        status: 429,
+        statusText: "Too Many Requests",
+        text: async () =>
+          JSON.stringify({
+            message: refusalMessage,
+            code: "too_many_event_streams",
+          }),
+        url: String(input),
+      } as Response),
+    );
+
+    const { subscribeToRunsFromController } = await import(
+      "../runtimeController/runs"
+    );
+    const onError = vi.fn();
+    const onRefused = vi.fn();
+    const unsubscribe = subscribeToRunsFromController({
+      projectId: "11111111-1111-4111-8111-111111111111",
+      quietErrors: true,
+      onRun: vi.fn(),
+      onRunPatch: vi.fn(),
+      onError,
+      onRefused,
+    });
+
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      await flushAsyncWork();
+      expect(onRefused).toHaveBeenCalledExactlyOnceWith(refusalMessage);
+      expect(onError).not.toHaveBeenCalled();
+
+      // The refusal's wait, not the 3 s of an ordinary reconnect.
+      await vi.advanceTimersByTimeAsync(3_000);
+      await flushAsyncWork();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      unsubscribe();
+    }
+  });
+
   it("bounds the wait after a refused stream and spreads it with jitter", async () => {
     const { refusedStreamReconnectDelayMs } = await import(
       "../runtimeController/runs"
