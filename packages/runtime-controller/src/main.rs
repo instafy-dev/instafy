@@ -95,6 +95,8 @@ mod tests_chat_attachment_lease;
 #[cfg(test)]
 mod tests_chat_attachment_policies;
 #[cfg(test)]
+mod tests_completion_reply_first;
+#[cfg(test)]
 mod tests_deleted_space_fence;
 #[cfg(test)]
 mod tests_hosted_runtime_billing;

@@ -387,15 +387,22 @@ pub(crate) async fn stamp_internal_conversation_metadata(
     conversation_id: &Uuid,
     metadata: &mut JsonValue,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
+    let internal = is_internal_conversation(transaction, conversation_id).await?;
+    stamp_known_internal_conversation_metadata(metadata, internal);
+    Ok(())
+}
+
+/// [`stamp_internal_conversation_metadata`] for a caller that already read
+/// whether the conversation is internal.
+pub(crate) fn stamp_known_internal_conversation_metadata(metadata: &mut JsonValue, internal: bool) {
     // The runtime cannot hide an ordinary message by claiming internal origin.
     strip_client_internal_metadata(metadata);
-    if is_internal_conversation(transaction, conversation_id).await? {
+    if internal {
         if !metadata.is_object() {
             *metadata = serde_json::json!({});
         }
         metadata["internalPurpose"] = serde_json::json!("space_review");
     }
-    Ok(())
 }
 
 pub(crate) async fn ensure_conversation_access(

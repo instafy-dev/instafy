@@ -393,7 +393,7 @@ fn mint_agent_complete_token(config: &AppConfig, project_id: &Uuid) -> anyhow::R
 }
 
 /// Leases the fixture's job and builds its `/agent/complete` request.
-async fn agent_complete_request(
+pub(crate) async fn agent_complete_request(
     fixture: &ReservedManagedAiPrompt,
     body: serde_json::Value,
 ) -> anyhow::Result<Request<Body>> {

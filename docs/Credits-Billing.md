@@ -229,6 +229,8 @@ controller's lease or the proxy's static credentials, with their kind and pinned
 
 The controller now reserves units at prompt dispatch and then reconciles the final charge after completion from actual input/cached/output token usage. Cached tokens are a subset of the reported input tokens, so only the uncached remainder is billed at the input rate and the cached prefix is billed once at the cached rate. The shared ledger keeps both the usage metadata and any follow-up adjustment row when the final charge differs from the reserve.
 
+Reconciliation never holds a turn's reply back. The completion first commits and publishes the reply and the run's end, then reconciles in a transaction of its own, and only after that announces `credits.updated` and lets the conversation's next queued send dispatch. An attempt that fails rolls back whole and is tried once more; the adjustment row is idempotent per prompt, so a retry never charges twice. A reconciliation that still fails no longer fails the completion: the run keeps its reply, the reserve stands as the charge, and the controller logs the failure.
+
 A multi-agent planning turn becomes terminal when the controller dispatches or refuses its plan,
 before the runtime submits its completion receipt. The controller accepts that receipt once from
 the original runtime, job attempt and runtime generation, retaining the planning calls' usage and

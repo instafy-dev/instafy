@@ -3129,36 +3129,28 @@ pub(crate) async fn agent_complete(
         .and_then(JsonValue::as_str)
         .and_then(|value| Uuid::from_str(value).ok());
 
+    let mut run_session_id: Option<Uuid> = job_session_id;
+    let mut run_conversation_id: Option<Uuid> = job_row_conversation_id.or(job_conversation_id);
+    let mut run_prompt_id: Option<Uuid> = job_prompt_id;
+
     if let Some(run_uuid) = run_id {
         // Mark the run as completed. We intentionally clear `progress_stage` so the frontend
         // doesn't interpret a stale "agent:leased" stage as an active/blocked run after completion.
-        transaction
-            .execute(
+        // The same statement returns the run's context.
+        if let Some(run_row) = transaction
+            .query_opt(
                 "update runs
                  set status = $2,
                      progress = greatest(progress, 100),
                      progress_stage = null,
                      last_message = coalesce($3, last_message),
                      updated_at = now()
-                 where id = $1",
+                 where id = $1
+                 returning session_id, conversation_id, prompt_id",
                 &[&run_uuid, &run_status, &summary_ref],
             )
             .await
-            .map_err(|error| internal_error(format!("failed to update run: {error}")))?;
-    }
-
-    let mut run_session_id: Option<Uuid> = job_session_id;
-    let mut run_conversation_id: Option<Uuid> = job_row_conversation_id.or(job_conversation_id);
-    let mut run_prompt_id: Option<Uuid> = job_prompt_id;
-
-    if let Some(run_uuid) = run_id {
-        if let Some(run_row) = transaction
-            .query_opt(
-                "select session_id, conversation_id, prompt_id from runs where id = $1",
-                &[&run_uuid],
-            )
-            .await
-            .map_err(|error| internal_error(format!("failed to load run context: {error}")))?
+            .map_err(|error| internal_error(format!("failed to update run: {error}")))?
         {
             let session: Option<Uuid> = run_row.get("session_id");
             let conversation: Option<Uuid> = run_row.get("conversation_id");
@@ -3248,21 +3240,6 @@ pub(crate) async fn agent_complete(
         crate::group_participation::job_payload_marks_agent_evaluation(&job_payload),
         crate::group_participation::job_payload_marks_agent_declined(&job_payload),
     );
-    if let (Some(run_uuid), false) = (run_id, silent_completion) {
-        // Home's feed: the run reached a terminal state.
-        crate::activity::record_run_completed(
-            &transaction,
-            &project_id,
-            &run_uuid,
-            run_conversation_id,
-            run_prompt_id,
-            &job_payload,
-            run_status == "success",
-            summary_ref,
-            error_ref,
-        )
-        .await;
-    }
 
     let provider_value = extract_provider_from_metadata(&proxy_metadata);
     let credit_snapshot_value = extract_credit_snapshot(&proxy_metadata);
@@ -3294,25 +3271,6 @@ pub(crate) async fn agent_complete(
         }
     }
 
-    if let Some(runtime_id) = leased_runtime_id {
-        let event_payload = json!({
-            "job_id": job_uuid,
-            "run_id": run_id,
-            "outcome": outcome_lower,
-            "artifacts_count": artifacts_value.as_array().map(|arr| arr.len()),
-            "provider": provider_value,
-        });
-        runtime::record_runtime_event_with_conversation(
-            &transaction,
-            &runtime_id,
-            &project_id,
-            run_conversation_id.as_ref(),
-            "agent.complete",
-            event_payload,
-        )
-        .await?;
-    }
-
     let tool_update_count =
         count_job_tool_update_messages(&transaction, &project_id, &job_uuid).await?;
     let lease_metrics = AgentLeaseMetrics {
@@ -3320,6 +3278,7 @@ pub(crate) async fn agent_complete(
         ..lease_metrics
     };
 
+    let mut usage_to_reconcile: Option<TurnUsage> = None;
     let mut token_usage_message: Option<ConversationMessageRow> = None;
     let mut assistant_message: Option<ConversationMessageRow> = None;
     if let Some(conversation_uuid) = run_conversation_id {
@@ -3332,23 +3291,17 @@ pub(crate) async fn agent_complete(
         );
         let should_swallow_evaluation_decline = explicit_successful_decline
             && !run_has_visible_assistant_message(&transaction, &project_id, run_id).await?;
+        // Both messages below land in this conversation: whether it is an
+        // internal review anchor is read once for the two.
+        let internal_conversation = if should_swallow_evaluation_decline {
+            false
+        } else {
+            crate::conversations::is_internal_conversation(&transaction, &conversation_uuid).await?
+        };
 
         if let Some(usage) = extract_turn_usage_from_artifacts(&artifacts_value) {
-            if let Some(org_id) = reconcile_completion_usage(
-                &state,
-                &transaction,
-                &project_id,
-                &job_payload,
-                run_id,
-                run_prompt_id.or(job_prompt_id),
-                leased_runtime_id,
-                provider_value.as_deref(),
-                usage,
-            )
-            .await?
-            {
-                completion_credit_org_id = Some(org_id);
-            }
+            // Billed once the reply is visible (CompletionSettlement).
+            usage_to_reconcile = Some(usage);
 
             if !should_swallow_evaluation_decline {
                 let usage_content = format!(
@@ -3378,7 +3331,10 @@ pub(crate) async fn agent_complete(
                     Some(&lease_metrics),
                 );
                 let usage_metadata = sanitize_json_for_postgres(usage_metadata);
-                let message_row = record_agent_conversation_message(
+                // The reply below is written in this transaction too and is
+                // the conversation's last message, so only it bumps the
+                // conversation. Usage rows are never Home replies.
+                let message_row = insert_agent_conversation_message(
                     &transaction,
                     &project_id,
                     &conversation_uuid,
@@ -3387,6 +3343,8 @@ pub(crate) async fn agent_complete(
                     run_id,
                     usage_content,
                     usage_metadata,
+                    internal_conversation,
+                    false,
                 )
                 .await?;
                 token_usage_message = Some(message_row);
@@ -3435,7 +3393,8 @@ pub(crate) async fn agent_complete(
                 Some(&lease_metrics),
             );
             let message_metadata = sanitize_json_for_postgres(message_metadata);
-            let message_row = record_agent_conversation_message(
+            // Its Home row is written with the settlement.
+            let message_row = insert_agent_conversation_message(
                 &transaction,
                 &project_id,
                 &conversation_uuid,
@@ -3444,6 +3403,8 @@ pub(crate) async fn agent_complete(
                 run_id,
                 message_content,
                 message_metadata,
+                internal_conversation,
+                true,
             )
             .await?;
             assistant_message = Some(message_row);
@@ -3455,27 +3416,9 @@ pub(crate) async fn agent_complete(
         .await
         .map_err(|error| internal_error(format!("failed to commit completion: {error}")))?;
 
+    // The turn is closed and its reply stored: publish both now. Billing and
+    // bookkeeping follow in CompletionSettlement and change nothing shown.
     crate::send_intents::publish_job_input_state_updates(&state, &job_input_state_updates);
-
-    if let Err((status, Json(api_error))) =
-        crate::multi_agent_plan::maybe_enqueue_lead_continuation_after_completion(
-            &state,
-            job_uuid,
-            &job_payload,
-        )
-        .await
-    {
-        warn!(
-            project_id = %project_id,
-            job_id = %job_uuid,
-            status = status.as_u16(),
-            error = %api_error.message,
-            "failed to queue skill-authored multi-agent lead continuation"
-        );
-    }
-    if let Some(conversation_id) = run_conversation_id {
-        crate::send_queue::spawn_send_queue_drain(state.clone(), conversation_id);
-    }
     if let Some(message) = token_usage_message.as_ref() {
         publish_conversation_message_event(&state.events, message);
         crate::notifications::enqueue_message_push_notifications(state.clone(), message.clone());
@@ -3533,19 +3476,242 @@ pub(crate) async fn agent_complete(
             }),
         );
     }
+    // The settlement takes its own connections.
+    drop(connection);
 
-    // Last: the org project lookup must not delay the completion's events.
-    if let Some(org_id) = completion_credit_org_id {
-        crate::credits::publish_credits_updated(
-            &state,
-            &*connection,
-            org_id,
-            crate::credits::CREDITS_UPDATED_LEDGER,
-        )
-        .await;
+    let settlement = CompletionSettlement {
+        project_id,
+        job_id: job_uuid,
+        run_id,
+        conversation_id: run_conversation_id,
+        prompt_id: run_prompt_id,
+        billing_prompt_id: run_prompt_id.or(job_prompt_id),
+        leased_runtime_id,
+        job_payload,
+        silent: silent_completion,
+        outcome: outcome_lower,
+        run_succeeded: run_status == "success",
+        summary,
+        error_message,
+        artifacts_count,
+        provider: provider_value,
+        usage: usage_to_reconcile,
+        reply: assistant_message,
+        credit_org_id: completion_credit_org_id,
+    };
+    // Detached, so a runtime that stops waiting for this response cannot cut
+    // the billing short; the response still waits for it.
+    if let Err(error) = tokio::spawn(settlement.settle(state.clone())).await {
+        warn!(job_id = %job_uuid, ?error, "agent completion settlement did not finish");
     }
 
     Ok(Json(AgentCompleteResponseBody { ok: true }))
+}
+
+/// What an agent completion leaves for after its reply and the run's end are
+/// committed and published: managed-AI usage billing, Home's feed rows and
+/// the runtime's `agent.complete` event. None of it changes what the
+/// conversation shows, and holding the reply's transaction open for it
+/// (some 60 round trips to the database) is what kept a finished turn's
+/// reply off the screen for seconds.
+struct CompletionSettlement {
+    project_id: Uuid,
+    job_id: Uuid,
+    run_id: Option<Uuid>,
+    conversation_id: Option<Uuid>,
+    prompt_id: Option<Uuid>,
+    billing_prompt_id: Option<Uuid>,
+    leased_runtime_id: Option<Uuid>,
+    job_payload: JsonValue,
+    /// An explicit decline is silence, not activity: no Home row.
+    silent: bool,
+    outcome: String,
+    run_succeeded: bool,
+    summary: Option<String>,
+    error_message: Option<String>,
+    artifacts_count: Option<usize>,
+    provider: Option<String>,
+    /// The turn's usage, when the run has a conversation.
+    usage: Option<TurnUsage>,
+    reply: Option<ConversationMessageRow>,
+    /// The org whose credits the completion's own transaction changed (a
+    /// failed run's refund, or billing deferred until the agent spoke).
+    credit_org_id: Option<Uuid>,
+}
+
+impl CompletionSettlement {
+    async fn settle(self, state: AppState) {
+        let mut credit_org_id = self.credit_org_id;
+        if let Some(usage) = self.usage {
+            if let Some(org_id) = self.bill_usage(&state, usage).await {
+                credit_org_id = Some(org_id);
+            }
+        }
+        if let Err((status, Json(api_error))) = self.record_activity(&state).await {
+            warn!(
+                job_id = %self.job_id,
+                status = status.as_u16(),
+                error = %api_error.message,
+                "failed to record agent completion activity"
+            );
+        }
+
+        // After the billing, so a lead continuation and the next queued send
+        // start from the settled balance.
+        if let Err((status, Json(api_error))) =
+            crate::multi_agent_plan::maybe_enqueue_lead_continuation_after_completion(
+                &state,
+                self.job_id,
+                &self.job_payload,
+            )
+            .await
+        {
+            warn!(
+                project_id = %self.project_id,
+                job_id = %self.job_id,
+                status = status.as_u16(),
+                error = %api_error.message,
+                "failed to queue skill-authored multi-agent lead continuation"
+            );
+        }
+        if let Some(conversation_id) = self.conversation_id {
+            crate::send_queue::spawn_send_queue_drain(state.clone(), conversation_id);
+        }
+
+        if let Some(org_id) = credit_org_id {
+            match state.pool.get().await {
+                Ok(connection) => {
+                    crate::credits::publish_credits_updated(
+                        &state,
+                        &*connection,
+                        org_id,
+                        crate::credits::CREDITS_UPDATED_LEDGER,
+                    )
+                    .await;
+                }
+                Err(error) => warn!(
+                    job_id = %self.job_id,
+                    %error,
+                    "failed to get a connection to announce updated credits"
+                ),
+            }
+        }
+    }
+
+    /// Reconcile the turn's managed-AI usage in a transaction of its own.
+    /// The adjustment is idempotent per prompt, so an attempt that failed
+    /// (and rolled back whole) is tried once more. Returns the org whose
+    /// credits changed.
+    async fn bill_usage(&self, state: &AppState, usage: TurnUsage) -> Option<Uuid> {
+        for attempt in 1..=2 {
+            let result = async {
+                let mut connection = state.pool.get().await.map_err(|error| {
+                    internal_error(format!("failed to get connection: {error}"))
+                })?;
+                let transaction = connection.transaction().await.map_err(|error| {
+                    internal_error(format!("failed to start transaction: {error}"))
+                })?;
+                let org_id = reconcile_completion_usage(
+                    state,
+                    &transaction,
+                    &self.project_id,
+                    &self.job_payload,
+                    self.run_id,
+                    self.billing_prompt_id,
+                    self.leased_runtime_id,
+                    self.provider.as_deref(),
+                    usage,
+                )
+                .await?;
+                transaction.commit().await.map_err(|error| {
+                    internal_error(format!("failed to commit usage reconciliation: {error}"))
+                })?;
+                Ok::<_, (StatusCode, Json<ApiError>)>(org_id)
+            }
+            .await;
+            match result {
+                Ok(org_id) => return org_id,
+                Err((status, Json(api_error))) if attempt == 1 => warn!(
+                    project_id = %self.project_id,
+                    job_id = %self.job_id,
+                    prompt_id = ?self.billing_prompt_id,
+                    status = status.as_u16(),
+                    error = %api_error.message,
+                    "failed to reconcile managed AI usage after agent completion; retrying"
+                ),
+                Err((status, Json(api_error))) => tracing::error!(
+                    project_id = %self.project_id,
+                    job_id = %self.job_id,
+                    prompt_id = ?self.billing_prompt_id,
+                    status = status.as_u16(),
+                    error = %api_error.message,
+                    "failed to reconcile managed AI usage after agent completion"
+                ),
+            }
+        }
+        None
+    }
+
+    /// Home's feed rows (the run's end, then the reply) and the runtime's
+    /// `agent.complete` event, in the order the completion always wrote them.
+    async fn record_activity(&self, state: &AppState) -> Result<(), (StatusCode, Json<ApiError>)> {
+        let mut connection = state
+            .pool
+            .get()
+            .await
+            .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
+        let transaction = connection
+            .transaction()
+            .await
+            .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
+        if let (Some(run_id), false) = (self.run_id, self.silent) {
+            crate::activity::record_run_completed(
+                &transaction,
+                &self.project_id,
+                &run_id,
+                self.conversation_id,
+                self.prompt_id,
+                &self.job_payload,
+                self.run_succeeded,
+                self.summary.as_deref(),
+                self.error_message.as_deref(),
+            )
+            .await;
+        }
+        if let Some(runtime_id) = self.leased_runtime_id {
+            let event_payload = json!({
+                "job_id": self.job_id,
+                "run_id": self.run_id,
+                "outcome": self.outcome,
+                "artifacts_count": self.artifacts_count,
+                "provider": self.provider,
+            });
+            runtime::record_runtime_event_with_conversation(
+                &transaction,
+                &runtime_id,
+                &self.project_id,
+                self.conversation_id.as_ref(),
+                "agent.complete",
+                event_payload,
+            )
+            .await?;
+        }
+        if let Some(reply) = self.reply.as_ref() {
+            crate::activity::record_reply_if_visible(
+                &transaction,
+                &reply.project_id,
+                &reply.conversation_id,
+                reply.run_id,
+                reply.prompt_id,
+                &reply.content,
+                &reply.metadata,
+            )
+            .await;
+        }
+        transaction.commit().await.map_err(|error| {
+            internal_error(format!("failed to commit completion activity: {error}"))
+        })
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7965,13 +8131,59 @@ pub(crate) async fn record_agent_conversation_message(
     content: String,
     metadata: JsonValue,
 ) -> Result<ConversationMessageRow, (StatusCode, Json<ApiError>)> {
-    let mut metadata = metadata;
-    crate::conversations::stamp_internal_conversation_metadata(
+    let internal_conversation =
+        crate::conversations::is_internal_conversation(transaction, conversation_id).await?;
+    let message = insert_agent_conversation_message(
         transaction,
+        project_id,
         conversation_id,
-        &mut metadata,
+        session_id,
+        prompt_id,
+        run_id,
+        content,
+        metadata,
+        internal_conversation,
+        true,
     )
     .await?;
+
+    // Home's feed: an agent conversationally speaking is a reply row.
+    crate::activity::record_reply_if_visible(
+        transaction,
+        project_id,
+        conversation_id,
+        run_id,
+        prompt_id,
+        &message.content,
+        &message.metadata,
+    )
+    .await;
+
+    Ok(message)
+}
+
+/// Insert an agent's message, without its Home row. The caller says whether
+/// the conversation is an internal review anchor, and whether this message
+/// bumps the conversation: a completion writes its usage row and its reply
+/// together, and only the reply, its last message, bumps it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn insert_agent_conversation_message(
+    transaction: &tokio_postgres::Transaction<'_>,
+    project_id: &Uuid,
+    conversation_id: &Uuid,
+    session_id: Option<Uuid>,
+    prompt_id: Option<Uuid>,
+    run_id: Option<Uuid>,
+    content: String,
+    metadata: JsonValue,
+    internal_conversation: bool,
+    bump_conversation: bool,
+) -> Result<ConversationMessageRow, (StatusCode, Json<ApiError>)> {
+    let mut metadata = metadata;
+    crate::conversations::stamp_known_internal_conversation_metadata(
+        &mut metadata,
+        internal_conversation,
+    );
     let message_id = Uuid::new_v4();
     let metadata_param = PgJson(&metadata);
 
@@ -8018,49 +8230,39 @@ pub(crate) async fn record_agent_conversation_message(
             ))
         })?;
 
-    let last_message_preview =
-        crate::conversations::build_conversation_last_message_preview(&content);
-    transaction
-        .execute(
-            "update conversations
-             set updated_at = now(),
-                 last_message_id = $2,
-                 last_message_at = now(),
-                 last_message_preview = $3
-             where id = $1",
-            &[conversation_id, &message_id, &last_message_preview],
-        )
-        .await
-        .map_err(|error| {
-            internal_error(format!("failed to bump conversation timestamp: {error}"))
-        })?;
+    if bump_conversation {
+        let last_message_preview =
+            crate::conversations::build_conversation_last_message_preview(&content);
+        transaction
+            .execute(
+                "update conversations
+                 set updated_at = now(),
+                     last_message_id = $2,
+                     last_message_at = now(),
+                     last_message_preview = $3
+                 where id = $1",
+                &[conversation_id, &message_id, &last_message_preview],
+            )
+            .await
+            .map_err(|error| {
+                internal_error(format!("failed to bump conversation timestamp: {error}"))
+            })?;
 
-    transaction
-        .execute(
-            "update conversations
-             set updated_at = now()
-             where id = (select root_conversation_id from conversations where id = $1)
-               and id <> $1",
-            &[conversation_id],
-        )
-        .await
-        .map_err(|error| {
-            internal_error(format!(
-                "failed to bump root conversation timestamp: {error}"
-            ))
-        })?;
-
-    // Home's feed: an agent conversationally speaking is a reply row.
-    crate::activity::record_reply_if_visible(
-        transaction,
-        project_id,
-        conversation_id,
-        run_id,
-        prompt_id,
-        &content,
-        &metadata,
-    )
-    .await;
+        transaction
+            .execute(
+                "update conversations
+                 set updated_at = now()
+                 where id = (select root_conversation_id from conversations where id = $1)
+                   and id <> $1",
+                &[conversation_id],
+            )
+            .await
+            .map_err(|error| {
+                internal_error(format!(
+                    "failed to bump root conversation timestamp: {error}"
+                ))
+            })?;
+    }
 
     Ok(map_conversation_message_row(&row))
 }
