@@ -5,6 +5,8 @@ import {
   listBrowserRuntimeCandidates,
 } from "./browserSessionRuntimeEnsure";
 import { browserRequestJobId, readBrowserRequestOf } from "./browserRequest";
+import { getMessageType } from "./chatMessageMetadata";
+import { shouldDisplayChatMessage } from "./chatMessagePresentation";
 import type { BrowserTransport } from "./usePersonalBrowserBridge";
 
 /**
@@ -12,24 +14,25 @@ import type { BrowserTransport } from "./usePersonalBrowserBridge";
  * Octo opens Instafy's browser on its own, and never starts or restarts a
  * cloud machine to do it).
  *
- * - `reuse`: the one browser session running in this space is the one this
- *   person opened in this conversation.
  * - `personal`: the browser in this desktop app, for a person on their own AI.
  *   It asks for the person's chosen approval mode, as a press does.
  * - `button`: the card stays a button, with the reason when there is one.
  *
- * Studio never switches the space's own machine to the browser by itself:
- * that stops whatever the machine still runs, such as a preview, a dev server
- * or a terminal session, and Studio cannot see those.
+ * Instafy's hosted browser always waits for a press. Studio cannot tell whose
+ * running session it is (the controller does not record who started one, so
+ * it may be a teammate's, with their pages and sign-ins), and opening a new
+ * one starts a machine or switches the space's own machine to the browser,
+ * which stops whatever it still runs, such as a preview, a dev server or a
+ * terminal session, that Studio cannot see.
  */
 export type BrowserAutoStartPlan =
-  | { kind: "reuse"; runtimeId: string }
   | { kind: "personal" }
   | { kind: "button"; reason: string | null };
 
 /**
- * Who else is in Instafy's browser, from its collaboration roster:
- * `unknown` until the roster connects, `unavailable` when it cannot.
+ * Who else is in Instafy's hosted browser, from its collaboration roster:
+ * `unknown` until the roster connects, `unavailable` when it cannot. Another
+ * person or agent run in control of it holds a card for the person.
  */
 export type SharedBrowserPresence = {
   status: "unknown" | "known" | "unavailable";
@@ -49,7 +52,6 @@ export const BROWSER_AUTO_START_COPY = {
   severalSessions: "Several browser sessions are running in this space. Open the one you want.",
   personalNeedsOwnAi: "The browser on this device needs your own AI connection.",
   unseenAddress: "Octo found this address itself. Check where it goes, then open it.",
-  presenceUnknown: "Studio could not check who else is in Instafy's browser. Open it when you are ready.",
   timedOut: "Instafy's browser did not start in time. Open it from the message to try again.",
 } as const;
 
@@ -74,13 +76,6 @@ export type BrowserAutoStartPlanInput = {
   projectId: string | null;
   /** This space's runtimes as the controller last reported them; null when unknown. */
   runtimes: readonly ControllerRuntimeStatusEntry[] | null;
-  /**
-   * The browser session this person opened in this conversation, from their
-   * own per-conversation browser state, or null. The controller does not
-   * record who started a session, so this is how Studio tells the person's
-   * own session from one a teammate started.
-   */
-  ownSessionRuntimeId: string | null;
 };
 
 function isLiveHostedMachine(entry: ControllerRuntimeStatusEntry): boolean {
@@ -98,20 +93,16 @@ export function browserAutoStartPlan(input: BrowserAutoStartPlanInput): BrowserA
       ? { kind: "personal" }
       : { kind: "button", reason: BROWSER_AUTO_START_COPY.personalNeedsOwnAi };
   }
+  // Instafy's hosted browser: the card stays a button, saying what a press
+  // would open.
   const projectId = input.projectId?.trim() ?? "";
   if (!projectId || !input.runtimes) return { kind: "button", reason: null };
   const sessions = listBrowserRuntimeCandidates([...input.runtimes]);
   if (sessions.length > 1) return { kind: "button", reason: BROWSER_AUTO_START_COPY.severalSessions };
-  if (sessions.length === 1) {
-    // Never another member's browser state: only the session this person
-    // opened here, and the hook checks again that nobody else is in it.
-    const own = input.ownSessionRuntimeId?.trim() ?? "";
-    return own && sessions[0]!.runtimeId === own
-      ? { kind: "reuse", runtimeId: own }
-      : { kind: "button", reason: BROWSER_AUTO_START_COPY.otherSession };
-  }
+  // Whoever started it: the controller does not record that.
+  if (sessions.length === 1) return { kind: "button", reason: BROWSER_AUTO_START_COPY.otherSession };
   // Opening a browser here would start a machine, or restart this space's
-  // own one: the person decides.
+  // own one.
   const machines = input.runtimes.filter(isLiveHostedMachine);
   if (machines.length === 0) return { kind: "button", reason: BROWSER_AUTO_START_COPY.firstMachine };
   if (machines.length > 1) return { kind: "button", reason: BROWSER_AUTO_START_COPY.anotherMachine };
@@ -133,6 +124,19 @@ const IPV4_PATTERN = /(^|[^0-9.])((?:\d{1,3}\.){3}\d{1,3})(?=$|[^0-9.]|\.(?![0-9
 
 function normalizeHost(host: string): string {
   return host.trim().toLowerCase().replace(/\.$/, "").replace(/^www\./, "");
+}
+
+/**
+ * Whether the person's draft or layout leaves a card to them for now: a draft
+ * in the composer, a layout too narrow to show the browser beside the chat, or
+ * side-by-side view turned off, where the browser would cover the chat.
+ */
+export function browserAutoStartHeldByComposerOrLayout(input: {
+  draft: string;
+  wideSurfaces: boolean;
+  splitView: boolean;
+}): boolean {
+  return input.draft.trim().length > 0 || !input.wideSurfaces || !input.splitView;
 }
 
 /**
@@ -158,13 +162,95 @@ export function hostsNamedIn(text: string): Set<string> {
   return hosts;
 }
 
+// Address forms Studio cannot compare with what the person read, so a task
+// naming one always leaves its card to the person: localhost (with or without
+// a port or path), IPv6 literals, internationalized hosts and hosts written
+// with a fullwidth or ideographic dot.
+const LOCALHOST_PATTERN = /(^|[^a-z0-9-])localhost(?![a-z0-9-])/i;
+const IPV6_BRACKETED_PATTERN = /\[[0-9a-f]*:[0-9a-z:.%]*\]/i;
+const IPV6_COMPRESSED_PATTERN =
+  /(^|[^0-9a-z:])(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4})*::|::[0-9a-f]{1,4})/i;
+const IPV6_FULL_PATTERN = /(^|[^0-9a-z:])(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}/i;
+// Labels of any script joined by an ASCII, fullwidth or ideographic dot.
+const UNICODE_HOST_PATTERN = /[\p{L}\p{N}][\p{L}\p{N}\p{M}-]*(?:[.\u3002\uFF0E\uFF61][\p{L}\p{N}][\p{L}\p{N}\p{M}-]*)+/gu;
+const NON_ASCII_PATTERN = /\P{ASCII}/u;
+
+function namesUnicodeHost(text: string): boolean {
+  for (const [candidate] of text.matchAll(UNICODE_HOST_PATTERN)) {
+    if (!NON_ASCII_PATTERN.test(candidate)) continue;
+    const labels = candidate.split(/[.\u3002\uFF0E\uFF61]/u);
+    const separators: string[] = candidate.match(/[.\u3002\uFF0E\uFF61]/gu) ?? [];
+    // A fullwidth or ideographic dot before an ASCII label, as in
+    // "example．com". A CJK sentence that ends in an ideographic full stop
+    // is not one.
+    if (separators.some((separator, index) => separator !== "." && /^[a-z0-9]/i.test(labels[index + 1] ?? ""))) {
+      return true;
+    }
+    // An internationalized domain, as in "bücher.de": an ASCII dot and a
+    // final label of two or more characters, so an abbreviation such as the
+    // Russian "т.е." is not one.
+    if (separators.includes(".") && [...(labels[labels.length - 1] ?? "")].length >= 2) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether a text names an address Studio cannot check: one of the forms above,
+ * a punycode host, or an http(s) address that does not parse.
+ */
+export function namesUncheckableAddress(text: string): boolean {
+  if (LOCALHOST_PATTERN.test(text) || IPV6_BRACKETED_PATTERN.test(text) ||
+      IPV6_COMPRESSED_PATTERN.test(text) || IPV6_FULL_PATTERN.test(text) || namesUnicodeHost(text)) {
+    return true;
+  }
+  for (const match of text.matchAll(URL_PATTERN)) {
+    const authority = match[0].replace(/^https?:\/\//i, "").split(/[/?#]/)[0] ?? "";
+    if (NON_ASCII_PATTERN.test(authority)) return true;
+    try {
+      if (new URL(match[0]).hostname.split(".").some((label) => label.startsWith("xn--"))) return true;
+    } catch {
+      return true;
+    }
+  }
+  return /(^|[^a-z0-9-])xn--[a-z0-9-]+\./i.test(text);
+}
+
+// Rows that are not the conversation itself, as runtime-controller's
+// NON_CONVERSATIONAL_AGENT_MESSAGE_TYPES (agent.rs) lists them, and the
+// controller's own notices. Cards that ask the person for something
+// (`*_request`) are left out too.
+const NON_CONVERSATIONAL_MESSAGE_TYPES = new Set([
+  "command_execution",
+  "mcp_tool_call",
+  "web_search",
+  "file_change",
+  "status",
+  "token_usage",
+  "reasoning",
+  "learn_router",
+  "todo_list",
+  "browser_decision",
+  "error",
+  "runtime_alert",
+  "run_cancellation",
+]);
+
+/** A message or reply the person could read in this conversation. */
+function isConversationalRow(message: ChatMessage): boolean {
+  if (!shouldDisplayChatMessage(message)) return false;
+  const type = getMessageType(message);
+  return !type || (!NON_CONVERSATIONAL_MESSAGE_TYPES.has(type) && !type.endsWith("_request"));
+}
+
 /**
  * Whether every address a card's task names is one the person could have
- * seen before Studio opens it by itself: in a skill setup (where an address
- * comes only from the skill's declaration), in the person's own messages, or
- * in this conversation's assistant text from before the turn that sent the
- * card. An address Octo read on a page or in a tool's output during that
- * turn, such as a search result, is not, so its card stays a button and the
+ * seen before Studio opens it by itself: in the person's own messages, or in
+ * this conversation's replies from before the turn that sent the card, a
+ * skill setup's included. Only rows the person could read count: never a
+ * tool's output, a status line, reasoning, a request card or a hidden row.
+ * An address Octo read on a page or in a tool's output during that turn, such
+ * as a search result, is not seen, and neither is an address Studio cannot
+ * check ({@link namesUncheckableAddress}), so its card stays a button and the
  * person sees the host first.
  */
 export function browserAutoStartAddressesSeen(input: {
@@ -172,15 +258,16 @@ export function browserAutoStartAddressesSeen(input: {
   messages: readonly ChatMessage[];
   cardIndex: number;
   currentUserId: string | null;
-  skillSetup: boolean;
 }): boolean {
+  if (namesUncheckableAddress(input.task)) return false;
   const wanted = hostsNamedIn(input.task);
-  if (wanted.size === 0 || input.skillSetup) return true;
+  if (wanted.size === 0) return true;
   const card = input.messages[input.cardIndex];
   const cardJobId = card ? browserRequestJobId(card) : null;
   const currentUserId = input.currentUserId?.trim() ?? "";
   const seen = new Set<string>();
   input.messages.forEach((message, index) => {
+    if (!isConversationalRow(message)) return;
     const own = message.role === "user" && Boolean(currentUserId) && message.authorId === currentUserId &&
       !readBrowserRequestOf(message);
     const earlierReply = message.role === "assistant" && index < input.cardIndex &&

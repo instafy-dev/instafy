@@ -31,41 +31,49 @@ Octo opens Instafy's browser on its own whenever a web page would help: to look
 something up, to check a page, or to walk the person through a provider's screens.
 Every interactive Chat turn carries that rule, whichever skills it loaded. When an
 interactive browser is not attached to the turn, Octo returns an **Open browser and
-continue** card, and Studio presses it by itself once the turn is finished. It sends
-the task to that exact browser once it is ready, and the chat records a one-line
-notice ("Octo opened Instafy's browser at dashboard.stripe.com") in place of the task,
-which the record keeps as the dispatched prompt. Studio starts a card by itself only:
+continue** card. In the desktop app, for a person on their own AI connection, Studio
+presses it by itself once the turn is finished, in the browser on this device. Everywhere
+else, including Instafy's hosted browser on the web, the card waits for the person's
+press. Either way the task goes to that exact browser once it is ready, and the chat
+records a one-line notice ("Octo opened Instafy's browser at dashboard.stripe.com") in
+place of the task, which the record keeps as the dispatched prompt. Studio starts a card
+by itself only:
 
+- in the desktop app's browser, for a person on their own AI connection. It never opens
+  Instafy's hosted browser by itself: the controller does not record who started a
+  running browser session, so Studio cannot tell the person's own session from a
+  teammate's, and opening a new one would start a machine or switch the space's own
+  machine to the browser, which stops whatever it still runs, such as a preview, a dev
+  server or a terminal session, and Studio cannot see those;
 - in the tab whose prompt started the run that sent the card, by the person who sent
   it; never for history, another viewer or device, a reload, an automation, a space
   review or a multi-agent worker;
 - for the newest card, within ten minutes, with nothing written after it, and never
   for a card a browser turn sent;
-- for addresses the person could have seen: in a skill setup (where an address comes
-  only from the skill's declaration), in the person's own messages, or in the
-  conversation's assistant text from before the turn that sent the card. An address
-  Octo read on a page or in a tool's output, such as a search result, leaves the card
-  to the person, who sees its host first;
+- for addresses the person could have seen: in their own messages, or in replies of the
+  conversation they could read from before the turn that sent the card. A skill setup's
+  address counts once a reply has shown it. Tool output, status lines, reasoning, request
+  cards and hidden rows do not count. An address Octo read on a page or in a tool's
+  output, such as a search result, leaves the card to the person, who sees its host
+  first, and so does an address Studio cannot compare: localhost, an IPv6 literal, an
+  internationalized host, a host written with a fullwidth dot, or an address that does
+  not parse;
 - once the tab is visible, once per card, at most once per conversation in ten
   minutes, and never after the person closed, paused or stopped the browser there;
-- when no one else is using the browser, the composer holds no draft and the layout
-  can show the browser beside the chat;
-- in the one browser session running in the space when this person opened it in
-  this conversation before, or in the browser in the desktop app for a person on
-  their own AI connection. It never starts a machine, never stops or restarts the
-  space's own machine (whatever it still runs, such as a preview, a dev server or a
-  terminal session, would stop with it, and Studio cannot see those), and never
-  presses **Stop and open here**.
+- when no one else is using the browser, the composer holds no draft, and side-by-side
+  view is on in a layout wide enough to show the browser beside the chat.
 
 Once the browser is ready and before the task goes out, Studio checks again: if someone
-wrote after the card, another run started, a draft appeared, or anyone else has the
-browser open or controls it, the task is not sent and the card keeps its button. A
-session someone else started is never continued by itself. Where Studio does not start a
-card, it keeps its button, with the reason when there is one, such as "This restarts this
-space's cloud machine as the browser, which stops anything still running on it." A draft or a browser
-in use only holds the card: it is looked at again once that clears. A failed start, or a
-continuation the controller did not take, leaves the button and says why, and leaves no
-notice. A press, or an opened card, reads **Opened** from then on, also after a reload,
+wrote after the card, another run started, a draft appeared, or someone else holds the
+browser, the task is not sent and the card keeps its button. Where Studio does not start a
+card, it keeps its button, with the reason when there is one, such as "A browser session is
+already running in this space. Open it when you are ready." or "This restarts this space's
+cloud machine as the browser, which stops anything still running on it." A draft or a
+browser in use only holds the card: it is looked at again once that clears. A failed start,
+or a continuation the controller did not take, leaves the button and says why, and leaves
+no notice. A continuation the controller put in the conversation's send queue, behind a
+run that took the lane first, counts as sent: the notice stays and the card reads
+**Opened**. A press, or an opened card, reads **Opened** from then on, also after a reload,
 so displaying an old message never runs it again. **Try again** on a failed browser run
 sends the card's task again through the browser, with the card it continues, never the
 notice text. A browser Studio opened by itself grants nothing a press does not: it uses
@@ -75,7 +83,7 @@ The card shows the host its task opens. The card says nothing about which browse
 because the Workspace browser starts on demand as a runtime of its own; Studio disables the
 button, with the reason, only when the Workspace browser is known not to open and there is no
 Personal Browser. Until then it counts as available.
-A skill setup opens the same card once, to walk to the provider screen that lists a value
+A skill setup offers the same card once, to walk to the provider screen that lists a value
 the skill asks for (see [Product](Product.md)). In a chat opened with
 `/skills import <source> --start` or `/skills start <name>`, the composer stays a chat
 composer for the rest of that chat, even while the browser is shown: a reply goes out as a

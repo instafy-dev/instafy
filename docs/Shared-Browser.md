@@ -311,12 +311,12 @@ classifier uses page descriptors and URL text; it cannot prove that arbitrary
 website JavaScript has no side effects or recognize every language/custom control.
 Use **Ask** when reviewing every state-changing interaction is important.
 
-A browser Studio opens by itself for Octo's `request_browser` card (see
-[Browser Profiles](Browser-Profiles.md)) asks exactly as one the person opened
-with the card's button: Studio never answers a site or action prompt for the
-person, and **Allow routine browsing** stays the person's own choice. A later
-change that grants routine browsing for such a browser needs risky-step
-enforcement in the browser runtime first.
+Studio never opens the Shared Browser by itself for Octo's `request_browser`
+card: the card waits for the person's press (see
+[Browser Profiles](Browser-Profiles.md)). Studio never answers a site or action
+prompt for the person, and **Allow routine browsing** stays the person's own
+choice. A later change that grants routine browsing for a browser Studio opened
+by itself needs risky-step enforcement in the browser runtime first.
 
 This is an additive runtime-origin policy choice, not caller-authored job metadata.
 Consent version `1` continues to attest the bounded browser lane and its default

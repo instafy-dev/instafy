@@ -14,7 +14,6 @@ import {
   isBrowserAutoStartDeclined,
   recordBrowserAutoStart,
   type BrowserAutoStartPlan,
-  type SharedBrowserPresence,
 } from "./browserAutoStart";
 import {
   BROWSER_AUTO_STARTED_METADATA_KEY,
@@ -52,18 +51,13 @@ export type BrowserAutoStartOptions = {
   activeRunIds: ReadonlySet<string>;
   /**
    * Why Studio leaves this conversation's cards to the person right now (a
-   * draft in the composer, a narrow layout), or null when it may start one.
+   * draft in the composer, a narrow layout, side-by-side view off), or null
+   * when it may start one.
    */
   blocked: { reason: string | null } | null;
   /** Another person or agent run holds the browser. */
   heldByOther: boolean;
-  /** A skill setup, where an address comes only from the skill's declaration. */
-  skillSetup: boolean;
-  /** Who else is in Instafy's browser once it is open here; null before. */
-  sharedPresence: SharedBrowserPresence | null;
   plan: (request: BrowserRequest, transport: BrowserTransport) => BrowserAutoStartPlan;
-  /** A failure the browser surface reported for the automatic start in flight. */
-  startFailure: string | null;
   /**
    * Changes whenever something the decision reads changes (a draft, the
    * layout, who holds the browser, this space's runtimes), so a card held by
@@ -95,7 +89,7 @@ type Options = {
   auto?: BrowserAutoStartOptions | null;
 };
 
-/** How long a press, or the reuse of a running browser, may take to open it. */
+/** How long a press, or an automatic start, may take to open the browser. */
 export const BROWSER_REQUEST_HANDOFF_DEADLINE_MS = 120_000;
 
 function hostOf(options: Options): BrowserRequestHost {
@@ -160,11 +154,11 @@ function autoStartStillApplies(current: Options, key: string): boolean {
  * - once that run is finished, and once the tab is visible;
  * - once per card on this page, at most once per conversation in ten minutes,
  *   and never after the person closed, paused or stopped the browser there;
- * - in the person's own running browser session, or in the desktop app for a
- *   person on their own AI (see browserAutoStartPlan): otherwise the card stays
- *   a button, with the reason;
+ * - only in the desktop app's browser, for a person on their own AI (see
+ *   browserAutoStartPlan): Instafy's hosted browser, and every other case,
+ *   leaves the card a button, with the reason;
  * - and, checked again once the browser is ready, only while nobody wrote
- *   after the card, the conversation is idle and nobody else is in the browser.
+ *   after the card, the conversation is idle and no one else holds the browser.
  * A start opens with the person's own approval settings, exactly as a press
  * does. A failed start leaves the button and says why.
  */
@@ -209,6 +203,9 @@ export function useChatBrowserRequest(options: Options) {
     if (unavailable) throw new Error(unavailable);
     const transport = browserRequestTransport(request, captured.transport, host);
     const autoStarted = plan !== null;
+    // Studio starts only the browser on this device by itself, never
+    // Instafy's hosted browser (see browserAutoStartPlan).
+    if (autoStarted && (plan.kind !== "personal" || transport !== "personal")) throw new BrowserAutoStartDropped();
     pending.current = true;
     try {
       captured.activate(transport, plan);
@@ -224,22 +221,14 @@ export function useChatBrowserRequest(options: Options) {
             (activated && (!current.open || current.transport !== transport))) {
           throw new Error("The browser or conversation changed before this task could continue.");
         }
-        if (autoStarted && current.auto?.startFailure) throw new Error(current.auto.startFailure);
         activated ||= current.open && current.transport === transport;
-        // An automatic start in Instafy's browser also waits to know who else
-        // is in it.
-        const presence = autoStarted && transport === "shared" ? current.auto?.sharedPresence ?? null : null;
-        if (presence?.status === "unavailable") throw new Error(BROWSER_AUTO_START_COPY.presenceUnknown);
-        const presenceKnown = !autoStarted || transport !== "shared" || presence?.status === "known";
-        if (activated && !current.busy && presenceKnown &&
+        if (activated && !current.busy &&
             (transport === "personal" ? current.personalReady : current.sharedReady)) {
           if (autoStarted) {
             // Nobody wrote or started anything while the browser opened.
             if (!autoStartStillApplies(current, key)) throw new BrowserAutoStartDropped();
-            // Never another person's browser state, and never one in use.
-            if (current.auto?.heldByOther || presence?.othersPresent || presence?.remoteController) {
-              throw new Error(BROWSER_AUTO_START_COPY.inUse);
-            }
+            // Never a browser in use.
+            if (current.auto?.heldByOther) throw new Error(BROWSER_AUTO_START_COPY.inUse);
           }
           const sent = await current.continueTask(transport, browserRequestContinuation(request), {
             display: browserRequestNotice(current.agentName ?? "Octo", request.task),
@@ -390,7 +379,6 @@ export function useChatBrowserRequest(options: Options) {
       messages: current.messages,
       cardIndex: index,
       currentUserId: auto.currentUserId,
-      skillSetup: auto.skillSetup,
     })) {
       leave(BROWSER_AUTO_START_COPY.unseenAddress);
       return;

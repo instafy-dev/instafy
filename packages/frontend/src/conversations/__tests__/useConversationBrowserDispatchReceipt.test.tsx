@@ -4,6 +4,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createInitialConversation, type ConversationState } from "../conversationState";
 import type { SubmitConversationOptions } from "../conversationSubmitTypes";
+import type { ChatMessage } from "../../screens/studio/types";
+import { browserRequestContinuedKeys } from "../../screens/studio/components/browserRequest";
 
 const { sendMessage, createBlank, recordMessage, resolveParticipation } = vi.hoisted(() => ({
   sendMessage: vi.fn(), createBlank: vi.fn(), recordMessage: vi.fn(), resolveParticipation: vi.fn(),
@@ -33,13 +35,14 @@ const browserOptions: SubmitConversationOptions = {
   metadata: { browserTransport: "shared", browserConsentVersion: 1, browserRuntimeId: RUNTIME_ID, browserPageId: "page-1" },
 };
 type Flow = ReturnType<typeof useConversationSubmitFlow>;
+const appendMessages = vi.fn();
 function Harness({ conversation, onReady }: { conversation: ConversationState; onReady: (flow: Flow) => void }) {
   const flow = useConversationSubmitFlow({
     conversations: [conversation], activeConversation: conversation, activeProjectId: PROJECT_ID,
     currentUserId: "user-1", preferredRuntimeId: null, runtimeStatuses: [], effectiveRuntimeId: null,
     effectiveRuntimeSource: "auto", showStatus: vi.fn(), createConversation: vi.fn(), selectConversation: vi.fn(),
     markConversationRead: vi.fn(), setConversationDraft: vi.fn(), setConversationControllerId: vi.fn(),
-    setConversationTitle: vi.fn(), setConversationGoal: vi.fn(), appendMessages: vi.fn(), updateMessage: vi.fn(),
+    setConversationTitle: vi.fn(), setConversationGoal: vi.fn(), appendMessages, updateMessage: vi.fn(),
     linkRunToConversation: vi.fn(),
   });
   onReady(flow);
@@ -77,6 +80,23 @@ describe("browser continuation through real submit flow and controller dispatch"
   it.each([null, {}, { runId: null, runIds: [] }])("requires an actual controller run, not a record-only response: %j", async (response) => {
     sendMessage.mockResolvedValue(response);
     await expect(flow.handleSubmit("conversation-local", prompt, browserOptions)).rejects.toThrow(/Controller unavailable|did not start a browser turn/);
+  });
+
+  it("counts a continuation the controller queued behind a busy lane as sent", async () => {
+    // The controller keeps it in the conversation's send queue and runs it
+    // next: the notice stays, the card reads continued, and nothing failed.
+    sendMessage.mockResolvedValue({ runId: null, runIds: null, promptId: null, jobId: null, jobIds: null, status: "queued",
+      conversationId: CONTROLLER_ID });
+    await expect(flow.handleSubmit("conversation-local", "Octo opened Instafy's browser", {
+      ...browserOptions,
+      dispatchInput: prompt,
+      metadata: { ...browserOptions.metadata, browserRequestOf: "job:job-1" },
+    })).resolves.toBeUndefined();
+    const appended = appendMessages.mock.calls.flatMap(([, rows]) => rows as ChatMessage[]);
+    expect(appended.filter((row) => row.messageType === "error")).toEqual([]);
+    const notice = appended.find((row) => row.role === "user");
+    expect(notice?.content).toBe("Octo opened Instafy's browser");
+    expect(browserRequestContinuedKeys(notice ? [notice] : [])).toEqual(new Set(["job:job-1"]));
   });
 
   it.each([{ runId: "accepted-run" }, { runIds: ["accepted-run"] }])("acknowledges accepted runs without exposing callbacks on the wire: %j", async (response) => {

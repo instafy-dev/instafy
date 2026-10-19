@@ -120,13 +120,14 @@ Start or Reconnect. Focus reaching the composer on its own does not count.
 The Machines panel only reads status. One exception remains: the shared
 browser dock still asks for a machine itself when it connects without one.
 
-When Octo asks for Instafy's browser, Studio opens it by itself only in a
-browser session already running in the space (see
-[Browser Profiles](Browser-Profiles.md)). It never starts a machine and never
-switches the space's own machine to the browser by itself: a restart stops
-whatever that machine still runs, such as a preview, a dev server or a
-terminal session, and none of those shows in its status. The card keeps its
-button, with that reason, and a press takes the usual path.
+When Octo asks for Instafy's browser, Studio never opens the hosted browser
+by itself (see [Browser Profiles](Browser-Profiles.md)). It never starts a
+machine, never switches the space's own machine to the browser and never
+connects to a running browser session on its own: a restart stops whatever
+that machine still runs, such as a preview, a dev server or a terminal
+session, none of which shows in its status, and the controller does not record
+who started a session. The card keeps its button, with the reason, and a press
+takes the usual path.
 
 The tab that makes a Stop or Remove holds the space the same way when that
 leaves it no live hosted machine, and a Machines-panel takeover holds the

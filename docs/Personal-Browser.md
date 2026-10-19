@@ -135,7 +135,7 @@ the person pressed it or Studio opened this browser by itself for Octo's card: a
 automatic start uses the same setting and grants nothing more. Only a person on
 their own AI connection gets that automatic start: with Instafy AI, a card resolves
 to Instafy's browser instead, because dispatch refuses a turn on this device's
-runtime. Existing active control keeps its approval mode. Older Desktop hosts
+runtime, and that card waits for a press. Existing active control keeps its approval mode. Older Desktop hosts
 without routine-mode support use Ask mode.
 
 Electron requires one native confirmation before enabling routine mode. It permits

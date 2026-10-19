@@ -772,12 +772,12 @@ message, and then continues the same turn by following each skill's `## Getting 
 section: questions are asked in chat, secrets are requested by name through the secrets card
 and never pasted into the conversation, dependencies are installed inside the skill folder,
 and schedules are created through the normal automation flow. When a skill declares the
-address where the person signs in to the provider, the setup also opens Instafy's browser
-once, beside the secret cards, through the **Open browser and continue** card: in the tab that
-started the setup, Studio presses it by itself once the turn is done, opens Instafy's browser
-at that address and walks to the screen that lists the value (see
-[Browser Profiles](Browser-Profiles.md) for when Studio leaves the card to the person). The
-card names the host it opens. The person signs in themselves: the walk pauses at
+address where the person signs in to the provider, the setup also offers once, beside the
+secret cards, the **Open browser and continue** card: pressing it opens Instafy's browser at
+that address and walks to the screen that lists the value. Studio presses it by itself only
+in the desktop app, for a person on their own AI connection, and only once a reply has shown
+that address (see [Browser Profiles](Browser-Profiles.md)); on the web nothing opens before
+the press. The card names the host it opens. The person signs in themselves: the walk pauses at
 the sign-in, they sign in on the page and choose **Let AI continue**, and the agent types no
 credential. The walk stops on that list: the agent is told never to open, or ask the person
 to open, a screen in Instafy's browser that shows the value itself, because others watching

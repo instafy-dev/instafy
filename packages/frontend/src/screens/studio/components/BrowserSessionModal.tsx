@@ -54,7 +54,7 @@ import {
   shouldRenderBrowserSessionFullscreen,
 } from "./browserSessionLayout";
 import { browserSessionWsDebugFields } from "./browserSessionDebug";
-import { BROWSER_AUTO_START_COPY, type SharedBrowserPresence } from "./browserAutoStart";
+import type { SharedBrowserPresence } from "./browserAutoStart";
 import {
   coalesceBrowserRuntimeEnsure,
   listBrowserRuntimeCandidates,
@@ -440,8 +440,6 @@ export function BrowserSessionModal({
   onContinueAfterHumanInput,
   sharedBrowserRfbCapabilities = null,
   sharedBrowserWebRtcCapabilities = null,
-  autoStart = null,
-  onAutoStartFailure,
   onPresenceChange,
 }: {
   isOpen: boolean;
@@ -482,14 +480,6 @@ export function BrowserSessionModal({
   onContinueAfterHumanInput?: ((message: string) => Promise<boolean>) | null;
   sharedBrowserRfbCapabilities?: RuntimeBrowserSessionCapabilities["rfb"] | null;
   sharedBrowserWebRtcCapabilities?: RuntimeBrowserSessionCapabilities["webrtc"] | null;
-  /**
-   * Studio opens this browser by itself for a request_browser card. It only
-   * reuses `runtimeId`, the person's own session running here: it never
-   * connects to another session, never starts, restarts or recycles a
-   * machine, and never presses Stop and open here.
-   */
-  autoStart?: { token: number; runtimeId: string } | null;
-  onAutoStartFailure?: ((token: number, reason: string) => void) | null;
   /** Who else is in this browser, from its collaboration roster; null once it closes. */
   onPresenceChange?: ((presence: SharedBrowserPresence | null) => void) | null;
 }) {
@@ -588,11 +578,6 @@ export function BrowserSessionModal({
   const webRtcConnectionRef = useRef<WebRtcBrowserConnection | null>(null);
   const webRtcProjectIdRef = useRef<string | null>(null);
   const preferRuntimeIdRef = useRef(preferRuntimeId);
-  const autoStartRef = useRef(autoStart);
-  autoStartRef.current = autoStart;
-  const consumedAutoStartTokenRef = useRef<number | null>(null);
-  const onAutoStartFailureRef = useRef(onAutoStartFailure);
-  onAutoStartFailureRef.current = onAutoStartFailure;
   const humanInputEnabledRef = useRef(humanInputEnabled);
   preferRuntimeIdRef.current = preferRuntimeId;
   humanInputEnabledRef.current = humanInputEnabled;
@@ -622,20 +607,6 @@ export function BrowserSessionModal({
   const [viewerOverride, setViewerOverride] =
     useState<SupportedSharedBrowserViewerKind | null>(null);
   const [connectAttempt, setConnectAttempt] = useState(0);
-  // A new automatic start, or a press after one, that finds this browser in
-  // an error state tries once more, so it is not left waiting on a
-  // connection that gave up.
-  const autoStartToken = autoStart?.token ?? null;
-  const statusRef = useRef<BrowserSessionStatus>(status);
-  statusRef.current = status;
-  const previousAutoStartTokenRef = useRef(autoStartToken);
-  useEffect(() => {
-    const changed = previousAutoStartTokenRef.current !== autoStartToken;
-    previousAutoStartTokenRef.current = autoStartToken;
-    if (changed && isOpen && statusRef.current === "error") {
-      setConnectAttempt((value) => value + 1);
-    }
-  }, [autoStartToken, isOpen]);
   const [hasConnectedOnce, setHasConnectedOnce] = useState(false);
   const [frozenFrameUrl, setFrozenFrameUrl] = useState<string | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
@@ -1276,31 +1247,6 @@ export function BrowserSessionModal({
       }
       const candidates = listBrowserRuntimeCandidates(statusEntries);
       setSessionChoices({ scope: selectionScope, candidates, loading: false, error: null });
-      // An automatic start decides once, on the first discovery after Studio
-      // asked for it; later reconnects behave as for a press.
-      const autoStartRequest = autoStartRef.current &&
-        consumedAutoStartTokenRef.current !== autoStartRef.current.token ? autoStartRef.current : null;
-      if (autoStartRequest) consumedAutoStartTokenRef.current = autoStartRequest.token;
-      const failAutoStart = (reason: string) => {
-        if (autoStartRequest) onAutoStartFailureRef.current?.(autoStartRequest.token, reason);
-      };
-      if (autoStartRequest) {
-        // It only reuses the person's own session running here. Another
-        // session, one that is gone, or a machine this browser would have to
-        // start or restart, stays the person's to open: nothing connects.
-        const selection = forcedRuntimeId ? null : resolveBrowserRuntimeSelection(statusEntries, exactRuntimeId);
-        if (selection?.kind !== "selected" || selection.candidate.runtimeId !== autoStartRequest.runtimeId) {
-          const reason = selection?.kind === "choose"
-            ? BROWSER_AUTO_START_COPY.severalSessions
-            : selection?.kind === "selected" || selection?.kind === "missing"
-              ? BROWSER_AUTO_START_COPY.otherSession
-              : BROWSER_AUTO_START_COPY.firstMachine;
-          failAutoStart(reason);
-          setStatus("error");
-          setError(reason);
-          return;
-        }
-      }
       if (!forcedRuntimeId) {
         const selection = resolveBrowserRuntimeSelection(statusEntries, exactRuntimeId);
         if (selection.kind === "choose" || selection.kind === "missing" || (selection.kind === "new" && !canControlBrowser)) {

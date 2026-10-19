@@ -4,6 +4,7 @@ import type { ChatMessage } from "../../types";
 import {
   BROWSER_AUTO_START_COPY,
   browserAutoStartAddressesSeen,
+  browserAutoStartHeldByComposerOrLayout,
   browserAutoStartPlan,
   browserAutoStartedRecently,
   claimBrowserAutoStart,
@@ -34,22 +35,17 @@ const browserSession = runtime({
 function plan(overrides: Partial<BrowserAutoStartPlanInput> = {}) {
   return browserAutoStartPlan({
     transport: "shared", personalAvailable: false, personalOwnAi: false, projectId: PROJECT,
-    runtimes: [runtime()], ownSessionRuntimeId: null, ...overrides,
+    runtimes: [runtime()], ...overrides,
   });
 }
 
 describe("browserAutoStartPlan", () => {
-  it("reuses the browser session this person opened in this conversation", () => {
-    expect(plan({ runtimes: [runtime(), browserSession], ownSessionRuntimeId: SESSION_ID }))
-      .toEqual({ kind: "reuse", runtimeId: SESSION_ID });
-  });
-
-  it("never continues on a browser session someone else started", () => {
-    // The session runs, but this person never opened it here: a teammate's
-    // sign-ins and pages stay theirs, so the card waits for a press.
+  it("never opens Instafy's hosted browser by itself, whoever started the session running here", () => {
+    // The controller does not record who started a session, so Studio cannot
+    // tell the person's own from a teammate's: the card waits for a press.
     expect(plan({ runtimes: [runtime(), browserSession] }))
       .toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.otherSession });
-    expect(plan({ runtimes: [runtime(), browserSession], ownSessionRuntimeId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd" }))
+    expect(plan({ runtimes: [browserSession] }))
       .toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.otherSession });
   });
 
@@ -78,11 +74,18 @@ describe("browserAutoStartPlan", () => {
     ["the machine is not this space's standard machine", { runtimes: [runtime({ displayName: "GPU worker" })] }, BROWSER_AUTO_START_COPY.secondMachine],
     ["several browser sessions are running", {
       runtimes: [browserSession, { ...browserSession, runtimeId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" }],
-      ownSessionRuntimeId: SESSION_ID,
     }, BROWSER_AUTO_START_COPY.severalSessions],
     ["this space's runtimes are not known", { runtimes: null }, null],
   ] as const)("leaves the button when %s", (_name, overrides, reason) => {
     expect(plan(overrides as Partial<BrowserAutoStartPlanInput>)).toEqual({ kind: "button", reason });
+  });
+
+  it("leaves the card to the person while side-by-side view is off", () => {
+    // The browser would open over the chat the person is reading.
+    expect(browserAutoStartHeldByComposerOrLayout({ draft: "", wideSurfaces: true, splitView: false })).toBe(true);
+    expect(browserAutoStartHeldByComposerOrLayout({ draft: "", wideSurfaces: false, splitView: true })).toBe(true);
+    expect(browserAutoStartHeldByComposerOrLayout({ draft: " Wait ", wideSurfaces: true, splitView: true })).toBe(true);
+    expect(browserAutoStartHeldByComposerOrLayout({ draft: "  ", wideSurfaces: true, splitView: true })).toBe(false);
   });
 
   it("writes its copy without em dashes", () => {
@@ -100,11 +103,14 @@ describe("addresses Studio may open by itself", () => {
       messageType: "action_request", jobId: "job-2", details: { browserRequest: { task, location: "auto" } },
     } });
   }
-  function seen(task: string, earlier: ChatMessage[], options: { skillSetup?: boolean } = {}) {
+  function seen(task: string, earlier: ChatMessage[]) {
     const messages = [...earlier, card(task)];
-    return browserAutoStartAddressesSeen({
-      task, messages, cardIndex: messages.length - 1, currentUserId: ME, skillSetup: options.skillSetup ?? false,
-    });
+    return browserAutoStartAddressesSeen({ task, messages, cardIndex: messages.length - 1, currentUserId: ME });
+  }
+  /** An earlier turn's row, of the given type, naming the address. */
+  function earlierRow(messageType: string | null, metadata: Record<string, unknown> = {}): ChatMessage {
+    return message({ role: "assistant", messageType, metadata: { jobId: "job-1", ...metadata },
+      content: "Found it at https://cheapflights.example/deals." });
   }
 
   it("finds every host a task names, not only the first", () => {
@@ -122,8 +128,60 @@ describe("addresses Studio may open by itself", () => {
     expect(seen("Search for the team plan price.", [])).toBe(true);
   });
 
-  it("opens the address a skill declares in a skill setup", () => {
-    expect(seen("Open https://app.freefinance.at and take me to API keys.", [], { skillSetup: true })).toBe(true);
+  it("checks a skill setup's address like any other: it passes only when a reply showed it", () => {
+    const task = "Open https://app.freefinance.at and take me to API keys.";
+    expect(seen(task, [message({ authorId: ME, content: "/skills start freefinance" })])).toBe(false);
+    expect(seen(task, [
+      message({ authorId: ME, content: "/skills start freefinance" }),
+      message({ role: "assistant", metadata: { jobId: "job-1" }, content: "You sign in to FreeFinance at app.freefinance.at." }),
+    ])).toBe(true);
+  });
+
+  it("counts only the conversation the person could read, not tool output or hidden rows", () => {
+    const task = "Open https://cheapflights.example/deals and pick the cheapest.";
+    expect(seen(task, [earlierRow(null)])).toBe(true);
+    expect(seen(task, [earlierRow("assistant_message")])).toBe(true);
+    for (const messageType of [
+      "command_execution", "mcp_tool_call", "web_search", "reasoning", "status", "token_usage", "file_change",
+      "error", "secret_request", "action_request", "integration_request",
+    ]) {
+      expect(seen(task, [earlierRow(messageType)]), messageType).toBe(false);
+    }
+    // A tool row the controller wraps under details.
+    expect(seen(task, [earlierRow(null, { details: { type: "web_search" } })])).toBe(false);
+    expect(seen(task, [earlierRow(null, { presentation: { hidden: true } })])).toBe(false);
+    expect(seen(task, [earlierRow(null, { details: { presentation: { hidden: true } } })])).toBe(false);
+    expect(seen(task, [message({ authorId: ME, content: "Try cheapflights.example", metadata: { presentation: { hidden: true } } })]))
+      .toBe(false);
+  });
+
+  it.each([
+    ["localhost with a port and path", "Open http://localhost:3000/settings."],
+    ["localhost with a port, no scheme", "Open localhost:5173 and check the header."],
+    ["bare localhost", "Open localhost and check the header."],
+    ["a .localhost host", "Open http://app.localhost/settings."],
+    ["an IPv6 literal in an address", "Open http://[::1]:8080/admin."],
+    ["a bare IPv6 literal", "Open fe80::1 and read the status page."],
+    ["a full IPv6 literal", "Open 2001:db8:0:0:0:0:2:1 and read it."],
+    ["an internationalized host in an address", "Open https://bücher.example/kasse."],
+    ["a bare internationalized host", "Open bücher.example and find the cart."],
+    ["a bare Unicode domain", "Open пример.рф and find the settings."],
+    ["a punycode host", "Open https://xn--bcher-kva.example/kasse."],
+    ["a fullwidth dot", "Open cheapflights．example and pick the cheapest."],
+    ["an ideographic full stop", "Open https://cheapflights。example/deals."],
+    ["an address that does not parse", "Open http://exa%mple.com/deals."],
+  ] as const)("leaves the card for %s, even one the person wrote", (_name, task) => {
+    expect(seen(task, [message({ authorId: ME, content: task })])).toBe(false);
+  });
+
+  it("does not take prose for an address", () => {
+    for (const task of [
+      "Откройте настройки, т.е. страницу ключей.",
+      "設定を開いてください。次にキーを表示します。",
+      "Stop at 12:30:45 and use std::fs as the example.",
+    ]) {
+      expect(seen(task, []), task).toBe(true);
+    }
   });
 
   it.each([
