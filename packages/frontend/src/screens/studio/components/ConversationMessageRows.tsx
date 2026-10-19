@@ -17,9 +17,11 @@ import { ChatBubbleRow } from "./ChatBubbleRow";
 import type { ChatSpeakerMarker } from "./chatSpeakerMarker";
 import {
   AssistantMessageEntry,
+  BrowserRequestNoticeRow,
   extractChatAttachments,
   UserMessageBubble,
 } from "./ChatMessageEntries";
+import { readBrowserRequestOf } from "./browserRequest";
 import {
   AssistantSpeakerIdentityLabel,
   type SpeakerStatusMarker,
@@ -261,6 +263,12 @@ export function ConversationMessageRows({
   let lastAssistantHandle: string | null = null;
   for (const [messageIndex, message] of messages.entries()) {
         flushTimedRowsBefore(message.timestamp);
+        // A continuation sent to Instafy's browser for a card reads as a
+        // one-line notice, not as a message the person wrote.
+        if (message.role === "user" && readBrowserRequestOf(message)) {
+          rows.push(<BrowserRequestNoticeRow key={message.id} message={message} />);
+          continue;
+        }
         const normalizedCurrentUserId = typeof currentUserId === "string" ? currentUserId.trim() : "";
         const humanIdentity =
           message.role === "user" ? resolveHumanChatIdentity(message, humanLabelByUserId) : null;

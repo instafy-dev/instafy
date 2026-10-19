@@ -311,6 +311,19 @@ classifier uses page descriptors and URL text; it cannot prove that arbitrary
 website JavaScript has no side effects or recognize every language/custom control.
 Use **Ask** when reviewing every state-changing interaction is important.
 
+Routine browsing is free in a browser Octo opened by itself (owner decision,
+Oct 19; see [Browser Profiles](Browser-Profiles.md)). For a run Studio started
+by itself from a `request_browser` card in this tab, and for the run **Let AI
+continue** starts after a sign-in pause in it, Studio answers the first site
+prompt with `allow_routine` for the person who started the run, once, where the
+runtime offers routine browsing. This is the same decision the person makes with
+**Allow routine browsing**, made by the initiating user's own client through
+the same origin bridge; consent version `1`, the runtime's approval state and
+every boundary above are unchanged. Action prompts, for a purchase, a
+submission or an activation key, still wait for the person, and secret entry
+stays blocked. A browser opened with the card's button, or from the composer,
+still asks at its first site.
+
 This is an additive runtime-origin policy choice, not caller-authored job metadata.
 Consent version `1` continues to attest the bounded browser lane and its default
 one-shot policy. The authenticated origin bridge accepts the new `allow_routine`

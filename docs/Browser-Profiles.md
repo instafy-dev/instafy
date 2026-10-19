@@ -27,15 +27,44 @@ cannot import either profile.
 
 ## Opening and continuing a browser task from Chat
 
-When an interactive browser is not attached to a Chat turn, the bundled browser
-skill can return an **Open browser and continue** card. Selecting it opens the
-conversation's browser and sends the task to that exact browser once it is ready.
-This is a user-selected handoff; displaying an old message never runs it again.
+Octo opens Instafy's browser on its own whenever a web page would help: to look
+something up, to check a page, or to walk the person through a provider's screens.
+Every interactive Chat turn carries that rule, whichever skills it loaded. When an
+interactive browser is not attached to the turn, Octo returns an **Open browser and
+continue** card, and Studio presses it by itself once the turn is finished. It sends
+the task to that exact browser once it is ready, and the chat records a one-line
+notice ("Octo opened Instafy's browser at dashboard.stripe.com") in place of the task,
+which the record keeps as the dispatched prompt. Studio starts a card by itself only:
+
+- in the tab whose prompt started the run that sent the card, by the person who sent
+  it; never for history, another viewer or device, a reload, an automation, a space
+  review or a multi-agent worker;
+- for the newest card, within ten minutes, with nothing written after it, and never
+  for a card a browser turn sent;
+- once the tab is visible, once per card, at most once per conversation in ten
+  minutes, and never after the person closed, paused or stopped the browser there;
+- when no one else is using the browser, the composer holds no draft and the layout
+  can show the browser beside the chat;
+- when it is cheap: a browser session already running in this space, the browser in
+  the desktop app for a person on their own AI connection (its one native
+  confirmation stays), or this space's one idle standard cloud machine, which
+  restarts as the browser (about two minutes and one billing interval, and the card
+  says so). It never starts a second machine, never stops another space's or a busy
+  machine, and never presses **Stop and open here**.
+
+Otherwise the card keeps its button, with the reason when there is one, such as
+"This starts a second cloud machine for this space." A failed start leaves the button
+and says why. A press, or an opened card, reads **Opened** from then on, also after a
+reload, so displaying an old message never runs it again. A browser Octo opened by
+itself keeps the chat composer: the person's next message is a chat turn, not a
+read-only browser turn. Routine browsing is free in it: Studio answers the run's first
+site prompt with routine browsing for the person who started the run, while purchases,
+submissions and activation keys still ask (see [Shared Browser](Shared-Browser.md)).
 The card shows the host its task opens. The card says nothing about which browsers exist,
 because the Workspace browser starts on demand as a runtime of its own; Studio disables the
 button, with the reason, only when the Workspace browser is known not to open and there is no
 Personal Browser. Until then it counts as available.
-A skill setup offers the same card once, to walk to the provider screen that lists a value
+A skill setup opens the same card once, to walk to the provider screen that lists a value
 the skill asks for (see [Product](Product.md)). In a chat opened with
 `/skills import <source> --start` or `/skills start <name>`, the composer stays a chat
 composer for the rest of that chat, even while the browser is shown: a reply goes out as a

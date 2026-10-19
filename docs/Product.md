@@ -772,10 +772,12 @@ message, and then continues the same turn by following each skill's `## Getting 
 section: questions are asked in chat, secrets are requested by name through the secrets card
 and never pasted into the conversation, dependencies are installed inside the skill folder,
 and schedules are created through the normal automation flow. When a skill declares the
-address where the person signs in to the provider, the setup also offers once, beside the
-secret cards, the **Open browser and continue** card: pressing it opens Instafy's browser at
-that address and walks to the screen that lists the value, and nothing opens before that
-press. The card names the host it opens. The person signs in themselves: the walk pauses at
+address where the person signs in to the provider, the setup also opens Instafy's browser
+once, beside the secret cards, through the **Open browser and continue** card: in the tab that
+started the setup, Studio presses it by itself once the turn is done, opens Instafy's browser
+at that address and walks to the screen that lists the value (see
+[Browser Profiles](Browser-Profiles.md) for when Studio leaves the card to the person). The
+card names the host it opens. The person signs in themselves: the walk pauses at
 the sign-in, they sign in on the page and choose **Let AI continue**, and the agent types no
 credential. The walk stops on that list: the agent is told never to open, or ask the person
 to open, a screen in Instafy's browser that shows the value itself, because others watching
@@ -785,9 +787,9 @@ browser and copy the value into its card there. That rule is guidance for the mo
 block the browser enforces. In that chat the composer stays a chat composer, even while the
 browser is shown, so each reply continues the setup instead of starting another browser task;
 the walk goes on only through the browser's own controls (see
-[Browser Profiles](Browser-Profiles.md)). A skill that declares no address gets no offer; one
-that declares several (such as live and demo) gets it once the person has picked one. The
-offer does not depend on the runtime running the chat turn, since Instafy's browser starts as
+[Browser Profiles](Browser-Profiles.md)). A skill that declares no address gets no browser;
+one that declares several (such as live and demo) gets it once the person has picked one. The
+walk does not depend on the runtime running the chat turn, since Instafy's browser starts as
 a runtime of its own; the card's button is disabled, with the reason, only where Studio knows
 no browser can open. A card's own where-to-get line still names a screen, never an address. Every later turn in that chat,
 including one that only saves a file the setup asked for, picks the setup up at its next

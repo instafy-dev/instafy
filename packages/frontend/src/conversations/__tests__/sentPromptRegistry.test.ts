@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   claimAutoRetryForPromptSentFromThisPage,
   didSendFailForPromptSentFromThisPage,
+  findPromptSentFromThisPageForRun,
   forgetPromptsSentFromThisPageForTests,
   readRetrySentFromThisPage,
   recordRunsStartedByPromptSentFromThisPage,
@@ -43,6 +44,22 @@ describe("sentPromptRegistry", () => {
         ["run-1"],
       ),
     ).toBe(false);
+  });
+
+  it("finds the prompt this page sent for a run, with its metadata as sent", () => {
+    // Studio's own browser start reads it: only the tab whose prompt started
+    // the run that sent a request_browser card starts that card, and never
+    // for a prompt that was itself a browser turn.
+    const sent = { ...LOCAL_COPY, metadata: { ...LOCAL_COPY.metadata, browserTransport: "shared" } };
+    rememberPromptSentFromThisPage(sent);
+    expect(findPromptSentFromThisPageForRun("job-1")).toBeNull();
+    recordRunsStartedByPromptSentFromThisPage(DISPATCHED, ["run-1", "job-1"]);
+    expect(findPromptSentFromThisPageForRun("job-1")).toEqual({ metadata: sent.metadata });
+    expect(findPromptSentFromThisPageForRun(" run-1 ")).toEqual({ metadata: sent.metadata });
+    expect(findPromptSentFromThisPageForRun("job-2")).toBeNull();
+    expect(findPromptSentFromThisPageForRun("")).toBeNull();
+    forgetPromptsSentFromThisPageForTests();
+    expect(findPromptSentFromThisPageForRun("job-1")).toBeNull();
   });
 
   it("never matches a prompt that started no run, such as a note that was only recorded", () => {

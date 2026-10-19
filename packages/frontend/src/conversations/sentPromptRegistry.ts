@@ -30,6 +30,8 @@ type SentPrompt = {
   retryOf: string | null;
   /** Set when the controller did not take the prompt (its dispatch or recording failed). */
   sendFailed: boolean;
+  /** The prompt's metadata as this page sent it. */
+  metadata: unknown;
 };
 
 /** What the registry reads from a prompt: its id, its metadata, or both. */
@@ -101,6 +103,7 @@ export function rememberPromptSentFromThisPage(message: Pick<ChatMessage, "id" |
     runIds: new Set<string>(),
     retryOf: readRunFailureRetryOf({ metadata: message.metadata }),
     sendFailed: false,
+    metadata: message.metadata,
   };
   for (const key of keys) {
     sentPromptsByKey.delete(key);
@@ -144,6 +147,25 @@ export function wasRunStartedByPromptSentFromThisPage(
 ): boolean {
   const entry = findEntry(message);
   return entry !== null && normalizedIds(runIds).some((id) => entry.runIds.has(id));
+}
+
+/**
+ * The prompt this page sent that started the given run or job, with its
+ * metadata as sent, or null when this page started no such run: another
+ * viewer's prompt, a reload, another device or a controller-dispatched run
+ * (an automation, a multi-agent worker or lead) all read null.
+ */
+export function findPromptSentFromThisPageForRun(runId: string): { metadata: unknown } | null {
+  const id = typeof runId === "string" ? runId.trim() : "";
+  if (!id) {
+    return null;
+  }
+  for (const entry of new Set(sentPromptsByKey.values())) {
+    if (entry.runIds.has(id)) {
+      return { metadata: entry.metadata };
+    }
+  }
+  return null;
 }
 
 /**

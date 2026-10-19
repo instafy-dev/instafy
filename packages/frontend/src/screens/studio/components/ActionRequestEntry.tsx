@@ -5,11 +5,14 @@ import { Input } from "../../../components/Input";
 import { Text } from "../../../components/Text";
 import { StudioListBox, StudioListBoxItem } from "../../../components/aria/StudioListBox";
 import { StudioPopover } from "../../../components/aria/StudioPopover";
+import { Badge } from "../../../components/Badge";
+import { Spinner } from "../../../components/Spinner";
 import { useStatus } from "../../../status/useStatus";
 import {
   BrowserRequestHostContext,
   browserRequestDestinations,
   browserRequestFromMessage,
+  browserRequestKey,
   browserRequestUnavailableReason,
 } from "./browserRequest";
 import { ChatActionCard, type ChatActionCardAction } from "./ChatActionCard";
@@ -242,6 +245,16 @@ export function ActionRequestEntry({
   );
   const browserUnavailable =
     browserRequest && browserHost ? browserRequestUnavailableReason(browserRequest, browserHost) : null;
+  // Studio opens the browser for a card by itself where it can: the card then
+  // reads Opening and then Opened in place of its button. Where it cannot,
+  // the button stays, with the reason when there is one. A continued card
+  // reads Opened after a reload too, so an old card is not pressed again.
+  const browserKey = browserRequest ? browserRequestKey(message) : null;
+  const browserCardState = browserKey ? browserHost?.cardStates?.get(browserKey) ?? null : null;
+  const browserPhase = browserKey && (browserHost?.continuedKeys?.has(browserKey) || browserCardState?.kind === "opened")
+    ? "opened"
+    : browserCardState?.kind === "opening" ? "opening" : "button";
+  const browserReason = browserCardState?.kind === "button" && !browserUnavailable ? browserCardState.reason : null;
   const [busyActionId, setBusyActionId] = useState<string | null>(null);
   const [inputValue, setInputValue] = useState("");
   const [selectOpen, setSelectOpen] = useState(false);
@@ -336,7 +349,10 @@ export function ActionRequestEntry({
     );
   }
 
-  const actions: ChatActionCardAction[] = parsed.actions.map((action) => ({
+  const visibleActions = browserPhase === "button"
+    ? parsed.actions
+    : parsed.actions.filter((action) => action.eventName !== "instafy:request-browser");
+  const actions: ChatActionCardAction[] = visibleActions.map((action) => ({
     id: action.id,
     label: action.label,
     variant: action.variant,
@@ -361,11 +377,37 @@ export function ActionRequestEntry({
       title={fallbackTitle}
       description={parsed.description}
       children={
-        parsed.input || parsed.context || browserDestinations.length > 0 || browserUnavailable ? (
+        parsed.input || parsed.context || browserDestinations.length > 0 || browserUnavailable || browserPhase !== "button" || browserReason ? (
           <div className="space-y-2">
-            {browserDestinations.length > 0 ? (
+            {browserPhase === "opening" ? (
+              <Text as="div" variant="caption" tone="muted" className="flex items-center gap-2 break-all" data-testid="browser-request-opening">
+                <Spinner aria-hidden="true" tone="slate" size="sm" />
+                <span>
+                  Opening Instafy&apos;s browser{browserDestinations.length > 0 ? (
+                    <> at <span className="font-mono text-slate-700 dark:text-slate-200">{browserDestinations[0]}</span></>
+                  ) : null}
+                </span>
+              </Text>
+            ) : browserPhase === "opened" ? (
+              <div className="flex items-center gap-2" data-testid="browser-request-opened">
+                <Badge tone="success">Opened</Badge>
+                {browserDestinations.length > 0 ? (
+                  <Text as="span" variant="caption" tone="muted" className="break-all font-mono">{browserDestinations.join(", ")}</Text>
+                ) : null}
+              </div>
+            ) : browserDestinations.length > 0 ? (
               <Text as="div" variant="caption" tone="muted" className="break-all" data-testid="browser-request-destination">
                 Opens <span className="font-mono text-slate-700 dark:text-slate-200">{browserDestinations.join(", ")}</span>
+              </Text>
+            ) : null}
+            {browserPhase === "opening" && browserCardState?.kind === "opening" && browserCardState.note ? (
+              <Text as="div" variant="caption" tone="muted" data-testid="browser-request-opening-note">
+                {browserCardState.note}
+              </Text>
+            ) : null}
+            {browserReason ? (
+              <Text as="div" variant="caption" tone="muted" data-testid="browser-request-reason">
+                {browserReason}
               </Text>
             ) : null}
             {browserUnavailable ? (

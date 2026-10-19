@@ -12,7 +12,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { MoreHoriz, WarningTriangle } from "iconoir-react";
+import { Globe, MoreHoriz, WarningTriangle } from "iconoir-react";
 import { Button } from "../../../components/Button";
 import { Surface } from "../../../components/Surface";
 import { Text } from "../../../components/Text";
@@ -24,6 +24,7 @@ import { controllerClient } from "../../../sdk/instafy";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
 import type { ChatMessage } from "../types";
 import { ActionRequestEntry } from "./ActionRequestEntry";
+import { readBrowserRequestOf } from "./browserRequest";
 import { CHAT_BUBBLE_MAX_WIDTH } from "./chatBubbleWidth";
 import {
   LocalCapabilityInlineEntry,
@@ -552,6 +553,27 @@ function SkillImportMessageBody({ label, command }: { label: string; command: st
   );
 }
 
+/**
+ * The record of a continuation sent to Instafy's browser for a
+ * request_browser card: a muted one-line notice, "Octo opened Instafy's
+ * browser at <host>", not a bubble the person wrote. The task it sent is
+ * kept as the prompt's dispatched content.
+ */
+export function BrowserRequestNoticeRow({ message }: { message: ChatMessage }) {
+  return (
+    <div
+      data-chat-message-id={message.id}
+      data-testid="chat-browser-request-notice"
+      className="flex justify-center px-2 py-0.5"
+    >
+      <Text as="div" variant="caption" tone="muted" className="flex min-w-0 items-center gap-1.5 text-center">
+        <Globe className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+        <span className="min-w-0 break-words">{message.content.trim()}</span>
+      </Text>
+    </div>
+  );
+}
+
 export type UserMessageBubbleProps = {
   message: ChatMessage;
   projectId?: string | null;
@@ -564,6 +586,33 @@ export type UserMessageBubbleProps = {
 };
 
 export function UserMessageBubble({
+  message,
+  projectId,
+  runtimeId,
+  align = "right",
+  showNotch = true,
+  showStartNotch = false,
+  onOpenImage,
+  mentionableAgentHandles,
+}: UserMessageBubbleProps) {
+  if (readBrowserRequestOf(message)) {
+    return <BrowserRequestNoticeRow message={message} />;
+  }
+  return (
+    <PersonMessageBubble
+      message={message}
+      projectId={projectId}
+      runtimeId={runtimeId}
+      align={align}
+      showNotch={showNotch}
+      showStartNotch={showStartNotch}
+      onOpenImage={onOpenImage}
+      mentionableAgentHandles={mentionableAgentHandles}
+    />
+  );
+}
+
+function PersonMessageBubble({
   message,
   projectId,
   runtimeId,
