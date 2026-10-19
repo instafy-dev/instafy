@@ -371,7 +371,7 @@ pub(crate) async fn daily_prompts_used(pool: &PgPool, user_id: &Uuid) -> anyhow:
     Ok(count)
 }
 
-fn mint_agent_complete_token(config: &AppConfig, project_id: &Uuid) -> anyhow::Result<String> {
+fn mint_agent_token(config: &AppConfig, project_id: &Uuid, scope: &str) -> anyhow::Result<String> {
     let minted = mint_scoped_token(
         config,
         ScopedTokenRequest {
@@ -381,7 +381,7 @@ fn mint_agent_complete_token(config: &AppConfig, project_id: &Uuid) -> anyhow::R
             origin_id: None,
             runtime_id: None,
             protocol: None,
-            scopes: vec!["agent.complete".to_string()],
+            scopes: vec![scope.to_string()],
             lease_id: None,
             run_id: None,
             prefer_runtime: None,
@@ -393,7 +393,7 @@ fn mint_agent_complete_token(config: &AppConfig, project_id: &Uuid) -> anyhow::R
 }
 
 /// Leases the fixture's job and builds its `/agent/complete` request.
-async fn agent_complete_request(
+pub(crate) async fn agent_complete_request(
     fixture: &ReservedManagedAiPrompt,
     body: serde_json::Value,
 ) -> anyhow::Result<Request<Body>> {
@@ -406,13 +406,42 @@ async fn agent_complete_request(
             )
             .await?;
     }
-    let token = mint_agent_complete_token(&fixture.config, &fixture.project_id)?;
+    let token = mint_agent_token(&fixture.config, &fixture.project_id, "agent.complete")?;
     Ok(Request::builder()
         .method("POST")
         .uri("/agent/complete")
         .header(axum::http::header::CONTENT_TYPE, "application/json")
         .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
         .body(Body::from(body.to_string()))?)
+}
+
+/// Posts one of the leased job's progress messages, as the runtime streams
+/// them, through `/agent/message`.
+async fn post_agent_message(
+    fixture: &ReservedManagedAiPrompt,
+    body: serde_json::Value,
+) -> anyhow::Result<StatusCode> {
+    {
+        let connection = fixture.pool.get().await?;
+        connection
+            .execute(
+                "update agent_jobs set status = 'leased' where id = $1",
+                &[&fixture.job_id],
+            )
+            .await?;
+    }
+    let token = mint_agent_token(&fixture.config, &fixture.project_id, "agent.message")?;
+    let request = Request::builder()
+        .method("POST")
+        .uri("/agent/message")
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::from(body.to_string()))?;
+    let response = agent::router()
+        .with_state(fixture.state.clone())
+        .oneshot(request)
+        .await?;
+    Ok(response.status())
 }
 
 async fn post_agent_complete(
@@ -526,6 +555,109 @@ async fn managed_ai_prompt_refunds_when_completion_fails_before_upstream() -> an
         json!(fixture.burn_amount)
     );
     fixture.cleanup().await
+}
+
+/// A command execution as the runtime streams it. The routing
+/// pre-observation is one the runtime runs itself before Codex's first model
+/// call, and says so in its `source`.
+fn command_execution_message(
+    job_id: Uuid,
+    item_id: &str,
+    source: Option<&str>,
+) -> serde_json::Value {
+    let mut metadata = json!({
+        "kind": "codex_command_execution",
+        "status": "completed",
+        "command": "git status --short",
+        "exitCode": 0,
+        "timedOut": false,
+        "aggregatedOutput": "",
+        "eventType": "item.completed",
+        "itemId": item_id,
+        "runtimeId": Uuid::new_v4(),
+    });
+    if let Some(source) = source {
+        metadata["source"] = json!(source);
+    }
+    json!({
+        "job_id": job_id,
+        "content": "git status --short",
+        "message_type": "command_execution",
+        "metadata": metadata,
+    })
+}
+
+/// The runtime streams its routing pre-observation before Codex runs, so a
+/// turn whose first model call the proxy rejects already shows a command
+/// execution. That is not the model working: the reserve and the daily slot
+/// still come back. A command Codex ran keeps them.
+#[tokio::test]
+async fn managed_ai_prompt_refunds_a_failed_turn_that_only_showed_its_routing_pre_observation(
+) -> anyhow::Result<()> {
+    for (label, codex_ran_a_command, refunded) in [
+        ("refund-after-pre-observation", false, true),
+        ("keep-after-codex-command", true, false),
+    ] {
+        let Some(fixture) = seed_reserved_managed_ai_prompt(label).await? else {
+            eprintln!("skipping managed AI pre-observation refund test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        let pre_observation = command_execution_message(
+            fixture.job_id,
+            &format!("routing-pre-observation:{}", Uuid::new_v4()),
+            Some("routing_pre_observation"),
+        );
+        assert_eq!(
+            post_agent_message(&fixture, pre_observation).await?,
+            StatusCode::OK
+        );
+        if codex_ran_a_command {
+            let command = command_execution_message(fixture.job_id, "item_3", None);
+            assert_eq!(post_agent_message(&fixture, command).await?, StatusCode::OK);
+        }
+
+        let status = post_agent_complete(
+            &fixture,
+            json!({
+                "job_id": fixture.job_id,
+                "outcome": "failed",
+                "error_message": PROXY_401_ERROR,
+                "artifacts": [],
+            }),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK, "{label}");
+
+        let rows = ledger_rows(&fixture.pool, &fixture.project_id).await?;
+        let refunds = rows
+            .iter()
+            .filter(|(reason, _, _)| reason == "managed_ai_refund")
+            .count();
+        assert_eq!(refunds, usize::from(refunded), "{label}: got {rows:?}");
+        let prompt = prompt_metadata(&fixture.pool, &fixture.prompt_id).await?;
+        if refunded {
+            assert_eq!(
+                credit_balance(&fixture.pool, &fixture.org_id).await?,
+                fixture.reserved_balance + fixture.burn_amount,
+                "{label}"
+            );
+            assert_eq!(prompt["managedAiUsed"], json!(false), "{label}");
+            assert_eq!(
+                daily_prompts_used(&fixture.pool, &fixture.owner_user_id).await?,
+                0,
+                "{label}: the daily prompt slot is released"
+            );
+        } else {
+            assert_eq!(
+                credit_balance(&fixture.pool, &fixture.org_id).await?,
+                fixture.reserved_balance,
+                "{label}"
+            );
+            assert_eq!(prompt["managedAiUsed"], json!(true), "{label}");
+        }
+        fixture.cleanup().await?;
+    }
+    Ok(())
 }
 
 const PROVIDER_USAGE_LIMIT_ERROR: &str =

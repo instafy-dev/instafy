@@ -229,6 +229,8 @@ controller's lease or the proxy's static credentials, with their kind and pinned
 
 The controller now reserves units at prompt dispatch and then reconciles the final charge after completion from actual input/cached/output token usage. Cached tokens are a subset of the reported input tokens, so only the uncached remainder is billed at the input rate and the cached prefix is billed once at the cached rate. The shared ledger keeps both the usage metadata and any follow-up adjustment row when the final charge differs from the reserve.
 
+Reconciliation never holds a turn's reply back. The completion first commits and publishes the reply and the run's end, and then lets the conversation's next queued send dispatch, which reserves its own credits; after a plan worker's turn that drain waits until the lead's continuation is queued. The completion then writes Home's rows, reconciles in a transaction of its own, and only after that queues a plan lead's continuation and announces `credits.updated`; its response waits for all of it. An attempt fails when the reconciliation returns an error (the org lookup, a ledger write) or when any statement in it failed, even one that was only logged (a ledger reference, the run's credit trace): Postgres turns `COMMIT` on such an aborted transaction into a rollback without an error, so the controller checks the transaction before it commits. A failed attempt is logged as an error, rolled back whole and tried once more, right away; the adjustment row is idempotent per prompt, so a retry never charges twice. A reconciliation whose second attempt fails too no longer fails the completion: the run keeps its reply, the reserve stands as the charge, the controller logs the failure as an error, and nothing retries it later.
+
 A multi-agent planning turn becomes terminal when the controller dispatches or refuses its plan,
 before the runtime submits its completion receipt. The controller accepts that receipt once from
 the original runtime, job attempt and runtime generation, retaining the planning calls' usage and
@@ -246,11 +248,13 @@ daily prompt slot (`refund_managed_ai_reserve_on_failed_completion`): when the p
 request (auth, configuration; refund reason `proxy_auth_rejected`), or the provider refused it
 for a spent plan window or quota ("You've hit your usage limit", `usage_limit_reached`,
 `usage_not_included`, `insufficient_quota`; reason `provider_limit_rejected`), and nothing shows
-a model was reached: no completed Codex turn, no visible message or tool update, and, for a
-provider limit, no call in the job's usage receipt that did not end in an error. A throttling
-429, a 5xx or a timeout keeps the reserve: it may have cut a paid answer short. The Studio tells
-a managed-AI run that hit the limit that Instafy AI is unavailable (`aiAccessMode` on the run's
-final message), with no "Try again", since a resend before the window reopens fails the same way.
+a model was reached: no completed Codex turn, no visible message or tool update (the routing
+pre-observation, a command the runtime runs and shows before the model's first call, does not
+count), and, for a provider limit, no call in the job's usage receipt that did not end in an
+error. A throttling 429, a 5xx or a timeout keeps the reserve: it may have cut a paid answer
+short. The Studio tells a managed-AI run that hit the limit that Instafy AI is unavailable
+(`aiAccessMode` on the run's final message), with no "Try again", since a resend before the
+window reopens fails the same way.
 
 Ambient multi-human evaluation turns defer the managed reserve and prompt count until
 the agent actually answers. Telemetry and explicitly hidden progress do not start a

@@ -6480,6 +6480,18 @@ impl JobProcessor {
         } else {
             None
         };
+        // It ran before Codex, so it is shown before Codex's own messages,
+        // not after the answer.
+        let pre_observation_message = routing_pre_observation.as_ref().map(|observation| {
+            with_runtime_metadata(
+                routing_pre_observation_message(observation),
+                &registration.runtime_id,
+            )
+        });
+        let pre_observation_streamed = stream_routing_pre_observation(
+            progress_sender.as_ref(),
+            pre_observation_message.as_ref(),
+        );
         let pre_observed_evidence =
             routing_evidence_progress(routing_pre_observation.as_ref(), &[]);
         codex_run_options.require_first_tool_call = initial_main_requires_tool_call(
@@ -6763,11 +6775,9 @@ impl JobProcessor {
             extract_codex_messages(&output.events),
             &registration.runtime_id,
         );
-        if let Some(observation) = routing_pre_observation.as_ref() {
-            raw_interim_messages.push(with_runtime_metadata(
-                routing_pre_observation_message(observation),
-                &registration.runtime_id,
-            ));
+        let codex_message_count = raw_interim_messages.len();
+        if let Some(message) = pre_observation_message {
+            raw_interim_messages.push(message);
         }
         let safety_check_downgrade_warning =
             extract_safety_check_downgrade_warning(&raw_interim_messages);
@@ -6798,7 +6808,12 @@ impl JobProcessor {
         };
         if let Some(ctx) = streaming_context.as_mut() {
             if ctx.active {
-                for message in raw_interim_messages.iter().skip(ctx.streamed_count) {
+                for message in interim_messages_to_flush(
+                    &raw_interim_messages,
+                    codex_message_count,
+                    ctx.streamed_count,
+                    pre_observation_streamed,
+                ) {
                     if ctx.sender.send(message.clone()).is_err() {
                         warn!(
                             job_id = %job_id,
@@ -7905,6 +7920,14 @@ impl JobProcessor {
                 }
             }
 
+            // The retry's result is settled: its cards go out now, right
+            // behind its answer, not after the workspace sync and the
+            // turn-end save.
+            let retry_final_messages = stream_settled_cards(
+                progress_sender.as_ref(),
+                streaming_active,
+                retry_final_messages,
+            );
             let mut retry_not_saved = pre_turn_refresh
                 .as_ref()
                 .map(workspace_commit::PreTurnRefreshOutcome::not_saved_sentences)
@@ -8015,6 +8038,12 @@ impl JobProcessor {
                 final_messages: retry_final_messages,
             });
         }
+
+        // No retry: the turn's result is settled, so its cards go out now,
+        // right behind its answer, not after the workspace sync and the
+        // turn-end save.
+        let final_messages =
+            stream_settled_cards(progress_sender.as_ref(), streaming_active, final_messages);
 
         // Deterministic /learn optimizer: enforce budgets + prune/compact learned memory so it
         // doesn't balloon future prompts. This runs only after we know we're not retrying.
@@ -11073,6 +11102,76 @@ fn normalize_codex_action_list_item(
         value.to_string()
     };
     Some(normalized)
+}
+
+/// Send the routing pre-observation through the turn's progress stream as
+/// soon as it has run, ahead of everything Codex does. Returns whether it
+/// went; when it did not, the post-Codex flush carries it as before.
+fn stream_routing_pre_observation(
+    progress: Option<&JobProgress>,
+    message: Option<&JobMessage>,
+) -> bool {
+    match (progress, message) {
+        (Some(progress), Some(message)) if progress.status.load(Ordering::SeqCst) => {
+            progress.sender.send(message.clone()).is_ok()
+        }
+        _ => false,
+    }
+}
+
+/// The interim messages the progress stream has not carried once Codex
+/// returned: Codex's own messages past `streamed_count`, then the routing
+/// pre-observation appended after them, unless it already went out before
+/// Codex ran.
+fn interim_messages_to_flush(
+    messages: &[JobMessage],
+    codex_message_count: usize,
+    streamed_count: usize,
+    pre_observation_streamed: bool,
+) -> &[JobMessage] {
+    let end = if pre_observation_streamed {
+        codex_message_count.min(messages.len())
+    } else {
+        messages.len()
+    };
+    &messages[streamed_count.min(end)..end]
+}
+
+/// Final messages that only ask the person for something: a secret, an
+/// integration, their location or their browser. The controller stores them
+/// like any other message, so they may go out as soon as the turn's result
+/// is settled. A multi-agent plan, which the controller acts on, and a goal
+/// update still post with the completion.
+fn is_early_card(message: &JobMessage) -> bool {
+    matches!(
+        message.message_type.as_deref(),
+        Some("secret_request" | "integration_request" | "action_request")
+    )
+}
+
+/// Send the leading cards of a settled turn's `final_messages` through its
+/// progress stream, right behind its answer, and return the rest for the
+/// completion to post. Order is kept: the first message that is not such a
+/// card, and everything after it, stays. Without a working stream nothing
+/// goes here, and the completion posts them all as before.
+fn stream_settled_cards(
+    progress: Option<&JobProgress>,
+    streaming_active: bool,
+    final_messages: Vec<JobMessage>,
+) -> Vec<JobMessage> {
+    let Some(progress) = progress else {
+        return final_messages;
+    };
+    if !streaming_active || !progress.status.load(Ordering::SeqCst) {
+        return final_messages;
+    }
+    let mut remaining = final_messages.into_iter().peekable();
+    while let Some(card) = remaining.next_if(is_early_card) {
+        if let Err(unsent) = progress.sender.send(card) {
+            return std::iter::once(unsent.0).chain(remaining).collect();
+        }
+    }
+    remaining.collect()
 }
 
 /// The chat messages an assistant turn's actions become.
@@ -27894,6 +27993,201 @@ mod tests {
             .and_then(JsonValue::as_object)
             .cloned()
             .expect("details")
+    }
+
+    fn test_progress() -> (
+        JobProgress,
+        tokio::sync::mpsc::UnboundedReceiver<JobMessage>,
+    ) {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        (
+            JobProgress {
+                sender,
+                status: Arc::new(AtomicBool::new(true)),
+            },
+            receiver,
+        )
+    }
+
+    fn drain_types(receiver: &mut tokio::sync::mpsc::UnboundedReceiver<JobMessage>) -> Vec<String> {
+        let mut types = Vec::new();
+        while let Ok(message) = receiver.try_recv() {
+            types.push(message.message_type.unwrap_or_default());
+        }
+        types
+    }
+
+    fn status_message(content: &str) -> JobMessage {
+        JobMessage {
+            content: content.to_string(),
+            message_type: Some("status".to_string()),
+            metadata: Some(json!({ "kind": "agent_message" })),
+        }
+    }
+
+    /// A settled turn's cards follow its answer on the progress stream, ahead
+    /// of the workspace sync's statuses, instead of waiting for the
+    /// completion. What the controller acts on (a multi-agent plan), and
+    /// everything after it, still posts with the completion.
+    #[test]
+    fn a_settled_turn_streams_its_cards_right_behind_its_answer() {
+        let actions = vec![
+            CodexAction::RequestSecret {
+                name: "NOTION_TOKEN".to_string(),
+                description: Some("Paste your Notion token.".to_string()),
+                value_label: Some("Notion token".to_string()),
+                where_to_get: None,
+                skill: None,
+                sensitive: Some(true),
+                agent_handles: vec!["octo".to_string()],
+                refused_class: None,
+            },
+            CodexAction::RequestLocation {
+                precision: LocationPrecision::Approximate,
+                description: None,
+            },
+            CodexAction::MultiAgentPlan {
+                plan: json!({ "agents": [] }),
+                agent_count: 2,
+                rationale: None,
+            },
+            CodexAction::RequestSecret {
+                name: "LATER_TOKEN".to_string(),
+                description: None,
+                value_label: None,
+                where_to_get: None,
+                skill: None,
+                sensitive: Some(true),
+                agent_handles: vec!["octo".to_string()],
+                refused_class: None,
+            },
+        ];
+        let final_messages = build_final_messages_from_actions(&actions, None);
+        let (progress, mut receiver) = test_progress();
+        progress
+            .sender
+            .send(status_message("/workspace"))
+            .expect("the answer streams");
+
+        let left = stream_settled_cards(Some(&progress), true, final_messages);
+        progress
+            .sender
+            .send(status_message("Syncing workspace changes…"))
+            .expect("the sync status streams");
+
+        assert_eq!(
+            drain_types(&mut receiver),
+            vec!["status", "secret_request", "action_request", "status"],
+            "the cards land right behind the answer, before the sync"
+        );
+        assert_eq!(
+            left.iter()
+                .map(|message| message.message_type.as_deref().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            vec!["multi_agent_plan", "secret_request"],
+            "the completion posts the plan and what follows it, in order"
+        );
+    }
+
+    #[test]
+    fn without_a_working_stream_the_completion_posts_every_card() {
+        let cards = || {
+            vec![
+                JobMessage {
+                    content: "Add the value in the card on this message.".to_string(),
+                    message_type: Some("secret_request".to_string()),
+                    metadata: None,
+                },
+                JobMessage {
+                    content: "Connect Notion.".to_string(),
+                    message_type: Some("integration_request".to_string()),
+                    metadata: None,
+                },
+            ]
+        };
+
+        assert_eq!(stream_settled_cards(None, true, cards()).len(), 2);
+
+        let (progress, mut receiver) = test_progress();
+        assert_eq!(
+            stream_settled_cards(Some(&progress), false, cards()).len(),
+            2
+        );
+        progress.status.store(false, Ordering::SeqCst);
+        assert_eq!(
+            stream_settled_cards(Some(&progress), true, cards()).len(),
+            2
+        );
+        assert!(drain_types(&mut receiver).is_empty());
+
+        // The stream's sender is gone (its lease was lost): nothing is lost
+        // here, the completion still holds every card.
+        let (progress, receiver) = test_progress();
+        drop(receiver);
+        let left = stream_settled_cards(Some(&progress), true, cards());
+        assert_eq!(
+            left.iter()
+                .map(|message| message.message_type.as_deref().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            vec!["secret_request", "integration_request"]
+        );
+    }
+
+    /// The routing pre-observation runs before Codex, so it streams first and
+    /// the flush after Codex does not send it again.
+    #[test]
+    fn the_routing_pre_observation_streams_before_codex_and_only_once() {
+        let observation = RoutingPreObservation {
+            command: "pwd".to_string(),
+            exit_code: Some(0),
+            timed_out: false,
+            output: "/workspace".to_string(),
+        };
+        let pre_observation = routing_pre_observation_message(&observation);
+        let (progress, mut receiver) = test_progress();
+
+        assert!(stream_routing_pre_observation(
+            Some(&progress),
+            Some(&pre_observation)
+        ));
+        // Codex runs and streams three messages, the last one not yet sent.
+        let codex = vec![
+            status_message("one"),
+            status_message("two"),
+            status_message("answer"),
+        ];
+        for message in &codex[..2] {
+            progress.sender.send(message.clone()).expect("streams");
+        }
+        let mut interim = codex.clone();
+        interim.push(pre_observation.clone());
+        for message in interim_messages_to_flush(&interim, codex.len(), 2, true) {
+            progress.sender.send(message.clone()).expect("flushes");
+        }
+        let mut sent = Vec::new();
+        while let Ok(message) = receiver.try_recv() {
+            sent.push(message.content);
+        }
+        assert_eq!(sent, vec!["pwd", "one", "two", "answer"]);
+
+        // Not streamed before Codex (no working stream): the flush carries
+        // it after Codex's messages, as it always did.
+        assert_eq!(
+            interim_messages_to_flush(&interim, codex.len(), 2, false)
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["answer", "pwd"]
+        );
+        progress.status.store(false, Ordering::SeqCst);
+        assert!(!stream_routing_pre_observation(
+            Some(&progress),
+            Some(&pre_observation)
+        ));
+        assert!(!stream_routing_pre_observation(
+            None,
+            Some(&pre_observation)
+        ));
     }
 
     #[test]

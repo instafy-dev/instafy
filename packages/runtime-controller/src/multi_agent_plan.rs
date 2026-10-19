@@ -707,28 +707,31 @@ fn extract_multi_agent_plan_payload(payload: &JsonValue) -> Option<JsonValue> {
         .cloned()
 }
 
+/// The job's plan metadata, when it is a worker of a multi-agent plan, whose
+/// completion may wake its lead.
+fn plan_worker_metadata(job_payload: &JsonValue) -> Option<&JsonMap<String, JsonValue>> {
+    job_payload
+        .get("metadata")
+        .and_then(JsonValue::as_object)
+        .and_then(|metadata| metadata.get("multiAgentPlan"))
+        .and_then(JsonValue::as_object)
+        .filter(|plan_meta| plan_meta.get("role").and_then(JsonValue::as_str) == Some("worker"))
+}
+
+/// Whether the job is a multi-agent plan's worker, whose completion may
+/// queue its lead's continuation.
+pub(crate) fn job_payload_is_plan_worker(job_payload: &JsonValue) -> bool {
+    plan_worker_metadata(job_payload).is_some()
+}
+
 pub(crate) async fn maybe_enqueue_lead_continuation_after_completion(
     state: &AppState,
     completed_job_id: Uuid,
     completed_job_payload: &JsonValue,
 ) -> Result<bool, (StatusCode, Json<ApiError>)> {
-    let Some(plan_meta) = completed_job_payload
-        .get("metadata")
-        .and_then(JsonValue::as_object)
-        .and_then(|metadata| metadata.get("multiAgentPlan"))
-        .and_then(JsonValue::as_object)
-    else {
+    let Some(plan_meta) = plan_worker_metadata(completed_job_payload) else {
         return Ok(false);
     };
-
-    if plan_meta
-        .get("role")
-        .and_then(JsonValue::as_str)
-        .map(|value| value == "worker")
-        != Some(true)
-    {
-        return Ok(false);
-    }
 
     let Some(group_id) = plan_meta
         .get("groupId")

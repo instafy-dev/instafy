@@ -376,7 +376,7 @@ pub(crate) async fn refund_managed_ai_reserve_for_expired_job(
         if crate::agent::run_has_visible_assistant_message(&savepoint, project_id, run_id)
             .await
             .map_err(|error| api_error_to_anyhow("check run output for managed AI refund", error))?
-            || crate::agent::count_job_tool_update_messages(&savepoint, project_id, job_id)
+            || crate::agent::count_job_model_tool_update_messages(&savepoint, project_id, job_id)
                 .await
                 .map_err(|error| {
                     api_error_to_anyhow("count tool updates for managed AI refund", error)
