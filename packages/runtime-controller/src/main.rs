@@ -104,6 +104,8 @@ mod tests_managed_ai_refund;
 #[cfg(test)]
 mod tests_managed_credential;
 #[cfg(test)]
+mod tests_personal_org_slug;
+#[cfg(test)]
 mod tests_platform_job_record;
 #[cfg(test)]
 mod tests_presence_beat;

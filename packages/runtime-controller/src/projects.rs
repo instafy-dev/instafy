@@ -1499,6 +1499,26 @@ async fn create_organization(
         return Err(bad_request("orgSlug must not be empty"));
     }
 
+    // Clients treat the team at exactly `user-<their id>` as their own
+    // personal team. Whoever claimed another user's slug first would receive
+    // that user's default spaces, so only that user (or the platform) may
+    // create one, whether the slug was sent or derived from a display name.
+    if !context.is_service_role {
+        if let Some(slug_owner) = personal_slug_owner(&resolved_slug) {
+            if Some(slug_owner) != context.user_id {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(ApiError {
+                        message: "That organization slug is reserved for another user's personal team. Pick a different slug."
+                            .to_string(),
+                        code: Some("org_slug_reserved".to_string()),
+                        details: None,
+                    }),
+                ));
+            }
+        }
+    }
+
     let resolved_name = trimmed_name.unwrap_or_else(|| {
         owner_user_id
             .map(|owner| format!("Workspace {}", owner.to_string()[..8].to_string()))
@@ -4757,6 +4777,13 @@ fn slugify_org_name(name: &str) -> String {
         }
     }
     slug.trim_matches('-').to_string()
+}
+
+/// The user a personal-team slug (`user-<uuid>`) is reserved for, or None
+/// when the slug is outside that namespace.
+pub(crate) fn personal_slug_owner(slug: &str) -> Option<Uuid> {
+    slug.strip_prefix("user-")
+        .and_then(|rest| Uuid::parse_str(rest).ok())
 }
 
 async fn load_org_record(
