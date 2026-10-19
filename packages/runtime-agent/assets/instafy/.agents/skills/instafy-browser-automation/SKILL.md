@@ -37,10 +37,10 @@ exposed, emit one `request_browser` action:
 { "type": "request_browser", "task": "The user's concrete browsing task and relevant continuation context", "browserLocation": "auto" }
 ```
 
-Studio opens the conversation's browser and continues the task there on its
-own. Its site and action approval prompts still apply. A browser the person
-paused stays paused until they resume it, and the card stays a button where
-Studio cannot open it by itself. In one sentence of
+Where Studio can open the conversation's browser by itself it does, and
+continues the task there; otherwise the card stays a button the person
+presses. Its site and action approval prompts still apply. A browser the
+person paused stays paused until they resume it. In one sentence of
 your reply, say where the browser goes and why.
 Do not claim the website was opened before a browser tool returns observations.
 
