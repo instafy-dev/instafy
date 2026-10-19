@@ -487,6 +487,31 @@ pub(crate) async fn count_job_tool_update_messages(
     project_id: &Uuid,
     job_id: &Uuid,
 ) -> Result<i64, (StatusCode, Json<ApiError>)> {
+    count_job_tool_updates(transaction, project_id, job_id, true).await
+}
+
+/// The job's tool updates that show its model was called, for the managed-AI
+/// refund gates. The routing pre-observation is left out: the runtime runs
+/// that command itself and streams it before Codex's first model call, so a
+/// turn whose first call the proxy rejected can still carry one.
+pub(crate) async fn count_job_model_tool_update_messages(
+    transaction: &tokio_postgres::Transaction<'_>,
+    project_id: &Uuid,
+    job_id: &Uuid,
+) -> Result<i64, (StatusCode, Json<ApiError>)> {
+    count_job_tool_updates(transaction, project_id, job_id, false).await
+}
+
+/// The runtime's marker on its routing pre-observation message, which the
+/// controller stores under the message's `details`.
+const ROUTING_PRE_OBSERVATION_SOURCE: &str = "routing_pre_observation";
+
+async fn count_job_tool_updates(
+    transaction: &tokio_postgres::Transaction<'_>,
+    project_id: &Uuid,
+    job_id: &Uuid,
+    include_routing_pre_observation: bool,
+) -> Result<i64, (StatusCode, Json<ApiError>)> {
     let job_id_text = job_id.to_string();
     // Scope by project_id (indexed) before the JSONB metadata filter. Every
     // message for a job lives in that job's project, so this cannot change the
@@ -504,8 +529,17 @@ pub(crate) async fn count_job_tool_update_messages(
                    'mcp_tool_call',
                    'web_search',
                    'file_change'
+               )
+               and (
+                   $3::boolean
+                   or metadata #>> '{details,source}' is distinct from $4
                )",
-            &[project_id, &job_id_text],
+            &[
+                project_id,
+                &job_id_text,
+                &include_routing_pre_observation,
+                &ROUTING_PRE_OBSERVATION_SOURCE,
+            ],
         )
         .await
         .map_err(|error| {
@@ -2721,7 +2755,8 @@ fn artifacts_show_a_model_call_that_did_not_fail(artifacts: &JsonValue) -> bool 
 /// A managed-AI run that failed before reaching a model still holds the
 /// prompt reserve burned at dispatch and the daily prompt slot that goes with
 /// it. Give both back, once, when nothing shows the model was ever called:
-/// no completed Codex turn in the artifacts, no visible assistant message, no tool updates,
+/// no completed Codex turn in the artifacts, no visible assistant message, no tool updates
+/// other than the routing pre-observation the runtime ran before the model,
 /// and an error that the proxy rejected the request outright. Returns the
 /// org id when this call wrote the refund, for a post-commit
 /// `credits.updated`.
@@ -2761,7 +2796,7 @@ async fn refund_managed_ai_reserve_on_failed_completion(
     // reported no usage and so carries no `usage` to reconcile.
     if artifacts_show_a_completed_codex_turn(artifacts_value)
         || run_has_visible_assistant_message(transaction, project_id, run_id).await?
-        || count_job_tool_update_messages(transaction, project_id, job_id).await? > 0
+        || count_job_model_tool_update_messages(transaction, project_id, job_id).await? > 0
     {
         return Ok(None);
     }
@@ -3479,6 +3514,17 @@ pub(crate) async fn agent_complete(
     // The settlement takes its own connections.
     drop(connection);
 
+    // The conversation's next queued send goes now, behind the reply: its
+    // dispatch reserves its own credits, so it does not wait for this turn's
+    // billing, and a send typed meanwhile cannot overtake it. A plan
+    // worker's completion may wake its lead, whose continuation takes the
+    // lane first, so that drain stays behind it in the settlement.
+    let drain_after_lead_continuation =
+        crate::multi_agent_plan::job_payload_is_plan_worker(&job_payload);
+    if let (Some(conversation_id), false) = (run_conversation_id, drain_after_lead_continuation) {
+        crate::send_queue::spawn_send_queue_drain(state.clone(), conversation_id);
+    }
+
     let settlement = CompletionSettlement {
         project_id,
         job_id: job_uuid,
@@ -3498,6 +3544,7 @@ pub(crate) async fn agent_complete(
         usage: usage_to_reconcile,
         reply: assistant_message,
         credit_org_id: completion_credit_org_id,
+        drain_after_lead_continuation,
     };
     // Detached, so a runtime that stops waiting for this response cannot cut
     // the billing short; the response still waits for it.
@@ -3537,16 +3584,16 @@ struct CompletionSettlement {
     /// The org whose credits the completion's own transaction changed (a
     /// failed run's refund, or billing deferred until the agent spoke).
     credit_org_id: Option<Uuid>,
+    /// A plan worker's completion drains the conversation's send queue only
+    /// once its lead's continuation is queued; any other completion drained
+    /// it as soon as its reply was committed.
+    drain_after_lead_continuation: bool,
 }
 
 impl CompletionSettlement {
     async fn settle(self, state: AppState) {
-        let mut credit_org_id = self.credit_org_id;
-        if let Some(usage) = self.usage {
-            if let Some(org_id) = self.bill_usage(&state, usage).await {
-                credit_org_id = Some(org_id);
-            }
-        }
+        // Home's rows first: they do not depend on the billing, and the next
+        // queued send, already on its way, should not get ahead of them.
         if let Err((status, Json(api_error))) = self.record_activity(&state).await {
             warn!(
                 job_id = %self.job_id,
@@ -3555,9 +3602,15 @@ impl CompletionSettlement {
                 "failed to record agent completion activity"
             );
         }
+        let mut credit_org_id = self.credit_org_id;
+        if let Some(usage) = self.usage {
+            if let Some(org_id) = self.bill_usage(&state, usage).await {
+                credit_org_id = Some(org_id);
+            }
+        }
 
-        // After the billing, so a lead continuation and the next queued send
-        // start from the settled balance.
+        // After the billing, so a lead continuation starts from the settled
+        // balance.
         if let Err((status, Json(api_error))) =
             crate::multi_agent_plan::maybe_enqueue_lead_continuation_after_completion(
                 &state,
@@ -3574,7 +3627,9 @@ impl CompletionSettlement {
                 "failed to queue skill-authored multi-agent lead continuation"
             );
         }
-        if let Some(conversation_id) = self.conversation_id {
+        if let (Some(conversation_id), true) =
+            (self.conversation_id, self.drain_after_lead_continuation)
+        {
             crate::send_queue::spawn_send_queue_drain(state.clone(), conversation_id);
         }
 
@@ -3623,6 +3678,19 @@ impl CompletionSettlement {
                     usage,
                 )
                 .await?;
+                // A statement that failed in there and was only logged (a
+                // ledger reference, the run's credit trace) leaves the
+                // transaction aborted, and COMMIT on an aborted transaction
+                // rolls it back without an error. Ask first, so that is a
+                // failed attempt, retried, and not a charge silently lost.
+                transaction
+                    .batch_execute("select 1")
+                    .await
+                    .map_err(|error| {
+                        internal_error(format!(
+                            "usage reconciliation transaction was aborted: {error}"
+                        ))
+                    })?;
                 transaction.commit().await.map_err(|error| {
                     internal_error(format!("failed to commit usage reconciliation: {error}"))
                 })?;
@@ -3631,7 +3699,7 @@ impl CompletionSettlement {
             .await;
             match result {
                 Ok(org_id) => return org_id,
-                Err((status, Json(api_error))) if attempt == 1 => warn!(
+                Err((status, Json(api_error))) if attempt == 1 => tracing::error!(
                     project_id = %self.project_id,
                     job_id = %self.job_id,
                     prompt_id = ?self.billing_prompt_id,
@@ -3645,7 +3713,8 @@ impl CompletionSettlement {
                     prompt_id = ?self.billing_prompt_id,
                     status = status.as_u16(),
                     error = %api_error.message,
-                    "failed to reconcile managed AI usage after agent completion"
+                    "failed to reconcile managed AI usage after agent completion; \
+                     the reserve stands as the charge"
                 ),
             }
         }
@@ -3871,14 +3940,9 @@ async fn reconcile_completion_usage(
                         }
                     }
                 }
-                Err(error) => {
-                    warn!(
-                        project_id = %project_id,
-                        prompt_id = %prompt_uuid,
-                        ?error,
-                        "failed to attach managed AI usage metadata to credit ledger entry"
-                    );
-                }
+                // The charge was not applied, and a failed statement leaves
+                // the transaction aborted: the caller rolls back and retries.
+                Err(error) => return Err(error),
             }
         }
     }
