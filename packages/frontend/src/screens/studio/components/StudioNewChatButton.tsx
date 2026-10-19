@@ -4,9 +4,9 @@ import { ChatLines, Lock, NavArrowRight, Plus } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { EntityRow } from "../../../components/EntityRow";
 import { SearchInput } from "../../../components/SearchInput";
-import { Spinner } from "../../../components/Spinner";
+import { LoadingStatus } from "../../../components/LoadingStatus";
 import { Text } from "../../../components/Text";
-import { StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
+import { StudioDialogBody, StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
 import { useProjects } from "../../../projects/useProjects";
@@ -243,7 +243,7 @@ export function StudioNewChatButton({
   );
 
   const newChatMenu = shouldShowNewChat ? (
-    <StudioDialogPopover placement="bottom start" offset={8} className="w-80 max-w-[calc(100vw-1.5rem)] p-3" data-testid="chat-new-chat-menu-popover">
+    <StudioDialogPopover placement="bottom start" layout="menu" className="w-80" data-testid="chat-new-chat-menu-popover">
       <div className="flex flex-col gap-1.5">
         <EntityRow
           title="Public chat"
@@ -329,100 +329,95 @@ export function StudioNewChatButton({
         isDismissable
         dialogAriaLabel="Start private chat"
         data-testid="chat-private-chat-modal"
-        modalClassName="max-h-[min(90dvh,42rem)] max-w-xl overflow-hidden p-0"
+        layout="editor"
+        gutter="responsive"
+        modalStyle={{ maxWidth: "36rem" }}
       >
-        <div className="flex max-h-[min(90dvh,42rem)] flex-col">
-          <StudioDialogHeader
-            title="Private chat"
-            description="Choose one teammate to start a private conversation."
-            descriptionClassName="mt-1 text-sm"
-            onClose={() => {
-              setPrivateChatPickerOpen(false);
-              setPrivateChatQuery("");
-            }}
-            closeLabel="Close private chat picker"
-            className="px-4 py-3"
+        <StudioDialogHeader
+          title="Private chat"
+          description="Choose one teammate to start a private conversation."
+          onClose={() => {
+            setPrivateChatPickerOpen(false);
+            setPrivateChatQuery("");
+          }}
+          closeLabel="Close private chat picker"
+        />
+
+        <StudioDialogBody scrollable>
+          <SearchInput
+            id={searchId}
+            label="Search teammates"
+            value={privateChatQuery}
+            onChange={(event) => setPrivateChatQuery(event.target.value)}
+            placeholder="Search teammates…"
+            autoFocus
+            data-testid="chat-private-chat-search"
           />
 
-          <div className="flex-1 overflow-y-auto px-4 pb-4 pt-3">
-            <SearchInput
-              id={searchId}
-              label="Search teammates"
-              value={privateChatQuery}
-              onChange={(event) => setPrivateChatQuery(event.target.value)}
-              placeholder="Search teammates…"
-              autoFocus
-              data-testid="chat-private-chat-search"
-            />
-
-            {privateChatTargetsLoading ? (
-              <div className="mt-4 flex items-center gap-2 text-sm text-slate-500 dark:text-slate-300">
-                <Spinner aria-hidden="true" size="xs" />
-                Loading teammates…
-              </div>
-            ) : privateChatTargets.length === 0 ? (
-              <div className="mt-4 space-y-3">
-                <Text as="p" variant="body" tone="muted">
-                  Invite a teammate to unlock private chats in this space.
-                </Text>
-                {onOpenProjectSettings ? (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    radius="full"
+          {privateChatTargetsLoading ? (
+            <LoadingStatus size="xs" className="mt-4">Loading teammates…</LoadingStatus>
+          ) : privateChatTargets.length === 0 ? (
+            <div className="mt-4 space-y-3">
+              <Text as="p" variant="body" tone="muted">
+                Invite a teammate to unlock private chats in this space.
+              </Text>
+              {onOpenProjectSettings ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  radius="full"
+                  onPress={() => {
+                    setPrivateChatPickerOpen(false);
+                    setPrivateChatQuery("");
+                    onOpenProjectSettings();
+                  }}
+                >
+                  Invite teammate
+                </Button>
+              ) : null}
+            </div>
+          ) : filteredPrivateChatTargets.length === 0 ? (
+            <div className="mt-4 space-y-3">
+              <Text as="p" variant="body" tone="muted">
+                No teammates match that search.
+              </Text>
+              <Button
+                variant="ghost"
+                size="sm"
+                radius="full"
+                className="justify-start"
+                onPress={() => setPrivateChatQuery("")}
+              >
+                Clear search
+              </Button>
+            </div>
+          ) : (
+            <div className="mt-4 space-y-2" data-testid="chat-private-chat-list">
+              {filteredPrivateChatTargets.map((member) => {
+                const userId = typeof member.userId === "string" ? member.userId.trim() : "";
+                if (!userId) {
+                  return null;
+                }
+                const displayName = resolvePrivateChatDisplayName(member);
+                return (
+                  <EntityRow
+                    key={userId}
+                    title={displayName}
+                    subtitle={resolvePrivateChatSubtitle(member) ?? undefined}
+                    surface="interactive"
+                    pressable
                     onPress={() => {
                       setPrivateChatPickerOpen(false);
                       setPrivateChatQuery("");
-                      onOpenProjectSettings();
+                      startConversation(() => onStartPrivateConversation?.({ userId, displayName }));
                     }}
-                  >
-                    Invite teammate
-                  </Button>
-                ) : null}
-              </div>
-            ) : filteredPrivateChatTargets.length === 0 ? (
-              <div className="mt-4 space-y-3">
-                <Text as="p" variant="body" tone="muted">
-                  No teammates match that search.
-                </Text>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  radius="full"
-                  className="justify-start"
-                  onPress={() => setPrivateChatQuery("")}
-                >
-                  Clear search
-                </Button>
-              </div>
-            ) : (
-              <div className="mt-4 space-y-2" data-testid="chat-private-chat-list">
-                {filteredPrivateChatTargets.map((member) => {
-                  const userId = typeof member.userId === "string" ? member.userId.trim() : "";
-                  if (!userId) {
-                    return null;
-                  }
-                  const displayName = resolvePrivateChatDisplayName(member);
-                  return (
-                    <EntityRow
-                      key={userId}
-                      title={displayName}
-                      subtitle={resolvePrivateChatSubtitle(member) ?? undefined}
-                      surface="interactive"
-                      pressable
-                      onPress={() => {
-                        setPrivateChatPickerOpen(false);
-                        setPrivateChatQuery("");
-                        startConversation(() => onStartPrivateConversation?.({ userId, displayName }));
-                      }}
-                      data-testid={`chat-private-chat-target-${userId}`}
-                    />
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        </div>
+                    data-testid={`chat-private-chat-target-${userId}`}
+                  />
+                );
+              })}
+            </div>
+          )}
+        </StudioDialogBody>
       </StudioDialogModal>
     </>
   );

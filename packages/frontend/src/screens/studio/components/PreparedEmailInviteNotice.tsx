@@ -88,8 +88,7 @@ export function PreparedEmailInviteNotice({
         <Button
           type="button"
           variant="primary"
-          size="sm"
-          radius="full"
+          preset="inline"
           onPress={() => void handleShare()}
           isDisabled={sharePending}
           data-testid={`${testIdPrefix}-share`}
@@ -100,8 +99,7 @@ export function PreparedEmailInviteNotice({
         <Button
           type="button"
           variant="outline"
-          size="sm"
-          radius="full"
+          preset="inline"
           onPress={() => void handleCopy()}
           isDisabled={copyPending}
           data-testid={`${testIdPrefix}-copy`}

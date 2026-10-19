@@ -40,11 +40,10 @@ export function ComposerInviteDeviceHandoff({
         <Button
           type="button"
           variant="ghost"
-          size="xs"
-          radius="full"
+          preset="inline"
           onPress={onCopy}
           isDisabled={!browserUrl}
-          className="min-w-0 flex-1 justify-start px-3"
+          className="min-w-0 flex-1 justify-start"
           data-testid="composer-device-handoff-copy"
         >
           Copy device link

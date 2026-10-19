@@ -105,7 +105,7 @@ export function MobileStudioNavigationHeader({
         >
           <MoreHoriz className="h-5 w-5" aria-hidden="true" />
         </IconButton>
-        <StudioDialogPopover placement="bottom end" offset={4} className="w-72 max-w-[calc(100vw-1.5rem)] p-2" data-testid="mobile-header-actions">
+        <StudioDialogPopover placement="bottom end" layout="menu" className="w-72" data-testid="mobile-header-actions">
           <div className="flex flex-col gap-1">
             {historyInOverflow ? <MobileStudioHistoryControls history={history} onNavigate={() => changeMoreOpen(false)} /> : null}
             {pageMenuActions?.map(action => <EntityRow key={action.label} title={action.label}

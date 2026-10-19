@@ -13,7 +13,7 @@ const INACTIVE_CLASSES: Record<TabTone, string> = {
   slate: "text-slate-600 hover:bg-slate-100 data-[hovered]:bg-slate-100",
 };
 
-export type TabPillProps = Omit<ButtonProps, "tone"> & {
+export type TabPillProps = Omit<ButtonProps, "tone" | "preset"> & {
   active?: boolean;
   tone?: TabTone;
 };

@@ -69,8 +69,7 @@ export function ComposerInvitePrivateChatSection({
                 <Button
                   type="button"
                   variant={invited ? "outline" : "primary"}
-                  size="xs"
-                  radius="full"
+                  preset="inline"
                   isDisabled={invited || busyUserId !== null}
                   onPress={() => onInvite(member)}
                   className="shrink-0"

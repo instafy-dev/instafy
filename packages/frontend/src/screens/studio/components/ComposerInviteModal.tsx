@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Settings } from "iconoir-react";
 import { Button } from "../../../components/Button";
-import { Text } from "../../../components/Text";
 import {
   StudioDialogBody,
   StudioDialogDivider,
@@ -117,9 +116,7 @@ export function ComposerInviteModal({
     qrState?.kind === "device" ? deviceHandoff.qr : accessInvites.qr;
 
   const body = (
-    <StudioDialogBody className={isDesktop
-      ? "studio-dark-scrollbar min-h-0 flex-1 touch-pan-y overflow-y-auto overscroll-contain scroll-pb-24 pt-3"
-      : "pt-3"}>
+    <StudioDialogBody scrollable={isDesktop} className="studio-dark-scrollbar scroll-pb-24">
       <div className="mx-auto w-full max-w-[24rem] space-y-3.5">
         <section className="space-y-3.5">
           <ComposerInviteDeviceHandoff {...deviceHandoff.sectionProps} />
@@ -155,12 +152,9 @@ export function ComposerInviteModal({
                     onOpenChange(false);
                     onOpenProjectSettings();
                   }}
-                  className="gap-2"
                   data-testid="composer-invite-open-settings"
                 >
-                  <Text as="span" variant="bodyStrong" tone="inherit" className="text-sm">
-                    Space settings
-                  </Text>
+                  Space settings
                   <Settings className="h-4 w-4 text-current" aria-hidden="true" />
                 </Button>
               </div>
@@ -173,41 +167,39 @@ export function ComposerInviteModal({
 
   return (
     <>
+      {/* Keep the originating focus scope and draft mounted under the QR overlay.
+          Closing QR restores its trigger; closing Invite then restores its opener. */}
       {isDesktop ? <StudioDialogModal
-        isOpen={isOpen && qrState === null}
+        isOpen={isOpen}
         onOpenChange={onOpenChange}
         isDismissable
         appearance="dark"
         dialogAriaLabel="Invite"
         data-testid="chat-invite-modal"
-        modalStyle={{
-          maxHeight:
-            "calc(100dvh - max(var(--instafy-safe-area-inset-top), 1rem) - max(var(--instafy-safe-area-inset-bottom), 1rem))",
-        }}
-        modalClassName="flex min-h-0 max-h-full max-w-md flex-col overflow-hidden rounded-[1.6rem] border p-0 shadow-modal"
-        dialogClassName="flex min-h-0 flex-1 flex-col"
+        layout="editor"
+        gutter="responsive"
+        modalStyle={{ maxWidth: "28rem" }}
       >
         <StudioDialogHeader
           title="Invite"
           onClose={() => onOpenChange(false)}
           closeLabel="Close invite modal"
-          className="border-[rgba(255,255,255,0.08)]"
-          titleClassName="text-slate-50"
         />
 
         {body}
-      </StudioDialogModal> : qrState === null ? (
+      </StudioDialogModal> : (
         <MobileFocusDialog
           isOpen={isOpen}
           onOpenChange={onOpenChange}
           appearance="dark"
+          gutter="responsive"
           dialogAriaLabel="Invite"
           dismissLabel="Close invite modal"
           data-testid="chat-invite-modal"
         >
           {body}
         </MobileFocusDialog>
-      ) : null}
+      )}
 
       <ComposerInviteQrModal
         role={qrRole}

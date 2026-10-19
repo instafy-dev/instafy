@@ -83,8 +83,7 @@ export function ComposerPendingInvitationList({
           <Button
             type="button"
             variant="ghost"
-            size="xs"
-            radius="full"
+            preset="inline"
             onPress={() => onCancel(invitation)}
             isDisabled={pendingId !== null}
             data-testid={`composer-invite-cancel-${invitation.id}`}

@@ -214,7 +214,7 @@ export function StudioOrganizationRail({
       </DndContext>
       {contextOrg && hasContextActions ? <StudioPopover
         triggerRef={contextTriggerRef} isOpen onOpenChange={open => { if (!open) setContextOrgKey(null); }}
-        placement="right top" offset={6} className="w-56 max-w-[calc(100vw-1rem)] p-2"
+        placement="right top" layout="menu" className="w-56"
         data-testid="sidebar-org-context-menu">
         <div className="mb-1 flex min-w-0 items-center gap-2 px-2 py-2 text-sm font-semibold">
           <OrgIdentity name={contextOrg.name} avatarUrl={contextOrg.avatarUrl} accentColor={contextOrg.accentColor} className="h-6 w-6 text-[11px]" />

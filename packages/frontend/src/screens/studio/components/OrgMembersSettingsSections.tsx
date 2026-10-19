@@ -5,6 +5,8 @@ import { Button } from "../../../components/Button";
 import { Input } from "../../../components/Input";
 import { Select } from "../../../components/Select";
 import { Text } from "../../../components/Text";
+import { InlineNotice } from "../../../components/InlineNotice";
+import { LoadingStatus } from "../../../components/LoadingStatus";
 import { type ControllerOrgInvitation, type ControllerOrgMember } from "../../../sdk/instafy";
 import type { OrgInvitationRoleConflict } from "../../../org/useInviteActions";
 import type { PreparedEmailInvite } from "../../../sharing/preparedEmailInvite";
@@ -152,32 +154,25 @@ export function OrgMembersSettingsSections({
               </Field>
             </div>
             {inviteError ? (
-              <Text
-                variant="caption"
+              <InlineNotice
                 tone="danger"
-                className="mt-1"
+                role="alert"
                 data-testid="org-member-invite-error"
               >
                 {inviteError}
-              </Text>
+              </InlineNotice>
             ) : null}
             {inviteRoleConflict ? (
-              <div
-                className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-300/60 bg-amber-50/80 px-3 py-2 dark:border-amber-700/50 dark:bg-amber-950/30"
+              <InlineNotice
+                tone="warning"
+                role="status"
                 data-testid="org-invite-role-conflict"
-              >
-                <Text variant="caption" tone="secondary">
-                  {inviteRoleConflict.email} already has a pending{" "}
-                  {inviteRoleConflict.existingRole} invite. Its link keeps working
-                  either way.
-                </Text>
-                <div className="flex items-center gap-2">
+                actions={<>
                   <Button
                     onPress={onApplyInviteRoleConflict}
                     isDisabled={inviteConflictPending}
                     variant="primary"
-                    size="xs"
-                    radius="full"
+                    preset="inline"
                     data-testid="org-invite-role-conflict-apply"
                   >
                     {inviteConflictPending
@@ -188,22 +183,24 @@ export function OrgMembersSettingsSections({
                     onPress={onDismissInviteRoleConflict}
                     isDisabled={inviteConflictPending}
                     variant="ghost"
-                    size="xs"
-                    radius="full"
+                    preset="inline"
                     data-testid="org-invite-role-conflict-dismiss"
                   >
                     Keep {inviteRoleConflict.existingRole}
                   </Button>
-                </div>
-              </div>
+                </>}
+              >
+                {inviteRoleConflict.email} already has a pending{" "}
+                {inviteRoleConflict.existingRole} invite. Its link keeps working
+                either way.
+              </InlineNotice>
             ) : null}
             <div className="flex justify-end">
               <Button
                 onPress={onInviteMember}
                 isDisabled={invitePending || !inviteEmailValid}
                 variant="primary"
-                size="sm"
-                radius="xl"
+                preset="form"
                 data-testid="org-member-invite-submit"
                 className="w-full @min-[32rem]/settings-content:w-auto"
               >
@@ -241,8 +238,7 @@ export function OrgMembersSettingsSections({
               <Button
                 onPress={() => setInvitationsExpanded((value) => !value)}
                 variant="ghost"
-                size="xs"
-                radius="full"
+                preset="inline"
                 data-testid="org-invitations-toggle"
               >
                 {invitationsExpanded ? "Hide" : "Review"}
@@ -250,16 +246,13 @@ export function OrgMembersSettingsSections({
             ) : null
           }
         >
-          <SettingsSurface padding="none" className="overflow-hidden">
-            {invitationsError ? (
-              <Text variant="caption" tone="danger" className="px-3 py-3">
-                {invitationsError}
-              </Text>
-            ) : invitationsLoading && invitations.length === 0 ? (
-              <Text variant="caption" tone="muted" className="px-3 py-3">
-                Loading invitations…
-              </Text>
-            ) : invitations.length === 0 ? (
+          {invitationsError ? (
+            <InlineNotice tone="danger" role="alert">{invitationsError}</InlineNotice>
+          ) : invitationsLoading && invitations.length === 0 ? (
+            <LoadingStatus>Loading invitations…</LoadingStatus>
+          ) : (
+            <SettingsSurface padding="none" className="overflow-hidden">
+            {invitations.length === 0 ? (
               <Text variant="body" tone="muted" className="px-3 py-3">
                 No pending invitations.
               </Text>
@@ -345,8 +338,7 @@ export function OrgMembersSettingsSections({
                           onPress={() => onCancelInvite(invite.id, invite.email)}
                           isDisabled={cancelDisabled || roleUpdatePending}
                           variant="outline"
-                          size="xs"
-                          radius="full"
+                          preset="inline"
                           data-testid={`org-invite-cancel-${invite.id}`}
                         >
                           {cancelDisabled ? "Canceling…" : "Cancel"}
@@ -357,7 +349,8 @@ export function OrgMembersSettingsSections({
                 })}
               </div>
             )}
-          </SettingsSurface>
+            </SettingsSurface>
+          )}
         </SettingsSection>
       ) : null}
 
@@ -372,8 +365,7 @@ export function OrgMembersSettingsSections({
               <Button
                 onPress={() => setMembersExpanded((value) => !value)}
                 variant="ghost"
-                size="xs"
-                radius="full"
+                preset="inline"
                 data-testid="org-members-toggle"
               >
                 {membersExpanded ? "Hide" : "Manage"}
@@ -393,9 +385,9 @@ export function OrgMembersSettingsSections({
           </div>
 
           {membersLoading && members.length === 0 ? (
-            <Text variant="caption" tone="muted" className="px-3 pb-3">
+            <LoadingStatus className="px-3 pb-3">
               Loading members…
-            </Text>
+            </LoadingStatus>
           ) : members.length === 0 ? (
             <Text variant="body" tone="muted" className="px-3 pb-3">
               No people have access yet.
@@ -472,8 +464,7 @@ export function OrgMembersSettingsSections({
                         onPress={() => onRemoveMember(member.userId, label)}
                         isDisabled={removeDisabled}
                         variant="outline"
-                        size="xs"
-                        radius="full"
+                        preset="inline"
                         data-testid={`org-member-remove-${member.userId}`}
                       >
                         {memberRemovePendingId === member.userId ? "Removing…" : "Remove"}
@@ -488,8 +479,7 @@ export function OrgMembersSettingsSections({
                     onPress={onLoadMoreMembers}
                     isDisabled={membersLoading || membersLoadingMore}
                     variant="outline"
-                    size="sm"
-                    radius="xl"
+                    preset="inline"
                     data-testid="org-members-load-more"
                     className="w-full"
                   >

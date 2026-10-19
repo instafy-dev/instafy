@@ -1,4 +1,6 @@
 import { Button } from "../../../components/Button";
+import { Text } from "../../../components/Text";
+import { StudioDialogBody } from "../../../components/aria/StudioDialogLayout";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 
 /**
@@ -39,28 +41,30 @@ export function HistoryConfirmDialog({
       }}
       isDismissable
       dialogAriaLabel={detail ? `${title} ${detail}` : title}
-      modalClassName="p-5"
+      gutter="responsive"
       data-testid={testId}
     >
-      <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-50">{title}</h2>
-      {detail ? (
-        <p className="mt-2 break-words text-sm font-medium text-slate-700 dark:text-slate-200" data-testid={`${testId}-detail`}>
-          {detail}
-        </p>
-      ) : null}
-      <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">{body}</p>
-      <div className="mt-5 flex flex-wrap justify-end gap-2">
-        <Button variant="outline" onPress={onCancel} autoFocus data-testid={`${testId}-cancel`}>
-          {cancelLabel}
-        </Button>
-        <Button
-          variant={destructive ? "danger" : "primary"}
-          onPress={onConfirm}
-          data-testid={`${testId}-confirm`}
-        >
-          {confirmLabel}
-        </Button>
-      </div>
+      <StudioDialogBody>
+        <Text as="h2" variant="subtitle" tone="primary">{title}</Text>
+        {detail ? (
+          <Text variant="bodyStrong" className="mt-2 break-words" data-testid={`${testId}-detail`}>
+            {detail}
+          </Text>
+        ) : null}
+        <Text tone="muted" className="mt-2">{body}</Text>
+        <div className="mt-5 flex flex-wrap justify-end gap-2">
+          <Button variant="outline" onPress={onCancel} autoFocus data-testid={`${testId}-cancel`}>
+            {cancelLabel}
+          </Button>
+          <Button
+            variant={destructive ? "danger" : "primary"}
+            onPress={onConfirm}
+            data-testid={`${testId}-confirm`}
+          >
+            {confirmLabel}
+          </Button>
+        </div>
+      </StudioDialogBody>
     </StudioDialogModal>
   );
 }

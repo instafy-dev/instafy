@@ -1,5 +1,5 @@
 import { AgentAvatar } from "../../../components/AgentAvatar";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { IdentityPhotoButton } from "../../../components/IdentityPhotoButton";
 import { SettingsFormLayout, SettingsIdentityRow } from "../../../components/SettingsFormLayout";
 import { SettingsFormActions } from "../../../components/SettingsFormActions";
@@ -11,6 +11,7 @@ import { Field } from "../../../components/Field";
 import { Input } from "../../../components/Input";
 import { Text } from "../../../components/Text";
 import { StudioDialogBody, StudioDialogFooter, StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
+import { useStudioDialogGutterClass } from "../../../components/aria/StudioDialogSpacing";
 import { Textarea } from "../../../components/Textarea";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { MobileFocusDialog } from "../../../components/aria/MobileFocusDialog";
@@ -23,6 +24,12 @@ import { ModelMenuSelect } from "./ModelMenuSelect";
 import { ProviderMenuSelect } from "./ProviderMenuSelect";
 
 export type AgentProfileModalMode = "create" | "edit" | "octo";
+
+function AgentProfileFooter({ children }: { children: ReactNode }) {
+  const gutterClass = useStudioDialogGutterClass();
+  // SettingsFormActions owns the inset divider and the space above its buttons.
+  return <StudioDialogFooter className={`${gutterClass} pb-4`}>{children}</StudioDialogFooter>;
+}
 
 type AgentProfileModalProps = {
   isOpen: boolean;
@@ -136,7 +143,7 @@ export function AgentProfileModal({
     disabled={!dirty || (handleRequired && !handle.trim()) || Array.from(bio).length > PROFILE_BIO_MAX_LENGTH}
     onSave={onSave} onCancel={onClose} saveTestId="agent-profile-save" />;
   const form = (
-      <div className="px-4 py-4 sm:px-5">
+      <StudioDialogBody scrollable={isDesktop}>
         <SettingsFormLayout>
           <SettingsIdentityRow>
             <IdentityPhotoButton
@@ -265,22 +272,23 @@ export function AgentProfileModal({
                 disabled={pending}
                 data-testid="agent-profile-description-input"
               />
-              <Text variant="caption" tone="muted" className="mt-1 font-normal">
+              <Text variant="caption" tone="muted" className="mt-1">
                 Used as style guidance; it does not override core system instructions.
               </Text>
             </Field>
           </section>
         </SettingsFormLayout>
-      </div>
+      </StudioDialogBody>
   );
 
   if (!isDesktop) {
     return <MobileFocusDialog isOpen={isOpen} onOpenChange={onOpenChange}
       dialogAriaLabel={title} closeDisabled={pending} dismissLabel="Close"
+      gutter="responsive"
       data-testid="agent-profile-modal"
-      footer={<div className="px-4 pb-3">{actions}</div>}
+      footer={<AgentProfileFooter>{actions}</AgentProfileFooter>}
       header={<div>
-        <Text as="h2" variant="bodyStrong" tone="primary">{title}</Text>
+        <Text as="h2" variant="subtitle" tone="primary">{title}</Text>
         {subtitle ? <Text as="p" variant="caption" tone="muted">{subtitle}</Text> : null}
       </div>}
     >
@@ -296,6 +304,7 @@ export function AgentProfileModal({
       isKeyboardDismissDisabled={pending}
       dialogAriaLabel={title}
       layout="editor"
+      gutter="responsive"
       data-testid="agent-profile-modal"
     >
       <StudioDialogHeader
@@ -305,8 +314,8 @@ export function AgentProfileModal({
         closeButtonDisabled={pending}
         closeLabel="Close"
       />
-      <StudioDialogBody scrollable padding="none">{form}</StudioDialogBody>
-      <StudioDialogFooter className="px-5 pb-4">{actions}</StudioDialogFooter>
+      {form}
+      <AgentProfileFooter>{actions}</AgentProfileFooter>
     </StudioDialogModal>
   );
 }

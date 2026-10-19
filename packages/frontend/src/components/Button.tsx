@@ -12,6 +12,14 @@ type ButtonTone = "neutral" | "muted" | "danger" | "accent";
 type ButtonSize = "xs" | "sm" | "md" | "lg" | "icon";
 type ButtonRadius = "none" | "md" | "lg" | "xl" | "2xl" | "full";
 type ButtonElevation = "none" | "raised";
+export type ButtonPreset = "inline" | "form";
+
+// Task-level presets own geometry and elevation; callers still choose importance
+// with variant/tone. Pointer adaptation remains shared by every button.
+const BUTTON_PRESETS = {
+  inline: { size: "sm", radius: "xl", elevation: "none" },
+  form: { size: "md", radius: "xl", elevation: "none" },
+} as const satisfies Record<ButtonPreset, { size: ButtonSize; radius: ButtonRadius; elevation: ButtonElevation }>;
 
 // The press nudge is a translate. Tailwind v4 translate utilities share one
 // --tw-translate-x/--tw-translate-y pair, so it replaces any translate a caller
@@ -82,6 +90,13 @@ const TEXT_SIZE_CLASSES: Record<ButtonSize, string> = {
   xs: "p-0 text-xs", sm: "p-0 text-sm", md: "p-0 text-sm", lg: "p-0 text-base", icon: "p-0 text-sm",
 };
 
+// Keep outlined and filled preset actions the same height. The 1px outline
+// replaces padding instead of adding to it; wrapping labels can still grow.
+const PRESET_OUTLINE_SIZE_CLASSES: Record<ButtonPreset, string> = {
+  inline: "px-2.5 py-[calc(0.375rem-1px)] text-sm",
+  form: "px-3.5 py-[calc(0.5rem-1px)] text-sm",
+};
+
 const RADIUS_CLASSES: Record<ButtonRadius, string> = {
   none: "rounded-none",
   md: "rounded-md",
@@ -119,14 +134,25 @@ export type ButtonProps = Omit<AriaButtonProps, "className"> & {
   variant?: ButtonVariant;
   /** Palette for ghost, outline and text actions; filled variants own their tone. */
   tone?: ButtonTone;
-  /** Shadows for filled and outlined actions. Ghost and text actions are always flat. */
-  elevation?: ButtonElevation;
-  size?: ButtonSize;
-  radius?: ButtonRadius;
   fullWidth?: boolean;
   className?: AriaButtonProps["className"];
   title?: string;
-};
+} & (
+  | {
+      /** Shared treatment for contextual actions or form submit/cancel controls. */
+      preset: ButtonPreset;
+      size?: never;
+      radius?: never;
+      elevation?: never;
+    }
+  | {
+      preset?: undefined;
+      size?: ButtonSize;
+      radius?: ButtonRadius;
+      /** Shadows for filled and outlined actions. Ghost and text actions are always flat. */
+      elevation?: ButtonElevation;
+    }
+);
 
 function assignForwardedRef<T>(ref: ForwardedRef<T>, value: T | null) {
   if (typeof ref === "function") {
@@ -140,9 +166,10 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
   {
     variant = "secondary",
     tone = "neutral",
-    elevation = "raised",
-    size = "sm",
-    radius = "lg",
+    preset,
+    elevation: customElevation,
+    size: customSize,
+    radius: customRadius,
     fullWidth = false,
     className,
     title,
@@ -152,6 +179,11 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
   },
   ref
 ) {
+  const { size, radius, elevation } = preset ? BUTTON_PRESETS[preset] : {
+    size: customSize ?? "sm",
+    radius: customRadius ?? "lg",
+    elevation: customElevation ?? "raised",
+  };
   // react-aria-components filters the native `title` attribute even though
   // our shared Button API exposes it. Apply it through the DOM ref so icon
   // controls keep their hover affordance alongside the accessible label.
@@ -178,7 +210,9 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
           BASE,
           appearanceClasses(variant, tone, elevation),
           TARGET_CLASSES,
-          variant === "text" ? TEXT_SIZE_CLASSES[size] : SIZE_CLASSES[size],
+          preset
+            ? variant === "outline" ? PRESET_OUTLINE_SIZE_CLASSES[preset] : SIZE_CLASSES[size]
+            : variant === "text" ? TEXT_SIZE_CLASSES[size] : SIZE_CLASSES[size],
           RADIUS_CLASSES[radius],
           fullWidth ? "w-full" : "",
           value
@@ -234,7 +268,7 @@ const ICON_SIZES = {
   lg: "h-10 w-10 text-lg"
 };
 
-export type IconButtonProps = Omit<ButtonProps, "size" | "icon"> & {
+export type IconButtonProps = Omit<ButtonProps, "size" | "icon" | "preset"> & {
   size?: keyof typeof ICON_SIZES;
 };
 

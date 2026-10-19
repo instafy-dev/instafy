@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Button, IconButton } from "../Button";
+import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
+import { Button, IconButton, type ButtonProps } from "../Button";
 
 const Glyph = () => <svg data-testid="glyph" aria-hidden="true" />;
 
@@ -26,6 +26,35 @@ describe("Button", () => {
     await act(async () => root.unmount());
     container.remove();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("makes preset geometry exclusive while keeping custom controls compatible", () => {
+    expectTypeOf<{ preset: "inline"; variant: "primary" }>().toExtend<ButtonProps>();
+    expectTypeOf<{ preset: "form"; variant: "ghost" }>().toExtend<ButtonProps>();
+    expectTypeOf<{ preset: "inline"; size: "xs" }>().not.toExtend<ButtonProps>();
+    expectTypeOf<{ preset: "inline"; radius: "full" }>().not.toExtend<ButtonProps>();
+    expectTypeOf<{ preset: "form"; elevation: "raised" }>().not.toExtend<ButtonProps>();
+    expectTypeOf<{ size: "xs"; radius: "full"; elevation: "raised" }>().toExtend<ButtonProps>();
+  });
+
+  it.each(["inline", "form"] as const)("preserves the %s action's ref, name and pending behavior", async (preset) => {
+    const ref = { current: null as HTMLButtonElement | null };
+    const onPress = vi.fn();
+    const button = await render(<Button ref={ref} preset={preset} variant="primary" onPress={onPress}>Apply</Button>);
+    expect(ref.current).toBe(button);
+    expect(button.hasAttribute("preset")).toBe(false);
+    button.focus();
+    await act(async () => button.click());
+    expect(onPress).toHaveBeenCalledOnce();
+
+    await render(<Button ref={ref} preset={preset} variant="primary" onPress={onPress} isPending>Apply</Button>);
+    expect(ref.current).toBe(button);
+    expect(document.activeElement).toBe(button);
+    expect(button.textContent).toBe("Apply");
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    expect(button.querySelector('[role="progressbar"]')).not.toBeNull();
+    await act(async () => button.click());
+    expect(onPress).toHaveBeenCalledOnce();
   });
 
   it.each(["primary", "secondary", "outline", "danger"] as const)(
