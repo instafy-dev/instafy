@@ -1,6 +1,11 @@
 import { useEffect, useRef } from "react";
 import type { ChatMessage } from "../types";
-import { browserRequestContinuation, browserRequestFromMessage, browserRequestTransport } from "./browserRequest";
+import {
+  browserRequestContinuation,
+  browserRequestFromMessage,
+  browserRequestTransport,
+  browserRequestUnavailableReason,
+} from "./browserRequest";
 import type { BrowserTransport } from "./usePersonalBrowserBridge";
 
 type Options = {
@@ -14,6 +19,8 @@ type Options = {
   personalAvailable: boolean;
   personalReady: boolean;
   sharedReady: boolean;
+  /** The Workspace browser is already known not to open here; unknown counts as available. */
+  sharedUnavailable: boolean;
   activate: (transport: BrowserTransport) => void;
   continueTask: (transport: BrowserTransport, message: string) => Promise<boolean>;
   onError: (message: string) => void;
@@ -44,10 +51,14 @@ export function useChatBrowserRequest(options: Options) {
       detail.completion = (async () => {
         if (pending.current) throw new Error("A browser task is already opening.");
         if (!captured.canWrite || !captured.ready) throw new Error("Wait for this conversation and browser selection to be ready.");
-        const transport = browserRequestTransport(request, captured.transport);
-        if (transport === "personal" && !captured.personalAvailable) {
-          throw new Error("This task uses the browser on this device. Open it in the Instafy desktop app or choose Workspace explicitly.");
-        }
+        const host = {
+          transport: captured.transport,
+          personalAvailable: captured.personalAvailable,
+          sharedUnavailable: captured.sharedUnavailable,
+        };
+        const unavailable = browserRequestUnavailableReason(request, host);
+        if (unavailable) throw new Error(unavailable);
+        const transport = browserRequestTransport(request, captured.transport, host);
         pending.current = true;
         try {
           captured.activate(transport);

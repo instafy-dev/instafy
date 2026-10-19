@@ -114,6 +114,12 @@ const INTEGRATION_ONBOARDING_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-integration-onboarding/SKILL.md"
 ));
+// The setup flow routes this skill into every kickoff, so a workspace still holding a
+// bundled version that predates the browser offer is upgraded; an edited one is kept.
+const LEGACY_INTEGRATION_ONBOARDING_TEMPLATES: &[&str] = &[
+    include_str!("legacy/integration-onboarding-v1.md"),
+    include_str!("legacy/integration-onboarding-v2.md"),
+];
 const BYOC_AI_CREDENTIALS_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-byoc-ai-credentials/SKILL.md"
@@ -361,18 +367,13 @@ pub fn ensure_project_memory_scaffold(workspace_dir: &Path) {
         }
     }
 
-    if !integration_onboarding_path.exists() {
-        if let Some(parent) = integration_onboarding_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if fs::write(
-            &integration_onboarding_path,
-            INTEGRATION_ONBOARDING_TEMPLATE,
-        )
-        .is_ok()
-        {
-            wrote_any = true;
-        }
+    if upgrade_bundled_skill(
+        workspace_dir,
+        &integration_onboarding_path,
+        LEGACY_INTEGRATION_ONBOARDING_TEMPLATES,
+        INTEGRATION_ONBOARDING_TEMPLATE,
+    ) {
+        wrote_any = true;
     }
 
     if !byoc_ai_credentials_path.exists() {
@@ -434,26 +435,13 @@ pub fn ensure_project_memory_scaffold(workspace_dir: &Path) {
         }
     }
 
-    let space_review_is_local = space_review_path
-        .ancestors()
-        .take_while(|path| *path != workspace_dir)
-        .all(|path| {
-            fs::symlink_metadata(path)
-                .map(|metadata| !metadata.file_type().is_symlink())
-                .unwrap_or_else(|error| error.kind() == std::io::ErrorKind::NotFound)
-        });
-    if space_review_is_local
-        && (!space_review_path.exists()
-            || fs::read_to_string(&space_review_path)
-                .ok()
-                .is_some_and(|content| LEGACY_SPACE_REVIEW_TEMPLATES.contains(&content.as_str())))
-    {
-        if let Some(parent) = space_review_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if fs::write(&space_review_path, SPACE_REVIEW_TEMPLATE).is_ok() {
-            wrote_any = true;
-        }
+    if upgrade_bundled_skill(
+        workspace_dir,
+        &space_review_path,
+        LEGACY_SPACE_REVIEW_TEMPLATES,
+        SPACE_REVIEW_TEMPLATE,
+    ) {
+        wrote_any = true;
     }
 
     if !diagnostics_path.exists() {
@@ -484,26 +472,13 @@ pub fn ensure_project_memory_scaffold(workspace_dir: &Path) {
         }
     }
 
-    let automations_are_local = automations_path
-        .ancestors()
-        .take_while(|path| *path != workspace_dir)
-        .all(|path| {
-            fs::symlink_metadata(path)
-                .map(|metadata| !metadata.file_type().is_symlink())
-                .unwrap_or_else(|error| error.kind() == std::io::ErrorKind::NotFound)
-        });
-    if automations_are_local
-        && (!automations_path.exists()
-            || fs::read_to_string(&automations_path)
-                .ok()
-                .is_some_and(|content| LEGACY_AUTOMATIONS_TEMPLATES.contains(&content.as_str())))
-    {
-        if let Some(parent) = automations_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if fs::write(&automations_path, AUTOMATIONS_TEMPLATE).is_ok() {
-            wrote_any = true;
-        }
+    if upgrade_bundled_skill(
+        workspace_dir,
+        &automations_path,
+        LEGACY_AUTOMATIONS_TEMPLATES,
+        AUTOMATIONS_TEMPLATE,
+    ) {
+        wrote_any = true;
     }
 
     if let Some(parent) = persistent_contexts_path.parent() {
@@ -571,6 +546,40 @@ pub fn ensure_project_memory_scaffold(workspace_dir: &Path) {
     // Commit the scaffold whenever it's present but not recorded yet (e.g. untracked on seed repos),
     // not only when this call wrote the files.
     maybe_commit_project_memory_scaffold(workspace_dir, wrote_any);
+}
+
+/// Writes the bundled `current` text at `path` when the file is absent or holds
+/// exactly one of the `legacy` bundled versions, and reports whether it wrote.
+/// A workspace's own edit is kept, and nothing is written through a symlink at
+/// or below the workspace root.
+fn upgrade_bundled_skill(
+    workspace_dir: &Path,
+    path: &Path,
+    legacy: &[&str],
+    current: &str,
+) -> bool {
+    let local = path
+        .ancestors()
+        .take_while(|ancestor| *ancestor != workspace_dir)
+        .all(|ancestor| {
+            fs::symlink_metadata(ancestor)
+                .map(|metadata| !metadata.file_type().is_symlink())
+                .unwrap_or_else(|error| error.kind() == std::io::ErrorKind::NotFound)
+        });
+    if !local {
+        return false;
+    }
+    let replaceable = !path.exists()
+        || fs::read_to_string(path)
+            .ok()
+            .is_some_and(|content| legacy.contains(&content.as_str()));
+    if !replaceable {
+        return false;
+    }
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    fs::write(path, current).is_ok()
 }
 
 pub fn parse_learn_request(prompt_text: &str) -> Option<LearnRequest> {
@@ -1636,6 +1645,54 @@ mod tests {
             ensure_project_memory_scaffold(workspace.path());
             assert_eq!(fs::read_to_string(&skill).unwrap(), customized);
         }
+    }
+
+    #[test]
+    fn scaffold_upgrades_bundled_integration_onboarding_and_preserves_edits() {
+        let workspace = tempdir().expect("workspace tempdir");
+        ensure_project_memory_scaffold(workspace.path());
+        let skill = workspace.path().join(INTEGRATION_ONBOARDING_RELATIVE_PATH);
+        assert_eq!(
+            fs::read_to_string(&skill).unwrap(),
+            INTEGRATION_ONBOARDING_TEMPLATE
+        );
+        assert!(INTEGRATION_ONBOARDING_TEMPLATE.contains("`request_browser`"));
+        for previous in LEGACY_INTEGRATION_ONBOARDING_TEMPLATES {
+            assert!(!previous.contains("request_browser"));
+            fs::write(&skill, previous).unwrap();
+            ensure_project_memory_scaffold(workspace.path());
+            assert_eq!(
+                fs::read_to_string(&skill).unwrap(),
+                INTEGRATION_ONBOARDING_TEMPLATE
+            );
+            let customized = format!("{previous}\nAlways use the staging portal.\n");
+            fs::write(&skill, &customized).unwrap();
+            ensure_project_memory_scaffold(workspace.path());
+            assert_eq!(fs::read_to_string(&skill).unwrap(), customized);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scaffold_does_not_write_the_onboarding_skill_through_a_symlink() {
+        use std::os::unix::fs::symlink;
+        let workspace = tempdir().expect("workspace");
+        let outside = tempdir().expect("outside workspace");
+        ensure_project_memory_scaffold(workspace.path());
+        let skill = workspace.path().join(INTEGRATION_ONBOARDING_RELATIVE_PATH);
+        let external_skill = outside.path().join("SKILL.md");
+        let previous = LEGACY_INTEGRATION_ONBOARDING_TEMPLATES.last().unwrap();
+        fs::write(&external_skill, previous).unwrap();
+        fs::remove_file(&skill).unwrap();
+        symlink(&external_skill, &skill).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&external_skill).unwrap(), *previous);
+        // A dangling link was followed by the old "write when absent" check.
+        fs::remove_file(&skill).unwrap();
+        let dangling = outside.path().join("created-outside.md");
+        symlink(&dangling, &skill).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert!(!dangling.exists());
     }
 
     #[test]

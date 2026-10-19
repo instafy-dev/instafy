@@ -29054,9 +29054,13 @@ mod tests {
         assert_eq!(actions.len(), 2);
         let messages = build_final_messages_from_actions(&actions, None);
         assert_eq!(messages.len(), 1);
+        // The card says nothing about the browser of the runtime that offered
+        // it: Instafy's Shared Browser runs as a separate on-demand runtime,
+        // so the turn's own runtime never has one. Studio decides from what it
+        // knows about the browsers it can open.
         assert_eq!(
-            messages[0].metadata.as_ref().unwrap()["details"]["browserRequest"]["task"],
-            "Continue comparing the saved items"
+            messages[0].metadata.as_ref().unwrap()["details"]["browserRequest"],
+            json!({ "task": "Continue comparing the saved items", "location": "auto" })
         );
         let mut outcome = CodexOutcome {
             summary: String::new(),
@@ -30031,6 +30035,118 @@ mod tests {
         // Any other request still loads the files it names.
         let (prompt, _, _) = build("What does `.agents/skills/freefinance/run.js` print?");
         assert!(prompt.contains("zq-companion-sentinel"));
+    }
+
+    /// A first-run setup's kickoff routes the onboarding skill into its
+    /// memory, which is selected from the kickoff's instructions alone. Until
+    /// Oct 19 it did not: the router scored location sharing 10 and onboarding
+    /// 5 against those instructions, so the consent-first browser guidance
+    /// never reached the model, which told the person to go and find the
+    /// provider's screen on their own.
+    ///
+    /// The offer does not depend on `INSTAFY_ENABLE_BROWSER_SESSION` on the
+    /// runtime running the turn: Instafy's Shared Browser is a separate
+    /// on-demand runtime, so the one running the kickoff never has that set.
+    /// Gating on it dropped the offer and this routing on every hosted space.
+    #[test]
+    fn skill_kickoff_routes_the_onboarding_skill_with_its_browser_offer() {
+        let tmp = tempdir().expect("temp dir");
+        learn::ensure_project_memory_scaffold(tmp.path());
+        let processor = test_job_processor(tmp.path());
+        let skill_dir = tmp.path().join(".agents/skills/acme-books");
+        fs::create_dir_all(&skill_dir).expect("skill dir");
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: acme-books\ndescription: Read an Acme Books ledger.\nrouting_keywords: acme, ledger\n---\n\n# Acme Books\n\nNeeds an API client id and secret.\n",
+        )
+        .expect("skill file");
+        let kickoff = skills::build_skill_start_prompt(
+            tmp.path(),
+            Some("https://github.com/instafy-dev/skills"),
+            &[".agents/skills/acme-books/SKILL.md".to_string()],
+        );
+        let job = test_lease_job(Some("feature"), json!({}));
+        let project_id = Uuid::new_v4();
+        let (prompt, _, _) = processor
+            .build_prompt_with_text(
+                &project_id,
+                &job,
+                tmp.path(),
+                kickoff.as_str(),
+                true,
+                None,
+                &[],
+                None,
+                None,
+            )
+            .expect("main prompt");
+
+        assert!(prompt.contains(
+            "## Context: instafy-integration-onboarding (.agents/skills/instafy-integration-onboarding/SKILL.md)"
+        ));
+        assert!(
+            prompt.contains("emit one `request_browser` action after any `request_secret` cards")
+        );
+        assert!(
+            prompt.contains("Tell the user to open that same page in a tab of their own browser")
+        );
+        assert_eq!(prompt.matches("## Showing the way").count(), 1);
+        // The full contract beside it lists the handoff it asks for.
+        assert!(prompt.contains("{ type: 'request_browser', task: string"));
+
+        // An ordinary question in the same workspace does not pull it in.
+        let (ordinary, _, _) = processor
+            .build_prompt_with_text(
+                &project_id,
+                &job,
+                tmp.path(),
+                "What changed in the ledger this week?",
+                true,
+                None,
+                &[],
+                None,
+                None,
+            )
+            .expect("ordinary prompt");
+        assert!(!ordinary.contains("## Context: instafy-integration-onboarding"));
+    }
+
+    /// The router reads a skill through `read_skill_routing_text`, which sees
+    /// only the first 4,096 bytes of its SKILL.md. On Oct 19 longer browser
+    /// guidance at the top of the onboarding skill pushed "## Failure recovery
+    /// rule" and "## GitHub repo onboarding" past that window, and requests
+    /// like these stopped loading the skill. That guidance sits at the end of
+    /// the file now, and the kickoff still names the skill (see above).
+    #[test]
+    fn onboarding_skill_still_routes_repo_imports_and_auth_failures() {
+        let tmp = tempdir().expect("temp dir");
+        learn::ensure_project_memory_scaffold(tmp.path());
+        for prompt in [
+            "continue working on my project https://github.com/acme/widgets",
+            "import https://github.com/acme/widgets into this space",
+            "the deploy failed with 401 unauthorized",
+            "permission denied when pushing to the private repo",
+        ] {
+            let snapshot = format_project_memory_snapshot(tmp.path(), prompt).expect("snapshot");
+            assert!(
+                snapshot.text.contains(
+                    "## Context: instafy-integration-onboarding (.agents/skills/instafy-integration-onboarding/SKILL.md)"
+                ),
+                "{prompt} no longer loads the onboarding skill"
+            );
+        }
+        let skill = fs::read(
+            tmp.path()
+                .join(".agents/skills/instafy-integration-onboarding/SKILL.md"),
+        )
+        .expect("onboarding skill");
+        let window = String::from_utf8_lossy(&skill[..skill.len().min(4096)]);
+        for heading in ["## Failure recovery rule", "## GitHub repo onboarding"] {
+            assert!(
+                window.contains(heading),
+                "{heading} is outside the routing window"
+            );
+        }
     }
 
     /// Nor does the carried text pick the project memory a kickoff loads. The

@@ -7,9 +7,9 @@ import { useChatBrowserRequest } from "../useChatBrowserRequest";
 
 type Options = Parameters<typeof useChatBrowserRequest>[0];
 function Harness({ value }: { value: Options }) { useChatBrowserRequest(value); return null; }
-function request(location = "auto"): ChatMessage {
+function request(location = "auto", extra: Record<string, unknown> = {}): ChatMessage {
   return { id: "request-1", role: "assistant", content: "Continue in browser", timestamp: 1,
-    metadata: { messageType: "action_request", details: { browserRequest: { task: "Continue comparing our earlier choices.", location } } } };
+    metadata: { messageType: "action_request", details: { browserRequest: { task: "Continue comparing our earlier choices.", location, ...extra } } } };
 }
 
 describe("Chat browser request handoff", () => {
@@ -34,7 +34,7 @@ describe("Chat browser request handoff", () => {
     container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container);
     value = { identity: "user/project/conversation", messages: [request()], canWrite: true, ready: true,
       transport: "personal", open: false, busy: false, personalAvailable: true, personalReady: false, sharedReady: false,
-      activate: vi.fn(), continueTask: vi.fn(async () => true), onError: vi.fn() };
+      sharedUnavailable: false, activate: vi.fn(), continueTask: vi.fn(async () => true), onError: vi.fn() };
   });
   afterEach(async () => {
     await act(async () => root.unmount()); await advance(); container.remove(); vi.useRealTimers();
@@ -78,6 +78,32 @@ describe("Chat browser request handoff", () => {
     value.messages = [request("device")]; value.transport = "shared"; value.personalAvailable = false; await render();
     const attempt = await begin();
     expect(await attempt.result).toMatchObject({ message: expect.stringContaining("desktop app") });
+    expect(value.activate).not.toHaveBeenCalled(); expect(value.continueTask).not.toHaveBeenCalled();
+  });
+
+  it("opens Instafy's browser for an automatic card while its availability is not known", async () => {
+    // The card's own `workspaceBrowser: false`, which a runtime once sent from
+    // its own setting, does not count: the Workspace browser runs elsewhere.
+    value.messages = [request("auto", { workspaceBrowser: false })]; value.transport = "shared";
+    value.personalAvailable = false; await render();
+    const attempt = await begin();
+    expect(value.activate).toHaveBeenCalledExactlyOnceWith("shared");
+    value.open = true; value.sharedReady = true; await render(); await advance();
+    expect(await attempt.result).toBeNull();
+    expect(value.continueTask).toHaveBeenCalledExactlyOnceWith("shared", expect.stringContaining("Continue comparing our earlier choices."));
+  });
+
+  it("opens an automatic card on this device when the Workspace browser is known not to open", async () => {
+    value.messages = [request("auto")]; value.transport = "shared"; value.sharedUnavailable = true; await render();
+    await begin();
+    expect(value.activate).toHaveBeenCalledExactlyOnceWith("personal");
+  });
+
+  it("refuses a card that cannot open any browser", async () => {
+    value.messages = [request("auto")]; value.transport = "shared"; value.personalAvailable = false;
+    value.sharedUnavailable = true; await render();
+    const attempt = await begin();
+    expect(await attempt.result).toMatchObject({ message: "Instafy's browser is not available in this workspace." });
     expect(value.activate).not.toHaveBeenCalled(); expect(value.continueTask).not.toHaveBeenCalled();
   });
 

@@ -384,6 +384,8 @@ import { resolveSharedBrowserControlOwner } from "./sharedBrowserControlOwner";
 import { useSharedBrowserApprovalTransport } from "./useSharedBrowserApprovalTransport";
 import { useChatBrowserHandoff } from "./useChatBrowserHandoff";
 import { useChatBrowserRequest } from "./useChatBrowserRequest";
+import { BrowserRequestHostContext, type BrowserRequestHost } from "./browserRequest";
+import { isSkillSetupConversation } from "./skillSetupConversation";
 import { sharedBrowserConversationRunIds } from "./browserHandoffRouting";
 
 const { enabled: runtimeControllerEnabled } = controllerClient.core;
@@ -1792,9 +1794,20 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     showStatus,
   });
   const browserModeActive = browserSessionOpen && browserVisible;
+  // A skill setup's composer answers the setup: its replies stay chat turns
+  // while the browser is shown, and a walk there goes on only through the
+  // browser's own controls (the card's button, Let AI continue).
+  const skillSetupConversation = useMemo(
+    () => isSkillSetupConversation({
+      messages: recentMessages,
+      olderMessagesUnloaded: hasMoreRecentHistory,
+      title: activeConversationEntry?.title,
+    }),
+    [activeConversationEntry?.title, hasMoreRecentHistory, recentMessages],
+  );
   // The split-view composer belongs to Chat. A visible resource must not
   // silently restrict every workspace task to browser tools.
-  const browserComposerActive = browserModeActive && !splitSurfaces;
+  const browserComposerActive = browserModeActive && !splitSurfaces && !skillSetupConversation;
   const showBrowserSessionPageStripForComposer =
     shouldShowBrowserSessionPageStripInComposer({
       browserModeActive,
@@ -3698,6 +3711,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
             browserTransport === "shared" && browserComposerActive,
           pendingNewBrowser: pendingBrowserLaunchMode === "new_page",
           sharedBrowserPageTargetAvailable:
+            !skillSetupConversation &&
             browserTransport === "shared" &&
             (browserSessionOpen || hasHiddenBrowserSession) &&
             Boolean(preferredBrowserPage),
@@ -3723,6 +3737,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       pendingBrowserLaunchMode,
       preferredBrowserPage,
       resolvePromptAgentTargets,
+      skillSetupConversation,
       softPrefillSuggestion,
     ],
   );
@@ -4373,6 +4388,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     showCredentialsGate: showChatCredentialsGate,
     showStatus,
     shouldAutoScrollRef,
+    skillSetupConversation,
     softPrefillSuggestion,
     submitSendIntent,
     targetsOverlapActiveRuns,
@@ -4411,6 +4427,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     personalAvailable: personalBrowser.available,
     personalReady: personalBrowser.status?.state === "ready",
     sharedReady: Boolean(resolvedBrowserRuntimeId && browserHandoffPage),
+    sharedUnavailable: sharedBrowserCapabilitiesUnsupported,
     activate: (transport) => {
       // This request selects a session, not a new device-wide preference.
       setBrowserTransport(transport);
@@ -4423,6 +4440,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       : browserHandoff.continueShared(message),
     onError: (message) => showStatus(message, "error", 6000),
   });
+  const browserRequestHost = useMemo<BrowserRequestHost>(() => ({
+    transport: browserTransport,
+    personalAvailable: personalBrowser.available,
+    sharedUnavailable: sharedBrowserCapabilitiesUnsupported,
+  }), [browserTransport, personalBrowser.available, sharedBrowserCapabilitiesUnsupported]);
 
   const handleStashDraft = useCallback(async (): Promise<boolean> => {
     if (!ensureProjectWriteAccess()) {
@@ -5998,6 +6020,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     <RunFailureRetryProvider value={runFailureRetryContextValue}>
     <ConversationFileContext.Provider value={openSurfaceFile}>
     <ChatRuntimeActivityContext.Provider value={chatRuntimeActivityValue}>
+    <BrowserRequestHostContext.Provider value={browserRequestHost}>
     <div
       ref={rootRef}
       className="relative flex h-full min-h-0 flex-col overflow-hidden"
@@ -6327,6 +6350,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         </StudioDialogModal>
       ) : null}
         </div>
+    </BrowserRequestHostContext.Provider>
     </ChatRuntimeActivityContext.Provider>
     </ConversationFileContext.Provider>
     </RunFailureRetryProvider>

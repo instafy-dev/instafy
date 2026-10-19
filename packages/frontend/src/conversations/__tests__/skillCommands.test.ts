@@ -5,6 +5,7 @@ import {
   deriveSkillNameHintFromImportSource,
   deriveSkillSourceLabel,
   humanizeSkillName,
+  isSkillSetupOpener,
   normalizeSkillName,
   parseSkillImportMessage,
 } from "../skillCommands";
@@ -186,5 +187,23 @@ describe("deriveSkillSourceLabel", () => {
   it("falls back to the trimmed source", () => {
     expect(deriveSkillSourceLabel("  https://github.com/  ")).toBe("https://github.com/");
     expect(deriveSkillSourceLabel("SKILL.md")).toBe("SKILL.md");
+  });
+});
+
+describe("isSkillSetupOpener", () => {
+  it("matches the lines that start a setup, as the runtime reads them", () => {
+    expect(isSkillSetupOpener(buildSkillImportMessage({ source: "https://github.com/acme/skills", start: true }))).toBe(true);
+    expect(isSkillSetupOpener("/skills import ./pack --START --name ledger")).toBe(true);
+    expect(isSkillSetupOpener(buildSkillStartMessage("freefinance"))).toBe(true);
+    expect(isSkillSetupOpener("/skill start freefinance\nwith the demo account")).toBe(true);
+  });
+
+  it("does not match an import without --start, a malformed start or a quoted line", () => {
+    expect(isSkillSetupOpener("/skills import https://github.com/acme/skills")).toBe(false);
+    expect(isSkillSetupOpener("/skills import --start")).toBe(false);
+    expect(isSkillSetupOpener("/skills start")).toBe(false);
+    expect(isSkillSetupOpener("/skills start one two")).toBe(false);
+    expect(isSkillSetupOpener("/skillset start ledger")).toBe(false);
+    expect(isSkillSetupOpener("I ran /skills start ledger yesterday")).toBe(false);
   });
 });

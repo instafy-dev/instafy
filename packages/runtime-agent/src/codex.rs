@@ -121,7 +121,8 @@ const SHARED_BROWSER_DEVELOPER_INSTRUCTIONS: &str = r#"Shared Browser transport 
 - Take a snapshot and pass both its `snapshotId` and one indexed element to each interaction. If the page or indexed target set changes, take another snapshot instead of retrying a stale target. Arbitrary CSS selectors are not accepted.
 - Do not invoke Shared Browser through shell commands or write an ad-hoc Playwright/CDP script. The capability is deliberately exposed only through the bounded MCP server for this turn.
 - The controller automatically emits the visible AI cursor and action-ticker events. Do not bypass it.
-- Never type authentication, payment, or identity secrets. Stop and ask the user to enter them directly.
+- Never type authentication, payment, or identity secrets. A sign-in, one-time code or consent step is a manual step for the user: pause on it with `request_human_input` on its fields, so the user completes it on the page and then chooses Let AI continue. Never ask for those values in chat.
+- Never open or reveal a screen, dialog or field that shows a credential value such as an API secret, token, key or recovery code, and never ask the user to open one in this browser: the next snapshot would show the value to you. When the user needs one, stop on the screen that lists it, tell them in words which control opens it, and ask them to open that same page in a tab of their own browser to see and copy the value there; do not use `request_human_input` for it. If an observation shows a value anyway, never repeat, store or act on it.
 - For a manual field step, use `request_human_input` with one to eight indices and the fresh snapshotId. It highlights the actual fields and ends this turn. Do not issue any further browser calls; the user explicitly continues after entering values directly, and the next turn must take a fresh snapshot. Never request or repeat those values in chat.
 - By default, the authenticated initiating user approves each site and every navigation, click, type, submission and key press for this run. The user may explicitly grant routine browsing at the first site prompt; the runtime then handles routine actions without repeated prompts while recognized consequential actions, submissions and activation keys still require **Allow once**. Never assume, request through a tool, or synthesize that grant; it is only a user-facing policy choice. Secret-entry restrictions always apply.
 - A denial, timeout, stale target, changed page, or replayed approval is final for that attempted action. Do not retry it automatically; report the exact returned error and wait for a new user instruction.
@@ -132,7 +133,9 @@ const PERSONAL_BROWSER_DEVELOPER_INSTRUCTIONS: &str = r#"Personal Browser transp
 - The broker currently controls one visible page. Reuse it and navigate sequentially; do not invent tab/window endpoints or silently switch to a hosted/shared browser.
 - Get interactive element indices from `snapshot`, then use one fresh index for exactly one click/type/press action. Snapshot again before every subsequent indexed action and after navigation, scrolling, or DOM changes. Arbitrary CSS selectors are not accepted.
 - The Personal Browser capability is deliberately unavailable to shell tools and subprocesses. Never try to discover, print, persist, or reconstruct it.
+- Never type authentication, payment, or identity secrets. A sign-in, one-time code or consent step is a manual step for the user: pause on it with `request_human_input` on its fields, so the user completes it on the page and then chooses Let AI continue. Never ask for those values in chat.
 - For a manual field step, use `request_human_input` with one to eight fresh snapshot indices. It highlights the fields and revokes agent control. End this turn immediately; the user fills the page directly and explicitly continues in a fresh turn. Never request or repeat their values in chat.
+- Never open or reveal a screen, dialog or field that shows a credential value such as an API secret, token, key or recovery code, and never ask the user to open one in this browser: the next snapshot would show the value to you. When the user needs one, stop on the screen that lists it, tell them in words which control opens it, and ask them to open that same page in a tab of their own browser to see and copy the value there; do not use `request_human_input` for it. If an observation shows a value anyway, never repeat, store or act on it.
 - Stop on a 423 response because the user paused control. Stop on 401 because the session capability was rotated or revoked; do not inspect or retry the token."#;
 const LOCAL_BROWSER_DEVELOPER_INSTRUCTIONS: &str = r#"Owner-local browser observation (self-hosted runtime policy):
 - The `instafy_local_browser.observe` tool can open one public HTTP(S) URL in a fresh headless browser, count matching elements, read bounded text and computed CSS, and optionally save a PNG under `artifacts/browser/`.
@@ -5427,6 +5430,39 @@ mod tests {
         assert!(enabled.contains("key press"));
         assert!(enabled.contains("Do not retry it automatically"));
         assert!(enabled.contains("never a model-visible tool"));
+    }
+
+    /// A setup can walk the person to the provider's screen that lists a value
+    /// it asks for in a card. Both visible browsers stop there and send the
+    /// person to their own browser tab for the value itself, pointing at the
+    /// control in words rather than with `request_human_input`, whose next turn
+    /// starts with a fresh snapshot.
+    #[test]
+    fn interactive_browser_policies_keep_credential_values_out_of_the_browser() {
+        const RULE: &str = "- Never open or reveal a screen, dialog or field that shows a credential value such as an API secret, token, key or recovery code, and never ask the user to open one in this browser: the next snapshot would show the value to you. When the user needs one, stop on the screen that lists it, tell them in words which control opens it, and ask them to open that same page in a tab of their own browser to see and copy the value there; do not use `request_human_input` for it. If an observation shows a value anyway, never repeat, store or act on it.\n";
+        for policy in [
+            append_shared_browser_developer_instructions(String::new(), true),
+            append_personal_browser_developer_instructions(String::new(), true),
+        ] {
+            assert_eq!(policy.matches(RULE).count(), 1, "{policy}");
+        }
+    }
+
+    /// A setup's walk reaches the provider's sign-in page before the screen it
+    /// was asked for. The person signs in on the page, so the walk pauses there
+    /// with `request_human_input` and goes on when they choose Let AI continue:
+    /// the explicit browser path. A request in chat would be answered in chat,
+    /// where a skill setup's replies go, and the walk would never resume.
+    #[test]
+    fn interactive_browser_policies_pause_for_sign_in_with_human_input() {
+        const RULE: &str = "- Never type authentication, payment, or identity secrets. A sign-in, one-time code or consent step is a manual step for the user: pause on it with `request_human_input` on its fields, so the user completes it on the page and then chooses Let AI continue. Never ask for those values in chat.\n";
+        for policy in [
+            append_shared_browser_developer_instructions(String::new(), true),
+            append_personal_browser_developer_instructions(String::new(), true),
+        ] {
+            assert_eq!(policy.matches(RULE).count(), 1, "{policy}");
+            assert!(!policy.contains("Stop and ask the user to enter them directly"));
+        }
     }
 
     #[test]
