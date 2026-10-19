@@ -771,7 +771,14 @@ source that contains a `SKILL.md` into `.agents/skills/`, reports what it wrote 
 message, and then continues the same turn by following each skill's `## Getting started`
 section: questions are asked in chat, secrets are requested by name through the secrets card
 and never pasted into the conversation, dependencies are installed inside the skill folder,
-and schedules are created through the normal automation flow. Every later turn in that chat,
+and schedules are created through the normal automation flow. When a skill declares the
+address where the person signs in to the provider, the setup also offers once, beside the
+secret cards, the **Open browser and continue** card: pressing it opens Instafy's browser at
+that address and walks to the screen the skill names, and nothing opens before that press.
+The person signs in themselves, the agent types no credential, and the walk stops on the
+screen before the one that shows the value, so the value goes from the provider's screen
+into its card without reaching the model. A skill that declares no address gets no offer,
+and a card's own where-to-get line still names a screen, never an address. Every later turn in that chat,
 including one that only saves a file the setup asked for, picks the setup up at its next
 question until the section is done. An opener the runtime answered without the model, such as
 an unknown skill name, a failed import or a chat with no AI connected, starts no setup.

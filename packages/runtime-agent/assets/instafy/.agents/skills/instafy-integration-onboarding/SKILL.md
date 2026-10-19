@@ -11,9 +11,11 @@ Goal: make provider workflows (GitHub, Slack, WhatsApp, etc.) proactively guide 
 ## Consent-first browser guidance
 
 When provider setup needs dashboard/login interaction:
-- Ask before opening a live browser session.
-- If the user agrees, guide step-by-step and pause for user-only actions (login, MFA, consent).
-- If the user declines, provide manual steps only.
+- Ask before opening a live browser session, and offer it once per setup. With browser tools on this turn, ask in one sentence and wait for a yes. Without them, emit one `request_browser` action after any `request_secret` cards: its button is the user's yes, and its `task` is sent as the user's own message, so write it as their request.
+- Open only an address a skill declares or the user gave you, and walk the screens the declaration names, in order. Never guess a provider address.
+- If the user agrees, guide step-by-step and pause for user-only actions (login, MFA, consent). Never type a password, a one-time code or another credential.
+- Stop on the screen before any screen that shows a secret value (an API secret, token or key), such as the list whose row opens it. The user opens that screen, copies the value into its `request_secret` card and closes it, so the value never reaches you.
+- If the user declines or ignores the offer, provide manual steps only.
 
 ## Capability preflight
 
@@ -42,10 +44,14 @@ Use these actions in the JSON response:
   - optional `description`, `requiredScopes`, `capabilities`, `authMethods`, `suggestedSecretNames`, `suggestedSecrets`, `agentHandles`
 - `request_secret`
   - `name`: env var (for example `GITHUB_TOKEN`)
-  - optional `description`, `agentHandles`
+  - optional `valueLabel`, `description`, `whereToGet`, `sensitive`, `skill`, `agentHandles`; a skill setup says how to fill each
+- `request_browser`
+  - `task`: the user's browsing request, written as their own message
+  - optional `browserLocation`: `auto` unless the user named this device or the Workspace
 
 Use `request_integration` for account connection/scope onboarding.
 Use `request_secret` for project runtime tokens/webhooks.
+Use `request_browser` to offer Instafy's browser when no browser tools are on this turn.
 
 ### Keep cards small
 

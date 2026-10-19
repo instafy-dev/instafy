@@ -31,6 +31,11 @@ When an interactive browser is not attached to a Chat turn, the bundled browser
 skill can return an **Open browser and continue** card. Selecting it opens the
 conversation's browser and sends the task to that exact browser once it is ready.
 This is a user-selected handoff; displaying an old message never runs it again.
+A skill setup offers the same card once, to walk to the provider screen the skill names
+(see [Product](Product.md)). On Personal and Shared Browser turns the agent is told to stay
+off any screen, dialog or field that shows a credential value: it stops one screen short,
+names the control that opens it, and leaves opening, copying and closing it to the person.
+That is turn guidance for the model, not a block the browser enforces.
 Paused native control uses the existing Resume flow with the Browser settings
 approval choice (routine browsing by default on supported Desktop hosts); already active
 control keeps its settings. A pending manual step must be finished with **Let AI continue** before another task can start.

@@ -30033,6 +30033,119 @@ mod tests {
         assert!(prompt.contains("zq-companion-sentinel"));
     }
 
+    /// A first-run setup's kickoff routes the onboarding skill into its
+    /// memory, which is selected from the kickoff's instructions alone. Until
+    /// Oct 19 it did not: the router scored location sharing 10 and onboarding
+    /// 5 against those instructions, so the consent-first browser guidance
+    /// never reached the model, which told the person to go and find the
+    /// provider's screen on their own.
+    #[test]
+    fn skill_kickoff_routes_the_onboarding_skill_with_its_browser_offer() {
+        let tmp = tempdir().expect("temp dir");
+        learn::ensure_project_memory_scaffold(tmp.path());
+        let processor = test_job_processor(tmp.path());
+        let skill_dir = tmp.path().join(".agents/skills/acme-books");
+        fs::create_dir_all(&skill_dir).expect("skill dir");
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: acme-books\ndescription: Read an Acme Books ledger.\nrouting_keywords: acme, ledger\n---\n\n# Acme Books\n\nNeeds an API client id and secret.\n",
+        )
+        .expect("skill file");
+        let kickoff = skills::build_skill_start_prompt(
+            tmp.path(),
+            Some("https://github.com/instafy-dev/skills"),
+            &[".agents/skills/acme-books/SKILL.md".to_string()],
+        );
+        let job = test_lease_job(Some("feature"), json!({}));
+        let project_id = Uuid::new_v4();
+        let (prompt, _, _) = processor
+            .build_prompt_with_text(
+                &project_id,
+                &job,
+                tmp.path(),
+                kickoff.as_str(),
+                true,
+                None,
+                &[],
+                None,
+                None,
+            )
+            .expect("main prompt");
+
+        assert!(prompt.contains(
+            "## Context: instafy-integration-onboarding (.agents/skills/instafy-integration-onboarding/SKILL.md)"
+        ));
+        assert!(
+            prompt.contains("emit one `request_browser` action after any `request_secret` cards")
+        );
+        assert!(prompt.contains("so the value never reaches you"));
+        assert_eq!(prompt.matches("## Showing the way").count(), 1);
+        // The full contract beside it lists the handoff it asks for.
+        assert!(prompt.contains("{ type: 'request_browser', task: string"));
+
+        // An ordinary question in the same workspace does not pull it in.
+        let (ordinary, _, _) = processor
+            .build_prompt_with_text(
+                &project_id,
+                &job,
+                tmp.path(),
+                "What changed in the ledger this week?",
+                true,
+                None,
+                &[],
+                None,
+                None,
+            )
+            .expect("ordinary prompt");
+        assert!(!ordinary.contains("## Context: instafy-integration-onboarding"));
+    }
+
+    /// The kickoff never runs with a browser attached: a browser job refuses
+    /// the skills lane, and a kickoff carries no browser transport. So the
+    /// offer is the `request_browser` card, whose button is the person's yes,
+    /// beside the secret cards rather than in place of them.
+    #[test]
+    fn skill_kickoff_offers_the_browser_as_a_card_beside_the_secret_cards() {
+        let workspace = tempdir().expect("temp dir");
+        let opener = "/skills import https://github.com/instafy-dev/skills --start";
+        let kickoff = test_lease_job(Some("feature"), json!({ "prompt_text": opener }));
+        assert!(!crate::shared_browser::payload_requests_shared_browser(
+            &kickoff.payload
+        ));
+        assert!(!crate::personal_browser::payload_requests_personal_browser(
+            &kickoff.payload
+        ));
+        for transport in ["desktop-personal", "shared"] {
+            let browser_job = test_lease_job(
+                Some("browser"),
+                json!({ "prompt_text": opener, "metadata": { "browserTransport": transport } }),
+            );
+            assert!(
+                ensure_browser_uses_bounded_lane(&browser_job, opener, workspace.path()).is_err()
+            );
+        }
+
+        let task = "Open https://app.example.test and take me to Settings, then API access. I sign in myself. Stop there, before the window that shows the Client secret; I open it and copy it into the card myself.";
+        let actions = parse_codex_actions(&json!({"actions": [
+            {"type": "request_secret", "name": "ACME_CLIENT_ID", "valueLabel": "Client ID", "whereToGet": "Settings, then API access.", "skill": "acme-books", "sensitive": true},
+            {"type": "request_secret", "name": "ACME_CLIENT_SECRET", "valueLabel": "Client secret", "whereToGet": "Settings, then API access.", "skill": "acme-books", "sensitive": true},
+            {"type": "request_browser", "task": task, "browserLocation": "auto"}
+        ]}));
+        let messages = build_final_messages_from_actions(&actions, None);
+        let kinds: Vec<_> = messages
+            .iter()
+            .map(|message| message.message_type.as_deref().unwrap_or_default())
+            .collect();
+        assert_eq!(
+            kinds,
+            ["secret_request", "secret_request", "action_request"]
+        );
+        let browser = &messages[2].metadata.as_ref().unwrap()["details"];
+        assert_eq!(browser["browserRequest"]["task"], task);
+        assert_eq!(browser["browserRequest"]["location"], "auto");
+        assert_eq!(browser["actions"][0]["event"], "instafy:request-browser");
+    }
+
     /// Nor does the carried text pick the project memory a kickoff loads. The
     /// skill router would otherwise route the kickoff to the skill it just
     /// installed and append that SKILL.md a second time.
