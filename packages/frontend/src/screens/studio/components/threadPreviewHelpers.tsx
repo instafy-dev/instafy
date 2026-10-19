@@ -25,6 +25,7 @@ import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 import type { ThreadCompactUpdateKind } from "./threadPreviewState";
 import type { ChatMessage } from "../types";
 import { isNonRecoverableRunErrorMessage } from "../../../conversations/conversationGoals";
+import { isSynthesizedTerminalThreadMessage } from "./threadPreviewRunData";
 
 export const THREAD_ACTIVE_STATES = new Set([
   "in_progress",
@@ -519,7 +520,11 @@ const THREAD_JOB_REPLY_MESSAGE_TYPES: ReadonlySet<string> = new Set(["", "error"
  * A controller-written outcome is not one, since a resumed job can follow it.
  */
 function isThreadJobReply(message: ChatMessage): boolean {
-  if (message.role !== "assistant" || !isFinalAgentOutcomeMessage(message)) {
+  if (
+    message.role !== "assistant"
+    || isSynthesizedTerminalThreadMessage(message)
+    || !isFinalAgentOutcomeMessage(message)
+  ) {
     return false;
   }
   const metadata = message.metadata && isRecord(message.metadata) ? message.metadata : null;

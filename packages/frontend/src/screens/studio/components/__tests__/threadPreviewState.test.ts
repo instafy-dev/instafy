@@ -215,6 +215,16 @@ describe("threadPreviewState", () => {
       ).toEqual({ phase: "running", status: "in_progress" });
     });
 
+    it("is never a terminal row made up from a run record", () => {
+      // Its job id is only a guess, so it must not end a job that is still running.
+      expect(
+        resolveThreadRunStatusFromMessages([
+          { ...reply("thread-preview-terminal:run-2", "job-1", 2), content: "Completed." },
+          progress("status-2", "job-1", 3),
+        ]),
+      ).toEqual({ phase: "running", status: "in_progress" });
+    });
+
     it("is not a controller-written outcome, which a resumed job can follow", () => {
       expect(
         resolveThreadRunStatusFromMessages([
