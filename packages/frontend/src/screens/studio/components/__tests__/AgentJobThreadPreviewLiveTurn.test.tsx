@@ -267,6 +267,49 @@ describe("AgentJobThreadPreviewLayout live turn", () => {
     );
   });
 
+  it("settles with its reply while the run record still reads running", async () => {
+    // Live at phone width, a short reply landed with the turn's rail still up
+    // and the rail went seconds later, with the run record. The reply alone
+    // settles the turn: here the run is still in flight and the job's last
+    // progress is stamped after the reply (a message's time is when the
+    // transaction that wrote it began).
+    const card = agentUpdate("secret-1", "secret_request", "Add the API token.", base + 3_000, {
+      name: "SERVICE_API_TOKEN",
+    });
+    const running = [...earlierSteps(), card];
+    const rail = () => container.querySelector('[data-testid="agent-thread-compact-rail"]');
+
+    await renderTurn(running);
+    expect(rail()).toBeInstanceOf(HTMLElement);
+    const cardWhileRunning = container.querySelector('[data-testid="secret-request-card"]');
+    expect(cardWhileRunning).toBeInstanceOf(HTMLElement);
+
+    // The run record has not caught up: the run is still in flight.
+    const answered = [
+      ...running,
+      reply("reply", "There are 12 files in this space.", base + 4_000),
+      agentUpdate("status-late", "status", "Counting the entries", base + 4_005, { kind: "agent_message" }),
+    ];
+    await renderTurn(answered);
+
+    expect(rail()).toBeNull();
+    expect(container.querySelector(".instafy-compact-event-pill")).toBeNull();
+    expect(container.querySelector('[data-testid="agent-thread-compact-rail-status"]')).toBeNull();
+    expect(container.querySelector(".instafy-status-sweep")).toBeNull();
+    expect(container.querySelector('[data-testid="message-content"]')?.textContent).toBe(
+      "There are 12 files in this space.",
+    );
+    // The card stays the same element through the settle.
+    expect(container.querySelector('[data-testid="secret-request-card"]')).toBe(cardWhileRunning);
+    const settledWithReply = turnStructure(container);
+
+    // Nothing moves when the run record catches up.
+    live.inFlight = false;
+    await renderTurn(answered);
+    expect(turnStructure(container)).toEqual(settledWithReply);
+    expect(container.querySelector('[data-testid="secret-request-card"]')).toBe(cardWhileRunning);
+  });
+
   it("renders the turn's cards the moment they arrive and keeps them with the reply", async () => {
     // The newest card of a running turn used to be taken for the reply: it
     // stayed hidden until the real reply came, then both popped in at once.

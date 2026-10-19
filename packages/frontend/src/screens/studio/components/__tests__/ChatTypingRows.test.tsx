@@ -892,6 +892,11 @@ describe("the typing row after a job thread's reply", () => {
     expect(resolveJobThreadTypingCoverage(threadRow([reasoning, reply]), [run("run-1", JOB_ID)], [])).toBe(
       "answered",
     );
+    // Progress of the same job stamped after its reply does not reopen it.
+    const lateProgress: ChatMessage = { ...reasoning, id: "reasoning-late", timestamp: 4 };
+    expect(
+      resolveJobThreadTypingCoverage(threadRow([reasoning, reply, lateProgress]), [run("run-1", JOB_ID)], []),
+    ).toBe("answered");
     // A different run starting after the reply gets its own typing row.
     expect(
       resolveJobThreadTypingCoverage(
