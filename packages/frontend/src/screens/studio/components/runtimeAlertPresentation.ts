@@ -115,7 +115,7 @@ export function resolveAgentWaitingActivityCopy(input: {
   workspaceStarting: boolean;
   queued: boolean;
   runtimeLimit?: AgentWaitingRuntimeLimit | null;
-}): { label: string; ariaLabel: string } {
+}): { label: string; ariaLabel: string; isRuntimeBusyNotice?: true } {
   const names = input.displayNames.filter((name) => name.trim().length > 0);
   const multiple = names.length > 1;
   const subject = names.join(", ") || "Octo";
@@ -133,7 +133,8 @@ export function resolveAgentWaitingActivityCopy(input: {
       input.runtimeLimit.blockerRuntimeLabel;
     const where = blocker ? `"${blocker}"` : "another project";
     const label = `Your cloud runtime is busy in ${where}. Stop it there or let it go idle, and this message sends once a runtime is free. It waits up to 30 minutes.`;
-    return { label, ariaLabel: label };
+    // A notice to read, not a status line: the typing row lets it wrap.
+    return { label, ariaLabel: label, isRuntimeBusyNotice: true };
   }
 
   if (input.workspaceStarting) {

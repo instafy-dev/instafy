@@ -182,6 +182,7 @@ import {
 } from "./assistantMessageGrouping";
 import {
   COMPACTION_STATUS_LABEL,
+  isTranscriptTailActiveTurnOutcome,
   resolveJobThreadTypingCoverage,
   resolveMultiAgentTypingStatus,
   resolveTranscriptTailKey,
@@ -3119,6 +3120,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           : typingIndicatorState?.phase === "waiting"
             ? waitingActivityCopy.label
             : "Typing…"));
+  // Every typing label is one truncated line except the runtime-busy notice,
+  // which carries an instruction and is meant to wrap.
+  const typingStatusIsRuntimeBusyNotice =
+    waitingActivityCopy.isRuntimeBusyNotice === true && typingStatusLabel === waitingActivityCopy.label;
   const typingStatusAriaLabel = hasMultipleTypingAgents
     ? workspaceStarting
       ? waitingActivityCopy.ariaLabel
@@ -3200,11 +3205,25 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const jobThreadTypingCoverage = useMemo(
     () =>
       isAssistantTyping
-        ? resolveJobThreadTypingCoverage(displayedMessages[displayedMessages.length - 1], activeConversationRuns)
+        ? resolveJobThreadTypingCoverage(
+            displayedMessages[displayedMessages.length - 1],
+            activeConversationRuns,
+            messages,
+          )
         : "none",
-    [activeConversationRuns, displayedMessages, isAssistantTyping],
+    [activeConversationRuns, displayedMessages, isAssistantTyping, messages],
   );
   const isAssistantTypingCoveredByJobThreadPreview = jobThreadTypingCoverage !== "none";
+  const transcriptTailEndsActiveTurn = useMemo(
+    () =>
+      isAssistantTyping &&
+      isTranscriptTailActiveTurnOutcome(
+        displayedMessages[displayedMessages.length - 1],
+        activeConversationRuns,
+        messages,
+      ),
+    [activeConversationRuns, displayedMessages, isAssistantTyping, messages],
+  );
   const transcriptTailKey = useMemo(
     () => resolveTranscriptTailKey(displayedMessages[displayedMessages.length - 1]),
     [displayedMessages],
@@ -5849,6 +5868,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
               isThinkingLabelExpanded={isThinkingLabelExpanded}
               onToggleThinkingLabel={() => setIsThinkingLabelExpanded((current) => !current)}
               latestDisplayedMessageId={transcriptTailKey}
+              latestDisplayedMessageEndsActiveTurn={transcriptTailEndsActiveTurn}
+              typingStatusWraps={typingStatusIsRuntimeBusyNotice}
               renderAssistantAvatar={renderAssistantAvatar}
             />
             {stoppedTurnNotice ? <StoppedTurnRow text={stoppedTurnNotice} /> : null}

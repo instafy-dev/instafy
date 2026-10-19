@@ -17,6 +17,7 @@ type AssistantTypingStatusSnapshot = {
   ariaLabel: string;
   expanded: boolean;
   clickable: boolean;
+  wraps: boolean;
   indicator: ReactNode;
 };
 
@@ -42,11 +43,14 @@ function AssistantTypingStatusLine({
   onToggleThinkingLabel: () => void;
 }) {
   const isFinalizing = snapshot.phase === "finalizing";
-  const labelClassName = snapshot.clickable
-    ? snapshot.expanded
+  // One line in a fixed box, whatever the label: a multi-agent count or a
+  // fallback that wrapped at phone width changed the row's height each time
+  // the runs changed. Only the runtime-busy notice, a sentence to read, wraps.
+  const labelClassName = snapshot.wraps
+    ? ""
+    : snapshot.clickable && snapshot.expanded
       ? "overflow-x-auto whitespace-nowrap"
-      : "truncate"
-    : "";
+      : "truncate";
 
   return (
     <div
@@ -74,7 +78,7 @@ function AssistantTypingStatusLine({
       <span
         className={["instafy-status-sweep min-w-0 max-w-full text-xs", labelClassName].join(" ")}
         data-sweep-text={snapshot.label}
-        title={snapshot.clickable ? snapshot.label : undefined}
+        title={snapshot.wraps ? undefined : snapshot.label}
         aria-hidden="true"
       >
         {snapshot.label}
@@ -98,6 +102,8 @@ export function ChatTypingRows({
   isThinkingLabelExpanded,
   onToggleThinkingLabel,
   latestDisplayedMessageId,
+  latestDisplayedMessageEndsActiveTurn = false,
+  typingStatusWraps = false,
   renderAssistantAvatar,
 }: {
   peerTypingLabel: string | null;
@@ -114,6 +120,10 @@ export function ChatTypingRows({
   isThinkingLabelExpanded: boolean;
   onToggleThinkingLabel: () => void;
   latestDisplayedMessageId: string | null;
+  /** The newest row is already the reply of a run this row speaks for. */
+  latestDisplayedMessageEndsActiveTurn?: boolean;
+  /** The label is the runtime-busy notice, which wraps instead of truncating. */
+  typingStatusWraps?: boolean;
   renderAssistantAvatar: (
     metadata?: Record<string, unknown> | null,
     messageAgentIdentity?: AssistantAgentIdentity | null,
@@ -144,6 +154,7 @@ export function ChatTypingRows({
       ariaLabel: typingStatusAriaLabel,
       expanded: isThinkingLabelExpanded,
       clickable: Boolean(typingIndicatorState?.label && !hasMultipleTypingAgents),
+      wraps: typingStatusWraps,
       indicator:
         !hasMultipleTypingAgents && typingIndicatorState?.phase === "compacting" ? (
           <CompressLines
@@ -179,6 +190,7 @@ export function ChatTypingRows({
       typingIndicatorState?.phase,
       typingStatusAriaLabel,
       typingStatusLabel,
+      typingStatusWraps,
     ],
   );
   const [lingeringAssistantStatus, setLingeringAssistantStatus] =
@@ -190,6 +202,9 @@ export function ChatTypingRows({
   // is a second octo avatar under a finished answer, for up to twelve
   // seconds.
   const statusAnchorMessageIdRef = useRef<string | null>(null);
+  // Whether that anchor was already the reply of a run the status spoke for:
+  // then no reply is on its way and the spacer has no place to hold.
+  const statusAnchorEndsTurnRef = useRef(false);
   const wasShowingAssistantStatusRef = useRef(false);
 
   useEffect(() => {
@@ -197,6 +212,13 @@ export function ChatTypingRows({
       if (!wasShowingAssistantStatusRef.current) {
         wasShowingAssistantStatusRef.current = true;
         statusAnchorMessageIdRef.current = latestDisplayedMessageId ?? null;
+        statusAnchorEndsTurnRef.current = false;
+      }
+      if (
+        latestDisplayedMessageEndsActiveTurn &&
+        (latestDisplayedMessageId ?? null) === statusAnchorMessageIdRef.current
+      ) {
+        statusAnchorEndsTurnRef.current = true;
       }
       setLingeringAssistantStatus(assistantStatusSnapshot);
       return;
@@ -206,7 +228,10 @@ export function ChatTypingRows({
     if (!lingeringAssistantStatus) {
       return;
     }
-    if ((latestDisplayedMessageId ?? null) !== statusAnchorMessageIdRef.current) {
+    if (
+      (latestDisplayedMessageId ?? null) !== statusAnchorMessageIdRef.current ||
+      statusAnchorEndsTurnRef.current
+    ) {
       setLingeringAssistantStatus(null);
       return;
     }
@@ -218,6 +243,7 @@ export function ChatTypingRows({
     return () => window.clearTimeout(timeoutId);
   }, [
     assistantStatusSnapshot,
+    latestDisplayedMessageEndsActiveTurn,
     latestDisplayedMessageId,
     lingeringAssistantStatus,
     showAssistantStatus,

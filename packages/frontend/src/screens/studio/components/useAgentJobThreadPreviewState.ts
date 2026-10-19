@@ -50,6 +50,7 @@ import {
   THREAD_HYBRID_COMPACTION_MIN_WIDTH_PX,
   THREAD_RECENT_ACTIVITY_WINDOW_MS,
   type ThreadCompactEvent,
+  windowThreadUpdates,
 } from "./threadPreviewHelpers";
 import { resolveThreadPreviewSafeInsetPx } from "./threadPreviewGeometry";
 import { resolveSpineToneFromStatus } from "./ThreadSpine";
@@ -476,32 +477,11 @@ export function useAgentJobThreadPreviewState({
   }, [finalSummaryMessage?.id, latestFileMessage?.id, threadMessages]);
 
   const isLiveTurn = isRunning || isThreadUnresolved;
+  const maxVisibleUpdates = isLiveTurn ? 5 : 3;
   const { visibleUpdates, hiddenUpdateCount } = useMemo(() => {
-    const maxVisible = isLiveTurn ? 5 : 3;
-    if (intermediateUpdates.length <= maxVisible) {
-      return { visibleUpdates: intermediateUpdates, hiddenUpdateCount: 0 };
-    }
-    return {
-      visibleUpdates: intermediateUpdates.slice(-maxVisible),
-      hiddenUpdateCount: intermediateUpdates.length - maxVisible,
-    };
-  }, [intermediateUpdates, isLiveTurn]);
-
-  useEffect(() => {
-    const allowed = new Set(visibleUpdates.map((entry) => entry.id));
-    setExpandedUpdateIds((current) => {
-      const next: Record<string, boolean> = {};
-      let changed = false;
-      for (const [id, expanded] of Object.entries(current)) {
-        if (allowed.has(id)) {
-          next[id] = expanded;
-        } else {
-          changed = true;
-        }
-      }
-      return changed ? next : current;
-    });
-  }, [visibleUpdates]);
+    const visible = windowThreadUpdates(intermediateUpdates, maxVisibleUpdates);
+    return { visibleUpdates: visible, hiddenUpdateCount: intermediateUpdates.length - visible.length };
+  }, [intermediateUpdates, maxVisibleUpdates]);
 
   useEffect(() => {
     const element = threadPreviewRef.current;
@@ -537,11 +517,26 @@ export function useAgentJobThreadPreviewState({
   const hasUpdates = visibleUpdates.length > 0 || hiddenUpdateCount > 0;
   const hasCommandOutput = Boolean(latestCommandExecution?.output);
   const hasCommandInvocation = Boolean(latestCommandExecution?.command);
-  const showLiveCommandPlaceholder = isRunning && hasCommandInvocation && !hasCommandOutput;
-  const showLiveCommandOutputRaw = isRunning && hasCommandOutput;
-  const showCollapsedCommandToggle = !isRunning && hasCommandOutput;
-  const showCollapsedCommandOutput = !isRunning && hasCommandOutput && commandOutputExpanded;
+  // The live command rows follow the turn, not isRunning: between two
+  // commands isRunning drops, and keyed to it the rows swapped for the
+  // collapsed toggle plus a summary running line, then back, at every command.
+  const showLiveCommandPlaceholder = isLiveTurn && hasCommandInvocation && !hasCommandOutput;
+  const showLiveCommandOutputRaw = isLiveTurn && hasCommandOutput;
+  const showCollapsedCommandToggle = !isLiveTurn && hasCommandOutput;
+  const showCollapsedCommandOutput = !isLiveTurn && hasCommandOutput && commandOutputExpanded;
 
+  // A wide row compacts once a live turn fills its update window. The reply
+  // shrinks that window (5 to 3), so a turn that compacted stays compacted;
+  // otherwise the reply turned its rail back into a list of rows.
+  const compactsForUpdateCount = Math.min(intermediateUpdates.length, maxVisibleUpdates) >= 5;
+  const hybridLatchKey = jobId || threadLocalId || message.id;
+  const [hybridLatchedKey, setHybridLatchedKey] = useState<string | null>(null);
+  const isHybridLatched = hybridLatchedKey === hybridLatchKey;
+  useEffect(() => {
+    if (compactsForUpdateCount && !isHybridLatched) {
+      setHybridLatchedKey(hybridLatchKey);
+    }
+  }, [compactsForUpdateCount, hybridLatchKey, isHybridLatched]);
   const shouldUseHybridThreadCompaction = useMemo(() => {
     if (threadPreviewWidth <= 0) {
       return false;
@@ -549,8 +544,25 @@ export function useAgentJobThreadPreviewState({
     if (threadPreviewWidth < THREAD_HYBRID_COMPACTION_MIN_WIDTH_PX) {
       return true;
     }
-    return visibleUpdates.length >= 5;
-  }, [threadPreviewWidth, visibleUpdates.length]);
+    return compactsForUpdateCount || isHybridLatched;
+  }, [compactsForUpdateCount, isHybridLatched, threadPreviewWidth]);
+
+  // In the compacted row a status, plan or tool step is a rail chip and only
+  // the rest render as rows, so only those take places in the window. Counted
+  // with the chips, three statuses after two cards pushed both cards out of
+  // the window the moment the reply shrank it.
+  const hybridInlineWindow = useMemo(
+    () =>
+      shouldUseHybridThreadCompaction
+        ? windowThreadUpdates(
+            intermediateUpdates.filter(
+              (update) => shouldKeepThreadUpdateInline(update) || resolveThreadCompactUpdateKind(update) === null,
+            ),
+            maxVisibleUpdates,
+          )
+        : [],
+    [intermediateUpdates, maxVisibleUpdates, shouldUseHybridThreadCompaction],
+  );
 
   const isHybridCompactionActive = shouldUseHybridThreadCompaction && !isThreadPreviewExpanded;
   const hybridThreadCompaction = useMemo(() => {
@@ -559,7 +571,7 @@ export function useAgentJobThreadPreviewState({
     }
     const inlineUpdates: ChatMessage[] = [];
     const compactEvents: ThreadCompactEvent[] = [];
-    const visibleUpdateIds = new Set(visibleUpdates.map((entry) => entry.id));
+    const inlineWindowIds = new Set(hybridInlineWindow.map((entry) => entry.id));
     const inlineUpdateIds = new Set<string>();
     const excludedIds = new Set<string>();
     if (finalSummaryMessage?.id) {
@@ -577,7 +589,7 @@ export function useAgentJobThreadPreviewState({
         continue;
       }
       if (shouldKeepThreadUpdateInline(update)) {
-        if (visibleUpdateIds.has(update.id) && !inlineUpdateIds.has(update.id)) {
+        if (inlineWindowIds.has(update.id) && !inlineUpdateIds.has(update.id)) {
           inlineUpdates.push(update);
           inlineUpdateIds.add(update.id);
         }
@@ -597,7 +609,7 @@ export function useAgentJobThreadPreviewState({
         });
         continue;
       }
-      if (visibleUpdateIds.has(update.id) && !inlineUpdateIds.has(update.id)) {
+      if (inlineWindowIds.has(update.id) && !inlineUpdateIds.has(update.id)) {
         inlineUpdates.push(update);
         inlineUpdateIds.add(update.id);
       }
@@ -618,7 +630,7 @@ export function useAgentJobThreadPreviewState({
       nextVisibleCompactEvents = compactEvents.slice(-safeIconSlots);
     }
 
-    for (const update of visibleUpdates) {
+    for (const update of hybridInlineWindow) {
       if (!inlineUpdateIds.has(update.id)) {
         const kind = resolveThreadCompactUpdateKind(update);
         if (!kind) {
@@ -636,11 +648,29 @@ export function useAgentJobThreadPreviewState({
     };
   }, [
     finalSummaryMessage?.id,
+    hybridInlineWindow,
     latestFileMessage?.id,
     shouldUseHybridThreadCompaction,
     threadMessages,
-    visibleUpdates,
   ]);
+
+  useEffect(() => {
+    const allowed = new Set(
+      [...visibleUpdates, ...(hybridThreadCompaction?.inlineUpdates ?? [])].map((entry) => entry.id),
+    );
+    setExpandedUpdateIds((current) => {
+      const next: Record<string, boolean> = {};
+      let changed = false;
+      for (const [id, expanded] of Object.entries(current)) {
+        if (allowed.has(id)) {
+          next[id] = expanded;
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [hybridThreadCompaction, visibleUpdates]);
 
   const updatesForInlineRendering = isThreadPreviewExpanded
     ? intermediateUpdates

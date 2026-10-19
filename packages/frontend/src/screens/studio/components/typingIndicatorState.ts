@@ -1,3 +1,4 @@
+import { shouldSuppressAgentEvaluationRunPresence } from "../../../conversations/groupParticipation";
 import { resolveRetryingStatusPresentation } from "../../../conversations/runFailurePresentation";
 import type { ChatMessage } from "../types";
 import type { RunRecord } from "../../../types";
@@ -131,36 +132,97 @@ function isJobThreadRow(message: ChatMessage): boolean {
 }
 
 /**
+ * The runs the typing row speaks for: the same set isAssistantTyping counts,
+ * which leaves out a silent skill-mode evaluation until it says something.
+ * Counted here, such a run kept a reply from covering its own turn.
+ */
+function resolveTypingRuns(activeRuns: readonly RunRecord[], messages: readonly ChatMessage[]): RunRecord[] {
+  return activeRuns.filter(
+    (run) => !shouldSuppressAgentEvaluationRunPresence({ runId: run.id, runMetadata: run.metadata, messages }),
+  );
+}
+
+/**
+ * The job and run ids of the reply that ended a turn, when the newest row is
+ * one: a job thread that already holds its reply, or a plain reply (a turn
+ * with no tool use posts no thread). Null for anything else.
+ */
+function resolveTurnOutcomeIds(latestDisplayedMessage: ChatMessage): string[] | null {
+  if (isJobThreadRow(latestDisplayedMessage)) {
+    const threadMessages = readJobThreadMessages(latestDisplayedMessage);
+    if (threadMessages.length === 0 || resolveThreadRunStatusFromMessages(threadMessages).phase !== "completed") {
+      return null;
+    }
+  } else if (!isFinalAgentOutcomeMessage(latestDisplayedMessage)) {
+    return null;
+  }
+  const ids = [
+    extractAgentJobId(latestDisplayedMessage),
+    extractRunIdFromMetadata(latestDisplayedMessage.metadata),
+  ].filter((id): id is string => Boolean(id));
+  return ids.length > 0 ? ids : null;
+}
+
+function outcomeNamesRun(outcomeIds: readonly string[], run: RunRecord): boolean {
+  return outcomeIds.some((id) => runMatchesThreadJobId(run, id));
+}
+
+/**
  * How the newest transcript row covers the assistant typing row.
  *
  * - `live`: the row is a job thread still running. It shows the run's state
  *   itself (rail and caption), so a typing row under it would say it twice.
- * - `answered`: the thread already holds its reply, and every run still marked
- *   active is that thread's own run, whose record has not caught up yet. A
- *   typing row here would bring back the turn's last reasoning title under the
- *   finished answer, and then hold its place for seconds after.
+ * - `answered`: the row is the turn's reply (inside its job thread, or a plain
+ *   reply when the turn used no tools), and every run still marked active is
+ *   that turn's own run, whose record has not caught up yet. A typing row here
+ *   would say "Thinking…" (or the turn's last reasoning title) under the
+ *   finished answer, and then drop out seconds later.
  * - `none`: anything else, including a different run starting after the reply.
+ *
+ * `activeRuns` may hold silent skill-mode evaluations; they are left out here
+ * as isAssistantTyping leaves them out.
  */
 export type JobThreadTypingCoverage = "none" | "live" | "answered";
 
 export function resolveJobThreadTypingCoverage(
   latestDisplayedMessage: ChatMessage | null | undefined,
   activeRuns: readonly RunRecord[],
+  messages: readonly ChatMessage[],
 ): JobThreadTypingCoverage {
-  if (!latestDisplayedMessage || !isJobThreadRow(latestDisplayedMessage)) {
+  if (!latestDisplayedMessage) {
     return "none";
   }
-  const threadMessages = readJobThreadMessages(latestDisplayedMessage);
-  if (threadMessages.length === 0) {
-    return "none";
+  if (isJobThreadRow(latestDisplayedMessage)) {
+    const threadMessages = readJobThreadMessages(latestDisplayedMessage);
+    if (threadMessages.length === 0) {
+      return "none";
+    }
+    if (resolveThreadRunStatusFromMessages(threadMessages).phase !== "completed") {
+      return "live";
+    }
   }
-  if (resolveThreadRunStatusFromMessages(threadMessages).phase !== "completed") {
-    return "live";
-  }
-  const jobId = extractAgentJobId(latestDisplayedMessage);
-  return jobId && activeRuns.length > 0 && activeRuns.every((run) => runMatchesThreadJobId(run, jobId))
+  const outcomeIds = resolveTurnOutcomeIds(latestDisplayedMessage);
+  const typingRuns = resolveTypingRuns(activeRuns, messages);
+  return outcomeIds && typingRuns.length > 0 && typingRuns.every((run) => outcomeNamesRun(outcomeIds, run))
     ? "answered"
     : "none";
+}
+
+/**
+ * Whether the newest row is the reply of a run the typing row speaks for. The
+ * typing row's hidden spacer holds the place of a reply still on its way; when
+ * the row it is anchored to is that reply already, the spacer only shifts the
+ * chat twice (in, then out after twelve seconds) under a finished answer.
+ */
+export function isTranscriptTailActiveTurnOutcome(
+  latestDisplayedMessage: ChatMessage | null | undefined,
+  activeRuns: readonly RunRecord[],
+  messages: readonly ChatMessage[],
+): boolean {
+  const outcomeIds = latestDisplayedMessage ? resolveTurnOutcomeIds(latestDisplayedMessage) : null;
+  return (
+    outcomeIds !== null && resolveTypingRuns(activeRuns, messages).some((run) => outcomeNamesRun(outcomeIds, run))
+  );
 }
 
 /**

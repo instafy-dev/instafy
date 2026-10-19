@@ -322,6 +322,20 @@ export const THREAD_ACTION_CARD_TYPES: ReadonlySet<string> = new Set([
   "action_request",
 ]);
 
+function isThreadActionCard(update: ChatMessage): boolean {
+  return THREAD_ACTION_CARD_TYPES.has((getMessageType(update) ?? "").trim().toLowerCase());
+}
+
+/**
+ * The newest `maxVisible` updates, plus every action card of the turn however
+ * far back it sits. A card can hold what the person is typing; windowing it
+ * away when the reply shrinks the window would unmount it mid-entry.
+ */
+export function windowThreadUpdates(updates: readonly ChatMessage[], maxVisible: number): ChatMessage[] {
+  const firstInWindow = Math.max(0, updates.length - maxVisible);
+  return updates.filter((update, index) => index >= firstInWindow || isThreadActionCard(update));
+}
+
 export function shouldKeepThreadUpdateInline(update: ChatMessage): boolean {
   const type = (getMessageType(update) ?? "").trim().toLowerCase();
   if (THREAD_ACTION_CARD_TYPES.has(type)) {

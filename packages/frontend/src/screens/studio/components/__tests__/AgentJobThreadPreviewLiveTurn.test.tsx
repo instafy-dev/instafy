@@ -302,6 +302,143 @@ describe("AgentJobThreadPreviewLayout live turn", () => {
     ).toEqual(["Two values are needed to finish setup."]);
   });
 
+  it("keeps every card of the turn mounted when its reply lands after commentary", async () => {
+    // Commentary statuses render as rail chips, not rows, yet they took places
+    // in the inline window. Two cards and three statuses showed both cards
+    // while the turn ran; the reply shrank the window from five to three and
+    // unmounted both, with whatever the person was typing into them.
+    const statuses = ["Checking the token scope", "Reading the service docs", "Comparing the account ids"].map(
+      (text, index) => agentUpdate(`status-${index + 1}`, "status", text, base + 3_600 + index * 100),
+    );
+    const running = [
+      ...earlierSteps(),
+      agentUpdate("secret-1", "secret_request", "Add the API token.", base + 3_000, { name: "SERVICE_API_TOKEN" }),
+      agentUpdate("secret-2", "secret_request", "Add the account id.", base + 3_500, { name: "SERVICE_ACCOUNT_ID" }),
+      ...statuses,
+    ];
+    const cards = () => Array.from(container.querySelectorAll('[data-testid="secret-request-card"]'));
+
+    await renderTurn(running);
+    const whileRunning = cards();
+    expect(whileRunning.map((card) => card.textContent)).toEqual(["secret-1", "secret-2"]);
+    // The statuses stay on the rail.
+    expect(container.textContent).not.toContain("Checking the token scope");
+
+    live.inFlight = false;
+    await renderTurn([...running, reply("reply", "Two values are needed to finish setup.", base + 4_000)]);
+    const settled = cards();
+    expect(settled.map((card) => card.textContent)).toEqual(["secret-1", "secret-2"]);
+    // The same elements: neither card was unmounted and mounted again.
+    expect(settled[0]).toBe(whileRunning[0]);
+    expect(settled[1]).toBe(whileRunning[1]);
+  });
+
+  it("never windows a card away when the reply shrinks a wide row's update window", async () => {
+    // A wide row with four updates lists them all while the turn runs; the
+    // reply keeps the newest three, which hid the card behind "1 earlier
+    // update" and unmounted it.
+    clientWidth.mockReturnValue(900);
+    const card = agentUpdate("secret-1", "secret_request", "Add the API token.", base + 3_000, {
+      name: "SERVICE_API_TOKEN",
+    });
+    const statuses = ["Checking the token scope", "Reading the service docs", "Comparing the account ids"].map(
+      (text, index) => agentUpdate(`status-${index + 1}`, "status", text, base + 3_100 + index * 100),
+    );
+    const running = [card, ...statuses];
+
+    await renderTurn(running);
+    const whileRunning = container.querySelector('[data-testid="secret-request-card"]');
+    expect(whileRunning).toBeInstanceOf(HTMLElement);
+
+    live.inFlight = false;
+    await renderTurn([...running, reply("reply", "One value is needed to finish setup.", base + 4_000)]);
+    expect(container.querySelector('[data-testid="secret-request-card"]')).toBe(whileRunning);
+    expect(container.textContent).not.toContain("earlier update");
+  });
+
+  it("counts only the updates that render as rows toward the compacted row's window", async () => {
+    // An approval notice stays a row; the statuses after it are rail chips.
+    // Counted with the chips it fell out of the window when the reply shrank
+    // it, and the turn lost a row as it settled.
+    const notice = agentUpdate("status-approval", "status", "Approval required to rotate the key", base + 3_000);
+    const statuses = ["Checking the token scope", "Reading the service docs", "Comparing the account ids"].map(
+      (text, index) => agentUpdate(`status-${index + 1}`, "status", text, base + 3_100 + index * 100),
+    );
+    const running = [...earlierSteps(), notice, ...statuses];
+
+    await renderTurn(running);
+    expect(container.textContent).toContain("Approval required to rotate the key");
+
+    live.inFlight = false;
+    await renderTurn([...running, reply("reply", "The key needs your approval first.", base + 4_000)]);
+    expect(container.textContent).toContain("Approval required to rotate the key");
+    expect(container.textContent).not.toContain("Comparing the account ids");
+  });
+
+  it("keeps a wide turn's command rows and running line still between commands", async () => {
+    // A wide row with few updates has no rail. Between two commands isRunning
+    // drops, and the rows used to follow it: the running command row gave way
+    // to a collapsed output toggle plus a summary running line (about 24px),
+    // which went away again when the next command started.
+    clientWidth.mockReturnValue(900);
+    const runningLine = () => container.querySelector('[data-testid="agent-thread-running-status"]');
+    const outputToggle = () => container.querySelector('[data-testid="agent-thread-command-output-toggle"]');
+
+    await renderTurn(earlierSteps());
+    expect(runningLine()).toBeNull();
+    expect(outputToggle()).toBeNull();
+    const betweenCommands = turnStructure(container);
+
+    await renderTurn([
+      ...earlierSteps(),
+      agentUpdate("command-2", "command_execution", "rg schema", base + 3_000, {
+        status: "in_progress",
+        command: "rg schema",
+      }),
+    ]);
+    expect(runningLine()).toBeNull();
+    expect(outputToggle()).toBeNull();
+    expect(turnStructure(container)).toEqual(betweenCommands);
+
+    await renderTurn([
+      ...earlierSteps(),
+      agentUpdate("command-2", "command_execution", "rg schema", base + 3_000, {
+        status: "completed",
+        command: "rg schema",
+        aggregated_output: "schema.json",
+      }),
+    ]);
+    expect(runningLine()).toBeNull();
+    expect(outputToggle()).toBeNull();
+    expect(turnStructure(container)).toEqual(betweenCommands);
+  });
+
+  it("keeps a wide turn that compacted into a rail compacted when its reply lands", async () => {
+    // Five updates compact a wide row into a rail. The reply shrinks the
+    // window to three, which used to turn the rail back into rows of status
+    // text under an "earlier updates" control the moment the turn settled.
+    clientWidth.mockReturnValue(900);
+    const statuses = [
+      "Checking the token scope",
+      "Reading the service docs",
+      "Comparing the account ids",
+      "Listing the webhooks",
+      "Drafting the setup steps",
+    ].map((text, index) => agentUpdate(`status-${index + 1}`, "status", text, base + 3_000 + index * 100));
+
+    await renderTurn(statuses);
+    expect(container.querySelector('[data-testid="agent-thread-compact-rail"]')).toBeInstanceOf(HTMLElement);
+    expect(container.textContent).not.toContain("Checking the token scope");
+
+    live.inFlight = false;
+    await renderTurn([...statuses, reply("reply", "Setup is ready.", base + 4_000)]);
+    expect(container.textContent).not.toContain("earlier update");
+    for (const text of ["Comparing the account ids", "Listing the webhooks", "Drafting the setup steps"]) {
+      expect(container.textContent).not.toContain(text);
+    }
+    expect(container.querySelector('[data-testid="message-content"]')?.textContent).toBe("Setup is ready.");
+  });
+
   it("keeps a long reasoning title on one truncated line when it is the running status", async () => {
     // Wide rows have no rail caption; the running line under the header
     // carries the title instead and must not wrap onto more lines.
