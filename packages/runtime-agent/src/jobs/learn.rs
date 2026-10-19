@@ -110,6 +110,12 @@ const FRONTEND_PREVIEWS_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-frontend-previews/SKILL.md"
 ));
+// The bundled browser guidance used to ask before opening a browser. Since Oct 19
+// Octo opens it on its own, so a workspace still holding an unedited earlier
+// bundled copy of this skill, browser automation or skill import compat is
+// upgraded; an edited one is kept.
+const LEGACY_FRONTEND_PREVIEWS_TEMPLATES: &[&str] =
+    &[include_str!("legacy/frontend-previews-v1.md")];
 const INTEGRATION_ONBOARDING_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-integration-onboarding/SKILL.md"
@@ -119,6 +125,7 @@ const INTEGRATION_ONBOARDING_TEMPLATE: &str = include_str!(concat!(
 const LEGACY_INTEGRATION_ONBOARDING_TEMPLATES: &[&str] = &[
     include_str!("legacy/integration-onboarding-v1.md"),
     include_str!("legacy/integration-onboarding-v2.md"),
+    include_str!("legacy/integration-onboarding-v3.md"),
 ];
 const BYOC_AI_CREDENTIALS_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -195,6 +202,16 @@ const BROWSER_AUTOMATION_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-browser-automation/SKILL.md"
 ));
+const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
+    include_str!("legacy/browser-automation-v1.md"),
+    include_str!("legacy/browser-automation-v2.md"),
+    include_str!("legacy/browser-automation-v3.md"),
+];
+const LEGACY_SKILL_IMPORT_COMPAT_TEMPLATES: &[&str] = &[
+    include_str!("legacy/skill-import-compat-v1.md"),
+    include_str!("legacy/skill-import-compat-v2.md"),
+    include_str!("legacy/skill-import-compat-v3.md"),
+];
 const SKILL_READING_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-skill-reading/SKILL.md"
@@ -358,13 +375,13 @@ pub fn ensure_project_memory_scaffold(workspace_dir: &Path) {
         }
     }
 
-    if !frontend_previews_path.exists() {
-        if let Some(parent) = frontend_previews_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if fs::write(&frontend_previews_path, FRONTEND_PREVIEWS_TEMPLATE).is_ok() {
-            wrote_any = true;
-        }
+    if upgrade_bundled_skill(
+        workspace_dir,
+        &frontend_previews_path,
+        LEGACY_FRONTEND_PREVIEWS_TEMPLATES,
+        FRONTEND_PREVIEWS_TEMPLATE,
+    ) {
+        wrote_any = true;
     }
 
     if upgrade_bundled_skill(
@@ -503,22 +520,22 @@ pub fn ensure_project_memory_scaffold(workspace_dir: &Path) {
         }
     }
 
-    if !skill_import_compat_path.exists() {
-        if let Some(parent) = skill_import_compat_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if fs::write(&skill_import_compat_path, SKILL_IMPORT_COMPAT_TEMPLATE).is_ok() {
-            wrote_any = true;
-        }
+    if upgrade_bundled_skill(
+        workspace_dir,
+        &skill_import_compat_path,
+        LEGACY_SKILL_IMPORT_COMPAT_TEMPLATES,
+        SKILL_IMPORT_COMPAT_TEMPLATE,
+    ) {
+        wrote_any = true;
     }
 
-    if !browser_automation_path.exists() {
-        if let Some(parent) = browser_automation_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if fs::write(&browser_automation_path, BROWSER_AUTOMATION_TEMPLATE).is_ok() {
-            wrote_any = true;
-        }
+    if upgrade_bundled_skill(
+        workspace_dir,
+        &browser_automation_path,
+        LEGACY_BROWSER_AUTOMATION_TEMPLATES,
+        BROWSER_AUTOMATION_TEMPLATE,
+    ) {
+        wrote_any = true;
     }
 
     if !skill_reading_path.exists() {
@@ -1657,8 +1674,9 @@ mod tests {
             INTEGRATION_ONBOARDING_TEMPLATE
         );
         assert!(INTEGRATION_ONBOARDING_TEMPLATE.contains("`request_browser`"));
+        assert!(INTEGRATION_ONBOARDING_TEMPLATE.contains("open Instafy's browser without asking"));
         for previous in LEGACY_INTEGRATION_ONBOARDING_TEMPLATES {
-            assert!(!previous.contains("request_browser"));
+            assert!(!previous.contains("open Instafy's browser without asking"));
             fs::write(&skill, previous).unwrap();
             ensure_project_memory_scaffold(workspace.path());
             assert_eq!(
@@ -1669,6 +1687,58 @@ mod tests {
             fs::write(&skill, &customized).unwrap();
             ensure_project_memory_scaffold(workspace.path());
             assert_eq!(fs::read_to_string(&skill).unwrap(), customized);
+        }
+    }
+
+    /// Until Oct 19 the bundled browser guidance asked before opening a
+    /// browser, and these three skills were only written when absent, so an
+    /// existing workspace kept that guidance for good. Each unedited earlier
+    /// bundled copy is upgraded now; an edited one is kept.
+    #[test]
+    fn scaffold_upgrades_bundled_browser_guidance_and_preserves_edits() {
+        let workspace = tempdir().expect("workspace tempdir");
+        ensure_project_memory_scaffold(workspace.path());
+        for (relative, legacy, current, ask_first) in [
+            (
+                BROWSER_AUTOMATION_RELATIVE_PATH,
+                LEGACY_BROWSER_AUTOMATION_TEMPLATES,
+                BROWSER_AUTOMATION_TEMPLATE,
+                "use disposable, non-sensitive accounts only",
+            ),
+            (
+                FRONTEND_PREVIEWS_RELATIVE_PATH,
+                LEGACY_FRONTEND_PREVIEWS_TEMPLATES,
+                FRONTEND_PREVIEWS_TEMPLATE,
+                "Never auto-open a live browser session",
+            ),
+            (
+                SKILL_IMPORT_COMPAT_RELATIVE_PATH,
+                LEGACY_SKILL_IMPORT_COMPAT_TEMPLATES,
+                SKILL_IMPORT_COMPAT_TEMPLATE,
+                "use Playwright CLI (Node + Playwright)",
+            ),
+        ] {
+            let skill = workspace.path().join(relative);
+            assert_eq!(fs::read_to_string(&skill).unwrap(), current, "{relative}");
+            assert!(!current.contains(ask_first), "{relative}");
+            assert!(!legacy.contains(&current), "{relative}");
+            assert!(
+                legacy.iter().any(|previous| previous.contains(ask_first)),
+                "{relative}"
+            );
+            for previous in legacy {
+                fs::write(&skill, previous).unwrap();
+                ensure_project_memory_scaffold(workspace.path());
+                assert_eq!(fs::read_to_string(&skill).unwrap(), current, "{relative}");
+                let customized = format!("{previous}\nAlways use the staging portal.\n");
+                fs::write(&skill, &customized).unwrap();
+                ensure_project_memory_scaffold(workspace.path());
+                assert_eq!(
+                    fs::read_to_string(&skill).unwrap(),
+                    customized,
+                    "{relative}"
+                );
+            }
         }
     }
 

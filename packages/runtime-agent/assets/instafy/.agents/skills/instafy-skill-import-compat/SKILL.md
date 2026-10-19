@@ -26,8 +26,8 @@ Goal: keep imported third-party skills usable in Instafy even when they were aut
 
 - Distinguish endpoint URLs from webpage URLs:
   - If the user asks to install/use an MCP endpoint (for example `https://.../mcp`), treat it as a server endpoint, not a webpage.
-  - Prefer endpoint/protocol checks first (JSON-RPC initialize/tools/list). Only use browser automation when you truly need to read human-facing docs/status pages.
-- If browser automation is requested, follow the pinned browser automation skill and use Playwright CLI (Node + Playwright) attached to the headed CDP browser session.
+  - Prefer endpoint/protocol checks first (JSON-RPC initialize/tools/list). Use the browser for human-facing docs and status pages.
+- For a page, follow instafy-browser-automation: use this turn's browser tools or emit `request_browser`; never script Playwright or CDP.
 - Do not bootstrap Playwright manually for runtime tasks (no `python -m playwright install`, `pip install playwright`, `npm i playwright` loops).
 
 ## Failure handling

@@ -29,14 +29,14 @@ impl BrowserRequest {
 
     pub(super) fn message(&self) -> JobMessage {
         JobMessage {
-            content: "Continue this task in your browser.".to_owned(),
+            content: "Continue this task in Instafy's browser.".to_owned(),
             message_type: Some("action_request".to_owned()),
             metadata: Some(json!({
                 "messageType": "action_request",
                 "details": {
                     "testId": "browser-request-card",
-                    "title": "Continue in browser",
-                    "description": "Open your browser and let the AI continue this task there.",
+                    "title": "Continue in Instafy's browser",
+                    "description": "Studio opens the browser and continues this task there.",
                     "browserRequest": { "task": self.task, "location": self.location },
                     "actions": [{
                         "id": "continue-browser",

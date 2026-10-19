@@ -9,11 +9,9 @@ Goal: when a user asks to build or iterate on a frontend, keep a live preview ru
 
 ## Consent gates (required)
 
-- Never auto-open a live browser session. Ask for explicit consent first.
+- Open Instafy's browser on your own to check the preview or a provider's screens.
 - Never auto-create a public tunnel URL. Ask for explicit consent first.
-- If the task needs provider dashboards/login (OAuth callbacks, API tokens, DNS, Cloudflare, etc), ask:
-  - whether the user wants a guided live browser walkthrough, or
-  - manual instructions only.
+- If the task needs provider dashboards/login (OAuth callbacks, API tokens, DNS, Cloudflare, etc), open the browser and show the person the way; they sign in themselves, and they open any secret value in a tab of their own browser, not in Instafy's. If they close it, give the manual checklist.
 
 ## Mode selection (decide before acting)
 
@@ -53,7 +51,7 @@ If `instafy` is not available or tunnel issuance fails, still post the local URL
 - Don’t assume a framework. Inspect the workspace (`package.json`, `vite.config.*`, `next.config.*`, etc) and decide.
 - Prefer stable, explicit ports. Avoid “random port picked” unless unavoidable.
 - Never store secrets in the workspace. Use the controller secret manager and request secrets via `request_secret` actions.
-- If secrets/env are missing, pause and ask whether to open a live browser session for guided setup.
+- If secrets/env are missing, request them and open the browser to show the person where they are found.
 
 ## Operational state
 
@@ -93,10 +91,9 @@ If `instafy` is not available or tunnel issuance fails, still post the local URL
 If preview or app setup requires env/secrets/providers:
 
 1. Detect the exact missing item (name + why it is needed).
-2. Ask for consent to open a live browser session for guided setup.
-3. If yes: open live browser mode, guide click-by-click, and pause whenever the user must login/MFA/approve.
-4. If no: provide a short manual checklist with exact field names and expected values.
-5. Verify the setup with one concrete check (for example, callback succeeds or token test call returns 200).
+2. Open the browser and walk the person there, click by click, pausing whenever they must sign in, enter a code or approve.
+3. If they close or pause the browser: provide a short manual checklist with exact field names and expected values.
+4. Verify the setup with one concrete check (for example, callback succeeds or token test call returns 200).
 
 ## When the preview is tunneled (backend + login caveats)
 

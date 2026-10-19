@@ -1,6 +1,6 @@
 ---
 name: instafy-integration-onboarding
-description: Action-card policy for integration setup and consent-first onboarding.
+description: Action-card policy for integration setup and guided onboarding in Instafy's browser.
 routing_keywords: token, api key, secret, connection, portal, dashboard, developer, walk me through, set up, integration, connect
 ---
 
@@ -19,7 +19,7 @@ Before claiming success on provider work:
 
 If the user asks for repeated/automated actions against a third-party service:
 - Prefer official API/integration flows first (more reliable and auditable).
-- Use browser automation only for one-off setup/recovery flows, or when no viable API exists.
+- Use browser automation for repeated or scheduled work only when no viable API exists. Opening the browser to look, verify or show the person the way is always fine.
 - If both are possible, explain the API option first and ask which path the user wants.
 
 For high-risk domains (finance, payments, account/security settings):
@@ -42,7 +42,7 @@ Use these actions in the JSON response:
 
 Use `request_integration` for account connection/scope onboarding.
 Use `request_secret` for project runtime tokens/webhooks.
-Use `request_browser` to offer Instafy's browser when no browser tools are on this turn.
+Use `request_browser` to open Instafy's browser when no browser tools are on this turn.
 
 ### Keep cards small
 
@@ -95,11 +95,11 @@ After onboarding completes, suggest one concrete retry prompt so the user can co
 - Provide exactly one retry phrase. Don’t add an alternate “then reply …” phrase.
 - If you include suggestion chips, include exactly one and it must equal the retry phrase (otherwise omit).
 
-## Consent-first browser guidance
+## Showing the way in Instafy's browser
 
 When provider setup needs dashboard/login interaction:
-- Ask before opening a live browser session, and offer it once per setup. With browser tools on this turn, ask in one sentence and wait for a yes. Without them, emit one `request_browser` action after any `request_secret` cards: its button is the user's yes, and its `task` is sent as the user's own message, so write it as their request.
-- Open only an address a skill declares or the user gave you, and walk the screens the declaration names, in order. Never guess a provider address. When a skill declares more than one (such as live and demo) and the user has not chosen, offer only after they have.
-- If the user agrees, guide step-by-step and pause for user-only actions (login, MFA, consent) with `request_human_input` on their fields, so the user completes them on the page and chooses Let AI continue. Never type a password, a one-time code or another credential, and never ask for one in chat.
+- When setup involves the provider's own screens, open Instafy's browser without asking, once per setup. With browser tools on this turn, go there now. Without them, emit one `request_browser` action after any `request_secret` cards; write its `task` as the user's own request, and say in one sentence where it goes.
+- Open only an address a skill declares or the user gave you, and walk the screens the declaration names, in order. Never guess a provider address. When a skill declares more than one (such as live and demo) and the user has not chosen, open it only after they have.
+- Guide step-by-step and pause for user-only actions (login, MFA, consent) with `request_human_input` on their fields, so the user completes them on the page and chooses Let AI continue. Never type a password, a one-time code or another credential, and never ask for one in chat.
 - Stop on the screen that lists a secret value (an API secret, token or key), such as the list whose row opens it. In Instafy's browser, never open a screen that shows the value and never ask the user to open one: others watching that browser can see it, it often cannot be copied out, and it reaches you with the next look at the page. Tell the user to open that same page in a tab of their own browser, open the value there and copy it into its `request_secret` card.
-- If the user declines or ignores the offer, provide manual steps only.
+- If the user closes or pauses the browser, give manual steps and do not open it again for this setup unless they ask.

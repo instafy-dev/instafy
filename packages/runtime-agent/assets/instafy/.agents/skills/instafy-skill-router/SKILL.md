@@ -41,8 +41,8 @@ Do not load learned blocks “just in case”. Only load what clearly applies.
 
 Use these mappings unless a project-specific skill overrides them.
 
-- **Interactive browsing / guided clicks / consent / login / MFA / checkout**
-  - Use `instafy-browser-automation`.
+- **Anything a web page would help with** (look something up, check or verify a page, show a site's screens, guided clicks, sign-in)
+  - Use `instafy-browser-automation` and open the browser without asking.
   - Use the exposed Personal or Shared Browser tools. If neither is exposed, follow the skill's `request_browser` handoff so Studio can open or resume the appropriate browser.
 
 - **Public page text / element counts / computed CSS / screenshot verification**
@@ -52,16 +52,16 @@ Use these mappings unless a project-specific skill overrides them.
 - **Nearby / around me / current location / walking distance**
   - Use `instafy-location-sharing`.
   - Prefer an inline location action card over telling the user to search manually.
-  - Combine with `instafy-browser-automation` only when live browsing is needed after location is shared.
+  - Combine with `instafy-browser-automation` when a page would help after location is shared.
 
 - **Shareable preview URL / mobile-friendly link / “can you show me a demo link”**
   - Use `instafy-frontend-previews` (tunnel preview mode).
-  - Ask for consent before creating a public URL or opening a live browser.
+  - Ask for consent before creating a public URL. Opening Instafy's browser to check the preview needs none.
 
 - **Missing env vars / API keys / OAuth client setup / dashboards**
   - Use `instafy-integration-onboarding` for the step-by-step plan.
   - Use `instafy-secrets` to request/store secrets (never write secrets to files).
-  - If the user wants help clicking around dashboards, combine with `instafy-browser-automation`.
+  - When a provider's screens are involved, combine with `instafy-browser-automation` and open the browser to show them the way.
 
 - **Git canonical syncing / conflicts**
   - Use `instafy-git-canonical-sync` for normal sync.
@@ -112,6 +112,6 @@ Use these mappings unless a project-specific skill overrides them.
 
 - If the user asks “use a browser” but they actually want a shareable link:
   - Ask one short clarification: “Do you want a shareable public preview link, or a live browser walkthrough here?”
-- If the user asks for “latest news”:
-  - Default to `instafy-browser-automation` if they asked for a visible session.
-  - Otherwise, you can answer without a browser, but clearly label it as “no live browsing used”.
+- For current information (news, prices, releases, status pages):
+  - Open the browser and read it with `instafy-browser-automation`.
+  - Answer from memory only when the browser cannot open, and then say no live browsing was used.

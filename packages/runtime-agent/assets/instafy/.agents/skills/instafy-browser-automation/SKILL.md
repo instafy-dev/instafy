@@ -1,9 +1,9 @@
 ---
 name: instafy-browser-automation
-description: Capability-aware guidance for Personal Browser, Shared Browser, and owner-local read-only page observation.
+description: Open Instafy's browser whenever a web page would help: look things up, check or verify pages, walk the person through a site. Personal, Shared and read-only observation.
 context_kind: workflow
 context_parent: instafy-skill-router
-routing_keywords: browser, playwright, page, click, screenshot, visible session, live browser, open url, read title
+routing_keywords: browser, playwright, page, click, screenshot, visible session, live browser, open url, read title, website, web page, look up, walk me through, docs, pricing, portal, sign in
 ---
 
 # Browser automation
@@ -26,21 +26,21 @@ For interactive Personal or Shared Browser work, default to `page` first. Do not
 
 ## When to use this skill
 
-Use this skill when the task requires opening, reading, clicking through, or verifying something in a browser. Follow the browser tools exposed for the current turn. When interactive tools are absent, use the Studio handoff below.
+Use this skill whenever a web page would help, whether or not the person mentioned a browser: to look something up, check or verify a page, or walk them through a site's screens. Open the browser yourself; do not ask first. Follow the browser tools exposed for the current turn. When interactive tools are absent, use the Studio handoff below.
 
 ## Open or resume from Chat
 
-If the task needs a visible, interactive browser and neither Personal nor Shared
-Browser tools are exposed, emit a `request_browser` action:
+When a page would help and neither Personal nor Shared Browser tools are
+exposed, emit one `request_browser` action:
 
 ```json
 { "type": "request_browser", "task": "The user's concrete browsing task and relevant continuation context", "browserLocation": "auto" }
 ```
 
-Studio opens the conversation's browser and continues the task on its exact
-runtime when the user selects **Open browser and continue**. Paused native
-control resumes in Ask mode; active control keeps its current settings. Existing
-site/action approval still applies.
+Studio opens the conversation's browser and continues the task there on its
+own. A browser the person paused stays paused until they resume it, and the
+card stays a button where Studio cannot open it by itself. In one sentence of
+your reply, say where the browser goes and why.
 Do not claim the website was opened before a browser tool returns observations.
 
 Use `auto` unless the user explicitly distinguishes this physical device from
@@ -110,12 +110,12 @@ operations and never exposes arbitrary JavaScript execution.
   - older memory: `/search`, button text `Search`, query `beta`
   - correct behavior: use `/lookup` + `Find` + `beta dossier`, while keeping any still-valid learned invariant such as `direct article links are gated` or `read "Article token:" from the detail page`
 - Prefer a compact action path and at most one repair attempt. Do not fall into inspect/retry loops unless a direct attempt produced a concrete blocker.
-- Treat consent/login/payment/MFA as user-owned steps. Pause and wait when the task requires a user-only action.
-- A stored browser session is not blanket permission to act as the signed-in user. For a sensitive site or action, the current user message must name the site and the concrete action; otherwise stop before using the authenticated state and ask for confirmation.
-- Treat financial services, healthcare, government/identity, employer administration, cloud consoles, source-control/org administration, password/account settings, and any page containing private communications as sensitive. Treat purchases, transfers, submissions, messages, permission changes, credential changes, downloads of private data, and destructive actions as high impact even on other sites.
-- Confirmation is session- and action-specific. Approval to inspect one page does not authorize a later message, purchase, permission change, or destructive action. Ask again immediately before the high-impact step when the user's current message did not already authorize that exact step.
-- Never type a password, one-time code, payment detail, government identifier, recovery secret, or other authentication secret into the Shared Browser. Let the user enter those values directly in the visible browser, then continue only after they say the step is complete.
-- For initial Shared Browser pilots, use disposable, non-sensitive accounts only. Do not reuse a teammate's real login until the product exposes a project-level shared-login consent policy and audit surface.
+- Treat sign-in, one-time codes, consent and payment as the person's steps: pause on them with `request_human_input`, and continue when they choose Let AI continue.
+- Opening, reading and navigating a signed-in site needs no approval; ask before a purchase, transfer, record-changing submit, message, permission or credential change, private-data download or destructive step unless the person's current message named it.
+- Treat purchases, transfers, record-changing submissions, messages, permission changes, credential changes, downloads of private data, and destructive actions as high impact on every site, signed in or not.
+- Confirmation is session- and action-specific. Approval to inspect one page does not authorize a later message, purchase, permission change, or destructive action. Ask again immediately before the high-impact step when the person's current message did not already name that exact step.
+- Never type a password, one-time code, payment detail, government identifier, recovery secret, or other authentication secret into the Shared Browser. Pause with `request_human_input` on those fields; the person enters them on the page and chooses Let AI continue.
+- Never use a sign-in that belongs to someone else in this space; the person signs in to their own account themselves.
 - Report observed state or the exact execution error. Do not claim browser success without real execution output.
 - When the `instafy_personal_browser` MCP server is present, use it exclusively for that turn. Do not attach Playwright or CDP in that runtime.
 - Treat the Personal Browser token as a secret capability: never print it, interpolate it into a command argument, persist it to a file, include it in learned memory, or include it in an error report.
@@ -160,7 +160,7 @@ operations and never exposes arbitrary JavaScript execution.
 1. If the user named a URL, domain, or target app, go there first.
 2. If a Personal or Shared task implies continuing from the current visible session, inspect current state and continue. Owner-local observation cannot continue a session.
 3. In Personal or Shared Browser, keep multiple sites/pages inside the same runtime when supported. In owner-local mode, make one bounded observation call per URL.
-4. If the target site is unclear, ask one short clarification question.
+4. If the target site is unclear, start from a web search; ask one short question only when a search cannot tell which site the person means.
 5. If the page already contains the requested answer, extract and verify it instead of re-navigating.
 6. If the user asked for a recommendation and the current page is only an intermediate result list, keep going until you can justify a recommendation or explain the exact blocker.
 
@@ -255,7 +255,7 @@ For example, one call can verify a page and produce a screenshot artifact:
 }
 ```
 
-Do not use it for authenticated/private pages, interactions, arbitrary JavaScript, session reuse, or non-HTTP(S) URLs. If the task needs those and no Personal or Shared Browser server is present, state that the required interactive capability is unavailable.
+Do not use it for authenticated/private pages, interactions, arbitrary JavaScript, session reuse, or non-HTTP(S) URLs. If the task needs those and no Personal or Shared Browser server is present, emit `request_browser` (see Open or resume from Chat).
 
 ## Personal Browser MCP
 
