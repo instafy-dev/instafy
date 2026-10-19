@@ -3,7 +3,6 @@ import type { ChatMessage } from "../../types";
 import {
   browserRequestDestinations,
   browserRequestFromMessage,
-  browserRequestInSkillSetup,
   browserRequestUnavailableReason,
   type BrowserRequest,
 } from "../browserRequest";
@@ -37,44 +36,32 @@ describe("browserRequestDestinations", () => {
 });
 
 describe("browserRequestUnavailableReason", () => {
-  const request = (location: BrowserRequest["location"], workspaceBrowser = true): BrowserRequest =>
-    ({ task: "Open https://app.example.test", location, workspaceBrowser });
+  const request = (location: BrowserRequest["location"]): BrowserRequest =>
+    ({ task: "Open https://app.example.test", location });
+  const web = { transport: "shared" as const, personalAvailable: false, sharedUnavailable: false };
 
-  it("allows a card any browser here can open", () => {
-    const host = { transport: "shared" as const, personalAvailable: false, sharedUnavailable: false };
-    expect(browserRequestUnavailableReason(request("auto"), host)).toBeNull();
-    expect(browserRequestUnavailableReason(request("workspace"), host)).toBeNull();
+  it("allows a card any browser here can open, counting a browser not known yet as available", () => {
+    // Instafy's browser starts on demand as a runtime of its own, so until it
+    // is known not to open here it counts as available.
+    expect(browserRequestUnavailableReason(request("auto"), web)).toBeNull();
+    expect(browserRequestUnavailableReason(request("workspace"), web)).toBeNull();
     // The Workspace browser cannot open, but this device's can.
-    expect(browserRequestUnavailableReason(request("auto", false), { ...host, personalAvailable: true })).toBeNull();
+    expect(browserRequestUnavailableReason(request("auto"), { ...web, sharedUnavailable: true, personalAvailable: true })).toBeNull();
   });
 
   it("explains a card no browser here can open", () => {
-    const web = { transport: "shared" as const, personalAvailable: false, sharedUnavailable: false };
-    expect(browserRequestUnavailableReason(request("auto", false), web)).toBe("Instafy's browser is not available in this workspace.");
+    expect(browserRequestUnavailableReason(request("auto"), { ...web, sharedUnavailable: true }))
+      .toBe("Instafy's browser is not available in this workspace.");
     expect(browserRequestUnavailableReason(request("workspace"), { ...web, sharedUnavailable: true, personalAvailable: true }))
       .toBe("Instafy's browser is not available in this workspace.");
     expect(browserRequestUnavailableReason(request("device"), web)).toContain("Instafy desktop app");
   });
 
-  it("reads the runtime's own word on its browser from the card", () => {
-    expect(browserRequestFromMessage(card({ task: "Open x", location: "auto", workspaceBrowser: false }))?.workspaceBrowser).toBe(false);
-    expect(browserRequestFromMessage(card({ task: "Open x", location: "auto" }))?.workspaceBrowser).toBe(true);
-  });
-});
-
-describe("browserRequestInSkillSetup", () => {
-  const opener = (content: string): ChatMessage => ({ id: "opener", role: "user", content, timestamp: 1 });
-
-  it("finds a setup opener before the card", () => {
-    const browserCard = card({ task: "Open x", location: "auto" });
-    expect(browserRequestInSkillSetup([opener("/skills import https://github.com/acme/skills --start"), browserCard], "card")).toBe(true);
-    expect(browserRequestInSkillSetup([opener("/skills start freefinance"), browserCard], "card")).toBe(true);
-  });
-
-  it("ignores an import without --start, an opener after the card and an unknown card", () => {
-    const browserCard = card({ task: "Open x", location: "auto" });
-    expect(browserRequestInSkillSetup([opener("/skills import https://github.com/acme/skills"), browserCard], "card")).toBe(false);
-    expect(browserRequestInSkillSetup([browserCard, { ...opener("/skills start freefinance"), id: "later" }], "card")).toBe(false);
-    expect(browserRequestInSkillSetup([opener("/skills start freefinance"), browserCard], "another-card")).toBe(false);
+  it("takes nothing about availability from the card itself", () => {
+    // A runtime once marked its cards `workspaceBrowser: false` from its own
+    // setting, which the runtime running a chat turn never has.
+    const parsed = browserRequestFromMessage(card({ task: "Open x", location: "auto", workspaceBrowser: false }));
+    expect(parsed).toEqual({ task: "Open x", location: "auto" });
+    expect(browserRequestUnavailableReason(parsed!, web)).toBeNull();
   });
 });

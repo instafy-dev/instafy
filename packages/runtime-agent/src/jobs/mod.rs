@@ -11098,7 +11098,7 @@ fn build_final_messages_from_actions(
         match action {
             CodexAction::RequestBrowser(request) => {
                 if !emitted_browser_request {
-                    out.push(request.message(crate::shared_browser::workspace_browser_enabled()));
+                    out.push(request.message());
                     emitted_browser_request = true;
                 }
             }
@@ -29054,9 +29054,13 @@ mod tests {
         assert_eq!(actions.len(), 2);
         let messages = build_final_messages_from_actions(&actions, None);
         assert_eq!(messages.len(), 1);
+        // The card says nothing about the browser of the runtime that offered
+        // it: Instafy's Shared Browser runs as a separate on-demand runtime,
+        // so the turn's own runtime never has one. Studio decides from what it
+        // knows about the browsers it can open.
         assert_eq!(
-            messages[0].metadata.as_ref().unwrap()["details"]["browserRequest"]["task"],
-            "Continue comparing the saved items"
+            messages[0].metadata.as_ref().unwrap()["details"]["browserRequest"],
+            json!({ "task": "Continue comparing the saved items", "location": "auto" })
         );
         let mut outcome = CodexOutcome {
             summary: String::new(),
@@ -30039,6 +30043,11 @@ mod tests {
     /// 5 against those instructions, so the consent-first browser guidance
     /// never reached the model, which told the person to go and find the
     /// provider's screen on their own.
+    ///
+    /// The offer does not depend on `INSTAFY_ENABLE_BROWSER_SESSION` on the
+    /// runtime running the turn: Instafy's Shared Browser is a separate
+    /// on-demand runtime, so the one running the kickoff never has that set.
+    /// Gating on it dropped the offer and this routing on every hosted space.
     #[test]
     fn skill_kickoff_routes_the_onboarding_skill_with_its_browser_offer() {
         let tmp = tempdir().expect("temp dir");
@@ -30051,11 +30060,10 @@ mod tests {
             "---\nname: acme-books\ndescription: Read an Acme Books ledger.\nrouting_keywords: acme, ledger\n---\n\n# Acme Books\n\nNeeds an API client id and secret.\n",
         )
         .expect("skill file");
-        let kickoff = skills::build_skill_start_prompt_for_browser(
+        let kickoff = skills::build_skill_start_prompt(
             tmp.path(),
             Some("https://github.com/instafy-dev/skills"),
             &[".agents/skills/acme-books/SKILL.md".to_string()],
-            true,
         );
         let job = test_lease_job(Some("feature"), json!({}));
         let project_id = Uuid::new_v4();

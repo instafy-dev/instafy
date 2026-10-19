@@ -1226,11 +1226,6 @@ fn embedded_shared_browser_script() -> String {
     format!("{SHARED_BROWSER_APPROVAL_SCRIPT}\n{SHARED_BROWSER_SCRIPT}")
 }
 
-/// Whether this runtime runs a Workspace browser (`INSTAFY_ENABLE_BROWSER_SESSION`).
-pub fn workspace_browser_enabled() -> bool {
-    browser_session_enabled(std::env::var(BROWSER_SESSION_ENV).ok().as_deref())
-}
-
 fn browser_session_enabled(raw: Option<&str>) -> bool {
     raw.map(str::trim)
         .map(str::to_ascii_lowercase)

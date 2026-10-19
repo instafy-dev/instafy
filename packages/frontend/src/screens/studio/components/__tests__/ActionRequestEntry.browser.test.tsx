@@ -72,10 +72,25 @@ describe("a request_browser card", () => {
     expect(card.button?.disabled).toBe(false);
   });
 
+  it("can be pressed while Instafy's browser is not known to be unavailable", async () => {
+    // A hosted space's Workspace browser starts on demand as a runtime of its
+    // own, so the runtime that offered the card says nothing about it, and a
+    // card from a runtime that once did (`workspaceBrowser: false`) is
+    // pressable too.
+    for (const browserRequest of [
+      { task: "Open https://app.example.test", location: "auto" },
+      { task: "Open https://app.example.test", location: "auto", workspaceBrowser: false },
+    ]) {
+      const card = await render(browserRequest, web);
+      expect(card.unavailable).toBeNull();
+      expect(card.button?.disabled).toBe(false);
+    }
+  });
+
   it("cannot be pressed where no browser can open, and says why", async () => {
     const press = vi.fn();
     window.addEventListener("instafy:request-browser", press);
-    const card = await render({ task: "Open https://app.example.test", location: "auto", workspaceBrowser: false }, web);
+    const card = await render({ task: "Open https://app.example.test", location: "auto" }, { ...web, sharedUnavailable: true });
     expect(card.unavailable).toBe("Instafy's browser is not available in this workspace.");
     expect(card.button?.disabled).toBe(true);
     await act(async () => card.button?.click());
@@ -85,15 +100,15 @@ describe("a request_browser card", () => {
 
   it("stays pressable when the browser on this device can open it instead", async () => {
     const card = await render(
-      { task: "Open https://app.example.test", location: "auto", workspaceBrowser: false },
-      { ...web, personalAvailable: true },
+      { task: "Open https://app.example.test", location: "auto" },
+      { ...web, sharedUnavailable: true, personalAvailable: true },
     );
     expect(card.unavailable).toBeNull();
     expect(card.button?.disabled).toBe(false);
   });
 
   it("keeps its old behaviour where Studio provides no browser information", async () => {
-    const card = await render({ task: "Open https://app.example.test", location: "device", workspaceBrowser: false }, null);
+    const card = await render({ task: "Open https://app.example.test", location: "device" }, null);
     expect(card.destination).toBe("Opens app.example.test");
     expect(card.unavailable).toBeNull();
     expect(card.button?.disabled).toBe(false);

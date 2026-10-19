@@ -1,5 +1,4 @@
 import { createContext } from "react";
-import { isSkillSetupOpener } from "../../../conversations/skillCommands";
 import type { ChatMessage } from "../types";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 import type { BrowserTransport } from "./usePersonalBrowserBridge";
@@ -7,19 +6,20 @@ import type { BrowserTransport } from "./usePersonalBrowserBridge";
 export type BrowserRequest = {
   task: string;
   location: "auto" | "device" | "workspace";
-  /**
-   * False when the runtime that offered the card has no browser of its own
-   * (`workspaceBrowser: false`). Older runtimes never say, so a missing value
-   * reads as available.
-   */
-  workspaceBrowser: boolean;
 };
 
-/** What this Studio can open for a request_browser card. */
+/**
+ * What this Studio can open for a request_browser card. The card itself says
+ * nothing about browsers: the runtime that offers it is not the one that runs
+ * Instafy's Workspace browser, which starts on demand as a runtime of its own.
+ */
 export type BrowserRequestHost = {
   transport: BrowserTransport;
   personalAvailable: boolean;
-  /** The Workspace browser is already known not to open for this runtime. */
+  /**
+   * The Workspace browser is already known not to open here. Anything not
+   * known yet, such as a browser that has not started, counts as available.
+   */
   sharedUnavailable: boolean;
 };
 
@@ -36,11 +36,7 @@ export function browserRequestFromMessage(message: ChatMessage): BrowserRequest 
   const value = details?.browserRequest as Record<string, unknown> | undefined;
   if (!value || typeof value.task !== "string" || !value.task.trim() || value.task.length > 8_000) return null;
   if (value.location !== "auto" && value.location !== "device" && value.location !== "workspace") return null;
-  return { task: value.task.trim(), location: value.location, workspaceBrowser: value.workspaceBrowser !== false };
-}
-
-function workspaceBrowserUnavailable(request: BrowserRequest, host: Omit<BrowserRequestHost, "transport">) {
-  return !request.workspaceBrowser || host.sharedUnavailable;
+  return { task: value.task.trim(), location: value.location };
 }
 
 export function browserRequestTransport(
@@ -51,8 +47,8 @@ export function browserRequestTransport(
   if (request.location === "device") return "personal";
   if (request.location === "workspace") return "shared";
   // "auto" keeps the selected browser, unless that is the Workspace browser,
-  // it cannot open here, and the browser on this device can.
-  if (host && current === "shared" && host.personalAvailable && workspaceBrowserUnavailable(request, host)) {
+  // it is known not to open here, and the browser on this device can.
+  if (host && current === "shared" && host.personalAvailable && host.sharedUnavailable) {
     return "personal";
   }
   return current;
@@ -64,7 +60,7 @@ export function browserRequestUnavailableReason(request: BrowserRequest, host: B
   if (transport === "personal") {
     return host.personalAvailable ? null : "This uses the browser on your device. Open this chat in the Instafy desktop app to continue.";
   }
-  return workspaceBrowserUnavailable(request, host) ? "Instafy's browser is not available in this workspace." : null;
+  return host.sharedUnavailable ? "Instafy's browser is not available in this workspace." : null;
 }
 
 const ADDRESS_PATTERN = /\bhttps?:\/\/[^\s<>"'`)\]]+/gi;
@@ -95,19 +91,6 @@ export function browserRequestDestinations(task: string): string[] {
   return hosts.slice(0, 3);
 }
 
-/**
- * Whether the card sits in a conversation a person opened with a skill setup
- * (`/skills import ... --start` or `/skills start <name>`). Such a walk ends on
- * the provider's screen and the setup goes on in chat, so the composer returns
- * to chat when the walk is done.
- */
-export function browserRequestInSkillSetup(messages: ChatMessage[], messageId: string): boolean {
-  const index = messages.findIndex((message) => message.id === messageId);
-  return index > 0 && messages
-    .slice(0, index)
-    .some((message) => message.role === "user" && typeof message.content === "string" && isSkillSetupOpener(message.content));
-}
-
-export function browserRequestContinuation(request: Omit<BrowserRequest, "workspaceBrowser">): string {
+export function browserRequestContinuation(request: BrowserRequest): string {
   return `Continue this browser task using the browser attached to this turn. Inspect its current state first, preserve existing session state, and avoid repeating work that is already complete.\n\n${request.task}`;
 }

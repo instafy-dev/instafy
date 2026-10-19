@@ -169,7 +169,7 @@ export function useChatSubmitFlow({
   pendingBrowserLaunchMode,
   pendingTypingBroadcastRef,
   performSubmit,
-  personalBrowserActive,
+  personalBrowserActive: personalBrowserShown,
   personalBrowserAgentControlEnabled,
   personalBrowserAgentError,
   personalBrowserAgentPhase,
@@ -187,11 +187,12 @@ export function useChatSubmitFlow({
   runtimeReady,
   scrollToBottom,
   sendingAttachment,
-  sharedBrowserActive,
+  sharedBrowserActive: sharedBrowserShown,
   sharedBrowserRuntimeId,
   showCredentialsGate,
   showStatus,
   shouldAutoScrollRef,
+  skillSetupConversation = false,
   softPrefillSuggestion,
   submitSendIntent,
   targetsOverlapActiveRuns,
@@ -270,6 +271,7 @@ export function useChatSubmitFlow({
     at: number;
   } | null>;
   performSubmit: (payload: ChatSubmitDispatchPayload) => Promise<boolean>;
+  /** The composer belongs to the Personal Browser shown beside it. */
   personalBrowserActive: boolean;
   personalBrowserAgentControlEnabled: boolean;
   personalBrowserAgentError: string | null;
@@ -296,11 +298,19 @@ export function useChatSubmitFlow({
   runtimeReady: boolean;
   scrollToBottom: () => void;
   sendingAttachment: boolean;
+  /** The composer belongs to the Shared Browser shown beside it. */
   sharedBrowserActive: boolean;
   sharedBrowserRuntimeId: string | null;
   showCredentialsGate: () => void;
   showStatus: ShowStatus;
   shouldAutoScrollRef: MutableRefObject<boolean>;
+  /**
+   * The chat is a skill setup (`isSkillSetupConversation`). Its composer
+   * answers the setup: a reply is a chat turn even while a browser is shown,
+   * and none is aimed at the browser page by its words. The browser's own
+   * controls (the card's button, Let AI continue) carry a walk on there.
+   */
+  skillSetupConversation?: boolean;
   softPrefillSuggestion: string | null | undefined;
   submitSendIntent: (input: {
     mode: "queue" | "steer";
@@ -310,6 +320,8 @@ export function useChatSubmitFlow({
   }) => Promise<boolean>;
   targetsOverlapActiveRuns: (targetAgentHandles: string[]) => boolean;
 }) {
+  const personalBrowserActive = personalBrowserShown && !skillSetupConversation;
+  const sharedBrowserActive = sharedBrowserShown && !skillSetupConversation;
   const submitMessageInFlightRef = useRef(false);
   const [submissionPending, setSubmissionPending] = useState(false);
   const submitMessageOnce = useCallback<SubmitMessageFn>(async (override, options) => {
@@ -335,6 +347,7 @@ export function useChatSubmitFlow({
       trimmed,
     } = buildChatSubmitPlan({
       activeConversationMessages,
+      autoTargetBrowserPage: !skillSetupConversation,
       browserTargetingEnabled: !personalBrowserActive && !automatic,
       browserSessionOpen,
       hasHiddenBrowserSession,
@@ -867,6 +880,7 @@ export function useChatSubmitFlow({
     showCredentialsGate,
     showStatus,
     shouldAutoScrollRef,
+    skillSetupConversation,
     softPrefillSuggestion,
     submitSendIntent,
     targetsOverlapActiveRuns,

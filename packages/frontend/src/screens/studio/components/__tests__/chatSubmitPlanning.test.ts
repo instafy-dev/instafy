@@ -65,3 +65,30 @@ describe("buildChatSubmitPlan browser transport targeting", () => {
     }
   });
 });
+
+describe("buildChatSubmitPlan page targeting by words", () => {
+  const plan = (autoTargetBrowserPage?: boolean) => buildChatSubmitPlan({
+    activeConversationMessages: [],
+    autoTargetBrowserPage,
+    browserTargetingEnabled: true,
+    browserSessionOpen: true,
+    hasHiddenBrowserSession: false,
+    imageAttachmentCount: 0,
+    inputValue: "I copied both values from that page in my own tab",
+    pendingBrowserLaunchMode: null,
+    preferredBrowserPage: sharedPage,
+    resolvePromptAgentTargets: () => assistantSelection,
+    softPrefillSuggestion: null,
+  });
+
+  it("aims a message that reads like a browser instruction at the open page", () => {
+    expect(plan().shouldApplyBrowserPageTarget).toBe(true);
+    expect(plan().dispatchedMessage).toContain('Use the existing "Example" page in the current shared browser session');
+  });
+
+  it("leaves it as written in a skill setup, whose replies answer the setup", () => {
+    const setup = plan(false);
+    expect(setup.shouldApplyBrowserPageTarget).toBe(false);
+    expect(setup.dispatchedMessage).toBe("I copied both values from that page in my own tab");
+  });
+});

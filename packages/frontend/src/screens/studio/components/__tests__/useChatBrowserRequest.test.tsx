@@ -11,7 +11,6 @@ function request(location = "auto", extra: Record<string, unknown> = {}): ChatMe
   return { id: "request-1", role: "assistant", content: "Continue in browser", timestamp: 1,
     metadata: { messageType: "action_request", details: { browserRequest: { task: "Continue comparing our earlier choices.", location, ...extra } } } };
 }
-const SETUP_OPENER: ChatMessage = { id: "opener", role: "user", content: "/skills start freefinance", timestamp: 0 };
 
 describe("Chat browser request handoff", () => {
   let root: Root;
@@ -35,7 +34,7 @@ describe("Chat browser request handoff", () => {
     container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container);
     value = { identity: "user/project/conversation", messages: [request()], canWrite: true, ready: true,
       transport: "personal", open: false, busy: false, personalAvailable: true, personalReady: false, sharedReady: false,
-      sharedUnavailable: false, activate: vi.fn(), continueTask: vi.fn(async () => true), returnToChat: vi.fn(), onError: vi.fn() };
+      sharedUnavailable: false, activate: vi.fn(), continueTask: vi.fn(async () => true), onError: vi.fn() };
   });
   afterEach(async () => {
     await act(async () => root.unmount()); await advance(); container.remove(); vi.useRealTimers();
@@ -82,44 +81,27 @@ describe("Chat browser request handoff", () => {
     expect(value.activate).not.toHaveBeenCalled(); expect(value.continueTask).not.toHaveBeenCalled();
   });
 
-  it("returns the composer to chat once a skill setup's walk has run, and only then", async () => {
-    value.messages = [SETUP_OPENER, request()]; await render();
+  it("opens Instafy's browser for an automatic card while its availability is not known", async () => {
+    // The card's own `workspaceBrowser: false`, which a runtime once sent from
+    // its own setting, does not count: the Workspace browser runs elsewhere.
+    value.messages = [request("auto", { workspaceBrowser: false })]; value.transport = "shared";
+    value.personalAvailable = false; await render();
     const attempt = await begin();
-    value.open = true; value.personalReady = true; await render(); await advance();
+    expect(value.activate).toHaveBeenCalledExactlyOnceWith("shared");
+    value.open = true; value.sharedReady = true; await render(); await advance();
     expect(await attempt.result).toBeNull();
-    expect(value.returnToChat).not.toHaveBeenCalled();
-    value.busy = true; await render(); expect(value.returnToChat).not.toHaveBeenCalled();
-    value.busy = false; await render(); expect(value.returnToChat).toHaveBeenCalledTimes(1);
-    // A later turn in the same chat is not a walk.
-    value.busy = true; await render(); value.busy = false; await render();
-    expect(value.returnToChat).toHaveBeenCalledTimes(1);
+    expect(value.continueTask).toHaveBeenCalledExactlyOnceWith("shared", expect.stringContaining("Continue comparing our earlier choices."));
   });
 
-  it("leaves the composer alone after an ordinary chat's walk, or a walk that never started", async () => {
-    await render(); const ordinary = await begin();
-    value.open = true; value.personalReady = true; await render(); await advance();
-    expect(await ordinary.result).toBeNull();
-    value.busy = true; await render(); value.busy = false; await render();
-    value.messages = [SETUP_OPENER, request()]; await render();
-    const neverStarted = await begin(); await advance();
-    expect(await neverStarted.result).toBeNull();
-    await advance(30_100);
-    value.busy = true; await render(); value.busy = false; await render();
-    expect(value.returnToChat).not.toHaveBeenCalled();
-  });
-
-  it("opens an automatic card on this device when the runtime has no Workspace browser", async () => {
-    value.messages = [request("auto", { workspaceBrowser: false })]; value.transport = "shared"; await render();
+  it("opens an automatic card on this device when the Workspace browser is known not to open", async () => {
+    value.messages = [request("auto")]; value.transport = "shared"; value.sharedUnavailable = true; await render();
     await begin();
     expect(value.activate).toHaveBeenCalledExactlyOnceWith("personal");
   });
 
-  it.each([
-    ["the runtime has none", { workspaceBrowser: false }, false],
-    ["the Workspace browser is known not to open", {}, true],
-  ])("refuses a card that cannot open any browser because %s", async (_, extra, sharedUnavailable) => {
-    value.messages = [request("auto", extra)]; value.transport = "shared"; value.personalAvailable = false;
-    value.sharedUnavailable = sharedUnavailable; await render();
+  it("refuses a card that cannot open any browser", async () => {
+    value.messages = [request("auto")]; value.transport = "shared"; value.personalAvailable = false;
+    value.sharedUnavailable = true; await render();
     const attempt = await begin();
     expect(await attempt.result).toMatchObject({ message: "Instafy's browser is not available in this workspace." });
     expect(value.activate).not.toHaveBeenCalled(); expect(value.continueTask).not.toHaveBeenCalled();

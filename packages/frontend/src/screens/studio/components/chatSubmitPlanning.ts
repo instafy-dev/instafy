@@ -27,6 +27,12 @@ export type ChatSubmitOverride = {
 
 type BuildChatSubmitPlanOptions = {
   activeConversationMessages: ChatMessage[];
+  /**
+   * Whether a message that reads like a browser instruction ("click the banner
+   * there") may be aimed at the open browser page. Off in a skill setup, whose
+   * replies answer the setup. Defaults to on.
+   */
+  autoTargetBrowserPage?: boolean;
   browserTargetingEnabled: boolean;
   browserSessionOpen: boolean;
   hasHiddenBrowserSession: boolean;
@@ -62,6 +68,7 @@ export type ChatSubmitPlan = {
 
 export function buildChatSubmitPlan({
   activeConversationMessages,
+  autoTargetBrowserPage = true,
   browserTargetingEnabled,
   browserSessionOpen,
   hasHiddenBrowserSession,
@@ -90,6 +97,7 @@ export function buildChatSubmitPlan({
     ? (override?.browserPageTarget ?? autoBrowserPageTarget)
     : null;
   const canApplyBrowserPageTarget =
+    autoTargetBrowserPage &&
     Boolean(browserPageTarget) &&
     !messageToSend.trimStart().startsWith("/") &&
     shouldAutoTargetBrowserSessionMessage(messageToSend);

@@ -3,20 +3,37 @@
 import { act, useState, type MutableRefObject } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("../../../../services/runtimeController/jobs", () => ({
+  cancelAgentJob: vi.fn(), cancelConversationJobs: vi.fn(), cancelPlanGroup: vi.fn(),
+}));
+
 import type { ResolvedPromptAgentSelection } from "../../../../conversations/assistantMentions";
 import type { ChatMessage } from "../../types";
+import { isSkillSetupConversation } from "../skillSetupConversation";
+import {
+  BROWSER_HUMAN_INPUT_CONTINUE_PROMPT,
+  useBrowserHumanInput,
+  type BrowserHumanInputRequest,
+} from "../useBrowserHumanInput";
+import { useChatBrowserHandoff } from "../useChatBrowserHandoff";
 import { useChatBrowserRequest } from "../useChatBrowserRequest";
 import { useChatSubmitFlow } from "../useChatSubmitFlow";
 
 // A skill setup offers a request_browser card that walks to the provider's
-// screen. Once that walk is done, the person's next message answers the setup.
-// It must go out as a chat turn, not as another bounded browser job (which
-// runs without the workspace's values and starts from a page snapshot).
-// ChatPanel routes the composer to the browser while the browser surface is
-// shown (`browserComposerActive`); this harness keeps that same rule.
+// screen. The walk stops at the provider's sign-in for the person and again on
+// the screen that lists the value. Meanwhile the person answers the setup in
+// chat, and those answers must go out as chat turns even while the browser is
+// shown (a browser turn runs without the workspace's values and starts from a
+// page snapshot). The walk goes on only through the browser's own controls.
+// The harness wires the hooks the way ChatPanel does.
 
 type SubmitOptions = Parameters<typeof useChatSubmitFlow>[0];
-type SubmitResult = ReturnType<typeof useChatSubmitFlow>;
+type HandoffOptions = Parameters<typeof useChatBrowserHandoff>[0];
+type Controls = {
+  submit: ReturnType<typeof useChatSubmitFlow>;
+  signIn: ReturnType<typeof useBrowserHumanInput>;
+};
 
 const OCTO: ResolvedPromptAgentSelection = {
   activeHandles: ["octo"],
@@ -26,23 +43,27 @@ const OCTO: ResolvedPromptAgentSelection = {
   nextStickyMentionedAgent: null,
   usesDefaultAssistantOnly: true,
 };
-const SETUP_REPLY = "I copied both values into the cards";
+const TASK = "Open https://app.example.test and take me to Settings, then Connected apps. Pause for me to sign in myself.";
 const PAGE = { id: "page-1", url: "https://app.example.test/apps", host: "app.example.test",
   label: "Connected apps", title: "Connected apps", lastReferencedAt: 1, isActive: true };
-
-function card(): ChatMessage {
-  return { id: "browser-card", role: "assistant", content: "Continue this task in your browser.", timestamp: 3,
-    metadata: { messageType: "action_request", details: { browserRequest: {
-      task: "Open https://app.example.test and take me to Settings, then Connected apps. I sign in myself.",
-      location: "auto" } } } };
-}
+// Both read like browser instructions ("page", "tab"), which ordinary chats
+// aim at the open page.
+const SIGNED_IN_REPLY = "I signed in, the page shows my dashboard";
+const COPIED_REPLY = "I copied both values from that page in my own tab";
+const PERSONAL = { ownerId: null, status: null, runtimeOverride: null } as unknown as HandoffOptions["personal"];
 
 function conversation(opener: string): ChatMessage[] {
   return [
     { id: "opener", role: "user", content: opener, timestamp: 1 },
     { id: "kickoff-reply", role: "assistant", content: "Two values are needed.", timestamp: 2 },
-    card(),
+    { id: "browser-card", role: "assistant", content: "Continue this task in your browser.", timestamp: 3,
+      metadata: { messageType: "action_request", details: { browserRequest: { task: TASK, location: "auto" } } } },
   ];
+}
+
+function signInPause(): BrowserHumanInputRequest {
+  return { version: 1, handoffId: "sign-in", origin: "https://app.example.test", createdAtMs: Date.now(),
+    expiresAtMs: Date.now() + 600_000, fields: [{ label: "Email" }, { label: "Password" }] };
 }
 
 function submitOptions(overrides: Partial<SubmitOptions>): SubmitOptions {
@@ -76,7 +97,7 @@ function submitOptions(overrides: Partial<SubmitOptions>): SubmitOptions {
     imageFiles: [],
     isAssistantTyping: false,
     inputEditorState: null,
-    inputValue: SETUP_REPLY,
+    inputValue: "",
     interruptConversationRuns: vi.fn(async () => []),
     invitePrompt: null,
     listConversationParticipants: vi.fn(async () => []),
@@ -123,34 +144,50 @@ function submitOptions(overrides: Partial<SubmitOptions>): SubmitOptions {
 type HarnessProps = {
   messages: ChatMessage[];
   busy: boolean;
+  input: string;
+  humanInput: BrowserHumanInputRequest | null;
   performSubmit: SubmitOptions["performSubmit"];
-  resultRef: MutableRefObject<SubmitResult | null>;
-  continueTask: (transport: "personal" | "shared", message: string) => Promise<boolean>;
+  onSubmit: HandoffOptions["onSubmit"];
+  controlsRef: MutableRefObject<Controls | null>;
 };
 
-function Harness({ messages, busy, performSubmit, resultRef, continueTask }: HarnessProps) {
+function Harness({ messages, busy, input, humanInput, performSubmit, onSubmit, controlsRef }: HarnessProps) {
   const [open, setOpen] = useState(false);
   const [surface, setSurface] = useState<"chat" | "browser">("chat");
+  const handoff = useChatBrowserHandoff({
+    userId: "user-1", projectId: "project-1", conversationId: "conversation-local", transport: "shared", open,
+    canWrite: true, runtimeId: open ? "shared-runtime" : null, page: open ? PAGE : null, runs: [],
+    personal: PERSONAL, agentHandle: "octo", onSubmit,
+  });
   useChatBrowserRequest({
     identity: "user/project/conversation", messages, canWrite: true, ready: true, transport: "shared",
-    open, busy, personalAvailable: false, personalReady: false, sharedReady: true, sharedUnavailable: false,
+    open, busy, personalAvailable: false, personalReady: false, sharedReady: open, sharedUnavailable: false,
     activate: () => { setOpen(true); setSurface("browser"); },
-    continueTask,
-    returnToChat: () => setSurface("chat"),
+    continueTask: (transport, message) => transport === "shared" ? handoff.continueShared(message) : Promise.resolve(false),
     onError: vi.fn(),
   });
-  const browserComposerActive = open && surface === "browser";
-  resultRef.current = useChatSubmitFlow(submitOptions({
-    activeConversationMessages: messages, browserSessionOpen: open, isAssistantTyping: busy,
-    preferredBrowserPage: open ? PAGE : null, performSubmit, sharedBrowserActive: browserComposerActive,
+  // The Shared Browser's Let AI continue (BrowserSessionModal) is wired to the
+  // same handoff as the card.
+  const signIn = useBrowserHumanInput({
+    identityKey: handoff.identityKey, request: humanInput, canTakeOver: false, humanControlConfirmed: true,
+    onTakeOver: async () => true, onContinue: handoff.continueShared,
+  });
+  const submit = useChatSubmitFlow(submitOptions({
+    activeConversationMessages: messages, browserSessionOpen: open, inputValue: input, isAssistantTyping: busy,
+    preferredBrowserPage: open ? PAGE : null, performSubmit,
+    // The browser is shown beside the composer, as ChatPanel's
+    // browserComposerActive has it before a skill setup is considered.
+    sharedBrowserActive: open && surface === "browser",
+    skillSetupConversation: isSkillSetupConversation({ messages, olderMessagesUnloaded: false, title: null }),
   }));
+  controlsRef.current = { submit, signIn };
   return <div data-testid="surface">{surface}</div>;
 }
 
 describe("a skill setup's browser walk", () => {
   let container: HTMLDivElement;
   let root: Root;
-  const resultRef: MutableRefObject<SubmitResult | null> = { current: null };
+  const controlsRef: MutableRefObject<Controls | null> = { current: null };
 
   beforeEach(() => {
     vi.useFakeTimers();
@@ -167,37 +204,67 @@ describe("a skill setup's browser walk", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  async function walkThenReply(messages: ChatMessage[]) {
+  async function walk(messages: ChatMessage[]) {
     const performSubmit = vi.fn<SubmitOptions["performSubmit"]>(async () => true);
-    const continueTask = vi.fn<HarnessProps["continueTask"]>(async () => true);
-    const render = (busy: boolean) => act(async () => {
-      root.render(<Harness messages={messages} busy={busy} performSubmit={performSubmit}
-        resultRef={resultRef} continueTask={continueTask} />);
+    const onSubmit = vi.fn<HandoffOptions["onSubmit"]>(async () => undefined);
+    let state = { busy: false, input: "", humanInput: null as BrowserHumanInputRequest | null };
+    const render = (next: Partial<typeof state>) => act(async () => {
+      state = { ...state, ...next };
+      root.render(<Harness messages={messages} {...state} performSubmit={performSubmit} onSubmit={onSubmit}
+        controlsRef={controlsRef} />);
     });
-    await render(false);
+    const reply = async (input: string) => {
+      await render({ input });
+      const before = performSubmit.mock.calls.length;
+      await act(async () => { await expect(controlsRef.current!.submit.submitMessage()).resolves.toBe(true); });
+      expect(performSubmit).toHaveBeenCalledTimes(before + 1);
+      return performSubmit.mock.calls[before][0];
+    };
+
+    await render({});
+    // The card's button starts the walk in the browser.
     const detail: { messageId: string; completion?: Promise<unknown> } = { messageId: "browser-card" };
     await act(async () => { window.dispatchEvent(new CustomEvent("instafy:request-browser", { detail })); });
     await act(async () => { await vi.advanceTimersByTimeAsync(200); });
     await expect(detail.completion).resolves.toBeUndefined();
-    expect(continueTask).toHaveBeenCalledExactlyOnceWith("shared", expect.stringContaining("Connected apps"));
-    // The walk runs, then finishes.
-    await render(true);
-    expect(container.textContent).toBe("browser");
-    await render(false);
-    await act(async () => { await expect(resultRef.current!.submitMessage()).resolves.toBe(true); });
-    return { surface: container.textContent, metadata: performSubmit.mock.calls[0][0].metadata };
+    // The walk runs and pauses at the provider's sign-in for the person.
+    await render({ busy: true });
+    await render({ busy: false, humanInput: signInPause() });
+    const afterPause = { surface: container.textContent, reply: await reply(SIGNED_IN_REPLY) };
+    // The person signs in on the page and chooses Let AI continue.
+    await act(async () => { await controlsRef.current!.signIn.continueTask(); });
+    await render({ humanInput: null, busy: true });
+    await render({ busy: false });
+    const afterWalk = { surface: container.textContent, reply: await reply(COPIED_REPLY) };
+    return { onSubmit, afterPause, afterWalk };
   }
 
-  it("sends the next setup reply as a chat turn", async () => {
-    const after = await walkThenReply(conversation("/skills import https://github.com/acme/skills --start"));
-    expect(after.surface).toBe("chat");
-    expect(after.metadata).not.toHaveProperty("browserTransport");
-    expect(after.metadata).not.toHaveProperty("browserRuntimeId");
+  it("sends the setup's replies as chat turns and continues the walk only through the browser", async () => {
+    const { onSubmit, afterPause, afterWalk } = await walk(conversation("/skills import https://github.com/acme/skills --start"));
+
+    // The walk itself: the card's press, then Let AI continue after sign-in.
+    expect(onSubmit).toHaveBeenCalledTimes(2);
+    expect(onSubmit.mock.calls[0][1]).toContain(TASK);
+    expect(onSubmit.mock.calls[1][1]).toBe(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT);
+    for (const [, , options] of onSubmit.mock.calls) {
+      expect(options?.metadata).toMatchObject({ browserTransport: "shared", browserRuntimeId: "shared-runtime" });
+    }
+
+    // The browser stays shown for the sign-in, and replies are chat turns.
+    for (const [after, text] of [[afterPause, SIGNED_IN_REPLY], [afterWalk, COPIED_REPLY]] as const) {
+      expect(after.surface).toBe("browser");
+      expect(after.reply.message).toBe(text);
+      expect(after.reply.metadata).not.toHaveProperty("browserTransport");
+      expect(after.reply.metadata).not.toHaveProperty("browserRuntimeId");
+      expect(after.reply.runtimeOverride ?? null).toBeNull();
+    }
   });
 
-  it("keeps an ordinary chat's browser composer after its walk", async () => {
-    const after = await walkThenReply(conversation("Compare the two plans on their pricing pages"));
-    expect(after.surface).toBe("browser");
-    expect(after.metadata).toMatchObject({ browserTransport: "shared", browserRuntimeId: "shared-runtime" });
+  it("keeps an ordinary chat's browser composer", async () => {
+    const { afterPause, afterWalk } = await walk(conversation("Compare the two plans on their pricing pages"));
+    for (const after of [afterPause, afterWalk]) {
+      expect(after.reply.metadata).toMatchObject({ browserTransport: "shared", browserRuntimeId: "shared-runtime" });
+      expect(after.reply.message).toContain('Use the existing "Connected apps" page in the current shared browser session');
+    }
   });
 });

@@ -31,16 +31,24 @@ When an interactive browser is not attached to a Chat turn, the bundled browser
 skill can return an **Open browser and continue** card. Selecting it opens the
 conversation's browser and sends the task to that exact browser once it is ready.
 This is a user-selected handoff; displaying an old message never runs it again.
-The card shows the host its task opens. When no browser can open for it (the runtime that
-offered it reports no Workspace browser, or the Workspace browser is known not to open, and
-there is no Personal Browser), its button is disabled with the reason.
+The card shows the host its task opens. The card says nothing about which browsers exist,
+because the Workspace browser starts on demand as a runtime of its own; Studio disables the
+button, with the reason, only when the Workspace browser is known not to open and there is no
+Personal Browser. Until then it counts as available.
 A skill setup offers the same card once, to walk to the provider screen that lists a value
-the skill asks for (see [Product](Product.md)), and the composer returns to Chat when that
-walk finishes. On Personal and Shared Browser turns the agent is told never to open, or ask
-the person to open, a screen, dialog or field that shows a credential value: it stops on the
-screen that lists it, names the control that opens it, and asks the person to open that page
-in a tab of their own browser to see and copy the value. That is turn guidance for the model,
-not a block the browser enforces.
+the skill asks for (see [Product](Product.md)). In a chat opened with
+`/skills import <source> --start` or `/skills start <name>`, the composer stays a chat
+composer for the rest of that chat, even while the browser is shown: a reply goes out as a
+chat turn, and is never aimed at the open page because of its words. Only the browser's own
+controls (the card's button, **Let AI continue**, a new browser page) carry the walk on. When
+the chat's opener is older than the loaded messages, a chat titled the way Studio titles a
+connector's setup (such as "Connect FreeFinance") counts as one too. On Personal and Shared
+Browser turns the agent is told to pause at a sign-in, one-time code or consent step with
+`request_human_input`, so the person completes it on the page and chooses **Let AI continue**,
+and never to open, or ask the person to open, a screen, dialog or field that shows a
+credential value: it stops on the screen that lists it, names the control that opens it, and
+asks the person to open that page in a tab of their own browser to see and copy the value.
+That is turn guidance for the model, not a block the browser enforces.
 Paused native control uses the existing Resume flow with the Browser settings
 approval choice (routine browsing by default on supported Desktop hosts); already active
 control keeps its settings. A pending manual step must be finished with **Let AI continue** before another task can start.

@@ -385,6 +385,7 @@ import { useSharedBrowserApprovalTransport } from "./useSharedBrowserApprovalTra
 import { useChatBrowserHandoff } from "./useChatBrowserHandoff";
 import { useChatBrowserRequest } from "./useChatBrowserRequest";
 import { BrowserRequestHostContext, type BrowserRequestHost } from "./browserRequest";
+import { isSkillSetupConversation } from "./skillSetupConversation";
 import { sharedBrowserConversationRunIds } from "./browserHandoffRouting";
 
 const { enabled: runtimeControllerEnabled } = controllerClient.core;
@@ -1793,9 +1794,20 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     showStatus,
   });
   const browserModeActive = browserSessionOpen && browserVisible;
+  // A skill setup's composer answers the setup: its replies stay chat turns
+  // while the browser is shown, and a walk there goes on only through the
+  // browser's own controls (the card's button, Let AI continue).
+  const skillSetupConversation = useMemo(
+    () => isSkillSetupConversation({
+      messages: recentMessages,
+      olderMessagesUnloaded: hasMoreRecentHistory,
+      title: activeConversationEntry?.title,
+    }),
+    [activeConversationEntry?.title, hasMoreRecentHistory, recentMessages],
+  );
   // The split-view composer belongs to Chat. A visible resource must not
   // silently restrict every workspace task to browser tools.
-  const browserComposerActive = browserModeActive && !splitSurfaces;
+  const browserComposerActive = browserModeActive && !splitSurfaces && !skillSetupConversation;
   const showBrowserSessionPageStripForComposer =
     shouldShowBrowserSessionPageStripInComposer({
       browserModeActive,
@@ -3699,6 +3711,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
             browserTransport === "shared" && browserComposerActive,
           pendingNewBrowser: pendingBrowserLaunchMode === "new_page",
           sharedBrowserPageTargetAvailable:
+            !skillSetupConversation &&
             browserTransport === "shared" &&
             (browserSessionOpen || hasHiddenBrowserSession) &&
             Boolean(preferredBrowserPage),
@@ -3724,6 +3737,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       pendingBrowserLaunchMode,
       preferredBrowserPage,
       resolvePromptAgentTargets,
+      skillSetupConversation,
       softPrefillSuggestion,
     ],
   );
@@ -4374,6 +4388,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     showCredentialsGate: showChatCredentialsGate,
     showStatus,
     shouldAutoScrollRef,
+    skillSetupConversation,
     softPrefillSuggestion,
     submitSendIntent,
     targetsOverlapActiveRuns,
@@ -4423,7 +4438,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     continueTask: (transport, message) => transport === "personal"
       ? browserHandoff.startPersonal(message)
       : browserHandoff.continueShared(message),
-    returnToChat: handleBackToChat,
     onError: (message) => showStatus(message, "error", 6000),
   });
   const browserRequestHost = useMemo<BrowserRequestHost>(() => ({
