@@ -1,8 +1,10 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import path from "node:path";
 import fs from "node:fs/promises";
+import { expectPointerCapability } from "./inputEmulation";
 
 const baseline = process.env.INSTAFY_REVIEW_CAPTURE === "before";
+test.beforeEach(async ({ page, hasTouch }) => expectPointerCapability(page, hasTouch ?? false));
 async function inViewport(locator: Locator, width: number) {
   await expect(locator).toBeVisible();
   const bounds = (await locator.boundingBox())!;
@@ -16,13 +18,12 @@ async function keyboardOpen(page: Page, locator: Locator) {
 
 for (const { width, hasTouch } of [{ width: 390, hasTouch: true }, { width: 1280, hasTouch: false }, { width: 2560, hasTouch: false }]) {
   test.describe(`${width}px`, () => {
-    test.use({ hasTouch });
+    test.use({ hasTouch, viewport: { width, height: 900 } });
     for (const theme of ["Light", "Dark"]) test(`${theme} dialogs, navigation and feedback`, async ({ page }, testInfo) => {
       const errors: string[] = [];
       const externalRequests: string[] = [];
       page.on("pageerror", error => errors.push(error.message));
       page.on("request", request => { if (/^https?:/.test(request.url()) && !/^https?:\/\/(127\.0\.0\.1|localhost)(:|\/)/.test(request.url())) externalRequests.push(request.url()); });
-      await page.setViewportSize({ width, height: 900 });
       await page.goto("/tests/fixtures/dialogs-feedback/index.html");
       await page.getByRole("radiogroup", { name: "Theme" }).getByText(theme, { exact: true }).click();
       const capture = async (name: string) => {
@@ -86,7 +87,8 @@ for (const { width, hasTouch } of [{ width: 390, hasTouch: true }, { width: 1280
         const { nodes } = await accessibility.send("Accessibility.getFullAXTree");
         return nodes.filter(node => !node.ignored && node.role?.value === "dialog").map(node => node.name?.value);
       }).toEqual(["Invite QR code"]);
-      await accessibility.detach();
+      // Keep this read-only session until context teardown: detaching a CDP
+      // session can reset Chromium's touch emulation for the remaining checks.
       await page.getByRole("button", { name: "Close QR code", exact: true }).click();
       await expect(qr).toHaveCount(0);
       if (!baseline) await expect(page.getByTestId("composer-device-handoff-show-qr")).toBeFocused();

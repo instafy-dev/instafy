@@ -1,9 +1,11 @@
 import { expect, test, type Locator, type Page, type TestInfo } from "@playwright/test";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { expectPointerCapability } from "./inputEmulation";
 
 const baseline = process.env.INSTAFY_REVIEW_CAPTURE === "before";
 const fixture = "/tests/fixtures/dialogs-feedback/index.html";
+test.beforeEach(async ({ page, hasTouch }) => expectPointerCapability(page, hasTouch ?? false));
 
 async function geometry(button: Locator, kind: "inline" | "form", coarse: boolean) {
   await expect(button).toBeVisible();
@@ -15,6 +17,7 @@ async function geometry(button: Locator, kind: "inline" | "form", coarse: boolea
   expect(style.fontSize).toBe("14px");
   expect(style.radius).toBe("12px");
   expect(style.shadow).toBe("none");
+  expect(style.coarse, "Geometry must be measured using the requested primary pointer").toBe(coarse);
   if (coarse) expect(style.height, JSON.stringify(style)).toBeGreaterThanOrEqual(44);
   else expect(style.height).toBe(kind === "inline" ? 32 : 36);
 }
@@ -46,11 +49,10 @@ async function chooseTheme(page: Page, theme: string) {
 
 for (const { width, hasTouch } of [{ width: 390, hasTouch: true }, { width: 1280, hasTouch: false }]) {
   test.describe(`action presets ${width}px`, () => {
-    test.use({ hasTouch });
+    test.use({ hasTouch, viewport: { width, height: 900 } });
     for (const theme of ["Light", "Dark"]) test(`${theme} production actions and pending behavior`, async ({ page }, info) => {
       const errors: string[] = [];
       page.on("pageerror", error => errors.push(error.message));
-      await page.setViewportSize({ width, height: 900 });
       await page.goto(`${fixture}?panel=feedback`);
       await chooseTheme(page, theme);
       const prefix = `${width}-${theme.toLowerCase()}`;
@@ -136,9 +138,8 @@ for (const { width, hasTouch } of [{ width: 390, hasTouch: true }, { width: 1280
 
 for (const { width, hasTouch } of [{ width: 390, hasTouch: false }, { width: 1280, hasTouch: true }]) {
   test.describe(`pointer density ${width}px ${hasTouch ? "coarse" : "fine"}`, () => {
-    test.use({ hasTouch });
+    test.use({ hasTouch, viewport: { width, height: 900 } });
     test("follows the pointer independently of screen width", async ({ page }) => {
-      await page.setViewportSize({ width, height: 900 });
       await page.goto(`${fixture}?panel=feedback`);
       expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(hasTouch);
       await geometry(page.getByTestId("org-invite-role-conflict-apply"), "inline", hasTouch);
@@ -163,9 +164,8 @@ for (const { width, hasTouch } of [{ width: 390, hasTouch: false }, { width: 128
 }
 
 for (const hasTouch of [false, true]) test.describe(`320px ${hasTouch ? "touch" : "mouse"} action wrapping`, () => {
-  test.use({ hasTouch });
+  test.use({ hasTouch, viewport: { width: 320, height: 568 } });
   test("keeps conflict, member and pending actions inside the available width", async ({ page }) => {
-    await page.setViewportSize({ width: 320, height: 568 });
     await page.goto(`${fixture}?panel=feedback&long=1`);
     await widthFits(page, page.getByTestId("org-invite-role-conflict-apply"));
     await widthFits(page, page.getByTestId("org-invite-role-conflict-dismiss"));
