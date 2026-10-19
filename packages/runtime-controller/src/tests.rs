@@ -1,5 +1,8 @@
 #![cfg(test)]
 
+#[path = "origins/released_registration_tests.rs"]
+mod released_origin_registration;
+
 // NOTE: these integration-style tests expect a local Supabase stack to be running.
 // Start it with `pnpm stack:up`, then point the test suite at the local Postgres
 // by exporting `TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:54322/postgres`
