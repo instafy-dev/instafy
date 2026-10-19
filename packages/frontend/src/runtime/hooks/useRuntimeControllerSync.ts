@@ -503,11 +503,14 @@ export function useRuntimeControllerSync({
                 // A null project id is an org-wide access invalidation and
                 // must refresh whichever project is active now, not whichever
                 // project this stream captured before a navigation switch.
-                // A deleted space is named, so every tab can drop it.
+                // A deleted space or team is named, so every tab can drop it.
                 detail: {
                   projectId: event.project_id ?? null,
                   deletedProjectId: event.data?.reason === "space_deleted"
                     ? sanitizeString(event.data?.projectId)
+                    : null,
+                  deletedOrgId: event.data?.reason === "team_deleted"
+                    ? sanitizeString(event.data?.orgId)
                     : null,
                 },
               }),

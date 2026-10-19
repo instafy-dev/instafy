@@ -41,6 +41,7 @@ vi.mock("../logging", () => ({
 import {
   createControllerOrganization,
   createControllerProject,
+  deleteControllerOrganization,
   deleteControllerProject,
   getControllerProjectSummaryResult,
   importGithubProject,
@@ -108,6 +109,52 @@ describe("space deletion", () => {
       ));
       await expect(deleteControllerProject(PROJECT_ID)).resolves.toBe(false);
     }
+  });
+});
+
+describe("team deletion", () => {
+  const ORG_ID = "22222222-2222-4222-8222-222222222222";
+  beforeEach(() => resetControllerMocks());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("treats a team that is already gone as deleted, so a repeat delete is not a failure", async () => {
+    for (const response of [
+      new Response(null, { status: 204 }),
+      new Response(JSON.stringify({ message: "organization not found" }), { status: 404 }),
+    ]) {
+      const fetchMock = vi.fn().mockResolvedValue(response);
+      vi.stubGlobal("fetch", fetchMock);
+      await expect(deleteControllerOrganization(ORG_ID)).resolves.toEqual({ status: "deleted" });
+      expect(fetchMock).toHaveBeenCalledExactlyOnceWith(
+        `http://controller.test/orgs/${ORG_ID}`,
+        expect.objectContaining({ method: "DELETE" }),
+      );
+    }
+  });
+
+  it("passes on the controller's word when the spaces are deleted but the team is kept", async () => {
+    const message = "This team's spaces are deleted, but some of their machines are still being released. Delete the team again in a few minutes to finish.";
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ message, code: "team_delete_incomplete" }), { status: 409 }),
+    ));
+    await expect(deleteControllerOrganization(ORG_ID)).resolves.toEqual({ status: "incomplete", message });
+  });
+
+  it("still reports a delete the controller refused or could not finish", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    for (const [status, body] of [
+      [403, { message: "only owners can delete teams" }],
+      [409, { message: "conflict", code: "something_else" }],
+      [500, { message: "no" }],
+    ] as const) {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status })));
+      await expect(deleteControllerOrganization(ORG_ID)).resolves.toEqual({ status: "failed" });
+    }
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
+    await expect(deleteControllerOrganization(ORG_ID)).resolves.toEqual({ status: "failed" });
   });
 });
 

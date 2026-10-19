@@ -300,6 +300,17 @@ describe("StudioSidebar organization navigation", () => {
     expect(container.querySelector('[data-testid="sidebar-team-org-c"]')).toBeNull();
   });
 
+  it("drops a team deleted elsewhere from the rail at once, even when its refetch fails", async () => {
+    await render();
+    expect(container.querySelector('[data-testid="sidebar-team-org-b"]')).not.toBeNull();
+    fixture.organizationsError = true;
+    await act(async () => window.dispatchEvent(new CustomEvent(PROJECT_ACCESS_REFRESH_EVENT, {
+      detail: { projectId: null, deletedProjectId: null, deletedOrgId: "org-b" },
+    })));
+    expect(container.querySelector('[data-testid="sidebar-team-org-b"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-team-org-a"]')).not.toBeNull();
+  });
+
   it.each([false, true])("opens Chats directly without desktop recent-list UI (collapsed=%s)", async collapsed => {
     const onOpenConversationHistory = vi.fn();
     const props: Partial<ComponentProps<typeof StudioSidebar>> = {

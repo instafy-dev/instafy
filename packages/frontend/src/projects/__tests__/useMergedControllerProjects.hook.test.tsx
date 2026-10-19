@@ -527,6 +527,28 @@ describe("useMergedControllerProjects accessible discovery", () => {
     expect(resultRef.current?.remoteProjects).toEqual([projectB]);
   });
 
+  it("drops a deleted team's spaces from the cached list before its refetch answers", async () => {
+    const projectA2 = { projectId: "project-a2", orgId: "org-a", projectName: "Space A2" };
+    listProjectsMock.mockResolvedValueOnce(successfulProjects([projectA, projectA2, projectB]));
+    const resultRef: MutableRefObject<HookResult | null> = { current: null };
+    await act(async () => { root.render(<Harness resultRef={resultRef} />); });
+    expect(resultRef.current?.mergedProjects.map((project) => project.id)).toEqual(["project-a", "project-a2", "project-b"]);
+
+    const refetch = deferred<ReturnType<typeof successfulProjects>>();
+    listProjectsMock.mockReturnValueOnce(refetch.promise);
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent(PROJECT_ACCESS_REFRESH_EVENT, {
+        detail: { projectId: null, deletedProjectId: null, deletedOrgId: "org-a" },
+      }));
+    });
+    expect(listProjectsMock).toHaveBeenCalledTimes(2);
+    expect(resultRef.current?.mergedProjects.map((project) => project.id)).toEqual(["project-b"]);
+    expect(resultRef.current?.allRemoteProjects).toEqual([projectB]);
+
+    await act(async () => { refetch.resolve(successfulProjects([projectB])); });
+    expect(resultRef.current?.remoteProjects).toEqual([projectB]);
+  });
+
   it("reuses legacy discovery when switching between organizations", async () => {
     listProjectsMock.mockResolvedValueOnce({ status: "unsupported" })
       .mockResolvedValueOnce(successfulProjects([projectA])).mockResolvedValueOnce(successfulProjects([projectB]));

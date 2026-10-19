@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   createProject: vi.fn(),
   getSummaryResult: vi.fn(),
   removeProject: vi.fn(),
+  removeProjectsByOrgId: vi.fn(),
   setProjectName: vi.fn(),
   setProjectOrg: vi.fn(),
   switchProject: vi.fn(),
@@ -24,6 +25,8 @@ const mocks = vi.hoisted(() => ({
   locationSearch: "?projectId=11111111-1111-4111-8111-111111111111",
   // Mutable per test: a self-hosted app built without Supabase.
   hasSupabaseConfig: true,
+  // Mutable per test: the spaces this tab lists besides the open one.
+  otherProjects: {} as Record<string, { metadata: { projectName: string }; org: { id: string; name: string } }>,
 }));
 
 vi.mock("../../lib/supabaseClient", () => ({
@@ -45,6 +48,7 @@ vi.mock("../../sdk/instafy", () => ({
 vi.mock("../ProjectStateProvider", () => ({
   useProjectState: () => ({
     projects: {
+      ...mocks.otherProjects,
       [PROJECT_ID]: {
         metadata: { projectName: "Shared space" },
         org: { id: "org-1", name: "Team" },
@@ -56,6 +60,7 @@ vi.mock("../ProjectStateProvider", () => ({
     setProjectOrg: mocks.setProjectOrg,
     setProjectName: mocks.setProjectName,
     removeProject: mocks.removeProject,
+    removeProjectsByOrgId: mocks.removeProjectsByOrgId,
   }),
 }));
 
@@ -154,6 +159,7 @@ describe("ProjectAccessProvider capability refresh", () => {
     });
     mocks.activeProjectId = PROJECT_ID;
     mocks.locationSearch = `?projectId=${PROJECT_ID}`;
+    mocks.otherProjects = {};
     mocks.useAuth.mockReturnValue({ user: { id: "user-1", email: "user@example.test" } });
   });
 
@@ -642,6 +648,110 @@ describe("ProjectAccessProvider capability refresh", () => {
     }
   });
 
+  it("drops a team deleted elsewhere from this tab's lists without touching an open space in another team", async () => {
+    mocks.getSummaryResult.mockResolvedValue(summaryFor("admin"));
+    await act(async () => root.render(<ProjectAccessProvider><AccessProbe /></ProjectAccessProvider>));
+    const probe = container.querySelector('[data-testid="access-probe"]');
+    expect(probe?.getAttribute("data-role")).toBe("admin");
+    mocks.getSummaryResult.mockClear();
+
+    await act(async () => window.dispatchEvent(new CustomEvent(PROJECT_ACCESS_REFRESH_EVENT, {
+      detail: { projectId: null, deletedProjectId: null, deletedOrgId: "org-2" },
+    })));
+
+    expect(mocks.removeProjectsByOrgId).toHaveBeenCalledExactlyOnceWith("org-2", { forgetSavedTabs: true });
+    expect(mocks.removeProject).not.toHaveBeenCalled();
+    expect(mocks.getSummaryResult).not.toHaveBeenCalled();
+    expect(probe?.getAttribute("data-role")).toBe("admin");
+    expect(probe?.getAttribute("data-blocked")).toBe("false");
+  });
+
+  it("says the open space was deleted with its team, without its own notice, and opens no other space", async () => {
+    const SIBLING = "77777777-7777-4777-8777-777777777777";
+    const ELSEWHERE = "88888888-8888-4888-8888-888888888888";
+    mocks.otherProjects = {
+      [SIBLING]: { metadata: { projectName: "Sibling" }, org: { id: "org-1", name: "Team" } },
+      [ELSEWHERE]: { metadata: { projectName: "Elsewhere" }, org: { id: "org-2", name: "Other team" } },
+    };
+    mocks.getSummaryResult.mockResolvedValueOnce(summaryFor("admin"));
+    await act(async () => root.render(<ProjectAccessProvider><AccessProbe /></ProjectAccessProvider>));
+    const probe = container.querySelector('[data-testid="access-probe"]');
+    expect(probe?.getAttribute("data-role")).toBe("admin");
+    mocks.getSummaryResult.mockClear();
+
+    // The real store opens another local space when the open one is removed,
+    // unless told not to; the URL still names the deleted one.
+    mocks.removeProject.mockImplementation((projectId: string, options?: { openFallback?: boolean }) => {
+      if (projectId === PROJECT_ID) mocks.activeProjectId = options?.openFallback === false ? "" : ELSEWHERE;
+    });
+    mocks.getSummaryResult.mockImplementation(async (projectId: string) => projectId === PROJECT_ID
+      ? { summary: null, notFound: true, forbidden: false, unauthorized: false }
+      : { ...summaryFor("admin"), summary: { ...summaryFor("admin").summary, projectId, orgId: "org-2" } });
+
+    await act(async () => window.dispatchEvent(new CustomEvent(PROJECT_ACCESS_REFRESH_EVENT, {
+      detail: { projectId: null, deletedProjectId: null, deletedOrgId: "org-1" },
+    })));
+    await act(async () => window.dispatchEvent(new Event("focus")));
+
+    // The sibling left first, and both as deleted spaces, saved tabs and all.
+    // The space of the other team stays.
+    expect(mocks.removeProject.mock.calls).toEqual([
+      [SIBLING, { forgetSavedTabs: true }],
+      [PROJECT_ID, { openFallback: false, forgetSavedTabs: true }],
+    ]);
+    expect(mocks.removeProjectsByOrgId).not.toHaveBeenCalled();
+    expect(mocks.getSummaryResult.mock.calls.map(([projectId]) => projectId)).toEqual([PROJECT_ID]);
+    expect(probe?.getAttribute("data-blocked")).toBe("true");
+    expect(probe?.getAttribute("data-deleted")).toBe("true");
+    expect(mocks.switchProject).not.toHaveBeenCalled();
+    expect(mocks.navigate).not.toHaveBeenCalled();
+  });
+
+  it("leaves an open space in a team this tab is deleting to the delete, and blocks it if the delete fails", async () => {
+    const SIBLING = "77777777-7777-4777-8777-777777777777";
+    mocks.otherProjects = {
+      [SIBLING]: { metadata: { projectName: "Sibling" }, org: { id: "org-1", name: "Team" } },
+    };
+    mocks.getSummaryResult.mockResolvedValueOnce(summaryFor("admin"));
+    await act(async () => root.render(<ProjectAccessProvider><AccessProbe /></ProjectAccessProvider>));
+    const probe = container.querySelector('[data-testid="access-probe"]');
+    mocks.getSummaryResult.mockClear();
+    mocks.getSummaryResult.mockResolvedValue({ summary: null, notFound: true, forbidden: false, unauthorized: false });
+    markProjectDeletedHere(PROJECT_ID);
+    markProjectDeletedHere(SIBLING);
+    try {
+      // Every notice of the team delete arrives while its request still runs.
+      await act(async () => {
+        for (const deletedProjectId of [SIBLING, PROJECT_ID]) {
+          window.dispatchEvent(new CustomEvent(PROJECT_ACCESS_REFRESH_EVENT, {
+            detail: { projectId: null, deletedProjectId },
+          }));
+        }
+        window.dispatchEvent(new CustomEvent(PROJECT_ACCESS_REFRESH_EVENT, {
+          detail: { projectId: null, deletedOrgId: "org-1" },
+        }));
+      });
+
+      // A space announced deleted leaves the lists; the open one is left alone.
+      expect(mocks.removeProject).toHaveBeenCalledExactlyOnceWith(SIBLING, { forgetSavedTabs: true });
+      expect(mocks.removeProjectsByOrgId).not.toHaveBeenCalled();
+      expect(mocks.getSummaryResult).not.toHaveBeenCalled();
+      expect(probe?.getAttribute("data-blocked")).toBe("false");
+      expect(probe?.getAttribute("data-role")).toBe("admin");
+    } finally {
+      unmarkProjectDeletedHere(PROJECT_ID);
+      unmarkProjectDeletedHere(SIBLING);
+    }
+
+    // The delete failed after all: the next check finds the space gone and
+    // says so, since the controller announced it, and forgets its tabs.
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    expect(probe?.getAttribute("data-blocked")).toBe("true");
+    expect(probe?.getAttribute("data-deleted")).toBe("true");
+    expect(mocks.removeProject).toHaveBeenLastCalledWith(PROJECT_ID, { openFallback: false, forgetSavedTabs: true });
+    expect(mocks.switchProject).not.toHaveBeenCalled();
+  });
+
   it("checks the open space at once when one of its reads gets a 404, even in a hidden tab", async () => {
     vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
     mocks.getSummaryResult.mockResolvedValueOnce(summaryFor("admin"));
@@ -710,6 +820,7 @@ describe("ProjectAccessProvider startup with nothing remembered", () => {
     });
     mocks.activeProjectId = "";
     mocks.locationSearch = "";
+    mocks.otherProjects = {};
     mocks.useAuth.mockReturnValue({ user: { id: "user-1", email: "user@example.test" } });
     mocks.getSummaryResult.mockImplementation(async (projectId: string) => ({
       summary: {

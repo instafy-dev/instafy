@@ -262,6 +262,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
     setProjectOrg,
     setProjectName,
     removeProject,
+    removeProjectsByOrgId,
   } = useProjectState();
   const { user } = useAuth();
   const location = useLocation();
@@ -1070,20 +1071,48 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
     };
     const handleAccessChanged = (event: Event) => {
       const detail = (event as CustomEvent<ProjectAccessRefreshEventDetail>).detail;
-      const deletedProjectId = detail?.deletedProjectId ?? null;
-      if (deletedProjectId) {
-        if (isProjectDeletedHere(deletedProjectId)) {
-          // The tab that deleted it navigates away by itself.
+      const deletedOrgId = detail?.deletedOrgId ?? null;
+      if (deletedOrgId) {
+        if (projectsRef.current[targetProjectId]?.org?.id !== deletedOrgId || urlHoldsBlockedProject()) {
+          // The open space is in another team, or already blocked: only this
+          // tab's lists change.
+          removeProjectsByOrgId(deletedOrgId, { forgetSavedTabs: true });
           return;
         }
+        if (isProjectDeletedHere(targetProjectId)) {
+          // This tab deleted the team and navigates away by itself.
+          return;
+        }
+        // The open space was in the team, and its own notice never came (the
+        // stream reconnected in between, say). Drop the team's other spaces
+        // and leave the open one to the refresh below, which finds it gone
+        // and blocks it: removing it first would open another space.
+        setLastDeletedProjectId(targetProjectId);
+        targetDeleted = true;
+        for (const [projectId, project] of Object.entries(projectsRef.current)) {
+          if (projectId !== targetProjectId && project.org?.id === deletedOrgId) {
+            removeProject(projectId, { forgetSavedTabs: true });
+          }
+        }
+      }
+      const deletedProjectId = detail?.deletedProjectId ?? null;
+      if (deletedProjectId) {
+        // Named even for a space this tab is deleting: if that delete fails
+        // after all, the space's notice still says it was deleted.
         setLastDeletedProjectId(deletedProjectId);
         if (deletedProjectId !== targetProjectId || urlHoldsBlockedProject()) {
           // Only this tab's lists change; access to the open space did not.
+          // That holds for a team this tab is deleting too: a space announced
+          // deleted is gone even if the team delete then fails.
           removeProject(deletedProjectId, { forgetSavedTabs: true });
           return;
         }
         // The open space: the refresh below finds it gone and blocks it.
         targetDeleted = true;
+        if (isProjectDeletedHere(deletedProjectId)) {
+          // The tab that deleted it navigates away by itself.
+          return;
+        }
       }
       if (detail?.projectId && detail.projectId !== targetProjectId) {
         return;
@@ -1160,6 +1189,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
     getControllerProjectSummaryResult,
     projectInitialized,
     removeProject,
+    removeProjectsByOrgId,
     setProjectName,
     setProjectOrg,
     user?.id,

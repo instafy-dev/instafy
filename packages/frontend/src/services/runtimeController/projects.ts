@@ -967,18 +967,30 @@ export async function deleteControllerProject(projectId: string): Promise<boolea
   }
 }
 
-export async function deleteControllerOrganization(orgId: string): Promise<boolean> {
+/**
+ * How a team delete ended. "incomplete" is the controller's
+ * `team_delete_incomplete`: the team's spaces are deleted, but the team is
+ * kept while their machines are released, and deleting it again finishes it.
+ */
+export type ControllerOrganizationDeleteResult =
+  | { status: "deleted" }
+  | { status: "incomplete"; message: string }
+  | { status: "failed" };
+
+const TEAM_DELETE_INCOMPLETE_CODE = "team_delete_incomplete";
+
+export async function deleteControllerOrganization(orgId: string): Promise<ControllerOrganizationDeleteResult> {
   if (!runtimeControllerEnabled) {
-    return false;
+    return { status: "failed" };
   }
   const trimmed = orgId.trim();
   if (!trimmed) {
-    return false;
+    return { status: "failed" };
   }
   const requestContext = await resolveControllerRequestContext(null);
   const accessToken = requestContext.accessToken;
   if (!accessToken) {
-    return false;
+    return { status: "failed" };
   }
   try {
     const response = await fetch(
@@ -990,19 +1002,30 @@ export async function deleteControllerOrganization(orgId: string): Promise<boole
         },
       },
     );
+    // Deleted already, from another tab or by an earlier attempt whose
+    // answer was lost: the team is gone, which is what this delete asked for.
+    if (response.status === 404) {
+      void response.body?.cancel().catch(() => undefined);
+      return { status: "deleted" };
+    }
     if (!response.ok) {
-      const message = await readControllerError(
+      const error = await readControllerApiError(
         response,
         "delete org failed",
         requestContext,
       );
-      throw new Error(message);
+      // A code comes only with the controller's own message, which says
+      // what is left and when to delete the team again.
+      if (response.status === 409 && error.code === TEAM_DELETE_INCOMPLETE_CODE) {
+        return { status: "incomplete", message: error.message };
+      }
+      throw new Error(error.message);
     }
-    return true;
+    return { status: "deleted" };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.warn("[runtime-controller] deleteControllerOrganization error:", message);
-    return false;
+    return { status: "failed" };
   }
 }
 

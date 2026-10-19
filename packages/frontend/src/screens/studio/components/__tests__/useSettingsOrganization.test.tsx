@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useSettingsOrganization } from "../useSettingsOrganization";
+import { PROJECT_ACCESS_REFRESH_EVENT } from "../../../../projects/projectAccessEvents";
 
 const mocks = vi.hoisted(() => ({ list: vi.fn() }));
 vi.mock("../../../../services/runtimeController/projects", () => ({ listControllerOrganizations: mocks.list }));
@@ -46,6 +47,25 @@ describe("settings organization scope", () => {
     await render({ selectOrganization: false, organizationId: "empty-team" });
     expect(scope!.selectedId).toBe("project-team");
     expect(scope!.role).toBe("builder");
+  });
+
+  it("drops a team deleted elsewhere from the selector and its page without loading again", async () => {
+    await render({ organizationId: "empty-team" });
+    expect(scope!.role).toBe("owner");
+
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent(PROJECT_ACCESS_REFRESH_EVENT, { detail: { projectId: null, deletedProjectId: "a-space" } }));
+    });
+    expect(scope!.organizations).toHaveLength(2);
+
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent(PROJECT_ACCESS_REFRESH_EVENT, { detail: { projectId: null, deletedOrgId: "empty-team" } }));
+    });
+    expect(scope!.organizations).toEqual([teams[0]]);
+    expect(scope!.organization).toBeNull();
+    expect(scope!.role).toBeNull();
+    expect(scope!.loading).toBe(false);
+    expect(mocks.list).toHaveBeenCalledOnce();
   });
 
   it("updates scope immediately when the requested organization changes", async () => {
