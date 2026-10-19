@@ -4,6 +4,9 @@
 // controller; those read as untitled too, so they never hide a real name.
 export const UNTITLED_SPACE_NAME = "Untitled space";
 
+/** Where a space name goes while no space is open. */
+export const NO_SPACE_OPEN_NAME = "Choose a Space";
+
 const LEGACY_PLACEHOLDER_NAMES = new Set(["untitled space", "untitled instafy project"]);
 
 export function isUntitledSpaceName(name: string | null | undefined): boolean {

@@ -119,6 +119,8 @@ export interface GatedIntervalOptions {
   idleMs?: number;
   /** Run the callback once when the gate leaves hidden or idle. Default true. */
   runOnWake?: boolean;
+  /** False keeps no timer at all (for owners whose preconditions are unmet). Default true. */
+  enabled?: boolean;
 }
 
 /**
@@ -131,12 +133,12 @@ export interface GatedIntervalOptions {
 export function useGatedInterval(
   callback: () => void,
   activeMs: number,
-  { idleMs = activeMs * POLLING_IDLE_CADENCE_MULTIPLIER, runOnWake = true }: GatedIntervalOptions = {},
+  { idleMs = activeMs * POLLING_IDLE_CADENCE_MULTIPLIER, runOnWake = true, enabled = true }: GatedIntervalOptions = {},
 ): void {
   const latest = useRef(callback);
   latest.current = callback;
   useEffect(() => {
-    if (typeof window === "undefined") return;
+    if (typeof window === "undefined" || !enabled) return;
     let timer: number | null = null;
     const clear = () => { if (timer !== null) window.clearTimeout(timer); timer = null; };
     const schedule = () => {
@@ -151,7 +153,7 @@ export function useGatedInterval(
     });
     schedule();
     return () => { clear(); unsubscribe(); };
-  }, [activeMs, idleMs, runOnWake]);
+  }, [activeMs, enabled, idleMs, runOnWake]);
 }
 
 installPollingGate();

@@ -210,7 +210,7 @@ Runtime jobs should use the narrowest final-output contract that still gives Stu
 - `strict_structured`: default for executable automation. The Responses API receives the JSON schema because Studio needs `summary`, `files`, `actions`, and `suggestions` to apply file changes or render product actions.
 - `schema_free_structured`: planning/checkpoint turns still prompt for a parseable JSON object, but the API-level schema is disabled because lead synthesis and action planning proved more reliable without strict final-output enforcement. Studio validates/parses after the model returns.
 - `plain_text_report`: pre-observed read-only worker lanes produce evidence prose. They should not be forced through the JSON final schema because no file/app action is expected.
-- `plain_text_write`: ordinary workspace-change jobs edit through tools and finish with a short summary; file changes are collected from disk. Required prior-context retrieval does not change this format. Read-only and coordination-required scopes retain their restrictions.
+- `plain_text_write`: ordinary required or conditional workspace-change jobs use tools and finish with a short summary; actual file changes are collected from disk. Conditional review can finish with an evidenced no-change result. Required prior-context retrieval does not change this format. Read-only and coordination-required scopes retain their restrictions.
 
 The selected mode is recorded in the runtime prompt-context artifact as `finalOutputMode` so no-final failures can be debugged without reverse-engineering prompt shape.
 
@@ -225,11 +225,25 @@ Before a normal root turn enters detailed planning, the runtime asks for one sma
 - `route`: `direct`, `multi_agent_candidate`, `cross_chat_lookup`, or `write_coordination_required`.
 - `requiresContextLookup`: true when necessary prior conversation/thread/context evidence must be retrieved because it is absent from the supplied current conversation.
 - `requiresCommandExecution`: true when a separate fresh observation of workspace, process, Git, or other current tool-observed state is needed. The CLI transport for context retrieval does not itself set this flag.
-- `requiresWorkspaceFileChanges`: true when success requires workspace changes, independently of either evidence requirement.
+- `workspaceFileChangeRequirement`: `none` when no mutation is requested, `conditional` when inspection or validation determines whether edits are warranted, or `required` when success needs actual workspace changes. This is independent of either evidence requirement.
 - `observationCommands`: up to three proposed current-state observations; the host executes only its existing allowlist. Rejected or missing proposals leave the observation requirement for the main agent under its normal permissions.
 - `selectedSkills`, `reason`, and `confidence`: observability for why the route was chosen.
 
+Write permission and completion requirements are separate. Controller `writeIntent` and
+`writeScope` authorize and constrain mutations; routing cannot grant permission. A conditional
+review must still perform its required observations and tests, but may explain why no edit is
+warranted. It can also make justified edits within its existing scope. Required writes retain
+their missing-change retry and failure checks; a no-change explanation does not waive them.
+
+New preflight responses use the three-state field. The runtime accepts the legacy Boolean
+`requiresWorkspaceFileChanges` when that field is absent (`true` maps to `required`, `false`
+to `none`). Artifacts retain that Boolean, and `runtimeExpectations.workspaceFileChanges`
+remains true only for `required`. Invalid or conflicting decisions stop before main execution
+rather than silently dropping the requirement.
+
 The preflight receives sanitized user/assistant history under the normal stateless conversation budget. History metadata and non-conversational roles are excluded; quoted history supplies evidence, not permissions. Compaction metrics record included, summarized and omitted turns.
+
+The preflight's verdicts are written into the job's `metadata.runtimeExpectations` as `commandExecution` and `workspaceFileChanges` for the turn. A turn expected to change files that changes none is retried once with a prompt that asks for the change, and then fails. One exception keeps a guess from becoming that contract: in a conversation that began with a skill setup (`/skills import ... --start` or `/skills start <name>` that reached the model, read from the history window or the controller's `skill_setup_openers`), `requiresWorkspaceFileChanges` is not applied unless the caller's own `runtimeExpectations.workspaceFileChanges` already asks for file changes. Interactive chat never sends that expectation, so there the verdict would be only the preflight's reading of the request, and a setup step is often a question for the person or a step they take in another product. Such a turn runs as one that need not write: it may still change files, and its first reply stands with no file-change retry. The preflight artifact still records `requiresWorkspaceFileChanges` as the preflight returned it. A setup's first turn never runs the preflight, and every other conversation keeps the verdict, so an ordinary edit answered without a file change is still retried and then failed.
 
 `direct` selects ordinary parent execution and may use exposed native helpers. It does not
 mean that all work must run on one model thread. `multi_agent_candidate` selects durable

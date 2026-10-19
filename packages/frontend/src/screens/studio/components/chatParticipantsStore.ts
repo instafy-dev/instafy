@@ -36,6 +36,7 @@ export type ParticipantCredentialState =
   | "pinned" // pinned to a specific credential
   | "missing" // pinned credential no longer exists
   | "revoked" // pinned credential was revoked
+  | "managed" // no credential of its own: the credits-funded managed lane
   | "none"; // no usable credential
 
 /**
@@ -70,8 +71,10 @@ export interface ParticipantAgent extends ConversationRosterAgent {
   canEditProfile?: boolean;
   /** Effective AI provider id (e.g. "openai"), for model options + gating. */
   providerId?: string | null;
-  /** Resolved model id, e.g. "gpt-5.5". */
+  /** Model id the agent pins, e.g. "gpt-5.6-sol"; null when it runs on the lane's default. */
   model: string | null;
+  /** What to show for the model when that differs from `model` (the managed lane's model). */
+  modelLabel?: string | null;
   /** Per-agent reasoning effort (minimal|low|medium|high), or null to inherit. */
   reasoningEffort?: string | null;
   /** The machine this agent runs in — used to group the roster by runtime. */

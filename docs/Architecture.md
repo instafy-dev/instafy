@@ -105,6 +105,20 @@ This does **not** require a dedicated public file server. Private storage stays 
   authenticated `fetch` stream and send bearer credentials in the `Authorization` header; access
   tokens must never be placed in the event-stream URL. The client requires the SSE media type and
   bounds individual lines and accumulated event data before parsing JSON.
+- Each Studio tab, Desktop window and phone holds one stream. A controller node allows one user
+  eight at once and refuses another, before reading the database, with 429, the code
+  `too_many_event_streams` and `Retry-After`. The client waits that long, doubles the wait on each
+  refusal in a row up to a minute, and adds a little jitter, so an extra tab asks about once a
+  minute instead of every few seconds. Opening a stream resets the wait.
+- The limit is checked right after the token, before the request's space, filters and access, so
+  a user at the limit gets 429 even for a stream that would otherwise be refused with 400, 403 or
+  404; that answer comes once a stream is free. A refused tab keeps the controller shown as
+  available: only its live updates wait, and it fetches its runs again when its stream opens.
+- Streams do not share access checks. Each stream checks access for an event it matches, at most
+  once per conversation every 5 s and on every runtime, origin, tunnel, workspace or roster event,
+  so one user's eight streams on one space can ask for eight database connections for one event.
+  That is more than the default pool of 4 (`DATABASE_POOL_SIZE`): the extra checks wait for a
+  connection, and other requests on the node wait behind them.
 - Supabase is a fallback when the controller is disabled.
 
 ## Conversation delivery intents

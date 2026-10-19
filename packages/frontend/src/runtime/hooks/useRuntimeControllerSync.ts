@@ -285,6 +285,27 @@ export function useRuntimeControllerSync({
       }));
     };
 
+    // A 429: this user's other tabs hold every stream the controller allows,
+    // and the stream asks again on its own backoff. The controller answered,
+    // so it is not unavailable; only live updates wait. Runs are reconciled
+    // when a stream opens.
+    const handleStreamRefused = (message: string) => {
+      if (controllerSyncTerminated) {
+        return;
+      }
+      streamErrorSinceLastOpenRef.current = true;
+      if (streamDisconnectNotifiedRef.current) {
+        return;
+      }
+      streamDisconnectNotifiedRef.current = true;
+      updateRuntime((current) => ({
+        ...current,
+        controllerStreamDisconnected: true,
+        controllerStreamDisconnectMessage:
+          formatRuntimeStreamDisconnectedMessage(message),
+      }));
+    };
+
     const handleControllerAccessDenied = (status: 401 | 403) => {
       if (cancelled) {
         return;
@@ -414,14 +435,23 @@ export function useRuntimeControllerSync({
           handleControllerAccessDenied(status);
         },
         onError: handleStreamError,
+        onRefused: handleStreamRefused,
         onOpen: () => {
           streamOpenedRef.current = true;
           initialStreamErrorNotifiedRef.current = false;
+          // An open stream also proves the controller answers and the space
+          // is readable, so it clears the "unavailable" a failed first
+          // attempt left: nothing else clears it while this sync runs.
           updateRuntime((current) =>
+            current.controllerUnavailable ||
             current.controllerStreamDisconnected ||
             current.controllerStreamDisconnectMessage !== null
               ? {
                   ...current,
+                  controllerReady: current.controllerUnavailable
+                    ? !current.controllerProjectMissing
+                    : current.controllerReady,
+                  controllerUnavailable: false,
                   controllerStreamDisconnected: false,
                   controllerStreamDisconnectMessage: null,
                 }

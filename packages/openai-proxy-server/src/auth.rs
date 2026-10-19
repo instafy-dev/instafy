@@ -130,17 +130,17 @@ impl Credentials {
             *access_token = updated_access_token;
             changed = true;
         }
-        if let Some(updated_refresh_token) =
-            normalize_optional_field(tokens.refresh_token.as_deref())
-            && refresh_token.as_deref() != Some(updated_refresh_token.as_str())
-        {
-            *refresh_token = Some(updated_refresh_token);
+        // A successfully read auth file is a complete credential snapshot.
+        // Keeping omitted fields could pair a new account's access token with
+        // the previous account's routing identity or refresh authority.
+        let updated_refresh_token = normalize_optional_field(tokens.refresh_token.as_deref());
+        if refresh_token.as_deref() != updated_refresh_token.as_deref() {
+            *refresh_token = updated_refresh_token;
             changed = true;
         }
-        if let Some(updated_account_id) = normalize_optional_field(tokens.account_id.as_deref())
-            && account_id.as_deref() != Some(updated_account_id.as_str())
-        {
-            *account_id = Some(updated_account_id);
+        let updated_account_id = normalize_optional_field(tokens.account_id.as_deref());
+        if account_id.as_deref() != updated_account_id.as_deref() {
+            *account_id = updated_account_id;
             changed = true;
         }
 
@@ -604,6 +604,49 @@ mod tests {
         server.abort();
         let _ = fs::remove_file(&auth_path);
         let _ = fs::remove_dir_all(&auth_dir);
+        Ok(())
+    }
+
+    #[test]
+    fn auth_reload_clears_omitted_account_and_refresh_token() -> Result<()> {
+        let auth_path = env::temp_dir().join(format!("instafy-proxy-auth-{}.json", Uuid::new_v4()));
+        struct TestFile(PathBuf);
+        impl Drop for TestFile {
+            fn drop(&mut self) {
+                let _ = fs::remove_file(&self.0);
+            }
+        }
+        let _file = TestFile(auth_path.clone());
+        let mut credentials = Credentials::ChatGpt {
+            access_token: "old-token".into(),
+            refresh_token: Some("old-refresh".into()),
+            account_id: Some("old-account".into()),
+            default_model: None,
+            auth_path: Some(auth_path.clone()),
+        };
+        fs::write(&auth_path, r#"{"tokens":{"access_token":"new-token"}}"#)?;
+        assert!(credentials.reload_chatgpt_access_token_from_auth_path()?);
+        let Credentials::ChatGpt {
+            access_token,
+            refresh_token,
+            account_id,
+            ..
+        } = &credentials
+        else {
+            unreachable!()
+        };
+        assert_eq!(access_token, "new-token");
+        assert!(refresh_token.is_none());
+        assert!(account_id.is_none());
+        assert!(!credentials.reload_chatgpt_access_token_from_auth_path()?);
+        fs::write(&auth_path, "invalid JSON")?;
+        assert!(
+            credentials
+                .reload_chatgpt_access_token_from_auth_path()
+                .is_err()
+        );
+        assert_eq!(credentials.bearer(), "new-token");
+        assert!(credentials.chatgpt_account_id().is_none());
         Ok(())
     }
 

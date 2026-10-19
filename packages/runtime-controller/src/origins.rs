@@ -1861,6 +1861,11 @@ async fn register_runtime_bound_origin(
                  endpoint = $3,
                  protocols = $4::text[],
                  metadata = coalesce($5, metadata),
+                 -- An instance allocated without a mode (dispatch, requeue and
+                 -- automation starts name none) takes the mode its origin
+                 -- registers with; one allocated with a mode was checked above
+                 -- to match it. The hosted-origin queries read this column.
+                 mode = coalesce(mode, $10),
                  required = true,
                  status = 'online',
                  updated_at = now()
@@ -1879,6 +1884,7 @@ async fn register_runtime_bound_origin(
                     &runtime_id,
                     &active_lease_id,
                     &candidate.origin_id,
+                    &mode.as_str(),
                 ],
             )
             .await

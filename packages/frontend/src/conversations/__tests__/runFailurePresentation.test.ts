@@ -1199,6 +1199,21 @@ describe("resolveRetryingStatusPresentation", () => {
     ).toEqual({ displayText: RETRYING_STATUS_DISPLAY_TEXT, fullText: raw });
   });
 
+  it("maps a retry kind the controller nested under details", () => {
+    const raw = "Reconnecting... 1/1";
+    expect(
+      resolveRetryingStatusPresentation({
+        metadata: {
+          source: "agent",
+          kind: "update",
+          outcome: "in_progress",
+          details: { kind: "codex_stream_retry" },
+        },
+        content: raw,
+      }),
+    ).toEqual({ displayText: RETRYING_STATUS_DISPLAY_TEXT, fullText: raw });
+  });
+
   it("ignores ordinary status lines", () => {
     expect(resolveRetryingStatusPresentation({ content: "Running tests now." })).toBeNull();
     expect(resolveRetryingStatusPresentation({ content: "Retrying the tests now." })).toBeNull();

@@ -433,9 +433,8 @@ export function InlineSecretsForm({
               {problem ? (
                 <Text
                   as="div"
-                  variant="caption"
-                  tone="inherit"
-                  className="text-xxs leading-snug text-rose-600 dark:text-rose-300"
+                  variant="captionSmall"
+                  tone="danger"
                   {...(valueTestIdPrefix
                     ? { "data-testid": `${valueTestIdPrefix}-${secret.name.toUpperCase()}-problem` }
                     : {})}
@@ -449,7 +448,7 @@ export function InlineSecretsForm({
       </div>
 
       {caption ? (
-        <Text as="div" variant="caption" tone="muted" className="text-xxs leading-snug">
+        <Text as="div" variant="captionSmall" tone="muted">
           {caption}
         </Text>
       ) : null}
@@ -482,9 +481,8 @@ export function InlineSecretsForm({
       {errorTestId && saveError ? (
         <Text
           as="div"
-          variant="caption"
-          tone="inherit"
-          className="text-xxs leading-snug text-rose-600 dark:text-rose-300"
+          variant="captionSmall"
+          tone="danger"
           data-testid={errorTestId}
         >
           {saveError}

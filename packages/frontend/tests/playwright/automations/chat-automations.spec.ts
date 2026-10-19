@@ -13,10 +13,11 @@ import {
   waitForHostedRuntimeReady,
 } from "../utils/harness.js";
 import { ensureProjectCreditsReadyForChat } from "../utils/projectCredits.js";
+import { E2E_MODEL } from "../utils/e2eModel.js";
 
 const AUTOMATION_MODEL =
-  (process.env.PLAYWRIGHT_AUTOMATION_MODEL ?? process.env.PLAYWRIGHT_LEARN_MODEL ?? "gpt-5.5").trim() ||
-  "gpt-5.5";
+  (process.env.PLAYWRIGHT_AUTOMATION_MODEL ?? process.env.PLAYWRIGHT_LEARN_MODEL ?? E2E_MODEL).trim() ||
+  E2E_MODEL;
 const LIVE_CHAT_AUTOMATIONS_ENABLED = (process.env.PLAYWRIGHT_LIVE_CHAT_AUTOMATIONS ?? "").trim() === "1";
 
 async function ensureHostedRuntimeReady(page: Page, projectId: string) {

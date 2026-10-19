@@ -17,6 +17,7 @@ import {
   waitForStoreProjectId,
 } from "../utils/harness.js";
 import { ensureProjectCreditsReadyForChat } from "../utils/projectCredits.js";
+import { E2E_MODEL } from "../utils/e2eModel.js";
 
 // This spec onboards the machine's real Codex credential for a secondary
 // user. Disable Playwright tracing so neither the credential nor the browser
@@ -24,7 +25,7 @@ import { ensureProjectCreditsReadyForChat } from "../utils/projectCredits.js";
 test.use({ trace: "off" });
 
 const INVITE_CHAT_MODEL =
-  (process.env.PLAYWRIGHT_INVITE_CHAT_MODEL ?? "gpt-5.5").trim() || "gpt-5.5";
+  (process.env.PLAYWRIGHT_INVITE_CHAT_MODEL ?? E2E_MODEL).trim() || E2E_MODEL;
 
 async function openProjectSettings(page: import("@playwright/test").Page) {
   await openTeamDirectory(page);

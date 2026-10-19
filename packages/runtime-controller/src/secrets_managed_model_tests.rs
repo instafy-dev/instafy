@@ -184,7 +184,12 @@ async fn byo_job_keeps_agent_model() -> anyhow::Result<()> {
         },
     )
     .await?;
-    assert_eq!(env, json!({}));
+    // No agent model: the credential's default, never "whatever the runtime
+    // was launched with" (an OpenAI key without a stored default runs Sol).
+    assert_eq!(
+        env,
+        json!({ "CODEX_MODEL": crate::model_defaults::DEFAULT_OPENAI_MODEL_ID })
+    );
     Ok(())
 }
 

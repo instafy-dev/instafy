@@ -24,13 +24,14 @@ class FakeIntersectionObserver {
     this.callback(elements.map((element) => ({ target: element, isIntersecting: intersecting, intersectionRect: element.getBoundingClientRect() })) as IntersectionObserverEntry[], this as unknown as IntersectionObserver);
   }
 }
-function Harness({ userId = ACCOUNT, messages = [id(1)], enabled = true, hidden = false }: {
-  userId?: string; messages?: string[]; enabled?: boolean; hidden?: boolean;
+function Harness({ userId = ACCOUNT, messages = [id(1)], enabled = true, hidden = false, grouped }: {
+  userId?: string; messages?: string[]; enabled?: boolean; hidden?: boolean; grouped?: string[];
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useConversationNotificationRead({ currentUserId: userId, conversationId: CONVERSATION, rootRef: ref as RefObject<HTMLElement | null>, enabled });
   return <div ref={ref} data-testid="transcript" hidden={hidden}>
     {messages.map((messageId, index) => <div key={messageId} data-chat-message-id={messageId} data-top={index * 3}>{messageId}</div>)}
+    {grouped ? <div data-chat-message-id="agent-job-thread:job-1" data-chat-message-ids={grouped.join(" ")} data-top={messages.length * 3}>thread</div> : null}
   </div>;
 }
 
@@ -156,5 +157,19 @@ describe("reading only visible persisted conversation messages", () => {
     await advance(); expect(read).toHaveBeenCalledOnce();
     await emit([container.querySelector(`[data-chat-message-id="${id(2)}"]`)!]); await advance();
     expect(read.mock.calls[1][0].messageIds).toEqual([id(2)]);
+  });
+
+  it("acknowledges the source replies a synthesized agent job thread row presents", async () => {
+    await render({ messages: [], grouped: [id(7), "local-optimistic", id(8)] });
+    const row = container.querySelector('[data-chat-message-id="agent-job-thread:job-1"]')!;
+    expect(observers[0].elements.has(row)).toBe(true);
+    await emit([row]); await advance();
+    expect(read).toHaveBeenCalledOnce();
+    expect(read.mock.calls[0][0].messageIds).toEqual([id(7), id(8)]);
+    // A reply appended to the running thread is acknowledged once it shows.
+    await render({ messages: [], grouped: [id(9), id(7), id(8)] });
+    await emit(); await advance();
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(read.mock.calls[1][0].messageIds).toEqual([id(9)]);
   });
 });

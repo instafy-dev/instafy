@@ -120,7 +120,12 @@ RUN mkdir -p packages/runtime-agent/src \
     && printf 'pub fn cargo_chef_placeholder() {}\n' > packages/runtime-agent/src/lib.rs \
     && printf 'fn main() {}\n' > packages/runtime-agent/src/main.rs
 COPY packages/runtime-contracts/ packages/runtime-contracts/
-COPY packages/openai-proxy-server/ packages/openai-proxy-server/
+# openai-proxy-server is only a dev-dependency: cargo resolves its manifest but
+# never compiles it for the image, so its sources stay out of the cook's key.
+COPY packages/openai-proxy-server/Cargo.toml packages/openai-proxy-server/Cargo.toml
+RUN mkdir -p packages/openai-proxy-server/src \
+    && printf '' > packages/openai-proxy-server/src/lib.rs \
+    && printf 'fn main() {}\n' > packages/openai-proxy-server/src/main.rs
 COPY packages/git-service/ packages/git-service/
 COPY packages/origin-http-server/ packages/origin-http-server/
 COPY codex/codex-rs/ codex/codex-rs/
@@ -135,12 +140,24 @@ RUN cargo chef prepare --recipe-path /src/recipe.json
 ########################
 # The recipe stubs only runtime-agent itself: cargo-chef keeps the out-of-tree
 # path crates (runtime-contracts, git-service, origin-http-server, codex-rs) as
-# real sources, so this layer is keyed on them too. target/ is deliberately NOT
-# a cache mount here: exported layer caches (the publisher's registry cache,
-# mode=max) keep image layers but never cache mounts, so only a layer carries
-# the compiled dependencies to a fresh runner.
+# real sources, so this layer is keyed on them too.
+#
+# Both Rust builders compile into one target/ cache mount with a stable id, so
+# a local daemon keeps every compiled crate across builds, whatever happened to
+# the layers: a runtime-agent edit recompiles runtime-agent only, a codex bump
+# only the crates that changed, and a cook whose layer BuildKit's cleanup
+# removed reruns in seconds. cargo-source-stamps makes that sharing safe across
+# checkouts (cargo alone trusts mtimes, and COPY keeps the checkout's).
+#
+# Exported layer caches (the publisher's registry cache, mode=max) keep image
+# layers but never cache mounts, so release builds, which only the publishers
+# run, also copy the cooked target/ into this layer (/src/cooked-target); the
+# builder seeds an empty mount from it. Dev builds skip that copy, which would
+# only double the disk the cache needs. CARGO_DEPS_LAYER=1 or 0 overrides it.
 FROM ${RUST_IMAGE} AS builder-deps
 ARG BUILD_PROFILE=dev
+ARG TARGETARCH
+ARG CARGO_DEPS_LAYER=auto
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential pkg-config libssl-dev libcap-dev protobuf-compiler \
       clang lld curl \
@@ -149,6 +166,20 @@ ENV CARGO_HOME=/usr/local/cargo \
     RUSTFLAGS="-C link-arg=-fuse-ld=lld"
 WORKDIR /src/packages/runtime-agent
 COPY --from=chef /usr/local/cargo/bin/cargo-chef /usr/local/cargo/bin/cargo-chef
+# codex-code-mode-host links V8 with its sandbox enabled. denoland publishes no
+# such prebuilt, so fetch the one Codex publishes, checked against the checksums
+# pinned in the codex checkout, and point the v8 build script at it. Only its
+# inputs are copied first (the v8 version comes from Cargo.lock), so a codex
+# source change does not download it again.
+COPY --from=chef /src/packages/runtime-agent/Cargo.lock /src/packages/runtime-agent/Cargo.lock
+COPY --from=chef /src/codex/third_party/v8 /src/codex/third_party/v8
+COPY scripts/fetch-rusty-v8.sh /src/scripts/fetch-rusty-v8.sh
+RUN /src/scripts/fetch-rusty-v8.sh "$(rustc -vV | sed -n 's/^host: //p')" /opt/rusty_v8
+ENV RUSTY_V8_ARCHIVE=/opt/rusty_v8/rusty_v8_archive \
+    RUSTY_V8_SRC_BINDING_PATH=/opt/rusty_v8/src_binding.rs
+# After the fetch, which uses neither, so editing them does not download again.
+COPY docker/runtime/cargo-config.toml /usr/local/cargo/config.toml
+COPY docker/runtime/cargo-source-stamps.sh /usr/local/bin/cargo-source-stamps
 COPY --from=chef /src/packages/runtime-agent /src/packages/runtime-agent
 COPY --from=chef /src/packages/runtime-contracts /src/packages/runtime-contracts
 COPY --from=chef /src/packages/openai-proxy-server /src/packages/openai-proxy-server
@@ -157,44 +188,62 @@ COPY --from=chef /src/packages/origin-http-server /src/packages/origin-http-serv
 COPY --from=chef /src/codex /src/codex
 COPY --from=chef /src/proto /src/proto
 COPY --from=chef /src/recipe.json /src/recipe.json
-# codex-code-mode-host links V8 with its sandbox enabled. denoland publishes no
-# such prebuilt, so fetch the one Codex publishes, checked against the checksums
-# pinned in the codex checkout, and point the v8 build script at it.
-COPY scripts/fetch-rusty-v8.sh /src/scripts/fetch-rusty-v8.sh
-RUN /src/scripts/fetch-rusty-v8.sh "$(rustc -vV | sed -n 's/^host: //p')" /opt/rusty_v8
-ENV RUSTY_V8_ARCHIVE=/opt/rusty_v8/rusty_v8_archive \
-    RUSTY_V8_SRC_BINDING_PATH=/opt/rusty_v8/src_binding.rs
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    cargo chef cook --features code-mode-host --profile ${BUILD_PROFILE} --recipe-path /src/recipe.json --locked
+    --mount=type=cache,id=instafy-runtime-agent-target-${BUILD_PROFILE}-${TARGETARCH},target=/src/packages/runtime-agent/target,sharing=locked \
+    set -eu; \
+    target=/src/packages/runtime-agent/target; \
+    cargo-source-stamps prepare "$target" /src/packages/runtime-contracts /src/packages/openai-proxy-server \
+      /src/packages/git-service /src/packages/origin-http-server /src/codex/codex-rs /src/proto; \
+    cargo chef cook --features code-mode-host --profile ${BUILD_PROFILE} --recipe-path /src/recipe.json --locked; \
+    cargo-source-stamps commit "$target"; \
+    deps_layer="${CARGO_DEPS_LAYER}"; \
+    if [ "$deps_layer" = auto ]; then deps_layer=0; [ "${BUILD_PROFILE}" != release ] || deps_layer=1; fi; \
+    if [ "$deps_layer" = 1 ]; then \
+      cat /proc/sys/kernel/random/uuid > "$target/.instafy-cook-id"; \
+      cp -a "$target" /src/cooked-target; \
+    fi
 
 ########################
 # Application builder
 ########################
-# Build on top of the cooked dependency layer (same toolchain, packages and
-# environment). target/ is a cache mount seeded from that layer rather than an
-# empty one: a fresh runner starts from the cooked dependencies, a local daemon
-# keeps its incremental state, and the per-commit compiled workspace stays out
-# of the exported layer cache.
-# Only runtime-agent's own sources are copied here. The path crates
-# (runtime-contracts, openai-proxy-server, origin-http-server, codex-rs, proto)
-# are already in builder-deps with the exact content and mtimes they were
-# cooked from; copying a fresh checkout over them gives every file a newer
-# mtime, and cargo then recompiles every path crate although nothing changed.
+# Build on top of the cooked dependency layer (same toolchain, packages, cargo
+# config and environment) in the same target/ mount as the cook. When the
+# cook's layer came from an exported cache and this daemon's mount does not
+# hold that cook (a fresh publisher runner), the mount is first replaced with
+# the cooked copy. The per-commit compiled workspace stays out of every layer.
+# Only the runtime-agent files that are compiled in are copied here: the path
+# crates come from builder-deps exactly as they were cooked, and runtime-agent's
+# tests and README stay out, so changing them does not rerun this build.
 FROM builder-deps AS builder
 ARG BUILD_PROFILE=dev
 ARG BUILD_ARTIFACT_DIR=debug
+ARG TARGETARCH
 WORKDIR /src
-COPY packages/runtime-agent/ packages/runtime-agent/
+COPY packages/runtime-agent/Cargo.toml packages/runtime-agent/Cargo.lock packages/runtime-agent/
+COPY packages/runtime-agent/src/ packages/runtime-agent/src/
+COPY packages/runtime-agent/assets/instafy/ packages/runtime-agent/assets/instafy/
+COPY packages/runtime-agent/assets/*.js packages/runtime-agent/assets/
+# One cargo command for all three binaries: the sandbox's library is already in
+# runtime-agent's graph, so building it here adds only its binary instead of
+# re-resolving its dependencies with other features and recompiling 63 crates.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/src/packages/runtime-agent/target,from=builder-deps,source=/src/packages/runtime-agent/target \
-    cargo build --profile ${BUILD_PROFILE} --manifest-path packages/runtime-agent/Cargo.toml --features code-mode-host -p runtime-agent -p codex-code-mode-host --locked \
-    && cargo build --profile ${BUILD_PROFILE} --manifest-path packages/runtime-agent/Cargo.toml -p codex-linux-sandbox --locked \
-    && mkdir -p /src/build-artifacts/${BUILD_ARTIFACT_DIR} \
-    && cp /src/packages/runtime-agent/target/${BUILD_ARTIFACT_DIR}/runtime-agent /src/build-artifacts/${BUILD_ARTIFACT_DIR}/runtime-agent \
-    && cp /src/packages/runtime-agent/target/${BUILD_ARTIFACT_DIR}/codex-linux-sandbox /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-linux-sandbox \
-    && cp /src/packages/runtime-agent/target/${BUILD_ARTIFACT_DIR}/codex-code-mode-host /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-code-mode-host
+    --mount=type=cache,id=instafy-runtime-agent-target-${BUILD_PROFILE}-${TARGETARCH},target=/src/packages/runtime-agent/target,sharing=locked \
+    set -eu; \
+    target=/src/packages/runtime-agent/target; \
+    if [ -f /src/cooked-target/.instafy-cook-id ] && ! cmp -s /src/cooked-target/.instafy-cook-id "$target/.instafy-cook-id"; then \
+      find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf {} +; \
+      cp -a /src/cooked-target/. "$target/"; \
+    fi; \
+    cargo-source-stamps prepare "$target" /src/packages/runtime-agent /src/packages/runtime-contracts \
+      /src/packages/openai-proxy-server /src/packages/git-service /src/packages/origin-http-server /src/codex/codex-rs /src/proto; \
+    cargo build --profile ${BUILD_PROFILE} --manifest-path packages/runtime-agent/Cargo.toml --features code-mode-host -p runtime-agent -p codex-code-mode-host -p codex-linux-sandbox --locked; \
+    cargo-source-stamps commit "$target"; \
+    mkdir -p /src/build-artifacts/${BUILD_ARTIFACT_DIR}; \
+    for binary in runtime-agent codex-linux-sandbox codex-code-mode-host; do \
+      cp "$target/${BUILD_ARTIFACT_DIR}/$binary" /src/build-artifacts/${BUILD_ARTIFACT_DIR}/$binary; \
+    done
 
 ########################
 # Binary-only export (dev fast loop): `--target binary-export --output type=local` yields just
@@ -319,35 +368,6 @@ RUN npm install -g "npm@${NPM_VERSION}" && \
     if [ -n "$unpatched" ]; then echo "unpatched undici copies: $unpatched" >&2; exit 1; fi && \
     rm -rf /root/.npm
 
-ARG BUILD_PROFILE=dev
-ARG BUILD_ARTIFACT_DIR=debug
-COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/runtime-agent /usr/local/bin/runtime-agent
-COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-linux-sandbox /usr/local/bin/codex-linux-sandbox
-# Code-mode-only models run their tools in this host; runtime-agent looks for it beside itself.
-COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-code-mode-host /usr/local/bin/codex-code-mode-host
-COPY --from=browser-egress-proxy-builder /out/browser-egress-proxy /usr/local/bin/browser-egress-proxy
-COPY --from=browser-webrtc-builder /out/browser-webrtc-sender /usr/local/bin/browser-webrtc-sender
-RUN set -eu; \
-    for binary in /usr/local/bin/browser-egress-proxy /usr/local/bin/browser-webrtc-sender /usr/local/bin/codex-code-mode-host; do \
-      magic="$(od -An -tx1 -N4 "${binary}" | tr -d ' \n')"; \
-      [ "${magic}" = "7f454c46" ] || { echo "Invalid ELF helper binary: ${binary}" >&2; exit 1; }; \
-    done
-COPY --from=cli-builder /out /opt/instafy-cli
-
-RUN install -m 0755 /usr/local/bin/codex-linux-sandbox /usr/local/bin/codex-linux-sandbox.real \
-    && printf '%s\n' \
-      '#!/bin/sh' \
-      'if [ "$1" = "--codex-run-as-apply-patch" ]; then' \
-      '  exec /usr/local/bin/runtime-agent "$@"' \
-      'fi' \
-      'exec /usr/local/bin/codex-linux-sandbox.real "$@"' \
-      > /usr/local/bin/codex-linux-sandbox \
-    && chmod +x /usr/local/bin/codex-linux-sandbox /usr/local/bin/codex-linux-sandbox.real
-
-RUN chmod +x /opt/instafy-cli/bin/instafy.js \
-    && ln -sf /opt/instafy-cli/bin/instafy.js /usr/local/bin/instafy
-RUN ln -sf /usr/local/bin/runtime-agent /usr/local/bin/codex
-
 RUN set -eu; \
     arch="${TARGETARCH:-}"; \
     if [ -z "$arch" ]; then \
@@ -374,6 +394,38 @@ RUN set -eu; \
 COPY docker/runtime/entrypoint.sh /usr/local/bin/runtime-entrypoint
 
 RUN chmod +x /usr/local/bin/runtime-entrypoint
+
+# codex-linux-sandbox is a wrapper that hands apply-patch to runtime-agent and
+# runs the real sandbox (copied in below as codex-linux-sandbox.real) otherwise.
+RUN printf '%s\n' \
+      '#!/bin/sh' \
+      'if [ "$1" = "--codex-run-as-apply-patch" ]; then' \
+      '  exec /usr/local/bin/runtime-agent "$@"' \
+      'fi' \
+      'exec /usr/local/bin/codex-linux-sandbox.real "$@"' \
+      > /usr/local/bin/codex-linux-sandbox \
+    && chmod +x /usr/local/bin/codex-linux-sandbox \
+    && ln -sf /usr/local/bin/runtime-agent /usr/local/bin/codex
+COPY --from=browser-egress-proxy-builder /out/browser-egress-proxy /usr/local/bin/browser-egress-proxy
+COPY --from=browser-webrtc-builder /out/browser-webrtc-sender /usr/local/bin/browser-webrtc-sender
+COPY --from=cli-builder /out /opt/instafy-cli
+RUN chmod +x /opt/instafy-cli/bin/instafy.js \
+    && ln -sf /opt/instafy-cli/bin/instafy.js /usr/local/bin/instafy
+
+# The compiled binaries change with almost every commit, so they come last: a
+# runtime-agent change re-exports only the binary layers and the small layers
+# after them.
+ARG BUILD_PROFILE=dev
+ARG BUILD_ARTIFACT_DIR=debug
+COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-linux-sandbox /usr/local/bin/codex-linux-sandbox.real
+# Code-mode-only models run their tools in this host; runtime-agent looks for it beside itself.
+COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-code-mode-host /usr/local/bin/codex-code-mode-host
+COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/runtime-agent /usr/local/bin/runtime-agent
+RUN set -eu; \
+    for binary in /usr/local/bin/browser-egress-proxy /usr/local/bin/browser-webrtc-sender /usr/local/bin/codex-code-mode-host; do \
+      magic="$(od -An -tx1 -N4 "${binary}" | tr -d ' \n')"; \
+      [ "${magic}" = "7f454c46" ] || { echo "Invalid ELF helper binary: ${binary}" >&2; exit 1; }; \
+    done
 
 ENV WORKSPACE_DIR=/workspace \
     CODEX_HOME=/workspace/.codex \
@@ -518,35 +570,6 @@ RUN set -eu; \
     unzip -q /tmp/ublock.zip -d /opt/instafy/extensions/ublock; \
     rm -f /tmp/ublock.zip
 
-ARG BUILD_PROFILE=dev
-ARG BUILD_ARTIFACT_DIR=debug
-COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/runtime-agent /usr/local/bin/runtime-agent
-COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-linux-sandbox /usr/local/bin/codex-linux-sandbox
-# Code-mode-only models run their tools in this host; runtime-agent looks for it beside itself.
-COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-code-mode-host /usr/local/bin/codex-code-mode-host
-COPY --from=browser-egress-proxy-builder /out/browser-egress-proxy /usr/local/bin/browser-egress-proxy
-COPY --from=browser-webrtc-builder /out/browser-webrtc-sender /usr/local/bin/browser-webrtc-sender
-RUN set -eu; \
-    for binary in /usr/local/bin/browser-egress-proxy /usr/local/bin/browser-webrtc-sender /usr/local/bin/codex-code-mode-host; do \
-      magic="$(od -An -tx1 -N4 "${binary}" | tr -d ' \n')"; \
-      [ "${magic}" = "7f454c46" ] || { echo "Invalid ELF helper binary: ${binary}" >&2; exit 1; }; \
-    done
-COPY --from=cli-builder /out /opt/instafy-cli
-
-RUN install -m 0755 /usr/local/bin/codex-linux-sandbox /usr/local/bin/codex-linux-sandbox.real \
-    && printf '%s\n' \
-      '#!/bin/sh' \
-      'if [ "$1" = "--codex-run-as-apply-patch" ]; then' \
-      '  exec /usr/local/bin/runtime-agent "$@"' \
-      'fi' \
-      'exec /usr/local/bin/codex-linux-sandbox.real "$@"' \
-      > /usr/local/bin/codex-linux-sandbox \
-    && chmod +x /usr/local/bin/codex-linux-sandbox /usr/local/bin/codex-linux-sandbox.real
-
-RUN chmod +x /opt/instafy-cli/bin/instafy.js \
-    && ln -sf /opt/instafy-cli/bin/instafy.js /usr/local/bin/instafy
-RUN ln -sf /usr/local/bin/runtime-agent /usr/local/bin/codex
-
 RUN set -eu; \
     arch="${TARGETARCH:-}"; \
     if [ -z "$arch" ]; then \
@@ -573,6 +596,38 @@ RUN set -eu; \
 COPY docker/runtime/entrypoint.sh /usr/local/bin/runtime-entrypoint
 
 RUN chmod +x /usr/local/bin/runtime-entrypoint
+
+# codex-linux-sandbox is a wrapper that hands apply-patch to runtime-agent and
+# runs the real sandbox (copied in below as codex-linux-sandbox.real) otherwise.
+RUN printf '%s\n' \
+      '#!/bin/sh' \
+      'if [ "$1" = "--codex-run-as-apply-patch" ]; then' \
+      '  exec /usr/local/bin/runtime-agent "$@"' \
+      'fi' \
+      'exec /usr/local/bin/codex-linux-sandbox.real "$@"' \
+      > /usr/local/bin/codex-linux-sandbox \
+    && chmod +x /usr/local/bin/codex-linux-sandbox \
+    && ln -sf /usr/local/bin/runtime-agent /usr/local/bin/codex
+COPY --from=browser-egress-proxy-builder /out/browser-egress-proxy /usr/local/bin/browser-egress-proxy
+COPY --from=browser-webrtc-builder /out/browser-webrtc-sender /usr/local/bin/browser-webrtc-sender
+COPY --from=cli-builder /out /opt/instafy-cli
+RUN chmod +x /opt/instafy-cli/bin/instafy.js \
+    && ln -sf /opt/instafy-cli/bin/instafy.js /usr/local/bin/instafy
+
+# The compiled binaries change with almost every commit, so they come last: a
+# runtime-agent change re-exports only the binary layers and the small layers
+# after them.
+ARG BUILD_PROFILE=dev
+ARG BUILD_ARTIFACT_DIR=debug
+COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-linux-sandbox /usr/local/bin/codex-linux-sandbox.real
+# Code-mode-only models run their tools in this host; runtime-agent looks for it beside itself.
+COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-code-mode-host /usr/local/bin/codex-code-mode-host
+COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/runtime-agent /usr/local/bin/runtime-agent
+RUN set -eu; \
+    for binary in /usr/local/bin/browser-egress-proxy /usr/local/bin/browser-webrtc-sender /usr/local/bin/codex-code-mode-host; do \
+      magic="$(od -An -tx1 -N4 "${binary}" | tr -d ' \n')"; \
+      [ "${magic}" = "7f454c46" ] || { echo "Invalid ELF helper binary: ${binary}" >&2; exit 1; }; \
+    done
 
 ENV WORKSPACE_DIR=/workspace \
     CODEX_HOME=/workspace/.codex \

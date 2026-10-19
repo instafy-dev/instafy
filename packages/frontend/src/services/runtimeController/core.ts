@@ -332,6 +332,25 @@ function isLikelyExpiredJwt(token: string): boolean {
   return expiresAtMs - Date.now() < 30_000;
 }
 
+const CONTROLLER_USER_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The user a context's token names, read the way the controller reads it: the
+ * `user_id` claim when present, else `sub`. Lowercase, or null when the token
+ * names no user (an opaque or scoped token), so callers never guess whose
+ * account a request acts for. The controller still verifies the token itself.
+ */
+export function controllerRequestContextUserId(
+  context: Pick<ControllerRequestContext, "accessToken">,
+): string | null {
+  const payload = context.accessToken ? tryDecodeJwtPayload(context.accessToken) : null;
+  const claim = payload?.user_id ?? payload?.sub;
+  return typeof claim === "string" && CONTROLLER_USER_ID_PATTERN.test(claim)
+    ? claim.toLowerCase()
+    : null;
+}
+
 function setInjectedControllerOverrides(
   token: string | null | undefined,
   baseUrl: string | null | undefined,

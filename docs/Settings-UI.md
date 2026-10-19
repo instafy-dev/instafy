@@ -89,6 +89,36 @@ For overlays, let the shared shell own the viewport clearance and use these pres
   preserves legacy geometry; do not apply menu padding around a rich form that
   already owns its inset.
 
+The shared Select uses the form-popover preset; action menus in Chats, Automations,
+AI connections and run controls use the menu preset. Listbox options, like menu items,
+keep compact mouse rows and at least 44px touch targets. Keep feature-specific choice
+contents in the caller rather than rebuilding menu geometry there.
+Select options use a checkmark for the current value and a separate keyboard-visible
+focus ring. Disabled options belong to the owning Select's selection state, so neither
+pointer nor keyboard interaction can select them. Avoid repeating the selected value
+as helper text below a field; its trigger already shows that value.
+Menu items and picker options use the same inset keyboard focus ring so scroll areas
+do not clip it. AI connection Test, Replace and Make default use quiet actions; mobile
+menus contain actions only, including Replace. Selecting Test closes the menu and
+returns focus to its trigger. Testing progress and results stay in the connection row;
+failure guidance wraps instead of relying on a hover tooltip. The Default badge also
+belongs to the row, rather than a disabled menu item.
+
+Secrets uses the comfortable page width and a plain, wrapping list. Recovery uses one
+`InlineNotice` with its Retry action; agent choices keep a bounded scroll area within
+the editor. Secrets and AI connection editors opt all shared sections into responsive
+gutters. API-key forms keep Connect in a footer outside the normal scrolling body.
+On phones these forms retain `MobileFocusDialog`, including its visual-viewport
+handling, Back behavior and very-short-viewport fallback. The footer scrolls with the
+form when there is too little room to fix both header and actions on screen.
+
+`/tests/fixtures/menus-forms/index.html` mounts the production Secrets and Your AI
+pages with local sample data, plus the shared Select. Its isolated browser suite covers
+light/dark themes at 390, 1280 and 2560px, form drafts across viewport changes, local
+save, provider Back, menu focus return and narrow error recovery. It does not connect
+real provider accounts or verify native keyboards. Generate comparison screenshots
+outside the source tree with `INSTAFY_REVIEW_SCREENSHOTS`; keep them as review artifacts.
+
 Keep work drawers resizable and mobile navigation thumb-reachable. Their current
 280–560px work-drawer range, 16px rail-header inset, and 12px mobile-navigation body
 inset serve different arrangements. Account for row hit-area padding when comparing

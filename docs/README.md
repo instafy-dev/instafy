@@ -24,6 +24,7 @@ These docs reflect the current product scope: a chat-first filesystem workspace 
 - npm package versioning and release automation: `docs/Package-Releases.md`
 - Credits and billing: `docs/Credits-Billing.md`
 - Local development: `docs/Local-Dev.md`
+- Runtime image layers, incremental Rust builds and rebuild times: [Runtime image builds](Runtime-Image-Builds.md)
 - Testing: `docs/Testing.md`
 - Camera operator guide: `docs/Camera-Operator.md`
 - Voice operator guide: `docs/Voice-Operator.md`

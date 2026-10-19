@@ -15,6 +15,8 @@ import {
 import { MoreHoriz, WarningTriangle } from "iconoir-react";
 import { Button } from "../../../components/Button";
 import { Surface } from "../../../components/Surface";
+import { Text } from "../../../components/Text";
+import { getSkillImportMessageLabel } from "../../../conversations/conversationAutoTitle";
 import { useConversations } from "../../../conversations/ConversationsProvider";
 import { isChatAttachmentStoragePath } from "../../../lib/chatAttachments";
 import { loadChatAttachmentPreview } from "../../../lib/chatAttachmentPreviews";
@@ -524,6 +526,32 @@ function ChatMessageFileAttachment({ attachment }: { attachment: ChatFileAttachm
   );
 }
 
+/**
+ * A first-party connector's `/skills import` line, as its chip sends it: the
+ * bubble says what it does, and the command itself stays one click away.
+ */
+function SkillImportMessageBody({ label, command }: { label: string; command: string }) {
+  return (
+    <div data-testid="chat-skill-import-message">
+      <Text as="p" variant="body" tone="inherit" className="break-words">{label}</Text>
+      <details className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+        <summary
+          className="w-fit cursor-pointer rounded-md py-0.5 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-500"
+          data-testid="chat-skill-import-command-toggle"
+        >
+          Show command
+        </summary>
+        <code
+          className="mt-1 block whitespace-pre-wrap break-all font-mono text-[0.92em] text-slate-600 dark:text-slate-300"
+          data-testid="chat-skill-import-command"
+        >
+          {command}
+        </code>
+      </details>
+    </div>
+  );
+}
+
 export type UserMessageBubbleProps = {
   message: ChatMessage;
   projectId?: string | null;
@@ -547,6 +575,7 @@ export function UserMessageBubble({
 }: UserMessageBubbleProps) {
   const attachments = useMemo(() => extractChatAttachments(message), [message]);
   const hasText = message.content.trim().length > 0;
+  const skillImportLabel = useMemo(() => getSkillImportMessageLabel(message.content), [message.content]);
   const isOwnMessage = align === "right";
   const fileChanges = Array.isArray(message.files) ? message.files : [];
   const hasFileChanges = fileChanges.length > 0;
@@ -587,7 +616,9 @@ export function UserMessageBubble({
           })}
         </div>
       ) : null}
-      {hasText ? (
+      {skillImportLabel ? (
+        <SkillImportMessageBody label={skillImportLabel} command={message.content.trim()} />
+      ) : hasText ? (
         <MessageContent
           content={message.content}
           metadata={

@@ -30,6 +30,7 @@ import {
   type CodexPreflightDockerResult,
 } from "./utils/codexPreflightProxy.js";
 import { resolvePlaywrightControllerUrl } from "./utils/controllerUrl.js";
+import { e2eModelFromEnv } from "./utils/e2eModel.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1261,7 +1262,7 @@ async function preflightCodexBackend(): Promise<void> {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            model: (process.env.PLAYWRIGHT_CODEX_PREFLIGHT_MODEL ?? process.env.CODEX_MODEL ?? "gpt-5.5").trim() || "gpt-5.5",
+            model: e2eModelFromEnv("PLAYWRIGHT_CODEX_PREFLIGHT_MODEL"),
             prompt: "Playwright preflight ping"
           }),
           signal: controller.signal

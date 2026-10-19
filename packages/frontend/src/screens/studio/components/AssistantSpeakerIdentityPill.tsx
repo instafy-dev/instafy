@@ -56,9 +56,13 @@ export function AssistantSpeakerIdentityPill({
  * the column's left edge (the pill's border and 2px of padding are pulled
  * back by the same 3px), the same 8px gap, and the face at the row's own
  * size, 32px beside the avatar gutter at sm+ and 28px inline below it.
+ *
+ * The 3px pull is a relative offset, not a negative margin. The sticky
+ * overlay shrink-wraps the pill, and a -3px margin made its max-content 3px
+ * narrower than the pill, so `max-w-full` clipped the name to "o…".
  */
 export const SPEAKER_PILL_CLASS_NAME =
-  "-ml-[3px] inline-flex max-w-full items-center gap-2 rounded-full border border-slate-200/70 bg-white/95 py-0 pl-0.5 pr-2 text-xs font-semibold text-slate-700 shadow-sm backdrop-blur";
+  "relative -left-[3px] inline-flex max-w-full items-center gap-2 rounded-full border border-slate-200/70 bg-white/95 py-0 pl-0.5 pr-2 text-xs font-semibold text-slate-700 shadow-sm backdrop-blur";
 
 export type SpeakerStatusMarker = {
   label: string;

@@ -8,7 +8,7 @@ import {
 
 const LIST_BOX_BASE = "outline-none";
 const LIST_BOX_ITEM_BASE =
-  "flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-sm text-slate-600 transition data-[hovered]:bg-slate-100 data-[focused]:bg-slate-100 data-[selected]:text-slate-900 data-[selected]:font-medium data-[disabled]:opacity-50 dark:text-slate-300 dark:data-[hovered]:bg-[var(--color-studio-dark-control-hover)] dark:data-[focused]:bg-[var(--color-studio-dark-control-hover)] dark:data-[selected]:text-slate-50";
+  "flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-sm text-slate-600 outline-none transition pointer-coarse:min-h-11 data-[focus-visible]:ring-2 data-[focus-visible]:ring-inset data-[focus-visible]:ring-primary-400/40 data-[hovered]:bg-slate-100 data-[focused]:bg-slate-100 data-[selected]:text-slate-900 data-[selected]:font-medium data-[disabled]:opacity-50 dark:text-slate-300 dark:data-[hovered]:bg-[var(--color-studio-dark-control-hover)] dark:data-[focused]:bg-[var(--color-studio-dark-control-hover)] dark:data-[selected]:text-slate-50";
 
 function mergeClassName(base: string, extra?: string) {
   if (!extra) {

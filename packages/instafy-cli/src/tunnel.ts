@@ -510,8 +510,28 @@ async function revokeTunnel(
   }
 }
 
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+
+// The broker advertises its ingress as one host:port. A local broker advertises loopback, which
+// inside a container (a runtime's shell) is the container itself, so the tunnel never connects.
+// There, dial the Docker host instead. INSTAFY_TUNNEL_SERVER_HOST overrides the host anywhere.
+export function resolveTunnelServerAddress(
+  server: string,
+  env: NodeJS.ProcessEnv = process.env,
+  inContainer: boolean = fs.existsSync("/.dockerenv"),
+): string {
+  const match = /^(\[[^\]]+\]|[^:]+):(\d+)$/.exec(server.trim());
+  if (!match) return server;
+  const [, host, port] = match;
+  const override = env["INSTAFY_TUNNEL_SERVER_HOST"]?.trim();
+  if (override) return `${override}:${port}`;
+  if (inContainer && LOOPBACK_HOSTS.has(host.toLowerCase())) return `host.docker.internal:${port}`;
+  return server;
+}
+
 function buildRatholeConfig(creds: Record<string, unknown>, port: number): string {
-  const server = typeof creds["server"] === "string" ? (creds["server"] as string) : null;
+  const advertised = typeof creds["server"] === "string" ? (creds["server"] as string) : null;
+  const server = advertised ? resolveTunnelServerAddress(advertised) : null;
   const token = typeof creds["token"] === "string" ? (creds["token"] as string) : null;
   const service =
     (typeof creds["service"] === "string" && (creds["service"] as string)) ||

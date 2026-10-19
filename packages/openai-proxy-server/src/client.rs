@@ -8,7 +8,9 @@ use serde_json::{Map as JsonMap, Value, json};
 use uuid::Uuid;
 
 use crate::auth::{Credentials, response_indicates_chatgpt_token_expired};
+use crate::context_controls::ScopedResponseContext;
 use crate::upstream_error::{self, ToolControlRejection, UpstreamFailure};
+use crate::usage::apply_chat_to_responses_usage;
 
 const APPLY_PATCH_GRAMMAR: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -18,7 +20,10 @@ const APPLY_PATCH_GRAMMAR: &str = include_str!(concat!(
 /// Last-resort model for requests that carry no model AND resolve against a
 /// credential with no default (local/dev auth.json paths). NOT a sentinel:
 /// requests that name this id explicitly are served exactly this model.
-pub const DEFAULT_MODEL: &str = "gpt-5.5";
+/// Kept equal to the controller's OpenAI default (`DEFAULT_OPENAI_MODEL_ID`)
+/// and the runtime's `DEFAULT_CODEX_MODEL`: the retired gpt-5.5 it used to
+/// name was rejected upstream.
+pub const DEFAULT_MODEL: &str = "gpt-5.6-sol";
 pub const DEFAULT_INSTRUCTIONS: &str = include_str!("../prompt_gpt5_codex.md");
 
 #[derive(Debug, Clone)]
@@ -34,6 +39,8 @@ pub struct CodexCompletion {
     /// present. Serialized shape matches the frontend `subscriptionUsage`
     /// contract; see `parse_codex_rate_limit_headers`.
     pub rate_limits: Option<Value>,
+    /// Scoped opaque routing state to return to the requesting client.
+    pub(crate) turn_state: Option<String>,
 }
 
 /// A policy over the tools one upstream request carries. It gets the final
@@ -70,6 +77,7 @@ pub struct CodexClient {
     service_tier_endpoints: ServiceTierEndpoints,
     send_hook: Option<SendHook>,
     user_agent: String,
+    context_controls: Option<ScopedResponseContext>,
 }
 
 pub(crate) fn conversation_id_enabled() -> bool {
@@ -194,7 +202,13 @@ impl CodexClient {
             service_tier_endpoints: ServiceTierEndpoints::default(),
             send_hook: None,
             user_agent: format!("openai-proxy-server/{}", env!("CARGO_PKG_VERSION")),
+            context_controls: None,
         })
+    }
+
+    pub(crate) fn with_context_controls(mut self, controls: ScopedResponseContext) -> Self {
+        self.context_controls = Some(controls);
+        self
     }
 
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
@@ -329,6 +343,17 @@ impl CodexClient {
             bail!("request must include at least one input item");
         }
 
+        // A local auth.json can be replaced by a different account between
+        // requests. Resolve that before deriving cache/routing scope, and keep
+        // this credential snapshot for the entire request/retry sequence.
+        let _ = self
+            .credentials
+            .reload_chatgpt_access_token_from_auth_path();
+        self.context_controls = self
+            .context_controls
+            .as_ref()
+            .map(|controls| controls.rebind(&self.credentials, &self.model));
+
         let mut headers = HeaderMap::new();
         let allow_conversation = conversation_id_enabled();
         let mut conversation_id_for_request = if allow_conversation {
@@ -397,6 +422,11 @@ impl CodexClient {
             }
         }
 
+        if upstream_wire_api == UpstreamWireApi::Responses {
+            if let Some(controls) = &self.context_controls {
+                controls.apply_headers(&mut headers);
+            }
+        }
         debug_http_request(self.credentials.endpoint(), &headers, &payload);
 
         let request_url = if upstream_wire_api == UpstreamWireApi::GeminiCodeAssist {
@@ -444,6 +474,14 @@ impl CodexClient {
             }
         };
 
+        let turn_state = if upstream_wire_api == UpstreamWireApi::Responses {
+            self.context_controls
+                .as_ref()
+                .and_then(|controls| controls.response_turn_state(response.headers()))
+        } else {
+            None
+        };
+
         // Capture the subscription-usage snapshot from OpenAI's `x-codex-*`
         // rate-limit headers before the body is consumed below. This is the
         // only point where the upstream response headers are still available.
@@ -460,6 +498,7 @@ impl CodexClient {
             let mut completion =
                 parse_completion(body).context(UpstreamFailure::InvalidResponse)?;
             completion.rate_limits = rate_limits;
+            completion.turn_state = turn_state;
             return Ok(completion);
         }
 
@@ -483,6 +522,7 @@ impl CodexClient {
             }
         };
         completion.rate_limits = rate_limits;
+        completion.turn_state = turn_state;
         Ok(completion)
     }
 
@@ -554,6 +594,11 @@ impl CodexClient {
                 }
             }
         };
+        if upstream_wire_api == UpstreamWireApi::Responses {
+            if let Some(controls) = &self.context_controls {
+                controls.apply_payload(&mut payload, self.credentials.is_chatgpt());
+            }
+        }
         if let Some(filter) = self.tool_filter.as_deref() {
             filter_payload_tools(&mut payload, filter);
         }
@@ -573,10 +618,6 @@ impl CodexClient {
         headers: &HeaderMap,
         payload: &Value,
     ) -> Result<reqwest::Response> {
-        let _ = self
-            .credentials
-            .reload_chatgpt_access_token_from_auth_path();
-
         let mut response = self
             .send_upstream_request(request_url, headers, payload)
             .await?;
@@ -1024,21 +1065,7 @@ fn chat_completions_to_responses(raw: Value) -> Result<Value> {
         bail!("chat completions response missing assistant content");
     };
 
-    let usage = raw.get("usage").and_then(Value::as_object);
-    let prompt_tokens = usage
-        .and_then(|u| u.get("prompt_tokens"))
-        .and_then(number_to_u64)
-        .unwrap_or(0);
-    let completion_tokens = usage
-        .and_then(|u| u.get("completion_tokens"))
-        .and_then(number_to_u64)
-        .unwrap_or(0);
-    let total_tokens = usage
-        .and_then(|u| u.get("total_tokens"))
-        .and_then(number_to_u64)
-        .unwrap_or(prompt_tokens + completion_tokens);
-
-    Ok(json!({
+    let mut response = json!({
         "id": id,
         "model": model,
         "output": [
@@ -1054,14 +1081,12 @@ fn chat_completions_to_responses(raw: Value) -> Result<Value> {
                 ]
             }
         ],
-        "usage": {
-            "input_tokens": prompt_tokens,
-            "output_tokens": completion_tokens,
-            "total_tokens": total_tokens,
-            "input_tokens_details": { "cached_tokens": 0 },
-            "output_tokens_details": { "reasoning_tokens": 0 }
-        }
-    }))
+    });
+    apply_chat_to_responses_usage(&raw, &mut response);
+    if let Some(diagnostics) = raw.get("prompt_cache_diagnostics") {
+        response["prompt_cache_diagnostics"] = diagnostics.clone();
+    }
+    Ok(response)
 }
 
 fn gemini_code_assist_to_responses(raw: Value, fallback_model: &str) -> Result<Value> {
@@ -1902,6 +1927,7 @@ fn parse_completion(raw: Value) -> Result<CodexCompletion> {
         // Filled in by `complete_with_input` from the upstream response headers
         // when they are still available; the body-parsing path leaves it None.
         rate_limits: None,
+        turn_state: None,
     })
 }
 

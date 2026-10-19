@@ -28,11 +28,13 @@ use crate::client::{
     RequiredToolCallFallbackHook, SendHook, ServiceTierEndpoints, conversation_id_enabled,
     is_additional_tools_item, normalize_reasoning_effort, sends_service_tier, sends_tool_controls,
 };
+use crate::context_controls::{AffinityCodec, ResponseContext, TURN_STATE_HEADER};
 use crate::controller_integration::ControllerIntegration;
 use crate::credential_lease::LeasedCredentials;
 use crate::incomplete_response;
 use crate::proxy_auth::ProxyClaims;
 use crate::upstream_error::{self, ToolControlRejection, UpstreamFailure};
+use crate::usage::responses_to_chat_usage;
 
 const MAX_PROXY_REQUEST_BYTES: usize = 25 * 1024 * 1024;
 const PUBLIC_PROXY_LANE_HEADER: &str = "x-instafy-proxy-lane";
@@ -133,6 +135,7 @@ struct ProxyState {
     /// `tool_choice: "required"` it set, after upstream refused that choice,
     /// since it started. Shared by every clone of the state, as above.
     required_tool_call_fallbacks: Arc<AtomicU64>,
+    affinity_codec: Arc<AffinityCodec>,
 }
 
 struct AuthenticatedProxyClaims(Option<ProxyClaims>);
@@ -1097,6 +1100,7 @@ where
         service_tier_overrides: Arc::new(AtomicU64::new(0)),
         service_tier_endpoints,
         required_tool_call_fallbacks: Arc::new(AtomicU64::new(0)),
+        affinity_codec: Arc::new(AffinityCodec::from_env()),
     };
 
     let app = Router::new()
@@ -1477,6 +1481,8 @@ struct RemoteCompletionOptions<'a> {
     auth_mode: &'a str,
     plain_text_completion: bool,
     response_controls: Option<RemoteResponseControls<'a>>,
+    context_controls: &'a ResponseContext,
+    affinity_codec: &'a Arc<AffinityCodec>,
     /// From [`model_service_tier`], decided once per request, so a lease
     /// renewal's retry sends the same tier.
     service_tier: Option<&'a Value>,
@@ -1613,9 +1619,16 @@ fn build_remote_completion_client<'i>(
         options.auth_mode,
         options.payload.get("instructions").and_then(Value::as_str),
     );
+    let context_controls = options.context_controls.scoped(
+        options.claims,
+        &creds,
+        &upstream_model,
+        options.affinity_codec,
+    );
     let mut client = CodexClient::new(creds)
         .map_err(anyhow::Error::from)?
         .with_model(upstream_model.clone())
+        .with_context_controls(context_controls)
         .with_instructions(instructions)
         .with_tools_enabled(!options.plain_text_completion)
         .with_service_tier(
@@ -1813,9 +1826,15 @@ fn spawn_credential_usage_report(
 async fn create_response(
     State(state): State<ProxyState>,
     AuthenticatedProxyClaims(claims): AuthenticatedProxyClaims,
+    headers: HeaderMap,
     Json(payload): Json<Value>,
 ) -> Result<impl IntoResponse, AppError> {
     let lane = classify_upstream_lane(claims.as_ref())?;
+    let context_controls =
+        ResponseContext::parse(&payload, &headers).map_err(AppError::bad_request)?;
+    context_controls
+        .validate_diagnostic_scope(claims.as_ref(), state.controller.is_some())
+        .map_err(AppError::bad_request)?;
     let service_tier = model_service_tier(lane, &payload)?;
     // Empty = absent: resolve_model_for_credentials substitutes the
     // credential's default; an explicit id is honored verbatim.
@@ -1871,6 +1890,8 @@ async fn create_response(
         service_tier: service_tier.upstream.as_ref(),
         service_tier_endpoints: state.service_tier_endpoints,
         required_tool_call_fallbacks: &state.required_tool_call_fallbacks,
+        context_controls: &context_controls,
+        affinity_codec: &state.affinity_codec,
     };
 
     let stream_requested = payload
@@ -1883,6 +1904,12 @@ async fn create_response(
         controller_credential_id,
         source: credential_source,
     } = state.lease_for_lane(lane).await?;
+    context_controls
+        .validate_upstream(
+            sends_tool_controls(&leased.credentials),
+            leased.credentials.is_chatgpt(),
+        )
+        .map_err(AppError::bad_request)?;
     let send_hook = state.service_tier_override_hook(
         &service_tier,
         &leased.credentials,
@@ -1938,20 +1965,29 @@ async fn create_response(
         }
     };
 
-    if stream_requested {
+    let ProxyCompletion::Remote(ref remote) = completion;
+    let turn_state = remote.turn_state.clone();
+    let response = if stream_requested {
         let ProxyCompletion::Remote(remote) = completion;
-        return stream_responses_from_value(remote.raw);
-    }
-
-    Ok(Json(completion.into_response_body()).into_response())
+        stream_responses_from_value(remote.raw)?
+    } else {
+        Json(completion.into_response_body()).into_response()
+    };
+    Ok(with_turn_state(response, turn_state))
 }
 
 async fn create_chat_completion(
     State(state): State<ProxyState>,
     AuthenticatedProxyClaims(claims): AuthenticatedProxyClaims,
+    headers: HeaderMap,
     Json(payload): Json<Value>,
 ) -> Result<Response, AppError> {
     let lane = classify_upstream_lane(claims.as_ref())?;
+    let context_controls =
+        ResponseContext::parse(&payload, &headers).map_err(AppError::bad_request)?;
+    context_controls
+        .validate_diagnostic_scope(claims.as_ref(), state.controller.is_some())
+        .map_err(AppError::bad_request)?;
     let service_tier = model_service_tier(lane, &payload)?;
     // Empty = absent: resolve_model_for_credentials substitutes the
     // credential's default; an explicit id is honored verbatim.
@@ -1991,6 +2027,8 @@ async fn create_chat_completion(
         service_tier: service_tier.upstream.as_ref(),
         service_tier_endpoints: state.service_tier_endpoints,
         required_tool_call_fallbacks: &state.required_tool_call_fallbacks,
+        context_controls: &context_controls,
+        affinity_codec: &state.affinity_codec,
     };
 
     let LaneLease {
@@ -1998,6 +2036,12 @@ async fn create_chat_completion(
         controller_credential_id,
         source: credential_source,
     } = state.lease_for_lane(lane).await?;
+    context_controls
+        .validate_upstream(
+            sends_tool_controls(&leased.credentials),
+            leased.credentials.is_chatgpt(),
+        )
+        .map_err(AppError::bad_request)?;
     let send_hook = state.service_tier_override_hook(
         &service_tier,
         &leased.credentials,
@@ -2501,6 +2545,13 @@ async fn create_transcription(
         .map_err(AppError::internal)
 }
 
+fn with_turn_state(mut response: Response, state: Option<String>) -> Response {
+    if let Some(value) = state.and_then(|value| value.parse().ok()) {
+        response.headers_mut().insert(TURN_STATE_HEADER, value);
+    }
+    response
+}
+
 async fn build_remote_chat_response(
     payload: &Value,
     completion: CodexCompletion,
@@ -2525,7 +2576,8 @@ async fn build_remote_chat_response(
         .unwrap_or_default()
         .as_secs();
 
-    let usage = translate_usage(&completion.raw);
+    let usage = responses_to_chat_usage(&completion.raw);
+    let turn_state = completion.turn_state.clone();
 
     let stream_requested = payload
         .get("stream")
@@ -2547,18 +2599,26 @@ async fn build_remote_chat_response(
                     },
                     "finish_reason": chat_finish_reason(&completion.raw)
                 }
-            ],
-            "usage": usage
+            ]
         });
+        if let Some(usage) = usage {
+            body["usage"] = usage;
+        }
+        if let Some(diagnostics) = completion.raw.get("prompt_cache_diagnostics") {
+            body["prompt_cache_diagnostics"] = diagnostics.clone();
+        }
 
         if completion.conversation_id.is_some() {
             body["conversation"] = json!(completion.conversation_id);
         }
 
-        return Ok(Json(body).into_response());
+        return Ok(with_turn_state(Json(body).into_response(), turn_state));
     }
 
-    stream_responses_from_value(completion.raw)
+    Ok(with_turn_state(
+        stream_responses_from_value(completion.raw)?,
+        turn_state,
+    ))
 }
 
 /// A Chat Completions `finish_reason` for an upstream Responses body. A response the upstream
@@ -3270,54 +3330,6 @@ fn extract_input_items(payload: &Value) -> Result<Vec<Value>> {
     Ok(items)
 }
 
-fn translate_usage(raw: &Value) -> Value {
-    let usage = raw.get("usage").and_then(Value::as_object);
-
-    if let Some(usage) = usage {
-        let prompt_tokens = usage
-            .get("input_tokens")
-            .and_then(number_to_u64)
-            .unwrap_or(0);
-        let completion_tokens = usage
-            .get("output_tokens")
-            .and_then(number_to_u64)
-            .unwrap_or(0);
-        let total_tokens = usage
-            .get("total_tokens")
-            .and_then(number_to_u64)
-            .unwrap_or(prompt_tokens + completion_tokens);
-
-        json!({
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": total_tokens,
-        })
-    } else {
-        json!({
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-        })
-    }
-}
-
-fn number_to_u64(value: &Value) -> Option<u64> {
-    if let Some(n) = value.as_u64() {
-        return Some(n);
-    }
-    if let Some(n) = value.as_i64() {
-        if n >= 0 {
-            return Some(n as u64);
-        }
-    }
-    if let Some(n) = value.as_f64() {
-        if n >= 0.0 {
-            return Some(n as u64);
-        }
-    }
-    None
-}
-
 /// Resolves on SIGTERM, which `docker stop` and most supervisors send, or
 /// on SIGINT (Ctrl-C). Both handlers are in place when this returns, so a
 /// stop sent while the proxy starts still counts.
@@ -3531,7 +3543,7 @@ mod tests {
             }
         });
 
-        let usage = translate_usage(&raw);
+        let usage = responses_to_chat_usage(&raw).unwrap();
         assert_eq!(usage["prompt_tokens"], json!(10));
         assert_eq!(usage["completion_tokens"], json!(5));
         assert_eq!(usage["total_tokens"], json!(16));
@@ -3680,6 +3692,13 @@ mod tests {
     }
 
     #[test]
+    fn the_last_resort_model_is_the_platforms_openai_default() {
+        // A model-less request on a credential without a default (a static
+        // auth.json) used to go upstream as the retired gpt-5.5.
+        assert_eq!(DEFAULT_MODEL, "gpt-5.6-sol");
+    }
+
+    #[test]
     fn resolve_model_falls_back_to_crate_default_without_credential_default() {
         let creds = Credentials::ApiKey {
             key: "test".to_string(),
@@ -3823,6 +3842,7 @@ mod tests {
             service_tier_overrides: Arc::new(AtomicU64::new(0)),
             service_tier_endpoints: ServiceTierEndpoints::default(),
             required_tool_call_fallbacks: Arc::new(AtomicU64::new(0)),
+            affinity_codec: Arc::new(AffinityCodec::from_env()),
         }
     }
 

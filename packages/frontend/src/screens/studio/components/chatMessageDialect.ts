@@ -59,6 +59,7 @@ export type MessageContentBlock =
   | { kind: "paragraph"; line: string }
   | { kind: "list"; ordered: boolean; start?: number; items: MessageListItem[] }
   | { kind: "quote"; lines: string[] }
+  | MessageTableBlock
   | {
       kind: "code";
       language: string | null;
@@ -624,6 +625,69 @@ function stripCodeFenceIndent(line: string, indent: number): string {
   return line.slice(removed);
 }
 
+export type MessageTableAlignment = "left" | "center" | "right" | null;
+
+/** A GFM pipe table: a header row, a delimiter row, then body rows. */
+export type MessageTableBlock = {
+  kind: "table";
+  align: MessageTableAlignment[];
+  header: string[];
+  rows: string[][];
+};
+
+/**
+ * Splits a pipe-table row into its cells: one optional leading and trailing
+ * pipe, `\|` as a literal pipe (inside code spans too, as in GFM), and bare
+ * pipes inside `code spans` kept as text.
+ * Returns null for a line with no cell separator at all.
+ */
+export function splitMessageTableRow(line: string): string[] | null {
+  let text = line.trim();
+  if (!text.includes("|")) return null;
+  if (text.startsWith("|")) text = text.slice(1);
+  if (text.endsWith("|") && !text.endsWith("\\|")) text = text.slice(0, -1);
+  const cells: string[] = [];
+  let cell = "";
+  let codeTicks = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text.charAt(index);
+    if (char === "\\" && text.charAt(index + 1) === "|") {
+      cell += "|";
+      index += 1;
+      continue;
+    }
+    if (char === "`") {
+      let run = 1;
+      while (text.charAt(index + run) === "`") run += 1;
+      if (codeTicks === 0) codeTicks = run;
+      else if (codeTicks === run) codeTicks = 0;
+      cell += "`".repeat(run);
+      index += run - 1;
+      continue;
+    }
+    if (char === "|" && codeTicks === 0) {
+      cells.push(cell.trim());
+      cell = "";
+      continue;
+    }
+    cell += char;
+  }
+  cells.push(cell.trim());
+  return cells;
+}
+
+function parseMessageTableDelimiter(line: string): MessageTableAlignment[] | null {
+  const cells = splitMessageTableRow(line);
+  if (!cells || cells.length === 0) return null;
+  const align: MessageTableAlignment[] = [];
+  for (const cell of cells) {
+    const match = cell.match(/^(:)?-+(:)?$/);
+    if (!match) return null;
+    align.push(match[1] && match[2] ? "center" : match[2] ? "right" : match[1] ? "left" : null);
+  }
+  return align;
+}
+
 export function parseMessageContentBlocks(content: string): MessageContentBlock[] {
   const blocks: MessageContentBlock[] = [];
   let pendingList: Extract<MessageContentBlock, { kind: "list" }> | null = null;
@@ -660,7 +724,18 @@ export function parseMessageContentBlocks(content: string): MessageContentBlock[
   // inside the single <p>, so a hard-wrapped source (a runbook, pasted docs)
   // no longer gets a `<p>` + `mt-2` per source line (#210).
   let pendingParagraph: string[] | null = null;
+  // GFM pipe table: the paragraph's last line becomes the header when the next
+  // line is a delimiter row with the same number of cells; rows follow until a
+  // blank line or a line without a pipe. Agents answer "compare these" with
+  // tables, and the chat showed them as raw pipes.
+  let pendingTable: MessageTableBlock | null = null;
 
+  const flushTable = () => {
+    if (pendingTable) {
+      blocks.push(pendingTable);
+      pendingTable = null;
+    }
+  };
   const flushList = () => {
     if (pendingList) {
       blocks.push(pendingList);
@@ -719,7 +794,33 @@ export function parseMessageContentBlocks(content: string): MessageContentBlock[
       }
       flushQuote();
       flushParagraph();
+      flushTable();
       continue;
+    }
+
+    if (pendingTable) {
+      const cells = splitMessageTableRow(line);
+      if (cells) {
+        const width = pendingTable.header.length;
+        pendingTable.rows.push(
+          Array.from({ length: width }, (_, index) => cells[index] ?? ""),
+        );
+        continue;
+      }
+      flushTable();
+    }
+
+    if (pendingParagraph && !listSurvivesBlankLine) {
+      const headerLine = pendingParagraph[pendingParagraph.length - 1] ?? "";
+      const header = splitMessageTableRow(headerLine);
+      const align = header ? parseMessageTableDelimiter(line) : null;
+      if (header && align && align.length === header.length) {
+        pendingParagraph.pop();
+        if (pendingParagraph.length === 0) pendingParagraph = null;
+        flushParagraph();
+        pendingTable = { kind: "table", align, header, rows: [] };
+        continue;
+      }
     }
 
     if (listSurvivesBlankLine) {
@@ -849,6 +950,7 @@ export function parseMessageContentBlocks(content: string): MessageContentBlock[
   flushList();
   flushQuote();
   flushParagraph();
+  flushTable();
   // An unclosed fence runs to the end of the message, per CommonMark.
   flushCode();
   return blocks.length > 0 ? blocks : [{ kind: "paragraph", line: "" }];

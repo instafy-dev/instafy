@@ -13,6 +13,7 @@ import type {
 import { createDefaultCodeWorkspace } from "./code/defaults";
 import { createDefaultBillingState } from "./credits/defaults";
 import { writePendingProjectSwitch } from "./screens/pendingProjectSwitch";
+import { forgetWorkspaceTabsForProjects, rememberWorkspaceTabsForProject } from "./workspace/workspaceTabPersistence";
 import { isUUID } from "./utils/uuid";
 import { studioPerformance } from "./telemetry/studioPerformance";
 
@@ -121,6 +122,25 @@ interface CreateProjectOptions {
   tags?: string[];
 }
 
+export interface RemoveProjectOptions {
+  /**
+   * Removing the open space opens another one this browser knows, unless this
+   * is false. A tab whose URL still names a space it cannot open shows that
+   * notice with no space open: another space's files and chats would appear
+   * behind it, as if they were the missing space's.
+   */
+  openFallback?: boolean;
+  /**
+   * The space is confirmed deleted, so its saved workspace tabs go too. Off
+   * by default: a space also leaves the store when its access check gets a
+   * 401, 403 or 404, and a 401 can be a token refresh in flight, so that
+   * removal must not erase the tabs of a space that is still there.
+   */
+  forgetSavedTabs?: boolean;
+}
+
+export type RemoveProjectsByOrgIdOptions = Pick<RemoveProjectOptions, "forgetSavedTabs">;
+
 export interface SessionStore {
   state: SiteBuilderState;
   history: HistoryEntry[];
@@ -156,8 +176,8 @@ export interface SessionStore {
   setProjectOrg: (projectId: string, org: ProjectOrgInfo) => void;
   setProjectName: (projectId: string, name: string) => void;
   setProjectIdentity: (projectId: string, identity: ProjectIdentity) => void;
-  removeProject: (projectId: string) => void;
-  removeProjectsByOrgId: (orgId: string) => void;
+  removeProject: (projectId: string, options?: RemoveProjectOptions) => void;
+  removeProjectsByOrgId: (orgId: string, options?: RemoveProjectsByOrgIdOptions) => void;
   undo: () => void;
   redo: () => void;
   reset: () => void;
@@ -474,6 +494,7 @@ export const useWorkspaceStore = create<SessionStore>()(
       throw new Error("createProject requires a valid projectId");
     }
     writePendingProjectSwitch(projectId);
+    rememberWorkspaceTabsForProject(projectId);
     set((store) => {
       const nextProjects = {
         ...store.projects,
@@ -585,7 +606,7 @@ export const useWorkspaceStore = create<SessionStore>()(
       state: projectId === store.activeProjectId ? clone(nextProject) : store.state,
     });
   },
-  removeProject: (projectId) => {
+  removeProject: (projectId, options) => {
     const trimmed = projectId.trim();
     if (!trimmed) {
       return;
@@ -601,8 +622,7 @@ export const useWorkspaceStore = create<SessionStore>()(
         return { projects: nextProjects };
       }
 
-      const remainingIds = Object.keys(nextProjects);
-      const fallbackId = remainingIds[0] ?? "";
+      const fallbackId = options?.openFallback === false ? "" : Object.keys(nextProjects)[0] ?? "";
       if (!fallbackId) {
         return {
           projects: nextProjects,
@@ -620,12 +640,18 @@ export const useWorkspaceStore = create<SessionStore>()(
         future: [],
       };
     });
+    if (options?.forgetSavedTabs) {
+      forgetWorkspaceTabsForProjects([trimmed]);
+    }
   },
-  removeProjectsByOrgId: (orgId) => {
+  removeProjectsByOrgId: (orgId, options) => {
     const trimmed = orgId.trim();
     if (!trimmed) {
       return;
     }
+    const removedIds = Object.entries(get().projects)
+      .filter(([, project]) => project.org?.id === trimmed)
+      .map(([projectId]) => projectId);
     set((store) => {
       const entries = Object.entries(store.projects);
       const nextEntries = entries.filter(([, project]) => project.org?.id !== trimmed);
@@ -654,6 +680,9 @@ export const useWorkspaceStore = create<SessionStore>()(
         future: [],
       };
     });
+    if (options?.forgetSavedTabs) {
+      forgetWorkspaceTabsForProjects(removedIds);
+    }
   },
   undo: () => {
     const { history, state, future, projects, activeProjectId } = get();

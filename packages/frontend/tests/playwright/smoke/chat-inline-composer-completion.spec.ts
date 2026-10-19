@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { prepareStudio } from "../utils/harness.js";
 import { DEFAULT_MOCK_CREDENTIAL_ID, mockDefaultAiCredential } from "../utils/credentialMocks.js";
+import { E2E_MODEL } from "../utils/e2eModel.js";
 
 test.describe("Chat inline composer completion", () => {
   test.setTimeout(120_000);
@@ -26,7 +27,7 @@ test.describe("Chat inline composer completion", () => {
           success: true,
           completion,
           provider: "openai",
-          model: "gpt-5.5",
+          model: E2E_MODEL,
           credentialId: DEFAULT_MOCK_CREDENTIAL_ID,
         }),
       });

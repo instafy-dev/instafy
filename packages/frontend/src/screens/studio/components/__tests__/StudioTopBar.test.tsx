@@ -24,7 +24,10 @@ const mocks = vi.hoisted(() => ({
   focusTab: vi.fn(),
   closeTab: vi.fn(),
   navigationPage: "workspace" as "home" | "team" | "account" | "workspace",
-  activeProjectName: "My space",
+  activeProjectId: "project-1",
+  projectList: [] as { id: string }[],
+  conversationsProjectKey: "default",
+  activeProjectName: "My space" as string | null,
   activeTeamName: "My team",
   activeTeamAvatarUrl: null as string | null,
   sidebarCollapsed: false,
@@ -64,7 +67,7 @@ vi.mock("../../../../lib/desktopShell", () => ({ desktopTitleBarFree: () => mock
 vi.mock("../../useStudioNavigationPosture", () => ({
   useStudioNavigationPosture: () => ({ isLargeScreen: mocks.isLargeScreen, showComposerNavigationButton: !mocks.isLargeScreen }),
 }));
-vi.mock("../../../../projects/useProjects", () => ({ useProjects: () => ({ activeProjectId: "project-1" }) }));
+vi.mock("../../../../projects/useProjects", () => ({ useProjects: () => ({ activeProjectId: mocks.activeProjectId, projectList: mocks.projectList }) }));
 vi.mock("../../../../providers/AuthProvider", () => ({ useAuth: () => ({ user: { id: "test-user" } }) }));
 vi.mock("../../../../projects/useProject", () => ({ useProject: () => ({ projectAccessBlocked: mocks.projectAccessBlocked }) }));
 vi.mock("../../../../runtime/useRuntime", () => ({ useRuntime: () => ({ runtime: { controllerProjectMissing: mocks.controllerProjectMissing } }) }));
@@ -81,7 +84,7 @@ vi.mock("../../../../workspace/WorkspaceTabsProvider", () => ({
   }),
 }));
 vi.mock("../../../../conversations/ConversationsProvider", () => ({
-  useConversations: () => ({ conversations: mocks.conversations, activeConversationId: "conversation-1" }),
+  useConversations: () => ({ conversations: mocks.conversations, activeConversationId: "conversation-1", projectKey: mocks.conversationsProjectKey }),
 }));
 vi.mock("../StudioNewChatButton", () => ({
   StudioNewChatButton: ({ testId, renderTrigger }: { testId?: string; renderTrigger?: (actions: Record<string, never>) => ReactNode }) => renderTrigger ? renderTrigger({}) : <button data-testid={testId} aria-label="New chat" />,
@@ -112,6 +115,9 @@ describe("StudioTopBar navigation", () => {
     mocks.controllerProjectMissing = false;
     mocks.projectAccessBlocked = false;
     mocks.navigationPage = "workspace";
+    mocks.activeProjectId = "project-1";
+    mocks.projectList = [];
+    mocks.conversationsProjectKey = "default";
     mocks.activeProjectName = "My space";
     mocks.sidebarCollapsed = false;
     mocks.titleBarFree = false;
@@ -292,6 +298,29 @@ describe("StudioTopBar navigation", () => {
     expect(mocks.requestUrlPush).toHaveBeenCalled();
   });
 
+  it("offers no way back to a chat of a space that was removed", async () => {
+    const deletedSpace = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const otherSpace = "11111111-2222-4333-8444-555555555555";
+    mocks.isLargeScreen = true;
+    mocks.conversationWorkspace = true;
+    mocks.tab = { id: "projects", kind: "panel", panel: "projects", title: "Spaces" };
+    mocks.conversations = [{ localId: "conversation-1", title: "Connect FreeFinance" }];
+    mocks.conversationsProjectKey = deletedSpace;
+    mocks.activeProjectId = "";
+    mocks.projectList = [];
+    await act(async () => root.render(<StudioTopBar inlineDesktop newChatInSidebar />));
+    expect(container.querySelector('[aria-label="Return to Connect FreeFinance"]')).toBeNull();
+
+    mocks.projectList = [{ id: otherSpace }];
+    await act(async () => root.render(<StudioTopBar inlineDesktop newChatInSidebar />));
+    expect(container.querySelector('[aria-label="Return to Connect FreeFinance"]')).toBeNull();
+
+    // The same chat in a space the store still holds keeps its way back.
+    mocks.projectList = [{ id: otherSpace }, { id: deletedSpace }];
+    await act(async () => root.render(<StudioTopBar inlineDesktop newChatInSidebar />));
+    expect(container.querySelector('[aria-label="Return to Connect FreeFinance"]')).not.toBeNull();
+  });
+
   it("embeds desktop tabs without nesting headers or repeating the native inset", async () => {
     mocks.isLargeScreen = true;
     mocks.titleBarFree = true;
@@ -464,6 +493,19 @@ describe("StudioTopBar navigation", () => {
     expect(container.querySelector('[data-testid="topbar-project-name"]')?.textContent).toBe("Untitled space");
     expect(container.querySelector('[data-testid="topbar-sidebar-toggle"]')?.getAttribute("aria-label"))
       .toBe("Open space navigation: Untitled space");
+  });
+
+  // A space deleted in another tab leaves no space open behind its notice.
+  // The header named a phantom "Untitled space" there.
+  it("names no space while none is open", async () => {
+    mocks.activeProjectId = "";
+    mocks.activeProjectName = null;
+    mocks.projectAccessBlocked = true;
+    await act(async () => root.render(<StudioTopBar />));
+    expect(container.querySelector('[data-testid="topbar-project-name"]')?.textContent).toBe("Choose a Space");
+    expect(container.querySelector('[data-testid="topbar-sidebar-toggle"]')?.getAttribute("aria-label"))
+      .toBe("Open space navigation: Choose a Space");
+    expect(container.textContent).not.toContain("Untitled space");
   });
 
   it("keeps space navigation and Back reachable when project access is blocked", async () => {

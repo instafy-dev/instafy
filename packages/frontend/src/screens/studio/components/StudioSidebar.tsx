@@ -595,6 +595,22 @@ export function StudioSidebar({
       || controllerOrgInfoById.has(project.orgId)
       || accessibleProjectIds.has(project.id));
   }, [allRemoteProjects, controllerOrgInfoById, cachedMergedProjects, projectList, resolvedOrgUser, userEmail]);
+  // A space this tab just created is newer than both directories, and so is
+  // the team a first space creates. Ask both again, once per space, so the
+  // filter above can tell it from a deleted team's leftover and keep it.
+  const directoryRecheckedProjectRef = useRef<string | null>(null);
+  useEffect(() => {
+    const orgId = activeProject?.orgId;
+    if (!runtimeControllerEnabled || !activeProject || !orgId || allRemoteProjects == null || orgsFetchState !== "ready"
+      || directoryRecheckedProjectRef.current === activeProject.id
+      || controllerOrgInfoById.has(orgId)
+      || allRemoteProjects.some((project) => project.projectId === activeProject.id)) {
+      return;
+    }
+    directoryRecheckedProjectRef.current = activeProject.id;
+    setOrgsRefreshEpoch((epoch) => epoch + 1);
+    retryRemoteProjects();
+  }, [activeProject, allRemoteProjects, controllerOrgInfoById, orgsFetchState, retryRemoteProjects]);
   const orgOptions = useMemo(() => {
     const options = new Map<
       string,
@@ -716,10 +732,18 @@ export function StudioSidebar({
   // Quick switching follows the selected team, independent of directory search
   // or a temporarily browsed team. Recency contains IDs only; access comes from
   // the authenticated project snapshot.
-  const recentSpaceCandidates = useMemo(() => activeTeamMetadataReady
-    ? mergedProjects.filter((project) => (project.orgId ?? "personal") === activeOrgKey)
-      .map((project) => ({ id: project.id, name: project.name, icon: project.projectIcon, color: project.projectColor, avatarUrl: project.projectAvatarUrl }))
-    : [], [activeOrgKey, activeTeamMetadataReady, mergedProjects]);
+  const recentSpaceCandidates = useMemo(() => {
+    if (!activeTeamMetadataReady) return [];
+    const teamProjects = [
+      ...mergedProjects.filter((project) => (project.orgId ?? "personal") === activeOrgKey),
+      // The open space names the space control even when the stale-team
+      // filter above dropped it: a space this tab just created is in neither
+      // directory yet, nor is the team a first space creates.
+      ...(activeProject && selectedTeamHasActiveSpace && !mergedProjects.some((project) => project.id === activeProject.id)
+        ? [activeProject] : []),
+    ];
+    return teamProjects.map((project) => ({ id: project.id, name: project.name, icon: project.projectIcon, color: project.projectColor, avatarUrl: project.projectAvatarUrl }));
+  }, [activeOrgKey, activeProject, activeTeamMetadataReady, mergedProjects, selectedTeamHasActiveSpace]);
   const filteredOrgProjects = useMemo(() => {
     const needle = workspaceProjectQuery.trim().toLowerCase();
     const filtered =

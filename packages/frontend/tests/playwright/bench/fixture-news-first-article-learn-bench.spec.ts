@@ -21,10 +21,11 @@ import {
 import { startBenchFixtureSite, type BenchFixtureSite } from "./fixtureSiteHarness.js";
 import { runFixtureNewsAttempt, type FixtureNewsAttemptResult } from "./benchTasks.js";
 import { updateLearnBenchSummary } from "./learnBenchSummary.js";
+import { E2E_MODEL } from "../utils/e2eModel.js";
 
 const BENCH_MODEL =
-  (process.env.PLAYWRIGHT_BENCH_MODEL ?? process.env.PLAYWRIGHT_LEARN_MODEL ?? process.env.PLAYWRIGHT_RETRO_MODEL ?? "gpt-5.5").trim() ||
-  "gpt-5.5";
+  (process.env.PLAYWRIGHT_BENCH_MODEL ?? process.env.PLAYWRIGHT_LEARN_MODEL ?? process.env.PLAYWRIGHT_RETRO_MODEL ?? E2E_MODEL).trim() ||
+  E2E_MODEL;
 
 async function ensureHostedRuntimeReady(page: Page, projectId: string) {
   const ready = await waitForHostedRuntimeReady(page, 10_000)

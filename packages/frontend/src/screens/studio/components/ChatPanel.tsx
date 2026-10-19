@@ -23,6 +23,7 @@ import { Spinner } from "../../../components/Spinner";
 import { useBreakpoint } from "../../../hooks/useBreakpoint";
 import { useStudioChatPerformance } from "../../../telemetry/useStudioChatPerformance";
 import { useConversationNotificationRead } from "../../../notifications/useConversationNotificationRead";
+import { registerOpenConversation } from "../../../notifications/openConversations";
 import {
   addFloatingSurfaceViewportChangeListener,
   clampFloatingSurfacePositionToStudioViewport,
@@ -284,6 +285,7 @@ import { updateMyAgent } from "../../../services/runtimeController/agents";
 import { formatProviderLabel } from "./CreditsUsageRates";
 import { parseSubscriptionUsage } from "./subscriptionUsageFormat";
 import { resolveCredentialLabel } from "../../../utils/credentialFormatting";
+import { resolveRosterCredential } from "./participantCredential";
 import {
   modelOptionsForProvider,
   normalizeAiModelId,
@@ -1983,6 +1985,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     rootRef: scrollContainerRef,
     enabled: chatVisible && !jobThread,
   });
+  // While this transcript is on screen the chat itself presents its replies:
+  // the notification center skips the banner for it and asks it to re-read
+  // when the durable feed sees a reply the live stream may have missed.
+  const showsConversationTranscript = chatVisible && !jobThread;
+  useEffect(() => {
+    if (!showsConversationTranscript || !activeConversationControllerId) return;
+    return registerOpenConversation(activeConversationControllerId);
+  }, [activeConversationControllerId, showsConversationTranscript]);
 
   const activeConversation = useMemo(
     () => conversations.find((conversation) => conversation.localId === activeConversationId) ?? null,
@@ -4707,35 +4717,24 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         !providerRaw || providerRaw === "assistant"
           ? defaultCredentialProviderId
           : normalizeAiProviderId(providerRaw);
-      // Explicit model, or the provider's default (the first option in
-      // modelOptionsForProvider) when the agent pins none.
-      const model = profile ?
-        normalizeAiModelId(providerId, profile.model) ??
-        modelOptionsForProvider(providerId)[0]?.id ??
-        null : null;
-      let credentialLabel: string | null = null;
-      let credentialState: ParticipantCredentialState = "none";
-      // The credential whose live usage applies to this agent: the pinned one
-      // when it resolves, otherwise the workspace default. Stays null for the
-      // broken states (missing/revoked); there's no live snapshot to show.
-      let effectiveCredential: (typeof availableCredentials)[number] | null = null;
-      if (profile?.credentialId) {
-        const pinned = credentialsById.get(profile.credentialId) ?? null;
-        if (!pinned) {
-          credentialState = "missing";
-        } else if (pinned.revokedAt) {
-          credentialState = "revoked";
-          credentialLabel = resolveCredentialLabel(pinned);
-        } else {
-          credentialState = "pinned";
-          credentialLabel = resolveCredentialLabel(pinned);
-          effectiveCredential = pinned;
-        }
-      } else if (profile && defaultAiCredential) {
-        credentialState = "default";
-        credentialLabel = resolveCredentialLabel(defaultAiCredential);
-        effectiveCredential = defaultAiCredential;
-      }
+      // Explicit model, or the lane's default: the managed model the
+      // controller reports, else the provider's first option.
+      const resolution = profile
+        ? resolveRosterCredential({
+            pinnedCredentialId: profile.credentialId,
+            pinnedModel: normalizeAiModelId(providerId, profile.model) ?? null,
+            providerDefaultModel: modelOptionsForProvider(providerId)[0]?.id ?? null,
+            credentialsById,
+            defaultCredential: defaultAiCredential ?? null,
+            managedAi: credentialRequirements.managedAi,
+          })
+        : null;
+      const model = resolution?.model ?? null;
+      const credentialState: ParticipantCredentialState = resolution?.credentialState ?? "none";
+      const credentialLabel = resolution?.labelCredential
+        ? resolveCredentialLabel(resolution.labelCredential)
+        : resolution?.managedLabel ?? null;
+      const effectiveCredential = resolution?.credential ?? null;
       // Read `subscriptionUsage` defensively: it's a recent addition to the
       // controller payload, so tolerate its absence rather than hard-depend on
       // the field being present in the credential type.
@@ -4748,6 +4747,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         canEditProfile: Boolean(profile),
         providerId,
         model,
+        modelLabel: resolution?.modelLabel ?? null,
         reasoningEffort: profile?.reasoningEffort ?? null,
         runtime: profile ? resolveRuntime(profile.runtimeId ?? null) : null,
         providerLabel: profile ? formatProviderLabel(providerId) : null,
@@ -4762,6 +4762,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     availableAgents,
     availableCredentials,
     conversationRosterAgents,
+    credentialRequirements.managedAi,
     defaultAiCredential,
     runtimeMenu,
   ]);
@@ -5623,6 +5624,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           key={`${activeProjectId}:${currentUserId}`}
           projectId={activeProjectId}
           userId={currentUserId}
+          active={chatVisible}
         />
       ) : null}
       <ChatScrollSnapshotBoundary identity={chatScrollMutationIdentity} messages={messages} capture={recordScrollPosition}>
@@ -6086,6 +6088,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         }}
         composerOverlayRef={composerOverlayRef}
         composerAutoHidden={composerAutoHidden}
+        touchLikeInput={touchLikeInput}
         compactBrowserViewport={compactBrowserViewport}
         onSubmit={handleSubmit}
         queueSurfaceProps={{

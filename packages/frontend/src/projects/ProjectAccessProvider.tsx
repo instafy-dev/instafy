@@ -170,6 +170,23 @@ function writeStoredProjectId(projectId: string | null | undefined) {
 }
 
 /**
+ * Says that no space is open to the runtime, chat and tab readers that use
+ * these window values while the store has none open. Left naming a blocked
+ * space, they kept reading it behind its notice.
+ */
+function publishNoActiveProject() {
+  if (typeof window === "undefined") {
+    return;
+  }
+  const runtimeWindow = window as typeof window & {
+    __INSTAFY_ACTIVE_PROJECT_ID__?: string | null;
+    __INSTAFY_PROJECT_INITIALIZED__?: boolean;
+  };
+  runtimeWindow.__INSTAFY_ACTIVE_PROJECT_ID__ = null;
+  runtimeWindow.__INSTAFY_PROJECT_INITIALIZED__ = true;
+}
+
+/**
  * Names the resolved space in the URL and reports whether that changed it.
  * The write goes through the router, not window.history: the studio's URL
  * writer and the chat's scroll restore read the routed location and hold
@@ -615,7 +632,10 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
         if (projectBlocked && urlProjectId) {
           blockedProjectIdRef.current = targetProjectId;
           projectSummaryRetryBackoffRef.current = null;
-          removeProject(targetProjectId);
+          // The URL names this space, so the notice stands in for it with no
+          // other space open behind it.
+          publishNoActiveProject();
+          removeProject(targetProjectId, { openFallback: false });
           if (storedProjectIdRef.current === targetProjectId) {
             storedProjectIdRef.current = null;
             writeStoredProjectId(null);
@@ -626,12 +646,6 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
           setProjectAccessPending(false);
           setProjectAccessBlocked(true);
           setProjectCapabilities(null);
-          if (typeof window !== "undefined") {
-            const runtimeWindow = window as typeof window & {
-              __INSTAFY_PROJECT_INITIALIZED__?: boolean;
-            };
-            runtimeWindow.__INSTAFY_PROJECT_INITIALIZED__ = true;
-          }
           setProjectInitialized(true);
           return;
         }
@@ -925,11 +939,14 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
     let retryTimer: number | null = null;
     let requestController: AbortController | null = null;
     let lastNotFoundCheckAt = 0;
+    // The controller said the open space was deleted, so removing it also
+    // drops its saved tabs. A failed access check alone never does.
+    let targetDeleted = false;
 
-    // Removing a blocked space moves the store on to another one while the
-    // URL still names the blocked space. This tab is not showing that other
-    // space, and checking it would unblock it: its workspace would open in
-    // place of the notice, with nothing said. Picking a space changes the URL.
+    // The store can hold another space while the URL still names a blocked
+    // one. This tab is not showing that other space, and checking it would
+    // unblock it: its workspace would open in place of the notice, with
+    // nothing said. Picking a space changes the URL.
     const urlHoldsBlockedProject = () => {
       const blockedProjectId = blockedProjectIdRef.current;
       return (
@@ -984,7 +1001,16 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
             current?.projectId === targetProjectId ? null : current,
           );
           setProjectAccessBlocked(true);
-          removeProject(targetProjectId);
+          // While the URL names it, the notice stands in for it: another space
+          // opened behind it would show its name, files and chats there.
+          const openFallback = readUrlProjectId() !== targetProjectId;
+          if (!openFallback) {
+            publishNoActiveProject();
+          }
+          removeProject(
+            targetProjectId,
+            targetDeleted ? { openFallback, forgetSavedTabs: true } : { openFallback },
+          );
           return;
         }
 
@@ -1050,7 +1076,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
         if (projectsRef.current[targetProjectId]?.org?.id !== deletedOrgId || urlHoldsBlockedProject()) {
           // The open space is in another team, or already blocked: only this
           // tab's lists change.
-          removeProjectsByOrgId(deletedOrgId);
+          removeProjectsByOrgId(deletedOrgId, { forgetSavedTabs: true });
           return;
         }
         if (isProjectDeletedHere(targetProjectId)) {
@@ -1062,9 +1088,10 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
         // and leave the open one to the refresh below, which finds it gone
         // and blocks it: removing it first would open another space.
         setLastDeletedProjectId(targetProjectId);
+        targetDeleted = true;
         for (const [projectId, project] of Object.entries(projectsRef.current)) {
           if (projectId !== targetProjectId && project.org?.id === deletedOrgId) {
-            removeProject(projectId);
+            removeProject(projectId, { forgetSavedTabs: true });
           }
         }
       }
@@ -1077,14 +1104,15 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
           // Only this tab's lists change; access to the open space did not.
           // That holds for a team this tab is deleting too: a space announced
           // deleted is gone even if the team delete then fails.
-          removeProject(deletedProjectId);
+          removeProject(deletedProjectId, { forgetSavedTabs: true });
           return;
         }
+        // The open space: the refresh below finds it gone and blocks it.
+        targetDeleted = true;
         if (isProjectDeletedHere(deletedProjectId)) {
           // The tab that deleted it navigates away by itself.
           return;
         }
-        // The open space: the refresh below finds it gone and blocks it.
       }
       if (detail?.projectId && detail.projectId !== targetProjectId) {
         return;

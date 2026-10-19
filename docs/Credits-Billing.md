@@ -308,6 +308,23 @@ the controller at all. These measurements therefore do not establish a complete
 provider bill. Compare actual models and credential paths separately before
 applying prices; diagnostic receipt totals do not authorize new charges.
 
+The proxy preserves reported usage when adapting Chat Completions and Responses.
+If a Chat provider returns partial or malformed counts that Codex cannot decode,
+the adapter omits typed `usage` and retains the original under
+`usage_metadata.metadata.instafy_provider_usage`. The answer can still complete,
+but those counters are diagnostic observations, not a complete typed usage report.
+
+Cache counts also depend on the reporting boundary. Codex currently normalizes an
+absent upstream cache-write counter to zero, so a zero in a runtime receipt does not
+prove the provider reported no cache writes. Cache comparisons should retain the
+upstream usage object's field presence and collect every request attempt across the
+root, native helpers and isolated workers; missing, invalid or interrupted usage
+remains unknown. Deduplicate repeated response identities instead of adding runtime
+receipts to the same requests. The controller's current pricing uses input, cached
+input and output rates, with no separate cache-write rate. This measurement does not
+change that credit policy or establish costs for providers with distinct cache-write
+pricing. API list-price estimates also do not establish a subscription customer's bill.
+
 ### Ledger guard
 Every `org_credit_ledger` insert moves the team balance through the ledger's balance trigger,
 under a lock on the team's balance row:

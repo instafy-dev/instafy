@@ -91,7 +91,7 @@ use crate::shared_browser::{
 };
 use crate::task_usage::{UsageAttempt, UsageCall, UsageCounts, UsageOutcome};
 
-const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
+use crate::job_model::DEFAULT_CODEX_MODEL;
 const DEFAULT_CODEX_RUN_TIMEOUT_SECONDS: u64 = 600;
 const DEFAULT_CODEX_MAX_RUN_RETRIES: usize = 1;
 const PROXY_STREAM_MAX_RETRIES: u64 = 1;
@@ -177,20 +177,26 @@ If work requires observing workspace/runtime state that was not already provided
 
 The final assistant message should be normal user-facing prose. Do not wrap it in JSON unless the latest request explicitly asks for JSON.
 "#;
-const PLAIN_WRITE_RUNTIME_DEVELOPER_INSTRUCTIONS: &str = r#"Instafy Studio workspace-change run:
+const PLAIN_WRITE_RUNTIME_DEVELOPER_INSTRUCTIONS: &str = r#"Instafy Studio workspace task:
 - Treat this as a background automation job, not an interactive chat turn.
-- Make the requested file changes directly with `apply_patch` (or write the files). Read files first with the available tools when you need current content before editing.
+- Complete the latest request under the existing permissions and write scopes. Required file changes must be completed with the available editing tools; a no-change explanation does not satisfy a required edit.
+- When edits are conditional on review or validation, inspect and validate first, then make only warranted changes. If none are needed, explain what you checked and why no change is warranted. Do not make a cosmetic edit solely to produce a diff.
+- Make warranted file changes directly with `apply_patch` (or write the files). Read files first with the available tools when you need current content before editing.
 - Do not send progress-only assistant messages as the final response.
 - Apply relevant skills silently. If a prompt includes a skill snapshot or compact workspace memory, treat that as already loaded.
-- Always end the turn with a final assistant message — never stop after reasoning alone. Finish with a short, normal summary of what you changed. Do not wrap the final answer in JSON, and do not paste full file contents — the runtime derives the changed-file list and diff from the workspace itself.
+- Always end the turn with a final assistant message — never stop after reasoning alone. Finish with a short, normal summary of the changes or justified no-change result. Do not wrap the final answer in JSON, and do not paste full file contents — the runtime derives the changed-file list and diff from the workspace itself.
 - If the request cannot be completed as stated (for example a referenced file or page does not exist), do not end silently: say what you found and either take the closest useful action (such as creating the missing file) or state clearly what is blocking it."#;
-const PLAIN_WRITE_RUNTIME_BASE_INSTRUCTIONS: &str = r#"You are Codex running inside Instafy Studio as a non-interactive background automation agent completing a workspace-change request.
+const PLAIN_WRITE_RUNTIME_BASE_INSTRUCTIONS: &str = r#"You are Codex running inside Instafy Studio as a non-interactive background automation agent completing a workspace task.
 
-Make the requested changes directly in the workspace using your file-editing tools (`apply_patch`). Inspect files with the available tools when you need to see current content before editing. Do not emit interim progress, preamble, or status-only assistant messages.
+Complete the latest request under the existing permissions and write scopes. Required file changes must be completed with the available editing tools; a no-change explanation does not satisfy a required edit.
+
+When edits are conditional on review or validation, inspect and validate first, then make only warranted changes. If none are needed, explain what you checked and why no change is warranted. Do not make a cosmetic edit solely to produce a diff.
+
+Make warranted changes directly in the workspace using your file-editing tools (`apply_patch`). Inspect files with the available tools when you need to see current content before editing. Do not emit interim progress, preamble, or status-only assistant messages.
 
 Apply skills silently. When the prompt includes a focused skill snapshot, compact workspace memory, or loaded learned blocks, treat that material as already loaded unless the latest request explicitly asks you to re-read it.
 
-When you have applied the changes, finish with a short, normal user-facing assistant message summarizing what you changed (files touched and any important caveats). Do not wrap the final answer in JSON, and do not restate full file contents — the runtime detects the actual file changes from the workspace itself.
+Finish with a short, normal user-facing assistant message summarizing the changes or justified no-change result, including relevant checks and any important caveats. Do not wrap the final answer in JSON, and do not restate full file contents — the runtime detects the actual file changes from the workspace itself.
 
 Always end the turn with a final assistant message; never stop after reasoning alone. If the request cannot be completed as stated — for example a referenced file or page does not exist in the workspace — do not stop silently: briefly say what you found and either take the closest useful action (such as creating the missing file) or state clearly what is blocking it.
 "#;
@@ -251,30 +257,9 @@ pub(crate) fn classify_internal_codex_fallback_summary(
 }
 
 fn normalize_runtime_codex_model_id(model: &str) -> String {
-    match model.trim() {
-        "" => DEFAULT_CODEX_MODEL.to_string(),
-        // Older persisted Studio agent settings can still point at retired Codex
-        // model ids even after the frontend option list is migrated.
-        trimmed if is_retired_runtime_codex_model_id(trimmed) => DEFAULT_CODEX_MODEL.to_string(),
-        trimmed => trimmed.to_string(),
-    }
-}
-
-fn is_retired_runtime_codex_model_id(model: &str) -> bool {
-    let normalized = model.trim().to_ascii_lowercase();
-    if normalized == "gpt-5" || normalized == "gpt-5-codex" {
-        return true;
-    }
-    normalized
-        .strip_prefix("gpt-5.")
-        .and_then(|rest| {
-            let minor: String = rest
-                .chars()
-                .take_while(|character| character.is_ascii_digit())
-                .collect();
-            minor.parse::<u32>().ok()
-        })
-        .is_some_and(|minor| minor < 5)
+    // Older persisted Studio agent settings can still point at retired Codex
+    // model ids even after the frontend option list is migrated.
+    crate::job_model::normalize_model_id(model)
 }
 
 /// The decoder's grammar for the final assistant message.
@@ -578,7 +563,7 @@ fn routing_preflight_final_output_json_schema() -> JsonValue {
         r#"{
           "type": "object",
           "additionalProperties": false,
-          "required": ["summary", "route", "reason", "selectedSkills", "confidence", "requiresContextLookup", "requiresCommandExecution", "requiresWorkspaceFileChanges", "observationCommands"],
+          "required": ["summary", "route", "reason", "selectedSkills", "confidence", "requiresContextLookup", "requiresCommandExecution", "workspaceFileChangeRequirement", "observationCommands"],
           "properties": {
             "summary": { "type": "string" },
             "route": { "type": "string" },
@@ -590,7 +575,11 @@ fn routing_preflight_final_output_json_schema() -> JsonValue {
             "confidence": { "type": "integer" },
             "requiresContextLookup": { "type": "boolean" },
             "requiresCommandExecution": { "type": "boolean" },
-            "requiresWorkspaceFileChanges": { "type": "boolean" },
+            "workspaceFileChangeRequirement": {
+              "type": "string",
+              "enum": ["none", "conditional", "required"],
+              "description": "none: no file changes requested; conditional: inspect or validate and change files only if warranted, so no change can be correct; required: success requires actual file changes. This describes the completion requirement, not write permission."
+            },
             "observationCommands": {
               "type": "array",
               "items": { "type": "string" }
@@ -1359,7 +1348,8 @@ impl CodexClient {
         );
 
         let overrides = ConfigOverrides {
-            model: optional_env("CODEX_MODEL"),
+            // Job secrets installed CODEX_MODEL; the launch value is only a logged fallback.
+            model: crate::job_model::installed_job_model_override("codex turn"),
             review_model: None,
             cwd: Some(self.config.workspace_dir.clone()),
             approval_policy: Some(AskForApproval::Never),
@@ -1369,7 +1359,7 @@ impl CodexClient {
                 resolve_sandbox_mode()
             }),
             personality: default_personality,
-            model_provider: optional_env("CODEX_MODEL_PROVIDER"),
+            model_provider: crate::job_model::installed_job_model_provider(),
             codex_linux_sandbox_exe: optional_env_path("CODEX_LINUX_SANDBOX_EXE"),
             // Runtime-scoped execution turns should not inherit external base instructions.
             base_instructions,
@@ -1559,6 +1549,11 @@ impl CodexClient {
                 to_model = %normalized_model,
                 "normalized runtime Codex model id"
             );
+        }
+        // The model this turn asks the proxy for, on the job's usage receipt: the evidence that a
+        // turn followed the controller's choice rather than a launch-time pin.
+        if let Some(observation) = usage_attempt.as_ref() {
+            observation.requested_model(&normalized_model);
         }
         config.model = Some(normalized_model);
 
@@ -2880,6 +2875,17 @@ fn latest_completed_reasoning_message_from_events<'a>(events: &'a [JsonValue]) -
     })
 }
 
+/// Short excerpt for log lines and diagnostic fallback summaries. Never use
+/// it as the body of a reply the user is meant to read in full.
+const FINAL_MESSAGE_PREVIEW_CHARS: usize = 500;
+
+fn log_preview(text: &str) -> String {
+    text.trim()
+        .chars()
+        .take(FINAL_MESSAGE_PREVIEW_CHARS)
+        .collect::<String>()
+}
+
 fn derive_final_json(
     turn_complete_message: Option<&str>,
     completed_agent_message_item: Option<&str>,
@@ -2913,14 +2919,16 @@ fn derive_final_json(
         .or(agent_message_event)
     else {
         if let Some(commentary) = commentary_message {
-            let preview = commentary.trim().chars().take(500).collect::<String>();
+            let preview = log_preview(commentary);
             if allow_plain_text_fallback {
                 tracing::warn!(
                     message_preview = %preview,
                     "Codex completed after commentary without a final assistant message; using commentary recovery summary"
                 );
+                // The recovered text becomes the user-visible reply, so keep it
+                // whole; the controller client applies the message-size cap.
                 return Ok(json!({
-                    "summary": preview,
+                    "summary": commentary.trim(),
                     "files": [],
                 }));
             }
@@ -2942,7 +2950,7 @@ fn derive_final_json(
         // commentary-style shape keeps it classified as a missing final so
         // recovery retries still run, just with content instead of silence.
         if let Some(reasoning) = reasoning_message {
-            let preview = reasoning.trim().chars().take(500).collect::<String>();
+            let preview = log_preview(reasoning);
             tracing::warn!(
                 message_preview = %preview,
                 "Codex completed after reasoning output without a final assistant message"
@@ -2963,14 +2971,20 @@ fn derive_final_json(
             "files": [],
         }));
     };
-    let preview = fallback_source.trim().chars().take(500).collect::<String>();
+    let preview = log_preview(fallback_source);
     if allow_plain_text_fallback {
-        tracing::warn!(
+        // Plain-text final mode: a reply that is not JSON is the expected
+        // shape, not a failure. A warning on every such turn buried the real
+        // parse failures (the branch below), so this is debug only.
+        tracing::debug!(
             message_preview = %preview,
-            "failed to parse Codex final assistant message as JSON; using plain text recovery summary"
+            "Codex final assistant message is plain text; using it as the summary"
         );
+        // In plain-text final mode this is the model's actual answer, not a
+        // diagnostic: return all of it (the controller client still bounds it
+        // by MAX_AGENT_SUMMARY_CHARS). Only the log line uses the preview.
         return Ok(json!({
-            "summary": preview,
+            "summary": fallback_source.trim(),
             "files": [],
         }));
     }
@@ -4813,7 +4827,7 @@ fn bool_from_env(key: &str) -> Option<bool> {
     })
 }
 
-fn resolve_codex_run_timeout() -> Duration {
+pub(crate) fn resolve_codex_run_timeout() -> Duration {
     optional_env("CODEX_RUN_TIMEOUT_SECONDS")
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
@@ -5346,6 +5360,34 @@ mod tests {
         );
         assert!(PLAIN_FINAL_RUNTIME_BASE_INSTRUCTIONS.contains("normal user-facing prose"));
         assert!(PLAIN_FINAL_RUNTIME_BASE_INSTRUCTIONS.contains("exec_command"));
+    }
+
+    #[test]
+    fn plain_write_prompts_distinguish_conditional_review_from_required_edits() {
+        let base = runtime_base_instructions(
+            RuntimeBaseInstructionsLane {
+                plain_text_final: true,
+                plain_text_write: true,
+                ..RuntimeBaseInstructionsLane::default()
+            },
+            None,
+        )
+        .expect("plain write runs must receive workspace instructions");
+
+        for instructions in [base.as_str(), PLAIN_WRITE_RUNTIME_DEVELOPER_INSTRUCTIONS] {
+            assert!(instructions.contains("existing permissions and write scopes"));
+            assert!(instructions.contains("Required file changes must be completed"));
+            assert!(
+                instructions.contains("a no-change explanation does not satisfy a required edit")
+            );
+            assert!(instructions.contains("When edits are conditional on review or validation"));
+            assert!(
+                instructions.contains("explain what you checked and why no change is warranted")
+            );
+            assert!(instructions.contains("Do not make a cosmetic edit solely to produce a diff"));
+            assert!(instructions.contains("justified no-change result"));
+            assert!(instructions.contains("Do not wrap the final answer in JSON"));
+        }
     }
 
     #[test]
@@ -6039,6 +6081,35 @@ mod tests {
     }
 
     #[test]
+    fn routing_preflight_schema_distinguishes_conditional_from_required_changes() {
+        let schema = routing_preflight_final_output_json_schema();
+        let requirement = &schema["properties"]["workspaceFileChangeRequirement"];
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(requirement["type"], "string");
+        assert_eq!(
+            requirement["enum"],
+            json!(["none", "conditional", "required"])
+        );
+        assert!(
+            schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("workspaceFileChangeRequirement"))
+        );
+        assert!(
+            schema["properties"]
+                .get("requiresWorkspaceFileChanges")
+                .is_none()
+        );
+        assert!(
+            !schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("requiresWorkspaceFileChanges"))
+        );
+    }
+
+    #[test]
     fn derive_final_json_falls_back_to_agent_message_event_when_turn_message_is_not_json() {
         let turn_message = Some("Running tasks...");
         let agent_message = Some("```json\n{\"summary\":\"ok-from-event\",\"files\":[]}\n```");
@@ -6082,6 +6153,107 @@ mod tests {
 
         assert_eq!(parsed["summary"], "Plain text recovery summary.");
         assert_eq!(parsed["files"], json!([]));
+    }
+
+    fn long_plain_text_final() -> String {
+        // A normal-length plain-text reply whose 500-char cut used to land
+        // mid-word and drop the closing line.
+        let body =
+            "Here is a short guide with the options, how to reach each one and caveats. ".repeat(9);
+        let text = format!("{body}Tap “Check” on any item. Open it from the card.");
+        assert_eq!(text.chars().count(), 722);
+        text
+    }
+
+    #[test]
+    fn derive_final_json_keeps_full_plain_text_final_when_plain_text_fallback_is_allowed() {
+        let text = long_plain_text_final();
+        let raw = format!("\n  {text}\n");
+        for candidate in [
+            (Some(raw.as_str()), None, None),
+            (None, Some(raw.as_str()), None),
+            (None, None, Some(raw.as_str())),
+        ] {
+            let parsed =
+                derive_final_json(candidate.0, candidate.1, candidate.2, None, None, true).unwrap();
+            assert_eq!(parsed["summary"].as_str().unwrap(), text);
+            assert_eq!(parsed["files"], json!([]));
+        }
+    }
+
+    #[test]
+    fn derive_final_json_keeps_full_commentary_when_plain_text_fallback_is_allowed() {
+        let text = long_plain_text_final();
+        let parsed = derive_final_json(None, None, None, Some(text.as_str()), None, true).unwrap();
+        assert_eq!(parsed["summary"].as_str().unwrap(), text);
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedLog(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLog {
+        type Writer = Self;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn warnings_while(run: impl FnOnce()) -> String {
+        let log = CapturedLog::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(log.clone())
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, run);
+        let text = String::from_utf8_lossy(&log.0.lock().unwrap()).to_string();
+        text
+    }
+
+    #[test]
+    fn a_plain_text_final_in_plain_text_mode_is_not_a_warning_but_a_real_parse_failure_is() {
+        let text = long_plain_text_final();
+        let quiet = warnings_while(|| {
+            derive_final_json(Some(text.as_str()), None, None, None, None, true).unwrap();
+        });
+        assert!(!quiet.contains("WARN"), "{quiet}");
+        let loud = warnings_while(|| {
+            derive_final_json(Some(text.as_str()), None, None, None, None, false).unwrap();
+        });
+        assert!(
+            loud.contains("failed to parse Codex final assistant message as JSON"),
+            "{loud}"
+        );
+    }
+
+    #[test]
+    fn derive_final_json_still_previews_invalid_json_when_plain_text_fallback_is_off() {
+        let text = long_plain_text_final();
+        let parsed = derive_final_json(Some(text.as_str()), None, None, None, None, false).unwrap();
+        let summary = parsed["summary"].as_str().unwrap();
+        assert!(summary.starts_with(INVALID_FINAL_ASSISTANT_MESSAGE_JSON_SUMMARY_PREFIX));
+        assert!(summary.ends_with(&log_preview(&text)));
+        assert!(!summary.contains("Open it from the card."));
+    }
+
+    #[test]
+    fn derive_final_json_long_json_final_is_unchanged() {
+        let long_summary = long_plain_text_final();
+        let raw = json!({"summary": long_summary, "files": []}).to_string();
+        let parsed = derive_final_json(Some(raw.as_str()), None, None, None, None, true).unwrap();
+        assert_eq!(parsed["summary"].as_str().unwrap(), long_summary);
+        let parsed = derive_final_json(Some(raw.as_str()), None, None, None, None, false).unwrap();
+        assert_eq!(parsed["summary"].as_str().unwrap(), long_summary);
     }
 
     #[test]

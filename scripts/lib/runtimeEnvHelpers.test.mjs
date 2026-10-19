@@ -7,6 +7,8 @@ import {
   createdAdminUser,
   DEFAULT_SERVICE_RUNTIME_EMAIL,
   deleteEnvFileValue,
+  DEV_PROXY_SECRET_DEFAULTS,
+  ensureDevProxySecrets,
   ensureServiceRuntimeUserId,
   findAdminUserByEmail,
   matchAdminUsersPage,
@@ -599,4 +601,36 @@ test("a provider's checkout folder is known only for the process it was recorded
   assert.equal(recordedProviderCheckoutRoot(file, 4243), null);
   fs.writeFileSync(file, "not json");
   assert.equal(recordedProviderCheckoutRoot(file, 4242), null);
+});
+
+test("ensureDevProxySecrets fills unset or blank proxy secrets and keeps set ones", () => {
+  const env = { CONTROLLER_INTERNAL_TOKEN: "operator-token", PROXY_SIGNING_SECRET: "  " };
+  assert.equal(ensureDevProxySecrets(env), env);
+  assert.deepEqual(env, {
+    CONTROLLER_INTERNAL_TOKEN: "operator-token",
+    PROXY_SIGNING_SECRET: "dev-proxy-secret",
+    PROXY_CREDENTIAL_LEASE_TOKEN: "dev-proxy-credential-lease-token",
+  });
+});
+
+test("every secret a compose-launched proxy takes from the environment has a dev default", () => {
+  const compose = fs.readFileSync(
+    new URL("../../docker/docker-compose.runtime.yml", import.meta.url),
+    "utf8"
+  );
+  const proxy = /^  proxy:\n([\s\S]*?)(?=^  \S)/m.exec(compose)?.[1];
+  assert.ok(proxy, "docker-compose.runtime.yml has a proxy service");
+  for (const key of [
+    "CONTROLLER_INTERNAL_TOKEN",
+    "PROXY_CREDENTIAL_LEASE_TOKEN",
+    "PROXY_SIGNING_SECRET",
+  ]) {
+    // Compose leaves these blank when the provider's environment lacks them.
+    assert.match(proxy, new RegExp(`^\\s+${key}: \\$\\{${key}:-\\}$`, "m"));
+    assert.ok(DEV_PROXY_SECRET_DEFAULTS[key], `${key} has a dev default`);
+  }
+  const env = ensureDevProxySecrets({});
+  for (const [key, value] of Object.entries(DEV_PROXY_SECRET_DEFAULTS)) {
+    assert.equal(env[key], value);
+  }
 });

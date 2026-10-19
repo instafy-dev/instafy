@@ -16,6 +16,10 @@ import {
   removeOtherAccountsConversationHistory,
   retainConversationHistoryCache,
 } from "./conversationHistoryCache";
+import {
+  CONVERSATION_REPLY_NOTIFIED_EVENT,
+  type ConversationReplyNotifiedDetail,
+} from "../notifications/openConversations";
 
 const ACTIVE_CONVERSATION_HISTORY_REFETCH_INTERVAL_MS = 10_000;
 const TERMINAL_RUN_STATUSES = new Set(["success", "failed", "canceled", "merged"]);
@@ -246,9 +250,23 @@ export function useConversationHistoryState({
       return;
     }
 
+    // The durable notification feed saw a reply here. Live delivery is a single
+    // SSE event with no replay, and the newest-page poll pauses while the tab
+    // is idle, so re-read once rather than leave a missed reply off screen
+    // while the notification banner already announces it.
+    const normalizedConversationId = controllerConversationId.toLowerCase();
+    const handleReplyNotified = (event: Event) => {
+      const ids = (event as CustomEvent<ConversationReplyNotifiedDetail>).detail?.conversationIds;
+      if (Array.isArray(ids) && ids.includes(normalizedConversationId)) {
+        refreshHistory();
+      }
+    };
+
     window.addEventListener("instafy:controller-stream-reconnected", refreshHistory);
+    window.addEventListener(CONVERSATION_REPLY_NOTIFIED_EVENT, handleReplyNotified);
     return () => {
       window.removeEventListener("instafy:controller-stream-reconnected", refreshHistory);
+      window.removeEventListener(CONVERSATION_REPLY_NOTIFIED_EVENT, handleReplyNotified);
     };
   }, [controllerConversationId, refreshHistory]);
 

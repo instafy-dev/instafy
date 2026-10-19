@@ -174,7 +174,9 @@ describe("settings loading states", () => {
     expect(container.textContent).not.toContain("No secrets yet");
     await act(async () => initial.resolve({ success: false, secrets: [], error: 'Unable to load secrets (503): {"error":"private controller detail"}' }));
     await settle();
-    expect(container.querySelector('[role="alert"]')?.textContent).toBe("Couldn't load secrets. Try again.");
+    const alert = container.querySelector('[role="alert"]');
+    expect(alert?.textContent).toContain("Couldn't load secrets. Try again.");
+    expect(alert?.querySelector('button')?.textContent).toBe("Retry");
     expect(container.textContent).not.toContain("private controller detail");
     expect(container.textContent).not.toContain("No secrets yet");
     mocks.listSecrets.mockResolvedValueOnce({ success: true, secrets: [secret("A")] });
@@ -195,7 +197,9 @@ describe("settings loading states", () => {
     await act(async () => refresh.resolve({ success: false, secrets: [], error: "Access denied" }));
     await settle();
     expect(container.textContent).not.toContain("SECRET_A");
-    expect(container.querySelector('[role="alert"]')?.textContent).toBe("Couldn't refresh secrets. Try again.");
+    const alert = container.querySelector('[role="alert"]');
+    expect(alert?.textContent).toContain("Couldn't refresh secrets. Try again.");
+    expect(alert?.querySelector('button')?.textContent).toBe("Retry");
   });
 
   it("does not show old-project secrets or agent names after late requests finish", async () => {

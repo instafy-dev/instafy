@@ -64,3 +64,37 @@ impl Drop for ConnectionPermit {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    /// A dropped permit (a closed stream) gives its place back as soon as
+    /// its release task runs, and keys count apart.
+    #[tokio::test]
+    async fn a_dropped_permit_gives_its_place_back() {
+        let limiter = ConnectionLimiter::new();
+        let first = limiter.try_acquire("user-a", 2).await.expect("first place");
+        let _second = limiter
+            .try_acquire("user-a", 2)
+            .await
+            .expect("second place");
+        assert!(limiter.try_acquire("user-a", 2).await.is_none());
+        assert!(limiter.try_acquire("user-b", 2).await.is_some());
+
+        drop(first);
+        let _again = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Some(permit) = limiter.try_acquire("user-a", 2).await {
+                    break permit;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the dropped place comes back");
+        assert!(limiter.try_acquire("user-a", 2).await.is_none());
+    }
+}

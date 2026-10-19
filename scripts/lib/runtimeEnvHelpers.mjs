@@ -574,3 +574,24 @@ export function relocateRuntimeCheckouts({
   }
   return report;
 }
+
+/**
+ * Dev defaults for the secrets the controller and the AI proxy share.
+ * `ensureDevProxySecrets` sets each one that `env` leaves unset or blank, so
+ * the controller, the stack's proxy and every per-space proxy the provider
+ * launches through docker compose (which takes them from the provider's
+ * environment) agree. Without the lease token a compose-launched proxy exits
+ * with "controller integration requires PROXY_CREDENTIAL_LEASE_TOKEN".
+ */
+export const DEV_PROXY_SECRET_DEFAULTS = Object.freeze({
+  CONTROLLER_INTERNAL_TOKEN: "dev-internal-token",
+  PROXY_SIGNING_SECRET: "dev-proxy-secret",
+  PROXY_CREDENTIAL_LEASE_TOKEN: "dev-proxy-credential-lease-token",
+});
+
+export function ensureDevProxySecrets(env = process.env) {
+  for (const [key, value] of Object.entries(DEV_PROXY_SECRET_DEFAULTS)) {
+    if (!String(env[key] ?? "").trim()) env[key] = value;
+  }
+  return env;
+}

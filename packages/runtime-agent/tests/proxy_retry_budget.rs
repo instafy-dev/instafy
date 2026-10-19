@@ -30,6 +30,15 @@ const TOOL_CMD: &str = "printf x >> tool-count.txt; printf TOOL_APPLIED";
 const TEST_MODEL_ENV: &str = "INSTAFY_TEST_CODEX_MODEL";
 const DEFAULT_TEST_MODEL: &str = "gpt-6-luna";
 const PERSONAL_BROWSER_TOKEN: &str = "inert-local-personal-browser-token";
+/// The command that opened the first-run FreeFinance setup of Oct 18.
+const SKILL_SETUP_OPENER: &str =
+    "/skills import https://github.com/instafy-dev/skills/tree/main/packs/bookkeeping --start";
+/// The follow-up the routing preflight read as a file write.
+const SET_IT_UP_REQUEST: &str = "Please just set up FreeFinance for me.";
+/// The agent's answer to it: a step the person takes in FreeFinance, which no
+/// file change can stand in for.
+const SETUP_STEP_ANSWER: &str =
+    "In FreeFinance, open Mein Profil, then Verbundene Apps. Do you see an API row there?";
 /// Tools a bounded browser turn must never offer: shell, file, image, agent and user-input tools.
 const BOUNDED_BROWSER_FORBIDDEN_TOOLS: &[&str] = &[
     "exec_command",
@@ -335,6 +344,23 @@ async fn responses(
                     Some(usage(12_000, 10_000, 400)),
                 ),
             };
+        }
+        // The routing preflight reads a follow-up as a file write, and every
+        // answer is a step for the person with no file.
+        "skill_setup_write_guess" | "chat_write_guess" => {
+            if ordinal == 1 {
+                return answer(
+                    &json!({
+                        "summary":"The user asks for the setup to be done.",
+                        "route":"direct", "reason":"Carry out the setup directly.",
+                        "selectedSkills":[], "confidence":0.9,
+                        "requiresContextLookup":false, "requiresCommandExecution":false,
+                        "requiresWorkspaceFileChanges":true, "observationCommands":[]
+                    })
+                    .to_string(),
+                );
+            }
+            return answer(&json!({"summary":SETUP_STEP_ANSWER, "files":[]}).to_string());
         }
         "transient" | "persistent" | "routing" => 503,
         "terminal_400" => 400,
@@ -992,6 +1018,21 @@ scenario_test!(
     "ambient_decline",
     2
 );
+// Oct 18: a skill-setup follow-up the routing preflight read as a file write
+// was answered with a step for the person, retried, then failed with the
+// answer hidden. It now finishes with that answer on its first attempt.
+scenario_test!(
+    skill_setup_follow_up_answer_stands_without_the_preflight_write_guess,
+    "skill_setup_write_guess",
+    2
+);
+// The same request, verdict and answer outside a skill setup is still retried
+// once for its missing file change, then fails.
+scenario_test!(
+    chat_without_a_file_change_still_fails_on_the_preflight_write_guess,
+    "chat_write_guess",
+    3
+);
 scenario_test!(
     turn_completed_reports_each_turn_of_a_resumed_thread,
     "per_turn_usage",
@@ -1088,6 +1129,8 @@ async fn isolated_retry_child() -> Result<()> {
             | "direct_usage"
             | "finalization_usage"
             | "failed_recovery_usage"
+            | "skill_setup_write_guess"
+            | "chat_write_guess"
     ) {
         return run_routing_job(&scenario).await;
     }
@@ -1495,6 +1538,26 @@ async fn run_routing_job(scenario: &str) -> Result<()> {
                 "groupParticipation":{"decision":"agent_evaluation", "reason":"skill_mode_ambient", "enforcedBy":"runtime-controller"}}
         });
     }
+    // A chat message as the controller leases it: the Studio grants write
+    // access and sends no file-change expectation of its own. Only the
+    // conversation's opener differs between the two scenarios.
+    let write_guess = matches!(scenario, "skill_setup_write_guess" | "chat_write_guess");
+    if write_guess {
+        let opener = if scenario == "skill_setup_write_guess" {
+            SKILL_SETUP_OPENER
+        } else {
+            "Help me keep the books for my company."
+        };
+        payload = json!({
+            "prompt_text":SET_IT_UP_REQUEST,
+            "conversation_history":[
+                {"role":"user", "content":opener},
+                {"role":"assistant", "content":"FreeFinance needs a connection to this space first.",
+                    "metadata":{"source":"agent", "provider":"codex-embedded"}}
+            ],
+            "metadata":{"writeIntent":true}
+        });
+    }
     let job: LeaseJob = serde_json::from_value(json!({
         "id":Uuid::new_v4(), "intent":"feature", "project_id":config.project_id,
         "run_id":Uuid::new_v4(), "conversation_id":Uuid::new_v4(), "payload":payload
@@ -1506,8 +1569,10 @@ async fn run_routing_job(scenario: &str) -> Result<()> {
         sender,
         status: Arc::new(AtomicBool::new(true)),
     });
+    // The write-guess scenarios commit to the workspace, as a chat turn does:
+    // only then does a turn expected to change files retry and fail without.
     let result = processor
-        .run_apply_job(&registration, &job, false, progress, None, None)
+        .run_apply_job(&registration, &job, write_guess, progress, None, None)
         .await;
     // Count from completed artifacts and from failed-job artifacts through the same public
     // API. A later failure must not discard earlier completed calls or turn absent usage
@@ -1521,7 +1586,7 @@ async fn run_routing_job(scenario: &str) -> Result<()> {
     let phases: Vec<_> = calls.iter().map(|call| call["phase"].as_str()).collect();
     let expected_phases = match scenario {
         "routing" => vec![Some("routing")],
-        "retry_usage" | "failed_recovery_usage" => {
+        "retry_usage" | "failed_recovery_usage" | "chat_write_guess" => {
             vec![Some("routing"), Some("main"), Some("recovery")]
         }
         "finalization_usage" => vec![
@@ -1571,6 +1636,42 @@ async fn run_routing_job(scenario: &str) -> Result<()> {
             assert_eq!(call["usage"]["input_tokens"], 10);
             assert_eq!(call["usage"]["output_tokens"], 5);
         }
+    }
+    if scenario == "skill_setup_write_guess" {
+        // The answer stands on the first attempt: no retry, no failure.
+        let execution = result?;
+        assert_eq!(execution.summary, SETUP_STEP_ANSWER);
+        assert!(
+            !execution
+                .messages
+                .iter()
+                .chain(execution.final_messages.iter())
+                .any(|message| message
+                    .metadata
+                    .as_ref()
+                    .is_some_and(|metadata| metadata["kind"] == "codex_retry")),
+            "a skill-setup follow-up must not be retried for the preflight's write guess"
+        );
+        // The preflight's record still shows how it read the request.
+        assert!(
+            execution.artifacts.iter().any(|artifact| {
+                artifact["kind"] == "agent/routing-preflight"
+                    && artifact["requiresWorkspaceFileChanges"] == true
+            }),
+            "the routing preflight artifact must record its write reading"
+        );
+        return Ok(());
+    }
+    if scenario == "chat_write_guess" {
+        let error = result.expect_err("an ordinary chat turn keeps the file-change contract");
+        let message = runtime_agent::jobs::extract_job_failure_message(&error)
+            .map(str::to_owned)
+            .unwrap_or_else(|| error.to_string());
+        assert!(
+            message.contains("did not apply any workspace changes"),
+            "{message}"
+        );
+        return Ok(());
     }
     if matches!(scenario, "direct_usage" | "finalization_usage") {
         assert_eq!(result?.summary, FINAL_TEXT);
@@ -1652,6 +1753,18 @@ fn usage_calls(artifacts: &[Value]) -> &[Value] {
         let invocation = call["invocationId"].as_str().expect("invocation identity");
         Uuid::parse_str(invocation).expect("opaque invocation UUID");
         let attempt = call["attempt"].as_u64().expect("attempt index");
+        if let Some(model) = call.get("model") {
+            let model = model.as_str().expect("model is a string");
+            assert!(
+                !model.is_empty()
+                    && model.len() <= 128
+                    && model
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric()
+                            || matches!(c, '-' | '_' | '.' | ':' | '/')),
+                "model must be a plain model identifier, not request content: {model:?}"
+            );
+        }
         assert!(identities.insert((invocation, attempt)), "{calls:?}");
         let fields = call.as_object().unwrap();
         assert!(
@@ -1659,6 +1772,7 @@ fn usage_calls(artifacts: &[Value]) -> &[Value] {
                 field.as_str(),
                 "invocationId"
                     | "attempt"
+                    | "model"
                     | "phase"
                     | "outcome"
                     | "usageStatus"

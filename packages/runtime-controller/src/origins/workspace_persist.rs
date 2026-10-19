@@ -252,7 +252,9 @@ async fn load_persist_job(
                and oi.lease_id = $3
                and ($4::uuid is null or o.id = $4)
                and oi.status = 'online'
-               and oi.mode in ('hosted', 'efs')
+               -- An instance a dispatch started before its mode was recorded
+               -- has none of its own; its registered origin's mode decides.
+               and coalesce(oi.mode, o.mode) in ('hosted', 'efs')
                and (cardinality(oi.protocols) = 0 or 'http' = any(oi.protocols))
              order by oi.updated_at desc
              limit 1",

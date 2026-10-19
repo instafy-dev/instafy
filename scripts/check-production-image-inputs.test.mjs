@@ -521,42 +521,68 @@ test("cargo-chef installation is version-locked", () => {
   }
 });
 
-test("runtime Rust dependencies compile into a layer the publisher's layer cache keeps", () => {
+test("runtime Rust builds share one persistent target mount and release cooks also fill a layer", () => {
   const source = read("docker/runtime/Dockerfile");
   const instructions = (stage) =>
     dockerfileStage(source, stage).split(/(?<!\\)\n/u).filter((line) => line.trim());
   const deps = instructions("builder-deps");
   const builder = instructions("builder");
-  const targetMount = /--mount=type=cache,target=\/src\/packages\/runtime-agent\/target(\S*)/gu;
+  const targetMount = /--mount=type=cache,(?:id=(\S+?),)?target=\/src\/packages\/runtime-agent\/target(\S*)/gu;
+  const stableMount = ["instafy-runtime-agent-target-${BUILD_PROFILE}-${TARGETARCH}", ",sharing=locked"];
 
-  // Exported layer caches never include cache mounts, so the cook must write
-  // target/ into its own layer.
+  // The cook and the build compile into the same cache mount, keyed by a fixed
+  // id rather than by the cooked layer (from=), so a local daemon keeps every
+  // compiled crate even when a layer is recooked or cleaned up.
   const cook = deps.filter((line) => line.includes("cargo chef cook"));
   assert.equal(cook.length, 1);
   assert.match(cook[0], /^RUN /u);
-  assert.match(cook[0], /--profile \$\{BUILD_PROFILE\} --recipe-path \/src\/recipe\.json --locked$/u);
-  assert.equal([...deps.join("\n").matchAll(targetMount)].length, 0);
+  assert.ok(cook[0].includes("cargo chef cook --features code-mode-host --profile ${BUILD_PROFILE} --recipe-path /src/recipe.json --locked;"));
+  const build = builder.filter((line) => line.includes("cargo build"));
+  assert.equal(build.length, 1);
+  for (const run of [cook[0], build[0]]) {
+    assert.deepEqual([...run.matchAll(targetMount)].map((match) => [match[1], match[2]]), [stableMount]);
+    // Cargo trusts mtimes; the stamps make the shared target/ content-based,
+    // and only a successful cargo run commits what target/ holds.
+    assertOrdered(run, "stamped cargo run", "cargo-source-stamps prepare \"$target\"",
+      run === cook[0] ? "cargo chef cook" : "cargo build", "cargo-source-stamps commit \"$target\"");
+  }
+  assert.equal([...deps.join("\n").matchAll(targetMount)].length, 1);
+  assert.equal([...builder.join("\n").matchAll(targetMount)].length, 1);
+  assert.ok(deps.includes("COPY docker/runtime/cargo-config.toml /usr/local/cargo/config.toml"));
+  assert.ok(deps.includes("COPY docker/runtime/cargo-source-stamps.sh /usr/local/bin/cargo-source-stamps"));
 
-  // The application build starts from the cooked layer, and its only target
-  // mount is seeded from that layer rather than starting empty.
+  // Exported layer caches never include cache mounts, so release builds (the
+  // publishers) also copy the cooked target/ into the builder-deps layer, and
+  // the builder seeds a mount that does not hold that cook from it.
+  assert.ok(deps.includes("ARG CARGO_DEPS_LAYER=auto"));
+  assert.ok(cook[0].includes('[ "${BUILD_PROFILE}" != release ] || deps_layer=1;'));
+  assertOrdered(cook[0], "release cook layer", 'if [ "$deps_layer" = 1 ]; then',
+    'cat /proc/sys/kernel/random/uuid > "$target/.instafy-cook-id";', 'cp -a "$target" /src/cooked-target;');
+  assertOrdered(build[0], "builder seed", 'if [ -f /src/cooked-target/.instafy-cook-id ] && ! cmp -s /src/cooked-target/.instafy-cook-id "$target/.instafy-cook-id"; then',
+    'cp -a /src/cooked-target/. "$target/";', "cargo-source-stamps prepare", "cargo build");
+  for (const { file } of runtimePublishers) {
+    const workflow = read(`.github/workflows/${file}`);
+    assert.ok(workflowStep(workflow, "Build audit image").includes("            BUILD_PROFILE=release\n"), file);
+    assert.ok(workflowStep(workflow, "Export the scanned build's layer cache").includes("--build-arg BUILD_PROFILE=release"), file);
+  }
+
+  // The application build starts from the cooked layer.
   assert.equal(builder[0], "FROM builder-deps AS builder");
-  // The path crates reach the builder only through builder-deps, with the
-  // content and mtimes they were cooked from. Copying a fresh checkout over
-  // them makes every file newer than the cook, and cargo recompiles codex-rs.
+  // The path crates reach the builder only through builder-deps, exactly as
+  // they were cooked; the builder copies only what runtime-agent compiles in,
+  // so its tests and README never rerun the Rust build.
   for (const path of ["packages/runtime-contracts", "packages/openai-proxy-server", "packages/git-service", "packages/origin-http-server", "codex", "proto"]) {
     assert.ok(deps.includes(`COPY --from=chef /src/${path} /src/${path}`), path);
   }
   assert.deepEqual(
     builder.filter((line) => /^(?:COPY|ADD) /u.test(line)),
-    ["COPY packages/runtime-agent/ packages/runtime-agent/"],
+    [
+      "COPY packages/runtime-agent/Cargo.toml packages/runtime-agent/Cargo.lock packages/runtime-agent/",
+      "COPY packages/runtime-agent/src/ packages/runtime-agent/src/",
+      "COPY packages/runtime-agent/assets/instafy/ packages/runtime-agent/assets/instafy/",
+      "COPY packages/runtime-agent/assets/*.js packages/runtime-agent/assets/",
+    ],
   );
-  const build = builder.filter((line) => line.includes("cargo build"));
-  assert.equal(build.length, 1);
-  assert.deepEqual(
-    [...builder.join("\n").matchAll(targetMount)].map((match) => match[1]),
-    [",from=builder-deps,source=/src/packages/runtime-agent/target"],
-  );
-  assert.ok(build[0].includes("--mount=type=cache,target=/src/packages/runtime-agent/target,from=builder-deps,"));
 
   // One registry layer cache per image and architecture cell, in a dedicated
   // package that is never the release package. This deliberately reverses the
@@ -1227,7 +1253,7 @@ test("runtime images build the code-mode host with its V8 and install it beside 
   assert.match(dockerfile, /^COPY codex\/third_party\/v8\/ codex\/third_party\/v8\/$/mu);
   assert.match(dockerfile, /^RUN \/src\/scripts\/fetch-rusty-v8\.sh "\$\(rustc -vV \| sed -n 's\/\^host: \/\/p'\)" \/opt\/rusty_v8$/mu);
   assert.match(dockerfile, /cargo chef cook --features code-mode-host /u);
-  assert.match(dockerfile, /--features code-mode-host -p runtime-agent -p codex-code-mode-host --locked/u);
+  assert.match(dockerfile, /--features code-mode-host -p runtime-agent -p codex-code-mode-host -p codex-linux-sandbox --locked;/u);
   // The binary export and both runtime flavors carry the host next to runtime-agent.
   assert.equal(
     [...dockerfile.matchAll(/^COPY --from=builder \S+\/codex-code-mode-host \/usr\/local\/bin\/codex-code-mode-host$/gmu)].length,

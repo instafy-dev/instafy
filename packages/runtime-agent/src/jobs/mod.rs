@@ -108,7 +108,6 @@ const COLLABORATION_SKILL_ROUTING_MAX_CHARS: usize = 1_400;
 const COLLABORATION_SKILL_DELEGATION_MAX_CHARS: usize = 1_600;
 const ROUTING_PRE_OBSERVATION_OUTPUT_MAX_CHARS: usize = 4_000;
 const ROUTING_PRE_OBSERVATION_TIMEOUT_SECS: u64 = 10;
-const DEFAULT_DIRECT_WORKER_MODEL: &str = "gpt-5.6-sol";
 const WORKSPACE_LEASE_WRITE_SCOPE: &str = "workspace.lease.write";
 const ORIGIN_TOKEN_MINT_SCOPE: &str = "origin.token.mint";
 const WORKSPACE_TOKEN_SEPARATED_SCOPE: &str = "job.token.workspace-separated";
@@ -153,6 +152,29 @@ enum AgentRoutingPreflightRoute {
     WriteCoordinationRequired,
 }
 
+// A completion requirement, never permission to write. Conditional work may
+// legitimately finish after inspection without producing a patch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceFileChangeRequirement {
+    None,
+    Conditional,
+    Required,
+}
+
+impl WorkspaceFileChangeRequirement {
+    fn requires_changes(self) -> bool {
+        self == Self::Required
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Conditional => "conditional",
+            Self::Required => "required",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AgentRoutingPreflight {
     route: AgentRoutingPreflightRoute,
@@ -161,7 +183,7 @@ struct AgentRoutingPreflight {
     confidence: i64,
     requires_context_lookup: bool,
     requires_command_execution: bool,
-    requires_workspace_file_changes: bool,
+    workspace_file_change_requirement: WorkspaceFileChangeRequirement,
     observation_commands: Vec<String>,
 }
 
@@ -1878,7 +1900,14 @@ fn format_project_memory_snapshot_with_preferences(
                 }
             }
 
-            for context in selected_contexts {
+            // Contexts this prompt actually matched go first, highest score first. Always-included
+            // contexts score 0 and follow, so they can no longer use up the budget before the
+            // instructions specific to this request (an imported skill routed for the prompt was
+            // otherwise left with a few hundred bytes after the built-in meta skills).
+            let mut ordered_contexts: Vec<&SelectedContextNode> =
+                selected_contexts.iter().collect();
+            ordered_contexts.sort_by(|a, b| b.score.cmp(&a.score));
+            for context in ordered_contexts {
                 if remaining == 0 {
                     break;
                 }
@@ -2913,6 +2942,29 @@ impl ControllerTokenGuard {
     }
 }
 
+/// The turn's start and hard deadline, exported to the agent's shell so a tool that paces itself reads the host's
+/// own limit instead of guessing when the turn began and how long it lasts.
+struct TurnClockGuard {
+    _overrides: Vec<EnvOverride>,
+}
+
+impl TurnClockGuard {
+    fn start() -> Self {
+        let started = chrono::Utc::now();
+        let limit = chrono::Duration::from_std(crate::codex::resolve_codex_run_timeout())
+            .unwrap_or_else(|_| chrono::Duration::seconds(600));
+        let format = |at: chrono::DateTime<chrono::Utc>| {
+            at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        };
+        Self {
+            _overrides: vec![
+                EnvOverride::apply("INSTAFY_TURN_STARTED_AT", &format(started)),
+                EnvOverride::apply("INSTAFY_TURN_DEADLINE", &format(started + limit)),
+            ],
+        }
+    }
+}
+
 struct ClientTimezoneGuard {
     _overrides: Vec<EnvOverride>,
 }
@@ -3520,6 +3572,42 @@ fn parse_agent_routing_preflight_route(raw: &str) -> Option<AgentRoutingPrefligh
     .into()
 }
 
+fn parse_workspace_file_change_requirement(
+    value: &JsonValue,
+) -> Result<WorkspaceFileChangeRequirement> {
+    let legacy = value
+        .get("requiresWorkspaceFileChanges")
+        .or_else(|| value.get("requires_workspace_file_changes"));
+    let legacy = legacy
+        .map(|value| {
+            value
+                .as_bool()
+                .ok_or_else(|| anyhow!("invalid legacy workspace change requirement"))
+        })
+        .transpose()?;
+    let typed = value.get("workspaceFileChangeRequirement");
+    let requirement = match typed {
+        Some(value) => match value.as_str() {
+            Some("none") => WorkspaceFileChangeRequirement::None,
+            Some("conditional") => WorkspaceFileChangeRequirement::Conditional,
+            Some("required") => WorkspaceFileChangeRequirement::Required,
+            _ => bail!("invalid workspace file-change requirement"),
+        },
+        // Older providers and recorded responses used only the Boolean.
+        None => {
+            return Ok(if legacy.unwrap_or(false) {
+                WorkspaceFileChangeRequirement::Required
+            } else {
+                WorkspaceFileChangeRequirement::None
+            });
+        }
+    };
+    if legacy.is_some_and(|required| required != requirement.requires_changes()) {
+        bail!("conflicting workspace file-change requirements");
+    }
+    Ok(requirement)
+}
+
 fn parse_agent_routing_preflight(value: &JsonValue) -> Option<AgentRoutingPreflight> {
     let object = value.as_object()?;
     let route = object.get("route").and_then(JsonValue::as_str)?;
@@ -3559,11 +3647,7 @@ fn parse_agent_routing_preflight(value: &JsonValue) -> Option<AgentRoutingPrefli
         .or_else(|| object.get("requires_command_execution"))
         .and_then(JsonValue::as_bool)
         .unwrap_or(false);
-    let requires_workspace_file_changes = object
-        .get("requiresWorkspaceFileChanges")
-        .or_else(|| object.get("requires_workspace_file_changes"))
-        .and_then(JsonValue::as_bool)
-        .unwrap_or(false);
+    let workspace_file_change_requirement = parse_workspace_file_change_requirement(value).ok()?;
     let observation_commands = object
         .get("observationCommands")
         .or_else(|| object.get("observation_commands"))
@@ -3587,7 +3671,7 @@ fn parse_agent_routing_preflight(value: &JsonValue) -> Option<AgentRoutingPrefli
         confidence,
         requires_context_lookup,
         requires_command_execution,
-        requires_workspace_file_changes,
+        workspace_file_change_requirement,
         observation_commands,
     })
 }
@@ -3606,12 +3690,41 @@ fn agent_routing_preflight_artifact(preflight: &AgentRoutingPreflight) -> JsonVa
         "confidence": preflight.confidence,
         "requiresContextLookup": preflight.requires_context_lookup,
         "requiresCommandExecution": preflight.requires_command_execution,
-        "requiresWorkspaceFileChanges": preflight.requires_workspace_file_changes,
+        "workspaceFileChangeRequirement": preflight.workspace_file_change_requirement.label(),
+        "requiresWorkspaceFileChanges": preflight.workspace_file_change_requirement.requires_changes(),
         "observationCommands": &preflight.observation_commands,
     })
 }
 
+/// Whether the routing preflight's `requiresWorkspaceFileChanges` verdict
+/// becomes this job's workspace-file-change expectation, the one a turn that
+/// changes no file is retried once on and then failed on.
+///
+/// It does for every job except a follow-up in a conversation that began with
+/// a skill setup (`conversation_began_with_skill_setup`) whose caller did not
+/// ask for file changes itself in `runtimeExpectations.workspaceFileChanges`.
+/// There the verdict is only the preflight's guess, because interactive chat
+/// never sends that expectation, and a setup step is often a question for the
+/// person or a step they take in another product, which no file change can
+/// stand in for. Such a turn runs as any turn that need not write: it may
+/// still change files, and its first reply stands. A skill-setup kickoff never
+/// reaches the preflight, so it never carries the expectation either.
+///
+/// Oct 18: on a first-run FreeFinance setup the preflight read the follow-up
+/// "Please just set up FreeFinance for me" as a file write. The agent answered
+/// with a step the person had to take in FreeFinance and changed no file. The
+/// turn was retried, then failed with the answer hidden, and the Studio's
+/// automatic resend failed the same way.
+///
+/// Every other conversation keeps the verdict, so an ordinary edit request the
+/// agent answers without writing is still retried and then failed.
+fn routing_preflight_file_change_verdict_applies(job: &LeaseJob) -> bool {
+    runtime_job_expectations(&job.payload).workspace_file_changes
+        || !conversation_began_with_skill_setup(job)
+}
+
 fn job_with_agent_routing_preflight(job: &LeaseJob, preflight: &AgentRoutingPreflight) -> LeaseJob {
+    let file_change_verdict_applies = routing_preflight_file_change_verdict_applies(job);
     let mut routed = job.clone();
     let mut payload = routed.payload.clone();
     let Some(payload_object) = payload.as_object_mut() else {
@@ -3634,7 +3747,11 @@ fn job_with_agent_routing_preflight(job: &LeaseJob, preflight: &AgentRoutingPref
                 metadata.insert(key.clone(), value.clone());
             }
         }
-        apply_agent_routing_preflight_runtime_expectations(metadata, preflight);
+        apply_agent_routing_preflight_runtime_expectations(
+            metadata,
+            preflight,
+            file_change_verdict_applies,
+        );
     }
 
     routed.payload = payload;
@@ -3644,6 +3761,7 @@ fn job_with_agent_routing_preflight(job: &LeaseJob, preflight: &AgentRoutingPref
 fn apply_agent_routing_preflight_runtime_expectations(
     metadata: &mut JsonMap<String, JsonValue>,
     preflight: &AgentRoutingPreflight,
+    file_change_verdict_applies: bool,
 ) {
     // A rejected proposed command does not erase the need for fresh evidence.
     // The host pre-observer remains allowlisted; the main agent can make an
@@ -3664,10 +3782,18 @@ fn apply_agent_routing_preflight_runtime_expectations(
             "commandExecution".to_string(),
             JsonValue::Bool(requires_command_observation),
         );
-        expectations.insert(
-            "workspaceFileChanges".to_string(),
-            JsonValue::Bool(preflight.requires_workspace_file_changes),
-        );
+        // Where the verdict does not apply, the caller's own file-change
+        // expectation, which asks for none, stands.
+        if file_change_verdict_applies {
+            expectations.insert(
+                "workspaceFileChanges".to_string(),
+                JsonValue::Bool(
+                    preflight
+                        .workspace_file_change_requirement
+                        .requires_changes(),
+                ),
+            );
+        }
     }
 }
 
@@ -3698,7 +3824,8 @@ fn agent_routing_preflight_metadata(preflight: &AgentRoutingPreflight) -> JsonVa
                 json!({
                     "required": preflight.requires_context_lookup,
                     "requiresCommandExecution": preflight.requires_command_execution,
-                    "requiresWorkspaceFileChanges": preflight.requires_workspace_file_changes,
+                    "workspaceFileChangeRequirement": preflight.workspace_file_change_requirement.label(),
+        "requiresWorkspaceFileChanges": preflight.workspace_file_change_requirement.requires_changes(),
                     "source": "model_routing_preflight",
                     "routeReason": preflight.reason,
                     "confidence": preflight.confidence,
@@ -4696,7 +4823,7 @@ impl JobProcessor {
         Ok(DirectWorkerProxyConfig {
             chat_completions_endpoint: format!("{base}/v1/chat/completions"),
             api_key: envelope.token.trim().to_string(),
-            model: resolve_direct_worker_model_id(model),
+            model: crate::job_model::normalize_model_id(model.as_deref().unwrap_or("")),
             reasoning_effort,
         })
     }
@@ -6182,6 +6309,10 @@ impl JobProcessor {
                 .await
             {
                 Ok(output) => {
+                    // An invalid completion contract must not fall through to the
+                    // legacy direct-route fallback with its requirements erased.
+                    parse_workspace_file_change_requirement(&output.final_json)
+                        .context("invalid routing preflight completion contract")?;
                     let preflight = parse_agent_routing_preflight(&output.final_json);
                     if preflight.is_none() {
                         warn!(
@@ -6205,6 +6336,16 @@ impl JobProcessor {
         };
         let routed_job_storage;
         let job = if let Some(preflight) = routing_preflight.as_ref() {
+            if preflight
+                .workspace_file_change_requirement
+                .requires_changes()
+                && !routing_preflight_file_change_verdict_applies(job)
+            {
+                tracing::info!(
+                    job_id = %job.id,
+                    "skill setup follow-up: not requiring the file changes the routing preflight read into the request"
+                );
+            }
             routed_job_storage = job_with_agent_routing_preflight(job, preflight);
             &routed_job_storage
         } else {
@@ -6265,13 +6406,25 @@ impl JobProcessor {
             browser_mode,
             direct_write_broad_context_suppression_eligible(runtime_expectations, browser_mode),
         );
+        // A skill kickoff's carried SKILL.md text names terms the person never
+        // asked about; cards are matched on its instructions alone.
         let project_context_cards = self
-            .load_relevant_project_context_cards(job, project_id, prompt_text)
+            .load_relevant_project_context_cards(
+                job,
+                project_id,
+                skills::request_outside_carried_skill_files(prompt_text),
+            )
             .await;
         let final_output_mode = final_output_mode_for_runtime_job(
             job,
             read_only_scoped_worker_preobserved,
             runtime_expectations,
+        );
+        let tracks_workspace_file_changes = tracks_workspace_file_changes(
+            commit_to_workspace,
+            read_only_workspace,
+            expects_workspace_file_changes,
+            final_output_mode,
         );
         let final_output_schema = if is_explicit_team_planning_job(job) {
             CodexFinalOutputSchema::MultiAgentPlan
@@ -6447,6 +6600,7 @@ impl JobProcessor {
         {
             let proxy_config = direct_worker_proxy_config(
                 proxy_envelope,
+                crate::job_model::resolve_for_installed_job("sequential direct lane").id,
                 codex_run_options.reasoning_effort.clone(),
             )?;
             return execute_preobserved_scoped_worker_direct(
@@ -6470,6 +6624,7 @@ impl JobProcessor {
             }
             let proxy_config = direct_worker_proxy_config(
                 proxy_envelope,
+                crate::job_model::resolve_for_installed_job("sequential direct lane").id,
                 codex_run_options.reasoning_effort.clone(),
             )?;
             let (execution, files) = execute_write_scoped_worker_direct(
@@ -6511,7 +6666,7 @@ impl JobProcessor {
         // lease resumes one a stop cut off (see `turn_baseline`).
         let earlier_attempt_status = git_status_before
             .as_ref()
-            .filter(|_| expects_workspace_file_changes && !read_only_workspace)
+            .filter(|_| tracks_workspace_file_changes)
             .and_then(|status| {
                 turn_baseline::begin(
                     &workspace_dir,
@@ -6544,6 +6699,7 @@ impl JobProcessor {
         let runtime_id_for_messages = registration.runtime_id;
         let _client_timezone_guard =
             ClientTimezoneGuard::from_metadata(job.payload.get("metadata"));
+        let _turn_clock_guard = TurnClockGuard::start();
         let native_prompt =
             without_project_preferences(&prompt, &project_id, &project_preferences)?;
         let output_result = if streaming_context.is_some() {
@@ -6760,27 +6916,15 @@ impl JobProcessor {
                 );
             }
         }
-        if outcome.files.is_empty() && expects_workspace_file_changes_after_actions {
-            let git_status_after = collect_git_status_porcelain(&workspace_dir).await;
-            if let (Some(before), Some(after)) =
-                (git_status_before.as_ref(), git_status_after.as_ref())
-            {
-                let inferred = infer_codex_files_from_git_status_delta(before, after);
-                if !inferred.is_empty() {
-                    outcome.files = normalize_codex_files(&workspace_dir, inferred)?;
-                }
-            }
-        }
-        // Taken before the paths an earlier attempt of this job changed are
-        // added: the retry and result checks weigh what this turn produced.
-        let own_files_empty = outcome.files.is_empty();
-        if expects_workspace_file_changes_after_actions {
-            add_resumed_turn_files(
-                &mut outcome.files,
-                earlier_attempt_status.as_ref(),
-                git_status_before.as_ref(),
-            );
-        }
+        let own_files_empty = collect_workspace_change_receipts(
+            &workspace_dir,
+            &mut outcome.files,
+            tracks_workspace_file_changes,
+            git_status_before.as_ref(),
+            earlier_attempt_status.as_ref(),
+        )
+        .await?
+            == 0;
 
         // Learning prompts require that we mention `INSTAFY.md` in the final summary (even when no
         // updates were needed). Relying on the model to follow this requirement is brittle, and
@@ -6879,8 +7023,11 @@ impl JobProcessor {
             && evidence_recovery_plan.is_some()
             && !personal_browser_execution_missing
             && !shared_browser_execution_missing;
-        let reported_file_changes_missing =
-            expects_workspace_file_changes && reported_files_len > 0 && normalized_files_len == 0;
+        let reported_file_changes_missing = reported_workspace_file_changes_missing(
+            tracks_workspace_file_changes,
+            reported_files_len,
+            normalized_files_len,
+        );
         // A successful apply_patch event is direct evidence that file changes
         // happened even when the git-status delta is blind (canonical layout
         // issues, gitignored targets); do not coerce a doomed rewrite retry.
@@ -7209,6 +7356,7 @@ impl JobProcessor {
                 explicit_shared_browser_execution.then(crate::shared_browser::action_log_len);
             let _client_timezone_guard =
                 ClientTimezoneGuard::from_metadata(job.payload.get("metadata"));
+            let _turn_clock_guard = TurnClockGuard::start();
             // Stream the retry like the first attempt: an invisible retry means
             // users watch a dead conversation while real work happens, and the
             // run trace loses the retry's interim evidence.
@@ -7360,26 +7508,14 @@ impl JobProcessor {
                     );
                 }
             }
-            if retry_outcome.files.is_empty() && retry_expects_workspace_file_changes_after_actions
-            {
-                let git_status_after = collect_git_status_porcelain(&workspace_dir).await;
-                if let (Some(before), Some(after)) =
-                    (git_status_before.as_ref(), git_status_after.as_ref())
-                {
-                    let inferred = infer_codex_files_from_git_status_delta(before, after);
-                    if !inferred.is_empty() {
-                        retry_outcome.files = normalize_codex_files(&workspace_dir, inferred)?;
-                    }
-                }
-            }
-            let retry_own_files_len = retry_outcome.files.len();
-            if retry_expects_workspace_file_changes_after_actions {
-                add_resumed_turn_files(
-                    &mut retry_outcome.files,
-                    earlier_attempt_status.as_ref(),
-                    git_status_before.as_ref(),
-                );
-            }
+            let retry_own_files_len = collect_workspace_change_receipts(
+                &workspace_dir,
+                &mut retry_outcome.files,
+                tracks_workspace_file_changes,
+                git_status_before.as_ref(),
+                earlier_attempt_status.as_ref(),
+            )
+            .await?;
             // Recognize each attempt independently before merging: event IDs may
             // be reused by a fresh provider turn and must not erase earlier proof.
             let (retry_attempt_evidence, retry_receipts) =
@@ -7419,9 +7555,11 @@ impl JobProcessor {
                     shared_browser_action_log_before_retry,
                     crate::shared_browser::action_log_len(),
                 );
-            let retry_reported_file_changes_missing = expects_workspace_file_changes
-                && retry_reported_files_len > 0
-                && retry_normalized_files_len == 0;
+            let retry_reported_file_changes_missing = reported_workspace_file_changes_missing(
+                tracks_workspace_file_changes,
+                retry_reported_files_len,
+                retry_normalized_files_len,
+            );
 
             let mut retry_artifacts = skills_kickoff_artifacts(skills_kickoff.as_ref());
             if let Some(refresh) = pre_turn_refresh.as_ref() {
@@ -7548,6 +7686,7 @@ impl JobProcessor {
                 let codex_guard = CODEX_EXECUTION_LOCK.lock().await;
                 let _client_timezone_guard =
                     ClientTimezoneGuard::from_metadata(job.payload.get("metadata"));
+                let _turn_clock_guard = TurnClockGuard::start();
                 let native_finalization_prompt = without_project_preferences(
                     &finalization_prompt,
                     &project_id,
@@ -8241,6 +8380,13 @@ impl JobProcessor {
             && !multi_agent_worker
             && !multi_agent_planning_turn
             && !metadata_requests_read_only_workspace(job.payload.get("metadata"));
+        // Output format follows the selected lane, independently of whether
+        // edits are mandatory. Keep conditional reviews' memory policy intact.
+        let workspace_write_response = !lead_continuation_checkpoint
+            && !multi_agent_worker
+            && !multi_agent_planning_turn
+            && final_output_mode_for_runtime_job(job, false, runtime_expectations)
+                == RuntimeFinalOutputMode::PlainTextWrite;
         let conversation_history = if lead_continuation_checkpoint || explicit_team_planning_job {
             None
         } else {
@@ -8382,10 +8528,14 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             );
         }
 
+        // A skill kickoff carries its SKILL.md files whole. Neither the files
+        // they name nor the contexts and learned blocks their text matches are
+        // loaded for it: what the prompt loads follows its instructions alone.
+        let request_for_selection = skills::request_outside_carried_skill_files(trimmed_prompt);
         let has_scoped_worker_observation = scoped_worker_path_observation.is_some();
         if !lead_continuation_checkpoint && !has_scoped_worker_observation {
             if let Some(section) =
-                format_prompt_referenced_files_section(workspace_dir, trimmed_prompt)
+                format_prompt_referenced_files_section(workspace_dir, request_for_selection)
             {
                 append_prompt_section(
                     &mut prompt,
@@ -8437,7 +8587,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
         } else if include_workspace_memory && !stateful_thread_restored {
             if let Some(snapshot) = format_project_memory_snapshot_with_preferences(
                 workspace_dir,
-                trimmed_prompt,
+                request_for_selection,
                 preferences,
             ) {
                 append_prompt_section(
@@ -8637,7 +8787,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 - Prepared sources are ordinary visible workspace paths supplied in sibling prompts. Treat declared handoff paths as canonical for the run; do not substitute older similarly named roots or invent hidden coordination directories.\n\
                 - Agent-to-agent follow-ups should target one clear focused lane when durable thread context matters; do not poll every prior worker.\n",
             );
-        } else if direct_workspace_file_change {
+        } else if workspace_write_response {
             append_prompt_section(
                 &mut prompt,
                 &mut prompt_section_metrics,
@@ -8648,13 +8798,12 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 // final. (The inline-JSON `files[]` write path survives as the dedicated
                 // missing-files retry prompt, which fires only when no disk changes landed.)
                 "\nDirect workspace-change response contract:\n\
-                - Make the requested file changes directly with `apply_patch`; read current contents with the available tools when needed.\n\
-                - Complete any required conversation/context retrieval before changes that depend on that evidence. Lookup requirements do not waive write-scope or read-only restrictions.\n\
-                - Complete the file-change request; do not return progress/status as the final response.\n\
-                - If the request supplies exact paths and contents, apply them as-is; do not do broad discovery first.\n\
-                - Keep changes minimal and workspace-relative. Do not add an extra `bash -lc` wrapper.\n\
-                - If commit/sync/status was requested, satisfy the file changes first; use repo/Instafy tools when callable.\n\
-                - Finish with one short plain-text summary of what changed. Do not wrap it in JSON and do not paste full file contents — the runtime detects changed files from the workspace itself.\n\
+                - Complete required edits with `apply_patch`; a no-change explanation does not satisfy a required edit. Inspect current contents when needed.\n\
+                - For conditional work, inspect and validate, then make only warranted changes. Explain a justified no-change result; do not manufacture a patch.\n\
+                - Complete required context retrieval, observations and tests before deciding on changes. These requirements never waive write-scope or read-only restrictions.\n\
+                - Keep changes minimal and workspace-relative. Apply exact supplied paths and contents as-is. Do not add an extra `bash -lc` wrapper.\n\
+                - If commit/sync/status was requested, use repo/Instafy tools when callable and complete still-required changes.\n\
+                - Finish with one short plain-text summary of changes or a justified no-change result. Do not wrap it in JSON or paste full file contents; changed files are detected from disk.\n\
                 - Do not emit `multi_agent_plan`, goals, integrations, browser/location actions, or broad coordination metadata.\n",
             );
             append_prompt_section(
@@ -9269,6 +9418,52 @@ fn outcome_defers_command_execution(outcome: &CodexOutcome) -> bool {
         .actions
         .iter()
         .any(|action| matches!(action, CodexAction::RequestBrowser(_)))
+}
+
+// Recording actual edits is independent of requiring edits for success. Both
+// conditional and mandatory write turns must preserve receipts and resumed work.
+fn tracks_workspace_file_changes(
+    commit_to_workspace: bool,
+    read_only_workspace: bool,
+    required: bool,
+    mode: RuntimeFinalOutputMode,
+) -> bool {
+    commit_to_workspace
+        && !read_only_workspace
+        && (required || mode == RuntimeFinalOutputMode::PlainTextWrite)
+}
+
+fn reported_workspace_file_changes_missing(
+    tracks_changes: bool,
+    reported_files_len: usize,
+    normalized_files_len: usize,
+) -> bool {
+    tracks_changes && reported_files_len > 0 && normalized_files_len == 0
+}
+
+async fn collect_workspace_change_receipts(
+    workspace_dir: &Path,
+    files: &mut Vec<CodexFileDescriptor>,
+    tracks_changes: bool,
+    before: Option<&HashMap<String, GitStatusEntry>>,
+    earlier_attempt: Option<&HashMap<String, GitStatusEntry>>,
+) -> Result<usize> {
+    if tracks_changes
+        && files.is_empty()
+        && let Some(before) = before
+        && let Some(after) = collect_git_status_porcelain(workspace_dir).await
+    {
+        *files = normalize_codex_files(
+            workspace_dir,
+            infer_codex_files_from_git_status_delta(before, &after),
+        )?;
+    }
+    // Retry checks weigh this attempt separately from work a stopped lease saved.
+    let own_files_len = files.len();
+    if tracks_changes {
+        add_resumed_turn_files(files, earlier_attempt, before);
+    }
+    Ok(own_files_len)
 }
 
 fn workspace_file_changes_still_required(
@@ -11882,7 +12077,7 @@ fn codex_plain_write_task_retry_prompt(prompt: &str) -> String {
         "{prompt}\n\nIMPORTANT WORKSPACE-CHANGE RETRY REQUIREMENT:\n\
         - The prior attempt did not provide a complete final response or verified requested file changes. Inspect the current state before repeating an edit.\n\
         - Complete any still-missing required lookup/observation and requested file changes under the original permissions and write-scope guardrails. Do not repeat work already completed.\n\
-        - Apply changes with the available tools. If evidence or permission is unavailable, report the concrete blocker instead of inventing a result.\n\
+        - Apply still-required changes with the available tools. For conditional changes, a completed inspection with no warranted edits is a valid result; do not manufacture a patch or repeat an already completed edit. If evidence or permission is unavailable, report the concrete blocker instead of inventing a result.\n\
         - Finish with one short plain-text summary. Do not wrap the final answer in JSON or serialize file contents; the runtime detects actual changes from disk.\n"
     )
 }
@@ -12849,7 +13044,12 @@ fn final_output_mode_for_runtime_job(
         RuntimeFinalOutputMode::SchemaFreeStructured
     } else if is_multi_agent_lead_continuation_job(job) {
         RuntimeFinalOutputMode::SchemaFreeStructured
-    } else if runtime_expectations.workspace_file_changes
+    } else if (runtime_expectations.workspace_file_changes
+        || job
+            .payload
+            .pointer("/metadata/agentRoutingPreflight/workspaceFileChangeRequirement")
+            .and_then(JsonValue::as_str)
+            == Some("conditional"))
         && !metadata_requests_read_only_workspace(job.payload.get("metadata"))
     {
         // Workspace-write jobs run the natural agentic loop: edit via tools, finish with a
@@ -13006,6 +13206,7 @@ struct DirectWorkerProxyConfig {
 
 fn direct_worker_proxy_config(
     envelope: Option<&ProxyEnvelopePayload>,
+    model: String,
     job_effort: Option<ReasoningEffort>,
 ) -> Result<DirectWorkerProxyConfig> {
     let api_key = envelope
@@ -13041,7 +13242,7 @@ fn direct_worker_proxy_config(
     Ok(DirectWorkerProxyConfig {
         chat_completions_endpoint: format!("{base_url}/v1/chat/completions"),
         api_key,
-        model: resolve_direct_worker_model_id(env::var("CODEX_MODEL").ok()),
+        model,
         reasoning_effort: crate::codex::resolve_runtime_reasoning_effort(
             env::var("CODEX_RUNTIME_REASONING_EFFORT").ok().as_deref(),
             job_effort,
@@ -13138,36 +13339,6 @@ async fn execute_preobserved_scoped_worker_direct(
         messages_streamed: false,
         final_messages: Vec::new(),
     })
-}
-
-fn resolve_direct_worker_model_id(raw_model: Option<String>) -> String {
-    let model = raw_model
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_DIRECT_WORKER_MODEL.to_string());
-
-    if is_retired_direct_worker_model_id(&model) {
-        DEFAULT_DIRECT_WORKER_MODEL.to_string()
-    } else {
-        model
-    }
-}
-
-fn is_retired_direct_worker_model_id(model: &str) -> bool {
-    let normalized = model.trim().to_ascii_lowercase();
-    if normalized == "gpt-5" || normalized == "gpt-5-codex" {
-        return true;
-    }
-    normalized
-        .strip_prefix("gpt-5.")
-        .and_then(|rest| {
-            let minor: String = rest
-                .chars()
-                .take_while(|character| character.is_ascii_digit())
-                .collect();
-            minor.parse::<u32>().ok()
-        })
-        .is_some_and(|minor| minor < 5)
 }
 
 #[derive(Debug, Clone)]
@@ -13673,12 +13844,12 @@ fn build_agent_routing_preflight_prompt(
         Prefer current-conversation evidence for follow-ups. Apply the collaboration skill to choose the execution lane; mentioning another chat alone does not require retrieving evidence already supplied.\n\
         Set `requiresContextLookup = true` only when required prior conversation/context evidence is absent from the latest request and supplied current-conversation evidence and must be retrieved. Referring to prior work or supplying links alone neither requires nor satisfies retrieval; use the actual supplied evidence. This flag independently requires a read-only Instafy context/conversation lookup, regardless of `requiresCommandExecution`.\n\
         Set `requiresCommandExecution = true` when a correct final answer needs a separate fresh observation of current filesystem, Git, process, repo, runtime, server, or tool state. Prior-conversation retrieval belongs only in `requiresContextLookup`; the fact that its transport uses a CLI does not set this flag. Leave it false when supplied current evidence is enough. Both flags may be true when both kinds of evidence are needed.\n\
-        Set `requiresWorkspaceFileChanges = true` when the latest request requires creating, overwriting, editing, moving, deleting, committing, or syncing workspace files as part of success; leave it false for read-only review, Q&A, planning, or requests that only mention files as evidence.\n\
-        Always include `observationCommands`; use an empty array when no current-state observation is needed. When `requiresCommandExecution` is true, propose up to 3 concrete safe commands for that observation. These are proposals, not permission grants: the host executes only its existing allowlist, and the main agent must obtain any remaining observation under its normal tool permissions. Do not place conversation/context retrieval commands here. Do not set `requiresCommandExecution = true` merely because the main task includes workspace writes, patches, commits, pushes, or syncs. Do not put file-writing, patching, commit, push, or sync commands in `observationCommands`; mark `requiresWorkspaceFileChanges = true` instead and let the main run make the requested changes under its existing permissions. Explicit non-file Instafy CLI actions such as `instafy automations create` or `instafy automations update` are allowed only when the user asked for that exact action. Propose independent read-only commands, not shell pipelines or command lists whose final status can hide a failed read. If no supported proposal fits, leave `observationCommands` empty and keep the observation requirement for the main agent.\n\
+        Set `workspaceFileChangeRequirement` from the success condition, independently of write permission: `required` when success necessarily requires creating, editing, moving, deleting, committing, or syncing workspace files; `conditional` when inspection or validation decides whether changes are warranted, and a justified unchanged result can satisfy the request; `none` when no workspace mutation is requested. Conditional work still permits warranted edits under the existing write scope. Do not turn permission to improve or repair into a requirement to produce a patch. Preserve the requested observations and tests even when no change is warranted.\n\
+        Always include `observationCommands`; use an empty array when no current-state observation is needed. When `requiresCommandExecution` is true, propose up to 3 concrete safe commands for that observation. These are proposals, not permission grants: the host executes only its existing allowlist, and the main agent must obtain any remaining observation under its normal tool permissions. Do not place conversation/context retrieval commands here. Do not set `requiresCommandExecution = true` merely because the main task includes workspace writes, patches, commits, pushes, or syncs. Do not put file-writing, patching, commit, push, or sync commands in `observationCommands`; classify `workspaceFileChangeRequirement` instead and let the main run make the requested changes under its existing permissions. Explicit non-file Instafy CLI actions such as `instafy automations create` or `instafy automations update` are allowed only when the user asked for that exact action. Propose independent read-only commands, not shell pipelines or command lists whose final status can hide a failed read. If no supported proposal fits, leave `observationCommands` empty and keep the observation requirement for the main agent.\n\
         {plan_group_guidance}\
         {skill_snapshot}\n\
         Latest user request:\n```text\n{prompt_text}\n```\n\
-        Return exactly one JSON object with fields `summary`, `route`, `reason`, `selectedSkills`, `confidence` (0-100), `requiresContextLookup`, `requiresCommandExecution`, `requiresWorkspaceFileChanges`, and `observationCommands`."
+        Return exactly one JSON object with fields `summary`, `route`, `reason`, `selectedSkills`, `confidence` (0-100), `requiresContextLookup`, `requiresCommandExecution`, `workspaceFileChangeRequirement`, and `observationCommands`."
     )
 }
 
@@ -17844,7 +18015,7 @@ mod tests {
             confidence: 90,
             requires_context_lookup,
             requires_command_execution,
-            requires_workspace_file_changes: false,
+            workspace_file_change_requirement: WorkspaceFileChangeRequirement::None,
             observation_commands: Vec::new(),
         }
     }
@@ -19781,7 +19952,11 @@ mod tests {
                 mode == "cross_chat",
                 false,
             );
-            route.requires_workspace_file_changes = mode == "write";
+            route.workspace_file_change_requirement = if mode == "write" {
+                WorkspaceFileChangeRequirement::Required
+            } else {
+                WorkspaceFileChangeRequirement::None
+            };
             let job = job_with_agent_routing_preflight(&job, &route);
             let original_payload = job.payload.clone();
             let (prompt, _, metrics) = processor
@@ -20045,7 +20220,14 @@ mod tests {
                 ])),
                 _ => skill_setup_test_job("Please inspect the imported repo."),
             };
-            for mode in ["write", "restored", "cross_chat", "full", "planning"] {
+            for mode in [
+                "write",
+                "write_guess",
+                "restored",
+                "cross_chat",
+                "full",
+                "planning",
+            ] {
                 let mut route = test_agent_routing_preflight(
                     match mode {
                         "cross_chat" => AgentRoutingPreflightRoute::CrossChatLookup,
@@ -20056,9 +20238,28 @@ mod tests {
                     false,
                 );
                 // A "yes" to saving the Mandant is what the preflight reads as
-                // a file write, which moves the turn into the direct-write lane.
-                route.requires_workspace_file_changes = mode == "write";
-                let job = job_with_agent_routing_preflight(&base_job, &route);
+                // a file write. With the caller's own file-change expectation
+                // ("write") that moves the turn into the direct-write lane.
+                // The preflight's reading alone ("write_guess") moves only a
+                // conversation that is not a setup there; a setup follow-up
+                // stays on the full contract.
+                route.workspace_file_change_requirement = if matches!(mode, "write" | "write_guess")
+                {
+                    WorkspaceFileChangeRequirement::Required
+                } else {
+                    WorkspaceFileChangeRequirement::None
+                };
+                let mut caller_job = base_job.clone();
+                if mode == "write" {
+                    caller_job.payload["metadata"] =
+                        json!({"runtimeExpectations": {"workspaceFileChanges": true}});
+                }
+                let lane = match mode {
+                    "write_guess" if source == "none" => "write",
+                    "write_guess" => "full",
+                    other => other,
+                };
+                let job = job_with_agent_routing_preflight(&caller_job, &route);
                 let (prompt, _, metrics) = processor
                     .build_prompt_with_text(
                         &project_id,
@@ -20074,7 +20275,7 @@ mod tests {
                     .expect("actual main prompt builder");
                 let label = format!("{mode} source={source}");
                 let sections = &metrics["promptSections"];
-                match mode {
+                match lane {
                     "write" => {
                         assert!(
                             prompt.contains("Direct workspace-change response contract"),
@@ -20112,7 +20313,7 @@ mod tests {
                 // Conversations that are not setups, and planning turns, pay
                 // nothing for it.
                 let expect_terse =
-                    source != "none" && matches!(mode, "write" | "restored" | "cross_chat");
+                    source != "none" && matches!(lane, "write" | "restored" | "cross_chat");
                 assert_eq!(
                     prompt.matches(terse_rule).count(),
                     usize::from(expect_terse),
@@ -20162,13 +20363,13 @@ mod tests {
                 // the terse section must not repeat it there.
                 assert_eq!(
                     prompt.matches(full_rule).count(),
-                    usize::from(mode == "full"),
+                    usize::from(lane == "full"),
                     "{label}"
                 );
                 // What the workspace shows now beats earlier failures. The full
                 // contract carries it for every conversation, and the setup
                 // rule carries it on every follow-up lane of a setup, once.
-                let expect_workspace_rule = expect_terse || mode == "full";
+                let expect_workspace_rule = expect_terse || lane == "full";
                 for rule in [WORKSPACE_IS_CURRENT_PROBE, SAVED_FILE_MISSING_PROBE] {
                     assert_eq!(
                         prompt.matches(rule).count(),
@@ -21120,7 +21321,7 @@ mod tests {
         let original = ambient_participation_test_job();
         let mut preflight =
             test_agent_routing_preflight(AgentRoutingPreflightRoute::CrossChatLookup, true, true);
-        preflight.requires_workspace_file_changes = true;
+        preflight.workspace_file_change_requirement = WorkspaceFileChangeRequirement::Required;
         let job = job_with_agent_routing_preflight(&original, &preflight);
         let requirements =
             routing_evidence_requirements(&job, runtime_job_expectations(&job.payload));
@@ -22105,7 +22306,7 @@ mod tests {
         assert!(prompt.contains("Use `multi_agent_candidate` for durable Instafy workers."));
         assert!(!prompt.contains("Detailed plan rules should not be loaded in preflight."));
         assert!(prompt.contains("Prefer current-conversation evidence for follow-ups"));
-        assert!(prompt.contains("requiresWorkspaceFileChanges"));
+        assert!(prompt.contains("workspaceFileChangeRequirement"));
         assert!(prompt.contains("Do not put file-writing"));
         assert!(prompt.contains("Latest user request:"));
     }
@@ -22136,7 +22337,11 @@ mod tests {
             job.project_id = Some(project_id);
             let mut preflight =
                 test_agent_routing_preflight(AgentRoutingPreflightRoute::Direct, false, false);
-            preflight.requires_workspace_file_changes = writes;
+            preflight.workspace_file_change_requirement = if writes {
+                WorkspaceFileChangeRequirement::Required
+            } else {
+                WorkspaceFileChangeRequirement::None
+            };
             // Skill selection describes the route; it cannot turn a direct task into
             // durable dispatch or grant native tools by itself.
             preflight.selected_skills = vec!["instafy-agent-collaboration".to_string()];
@@ -22432,13 +22637,331 @@ mod tests {
         );
         assert!(!parsed.requires_context_lookup);
         assert!(parsed.requires_command_execution);
-        assert!(parsed.requires_workspace_file_changes);
+        assert!(parsed.workspace_file_change_requirement.requires_changes());
         assert_eq!(
             parsed.observation_commands,
             vec![
                 "git status --short".to_string(),
                 "git remote -v".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn conditional_write_requirement_parser_keeps_legacy_compatibility_and_rejects_conflicts() {
+        for (label, requirement) in [
+            ("none", WorkspaceFileChangeRequirement::None),
+            ("conditional", WorkspaceFileChangeRequirement::Conditional),
+            ("required", WorkspaceFileChangeRequirement::Required),
+        ] {
+            let value = json!({"route":"direct", "workspaceFileChangeRequirement":label});
+            assert_eq!(
+                parse_agent_routing_preflight(&value)
+                    .unwrap()
+                    .workspace_file_change_requirement,
+                requirement
+            );
+            let mut compatible = value;
+            compatible["requiresWorkspaceFileChanges"] = json!(requirement.requires_changes());
+            assert!(parse_agent_routing_preflight(&compatible).is_some());
+            compatible["requiresWorkspaceFileChanges"] = json!(!requirement.requires_changes());
+            assert!(parse_agent_routing_preflight(&compatible).is_none());
+        }
+        for (legacy, expected) in [
+            (false, WorkspaceFileChangeRequirement::None),
+            (true, WorkspaceFileChangeRequirement::Required),
+        ] {
+            for key in [
+                "requiresWorkspaceFileChanges",
+                "requires_workspace_file_changes",
+            ] {
+                let mut value = json!({"route":"direct"});
+                value[key] = json!(legacy);
+                assert_eq!(
+                    parse_agent_routing_preflight(&value)
+                        .unwrap()
+                        .workspace_file_change_requirement,
+                    expected
+                );
+            }
+        }
+        for invalid in [
+            json!("optional"),
+            json!("CONDITIONAL"),
+            json!(false),
+            JsonValue::Null,
+        ] {
+            assert!(
+                parse_agent_routing_preflight(&json!({
+                    "route":"direct", "workspaceFileChangeRequirement":invalid,
+                    "requiresWorkspaceFileChanges":true
+                }))
+                .is_none()
+            );
+        }
+        assert!(
+            parse_agent_routing_preflight(&json!({
+                "route":"direct", "requiresWorkspaceFileChanges":"false"
+            }))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn conditional_write_routing_changes_completion_contract_without_changing_permissions() {
+        for requirement in [
+            WorkspaceFileChangeRequirement::None,
+            WorkspaceFileChangeRequirement::Conditional,
+            WorkspaceFileChangeRequirement::Required,
+        ] {
+            for write_intent in [false, true] {
+                for scope in ["owned", "read_only"] {
+                    let job = test_lease_job(
+                        Some("feature"),
+                        json!({
+                            "metadata": {
+                                "writeIntent":write_intent,
+                                "writeScope":{"mode":scope,"ownedPaths":["src/index.mjs"],"readOnlyPaths":["test"]},
+                                "runtimeExpectations":{"workspaceFileChanges":true}
+                            }
+                        }),
+                    );
+                    let mut preflight = test_agent_routing_preflight(
+                        AgentRoutingPreflightRoute::Direct,
+                        false,
+                        true,
+                    );
+                    preflight.workspace_file_change_requirement = requirement;
+                    let routed = job_with_agent_routing_preflight(&job, &preflight);
+                    let expectations = runtime_job_expectations(&routed.payload);
+                    assert_eq!(
+                        routed.payload["metadata"]["writeIntent"],
+                        job.payload["metadata"]["writeIntent"]
+                    );
+                    assert_eq!(
+                        routed.payload["metadata"]["writeScope"],
+                        job.payload["metadata"]["writeScope"]
+                    );
+                    assert_eq!(
+                        expectations.workspace_file_changes,
+                        requirement == WorkspaceFileChangeRequirement::Required
+                    );
+                    assert!(
+                        expectations.command_execution,
+                        "a no-change result still needs the requested observation"
+                    );
+                    let mode = final_output_mode_for_runtime_job(&routed, false, expectations);
+                    let writes =
+                        requirement != WorkspaceFileChangeRequirement::None && scope != "read_only";
+                    assert_eq!(
+                        mode,
+                        if writes {
+                            RuntimeFinalOutputMode::PlainTextWrite
+                        } else {
+                            RuntimeFinalOutputMode::StrictStructured
+                        }
+                    );
+                    assert_eq!(
+                        tracks_workspace_file_changes(
+                            true,
+                            scope == "read_only",
+                            expectations.workspace_file_changes,
+                            mode
+                        ),
+                        writes
+                    );
+                    assert!(!tracks_workspace_file_changes(
+                        false,
+                        scope == "read_only",
+                        expectations.workspace_file_changes,
+                        mode
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn conditional_write_no_change_is_valid_but_required_edits_remain_required() {
+        let outcome = CodexOutcome {
+            summary: "Reviewed the implementation and ran the tests; no warranted changes.".into(),
+            suggested_replies: Vec::new(),
+            files: Vec::new(),
+            read_files: Vec::new(),
+            snippet: None,
+            actions: Vec::new(),
+        };
+        assert!(!workspace_file_changes_still_required(
+            WorkspaceFileChangeRequirement::Conditional.requires_changes(),
+            &outcome,
+        ));
+        assert!(workspace_file_changes_still_required(
+            WorkspaceFileChangeRequirement::Required.requires_changes(),
+            &outcome,
+        ));
+        assert!(!reported_workspace_file_changes_missing(true, 0, 0));
+    }
+
+    #[test]
+    fn conditional_write_still_rejects_reported_files_that_do_not_exist() {
+        let tmp = tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let claimed =
+            parse_file_descriptor(&json!({"path":"missing.rs","type":"changed"})).unwrap();
+        let files = normalize_codex_files_for_commit(&workspace, vec![claimed], true).unwrap();
+        let tracking = tracks_workspace_file_changes(
+            true,
+            false,
+            false,
+            RuntimeFinalOutputMode::PlainTextWrite,
+        );
+        assert!(reported_workspace_file_changes_missing(
+            tracking,
+            1,
+            files.len()
+        ));
+        assert!(!workspace.join("missing.rs").exists());
+        assert!(!reported_workspace_file_changes_missing(
+            false,
+            1,
+            files.len()
+        ));
+    }
+
+    #[tokio::test]
+    async fn conditional_write_receipts_capture_real_and_resumed_edits_without_forcing_a_patch() {
+        let tmp = tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let initialized = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .arg(&workspace)
+            .output()
+            .expect("initialize isolated fixture repository");
+        assert!(initialized.status.success());
+        fs::write(workspace.join("personal.txt"), "pre-existing user work\n").unwrap();
+        let earlier = collect_git_status_porcelain(&workspace).await.unwrap();
+        fs::write(
+            workspace.join("resumed.rs"),
+            "// saved by an interrupted attempt\n",
+        )
+        .unwrap();
+        let before = collect_git_status_porcelain(&workspace).await.unwrap();
+        let tracking = tracks_workspace_file_changes(
+            true,
+            false,
+            false,
+            RuntimeFinalOutputMode::PlainTextWrite,
+        );
+
+        let mut resumed = Vec::new();
+        let own_count = collect_workspace_change_receipts(
+            &workspace,
+            &mut resumed,
+            tracking,
+            Some(&before),
+            Some(&earlier),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            own_count, 0,
+            "resumed files do not pretend this attempt produced a patch"
+        );
+        assert_eq!(
+            resumed
+                .iter()
+                .map(|file| file.workspace_path.as_str())
+                .collect::<Vec<_>>(),
+            ["resumed.rs"]
+        );
+
+        fs::write(
+            workspace.join("current.rs"),
+            "// concrete improvement in this attempt\n",
+        )
+        .unwrap();
+        for (commit, read_only) in [(false, false), (true, true)] {
+            let mut files = Vec::new();
+            let tracking = tracks_workspace_file_changes(
+                commit,
+                read_only,
+                false,
+                RuntimeFinalOutputMode::PlainTextWrite,
+            );
+            let count = collect_workspace_change_receipts(
+                &workspace,
+                &mut files,
+                tracking,
+                Some(&before),
+                Some(&earlier),
+            )
+            .await
+            .unwrap();
+            assert_eq!(count, 0);
+            assert!(files.is_empty());
+            assert!(
+                !tmp.path().join("current.rs").exists(),
+                "disabled tracking must not invoke normalizer writes"
+            );
+        }
+
+        let mut files = Vec::new();
+        assert_eq!(
+            collect_workspace_change_receipts(
+                &workspace,
+                &mut files,
+                tracking,
+                Some(&before),
+                Some(&earlier)
+            )
+            .await
+            .unwrap(),
+            1
+        );
+        let outcome = CodexOutcome {
+            summary: "Refined the implementation.".into(),
+            suggested_replies: Vec::new(),
+            files,
+            read_files: Vec::new(),
+            snippet: None,
+            actions: Vec::new(),
+        };
+        let artifacts = build_codex_artifacts(&codex_run_output(JsonValue::Null), &outcome);
+        let mut published = artifacts
+            .iter()
+            .find(|artifact| artifact["kind"] == "apply/files")
+            .unwrap()["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|file| file["workspacePath"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        published.sort();
+        assert_eq!(published, ["current.rs", "resumed.rs"]);
+        assert_eq!(
+            fs::read_to_string(workspace.join("personal.txt")).unwrap(),
+            "pre-existing user work\n"
+        );
+
+        let after = collect_git_status_porcelain(&workspace).await.unwrap();
+        let mut unchanged = Vec::new();
+        assert_eq!(
+            collect_workspace_change_receipts(
+                &workspace,
+                &mut unchanged,
+                tracking,
+                Some(&after),
+                None
+            )
+            .await
+            .unwrap(),
+            0
+        );
+        assert!(
+            unchanged.is_empty(),
+            "a completed no-change review has no invented file receipt"
         );
     }
 
@@ -22453,7 +22976,7 @@ mod tests {
         );
         let mut preflight =
             test_agent_routing_preflight(AgentRoutingPreflightRoute::Direct, false, false);
-        preflight.requires_workspace_file_changes = true;
+        preflight.workspace_file_change_requirement = WorkspaceFileChangeRequirement::Required;
 
         let routed = job_with_agent_routing_preflight(&job, &preflight);
 
@@ -24765,6 +25288,151 @@ mod tests {
         assert!(!missing_final_should_retry_original_task(false, false, 0));
     }
 
+    /// Oct 18: on a first-run FreeFinance setup the routing preflight read the
+    /// follow-up "Please just set up FreeFinance for me" as a file write. The
+    /// agent's answer was a step the person had to take in FreeFinance, so it
+    /// changed no file; the turn was retried, then failed with the answer
+    /// hidden. A skill-setup follow-up now keeps only the caller's own
+    /// file-change expectation. Every other chat keeps the preflight's verdict.
+    #[test]
+    fn preflight_write_guess_is_dropped_only_for_skill_setup_follow_ups() {
+        let mut write_guess =
+            test_agent_routing_preflight(AgentRoutingPreflightRoute::Direct, false, false);
+        write_guess.workspace_file_change_requirement = WorkspaceFileChangeRequirement::Required;
+        let no_write_guess =
+            test_agent_routing_preflight(AgentRoutingPreflightRoute::Direct, false, false);
+        let expects_changes = |job: &LeaseJob| {
+            runtime_job_expectations_for_execution(&job.payload, false, false)
+                .workspace_file_changes
+        };
+        // The job the controller leases for a chat message: the Studio grants
+        // write access and sends no file-change expectation of its own, and
+        // the controller adds the history window and the setup openers.
+        let chat_job =
+            |prompt: &str, history: JsonValue, openers: Option<JsonValue>, metadata: JsonValue| {
+                let mut payload = json!({
+                    "prompt_text": prompt,
+                    "conversation_history": history,
+                    "metadata": metadata,
+                });
+                if let Some(openers) = openers {
+                    payload["skill_setup_openers"] = openers;
+                }
+                test_lease_job(Some("feature"), payload)
+            };
+        let setup_history = json!([
+            {"role": "user", "content": SKILL_SETUP_TEST_OPENER},
+            {
+                "role": "assistant",
+                "content": SKILL_SETUP_TEST_QUESTION,
+                "metadata": {"source": "agent", "provider": "codex-embedded"}
+            }
+        ]);
+        let setup_openers =
+            json!([{"content": SKILL_SETUP_TEST_OPENER, "replyProvider": "codex-embedded"}]);
+
+        // (a) A skill-setup follow-up the preflight reads as a write: the guess
+        // is not applied, while the preflight's own record keeps it.
+        let setup = chat_job(
+            "Please just set up FreeFinance for me.",
+            setup_history.clone(),
+            Some(setup_openers.clone()),
+            json!({ "writeIntent": true }),
+        );
+        assert!(!routing_preflight_file_change_verdict_applies(&setup));
+        let routed = job_with_agent_routing_preflight(&setup, &write_guess);
+        assert!(!expects_changes(&routed));
+        assert_eq!(
+            routed.payload["metadata"]["agentRoutingPreflight"]["requiresWorkspaceFileChanges"],
+            json!(true)
+        );
+        assert_eq!(routed.payload["metadata"]["writeIntent"], json!(true));
+        // The same once the opener has left the history window.
+        let later = chat_job(
+            "Please just set up FreeFinance for me.",
+            json!([{
+                "role": "assistant",
+                "content": SKILL_SETUP_TEST_QUESTION,
+                "metadata": {"source": "agent", "provider": "codex-embedded"}
+            }]),
+            Some(setup_openers.clone()),
+            json!({ "writeIntent": true }),
+        );
+        assert!(!routing_preflight_file_change_verdict_applies(&later));
+        assert!(!expects_changes(&job_with_agent_routing_preflight(
+            &later,
+            &write_guess
+        )));
+
+        // (b) An ordinary chat edit the preflight reads as a write keeps
+        // today's contract: no file change is retried, then fails.
+        let edit = chat_job(
+            "Change the title in index.html to Hello.",
+            json!([
+                {"role": "user", "content": "Make me a landing page."},
+                {
+                    "role": "assistant",
+                    "content": "I made index.html with a hero section.",
+                    "metadata": {"source": "agent", "provider": "codex-embedded"}
+                }
+            ]),
+            None,
+            json!({ "writeIntent": true }),
+        );
+        assert!(routing_preflight_file_change_verdict_applies(&edit));
+        assert!(!expects_changes(&edit));
+        assert!(expects_changes(&job_with_agent_routing_preflight(
+            &edit,
+            &write_guess
+        )));
+        // So does a conversation whose `/skills` opener the skills lane
+        // answered by itself: no setup began.
+        let failed_import = chat_job(
+            "Change the title in index.html to Hello.",
+            json!([
+                {"role": "user", "content": SKILL_SETUP_TEST_OPENER},
+                {
+                    "role": "assistant",
+                    "content": "Skill import failed: GitHub returned 404 Not Found",
+                    "metadata": {"source": "agent", "provider": skills::SKILLS_LANE_PROVIDER}
+                }
+            ]),
+            None,
+            json!({ "writeIntent": true }),
+        );
+        assert!(routing_preflight_file_change_verdict_applies(
+            &failed_import
+        ));
+        assert!(expects_changes(&job_with_agent_routing_preflight(
+            &failed_import,
+            &write_guess
+        )));
+
+        // (c) A skill-setup job whose caller requires a change keeps its
+        // contract, and the preflight's verdict applies to it as before.
+        let required = chat_job(
+            "Save the Mandant to freefinance.json.",
+            setup_history.clone(),
+            Some(setup_openers.clone()),
+            json!({ "runtimeExpectations": { "workspaceFileChanges": true } }),
+        );
+        assert!(routing_preflight_file_change_verdict_applies(&required));
+        assert!(expects_changes(&job_with_agent_routing_preflight(
+            &required,
+            &write_guess
+        )));
+        assert!(!expects_changes(&job_with_agent_routing_preflight(
+            &required,
+            &no_write_guess
+        )));
+
+        // A setup follow-up the preflight reads as no write stays one.
+        assert!(!expects_changes(&job_with_agent_routing_preflight(
+            &setup,
+            &no_write_guess
+        )));
+    }
+
     #[test]
     fn inert_write_task_retry_prompt_re_embeds_the_original_request() {
         let retry =
@@ -25335,35 +26003,6 @@ mod tests {
     }
 
     #[test]
-    fn direct_worker_model_normalizes_retired_codex_slugs() {
-        assert_eq!(resolve_direct_worker_model_id(None), "gpt-5.6-sol");
-        assert_eq!(
-            resolve_direct_worker_model_id(Some("gpt-5-codex".to_string())),
-            "gpt-5.6-sol"
-        );
-        assert_eq!(
-            resolve_direct_worker_model_id(Some("gpt-5.3-codex".to_string())),
-            "gpt-5.6-sol"
-        );
-        assert_eq!(
-            resolve_direct_worker_model_id(Some("gpt-5.3".to_string())),
-            "gpt-5.6-sol"
-        );
-        assert_eq!(
-            resolve_direct_worker_model_id(Some("gpt-5.2".to_string())),
-            "gpt-5.6-sol"
-        );
-        assert_eq!(
-            resolve_direct_worker_model_id(Some("gpt-5.4".to_string())),
-            "gpt-5.6-sol"
-        );
-        assert_eq!(
-            resolve_direct_worker_model_id(Some("gpt-5.4-mini".to_string())),
-            "gpt-5.6-sol"
-        );
-    }
-
-    #[test]
     fn direct_worker_summary_extracts_chat_completion_content() {
         let response = json!({
             "choices": [
@@ -25606,7 +26245,7 @@ mod tests {
                 );
                 job.project_id = Some(project_id);
                 let mut parsed = test_agent_routing_preflight(route.clone(), true, false);
-                parsed.requires_workspace_file_changes = true;
+                parsed.workspace_file_change_requirement = WorkspaceFileChangeRequirement::Required;
                 let job = job_with_agent_routing_preflight(&job, &parsed);
                 let expectations = runtime_job_expectations(&job.payload);
                 let requirements = routing_evidence_requirements(&job, expectations);
@@ -25660,6 +26299,95 @@ mod tests {
                     assert!(
                         expectations.workspace_file_changes,
                         "a permission restriction must not silently clear the requested requirement"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn conditional_write_prompt_matches_plain_output_without_suppressing_review_context() {
+        let tmp = tempdir().unwrap();
+        let memory = "Keep the event report deterministic; inspect caller-data ownership.";
+        fs::write(
+            tmp.path().join("INSTAFY.md"),
+            format!("# Workspace memory\n{memory}\n"),
+        )
+        .unwrap();
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        for cross_chat in [false, true] {
+            for restored in [false, true] {
+                let scope =
+                    json!({"mode":"owned","ownedPaths":["src/index.mjs"],"readOnlyPaths":["test"]});
+                let mut job = test_lease_job(
+                    Some("feature"),
+                    json!({
+                        "metadata":{"writeIntent":true,"writeScope":scope},
+                        "conversation_history":[{"role":"user","content":"Preserve the agreed event report semantics."}]
+                    }),
+                );
+                job.project_id = Some(project_id);
+                let mut preflight = test_agent_routing_preflight(
+                    if cross_chat {
+                        AgentRoutingPreflightRoute::CrossChatLookup
+                    } else {
+                        AgentRoutingPreflightRoute::Direct
+                    },
+                    cross_chat,
+                    true,
+                );
+                preflight.workspace_file_change_requirement =
+                    WorkspaceFileChangeRequirement::Conditional;
+                let routed = job_with_agent_routing_preflight(&job, &preflight);
+                let expectations = runtime_job_expectations(&routed.payload);
+                assert_eq!(
+                    final_output_mode_for_runtime_job(&routed, false, expectations),
+                    RuntimeFinalOutputMode::PlainTextWrite
+                );
+                let required = routing_evidence_requirements(&routed, expectations);
+                assert!(required.command_observation);
+                assert_eq!(required.context_retrieval, cross_chat);
+                assert_eq!(routed.payload["metadata"]["writeScope"], scope);
+                let state =
+                    json!({"defaultThreadId":"restored-parent","historyReplayRequired":false});
+                let (prompt, _, _) = processor
+                    .build_prompt_with_text(
+                        &project_id,
+                        &routed,
+                        tmp.path(),
+                        "Review the event report and run its tests; refine only if warranted.",
+                        true,
+                        restored.then_some(&state),
+                        &[],
+                        None,
+                        None,
+                    )
+                    .unwrap();
+                assert!(prompt.contains("Finish with one short plain-text summary"));
+                assert!(prompt.contains("Explain a justified no-change result"));
+                assert!(
+                    prompt.contains("a no-change explanation does not satisfy a required edit")
+                );
+                assert!(prompt.contains("Owned paths: src/index.mjs"));
+                assert!(!prompt.contains("Return one JSON object"));
+                assert!(!prompt.contains("Return exactly one JSON object"));
+                assert!(!prompt.contains("Respond with a single JSON object"));
+                assert!(!prompt.contains("Do not edit files"));
+                if cross_chat {
+                    assert!(prompt.contains("Context recovery lookup required"));
+                    assert!(prompt.contains("Cross-chat lookup observation requirement"));
+                } else if !restored {
+                    assert!(
+                        prompt.contains(memory),
+                        "fresh conditional reviews must retain workspace memory"
+                    );
+                    assert!(!direct_write_broad_context_suppression_eligible(
+                        expectations,
+                        false
+                    ));
+                    assert!(
+                        !prompt.contains("snapshot skipped for this direct workspace-change run")
                     );
                 }
             }
@@ -26590,6 +27318,29 @@ mod tests {
             assert!(!section.contains("Local timezone: UTC"));
             assert_eq!(extract_client_timezone(Some(&metadata)), None);
         }
+    }
+
+    #[tokio::test]
+    async fn a_turn_exports_its_start_and_the_hosts_deadline_to_the_shell() {
+        let _lock = JOB_PROCESS_ENV_LOCK.lock().await;
+        let _timeout = EnvOverride::apply("CODEX_RUN_TIMEOUT_SECONDS", "900");
+        let _started = EnvOverride::remove("INSTAFY_TURN_STARTED_AT");
+        let _deadline = EnvOverride::remove("INSTAFY_TURN_DEADLINE");
+        let parse = |key: &str| {
+            chrono::DateTime::parse_from_rfc3339(&env::var(key).expect(key)).expect("rfc3339")
+        };
+        {
+            let _guard = TurnClockGuard::start();
+            let span = parse("INSTAFY_TURN_DEADLINE") - parse("INSTAFY_TURN_STARTED_AT");
+            assert_eq!(span.num_seconds(), 900);
+            let started = parse("INSTAFY_TURN_STARTED_AT").with_timezone(&chrono::Utc);
+            assert!((chrono::Utc::now() - started).num_seconds().abs() <= 5);
+        }
+        assert!(
+            env::var_os("INSTAFY_TURN_STARTED_AT").is_none()
+                && env::var_os("INSTAFY_TURN_DEADLINE").is_none(),
+            "cleared when the turn ends"
+        );
     }
 
     #[test]
@@ -29225,6 +29976,118 @@ mod tests {
         assert_eq!(content, "Hello Universe");
     }
 
+    /// A skill kickoff carries its SKILL.md whole, so the prompt builder does
+    /// not load it a second time from the path the kickoff names, nor the
+    /// files its text mentions.
+    #[test]
+    fn skill_kickoff_prompt_carries_each_skill_file_once() {
+        let tmp = tempdir().expect("temp dir");
+        let processor = test_job_processor(tmp.path());
+        let skill_dir = tmp.path().join(".agents/skills/freefinance");
+        fs::create_dir_all(&skill_dir).expect("skill dir");
+        let instruction = "Run `node .agents/skills/freefinance/run.js check` to test the token.";
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("# FreeFinance\n\n{instruction}\n"),
+        )
+        .expect("skill file");
+        fs::write(
+            skill_dir.join("run.js"),
+            "console.log('zq-companion-sentinel');\n",
+        )
+        .expect("companion script");
+        let kickoff = skills::build_skill_start_prompt(
+            tmp.path(),
+            Some("https://github.com/instafy-dev/skills"),
+            &[".agents/skills/freefinance/SKILL.md".to_string()],
+        );
+        let job = test_lease_job(Some("feature"), json!({}));
+        let project_id = Uuid::new_v4();
+        let build = |prompt_text: &str| {
+            processor
+                .build_prompt_with_text(
+                    &project_id,
+                    &job,
+                    tmp.path(),
+                    prompt_text,
+                    false,
+                    None,
+                    &[],
+                    None,
+                    None,
+                )
+                .expect("main prompt")
+        };
+
+        let (prompt, _, metrics) = build(kickoff.as_str());
+        assert_eq!(prompt.matches(instruction).count(), 1);
+        assert!(!prompt.contains("zq-companion-sentinel"));
+        assert!(
+            metrics["promptSections"]
+                .get("referencedWorkspaceFiles")
+                .is_none()
+        );
+
+        // Any other request still loads the files it names.
+        let (prompt, _, _) = build("What does `.agents/skills/freefinance/run.js` print?");
+        assert!(prompt.contains("zq-companion-sentinel"));
+    }
+
+    /// Nor does the carried text pick the project memory a kickoff loads. The
+    /// skill router would otherwise route the kickoff to the skill it just
+    /// installed and append that SKILL.md a second time.
+    #[test]
+    fn skill_kickoff_memory_is_selected_by_its_instructions_alone() {
+        let tmp = tempdir().expect("temp dir");
+        let processor = test_job_processor(tmp.path());
+        let skills_root = tmp.path().join(learn::SKILLS_ROOT_RELATIVE_PATH);
+        let skill_text = "Zorblat quuxifies frobnicator ledgers.";
+        for (name, text) in [
+            (
+                "instafy-skill-router",
+                "# Skill router\n\nRoutes requests to installed skills.\n".to_string(),
+            ),
+            ("zorblat", format!("# Zorblat\n\n{skill_text}\n")),
+        ] {
+            let dir = skills_root.join(name);
+            fs::create_dir_all(&dir).expect("skill dir");
+            fs::write(dir.join("SKILL.md"), text).expect("skill file");
+        }
+        let kickoff = skills::build_skill_start_prompt(
+            tmp.path(),
+            Some("https://github.com/instafy-dev/skills"),
+            &[".agents/skills/zorblat/SKILL.md".to_string()],
+        );
+        let job = test_lease_job(Some("feature"), json!({}));
+        let project_id = Uuid::new_v4();
+        let build = |prompt_text: &str| {
+            processor
+                .build_prompt_with_text(
+                    &project_id,
+                    &job,
+                    tmp.path(),
+                    prompt_text,
+                    true,
+                    None,
+                    &[],
+                    None,
+                    None,
+                )
+                .expect("main prompt")
+                .0
+        };
+
+        let prompt = build(kickoff.as_str());
+        assert!(prompt.contains("Project memory snapshot"));
+        assert!(prompt.contains("## Context: instafy-skill-router"));
+        assert!(!prompt.contains("## Context: zorblat"));
+        assert_eq!(prompt.matches(skill_text).count(), 1);
+
+        // A request about the skill still routes to it.
+        let prompt = build("How do zorblat ledgers get quuxified?");
+        assert!(prompt.contains("## Context: zorblat (.agents/skills/zorblat/SKILL.md)"));
+    }
+
     #[test]
     fn prompt_referenced_files_loads_backticked_workspace_path() {
         let tmp = tempdir().expect("tmp");
@@ -29671,6 +30534,98 @@ always_include: true
                 .text
                 .contains("## Persistent context tree (selected)")
         );
+    }
+
+    #[test]
+    fn routed_context_is_loaded_before_always_included_contexts_exhaust_the_budget() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+        let skills_dir = root.join(learn::SKILLS_ROOT_RELATIVE_PATH);
+        fs::create_dir_all(&skills_dir).expect("create skills dir");
+        fs::write(root.join(learn::INSTAFY_FILENAME), "# INSTAFY\n").expect("write instafy");
+
+        let write_skill = |name: &str, body: &str| {
+            let dir = skills_dir.join(name);
+            fs::create_dir_all(&dir).expect("create skill dir");
+            fs::write(dir.join("SKILL.md"), body).expect("write skill");
+        };
+
+        write_skill(
+            "instafy-persistent-contexts",
+            r#"---
+name: instafy-persistent-contexts
+description: Root persistent context rules.
+context_kind: root
+always_include: true
+context_children: instafy-skill-router
+---
+
+# Persistent contexts
+"#,
+        );
+        write_skill(
+            "instafy-skill-router",
+            r#"---
+name: instafy-skill-router
+description: Select workflow contexts.
+context_kind: meta
+context_parent: instafy-persistent-contexts
+always_include: true
+max_children: 3
+---
+
+# Skill router
+"#,
+        );
+        // Five always-included contexts of 12 KB each: together they are larger than the whole
+        // project memory budget.
+        let filler = "Always-included guidance that does not mention the request.\n".repeat(200);
+        for index in 0..5 {
+            write_skill(
+                &format!("instafy-always-{index}"),
+                &format!(
+                    "---\nname: instafy-always-{index}\ndescription: Always included.\ncontext_kind: meta\ncontext_parent: instafy-persistent-contexts\nalways_include: true\n---\n\n# Always {index}\n{filler}"
+                ),
+            );
+        }
+        write_skill(
+            "interactive-map",
+            r#"---
+name: interactive-map
+description: Build interactive map sites.
+context_parent: instafy-skill-router
+routing_keywords: map, hotel, walk
+---
+
+# Interactive map sites
+
+Use the uw commands.
+END-OF-MAP-SKILL
+"#,
+        );
+
+        let prompt = "Make us a map that helps us choose a hotel in Taipei.";
+        let snapshot = format_project_memory_snapshot(root, prompt).expect("snapshot");
+
+        assert!(snapshot.text.len() <= PROJECT_MEMORY_MAX_TOTAL_BYTES + 4_096);
+        assert!(
+            snapshot
+                .text
+                .contains("## Context: interactive-map (.agents/skills/interactive-map/SKILL.md)")
+        );
+        assert!(
+            snapshot.text.contains("END-OF-MAP-SKILL"),
+            "the routed skill must be loaded in full, not crowded out by always-included contexts"
+        );
+        let routed_at = snapshot
+            .text
+            .find("## Context: interactive-map")
+            .expect("routed context");
+        let always_at = snapshot
+            .text
+            .find("## Context: instafy-always-0")
+            .unwrap_or(usize::MAX);
+        assert!(routed_at < always_at, "routed context is loaded first");
     }
 
     #[test]

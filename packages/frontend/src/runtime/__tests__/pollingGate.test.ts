@@ -91,8 +91,8 @@ describe("polling gate", () => {
     let container: HTMLDivElement;
     const callback = vi.fn();
 
-    function Harness({ runOnWake }: { runOnWake?: boolean }) {
-      useGatedInterval(callback, 20_000, { idleMs: 120_000, runOnWake });
+    function Harness({ runOnWake, enabled }: { runOnWake?: boolean; enabled?: boolean }) {
+      useGatedInterval(callback, 20_000, { idleMs: 120_000, runOnWake, enabled });
       return null;
     }
 
@@ -167,6 +167,17 @@ describe("polling gate", () => {
       await act(async () => setVisibility("hidden"));
       await act(async () => setVisibility("visible"));
       expect(callback).not.toHaveBeenCalled();
+      await advance(20_000);
+      expect(callback).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps no timer and no wake run while disabled", async () => {
+      await act(async () => root.render(createElement(Harness, { enabled: false })));
+      await advance(60_000);
+      await act(async () => setVisibility("hidden"));
+      await act(async () => setVisibility("visible"));
+      expect(callback).not.toHaveBeenCalled();
+      await act(async () => root.render(createElement(Harness, { enabled: true })));
       await advance(20_000);
       expect(callback).toHaveBeenCalledTimes(1);
     });

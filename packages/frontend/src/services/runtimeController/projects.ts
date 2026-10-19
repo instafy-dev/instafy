@@ -1,6 +1,7 @@
 import { normalizeSpaceAvatarUrl, normalizeSpaceIcon, normalizeSpaceColor, type ProjectIdentity, type ProjectIdentityUpdate } from "@instafy/sdk/project-identity";
 import {
   ControllerApiError,
+  controllerRequestContextUserId,
   normalizeUuidParam,
   readControllerApiError,
   readControllerError,
@@ -11,7 +12,7 @@ import {
 export { deriveGithubImportTargetPath } from "./githubImportPath";
 import { logControllerRequestError } from "./logging";
 import { CONTROLLER_READ_BUDGET_MS, createControllerReadBudget } from "./readBudget";
-import { PERSONAL_ORG_LABEL } from "../../org/orgNaming";
+import { isPersonalOrgName, PERSONAL_ORG_LABEL } from "../../org/orgNaming";
 
 export interface ControllerProjectCreateParams {
   projectType?: "sandbox" | "customer";
@@ -43,6 +44,15 @@ export interface ControllerOrgSummary {
   avatarUrl?: string | null;
   accentColor?: string | null;
   role?: string | null;
+}
+
+export interface ControllerOrgCreateResult extends ControllerOrgSummary {
+  /**
+   * False when the controller resolved a team the caller already belongs to
+   * instead of creating one (an idempotent create, such as the personal team).
+   * Absent from controllers that predate the signal.
+   */
+  created?: boolean;
 }
 
 export interface ControllerProjectSummary extends ProjectIdentity {
@@ -201,7 +211,7 @@ type ControllerOrganizationCreateParams = {
 async function createControllerOrganizationWithContext(
   params: ControllerOrganizationCreateParams | undefined,
   requestContext: ControllerRequestContext,
-): Promise<ControllerOrgSummary | null> {
+): Promise<ControllerOrgCreateResult | null> {
   const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return null;
@@ -236,6 +246,7 @@ async function createControllerOrganizationWithContext(
       orgId?: string | null;
       orgSlug?: string | null;
       orgName?: string | null;
+      created?: unknown;
     } | null;
     const orgId =
       typeof body?.orgId === "string" && body.orgId.length > 0 ? body.orgId : null;
@@ -246,7 +257,13 @@ async function createControllerOrganizationWithContext(
     if (!orgId || !orgSlug || !orgName) {
       return null;
     }
-    return { id: orgId, slug: orgSlug, name: orgName, accentColor: body?.accentColor ?? null };
+    return {
+      id: orgId,
+      slug: orgSlug,
+      name: orgName,
+      accentColor: body?.accentColor ?? null,
+      ...(typeof body?.created === "boolean" ? { created: body.created } : {}),
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.warn("[runtime-controller] createControllerOrganization error:", message);
@@ -256,12 +273,70 @@ async function createControllerOrganizationWithContext(
 
 export async function createControllerOrganization(
   params?: ControllerOrganizationCreateParams,
-): Promise<ControllerOrgSummary | null> {
+): Promise<ControllerOrgCreateResult | null> {
   if (!runtimeControllerEnabled) {
     return null;
   }
   const requestContext = await resolveControllerRequestContext(null);
   return createControllerOrganizationWithContext(params, requestContext);
+}
+
+/**
+ * The team a space joins when its creator chose none: the personal team the
+ * controller pins to the caller's own id (slug `user-<caller id>`), when they
+ * own it. Never a team found by name, nor another user's personal team the
+ * caller co-owns. Null when the caller's id is unknown or the team is not
+ * listed; the controller then resolves the personal team from the token.
+ */
+export function pickDefaultSpaceOrg(
+  orgs: readonly ControllerOrgSummary[],
+  callerUserId: string | null,
+): ControllerOrgSummary | null {
+  const personalSlug = callerUserId?.trim() ? `user-${callerUserId.trim().toLowerCase()}` : null;
+  if (!personalSlug) {
+    return null;
+  }
+  return (
+    orgs.find(
+      (org) =>
+        org.slug?.trim().toLowerCase() === personalSlug &&
+        org.role?.trim().toLowerCase() === "owner",
+    ) ?? null
+  );
+}
+
+async function findDefaultSpaceOrgWithContext(
+  requestContext: ControllerRequestContext,
+): Promise<ControllerOrgSummary | null> {
+  const callerUserId = controllerRequestContextUserId(requestContext);
+  if (!callerUserId) {
+    return null;
+  }
+  const budget = createControllerReadBudget();
+  try {
+    const response = await budget.wait(() => fetch(`${requestContext.baseUrl}/orgs`, {
+      signal: budget.signal,
+      headers: {
+        authorization: `Bearer ${requestContext.accessToken}`,
+      },
+    }));
+    if (!response.ok) {
+      return null;
+    }
+    const payload = (await budget.wait(() => response.json().catch(() => null))) as {
+      orgs?: ControllerOrgSummary[];
+    } | null;
+    const orgs = Array.isArray(payload?.orgs)
+      ? payload.orgs.filter((org) => typeof org.id === "string" && org.id.length > 0)
+      : [];
+    return pickDefaultSpaceOrg(orgs, callerUserId);
+  } catch {
+    // Without the list, fall back to ensuring the personal team, which the
+    // controller pins to the caller's own slug.
+    return null;
+  } finally {
+    budget.dispose();
+  }
 }
 
 export async function createControllerProject(
@@ -279,14 +354,18 @@ export async function createControllerProject(
   let resolvedOrgId = normalizedOrgId ?? null;
   let resolvedOrgName = params.orgName ?? null;
   if (!resolvedOrgId) {
-    const fallbackOrgName =
-      typeof params.orgName === "string" && params.orgName.trim().length > 0
-        ? params.orgName.trim()
-        : PERSONAL_ORG_LABEL;
-    const org = await createControllerOrganizationWithContext(
+    const requestedOrgName = params.orgName?.trim() || null;
+    // No team was chosen: join the creator's own personal team when it is
+    // listed, else ensure it. A display label such as "Personal" is sent as
+    // the stored label, which the controller pins to the caller's own team.
+    const personalTeamRequested = !params.orgSlug?.trim() && isPersonalOrgName(requestedOrgName);
+    const existingOrg = personalTeamRequested
+      ? await findDefaultSpaceOrgWithContext(requestContext)
+      : null;
+    const org = existingOrg ?? await createControllerOrganizationWithContext(
       {
         orgSlug: params.orgSlug ?? null,
-        orgName: fallbackOrgName,
+        orgName: isPersonalOrgName(requestedOrgName) ? PERSONAL_ORG_LABEL : requestedOrgName,
       },
       requestContext,
     );

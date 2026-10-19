@@ -350,7 +350,7 @@ describe("ProjectAccessProvider capability refresh", () => {
     expect(probe?.getAttribute("data-initialized")).toBe("true");
     expect(probe?.getAttribute("data-blocked")).toBe("true");
     expect(probe?.getAttribute("data-write")).toBe("false");
-    expect(mocks.removeProject).toHaveBeenCalledWith(PROJECT_ID);
+    expect(mocks.removeProject).toHaveBeenCalledWith(PROJECT_ID, { openFallback: false });
     await act(async () => vi.advanceTimersByTimeAsync(5_000));
     expect(mocks.getSummaryResult).toHaveBeenCalledTimes(1);
     expect(mocks.createControllerProject).not.toHaveBeenCalled();
@@ -540,14 +540,15 @@ describe("ProjectAccessProvider capability refresh", () => {
     });
   });
 
-  it("fails closed when an explicit refresh discovers revoked access", async () => {
+  it.each(["forbidden", "unauthorized", "notFound"])("fails closed when an explicit refresh gets %s, and keeps the space's saved tabs", async (failure) => {
     mocks.getSummaryResult
       .mockResolvedValueOnce(summaryFor("admin"))
       .mockResolvedValueOnce({
         summary: null,
         notFound: false,
-        forbidden: true,
+        forbidden: false,
         unauthorized: false,
+        [failure]: true,
       });
 
     await act(async () => {
@@ -568,8 +569,10 @@ describe("ProjectAccessProvider capability refresh", () => {
       const probe = container.querySelector('[data-testid="access-probe"]');
       expect(probe?.getAttribute("data-blocked")).toBe("true");
       expect(probe?.getAttribute("data-resolved")).toBe("false");
-      expect(mocks.removeProject).toHaveBeenCalledWith(PROJECT_ID);
+      expect(mocks.removeProject).toHaveBeenCalledWith(PROJECT_ID, { openFallback: false });
     });
+    // A 401 can be a token refresh in flight: only a deletion forgets tabs.
+    expect(mocks.removeProject.mock.calls.some(([, options]) => options?.forgetSavedTabs)).toBe(false);
   });
 
   it("drops a space deleted elsewhere from this tab's lists without touching the open space", async () => {
@@ -584,7 +587,7 @@ describe("ProjectAccessProvider capability refresh", () => {
       detail: { projectId: null, deletedProjectId: DELETED },
     })));
 
-    expect(mocks.removeProject).toHaveBeenCalledExactlyOnceWith(DELETED);
+    expect(mocks.removeProject).toHaveBeenCalledExactlyOnceWith(DELETED, { forgetSavedTabs: true });
     expect(mocks.getSummaryResult).not.toHaveBeenCalled();
     expect(probe?.getAttribute("data-role")).toBe("admin");
     expect(probe?.getAttribute("data-write")).toBe("true");
@@ -599,10 +602,10 @@ describe("ProjectAccessProvider capability refresh", () => {
     expect(probe?.getAttribute("data-role")).toBe("admin");
     mocks.getSummaryResult.mockClear();
 
-    // The real store activates another local space when the open one is
-    // removed; the URL still names the deleted one.
-    mocks.removeProject.mockImplementation(() => {
-      mocks.activeProjectId = FALLBACK;
+    // The real store opens another local space when the open one is removed,
+    // unless told not to; the URL still names the deleted one.
+    mocks.removeProject.mockImplementation((_projectId: string, options?: { openFallback?: boolean }) => {
+      mocks.activeProjectId = options?.openFallback === false ? "" : FALLBACK;
     });
     mocks.getSummaryResult.mockImplementation(async (projectId: string) => projectId === PROJECT_ID
       ? { summary: null, notFound: true, forbidden: false, unauthorized: false }
@@ -613,7 +616,7 @@ describe("ProjectAccessProvider capability refresh", () => {
     })));
     await act(async () => window.dispatchEvent(new Event("focus")));
 
-    expect(mocks.removeProject).toHaveBeenCalledWith(PROJECT_ID);
+    expect(mocks.removeProject).toHaveBeenCalledWith(PROJECT_ID, { openFallback: false, forgetSavedTabs: true });
     expect(mocks.getSummaryResult.mock.calls.map(([projectId]) => projectId)).toEqual([PROJECT_ID]);
     expect(probe?.getAttribute("data-blocked")).toBe("true");
     expect(probe?.getAttribute("data-deleted")).toBe("true");
@@ -656,7 +659,7 @@ describe("ProjectAccessProvider capability refresh", () => {
       detail: { projectId: null, deletedProjectId: null, deletedOrgId: "org-2" },
     })));
 
-    expect(mocks.removeProjectsByOrgId).toHaveBeenCalledExactlyOnceWith("org-2");
+    expect(mocks.removeProjectsByOrgId).toHaveBeenCalledExactlyOnceWith("org-2", { forgetSavedTabs: true });
     expect(mocks.removeProject).not.toHaveBeenCalled();
     expect(mocks.getSummaryResult).not.toHaveBeenCalled();
     expect(probe?.getAttribute("data-role")).toBe("admin");
@@ -676,10 +679,10 @@ describe("ProjectAccessProvider capability refresh", () => {
     expect(probe?.getAttribute("data-role")).toBe("admin");
     mocks.getSummaryResult.mockClear();
 
-    // The real store activates another space when the open one is removed;
-    // the URL still names the deleted one.
-    mocks.removeProject.mockImplementation((projectId: string) => {
-      if (projectId === PROJECT_ID) mocks.activeProjectId = ELSEWHERE;
+    // The real store opens another local space when the open one is removed,
+    // unless told not to; the URL still names the deleted one.
+    mocks.removeProject.mockImplementation((projectId: string, options?: { openFallback?: boolean }) => {
+      if (projectId === PROJECT_ID) mocks.activeProjectId = options?.openFallback === false ? "" : ELSEWHERE;
     });
     mocks.getSummaryResult.mockImplementation(async (projectId: string) => projectId === PROJECT_ID
       ? { summary: null, notFound: true, forbidden: false, unauthorized: false }
@@ -690,20 +693,18 @@ describe("ProjectAccessProvider capability refresh", () => {
     })));
     await act(async () => window.dispatchEvent(new Event("focus")));
 
-    // The sibling left first, so the store never moved to a space of the team.
-    expect(mocks.removeProject.mock.calls.map(([projectId]) => projectId)).toEqual([SIBLING, PROJECT_ID]);
+    // The sibling left first, and both as deleted spaces, saved tabs and all.
+    // The space of the other team stays.
+    expect(mocks.removeProject.mock.calls).toEqual([
+      [SIBLING, { forgetSavedTabs: true }],
+      [PROJECT_ID, { openFallback: false, forgetSavedTabs: true }],
+    ]);
+    expect(mocks.removeProjectsByOrgId).not.toHaveBeenCalled();
     expect(mocks.getSummaryResult.mock.calls.map(([projectId]) => projectId)).toEqual([PROJECT_ID]);
     expect(probe?.getAttribute("data-blocked")).toBe("true");
     expect(probe?.getAttribute("data-deleted")).toBe("true");
     expect(mocks.switchProject).not.toHaveBeenCalled();
     expect(mocks.navigate).not.toHaveBeenCalled();
-
-    // A repeated notice, now that the store holds a space of another team.
-    await act(async () => window.dispatchEvent(new CustomEvent(PROJECT_ACCESS_REFRESH_EVENT, {
-      detail: { projectId: null, deletedProjectId: null, deletedOrgId: "org-1" },
-    })));
-    expect(mocks.removeProjectsByOrgId).toHaveBeenCalledExactlyOnceWith("org-1");
-    expect(probe?.getAttribute("data-deleted")).toBe("true");
   });
 
   it("leaves an open space in a team this tab is deleting to the delete, and blocks it if the delete fails", async () => {
@@ -732,7 +733,7 @@ describe("ProjectAccessProvider capability refresh", () => {
       });
 
       // A space announced deleted leaves the lists; the open one is left alone.
-      expect(mocks.removeProject).toHaveBeenCalledExactlyOnceWith(SIBLING);
+      expect(mocks.removeProject).toHaveBeenCalledExactlyOnceWith(SIBLING, { forgetSavedTabs: true });
       expect(mocks.removeProjectsByOrgId).not.toHaveBeenCalled();
       expect(mocks.getSummaryResult).not.toHaveBeenCalled();
       expect(probe?.getAttribute("data-blocked")).toBe("false");
@@ -743,10 +744,11 @@ describe("ProjectAccessProvider capability refresh", () => {
     }
 
     // The delete failed after all: the next check finds the space gone and
-    // says so, since the controller announced it.
+    // says so, since the controller announced it, and forgets its tabs.
     await act(async () => window.dispatchEvent(new Event("focus")));
     expect(probe?.getAttribute("data-blocked")).toBe("true");
     expect(probe?.getAttribute("data-deleted")).toBe("true");
+    expect(mocks.removeProject).toHaveBeenLastCalledWith(PROJECT_ID, { openFallback: false, forgetSavedTabs: true });
     expect(mocks.switchProject).not.toHaveBeenCalled();
   });
 
@@ -768,7 +770,7 @@ describe("ProjectAccessProvider capability refresh", () => {
     expect(probe?.getAttribute("data-blocked")).toBe("true");
     // Nothing said the space was deleted, only that it is not found.
     expect(probe?.getAttribute("data-deleted")).toBe("false");
-    expect(mocks.removeProject).toHaveBeenCalledWith(PROJECT_ID);
+    expect(mocks.removeProject).toHaveBeenCalledWith(PROJECT_ID, { openFallback: false });
   });
 
   it("ends the lookup when the last space this browser knew is gone and nothing replaces it", async () => {

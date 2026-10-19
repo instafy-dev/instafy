@@ -1338,7 +1338,7 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
       handleOpenProjectsPanel({ projectId: null });
       suppressProjectAutoCreate();
     }
-    removeProject(deletedProjectId);
+    removeProject(deletedProjectId, { forgetSavedTabs: true });
     // Lists cached from before the delete refresh now, not on the next focus.
     window.dispatchEvent(new CustomEvent<ProjectAccessRefreshEventDetail>(PROJECT_ACCESS_REFRESH_EVENT, {
       detail: { projectId: null, deletedProjectId },
@@ -1396,7 +1396,8 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
           suppressProjectAutoCreate();
         }
       },
-      removeTeamProjects: removeProjectsByOrgId,
+      // Called only once the team's spaces are deleted, so their tabs go too.
+      removeTeamProjects: (orgId) => removeProjectsByOrgId(orgId, { forgetSavedTabs: true }),
     });
     if (outcome.status === "failed") {
       showStatus("Unable to delete this team right now.", "error", 4000);

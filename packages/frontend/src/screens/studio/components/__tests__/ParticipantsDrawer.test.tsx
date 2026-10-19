@@ -129,6 +129,36 @@ describe("ParticipantsDrawer", () => {
     ).toBe("1 running · 2 messages queued");
   });
 
+  it("shows a managed-AI agent's model and lane without a credential warning", async () => {
+    await act(async () => {
+      publishChatParticipants(
+        snapshot({
+          agents: [
+            {
+              handle: "octo",
+              displayName: "Octo",
+              avatarSeed: "octo",
+              model: null,
+              modelLabel: "GPT-6 Luna",
+              providerLabel: "OpenAI",
+              credentialId: null,
+              credentialLabel: "Instafy AI",
+              credentialState: "managed",
+              subscriptionUsage: null,
+            },
+          ],
+        }),
+      );
+    });
+    await render();
+
+    const drawer = container.querySelector('[data-testid="participants-drawer"]');
+    expect(drawer?.textContent).toContain("GPT-6 Luna");
+    expect(drawer?.textContent).toContain("Instafy AI · credits");
+    expect(drawer?.textContent).not.toContain("No AI credential");
+    expect(drawer?.textContent).not.toContain("gpt-5.6-sol");
+  });
+
   it("shows built-in Octo as its coin, not a gradient initial", async () => {
     // The drawer used to draw every agent as a gradient initial, so Octo was an
     // "O" here while every other surface showed its coin (docs/Brand.md).

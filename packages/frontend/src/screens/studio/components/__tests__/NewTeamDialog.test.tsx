@@ -137,5 +137,27 @@ describe("new team picture onboarding", () => {
     expect(mocks.create).toHaveBeenCalledTimes(1);
     expect(onCreated).toHaveBeenCalledExactlyOnceWith({ ...created, accentColor: null, avatarUrl: "https://example.test/team.png" });
   });
+  it("leaves a team the user already had untouched and lets them pick another name", async () => {
+    // Typing "Personal" resolves the user's own personal team; the chosen
+    // picture must not replace that team's picture.
+    const personal = { id: "team-personal", slug: "user-624ae065-1cfe-4a2b-9c3d-0123456789ab", name: "Personal team", role: "owner" };
+    mocks.create.mockResolvedValueOnce({ ...personal, created: false });
+    await render(); await input("sidebar-new-team-name", "Personal"); await choose(); await submit();
+    expect(mocks.upload).not.toHaveBeenCalled();
+    expect(mocks.update).not.toHaveBeenCalled();
+    expect(onCreated).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    const notice = container.querySelector('[data-testid="new-team-existing-notice"]');
+    expect(notice?.getAttribute("role")).toBe("status");
+    expect(notice?.textContent).toBe("Personal is already one of your teams. Choose a different name to create a new one.");
+    expect(container.querySelector<HTMLInputElement>('[data-testid="sidebar-new-team-name"]')!.disabled).toBe(false);
+
+    mocks.create.mockResolvedValueOnce({ ...created, created: true });
+    await input("sidebar-new-team-name", "New team"); await submit();
+    expect(mocks.create).toHaveBeenLastCalledWith({ orgName: "New team" });
+    expect(mocks.upload).toHaveBeenCalledExactlyOnceWith({ orgId: "team-new", file: expect.any(File) });
+    expect(onCreated).toHaveBeenCalledExactlyOnceWith({ ...created, avatarUrl: "https://example.test/team.png" });
+    expect(container.querySelector('[data-testid="new-team-existing-notice"]')).toBeNull();
+  });
 
 });

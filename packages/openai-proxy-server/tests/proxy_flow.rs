@@ -209,6 +209,8 @@ struct ControllerStub {
 
 #[derive(Clone, Default)]
 struct UpstreamStub {
+    headers: Arc<Mutex<Vec<HeaderMap>>>,
+    turn_state: Arc<Mutex<Option<String>>>,
     /// Authorization headers seen by the model endpoint.
     bearers: Arc<Mutex<Vec<String>>>,
     /// The `model` of each request the model endpoint received.
@@ -331,6 +333,10 @@ fn record_upstream_request(stub: &UpstreamStub, headers: &HeaderMap, payload: &V
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_string();
+    stub.headers
+        .lock()
+        .expect("header log")
+        .push(headers.clone());
     stub.bearers
         .lock()
         .expect("bearer log")
@@ -385,11 +391,17 @@ async fn upstream_chatgpt_stub(
     if let Some((status, body)) = next_canned_response(&stub) {
         return (status, AxumJson(body)).into_response();
     }
-    (
+    let mut response = (
         [(header::CONTENT_TYPE, "text/event-stream")],
         RESPONSES_FIXTURE,
     )
-        .into_response()
+        .into_response();
+    if let Some(state) = stub.turn_state.lock().expect("turn state").as_ref() {
+        response
+            .headers_mut()
+            .insert("x-codex-turn-state", state.parse().unwrap());
+    }
+    response
 }
 
 async fn upstream_responses_stub(
@@ -690,12 +702,24 @@ struct TestProxyClaims {
 /// managed-lane one has no credential_id; the agent-login and runtime-register
 /// envelopes carry neither.
 fn proxy_token(run_id: Option<&str>, credential_id: Option<&str>) -> String {
+    proxy_token_in_project(
+        run_id,
+        credential_id,
+        "11111111-1111-4111-8111-111111111111",
+    )
+}
+
+fn proxy_token_in_project(
+    run_id: Option<&str>,
+    credential_id: Option<&str>,
+    project_id: &str,
+) -> String {
     let now = chrono::Utc::now().timestamp();
     let claims = TestProxyClaims {
         aud: "proxy",
         iss: "runtime-controller",
         sub: "proxy:project:runtime".to_string(),
-        project_id: "11111111-1111-4111-8111-111111111111".to_string(),
+        project_id: project_id.to_string(),
         runtime_id: "22222222-2222-4222-8222-222222222222".to_string(),
         run_id: run_id.map(str::to_string),
         credential_id: credential_id.map(str::to_string),
@@ -4086,5 +4110,363 @@ async fn byo_and_standalone_audio_still_go_upstream_as_sent() -> Result<()> {
         assert_eq!(forwarded[1], form, "{name}");
     }
 
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn response_context_controls_scope_identity_and_sticky_state_on_dynamic_leases() -> Result<()>
+{
+    let (addr, controller, upstream, _env, _guards) =
+        spawn_managed_stack(Some(MANAGED_STUB_KEY), Some(PINNED_MODEL), false).await?;
+    *upstream.turn_state.lock().unwrap() = Some("provider-sticky-sentinel".into());
+    let payload = json!({
+        "model":"gpt-5.6-sol","stream":true,"tools":[],
+        "prompt_cache_key":"root-session",
+        "reasoning":{"effort":"high","context":"all_turns"},
+        "include":["reasoning.encrypted_content"],
+        "client_metadata":{"do_not_forward":"sentinel"},
+        "input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]
+    });
+    let client = reqwest::Client::new();
+    let post = |token: String, state: Option<&str>, body: &Value| {
+        let request = client
+            .post(format!("http://{addr}/v1/responses"))
+            .bearer_auth(token)
+            .header("session-id", "root-session")
+            .header("thread-id", "child-thread")
+            .header("x-not-allowed", "do-not-forward")
+            .json(body);
+        if let Some(state) = state {
+            request.header("x-codex-turn-state", state)
+        } else {
+            request
+        }
+    };
+    let first = post(
+        proxy_token(Some(RUN_ID), Some(BYO_CHATGPT_CREDENTIAL_ID)),
+        None,
+        &payload,
+    )
+    .send()
+    .await?;
+    assert_eq!(first.status(), StatusCode::OK);
+    assert!(
+        first.headers()["content-type"]
+            .to_str()?
+            .contains("text/event-stream")
+    );
+    let sticky = first.headers()["x-codex-turn-state"].to_str()?.to_string();
+    assert_ne!(sticky, "provider-sticky-sentinel");
+    let first_stream = first.text().await?;
+    assert!(first_stream.contains("response.completed"));
+    let second = post(
+        proxy_token(Some("other-job-run"), Some(BYO_CHATGPT_CREDENTIAL_ID)),
+        Some(&sticky),
+        &payload,
+    )
+    .send()
+    .await?;
+    assert_eq!(second.status(), StatusCode::OK);
+    let _ = second.text().await?;
+    let other_project = post(
+        proxy_token_in_project(
+            Some(RUN_ID),
+            Some(BYO_CHATGPT_CREDENTIAL_ID),
+            "other-project",
+        ),
+        Some(&sticky),
+        &payload,
+    )
+    .send()
+    .await?;
+    assert_eq!(other_project.status(), StatusCode::OK);
+    let _ = other_project.text().await?;
+    let mut public_payload = payload.clone();
+    public_payload["prompt_cache_options"] =
+        json!({"mode":"implicit","ttl":"30m","comparison_response_id":"resp-prior"});
+    public_payload["input"][0]["content"][0]["prompt_cache_breakpoint"] =
+        json!({"mode":"explicit"});
+    let other_credential = post(
+        proxy_token(Some(RUN_ID), Some(BYO_CREDENTIAL_ID)),
+        Some(&sticky),
+        &public_payload,
+    )
+    .send()
+    .await?;
+    assert_eq!(other_credential.status(), StatusCode::OK);
+    assert!(
+        other_credential
+            .headers()
+            .get("x-codex-turn-state")
+            .is_none()
+    );
+    let _ = other_credential.text().await?;
+    let bodies = upstream.bodies.lock().unwrap().clone();
+    let headers = upstream.headers.lock().unwrap().clone();
+    assert_eq!(bodies.len(), 4);
+    assert_eq!(bodies[0]["prompt_cache_key"], bodies[1]["prompt_cache_key"]);
+    assert_ne!(bodies[0]["prompt_cache_key"], bodies[2]["prompt_cache_key"]);
+    assert_ne!(bodies[0]["prompt_cache_key"], bodies[3]["prompt_cache_key"]);
+    assert_eq!(
+        headers[0]["session-id"].to_str()?,
+        bodies[0]["prompt_cache_key"].as_str().unwrap()
+    );
+    assert_ne!(headers[0]["thread-id"], headers[0]["session-id"]);
+    assert!(headers[0].get("x-codex-turn-state").is_none());
+    assert_eq!(headers[1]["x-codex-turn-state"], "provider-sticky-sentinel");
+    assert!(headers[2].get("x-codex-turn-state").is_none());
+    assert!(headers[3].get("x-codex-turn-state").is_none());
+    for (index, body) in bodies.iter().enumerate() {
+        assert_eq!(body["reasoning"]["context"], "all_turns");
+        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+        assert!(body.get("conversation_id").is_none());
+        assert!(body.get("previous_response_id").is_none());
+        assert!(body.get("client_metadata").is_none());
+        assert!(headers[index].get("x-not-allowed").is_none());
+        if index == 3 {
+            assert_eq!(
+                body["input"].as_array().unwrap().last().unwrap()["content"][0]["prompt_cache_breakpoint"],
+                json!({"mode":"explicit"})
+            );
+        }
+    }
+    assert!(bodies[0].get("prompt_cache_options").is_none());
+    assert_eq!(
+        bodies[3]["prompt_cache_options"],
+        public_payload["prompt_cache_options"]
+    );
+    assert_eq!(
+        headers[0]["authorization"],
+        format!("Bearer {BYO_CHATGPT_STUB_TOKEN}")
+    );
+    assert_eq!(
+        headers[3]["authorization"],
+        format!("Bearer {BYO_STUB_KEY}")
+    );
+    assert!(controller.leases.lock().unwrap().len() >= 2);
+
+    let refused = post(proxy_token(Some(RUN_ID), None), None, &public_payload)
+        .send()
+        .await?;
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        refused
+            .text()
+            .await?
+            .contains("comparison_response_id requires a bring-your-own credential")
+    );
+    assert_eq!(upstream.bodies.lock().unwrap().len(), 4);
+    let unsupported = post(
+        proxy_token(Some(RUN_ID), Some(BYO_CHATGPT_CREDENTIAL_ID)),
+        None,
+        &public_payload,
+    )
+    .send()
+    .await?;
+    assert_eq!(unsupported.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        unsupported
+            .text()
+            .await?
+            .contains("unsupported on imported Codex credentials")
+    );
+    assert_eq!(upstream.bodies.lock().unwrap().len(), 4);
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn chat_projection_preserves_observed_usage_and_diagnostics_on_dynamic_leases() -> Result<()>
+{
+    let (addr, _controller, upstream, _env, _guards) =
+        spawn_managed_stack(Some(MANAGED_STUB_KEY), Some(PINNED_MODEL), false).await?;
+    for usage in [
+        Some(
+            json!({"input_tokens":1000,"input_tokens_details":{"cached_tokens":600,"cache_write_tokens":200},"output_tokens":20,"output_tokens_details":{"reasoning_tokens":10},"total_tokens":1020}),
+        ),
+        Some(json!({"input_tokens_details":{"cached_tokens":0}})),
+        Some(json!({"input_tokens_details":{"cached_tokens":"invalid","cache_write_tokens":null}})),
+        None,
+    ] {
+        let mut completed = fixture_completed_response();
+        completed.as_object_mut().unwrap().remove("usage");
+        if let Some(usage) = usage.as_ref() {
+            completed["usage"] = usage.clone();
+        }
+        completed["prompt_cache_diagnostics"] = json!({"opaque":"preserved"});
+        upstream
+            .respond_next
+            .lock()
+            .unwrap()
+            .push_back((StatusCode::OK, completed));
+        let response = reqwest::Client::new().post(format!("http://{addr}/v1/chat/completions"))
+            .bearer_auth(proxy_token(Some(RUN_ID),Some(BYO_CREDENTIAL_ID)))
+            .json(&json!({"model":"gpt-5.6-sol","stream":false,"messages":[{"role":"user","content":"hello"}]})).send().await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = response.json().await?;
+        assert_eq!(
+            body["prompt_cache_diagnostics"],
+            json!({"opaque":"preserved"})
+        );
+        assert_eq!(body.get("usage").is_some(), usage.is_some());
+        if let Some(usage) = usage {
+            assert_eq!(
+                body["usage"].get("prompt_tokens_details"),
+                usage.get("input_tokens_details")
+            );
+            assert_eq!(
+                body["usage"].get("completion_tokens_details"),
+                usage.get("output_tokens_details")
+            );
+            assert_eq!(body["usage"].get("total_tokens"), usage.get("total_tokens"));
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn response_context_rebinds_after_local_login_account_replacement() -> Result<()> {
+    let (_addr, _controller, upstream, _env, _guards) = spawn_stack(
+        None,
+        None,
+        false,
+        StackProxy::StaticChatGpt { pinned_model: None },
+    )
+    .await?;
+    *upstream.turn_state.lock().unwrap() = Some("account-sticky".into());
+    let directory = std::env::temp_dir().join(format!(
+        "instafy-proxy-context-test-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir(&directory)?;
+    struct TestDirectory(std::path::PathBuf);
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _directory = TestDirectory(directory.clone());
+    let auth_path = directory.join("auth.json");
+    let write_login = |account: &str| {
+        std::fs::write(
+            &auth_path,
+            json!({"tokens":{"access_token":MANAGED_STUB_KEY,"account_id":account,"refresh_token":"inert-old-refresh"}}).to_string(),
+        )
+    };
+    write_login("account-a")?;
+    let (addr, _proxy) = spawn_proxy(Some(Credentials::ChatGpt {
+        access_token: MANAGED_STUB_KEY.into(),
+        refresh_token: Some("inert-old-refresh".into()),
+        account_id: Some("account-a".into()),
+        default_model: None,
+        auth_path: Some(auth_path.clone()),
+    }))
+    .await?;
+    let client = reqwest::Client::new();
+    let request = || {
+        client.post(format!("http://{addr}/v1/responses"))
+        .bearer_auth(proxy_token(Some(RUN_ID),None))
+        .header("session-id","root-session")
+        .json(&json!({"model":"gpt-5.6-sol","tools":[],"stream":false,"prompt_cache_key":"root-session","input":"hello"}))
+    };
+    let first = request().send().await?;
+    assert_eq!(first.status(), StatusCode::OK);
+    let sticky = first.headers()["x-codex-turn-state"].to_str()?.to_string();
+    let _ = first.text().await?;
+    write_login("account-b")?;
+    let second = request()
+        .header("x-codex-turn-state", sticky)
+        .send()
+        .await?;
+    assert_eq!(second.status(), StatusCode::OK);
+    let second_sticky = second.headers()["x-codex-turn-state"].to_str()?.to_string();
+    let _ = second.text().await?;
+    std::fs::write(
+        &auth_path,
+        json!({"tokens":{"access_token":BYO_CHATGPT_STUB_TOKEN}}).to_string(),
+    )?;
+    let third = request()
+        .header("x-codex-turn-state", second_sticky)
+        .send()
+        .await?;
+    assert_eq!(third.status(), StatusCode::OK);
+    let _ = third.text().await?;
+    let headers = upstream.headers.lock().unwrap();
+    assert_eq!(headers[0]["chatgpt-account-id"], "account-a");
+    assert_eq!(headers[1]["chatgpt-account-id"], "account-b");
+    assert!(headers[1].get("x-codex-turn-state").is_none());
+    assert_ne!(headers[0]["session-id"], headers[1]["session-id"]);
+    assert!(headers[2].get("chatgpt-account-id").is_none());
+    assert!(headers[2].get("x-codex-turn-state").is_none());
+    assert_eq!(
+        headers[2]["authorization"],
+        format!("Bearer {BYO_CHATGPT_STUB_TOKEN}")
+    );
+    assert_ne!(headers[1]["session-id"], headers[2]["session-id"]);
+    let bodies = upstream.bodies.lock().unwrap();
+    assert_ne!(bodies[0]["prompt_cache_key"], bodies[1]["prompt_cache_key"]);
+    assert_ne!(bodies[1]["prompt_cache_key"], bodies[2]["prompt_cache_key"]);
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn chat_upstream_partial_usage_keeps_completed_stream_and_exact_chat_roundtrip() -> Result<()>
+{
+    async fn chat_stub(State(body): State<Arc<Mutex<Value>>>) -> impl IntoResponse {
+        AxumJson(body.lock().unwrap().clone())
+    }
+    let raw = Arc::new(Mutex::new(json!({
+        "id":"chat-usage","model":"test-model",
+        "choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],
+        "usage":{"prompt_tokens":100,"completion_tokens":10,"prompt_tokens_details":{"cache_write_tokens":20}},
+        "prompt_cache_diagnostics":{"opaque":"retained"}
+    })));
+    let (upstream, _upstream) = spawn_router(
+        Router::new()
+            .route("/v1/chat/completions", post(chat_stub))
+            .with_state(Arc::clone(&raw)),
+    )
+    .await?;
+    let _controller = EnvGuard::set("PROXY_CONTROLLER_BASE_URL", None);
+    let _legacy_controller = EnvGuard::set("CONTROLLER_BASE_URL", None);
+    let (proxy, _proxy) = spawn_proxy(Some(Credentials::ApiKey {
+        key: "inert-test".into(),
+        endpoint: Some(format!("http://{upstream}/v1/chat/completions")),
+        default_model: None,
+    }))
+    .await?;
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://{proxy}/v1/responses"))
+        .json(&json!({"model":"test-model","input":"hello","stream":true}))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let sse = response.text().await?;
+    let completed = sse
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+        .find(|event| event["type"] == "response.completed")
+        .expect("completion event");
+    assert_eq!(completed["response"]["status"], "completed");
+    assert!(completed["response"].get("usage").is_none());
+    assert_eq!(
+        completed["response"]["usage_metadata"]["metadata"]["instafy_provider_usage"]["usage"],
+        raw.lock().unwrap()["usage"]
+    );
+    let response = client.post(format!("http://{proxy}/v1/chat/completions"))
+        .json(&json!({"model":"test-model","messages":[{"role":"user","content":"hello"}],"stream":false})).send().await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response: Value = response.json().await?;
+    assert_eq!(response["choices"][0]["message"]["content"], "done");
+    assert_eq!(response["usage"], raw.lock().unwrap()["usage"]);
+    assert_eq!(
+        response["prompt_cache_diagnostics"],
+        json!({"opaque":"retained"})
+    );
     Ok(())
 }

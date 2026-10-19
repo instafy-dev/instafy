@@ -346,6 +346,10 @@ pub(crate) struct ManagedAiAccessResponse {
     pub(crate) enabled: bool,
     pub(crate) available: bool,
     pub(crate) label: String,
+    /// The model managed turns run on (the controller resolves every managed
+    /// job to it), so Studio shows that rather than a copy of its own.
+    pub(crate) model_id: String,
+    pub(crate) model_label: String,
     pub(crate) credit_burn_amount: i32,
     pub(crate) daily_prompt_limit: i32,
     pub(crate) daily_prompts_used: i32,
@@ -558,7 +562,23 @@ pub(crate) async fn ensure_managed_ai_proxy_ready(
     client: &reqwest::Client,
     config: &crate::config::AppConfig,
 ) -> anyhow::Result<()> {
-    if !config.managed_ai_enabled || !config.managed_ai_startup_check {
+    if !config.managed_ai_enabled {
+        return Ok(());
+    }
+    if !config.managed_ai_startup_check {
+        // Dev mode skips the strict check, but an unpinned static lane is how
+        // a stale client-side model reaches upstream unnoticed: probe once,
+        // never fail startup, and say what the lane will serve.
+        if let Some(proxy_base_url) = config.proxy_base_url.as_ref() {
+            let requirements =
+                fetch_proxy_credential_requirements(client, proxy_base_url, Duration::from_secs(2))
+                    .await;
+            log_managed_ai_platform_lane(
+                proxy_base_url,
+                requirements.platform_lane.as_ref(),
+                &config.managed_ai_model_id,
+            );
+        }
         return Ok(());
     }
 
@@ -604,14 +624,25 @@ pub(crate) async fn ensure_managed_ai_proxy_ready(
         );
     }
 
-    log_managed_ai_platform_lane(proxy_base_url, requirements.platform_lane.as_ref());
+    log_managed_ai_platform_lane(
+        proxy_base_url,
+        requirements.platform_lane.as_ref(),
+        &config.managed_ai_model_id,
+    );
     Ok(())
 }
 
 /// Names at boot how the controller's own proxy serves managed turns, as its
 /// `/healthz` reports it, so an operator can see the key, pin and usage
 /// reporting behind them.
-fn log_managed_ai_platform_lane(proxy_base_url: &str, lane: Option<&ProxyPlatformLane>) {
+fn log_managed_ai_platform_lane(
+    proxy_base_url: &str,
+    lane: Option<&ProxyPlatformLane>,
+    managed_model: &str,
+) {
+    if let Some(problem) = lane.and_then(|lane| platform_lane_pin_problem(lane, managed_model)) {
+        tracing::warn!(proxy = %proxy_base_url, managed_model, "{problem}");
+    }
     let Some(lane) = lane else {
         tracing::info!(
             proxy = %proxy_base_url,
@@ -630,6 +661,27 @@ fn log_managed_ai_platform_lane(proxy_base_url: &str, lane: Option<&ProxyPlatfor
         output_ceiling_source = lane.output_ceiling_source.as_deref(),
         "managed AI proxy platform lane"
     );
+}
+
+/// A static platform lane serves whatever model the client asks for unless
+/// it is pinned; then a runtime with a stale model (an old template pin) sends
+/// it upstream on the operator's credentials. Returns why, if so.
+pub(crate) fn platform_lane_pin_problem(
+    lane: &ProxyPlatformLane,
+    managed_model: &str,
+) -> Option<String> {
+    if lane.served_by != ProxyPlatformLaneServedBy::Static {
+        return None;
+    }
+    match lane.pinned_model.as_deref().map(str::trim) {
+        Some(pinned) if pinned == managed_model.trim() => None,
+        Some(pinned) if !pinned.is_empty() => Some(format!(
+            "managed AI proxy pins {pinned}, not the controller's managed model; set PROXY_PINNED_MODEL to MANAGED_AI_MODEL_ID or leave both unset"
+        )),
+        _ => Some(
+            "managed AI proxy serves the platform lane from static credentials without a model pin; it forwards whatever model a runtime asks for (set PROXY_PINNED_MODEL to the managed model)".to_string(),
+        ),
+    }
 }
 
 /// Whether the probed proxy can complete a managed-lane turn. A proxy with
@@ -798,6 +850,8 @@ pub(crate) fn build_managed_ai_access_response(
         enabled: config.managed_ai_enabled,
         available,
         label: config.managed_ai_label.clone(),
+        model_id: config.managed_ai_model_id.clone(),
+        model_label: config.managed_ai_model_label.clone(),
         credit_burn_amount: config.managed_ai_credit_burn_amount,
         daily_prompt_limit: config.managed_ai_daily_prompt_limit,
         daily_prompts_used,
@@ -831,6 +885,8 @@ async fn get_my_credential_requirements(
             enabled: state.config.managed_ai_enabled,
             available: false,
             label: state.config.managed_ai_label.clone(),
+            model_id: state.config.managed_ai_model_id.clone(),
+            model_label: state.config.managed_ai_model_label.clone(),
             credit_burn_amount: state.config.managed_ai_credit_burn_amount,
             daily_prompt_limit: state.config.managed_ai_daily_prompt_limit,
             daily_prompts_used: 0,
@@ -1222,14 +1278,7 @@ async fn resolve_editor_completion_credential(
     let kind: String = row.get("kind");
     let metadata: JsonValue = row.get::<_, PgJson<JsonValue>>("metadata").0;
     let provider = provider_for_credential(&kind, &metadata);
-    let model = metadata
-        .as_object()
-        .and_then(|map| map.get("default_model"))
-        .and_then(JsonValue::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| default_model_for_credential(&kind, &provider))
-        .to_string();
+    let model = credential_default_model(&kind, &metadata);
 
     Ok(Some(EditorCompletionCredential {
         credential_id,
@@ -2806,6 +2855,22 @@ fn default_endpoint_for_provider(provider: &str) -> &'static str {
     }
 }
 
+/// The model a bring-your-own credential runs when nothing more specific (an
+/// agent's model) is set: the credential's stored default, else the default
+/// for its kind and provider. Shared by completions and job secrets so a job
+/// never falls back to whatever model its runtime was launched with.
+pub(crate) fn credential_default_model(kind: &str, metadata: &JsonValue) -> String {
+    let provider = provider_for_credential(kind, metadata);
+    metadata
+        .as_object()
+        .and_then(|map| map.get("default_model"))
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| default_model_for_credential(kind, &provider))
+        .to_string()
+}
+
 fn default_model_for_credential(kind: &str, provider: &str) -> &'static str {
     if kind.trim() == CREDENTIAL_KIND_CODEX_AUTH_JSON {
         // ChatGPT login (user-paid): Sol, not the managed-tier default.
@@ -3384,8 +3449,8 @@ mod credential_lease_contract_tests {
 mod requirement_tests {
     use super::{
         build_managed_ai_access_response, ensure_managed_ai_proxy_ready,
-        fetch_proxy_credential_requirements, ProxyCredentialRequirements, ProxyPlatformLane,
-        ProxyPlatformLaneServedBy,
+        fetch_proxy_credential_requirements, platform_lane_pin_problem,
+        ProxyCredentialRequirements, ProxyPlatformLane, ProxyPlatformLaneServedBy,
     };
     use crate::tests::{build_app_config, test_origin_private_key, test_origin_public_key};
 
@@ -3643,6 +3708,19 @@ mod requirement_tests {
         assert_eq!(managed_ai.credit_burn_amount, 1);
         assert_eq!(managed_ai.daily_prompt_limit, 20);
         assert_eq!(managed_ai.remaining_prompts, Some(17));
+        // Studio shows the model managed turns really run on (the roster
+        // showed the BYO default "gpt-5.6-sol" for a GPT-6 Luna space).
+        assert_eq!(managed_ai.model_id, config.managed_ai_model_id);
+        assert_eq!(managed_ai.model_label, config.managed_ai_model_label);
+        let wire = serde_json::to_value(&managed_ai).expect("json");
+        assert_eq!(
+            wire["modelId"],
+            serde_json::json!(config.managed_ai_model_id)
+        );
+        assert_eq!(
+            wire["modelLabel"],
+            serde_json::json!(config.managed_ai_model_label)
+        );
     }
 
     #[test]
@@ -3667,6 +3745,43 @@ mod requirement_tests {
         assert!(managed_ai.enabled);
         assert!(!managed_ai.available);
         assert_eq!(managed_ai.remaining_prompts, Some(0));
+    }
+
+    #[test]
+    fn an_unpinned_or_mismatched_static_platform_lane_is_reported() {
+        let lane = |served_by, pinned: Option<&str>| ProxyPlatformLane {
+            served_by,
+            pinned_model: pinned.map(str::to_string),
+            static_credential_kind: Some("chatgpt".to_string()),
+            session_tokens_refused: false,
+            reports_usage: false,
+            controller_metering_protocol: None,
+            output_ceiling_source: None,
+        };
+        let managed = "gpt-6-luna";
+        assert!(
+            platform_lane_pin_problem(&lane(ProxyPlatformLaneServedBy::Static, None), managed)
+                .is_some_and(|problem| problem.contains("without a model pin"))
+        );
+        assert!(platform_lane_pin_problem(
+            &lane(ProxyPlatformLaneServedBy::Static, Some("gpt-5.5")),
+            managed
+        )
+        .is_some_and(|problem| problem.contains("gpt-5.5")));
+        assert_eq!(
+            platform_lane_pin_problem(
+                &lane(ProxyPlatformLaneServedBy::Static, Some(managed)),
+                managed
+            ),
+            None
+        );
+        assert_eq!(
+            platform_lane_pin_problem(
+                &lane(ProxyPlatformLaneServedBy::ControllerLease, None),
+                managed
+            ),
+            None
+        );
     }
 
     #[tokio::test]

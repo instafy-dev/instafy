@@ -11,6 +11,8 @@ const MAX_RECEIPT_BYTES: usize = 64 * 1024;
 const MAX_CALLS: usize = 128;
 const MAX_JOB_RECEIPTS: usize = 32;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+/// The runtime names at most this many bytes of model id on a call.
+const MAX_MODEL_ID_BYTES: usize = 128;
 
 /// These fields are controller-owned results, never authoring instructions.
 /// Strip them even for service-role dispatches: only agent completion may
@@ -50,6 +52,10 @@ struct CallReceipt {
     usage_scope: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     usage: Option<Usage>,
+    /// The model id the attempt asked for, which the runtime names on each
+    /// call (an id, never content).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -139,6 +145,10 @@ pub(crate) fn extract(artifacts: &Value) -> Result<Option<TaskUsageReceipt>, &'s
     for call in &receipt.calls {
         if call.attempt == 0
             || call.usage_scope != "turn"
+            || call
+                .model
+                .as_deref()
+                .is_some_and(|model| model.trim().is_empty() || model.len() > MAX_MODEL_ID_BYTES)
             || !seen.insert((call.invocation_id, call.attempt))
         {
             return Err("invalid or duplicate task usage call identity");
@@ -203,6 +213,27 @@ pub(crate) mod tests {
                 }
             }]
         })
+    }
+
+    #[test]
+    fn a_receipt_that_names_its_model_is_accepted() {
+        // The runtime names the requested model on every call
+        // (runtime-agent task_usage.rs); a receipt that does was dropped as
+        // "invalid task usage schema" on every completion.
+        let mut receipt = receipt_fixture();
+        receipt["calls"][0]["model"] = json!("gpt-6-luna");
+        let artifacts = json!([receipt]);
+        assert!(extract(&artifacts).unwrap().is_some());
+        let mut failed = receipt_fixture();
+        failed["calls"][0] = json!({
+            "invocationId": "324bdb30-9eb2-4a38-aac0-dd2d1f0e0e3d", "attempt": 1,
+            "phase": "routing", "outcome": "error", "usageStatus": "unknown",
+            "usageScope": "turn", "model": "gpt-6-luna"
+        });
+        assert!(extract(&json!([failed])).unwrap().is_some());
+        let mut oversized = receipt_fixture();
+        oversized["calls"][0]["model"] = json!("m".repeat(129));
+        assert!(extract(&json!([oversized])).is_err());
     }
 
     #[test]

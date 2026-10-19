@@ -457,7 +457,7 @@ export function ConversationHistoryTab({
           ) : null}
         </span>
       </IconButton>
-      <StudioPopover placement="bottom end" offset={6} className="w-48 p-1">
+      <StudioPopover placement="bottom end" layout="menu">
         <StudioMenu
           aria-label="Chat status"
           selectionMode="single"
@@ -475,7 +475,6 @@ export function ConversationHistoryTab({
               key={option.value}
               id={option.value}
               textValue={`${option.label} (${option.count})`}
-              className="pointer-coarse:min-h-11"
             >
               <MenuItemContent end={option.value === filter ? <Check aria-hidden="true" /> : undefined}>
                 {option.label} ({option.count})
@@ -733,7 +732,7 @@ export function ConversationHistoryTab({
                           >
                             <MoreHoriz className="h-4 w-4" aria-hidden="true" />
                           </IconButton>
-                          <StudioPopover placement="left top" offset={8} className="w-56 p-1">
+                          <StudioPopover placement="left top" layout="menu">
                             <StudioMenu
                               aria-label="Conversation actions"
                               onAction={(key) => {
