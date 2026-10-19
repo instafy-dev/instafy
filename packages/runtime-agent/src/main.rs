@@ -11,8 +11,10 @@ use codex_arg0::arg0_dispatch;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use runtime_agent::{
-    agent::RuntimeAgent, code_mode_host, config, config::Config, local_browser, loopback_proxy,
-    personal_browser, process_hardening, shared_browser,
+    agent::{AgentExit, RuntimeAgent, SPACE_DELETED_EXIT_CODE, exits_when_space_deleted},
+    code_mode_host, config,
+    config::Config,
+    local_browser, loopback_proxy, personal_browser, process_hardening, shared_browser,
 };
 use tokio::signal;
 use tracing::{Level, error, info, warn};
@@ -97,7 +99,11 @@ fn main() -> anyhow::Result<()> {
     // SAFETY: no other thread exists yet.
     unsafe { runtime_agent::job_model::capture_and_scrub_launch_model() };
     let runtime = build_tokio_runtime()?;
-    runtime.block_on(async move { run_runtime_agent().await })
+    let exit = runtime.block_on(async move { run_runtime_agent().await })?;
+    if exit == AgentExit::SpaceDeleted {
+        std::process::exit(SPACE_DELETED_EXIT_CODE);
+    }
+    Ok(())
 }
 
 fn maybe_dispatch_apply_patch_with_bootstrapped_updates() -> Option<i32> {
@@ -240,7 +246,7 @@ fn sanitize_tmpdir() {
     }
 }
 
-async fn run_runtime_agent() -> Result<()> {
+async fn run_runtime_agent() -> Result<AgentExit> {
     init_tracing();
 
     info!("runtime-agent bootstrap starting");
@@ -264,11 +270,30 @@ async fn run_runtime_agent() -> Result<()> {
     );
     code_mode_host::report_startup_availability();
 
+    let exit_when_space_deleted = exits_when_space_deleted(&config);
     let agent = RuntimeAgent::new(config);
     let shutdown = agent.shutdown_handle();
-    let agent_task = tokio::spawn(agent.run());
+    let mut agent_task = tokio::spawn(agent.run());
+    let shutdown_signal = wait_for_shutdown();
+    tokio::pin!(shutdown_signal);
 
-    wait_for_shutdown().await;
+    tokio::select! {
+        _ = &mut shutdown_signal => {}
+        exit = &mut agent_task => {
+            if matches!(exit, Ok(AgentExit::SpaceDeleted)) {
+                if exit_when_space_deleted {
+                    info!("runtime-agent exiting: this runtime's space was deleted");
+                    return Ok(AgentExit::SpaceDeleted);
+                }
+                info!("this runtime's space was deleted; waiting for its provider to release it");
+            }
+            // An agent that stopped on its own keeps the process up until it
+            // is signalled, as it always has.
+            shutdown_signal.await;
+            info!("runtime-agent exiting");
+            return Ok(AgentExit::Stopped);
+        }
+    }
     info!("shutdown signal received; stopping agent");
 
     shutdown.cancel();
@@ -280,7 +305,7 @@ async fn run_runtime_agent() -> Result<()> {
     }
 
     info!("runtime-agent exiting");
-    Ok(())
+    Ok(AgentExit::Stopped)
 }
 
 fn init_tracing() {

@@ -60,6 +60,7 @@ import {
   buildDesktopRuntimeStopUrl,
   canResumeDesktopRuntimeAfterFailedQuit,
   createDesktopQuitWaitControl,
+  desktopRuntimeExitedForDeletedSpace,
   readDesktopRuntimeActiveJobCount,
   resolveRefreshedDesktopRuntimeAccessToken,
   resolveDesktopRuntimeControllerCredentialAction,
@@ -768,6 +769,12 @@ let pausedPersonalBrowserRuntime: {
   controllerCredentialProvenance: DesktopRuntimeControllerCredentialProvenance;
   restartOptions: DesktopRuntimeRestartOptions;
 } | null = null;
+// Spaces whose runtime exited because the space was deleted. A deleted space
+// stays deleted, so Desktop starts no runtime for them again.
+const deletedDesktopRuntimeSpaces = new Set<string>();
+// The space of the last runtime that stopped because its space was deleted,
+// until another runtime starts.
+let desktopRuntimeStoppedForDeletedSpace: string | null = null;
 let desktopRuntimeMutationTail: Promise<void> = Promise.resolve();
 let personalBrowserMutationTail: Promise<void> = Promise.resolve();
 let desktopVoiceHostSupervisor: ReturnType<typeof createDesktopVoiceHostSupervisor> | null = null;
@@ -1427,10 +1434,11 @@ function registerDesktopRuntime(
 ): DesktopRuntimeRecord {
   const record: DesktopRuntimeRecord = { handle, ...options };
   desktopRuntime = record;
+  desktopRuntimeStoppedForDeletedSpace = null;
   if (record.runtimeId) {
     personalBrowserHost?.setRuntimeId(record.projectId, record.runtimeId);
   }
-  void runDesktopRuntimeExitCleanup(handle.exited, (exitError) =>
+  void runDesktopRuntimeExitCleanup(handle.exited, (exitError, exit) =>
     serializeDesktopRuntimeMutation(async () => {
         if (desktopRuntime?.handle !== handle) {
           return;
@@ -1441,10 +1449,15 @@ function registerDesktopRuntime(
             runtimeId: record.runtimeId,
           });
         }
+        const spaceDeleted = desktopRuntimeExitedForDeletedSpace(exit);
         try {
           // Root exit is not process-tree exit. Sweep a stubborn descendant
           // before clearing the only record that retains the process-group ID.
-          await stopAndDispositionDesktopRuntime(record, "desktop_runtime_process_exit");
+          // The delete already stopped a deleted space's runtime in the
+          // controller, so only its process tree is left to prove gone.
+          await (spaceDeleted
+            ? stopDesktopRuntime(handle)
+            : stopAndDispositionDesktopRuntime(record, "desktop_runtime_process_exit"));
         } catch (error) {
           desktopLog("error", "[instafy-desktop] failed to prove exited runtime tree is gone", {
             message: error instanceof Error ? error.message : String(error),
@@ -1465,6 +1478,9 @@ function registerDesktopRuntime(
         if (!record.personalBrowser && record.runtimeId) {
           personalBrowserHost?.setRuntimeId(record.projectId, null);
         }
+        if (spaceDeleted) {
+          noteDesktopRuntimeSpaceDeleted(record);
+        }
       }),
   )
     .catch((error) => {
@@ -1473,6 +1489,32 @@ function registerDesktopRuntime(
       });
     });
   return record;
+}
+
+function desktopRuntimeSpaceKey(projectId: string): string {
+  return projectId.trim().toLowerCase();
+}
+
+/**
+ * The runtime stopped because the controller refused its deleted space. That
+ * is the outcome of someone deleting the space, not a failure: tell the user
+ * once, quietly, and never start a runtime for the space again.
+ */
+function noteDesktopRuntimeSpaceDeleted(record: DesktopRuntimeRecord): void {
+  deletedDesktopRuntimeSpaces.add(desktopRuntimeSpaceKey(record.projectId));
+  desktopRuntimeStoppedForDeletedSpace = record.projectId;
+  forgetPausedPersonalBrowserRuntime(record.projectId);
+  desktopLog("info", "[instafy-desktop] runtime stopped because its space was deleted", {
+    projectId: record.projectId,
+    runtimeId: record.runtimeId,
+  });
+  if (Notification.isSupported()) {
+    new Notification({
+      title: "This space was deleted",
+      body: "Instafy stopped the local runtime that was working in it.",
+      silent: true,
+    }).show();
+  }
 }
 
 async function suspendPersonalBrowserRuntime(projectId: string) {
@@ -2420,7 +2462,13 @@ app.whenReady().then(() => {
   ipcMain.handle("instafy:desktopRuntimeStatus", async (event) => {
     assertAllowedCaller(event);
     if (!desktopRuntime) {
-      return { running: false };
+      return desktopRuntimeStoppedForDeletedSpace
+        ? {
+            running: false,
+            projectId: desktopRuntimeStoppedForDeletedSpace,
+            stoppedReason: "space_deleted",
+          }
+        : { running: false };
     }
     return {
       running: true,
@@ -2641,6 +2689,9 @@ app.whenReady().then(() => {
         typeof payload?.projectId === "string" ? payload.projectId.trim() : "";
       if (!requestedProjectId) {
         throw new Error("startDesktopRuntime requires projectId.");
+      }
+      if (deletedDesktopRuntimeSpaces.has(desktopRuntimeSpaceKey(requestedProjectId))) {
+        throw new Error("This space was deleted.");
       }
       const enablePersonalBrowser = payload?.enablePersonalBrowser === true;
       const personalBrowserOwnerId = enablePersonalBrowser

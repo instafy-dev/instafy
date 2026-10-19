@@ -24,6 +24,7 @@ use crate::agent_executor::{AgentExecutor, TurnEnd};
 use crate::config::Config;
 use crate::controller::{
     AgentSecretInventoryItem, ControllerClient, JobSecrets, LeaseError, LeaseJob, Registration,
+    SpaceDeleted,
 };
 use crate::job_cancel::JobCancelSignal;
 use crate::jobs::{JobExecution, JobFailureWithArtifacts, JobProcessor};
@@ -35,6 +36,30 @@ static JOB_PROCESS_ENV_LOCK: Lazy<AsyncMutex<()>> = Lazy::new(|| AsyncMutex::new
 
 fn runtime_reuse_is_safe() -> bool {
     crate::isolated_tool_worker::runtime_reuse_is_safe() && crate::codex::runtime_reuse_is_safe()
+}
+
+/// The exit status of a runtime-agent process that stopped because its space
+/// was deleted. Desktop reads it to stop that runtime for good rather than
+/// report a failure. No other exit of the process uses it.
+pub const SPACE_DELETED_EXIT_CODE: i32 = 3;
+
+/// How [`RuntimeAgent::run`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentExit {
+    /// Shutdown was requested, the runtime was stopped, or the agent failed.
+    Stopped,
+    /// The controller refused the runtime because its space was deleted.
+    /// The origin and tunnel are down and no job is left.
+    SpaceDeleted,
+}
+
+/// Whether the process should exit once its space is deleted. A runtime a
+/// provider launched for a lease waits instead: the controller has its
+/// provider release the machine, and a hosted container that exits is only
+/// started again. Desktop, the CLI and other self-hosted runtimes have no
+/// one else to stop them.
+pub fn exits_when_space_deleted(config: &Config) -> bool {
+    config.runtime_lease_id.is_none()
 }
 
 pub struct RuntimeAgent {
@@ -638,6 +663,10 @@ enum RegistrationOutcome {
     /// task obtained one, so the next cycle adopts it without another
     /// register round-trip.
     Reregister(Option<Registration>),
+    /// The controller refused the runtime because its space was deleted.
+    /// The delete stopped the runtime already, so nothing is stopped or
+    /// snapshotted on the way out.
+    SpaceDeleted,
 }
 
 impl RuntimeAgent {
@@ -653,13 +682,17 @@ impl RuntimeAgent {
         self.shutdown.clone()
     }
 
-    pub async fn run(self) {
-        if let Err(error) = self.run_inner().await {
-            error!(?error, "runtime agent terminated with error");
+    pub async fn run(self) -> AgentExit {
+        match self.run_inner().await {
+            Ok(exit) => exit,
+            Err(error) => {
+                error!(?error, "runtime agent terminated with error");
+                AgentExit::Stopped
+            }
         }
     }
 
-    async fn run_inner(self) -> Result<()> {
+    async fn run_inner(self) -> Result<AgentExit> {
         let RuntimeAgent {
             config,
             shutdown,
@@ -686,7 +719,7 @@ impl RuntimeAgent {
         executor: Arc<AgentExecutor>,
         shutdown: ShutdownSignal,
         secret_env_keys: Arc<Mutex<HashSet<String>>>,
-    ) -> Result<()> {
+    ) -> Result<AgentExit> {
         // A registration renewed proactively by the previous cycle; adopted
         // instead of registering again so the fresh tokens are not wasted.
         let mut renewed_registration: Option<Registration> = None;
@@ -703,7 +736,11 @@ impl RuntimeAgent {
             {
                 Ok(RegistrationOutcome::Shutdown) => {
                     info!("registration loop signalled shutdown");
-                    return Ok(());
+                    return Ok(AgentExit::Stopped);
+                }
+                Ok(RegistrationOutcome::SpaceDeleted) => {
+                    info!("this runtime's space was deleted; the agent stops for good");
+                    return Ok(AgentExit::SpaceDeleted);
                 }
                 Ok(RegistrationOutcome::Reregister(Some(registration))) => {
                     info!(
@@ -722,7 +759,7 @@ impl RuntimeAgent {
             }
             if Self::sleep_or_shutdown(Duration::from_secs(5), shutdown.clone()).await {
                 info!("shutdown requested; exiting registration retry loop");
-                return Ok(());
+                return Ok(AgentExit::Stopped);
             }
         }
     }
@@ -737,10 +774,13 @@ impl RuntimeAgent {
     ) -> Result<RegistrationOutcome> {
         let registration = match renewed_registration {
             Some(registration) => registration,
-            None => client
-                .register_runtime(&config)
-                .await
-                .context("failed to register runtime")?,
+            None => match client.register_runtime(&config).await {
+                Ok(registration) => registration,
+                Err(error) if error.is::<SpaceDeleted>() => {
+                    return Ok(RegistrationOutcome::SpaceDeleted);
+                }
+                Err(error) => return Err(error.context("failed to register runtime")),
+            },
         };
 
         // Flag-gated (INSTAFY_BROWSER_PROFILE_PERSIST): restore the durable
@@ -904,6 +944,15 @@ impl RuntimeAgent {
                 .await;
         }
 
+        // The delete stopped this runtime already, and a deleted space has no
+        // use for a browser profile snapshot.
+        if lease_result
+            .as_ref()
+            .is_err_and(|error| error.is::<SpaceDeleted>())
+        {
+            return Ok(RegistrationOutcome::SpaceDeleted);
+        }
+
         let shutdown_triggered = if !runtime_reuse_is_safe() {
             warn!("AI worker shutdown could not be confirmed; stopping this runtime before reuse");
             true
@@ -944,7 +993,8 @@ impl RuntimeAgent {
 
     /// Runs the lease loop until shutdown (`Ok(true)`), until a re-register is
     /// wanted (`Ok(false)`: tunnel refresh or a proactively renewed
-    /// registration), or until the agent token is rejected (`Err`).
+    /// registration), until the agent token is rejected (`Err`), or until the
+    /// space is deleted (an `Err` that is [`SpaceDeleted`]).
     ///
     /// Renewal is only observed at the idle points between jobs, so adopting a
     /// renewed registration never interrupts an in-flight job.
@@ -982,6 +1032,10 @@ impl RuntimeAgent {
                 Err(LeaseError::Unauthorized) => {
                     warn!("lease request returned 401; agent token expired. Re-registering.");
                     return Err(anyhow!("agent token expired"));
+                }
+                Err(LeaseError::SpaceDeleted) => {
+                    info!("lease refused: this runtime's space was deleted");
+                    return Err(SpaceDeleted.into());
                 }
                 Err(LeaseError::Other(error)) => {
                     warn!(?error, "lease request failed; retrying");

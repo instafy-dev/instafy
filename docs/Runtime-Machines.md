@@ -582,14 +582,30 @@ released; the platform-wide cap still counts them.
 
 The controller's origin proxy answers `404` for the space, so an origin
 access token minted before the delete reads nothing more through it, even
-for a hosted gateway origin, whose gateway checks only the token. Two
-things still end on their own:
+for a hosted gateway origin, whose gateway checks only the token. A git
+token already minted for Git Edge stays valid until it expires, bounded by
+its TTL, since Git Edge checks only the token's claims.
 
-- A git token already minted for Git Edge stays valid until it expires,
-  bounded by its TTL, since Git Edge checks only the token's claims.
-- A Desktop or self-hosted agent keeps polling, refused every time, until
-  the app or the container is stopped. Its runtime is marked stopped, but
-  nothing tells the agent to exit yet.
+The agent takes a `410` with code `space_deleted` on its registration or a
+lease poll as final. It takes its origin offline, stops its tunnel and
+leases nothing more, and it neither stops the runtime again nor uploads a
+browser profile. A Desktop, CLI or other self-hosted agent then exits with
+status `3`. Desktop takes that status for the deletion it is, not a
+failure: it proves the process tree gone without stopping the runtime in
+the controller again, shows a quiet "This space was deleted" notification,
+and starts no runtime for the space again in that session. An agent that
+a provider launched for a lease (`RUNTIME_LEASE_ID` is set) stays up idle
+instead, since a hosted container that exits is only restarted; the
+provider release removes the machine. One that a self-hosted provider
+service launched is not released by the controller either, so it idles
+until its operator stops it.
+
+A Desktop that quits after the delete fences its runtime first (`POST
+/projects/:id/runtime/:runtimeId/drain`). For a deleted space the
+runtime's owner gets the usual `draining` answer with `activeJobCount: 0`,
+since nothing the runtime still runs can reach the controller, and the
+stopped runtime is not written. A resume answers `410 space_deleted`, and
+anyone else gets the `404` of a deleted space.
 
 The idle sweep finishes what that task did not, for example after a
 controller restart or a failed load, a failed release, a tunnel revoke the
