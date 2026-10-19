@@ -1049,7 +1049,7 @@ async fn immediate_checkout_publishes_credits_updated_after_commit() -> anyhow::
 
 /// Reads SSE frames until one carries `kind`, returning its parsed payload.
 /// Every frame read on the way is appended to `seen`.
-async fn next_stream_event(
+pub(super) async fn next_stream_event(
     body: &mut axum::body::BodyDataStream,
     buffer: &mut String,
     seen: &mut Vec<serde_json::Value>,

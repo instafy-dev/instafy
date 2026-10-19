@@ -405,6 +405,19 @@ export function useRuntimeControllerSync({
       }
     };
 
+    // Live delivery has no replay, so whatever the stream did not deliver is
+    // read again through the authorized endpoints.
+    const resyncMissedEvents = () => {
+      void reconcileRunsAfterReconnect();
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(
+          new CustomEvent("instafy:controller-stream-reconnected", {
+            detail: { projectId },
+          }),
+        );
+      }
+    };
+
     const connectControllerStream = () => {
       unsubscribe();
       unsubscribe = subscribeToRunsFromController({
@@ -460,17 +473,16 @@ export function useRuntimeControllerSync({
           if (streamErrorSinceLastOpenRef.current) {
             streamErrorSinceLastOpenRef.current = false;
             streamDisconnectNotifiedRef.current = false;
-            void reconcileRunsAfterReconnect();
-            if (typeof window !== "undefined") {
-              window.dispatchEvent(
-                new CustomEvent("instafy:controller-stream-reconnected", {
-                  detail: { projectId },
-                }),
-              );
-            }
+            resyncMissedEvents();
           }
         },
         onEvent: (event) => {
+          // The controller dropped events for this stream: it fell behind,
+          // or could not check access for them. Nothing else is in it.
+          if (event.kind === "events.resync") {
+            resyncMissedEvents();
+            return;
+          }
           if (import.meta.env.DEV && !isAutomationBrowser()) {
             if (event.kind !== "runtime.dev_isolation") {
               console.info("[runtime] controller:event", {

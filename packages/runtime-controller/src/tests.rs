@@ -96,6 +96,9 @@ mod message_search_http_tests;
 #[path = "controller_event_fanout_tests.rs"]
 pub(crate) mod controller_event_fanout_tests;
 
+#[path = "event_stream_burst_tests.rs"]
+mod event_stream_burst_tests;
+
 struct TestOriginKeyPair {
     private_pem: String,
     public_pem: String,
