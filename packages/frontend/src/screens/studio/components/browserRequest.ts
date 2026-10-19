@@ -1,4 +1,5 @@
 import { createContext } from "react";
+import { didSendFailForPromptSentFromThisPage } from "../../../conversations/sentPromptRegistry";
 import type { ChatMessage } from "../types";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 import type { BrowserTransport } from "./usePersonalBrowserBridge";
@@ -120,8 +121,11 @@ export function browserRequestDestinations(task: string): string[] {
   return hosts.slice(0, 3);
 }
 
+const CONTINUATION_PREFIX =
+  "Continue this browser task using the browser attached to this turn. Inspect its current state first, preserve existing session state, and avoid repeating work that is already complete.\n\n";
+
 export function browserRequestContinuation(request: BrowserRequest): string {
-  return `Continue this browser task using the browser attached to this turn. Inspect its current state first, preserve existing session state, and avoid repeating work that is already complete.\n\n${request.task}`;
+  return `${CONTINUATION_PREFIX}${request.task}`;
 }
 
 /**
@@ -190,14 +194,44 @@ export function isBrowserTurnPromptMetadata(metadata: unknown): boolean {
   });
 }
 
+/**
+ * A continuation this page sent whose dispatch failed: the controller never
+ * took it, so it opened nothing and continues no card.
+ */
+export function isUnsentBrowserRequestNotice(message: Pick<ChatMessage, "id" | "role" | "metadata">): boolean {
+  return readBrowserRequestOf(message) !== null && didSendFailForPromptSentFromThisPage(message);
+}
+
 /** Cards a continuation was sent for, by {@link browserRequestKey}. */
 export function browserRequestContinuedKeys(messages: readonly ChatMessage[]): Set<string> {
   const keys = new Set<string>();
   for (const message of messages) {
     const key = readBrowserRequestOf(message);
-    if (key) keys.add(key);
+    if (key && !isUnsentBrowserRequestNotice(message)) keys.add(key);
   }
   return keys;
+}
+
+/**
+ * The task a continuation sent, read back from its own prompt: the stored
+ * prompt keeps what it dispatched as `dispatchContent`. Its browser is the
+ * one it ran in. Null when the prompt is not a continuation or carries no
+ * task, so a retry never resends the notice in its place.
+ */
+export function browserRequestFromContinuationPrompt(
+  message: Pick<ChatMessage, "role" | "metadata">,
+): BrowserRequest | null {
+  if (!readBrowserRequestOf(message)) return null;
+  for (const record of promptMetadataRecords(message.metadata)) {
+    const dispatched = record["dispatchContent"];
+    if (typeof dispatched !== "string" || !dispatched.trim().startsWith(CONTINUATION_PREFIX.trim())) continue;
+    const task = dispatched.trim().slice(CONTINUATION_PREFIX.trim().length).trim();
+    if (!task || task.length > 8_000) continue;
+    const transport = record["browserTransport"] ?? record["browser_transport"];
+    const location = transport === "shared" ? "workspace" : transport === "desktop-personal" ? "device" : "auto";
+    return { task, location };
+  }
+  return null;
 }
 
 /**

@@ -385,7 +385,6 @@ import { useSharedBrowserApprovalTransport } from "./useSharedBrowserApprovalTra
 import { useChatBrowserHandoff } from "./useChatBrowserHandoff";
 import { useChatBrowserRequest, type BrowserAutoStartOptions } from "./useChatBrowserRequest";
 import {
-  BROWSER_AUTO_STARTED_METADATA_KEY,
   BrowserRequestHostContext,
   browserRequestContinuedKeys,
   type BrowserRequestHost,
@@ -393,13 +392,10 @@ import {
 import {
   browserAutoStartPlan,
   markBrowserAutoStartDeclined,
-  wasBrowserAutoStarted,
-  type BrowserAutoStartPlan,
+  type SharedBrowserPresence,
 } from "./browserAutoStart";
 import { isSkillSetupConversation } from "./skillSetupConversation";
 import { sharedBrowserConversationRunIds } from "./browserHandoffRouting";
-import { findPromptSentFromThisPageForRun } from "../../../conversations/sentPromptRegistry";
-import { getRuntimeSizePreference } from "../../../runtime/runtimeSizePreference";
 
 const { enabled: runtimeControllerEnabled } = controllerClient.core;
 const {
@@ -1818,14 +1814,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     }),
     [activeConversationEntry?.title, hasMoreRecentHistory, recentMessages],
   );
-  // A browser Octo opened by itself keeps the chat composer too: the person's
-  // next message answers the chat, it does not silently become a read-only
-  // browser turn. The walk there goes on through the browser's own controls.
   const browserRequestIdentity = JSON.stringify([currentUserId, activeProjectId, activeConversationId]);
-  const keepChatComposer = skillSetupConversation || wasBrowserAutoStarted(browserRequestIdentity);
   // The split-view composer belongs to Chat. A visible resource must not
   // silently restrict every workspace task to browser tools.
-  const browserComposerActive = browserModeActive && !splitSurfaces && !keepChatComposer;
+  const browserComposerActive = browserModeActive && !splitSurfaces && !skillSetupConversation;
   const showBrowserSessionPageStripForComposer =
     shouldShowBrowserSessionPageStripInComposer({
       browserModeActive,
@@ -2314,6 +2306,16 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     return { conversationId, jobId };
   }, [jobThread?.conversationId, jobThread?.jobId]);
 
+  // Try again for a failed browser run sends the card's task again through
+  // the browser handoff (set once useChatBrowserRequest below has run).
+  const browserRequestRetryRef = useRef<
+    ((promptMessage: ChatMessage, retryMetadata: Record<string, unknown>) => Promise<boolean>) | null
+  >(null);
+  const resendBrowserRequest = useCallback(
+    (promptMessage: ChatMessage, retryMetadata: Record<string, unknown>) =>
+      browserRequestRetryRef.current?.(promptMessage, retryMetadata) ?? Promise.resolve(false),
+    [],
+  );
   const runFailureRetryContextValue = useRunFailureRetryActions({
     messages,
     queuedSends: combinedChatSendQueue,
@@ -2326,6 +2328,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     // countdown or its Cancel: never resend automatically from it.
     autoRetryEnabled: normalizedJobThread === null,
     submit: invokeSubmitMessage,
+    resendBrowserRequest,
     showStatus,
     onConnectAi: openAiManager,
   });
@@ -3729,7 +3732,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
             browserTransport === "shared" && browserComposerActive,
           pendingNewBrowser: pendingBrowserLaunchMode === "new_page",
           sharedBrowserPageTargetAvailable:
-            !keepChatComposer &&
+            !skillSetupConversation &&
             browserTransport === "shared" &&
             (browserSessionOpen || hasHiddenBrowserSession) &&
             Boolean(preferredBrowserPage),
@@ -3755,7 +3758,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       pendingBrowserLaunchMode,
       preferredBrowserPage,
       resolvePromptAgentTargets,
-      keepChatComposer,
+      skillSetupConversation,
       softPrefillSuggestion,
     ],
   );
@@ -4406,9 +4409,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     showCredentialsGate: showChatCredentialsGate,
     showStatus,
     shouldAutoScrollRef,
-    // Composer submits stay chat turns while the browser is shown: in a skill
-    // setup, and in a conversation where Octo opened the browser by itself.
-    skillSetupConversation: keepChatComposer,
+    skillSetupConversation,
     softPrefillSuggestion,
     submitSendIntent,
     targetsOverlapActiveRuns,
@@ -4438,13 +4439,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   });
   // Octo opens Instafy's browser by itself for its request_browser cards
   // (useChatBrowserRequest says when). These are what that decision reads.
-  const [browserAutoStartRequest, setBrowserAutoStartRequest] = useState<{
-    token: number;
-    plan: Extract<BrowserAutoStartPlan, { kind: "reuse" | "convert" }>;
-  } | null>(null);
+  const [browserAutoStartRequest, setBrowserAutoStartRequest] = useState<{ token: number; runtimeId: string } | null>(null);
   const [browserAutoStartFailure, setBrowserAutoStartFailure] = useState<{ token: number; reason: string } | null>(null);
-  const [sharedBrowserRemoteController, setSharedBrowserRemoteController] =
-    useState<{ kind: "human" | "agent"; displayName: string } | null>(null);
+  const [sharedBrowserPresence, setSharedBrowserPresence] = useState<SharedBrowserPresence | null>(null);
   const browserAutoStartTokenRef = useRef(0);
   const handleBrowserAutoStartFailure = useCallback((token: number, reason: string) => {
     setBrowserAutoStartFailure({ token, reason });
@@ -4452,19 +4449,13 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   // Turns in the browser on this device run on this device's runtime, which
   // Instafy AI does not reach.
   const personalTurnsAllowed = credentialRequirements.hasDefaultCredential || !credentialRequirements.managedAi?.enabled;
-  const projectRuns = useMemo(
-    () => Object.values(runs ?? {}).filter((run) => !run.projectId || run.projectId === (activeProjectId ?? null)),
-    [activeProjectId, runs],
-  );
-  const { spaceBusy, browserRunActive } = useMemo(() => {
+  const browserRunActive = useMemo(() => {
     const now = Date.now();
-    const working = projectRuns.filter((run) => isRunActivelyProgressing(run, now));
-    return {
-      spaceBusy: working.length > 0,
-      browserRunActive: working.some((run) =>
-        run.metadata?.browserTransport === "shared" || run.metadata?.browserTransport === "desktop-personal"),
-    };
-  }, [projectRuns]);
+    return Object.values(runs ?? {}).some((run) =>
+      (!run.projectId || run.projectId === (activeProjectId ?? null)) &&
+      isRunActivelyProgressing(run, now) &&
+      (run.metadata?.browserTransport === "shared" || run.metadata?.browserTransport === "desktop-personal"));
+  }, [activeProjectId, runs]);
   const activeConversationRunIds = useMemo(() => {
     const ids = new Set<string>();
     for (const run of activeConversationRuns) {
@@ -4474,27 +4465,42 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     }
     return ids;
   }, [activeConversationRuns]);
+  const browserAutoStartBlocked = inputValue.trim().length > 0 || !wideSurfaces;
+  const browserHeldByOther = browserRunActive ||
+    sharedBrowserPresence?.remoteController === true ||
+    Boolean(personalBrowser.status?.humanInputRequest);
+  const personalOwnAi = credentialRequirements.hasDefaultCredential === true;
+  const runtimeStatusKey = (runtimeStatuses ?? [])
+    .map((entry) => `${entry.runtimeId}:${entry.status}:${entry.displayName ?? ""}:${entry.origin?.originId ?? ""}`)
+    .join("|");
   const browserAutoStart: BrowserAutoStartOptions | null = jobThread || !canWriteProject ? null : {
     currentUserId,
     chatClientSessionId,
     activeRunIds: activeConversationRunIds,
     // A draft the person is typing, or a layout that cannot show the browser
     // beside the chat, leaves the card to them.
-    blocked: inputValue.trim().length > 0 || !wideSurfaces ? { reason: null } : null,
-    heldByOther: browserRunActive ||
-      sharedBrowserRemoteController?.kind === "human" ||
-      Boolean(personalBrowser.status?.humanInputRequest),
+    blocked: browserAutoStartBlocked ? { reason: null } : null,
+    heldByOther: browserHeldByOther,
+    skillSetup: skillSetupConversation,
+    sharedPresence: sharedBrowserPresence,
     plan: (_request, transport) => browserAutoStartPlan({
       transport,
       personalAvailable: personalBrowser.available,
-      personalOwnAi: credentialRequirements.hasDefaultCredential === true,
+      personalOwnAi,
       projectId: activeProjectId ?? null,
       runtimes: runtimeStatuses ?? null,
-      spaceBusy,
-      boost: getRuntimeSizePreference(activeProjectId) === "boost",
+      ownSessionRuntimeId: resolvedBrowserRuntimeId,
     }),
     startFailure: browserAutoStartFailure && browserAutoStartFailure.token === browserAutoStartRequest?.token
       ? browserAutoStartFailure.reason : null,
+    revision: JSON.stringify([
+      browserAutoStartBlocked,
+      browserHeldByOther,
+      runtimeStatusKey,
+      resolvedBrowserRuntimeId,
+      personalBrowser.available,
+      personalOwnAi,
+    ]),
   };
   const browserRequestState = useChatBrowserRequest({
     identity: browserRequestIdentity,
@@ -4514,9 +4520,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       // This request selects a session, not a new device-wide preference.
       setBrowserTransport(transport);
       if (transport === "shared") setSharedBrowserActivated(true);
-      if (transport === "shared" && plan && (plan.kind === "reuse" || plan.kind === "convert")) {
+      if (transport === "shared" && plan?.kind === "reuse") {
         browserAutoStartTokenRef.current += 1;
-        setBrowserAutoStartRequest({ token: browserAutoStartTokenRef.current, plan });
+        setBrowserAutoStartRequest({ token: browserAutoStartTokenRef.current, runtimeId: plan.runtimeId });
       } else {
         setBrowserAutoStartRequest(null);
       }
@@ -4529,7 +4535,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     onError: (message) => showStatus(message, "error", 6000),
     auto: browserAutoStart,
   });
-  const browserRequestContinued = useMemo(() => browserRequestContinuedKeys(messages), [messages]);
+  browserRequestRetryRef.current = browserRequestState.retryContinuation;
+  // A continuation whose dispatch failed continues no card; the failure also
+  // sets that card's state, which recomputes this.
+  const browserRequestContinued = useMemo(
+    () => browserRequestContinuedKeys(messages),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [messages, browserRequestState.cardStates],
+  );
   const browserRequestHost = useMemo<BrowserRequestHost>(() => ({
     transport: browserTransport,
     personalAvailable: personalBrowser.available,
@@ -4545,27 +4558,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     personalTurnsAllowed,
     sharedBrowserCapabilitiesUnsupported,
   ]);
-  // Runs Octo opened the browser for by itself from this page, and the
-  // continuations after a sign-in pause in them: their first site prompt is
-  // answered with routine browsing (owner decision, Oct 19).
-  const autoRoutineRunIds = useMemo(() => {
-    const ids = new Set<string>();
-    const controllerId = activeConversationEntry?.controllerId ?? null;
-    for (const run of projectRuns) {
-      if (!controllerId || run.conversationId !== controllerId || run.metadata?.browserTransport !== "shared") continue;
-      const runIds = [run.id, typeof run.metadata?.jobId === "string" ? run.metadata.jobId : null]
-        .filter((id): id is string => Boolean(id));
-      const sent = runIds.map((id) => findPromptSentFromThisPageForRun(id)).find(Boolean);
-      const metadata = sent?.metadata && typeof sent.metadata === "object" ? sent.metadata as Record<string, unknown> : null;
-      if (metadata?.[BROWSER_AUTO_STARTED_METADATA_KEY] === true) runIds.forEach((id) => ids.add(id));
-    }
-    return ids;
-  }, [activeConversationEntry?.controllerId, projectRuns]);
-  const continueSharedAfterHumanInput = useCallback((message: string) => {
-    const continuesAutoWalk = [...browserHumanInputRunIds].some((id) => autoRoutineRunIds.has(id));
-    return browserHandoff.continueShared(message, continuesAutoWalk
-      ? { metadata: { [BROWSER_AUTO_STARTED_METADATA_KEY]: true } } : null);
-  }, [autoRoutineRunIds, browserHandoff, browserHumanInputRunIds]);
   // The person closed, paused or stopped the browser here: Octo does not open
   // it again by itself in this conversation.
   const browserOpenTrackRef = useRef<{ identity: string; open: boolean } | null>(null);
@@ -6136,11 +6128,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     humanInputRunIds={browserHumanInputRunIds}
                     activeBrowserRunId={browserHandoff.sharedJob?.runId ?? null}
                     onTakeOverAgent={browserHandoff.sharedJob ? takeOverSharedBrowser : null}
-                    onContinueAfterHumanInput={continueSharedAfterHumanInput}
+                    onContinueAfterHumanInput={browserHandoff.continueShared}
                     autoStart={browserAutoStartRequest}
                     onAutoStartFailure={handleBrowserAutoStartFailure}
-                    autoRoutineRunIds={autoRoutineRunIds}
-                    onRemoteControllerChange={setSharedBrowserRemoteController}
+                    onPresenceChange={setSharedBrowserPresence}
                     sharedBrowserChrome={sharedBrowserChrome}
                     sharedBrowserViewerKind={sharedBrowserViewerKind}
                     sharedBrowserCapabilitiesResolved={sharedBrowserCapabilitiesResolved}

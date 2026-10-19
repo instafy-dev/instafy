@@ -54,12 +54,7 @@ import {
   shouldRenderBrowserSessionFullscreen,
 } from "./browserSessionLayout";
 import { browserSessionWsDebugFields } from "./browserSessionDebug";
-import {
-  BROWSER_AUTO_START_COPY,
-  browserAutoStartFailureReason,
-  shouldAllowRoutineBrowsingForAutoStart,
-  type BrowserAutoStartPlan,
-} from "./browserAutoStart";
+import { BROWSER_AUTO_START_COPY, type SharedBrowserPresence } from "./browserAutoStart";
 import {
   coalesceBrowserRuntimeEnsure,
   listBrowserRuntimeCandidates,
@@ -141,8 +136,6 @@ type BrowserSessionRfbModule = {
   RFB?: BrowserSessionRfbConstructor;
 };
 const BROWSER_RUNTIME_DISPLAY_NAME = "Browser session";
-/** How long a space's machine switched to the browser may take to come back. */
-const BROWSER_AUTO_CONVERT_ORIGIN_TIMEOUT_MS = 230_000;
 const controllerBaseUrl = controllerClient.core.baseUrl;
 const CDP_SCREENCAST_REQUESTED =
   (import.meta.env.VITE_INSTAFY_SHARED_BROWSER_CDP_SCREENCAST ?? "").trim() === "1";
@@ -449,8 +442,7 @@ export function BrowserSessionModal({
   sharedBrowserWebRtcCapabilities = null,
   autoStart = null,
   onAutoStartFailure,
-  autoRoutineRunIds = null,
-  onRemoteControllerChange,
+  onPresenceChange,
 }: {
   isOpen: boolean;
   onOpenChange: (open: boolean) => void;
@@ -491,22 +483,15 @@ export function BrowserSessionModal({
   sharedBrowserRfbCapabilities?: RuntimeBrowserSessionCapabilities["rfb"] | null;
   sharedBrowserWebRtcCapabilities?: RuntimeBrowserSessionCapabilities["webrtc"] | null;
   /**
-   * Studio opens this browser by itself for a request_browser card. `reuse`
-   * opens the session already running here and never starts one; `convert`
-   * restarts this space's idle standard machine as the browser (stop if idle,
-   * then the same runtime id), never a second machine. Neither recycles
-   * another machine or presses Stop and open here.
+   * Studio opens this browser by itself for a request_browser card. It only
+   * reuses `runtimeId`, the person's own session running here: it never
+   * connects to another session, never starts, restarts or recycles a
+   * machine, and never presses Stop and open here.
    */
-  autoStart?: { token: number; plan: Extract<BrowserAutoStartPlan, { kind: "reuse" | "convert" }> } | null;
+  autoStart?: { token: number; runtimeId: string } | null;
   onAutoStartFailure?: ((token: number, reason: string) => void) | null;
-  /**
-   * Runs Octo opened this browser for by itself, from this page. Their first
-   * site prompt is answered with routine browsing (owner decision, Oct 19);
-   * consequential actions, submissions and activation keys still ask.
-   */
-  autoRoutineRunIds?: ReadonlySet<string> | null;
-  /** Who else controls this browser, a teammate or an agent, or null. */
-  onRemoteControllerChange?: ((controller: { kind: "human" | "agent"; displayName: string } | null) => void) | null;
+  /** Who else is in this browser, from its collaboration roster; null once it closes. */
+  onPresenceChange?: ((presence: SharedBrowserPresence | null) => void) | null;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [containerNode, setContainerNode] = useState<HTMLDivElement | null>(null);
@@ -549,13 +534,18 @@ export function BrowserSessionModal({
         ? controlOwner
         : null;
   const remoteController = remoteSharedBrowserController(collaboration.client, effectiveAgentControlOwner);
-  const remoteControllerKind = remoteController?.kind ?? null;
-  const remoteControllerName = remoteController?.displayName ?? null;
+  const presenceStatus: SharedBrowserPresence["status"] =
+    collaboration.client.connectionStatus === "connected" && collaboration.client.participantId && collaboration.client.state
+      ? "known"
+      : collaboration.client.connectionStatus === "error" ? "unavailable" : "unknown";
+  const othersPresent = Boolean(collaboration.client.participantId && collaboration.client.state?.participants.some(
+    (participant) => participant.id !== collaboration.client.participantId,
+  ));
+  const remoteControllerPresent = remoteController !== null;
   useEffect(() => {
-    onRemoteControllerChange?.(remoteControllerKind && remoteControllerName !== null
-      ? { kind: remoteControllerKind, displayName: remoteControllerName } : null);
-  }, [onRemoteControllerChange, remoteControllerKind, remoteControllerName]);
-  useEffect(() => () => onRemoteControllerChange?.(null), [onRemoteControllerChange]);
+    onPresenceChange?.({ status: presenceStatus, othersPresent, remoteController: remoteControllerPresent });
+  }, [onPresenceChange, othersPresent, presenceStatus, remoteControllerPresent]);
+  useEffect(() => () => onPresenceChange?.(null), [onPresenceChange]);
   const humanInputEnabled =
     canControlBrowser &&
     collaborationSelfOwnsControl(collaboration.client) &&
@@ -623,31 +613,6 @@ export function BrowserSessionModal({
   useEffect(() => {
     onApprovalPendingChange?.(Boolean(sharedBrowserApproval.pending));
   }, [onApprovalPendingChange, sharedBrowserApproval.pending]);
-  // Routine browsing is free in a browser Octo opened by itself: Studio
-  // answers that run's first site prompt for the person who started it, once.
-  // The runtime still pauses consequential actions, submissions and
-  // activation keys for Allow once, and secret entry stays blocked.
-  const autoRoutineDecidedRef = useRef<string | null>(null);
-  const decideSharedBrowserApproval = sharedBrowserApproval.decide;
-  useEffect(() => {
-    const request = sharedBrowserApproval.pending?.request ?? null;
-    if (sharedBrowserApproval.submitting || !request || !shouldAllowRoutineBrowsingForAutoStart({
-      request,
-      routineAvailable: sharedBrowserRoutineApprovalAvailable,
-      currentUserId,
-      autoStartedRunIds: autoRoutineRunIds,
-      alreadyDecidedApprovalId: autoRoutineDecidedRef.current,
-    })) return;
-    autoRoutineDecidedRef.current = request.approvalId;
-    void decideSharedBrowserApproval("allow_routine");
-  }, [
-    autoRoutineRunIds,
-    currentUserId,
-    decideSharedBrowserApproval,
-    sharedBrowserApproval.pending,
-    sharedBrowserApproval.submitting,
-    sharedBrowserRoutineApprovalAvailable,
-  ]);
   useEffect(
     () => () => {
       onApprovalPendingChange?.(false);
@@ -657,13 +622,17 @@ export function BrowserSessionModal({
   const [viewerOverride, setViewerOverride] =
     useState<SupportedSharedBrowserViewerKind | null>(null);
   const [connectAttempt, setConnectAttempt] = useState(0);
-  // An automatic start that finds this browser in an error state tries once
-  // more, so it is not left waiting on a connection that gave up.
+  // A new automatic start, or a press after one, that finds this browser in
+  // an error state tries once more, so it is not left waiting on a
+  // connection that gave up.
   const autoStartToken = autoStart?.token ?? null;
   const statusRef = useRef<BrowserSessionStatus>(status);
   statusRef.current = status;
+  const previousAutoStartTokenRef = useRef(autoStartToken);
   useEffect(() => {
-    if (autoStartToken !== null && isOpen && statusRef.current === "error") {
+    const changed = previousAutoStartTokenRef.current !== autoStartToken;
+    previousAutoStartTokenRef.current = autoStartToken;
+    if (changed && isOpen && statusRef.current === "error") {
       setConnectAttempt((value) => value + 1);
     }
   }, [autoStartToken, isOpen]);
@@ -1315,19 +1284,21 @@ export function BrowserSessionModal({
       const failAutoStart = (reason: string) => {
         if (autoStartRequest) onAutoStartFailureRef.current?.(autoStartRequest.token, reason);
       };
-      let convertTarget: Extract<BrowserAutoStartPlan, { kind: "convert" }> | null = null;
-      if (autoStartRequest && !forcedRuntimeId) {
-        const selection = resolveBrowserRuntimeSelection(statusEntries, exactRuntimeId);
-        if (selection.kind === "new" && autoStartRequest.plan.kind === "convert") {
-          convertTarget = autoStartRequest.plan;
-        } else if (selection.kind === "new") {
-          // The session it meant to reuse is gone: never start a machine by itself.
-          failAutoStart(BROWSER_AUTO_START_COPY.secondMachine);
+      if (autoStartRequest) {
+        // It only reuses the person's own session running here. Another
+        // session, one that is gone, or a machine this browser would have to
+        // start or restart, stays the person's to open: nothing connects.
+        const selection = forcedRuntimeId ? null : resolveBrowserRuntimeSelection(statusEntries, exactRuntimeId);
+        if (selection?.kind !== "selected" || selection.candidate.runtimeId !== autoStartRequest.runtimeId) {
+          const reason = selection?.kind === "choose"
+            ? BROWSER_AUTO_START_COPY.severalSessions
+            : selection?.kind === "selected" || selection?.kind === "missing"
+              ? BROWSER_AUTO_START_COPY.otherSession
+              : BROWSER_AUTO_START_COPY.firstMachine;
+          failAutoStart(reason);
           setStatus("error");
-          setError(BROWSER_AUTO_START_COPY.secondMachine);
+          setError(reason);
           return;
-        } else if (selection.kind !== "selected") {
-          failAutoStart(BROWSER_AUTO_START_COPY.severalSessions);
         }
       }
       if (!forcedRuntimeId) {
@@ -1430,43 +1401,12 @@ export function BrowserSessionModal({
 
           let ensured: Awaited<ReturnType<typeof ensureBrowserRuntime>>;
           let ensuredRuntimeId = forcedRuntimeId;
-          if (convertTarget) {
-            // This space's own idle standard machine restarts as the browser,
-            // as the limit recycle below does: chat turns keep running on it.
-            // A machine with live work stays as it is.
-            const stopOutcome = await controllerClient.runtimes.stopIfIdle({
-              runtimeId: convertTarget.runtimeId,
-              reason: "runtime_limit_takeover",
-              expectedProjectId: convertTarget.projectId,
-              expectedProvider: convertTarget.provider,
-              expectedDisplayName: convertTarget.displayName,
-            }).catch(() => null);
-            if (connectionCancelled()) {
-              return;
-            }
-            const released = stopOutcome?.statusChanged === true ||
-              stopOutcome?.skipReason === "already_stopped";
-            runtimeDebugLog("browser-session:auto-convert-runtime", {
-              projectId,
-              runtimeId: convertTarget.runtimeId,
-              released,
-              skipReason: stopOutcome?.skipReason ?? null,
-            });
-            if (!released) {
-              throw new Error(BROWSER_AUTO_START_COPY.stillWorking);
-            }
-            ensuredRuntimeId = convertTarget.runtimeId;
-          }
           try {
             ensured = await ensureBrowserRuntime(
               ensuredRuntimeId,
-              convertTarget ? false : connectAttempt === 0,
+              connectAttempt === 0,
             );
           } catch (initialError) {
-            // An automatic start never recycles another machine.
-            if (autoStartRequest) {
-              throw initialError;
-            }
             const initialLimitDetails = hostedRuntimeLimitDetailsFromError(initialError);
             let recyclableRuntime = initialLimitDetails
               ? resolveAutoRecyclableBrowserRuntimeIdentity({
@@ -1567,7 +1507,6 @@ export function BrowserSessionModal({
             return;
           }
           const message = err instanceof Error ? err.message : String(err);
-          failAutoStart(browserAutoStartFailureReason(err, projectId));
           setStatus("error");
           setError(message || "Unable to start a runtime for the browser session.");
           setRuntimeLimitDetails(hostedRuntimeLimitDetailsFromError(err));
@@ -1587,8 +1526,6 @@ export function BrowserSessionModal({
           runtimeId,
           fetchStatus: controllerClient.runtimes.fetchStatus,
           signal: startupAbortController.signal,
-          // A machine switched to the browser restarts first.
-          ...(convertTarget ? { timeoutMs: BROWSER_AUTO_CONVERT_ORIGIN_TIMEOUT_MS } : {}),
         });
         originId = awaitedOrigin.originId;
         originEndpoint = awaitedOrigin.endpoint;
@@ -1603,7 +1540,6 @@ export function BrowserSessionModal({
         return;
       }
       if (!originId) {
-        failAutoStart(BROWSER_AUTO_START_COPY.timedOut);
         setStatus("error");
         setError("Browser session is unavailable (runtime origin not ready yet).");
         return;

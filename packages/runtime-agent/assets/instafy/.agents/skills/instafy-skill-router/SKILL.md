@@ -42,7 +42,7 @@ Do not load learned blocks “just in case”. Only load what clearly applies.
 Use these mappings unless a project-specific skill overrides them.
 
 - **Anything a web page would help with** (look something up, check or verify a page, show a site's screens, guided clicks, sign-in)
-  - Use `instafy-browser-automation` and open the browser without asking.
+  - Use `instafy-browser-automation` and open the browser without asking in chat first; its site and action prompts still apply.
   - Use the exposed Personal or Shared Browser tools. If neither is exposed, follow the skill's `request_browser` handoff so Studio can open or resume the appropriate browser.
 
 - **Public page text / element counts / computed CSS / screenshot verification**

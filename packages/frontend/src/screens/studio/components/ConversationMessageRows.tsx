@@ -21,7 +21,7 @@ import {
   extractChatAttachments,
   UserMessageBubble,
 } from "./ChatMessageEntries";
-import { readBrowserRequestOf } from "./browserRequest";
+import { isUnsentBrowserRequestNotice, readBrowserRequestOf } from "./browserRequest";
 import {
   AssistantSpeakerIdentityLabel,
   type SpeakerStatusMarker,
@@ -264,9 +264,13 @@ export function ConversationMessageRows({
   for (const [messageIndex, message] of messages.entries()) {
         flushTimedRowsBefore(message.timestamp);
         // A continuation sent to Instafy's browser for a card reads as a
-        // one-line notice, not as a message the person wrote.
+        // one-line notice, not as a message the person wrote. One whose
+        // dispatch failed opened nothing, so it shows nothing; the card keeps
+        // its button with the error.
         if (message.role === "user" && readBrowserRequestOf(message)) {
-          rows.push(<BrowserRequestNoticeRow key={message.id} message={message} />);
+          if (!isUnsentBrowserRequestNotice(message)) {
+            rows.push(<BrowserRequestNoticeRow key={message.id} message={message} />);
+          }
           continue;
         }
         const normalizedCurrentUserId = typeof currentUserId === "string" ? currentUserId.trim() : "";

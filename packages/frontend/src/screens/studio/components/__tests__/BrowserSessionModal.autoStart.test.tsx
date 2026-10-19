@@ -12,7 +12,7 @@ vi.mock("../../../../sdk/instafy", () => ({ controllerClient: {
 } }));
 vi.mock("../SharedBrowserProfileStatus", () => ({ SharedBrowserProfileStatus: () => null }));
 import { BrowserSessionModal } from "../BrowserSessionModal";
-import { BROWSER_AUTO_START_COPY, type BrowserAutoStartPlan } from "../browserAutoStart";
+import { BROWSER_AUTO_START_COPY } from "../browserAutoStart";
 
 const projectId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const machineId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -21,15 +21,13 @@ const machine = { runtimeId: machineId, status: "ready", provider: "instafy-clou
   isLocal: false, lastSeenAt: new Date().toISOString() };
 const session = { runtimeId: sessionId, status: "ready", provider: "instafy-cloud", displayName: "Browser session", health: "idle",
   isLocal: false, lastSeenAt: null, origin: { originId: `origin-${sessionId}`, endpoint: "https://origin.test", protocols: ["http"] } };
-const convert: Extract<BrowserAutoStartPlan, { kind: "convert" }> = {
-  kind: "convert", runtimeId: machineId, projectId, provider: "instafy-cloud", displayName: "hosted runtime",
-};
 
 /**
- * Studio opens Instafy's browser by itself only where it is cheap: it reuses
- * a running session, or switches this space's own idle machine to the
- * browser. It never starts a second machine, recycles another one, or
- * presses Stop and open here on its own.
+ * Studio opens Instafy's browser by itself only in a session already running
+ * here. It never starts a machine, never stops or restarts this space's own
+ * machine (whatever it still runs, such as a preview or a terminal, would
+ * stop with it), never recycles another one and never presses Stop and open
+ * here on its own.
  */
 describe("Shared browser started by Studio itself", () => {
   let root: Root;
@@ -49,64 +47,54 @@ describe("Shared browser started by Studio itself", () => {
     await act(async () => root.unmount()); container.remove(); vi.restoreAllMocks(); vi.unstubAllGlobals();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
-  async function render(plan: Extract<BrowserAutoStartPlan, { kind: "reuse" | "convert" }>) {
+  async function render() {
     await act(async () => { root.render(<BrowserSessionModal isOpen onOpenChange={vi.fn()} projectId={projectId}
       currentUserId="user-1" preferRuntimeId={null} resumeRuntimeId={null} onRuntimeIdResolved={onResolved}
       presentation="docked" fillContainer canControlBrowser sharedBrowserCapabilitiesResolved={false}
-      autoStart={{ token: 1, plan }} onAutoStartFailure={onFailure} />); });
+      autoStart={{ token: 1, runtimeId: sessionId }} onAutoStartFailure={onFailure} />); });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
   }
 
-  it("switches this space's idle machine to the browser: stop if idle, then the same runtime", async () => {
+  it.each([
+    ["an idle machine", { statusChanged: true, skipReason: null }],
+    ["a machine with live work", { statusChanged: false, skipReason: "active_jobs" }],
+  ])("never stops or restarts this space's own machine, %s", async (_name, stopOutcome) => {
     mocks.fetchStatus.mockResolvedValue({ runtimes: [machine] });
-    mocks.stopIfIdle.mockResolvedValue({ statusChanged: true, skipReason: null });
+    mocks.stopIfIdle.mockResolvedValue(stopOutcome);
     mocks.ensure.mockResolvedValue({ runtimeId: machineId });
-    await render(convert);
-    expect(mocks.stopIfIdle).toHaveBeenCalledExactlyOnceWith({
-      runtimeId: machineId, reason: "runtime_limit_takeover", expectedProjectId: projectId,
-      expectedProvider: "instafy-cloud", expectedDisplayName: "hosted runtime",
-    });
-    expect(mocks.ensure).toHaveBeenCalledTimes(1);
-    expect(mocks.ensure.mock.calls[0]![0]).toMatchObject({ projectId, runtimeId: machineId, displayName: "Browser session" });
-    expect(onFailure).not.toHaveBeenCalled();
-  });
-
-  it("leaves a machine with live work alone and starts nothing", async () => {
-    mocks.fetchStatus.mockResolvedValue({ runtimes: [machine] });
-    mocks.stopIfIdle.mockResolvedValue({ statusChanged: false, skipReason: "active_jobs" });
-    await render(convert);
+    await render();
+    expect(mocks.stopIfIdle).not.toHaveBeenCalled();
     expect(mocks.ensure).not.toHaveBeenCalled();
-    expect(onFailure).toHaveBeenCalledExactlyOnceWith(1, BROWSER_AUTO_START_COPY.stillWorking);
-  });
-
-  it("never recycles another machine when the team's slot is taken elsewhere", async () => {
-    mocks.fetchStatus.mockResolvedValue({ runtimes: [machine] });
-    mocks.stopIfIdle.mockResolvedValue({ statusChanged: true, skipReason: null });
-    mocks.ensure.mockRejectedValue(Object.assign(new Error("Runtime limit reached"), {
-      code: "runtime_limit_reached",
-      details: { activeCount: 1, maxActiveCount: 1, blockerProjectId: "99999999-9999-4999-8999-999999999999",
-        blockerRuntimeId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", blockerRuntimeLabel: "hosted runtime" },
-    }));
-    await render(convert);
-    expect(mocks.stopIfIdle).toHaveBeenCalledTimes(1);
-    expect(mocks.ensure).toHaveBeenCalledTimes(1);
-    expect(onFailure).toHaveBeenCalledExactlyOnceWith(1, BROWSER_AUTO_START_COPY.inUseElsewhere);
+    expect(onFailure).toHaveBeenCalledExactlyOnceWith(1, BROWSER_AUTO_START_COPY.firstMachine);
   });
 
   it("reuses the session already running and starts no machine", async () => {
     mocks.fetchStatus.mockResolvedValue({ runtimes: [machine, session] });
-    await render({ kind: "reuse" });
+    await render();
     expect(mocks.stopIfIdle).not.toHaveBeenCalled();
     expect(mocks.ensure).not.toHaveBeenCalled();
     expect(onResolved).toHaveBeenCalledWith(sessionId);
     expect(onFailure).not.toHaveBeenCalled();
   });
 
+  it("never connects to another session that runs in its place", async () => {
+    // The person's own session is gone and a teammate's runs: their pages and
+    // sign-ins stay theirs.
+    const teammates = { ...session, runtimeId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      origin: { ...session.origin, originId: "origin-teammate" } };
+    mocks.fetchStatus.mockResolvedValue({ runtimes: [machine, teammates] });
+    await render();
+    expect(mocks.requestAccessToken).not.toHaveBeenCalled();
+    expect(onResolved).not.toHaveBeenCalled();
+    expect(mocks.ensure).not.toHaveBeenCalled();
+    expect(onFailure).toHaveBeenCalledExactlyOnceWith(1, BROWSER_AUTO_START_COPY.otherSession);
+  });
+
   it("does not start a machine when the session it meant to reuse is gone", async () => {
-    mocks.fetchStatus.mockResolvedValue({ runtimes: [machine] });
-    await render({ kind: "reuse" });
+    mocks.fetchStatus.mockResolvedValue({ runtimes: [] });
+    await render();
     expect(mocks.stopIfIdle).not.toHaveBeenCalled();
     expect(mocks.ensure).not.toHaveBeenCalled();
-    expect(onFailure).toHaveBeenCalledExactlyOnceWith(1, BROWSER_AUTO_START_COPY.secondMachine);
+    expect(onFailure).toHaveBeenCalledExactlyOnceWith(1, BROWSER_AUTO_START_COPY.firstMachine);
   });
 });

@@ -7,19 +7,21 @@ import { findPromptSentFromThisPageForRun } from "../../../conversations/sentPro
 import type { ChatMessage } from "../types";
 import {
   BROWSER_AUTO_START_COPY,
+  browserAutoStartAddressesSeen,
   browserAutoStartedRecently,
   claimBrowserAutoStart,
   isBrowserAutoStartClaimed,
   isBrowserAutoStartDeclined,
   recordBrowserAutoStart,
-  wasBrowserAutoStarted,
   type BrowserAutoStartPlan,
+  type SharedBrowserPresence,
 } from "./browserAutoStart";
 import {
   BROWSER_AUTO_STARTED_METADATA_KEY,
   BROWSER_REQUEST_OF_METADATA_KEY,
   browserRequestContinuation,
   browserRequestContinuedKeys,
+  browserRequestFromContinuationPrompt,
   browserRequestFromMessage,
   browserRequestJobId,
   browserRequestKey,
@@ -27,6 +29,7 @@ import {
   browserRequestTransport,
   browserRequestUnavailableReason,
   isBrowserTurnPromptMetadata,
+  readBrowserRequestOf,
   type BrowserRequest,
   type BrowserRequestCardState,
   type BrowserRequestHost,
@@ -39,8 +42,6 @@ export type BrowserTaskExtras = {
   display: string;
   /** Prompt metadata naming the card, and whether Studio sent it by itself. */
   metadata: Record<string, unknown>;
-  /** Studio opened the browser by itself: ask the desktop app for routine control. */
-  autoStarted: boolean;
 };
 
 /** What Studio needs to start a card by itself. Absent, every card waits for a press. */
@@ -56,9 +57,19 @@ export type BrowserAutoStartOptions = {
   blocked: { reason: string | null } | null;
   /** Another person or agent run holds the browser. */
   heldByOther: boolean;
+  /** A skill setup, where an address comes only from the skill's declaration. */
+  skillSetup: boolean;
+  /** Who else is in Instafy's browser once it is open here; null before. */
+  sharedPresence: SharedBrowserPresence | null;
   plan: (request: BrowserRequest, transport: BrowserTransport) => BrowserAutoStartPlan;
   /** A failure the browser surface reported for the automatic start in flight. */
   startFailure: string | null;
+  /**
+   * Changes whenever something the decision reads changes (a draft, the
+   * layout, who holds the browser, this space's runtimes), so a card held by
+   * one of them is looked at again once it clears.
+   */
+  revision: string;
 };
 
 type Options = {
@@ -86,8 +97,6 @@ type Options = {
 
 /** How long a press, or the reuse of a running browser, may take to open it. */
 export const BROWSER_REQUEST_HANDOFF_DEADLINE_MS = 120_000;
-/** How long switching this space's machine to the browser may take. */
-export const BROWSER_REQUEST_CONVERSION_DEADLINE_MS = 240_000;
 
 function hostOf(options: Options): BrowserRequestHost {
   return {
@@ -102,6 +111,40 @@ function isDocumentVisible() {
   return typeof document === "undefined" || document.visibilityState !== "hidden";
 }
 
+function sameCardState(a: BrowserRequestCardState | undefined, b: BrowserRequestCardState): boolean {
+  if (!a || a.kind !== b.kind) return false;
+  if (a.kind === "opening" && b.kind === "opening") return a.note === b.note;
+  if (a.kind === "button" && b.kind === "button") return a.reason === b.reason;
+  return true;
+}
+
+/**
+ * An automatic start that no longer applies by the time the browser is
+ * ready: the card stays a button, without a reason or a toast.
+ */
+class BrowserAutoStartDropped extends Error {
+  constructor() {
+    super("");
+    this.name = "BrowserAutoStartDropped";
+  }
+}
+
+/**
+ * Whether an automatic start still applies right before its continuation is
+ * sent: the card is still the newest, nobody wrote after it or continued it,
+ * and the conversation is idle with no draft.
+ */
+function autoStartStillApplies(current: Options, key: string): boolean {
+  const auto = current.auto;
+  if (!auto || current.busy || auto.activeRunIds.size > 0 || auto.blocked) return false;
+  const index = current.messages.findIndex((message) =>
+    browserRequestKey(message) === key && browserRequestFromMessage(message) !== null);
+  if (index < 0) return false;
+  if (current.messages.slice(index + 1).some((message) =>
+    message.role === "user" || browserRequestFromMessage(message) !== null)) return false;
+  return !browserRequestContinuedKeys(current.messages).has(key);
+}
+
 /**
  * The model requests a handoff with a `request_browser` card. Pressing the
  * card starts the browser and continues the task there. Studio also presses
@@ -113,12 +156,17 @@ function isDocumentVisible() {
  * - for the newest card, sent after the conversation was opened and within ten
  *   minutes, with no message after it and no continuation for it;
  * - never for a card a browser turn sent, so a pause or a denial cannot loop;
+ * - for an address the person could have seen ({@link browserAutoStartAddressesSeen});
  * - once that run is finished, and once the tab is visible;
  * - once per card on this page, at most once per conversation in ten minutes,
  *   and never after the person closed, paused or stopped the browser there;
- * - when it is cheap (see browserAutoStartPlan): otherwise the card stays a
- *   button, with the reason.
- * A failed start leaves the button and says why.
+ * - in the person's own running browser session, or in the desktop app for a
+ *   person on their own AI (see browserAutoStartPlan): otherwise the card stays
+ *   a button, with the reason;
+ * - and, checked again once the browser is ready, only while nobody wrote
+ *   after the card, the conversation is idle and nobody else is in the browser.
+ * A start opens with the person's own approval settings, exactly as a press
+ * does. A failed start leaves the button and says why.
  */
 export function useChatBrowserRequest(options: Options) {
   const latest = useRef(options);
@@ -134,10 +182,9 @@ export function useChatBrowserRequest(options: Options) {
   const pending = useRef(false);
   const [cardStates, setCardStates] = useState<ReadonlyMap<string, BrowserRequestCardState>>(() => new Map());
   const [visible, setVisible] = useState(isDocumentVisible);
-  const [, setAutoStartTick] = useState(0);
 
   const setCardState = useCallback((key: string, state: BrowserRequestCardState) => {
-    setCardStates((current) => new Map(current).set(key, state));
+    setCardStates((current) => sameCardState(current.get(key), state) ? current : new Map(current).set(key, state));
   }, []);
 
   useEffect(() => {
@@ -147,7 +194,12 @@ export function useChatBrowserRequest(options: Options) {
     return () => document.removeEventListener("visibilitychange", update);
   }, []);
 
-  const start = useCallback(async (message: ChatMessage, request: BrowserRequest, plan: BrowserAutoStartPlan | null) => {
+  const start = useCallback(async (
+    key: string,
+    request: BrowserRequest,
+    plan: BrowserAutoStartPlan | null,
+    extraMetadata: Record<string, unknown> | null = null,
+  ) => {
     const captured = latest.current;
     const epoch = generation.current;
     if (pending.current) throw new Error("A browser task is already opening.");
@@ -160,8 +212,7 @@ export function useChatBrowserRequest(options: Options) {
     pending.current = true;
     try {
       captured.activate(transport, plan);
-      const deadline = Date.now() + (plan?.kind === "convert"
-        ? BROWSER_REQUEST_CONVERSION_DEADLINE_MS : BROWSER_REQUEST_HANDOFF_DEADLINE_MS);
+      const deadline = Date.now() + BROWSER_REQUEST_HANDOFF_DEADLINE_MS;
       let activated = false;
       // Let React commit the chosen surface before considering a cached
       // ready runtime. Identity, closure and explicit location changes cancel
@@ -175,16 +226,28 @@ export function useChatBrowserRequest(options: Options) {
         }
         if (autoStarted && current.auto?.startFailure) throw new Error(current.auto.startFailure);
         activated ||= current.open && current.transport === transport;
-        if (activated && !current.busy && (transport === "personal" ? current.personalReady : current.sharedReady)) {
-          // Never take the browser from someone using it.
-          if (autoStarted && current.auto?.heldByOther) throw new Error(BROWSER_AUTO_START_COPY.inUse);
+        // An automatic start in Instafy's browser also waits to know who else
+        // is in it.
+        const presence = autoStarted && transport === "shared" ? current.auto?.sharedPresence ?? null : null;
+        if (presence?.status === "unavailable") throw new Error(BROWSER_AUTO_START_COPY.presenceUnknown);
+        const presenceKnown = !autoStarted || transport !== "shared" || presence?.status === "known";
+        if (activated && !current.busy && presenceKnown &&
+            (transport === "personal" ? current.personalReady : current.sharedReady)) {
+          if (autoStarted) {
+            // Nobody wrote or started anything while the browser opened.
+            if (!autoStartStillApplies(current, key)) throw new BrowserAutoStartDropped();
+            // Never another person's browser state, and never one in use.
+            if (current.auto?.heldByOther || presence?.othersPresent || presence?.remoteController) {
+              throw new Error(BROWSER_AUTO_START_COPY.inUse);
+            }
+          }
           const sent = await current.continueTask(transport, browserRequestContinuation(request), {
             display: browserRequestNotice(current.agentName ?? "Octo", request.task),
             metadata: {
-              [BROWSER_REQUEST_OF_METADATA_KEY]: browserRequestKey(message),
+              ...(extraMetadata ?? {}),
+              [BROWSER_REQUEST_OF_METADATA_KEY]: key,
               ...(autoStarted ? { [BROWSER_AUTO_STARTED_METADATA_KEY]: true } : {}),
             },
-            autoStarted,
           });
           if (!sent) throw new Error("The browser task was not sent. You can retry from its message.");
           return;
@@ -201,6 +264,31 @@ export function useChatBrowserRequest(options: Options) {
     }
   }, []);
 
+  /**
+   * Runs a press, or a retry, of a card: the card reads Opened once the task
+   * went out, and keeps its button with the error when it did not.
+   */
+  const startByHand = useCallback(async (
+    key: string,
+    request: BrowserRequest,
+    extraMetadata: Record<string, unknown> | null,
+  ) => {
+    const epoch = generation.current;
+    // A pressed card is never also started by itself.
+    claimBrowserAutoStart(key);
+    try {
+      await start(key, request, null, extraMetadata);
+      setCardState(key, { kind: "opened" });
+    } catch (error: unknown) {
+      const message = error instanceof Error && error.message ? error.message : "Unable to continue in the browser.";
+      if (generation.current === epoch) {
+        setCardState(key, { kind: "button", reason: message });
+        latest.current.onError(message);
+      }
+      throw error;
+    }
+  }, [setCardState, start]);
+
   useEffect(() => {
     const handler = (event: Event) => {
       const detail = (event as CustomEvent<{ messageId?: string; completion?: Promise<unknown> }>).detail;
@@ -208,24 +296,40 @@ export function useChatBrowserRequest(options: Options) {
       const message = captured.messages.find((entry) => entry.id === detail?.messageId);
       const request = message && browserRequestFromMessage(message);
       if (!message || !request || !detail) return;
-      const epoch = generation.current;
-      const key = browserRequestKey(message);
-      detail.completion = (async () => {
-        // A pressed card is never also started by itself.
-        claimBrowserAutoStart(key);
-        await start(message, request, null);
-        setCardState(key, { kind: "opened" });
-      })().catch((error: unknown) => {
-        if (generation.current === epoch) latest.current.onError(error instanceof Error ? error.message : "Unable to continue in the browser.");
-        throw error;
-      });
+      detail.completion = startByHand(browserRequestKey(message), request, null);
     };
     window.addEventListener("instafy:request-browser", handler);
     return () => {
       generation.current += 1;
       window.removeEventListener("instafy:request-browser", handler);
     };
-  }, [setCardState, start]);
+  }, [startByHand]);
+
+  /**
+   * Try again for a failed browser run: sends the card's task again, as the
+   * same notice naming the card, with the retry's metadata. Never the notice
+   * text in its place. Resolves to whether it went out.
+   */
+  const retryContinuation = useCallback(async (
+    promptMessage: ChatMessage,
+    retryMetadata: Record<string, unknown>,
+  ): Promise<boolean> => {
+    const key = readBrowserRequestOf(promptMessage);
+    if (!key) return false;
+    const card = latest.current.messages.find((message) =>
+      browserRequestKey(message) === key && browserRequestFromMessage(message) !== null);
+    const request = (card ? browserRequestFromMessage(card) : null) ?? browserRequestFromContinuationPrompt(promptMessage);
+    if (!request) {
+      latest.current.onError("Couldn't find the browser task to send again.");
+      return false;
+    }
+    try {
+      await startByHand(key, request, retryMetadata);
+      return true;
+    } catch {
+      return false;
+    }
+  }, [startByHand]);
 
   // The newest card, found once per change of the transcript.
   const newestCardIndex = useMemo(() => {
@@ -234,6 +338,7 @@ export function useChatBrowserRequest(options: Options) {
     return index;
   }, [options.messages]);
   const autoEnabled = Boolean(options.auto);
+  const autoRevision = options.auto?.revision ?? "";
   const activeRunIdsKey = options.auto ? [...options.auto.activeRunIds].sort().join(",") : "";
 
   useEffect(() => {
@@ -268,16 +373,33 @@ export function useChatBrowserRequest(options: Options) {
     // Wait for that run to finish and for the person to see this tab.
     if (current.busy || auto.activeRunIds.has(jobId) || !visible) return;
 
-    // From here the card is decided once on this page.
-    if (!claimBrowserAutoStart(key)) return;
+    // Settled for good: the card is left to the person on this page.
+    const leave = (reason: string | null) => {
+      claimBrowserAutoStart(key);
+      setCardState(key, { kind: "button", reason });
+    };
     const conversation = current.identity;
     if (isBrowserAutoStartDeclined(conversation) || browserAutoStartedRecently(conversation)) {
-      setCardState(key, { kind: "button", reason: null });
+      leave(null);
+      return;
+    }
+    // An address Octo found itself, such as on a page or in a search result,
+    // is the person's to check first.
+    if (!browserAutoStartAddressesSeen({
+      task: request.task,
+      messages: current.messages,
+      cardIndex: index,
+      currentUserId: auto.currentUserId,
+      skillSetup: auto.skillSetup,
+    })) {
+      leave(BROWSER_AUTO_START_COPY.unseenAddress);
       return;
     }
     const host = hostOf(current);
     // The card says itself why no browser opens here.
     if (browserRequestUnavailableReason(request, host)) return;
+    // Held for now: the button shows why, and the card is looked at again
+    // once that changes.
     if (auto.blocked) {
       setCardState(key, { kind: "button", reason: auto.blocked.reason });
       return;
@@ -291,16 +413,17 @@ export function useChatBrowserRequest(options: Options) {
       setCardState(key, { kind: "button", reason: plan.reason });
       return;
     }
+    if (!claimBrowserAutoStart(key)) return;
     recordBrowserAutoStart(conversation);
-    setAutoStartTick((tick) => tick + 1);
-    setCardState(key, {
-      kind: "opening",
-      note: plan.kind === "convert" ? BROWSER_AUTO_START_COPY.converting : null,
-    });
+    setCardState(key, { kind: "opening", note: null });
     const epoch = generation.current;
-    void start(message, request, plan).then(
+    void start(key, request, plan).then(
       () => setCardState(key, { kind: "opened" }),
       (error: unknown) => {
+        if (error instanceof BrowserAutoStartDropped) {
+          setCardState(key, { kind: "button", reason: null });
+          return;
+        }
         const reason = error instanceof Error && error.message ? error.message : BROWSER_AUTO_START_COPY.timedOut;
         setCardState(key, { kind: "button", reason });
         if (generation.current === epoch) latest.current.onError(reason);
@@ -309,6 +432,7 @@ export function useChatBrowserRequest(options: Options) {
   }, [
     activeRunIdsKey,
     autoEnabled,
+    autoRevision,
     newestCardIndex,
     options.busy,
     options.canWrite,
@@ -320,9 +444,5 @@ export function useChatBrowserRequest(options: Options) {
     visible,
   ]);
 
-  return {
-    cardStates,
-    /** Studio opened the browser by itself in this conversation, on this page. */
-    autoStartedHere: wasBrowserAutoStarted(options.identity),
-  };
+  return { cardStates, retryContinuation };
 }

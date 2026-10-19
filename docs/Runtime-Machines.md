@@ -120,16 +120,13 @@ Start or Reconnect. Focus reaching the composer on its own does not count.
 The Machines panel only reads status. One exception remains: the shared
 browser dock still asks for a machine itself when it connects without one.
 
-When Octo asks for Instafy's browser and no browser session runs in the space,
-Studio may switch the space's one idle standard machine to the browser by
-itself (see [Browser Profiles](Browser-Profiles.md)): `stopIfIdle` with
-`runtime_limit_takeover` and the machine's own identity, then an ensure of the
-same runtime id as the browser, the path a browser session's limit recycle
-takes. Chat turns keep running on that machine, so it costs one billing
-interval and about two minutes, and the card says so. It never starts a second
-machine, never stops another space's machine or one with live work, and never
-presses **Stop and open here**; a busy, Boost-size or missing machine leaves
-the card's button for the person.
+When Octo asks for Instafy's browser, Studio opens it by itself only in a
+browser session already running in the space (see
+[Browser Profiles](Browser-Profiles.md)). It never starts a machine and never
+switches the space's own machine to the browser by itself: a restart stops
+whatever that machine still runs, such as a preview, a dev server or a
+terminal session, and none of those shows in its status. The card keeps its
+button, with that reason, and a press takes the usual path.
 
 The tab that makes a Stop or Remove holds the space the same way when that
 leaves it no live hosted machine, and a Machines-panel takeover holds the

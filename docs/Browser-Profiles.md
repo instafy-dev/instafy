@@ -41,25 +41,36 @@ which the record keeps as the dispatched prompt. Studio starts a card by itself 
   review or a multi-agent worker;
 - for the newest card, within ten minutes, with nothing written after it, and never
   for a card a browser turn sent;
+- for addresses the person could have seen: in a skill setup (where an address comes
+  only from the skill's declaration), in the person's own messages, or in the
+  conversation's assistant text from before the turn that sent the card. An address
+  Octo read on a page or in a tool's output, such as a search result, leaves the card
+  to the person, who sees its host first;
 - once the tab is visible, once per card, at most once per conversation in ten
   minutes, and never after the person closed, paused or stopped the browser there;
 - when no one else is using the browser, the composer holds no draft and the layout
   can show the browser beside the chat;
-- when it is cheap: a browser session already running in this space, the browser in
-  the desktop app for a person on their own AI connection (its one native
-  confirmation stays), or this space's one idle standard cloud machine, which
-  restarts as the browser (about two minutes and one billing interval, and the card
-  says so). It never starts a second machine, never stops another space's or a busy
-  machine, and never presses **Stop and open here**.
+- in the one browser session running in the space when this person opened it in
+  this conversation before, or in the browser in the desktop app for a person on
+  their own AI connection. It never starts a machine, never stops or restarts the
+  space's own machine (whatever it still runs, such as a preview, a dev server or a
+  terminal session, would stop with it, and Studio cannot see those), and never
+  presses **Stop and open here**.
 
-Otherwise the card keeps its button, with the reason when there is one, such as
-"This starts a second cloud machine for this space." A failed start leaves the button
-and says why. A press, or an opened card, reads **Opened** from then on, also after a
-reload, so displaying an old message never runs it again. A browser Octo opened by
-itself keeps the chat composer: the person's next message is a chat turn, not a
-read-only browser turn. Routine browsing is free in it: Studio answers the run's first
-site prompt with routine browsing for the person who started the run, while purchases,
-submissions and activation keys still ask (see [Shared Browser](Shared-Browser.md)).
+Once the browser is ready and before the task goes out, Studio checks again: if someone
+wrote after the card, another run started, a draft appeared, or anyone else has the
+browser open or controls it, the task is not sent and the card keeps its button. A
+session someone else started is never continued by itself. Where Studio does not start a
+card, it keeps its button, with the reason when there is one, such as "This restarts this
+space's cloud machine as the browser, which stops anything still running on it." A draft or a browser
+in use only holds the card: it is looked at again once that clears. A failed start, or a
+continuation the controller did not take, leaves the button and says why, and leaves no
+notice. A press, or an opened card, reads **Opened** from then on, also after a reload,
+so displaying an old message never runs it again. **Try again** on a failed browser run
+sends the card's task again through the browser, with the card it continues, never the
+notice text. A browser Studio opened by itself grants nothing a press does not: it uses
+the person's own approval settings, so the browser's site and action prompts ask exactly
+as for a press.
 The card shows the host its task opens. The card says nothing about which browsers exist,
 because the Workspace browser starts on demand as a runtime of its own; Studio disables the
 button, with the reason, only when the Workspace browser is known not to open and there is no

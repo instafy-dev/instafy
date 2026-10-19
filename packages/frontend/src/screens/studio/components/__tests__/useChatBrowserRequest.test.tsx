@@ -70,7 +70,6 @@ describe("Chat browser request handoff", () => {
       // The chat records it as a notice naming the card, not as the person's words.
       display: "Octo opened Instafy's browser",
       metadata: { browserRequestOf: "message:request-1" },
-      autoStarted: false,
     });
     expect(lastState?.cardStates.get("message:request-1")).toEqual({ kind: "opened" });
   });
@@ -161,6 +160,52 @@ describe("Chat browser request handoff", () => {
     expect((await begin()).detail.completion).toBeUndefined();
   });
 
+  it("restores the button with the error when the continuation is not dispatched", async () => {
+    // The dispatch failed: nothing opened, so the card must not read Opened.
+    value.continueTask = vi.fn(async () => { throw new Error("The controller did not start a browser turn."); });
+    await render();
+    const attempt = await begin();
+    value.open = true; value.personalReady = true; await render(); await advance();
+    expect(await attempt.result).toMatchObject({ message: "The controller did not start a browser turn." });
+    expect(lastState?.cardStates.get("message:request-1"))
+      .toEqual({ kind: "button", reason: "The controller did not start a browser turn." });
+    expect(value.onError).toHaveBeenCalledWith("The controller did not start a browser turn.");
+  });
+
+  it("sends the card's task again for Try again, never the notice, naming the card and the failure", async () => {
+    const notice: ChatMessage = { id: "notice-1", role: "user", content: "Octo opened Instafy's browser", timestamp: 2,
+      metadata: { browserRequestOf: "message:request-1", displayContent: "Octo opened Instafy's browser",
+        dispatchContent: "Continue this browser task.", browserTransport: "desktop-personal" } };
+    value.messages = [request(), notice]; value.open = true; value.personalReady = true;
+    await render();
+    let sent: Promise<boolean> | undefined;
+    await act(async () => { sent = lastState!.retryContinuation(notice, { retryOfMessageId: "failure-1" }); });
+    await advance();
+    expect(await sent).toBe(true);
+    expect(value.continueTask).toHaveBeenCalledExactlyOnceWith("personal", expect.stringContaining("Continue comparing our earlier choices."), {
+      display: "Octo opened Instafy's browser",
+      metadata: { retryOfMessageId: "failure-1", browserRequestOf: "message:request-1" },
+    });
+    expect(value.activate).toHaveBeenCalledExactlyOnceWith("personal", null);
+  });
+
+  it("reads the task back from the continuation when its card is no longer loaded", async () => {
+    const task = "Open https://app.example.test/settings and stop on API keys.";
+    const notice: ChatMessage = { id: "notice-1", role: "user", content: "Octo opened Instafy's browser at app.example.test", timestamp: 2,
+      metadata: { prompt_metadata: { browserRequestOf: "job:old", browserTransport: "shared",
+        dispatchContent: `Continue this browser task using the browser attached to this turn. Inspect its current state first, preserve existing session state, and avoid repeating work that is already complete.\n\n${task}` } } };
+    value.messages = [notice]; value.transport = "shared"; value.open = true; value.sharedReady = true;
+    await render();
+    let sent: Promise<boolean> | undefined;
+    await act(async () => { sent = lastState!.retryContinuation(notice, { retryOfMessageId: "failure-1" }); });
+    await advance();
+    expect(await sent).toBe(true);
+    expect(value.continueTask).toHaveBeenCalledExactlyOnceWith("shared", expect.stringMatching(/\n\nOpen https:\/\/app\.example\.test\/settings and stop on API keys\.$/), {
+      display: "Octo opened Instafy's browser at app.example.test",
+      metadata: { retryOfMessageId: "failure-1", browserRequestOf: "job:old" },
+    });
+  });
+
   it("bounds a press at two minutes and retains a retry path", async () => {
     await render(); const attempt = await begin(); await advance(60_100);
     // A browser runtime that starts cold can take longer than a minute.
@@ -184,28 +229,34 @@ describe("Studio starting a request_browser card by itself", () => {
   let auto: BrowserAutoStartOptions;
   let visibility: DocumentVisibilityState;
   const plan = vi.fn<(...args: unknown[]) => BrowserAutoStartPlan>();
+  const KNOWN_AND_ALONE = { status: "known", othersPresent: false, remoteController: false } as const;
 
-  async function render() { await act(async () => root.render(<Harness value={{ ...value, auto: value.auto ? { ...auto } : null }} />)); }
+  async function render() {
+    await act(async () => root.render(<Harness value={{ ...value, auto: value.auto ? {
+      ...auto,
+      revision: JSON.stringify([auto.blocked, auto.heldByOther, auto.skillSetup]),
+    } : null }} />));
+  }
   async function advance(ms = 100) { await act(async () => { await vi.advanceTimersByTimeAsync(ms); }); }
 
   /** The prompt this page sent, and the run the controller started for it. */
-  function sendPrompt(metadata: Record<string, unknown> = {}, jobId = "job-1") {
+  function sendPrompt(metadata: Record<string, unknown> = {}, jobId = "job-1", content = "What does the settings page on app.example.test say?") {
     const prompt = { id: `prompt-${jobId}`, metadata: {
       clientMessageId: `client-${jobId}`, client: { sessionId: "session-1", userId: "user-1" }, ...metadata,
     } };
     rememberPromptSentFromThisPage(prompt);
     recordRunsStartedByPromptSentFromThisPage({ metadata: { clientMessageId: `client-${jobId}` } }, [`run-${jobId}`, jobId]);
-    return { id: prompt.id, role: "user" as const, content: "What does the settings page say?", timestamp: Date.now(), metadata: prompt.metadata };
+    return { id: prompt.id, role: "user" as const, authorId: "user-1", content, timestamp: Date.now(), metadata: prompt.metadata };
   }
   function card(jobId = "job-1", timestamp = Date.now()): ChatMessage {
     return { id: `card-${jobId}`, role: "assistant", content: "Continue this task in Instafy's browser.", timestamp,
       metadata: { messageType: "action_request", jobId, details: { browserRequest: { task: TASK, location: "auto" } } } };
   }
   /** Opens the conversation, then the asking turn ends with a card. */
-  async function cardArrives(options: { prompt?: Record<string, unknown>; jobId?: string } = {}) {
+  async function cardArrives(options: { prompt?: Record<string, unknown>; jobId?: string; content?: string } = {}) {
     await render();
     await advance(5_000);
-    const prompt = sendPrompt(options.prompt, options.jobId);
+    const prompt = sendPrompt(options.prompt, options.jobId, options.content);
     value.messages = [...value.messages, prompt, card(options.jobId)];
     await render();
     await advance(10);
@@ -225,9 +276,9 @@ describe("Studio starting a request_browser card by itself", () => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container);
     plan.mockReset();
-    plan.mockReturnValue({ kind: "reuse" });
+    plan.mockReturnValue({ kind: "reuse", runtimeId: "session-1" });
     auto = { currentUserId: "user-1", chatClientSessionId: "session-1", activeRunIds: new Set(), blocked: null,
-      heldByOther: false, plan, startFailure: null };
+      heldByOther: false, skillSetup: false, sharedPresence: KNOWN_AND_ALONE, plan, startFailure: null, revision: "" };
     value = { identity: IDENTITY, messages: [], canWrite: true, ready: true, transport: "shared", open: false, busy: false,
       personalAvailable: false, personalReady: false, sharedReady: false, sharedUnavailable: false,
       activate: vi.fn(), continueTask: vi.fn(async () => true), onError: vi.fn(), auto };
@@ -244,16 +295,15 @@ describe("Studio starting a request_browser card by itself", () => {
     expect(value.activate).not.toHaveBeenCalled();
     auto.activeRunIds = new Set();
     await render();
-    expect(value.activate).toHaveBeenCalledExactlyOnceWith("shared", { kind: "reuse" });
+    expect(value.activate).toHaveBeenCalledExactlyOnceWith("shared", { kind: "reuse", runtimeId: "session-1" });
     expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "opening", note: null });
     await becomeReady();
+    // It grants nothing: no routine browsing, the person's own approval settings.
     expect(value.continueTask).toHaveBeenCalledExactlyOnceWith("shared", expect.stringContaining(TASK), {
       display: "Octo opened Instafy's browser at app.example.test",
       metadata: { browserRequestOf: "job:job-1", browserAutoStarted: true },
-      autoStarted: true,
     });
     expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "opened" });
-    expect(lastState?.autoStartedHere).toBe(true);
   });
 
   it("waits while the conversation is still busy", async () => {
@@ -325,19 +375,46 @@ describe("Studio starting a request_browser card by itself", () => {
     expect(value.activate).not.toHaveBeenCalled();
     visibility = "visible";
     await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
-    expect(value.activate).toHaveBeenCalledExactlyOnceWith("shared", { kind: "reuse" });
+    expect(value.activate).toHaveBeenCalledExactlyOnceWith("shared", { kind: "reuse", runtimeId: "session-1" });
   });
 
   it.each([
     ["a draft in the composer", () => { auto.blocked = { reason: null }; }, null],
     ["a browser someone else is using", () => { auto.heldByOther = true; }, BROWSER_AUTO_START_COPY.inUse],
     ["a conversation where the person closed the browser", () => { markBrowserAutoStartDeclined(IDENTITY); }, null],
-    ["a start that would cost a machine", () => { plan.mockReturnValue({ kind: "button", reason: BROWSER_AUTO_START_COPY.secondMachine }); }, BROWSER_AUTO_START_COPY.secondMachine],
+    ["a start that would cost a machine", () => { plan.mockReturnValue({ kind: "button", reason: BROWSER_AUTO_START_COPY.restartsMachine }); }, BROWSER_AUTO_START_COPY.restartsMachine],
+    ["a session someone else started", () => { plan.mockReturnValue({ kind: "button", reason: BROWSER_AUTO_START_COPY.otherSession }); }, BROWSER_AUTO_START_COPY.otherSession],
   ] as const)("leaves the button for %s, with the reason", async (_name, arrange, reason) => {
     arrange();
     await cardArrives();
     expect(value.activate).not.toHaveBeenCalled();
     expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason });
+  });
+
+  it("looks at a held card again once what held it clears", async () => {
+    // A draft or a browser in use only holds the card for now.
+    auto.blocked = { reason: null };
+    await cardArrives();
+    expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason: null });
+    auto.blocked = null; auto.heldByOther = true;
+    await render();
+    expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.inUse });
+    auto.heldByOther = false;
+    await render();
+    expect(value.activate).toHaveBeenCalledExactlyOnceWith("shared", { kind: "reuse", runtimeId: "session-1" });
+    expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "opening", note: null });
+  });
+
+  it("leaves the card for an address Octo found itself, and opens one the person wrote", async () => {
+    await cardArrives({ content: "Find the settings page for me." });
+    expect(value.activate).not.toHaveBeenCalled();
+    expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.unseenAddress });
+  });
+
+  it("opens the address a skill declares in a skill setup", async () => {
+    auto.skillSetup = true;
+    await cardArrives({ content: "/skills start freefinance" });
+    expect(value.activate).toHaveBeenCalledExactlyOnceWith("shared", { kind: "reuse", runtimeId: "session-1" });
   });
 
   it("claims each card once across remounts and starts one card per conversation in ten minutes", async () => {
@@ -367,23 +444,12 @@ describe("Studio starting a request_browser card by itself", () => {
     expect(value.continueTask).not.toHaveBeenCalled();
   });
 
-  it("gives switching this space's machine four minutes and says so on the card", async () => {
-    plan.mockReturnValue({ kind: "convert", runtimeId: "runtime-1", projectId: "project-1", provider: "instafy-cloud", displayName: "hosted runtime" });
-    await cardArrives();
-    expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "opening", note: BROWSER_AUTO_START_COPY.converting });
-    await advance(200_000);
-    expect(value.onError).not.toHaveBeenCalled();
-    await becomeReady();
-    expect(value.continueTask).toHaveBeenCalledTimes(1);
-  });
-
   it("stops at once when the browser reports the start failed", async () => {
-    plan.mockReturnValue({ kind: "convert", runtimeId: "runtime-1", projectId: "project-1", provider: "instafy-cloud", displayName: "hosted runtime" });
     await cardArrives();
-    value.open = true; auto.startFailure = BROWSER_AUTO_START_COPY.inUseElsewhere;
+    value.open = true; auto.startFailure = BROWSER_AUTO_START_COPY.firstMachine;
     await render(); await advance();
-    expect(value.onError).toHaveBeenCalledWith(BROWSER_AUTO_START_COPY.inUseElsewhere);
-    expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.inUseElsewhere });
+    expect(value.onError).toHaveBeenCalledWith(BROWSER_AUTO_START_COPY.firstMachine);
+    expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.firstMachine });
   });
 
   it("never takes the browser from someone who started using it meanwhile", async () => {
@@ -392,6 +458,44 @@ describe("Studio starting a request_browser card by itself", () => {
     await becomeReady();
     expect(value.continueTask).not.toHaveBeenCalled();
     expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.inUse });
+  });
+
+  it.each([
+    ["someone else has it open", { status: "known", othersPresent: true, remoteController: false }],
+    ["a teammate or an agent drives it", { status: "known", othersPresent: false, remoteController: true }],
+  ] as const)("never continues on a browser where %s", async (_name, presence) => {
+    await cardArrives();
+    auto.sharedPresence = presence;
+    await becomeReady();
+    expect(value.continueTask).not.toHaveBeenCalled();
+    expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.inUse });
+  });
+
+  it("waits to know who else is in the browser, and gives up when it cannot tell", async () => {
+    auto.sharedPresence = null;
+    await cardArrives();
+    await becomeReady();
+    expect(value.continueTask).not.toHaveBeenCalled();
+    auto.sharedPresence = { status: "unavailable", othersPresent: false, remoteController: false };
+    await render(); await advance();
+    expect(value.continueTask).not.toHaveBeenCalled();
+    expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.presenceUnknown });
+  });
+
+  it.each([
+    ["someone wrote after the card", () => {
+      value.messages = [...value.messages, { id: "reply", role: "user", content: "Actually, skip it", timestamp: Date.now() }];
+    }],
+    ["another run started in the conversation", () => { auto.activeRunIds = new Set(["run-other"]); }],
+    ["the person started a draft", () => { auto.blocked = { reason: null }; }],
+  ] as const)("drops the start without a word when %s while the browser opened", async (_name, change) => {
+    await cardArrives();
+    expect(value.activate).toHaveBeenCalledTimes(1);
+    change();
+    await becomeReady();
+    expect(value.continueTask).not.toHaveBeenCalled();
+    expect(value.onError).not.toHaveBeenCalled();
+    expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason: null });
   });
 
   it("starts the browser on this device for a person on their own AI", async () => {

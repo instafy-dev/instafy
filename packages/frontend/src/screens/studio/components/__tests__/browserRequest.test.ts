@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../../types";
 import {
+  browserRequestContinuation,
   browserRequestContinuedKeys,
   browserRequestDestinations,
+  browserRequestFromContinuationPrompt,
   browserRequestFromMessage,
   browserRequestKey,
   browserRequestNotice,
@@ -118,5 +120,28 @@ describe("continuations of a card", () => {
       .toBe("Octo opened Instafy's browser at dashboard.stripe.com");
     expect(browserRequestNotice("", "Continue comparing the saved items.")).toBe("Octo opened Instafy's browser");
     expect(browserRequestNotice("Cub", "Open https://a.example")).not.toMatch(/\u2014/);
+  });
+});
+
+describe("browserRequestFromContinuationPrompt", () => {
+  const continuation = (metadata: Record<string, unknown>): ChatMessage => ({ id: "p1", role: "user", timestamp: 3,
+    content: "Octo opened Instafy's browser at app.example.test", metadata });
+  const dispatched = browserRequestContinuation({ task: "Open https://app.example.test and stop on API keys.", location: "auto" });
+
+  it("reads the task a continuation sent, and the browser it ran in, never the notice", () => {
+    expect(browserRequestFromContinuationPrompt(continuation({
+      prompt_metadata: { browserRequestOf: "job:job-1", dispatchContent: dispatched, browserTransport: "shared" },
+    }))).toEqual({ task: "Open https://app.example.test and stop on API keys.", location: "workspace" });
+    expect(browserRequestFromContinuationPrompt(continuation({
+      browserRequestOf: "job:job-1", dispatchContent: dispatched, browserTransport: "desktop-personal",
+    }))).toEqual({ task: "Open https://app.example.test and stop on API keys.", location: "device" });
+  });
+
+  it("finds nothing for an ordinary prompt or one without the task", () => {
+    expect(browserRequestFromContinuationPrompt(continuation({ dispatchContent: dispatched }))).toBeNull();
+    expect(browserRequestFromContinuationPrompt(continuation({ browserRequestOf: "job:job-1" }))).toBeNull();
+    expect(browserRequestFromContinuationPrompt(continuation({
+      browserRequestOf: "job:job-1", dispatchContent: "Octo opened Instafy's browser at app.example.test",
+    }))).toBeNull();
   });
 });

@@ -15,8 +15,6 @@ import type { BrowserTransport, usePersonalBrowserBridge } from "./usePersonalBr
 export type BrowserContinuationExtras = {
   display?: string | null;
   metadata?: Record<string, unknown> | null;
-  /** Studio opened the browser by itself: the desktop app asks once for routine control. */
-  autoStarted?: boolean;
 };
 
 function displayOptions(message: string, extras: BrowserContinuationExtras | null | undefined) {
@@ -196,13 +194,10 @@ export function useChatBrowserHandoff(options: Options) {
     }
     const runtimeOverride = captured.personal.runtimeOverride;
     if (!runtimeOverride) {
-      // Routine browsing is free in a browser Octo opened by itself; the
-      // desktop app still asks its one native confirmation for it.
-      const routineAvailable = captured.personal.status?.approvalModes?.includes("routine") === true;
-      const approvalMode = routineAvailable
-        ? extras?.autoStarted ? "routine" : captured.personal.preferredApprovalMode
-        : "ask";
-      return continuePersonal(message, approvalMode, extras);
+      // The person's own approval mode, whether they pressed the card or
+      // Studio opened the browser by itself.
+      return continuePersonal(message, captured.personal.status?.approvalModes?.includes("routine")
+        ? captured.personal.preferredApprovalMode : "ask", extras);
     }
     const shown = displayOptions(message, extras);
     await captured.onSubmit(captured.conversationId, shown.text, {

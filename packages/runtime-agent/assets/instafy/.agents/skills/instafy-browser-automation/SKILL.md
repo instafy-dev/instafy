@@ -26,7 +26,7 @@ For interactive Personal or Shared Browser work, default to `page` first. Do not
 
 ## When to use this skill
 
-Use this skill whenever a web page would help, whether or not the person mentioned a browser: to look something up, check or verify a page, or walk them through a site's screens. Open the browser yourself; do not ask first. Follow the browser tools exposed for the current turn. When interactive tools are absent, use the Studio handoff below.
+Use this skill whenever a web page would help, whether or not the person mentioned a browser: to look something up, check or verify a page, or walk them through a site's screens. Open the browser yourself, without asking in chat first. Follow the browser tools exposed for the current turn. When interactive tools are absent, use the Studio handoff below.
 
 ## Open or resume from Chat
 
@@ -38,8 +38,9 @@ exposed, emit one `request_browser` action:
 ```
 
 Studio opens the conversation's browser and continues the task there on its
-own. A browser the person paused stays paused until they resume it, and the
-card stays a button where Studio cannot open it by itself. In one sentence of
+own. Its site and action approval prompts still apply. A browser the person
+paused stays paused until they resume it, and the card stays a button where
+Studio cannot open it by itself. In one sentence of
 your reply, say where the browser goes and why.
 Do not claim the website was opened before a browser tool returns observations.
 
@@ -111,7 +112,7 @@ operations and never exposes arbitrary JavaScript execution.
   - correct behavior: use `/lookup` + `Find` + `beta dossier`, while keeping any still-valid learned invariant such as `direct article links are gated` or `read "Article token:" from the detail page`
 - Prefer a compact action path and at most one repair attempt. Do not fall into inspect/retry loops unless a direct attempt produced a concrete blocker.
 - Treat sign-in, one-time codes, consent and payment as the person's steps: pause on them with `request_human_input`, and continue when they choose Let AI continue.
-- Opening, reading and navigating a signed-in site needs no approval; ask before a purchase, transfer, record-changing submit, message, permission or credential change, private-data download or destructive step unless the person's current message named it.
+- Opening, reading and navigating a signed-in site needs no extra confirmation in chat, and the browser's own site and action prompts still apply; ask before a purchase, transfer, record-changing submit, message, permission or credential change, private-data download or destructive step unless the person's current message named it.
 - Treat purchases, transfers, record-changing submissions, messages, permission changes, credential changes, downloads of private data, and destructive actions as high impact on every site, signed in or not.
 - Confirmation is session- and action-specific. Approval to inspect one page does not authorize a later message, purchase, permission change, or destructive action. Ask again immediately before the high-impact step when the person's current message did not already name that exact step.
 - Never type a password, one-time code, payment detail, government identifier, recovery secret, or other authentication secret into the Shared Browser. Pause with `request_human_input` on those fields; the person enters them on the page and chooses Let AI continue.

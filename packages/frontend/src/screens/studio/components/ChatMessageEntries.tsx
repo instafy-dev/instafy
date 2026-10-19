@@ -24,7 +24,7 @@ import { controllerClient } from "../../../sdk/instafy";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
 import type { ChatMessage } from "../types";
 import { ActionRequestEntry } from "./ActionRequestEntry";
-import { readBrowserRequestOf } from "./browserRequest";
+import { isUnsentBrowserRequestNotice, readBrowserRequestOf } from "./browserRequest";
 import { CHAT_BUBBLE_MAX_WIDTH } from "./chatBubbleWidth";
 import {
   LocalCapabilityInlineEntry,
@@ -596,7 +596,7 @@ export function UserMessageBubble({
   mentionableAgentHandles,
 }: UserMessageBubbleProps) {
   if (readBrowserRequestOf(message)) {
-    return <BrowserRequestNoticeRow message={message} />;
+    return isUnsentBrowserRequestNotice(message) ? null : <BrowserRequestNoticeRow message={message} />;
   }
   return (
     <PersonMessageBubble

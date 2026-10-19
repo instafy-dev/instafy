@@ -4,6 +4,12 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mapControllerMessageToChat } from "../../../../conversations/conversationMessageUtils";
+import {
+  forgetPromptsSentFromThisPageForTests,
+  recordSendFailedForPromptSentFromThisPage,
+  rememberPromptSentFromThisPage,
+} from "../../../../conversations/sentPromptRegistry";
+import type { ChatMessage } from "../../types";
 import { UserMessageBubble } from "../ChatMessageEntries";
 import { browserRequestContinuedKeys } from "../browserRequest";
 
@@ -57,6 +63,23 @@ describe("the record of a continuation sent to Instafy's browser", () => {
     const message = storedContinuation();
     expect(message.content).toBe("Octo opened Instafy's browser at dashboard.stripe.com");
     expect([...browserRequestContinuedKeys([message])]).toEqual(["job:job-1"]);
+  });
+
+  it("leaves no notice, and continues no card, when its dispatch failed", async () => {
+    // The local copy the submit flow shows before dispatch; the controller
+    // never took it, so nothing opened.
+    forgetPromptsSentFromThisPageForTests();
+    const local: ChatMessage = { id: "local-1", role: "user", authorId: "user-1", timestamp: 1,
+      content: "Octo opened Instafy's browser at dashboard.stripe.com",
+      metadata: { clientMessageId: "client-2", browserRequestOf: "job:job-1", dispatchContent: TASK } };
+    rememberPromptSentFromThisPage(local);
+    expect([...browserRequestContinuedKeys([local])]).toEqual(["job:job-1"]);
+    recordSendFailedForPromptSentFromThisPage(local);
+    expect([...browserRequestContinuedKeys([local])]).toEqual([]);
+    await act(async () => root.render(<UserMessageBubble message={local} />));
+    expect(container.querySelector('[data-testid="chat-browser-request-notice"]')).toBeNull();
+    expect(container.textContent).not.toContain("opened Instafy's browser");
+    forgetPromptsSentFromThisPageForTests();
   });
 
   it("reads as a one-line notice, not as a message the person wrote", async () => {

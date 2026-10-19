@@ -146,17 +146,23 @@ describe("useChatBrowserHandoff", () => {
     }));
   });
 
-  it("asks the desktop app once for routine control when Octo opened its browser by itself", async () => {
+  it("keeps the person's own approval mode when Octo opened its browser by itself", async () => {
+    // Studio opening the browser grants nothing: the person's chosen mode
+    // applies, exactly as for a press.
     const value = options({ transport: "personal", personal: personal({
       status: { ...personal().status!, approvalModes: ["ask", "routine"] },
       preferredApprovalMode: "ask",
     } as Partial<Options["personal"]>) });
     await render(value);
-    void resultRef.current!.startPersonal("Open https://app.example.test", {
-      display: "Octo opened Instafy's browser at app.example.test", metadata: { browserRequestOf: "job:job-1" }, autoStarted: true,
-    }).catch(() => null);
+    // Even an extras object that still says Studio opened it by itself.
+    const extras = {
+      display: "Octo opened Instafy's browser at app.example.test",
+      metadata: { browserRequestOf: "job:job-1", browserAutoStarted: true },
+      autoStarted: true,
+    };
+    void resultRef.current!.startPersonal("Open https://app.example.test", extras).catch(() => null);
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
-    expect(value.personal.setAgentControlEnabled).toHaveBeenCalledWith(true, "routine");
+    expect(value.personal.setAgentControlEnabled).toHaveBeenCalledExactlyOnceWith(true, "ask");
   });
 
   it.each([{ transport: "personal" as const }, { runtimeId: null }, { page: null }])("does not fall back when Shared routing is unavailable: %j", async (change) => {

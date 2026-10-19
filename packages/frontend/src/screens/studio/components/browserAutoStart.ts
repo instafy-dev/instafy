@@ -1,44 +1,55 @@
 import type { ControllerRuntimeStatusEntry } from "../../../services/runtimeController";
-import { runtimeEntryIsDispatchable } from "../../../runtime/utils/runtimeEntry";
-import { hostedRuntimeLimitDetailsFromError } from "../../../runtime/hostedRuntimeLimitError";
+import type { ChatMessage } from "../types";
 import {
   isManagedInstafyCloudProvider,
   listBrowserRuntimeCandidates,
 } from "./browserSessionRuntimeEnsure";
+import { browserRequestJobId, readBrowserRequestOf } from "./browserRequest";
 import type { BrowserTransport } from "./usePersonalBrowserBridge";
 
 /**
  * How Studio starts a request_browser card by itself (owner decision, Oct 19:
- * Octo opens Instafy's browser on its own, and never starts a second cloud
- * machine to do it).
+ * Octo opens Instafy's browser on its own, and never starts or restarts a
+ * cloud machine to do it).
  *
- * - `reuse`: a browser session already runs in this space.
+ * - `reuse`: the one browser session running in this space is the one this
+ *   person opened in this conversation.
  * - `personal`: the browser in this desktop app, for a person on their own AI.
- *   The app's one native confirmation stays.
- * - `convert`: this space's one idle standard machine restarts as the browser,
- *   the same machine Studio's limit recycle switches today. Chat turns keep
- *   running on it, so this never doubles the cost; it takes about two minutes
- *   and one billing interval, and the card says so.
+ *   It asks for the person's chosen approval mode, as a press does.
  * - `button`: the card stays a button, with the reason when there is one.
+ *
+ * Studio never switches the space's own machine to the browser by itself:
+ * that stops whatever the machine still runs, such as a preview, a dev server
+ * or a terminal session, and Studio cannot see those.
  */
 export type BrowserAutoStartPlan =
-  | { kind: "reuse" }
+  | { kind: "reuse"; runtimeId: string }
   | { kind: "personal" }
-  | { kind: "convert"; runtimeId: string; projectId: string; provider: string; displayName: string }
   | { kind: "button"; reason: string | null };
 
+/**
+ * Who else is in Instafy's browser, from its collaboration roster:
+ * `unknown` until the roster connects, `unavailable` when it cannot.
+ */
+export type SharedBrowserPresence = {
+  status: "unknown" | "known" | "unavailable";
+  /** Someone else has this browser open. */
+  othersPresent: boolean;
+  /** Another person or an agent run controls it. */
+  remoteController: boolean;
+};
+
 export const BROWSER_AUTO_START_COPY = {
-  stillWorking: "This space is still working. Open it when you are ready.",
   secondMachine: "This starts a second cloud machine for this space.",
   anotherMachine: "This starts another cloud machine for this space.",
   firstMachine: "This starts a cloud machine for this space.",
-  inUseElsewhere: "Your team's cloud machine is in use in another space.",
+  restartsMachine: "This restarts this space's cloud machine as the browser, which stops anything still running on it.",
   inUse: "Instafy's browser is in use. Open it when it is free.",
+  otherSession: "A browser session is already running in this space. Open it when you are ready.",
   severalSessions: "Several browser sessions are running in this space. Open the one you want.",
-  boost: "This restarts this space's Boost machine. Open it when you are ready.",
-  notReady: "This space's cloud machine is still starting. Open it when it is ready.",
   personalNeedsOwnAi: "The browser on this device needs your own AI connection.",
-  converting: "This space's machine restarts with the browser. This takes about two minutes and one billing interval.",
+  unseenAddress: "Octo found this address itself. Check where it goes, then open it.",
+  presenceUnknown: "Studio could not check who else is in Instafy's browser. Open it when you are ready.",
   timedOut: "Instafy's browser did not start in time. Open it from the message to try again.",
 } as const;
 
@@ -63,10 +74,13 @@ export type BrowserAutoStartPlanInput = {
   projectId: string | null;
   /** This space's runtimes as the controller last reported them; null when unknown. */
   runtimes: readonly ControllerRuntimeStatusEntry[] | null;
-  /** Any run of this space is still working or queued. */
-  spaceBusy: boolean;
-  /** This space's hosted machine is set to start at Boost size. */
-  boost: boolean;
+  /**
+   * The browser session this person opened in this conversation, from their
+   * own per-conversation browser state, or null. The controller does not
+   * record who started a session, so this is how Studio tells the person's
+   * own session from one a teammate started.
+   */
+  ownSessionRuntimeId: string | null;
 };
 
 function isLiveHostedMachine(entry: ControllerRuntimeStatusEntry): boolean {
@@ -76,7 +90,7 @@ function isLiveHostedMachine(entry: ControllerRuntimeStatusEntry): boolean {
     !ENDED_RUNTIME_STATUSES.has(entry.status.trim().toLowerCase());
 }
 
-/** What Studio may do by itself for a card, from the cost table of the plan. */
+/** What Studio may do by itself for a card. */
 export function browserAutoStartPlan(input: BrowserAutoStartPlanInput): BrowserAutoStartPlan {
   if (input.transport === "personal") {
     if (!input.personalAvailable) return { kind: "button", reason: null };
@@ -87,69 +101,94 @@ export function browserAutoStartPlan(input: BrowserAutoStartPlanInput): BrowserA
   const projectId = input.projectId?.trim() ?? "";
   if (!projectId || !input.runtimes) return { kind: "button", reason: null };
   const sessions = listBrowserRuntimeCandidates([...input.runtimes]);
-  if (sessions.length === 1) return { kind: "reuse" };
   if (sessions.length > 1) return { kind: "button", reason: BROWSER_AUTO_START_COPY.severalSessions };
+  if (sessions.length === 1) {
+    // Never another member's browser state: only the session this person
+    // opened here, and the hook checks again that nobody else is in it.
+    const own = input.ownSessionRuntimeId?.trim() ?? "";
+    return own && sessions[0]!.runtimeId === own
+      ? { kind: "reuse", runtimeId: own }
+      : { kind: "button", reason: BROWSER_AUTO_START_COPY.otherSession };
+  }
+  // Opening a browser here would start a machine, or restart this space's
+  // own one: the person decides.
   const machines = input.runtimes.filter(isLiveHostedMachine);
-  // Without a cloud machine in this space Studio cannot tell whether a browser
-  // can start here at all (a self-hosted deployment may have none), and
-  // starting one would add a machine: the person decides.
   if (machines.length === 0) return { kind: "button", reason: BROWSER_AUTO_START_COPY.firstMachine };
   if (machines.length > 1) return { kind: "button", reason: BROWSER_AUTO_START_COPY.anotherMachine };
-  const machine = machines[0]!;
-  const displayName = machine.displayName?.trim() ?? "";
-  if (displayName.toLowerCase() !== GENERIC_HOSTED_RUNTIME_DISPLAY_NAME) {
-    return { kind: "button", reason: BROWSER_AUTO_START_COPY.secondMachine };
-  }
-  if (input.boost) return { kind: "button", reason: BROWSER_AUTO_START_COPY.boost };
-  if (input.spaceBusy) return { kind: "button", reason: BROWSER_AUTO_START_COPY.stillWorking };
-  if (!runtimeEntryIsDispatchable(machine)) return { kind: "button", reason: BROWSER_AUTO_START_COPY.notReady };
+  const displayName = machines[0]!.displayName?.trim().toLowerCase() ?? "";
   return {
-    kind: "convert",
-    runtimeId: machine.runtimeId,
-    projectId,
-    provider: machine.provider.trim(),
-    displayName,
+    kind: "button",
+    reason: displayName === GENERIC_HOSTED_RUNTIME_DISPLAY_NAME
+      ? BROWSER_AUTO_START_COPY.restartsMachine
+      : BROWSER_AUTO_START_COPY.secondMachine,
   };
 }
 
-/** The card's reason when an automatic start failed. */
-export function browserAutoStartFailureReason(error: unknown, projectId: string | null): string {
-  const limit = hostedRuntimeLimitDetailsFromError(error);
-  if (limit) {
-    const blocker = limit.blockerProjectId?.trim() ?? "";
-    return blocker && blocker !== (projectId?.trim() ?? "")
-      ? BROWSER_AUTO_START_COPY.inUseElsewhere
-      : BROWSER_AUTO_START_COPY.secondMachine;
-  }
-  const message = error instanceof Error ? error.message.trim() : "";
-  return message || BROWSER_AUTO_START_COPY.timedOut;
+const URL_PATTERN = /\bhttps?:\/\/[^\s<>"'`)\]]+/gi;
+// A bare host such as dashboard.stripe.com, not the domain of an email
+// address and not followed by more labels.
+const BARE_HOST_PATTERN =
+  /(^|[^a-z0-9@._-])((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63})(?=$|[^a-z0-9.-]|\.(?![a-z0-9]))/gi;
+const IPV4_PATTERN = /(^|[^0-9.])((?:\d{1,3}\.){3}\d{1,3})(?=$|[^0-9.]|\.(?![0-9]))/g;
+
+function normalizeHost(host: string): string {
+  return host.trim().toLowerCase().replace(/\.$/, "").replace(/^www\./, "");
 }
 
 /**
- * Whether Studio answers a Shared Browser approval prompt with routine
- * browsing for the person (owner decision, Oct 19: routine browsing is free
- * inside a browser Octo opened by itself). Only the first site prompt of a run
- * this page started by itself, for the person who started it, once, and only
- * where the runtime offers routine browsing. Every action prompt, for a
- * purchase, a submission or an activation key, still waits for the person.
+ * Every host a text names: in http(s) addresses, as bare domains, and as
+ * IPv4 addresses. Broader than the hosts a card shows, because an address
+ * anywhere in a task is somewhere the browser may go.
  */
-export function shouldAllowRoutineBrowsingForAutoStart(input: {
-  request: { kind: string; runId: string; initiatorUserId: string; approvalId: string } | null;
-  routineAvailable: boolean;
+export function hostsNamedIn(text: string): Set<string> {
+  const hosts = new Set<string>();
+  const add = (host: string) => {
+    const normalized = normalizeHost(host);
+    if (normalized) hosts.add(normalized);
+  };
+  for (const match of text.matchAll(URL_PATTERN)) {
+    try {
+      add(new URL(match[0]).hostname);
+    } catch {
+      // Not an address after all.
+    }
+  }
+  for (const match of text.matchAll(BARE_HOST_PATTERN)) add(match[2]!);
+  for (const match of text.matchAll(IPV4_PATTERN)) add(match[2]!);
+  return hosts;
+}
+
+/**
+ * Whether every address a card's task names is one the person could have
+ * seen before Studio opens it by itself: in a skill setup (where an address
+ * comes only from the skill's declaration), in the person's own messages, or
+ * in this conversation's assistant text from before the turn that sent the
+ * card. An address Octo read on a page or in a tool's output during that
+ * turn, such as a search result, is not, so its card stays a button and the
+ * person sees the host first.
+ */
+export function browserAutoStartAddressesSeen(input: {
+  task: string;
+  messages: readonly ChatMessage[];
+  cardIndex: number;
   currentUserId: string | null;
-  autoStartedRunIds: ReadonlySet<string> | null;
-  alreadyDecidedApprovalId: string | null;
+  skillSetup: boolean;
 }): boolean {
-  const request = input.request;
-  return Boolean(
-    request &&
-      request.kind === "origin" &&
-      input.routineAvailable &&
-      input.currentUserId &&
-      request.initiatorUserId === input.currentUserId &&
-      input.autoStartedRunIds?.has(request.runId) &&
-      request.approvalId !== input.alreadyDecidedApprovalId,
-  );
+  const wanted = hostsNamedIn(input.task);
+  if (wanted.size === 0 || input.skillSetup) return true;
+  const card = input.messages[input.cardIndex];
+  const cardJobId = card ? browserRequestJobId(card) : null;
+  const currentUserId = input.currentUserId?.trim() ?? "";
+  const seen = new Set<string>();
+  input.messages.forEach((message, index) => {
+    const own = message.role === "user" && Boolean(currentUserId) && message.authorId === currentUserId &&
+      !readBrowserRequestOf(message);
+    const earlierReply = message.role === "assistant" && index < input.cardIndex &&
+      (!cardJobId || browserRequestJobId(message) !== cardJobId);
+    if (!own && !earlierReply) return;
+    for (const host of hostsNamedIn(message.content)) seen.add(host);
+  });
+  return [...wanted].every((host) => seen.has(host));
 }
 
 // What this page remembers about automatic starts, in module memory only like
@@ -193,11 +232,6 @@ export function recordBrowserAutoStart(conversationKey: string, now = Date.now()
 export function browserAutoStartedRecently(conversationKey: string, now = Date.now()): boolean {
   const at = autoStartedAt.get(conversationKey);
   return at !== undefined && now - at < BROWSER_AUTO_START_CONVERSATION_WINDOW_MS;
-}
-
-/** True once Studio opened the browser by itself in this conversation, on this page. */
-export function wasBrowserAutoStarted(conversationKey: string): boolean {
-  return autoStartedAt.has(conversationKey);
 }
 
 /** The person closed, paused or stopped the browser in this conversation. */

@@ -699,9 +699,9 @@ const SKILL_START_PROMPT_BODY: &str = "Start them now, in this conversation. Wor
 /// "Showing the way" came from a first-run FreeFinance setup on Oct 19: the
 /// person got two cards and a line naming a screen, and was left to find that
 /// screen alone while Instafy has a browser that could have opened it. The
-/// walk rides on the existing `request_browser` handoff, which Studio starts by
-/// itself in the tab that sent the kickoff once the turn is done (owner
-/// decision, Oct 19: Octo opens the browser without asking); elsewhere the
+/// walk rides on the existing `request_browser` handoff, which Studio may start
+/// by itself in the tab that sent the kickoff once the turn is done (owner
+/// decision, Oct 19: Octo opens the browser without asking); otherwise the
 /// card is a button. No browser tool is exposed before the browser opens. The
 /// address comes from the declaration, never `whereToGet`. Naming the
 /// onboarding skill also routes it into the kickoff's memory, which is selected
