@@ -135,17 +135,13 @@ export function shouldSweepCompactRailStatusText(params: {
   return params.showCompactRailStatus && params.isUnresolved;
 }
 
+// The compact rail's caption is the turn's one live status line. Anything the
+// summary would show under it while the turn runs (a spinner label, a short
+// preview, a multi-line preview box) either repeats it or comes and goes with
+// each command, moving the rail. The caption only shows before completion, so
+// the final reply is never suppressed.
 export function shouldSuppressSummaryRunningStatus(params: {
   showCompactRailStatus: boolean;
-  showRunningSpinnerFallback: boolean;
-  useCompactRunningPreview: boolean;
-  hasRunningStatusLabel: boolean;
 }): boolean {
-  if (!params.showCompactRailStatus) {
-    return false;
-  }
-  if (params.showRunningSpinnerFallback) {
-    return true;
-  }
-  return params.useCompactRunningPreview && params.hasRunningStatusLabel;
+  return params.showCompactRailStatus;
 }

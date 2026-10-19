@@ -313,9 +313,32 @@ function looksLikeHighPriorityThreadUpdateText(value: string): boolean {
   );
 }
 
+// Cards that ask the person for something. Wherever one sits in a turn it
+// renders as its card, the moment it arrives; it is never the turn's reply
+// text and never a running preview.
+export const THREAD_ACTION_CARD_TYPES: ReadonlySet<string> = new Set([
+  "integration_request",
+  "secret_request",
+  "action_request",
+]);
+
+function isThreadActionCard(update: ChatMessage): boolean {
+  return THREAD_ACTION_CARD_TYPES.has((getMessageType(update) ?? "").trim().toLowerCase());
+}
+
+/**
+ * The newest `maxVisible` updates, plus every action card of the turn however
+ * far back it sits. A card can hold what the person is typing; windowing it
+ * away when the reply shrinks the window would unmount it mid-entry.
+ */
+export function windowThreadUpdates(updates: readonly ChatMessage[], maxVisible: number): ChatMessage[] {
+  const firstInWindow = Math.max(0, updates.length - maxVisible);
+  return updates.filter((update, index) => index >= firstInWindow || isThreadActionCard(update));
+}
+
 export function shouldKeepThreadUpdateInline(update: ChatMessage): boolean {
   const type = (getMessageType(update) ?? "").trim().toLowerCase();
-  if (type === "integration_request" || type === "secret_request" || type === "action_request") {
+  if (THREAD_ACTION_CARD_TYPES.has(type)) {
     return true;
   }
   if ((type === "status" || type === "reasoning") && looksLikeHighPriorityThreadUpdateText(update.content)) {
@@ -452,6 +475,26 @@ export function extractThreadRunStatus(message: ChatMessage): string | null {
   return null;
 }
 
+/**
+ * The message a turn ends on: the agent's reply with its outcome, or the
+ * outcome the controller writes itself when it fails a turn no runtime
+ * finished, such as one a stop left queued past its resume window. Progress
+ * updates carry `kind: "update"` and an `in_progress` outcome.
+ */
+export function isFinalAgentOutcomeMessage(message: ChatMessage): boolean {
+  const metadata = message.metadata && isRecord(message.metadata) ? message.metadata : null;
+  const read = (key: string) =>
+    metadata && typeof metadata[key] === "string" ? (metadata[key] as string).trim().toLowerCase() : "";
+  const source = read("source");
+  const outcome = read("outcome");
+  return (
+    (source === "agent" || source === "controller") &&
+    outcome !== "" &&
+    outcome !== "in_progress" &&
+    read("kind") !== "update"
+  );
+}
+
 export function resolveThreadRunStatusFromMessages(threadMessages: ChatMessage[]): {
   phase: "running" | "completed" | "unknown";
   status: string | null;
@@ -466,27 +509,7 @@ export function resolveThreadRunStatusFromMessages(threadMessages: ChatMessage[]
     if (!status) {
       continue;
     }
-    const candidateMetadata = candidate.metadata && isRecord(candidate.metadata) ? candidate.metadata : null;
-    const candidateSource =
-      candidateMetadata && typeof candidateMetadata["source"] === "string"
-        ? candidateMetadata["source"].trim().toLowerCase()
-        : "";
-    const candidateOutcome =
-      candidateMetadata && typeof candidateMetadata["outcome"] === "string"
-        ? candidateMetadata["outcome"].trim().toLowerCase()
-        : "";
-    const candidateKind =
-      candidateMetadata && typeof candidateMetadata["kind"] === "string"
-        ? candidateMetadata["kind"].trim().toLowerCase()
-        : "";
-    // The controller writes a run's final outcome itself when it fails a turn
-    // no runtime finished, such as one a stop left queued past its resume
-    // window. Every outcome it writes on a message is terminal.
-    const looksLikeFinalAgentOutcomeMessage =
-      (candidateSource === "agent" || candidateSource === "controller") &&
-      candidateOutcome !== "" &&
-      candidateOutcome !== "in_progress" &&
-      candidateKind !== "update";
+    const looksLikeFinalAgentOutcomeMessage = isFinalAgentOutcomeMessage(candidate);
     const isControllerTerminalNotice =
       messageType === "runtime_alert" || messageType === "run_cancellation";
     const isNonRecoverableError =
