@@ -86,11 +86,21 @@ function resolveTerminalRunFallbackText(status: RunRecord["status"]): string {
   }
 }
 
+const SYNTHESIZED_TERMINAL_MESSAGE_ID_PREFIX = "thread-preview-terminal:";
+
+/**
+ * A terminal row made up here from a run record, not written by the agent.
+ * Its job id is only the thread's guess, so it never stands for a job's reply.
+ */
+export function isSynthesizedTerminalThreadMessage(message: ChatMessage): boolean {
+  return typeof message.id === "string" && message.id.startsWith(SYNTHESIZED_TERMINAL_MESSAGE_ID_PREFIX);
+}
+
 function synthesizeTerminalThreadMessage(run: RunRecord, jobId: string): ChatMessage {
   const normalizedStatus = run.status.trim().toLowerCase();
   const content = run.lastMessage?.trim() || resolveTerminalRunFallbackText(run.status);
   return {
-    id: `thread-preview-terminal:${run.id}`,
+    id: `${SYNTHESIZED_TERMINAL_MESSAGE_ID_PREFIX}${run.id}`,
     role: "assistant",
     authorId: null,
     content,

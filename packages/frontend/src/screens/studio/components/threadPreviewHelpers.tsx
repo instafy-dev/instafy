@@ -25,6 +25,7 @@ import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 import type { ThreadCompactUpdateKind } from "./threadPreviewState";
 import type { ChatMessage } from "../types";
 import { isNonRecoverableRunErrorMessage } from "../../../conversations/conversationGoals";
+import { isSynthesizedTerminalThreadMessage } from "./threadPreviewRunData";
 
 export const THREAD_ACTIVE_STATES = new Set([
   "in_progress",
@@ -495,12 +496,68 @@ export function isFinalAgentOutcomeMessage(message: ChatMessage): boolean {
   );
 }
 
+function extractThreadMessageJobId(message: ChatMessage): string | null {
+  const metadata = message.metadata && isRecord(message.metadata) ? message.metadata : null;
+  if (!metadata) {
+    return null;
+  }
+  for (const key of ["jobId", "job_id", "jobID"]) {
+    const value = metadata[key];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return null;
+}
+
+// The reply is the answer itself (untyped) or the failure the agent ended on.
+// Timeline rows (statuses, reasoning, tool steps) and cards are never it.
+const THREAD_JOB_REPLY_MESSAGE_TYPES: ReadonlySet<string> = new Set(["", "error"]);
+
+/**
+ * The agent's own reply to its job, with a terminal outcome. It is the job's
+ * last word: the controller takes no progress for a job once it completes.
+ * A controller-written outcome is not one, since a resumed job can follow it.
+ */
+function isThreadJobReply(message: ChatMessage): boolean {
+  if (
+    message.role !== "assistant"
+    || isSynthesizedTerminalThreadMessage(message)
+    || !isFinalAgentOutcomeMessage(message)
+  ) {
+    return false;
+  }
+  const metadata = message.metadata && isRecord(message.metadata) ? message.metadata : null;
+  const source = typeof metadata?.["source"] === "string" ? metadata["source"].trim().toLowerCase() : "";
+  if (source !== "agent") {
+    return false;
+  }
+  if (!THREAD_JOB_REPLY_MESSAGE_TYPES.has((getMessageType(message) ?? "").trim().toLowerCase())) {
+    return false;
+  }
+  const status = extractThreadRunStatus(message);
+  return status !== null && THREAD_TERMINAL_STATES.has(status);
+}
+
 export function resolveThreadRunStatusFromMessages(threadMessages: ChatMessage[]): {
   phase: "running" | "completed" | "unknown";
   status: string | null;
 } {
   let latestActive: { status: string; timestamp: number } | null = null;
   let latestTerminal: { status: string; timestamp: number } | null = null;
+
+  // A job that has replied is over, so none of its progress keeps the turn
+  // running, whatever its timestamp. A message's time is when the transaction
+  // that wrote it began: progress written just before the completion can still
+  // read as newer than the reply. Ordered by timestamp alone, such progress
+  // kept the turn live (rail up, reply hidden) after the reply had landed.
+  const repliedJobIds = new Set<string>();
+  for (const candidate of threadMessages) {
+    const jobId = isThreadJobReply(candidate) ? extractThreadMessageJobId(candidate) : null;
+    if (jobId) {
+      repliedJobIds.add(jobId);
+    }
+  }
 
   for (let index = 0; index < threadMessages.length; index += 1) {
     const candidate = threadMessages[index];
@@ -534,6 +591,10 @@ export function resolveThreadRunStatusFromMessages(threadMessages: ChatMessage[]
     }
 
     if (THREAD_ACTIVE_STATES.has(status)) {
+      const jobId = extractThreadMessageJobId(candidate);
+      if (jobId && repliedJobIds.has(jobId)) {
+        continue;
+      }
       if (!latestActive || timestamp >= latestActive.timestamp) {
         latestActive = { status, timestamp };
       }
