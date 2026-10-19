@@ -27,7 +27,16 @@ impl BrowserRequest {
         })
     }
 
-    pub(super) fn message(&self) -> JobMessage {
+    /// The handoff card. `workspace_browser` is whether this runtime runs a
+    /// Workspace browser; when it does not, the card says so
+    /// (`workspaceBrowser: false`) and Studio opens the browser on the
+    /// person's device or explains that none can open, instead of offering a
+    /// press that waits for a browser this workspace does not have.
+    pub(super) fn message(&self, workspace_browser: bool) -> JobMessage {
+        let mut browser_request = json!({ "task": self.task, "location": self.location });
+        if !workspace_browser {
+            browser_request["workspaceBrowser"] = json!(false);
+        }
         JobMessage {
             content: "Continue this task in your browser.".to_owned(),
             message_type: Some("action_request".to_owned()),
@@ -37,7 +46,7 @@ impl BrowserRequest {
                     "testId": "browser-request-card",
                     "title": "Continue in browser",
                     "description": "Open your browser and let the AI continue this task there.",
-                    "browserRequest": { "task": self.task, "location": self.location },
+                    "browserRequest": browser_request,
                     "actions": [{
                         "id": "continue-browser",
                         "label": "Open browser and continue",
@@ -64,7 +73,7 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        let message = request.message();
+        let message = request.message(true);
         let metadata = message.metadata.unwrap();
         assert_eq!(
             metadata["details"]["browserRequest"],
@@ -79,6 +88,31 @@ mod tests {
         assert!(
             metadata["details"]["browserRequest"]
                 .get("runtimeId")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn browser_request_says_when_this_runtime_has_no_workspace_browser() {
+        let request = BrowserRequest::parse(
+            json!({"task": "Open https://app.example.test and take me to Settings."})
+                .as_object()
+                .unwrap(),
+        )
+        .unwrap();
+        let without = request.message(false).metadata.unwrap();
+        assert_eq!(
+            without["details"]["browserRequest"],
+            json!({
+                "task": "Open https://app.example.test and take me to Settings.",
+                "location": "auto",
+                "workspaceBrowser": false
+            })
+        );
+        let with = request.message(true).metadata.unwrap();
+        assert!(
+            with["details"]["browserRequest"]
+                .get("workspaceBrowser")
                 .is_none()
         );
     }

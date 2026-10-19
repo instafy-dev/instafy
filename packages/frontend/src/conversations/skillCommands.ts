@@ -194,3 +194,23 @@ export function parseSkillImportMessage(text: string): ParsedSkillImportMessage 
 export function buildSkillStartMessage(slug: string): string {
   return `/skills start ${slug.trim()}`;
 }
+
+/**
+ * Whether a person's message opens a skill setup: `/skills start <name>` or a
+ * `/skills import` line with `--start`. Like the runtime's own parser
+ * (`is_skill_setup_opener`), it reads the first line and accepts `/skill`.
+ */
+export function isSkillSetupOpener(text: string): boolean {
+  const tokens = (text.trim().split("\n", 1)[0] ?? "").trim().split(/\s+/);
+  if (!/^\/skills?$/i.test(tokens[0] ?? "")) {
+    return false;
+  }
+  const subcommand = (tokens[1] ?? "").toLowerCase();
+  if (subcommand === "start") {
+    return tokens.length === 3;
+  }
+  return subcommand === "import" &&
+    Boolean(tokens[2]) &&
+    !tokens[2].startsWith("--") &&
+    tokens.slice(3).some((token) => token.toLowerCase() === "--start");
+}

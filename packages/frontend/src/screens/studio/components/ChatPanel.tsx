@@ -384,6 +384,7 @@ import { resolveSharedBrowserControlOwner } from "./sharedBrowserControlOwner";
 import { useSharedBrowserApprovalTransport } from "./useSharedBrowserApprovalTransport";
 import { useChatBrowserHandoff } from "./useChatBrowserHandoff";
 import { useChatBrowserRequest } from "./useChatBrowserRequest";
+import { BrowserRequestHostContext, type BrowserRequestHost } from "./browserRequest";
 import { sharedBrowserConversationRunIds } from "./browserHandoffRouting";
 
 const { enabled: runtimeControllerEnabled } = controllerClient.core;
@@ -4411,6 +4412,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     personalAvailable: personalBrowser.available,
     personalReady: personalBrowser.status?.state === "ready",
     sharedReady: Boolean(resolvedBrowserRuntimeId && browserHandoffPage),
+    sharedUnavailable: sharedBrowserCapabilitiesUnsupported,
     activate: (transport) => {
       // This request selects a session, not a new device-wide preference.
       setBrowserTransport(transport);
@@ -4421,8 +4423,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     continueTask: (transport, message) => transport === "personal"
       ? browserHandoff.startPersonal(message)
       : browserHandoff.continueShared(message),
+    returnToChat: handleBackToChat,
     onError: (message) => showStatus(message, "error", 6000),
   });
+  const browserRequestHost = useMemo<BrowserRequestHost>(() => ({
+    transport: browserTransport,
+    personalAvailable: personalBrowser.available,
+    sharedUnavailable: sharedBrowserCapabilitiesUnsupported,
+  }), [browserTransport, personalBrowser.available, sharedBrowserCapabilitiesUnsupported]);
 
   const handleStashDraft = useCallback(async (): Promise<boolean> => {
     if (!ensureProjectWriteAccess()) {
@@ -5998,6 +6006,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     <RunFailureRetryProvider value={runFailureRetryContextValue}>
     <ConversationFileContext.Provider value={openSurfaceFile}>
     <ChatRuntimeActivityContext.Provider value={chatRuntimeActivityValue}>
+    <BrowserRequestHostContext.Provider value={browserRequestHost}>
     <div
       ref={rootRef}
       className="relative flex h-full min-h-0 flex-col overflow-hidden"
@@ -6327,6 +6336,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         </StudioDialogModal>
       ) : null}
         </div>
+    </BrowserRequestHostContext.Provider>
     </ChatRuntimeActivityContext.Provider>
     </ConversationFileContext.Provider>
     </RunFailureRetryProvider>

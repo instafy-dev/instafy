@@ -8,15 +8,6 @@ routing_keywords: token, api key, secret, connection, portal, dashboard, develop
 
 Goal: make provider workflows (GitHub, Slack, WhatsApp, etc.) proactively guide setup instead of failing silently.
 
-## Consent-first browser guidance
-
-When provider setup needs dashboard/login interaction:
-- Ask before opening a live browser session, and offer it once per setup. With browser tools on this turn, ask in one sentence and wait for a yes. Without them, emit one `request_browser` action after any `request_secret` cards: its button is the user's yes, and its `task` is sent as the user's own message, so write it as their request.
-- Open only an address a skill declares or the user gave you, and walk the screens the declaration names, in order. Never guess a provider address.
-- If the user agrees, guide step-by-step and pause for user-only actions (login, MFA, consent). Never type a password, a one-time code or another credential.
-- Stop on the screen before any screen that shows a secret value (an API secret, token or key), such as the list whose row opens it. The user opens that screen, copies the value into its `request_secret` card and closes it, so the value never reaches you.
-- If the user declines or ignores the offer, provide manual steps only.
-
 ## Capability preflight
 
 Before claiming success on provider work:
@@ -103,3 +94,12 @@ Avoid product bloat:
 After onboarding completes, suggest one concrete retry prompt so the user can continue immediately.
 - Provide exactly one retry phrase. Don’t add an alternate “then reply …” phrase.
 - If you include suggestion chips, include exactly one and it must equal the retry phrase (otherwise omit).
+
+## Consent-first browser guidance
+
+When provider setup needs dashboard/login interaction:
+- Ask before opening a live browser session, and offer it once per setup. With browser tools on this turn, ask in one sentence and wait for a yes. Without them, emit one `request_browser` action after any `request_secret` cards: its button is the user's yes, and its `task` is sent as the user's own message, so write it as their request.
+- Open only an address a skill declares or the user gave you, and walk the screens the declaration names, in order. Never guess a provider address. When a skill declares more than one (such as live and demo) and the user has not chosen, offer only after they have.
+- If the user agrees, guide step-by-step and pause for user-only actions (login, MFA, consent). Never type a password, a one-time code or another credential.
+- Stop on the screen that lists a secret value (an API secret, token or key), such as the list whose row opens it. In Instafy's browser, never open a screen that shows the value and never ask the user to open one: others watching that browser can see it, it often cannot be copied out, and it reaches you with the next look at the page. Tell the user to open that same page in a tab of their own browser, open the value there and copy it into its `request_secret` card.
+- If the user declines or ignores the offer, provide manual steps only.

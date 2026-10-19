@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useContext, useMemo, useRef, useState } from "react";
 import { Key, MapPin, NavArrowDown, Terminal } from "iconoir-react";
 import { Button } from "../../../components/Button";
 import { Input } from "../../../components/Input";
@@ -6,6 +6,12 @@ import { Text } from "../../../components/Text";
 import { StudioListBox, StudioListBoxItem } from "../../../components/aria/StudioListBox";
 import { StudioPopover } from "../../../components/aria/StudioPopover";
 import { useStatus } from "../../../status/useStatus";
+import {
+  BrowserRequestHostContext,
+  browserRequestDestinations,
+  browserRequestFromMessage,
+  browserRequestUnavailableReason,
+} from "./browserRequest";
 import { ChatActionCard, type ChatActionCardAction } from "./ChatActionCard";
 import type { ChatMessage } from "../types";
 
@@ -225,6 +231,17 @@ export function ActionRequestEntry({
 }) {
   const { showStatus } = useStatus();
   const parsed = useMemo(() => parseActionRequestDetails(details), [details]);
+  // A request_browser card names where its press goes, so the press is consent
+  // to a destination the person can see, and it cannot be pressed where no
+  // browser can open.
+  const browserHost = useContext(BrowserRequestHostContext);
+  const browserRequest = useMemo(() => browserRequestFromMessage(message), [message]);
+  const browserDestinations = useMemo(
+    () => (browserRequest ? browserRequestDestinations(browserRequest.task) : []),
+    [browserRequest],
+  );
+  const browserUnavailable =
+    browserRequest && browserHost ? browserRequestUnavailableReason(browserRequest, browserHost) : null;
   const [busyActionId, setBusyActionId] = useState<string | null>(null);
   const [inputValue, setInputValue] = useState("");
   const [selectOpen, setSelectOpen] = useState(false);
@@ -324,7 +341,10 @@ export function ActionRequestEntry({
     label: action.label,
     variant: action.variant,
     onPress: () => void handlePress(action),
-    isDisabled: busyActionId !== null || (action.usesInput && inputValue.trim().length === 0),
+    isDisabled:
+      busyActionId !== null ||
+      (action.usesInput && inputValue.trim().length === 0) ||
+      (browserUnavailable !== null && action.eventName === "instafy:request-browser"),
     isLoading: busyActionId === action.id,
     loadingLabel: action.busyLabel,
     testId: action.testId ?? undefined,
@@ -341,8 +361,18 @@ export function ActionRequestEntry({
       title={fallbackTitle}
       description={parsed.description}
       children={
-        parsed.input || parsed.context ? (
+        parsed.input || parsed.context || browserDestinations.length > 0 || browserUnavailable ? (
           <div className="space-y-2">
+            {browserDestinations.length > 0 ? (
+              <Text as="div" variant="caption" tone="muted" className="break-all" data-testid="browser-request-destination">
+                Opens <span className="font-mono text-slate-700 dark:text-slate-200">{browserDestinations.join(", ")}</span>
+              </Text>
+            ) : null}
+            {browserUnavailable ? (
+              <Text as="div" variant="caption" tone="muted" data-testid="browser-request-unavailable">
+                {browserUnavailable}
+              </Text>
+            ) : null}
             {parsed.context ? (
               <Text as="div" variant="mono" tone="muted" className="break-all">
                 {parsed.context}

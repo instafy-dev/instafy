@@ -11098,7 +11098,7 @@ fn build_final_messages_from_actions(
         match action {
             CodexAction::RequestBrowser(request) => {
                 if !emitted_browser_request {
-                    out.push(request.message());
+                    out.push(request.message(crate::shared_browser::workspace_browser_enabled()));
                     emitted_browser_request = true;
                 }
             }
@@ -30051,10 +30051,11 @@ mod tests {
             "---\nname: acme-books\ndescription: Read an Acme Books ledger.\nrouting_keywords: acme, ledger\n---\n\n# Acme Books\n\nNeeds an API client id and secret.\n",
         )
         .expect("skill file");
-        let kickoff = skills::build_skill_start_prompt(
+        let kickoff = skills::build_skill_start_prompt_for_browser(
             tmp.path(),
             Some("https://github.com/instafy-dev/skills"),
             &[".agents/skills/acme-books/SKILL.md".to_string()],
+            true,
         );
         let job = test_lease_job(Some("feature"), json!({}));
         let project_id = Uuid::new_v4();
@@ -30078,7 +30079,9 @@ mod tests {
         assert!(
             prompt.contains("emit one `request_browser` action after any `request_secret` cards")
         );
-        assert!(prompt.contains("so the value never reaches you"));
+        assert!(
+            prompt.contains("Tell the user to open that same page in a tab of their own browser")
+        );
         assert_eq!(prompt.matches("## Showing the way").count(), 1);
         // The full contract beside it lists the handoff it asks for.
         assert!(prompt.contains("{ type: 'request_browser', task: string"));
@@ -30100,50 +30103,42 @@ mod tests {
         assert!(!ordinary.contains("## Context: instafy-integration-onboarding"));
     }
 
-    /// The kickoff never runs with a browser attached: a browser job refuses
-    /// the skills lane, and a kickoff carries no browser transport. So the
-    /// offer is the `request_browser` card, whose button is the person's yes,
-    /// beside the secret cards rather than in place of them.
+    /// The router reads a skill through `read_skill_routing_text`, which sees
+    /// only the first 4,096 bytes of its SKILL.md. On Oct 19 longer browser
+    /// guidance at the top of the onboarding skill pushed "## Failure recovery
+    /// rule" and "## GitHub repo onboarding" past that window, and requests
+    /// like these stopped loading the skill. That guidance sits at the end of
+    /// the file now, and the kickoff still names the skill (see above).
     #[test]
-    fn skill_kickoff_offers_the_browser_as_a_card_beside_the_secret_cards() {
-        let workspace = tempdir().expect("temp dir");
-        let opener = "/skills import https://github.com/instafy-dev/skills --start";
-        let kickoff = test_lease_job(Some("feature"), json!({ "prompt_text": opener }));
-        assert!(!crate::shared_browser::payload_requests_shared_browser(
-            &kickoff.payload
-        ));
-        assert!(!crate::personal_browser::payload_requests_personal_browser(
-            &kickoff.payload
-        ));
-        for transport in ["desktop-personal", "shared"] {
-            let browser_job = test_lease_job(
-                Some("browser"),
-                json!({ "prompt_text": opener, "metadata": { "browserTransport": transport } }),
-            );
+    fn onboarding_skill_still_routes_repo_imports_and_auth_failures() {
+        let tmp = tempdir().expect("temp dir");
+        learn::ensure_project_memory_scaffold(tmp.path());
+        for prompt in [
+            "continue working on my project https://github.com/acme/widgets",
+            "import https://github.com/acme/widgets into this space",
+            "the deploy failed with 401 unauthorized",
+            "permission denied when pushing to the private repo",
+        ] {
+            let snapshot = format_project_memory_snapshot(tmp.path(), prompt).expect("snapshot");
             assert!(
-                ensure_browser_uses_bounded_lane(&browser_job, opener, workspace.path()).is_err()
+                snapshot.text.contains(
+                    "## Context: instafy-integration-onboarding (.agents/skills/instafy-integration-onboarding/SKILL.md)"
+                ),
+                "{prompt} no longer loads the onboarding skill"
             );
         }
-
-        let task = "Open https://app.example.test and take me to Settings, then API access. I sign in myself. Stop there, before the window that shows the Client secret; I open it and copy it into the card myself.";
-        let actions = parse_codex_actions(&json!({"actions": [
-            {"type": "request_secret", "name": "ACME_CLIENT_ID", "valueLabel": "Client ID", "whereToGet": "Settings, then API access.", "skill": "acme-books", "sensitive": true},
-            {"type": "request_secret", "name": "ACME_CLIENT_SECRET", "valueLabel": "Client secret", "whereToGet": "Settings, then API access.", "skill": "acme-books", "sensitive": true},
-            {"type": "request_browser", "task": task, "browserLocation": "auto"}
-        ]}));
-        let messages = build_final_messages_from_actions(&actions, None);
-        let kinds: Vec<_> = messages
-            .iter()
-            .map(|message| message.message_type.as_deref().unwrap_or_default())
-            .collect();
-        assert_eq!(
-            kinds,
-            ["secret_request", "secret_request", "action_request"]
-        );
-        let browser = &messages[2].metadata.as_ref().unwrap()["details"];
-        assert_eq!(browser["browserRequest"]["task"], task);
-        assert_eq!(browser["browserRequest"]["location"], "auto");
-        assert_eq!(browser["actions"][0]["event"], "instafy:request-browser");
+        let skill = fs::read(
+            tmp.path()
+                .join(".agents/skills/instafy-integration-onboarding/SKILL.md"),
+        )
+        .expect("onboarding skill");
+        let window = String::from_utf8_lossy(&skill[..skill.len().min(4096)]);
+        for heading in ["## Failure recovery rule", "## GitHub repo onboarding"] {
+            assert!(
+                window.contains(heading),
+                "{heading} is outside the routing window"
+            );
+        }
     }
 
     /// Nor does the carried text pick the project memory a kickoff loads. The
