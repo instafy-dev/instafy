@@ -61,6 +61,7 @@ mod notifications;
 mod operator_admin;
 mod operator_metrics;
 mod org_limits;
+mod organization_deletion;
 mod origins;
 mod ota;
 mod project_memory_origin;

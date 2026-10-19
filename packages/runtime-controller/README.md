@@ -104,7 +104,10 @@ refetch their own capabilities. A membership change sends `{ "reason": "membersh
 Deleting a space sends `{ "reason": "space_deleted", "projectId": "<space id>" }` with no
 project, once the delete commits, to each user who could see the space (its owner, its direct
 members and its org's members). It reaches every open stream of that user, whatever its space, so
-their clients drop the space from their lists and leave it if it is open.
+their clients drop the space from their lists and leave it if it is open. Deleting a team announces
+each space it deleted that way, then, once the team's row is deleted, sends
+`{ "reason": "team_deleted", "orgId": "<team id>" }` the same way to each user who could see the
+team or one of its spaces.
 
 ### Conversation recipients
 

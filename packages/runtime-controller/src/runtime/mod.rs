@@ -37,7 +37,9 @@ pub(crate) use db::{
     record_runtime_event_with_conversation, touch_runtime_last_seen, RuntimeRecord,
     RUNTIME_LAST_SEEN_TOUCH_INTERVAL_SECONDS,
 };
-pub(crate) use deleted_project_stop::spawn_stop_runtimes_of_deleted_project;
+pub(crate) use deleted_project_stop::{
+    spawn_stop_runtimes_of_deleted_project, stop_runtimes_of_deleted_project,
+};
 pub(crate) use drain::RuntimeDrainState;
 pub(crate) use ensure::{
     ensure_error_committed_lease_id, ensure_runtime_for_automation,

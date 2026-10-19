@@ -4625,135 +4625,17 @@ async fn delete_organization(
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
     let context = authenticate_request(&state.config, &headers).await?;
     let org_id = parse_uuid_param(org_id_raw, "org_id")?;
-
-    let mut connection = state
-        .pool
-        .get()
-        .await
-        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
-    let transaction = connection.transaction().await.map_err(|error| {
-        internal_error(format!(
-            "failed to start organization delete transaction: {error}"
-        ))
-    })?;
-
-    let _org = match load_org_record(&transaction, &org_id).await {
-        Ok(org) => org,
-        Err((StatusCode::NOT_FOUND, _)) if context.is_service_role => {
-            // Recovery may repeat after the first service-role deletion
-            // committed but its response was lost. Keep that narrow cleanup
-            // operation idempotent without changing normal org visibility.
-            return Ok(StatusCode::NO_CONTENT);
-        }
-        Err(error) => return Err(error),
-    };
-    let role = require_org_access(&transaction, &org_id, &context).await?;
-    if !context.is_service_role {
-        match role.as_deref() {
-            Some("owner") => {}
-            _ => {
-                return Err(forbidden(
-                    "Only organization owners can delete organizations",
-                ));
-            }
-        }
-    }
-
-    // A deleted org must not keep billing: cancel any live Stripe subscription
-    // first, and refuse the deletion when that cancellation cannot be
-    // confirmed (otherwise the customer is charged forever with no portal
-    // access left to stop it).
-    let billing_ref = crate::billing::service::load_org_billing_ref(&transaction, &org_id)
-        .await
-        .map_err(internal_error)?;
-    if let Some(subscription) = billing_ref.filter(|subscription| {
-        subscription.processor == "stripe"
-            && matches!(
-                subscription.status.as_str(),
-                "active" | "trialing" | "past_due"
-            )
-    }) {
-        if state.config.stripe.is_none() {
-            return Err(internal_error(
-                "cannot delete organization: it has a live Stripe subscription but Stripe is not configured on this controller",
-            ));
-        }
-        if !subscription.external_id.starts_with("sub_") {
-            return Err(internal_error(
-                "cannot delete organization: its Stripe subscription reference is not a subscription id; cancel the subscription in the Stripe dashboard first",
-            ));
-        }
-        let processor_context = crate::billing::processors::ProcessorContext {
-            config: &state.config,
-            http_client: &state.http_client,
-        };
-        crate::billing::processors::stripe::cancel_subscription(
-            &processor_context,
-            &subscription.external_id,
-        )
-        .await
-        .map_err(|error| error.into_response())?;
-        tracing::info!(
-            org_id = %org_id,
-            subscription_id = %subscription.external_id,
-            "canceled Stripe subscription before organization deletion"
-        );
-    }
-
-    // Keep encrypted browser identity data tied to the org lifecycle even on
-    // installations that have not yet acquired the cascade FK from migration
-    // 20260000000048. The migration remains the database-level backstop.
-    transaction
-        .execute(
-            "delete from project_browser_profiles
-             where project_id in (select id from projects where org_id = $1)",
-            &[&org_id],
-        )
-        .await
-        .map_err(|error| {
-            internal_error(format!(
-                "failed to delete organization browser profiles: {error}"
-            ))
-        })?;
-
-    // Every space of the team goes with it through the projects foreign key.
-    // Their chat attachments are purged after the commit, so remember the
-    // spaces first. The team's row lock keeps a space from being added between
-    // this read and the delete.
-    transaction
-        .execute(
-            "select 1 from organizations where id = $1 for update",
-            &[&org_id],
-        )
-        .await
-        .map_err(|error| internal_error(format!("failed to lock organization: {error}")))?;
-    let project_ids: Vec<Uuid> = transaction
-        .query("select id from projects where org_id = $1", &[&org_id])
-        .await
-        .map_err(|error| internal_error(format!("failed to list organization spaces: {error}")))?
-        .iter()
-        .map(|row| row.get(0))
-        .collect();
-
-    transaction
-        .execute("delete from organizations where id = $1", &[&org_id])
-        .await
-        .map_err(|error| internal_error(format!("failed to delete organization: {error}")))?;
-
-    transaction.commit().await.map_err(|error| {
-        internal_error(format!(
-            "failed to finalize organization delete transaction: {error}"
-        ))
-    })?;
-
-    // Browsers lost access with the spaces' rows; this frees their chat
-    // attachments and never fails the delete.
-    crate::chat_attachments::spawn_projects_purge(
-        crate::chat_attachments::StorageAccess::from_config(&state.http_client, &state.config),
-        project_ids,
-    );
-
-    Ok(StatusCode::NO_CONTENT)
+    // In a task of its own, so a client that goes away cannot stop the delete
+    // between its phases (see `organization_deletion`).
+    tokio::spawn(crate::organization_deletion::delete_organization(
+        state, org_id, context,
+    ))
+    .await
+    .unwrap_or_else(|error| {
+        Err(internal_error(format!(
+            "organization delete task failed: {error}"
+        )))
+    })
 }
 
 fn parse_uuid_param(raw: String, field: &str) -> Result<Uuid, (StatusCode, Json<ApiError>)> {
@@ -4894,6 +4776,22 @@ pub(crate) async fn require_org_access(
 
     let role: String = row.get("role");
     Ok(Some(role))
+}
+
+/// Refuse `context` unless it may delete the organization `org_id`: one of
+/// its owners, or the service role.
+pub(crate) async fn require_organization_deleter(
+    transaction: &tokio_postgres::Transaction<'_>,
+    org_id: &Uuid,
+    context: &RequestContext,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    let role = require_org_access(transaction, org_id, context).await?;
+    if !context.is_service_role && role.as_deref() != Some("owner") {
+        return Err(forbidden(
+            "Only organization owners can delete organizations",
+        ));
+    }
+    Ok(())
 }
 
 async fn require_org_project_sharer(
