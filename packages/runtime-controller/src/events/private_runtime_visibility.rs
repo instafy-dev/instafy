@@ -27,11 +27,35 @@ struct RuntimeReferences {
     tunnel_ids: HashSet<String>,
 }
 
+/// What [`ensure_visible`] has to find for `event` when a stream's recent
+/// checks can answer for it: the runtimes its payload names (none, for most
+/// events). `None` for an event about a runtime, origin, tunnel or local
+/// workspace, or one whose payload cannot be read for runtimes: those are
+/// checked on their own every time.
+///
+/// Every agent message and `run.completed` names the runtime it ran on, so
+/// without this a turn's closing burst took one check, and one pool
+/// connection, per event on every open stream.
+pub(super) fn named_runtimes(
+    event: &ControllerEvent,
+    context: &RequestContext,
+) -> Option<HashSet<Uuid>> {
+    let mut runtime_ids = HashSet::new();
+    if context.is_service_role {
+        return Some(runtime_ids);
+    }
+    if visibility_scope(&event.kind).is_some() {
+        return None;
+    }
+    collect_keyed_uuids(&event.data, runtime_id_key, true, &mut runtime_ids)?;
+    Some(runtime_ids)
+}
+
 /// Whether [`ensure_visible`] reads the database for `event`, or decides it
 /// without one: true for an event about a runtime, origin, tunnel or local
 /// workspace, or one whose payload names a runtime (or cannot be read for
 /// one).
-pub(super) fn needs_lookup(event: &ControllerEvent, context: &RequestContext) -> bool {
+fn needs_lookup(event: &ControllerEvent, context: &RequestContext) -> bool {
     if context.is_service_role {
         return false;
     }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
@@ -36,15 +36,16 @@ const PROJECT_ACCESS_CHANGED_EVENT: &str = "project.access_changed";
 /// shared broadcast, a project watch count and a keep-alive every 15 s (Redis
 /// is one subscription per node, not per stream). It costs the pool when fed:
 /// an event it matches takes a connection for an access check, at most once
-/// per conversation per `EVENT_ACCESS_RECHECK_AFTER`, and on every runtime,
-/// origin, tunnel, workspace or roster event. Streams do not share those
-/// checks, so one user's eight streams on one space can ask for eight
-/// connections for a single event: more than the pool holds (6 in
-/// production, 4 by default, `DATABASE_POOL_SIZE`). The checks past the pool
-/// wait for a connection (up to its 10 s timeout, then one retry, then the
-/// event is dropped for that stream), and other requests on the node wait
-/// behind them. Eight is sized for a handful of tabs, Desktop and a phone,
-/// plus a tab whose last stream has not closed yet, not to fit the pool.
+/// per conversation and runtime named per `EVENT_ACCESS_RECHECK_AFTER`, and
+/// on every event about a runtime, origin, tunnel, workspace or the roster.
+/// Streams do not share those checks, so one user's eight streams on one
+/// space can ask for eight connections for a single event: more than the pool
+/// holds (6 in production, 4 by default, `DATABASE_POOL_SIZE`). The checks
+/// past the pool wait for a connection (up to its 10 s timeout, then one
+/// retry, then the event is dropped for that stream and the stream is sent
+/// `events.resync`), and other requests on the node wait behind them. Eight
+/// is sized for a handful of tabs, Desktop and a phone, plus a tab whose last
+/// stream has not closed yet, not to fit the pool.
 pub(crate) const MAX_EVENT_STREAMS_PER_USER: usize = 8;
 
 /// How long a stream refused for [`MAX_EVENT_STREAMS_PER_USER`] is asked to
@@ -78,44 +79,88 @@ fn too_many_event_streams() -> axum::response::Response {
         .into_response()
 }
 
-/// The access checks one stream has passed lately, by conversation (`None`
-/// for an event of the project as a whole), so a burst of events takes one
-/// check, not one pool connection per event. A check holds for
-/// `AppConfig::event_access_recheck_after`; an access change the stream sees
-/// drops them all.
+/// What a stream sends in place of events it had to drop: it fell behind the
+/// node's broadcast, or an access check could not reach the database even on
+/// its retry. It carries only the reason, nothing about what was dropped; the
+/// client re-reads through its own authorized endpoints, as after a
+/// reconnect. A stream filtered to other kinds is not sent one.
+const EVENTS_RESYNC_EVENT: &str = "events.resync";
+const RESYNC_LAGGED: &str = "lagged";
+const RESYNC_ACCESS_CHECK_UNAVAILABLE: &str = "access_check_unavailable";
+
+/// The access checks one stream has passed lately: its project and
+/// conversation access, by conversation (`None` for an event of the project
+/// as a whole), and the runtimes it found visible to its subscriber. A burst
+/// of events on one conversation from one runtime, such as the end of a
+/// turn, takes one check, not one pool connection per event. A check holds
+/// for `AppConfig::event_access_recheck_after`; an access change the stream
+/// sees drops them all.
 #[derive(Default)]
 struct RecentAccess {
-    passed: Mutex<HashMap<Option<uuid::Uuid>, Instant>>,
+    passed: Mutex<PassedChecks>,
+}
+
+#[derive(Default)]
+struct PassedChecks {
+    conversations: HashMap<Option<uuid::Uuid>, Instant>,
+    runtimes: HashMap<uuid::Uuid, Instant>,
+}
+
+fn still_holds(passed_at: Instant, now: Instant, for_how_long: Duration) -> bool {
+    now.saturating_duration_since(passed_at) < for_how_long
 }
 
 impl RecentAccess {
+    fn passed(&self) -> std::sync::MutexGuard<'_, PassedChecks> {
+        self.passed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Whether this stream passed `conversation_id`'s check, and found each
+    /// of `runtime_ids` visible, within `for_how_long` before `now`.
     fn holds(
         &self,
         conversation_id: Option<uuid::Uuid>,
+        runtime_ids: &HashSet<uuid::Uuid>,
         now: Instant,
         for_how_long: Duration,
     ) -> bool {
-        self.passed
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        let passed = self.passed();
+        let holds = |passed_at: &Instant| still_holds(*passed_at, now, for_how_long);
+        passed
+            .conversations
             .get(&conversation_id)
-            .is_some_and(|passed_at| now.saturating_duration_since(*passed_at) < for_how_long)
+            .is_some_and(holds)
+            && runtime_ids
+                .iter()
+                .all(|runtime_id| passed.runtimes.get(runtime_id).is_some_and(holds))
     }
 
-    fn record(&self, conversation_id: Option<uuid::Uuid>, now: Instant, for_how_long: Duration) {
-        let mut passed = self
-            .passed
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        passed.retain(|_, passed_at| now.saturating_duration_since(*passed_at) < for_how_long);
-        passed.insert(conversation_id, now);
+    fn record(
+        &self,
+        conversation_id: Option<uuid::Uuid>,
+        runtime_ids: &HashSet<uuid::Uuid>,
+        now: Instant,
+        for_how_long: Duration,
+    ) {
+        let mut passed = self.passed();
+        passed
+            .conversations
+            .retain(|_, passed_at| still_holds(*passed_at, now, for_how_long));
+        passed
+            .runtimes
+            .retain(|_, passed_at| still_holds(*passed_at, now, for_how_long));
+        passed.conversations.insert(conversation_id, now);
+        for runtime_id in runtime_ids {
+            passed.runtimes.insert(*runtime_id, now);
+        }
     }
 
     fn forget(&self) {
-        self.passed
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
+        let mut passed = self.passed();
+        passed.conversations.clear();
+        passed.runtimes.clear();
     }
 }
 
@@ -125,14 +170,53 @@ fn changes_access(event: &ControllerEvent) -> bool {
     event.kind == PROJECT_ACCESS_CHANGED_EVENT || event.kind == PROJECT_MEMBERS_CHANGED_EVENT
 }
 
-/// Whether delivering `event` reads the database beyond the stream's project
-/// and conversation access: a runtime, origin, tunnel or local workspace it
-/// refers to, or the organization roster.
-fn event_needs_lookup(event: &ControllerEvent, context: &RequestContext) -> bool {
-    private_runtime_visibility::needs_lookup(event, context)
-        || (event.kind == PROJECT_MEMBERS_CHANGED_EVENT
-            && event.data.get("reason").and_then(serde_json::Value::as_str)
-                != Some(MEMBERS_CHANGED_PROJECT_MEMBERSHIP))
+/// The runtimes delivering `event` has to find visible when the stream's
+/// recent checks can answer for it: those its payload names, usually none.
+/// `None` for an event checked on its own every time, because it reads the
+/// database beyond that: one about a runtime, origin, tunnel or local
+/// workspace, or the organization roster.
+fn recent_check_runtimes(
+    event: &ControllerEvent,
+    context: &RequestContext,
+) -> Option<HashSet<uuid::Uuid>> {
+    if event.kind == PROJECT_MEMBERS_CHANGED_EVENT
+        && event.data.get("reason").and_then(serde_json::Value::as_str)
+            != Some(MEMBERS_CHANGED_PROJECT_MEMBERSHIP)
+    {
+        return None;
+    }
+    private_runtime_visibility::named_runtimes(event, context)
+}
+
+/// An `EVENTS_RESYNC_EVENT` for this stream, unless it is filtered to other
+/// kinds.
+fn resync_hint(filters: &EventFilters, reason: &str) -> Option<Result<SseEvent, Infallible>> {
+    if !filters.kinds.is_empty() && !filters.kinds.iter().any(|kind| kind == EVENTS_RESYNC_EVENT) {
+        return None;
+    }
+    encode_event(&ControllerEvent {
+        kind: EVENTS_RESYNC_EVENT.to_string(),
+        project_id: Some(filters.project_id),
+        session_id: filters.session_id,
+        conversation_id: filters.conversation_id,
+        run_id: filters.run_id,
+        job_id: None,
+        channel: None,
+        channels: Vec::new(),
+        target_user_id: None,
+        data: serde_json::json!({ "reason": reason }),
+        timestamp: chrono::Utc::now(),
+    })
+}
+
+fn encode_event(event: &ControllerEvent) -> Option<Result<SseEvent, Infallible>> {
+    match SseEvent::default().json_data(event) {
+        Ok(payload) => Some(Ok(payload)),
+        Err(error) => {
+            warn!(?error, "failed to encode controller event");
+            None
+        }
+    }
 }
 
 /// Runs an access check once more when the database was only briefly out of
@@ -258,13 +342,15 @@ async fn events_stream(
                         recent_access.forget();
                     }
                     // The project and conversation access this stream passed
-                    // within `event_access_recheck_after` still holds for an
-                    // event that needs no lookup of its own.
+                    // within `event_access_recheck_after`, and the runtimes
+                    // it found visible, still hold for an event that needs no
+                    // other lookup.
                     let now = Instant::now();
                     let recheck_after = state.config.event_access_recheck_after;
-                    let access_holds =
-                        recent_access.holds(event.conversation_id, now, recheck_after)
-                            && !event_needs_lookup(&event, &context);
+                    let runtime_ids = recent_check_runtimes(&event, &context);
+                    let access_holds = runtime_ids.as_ref().is_some_and(|runtime_ids| {
+                        recent_access.holds(event.conversation_id, runtime_ids, now, recheck_after)
+                    });
                     if !is_targeted_access_invalidation(&event, &context) && !access_holds {
                         let checked = retry_once_if_unavailable(|| {
                             ensure_event_delivery_access(
@@ -278,12 +364,24 @@ async fn events_stream(
                         })
                         .await;
                         match checked {
+                            // Only the project and conversation passed: the
+                            // runtimes it names are not visible.
                             Ok(Some(projected)) => {
-                                recent_access.record(event.conversation_id, now, recheck_after);
+                                recent_access.record(
+                                    event.conversation_id,
+                                    &HashSet::new(),
+                                    now,
+                                    recheck_after,
+                                );
                                 event = projected;
                             }
                             Ok(None) => {
-                                recent_access.record(event.conversation_id, now, recheck_after);
+                                recent_access.record(
+                                    event.conversation_id,
+                                    runtime_ids.as_ref().unwrap_or(&HashSet::new()),
+                                    now,
+                                    recheck_after,
+                                );
                             }
                             Err((status, Json(error))) => {
                                 recent_access.forget();
@@ -294,34 +392,29 @@ async fn events_stream(
                                         conversation_id = ?event.conversation_id,
                                         project_id = %filters.project_id,
                                         error = %error.message,
-                                        "failed to authorize controller event; dropping it"
+                                        "failed to authorize controller event; dropping it and asking the client to resync"
                                     );
-                                } else {
-                                    debug!(
-                                        %status,
-                                        conversation_id = ?event.conversation_id,
-                                        project_id = %filters.project_id,
-                                        "controller event is not visible to subscriber; dropping it"
-                                    );
+                                    return resync_hint(&filters, RESYNC_ACCESS_CHECK_UNAVAILABLE);
                                 }
+                                debug!(
+                                    %status,
+                                    conversation_id = ?event.conversation_id,
+                                    project_id = %filters.project_id,
+                                    "controller event is not visible to subscriber; dropping it"
+                                );
                                 return None;
                             }
                         }
                     }
-                    match SseEvent::default().json_data(&event) {
-                        Ok(payload) => Some(Ok::<SseEvent, Infallible>(payload)),
-                        Err(error) => {
-                            warn!(?error, "failed to encode controller event");
-                            None
-                        }
-                    }
+                    encode_event(&event)
                 }
                 Err(BroadcastStreamRecvError::Lagged(skipped)) => {
                     warn!(
                         lagged = skipped,
-                        "controller event stream lagged; dropping events"
+                        project_id = %filters.project_id,
+                        "controller event stream lagged; dropping events and asking the client to resync"
                     );
-                    None
+                    resync_hint(&filters, RESYNC_LAGGED)
                 }
             }
         }
@@ -884,37 +977,114 @@ mod tests {
     fn recent_access_holds_per_conversation_for_the_window_only() {
         let window = Duration::from_secs(5);
         let recent = RecentAccess::default();
+        let none = HashSet::new();
         let conversation = Some(Uuid::new_v4());
         let start = Instant::now();
-        assert!(!recent.holds(conversation, start, window));
+        assert!(!recent.holds(conversation, &none, start, window));
 
-        recent.record(conversation, start, window);
-        assert!(recent.holds(conversation, start + Duration::from_millis(4_900), window));
-        assert!(!recent.holds(conversation, start + window, window));
+        recent.record(conversation, &none, start, window);
+        assert!(recent.holds(
+            conversation,
+            &none,
+            start + Duration::from_millis(4_900),
+            window
+        ));
+        assert!(!recent.holds(conversation, &none, start + window, window));
         assert!(
-            !recent.holds(None, start, window),
+            !recent.holds(None, &none, start, window),
             "the project's own events check on their own"
         );
-        assert!(!recent.holds(Some(Uuid::new_v4()), start, window));
+        assert!(!recent.holds(Some(Uuid::new_v4()), &none, start, window));
 
-        recent.record(None, start, window);
+        recent.record(None, &none, start, window);
         recent.forget();
-        assert!(!recent.holds(conversation, start, window));
-        assert!(!recent.holds(None, start, window));
+        assert!(!recent.holds(conversation, &none, start, window));
+        assert!(!recent.holds(None, &none, start, window));
+    }
+
+    /// A runtime the stream found visible holds for the window on any of its
+    /// conversations; an event naming a runtime it has not checked, or one
+    /// it checked longer ago, takes a check of its own.
+    #[test]
+    fn recent_access_holds_only_for_runtimes_found_visible_within_the_window() {
+        let window = Duration::from_secs(5);
+        let recent = RecentAccess::default();
+        let conversation = Some(Uuid::new_v4());
+        let other_conversation = Some(Uuid::new_v4());
+        let ran_on = Uuid::new_v4();
+        let other_runtime = Uuid::new_v4();
+        let start = Instant::now();
+
+        recent.record(conversation, &HashSet::from([ran_on]), start, window);
+        assert!(recent.holds(conversation, &HashSet::from([ran_on]), start, window));
+        assert!(!recent.holds(
+            conversation,
+            &HashSet::from([ran_on, other_runtime]),
+            start,
+            window
+        ));
+        assert!(
+            !recent.holds(other_conversation, &HashSet::from([ran_on]), start, window),
+            "the runtime holds, the conversation has not been checked"
+        );
+        recent.record(other_conversation, &HashSet::new(), start, window);
+        assert!(recent.holds(other_conversation, &HashSet::from([ran_on]), start, window));
+
+        // A later check of the conversation alone does not renew the runtime.
+        let later = start + Duration::from_secs(3);
+        recent.record(conversation, &HashSet::new(), later, window);
+        assert!(recent.holds(
+            conversation,
+            &HashSet::from([ran_on]),
+            start + Duration::from_millis(4_900),
+            window
+        ));
+        assert!(!recent.holds(
+            conversation,
+            &HashSet::from([ran_on]),
+            start + window,
+            window
+        ));
+        assert!(recent.holds(conversation, &HashSet::new(), start + window, window));
+
+        recent.forget();
+        assert!(!recent.holds(conversation, &HashSet::from([ran_on]), later, window));
     }
 
     /// Events about runtimes, origins, tunnels, local workspaces or the org
-    /// roster are checked on their own every time; others can use the
-    /// stream's recent check.
+    /// roster are checked on their own every time. Others can use the
+    /// stream's recent check, together with its recent finding that each
+    /// runtime their payload names (every agent message names one) is
+    /// visible.
     #[test]
     fn only_events_without_a_lookup_of_their_own_use_a_recent_check() {
         let user = user_context(Uuid::new_v4());
         let mut event = targeted_event("conversation.message_created", Uuid::new_v4());
         event.data = json!({ "marker": "plain" });
-        assert!(!event_needs_lookup(&event, &user));
+        assert_eq!(recent_check_runtimes(&event, &user), Some(HashSet::new()));
 
-        event.data = json!({ "nested": { "runtimeId": Uuid::new_v4() } });
-        assert!(event_needs_lookup(&event, &user));
+        let ran_on = Uuid::new_v4();
+        let preferred = Uuid::new_v4();
+        event.data = json!({
+            "metadata": {
+                "runtimeId": ran_on,
+                "runtime_id": ran_on,
+                "leaseMetrics": { "leasedByRuntimeId": ran_on },
+                "details": { "runtimeId": preferred },
+            }
+        });
+        assert_eq!(
+            recent_check_runtimes(&event, &user),
+            Some(HashSet::from([ran_on, preferred]))
+        );
+        event.data = json!({ "metadata": { "runtimeId": null } });
+        assert_eq!(recent_check_runtimes(&event, &user), Some(HashSet::new()));
+        event.data = json!({ "metadata": { "runtimeId": "not-a-runtime" } });
+        assert_eq!(
+            recent_check_runtimes(&event, &user),
+            None,
+            "a payload that cannot be read for runtimes is checked on its own"
+        );
 
         for kind in [
             "runtime.stopped",
@@ -924,15 +1094,43 @@ mod tests {
         ] {
             event.kind = kind.to_string();
             event.data = json!({});
-            assert!(event_needs_lookup(&event, &user), "{kind}");
+            assert_eq!(recent_check_runtimes(&event, &user), None, "{kind}");
         }
 
         event.kind = PROJECT_MEMBERS_CHANGED_EVENT.to_string();
         event.data = json!({ "reason": "org_membership" });
-        assert!(event_needs_lookup(&event, &user));
+        assert_eq!(recent_check_runtimes(&event, &user), None);
         event.data = json!({ "reason": MEMBERS_CHANGED_PROJECT_MEMBERSHIP });
-        assert!(!event_needs_lookup(&event, &user));
+        assert_eq!(recent_check_runtimes(&event, &user), Some(HashSet::new()));
         assert!(changes_access(&event));
+    }
+
+    /// A stream filtered to other kinds gets no resync hint; one that lists
+    /// it, or takes every kind, does.
+    #[test]
+    fn a_resync_hint_follows_the_stream_kind_filter() {
+        let filters = EventFilters {
+            project_id: Uuid::new_v4(),
+            session_id: None,
+            run_id: None,
+            conversation_id: Some(Uuid::new_v4()),
+            kinds: Vec::new(),
+        };
+        assert!(resync_hint(&filters, RESYNC_LAGGED).is_some());
+
+        let filtered = EventFilters {
+            kinds: vec!["conversation.message_created".to_string()],
+            ..filters.clone()
+        };
+        assert!(resync_hint(&filtered, RESYNC_LAGGED).is_none());
+        let opted_in = EventFilters {
+            kinds: vec![
+                "conversation.message_created".to_string(),
+                EVENTS_RESYNC_EVENT.to_string(),
+            ],
+            ..filters.clone()
+        };
+        assert!(resync_hint(&opted_in, RESYNC_ACCESS_CHECK_UNAVAILABLE).is_some());
     }
 
     /// A pool wait that timed out (503) is tried once more; a refusal stands,

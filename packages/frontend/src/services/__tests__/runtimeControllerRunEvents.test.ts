@@ -1132,6 +1132,36 @@ describe("runtime controller run event streaming", () => {
     unsubscribe();
   });
 
+  it("requests and forwards the controller's resync hint", async () => {
+    const { subscribeToRunsFromController } = await import(
+      "../runtimeController/runs"
+    );
+    const onEvent = vi.fn();
+    const onOpen = vi.fn();
+    const unsubscribe = subscribeToRunsFromController({
+      projectId: "11111111-1111-4111-8111-111111111111",
+      quietErrors: true,
+      onRun: vi.fn(),
+      onRunPatch: vi.fn(),
+      onEvent,
+      onOpen,
+    });
+
+    await vi.waitFor(() => expect(onOpen).toHaveBeenCalledOnce());
+    const request = streamingRequests[0];
+    expect(new URL(request.url).searchParams.getAll("kinds[]")).toContain("events.resync");
+
+    const resync = {
+      kind: "events.resync",
+      project_id: "11111111-1111-4111-8111-111111111111",
+      data: { reason: "lagged" },
+    };
+    request.write(`data: ${JSON.stringify(resync)}\n\n`);
+
+    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledWith(resync));
+    unsubscribe();
+  });
+
   it("discards a pending event when the stream ends without a blank line", async () => {
     const { subscribeToRunsFromController } = await import(
       "../runtimeController/runs"

@@ -197,6 +197,38 @@ describe("useRuntimeControllerSync first event stream", () => {
     }
   });
 
+  it("re-reads what the stream dropped when the controller sends a resync hint", async () => {
+    const subscription = await renderHydrated();
+    const reconnected = vi.fn();
+    window.addEventListener("instafy:controller-stream-reconnected", reconnected);
+    try {
+      expect(subscription.onEvent).toBeTypeOf("function");
+      await during(() =>
+        subscription.onEvent?.({
+          kind: "events.resync",
+          project_id: PROJECT_ID,
+          data: { reason: "access_check_unavailable" },
+        }),
+      );
+      // The same re-read as after a reconnect: runs, and every listener
+      // (chat history among them) through its own endpoint.
+      await vi.waitFor(() => expect(mocks.fetchRuns).toHaveBeenCalledTimes(2));
+      expect(reconnected).toHaveBeenCalledOnce();
+      expect(
+        (reconnected.mock.calls[0][0] as CustomEvent<{ projectId: string }>).detail,
+      ).toEqual({ projectId: PROJECT_ID });
+      // The stream itself stays open.
+      expect(mocks.subscribeToRuns).toHaveBeenCalledOnce();
+      expect(latestRuntime).toMatchObject({
+        controllerReady: true,
+        controllerUnavailable: false,
+        controllerStreamDisconnected: false,
+      });
+    } finally {
+      window.removeEventListener("instafy:controller-stream-reconnected", reconnected);
+    }
+  });
+
   it("clears the unavailable mark of a failed first attempt once the stream opens", async () => {
     const subscription = await renderHydrated();
 

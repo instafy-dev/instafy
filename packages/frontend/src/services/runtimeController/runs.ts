@@ -65,6 +65,9 @@ const PROJECT_ACCESS_EVENT_KINDS = ["project.access_changed"] as const;
 // refetch the roster or /credits/status through their own authorization.
 const PROJECT_MEMBERS_EVENT_KINDS = ["project.members_changed"] as const;
 const CREDITS_EVENT_KINDS = ["credits.updated"] as const;
+// The stream dropped events (it fell behind, or could not check access for
+// them); the payload is just a reason, and the listener re-reads everything.
+const STREAM_EVENT_KINDS = ["events.resync"] as const;
 const FORWARD_EVENT_KINDS = [
   ...RUNTIME_TELEMETRY_EVENT_KINDS,
   ...TELEMETRY_EVENT_KINDS,
@@ -78,6 +81,7 @@ const FORWARD_EVENT_KINDS = [
   ...PROJECT_ACCESS_EVENT_KINDS,
   ...PROJECT_MEMBERS_EVENT_KINDS,
   ...CREDITS_EVENT_KINDS,
+  ...STREAM_EVENT_KINDS,
 ] as const;
 
 export interface ControllerEventPayload {
