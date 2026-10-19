@@ -16,6 +16,19 @@ determines the winner. Arbitrary layout classes remain supported.
   Filled actions keep their existing variants. `elevation="none"` removes decorative
   shadows from filled and outlined actions without removing their keyboard focus ring. Avoid nested color spans, `!text-*` workarounds
   and locally reconstructed destructive hover states.
+- Prefer `Button preset="inline"` for contextual actions in notices and lists, and
+  `preset="form"` for submit/cancel actions in forms. Both own 14px text, 12px corners
+  and flat elevation. Inline uses 10px horizontal / 6px vertical padding; form uses
+  14px / 8px. At the default font size they are 32px / 36px tall on fine pointers,
+  including outlined variants; coarse pointers retain a 44px minimum target.
+  Outlines replace 1px of vertical padding rather than increasing the height.
+  Labels can wrap and increase height. A preset also supplies padding for a text
+  variant; an unpreset text action keeps its existing unpadded inline treatment.
+  Choose importance with `variant` and `tone`, and arrangement with layout classes.
+  TypeScript rejects `size`, `radius` or `elevation` alongside a preset. Keep these
+  individual props for specialized controls such as icons and chips; the presets
+  do not change unconverted buttons. `SettingsFormActions` uses the form preset;
+  invitation conflict and member actions share the inline preset with chat invites.
 - `Input` and both native/styled `Select` share medium defaults and control size tokens.
   `Field label` plus matching `htmlFor`/control `id` also labels app-rendered selects;
   explicit ARIA labels remain authoritative. `Checkbox` owns its interaction target
@@ -104,6 +117,20 @@ returns focus to its trigger. Testing progress and results stay in the connectio
 failure guidance wraps instead of relying on a hover tooltip. The Default badge also
 belongs to the row, rather than a disabled menu item.
 
+New-chat, recent-space, organization-context and compact-header action popovers also
+use the menu preset. They retain their content-specific widths and navigation behavior;
+the shared shell owns the padding, trigger gap and viewport clearance. Private-chat
+selection and Invite use the bounded editor layout, keeping their existing preferred
+widths. Agent profile header, body and footer share responsive gutters. When a footer
+contains `SettingsFormActions`, retain its inset divider and action spacing instead of
+adding another divider or a second padded action wrapper.
+
+History confirmation stays a compact dialog with shared body spacing and semantic text;
+Cancel remains the initial focus. Team settings errors and invitation conflicts use
+`InlineNotice`, with recovery or resolution controls in its actions slot. Local loading
+states use `LoadingStatus`; permissions and the scope of each recovery action stay with
+the owning screen.
+
 Secrets uses the comfortable page width and a plain, wrapping list. Recovery uses one
 `InlineNotice` with its Retry action; agent choices keep a bounded scroll area within
 the editor. Secrets and AI connection editors opt all shared sections into responsive
@@ -118,6 +145,12 @@ light/dark themes at 390, 1280 and 2560px, form drafts across viewport changes, 
 save, provider Back, menu focus return and narrow error recovery. It does not connect
 real provider accounts or verify native keyboards. Generate comparison screenshots
 outside the source tree with `INSTAFY_REVIEW_SCREENSHOTS`; keep them as review artifacts.
+
+`/tests/fixtures/dialogs-feedback/index.html` covers the additional dialogs, navigation
+menus and member feedback with inert data. Its browser checks include short viewports,
+long labels, scrolling, draft retention and keyboard focus. The Invite dialog remains
+mounted beneath QR so closing each layer restores its trigger; only the active QR
+dialog is exposed in the browser accessibility tree.
 
 Keep work drawers resizable and mobile navigation thumb-reachable. Their current
 280–560px work-drawer range, 16px rail-header inset, and 12px mobile-navigation body

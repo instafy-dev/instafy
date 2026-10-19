@@ -222,8 +222,8 @@ export function StudioRecentSpaces({
         {trigger}
         <StudioDialogPopover
           placement={pathPresentation ? "bottom start" : "right top"}
-          offset={8}
-          className="w-72 max-h-[min(32rem,calc(100dvh-2rem))] max-w-[calc(100vw-1rem)] p-2"
+          layout="menu"
+          className="w-72 max-h-[min(32rem,calc(100dvh-2rem))]"
           data-testid="sidebar-recent-spaces-popover"
         >
           <div className="mb-2 px-2.5 py-1">

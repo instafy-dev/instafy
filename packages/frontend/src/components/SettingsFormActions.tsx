@@ -21,9 +21,9 @@ export function SettingsFormActions({ saveLabel, saving, disabled, onSave, onCan
     {secondary ? <div className="mr-auto">{secondary}</div> : null}
     <div className="flex flex-wrap items-center justify-end gap-2">
       {onCancel ? <Button type="button" onPress={onCancel} isDisabled={saving || cancelDisabled}
-        variant="ghost" size="md" radius="xl" className="shrink-0" data-testid={cancelTestId}>Cancel</Button> : null}
+        variant="ghost" preset="form" className="shrink-0" data-testid={cancelTestId}>Cancel</Button> : null}
       <Button type={onSave ? "button" : "submit"} onPress={onSave} isDisabled={saving || disabled}
-        variant="primary" size="md" radius="xl" className="shrink-0" data-testid={saveTestId}>
+        variant="primary" preset="form" className="shrink-0" data-testid={saveTestId}>
         {saving ? "Saving…" : saveLabel}
       </Button>
     </div>

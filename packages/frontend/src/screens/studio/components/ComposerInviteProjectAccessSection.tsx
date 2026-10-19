@@ -179,8 +179,7 @@ export function ComposerInviteProjectAccessSection({
             <Button
               type="button"
               variant="ghost"
-              size="xs"
-              radius="full"
+              preset="inline"
               onPress={onRevokeInviteLink}
               isDisabled={inviteLinkRevokePendingId !== null}
               data-testid="composer-invite-revoke-link"
@@ -194,8 +193,7 @@ export function ComposerInviteProjectAccessSection({
           <Button
             type="button"
             variant="outline"
-            size="sm"
-            radius="full"
+            preset="inline"
             onPress={onCopyInviteLink}
             isDisabled={
               !sharingTargetReady ||
@@ -316,8 +314,7 @@ export function ComposerInviteProjectAccessSection({
           <Button
             type="submit"
             variant="primary"
-            size="sm"
-            radius="full"
+            preset="form"
             isDisabled={!sharingTargetReady || !emailValid || emailInvitePending}
             className="shrink-0"
             data-testid="composer-invite-email-submit"

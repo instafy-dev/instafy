@@ -8,6 +8,8 @@ import { Button } from "../../../components/Button";
 import { Card } from "../../../components/Card";
 import { EntityRow } from "../../../components/EntityRow";
 import { Text } from "../../../components/Text";
+import { InlineNotice } from "../../../components/InlineNotice";
+import { LoadingStatus } from "../../../components/LoadingStatus";
 import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu";
 import { StudioPopover } from "../../../components/aria/StudioPopover";
 import { useAuth } from "../../../providers/AuthProvider";
@@ -1629,11 +1631,9 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
           ) : projectCategory === "access" ? (
             <div className="space-y-4" data-testid="project-access-section">
               {!runtimeControllerEnabled ? (
-                <SettingsSurface tone="warning">
-                  <Text variant="body" tone="warning">
-                    Connect the runtime controller to share spaces and manage guests.
-                  </Text>
-                </SettingsSurface>
+                <InlineNotice tone="warning" density="comfortable">
+                  Connect the runtime controller to share spaces and manage guests.
+                </InlineNotice>
               ) : null}
 
               {!activeProjectId ? (
@@ -1651,11 +1651,9 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
           ) : projectCategory === "providers" ? (
             <div className="space-y-4" data-testid="project-providers-section">
               {!runtimeControllerEnabled ? (
-                <SettingsSurface tone="warning">
-                  <Text variant="body" tone="warning">
-                    Connect the runtime controller to manage provider and device grants.
-                  </Text>
-                </SettingsSurface>
+                <InlineNotice tone="warning" density="comfortable">
+                  Connect the runtime controller to manage provider and device grants.
+                </InlineNotice>
               ) : null}
 
               {!activeProjectId ? (
@@ -1672,11 +1670,9 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
             </div>
           ) : (<> 
           {!runtimeControllerEnabled ? (
-            <SettingsSurface tone="warning">
-              <Text variant="body" tone="warning">
-                Connect the runtime controller to share spaces and manage guests.
-              </Text>
-            </SettingsSurface>
+            <InlineNotice tone="warning" density="comfortable">
+              Connect the runtime controller to share spaces and manage guests.
+            </InlineNotice>
           ) : null}
 
           {!activeProjectId ? (
@@ -1688,11 +1684,9 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
           ) : null}
 
           {membersError && canLoadOrgSettings ? (
-            <SettingsSurface tone="danger">
-              <Text variant="body" tone="danger" className="font-medium">
-                {membersError}
-              </Text>
-            </SettingsSurface>
+            <InlineNotice tone="danger" density="comfortable" role="alert">
+              {membersError}
+            </InlineNotice>
           ) : null}
 
           {canLoadProjectSettings ? (
@@ -1703,19 +1697,20 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
       ) : (
           <div className="space-y-4" data-testid="org-settings-section">
               {orgScope.error ? (
-                <SettingsSurface tone="danger">
-                  <Text as="p" role="alert" variant="body" tone="danger">{orgScope.error}</Text>
-                  <Button variant="outline" size="sm" onPress={orgScope.refresh}>Retry</Button>
-                </SettingsSurface>
+                <InlineNotice tone="danger" density="comfortable" role="alert" actions={
+                  <Button variant="text" tone="danger" size="sm" onPress={orgScope.refresh}>Retry</Button>
+                }>{orgScope.error}</InlineNotice>
               ) : null}
               {orgCategory === "profile" ? (
                 !runtimeControllerEnabled ? (
                   <SettingsSurface><Text variant="body" tone="secondary">Connect the runtime controller to manage your team profile.</Text></SettingsSurface>
                 ) : orgScope.organization ? (
                   <TeamProfileSettings key={orgScope.organization.id} organization={orgScope.organization} role={orgRole} onCreateSpace={onStartNewProject} />
+                ) : orgScope.loading ? (
+                  <LoadingStatus>Loading team profile…</LoadingStatus>
                 ) : (
                   <SettingsSurface><Text variant="body" tone="secondary">
-                    {orgScope.loading ? "Loading team profile…" : "Select a team to view its profile."}
+                    Select a team to view its profile.
                   </Text></SettingsSurface>
                 )
               ) : orgCategory === "ai" ? (
@@ -1812,11 +1807,9 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
           ) : (
             <>
               {!runtimeControllerEnabled ? (
-                <SettingsSurface tone="warning">
-                  <Text variant="body" tone="warning">
-                    Connect the runtime controller to manage people and invites.
-                  </Text>
-                </SettingsSurface>
+                <InlineNotice tone="warning" density="comfortable">
+                  Connect the runtime controller to manage people and invites.
+                </InlineNotice>
               ) : null}
 
               {!activeOrgId ? (
@@ -1828,11 +1821,7 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
               ) : null}
 
               {runtimeControllerEnabled && activeOrgId && !orgRoleChecked && !orgScope.error ? (
-                <SettingsSurface>
-                  <Text variant="body" tone="secondary">
-                    Loading access…
-                  </Text>
-                </SettingsSurface>
+                <LoadingStatus>Loading access…</LoadingStatus>
               ) : null}
 
               {runtimeControllerEnabled && activeOrgId && orgRoleChecked && !orgRole ? (
@@ -1845,11 +1834,9 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
               ) : null}
 
               {membersError && canLoadOrgSettings ? (
-                <SettingsSurface tone="danger">
-                  <Text variant="body" tone="danger" className="font-medium">
-                    {membersError}
-                  </Text>
-                </SettingsSurface>
+                <InlineNotice tone="danger" density="comfortable" role="alert">
+                  {membersError}
+                </InlineNotice>
               ) : null}
 
               {canLoadOrgSettings ? (

@@ -54,6 +54,7 @@ vi.mock("../../../../components/aria/StudioModal", () => ({
 }));
 vi.mock("../../../../components/aria/StudioDialogLayout", () => ({
   StudioDialogHeader: ({ title }: { title: string }) => <h2>{title}</h2>,
+  StudioDialogBody: ({ children }: { children: ReactNode }) => <div>{children}</div>,
 }));
 
 describe("StudioNewChatButton", () => {

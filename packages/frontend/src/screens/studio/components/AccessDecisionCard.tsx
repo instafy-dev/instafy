@@ -204,7 +204,7 @@ export function AccessStatusPanel({
 
 type AccessProviderChoiceButtonProps = Omit<
   ButtonProps,
-  "children" | "className" | "fullWidth" | "radius" | "size" | "variant"
+  "children" | "className" | "fullWidth" | "preset" | "radius" | "size" | "variant"
 > & {
   icon: ReactNode;
   title: string;

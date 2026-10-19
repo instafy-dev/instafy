@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, type ComponentProps } from "react";
+import { act, useState, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ComposerInviteModal } from "../ComposerInviteModal";
@@ -486,6 +486,48 @@ describe("ComposerInviteModal", () => {
 
     act(() => mocks.nativeBackHandler?.());
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it.each([true, false])("keeps the original Invite draft mounted through QR and back (desktop: %s)", async (isDesktop) => {
+    mockDesktopWidth(isDesktop);
+    function InviteFlow() {
+      const [open, setOpen] = useState(false);
+      return <>
+        <button onClick={() => setOpen(true)} data-testid="invite-opener">Invite</button>
+        <ComposerInviteModal {...createProps({ isOpen: open, onOpenChange: setOpen })} />
+      </>;
+    }
+    await act(async () => root.render(<InviteFlow />));
+    const opener = document.querySelector<HTMLButtonElement>('[data-testid="invite-opener"]')!;
+    await act(async () => { opener.focus(); opener.click(); });
+    await act(async () => { await new Promise(requestAnimationFrame); });
+    const input = document.querySelector<HTMLInputElement>('[data-testid="composer-invite-email-input"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "draft@example.com");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const qrTrigger = document.querySelector<HTMLButtonElement>('[data-testid="composer-device-handoff-show-qr"]')!;
+    await act(async () => { qrTrigger.focus(); qrTrigger.click(); });
+    await act(async () => { await new Promise(requestAnimationFrame); });
+    const qrDialog = document.querySelector('[data-testid="composer-invite-nearby-qr-modal"]')!;
+    expect(qrDialog).not.toBeNull();
+    expect(input.isConnected).toBe(true);
+    expect(qrTrigger.isConnected).toBe(true);
+    await act(async () => {
+      const closeQr = qrDialog.querySelector<HTMLButtonElement>('[aria-label="Close QR code"]')!;
+      closeQr.focus();
+      closeQr.click();
+    });
+    await act(async () => { await new Promise(requestAnimationFrame); });
+    expect(document.querySelector('[data-testid="composer-invite-email-input"]')).toBe(input);
+    expect(input.value).toBe("draft@example.com");
+    await act(async () => {
+      const closeInvite = document.querySelector<HTMLButtonElement>('[aria-label="Close invite modal"]')!;
+      closeInvite.focus();
+      closeInvite.click();
+    });
+    await act(async () => { await new Promise(requestAnimationFrame); });
+    expect(document.querySelector('[data-testid="chat-invite-modal"]')).toBeNull();
   });
 
   it("shares a prepared device link without creating an invitation", async () => {
