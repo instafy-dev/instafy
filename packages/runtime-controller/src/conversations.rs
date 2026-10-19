@@ -4165,6 +4165,34 @@ mod conversation_notification_metadata_tests {
         }
     }
 
+    /// A continuation Studio sends for a request_browser card keeps the card
+    /// it answers and its notice in the stored prompt metadata, which Studio
+    /// reads back after a reload.
+    #[test]
+    fn dispatch_message_keeps_the_card_a_browser_continuation_answers() {
+        let payload: DispatchPromptRequest = serde_json::from_value(json!({
+            "projectId": Uuid::new_v4(), "promptText": "Continue this browser task.",
+            "metadata": {
+                "browserRequestOf": "job:00000000-0000-4000-8000-000000000001",
+                "browserAutoStarted": true,
+                "displayContent": "Octo opened Instafy's browser at dashboard.stripe.com",
+                "dispatchContent": "Continue this browser task."
+            }
+        }))
+        .unwrap();
+        let request = crate::dispatch::normalize_dispatch_request(payload).unwrap();
+        let source = build_conversation_message_metadata(&request);
+        assert_eq!(
+            source["prompt_metadata"]["browserRequestOf"],
+            "job:00000000-0000-4000-8000-000000000001"
+        );
+        assert_eq!(source["prompt_metadata"]["browserAutoStarted"], true);
+        assert_eq!(
+            source["prompt_metadata"]["displayContent"],
+            "Octo opened Instafy's browser at dashboard.stripe.com"
+        );
+    }
+
     #[test]
     fn dispatch_message_exposes_selected_human_mentions_at_the_canonical_source_key() {
         let user_id = Uuid::new_v4();

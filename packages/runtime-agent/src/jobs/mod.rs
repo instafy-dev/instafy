@@ -3034,6 +3034,70 @@ const CHAT_REFERENCE_CONTRACT: &str = "\nChat references in replies:\n\
 - Use the source's observed title in prose. With its accessible ID, write `[[conversation:<id>|<actual chat title>]]` outside code formatting. Use `Source chat` when untitled; never invent titles or links.\n\
 - Show raw conversation, message or run UUIDs in prose or labels only when the user explicitly asks for technical identifiers. Keep IDs in link targets, tool arguments and API fields. If title or link is unavailable, describe the source.\n";
 
+/// Octo opens Instafy's browser on its own whenever a page would help. Like
+/// the chat reference contract, it is a Studio contract independent of the
+/// lane and of which skills were routed: the browser skill is rarely routed,
+/// and a restored provider thread loads no skills at all. So it rides on every
+/// interactive turn that can emit actions, first, restored, cross-chat and
+/// skill setup alike (see `browser_choice_applies`).
+///
+/// Studio starts a `request_browser` card by itself only in the tab whose
+/// prompt asked for it, once that turn is finished, for an address the person
+/// could have seen and where nothing else is stopped or taken over; anywhere
+/// else the card is a button. Opening it changes no approval in the browser. The reply says where the browser goes in either case, and never
+/// that a page was opened before a browser tool saw it, so it stays true when
+/// the card is only a button.
+///
+/// It supersedes the consent-first wording older provider threads carry in
+/// their history, so it says so.
+const BROWSER_CHOICE_CONTRACT: &str = "\nInstafy's browser:\n\
+- Whenever a web page would help (to look something up, check a page, or walk the person through a provider's screens), open Instafy's browser yourself, without asking in chat first or waiting for them to mention a browser; this replaces any earlier instruction to offer it first.\n\
+- With browser tools on this turn, use them. Without them, emit one `request_browser` action: { type: 'request_browser', task: string, optional browserLocation: 'auto' | 'device' | 'workspace' }. Write `task` as the person's request: what to do and where to stop. An address in it comes from a skill, the person or your earlier replies, never a guess or page or tool output such as a search result.\n\
+- It changes no approval: the browser's own site and action prompts still apply, as does asking before a purchase, transfer, record-changing submit, message, permission or credential change, private-data download or destructive step.\n\
+- In `summary`, say in one sentence where the browser goes and why; never say a page opened, or what it shows, before a browser tool saw it.\n\
+- Skip it when you can answer as well without a page or a tool or API is more reliable. Do not reopen it for a task after the person closed, paused or stopped it or denied an action there.\n\
+- The person does their own sign-ins, codes and consent screens; never type or ask for a credential. Never open, or ask them to open, a screen there that shows a secret value: stop on the list and have them open it in their own browser tab.\n";
+
+/// A turn nobody is watching as it happens: a scheduled automation or a
+/// space review. The controller stamps `automation` on every automation run
+/// and `spaceReview` (with `controllerDispatch.suppressUserMessage`) on a
+/// review. A client can set these only to take the browser rule away from its
+/// own turn, so trusting them is harmless.
+fn job_is_unattended(job: &LeaseJob) -> bool {
+    let Some(metadata) = job.payload.get("metadata").and_then(JsonValue::as_object) else {
+        return false;
+    };
+    let present = |key: &str| metadata.get(key).is_some_and(|value| !value.is_null());
+    present("automation")
+        || present("spaceReview")
+        || metadata
+            .get("controllerDispatch")
+            .and_then(|dispatch| dispatch.get("suppressUserMessage"))
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(false)
+}
+
+/// Whether a turn carries [`BROWSER_CHOICE_CONTRACT`]: an interactive turn
+/// that can emit actions and has no browser tools of its own. Workers, lead
+/// checkpoints and planning turns act on work handed to them, a Personal or
+/// Shared Browser turn already has its tools, the direct workspace-change lane
+/// has no action channel, and nobody watches an unattended run.
+fn browser_choice_applies(
+    job: &LeaseJob,
+    multi_agent_planning_turn: bool,
+    lead_continuation_checkpoint: bool,
+    multi_agent_worker: bool,
+    workspace_write_response: bool,
+) -> bool {
+    !multi_agent_planning_turn
+        && !lead_continuation_checkpoint
+        && !multi_agent_worker
+        && !workspace_write_response
+        && !crate::personal_browser::payload_requests_personal_browser(&job.payload)
+        && !crate::shared_browser::payload_requests_shared_browser(&job.payload)
+        && !job_is_unattended(job)
+}
+
 /// Keeps a skill setup going on follow-up turns. The full Studio contract
 /// states this rule, but only the first turn of a thread gets that contract.
 /// Later turns get the compact reminder of a restored thread, the direct
@@ -6851,6 +6915,7 @@ impl JobProcessor {
                 || expects_generic_mcp_tool_execution,
         );
         suppress_multi_agent_plan_actions_for_worker(job, &mut outcome);
+        suppress_browser_requests_where_unsupported(job, &mut outcome);
         let mut codex_fallback_summary_kind =
             classify_internal_codex_fallback_summary(&outcome.summary);
         apply_terminal_shared_browser_summary(
@@ -7442,6 +7507,7 @@ impl JobProcessor {
             retry_outcome.read_files =
                 normalize_codex_read_files(&workspace_dir, retry_outcome.read_files);
             suppress_multi_agent_plan_actions_for_worker(job, &mut retry_outcome);
+            suppress_browser_requests_where_unsupported(job, &mut retry_outcome);
             let mut retry_codex_fallback_summary_kind =
                 classify_internal_codex_fallback_summary(&retry_outcome.summary);
             augment_summary_for_onboarding_actions(
@@ -7721,6 +7787,7 @@ impl JobProcessor {
                     extract_codex_outcome(&finalization_output.final_json)?;
                 finalization_outcome.files.clear();
                 suppress_multi_agent_plan_actions_for_worker(job, &mut finalization_outcome);
+                suppress_browser_requests_where_unsupported(job, &mut finalization_outcome);
                 let finalization_fallback_kind =
                     classify_internal_codex_fallback_summary(&finalization_outcome.summary);
                 if finalization_fallback_kind.is_none() {
@@ -8256,7 +8323,7 @@ impl JobProcessor {
             - Keep `files` empty unless the user explicitly asked for file changes.\n\
             \n\
             Browser usage:\n\
-            - Do not use Playwright/browser tools unless the user explicitly asks for browser navigation or page interaction.\n\
+            - Do not script a browser with Playwright or shell commands. If a human-facing page would help, emit one `request_browser` action.\n\
             - Treat `/mcp` URLs as MCP endpoints first, not as normal webpages.\n",
         );
 
@@ -8855,7 +8922,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 - Return one JSON object only: { \"summary\": string, \"files\": [], optional \"suggestions\": [], optional \"actions\": [] }.\n\
                 - Put the natural-language answer in `summary`; do not wrap the JSON in Markdown.\n\
                 - Populate `files` only for real workspace changes.\n\
-                - Use `actions` for required secrets, integrations, location, goal creation/status updates, or skill-authored multi-agent coordination.\n",
+                - Use `actions` for required secrets, integrations, location, opening Instafy's browser (`request_browser`), goal creation/status updates, or skill-authored multi-agent coordination.\n",
                     SECRET_REJECTION_CONTRACT,
                     "- A request to create/start a goal also starts goal execution. Do not only acknowledge goal creation or suggest starting later.\n\
                 - For a newly requested goal that can be fully satisfied in this turn, satisfy it in `summary` and emit one completed `goal_update`; do not leave simple finite goals active.\n\
@@ -9011,7 +9078,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             prompt.push_str(WORKSPACE_IS_CURRENT_RULE);
             prompt.push_str(
             "- Context you recovered from earlier turns, other conversations or context cards is for you: never say that you recovered it, where from, or any conversation, job, thread or context-card id.\n\
-              - Use `actions` to request interactive UI help when needed (e.g. secrets/integrations). Supported actions:\n\
+              - Use `actions` for interactive UI help: secrets, integrations, location, and opening Instafy's browser. Supported actions:\n\
               - { type: 'request_integration', provider: string, optional description: string, optional requiredScopes: string[], optional capabilities: string[], optional authMethods: string[], optional suggestedSecretNames: string[], optional suggestedSecrets: { name: string, optional description: string }[], optional agentHandles: string[] }\n\
               - { type: 'request_location', optional precision: 'approximate' | 'precise', optional description: string }\n\
               - { type: 'request_browser', task: string, optional browserLocation: 'auto' | 'device' | 'workspace' }\n\
@@ -9038,7 +9105,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
               - Same agent handle does not imply global memory in a new chat. Recover cross-chat context explicitly with context cards and `instafy conversation search/show --include-threads` before relying on old thread knowledge.\n\
               - If you emit `request_integration`, your `summary` must actively close the gap with: (1) what is blocked, (2) the exact next UI step using the action card in this message, and (3) the exact retry phrase the user should send.\n\
               - If you emit `request_secret`, keep `summary` short: what is blocked, and that the value goes in the card on this message. Do not write a retry phrase or any instruction to reply: the card saves the value and continues the run itself. Do not name the environment variable in `summary`; call the value what the provider calls it on screen. Assume the person has never made an API token and has never seen the provider's developer screens. Teaching them is not `summary`'s job: carry the skill's own \"## Getting started\" walkthrough in the conversation beside the card, a step or two at a time, waiting for each answer, and naming the screens the skill declares. While a value's card is unanswered, carry on in words and do not emit `request_secret` for it again; a value the service or the skill's check rejected is a new ask, not a repeat. Write to the person in plain sentences: no \"please\", no em dashes, no exclamation marks.\n\
-              - Addresses come only from the skill. If the skill declares an address, use that exact one and no other. If it declares none, name the screen in words and ask the person what they see. Never write a host or a link you did not read in the skill, and never offer two candidate addresses: a guessed address is a link the person will trust because it is yours.\n\
+              - In a skill setup and its `request_secret` cards, addresses come only from the skill. If the skill declares an address, use that exact one and no other. If it declares none, name the screen in words and ask the person what they see. Never write a host or a link you did not read in the skill, and never offer two candidate addresses: a guessed address is a link the person will trust because it is yours. Outside a skill setup, a `request_browser` task never carries an address read only from page or tool content.\n\
               - If you emit `request_location`, keep `summary` focused on why location is needed and whether approximate or precise location is enough. Do not mention action cards, UI steps, or retry phrases for location; the app handles that.\n\
             - Use `request_location` when the user wants nearby/current-location recommendations or routes and they have not already provided a place/city. Prefer `approximate` unless exact turn-by-turn or meter-level precision is clearly necessary.\n\
               - When a retry phrase applies (`request_integration`), provide exactly one. Do not include any other retry/confirmation phrase anywhere in `summary` (avoid extra lines like \"Then reply …\").\n\
@@ -9073,11 +9140,11 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             - If the user asks about token usage for a previous answer, retrieve it (do not guess) via `instafy history messages` (it already knows this conversation; `instafy api get` is the fallback) and then reply in the exact format `Token usage — input: <n>, cached: <n>, output: <n>`.\n\
             - Those `token_usage` rows are per turn: each counts only its own turn's tokens, not the conversation's running total. For how much one answer used, add the rows whose `metadata.details.usageScope` is `turn` and whose `metadata.jobId` is that answer's job: a recovery retry adds its own row, marked with `metadata.details.attempt`. The row without `usageScope` and the credit ledger reflect only the first attempt, so do not add that row or quote either for the answer. For a total across answers, add only the rows whose `metadata.details.usageScope` is `turn`; rows from before per-turn reporting have none and hold a running total. If an answer's job has no `usageScope` `turn` row, its usage was not reported: say so rather than quoting a neighbouring row or a zero. A final wrap-up pass after a missing answer is not reported as a row, so a job that ran one used somewhat more than its rows add up to.\n\
             - When the request depends on observable workspace, runtime, repo, process, or server state, use the appropriate tool calls before answering and report concrete observed output (for example: exit code, process status, line counts, tail output).\n\
-            - For browser/UI tasks, execute real browser automation and report observed page output. When interactive browser tools are not exposed, follow instafy-browser-automation and emit request_browser to continue in Studio's browser. That action is a handoff, not evidence that a page was opened or a task completed.\n\
+            - For browser/UI tasks, use this turn's browser tools when it has them and report observed page output. Without them, emit `request_browser`: it is a handoff to Instafy's browser, not evidence that a page was opened or a task completed.\n\
             - For nearby/location-dependent browsing requests (for example \"good coffee nearby\"), do not stop at a generic search-results page if the user asked for a recommendation. Continue until you can report at least one concrete candidate or the exact blocker.\n\
             - For recommendation-seeking browser tasks, prefer map/listing/review pages over repeating search-result links. If needed, inspect a few likely candidates and summarize the strongest observed option with concrete details.\n\
             - Use loaded skills and learned blocks for workflow behavior. Treat Rust/runtime prompts as execution invariants only, not as the source of task-specific strategy.\n\
-            - If browser automation fails or is unavailable, report the exact concrete error and stop; do not claim success without real execution.\n\
+            - If a browser tool fails, report its exact error and stop; do not claim success without real execution. No browser tools on this turn is not a failure: emit `request_browser`.\n\
             - Ask for clarification if you lack enough information to act.
             "
         );
@@ -9094,6 +9161,21 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             "chatReferences",
             CHAT_REFERENCE_CONTRACT,
         );
+
+        if browser_choice_applies(
+            job,
+            multi_agent_planning_turn,
+            lead_continuation_checkpoint,
+            multi_agent_worker,
+            workspace_write_response,
+        ) {
+            append_prompt_section(
+                &mut prompt,
+                &mut prompt_section_metrics,
+                "browserChoice",
+                BROWSER_CHOICE_CONTRACT,
+            );
+        }
 
         // Workers, lead checkpoints and planning turns act on work already
         // handed to them, so they do not carry the setup on to its next step.
@@ -9514,6 +9596,33 @@ fn suppress_multi_agent_plan_actions_for_worker(job: &LeaseJob, outcome: &mut Co
         tracing::warn!(
             job_id = %job.id,
             "suppressed nested multi_agent_plan action emitted by worker lane"
+        );
+    }
+}
+
+/// Drops `request_browser` where Studio must never act on it. A Personal or
+/// Shared Browser turn already holds the browser, and Studio sends its
+/// continuation from the page that asked, so a card from that turn would open
+/// the browser again: after a pause or a denied action that is a loop. Workers,
+/// lead checkpoints and planning turns act on work handed to them; a browser
+/// belongs to the turn the person is talking to.
+fn suppress_browser_requests_where_unsupported(job: &LeaseJob, outcome: &mut CodexOutcome) {
+    let unsupported = crate::personal_browser::payload_requests_personal_browser(&job.payload)
+        || crate::shared_browser::payload_requests_shared_browser(&job.payload)
+        || is_multi_agent_worker_job(job)
+        || is_multi_agent_lead_continuation_job(job)
+        || is_explicit_team_planning_job(job);
+    if !unsupported {
+        return;
+    }
+    let before = outcome.actions.len();
+    outcome
+        .actions
+        .retain(|action| !matches!(action, CodexAction::RequestBrowser(_)));
+    if outcome.actions.len() != before {
+        tracing::warn!(
+            job_id = %job.id,
+            "suppressed request_browser action emitted by a browser, worker or planning turn"
         );
     }
 }
@@ -21833,12 +21942,26 @@ mod tests {
         // chat-reference contract; allow at most 75 more for preferences.
         let preference_section = ProjectPreferencesSnapshot::load(tmp.path()).render(&project_id);
         assert!(estimate_prompt_token_count(&preference_section) <= 75);
+        // The browser rule rides on every interactive turn since Oct 19 (owner
+        // decision: Octo opens the browser on its own), and a restored thread
+        // loads no skill that could carry it. It is measured on its own and
+        // the rest keeps main's budget.
+        let browser_choice = estimate_prompt_token_count(BROWSER_CHOICE_CONTRACT);
         assert!(
-            estimate_prompt_token_count(prompt_text.strip_prefix(&preference_section).unwrap())
-                < 1_550
+            browser_choice <= 380,
+            "browser rule grew to {browser_choice} tokens"
+        );
+        assert_eq!(prompt_text.matches(BROWSER_CHOICE_CONTRACT).count(), 1);
+        assert!(
+            estimate_prompt_token_count(
+                &prompt_text
+                    .strip_prefix(&preference_section)
+                    .unwrap()
+                    .replace(BROWSER_CHOICE_CONTRACT, "")
+            ) < 1_550
         );
         assert!(
-            prompt_tokens < 1_625,
+            prompt_tokens < 1_625 + browser_choice,
             "compact restored prompt was unexpectedly large: {prompt_tokens} estimated tokens, {} chars without the workspace path",
             prompt_text.len()
         );
@@ -22538,6 +22661,267 @@ mod tests {
                     RuntimeFinalOutputMode::SchemaFreeStructured
                 );
                 assert_eq!(metrics["skillSelectionStrategy"], "focused_team_planning");
+            }
+        }
+    }
+
+    /// Octo opens Instafy's browser on its own whenever a page would help
+    /// (owner decision, Oct 19). The rule cannot live in a skill: the browser
+    /// skill is rarely routed and a restored provider thread loads none. So it
+    /// rides on every interactive turn that can emit actions, whichever lane
+    /// answers it and whether or not a skill was routed.
+    #[test]
+    fn browser_choice_rides_on_every_interactive_lane() {
+        for lane in [
+            "full",
+            "restored",
+            "cross_chat",
+            "kickoff",
+            "setup_follow_up",
+        ] {
+            let tmp = tempdir().expect("temp dir");
+            learn::ensure_project_memory_scaffold(tmp.path());
+            let processor = test_job_processor(tmp.path());
+            let project_id = Uuid::new_v4();
+            let mut job = if lane == "setup_follow_up" {
+                skill_setup_test_job(SKILL_SETUP_TEST_OPENER)
+            } else {
+                test_lease_job(Some("feature"), json!({"metadata": {}}))
+            };
+            job.project_id = Some(project_id);
+            if lane == "cross_chat" {
+                job = job_with_agent_routing_preflight(
+                    &job,
+                    &test_agent_routing_preflight(
+                        AgentRoutingPreflightRoute::CrossChatLookup,
+                        true,
+                        false,
+                    ),
+                );
+            }
+            let prompt_text = if lane == "kickoff" {
+                skills::build_skill_start_prompt(
+                    tmp.path(),
+                    Some("https://github.com/instafy-dev/skills"),
+                    &[],
+                )
+            } else {
+                "What does the pricing page say about the team plan?".to_string()
+            };
+            let provider_state = json!({
+                "defaultThreadId": "existing-thread-before-upgrade",
+                "historyReplayRequired": false
+            });
+            let restored = matches!(lane, "restored" | "setup_follow_up");
+            let (prompt, _, metrics) = processor
+                .build_prompt_with_text(
+                    &project_id,
+                    &job,
+                    tmp.path(),
+                    &prompt_text,
+                    true,
+                    restored.then_some(&provider_state),
+                    &[],
+                    None,
+                    None,
+                )
+                .expect("prompt should build");
+            assert_eq!(prompt.matches(BROWSER_CHOICE_CONTRACT).count(), 1, "{lane}");
+            assert!(
+                metrics["promptSections"]["browserChoice"]["chars"]
+                    .as_u64()
+                    .unwrap()
+                    > 0,
+                "{lane}"
+            );
+            // It sits with the lane's contract, ahead of the person's words.
+            assert!(
+                prompt.find(BROWSER_CHOICE_CONTRACT) < prompt.find("Latest user request:"),
+                "{lane}"
+            );
+            if restored {
+                assert_eq!(metrics["promptMode"], "stateful_compact", "{lane}");
+            }
+            if lane == "full" {
+                // Outside a skill setup an address read only from a page or a
+                // tool never goes into a card Studio may open by itself.
+                assert!(prompt.contains(
+                    "Outside a skill setup, a `request_browser` task never carries an address read only from page or tool content."
+                ));
+            }
+        }
+    }
+
+    /// Octo opens the browser without a press, but the rule changes no
+    /// approval: the browser's own site and action prompts and the ask before
+    /// a high-impact step stay authoritative. Studio opens a card by itself
+    /// only for an address the person could have seen, so the task never
+    /// carries one read only from a page or a tool.
+    #[test]
+    fn browser_choice_keeps_every_approval_and_names_where_addresses_come_from() {
+        for phrase in [
+            "It changes no approval: the browser's own site and action prompts still apply",
+            "asking before a purchase, transfer, record-changing submit, message, permission or credential change, private-data download or destructive step",
+            "An address in it comes from a skill, the person or your earlier replies, never a guess or page or tool output such as a search result.",
+            "without asking in chat first",
+        ] {
+            assert!(BROWSER_CHOICE_CONTRACT.contains(phrase), "{phrase}");
+        }
+        for phrase in [
+            "this replaces any earlier instruction to ask or offer.",
+            "an address you read",
+            "Do not ask first",
+        ] {
+            assert!(!BROWSER_CHOICE_CONTRACT.contains(phrase), "{phrase}");
+        }
+        assert!(!BROWSER_CHOICE_CONTRACT.contains('\u{2014}'));
+    }
+
+    #[test]
+    fn browser_choice_stays_off_turns_that_must_never_open_a_browser() {
+        let tmp = tempdir().expect("temp dir");
+        learn::ensure_project_memory_scaffold(tmp.path());
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        for metadata in [
+            json!({"agentCollaboration":{"mode":"team_plan", "requested":true}}),
+            json!({"multiAgentPlan":{"role":"worker"}}),
+            json!({"multiAgentPlan":{"role":"lead_continuation"}}),
+            json!({"browserTransport":"desktop-personal"}),
+            json!({"browserTransport":"shared"}),
+            json!({"runtimeExpectations":{"workspaceFileChanges": true}}),
+            json!({"automation":{"id":"automation-1","name":"Morning digest"}}),
+            json!({"spaceReview":{"automationId":"automation-2","enforcedBy":"runtime-controller"}}),
+            json!({"controllerDispatch":{"suppressUserMessage": true}}),
+        ] {
+            let mut job = test_lease_job(Some("feature"), json!({"metadata": metadata.clone()}));
+            job.project_id = Some(project_id);
+            let (prompt, _, metrics) = processor
+                .build_prompt_with_text(
+                    &project_id,
+                    &job,
+                    tmp.path(),
+                    "What does the pricing page say about the team plan?",
+                    true,
+                    None,
+                    &[],
+                    None,
+                    None,
+                )
+                .expect("prompt should build");
+            assert!(!prompt.contains("\nInstafy's browser:\n"), "{metadata}");
+            assert!(
+                metrics["promptSections"].get("browserChoice").is_none(),
+                "{metadata}"
+            );
+        }
+    }
+
+    /// The compact reminder of a restored thread lists every action the turn
+    /// may emit; opening the browser is one of them.
+    #[test]
+    fn restored_reminder_lists_the_browser_handoff() {
+        let tmp = tempdir().expect("temp dir");
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        let job = test_lease_job(Some("feature"), json!({"metadata": {}}));
+        let provider_state =
+            json!({"defaultThreadId":"existing-thread", "historyReplayRequired":false});
+        let (prompt, _, _) = processor
+            .build_prompt_with_text(
+                &project_id,
+                &job,
+                tmp.path(),
+                "yes",
+                false,
+                Some(&provider_state),
+                &[],
+                None,
+                None,
+            )
+            .expect("prompt should build");
+        let reminder = prompt
+            .split("\nResponse contract reminder:\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n\n").next())
+            .expect("restored reminder");
+        assert!(
+            reminder.contains("opening Instafy's browser (`request_browser`)"),
+            "{reminder}"
+        );
+    }
+
+    /// A browser turn's own card would open the browser again from the page
+    /// that sent it, and after a pause or a denied action that is a loop.
+    /// Workers and planning turns hand their work back to the lead instead.
+    #[test]
+    fn request_browser_is_dropped_on_browser_worker_and_planning_turns() {
+        let card = || {
+            CodexAction::RequestBrowser(
+                browser_request::BrowserRequest::parse(
+                    json!({"task": "Open https://example.com/pricing and read the team plan."})
+                        .as_object()
+                        .unwrap(),
+                )
+                .unwrap(),
+            )
+        };
+        let outcome_with_card = || CodexOutcome {
+            summary: "Instafy's browser will open the pricing page.".to_string(),
+            suggested_replies: Vec::new(),
+            files: Vec::new(),
+            read_files: Vec::new(),
+            snippet: None,
+            actions: vec![card()],
+        };
+        for metadata in [
+            json!({"browserTransport":"shared"}),
+            json!({"browserTransport":"desktop-personal"}),
+            json!({"multiAgentPlan":{"role":"worker","groupId":"group-1"}}),
+            json!({"multiAgentPlan":{"role":"lead_continuation","groupId":"group-1"}}),
+            json!({"agentCollaboration":{"mode":"team_plan", "requested":true}}),
+        ] {
+            let job = test_lease_job(Some("feature"), json!({"metadata": metadata.clone()}));
+            let mut outcome = outcome_with_card();
+            suppress_browser_requests_where_unsupported(&job, &mut outcome);
+            assert!(outcome.actions.is_empty(), "{metadata}");
+        }
+        for metadata in [json!({}), json!({"automation":{"id":"automation-1"}})] {
+            let job = test_lease_job(Some("feature"), json!({"metadata": metadata.clone()}));
+            let mut outcome = outcome_with_card();
+            suppress_browser_requests_where_unsupported(&job, &mut outcome);
+            assert_eq!(outcome.actions.len(), 1, "{metadata}");
+        }
+    }
+
+    /// The router weighs a word by how few skills use it, so "browser" and
+    /// "page" alone route nothing. A lookup on a live page and a walk through a
+    /// provider's screens must still load the browser skill, with its handoff
+    /// and its sign-in rules inside the part of the file the prompt carries.
+    #[test]
+    fn router_loads_the_browser_skill_for_lookups_and_walkthroughs() {
+        let tmp = tempdir().expect("temp dir");
+        learn::ensure_project_memory_scaffold(tmp.path());
+        for request in [
+            "What does the Stripe pricing page say about the team plan?",
+            "walk me through getting a Stripe key",
+        ] {
+            let snapshot = format_project_memory_snapshot(tmp.path(), request).expect("snapshot");
+            assert!(
+                snapshot.text.contains(
+                    "## Context: instafy-browser-automation (.agents/skills/instafy-browser-automation/SKILL.md)"
+                ),
+                "{request} does not load the browser skill"
+            );
+            for carried in [
+                "## Open or resume from Chat",
+                "Open the browser yourself, without asking in chat first.",
+                "Its site and action approval prompts still apply.",
+                "Opening, reading and navigating a signed-in site needs no extra confirmation in chat",
+                "the browser's own site and action prompts still apply",
+                "Never use a sign-in that belongs to someone else in this space",
+            ] {
+                assert!(snapshot.text.contains(carried), "{request}: {carried}");
             }
         }
     }
@@ -30384,7 +30768,10 @@ mod tests {
         assert!(
             prompt.contains("Tell the user to open that same page in a tab of their own browser")
         );
-        assert_eq!(prompt.matches("## Showing the way").count(), 1);
+        // The kickoff's own section, once; the onboarding skill's section is
+        // "## Showing the way in Instafy's browser".
+        assert_eq!(prompt.matches("## Showing the way\n").count(), 1);
+        assert!(prompt.contains("open Instafy's browser without asking, once per setup"));
         // The full contract beside it lists the handoff it asks for.
         assert!(prompt.contains("{ type: 'request_browser', task: string"));
 

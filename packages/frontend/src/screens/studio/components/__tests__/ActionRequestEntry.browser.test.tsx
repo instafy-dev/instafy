@@ -11,15 +11,15 @@ import { BrowserRequestHostContext, type BrowserRequestHost } from "../browserRe
 function browserCard(browserRequest: Record<string, unknown>): { message: ChatMessage; details: Record<string, unknown> } {
   const details = {
     testId: "browser-request-card",
-    title: "Continue in browser",
-    description: "Open your browser and let the AI continue this task there.",
+    title: "Continue in Instafy's browser",
+    description: "Studio opens the browser and continues this task there.",
     browserRequest,
     actions: [{ id: "continue-browser", label: "Open browser and continue", variant: "primary",
       event: "instafy:request-browser", busyLabel: "Opening browser…", testId: "browser-request-continue" }],
   };
   return {
-    message: { id: "card", role: "assistant", content: "Continue this task in your browser.", timestamp: 1,
-      metadata: { messageType: "action_request", details } },
+    message: { id: "card", role: "assistant", content: "Continue this task in Instafy's browser.", timestamp: 1,
+      metadata: { messageType: "action_request", jobId: "job-1", details } },
     details,
   };
 }
@@ -50,9 +50,14 @@ describe("a request_browser card", () => {
         </BrowserRequestHostContext.Provider>,
       );
     });
+    const text = (testId: string) => container.querySelector(`[data-testid="${testId}"]`)?.textContent ?? null;
     return {
-      destination: container.querySelector('[data-testid="browser-request-destination"]')?.textContent ?? null,
-      unavailable: container.querySelector('[data-testid="browser-request-unavailable"]')?.textContent ?? null,
+      destination: text("browser-request-destination"),
+      unavailable: text("browser-request-unavailable"),
+      opening: text("browser-request-opening"),
+      openingNote: text("browser-request-opening-note"),
+      opened: text("browser-request-opened"),
+      reason: text("browser-request-reason"),
       button: container.querySelector<HTMLButtonElement>('[data-testid="browser-request-continue"]'),
     };
   }
@@ -105,6 +110,49 @@ describe("a request_browser card", () => {
     );
     expect(card.unavailable).toBeNull();
     expect(card.button?.disabled).toBe(false);
+  });
+
+  // Octo opens Instafy's browser by itself (owner decision, Oct 19); the card
+  // says so in place of its button, or keeps the button with the reason.
+  const task = { task: "Open https://dashboard.stripe.com/apikeys and stop on the list.", location: "auto" };
+
+  it("reads Opening while Studio opens the browser by itself, with the cost of switching the machine", async () => {
+    const card = await render(task, { ...web, cardStates: new Map([["job:job-1", {
+      kind: "opening", note: "This space's machine restarts with the browser. This takes about two minutes and one billing interval.",
+    }]]) });
+    expect(card.opening).toBe("Opening Instafy's browser at dashboard.stripe.com");
+    expect(card.openingNote).toContain("about two minutes and one billing interval");
+    expect(card.button).toBeNull();
+    expect(card.destination).toBeNull();
+  });
+
+  it("reads Opened, without its button, once continued, also after a reload", async () => {
+    for (const host of [
+      { ...web, cardStates: new Map([["job:job-1", { kind: "opened" } as const]]) },
+      { ...web, continuedKeys: new Set(["job:job-1"]) },
+    ]) {
+      const card = await render(task, host);
+      expect(card.opened).toContain("Opened");
+      expect(card.opened).toContain("dashboard.stripe.com");
+      expect(card.button).toBeNull();
+    }
+  });
+
+  it("keeps the button with the reason Studio did not open it by itself", async () => {
+    const card = await render(task, { ...web, cardStates: new Map([["job:job-1", {
+      kind: "button", reason: "This starts a second cloud machine for this space.",
+    } as const]]) });
+    expect(card.reason).toBe("This starts a second cloud machine for this space.");
+    expect(card.destination).toBe("Opens dashboard.stripe.com");
+    expect(card.button?.disabled).toBe(false);
+  });
+
+  it("says the browser on this device needs the person's own AI", async () => {
+    const card = await render({ ...task, location: "device" }, {
+      transport: "personal", personalAvailable: true, sharedUnavailable: false, personalTurnsAllowed: false,
+    });
+    expect(card.unavailable).toBe("The browser on this device needs your own AI connection.");
+    expect(card.button?.disabled).toBe(true);
   });
 
   it("keeps its old behaviour where Studio provides no browser information", async () => {

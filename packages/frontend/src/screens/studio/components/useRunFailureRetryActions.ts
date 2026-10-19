@@ -12,6 +12,7 @@ import {
 } from "../../../conversations/sentPromptRegistry";
 import type { StatusIntent } from "../../../status/StatusProvider";
 import type { ChatMessage } from "../types";
+import { readBrowserRequestOf } from "./browserRequest";
 import type { ChatSubmitOverride } from "./chatSubmitPlanning";
 import type { RunFailureRetryContextValue } from "./RunFailureNotice";
 import { useRunFailureAutoRetry } from "./useRunFailureAutoRetry";
@@ -55,6 +56,7 @@ export function useRunFailureRetryActions({
   isAssistantTyping,
   autoRetryEnabled = true,
   submit,
+  resendBrowserRequest,
   showStatus,
   onConnectAi,
 }: {
@@ -76,6 +78,12 @@ export function useRunFailureRetryActions({
    * queued behind a busy agent resolves `false` and calls `onQueued` first.
    */
   submit: (override: ChatSubmitOverride, options?: RunFailureResendOptions) => Promise<boolean>;
+  /**
+   * Sends a browser card's task again for a failed continuation of it, with
+   * the given retry metadata. Resolves to whether it went out. Without it, a
+   * continuation is not resent here: its shown text is only a notice.
+   */
+  resendBrowserRequest?: (promptMessage: ChatMessage, retryMetadata: Record<string, unknown>) => Promise<boolean>;
   showStatus: (message: string, intent?: StatusIntent, durationMs?: number) => void;
   onConnectAi?: () => void;
 }): RunFailureRetryContextValue {
@@ -173,6 +181,13 @@ export function useRunFailureRetryActions({
         showStatus("Couldn't find the original message to send again.", "info", 4000);
         return;
       }
+      // A continuation of a browser card shows a one-line notice in place of
+      // the task it sent: Try again sends that task again, never the notice.
+      const browserContinuation = readBrowserRequestOf(promptMessage) !== null;
+      if (browserContinuation && !resendBrowserRequest) {
+        showStatus("Open the browser from Octo's message to try again.", "info", 4000);
+        return;
+      }
       // Retried by hand, so never also automatically: this uses up the
       // prompt's automatic retry for the page, which a remount or another
       // panel does not get back.
@@ -180,13 +195,21 @@ export function useRunFailureRetryActions({
       retryInFlightRef.current = true;
       setPendingRetryKey(failureMessage.id);
       try {
-        await resend(failureMessage, promptMessage.content);
+        if (browserContinuation && resendBrowserRequest) {
+          const sent = await resendBrowserRequest(promptMessage, buildRunFailureRetryMetadata(failureMessage));
+          if (sent) {
+            if (readRetrySentFromThisPage(failureMessage.id) === "failed") markNotRetried(failureMessage.id);
+            else markRetried(failureMessage.id);
+          }
+        } else {
+          await resend(failureMessage, promptMessage.content);
+        }
       } finally {
         retryInFlightRef.current = false;
         setPendingRetryKey(null);
       }
     },
-    [isRetrySuperseded, messages, resend, showStatus],
+    [isRetrySuperseded, markNotRetried, markRetried, messages, resend, resendBrowserRequest, showStatus],
   );
 
   // The automatic re-dispatch shares the resend but deliberately does NOT touch

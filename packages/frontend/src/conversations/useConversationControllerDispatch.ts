@@ -398,7 +398,9 @@ export function useConversationControllerDispatch({
         if (!response) {
           throw new Error("Controller unavailable. Try again shortly.");
         }
-        if (requirements?.requireRun && resolveRunIds(response).length === 0) {
+        // A prompt the controller put in the conversation's send queue, behind
+        // a run that took the lane first, is sent: it runs next.
+        if (requirements?.requireRun && resolveRunIds(response).length === 0 && response.status !== "queued") {
           throw new Error("The controller did not start a browser turn. Your manual input remains on the page; try again when ready.");
         }
         const isAgentEvaluationDispatch = isSkillModeAmbientDispatchMetadata(metadata);

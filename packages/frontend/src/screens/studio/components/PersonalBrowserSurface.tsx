@@ -141,6 +141,7 @@ export function PersonalBrowserSurface({
   humanInputIdentityKey,
   historyUserId,
   onContinueAfterHumanInput,
+  onPauseAgentControl,
   sharingControls,
 }: {
   active: boolean;
@@ -151,6 +152,8 @@ export function PersonalBrowserSurface({
   humanInputIdentityKey?: string;
   historyUserId?: string | null;
   onContinueAfterHumanInput?: (message: string, approvalMode: "ask" | "routine") => Promise<boolean>;
+  /** The person paused agent control with the toolbar button. */
+  onPauseAgentControl?: () => void;
   sharingControls?: ReactNode;
 }) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -462,10 +465,13 @@ export function PersonalBrowserSurface({
               aria-label={model.status?.agentControlEnabled ? "Pause agent control" : "Resume agent control"}
               isDisabled={!model.status?.agentControlEnabled && (model.status?.humanControlReady === false || model.status?.tabControlActive)}
               className="max-[540px]:h-10 max-[540px]:w-10"
-              onPress={() => void model.setAgentControlEnabled(
-                !model.status?.agentControlEnabled,
-                routineApprovalAvailable ? selectedApprovalMode : undefined,
-              )}
+              onPress={() => {
+                if (model.status?.agentControlEnabled) onPauseAgentControl?.();
+                void model.setAgentControlEnabled(
+                  !model.status?.agentControlEnabled,
+                  routineApprovalAvailable ? selectedApprovalMode : undefined,
+                );
+              }}
               radius="full"
               size="sm"
               title={model.status?.agentControlEnabled ? "Pause agent control" : "Resume agent control"}

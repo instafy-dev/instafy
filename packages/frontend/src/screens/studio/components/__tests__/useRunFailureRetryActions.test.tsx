@@ -90,6 +90,7 @@ type HarnessProps = {
   showStatus?: (message: string) => void;
   isAssistantTyping?: boolean;
   autoRetryEnabled?: boolean;
+  resendBrowserRequest?: (promptMessage: ChatMessage, retryMetadata: Record<string, unknown>) => Promise<boolean>;
 };
 
 let latest: RunFailureRetryContextValue | null = null;
@@ -101,6 +102,7 @@ function Harness({
   showStatus = vi.fn(),
   isAssistantTyping = false,
   autoRetryEnabled,
+  resendBrowserRequest,
 }: HarnessProps) {
   latest = useRunFailureRetryActions({
     messages,
@@ -111,6 +113,7 @@ function Harness({
     isAssistantTyping,
     autoRetryEnabled,
     submit,
+    resendBrowserRequest,
     showStatus,
   });
   return null;
@@ -239,6 +242,72 @@ describe("useRunFailureRetryActions", () => {
     expect(latest?.pendingRetryKey).toBeNull();
     // Accepted, though the resent message is not listed yet: no second Try again.
     expect(latest?.isRetrySuperseded?.(failed)).toBe(true);
+  });
+
+  describe("a failed run of a browser card's continuation", () => {
+    // Shown as a one-line notice; what it dispatched was the card's task.
+    const NOTICE = createMessage({
+      id: "notice-1",
+      role: "user",
+      authorId: CURRENT_USER_ID,
+      content: "Octo opened Instafy's browser at app.example.test",
+      timestamp: 1,
+      metadata: {
+        clientMessageId: "client-notice-1",
+        client: { sessionId: CHAT_CLIENT_SESSION_ID, userId: CURRENT_USER_ID },
+        browserRequestOf: "job:card-job",
+        browserTransport: "shared",
+        displayContent: "Octo opened Instafy's browser at app.example.test",
+        dispatchContent: "Continue this browser task using the browser attached to this turn.\n\nOpen https://app.example.test",
+      },
+    });
+    beforeEach(() => {
+      rememberPromptSentFromThisPage(NOTICE);
+      recordRunsStartedByPromptSentFromThisPage(NOTICE, ["job-browser"]);
+    });
+
+    it("sends the card's task again through the browser, never the notice as a prompt", async () => {
+      const failed = failure("failure-b", MISSING_FINAL_MESSAGE, 2, { jobId: "job-browser" });
+      const submit = vi.fn<Submit>(async () => true);
+      const resendBrowserRequest = vi.fn(async (_prompt: ChatMessage, metadata: Record<string, unknown>) => {
+        // The handoff records the resend, with the retry's metadata, and the
+        // browser turn it started.
+        const sent = { id: "resend-b", metadata: { ...metadata, clientMessageId: "client-resend-b" } };
+        rememberPromptSentFromThisPage(sent);
+        recordRunsStartedByPromptSentFromThisPage(sent, ["job-resend-b"]);
+        return true;
+      });
+      await render({ messages: [NOTICE, failed], submit, resendBrowserRequest });
+      await act(async () => {
+        await latest?.requestRetry(failed);
+      });
+      expect(submit).not.toHaveBeenCalled();
+      expect(resendBrowserRequest).toHaveBeenCalledExactlyOnceWith(NOTICE, { retryOfMessageId: "failure-b" });
+      expect(latest?.isRetrySuperseded?.(failed)).toBe(true);
+    });
+
+    it("keeps Try again when the browser resend did not go out", async () => {
+      const failed = failure("failure-b", MISSING_FINAL_MESSAGE, 2, { jobId: "job-browser" });
+      const submit = vi.fn<Submit>(async () => true);
+      await render({ messages: [NOTICE, failed], submit, resendBrowserRequest: vi.fn(async () => false) });
+      await act(async () => {
+        await latest?.requestRetry(failed);
+      });
+      expect(submit).not.toHaveBeenCalled();
+      expect(latest?.isRetrySuperseded?.(failed)).toBe(false);
+    });
+
+    it("never resends the notice where no browser handoff is available", async () => {
+      const failed = failure("failure-b", MISSING_FINAL_MESSAGE, 2, { jobId: "job-browser" });
+      const submit = vi.fn<Submit>(async () => true);
+      const showStatus = vi.fn();
+      await render({ messages: [NOTICE, failed], submit, showStatus });
+      await act(async () => {
+        await latest?.requestRetry(failed);
+      });
+      expect(submit).not.toHaveBeenCalled();
+      expect(showStatus).toHaveBeenCalledWith("Open the browser from Octo's message to try again.", "info", 4000);
+    });
   });
 
   it("retires the card when the resend was queued behind a busy agent", async () => {

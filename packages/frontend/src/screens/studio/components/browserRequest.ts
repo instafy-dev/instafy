@@ -1,4 +1,5 @@
 import { createContext } from "react";
+import { didSendFailForPromptSentFromThisPage } from "../../../conversations/sentPromptRegistry";
 import type { ChatMessage } from "../types";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 import type { BrowserTransport } from "./usePersonalBrowserBridge";
@@ -7,6 +8,16 @@ export type BrowserRequest = {
   task: string;
   location: "auto" | "device" | "workspace";
 };
+
+/**
+ * What became of a card Studio considered starting by itself: it is opening,
+ * it opened, or it stays a button, with the reason when there is one worth
+ * telling the person.
+ */
+export type BrowserRequestCardState =
+  | { kind: "opening"; note: string | null }
+  | { kind: "opened" }
+  | { kind: "button"; reason: string | null };
 
 /**
  * What this Studio can open for a request_browser card. The card itself says
@@ -21,6 +32,16 @@ export type BrowserRequestHost = {
    * known yet, such as a browser that has not started, counts as available.
    */
   sharedUnavailable: boolean;
+  /**
+   * A turn in the browser on this device runs on this device's own runtime,
+   * which Instafy AI does not reach: dispatch refuses it. False only when the
+   * person's turns are known to use Instafy AI; absent counts as allowed.
+   */
+  personalTurnsAllowed?: boolean;
+  /** Cards Studio considered starting by itself, by {@link browserRequestKey}. */
+  cardStates?: ReadonlyMap<string, BrowserRequestCardState>;
+  /** Cards a continuation was already sent for, by {@link browserRequestKey}. */
+  continuedKeys?: ReadonlySet<string>;
 };
 
 /**
@@ -39,17 +60,25 @@ export function browserRequestFromMessage(message: ChatMessage): BrowserRequest 
   return { task: value.task.trim(), location: value.location };
 }
 
+type BrowserRequestHostAvailability = Pick<BrowserRequestHost, "personalAvailable" | "sharedUnavailable" | "personalTurnsAllowed">;
+
 export function browserRequestTransport(
   request: BrowserRequest,
   current: BrowserTransport,
-  host: Omit<BrowserRequestHost, "transport"> | null = null,
+  host: BrowserRequestHostAvailability | null = null,
 ): BrowserTransport {
   if (request.location === "device") return "personal";
   if (request.location === "workspace") return "shared";
   // "auto" keeps the selected browser, unless that is the Workspace browser,
   // it is known not to open here, and the browser on this device can.
-  if (host && current === "shared" && host.personalAvailable && host.sharedUnavailable) {
+  if (host && current === "shared" && host.personalAvailable && host.sharedUnavailable &&
+      host.personalTurnsAllowed !== false) {
     return "personal";
+  }
+  // Nor does it pick this device's browser for turns dispatch would refuse
+  // there (Instafy AI), while Instafy's browser can still open.
+  if (host && current === "personal" && host.personalTurnsAllowed === false && !host.sharedUnavailable) {
+    return "shared";
   }
   return current;
 }
@@ -58,7 +87,8 @@ export function browserRequestTransport(
 export function browserRequestUnavailableReason(request: BrowserRequest, host: BrowserRequestHost): string | null {
   const transport = browserRequestTransport(request, host.transport, host);
   if (transport === "personal") {
-    return host.personalAvailable ? null : "This uses the browser on your device. Open this chat in the Instafy desktop app to continue.";
+    if (!host.personalAvailable) return "This uses the browser on your device. Open this chat in the Instafy desktop app to continue.";
+    return host.personalTurnsAllowed === false ? "The browser on this device needs your own AI connection." : null;
   }
   return host.sharedUnavailable ? "Instafy's browser is not available in this workspace." : null;
 }
@@ -91,6 +121,125 @@ export function browserRequestDestinations(task: string): string[] {
   return hosts.slice(0, 3);
 }
 
+const CONTINUATION_PREFIX =
+  "Continue this browser task using the browser attached to this turn. Inspect its current state first, preserve existing session state, and avoid repeating work that is already complete.\n\n";
+
 export function browserRequestContinuation(request: BrowserRequest): string {
-  return `Continue this browser task using the browser attached to this turn. Inspect its current state first, preserve existing session state, and avoid repeating work that is already complete.\n\n${request.task}`;
+  return `${CONTINUATION_PREFIX}${request.task}`;
+}
+
+/**
+ * Prompt metadata naming the card a continuation was sent for, by
+ * {@link browserRequestKey}. It marks the prompt as Octo's request rather
+ * than the person's own words, and the card as answered, also after a reload.
+ */
+export const BROWSER_REQUEST_OF_METADATA_KEY = "browserRequestOf";
+/** Prompt metadata on a continuation Studio sent by itself, without a press. */
+export const BROWSER_AUTO_STARTED_METADATA_KEY = "browserAutoStarted";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function promptMetadataRecords(metadata: unknown): Record<string, unknown>[] {
+  if (!isRecord(metadata)) return [];
+  const records = [metadata];
+  for (const key of ["prompt_metadata", "promptMetadata"]) {
+    const nested = metadata[key];
+    if (isRecord(nested)) records.push(nested);
+  }
+  return records;
+}
+
+function readJobId(metadata: unknown): string | null {
+  if (!isRecord(metadata)) return null;
+  for (const key of ["jobId", "job_id"]) {
+    const value = metadata[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+/**
+ * A card's identity. The controller stamps the job that sent it, and a turn
+ * sends at most one card, so the job outlasts a message id that changes once
+ * the card is stored. A card without a job falls back to its message id.
+ */
+export function browserRequestKey(message: Pick<ChatMessage, "id" | "metadata">): string {
+  const jobId = readJobId(message.metadata);
+  return jobId ? `job:${jobId}` : `message:${message.id}`;
+}
+
+/** The job that sent a card, when the controller stamped one. */
+export function browserRequestJobId(message: Pick<ChatMessage, "metadata">): string | null {
+  return readJobId(message.metadata);
+}
+
+/** The card a prompt continued, from its own or its stored prompt metadata. */
+export function readBrowserRequestOf(message: Pick<ChatMessage, "role" | "metadata">): string | null {
+  if (message.role !== "user") return null;
+  for (const record of promptMetadataRecords(message.metadata)) {
+    const value = record[BROWSER_REQUEST_OF_METADATA_KEY];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+/** True when a prompt's metadata routes it to a browser or continues a card. */
+export function isBrowserTurnPromptMetadata(metadata: unknown): boolean {
+  return promptMetadataRecords(metadata).some((record) => {
+    const transport = record["browserTransport"] ?? record["browser_transport"];
+    return (typeof transport === "string" && transport.trim().length > 0) ||
+      (typeof record[BROWSER_REQUEST_OF_METADATA_KEY] === "string");
+  });
+}
+
+/**
+ * A continuation this page sent whose dispatch failed: the controller never
+ * took it, so it opened nothing and continues no card.
+ */
+export function isUnsentBrowserRequestNotice(message: Pick<ChatMessage, "id" | "role" | "metadata">): boolean {
+  return readBrowserRequestOf(message) !== null && didSendFailForPromptSentFromThisPage(message);
+}
+
+/** Cards a continuation was sent for, by {@link browserRequestKey}. */
+export function browserRequestContinuedKeys(messages: readonly ChatMessage[]): Set<string> {
+  const keys = new Set<string>();
+  for (const message of messages) {
+    const key = readBrowserRequestOf(message);
+    if (key && !isUnsentBrowserRequestNotice(message)) keys.add(key);
+  }
+  return keys;
+}
+
+/**
+ * The task a continuation sent, read back from its own prompt: the stored
+ * prompt keeps what it dispatched as `dispatchContent`. Its browser is the
+ * one it ran in. Null when the prompt is not a continuation or carries no
+ * task, so a retry never resends the notice in its place.
+ */
+export function browserRequestFromContinuationPrompt(
+  message: Pick<ChatMessage, "role" | "metadata">,
+): BrowserRequest | null {
+  if (!readBrowserRequestOf(message)) return null;
+  for (const record of promptMetadataRecords(message.metadata)) {
+    const dispatched = record["dispatchContent"];
+    if (typeof dispatched !== "string" || !dispatched.trim().startsWith(CONTINUATION_PREFIX.trim())) continue;
+    const task = dispatched.trim().slice(CONTINUATION_PREFIX.trim().length).trim();
+    if (!task || task.length > 8_000) continue;
+    const transport = record["browserTransport"] ?? record["browser_transport"];
+    const location = transport === "shared" ? "workspace" : transport === "desktop-personal" ? "device" : "auto";
+    return { task, location };
+  }
+  return null;
+}
+
+/**
+ * The one-line record a continuation leaves in the chat, in place of the task
+ * it sent: "Octo opened Instafy's browser at dashboard.stripe.com".
+ */
+export function browserRequestNotice(agentName: string, task: string): string {
+  const name = agentName.trim() || "Octo";
+  const [host] = browserRequestDestinations(task);
+  return host ? `${name} opened Instafy's browser at ${host}` : `${name} opened Instafy's browser`;
 }

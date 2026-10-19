@@ -42,5 +42,5 @@ Notes:
 
 ## Combining with other skills
 
-- If the task needs live browsing after location is shared, combine with `instafy-browser-automation`.
+- If the task would benefit from a page after location is shared, combine with `instafy-browser-automation`.
 - If the user wants a public preview or a shareable link instead of nearby recommendations, use `instafy-frontend-previews` instead.

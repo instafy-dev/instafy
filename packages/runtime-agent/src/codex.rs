@@ -114,7 +114,7 @@ const MAX_COMMAND_OUTPUT_EVENT_CHARS: usize = 4096;
 const MAX_COMMAND_OUTPUT_BUFFER_CHARS: usize = 8192;
 const BROWSER_MODE_DEVELOPER_INSTRUCTIONS: &str = r#"Browser/UI execution run:
 - Use project memory, pinned skills, and loaded learned blocks as the source of task behavior. This prompt only defines run-level invariants.
-- Use the dedicated browser tools configured for this turn when browser execution was requested.
+- Use the dedicated browser tools configured for this turn when browser execution was requested. Every site and action approval the browser asks for still applies, and ask before a purchase, transfer, record-changing submit, message, permission or credential change, private-data download or destructive step unless the user's current message named it.
 - Keep the visible page open and focused. Report only concrete observed state or exact execution errors."#;
 const SHARED_BROWSER_DEVELOPER_INSTRUCTIONS: &str = r#"Shared Browser transport (managed runtime policy):
 - A headed browser in the project's isolated hosted runtime is available. Use the dedicated tools from the `instafy_shared_browser` MCP server: `status`, `snapshot`, `navigate`, `click`, `type`, `press`, `scroll`, and `request_human_input`.
@@ -5157,6 +5157,32 @@ mod tests {
     };
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Mutex, OnceLock};
+
+    /// Octo opens Instafy's browser without a press, but nothing in a browser
+    /// turn's run-level policy may tell it to skip the browser's own site and
+    /// action prompts, or claim Studio grants routine browsing for it.
+    #[test]
+    fn browser_turn_policy_keeps_every_approval_gate() {
+        assert!(
+            BROWSER_MODE_DEVELOPER_INSTRUCTIONS
+                .contains("Every site and action approval the browser asks for still applies")
+        );
+        assert!(BROWSER_MODE_DEVELOPER_INSTRUCTIONS.contains(
+            "ask before a purchase, transfer, record-changing submit, message, permission or credential change, private-data download or destructive step"
+        ));
+        for policy in [
+            BROWSER_MODE_DEVELOPER_INSTRUCTIONS,
+            SHARED_BROWSER_DEVELOPER_INSTRUCTIONS,
+            PERSONAL_BROWSER_DEVELOPER_INSTRUCTIONS,
+        ] {
+            assert!(!policy.contains("without asking first"), "{policy}");
+            assert!(!policy.contains("Studio grants it"), "{policy}");
+        }
+        assert!(
+            SHARED_BROWSER_DEVELOPER_INSTRUCTIONS
+                .contains("Never assume, request through a tool, or synthesize that grant")
+        );
+    }
 
     #[test]
     fn abandoned_codex_attempt_rejects_reuse_before_registration_handles_drop() {

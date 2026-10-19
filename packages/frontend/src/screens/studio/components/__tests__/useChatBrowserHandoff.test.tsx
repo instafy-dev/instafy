@@ -127,6 +127,44 @@ describe("useChatBrowserHandoff", () => {
     expect(cancelAgentJob).not.toHaveBeenCalled();
   });
 
+  it("records a card's continuation as a notice and sends its task, with the card it continues", async () => {
+    // Octo's request, not the person's words: the chat shows the notice, the
+    // turn gets the task, and the prompt's metadata names the card.
+    const value = options();
+    await render(value);
+    await expect(resultRef.current!.continueShared("Continue this browser task.\n\nOpen https://app.example.test", {
+      display: "Octo opened Instafy's browser at app.example.test",
+      metadata: { browserRequestOf: "job:job-1", browserAutoStarted: true, browserTransport: "desktop-personal" },
+    })).resolves.toBe(true);
+    expect(value.onSubmit).toHaveBeenCalledExactlyOnceWith("conversation-1", "Octo opened Instafy's browser at app.example.test", expect.objectContaining({
+      dispatchInput: "Continue this browser task.\n\nOpen https://app.example.test",
+      metadata: expect.objectContaining({
+        browserRequestOf: "job:job-1", browserAutoStarted: true,
+        // The card's metadata never overrides where the turn runs.
+        browserTransport: "shared", browserRuntimeId: "shared-runtime-1", browserPageId: "page-1",
+      }),
+    }));
+  });
+
+  it("keeps the person's own approval mode when Octo opened its browser by itself", async () => {
+    // Studio opening the browser grants nothing: the person's chosen mode
+    // applies, exactly as for a press.
+    const value = options({ transport: "personal", personal: personal({
+      status: { ...personal().status!, approvalModes: ["ask", "routine"] },
+      preferredApprovalMode: "ask",
+    } as Partial<Options["personal"]>) });
+    await render(value);
+    // Even an extras object that still says Studio opened it by itself.
+    const extras = {
+      display: "Octo opened Instafy's browser at app.example.test",
+      metadata: { browserRequestOf: "job:job-1", browserAutoStarted: true },
+      autoStarted: true,
+    };
+    void resultRef.current!.startPersonal("Open https://app.example.test", extras).catch(() => null);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(value.personal.setAgentControlEnabled).toHaveBeenCalledExactlyOnceWith(true, "ask");
+  });
+
   it.each([{ transport: "personal" as const }, { runtimeId: null }, { page: null }])("does not fall back when Shared routing is unavailable: %j", async (change) => {
     const value = options(change);
     await render(value);

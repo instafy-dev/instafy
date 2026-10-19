@@ -130,9 +130,13 @@ The user can navigate manually without granting agent access. Cross-origin agent
 
 Studio selects **Allow routine browsing without asking each time** by default for
 Personal Browser control. The setting is available in Browser settings before
-Resume and also applies to Chat's **Open browser and continue** handoff. Existing
-active control keeps its approval mode. Older Desktop hosts without routine-mode
-support use Ask mode.
+Resume and also applies to Chat's **Open browser and continue** handoff, whether
+the person pressed it or Studio opened this browser by itself for Octo's card: an
+automatic start uses the same setting and grants nothing more. Only a person on
+their own AI connection gets that automatic start: with Instafy AI, a card resolves
+to Instafy's browser instead, because dispatch refuses a turn on this device's
+runtime, and that card waits for a press. Existing active control keeps its approval mode. Older Desktop hosts
+without routine-mode support use Ask mode.
 
 Electron requires one native confirmation before enabling routine mode. It permits
 ordinary navigation, searches, clicks, non-sensitive field filling and form

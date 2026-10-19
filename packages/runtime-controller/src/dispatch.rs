@@ -6307,6 +6307,35 @@ mod tests {
         assert!(request.metadata.get("agent_collaboration").is_none());
     }
 
+    /// Studio records a continuation it sends for a request_browser card as a
+    /// notice and names the card in the prompt's metadata, which is how the
+    /// card reads Opened and the notice shows after a reload. The Shared
+    /// Browser canonicalization must keep those keys.
+    #[test]
+    fn shared_browser_dispatch_keeps_the_card_a_continuation_answers() {
+        let mut request = normalized_shared_browser_request(json!({
+            "browserTransport": "shared",
+            "browserRequestOf": "job:00000000-0000-4000-8000-000000000001",
+            "browserAutoStarted": true,
+            "displayContent": "Octo opened Instafy's browser at dashboard.stripe.com",
+            "dispatchContent": "Continue this browser task.",
+        }));
+        canonicalize_shared_browser_request(&mut request).expect("valid Shared Browser metadata");
+        assert_eq!(
+            request.metadata["browserRequestOf"],
+            "job:00000000-0000-4000-8000-000000000001"
+        );
+        assert_eq!(request.metadata["browserAutoStarted"], true);
+        assert_eq!(
+            request.metadata["displayContent"],
+            "Octo opened Instafy's browser at dashboard.stripe.com"
+        );
+        assert_eq!(
+            request.metadata["dispatchContent"],
+            "Continue this browser task."
+        );
+    }
+
     #[test]
     fn shared_browser_dispatch_requires_exact_client_consent_version() {
         for invalid in [None, Some(json!(true)), Some(json!(0)), Some(json!(2))] {

@@ -54,6 +54,7 @@ import {
   shouldRenderBrowserSessionFullscreen,
 } from "./browserSessionLayout";
 import { browserSessionWsDebugFields } from "./browserSessionDebug";
+import type { SharedBrowserPresence } from "./browserAutoStart";
 import {
   coalesceBrowserRuntimeEnsure,
   listBrowserRuntimeCandidates,
@@ -439,6 +440,7 @@ export function BrowserSessionModal({
   onContinueAfterHumanInput,
   sharedBrowserRfbCapabilities = null,
   sharedBrowserWebRtcCapabilities = null,
+  onPresenceChange,
 }: {
   isOpen: boolean;
   onOpenChange: (open: boolean) => void;
@@ -478,6 +480,8 @@ export function BrowserSessionModal({
   onContinueAfterHumanInput?: ((message: string) => Promise<boolean>) | null;
   sharedBrowserRfbCapabilities?: RuntimeBrowserSessionCapabilities["rfb"] | null;
   sharedBrowserWebRtcCapabilities?: RuntimeBrowserSessionCapabilities["webrtc"] | null;
+  /** Who else is in this browser, from its collaboration roster; null once it closes. */
+  onPresenceChange?: ((presence: SharedBrowserPresence | null) => void) | null;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [containerNode, setContainerNode] = useState<HTMLDivElement | null>(null);
@@ -520,6 +524,18 @@ export function BrowserSessionModal({
         ? controlOwner
         : null;
   const remoteController = remoteSharedBrowserController(collaboration.client, effectiveAgentControlOwner);
+  const presenceStatus: SharedBrowserPresence["status"] =
+    collaboration.client.connectionStatus === "connected" && collaboration.client.participantId && collaboration.client.state
+      ? "known"
+      : collaboration.client.connectionStatus === "error" ? "unavailable" : "unknown";
+  const othersPresent = Boolean(collaboration.client.participantId && collaboration.client.state?.participants.some(
+    (participant) => participant.id !== collaboration.client.participantId,
+  ));
+  const remoteControllerPresent = remoteController !== null;
+  useEffect(() => {
+    onPresenceChange?.({ status: presenceStatus, othersPresent, remoteController: remoteControllerPresent });
+  }, [onPresenceChange, othersPresent, presenceStatus, remoteControllerPresent]);
+  useEffect(() => () => onPresenceChange?.(null), [onPresenceChange]);
   const humanInputEnabled =
     canControlBrowser &&
     collaborationSelfOwnsControl(collaboration.client) &&

@@ -7,6 +7,23 @@ import type { BrowserSessionPageTarget } from "./browserSessionPages";
 import { buildSharedBrowserSubmitMetadata, withPersonalBrowserRuntimeExpectations } from "./sharedBrowserSubmitRouting";
 import type { BrowserTransport, usePersonalBrowserBridge } from "./usePersonalBrowserBridge";
 
+/**
+ * How a continuation is shown and recorded. `display` replaces the task in the
+ * chat (the task is still what the browser turn receives, and the record keeps
+ * it as the dispatched content); `metadata` joins the prompt's metadata.
+ */
+export type BrowserContinuationExtras = {
+  display?: string | null;
+  metadata?: Record<string, unknown> | null;
+};
+
+function displayOptions(message: string, extras: BrowserContinuationExtras | null | undefined) {
+  const display = extras?.display?.trim();
+  return display && display !== message.trim()
+    ? { text: display, dispatchInput: message }
+    : { text: message, dispatchInput: null };
+}
+
 type Options = {
   userId: string | null;
   projectId: string | null;
@@ -68,25 +85,35 @@ export function useChatBrowserHandoff(options: Options) {
     return result?.ok === true && (result.canceledJobIds.includes(job.jobId) || result.canceledRunIds.includes(job.runId));
   }, [assertCurrent]);
 
-  const continueShared = useCallback(async (message: string) => {
+  const continueShared = useCallback(async (message: string, extras?: BrowserContinuationExtras | null) => {
     const captured = latest.current;
     const epoch = generation.current;
     assertCurrent(captured, epoch);
     if (captured.transport !== "shared" || !captured.runtimeId || !captured.page) return false;
-    await captured.onSubmit(captured.conversationId, message, {
+    const shown = displayOptions(message, extras);
+    await captured.onSubmit(captured.conversationId, shown.text, {
       agentHandles: [captured.agentHandle],
       imageFiles: [],
       editorState: null,
       expectedLaneIdle: true,
       requireDispatch: true,
+      ...(shown.dispatchInput ? { dispatchInput: shown.dispatchInput } : {}),
       assertDispatchCurrent: () => assertCurrent(captured, epoch),
       runtimeOverride: { runtimeId: captured.runtimeId, runtimeDisplayName: null, preferRuntime: true },
-      metadata: buildSharedBrowserSubmitMetadata({ baseMetadata: null, browserPageTarget: captured.page, runtimeId: captured.runtimeId }),
+      metadata: buildSharedBrowserSubmitMetadata({
+        baseMetadata: extras?.metadata ?? null,
+        browserPageTarget: captured.page,
+        runtimeId: captured.runtimeId,
+      }),
     });
     return true;
   }, [assertCurrent]);
 
-  const continuePersonal = useCallback(async (message: string, approvalMode: "ask" | "routine") => {
+  const continuePersonal = useCallback(async (
+    message: string,
+    approvalMode: "ask" | "routine",
+    extras?: BrowserContinuationExtras | null,
+  ) => {
     const captured = latest.current;
     const epoch = generation.current;
     assertCurrent(captured, epoch);
@@ -129,15 +156,17 @@ export function useChatBrowserHandoff(options: Options) {
           throw new Error("Personal Browser control changed before the task was sent. Take control again before continuing.");
         }
       };
-      await captured.onSubmit(captured.conversationId, message, {
+      const shown = displayOptions(message, extras);
+      await captured.onSubmit(captured.conversationId, shown.text, {
         agentHandles: [captured.agentHandle],
         imageFiles: [],
         editorState: null,
         expectedLaneIdle: true,
         requireDispatch: true,
+        ...(shown.dispatchInput ? { dispatchInput: shown.dispatchInput } : {}),
         assertDispatchCurrent,
         runtimeOverride,
-        metadata: withPersonalBrowserRuntimeExpectations({ browserTransport: "desktop-personal" }),
+        metadata: withPersonalBrowserRuntimeExpectations({ ...(extras?.metadata ?? {}), browserTransport: "desktop-personal" }),
       });
       return true;
     } catch (error) {
@@ -155,7 +184,7 @@ export function useChatBrowserHandoff(options: Options) {
     }
   }, [assertCurrent]);
 
-  const startPersonal = useCallback(async (message: string) => {
+  const startPersonal = useCallback(async (message: string, extras?: BrowserContinuationExtras | null) => {
     const captured = latest.current;
     const epoch = generation.current;
     assertCurrent(captured, epoch);
@@ -165,15 +194,19 @@ export function useChatBrowserHandoff(options: Options) {
     }
     const runtimeOverride = captured.personal.runtimeOverride;
     if (!runtimeOverride) {
+      // The person's own approval mode, whether they pressed the card or
+      // Studio opened the browser by itself.
       return continuePersonal(message, captured.personal.status?.approvalModes?.includes("routine")
-        ? captured.personal.preferredApprovalMode : "ask");
+        ? captured.personal.preferredApprovalMode : "ask", extras);
     }
-    await captured.onSubmit(captured.conversationId, message, {
+    const shown = displayOptions(message, extras);
+    await captured.onSubmit(captured.conversationId, shown.text, {
       agentHandles: [captured.agentHandle],
       imageFiles: [],
       editorState: null,
       expectedLaneIdle: true,
       requireDispatch: true,
+      ...(shown.dispatchInput ? { dispatchInput: shown.dispatchInput } : {}),
       assertDispatchCurrent: () => {
         assertCurrent(captured, epoch);
         if (latest.current.personal.runtimeOverride?.runtimeId !== runtimeOverride.runtimeId) {
@@ -181,7 +214,7 @@ export function useChatBrowserHandoff(options: Options) {
         }
       },
       runtimeOverride,
-      metadata: withPersonalBrowserRuntimeExpectations({ browserTransport: "desktop-personal" }),
+      metadata: withPersonalBrowserRuntimeExpectations({ ...(extras?.metadata ?? {}), browserTransport: "desktop-personal" }),
     });
     return true;
   }, [assertCurrent, continuePersonal]);
