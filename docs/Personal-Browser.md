@@ -124,7 +124,7 @@ Personal Browser is gated at several layers.
 
 In Ask mode, the first agent navigation to, or interaction with, an HTTP(S) origin shows a native Electron confirmation. The positive choice is **Allow for this session**. Approval is held in memory for the current project/browser session and is cleared when the browser closes, its identity changes, or browser data is cleared.
 
-The user can navigate manually without granting agent access. Cross-origin agent navigation and link activation require approval for the destination origin, unless routine browsing was explicitly granted as described below.
+The user can navigate manually without granting agent access. Cross-origin agent navigation and link activation require approval for the destination origin, unless routine browsing was explicitly granted as described below. A routine run shows no site prompt at all.
 
 ### Routine browsing and stricter approval
 
@@ -144,29 +144,74 @@ browser instead, because dispatch refuses a turn on this device's runtime, and t
 waits for a press. Existing active control keeps its approval mode. Older Desktop hosts
 without routine-mode support use Ask mode.
 
-The rest of this section describes routine on Desktop hosts without policy version 2.
+Desktop reports `approvalPolicyVersion: 2` in its status. On such a host
+"routine" is the owner's tier, the same for a press, Resume, **Let AI continue**
+and a start Studio makes by itself. Electron shows one native confirmation per
+run with three buttons: **Cancel** ends the start, **Ask me each step** starts
+the run in Ask mode, and **Allow** starts routine. When Studio passes the card's
+hosts as `knownHosts` (at most three valid host names; others are dropped), the
+dialog lists them.
 
-Electron requires one native confirmation before enabling routine mode. It permits
+Routine never shows a per-site prompt, including for an address the agent types
+itself. What it does:
+
+- **Free, never prompted:** reading (snapshot and status, always redacted),
+  scrolling, following a plain link (the clicked element is the link itself,
+  an `http(s)` address that is not a same-page anchor, a download or a risky
+  address, and not an entry in a credential row or dialog), tabs, `<summary>`,
+  menu and popup openers, neutral menu, tree, tab and navigation items, page
+  numbers, privacy-preserving cookie dismissals, clicking into a field, typing
+  into a search field, submitting a search that uses GET to the same site or no
+  form, and Tab, Escape, PageUp, PageDown, Home, End and arrow keys outside
+  value controls.
+- **Asks ("Allow once"), titled by category:** every other click (buttons,
+  icon-only and script-driven controls, checkboxes, selects, rows), every other
+  submit including every POST form, Enter on a field that is not proven to be
+  search, arrow keys on sliders and option lists, and risky addresses.
+  Typing outside search asks once per form on the page, or once per field
+  outside forms; Space, Backspace and Delete in a field share that approval.
+  `type` with `submit` asks once to fill in and submit; the submission asks
+  again only when typing changed what kind of step it is.
+- **Risky addresses** are judged by the address only: sign-out and unsubscribe,
+  an action word next to an id or token (delete, remove, cancel, confirm,
+  approve, accept, join, forward, verify, activate, reset, revoke, unlink,
+  löschen, stornieren, kündigen), invite, magic and reset links with a long
+  random token, export and download paths, and file extensions such as csv,
+  xlsx, json, pdf, zip, ofx, qif, mt940, camt and DATEV. Search terms never
+  count. The check runs on the agent's `navigate`, on links, and on navigations
+  the page starts and redirects, in both modes. The address an approved step
+  opens is not asked about again; a redirect to another risky address is held
+  until the person allows it.
+- **Refused in every mode:** see the step categories below.
+
+Denials are final for that step: `activation_denied`, `typing_denied`,
+`form_submission_denied`, `navigation_denied` and `origin_not_approved`.
+
+On a Desktop host without policy version 2, routine keeps its older meaning. electron requires one native confirmation before enabling routine mode. It permits
 ordinary navigation, searches, clicks, non-sensitive field filling and form
 submissions, including Enter/Space activation, across sites in the
 current project/browser control session without repeated site/action prompts.
 Recognized consequential controls and URLs still ask; secret-entry blocks and
 fresh-target validation remain.
 Pause, Escape, closing, clearing data, or changing the user/project/renderer
-revokes this grant. The visible checkbox may retain its selection while this
-browser surface stays open, but a later Resume requires a fresh native
-confirmation; no permission is saved to the browser profile or shared with teammates.
+revokes this grant. A later Resume shows the start confirmation again; no
+permission is saved to the browser profile or shared with teammates.
 
-Uncheck the setting to use **Ask** mode. Every agent activation of a button, link,
-submit-like input, or form submission then shows a native **Allow once**
-confirmation, independent of its label. Explicit same-origin URL navigation is
-also confirmed after that origin has already been approved. Form ownership is
-part of the fresh-target check in either mode, so a changed association requires
-a new observation.
+Uncheck the setting to use **Ask** mode. It keeps the per-site prompt, and every
+agent activation of a button, link, submit-like input, or form submission shows a
+native **Allow once** confirmation, independent of its label. Explicit
+same-origin URL navigation is also confirmed after that origin has already been
+approved, and typing outside search asks once per form as in routine, so Ask is
+never freer than routine. Form ownership is part of the fresh-target check in
+either mode, so a changed association requires a new observation.
 
-Routine mode uses a conservative text/descriptor classifier, not a proof that
-ordinary controls are harmless. A website can attach unexpected side effects to
-an ordinary click. Keep Ask mode when every activation needs human review.
+A desktop host without `approvalPolicyVersion` used an earlier routine that
+also clicked ordinary controls and submitted non-sensitive forms without asking;
+Studio requests routine from such a host only on the person's explicit choice.
+
+A website can still attach side effects to a free control, such as a link or
+menu item with a click handler, or a GET address that is not on the risky list.
+Keep Ask mode when every activation needs human review.
 
 The text-based high-impact classifier remains defense in depth for custom controls and activation keys, not a proof that every consequential control is detected. Keep adversarial coverage against real applications and conservative classifier updates in the release loop.
 
@@ -224,8 +269,8 @@ until a real page load or an agent `navigate`.
 and script-driven controls unless they are structurally free (tabs, `<summary>`, menu openers,
 neutral menu or navigation items, page numbers and privacy-preserving cookie
 dismissals), and asks for Enter on any editable field that is not a search
-field, because a chat box can send on keydown without a form. Routine mode
-keeps its existing rules apart from the refusals and the category titles.
+field, because a chat box can send on keydown without a form. Routine frees
+only the structurally free steps listed above.
 
 Snapshots include `<summary>`, menu, tree, tab, switch, checkbox, radio and
 option roles, `aria-expanded`/`aria-haspopup` openers and elements with an

@@ -17,7 +17,9 @@ const {
   isSensitivePersonalBrowserEditable,
   normalizePersonalBrowserBounds,
   normalizePersonalBrowserApprovalMode,
+  normalizePersonalBrowserKnownHosts,
   normalizePersonalBrowserPressKey,
+  PERSONAL_BROWSER_APPROVAL_POLICY_VERSION,
   normalizePersonalBrowserProfileUserId,
   normalizePersonalBrowserScroll,
   normalizePersonalBrowserUrl,
@@ -37,19 +39,18 @@ test("routine browsing is an explicit mode and cannot disable consequential or s
   for (const invalid of [null, true, "always", "all", "ROUTINE", {}, 1]) {
     assert.throws(() => normalizePersonalBrowserApprovalMode(invalid), /approval mode/);
   }
-  const ordinary = { tag: "a", text: "Documentation", href: "https://example.test/docs" };
+  const ordinary = { tag: "a", text: "Documentation", href: "https://example.test/docs", linkSelf: true };
   assert.equal(personalBrowserActivationRequiresConfirmation(ordinary), true);
   assert.equal(personalBrowserActivationRequiresConfirmation(ordinary, "routine"), false);
   for (const target of [
     { tag: "button", type: "button", ariaLabel: "Delete account" },
     { tag: "a", text: "Continue", href: "https://example.test/purchase" },
-    { tag: "input", type: "submit", formActionText: "Place order" },
-    { tag: "button", type: "submit", formActionText: "Delete account" },
+    { tag: "input", type: "submit", formActionText: "Place order", formOwnerIdentity: "form-owner" },
+    { tag: "button", type: "submit", formActionText: "Delete account", formOwnerIdentity: "form-owner" },
   ]) {
     assert.equal(personalBrowserActivationRequiresConfirmation(target, "routine"), true);
     assert.equal(personalBrowserKeyRequiresConfirmation("Enter", target, "routine"), true);
   }
-  assert.equal(personalBrowserKeyRequiresConfirmation("Enter", { tag: "input", type: "text" }, "routine"), false);
   assert.equal(personalBrowserKeyRequiresConfirmation(" ", ordinary, "routine"), false);
   assert.equal(personalBrowserKeyRequiresConfirmation("Tab", ordinary, "routine"), false);
   assert.equal(isSensitivePersonalBrowserEditable({ type: "password" }), true);
@@ -57,27 +58,81 @@ test("routine browsing is an explicit mode and cannot disable consequential or s
   assert.equal(isSensitivePersonalBrowserEditable({ autocomplete: "cc-number" }), true);
 });
 
-test("a routine session grant covers ordinary search and form submissions", () => {
+test("the host reports approval policy version 2 and keeps at most three valid card hosts", () => {
+  assert.equal(PERSONAL_BROWSER_APPROVAL_POLICY_VERSION, 2);
+  assert.deepEqual(normalizePersonalBrowserKnownHosts(undefined), []);
+  assert.deepEqual(normalizePersonalBrowserKnownHosts("app.example.test"), []);
+  assert.deepEqual(
+    normalizePersonalBrowserKnownHosts([
+      " App.Example.TEST. ", "app.example.test", "https://evil.test/", "bad host", "", 7, "-x.test",
+      "accounts.example.test", "docs.example.test", "fourth.example.test",
+    ]),
+    ["app.example.test", "accounts.example.test", "docs.example.test"],
+  );
+});
+
+// Routine is the owner tier (policy version 2): only structurally free steps
+// go ahead without asking. These cases are rewritten on purpose from the
+// earlier routine, which submitted ordinary forms by itself.
+test("routine frees reading-style steps: plain links, menus, tabs, dismissals and searches", () => {
+  const page = { pageUrl: "https://example.test/list" };
+  for (const descriptor of [
+    { tag: "a", text: "Documentation", href: "https://docs.example.test/", linkSelf: true },
+    { tag: "a", text: "Send money", href: "https://example.test/help/send-money", linkSelf: true },
+    { tag: "div", role: "menuitem", text: "Mein Profil", areas: "menu" },
+    { tag: "span", text: "Verbundene Apps", areas: "nav" },
+    { tag: "button", role: "tab", text: "Overview" },
+    { tag: "summary", text: "More" },
+    { tag: "button", text: "Konto", menuOpener: true },
+    { tag: "button", text: "Alle ablehnen" },
+    { tag: "a", text: "2", areas: "pagination" },
+    { tag: "input", type: "text", ariaLabel: "Name" },
+  ]) {
+    assert.equal(personalBrowserActivationRequiresConfirmation(descriptor, "routine", page), false, JSON.stringify(descriptor));
+  }
+  assert.equal(personalBrowserKeyRequiresConfirmation("Enter", { tag: "input", type: "search" }, "routine", page), false);
+  assert.equal(
+    personalBrowserKeyRequiresConfirmation("Enter", {
+      tag: "input", type: "search", formOwnerIdentity: "form", formMethod: "get", formActionUrl: "https://example.test/search",
+    }, "routine", page),
+    false,
+  );
+  for (const key of ["Tab", "Escape", "PageDown", "Home", "End", "ArrowDown"]) {
+    assert.equal(personalBrowserKeyRequiresConfirmation(key, { tag: "div", text: "List" }, "routine", page), false, key);
+  }
+});
+
+test("routine asks for every other click, submit, risky address and Enter outside search", () => {
+  const page = { pageUrl: "https://example.test/list" };
   for (const descriptor of [
     { tag: "button", type: "submit", formOwnerIdentity: "form-owner" },
-    { tag: "button", type: "submit", formOwnerIdentity: "form-owner", formActionText: "" },
     { tag: "button", formOwnerIdentity: "form-owner" },
-    { tag: "button", type: "submit" },
-    { tag: "button" },
     { tag: "input", type: "image", formOwnerIdentity: "form-owner" },
-    { tag: "button", type: "submit", formActionText: "Search" },
+    { tag: "button", type: "submit", text: "Search", formOwnerIdentity: "form-owner", formMethod: "post" },
+    { tag: "button", type: "button", text: "Show details", formOwnerIdentity: "form-owner" },
+    { tag: "button", type: "reset", text: "Start again", formOwnerIdentity: "form-owner" },
+    { tag: "button", text: "Neuen Mandant anlegen" },
+    { tag: "div", role: "button", ariaLabel: "Open" },
+    { tag: "input", type: "checkbox", ariaLabel: "Paid" },
+    { tag: "tr", text: "Instafy api-instafy", row: true, credentialContext: true },
+    { tag: "a", text: "Abmelden", href: "https://example.test/logout", linkSelf: true },
+    { tag: "a", text: "Export", href: "https://example.test/reports/2026.csv", linkSelf: true },
+    { tag: "a", text: "Invoice", href: "https://example.test/invoice", linkSelf: true, download: true },
+    { tag: "a", text: "Remove", href: "https://example.test/items/123/delete", linkSelf: true },
   ]) {
-    assert.equal(personalBrowserActivationRequiresConfirmation(descriptor, "routine"), false);
-    assert.equal(personalBrowserKeyRequiresConfirmation("Enter", descriptor, "routine"), false);
-    assert.equal(personalBrowserActivationRequiresConfirmation(descriptor, "ask"), true);
+    assert.equal(personalBrowserActivationRequiresConfirmation(descriptor, "routine", page), true, JSON.stringify(descriptor));
   }
   for (const descriptor of [
-    { tag: "button", type: "button", formOwnerIdentity: "form-owner", formActionText: "Details" },
-    { tag: "button", type: "reset", formOwnerIdentity: "form-owner", formActionText: "Details" },
-    { tag: "button", type: "submit", formOwnerIdentity: "" },
+    { tag: "input", type: "text", ariaLabel: "Notes", formOwnerIdentity: "form-owner" },
+    { tag: "div", role: "textbox", ariaLabel: "Message", contentEditable: true },
+    { tag: "input", type: "search", formOwnerIdentity: "form", formMethod: "post" },
+    { tag: "input", type: "search", formOwnerIdentity: "form", formMethod: "get", formActionUrl: "https://elsewhere.test/q" },
   ]) {
-    assert.equal(personalBrowserActivationRequiresConfirmation(descriptor, "routine"), false);
+    assert.equal(personalBrowserKeyRequiresConfirmation("Enter", descriptor, "routine", page), true, JSON.stringify(descriptor));
   }
+  assert.equal(personalBrowserKeyRequiresConfirmation("ArrowDown", { tag: "input", type: "range" }, "routine", page), true);
+  // Ask mode is unchanged and never freer than routine for these.
+  assert.equal(personalBrowserActivationRequiresConfirmation({ tag: "button", type: "submit", formOwnerIdentity: "f" }, "ask"), true);
   assert.equal(personalBrowserKeyRequiresConfirmation("Enter", { tag: "input", type: "text", formOwnerIdentity: "form-owner", formActionText: "" }), true);
 });
 

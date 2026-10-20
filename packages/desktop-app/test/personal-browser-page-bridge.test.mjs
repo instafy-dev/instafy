@@ -257,15 +257,16 @@ test("native descriptors retain external form ownership and respect the submissi
     if (index < 3) {
       assert.equal(item.descriptor.type, "submit");
       assert.equal(security.personalBrowserActivationRequiresConfirmation(item.descriptor, "ask"), true);
-      assert.equal(security.personalBrowserActivationRequiresConfirmation(item.descriptor, "routine"), false);
+      // Owner tier: every submit asks in routine too.
+      assert.equal(security.personalBrowserActivationRequiresConfirmation(item.descriptor, "routine"), true);
     } else {
       assert.equal(security.personalBrowserKeyRequiresConfirmation("Enter", item.descriptor), true);
-      assert.equal(security.personalBrowserKeyRequiresConfirmation("Enter", item.descriptor, "routine"), false);
+      assert.equal(security.personalBrowserKeyRequiresConfirmation("Enter", item.descriptor, "routine"), true);
     }
   }
 });
 
-test("non-submitting buttons remain routine and native no-owner state does not inherit an ancestor form", async () => {
+test("non-submitting buttons ask in routine and native no-owner state does not inherit an ancestor form", async () => {
   const harness = createPageHarness();
   const form = new harness.HTMLFormElement({ "aria-label": "Details" });
   const ordinary = new harness.HTMLButtonElement({ type: "button", text: "Show details" });
@@ -280,8 +281,9 @@ test("non-submitting buttons remain routine and native no-owner state does not i
   assert.ok(snapshot.interactive[1].descriptor.formOwnerIdentity);
   assert.equal(snapshot.interactive[2].descriptor.formOwnerIdentity, "");
   assert.equal(snapshot.interactive[2].descriptor.formActionText, "");
+  // Owner tier: a button that is not a menu, tab or dismissal asks.
   for (const { descriptor } of snapshot.interactive) {
-    assert.equal(security.personalBrowserActivationRequiresConfirmation(descriptor, "routine"), false);
+    assert.equal(security.personalBrowserActivationRequiresConfirmation(descriptor, "routine"), true);
   }
 });
 
