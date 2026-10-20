@@ -40,6 +40,7 @@ function fixture(choose = async () => ({ response: 1 }), pageOverrides = {}, hos
     "./browserTabExplorePage": { createBrowserTabExplorePage() { throw new Error("Unexpected native Explore page"); } },
     "./personalBrowserSecurity": security,
     "./personalBrowserRedaction": require(path.join(packageRoot, "dist/personalBrowserRedaction.js")),
+    "./personalBrowserActionPolicy": require(path.join(packageRoot, "dist/personalBrowserActionPolicy.js")),
     "./personalBrowserPageBridge": { ...pageBridge, clearPersonalBrowserHumanInput: async () => {}, ...pageOverrides },
     "./personalBrowserHumanInput": {},
     "./personalBrowserInputShield": { PersonalBrowserInputShield: InputShield },
@@ -91,10 +92,11 @@ test("Personal routine grant requires native consent and ends synchronously on P
   assert.equal(host.getStatus().approvalMode, "ask", "a later Resume must not inherit routine trust");
 });
 
-for (const { mode, formAction, confirmSubmission } of [
+for (const { mode, formAction, confirmSubmission, title } of [
   { mode: "routine", formAction: "Search", confirmSubmission: false },
-  { mode: "ask", formAction: "Search", confirmSubmission: true },
-  { mode: "routine", formAction: "Place order", confirmSubmission: true },
+  // The dialog title names the step's category.
+  { mode: "ask", formAction: "Search", confirmSubmission: true, title: "Change something" },
+  { mode: "routine", formAction: "Place order", confirmSubmission: true, title: "Purchase or payment" },
 ]) {
   test(`type-and-submit uses ${mode} approval for the post-typing ${formAction} form`, async () => {
     const descriptor = { found: true, disabled: false, identity: "fixture-document:1", tag: "input", type: "text", formOwnerIdentity: "fixture-form", formActionText: "Search" };
@@ -121,7 +123,7 @@ for (const { mode, formAction, confirmSubmission } of [
     assert.equal(result.submitted, true);
     assert.deepEqual(keys, ["Enter"]);
     assert.equal(dialogs.length - priorDialogs, confirmSubmission ? 1 : 0);
-    if (confirmSubmission) assert.equal(dialogs.at(-1).title, "Confirm form submission");
+    if (confirmSubmission) assert.equal(dialogs.at(-1).title, title);
   });
 }
 
@@ -301,4 +303,89 @@ test("a page whose secret signals are missing is withheld", async () => {
   assert.equal(result.snapshot.text, "");
   assert.equal(result.snapshot.url, "");
   assert.equal(result.snapshot.interactive[0].name, undefined, "unchecked names are dropped");
+});
+
+function stepFixture(descriptor, mode, choose) {
+  const target = { found: true, disabled: false, identity: "doc-a:0", ...descriptor };
+  const calls = { clicks: 0, keys: [], typed: 0 };
+  let page = snapshotPage();
+  page.interactive = [{ index: 0, tag: target.tag, name: target.text, disabled: false, identity: target.identity, descriptor: { ...target } }];
+  const harness = fixture(choose, {
+    snapshotPersonalBrowserPage: async () => page,
+    inspectPersonalBrowserTarget: async () => ({ ...target }),
+    clickPersonalBrowserTarget: async () => { calls.clicks += 1; return { clicked: true, targetChanged: false, descriptor: { ...target } }; },
+    typeIntoPersonalBrowserTarget: async () => { calls.typed += 1; return { typed: true, targetChanged: false, descriptor: { ...target } }; },
+    pressPersonalBrowserTarget: async (_contents, _target, key) => { calls.keys.push(key); return { pressed: true, targetChanged: false }; },
+  });
+  return { ...harness, calls, mode, setPage: (next) => { page = next; } };
+}
+
+for (const mode of ["ask", "routine"]) {
+  for (const { name, operation, payload, descriptor, code } of [
+    { name: "a reveal control in a credential row", operation: "click", payload: {}, code: "step_refused_secret",
+      descriptor: { tag: "button", type: "button", text: "Anzeigen", credentialContext: true, row: true } },
+    { name: "a sign-in submit", operation: "click", payload: {}, code: "step_refused_sign_in",
+      descriptor: { tag: "button", type: "submit", text: "Sign in", formOwnerIdentity: "doc-a:form", formHasPassword: true, formFieldCount: 2 } },
+    { name: "a file chooser", operation: "click", payload: {}, code: "step_refused_upload",
+      descriptor: { tag: "input", type: "file", ariaLabel: "Attachment" } },
+    { name: "the username of a sign-in form", operation: "type", payload: { text: "someone" }, code: "step_refused_sign_in",
+      descriptor: { tag: "input", type: "email", autocomplete: "username", formOwnerIdentity: "doc-a:form", formHasPassword: true, formFieldCount: 2 } },
+  ]) {
+    test(`${mode} mode refuses ${name} without a dialog`, async () => {
+      const { host, dialogs, calls } = stepFixture(descriptor, mode);
+      host.enablePreparedAgentControl(await host.prepareAgentControl(mode));
+      await host.handleControlOperation("snapshot", {});
+      const before = dialogs.length;
+      await assert.rejects(
+        host.handleControlOperation(operation, { index: 0, ...payload }),
+        (error) => error.statusCode === 403 && error.code === code,
+      );
+      assert.equal(dialogs.length, before, "a refusal shows no dialog");
+      assert.equal(calls.clicks + calls.typed, 0);
+    });
+  }
+}
+
+test("Enter in a chat box outside any form asks in Ask mode and names the category", async () => {
+  const { host, dialogs, calls } = stepFixture(
+    { tag: "div", role: "textbox", ariaLabel: "Message", contentEditable: true },
+    "ask",
+  );
+  host.enablePreparedAgentControl(await host.prepareAgentControl("ask"));
+  await host.handleControlOperation("snapshot", {});
+  const before = dialogs.length;
+  await host.handleControlOperation("press", { index: 0, key: "Enter" });
+  assert.equal(dialogs.length - before, 1);
+  assert.equal(dialogs.at(-1).title, "Send a message");
+  assert.deepEqual(calls.keys, ["Enter"]);
+});
+
+test("an approval dialog shows both labels when the accessible name and visible text differ", async () => {
+  const { host, dialogs } = stepFixture({ tag: "button", type: "button", ariaLabel: "Delete workspace", text: "Open" }, "ask");
+  host.enablePreparedAgentControl(await host.prepareAgentControl("ask"));
+  await host.handleControlOperation("snapshot", {});
+  await host.handleControlOperation("click", { index: 0 });
+  assert.equal(dialogs.at(-1).title, "Delete, cancel or sign out");
+  assert.match(dialogs.at(-1).message, /“Delete workspace” \(shown on the page as “Open”\)/);
+});
+
+test("after a step that may show a secret, the page and the page it opens stay withheld", async () => {
+  const fixtureState = stepFixture(
+    { tag: "tr", text: "Instafy api-instafy ••••", row: true, credentialContext: true, nearMaskedText: true },
+    "routine",
+  );
+  const { host, calls, setPage } = fixtureState;
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine"));
+  await host.handleControlOperation("snapshot", {});
+  await host.handleControlOperation("click", { index: 0 });
+  assert.equal(calls.clicks, 1);
+
+  setPage(snapshotPage({ documentToken: "doc-a", text: "Same page, dialog closed" }));
+  assert.equal((await host.handleControlOperation("snapshot", {})).snapshot.secretScreen, true);
+  setPage(snapshotPage({ documentToken: "doc-b", text: "The page the row opened" }));
+  const opened = (await host.handleControlOperation("snapshot", {})).snapshot;
+  assert.equal(opened.secretScreen, true);
+  assert.equal(opened.text, "");
+  setPage(snapshotPage({ documentToken: "doc-c", text: "A later page" }));
+  assert.equal((await host.handleControlOperation("snapshot", {})).snapshot.text, "A later page");
 });

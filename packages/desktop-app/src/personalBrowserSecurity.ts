@@ -1,5 +1,14 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 
+import {
+  classifyStep,
+  isEditable as isPolicyEditable,
+  isSearchField as isPolicySearchField,
+  type PersonalBrowserStep,
+  type PersonalBrowserStepClassification,
+  type PersonalBrowserStepContext,
+} from "./personalBrowserActionPolicy";
+
 export const PERSONAL_BROWSER_PARTITION_PREFIX = "persist:instafy-personal-";
 export const MAX_PERSONAL_BROWSER_URL_LENGTH = 4_096;
 export const MAX_PERSONAL_BROWSER_TEXT_LENGTH = 16_384;
@@ -46,6 +55,30 @@ export type PersonalBrowserActionDescriptor = {
   /** Empty means no native form owner; absent means ownership was not observed. */
   formOwnerIdentity?: string | null;
   formActionText?: string | null;
+  /** The clicked element is the link itself, not a child inheriting its address. */
+  linkSelf?: boolean;
+  download?: boolean;
+  formMethod?: string | null;
+  formActionUrl?: string | null;
+  formHasPassword?: boolean;
+  formFieldCount?: number;
+  /** Every submit label of the owning form, at most 200 characters. */
+  formSubmitLabels?: string | null;
+  /** Enclosing page areas, nearest first: dialog, search, nav, menu, tree, tablist, pagination. */
+  areas?: string | null;
+  /** Whether the element opens a menu or popup; never whether it is open now. */
+  menuOpener?: boolean;
+  /** A heading, dialog title or row around the element names a credential. */
+  credentialContext?: boolean;
+  contentEditable?: boolean;
+  /** The element is, or sits in, a table row or list entry. */
+  row?: boolean;
+  /** Nearest dialog title, heading and row text, at most 200 characters. Not part of the fingerprint. */
+  contextLabel?: string | null;
+  /** Masked text such as •••• sits next to the element. Not part of the fingerprint. */
+  nearMaskedText?: boolean;
+  /** Icon class names and similar hints. Not part of the fingerprint. */
+  iconHint?: string | null;
 };
 
 export type PersonalBrowserActivationTarget = PersonalBrowserActionDescriptor &
@@ -72,6 +105,19 @@ export const PERSONAL_BROWSER_SECURITY_FINGERPRINT_FIELDS = [
   "formOwnerIdentity",
   "formActionText",
   "disabled",
+  // Structural fields only. Whether a menu is open right now and heading text
+  // stay out, so opening a menu does not cancel a pending approval.
+  "linkSelf",
+  "download",
+  "formMethod",
+  "formActionUrl",
+  "formHasPassword",
+  "formFieldCount",
+  "areas",
+  "menuOpener",
+  "credentialContext",
+  "contentEditable",
+  "row",
 ] as const;
 
 const SENSITIVE_EDITABLE_PATTERN =
@@ -302,6 +348,21 @@ export function isHighImpactPersonalBrowserAction(
   return HIGH_IMPACT_ACTION_PATTERN.test(text);
 }
 
+/**
+ * Classifies one agent step. Refusals apply in every approval mode; the
+ * category names the approval dialog.
+ */
+export function classifyPersonalBrowserStep(
+  step: PersonalBrowserStep,
+  value: PersonalBrowserActivationTarget,
+  context: Omit<PersonalBrowserStepContext, "sensitive"> = {},
+): PersonalBrowserStepClassification {
+  return classifyStep(step, value, {
+    ...context,
+    sensitive: isSensitivePersonalBrowserEditable(value),
+  });
+}
+
 export function personalBrowserActivationRequiresConfirmation(
   value: PersonalBrowserActionDescriptor,
   approvalMode: PersonalBrowserApprovalMode = "ask",
@@ -319,7 +380,10 @@ export function personalBrowserActivationRequiresConfirmation(
     role === "button" ||
     role === "link" ||
     Boolean(value.href) ||
-    (tag === "input" && ["button", "submit", "image"].includes(type ?? ""))
+    (tag === "input" && ["button", "submit", "image"].includes(type ?? "")) ||
+    // Ask mode also asks for checkboxes, switches, menu items and
+    // script-driven controls unless they are structurally free.
+    classifyPersonalBrowserStep("click", value).verdict === "ask"
   );
 }
 
@@ -339,7 +403,10 @@ export function personalBrowserKeyRequiresConfirmation(
   return (
     isPersonalBrowserActivationKey(key) &&
     (personalBrowserActivationRequiresConfirmation(value) ||
-      (key === "Enter" && Boolean(value.formOwnerIdentity?.trim() || value.formActionText?.trim())))
+      (key === "Enter" && Boolean(value.formOwnerIdentity?.trim() || value.formActionText?.trim())) ||
+      // A chat box can send on keydown without any form. Enter on a field
+      // that is not proven to be search asks.
+      (key === "Enter" && isPolicyEditable(value) && !isPolicySearchField(value)))
   );
 }
 

@@ -192,7 +192,11 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
     const interactiveSelector = [
       "a[href]", "button", "input:not([type='hidden'])", "textarea", "select",
       "[contenteditable='true']", "[role='button']", "[role='link']", "[role='textbox']",
-      "[tabindex]:not([tabindex='-1'])"
+      "[tabindex]:not([tabindex='-1'])",
+      // Script-driven apps build menus, trees and rows from generic elements.
+      "summary", "[role='menuitem']", "[role='menuitemcheckbox']", "[role='menuitemradio']",
+      "[role='treeitem']", "[role='tab']", "[role='switch']", "[role='checkbox']", "[role='radio']",
+      "[role='option']", "[aria-expanded]", "[aria-haspopup]:not([aria-haspopup='false'])", "[onclick]"
     ].join(",");
     const clean = (value, limit = 500) => typeof value === "string"
       ? value.replace(/\\s+/g, " ").trim().slice(0, limit)
@@ -206,6 +210,7 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
         && style.visibility !== "hidden" && style.display !== "none"
         && style.pointerEvents !== "none";
     };
+    ${PAGE_SECRET_SIGNAL_SCRIPT}
     const forbiddenTarget = (element) => element.matches("iframe, frame, object, embed");
     const candidates = () => Array.from(document.querySelectorAll(interactiveSelector))
       .filter((element) => element.ownerDocument === document && !forbiddenTarget(element) && visible(element));
@@ -235,6 +240,82 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
       }
       return null;
     };
+    // Structure around the element, walked through parentElement only. Text
+    // is bounded and stays in the main process; it is never sent to the agent.
+    const describeStructure = (element, link) => {
+      const attribute = (node, name) => typeof node?.getAttribute === "function" ? node.getAttribute(name) : null;
+      const tagOf = (node) => typeof node?.tagName === "string" ? node.tagName.toUpperCase() : "";
+      const areaOf = (node) => {
+        const role = clean(attribute(node, "role")).toLowerCase();
+        const tag = tagOf(node);
+        if (tag === "DIALOG" || role === "dialog" || role === "alertdialog" || attribute(node, "aria-modal") === "true") return "dialog";
+        if (tag === "SEARCH" || role === "search") return "search";
+        const pagination = /pagination|pager|paginat|seitennavigation/i.test(
+          [attribute(node, "aria-label"), attribute(node, "class"), attribute(node, "data-testid")].filter(Boolean).join(" "),
+        );
+        if (pagination) return "pagination";
+        if (tag === "NAV" || role === "navigation") return "nav";
+        if (role === "menu" || role === "menubar") return role;
+        if (role === "tree" || role === "tablist") return role;
+        return "";
+      };
+      const areas = [];
+      let dialogLabel = "";
+      let heading = "";
+      let rowText = "";
+      let isRow = false;
+      let nearMaskedText = false;
+      const headingSelector = "h1, h2, h3, h4, h5, h6, [role='heading'], legend, caption";
+      const rowOf = (node) => {
+        const role = clean(attribute(node, "role")).toLowerCase();
+        return ["TR", "LI", "DT", "DD"].includes(tagOf(node)) || ["row", "listitem", "option", "gridcell", "treeitem", "article"].includes(role);
+      };
+      if (rowOf(element)) {
+        isRow = true;
+        rowText = clean(element.textContent ?? "", 500);
+      }
+      let node = element.parentElement;
+      for (let depth = 0; node && depth < 40; depth += 1, node = node.parentElement) {
+        const area = areaOf(node);
+        if (area && !areas.includes(area)) areas.push(area);
+        if (area === "dialog" && !dialogLabel) {
+          const labelledBy = clean(attribute(node, "aria-labelledby")).split(/\s+/)
+            .map((id) => id ? document.getElementById(id) : null).filter(Boolean)
+            .map((label) => clean(label.textContent)).join(" ");
+          const dialogHeading = typeof node.querySelector === "function" ? node.querySelector(headingSelector) : null;
+          dialogLabel = clean(attribute(node, "aria-label") || labelledBy || dialogHeading?.textContent || "", 200);
+        }
+        if (!isRow && rowOf(node)) {
+          isRow = true;
+          rowText = clean(node.textContent ?? "", 500);
+        }
+        if (!heading && depth < 6 && typeof node.querySelector === "function") {
+          const found = node.querySelector(headingSelector);
+          if (found && found !== element) heading = clean(found.textContent ?? "", 200);
+        }
+        if (!nearMaskedText && depth < 3 && maskedTextPattern.test(clean(node.textContent ?? "", 2_000))) {
+          nearMaskedText = true;
+        }
+      }
+      const contextLabel = clean([dialogLabel, heading, rowText].filter(Boolean).join(" · "), 200);
+      const iconChild = typeof element.querySelector === "function" ? element.querySelector("svg, i, img, use") : null;
+      const iconHint = clean([
+        attribute(element, "class"), attribute(element, "data-icon"), attribute(element, "data-testid"),
+        attribute(iconChild, "class"), attribute(iconChild, "aria-label"), attribute(iconChild, "alt"),
+        attribute(iconChild, "data-icon"), attribute(iconChild, "href"),
+      ].filter(Boolean).join(" "), 160);
+      const expanded = attribute(element, "aria-expanded") ?? attribute(link, "aria-expanded");
+      const popup = attribute(element, "aria-haspopup");
+      return {
+        areas: areas.join(" "),
+        menuOpener: expanded !== null || (popup !== null && popup !== "false"),
+        credentialContext: credentialContextPattern.test([dialogLabel, heading, rowText].join(" ")),
+        row: isRow,
+        contextLabel,
+        nearMaskedText,
+        iconHint,
+      };
+    };
     const descriptor = (element) => {
       if (
         !(element instanceof Element) ||
@@ -257,12 +338,26 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
       // no owner despite being inside one. Use the browser's resolved owner.
       const formCandidate = "form" in element ? element.form : element.closest("form");
       const form = formCandidate instanceof HTMLFormElement ? formCandidate : null;
-      const submit = form ? Array.from(form.elements).find((control) =>
+      const formControls = form ? Array.from(form.elements || []) : [];
+      const isSubmitControl = (control) => control.form === form && (
+        (control instanceof HTMLButtonElement && control.type === "submit") ||
+        (control instanceof HTMLInputElement && ["submit", "image"].includes(control.type))
+      );
+      const submit = formControls.find(isSubmitControl) ?? null;
+      const submitLabel = (control) => clean(
+        control.getAttribute("aria-label") || control.textContent || control.getAttribute("value") || "",
+        80,
+      );
+      const formSubmitLabels = clean(formControls.filter(isSubmitControl).map(submitLabel).filter(Boolean).join(" | "), 200);
+      const editableTypes = ["", "text", "search", "email", "url", "tel", "number", "password", "date", "time", "datetime-local", "month", "week"];
+      const formFieldCount = formControls.filter((control) =>
         control.form === form && (
-          (control instanceof HTMLButtonElement && control.type === "submit") ||
-          (control instanceof HTMLInputElement && ["submit", "image"].includes(control.type))
-        ),
-      ) : null;
+          (control instanceof HTMLInputElement && editableTypes.includes(String(control.type || "").toLowerCase())) ||
+          control instanceof HTMLTextAreaElement ||
+          String(control.tagName || "").toUpperCase() === "SELECT"
+        )).length;
+      const formHasPassword = formControls.some((control) =>
+        control instanceof HTMLInputElement && String(control.type || "").toLowerCase() === "password");
       const formLabelledBy = clean(form?.getAttribute("aria-labelledby"))
         .split(/\\s+/)
         .map((id) => document.getElementById(id))
@@ -294,6 +389,7 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
         ? Array.from(element.labels).map((label) => clean(label.textContent)).filter(Boolean).join(" ")
         : "";
       const accessibleLabel = read("aria-label") || labelledBy || associatedLabels;
+      const structure = describeStructure(element, link);
       return {
         found: true,
         identity: targetIdentity(element),
@@ -317,6 +413,15 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
         // Keep a non-empty description even for an unlabeled implicit form.
         formActionText,
         disabled: Boolean("disabled" in element && element.disabled) || read("aria-disabled") === "true",
+        linkSelf: link instanceof HTMLAnchorElement && link === element,
+        download: link instanceof HTMLAnchorElement && typeof link.getAttribute === "function" && link.getAttribute("download") !== null,
+        formMethod: form ? clean(form.getAttribute("method") || "get", 16).toLowerCase() : "",
+        formActionUrl: form ? clean(typeof form.action === "string" ? form.action : form.getAttribute("action"), 4096) : "",
+        formHasPassword,
+        formFieldCount,
+        formSubmitLabels,
+        contentEditable: element.isContentEditable === true,
+        ...structure,
         rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
       };
     };
@@ -337,7 +442,6 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
         || securityFingerprint(item) !== args.expectedSecurityFingerprint;
       return { element, item, targetChanged };
     };
-    ${PAGE_SECRET_SIGNAL_SCRIPT}
     ${body}
   })()`;
 }

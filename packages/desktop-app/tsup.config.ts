@@ -33,6 +33,7 @@ export default defineConfig({
     personalBrowserIdentity: "src/personalBrowserIdentity.ts",
     personalBrowserSecurity: "src/personalBrowserSecurity.ts",
     personalBrowserRedaction: "src/personalBrowserRedaction.js",
+    personalBrowserActionPolicy: "src/personalBrowserActionPolicy.js",
     personalBrowserPageBridge: "src/personalBrowserPageBridge.ts",
     personalBrowserHumanInput: "src/personalBrowserHumanInput.ts",
     personalBrowserInputShield: "src/personalBrowserInputShield.ts",

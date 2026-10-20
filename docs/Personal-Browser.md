@@ -162,6 +162,57 @@ an ordinary click. Keep Ask mode when every activation needs human review.
 
 The text-based high-impact classifier remains defense in depth for custom controls and activation keys, not a proof that every consequential control is detected. Keep adversarial coverage against real applications and conservative classifier updates in the release loop.
 
+### Step categories and refusals
+
+Electron main classifies every agent click, typing step, submission and key
+press before it runs (`personalBrowserActionPolicy.js`). The classifier works on
+the element's structure: tag, role, whether the target is the link itself,
+the link's address and `download` attribute, the owning form's method, action,
+password field, editable-field count and submit labels, and the enclosing page
+area (dialog, search, navigation, menu, tree, tab list or pagination). Label
+words in English and German only add risk; verbs match whole words and
+credential nouns also match inside compounds such as Zugangsschlüssel.
+
+**Refused in every mode, with no dialog.** The agent receives a 403 and must stop
+and tell the person:
+
+- `step_refused_secret`: a reveal, show, view or copy control (including
+  Anzeigen, Einblenden, Kopieren and eye or copy icons) in a credential context,
+  next to masked text, or labelled with a credential word;
+- `step_refused_sign_in`: a sign-in form's submit, a sign-in button, a
+  "Continue with …", "Sign in with …" or "Mit … anmelden" control, and typing
+  into the username or email field of a sign-in form. Plain links to a sign-in
+  page stay allowed;
+- `step_refused_upload`: file inputs.
+
+Password, code and payment fields stay blocked as before.
+
+**Category titles.** When a step asks, the native dialog title names its
+category: purchase or payment, money transfer, send a message, sharing or access
+change, key or password change, download or export, delete/cancel/sign out,
+"May show a secret" (a row or entry in a credential context), or "Change
+something" by default. When a control's accessible name and visible text differ,
+the dialog shows both. After a key or password step, or a step that may show a
+secret, the page stays withheld from the agent until a new page loads, and so
+does the page that step opens.
+
+**Ask mode** also asks for checkboxes, switches, menu items and script-driven
+controls unless they are structurally free (tabs, `<summary>`, menu openers,
+neutral menu or navigation items, page numbers and privacy-preserving cookie
+dismissals), and asks for Enter on any editable field that is not a search
+field, because a chat box can send on keydown without a form. Routine mode
+keeps its existing rules apart from the refusals and the category titles.
+
+Snapshots include `<summary>`, menu, tree, tab, switch, checkbox, radio and
+option roles, `aria-expanded`/`aria-haspopup` openers and elements with an
+`onclick` handler, so script-driven menus are addressable. The security
+fingerprint gains only structural fields; whether a menu is open and heading
+text stay out of it, so opening a menu does not cancel a pending approval.
+
+The case table in `packages/desktop-app/test/fixtures/risky-steps/cases.json`
+and the English and German fixture pages beside it hold synthetic values only;
+the canary key is assembled by script at run time.
+
 ### Sensitive input is hard-blocked
 
 Agent typing into the following classes of fields is rejected, even after origin approval:

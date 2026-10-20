@@ -223,6 +223,7 @@ function createPageHarness() {
     HTMLButtonElement,
     HTMLInputElement,
     HTMLTextAreaElement,
+    HTMLAnchorElement,
     HTMLFormElement,
   };
 }
@@ -490,4 +491,53 @@ test("page secret signals look inside open shadow roots", async () => {
   const snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
   assert.equal(snapshot.signals.secretField, true);
   assert.ok(!JSON.stringify(snapshot).includes(CANARY));
+});
+
+test("opening a menu keeps the target fingerprint; only the opener's presence is bound", async () => {
+  const harness = createPageHarness();
+  const opener = new harness.HTMLButtonElement({ type: "button", text: "More actions", "aria-haspopup": "menu", "aria-expanded": "false" });
+  harness.document.elements = [opener];
+  const snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
+  const before = snapshot.interactive[0].descriptor;
+  assert.equal(before.menuOpener, true);
+  opener.attributes.set("aria-expanded", "true");
+  const after = await bridge.inspectPersonalBrowserTarget(harness.webContents, { index: 0 });
+  assert.equal(after.menuOpener, true);
+  assert.equal(
+    security.personalBrowserTargetSecurityFingerprint(after),
+    security.personalBrowserTargetSecurityFingerprint(before),
+  );
+});
+
+test("descriptors carry form, link and page-area structure for the step classifier", async () => {
+  const harness = createPageHarness();
+  const form = new harness.HTMLFormElement({ method: "POST" });
+  const email = new harness.HTMLInputElement({ type: "email", autocomplete: "username" });
+  const password = new harness.HTMLInputElement({ type: "password" });
+  const submit = new harness.HTMLButtonElement({ type: "submit", text: "Sign in" });
+  const other = new harness.HTMLButtonElement({ type: "submit", text: "Create account" });
+  form.elements = [email, password, submit, other];
+  for (const control of form.elements) control.form = form;
+  const link = new harness.HTMLAnchorElement({ href: "https://example.test/report.csv", text: "Report", download: "" });
+  const nav = new harness.Element("nav", {});
+  const row = new harness.Element("tr", { text: "API-Schlüssel •••••••• Anzeigen" });
+  const reveal = new harness.HTMLButtonElement({ type: "button", text: "Anzeigen" });
+  reveal.parentElement = row;
+  row.parentElement = nav;
+  harness.document.elements = [submit, link, reveal];
+  const snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
+  const [signIn, report, revealDescriptor] = snapshot.interactive.map((entry) => entry.descriptor);
+  assert.equal(signIn.formMethod, "post");
+  assert.equal(signIn.formHasPassword, true);
+  assert.equal(signIn.formFieldCount, 2);
+  assert.equal(signIn.formSubmitLabels, "Sign in | Create account");
+  assert.equal(report.linkSelf, true);
+  assert.equal(report.download, true);
+  assert.equal(revealDescriptor.row, true);
+  assert.equal(revealDescriptor.areas, "nav");
+  assert.equal(revealDescriptor.credentialContext, true);
+  assert.equal(revealDescriptor.nearMaskedText, true);
+  assert.equal(security.classifyPersonalBrowserStep("click", signIn).code, "step_refused_sign_in");
+  assert.equal(security.classifyPersonalBrowserStep("click", revealDescriptor).code, "step_refused_secret");
+  assert.equal(security.classifyPersonalBrowserStep("click", report).category, "download");
 });

@@ -46,6 +46,7 @@ async function fixture(highlight = async () => true, options = {}) {
     "./browserTabExplorePage": { createBrowserTabExplorePage() { throw new Error("Unexpected native Explore page"); } },
     "./personalBrowserSecurity": security,
     "./personalBrowserRedaction": require(path.join(packageRoot, "dist/personalBrowserRedaction.js")),
+    "./personalBrowserActionPolicy": require(path.join(packageRoot, "dist/personalBrowserActionPolicy.js")),
     "./personalBrowserPageBridge": {
       ...pageBridge,
       snapshotPersonalBrowserPage: async () => ({
