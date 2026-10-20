@@ -21,10 +21,20 @@ static LAUNCH_CREDENTIALS: OnceLock<Vec<(&'static str, String)>> = OnceLock::new
 const CONFIGURED_LAUNCH_CREDENTIAL_KEYS: [&str; 2] =
     ["RUNTIME_ACCESS_TOKEN", "ORIGIN_INTERNAL_TOKEN"];
 
-/// Keeps the launch credentials [`Config::from_env`] reads and removes every
-/// `LAUNCH_CREDENTIAL_ENV_KEYS` entry from the process environment, so
-/// processes the agent spawns later (git, tunnels, helpers) do not inherit
-/// them. The agent then holds the runtime token in memory and renews it there.
+/// The launch metadata. It repeats the launch environment, which can carry
+/// browser relay (TURN) credentials, and only `Config::from_env` reads it, so
+/// it leaves the process environment together with the launch credentials.
+pub(crate) const LAUNCH_METADATA_ENV_KEY: &str = "RUNTIME_METADATA";
+
+/// The launch metadata captured before the agent removed it from its
+/// environment. Unset when nothing captured it, as for `LAUNCH_CREDENTIALS`.
+static LAUNCH_METADATA: OnceLock<Option<String>> = OnceLock::new();
+
+/// Keeps the launch credentials and launch metadata [`Config::from_env`] reads
+/// and removes them, with every other `LAUNCH_CREDENTIAL_ENV_KEYS` entry, from
+/// the process environment, so processes the agent spawns later (git, tunnels,
+/// helpers, Codex hooks) do not inherit them. The agent then holds the runtime
+/// token in memory and renews it there.
 ///
 /// `/proc/<pid>/environ` keeps showing the initial environment block; the
 /// runtime agent is non-dumpable (`process_hardening`), so this only changes
@@ -42,11 +52,24 @@ pub unsafe fn capture_and_scrub_launch_credentials() -> Result<()> {
     LAUNCH_CREDENTIALS
         .set(captured)
         .map_err(|_| anyhow!("runtime launch credentials were captured twice"))?;
-    for key in LAUNCH_CREDENTIAL_ENV_KEYS {
+    LAUNCH_METADATA
+        .set(std::env::var(LAUNCH_METADATA_ENV_KEY).ok())
+        .map_err(|_| anyhow!("runtime launch metadata was captured twice"))?;
+    for key in LAUNCH_CREDENTIAL_ENV_KEYS
+        .iter()
+        .chain(std::iter::once(&LAUNCH_METADATA_ENV_KEY))
+    {
         // SAFETY: the caller guarantees no concurrent environment access.
         unsafe { std::env::remove_var(key) };
     }
     Ok(())
+}
+
+fn launch_metadata() -> Option<String> {
+    match LAUNCH_METADATA.get() {
+        Some(captured) => captured.clone(),
+        None => std::env::var(LAUNCH_METADATA_ENV_KEY).ok(),
+    }
 }
 
 fn launch_credential(key: &str) -> Option<String> {
@@ -274,8 +297,7 @@ impl Config {
             crate::local_browser::registration_capability(),
         );
 
-        let metadata = std::env::var("RUNTIME_METADATA")
-            .ok()
+        let metadata = launch_metadata()
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_else(|| serde_json::json!({}));
 
@@ -624,8 +646,9 @@ fn detect_rathole_use_subcommands(bin: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        CONFIGURED_LAUNCH_CREDENTIAL_KEYS, Config, apply_local_browser_capability,
-        capture_and_scrub_launch_credentials, normalize_lease_max_jobs,
+        CONFIGURED_LAUNCH_CREDENTIAL_KEYS, Config, LAUNCH_METADATA_ENV_KEY,
+        apply_local_browser_capability, capture_and_scrub_launch_credentials,
+        normalize_lease_max_jobs,
     };
     use crate::model_environment::LAUNCH_CREDENTIAL_ENV_KEYS;
     use serde_json::json;
@@ -658,6 +681,10 @@ mod tests {
             for key in LAUNCH_CREDENTIAL_ENV_KEYS {
                 child.env(key, format!("launch-{key}"));
             }
+            child.env(
+                LAUNCH_METADATA_ENV_KEY,
+                r#"{"env":{"INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON":"turn-secret"}}"#,
+            );
             child
                 .env("CONTROLLER_BASE_URL", "http://127.0.0.1:9")
                 .env("SPACE_ID", Uuid::new_v4().to_string())
@@ -690,8 +717,16 @@ mod tests {
                 "{key} stayed in the runtime agent's environment"
             );
         }
+        assert!(
+            std::env::var_os(LAUNCH_METADATA_ENV_KEY).is_none(),
+            "the launch metadata stayed in the runtime agent's environment"
+        );
 
         let config = Config::from_env().expect("load configuration after the scrub");
+        assert_eq!(
+            config.metadata["env"]["INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON"],
+            json!("turn-secret")
+        );
         assert_eq!(
             config.runtime_access_token.as_deref(),
             Some("launch-RUNTIME_ACCESS_TOKEN")
@@ -712,6 +747,7 @@ mod tests {
             reloaded.runtime_access_token.as_deref(),
             Some("launch-RUNTIME_ACCESS_TOKEN")
         );
+        assert_eq!(reloaded.metadata, config.metadata);
     }
 
     #[test]

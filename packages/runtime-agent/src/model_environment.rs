@@ -43,10 +43,13 @@ pub(crate) const INTERNAL_CREDENTIAL_ENV_KEYS: &[&str] = &[
     "PROXY_CREDENTIAL_LEASE_TOKEN",
     "MANAGED_AI_OPENAI_API_KEY",
     // Other controller-only credentials an operator shell may carry into a
-    // locally launched runtime.
+    // locally launched runtime. Only Instafy-specific names belong here:
+    // granted project secrets reach model shells through this process's
+    // environment, so a generic name (a push-notification key, say) would
+    // also withhold a user's own secret of that name.
     "SERVICE_RUNTIME_USER_PASSWORD",
     "DESKTOP_RELEASE_GITHUB_TOKEN",
-    "WEB_PUSH_VAPID_PRIVATE_KEY",
+    "INSTAFY_AUTHOR_PSEUDONYM_KEYS",
     // Runtime allocator/provider credentials.
     "PROVIDER_AUTH_TOKEN",
     "DEV_PROVIDER_AUTH_TOKEN",
@@ -90,10 +93,11 @@ pub(crate) const LAUNCH_CREDENTIAL_ENV_KEYS: &[&str] = INTERNAL_CREDENTIAL_ENV_K
 /// Values the parent runtime must retain for in-process features but a
 /// model-controlled subprocess must never inherit.
 ///
-/// `RUNTIME_METADATA` is the launch metadata, read once by
-/// `Config::from_env`. It repeats the launch `env` object, which can carry
-/// `INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON` and its TURN credentials, and any
-/// later controller attestation, so it is withheld as a whole.
+/// `RUNTIME_METADATA` is the launch metadata. It repeats the launch `env`
+/// object, which can carry `INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON` and its
+/// TURN credentials. `config::capture_and_scrub_launch_credentials` already
+/// removes it from the agent's environment at startup; listing it here keeps
+/// it out of model shells in any process that skipped that capture.
 pub(crate) const MODEL_CHILD_ONLY_EXCLUDED_ENV_KEYS: &[&str] = &[
     "INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON",
     "RUNTIME_METADATA",
@@ -329,23 +333,33 @@ mod tests {
             "MANAGED_AI_OPENAI_API_KEY",
             "SERVICE_RUNTIME_USER_PASSWORD",
             "DESKTOP_RELEASE_GITHUB_TOKEN",
-            "WEB_PUSH_VAPID_PRIVATE_KEY",
+            "INSTAFY_AUTHOR_PSEUDONYM_KEYS",
         ] {
             assert!(is_internal_credential_env_key(key), "{key}");
             assert!(is_model_child_excluded_env_key(key), "{key}");
             assert!(!LAUNCH_CREDENTIAL_ENV_KEYS.contains(&key), "{key}");
         }
         // The per-job controller token and the proxy envelope keys are how a
-        // model shell legitimately reaches the controller and the proxy.
-        for key in ["CONTROLLER_ACCESS_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY"] {
+        // model shell legitimately reaches the controller and the proxy, and
+        // generic push-notification key names may be a project's own secrets.
+        for key in [
+            "CONTROLLER_ACCESS_TOKEN",
+            "CODEX_API_KEY",
+            "OPENAI_API_KEY",
+            "WEB_PUSH_VAPID_PRIVATE_KEY",
+            "APNS_PRIVATE_KEY",
+            "APNS_PRIVATE_KEY_B64",
+        ] {
             assert!(!is_model_child_excluded_env_key(key), "{key}");
         }
     }
 
     #[test]
-    fn runtime_compose_files_forward_launch_metadata_only_to_the_agent() {
-        // The compose files hand the runtime its launch metadata; this test
-        // pins the name the exclusion above must match.
+    fn runtime_compose_launch_metadata_name_matches_the_scrubbed_name() {
+        // The compose files hand the runtime its launch metadata under the
+        // name the startup scrub and the model-child exclusion both match.
+        let key = crate::config::LAUNCH_METADATA_ENV_KEY;
+        assert!(is_model_child_excluded_env_key(key));
         for compose in [
             include_str!("../../../docker/docker-compose.runtime.yml"),
             include_str!("../../../docker/docker-compose.runtime.provider.yml"),
@@ -353,8 +367,8 @@ mod tests {
             assert!(
                 compose
                     .lines()
-                    .any(|line| line.trim() == "RUNTIME_METADATA: ${RUNTIME_METADATA:-}"),
-                "runtime compose no longer forwards RUNTIME_METADATA under the excluded name"
+                    .any(|line| line.trim_start().starts_with(&format!("{key}:"))),
+                "runtime compose no longer passes the launch metadata as {key}"
             );
         }
     }
