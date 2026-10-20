@@ -257,6 +257,48 @@ COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-linux-sandb
 COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-code-mode-host /codex-code-mode-host
 
 ########################
+# Shared Browser extensions
+########################
+# uBlock Origin Lite (Manifest V3) provides ad blocking on modern Chromium builds.
+# uBlock Origin itself is Manifest V2 which may be blocked/disabled in newer releases.
+# Both runtime images copy the unpacked extension from this stage, so the
+# download and its checksum check exist once.
+FROM ${RUNTIME_BASE} AS browser-extensions
+ARG TARGETARCH
+ARG UBOLITE_VERSION=2026.301.2014
+ARG UBOLITE_SHA256_AMD64
+ARG UBOLITE_SHA256_ARM64
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates curl unzip && \
+    rm -rf /var/lib/apt/lists/*
+
+# Keep the headed browser usable for humans by shipping an ad blocker extension.
+# This is architecture-independent and avoids having to bundle Brave (which is not
+# consistently available on all target arches).
+RUN set -eu; \
+    arch="${TARGETARCH:-}"; \
+    if [ -z "$arch" ]; then \
+      uname_arch="$(uname -m || true)"; \
+      case "$uname_arch" in \
+        x86_64) arch="amd64" ;; \
+        aarch64|arm64) arch="arm64" ;; \
+        *) arch="$uname_arch" ;; \
+      esac; \
+    fi; \
+    case "$arch" in \
+      amd64) checksum="${UBOLITE_SHA256_AMD64}" ;; \
+      arm64) checksum="${UBOLITE_SHA256_ARM64}" ;; \
+      *) echo "Unsupported arch=$arch (expected amd64|arm64)"; exit 1 ;; \
+    esac; \
+    mkdir -p /opt/instafy/extensions/ublock; \
+    curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+      -o /tmp/ublock.zip \
+      "https://github.com/uBlockOrigin/uBOL-home/releases/download/${UBOLITE_VERSION}/uBOLite_${UBOLITE_VERSION}.chromium.zip"; \
+    printf '%s  %s\n' "${checksum}" /tmp/ublock.zip | sha256sum --check --status; \
+    unzip -q /tmp/ublock.zip -d /opt/instafy/extensions/ublock; \
+    rm -f /tmp/ublock.zip
+
+########################
 # Runtime image
 ########################
 # The runtime publisher rebuilds this stage and runtime-webdev on every release
@@ -303,7 +345,13 @@ RUN test -n "${CHROMIUM_MIN_VERSION}" && \
       mount \
       procps \
       ripgrep \
+      fluxbox \
+      ffmpeg \
+      fonts-liberation \
+      tigervnc-standalone-server \
+      tigervnc-common \
       unzip \
+      x11-utils \
       openssh-client \
       python-is-python3 \
       python3 \
@@ -367,6 +415,31 @@ RUN npm install -g "npm@${NPM_VERSION}" && \
     unpatched="$(find /usr -type f \( -path '*/node_modules/npm/node_modules/undici/package.json' -o -path '*/node_modules/pnpm/dist/node_modules/undici/package.json' \) -exec grep -L "\"version\": \"${UNDICI_VERSION}\"" {} + 2>/dev/null || true)" && \
     if [ -n "$unpatched" ]; then echo "unpatched undici copies: $unpatched" >&2; exit 1; fi && \
     rm -rf /root/.npm
+
+# The on-demand browser host (runtime-entrypoint start-browser-host) and its
+# agent tools use their own Node and Playwright, outside the /usr/local tree
+# that workspace tooling (npm -g, version managers) rewrites. The build fails
+# if the copy would resolve Playwright from anywhere else.
+RUN set -eu; \
+    host_root=/opt/instafy/browser-host; \
+    global_root="$(npm root -g)"; \
+    install -d -m 0755 "${host_root}/bin" "${host_root}/node_modules"; \
+    install -m 0755 "$(command -v node)" "${host_root}/bin/node"; \
+    cp -a "${global_root}/playwright" "${host_root}/node_modules/playwright"; \
+    if [ -d "${global_root}/playwright-core" ]; then \
+      cp -a "${global_root}/playwright-core" "${host_root}/node_modules/playwright-core"; \
+    fi; \
+    env -u NODE_PATH "${host_root}/bin/node" -e ' \
+      const path = require("node:path"); \
+      const root = "/opt/instafy/browser-host/node_modules"; \
+      const playwright = require.resolve("playwright", { paths: [root] }); \
+      const core = require.resolve("playwright-core", { paths: [path.dirname(playwright)] }); \
+      for (const resolved of [playwright, core]) { \
+        if (!resolved.startsWith(root + "/")) throw new Error("Playwright resolved outside the browser host: " + resolved); \
+      } \
+      require(playwright);'
+
+COPY --from=browser-extensions /opt/instafy/extensions /opt/instafy/extensions
 
 RUN set -eu; \
     arch="${TARGETARCH:-}"; \
@@ -457,11 +530,6 @@ ARG IP_ADDRESS_VERSION
 ARG IP_ADDRESS_SHA256
 ARG UNDICI_VERSION
 ARG UNDICI_SHA256
-# uBlock Origin Lite (Manifest V3) provides ad blocking on modern Chromium builds.
-# uBlock Origin itself is Manifest V2 which may be blocked/disabled in newer releases.
-ARG UBOLITE_VERSION=2026.301.2014
-ARG UBOLITE_SHA256_AMD64
-ARG UBOLITE_SHA256_ARM64
 ARG WEBDEV_OPENSSL_MIN_VERSION
 
 RUN test -n "${WEBDEV_OPENSSL_MIN_VERSION}" && \
@@ -544,31 +612,7 @@ RUN npm install -g "npm@${NPM_VERSION}" && \
     if [ -n "$unpatched" ]; then echo "unpatched undici copies: $unpatched" >&2; exit 1; fi && \
     rm -rf /root/.npm
 
-# Keep the headed browser usable for humans by shipping an ad blocker extension.
-# This is architecture-independent and avoids having to bundle Brave (which is not
-# consistently available on all target arches).
-RUN set -eu; \
-    arch="${TARGETARCH:-}"; \
-    if [ -z "$arch" ]; then \
-      uname_arch="$(uname -m || true)"; \
-      case "$uname_arch" in \
-        x86_64) arch="amd64" ;; \
-        aarch64|arm64) arch="arm64" ;; \
-        *) arch="$uname_arch" ;; \
-      esac; \
-    fi; \
-    case "$arch" in \
-      amd64) checksum="${UBOLITE_SHA256_AMD64}" ;; \
-      arm64) checksum="${UBOLITE_SHA256_ARM64}" ;; \
-      *) echo "Unsupported arch=$arch (expected amd64|arm64)"; exit 1 ;; \
-    esac; \
-    mkdir -p /opt/instafy/extensions/ublock; \
-    curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
-      -o /tmp/ublock.zip \
-      "https://github.com/uBlockOrigin/uBOL-home/releases/download/${UBOLITE_VERSION}/uBOLite_${UBOLITE_VERSION}.chromium.zip"; \
-    printf '%s  %s\n' "${checksum}" /tmp/ublock.zip | sha256sum --check --status; \
-    unzip -q /tmp/ublock.zip -d /opt/instafy/extensions/ublock; \
-    rm -f /tmp/ublock.zip
+COPY --from=browser-extensions /opt/instafy/extensions /opt/instafy/extensions
 
 RUN set -eu; \
     arch="${TARGETARCH:-}"; \

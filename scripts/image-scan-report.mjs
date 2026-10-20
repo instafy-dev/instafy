@@ -9,7 +9,8 @@
 //   node scripts/image-scan-report.mjs comment <jobs.json>
 //
 // cell reads CELL_IMAGE, CELL_SOURCE, CELL_TARGET, CELL_PLATFORM, BUILD_OUTCOME,
-// SCAN_OUTCOME, SMOKE_OUTCOME, SMOKE_REQUIRED, FINDINGS_FILE and RESULT_FILE.
+// SCAN_OUTCOME, SMOKE_OUTCOME, SMOKE_REQUIRED, HOST_SMOKE_OUTCOME,
+// HOST_SMOKE_REQUIRED, FINDINGS_FILE and RESULT_FILE.
 // It appends to GITHUB_STEP_SUMMARY and, for a failed cell only, writes a JSON
 // record to RESULT_FILE; the workflow names each record's artifact after the
 // run attempt so the report reads only the current attempt's failures. issue and comment read REPOSITORY_URL, RUN_URL and
@@ -108,12 +109,13 @@ const outcomeText = {
 
 // Builds the record for one image cell from its step outcomes and, when the
 // gate failed, the JSON listing of what it found.
-export function cellResult({ image, source, target = "", platform, build, scan, smoke, smokeRequired, findings }) {
+export function cellResult({ image, source, target = "", platform, build, scan, smoke, smokeRequired, hostSmoke = "", hostSmokeRequired = false, findings }) {
   const checks = [
     { name: "Build", outcome: build || "" },
     { name: "Trivy scan (fixable HIGH and CRITICAL, secrets)", outcome: scan || "" },
   ];
   if (smokeRequired) checks.push({ name: "Shared Browser starts", outcome: smoke || "" });
+  if (hostSmokeRequired) checks.push({ name: "Browser host starts on demand", outcome: hostSmoke || "" });
   const passed = checks.every((check) => check.outcome === "success");
   const reasons = [];
   if (build !== "success") {
@@ -131,6 +133,9 @@ export function cellResult({ image, source, target = "", platform, build, scan, 
   }
   if (smokeRequired && smoke === "failure") {
     reasons.push("Headed Chromium did not answer on its CDP port; the Shared Browser step log shows the entrypoint and Chromium output.");
+  }
+  if (hostSmokeRequired && hostSmoke === "failure") {
+    reasons.push("The on-demand browser host did not start, stop and restart cleanly; the browser host step log shows its status lines and logs.");
   }
   return {
     schemaVersion: 1,
@@ -242,6 +247,8 @@ function runCell(env) {
     scan: env.SCAN_OUTCOME ?? "",
     smoke: env.SMOKE_OUTCOME ?? "",
     smokeRequired: env.SMOKE_REQUIRED === "true",
+    hostSmoke: env.HOST_SMOKE_OUTCOME ?? "",
+    hostSmokeRequired: env.HOST_SMOKE_REQUIRED === "true",
     findings: env.SCAN_OUTCOME === "failure" ? readFindings(env.FINDINGS_FILE) : [],
   });
   const markdown = cellMarkdown(result);

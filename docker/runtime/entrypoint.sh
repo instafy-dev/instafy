@@ -12,7 +12,9 @@ mkdir -p "${WORKSPACE_DIR}" "${CODEX_HOME}"
 # than resolving a bare module name from a tenant-controlled workspace.
 unset INSTAFY_SHARED_BROWSER_PLAYWRIGHT_PATH
 unset INSTAFY_SHARED_BROWSER_TRUSTED_NODE_MODULES_ROOT
-if command -v npm >/dev/null 2>&1; then
+# The on-demand browser host (`start-browser-host`) uses neither, so it skips
+# the probe and does not add two Node start-ups to every start.
+if [ "${1:-}" != "start-browser-host" ] && command -v npm >/dev/null 2>&1; then
   global_node_modules="$(npm root -g 2>/dev/null || true)"
   if [ -n "${global_node_modules}" ]; then
     if [ -n "${NODE_PATH:-}" ]; then
@@ -367,25 +369,13 @@ browser_display_dpi() {
   awk -v scale="${scale}" 'BEGIN { printf "%d", int(96 * scale + 0.5); }'
 }
 
-start_headed_chromium_daemon() {
-  if [ "${INSTAFY_ENABLE_BROWSER_SESSION:-0}" != "1" ]; then
-    return
-  fi
+# Chromium's command line for the Shared Browser, shared by the boot-time
+# launch and the on-demand browser host. It reads the profile directory, CDP
+# port, egress proxy address, render scale and view settings from the
+# environment and leaves the flags in CHROMIUM_LAUNCH_FLAGS.
+CHROMIUM_LAUNCH_FLAGS=()
 
-  if ! ensure_browser_egress_proxy; then
-    local warning_text
-    warning_text="Shared Browser egress isolation is unavailable; Chromium was not launched."
-    printf '%s\n' "${warning_text}" > "$(chromium_warning_file)"
-    echo "[instafy] ${warning_text}" >&2
-    return 1
-  fi
-
-  mkdir -p /tmp/instafy/playwright "${INSTAFY_PLAYWRIGHT_PROFILE_DIR}"
-  rm -f "$(chromium_warning_file)"
-  # Start each browser session with a clean action log so the UI never replays
-  # a prior session's cursor/ticker events.
-  : > "${INSTAFY_BROWSER_ACTIONS_FILE}" 2>/dev/null || true
-
+build_chromium_launch_flags() {
   local window_flags=()
   local render_scale
   render_scale="$(browser_render_scale)"
@@ -447,6 +437,47 @@ start_headed_chromium_daemon() {
     fi
   fi
 
+  CHROMIUM_LAUNCH_FLAGS=(
+    --no-first-run
+    --no-default-browser-check
+    --disable-component-update
+    --disable-infobars
+    --disable-features=TranslateUI
+    --high-dpi-support=1
+    --force-device-scale-factor="${render_scale}"
+    --disable-dev-shm-usage
+    --remote-debugging-address=127.0.0.1
+    --remote-debugging-port="${INSTAFY_PLAYWRIGHT_CDP_PORT}"
+    --user-data-dir="${INSTAFY_PLAYWRIGHT_PROFILE_DIR}"
+    --no-sandbox
+    "${egress_flags[@]}"
+    "${extension_flags[@]}"
+    "${window_flags[@]}"
+    "${viewport_flags[@]}"
+  )
+}
+
+start_headed_chromium_daemon() {
+  if [ "${INSTAFY_ENABLE_BROWSER_SESSION:-0}" != "1" ]; then
+    return
+  fi
+
+  if ! ensure_browser_egress_proxy; then
+    local warning_text
+    warning_text="Shared Browser egress isolation is unavailable; Chromium was not launched."
+    printf '%s\n' "${warning_text}" > "$(chromium_warning_file)"
+    echo "[instafy] ${warning_text}" >&2
+    return 1
+  fi
+
+  mkdir -p /tmp/instafy/playwright "${INSTAFY_PLAYWRIGHT_PROFILE_DIR}"
+  rm -f "$(chromium_warning_file)"
+  # Start each browser session with a clean action log so the UI never replays
+  # a prior session's cursor/ticker events.
+  : > "${INSTAFY_BROWSER_ACTIONS_FILE}" 2>/dev/null || true
+
+  build_chromium_launch_flags
+
   local pid_file
   pid_file="$(chromium_pid_file)"
   if [ -f "${pid_file}" ]; then
@@ -472,22 +503,7 @@ start_headed_chromium_daemon() {
     "${MODEL_SAFE_BASE_ENV_KEYS[@]}" \
     DISPLAY XAUTHORITY XDG_RUNTIME_DIR NODE_PATH
   env -i "${MODEL_SAFE_ENV[@]}" "${chrome_path}" \
-    --no-first-run \
-    --no-default-browser-check \
-    --disable-component-update \
-    --disable-infobars \
-    --disable-features=TranslateUI \
-    --high-dpi-support=1 \
-    --force-device-scale-factor="${render_scale}" \
-    --disable-dev-shm-usage \
-    --remote-debugging-address=127.0.0.1 \
-    --remote-debugging-port="${INSTAFY_PLAYWRIGHT_CDP_PORT}" \
-    --user-data-dir="${INSTAFY_PLAYWRIGHT_PROFILE_DIR}" \
-    --no-sandbox \
-    "${egress_flags[@]}" \
-    "${extension_flags[@]}" \
-    "${window_flags[@]}" \
-    "${viewport_flags[@]}" \
+    "${CHROMIUM_LAUNCH_FLAGS[@]}" \
     about:blank \
     >"$(chromium_log_file)" 2>&1 &
   local chromium_pid=$!
@@ -535,6 +551,14 @@ start_browser_session() {
   fi
   if [ "${ORIGIN_MODE:-desktop}" = "desktop" ]; then
     export ORIGIN_MODE="hosted"
+  fi
+
+  # The base image carries X/VNC and Chromium only for the on-demand browser
+  # host below. Its boot path keeps its earlier effect: the egress proxy may
+  # start, but no display or browser does until something calls the host.
+  if [ "${INSTAFY_RUNTIME_FLAVOR:-}" = "base" ]; then
+    echo "[instafy] browser session enabled, but the base image starts its browser only on demand (use runtime-webdev image target)" >&2
+    return
   fi
 
   if ! command -v Xtigervnc >/dev/null 2>&1; then
@@ -643,6 +667,607 @@ EOF
 
   start_browser_webrtc_sender_daemon
 }
+
+# On-demand browser host: `runtime-entrypoint start-browser-host`.
+#
+# Starts one Shared Browser stack (egress proxy, X/VNC, window manager,
+# Chromium and, when enabled, the WebRTC sender) when a caller asks for it,
+# instead of at boot. Nothing here runs unless the subcommand is called, and
+# the boot path above is unchanged.
+#
+# The caller owns every location and port, passed in the environment:
+#
+#   INSTAFY_BROWSER_HOST_HOME         HOME for the browser processes (absolute)
+#   INSTAFY_BROWSER_HOST_PROFILE_DIR  Chromium user-data-dir (absolute). It is
+#                                     used as given and never wiped, so a
+#                                     persisted profile keeps its sign-ins.
+#   INSTAFY_BROWSER_HOST_STATE_DIR    logs, window-manager style and the
+#                                     host's lock (absolute). One host runs
+#                                     per state directory at a time.
+#   INSTAFY_BROWSER_HOST_DISPLAY      X display, :N
+#   INSTAFY_BROWSER_HOST_CDP_PORT     loopback CDP port
+#   INSTAFY_BROWSER_HOST_VNC_PORT     loopback RFB port
+#   INSTAFY_BROWSER_HOST_EGRESS_PORT  loopback egress proxy port
+#   INSTAFY_BROWSER_HOST_WEBRTC_PORT  loopback WebRTC sender port, required
+#                                     only with INSTAFY_BROWSER_WEBRTC_ENABLED=1
+#   INSTAFY_BROWSER_HOST_CHROMIUM     optional Chromium executable
+#   INSTAFY_BROWSER_HOST_DISK_CACHE_MB optional HTTP cache cap, 8-512 (64)
+#
+# The display and ports must differ from the boot-time defaults (:1, 5900,
+# 9223, 9225, 9226) and from each other. The host starts fresh children every
+# time: it never reuses pid files, deletes X locks or kills processes it did
+# not start, and it reports a display or port that is already taken instead of
+# taking it over. It leads its own process group, so signalling that group
+# stops the whole browser, and it lowers its priority to nice 10 and raises
+# its OOM score to 1000 so the workspace keeps priority over the browser.
+#
+# stdout carries exactly one status line per outcome:
+#
+#   instafy-browser-host: ready display=:N cdp=P vnc=P egress=P|off webrtc=P|off|unavailable scale=S elapsed_ms=MS
+#   instafy-browser-host: failed <reason>   (exit status below)
+#   instafy-browser-host: exited <child>    (a required child stopped; exit 71)
+#   instafy-browser-host: stopped           (SIGTERM, SIGINT or SIGHUP; exit 0)
+#
+# Failure reasons and exit statuses: config_invalid 64, port_reserved 65,
+# display_in_use, port_in_use, profile_in_use and host_in_use 66,
+# stack_missing 67, egress_unavailable 68, display_failed 69,
+# chromium_failed 70, host_error 72 (any other failure, such as a write that
+# fails on a full disk).
+# Diagnostics go to stderr and to the logs in the state directory.
+
+readonly BROWSER_HOST_STATUS_PREFIX="instafy-browser-host:"
+readonly -a BROWSER_HOST_RESERVED_PORTS=(5900 9223 9225 9226)
+BROWSER_HOST_CHILD_NAMES=()
+BROWSER_HOST_CHILD_PIDS=()
+BROWSER_HOST_REQUIRED_PIDS=()
+# Set once a final status line (failed, exited or stopped) is printed.
+BROWSER_HOST_ENDED=0
+
+browser_host_status() {
+  case "$*" in
+    failed* | exited* | stopped*) BROWSER_HOST_ENDED=1 ;;
+  esac
+  printf '%s %s\n' "${BROWSER_HOST_STATUS_PREFIX}" "$*"
+}
+
+browser_host_track_child() {
+  # $1 name, $2 pid, $3 "required" when the host must stop with this child.
+  BROWSER_HOST_CHILD_NAMES+=("$1")
+  BROWSER_HOST_CHILD_PIDS+=("$2")
+  if [ "${3:-}" = "required" ]; then
+    BROWSER_HOST_REQUIRED_PIDS+=("$2")
+  fi
+}
+
+# Set once the host leads its own process group (Linux with setsid). Every
+# child, and everything a child starts, such as Chromium's zygote, renderers
+# and crash handler, then shares that group, so a caller can stop the whole
+# browser by signalling the group and the host can find what remains.
+BROWSER_HOST_GROUP_LEADER=0
+BROWSER_HOST_GROUP_MEMBERS=()
+
+browser_host_process_group() {
+  # Prints the process group of process $1 from /proc, or nothing.
+  local stat="" rest pgrp=""
+  read -r stat 2>/dev/null < "/proc/$1/stat" || return 0
+  rest="${stat##*) }"
+  read -r _ _ pgrp _ <<< "${rest}"
+  printf '%s' "${pgrp}"
+}
+
+browser_host_collect_group_members() {
+  # Fills BROWSER_HOST_GROUP_MEMBERS with the live processes in the host's
+  # group other than the host itself. Reads /proc with builtins only, so the
+  # scan adds no process of its own to the group.
+  BROWSER_HOST_GROUP_MEMBERS=()
+  local stat_file pid stat rest state pgrp
+  for stat_file in /proc/[0-9]*/stat; do
+    pid="${stat_file#/proc/}"
+    pid="${pid%/stat}"
+    if [ "${pid}" = "$$" ] || [ "${pid}" = "${BASHPID}" ]; then
+      continue
+    fi
+    stat=""
+    read -r stat 2>/dev/null < "${stat_file}" || continue
+    rest="${stat##*) }"
+    read -r state _ pgrp _ <<< "${rest}"
+    # A zombie has already exited; it stays only until its parent reaps it.
+    if [ "${pgrp}" = "$$" ] && [ "${state}" != "Z" ]; then
+      BROWSER_HOST_GROUP_MEMBERS+=("${pid}")
+    fi
+  done
+}
+
+browser_host_stop_children() {
+  # Stop what this host started, then reap it. As the group leader the host
+  # signals its whole group (ignoring the signal itself), so the browser's
+  # own descendants stop too; otherwise it signals its direct children.
+  local index pid alive
+  if [ "${BROWSER_HOST_GROUP_LEADER}" = "1" ]; then
+    trap '' TERM
+    kill -TERM -- "-$$" >/dev/null 2>&1 || true
+    for _ in $(seq 1 50); do
+      browser_host_collect_group_members
+      if [ "${#BROWSER_HOST_GROUP_MEMBERS[@]}" = "0" ]; then
+        break
+      fi
+      sleep 0.1
+    done
+    browser_host_collect_group_members
+    for pid in "${BROWSER_HOST_GROUP_MEMBERS[@]}"; do
+      kill -KILL "${pid}" >/dev/null 2>&1 || true
+    done
+  else
+    for (( index=${#BROWSER_HOST_CHILD_PIDS[@]} - 1; index >= 0; index-- )); do
+      kill -TERM "${BROWSER_HOST_CHILD_PIDS[index]}" >/dev/null 2>&1 || true
+    done
+    for _ in $(seq 1 50); do
+      alive=0
+      for pid in "${BROWSER_HOST_CHILD_PIDS[@]}"; do
+        if kill -0 "${pid}" >/dev/null 2>&1; then
+          alive=1
+          break
+        fi
+      done
+      if [ "${alive}" = "0" ]; then
+        break
+      fi
+      sleep 0.1
+    done
+  fi
+  for pid in "${BROWSER_HOST_CHILD_PIDS[@]}"; do
+    kill -KILL "${pid}" >/dev/null 2>&1 || true
+    wait "${pid}" >/dev/null 2>&1 || true
+  done
+  BROWSER_HOST_CHILD_NAMES=()
+  BROWSER_HOST_CHILD_PIDS=()
+  BROWSER_HOST_REQUIRED_PIDS=()
+}
+
+browser_host_fail() {
+  # $1 reason, $2 exit status, $3 diagnostic (fixed text plus caller values).
+  echo "[instafy] browser host: $3" >&2
+  browser_host_stop_children
+  trap - EXIT
+  browser_host_status "failed $1"
+  exit "$2"
+}
+
+browser_host_child_name() {
+  local index
+  for index in "${!BROWSER_HOST_CHILD_PIDS[@]}"; do
+    if [ "${BROWSER_HOST_CHILD_PIDS[index]}" = "$1" ]; then
+      printf '%s' "${BROWSER_HOST_CHILD_NAMES[index]}"
+      return 0
+    fi
+  done
+  printf '%s' "unknown"
+}
+
+browser_host_require_dir() {
+  # $1 variable name: an absolute path without `..` segments or control
+  # characters. Runs in the host's own shell so a failure ends the host.
+  local name="$1"
+  local value="${!name:-}"
+  if [[ ! "${value}" =~ ^/[^[:cntrl:]]*$ ]] || [[ "/${value}/" == *"/../"* ]]; then
+    browser_host_fail config_invalid 64 "${name} must be an absolute directory path"
+  fi
+}
+
+browser_host_require_port() {
+  # $1 variable name: a loopback port this host may use, 1024-65535 and not
+  # one the boot-time browser owns.
+  local name="$1"
+  local value="${!name:-}"
+  if [[ ! "${value}" =~ ^[1-9][0-9]{3,4}$ ]] || [ "${value}" -lt 1024 ] || [ "${value}" -gt 65535 ]; then
+    browser_host_fail config_invalid 64 "${name} must be a port from 1024 to 65535"
+  fi
+  local reserved
+  for reserved in "${BROWSER_HOST_RESERVED_PORTS[@]}"; do
+    if [ "${value}" = "${reserved}" ]; then
+      browser_host_fail port_reserved 65 "${name}=${value} belongs to the boot-time browser"
+    fi
+  done
+}
+
+browser_host_port_open() {
+  # True when something already accepts connections on loopback port $1.
+  (exec 3<>"/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1
+}
+
+browser_host_display_owner_alive() {
+  # True when display $1 (a number) has a lock file naming a live process.
+  # A stale lock is left for the X server, which replaces it itself.
+  local lock_file="/tmp/.X$1-lock"
+  local owner=""
+  if [ ! -f "${lock_file}" ]; then
+    return 1
+  fi
+  owner="$(tr -d '[:space:]' < "${lock_file}" 2>/dev/null || true)"
+  [[ "${owner}" =~ ^[0-9]+$ ]] && kill -0 "${owner}" >/dev/null 2>&1
+}
+
+browser_host_release_profile_lock() {
+  # A persisted profile can carry Chromium's singleton lock from the machine
+  # that saved it. Refuse a profile a live Chromium on this machine still
+  # holds; otherwise the lock is stale and is removed so Chromium starts.
+  local profile_dir="$1"
+  local lock="${profile_dir}/SingletonLock"
+  if [ -L "${lock}" ] || [ -e "${lock}" ]; then
+    local target owner_host owner_pid owner_command=""
+    target="$(readlink "${lock}" 2>/dev/null || true)"
+    owner_host="${target%-*}"
+    owner_pid="${target##*-}"
+    if [ "${owner_host}" = "${HOSTNAME:-}" ] && [[ "${owner_pid}" =~ ^[0-9]+$ ]] \
+      && kill -0 "${owner_pid}" >/dev/null 2>&1; then
+      owner_command="$(cat "/proc/${owner_pid}/comm" 2>/dev/null || true)"
+      case "${owner_command}" in
+        chrom*)
+          return 1
+          ;;
+      esac
+    fi
+  fi
+  rm -f "${profile_dir}/SingletonLock" \
+    "${profile_dir}/SingletonSocket" \
+    "${profile_dir}/SingletonCookie"
+}
+
+browser_host_disk_cache_bytes() {
+  awk -v raw="${INSTAFY_BROWSER_HOST_DISK_CACHE_MB:-64}" 'BEGIN {
+    if (raw !~ /^[0-9]+$/) raw = 64;
+    if (raw < 8) raw = 8;
+    if (raw > 512) raw = 512;
+    printf "%d", raw * 1048576;
+  }'
+}
+
+resolve_browser_host_chromium() {
+  # An explicit executable wins. Otherwise prefer Playwright's Chromium (the
+  # webdev image), then Debian's real binary over its /usr/bin/chromium shell
+  # wrapper, which reads flags from /etc/chromium.d.
+  if [ -n "${INSTAFY_BROWSER_HOST_CHROMIUM:-}" ]; then
+    if [ -x "${INSTAFY_BROWSER_HOST_CHROMIUM}" ]; then
+      printf '%s' "${INSTAFY_BROWSER_HOST_CHROMIUM}"
+    fi
+    return 0
+  fi
+  local resolved
+  resolved="$(resolve_chromium_executable_path)"
+  if [ "${resolved}" = "/usr/bin/chromium" ] && [ -x /usr/lib/chromium/chromium ]; then
+    resolved=/usr/lib/chromium/chromium
+  fi
+  printf '%s' "${resolved}"
+}
+
+browser_host_prepare_process() {
+  # Re-exec once, keeping this pid, as the leader of a new process group
+  # (setsid does not fork for a process that does not lead a group) and at
+  # nice 10 relative to the caller. Then raise the OOM score. Children inherit
+  # the group, the niceness and the OOM score.
+  #
+  # The TURN credentials never stay in this process's own environment: unset
+  # changes only the shell's variables, not /proc/<pid>/environ, so a host
+  # started with INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON re-execs without it.
+  local pgrp current relaunch=()
+  pgrp="$(browser_host_process_group "$$")"
+  if [ -n "${INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON+set}" ]; then
+    relaunch+=(env -u INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON)
+  fi
+  if [ -z "${INSTAFY_BROWSER_HOST_RELAUNCHED:-}" ]; then
+    if [ -n "${pgrp}" ] && [ "${pgrp}" != "$$" ] && command -v setsid >/dev/null 2>&1; then
+      relaunch+=(setsid)
+    fi
+    current="$(nice 2>/dev/null || true)"
+    if [[ "${current}" =~ ^-?[0-9]+$ ]] && [ "${current}" -lt 10 ]; then
+      relaunch+=(nice -n "$(( 10 - current ))")
+    fi
+  fi
+  if [ "${#relaunch[@]}" -gt 0 ]; then
+    export INSTAFY_BROWSER_HOST_RELAUNCHED=1
+    exec "${relaunch[@]}" bash "$0" start-browser-host
+  fi
+  if [ -n "${pgrp}" ] && [ "${pgrp}" = "$$" ]; then
+    BROWSER_HOST_GROUP_LEADER=1
+  fi
+  { printf '1000\n' > "/proc/$$/oom_score_adj"; } 2>/dev/null || true
+}
+
+browser_host_on_exit() {
+  # Any exit without a final status line, such as a write that fails under
+  # `set -e`, still stops the children and reports one.
+  trap - EXIT
+  browser_host_stop_children
+  if [ "${BROWSER_HOST_ENDED}" != "1" ]; then
+    browser_host_status "failed host_error"
+    exit 72
+  fi
+}
+
+browser_host_on_signal() {
+  trap - EXIT TERM INT HUP
+  browser_host_stop_children
+  browser_host_status "stopped"
+  exit 0
+}
+
+start_browser_host() {
+  browser_host_prepare_process
+  trap 'browser_host_on_exit' EXIT
+  trap 'browser_host_on_signal' TERM INT HUP
+
+  local started_ms
+  started_ms="$(chromium_ready_clock_ms)"
+
+  # The sender takes ICE servers from each offer in this mode, so the host
+  # has no use for TURN credentials (browser_host_prepare_process already
+  # re-executed without them).
+  unset INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON
+
+  browser_host_require_dir INSTAFY_BROWSER_HOST_HOME
+  browser_host_require_dir INSTAFY_BROWSER_HOST_PROFILE_DIR
+  browser_host_require_dir INSTAFY_BROWSER_HOST_STATE_DIR
+  local home_dir="${INSTAFY_BROWSER_HOST_HOME}"
+  local profile_dir="${INSTAFY_BROWSER_HOST_PROFILE_DIR}"
+  local state_dir="${INSTAFY_BROWSER_HOST_STATE_DIR}"
+  local display="${INSTAFY_BROWSER_HOST_DISPLAY:-}"
+  if [[ ! "${display}" =~ ^:[0-9]{1,4}$ ]]; then
+    browser_host_fail config_invalid 64 "INSTAFY_BROWSER_HOST_DISPLAY must be :N"
+  fi
+  local display_number="${display#:}"
+  display_number="$(( 10#${display_number} ))"
+  display=":${display_number}"
+  if [ "${display_number}" = "1" ]; then
+    browser_host_fail port_reserved 65 "display :1 belongs to the boot-time browser"
+  fi
+
+  browser_host_require_port INSTAFY_BROWSER_HOST_CDP_PORT
+  browser_host_require_port INSTAFY_BROWSER_HOST_VNC_PORT
+  browser_host_require_port INSTAFY_BROWSER_HOST_EGRESS_PORT
+  local cdp_port="${INSTAFY_BROWSER_HOST_CDP_PORT}"
+  local vnc_port="${INSTAFY_BROWSER_HOST_VNC_PORT}"
+  local egress_port="${INSTAFY_BROWSER_HOST_EGRESS_PORT}"
+  local webrtc_enabled=0 webrtc_port=""
+  local ports=("${cdp_port}" "${vnc_port}" "${egress_port}")
+  if [ "${INSTAFY_BROWSER_WEBRTC_ENABLED:-0}" = "1" ]; then
+    browser_host_require_port INSTAFY_BROWSER_HOST_WEBRTC_PORT
+    webrtc_enabled=1
+    webrtc_port="${INSTAFY_BROWSER_HOST_WEBRTC_PORT}"
+    ports+=("${webrtc_port}")
+  fi
+  local index other
+  for index in "${!ports[@]}"; do
+    for other in "${ports[@]:index+1}"; do
+      if [ "${ports[index]}" = "${other}" ]; then
+        browser_host_fail config_invalid 64 "the browser host ports must be distinct"
+      fi
+    done
+  done
+
+  if ! command -v Xtigervnc >/dev/null 2>&1 || ! command -v xdpyinfo >/dev/null 2>&1; then
+    browser_host_fail stack_missing 67 "Xtigervnc and xdpyinfo are required"
+  fi
+  local chrome_path
+  chrome_path="$(resolve_browser_host_chromium)"
+  if [ -z "${chrome_path}" ]; then
+    browser_host_fail stack_missing 67 "no Chromium executable found"
+  fi
+
+  # Only the directories are created; an existing profile is used as is.
+  if ! mkdir -p "${home_dir}" "${profile_dir}" "${state_dir}" 2>/dev/null \
+    || ! chmod 700 "${home_dir}" "${profile_dir}" "${state_dir}" 2>/dev/null; then
+    browser_host_fail config_invalid 64 "cannot create the host's home, profile or state directory"
+  fi
+
+  # One host per state directory: a second start for the same caller fails
+  # here instead of racing the first one's port and readiness checks. The
+  # lock is held on fd 9 for the host's life; no child inherits it.
+  if ! command -v flock >/dev/null 2>&1; then
+    browser_host_fail stack_missing 67 "flock is required"
+  fi
+  if ! { exec 9>>"${state_dir}/host.lock"; } 2>/dev/null; then
+    browser_host_fail config_invalid 64 "cannot open ${state_dir}/host.lock"
+  fi
+  if ! flock -n 9; then
+    browser_host_fail host_in_use 66 "another browser host is using ${state_dir}"
+  fi
+
+  if browser_host_display_owner_alive "${display_number}"; then
+    browser_host_fail display_in_use 66 "display ${display} is already in use"
+  fi
+  local port
+  for port in "${ports[@]}"; do
+    if browser_host_port_open "${port}"; then
+      browser_host_fail port_in_use 66 "loopback port ${port} is already in use"
+    fi
+  done
+
+  if ! browser_host_release_profile_lock "${profile_dir}"; then
+    browser_host_fail profile_in_use 66 "a running Chromium holds the profile"
+  fi
+
+  export HOME="${home_dir}"
+  export DISPLAY="${display}"
+  export INSTAFY_PLAYWRIGHT_PROFILE_DIR="${profile_dir}"
+  export INSTAFY_PLAYWRIGHT_CDP_PORT="${cdp_port}"
+  export INSTAFY_BROWSER_EGRESS_PROXY_BIND="127.0.0.1:${egress_port}"
+  export INSTAFY_BROWSER_RENDER_SCALE="$(browser_render_scale)"
+  export INSTAFY_BROWSER_MAX_FRAMEBUFFER_PIXELS="$(browser_max_framebuffer_pixels)"
+
+  # Egress isolation first: a browser without the policy proxy can reach
+  # container, control-plane and cloud metadata addresses.
+  local egress_status="off"
+  if browser_egress_isolation_active; then
+    if ! command -v browser-egress-proxy >/dev/null 2>&1; then
+      browser_host_fail stack_missing 67 "browser-egress-proxy is missing"
+    fi
+    build_model_safe_env \
+      "${MODEL_SAFE_BASE_ENV_KEYS[@]}" \
+      INSTAFY_BROWSER_EGRESS_PROXY_BIND \
+      INSTAFY_BROWSER_EGRESS_ALLOWED_PORTS \
+      INSTAFY_BROWSER_EGRESS_MAX_CONNECTIONS
+    env -i "${MODEL_SAFE_ENV[@]}" browser-egress-proxy \
+      >>"${state_dir}/browser-egress-proxy.log" 2>&1 9>&- &
+    local egress_pid=$!
+    browser_host_track_child egress-proxy "${egress_pid}" required
+    local egress_ready=0
+    for _ in $(seq 1 50); do
+      if ! kill -0 "${egress_pid}" >/dev/null 2>&1; then
+        break
+      fi
+      if browser_egress_proxy_healthy; then
+        egress_ready=1
+        break
+      fi
+      sleep 0.1
+    done
+    if [ "${egress_ready}" != "1" ]; then
+      browser_host_fail egress_unavailable 68 "the egress proxy failed its readiness check"
+    fi
+    egress_status="${egress_port}"
+  elif [ "${INSTAFY_BROWSER_EGRESS_ALLOW_UNSAFE_DEV}" = "1" ]; then
+    echo "[instafy] WARNING: browser host egress isolation disabled by dev-only override" >&2
+  else
+    browser_host_fail egress_unavailable 68 "egress isolation is required; set INSTAFY_BROWSER_EGRESS_ISOLATION=1"
+  fi
+
+  local geometry depth display_dpi
+  geometry="$(scaled_browser_geometry)"
+  depth="${INSTAFY_VNC_DEPTH:-24}"
+  if [[ ! "${depth}" =~ ^(16|24|32)$ ]]; then
+    depth=24
+  fi
+  display_dpi="$(browser_display_dpi)"
+  build_model_safe_env \
+    "${MODEL_SAFE_BASE_ENV_KEYS[@]}" \
+    DISPLAY XAUTHORITY XDG_RUNTIME_DIR
+  env -i "${MODEL_SAFE_ENV[@]}" Xtigervnc "${DISPLAY}" \
+    -rfbport "${vnc_port}" \
+    -geometry "${geometry}" \
+    -depth "${depth}" \
+    -dpi "${display_dpi}" \
+    -localhost \
+    -SecurityTypes None \
+    -AlwaysShared \
+    >"${state_dir}/vnc.log" 2>&1 9>&- &
+  local display_pid=$!
+  browser_host_track_child display "${display_pid}" required
+  local display_ready=0
+  for _ in $(seq 1 60); do
+    if ! kill -0 "${display_pid}" >/dev/null 2>&1; then
+      break
+    fi
+    if xdpyinfo -display "${DISPLAY}" >/dev/null 2>&1; then
+      display_ready=1
+      break
+    fi
+    sleep 0.1
+  done
+  if [ "${display_ready}" != "1" ]; then
+    browser_host_fail display_failed 69 "Xtigervnc did not start on display ${display}"
+  fi
+
+  if command -v fluxbox >/dev/null 2>&1; then
+    # The window manager's settings live under this host's HOME, never /root.
+    mkdir -p "${HOME}/.fluxbox"
+    printf '%s\n' \
+      'background: flat' \
+      'background.color: #101010' \
+      'background.colorTo: #101010' \
+      > "${state_dir}/fluxbox-style"
+    printf '%s\n' \
+      'session.screen0.rootCommand: /bin/true' \
+      "session.styleFile: ${state_dir}/fluxbox-style" \
+      'session.screen0.toolbar.visible: false' \
+      > "${HOME}/.fluxbox/init"
+    build_model_safe_env \
+      "${MODEL_SAFE_BASE_ENV_KEYS[@]}" \
+      DISPLAY XAUTHORITY XDG_RUNTIME_DIR
+    env -i "${MODEL_SAFE_ENV[@]}" fluxbox >"${state_dir}/fluxbox.log" 2>&1 9>&- &
+    browser_host_track_child window-manager "$!"
+  fi
+
+  build_chromium_launch_flags
+  build_model_safe_env \
+    "${MODEL_SAFE_BASE_ENV_KEYS[@]}" \
+    DISPLAY XAUTHORITY XDG_RUNTIME_DIR
+  env -i "${MODEL_SAFE_ENV[@]}" "${chrome_path}" \
+    "${CHROMIUM_LAUNCH_FLAGS[@]}" \
+    --disk-cache-size="$(browser_host_disk_cache_bytes)" \
+    --password-store=basic \
+    about:blank \
+    >"${state_dir}/chromium.log" 2>&1 9>&- &
+  local chromium_pid=$!
+  browser_host_track_child chromium "${chromium_pid}" required
+  local ready_rc=0
+  check_chromium_cdp_ready "${chromium_pid}" "$(chromium_cdp_ready_timeout_secs)" || ready_rc=$?
+  if [ "${ready_rc}" = "2" ]; then
+    browser_host_fail chromium_failed 70 "Chromium exited before answering on CDP port ${cdp_port}; see ${state_dir}/chromium.log"
+  elif [ "${ready_rc}" != "0" ]; then
+    browser_host_fail chromium_failed 70 "Chromium did not answer on CDP port ${cdp_port} in time; see ${state_dir}/chromium.log"
+  fi
+
+  # The WebRTC sender is optional: Studio falls back to CDP screencast or RFB.
+  local webrtc_status="off"
+  if [ "${webrtc_enabled}" = "1" ]; then
+    webrtc_status="unavailable"
+    if command -v browser-webrtc-sender >/dev/null 2>&1 && command -v ffmpeg >/dev/null 2>&1; then
+      export INSTAFY_BROWSER_WEBRTC_BIND="127.0.0.1:${webrtc_port}"
+      export INSTAFY_BROWSER_WEBRTC_GEOMETRY="${INSTAFY_BROWSER_WEBRTC_GEOMETRY:-${geometry}}"
+      build_model_safe_env \
+        "${MODEL_SAFE_BASE_ENV_KEYS[@]}" \
+        DISPLAY \
+        INSTAFY_BROWSER_WEBRTC_BIND \
+        INSTAFY_BROWSER_WEBRTC_GEOMETRY \
+        INSTAFY_BROWSER_WEBRTC_FPS \
+        INSTAFY_BROWSER_WEBRTC_BITRATE_KBPS \
+        INSTAFY_BROWSER_WEBRTC_FFMPEG \
+        INSTAFY_BROWSER_WEBRTC_REQUIRE_TURN \
+        INSTAFY_VNC_GEOMETRY
+      env -i "${MODEL_SAFE_ENV[@]}" browser-webrtc-sender \
+        >>"${state_dir}/browser-webrtc-sender.log" 2>&1 9>&- &
+      local webrtc_pid=$!
+      browser_host_track_child webrtc-sender "${webrtc_pid}"
+      for _ in $(seq 1 50); do
+        if ! kill -0 "${webrtc_pid}" >/dev/null 2>&1; then
+          break
+        fi
+        if curl --noproxy '*' -fsS --max-time 1 "http://127.0.0.1:${webrtc_port}/healthz" >/dev/null 2>&1; then
+          webrtc_status="${webrtc_port}"
+          break
+        fi
+        sleep 0.1
+      done
+    fi
+    if [ "${webrtc_status}" = "unavailable" ]; then
+      echo "[instafy] browser host: the WebRTC sender is unavailable; see ${state_dir}/browser-webrtc-sender.log" >&2
+    fi
+  fi
+
+  local elapsed_ms
+  elapsed_ms="$(( $(chromium_ready_clock_ms) - started_ms ))"
+  if [ "${elapsed_ms}" -lt 0 ]; then
+    elapsed_ms=0
+  fi
+  browser_host_status "ready display=${display} cdp=${cdp_port} vnc=${vnc_port} egress=${egress_status} webrtc=${webrtc_status} scale=${INSTAFY_BROWSER_RENDER_SCALE} elapsed_ms=${elapsed_ms}"
+
+  # Stay in the foreground as the parent of every child. The caller stops the
+  # host with SIGTERM (or by killing its process group); a required child that
+  # stops on its own ends the host so the caller sees the failure.
+  local exited_pid="" wait_status=0
+  wait -n -p exited_pid "${BROWSER_HOST_REQUIRED_PIDS[@]}" || wait_status=$?
+  local exited_name
+  exited_name="$(browser_host_child_name "${exited_pid}")"
+  echo "[instafy] browser host: ${exited_name} stopped (status ${wait_status})" >&2
+  browser_host_stop_children
+  trap - EXIT
+  browser_host_status "exited ${exited_name}"
+  exit 71
+}
+
+if [ "${1:-}" = "start-browser-host" ]; then
+  start_browser_host
+fi
 
 # Subcommand: `runtime-entrypoint launch-chromium` only (re)launches the headed
 # Chromium daemon against the already-seeded profile dir. runtime-agent invokes

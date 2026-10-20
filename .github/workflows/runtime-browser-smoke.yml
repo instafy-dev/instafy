@@ -1,7 +1,8 @@
 name: Runtime browser smoke
 
 # Runs a change to the runtime entrypoint inside the newest published webdev
-# image and requires headed Chromium to answer on its CDP port. Publication
+# image and requires headed Chromium to answer on its CDP port, both at boot
+# and from the on-demand browser host (--lazy). Publication
 # runs the same check on each freshly built webdev image before pushing it
 # (publish-runtime-agent.yml); this catches entrypoint regressions at review
 # time, such as the chrome-linux64 layout that the Chromium resolver missed.
@@ -66,3 +67,8 @@ jobs:
         env:
           IMAGE: ${{ steps.image.outputs.image }}
         run: bash scripts/runtime-image-browser-smoke.sh "$IMAGE" docker/runtime/entrypoint.sh
+
+      - name: Start the on-demand browser host with this entrypoint
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+        run: bash scripts/runtime-image-browser-smoke.sh --lazy "$IMAGE" docker/runtime/entrypoint.sh
