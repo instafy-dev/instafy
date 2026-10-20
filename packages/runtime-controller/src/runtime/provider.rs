@@ -256,6 +256,70 @@ pub(super) fn apply_controller_turn_credentials(
     metadata
 }
 
+/// Launch settings of a lease attested as a lazy browser host (see
+/// `managed::MANAGED_BROWSER_HOST_ATTESTATION`). Runs after the runtime and
+/// provider metadata are merged, in place of
+/// [`apply_controller_turn_credentials`], so neither source can change them.
+///
+/// - Nothing browser-related starts at boot: the eager browser session switch
+///   is forced off, and the runtime starts the browser on first use.
+/// - The browser renders viewport-only with CDP screencast, which needs no
+///   relay.
+/// - WebRTC is on only when managed TURN serves the project, and then relay
+///   only. No ICE servers are written at launch: lease metadata reaches the
+///   runtime's environment, and the origin injects fresh relay credentials
+///   into each capabilities and offer request instead. A provider's static
+///   ICE list is removed as well.
+pub(super) fn apply_browser_host_launch_policy(
+    turn: Option<&BrowserTurnRestConfig>,
+    project_id: Uuid,
+    metadata: Option<JsonValue>,
+) -> Option<JsonValue> {
+    let mut root = match metadata {
+        Some(JsonValue::Object(map)) => map,
+        Some(other) => {
+            let mut map = JsonMap::new();
+            map.insert("metadata".to_string(), other);
+            map
+        }
+        None => JsonMap::new(),
+    };
+    let mut env = match root.remove("env") {
+        Some(JsonValue::Object(env)) => env,
+        _ => JsonMap::new(),
+    };
+    let set = |env: &mut JsonMap<String, JsonValue>, key: &str, value: &str| {
+        env.insert(key.to_string(), JsonValue::String(value.to_string()));
+    };
+
+    set(&mut env, "INSTAFY_ENABLE_BROWSER_SESSION", "0");
+    set(&mut env, "INSTAFY_BROWSER_VIEWPORT_ONLY", "1");
+    set(&mut env, "INSTAFY_BROWSER_CDP_SCREENCAST", "1");
+    env.remove("INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON");
+
+    if turn.is_some_and(|turn| turn.allows_project(project_id)) {
+        set(&mut env, "INSTAFY_BROWSER_WEBRTC_ENABLED", "1");
+        set(&mut env, "INSTAFY_BROWSER_WEBRTC_REQUIRE_TURN", "1");
+    } else {
+        set(&mut env, "INSTAFY_BROWSER_WEBRTC_ENABLED", "0");
+        env.remove("INSTAFY_BROWSER_WEBRTC_REQUIRE_TURN");
+        if env
+            .get("INSTAFY_BROWSER_PREFERRED_VIEWER")
+            .and_then(JsonValue::as_str)
+            == Some("webrtc")
+        {
+            set(
+                &mut env,
+                "INSTAFY_BROWSER_PREFERRED_VIEWER",
+                "cdp-screencast",
+            );
+        }
+    }
+
+    root.insert("env".to_string(), JsonValue::Object(env));
+    Some(JsonValue::Object(root))
+}
+
 fn provider_owned_runtime_env_key(key: &str) -> bool {
     matches!(
         key,
@@ -584,7 +648,8 @@ pub(super) fn authorize_provider_config_for_project(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_browser_profile_persistence_env, apply_controller_turn_credentials,
+        apply_browser_host_launch_policy, apply_browser_profile_persistence_env,
+        apply_browser_profile_persistence_policy, apply_controller_turn_credentials,
         call_provider_endpoint, merge_provider_metadata, provider_call_status_is_final_success,
         resolve_provider_auth_tokens,
     };
@@ -975,5 +1040,147 @@ mod tests {
             .expect("disabled policy must override ambient provider env");
         assert_eq!(result["env"]["INSTAFY_BROWSER_PROFILE_PERSIST"], "0");
         assert_eq!(result["env"]["INSTAFY_BROWSER_PROFILE_SNAPSHOT_SECS"], "0");
+    }
+
+    fn host_policy_test_config(
+        policy: crate::config::HostedBrowserHostPolicy,
+    ) -> crate::config::AppConfig {
+        let mut config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "browser-host-test",
+        );
+        config.hosted_browser_host = policy;
+        config
+    }
+
+    /// The env a host lease launches with, through the same steps the launch
+    /// path takes after the metadata merge.
+    fn host_launch_env(
+        config: &crate::config::AppConfig,
+        turn: Option<&BrowserTurnRestConfig>,
+        project_id: Uuid,
+        runtime_meta: Option<JsonValue>,
+        provider_meta: Option<JsonValue>,
+    ) -> serde_json::Map<String, JsonValue> {
+        let merged = merge_provider_metadata(&runtime_meta, &provider_meta);
+        let launched = apply_browser_profile_persistence_policy(
+            config,
+            project_id,
+            apply_browser_host_launch_policy(turn, project_id, merged),
+        )
+        .expect("host metadata");
+        launched["env"].as_object().expect("environment").clone()
+    }
+
+    #[test]
+    fn browser_host_launch_requires_turn_without_launch_ice_when_turn_serves_the_project() {
+        let project_id = Uuid::new_v4();
+        let turn = BrowserTurnRestConfig::for_test_projects(
+            "turns:turn.example.test:443",
+            TEST_TURN_SECRET,
+            600,
+            &project_id.to_string(),
+        );
+        let config =
+            host_policy_test_config(crate::config::HostedBrowserHostPolicy::Projects(vec![
+                project_id,
+            ]));
+        let env = host_launch_env(
+            &config,
+            Some(&turn),
+            project_id,
+            Some(json!({
+                "source": "studio",
+                "env": { "INSTAFY_BROWSER_PREFERRED_VIEWER": "webrtc" }
+            })),
+            // A provider's static ICE list and an eager browser switch.
+            Some(json!({
+                "env": {
+                    "INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON": "[{\"urls\":\"turn:static.example\"}]",
+                    "INSTAFY_BROWSER_WEBRTC_REQUIRE_TURN": "0",
+                    "INSTAFY_ENABLE_BROWSER_SESSION": "1"
+                }
+            })),
+        );
+
+        assert_eq!(env["INSTAFY_BROWSER_WEBRTC_ENABLED"], "1");
+        assert_eq!(env["INSTAFY_BROWSER_WEBRTC_REQUIRE_TURN"], "1");
+        assert!(!env.contains_key("INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON"));
+        assert_eq!(env["INSTAFY_BROWSER_PREFERRED_VIEWER"], "webrtc");
+        assert_eq!(env["INSTAFY_BROWSER_VIEWPORT_ONLY"], "1");
+        assert_eq!(env["INSTAFY_BROWSER_CDP_SCREENCAST"], "1");
+        assert_eq!(env["INSTAFY_ENABLE_BROWSER_SESSION"], "0");
+        // Sign-ins are kept: the policy turns on the profile store.
+        assert_eq!(env["INSTAFY_BROWSER_PROFILE_PERSIST"], "1");
+        assert_eq!(env["INSTAFY_BROWSER_PROFILE_SNAPSHOT_SECS"], "30");
+        assert!(!env.values().any(|value| value
+            .as_str()
+            .is_some_and(|value| value.contains(TEST_TURN_SECRET))));
+    }
+
+    #[test]
+    fn browser_host_launch_falls_back_to_cdp_without_managed_turn() {
+        let project_id = Uuid::new_v4();
+        let other_project = Uuid::new_v4();
+        let turn = BrowserTurnRestConfig::for_test_projects(
+            "turns:turn.example.test:443",
+            TEST_TURN_SECRET,
+            600,
+            &other_project.to_string(),
+        );
+        let config = host_policy_test_config(crate::config::HostedBrowserHostPolicy::All);
+        for turn in [None, Some(&turn)] {
+            let env = host_launch_env(
+                &config,
+                turn,
+                project_id,
+                Some(json!({
+                    "env": {
+                        "INSTAFY_BROWSER_WEBRTC_ENABLED": "1",
+                        "INSTAFY_BROWSER_PREFERRED_VIEWER": "webrtc"
+                    }
+                })),
+                Some(json!({
+                    "env": {
+                        "INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON": "local-development",
+                        "INSTAFY_BROWSER_WEBRTC_REQUIRE_TURN": "1"
+                    }
+                })),
+            );
+            assert_eq!(env["INSTAFY_BROWSER_WEBRTC_ENABLED"], "0");
+            assert!(!env.contains_key("INSTAFY_BROWSER_WEBRTC_REQUIRE_TURN"));
+            assert!(!env.contains_key("INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON"));
+            assert_eq!(env["INSTAFY_BROWSER_PREFERRED_VIEWER"], "cdp-screencast");
+            assert_eq!(env["INSTAFY_BROWSER_CDP_SCREENCAST"], "1");
+            assert_eq!(env["INSTAFY_BROWSER_PROFILE_PERSIST"], "1");
+        }
+    }
+
+    #[test]
+    fn browser_host_policy_keeps_sign_ins_only_for_the_spaces_it_covers() {
+        let covered = Uuid::new_v4();
+        let outside = Uuid::new_v4();
+        let legacy = Uuid::new_v4();
+
+        let off = host_policy_test_config(crate::config::HostedBrowserHostPolicy::Off);
+        assert!(!off.browser_profile_persistence_enabled_for_project(&covered));
+
+        let mut projects =
+            host_policy_test_config(crate::config::HostedBrowserHostPolicy::Projects(vec![
+                covered,
+            ]));
+        projects.browser_profile_persist_project_ids.push(legacy);
+        assert!(projects.browser_profile_persistence_enabled_for_project(&covered));
+        assert!(projects.browser_profile_persistence_enabled_for_project(&legacy));
+        assert!(!projects.browser_profile_persistence_enabled_for_project(&outside));
+
+        let launched = apply_browser_profile_persistence_policy(
+            &projects,
+            outside,
+            Some(json!({ "env": { "INSTAFY_BROWSER_PROFILE_PERSIST": "1" } })),
+        )
+        .expect("metadata");
+        assert_eq!(launched["env"]["INSTAFY_BROWSER_PROFILE_PERSIST"], "0");
     }
 }

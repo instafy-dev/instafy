@@ -295,22 +295,90 @@ fn resolve_credential_key_ring(
 
 pub(crate) const DEFAULT_SERVICE_RUNTIME_USER_EMAIL: &str = "service-runtime@instafy.dev";
 
-fn parse_browser_profile_persist_project_ids(raw: &str) -> anyhow::Result<Vec<Uuid>> {
+fn parse_project_id_list(variable: &str, raw: &str) -> anyhow::Result<Vec<Uuid>> {
     let mut project_ids = raw
         .split(',')
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| {
             Uuid::parse_str(value).map_err(|error| {
-                anyhow::anyhow!(
-                    "BROWSER_PROFILE_PERSIST_PROJECT_IDS contains invalid UUID '{value}': {error}"
-                )
+                anyhow::anyhow!("{variable} contains invalid UUID '{value}': {error}")
             })
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     project_ids.sort_unstable();
     project_ids.dedup();
     Ok(project_ids)
+}
+
+fn parse_browser_profile_persist_project_ids(raw: &str) -> anyhow::Result<Vec<Uuid>> {
+    parse_project_id_list("BROWSER_PROFILE_PERSIST_PROJECT_IDS", raw)
+}
+
+pub(crate) const HOSTED_BROWSER_HOST_ENV: &str = "HOSTED_BROWSER_HOST";
+pub(crate) const HOSTED_BROWSER_HOST_PROJECT_IDS_ENV: &str = "HOSTED_BROWSER_HOST_PROJECT_IDS";
+
+/// Which spaces' own managed machines are launched ready to host Instafy's
+/// browser on demand (`HOSTED_BROWSER_HOST`).
+///
+/// `off` (the default) changes nothing. `projects` covers exactly the UUIDs in
+/// `HOSTED_BROWSER_HOST_PROJECT_IDS`; `all` covers every space. A covered
+/// space's next managed lease carries the controller-owned browser-host
+/// attestation and launch settings, and the space also keeps its shared
+/// browser sign-ins through the existing encrypted profile store. Turning the
+/// policy off is the rollback: the next lease, or the next reuse of a live
+/// one, carries no attestation.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum HostedBrowserHostPolicy {
+    #[default]
+    Off,
+    Projects(Vec<Uuid>),
+    All,
+}
+
+impl HostedBrowserHostPolicy {
+    pub(crate) fn from_values(
+        mode: Option<&str>,
+        project_ids: Option<&str>,
+    ) -> anyhow::Result<Self> {
+        let mode = mode.map(str::trim).unwrap_or_default().to_ascii_lowercase();
+        match mode.as_str() {
+            "" | "off" => Ok(Self::Off),
+            "all" => Ok(Self::All),
+            "projects" => {
+                let project_ids = parse_project_id_list(
+                    HOSTED_BROWSER_HOST_PROJECT_IDS_ENV,
+                    project_ids.unwrap_or_default(),
+                )?;
+                anyhow::ensure!(
+                    !project_ids.is_empty(),
+                    "{HOSTED_BROWSER_HOST_ENV}=projects requires at least one UUID in \
+                     {HOSTED_BROWSER_HOST_PROJECT_IDS_ENV}"
+                );
+                Ok(Self::Projects(project_ids))
+            }
+            other => Err(anyhow::anyhow!(
+                "{HOSTED_BROWSER_HOST_ENV} must be off, projects or all, not '{other}'"
+            )),
+        }
+    }
+
+    fn from_env() -> anyhow::Result<Self> {
+        Self::from_values(
+            std::env::var(HOSTED_BROWSER_HOST_ENV).ok().as_deref(),
+            std::env::var(HOSTED_BROWSER_HOST_PROJECT_IDS_ENV)
+                .ok()
+                .as_deref(),
+        )
+    }
+
+    pub(crate) fn allows_project(&self, project_id: &Uuid) -> bool {
+        match self {
+            Self::Off => false,
+            Self::Projects(project_ids) => project_ids.binary_search(project_id).is_ok(),
+            Self::All => true,
+        }
+    }
 }
 
 /// Users asked for per page when the service runtime user is looked up in the
@@ -699,6 +767,9 @@ pub struct AppConfig {
     /// Controller-owned interval forwarded to allowlisted runtimes. The client
     /// cannot override this value through runtime metadata.
     pub browser_profile_snapshot_secs: u64,
+    /// Spaces whose own managed machine is launched ready to host Instafy's
+    /// browser (`HOSTED_BROWSER_HOST`). Off by default.
+    pub hosted_browser_host: HostedBrowserHostPolicy,
     pub progress_callback_secret: Option<String>,
     pub git_remote_base_url: Option<String>,
     pub git_remote_public_base_url: Option<String>,
@@ -1262,6 +1333,7 @@ impl AppConfig {
             }
             _ => 30,
         };
+        let hosted_browser_host = HostedBrowserHostPolicy::from_env()?;
 
         let progress_callback_secret = std::env::var("PROGRESS_CALLBACK_SECRET")
             .ok()
@@ -1598,6 +1670,7 @@ impl AppConfig {
             credential_keys: Some(credential_keys),
             browser_profile_persist_project_ids,
             browser_profile_snapshot_secs,
+            hosted_browser_host,
             progress_callback_secret,
             git_remote_base_url,
             git_remote_public_base_url,
@@ -1687,10 +1760,17 @@ impl AppConfig {
             .map_err(|error| anyhow::anyhow!("failed to create postgres pool: {error}"))
     }
 
+    /// Whether the project's shared browser profile is saved and restored.
+    ///
+    /// A space the browser-host policy covers keeps its sign-ins too: its own
+    /// machine hosts the browser, and the person signs in to a provider once.
+    /// Both cases use the same encrypted store, token scope and launch
+    /// settings, so this one answer gates all three.
     pub fn browser_profile_persistence_enabled_for_project(&self, project_id: &Uuid) -> bool {
         self.browser_profile_persist_project_ids
             .iter()
             .any(|allowed| allowed == project_id)
+            || self.hosted_browser_host.allows_project(project_id)
     }
 }
 
@@ -1787,7 +1867,7 @@ mod tests {
         parse_browser_profile_persist_project_ids, published_development_key_warning,
         resolve_credential_encryption_key, resolve_credential_key_ring, resolve_user_token_secret,
         working_state_saves_enabled, AdminUserLookup, AdminUsersPage, CredentialEncryptionKey,
-        DEV_USER_TOKEN_SECRET,
+        HostedBrowserHostPolicy, DEV_USER_TOKEN_SECRET,
     };
     use crate::credential_keys::{
         credential_key_id, CredentialKeySlot, MAX_PREVIOUS_CREDENTIAL_KEYS,
@@ -2173,6 +2253,55 @@ mod tests {
         assert!(error
             .to_string()
             .contains("BROWSER_PROFILE_PERSIST_PROJECT_IDS contains invalid UUID"));
+    }
+
+    #[test]
+    fn hosted_browser_host_policy_defaults_off_and_parses_each_mode() {
+        let first = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap();
+        let second = Uuid::parse_str("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb").unwrap();
+        let outside = Uuid::parse_str("cccccccc-cccc-4ccc-8ccc-cccccccccccc").unwrap();
+
+        for mode in [None, Some(""), Some("  "), Some("off"), Some("OFF")] {
+            let policy = HostedBrowserHostPolicy::from_values(mode, Some(&first.to_string()))
+                .expect("off policy");
+            assert_eq!(policy, HostedBrowserHostPolicy::Off);
+            assert!(!policy.allows_project(&first));
+        }
+
+        let all = HostedBrowserHostPolicy::from_values(Some(" all "), None).expect("all policy");
+        assert!(all.allows_project(&outside));
+
+        let projects = HostedBrowserHostPolicy::from_values(
+            Some("projects"),
+            Some(&format!(" {second},\n{first}, {second} ")),
+        )
+        .expect("project policy");
+        assert_eq!(
+            projects,
+            HostedBrowserHostPolicy::Projects(vec![first, second])
+        );
+        assert!(projects.allows_project(&first));
+        assert!(projects.allows_project(&second));
+        assert!(!projects.allows_project(&outside));
+    }
+
+    #[test]
+    fn hosted_browser_host_policy_fails_closed_on_bad_configuration() {
+        for (mode, project_ids, expected) in [
+            (Some("projects"), None, "requires at least one UUID"),
+            (Some("projects"), Some(" , "), "requires at least one UUID"),
+            (
+                Some("projects"),
+                Some("not-a-project"),
+                "HOSTED_BROWSER_HOST_PROJECT_IDS contains invalid UUID",
+            ),
+            (Some("on"), None, "must be off, projects or all"),
+            (Some("1"), None, "must be off, projects or all"),
+        ] {
+            let error = HostedBrowserHostPolicy::from_values(mode, project_ids)
+                .expect_err("bad policy must fail controller startup");
+            assert!(error.to_string().contains(expected), "{error}");
+        }
     }
 
     #[test]
