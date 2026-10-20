@@ -135,22 +135,22 @@ async fn require_service_role(
 /// One runtime on the node, as the provider sees it.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
-struct ProviderContainer {
-    compose_project: String,
-    project_id: Option<Uuid>,
-    runtime_id: Option<Uuid>,
-    lease_id: Option<Uuid>,
-    running: bool,
+pub(super) struct ProviderContainer {
+    pub(super) compose_project: String,
+    pub(super) project_id: Option<Uuid>,
+    pub(super) runtime_id: Option<Uuid>,
+    pub(super) lease_id: Option<Uuid>,
+    pub(super) running: bool,
 }
 
 /// The provider's census. Fields it adds (an older provider's checkout
 /// list among them) are ignored.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
-struct ProviderCensus {
-    supported: bool,
-    containers: Vec<ProviderContainer>,
-    truncated: bool,
+pub(super) struct ProviderCensus {
+    pub(super) supported: bool,
+    pub(super) containers: Vec<ProviderContainer>,
+    pub(super) truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -194,7 +194,7 @@ pub(crate) struct DrainCensusResponse {
 
 /// The providers this node drains: every configured provider that launches
 /// runtimes through an endpoint (never a self-hosted machine).
-fn drained_providers(state: &AppState) -> Vec<RuntimeProviderConfig> {
+pub(super) fn drained_providers(state: &AppState) -> Vec<RuntimeProviderConfig> {
     let mut providers: Vec<RuntimeProviderConfig> = state
         .provider_registry
         .provider_configs()
@@ -212,7 +212,7 @@ fn drained_providers(state: &AppState) -> Vec<RuntimeProviderConfig> {
     providers
 }
 
-async fn provider_census(
+pub(super) async fn provider_census(
     state: &AppState,
     provider: &RuntimeProviderConfig,
 ) -> anyhow::Result<ProviderCensus> {

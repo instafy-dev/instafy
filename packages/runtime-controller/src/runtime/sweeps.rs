@@ -234,6 +234,10 @@ pub(crate) async fn sweep_idle_activity(state: &AppState) -> AnyResult<()> {
     fail_platform_jobs_stranded_on_private_runtimes(state, &mut tick).await?;
     // Last: each of its stops may wait out a provider release.
     stop_runtimes_of_deleted_projects(state, &mut tick).await?;
+    // Runtimes the providers still run for spaces the database no longer
+    // has, at most once per reconcile interval.
+    tick.release();
+    super::gone_space_runtimes::maybe_release_runtimes_of_gone_spaces(state).await;
 
     Ok(())
 }
