@@ -8,6 +8,7 @@ mod db;
 mod deleted_project_stop;
 mod drain;
 mod ensure;
+mod gone_space_runtimes;
 mod lease;
 mod limit_waits;
 mod managed;
