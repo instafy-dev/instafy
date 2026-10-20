@@ -161,7 +161,7 @@ describe("preview check: pure parts", () => {
     const url = siteUrlFor("http://127.0.0.1:4173", '/search?q="shoes"<b>#"x"');
     expect(url).toBe("http://127.0.0.1:4173/search?q=%22shoes%22%3Cb%3E#%22x%22");
     const page = framePage('http://127.0.0.1:4173/?q="><script>alert(1)</script>&a=1');
-    expect(page).not.toMatch(/<script>/);
+    expect(page.toLowerCase()).not.toContain("<script");
     expect(page).toContain('src="http://127.0.0.1:4173/?q=&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;&amp;a=1"');
   });
 
