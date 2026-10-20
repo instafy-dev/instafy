@@ -396,11 +396,14 @@ budget. The proxy therefore answers HTTP 200 with one server-sent `response.fail
   "message":"The upstream provider rate limit was reached (upstream_rate_limit, 429). Please try again in 5.734s."}}}
 ```
 
-The wait is the `Retry-After` the 429 would have carried (the provider's own, the derived one,
-or 5 seconds), clamped to 1-30 seconds and spread by up to 20% so that runtimes sharing one key
-do not all retry at the same instant. The spread only lengthens a wait and never past 30
-seconds; a `Retry-After` of 30 seconds or more spreads below 30 instead. The wait is stated to
-the millisecond, the precision Codex reads back. The message keeps the `upstream_rate_limit`
+The wait preserves the `Retry-After` the 429 would have carried (the provider's own, the derived
+one, or 5 seconds), with a minimum of one second. Waits below 30 seconds spread upwards by up
+to 20%, without passing 30 seconds, so runtimes sharing one key do not all retry at the same
+instant. Longer provider waits remain unchanged: `Retry-After: 169` means a 169-second wait.
+The runtime's existing deadline and cancellation still bound the turn; the proxy does not
+shorten provider advice to fit that budget. A wait that cannot be represented safely by the
+client stays HTTP 429 with its original `Retry-After`. The wait is stated to the millisecond,
+the precision Codex reads back. The message keeps the `upstream_rate_limit`
 code and the words the Studio and the runtime recognise. Only a transient rate limit changes: a
 plan limit, a rate limit window too long to wait out, quota exhaustion and every other failure
 keep their HTTP error, and a request that does not stream, every Chat Completions request

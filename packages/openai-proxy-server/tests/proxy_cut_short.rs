@@ -628,14 +628,20 @@ async fn streaming_transient_rate_limit_is_a_rate_limit_exceeded_stream_failure(
         (
             Lane::ApiKey,
             rate_limited(vec![("retry-after", "120")]),
-            24.0,
-            30.0,
+            120.0,
+            120.0,
         ),
         (
             Lane::ChatGpt,
             rate_limited(vec![("retry-after", "7")]),
             7.0,
             8.4,
+        ),
+        (
+            Lane::ChatGpt,
+            rate_limited(vec![("retry-after", "169")]),
+            169.0,
+            169.0,
         ),
         // A rate limit the backend reports inside its stream carries no headers.
         (
@@ -668,6 +674,32 @@ async fn streaming_transient_rate_limit_is_a_rate_limit_exceeded_stream_failure(
         assert_eq!(body["error"]["code"], "upstream_rate_limit");
         assert_eq!(body["error"]["retryable"], true);
         assert_eq!(mock.calls.load(Ordering::SeqCst), 2);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn an_unrepresentable_stream_wait_retains_http_429_and_retry_after() -> Result<()> {
+    let retry_after = u64::MAX.to_string();
+    for lane in [Lane::ApiKey, Lane::ChatGpt] {
+        let mut env = EnvGuard::isolated();
+        let (addr, mock, _upstream, _proxy) = lane_proxy(
+            &mut env,
+            lane,
+            vec![rate_limited(vec![("retry-after", &retry_after)])],
+        )
+        .await?;
+        let response = stream_request(addr).await?;
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response.headers()[header::RETRY_AFTER].to_str()?,
+            retry_after
+        );
+        let body: Value = response.json().await?;
+        assert_eq!(body["error"]["code"], "upstream_rate_limit");
+        assert!(!body.to_string().contains("private-token"));
+        assert_eq!(mock.calls.load(Ordering::SeqCst), 1);
     }
     Ok(())
 }

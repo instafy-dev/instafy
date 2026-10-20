@@ -30,6 +30,7 @@ const TOOL_CMD: &str = "printf x >> tool-count.txt; printf TOOL_APPLIED";
 const TEST_MODEL_ENV: &str = "INSTAFY_TEST_CODEX_MODEL";
 const DEFAULT_TEST_MODEL: &str = "gpt-6-luna";
 const PERSONAL_BROWSER_TOKEN: &str = "inert-local-personal-browser-token";
+const LONG_RETRY_WAIT_SECONDS: u64 = 15;
 /// The command that opened the first-run FreeFinance setup of Oct 18.
 const SKILL_SETUP_OPENER: &str =
     "/skills import https://github.com/instafy-dev/skills/tree/main/packs/bookkeeping --start";
@@ -137,11 +138,15 @@ fn proxy_rate_limit() -> Response {
 
 /// What the proxy streams instead of that 429 when the request streams, as every codex request
 /// does: one `response.failed` with code `rate_limit_exceeded` whose message names the wait.
-/// The proxy never asks for less than a second, which keeps the scheduled retry short.
+/// Most scenarios use a short wait; the deadline scenario must outlast its run budget.
 fn proxy_stream_rate_limit() -> Response {
+    proxy_stream_rate_limit_after(1)
+}
+
+fn proxy_stream_rate_limit_after(seconds: u64) -> Response {
     let failed = json!({"type":"response.failed","response":{"status":"failed","error":{
         "code":"rate_limit_exceeded",
-        "message":"The upstream provider rate limit was reached (upstream_rate_limit, 429). Please try again in 1s."}}});
+        "message":format!("The upstream provider rate limit was reached (upstream_rate_limit, 429). Please try again in {seconds}s.")}}});
     sse_events(vec![failed])
 }
 
@@ -263,6 +268,9 @@ async fn responses(
         }
         "http_429" => return proxy_rate_limit(),
         "transient_429_sse" | "persistent_429_sse" => return proxy_stream_rate_limit(),
+        "timeout_during_429_wait" => {
+            return proxy_stream_rate_limit_after(LONG_RETRY_WAIT_SECONDS);
+        }
         "usage_limit_429" => return proxy_usage_limit(),
         // Two sampling requests in one browser-lane turn, each throttled once and recovered.
         "browser_step_429s_sse" => {
@@ -698,7 +706,11 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
         .env("CODEX_RETRY_BASE_DELAY_MS", "1")
         .env(
             "CODEX_RUN_TIMEOUT_SECONDS",
-            if scenario == "timeout" { "10" } else { "20" },
+            if matches!(scenario, "timeout" | "timeout_during_429_wait") {
+                "10"
+            } else {
+                "20"
+            },
         )
         .env("INSTAFY_RETRY_TEST_WORKSPACE", &workspace)
         .env("INSTAFY_RETRY_TEST_REQUEST_READY", &state.request_ready)
@@ -1008,6 +1020,11 @@ scenario_test!(
 scenario_test!(cancellation_does_not_restart_the_run, "cancel", 1);
 scenario_test!(timeout_does_not_restart_the_run, "timeout", 1);
 scenario_test!(
+    timeout_cancels_scheduled_rate_limit_retry_without_restarting,
+    "timeout_during_429_wait",
+    1
+);
+scenario_test!(
     completed_tool_is_not_replayed_after_stream_failure,
     "tool_once",
     3
@@ -1159,10 +1176,27 @@ async fn isolated_retry_child() -> Result<()> {
     });
     let started = Instant::now();
     let task_usage = TaskUsage::default();
+    let mut retry_started = None;
+    let mut observe_retry = |event: &Value| -> Result<()> {
+        if event["type"] == "stream.retry" {
+            assert!(retry_started.is_none(), "more than one retry scheduled");
+            assert!(
+                event["message"].as_str().is_some_and(|message| message
+                    .contains(&format!("Please try again in {LONG_RETRY_WAIT_SECONDS}s."))),
+                "expected the long rate-limit wait: {event}"
+            );
+            retry_started = Some(Instant::now());
+        }
+        Ok(())
+    };
     let result = client
         .execute_with_options(
             "Run the supplied local diagnostic and finish with its result.",
-            None,
+            if scenario == "timeout_during_429_wait" {
+                Some(&mut observe_retry)
+            } else {
+                None
+            },
             CodexRunOptions {
                 disable_final_output_json_schema: true,
                 allow_plain_text_final_fallback: true,
@@ -1296,8 +1330,20 @@ async fn isolated_retry_child() -> Result<()> {
                 started.elapsed()
             );
         }
-        if scenario == "timeout" {
+        if matches!(scenario.as_str(), "timeout" | "timeout_during_429_wait") {
             assert!(message.contains("timed out"), "{message}");
+        }
+        if scenario == "timeout_during_429_wait" {
+            let retry_started = retry_started.context("Codex must schedule the rate-limit wait")?;
+            let wait = Duration::from_secs(LONG_RETRY_WAIT_SECONDS);
+            assert!(
+                retry_started.elapsed() < wait,
+                "the run deadline must end the run before the retry is due"
+            );
+            // Keep the child and mock alive past the scheduled retry. The parent's exact
+            // request count then detects an orphan retry or an outer whole-run replay.
+            tokio::time::sleep_until((retry_started + wait + Duration::from_millis(250)).into())
+                .await;
         }
         if scenario.starts_with("terminal_") || scenario == "cancel" {
             // Keep the process alive beyond Codex's initial stream-retry backoff:
