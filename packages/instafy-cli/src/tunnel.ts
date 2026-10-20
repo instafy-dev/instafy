@@ -70,6 +70,8 @@ type TunnelStateEntry = {
   logFile: string;
   workdir: string;
   startedAt: string;
+  /** the rathole binary that was spawned; absent in entries from older CLIs */
+  binary?: string;
 };
 
 type TunnelStateFile = {
@@ -149,7 +151,12 @@ function normalizeTunnelPurpose(raw: string): string | null {
     }
   }
 
-  normalized = normalized.replace(/^_+/, "").replace(/_+$/, "");
+  // Index loops, not anchored regexes, so trimming the underscores stays linear.
+  let start = 0;
+  let end = normalized.length;
+  while (start < end && normalized[start] === "_") start += 1;
+  while (end > start && normalized[end - 1] === "_") end -= 1;
+  normalized = normalized.slice(start, end);
   return normalized ? normalized : null;
 }
 
@@ -440,22 +447,50 @@ export function readProcessCommandLine(pid: number): string | null {
  * another process after a restart or reboot, so nothing is reused or signalled unless this holds.
  * Fails closed: an unreadable command line counts as not ours.
  */
-export function isRatholeClientFor(pid: number, configPath: string): boolean {
+export function isRatholeClientFor(pid: number, configPath: string, binary?: string | null): boolean {
   if (!configPath) return false;
   const commandLine = readProcessCommandLine(pid);
-  return commandLine !== null && commandLine.includes(configPath);
+  return commandLine !== null && commandLineIsRatholeClient(commandLine, configPath, binary);
 }
 
-/** Stops the rathole client started with `configPath`: SIGTERM, then SIGKILL after 4 s. Any other process is left alone. */
-export async function stopRatholeClient(pid: number, configPath: string): Promise<void> {
-  if (!isRatholeClientFor(pid, configPath)) return;
+function endsWithProgram(program: string, binary: string): boolean {
+  if (program === binary) return true;
+  if (!program.endsWith(binary)) return false;
+  const before = program[program.length - binary.length - 1];
+  return before === " " || before === "/" || before === "\\";
+}
+
+/**
+ * Whether a command line is the rathole client spawned as `<binary> -c <configPath>`: the line ends with exactly that
+ * `-c <configPath>` pair, and the program before it is `binary` (the one that was spawned) or a file whose name
+ * contains "rathole". A process that only mentions the path (an editor, `tail`, `less -c`) does not match.
+ */
+export function commandLineIsRatholeClient(commandLine: string, configPath: string, binary?: string | null): boolean {
+  if (!configPath) return false;
+  // Windows quotes arguments that contain spaces; ps and /proc do not.
+  const line = commandLine.split('"').join("").trim();
+  const tail = ` -c ${configPath}`;
+  if (!line.endsWith(tail)) return false;
+  const program = line.slice(0, line.length - tail.length).trimEnd();
+  if (!program) return false;
+  if (binary && endsWithProgram(program, binary)) return true;
+  const name = program.split(/[\\/]/).pop() ?? "";
+  return name.toLowerCase().includes("rathole");
+}
+
+/**
+ * Stops the rathole client started with `configPath` (and `binary`, when recorded): SIGTERM, then SIGKILL after 4 s.
+ * Any other process is left alone.
+ */
+export async function stopRatholeClient(pid: number, configPath: string, binary?: string | null): Promise<void> {
+  if (!isRatholeClientFor(pid, configPath, binary)) return;
   try {
     process.kill(pid, "SIGTERM");
   } catch {
     // ignore
   }
   if (await waitForProcessExit(pid, 4000)) return;
-  if (!isRatholeClientFor(pid, configPath)) return;
+  if (!isRatholeClientFor(pid, configPath, binary)) return;
   try {
     process.kill(pid, "SIGKILL");
   } catch {
@@ -840,6 +875,7 @@ export async function startTunnelDetached(opts: TunnelStartOptions): Promise<Tun
     logFile,
     workdir,
     startedAt: new Date().toISOString(),
+    binary: rathole,
   };
 
   upsertTunnelState(entry);
@@ -869,7 +905,7 @@ export async function stopTunnelSession(opts: TunnelStopOptions): Promise<{ ok: 
     throw new Error(`Tunnel not found in local state: ${tunnelId}`);
   }
 
-  await stopRatholeClient(entry.pid, path.join(entry.workdir, "rathole.toml"));
+  await stopRatholeClient(entry.pid, path.join(entry.workdir, "rathole.toml"), entry.binary);
 
   const controllerToken = resolveControllerToken(opts, `instafy tunnel stop ${tunnelId}`);
   if (controllerToken.runtimeControllerUrl) {

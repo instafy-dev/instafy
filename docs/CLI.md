@@ -519,26 +519,35 @@ gives exit `5` and nothing else happens.
 3. Once the client has stayed up for 250 ms, asks the server to post the card, and prints the result:
 
 ```json
-{"previewId":"<uuid>","title":"Site preview","port":4173,"path":"/","status":"live","messageId":"<uuid>","viewerHostSuffix":"<preview domain>"}
+{"previewId":"<uuid>","title":"Site preview","port":4173,"path":"/","status":"live","httpStatus":200,"messageId":"<uuid>","viewerHostSuffix":"<preview domain>"}
 ```
 
 `viewerHostSuffix` is the part of the host name viewers reach the site under after its first label. A dev
-server that checks the `Host` header (for example Vite's `server.allowedHosts`) must allow it, with a
-leading dot. It is `null` when the server does not report it.
+server that checks the `Host` header (Vite dev and `vite preview`, webpack-dev-server, Angular) must allow
+it, with a leading dot and without any `:port`, or everyone who opens the card sees its "Blocked request"
+page. Add it the first time, restart the server on the same port, and run `open` again. It is `null` when
+the server does not report it.
 
 `status` is `live` when the server reached the site through the tunnel, `not_responding` when it did not
-(check the site, then run `open` again), and `unknown` when the server does not say.
+(check the site, then run `open` again), and `unknown` when the server does not say. `httpStatus` is the
+HTTP status the server's check got from the site, or `null`. That check is a `HEAD` request sent with
+`Host: localhost`, so it does not show a dev server's host check.
 
-Options: `--path /<…>` opens a sub-path (default `/`). `--title` is at most 120 characters.
+Options: `--path /<…>` opens a sub-path (default `/`): at most 512 printable ASCII characters with no
+spaces, backslashes or `#`; a query string is allowed. `--title` is at most 120 characters, with no
+control characters. Both follow the server's rules, so a value it would refuse is refused before any
+request.
 `--conversation <id>` picks the conversation for the card; it is needed only without a job
 token, for example in an end-to-end test.
 
 Exit codes:
 
-- `2`: nothing answers on the port, or the site answered with a server error (`5xx`). Start or fix the
-  site, then retry. When a server takes the connection but sends no answer within 5 s (often a dev server
-  still compiling its first request), the message says so instead: wait for it rather than starting a second
-  server.
+- `2`: nothing answers on `127.0.0.1` at the port, or the site answered with a server error (`5xx`).
+  Start or fix the site, then retry. When a server takes the connection but sends no answer within 5 s
+  (often a dev server still compiling its first request), the message says so instead: wait for it rather
+  than starting a second server. A site that answers only on `[::1]` (a server bound to `localhost` that
+  resolves to `::1`) is named as such: it is running, so bind it to `127.0.0.1` or `0.0.0.0` instead of
+  starting it again.
 - `3`: the port is not allowed: outside 1024-65535 or one of Instafy's own (the same rules as `check`,
   below), or refused by the server (`400` with code `port_not_allowed`).
 - `5`: previews are not available on this server ("Previews are not available on this server"). The server
@@ -551,8 +560,15 @@ Exit codes:
 - Running `open` again for the same port reuses the running client and repeats only the card
   step. A client left over from an older preview on the same port is stopped, and that preview is
   closed on the server.
-- A recorded client is reused or stopped only while its process is still rathole running that
-  preview's config. A process id that now belongs to something else is never signalled.
+- A recorded client is reused or stopped only while its command line is still the rathole binary
+  that was started, followed by `-c <that preview's config>`. A process id that now belongs to
+  something else, including a process that only mentions the config file (an editor, `tail`), is
+  never signalled. `instafy tunnel stop` follows the same rule.
+- A preview's config holds its service token. It is removed whenever the preview is forgotten
+  locally: on `close`, after a failed `open`, when previews turn off, and when another preview
+  replaces it on the port.
+- `instafy preview` commands on one machine take turns (a lock file in `~/.instafy`), so two `open`
+  runs for the same port at once start one client. A lock left by a command that died is taken over.
 - If the client exits right away, the preview is closed again and `open` exits `1` with the
   client's last log lines.
 - The server makes its own port decision as well; the local rules only refuse earlier.

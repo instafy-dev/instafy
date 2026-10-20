@@ -12,6 +12,7 @@ import {
   noAnswerMessage,
   parsePreviewPort,
   probeLocalSite,
+  type LocalSiteProbe,
 } from "./local-site.js";
 import {
   buildRatholeConfig,
@@ -66,6 +67,9 @@ export type PreviewSummary = {
 
 export type PreviewOpenResult = PreviewSummary & {
   messageId: string | null;
+  // The HTTP status the server's own check of the site got through the tunnel, or null when it got none
+  // or did not say. That check sends `Host: localhost`, so a dev server's host check never shows up here.
+  httpStatus: number | null;
   // Everything after `p-<label>--<id>.` in the host viewers reach the site under, or null when the
   // server does not say. A dev server that checks the Host header must allow this suffix.
   viewerHostSuffix: string | null;
@@ -82,6 +86,8 @@ type PreviewStateEntry = {
   logFile: string;
   workdir: string;
   startedAt: string;
+  /** the rathole binary that was spawned; absent in entries from older CLIs */
+  binary?: string;
 };
 
 type PreviewStateFile = {
@@ -89,10 +95,15 @@ type PreviewStateFile = {
   previews: PreviewStateEntry[];
 };
 
-// The rathole client dials the site at 127.0.0.1, so that is the only address the probe tries.
+// The rathole client dials the site at 127.0.0.1, so that is the only address the probe accepts.
 const RATHOLE_LOCAL_HOSTS = ["127.0.0.1"] as const;
+// Same limits as the server's.
 const MAX_TITLE_LENGTH = 120;
 const MAX_PATH_LENGTH = 512;
+// How long `open` waits for another `instafy preview` command on this machine before giving up, and when a lock left
+// by a command that died is taken over.
+const STATE_LOCK_WAIT_MS = 120_000;
+const STATE_LOCK_STALE_MS = 10 * 60_000;
 
 function instafyDir(): string {
   return path.join(os.homedir(), ".instafy");
@@ -100,6 +111,18 @@ function instafyDir(): string {
 
 function previewStateFile(): string {
   return path.join(instafyDir(), "cli-preview-state.json");
+}
+
+function previewStateLockFile(): string {
+  return path.join(instafyDir(), "cli-preview-state.lock");
+}
+
+function workdirsRoot(): string {
+  return path.join(instafyDir(), "cli-preview-workdirs");
+}
+
+function workdirFor(previewId: string): string {
+  return path.join(workdirsRoot(), safePathSegment(previewId));
 }
 
 const HOST_SUFFIX_RE = /^[a-z0-9-]+(?:\.[a-z0-9-]+)*(?::\d{1,5})?$/;
@@ -111,7 +134,11 @@ export function parseViewerHostSuffix(raw: unknown): string | undefined {
   return suffix.length <= 253 && HOST_SUFFIX_RE.test(suffix) ? suffix : undefined;
 }
 
-function parsePreviewTitle(raw: string | undefined): string {
+// C0 and C1 control characters, the ones the server refuses in a title (Rust's char::is_control).
+const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f-\u009f]/;
+
+/** The title as the server will accept it: whitespace runs become one space, 1 to 120 characters, no control characters. */
+export function parsePreviewTitle(raw: string | undefined): string {
   const title = (raw ?? "").replace(/\s+/g, " ").trim();
   if (!title) {
     throw new Error('A title is required: --title "<name>".');
@@ -119,18 +146,30 @@ function parsePreviewTitle(raw: string | undefined): string {
   if ([...title].length > MAX_TITLE_LENGTH) {
     throw new Error(`Title must be at most ${MAX_TITLE_LENGTH} characters.`);
   }
+  if (CONTROL_CHARS_RE.test(title)) {
+    throw new Error("Title must not contain control characters.");
+  }
   return title;
 }
 
-function parsePreviewPath(raw: string | undefined): string {
+/**
+ * The site path as the server will accept it: starts with / (not //), at most 512 characters of printable ASCII with
+ * no space, backslash or #. A query string is allowed.
+ */
+export function parsePreviewPath(raw: string | undefined): string {
   const value = raw?.trim() || "/";
-  if (
-    !value.startsWith("/") ||
-    value.startsWith("//") ||
-    value.length > MAX_PATH_LENGTH ||
-    /[\s\\?#]/.test(value)
-  ) {
-    throw new Error("Path must start with / and contain no spaces, backslashes, ? or #.");
+  let printable = true;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code < 0x21 || code > 0x7e || code === 0x5c || code === 0x23) {
+      printable = false;
+      break;
+    }
+  }
+  if (!value.startsWith("/") || value.startsWith("//") || value.length > MAX_PATH_LENGTH || !printable) {
+    throw new Error(
+      `Path must start with / (not //) and be at most ${MAX_PATH_LENGTH} printable ASCII characters with no spaces, backslashes or #.`,
+    );
   }
   return value;
 }
@@ -166,13 +205,82 @@ function removePreviewState(previewId: string): PreviewStateEntry | null {
   return existing;
 }
 
+// Removes a preview's workdir, which holds its rathole.toml and so its service token. Only this CLI's own workdir
+// for that id is removed, whatever path a state file names.
+function removeWorkdir(previewId: string) {
+  fs.rmSync(workdirFor(previewId), { recursive: true, force: true });
+}
+
+// Forgets a preview locally: its state entry and its workdir go together.
+function forgetPreview(previewId: string): PreviewStateEntry | null {
+  const entry = removePreviewState(previewId);
+  removeWorkdir(previewId);
+  return entry;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function lockHolderIsGone(lockFile: string): boolean {
+  try {
+    const stat = fs.statSync(lockFile);
+    if (Date.now() - stat.mtimeMs > STATE_LOCK_STALE_MS) return true;
+    const pid = Number.parseInt(fs.readFileSync(lockFile, "utf8").trim(), 10);
+    if (!Number.isInteger(pid) || pid <= 0) return Date.now() - stat.mtimeMs > 5_000;
+    try {
+      process.kill(pid, 0);
+      return false;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ESRCH";
+    }
+  } catch {
+    // Gone already: the next exclusive create decides.
+    return false;
+  }
+}
+
+/**
+ * Runs `fn` while holding the preview state lock, so two `instafy preview` commands on this machine (several Octo
+ * turns at once) never both start a client for the same preview or overwrite each other's state. A lock whose holder
+ * died is taken over.
+ */
+async function withStateLock<T>(fn: () => Promise<T>): Promise<T> {
+  const lockFile = previewStateLockFile();
+  fs.mkdirSync(instafyDir(), { recursive: true });
+  const deadline = Date.now() + STATE_LOCK_WAIT_MS;
+  for (;;) {
+    try {
+      const fd = fs.openSync(lockFile, "wx", 0o600);
+      fs.writeSync(fd, String(process.pid));
+      fs.closeSync(fd);
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if (lockHolderIsGone(lockFile)) {
+        fs.rmSync(lockFile, { force: true });
+        continue;
+      }
+      if (Date.now() > deadline) {
+        throw new Error("Another instafy preview command on this machine is still running. Retry when it is done.");
+      }
+      await sleep(100);
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    fs.rmSync(lockFile, { force: true });
+  }
+}
+
 function configPathFor(workdir: string): string {
   return path.join(workdir, "rathole.toml");
 }
 
 // Stops the entry's client only if its pid still runs rathole with the entry's config.
-async function stopClient(entry: Pick<PreviewStateEntry, "pid" | "workdir">) {
-  await stopRatholeClient(entry.pid, configPathFor(entry.workdir));
+async function stopClient(entry: Pick<PreviewStateEntry, "pid" | "workdir" | "binary">) {
+  await stopRatholeClient(entry.pid, configPathFor(entry.workdir), entry.binary);
 }
 
 // Single-quoted for a POSIX shell, so a title with quotes still gives a command that can be copied.
@@ -346,42 +454,72 @@ function readFileOrNull(file: string): string | null {
   }
 }
 
+function readyHealth(readyBody: Record<string, unknown>): Record<string, unknown> | null {
+  return readyBody["health"] && typeof readyBody["health"] === "object" && !Array.isArray(readyBody["health"])
+    ? (readyBody["health"] as Record<string, unknown>)
+    : null;
+}
+
 /** What the server's /ready health says: live, not_responding, or unknown when it reports nothing. */
 export function previewStatusFromHealth(readyBody: Record<string, unknown>): "live" | "not_responding" | "unknown" {
-  const health =
-    readyBody["health"] && typeof readyBody["health"] === "object"
-      ? (readyBody["health"] as Record<string, unknown>)
-      : null;
+  const health = readyHealth(readyBody);
   if (health?.["listening"] === true) return "live";
   if (health?.["listening"] === false) return "not_responding";
   return "unknown";
 }
 
-export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpenResult> {
-  // A port that is out of range or Instafy's own (the same rules as `preview check`) is refused
-  // before anything else: no probe, no request. The server decides as well (400 port_not_allowed).
-  const port = parsePreviewPort(opts.port);
-  const title = parsePreviewTitle(opts.title);
-  const sitePath = parsePreviewPath(opts.path);
-  const projectId = resolveProject({ project: opts.project });
-  const retryCommand = `instafy preview open --port ${port} --title ${shellQuote(title)}`;
-  const { auth, controllerUrl } = resolveAuth(opts, retryCommand);
-  const serverUrl = cleanUrl(controllerUrl);
-  // Progress goes to stderr so `--json` output stays parseable.
-  const log = (message: string) => console.error(kleur.cyan(message));
+/** The HTTP status in the server's /ready health, or null when it reports none. */
+export function previewHttpStatusFromHealth(readyBody: Record<string, unknown>): number | null {
+  const status = readyHealth(readyBody)?.["status"];
+  return typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599 ? status : null;
+}
 
-  const probe = await probeLocalSite(port, sitePath, undefined, RATHOLE_LOCAL_HOSTS);
-  if (!probe.listening) {
-    throw new PreviewCommandError(
-      probe.status !== null
-        ? `The site at http://127.0.0.1:${port}${sitePath} answered HTTP ${probe.status}. Fix the server error, then retry.`
-        : noAnswerMessage(port, probe, `http://127.0.0.1:${port}${sitePath}`, "retry"),
+// Why `open` cannot use the site. The tunnel dials 127.0.0.1 only, so a site that answers only on [::1] (a server bound
+// to `localhost` that resolves to ::1) is named as such instead of being reported as not running.
+async function notListeningError(port: number, sitePath: string, probe: LocalSiteProbe): Promise<PreviewCommandError> {
+  const where = `http://127.0.0.1:${port}${sitePath}`;
+  if (probe.status !== null) {
+    return new PreviewCommandError(
+      `The site at ${where} answered HTTP ${probe.status}. Fix the server error, then retry.`,
       PREVIEW_EXIT_NOT_LISTENING,
     );
   }
+  // A server took the connection but did not answer in time: it is running on 127.0.0.1, perhaps still compiling.
+  if (probe.timedOut) {
+    return new PreviewCommandError(noAnswerMessage(port, probe, where, "retry"), PREVIEW_EXIT_NOT_LISTENING);
+  }
+  const ipv6 = await probeLocalSite(port, sitePath, undefined, ["::1"]);
+  if (ipv6.status !== null) {
+    return new PreviewCommandError(
+      `The site answers only on [::1]:${port}, and the preview reaches it on 127.0.0.1. ` +
+        `It is running: do not start it again. Bind it to 127.0.0.1 or 0.0.0.0 instead (for example --host 127.0.0.1), restart it, then retry.`,
+      PREVIEW_EXIT_NOT_LISTENING,
+    );
+  }
+  return new PreviewCommandError(noAnswerMessage(port, probe, where, "retry"), PREVIEW_EXIT_NOT_LISTENING);
+}
 
+// Asks the server for the preview and starts (or reuses) its rathole client, then records it. Runs under the state lock.
+async function createAndStartClient(params: {
+  opts: PreviewOpenOptions;
+  port: number;
+  title: string;
+  sitePath: string;
+  projectId: string;
+  retryCommand: string;
+  auth: ResolvedTunnelToken;
+  controllerUrl: string;
+  serverUrl: string;
+  log: (message: string) => void;
+}): Promise<{
+  grant: Record<string, unknown>;
+  previewId: string;
+  entry: PreviewStateEntry;
+  current: PreviewStateEntry | null;
+}> {
   // The server is asked first, so a server without previews exits 5 before anything is
   // downloaded or started here.
+  const { opts, port, title, sitePath, projectId, retryCommand, auth, controllerUrl, serverUrl, log } = params;
   const conversationId = opts.conversationId?.trim() || undefined;
   const created = await controllerRequest({
     controllerUrl,
@@ -406,7 +544,7 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
     throw new Error("Preview response is missing previewId.");
   }
 
-  const workdir = path.join(instafyDir(), "cli-preview-workdirs", safePathSegment(previewId));
+  const workdir = workdirFor(previewId);
   const logFile = path.join(instafyDir(), "cli-preview-logs", `preview-${safePathSegment(previewId)}.log`);
   const configPath = configPathFor(workdir);
   const state = readStateFile();
@@ -415,6 +553,7 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
   // From here on the server holds a preview. Any failure before the client runs closes it again,
   // so no grant or card is left without a tunnel behind it.
   let pid: number | null = null;
+  let binary: string | undefined = current?.binary;
   try {
     const credentials =
       grant["credentials"] && typeof grant["credentials"] === "object"
@@ -426,7 +565,7 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
 
     // The create call is idempotent per runtime, lease and port, so a re-run gets the same preview.
     // Keep its client when it is still our rathole on an unchanged config.
-    if (current && readFileOrNull(configPath) === configBody && isRatholeClientFor(current.pid, configPath)) {
+    if (current && readFileOrNull(configPath) === configBody && isRatholeClientFor(current.pid, configPath, current.binary)) {
       pid = current.pid;
     }
     // Replace any other client on this port. An older preview on the port is closed on the
@@ -438,7 +577,7 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
       }
       if (stale.localPort !== port) continue;
       await stopClient(stale);
-      removePreviewState(stale.previewId);
+      forgetPreview(stale.previewId);
       // The token is only ever sent to the server it was resolved for.
       if (cleanUrl(stale.controllerUrl) === serverUrl) {
         await closePreviewOnServer(controllerUrl, auth, stale.projectId, stale.previewId).catch(() => {});
@@ -448,6 +587,7 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
     if (pid === null) {
       const rathole = await resolveRathole(opts.ratholeBin, log);
       fs.writeFileSync(configPath, configBody, { encoding: "utf8", mode: 0o600 });
+      binary = rathole;
       const started = await spawnRatholeDetached({ rathole, configPath, workdir, logFile });
       if (started.exit !== null) {
         const suffix = started.logTail ? `\n\nLast logs:\n${started.logTail}` : "";
@@ -458,8 +598,8 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
       log(`Reusing the running preview client (pid ${pid}).`);
     }
   } catch (error) {
-    if (pid !== null) await stopRatholeClient(pid, configPath);
-    removePreviewState(previewId);
+    if (pid !== null) await stopRatholeClient(pid, configPath, binary);
+    forgetPreview(previewId);
     await closePreviewOnServer(controllerUrl, auth, projectId, previewId).catch(() => {});
     const message = error instanceof Error ? error.message : String(error);
     const [first, ...rest] = message.split("\n");
@@ -479,8 +619,34 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
     logFile,
     workdir,
     startedAt: current?.pid === pid ? current.startedAt : new Date().toISOString(),
+    ...(binary ? { binary } : {}),
   };
   upsertPreviewState(entry);
+  return { grant, previewId, entry, current };
+}
+
+export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpenResult> {
+  // A port that is out of range or Instafy's own (the same rules as `preview check`) is refused
+  // before anything else: no probe, no request. The server decides as well (400 port_not_allowed).
+  const port = parsePreviewPort(opts.port);
+  const title = parsePreviewTitle(opts.title);
+  const sitePath = parsePreviewPath(opts.path);
+  const projectId = resolveProject({ project: opts.project });
+  const retryCommand = `instafy preview open --port ${port} --title ${shellQuote(title)}`;
+  const { auth, controllerUrl } = resolveAuth(opts, retryCommand);
+  const serverUrl = cleanUrl(controllerUrl);
+  // Progress goes to stderr so `--json` output stays parseable.
+  const log = (message: string) => console.error(kleur.cyan(message));
+
+  const probe = await probeLocalSite(port, sitePath, undefined, RATHOLE_LOCAL_HOSTS);
+  if (!probe.listening) {
+    throw await notListeningError(port, sitePath, probe);
+  }
+
+  // From the create call to the state write, one `instafy preview` command at a time on this machine.
+  const { grant, previewId, entry } = await withStateLock(() =>
+    createAndStartClient({ opts, port, title, sitePath, projectId, retryCommand, auth, controllerUrl, serverUrl, log }),
+  );
 
   // The client stays up if this fails: a re-run reuses it and only repeats the ready call.
   // If the server turned previews off in between, nothing is left running.
@@ -496,8 +662,10 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
     });
   } catch (error) {
     if (error instanceof PreviewCommandError && error.exitCode === PREVIEW_EXIT_UNAVAILABLE) {
-      removePreviewState(previewId);
-      await stopClient(entry);
+      await withStateLock(async () => {
+        await stopClient(entry);
+        forgetPreview(previewId);
+      });
     }
     throw error;
   }
@@ -509,6 +677,7 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
     port,
     path: sitePath,
     status: previewStatusFromHealth(readyBody),
+    httpStatus: previewHttpStatusFromHealth(readyBody),
     messageId: stringField(readyBody, "messageId"),
     viewerHostSuffix: parseViewerHostSuffix(grant["viewerHostSuffix"]) ?? null,
   };
@@ -552,10 +721,11 @@ export async function previewClose(opts: PreviewCloseOptions): Promise<{ ok: tru
   if (!previewId) {
     throw new Error("Preview id is required. Use `instafy preview list` to find it.");
   }
-  const entry = removePreviewState(previewId);
-  if (entry) {
-    await stopClient(entry);
-  }
+  const entry = await withStateLock(async () => {
+    const removed = removePreviewState(previewId);
+    if (removed) await stopClient(removed);
+    return removed;
+  });
 
   const projectId = entry?.projectId ?? resolveProject({ project: opts.project });
   try {
@@ -566,13 +736,11 @@ export async function previewClose(opts: PreviewCloseOptions): Promise<{ ok: tru
     await closePreviewOnServer(controllerUrl, auth, projectId, previewId);
   } catch (error) {
     // The local client is already stopped; keep a record so a retry by id finds the space.
-    if (entry) upsertPreviewState({ ...entry, pid: -1 });
+    if (entry) await withStateLock(async () => upsertPreviewState({ ...entry, pid: -1 }));
     throw error;
   }
 
-  if (entry) {
-    fs.rmSync(entry.workdir, { recursive: true, force: true });
-  }
+  removeWorkdir(previewId);
   return { ok: true, previewId };
 }
 
@@ -589,6 +757,9 @@ export function printPreviewOpen(result: PreviewOpenResult, json: boolean) {
         : kleur.yellow("Preview opened (the server did not report whether the site answers)");
   console.log(`${label}: ${result.title} (port ${result.port}). Open it from the card in the conversation.`);
   console.log(kleur.gray(`previewId=${result.previewId}`));
+  if (result.httpStatus !== null && result.httpStatus >= 400) {
+    console.log(kleur.yellow(`The site answered HTTP ${result.httpStatus} through the preview.`));
+  }
   if (result.viewerHostSuffix) {
     console.log(kleur.gray(`viewerHostSuffix=${result.viewerHostSuffix}`));
   }

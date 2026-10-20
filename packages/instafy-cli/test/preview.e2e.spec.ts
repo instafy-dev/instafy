@@ -6,7 +6,8 @@ import { once } from "node:events";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { parseViewerHostSuffix } from "../src/preview.js";
+import { parsePreviewPath, parsePreviewTitle, parseViewerHostSuffix } from "../src/preview.js";
+import { commandLineIsRatholeClient } from "../src/tunnel.js";
 
 type RequestCapture = {
   method: string;
@@ -105,6 +106,35 @@ function startStranger(): number {
     }
   });
   return child.pid!;
+}
+
+// Unrelated processes whose command lines mention a preview's config path: one names it as a plain argument, one runs
+// a program that is not rathole with `-c <path>` (like `less -c`). Neither may ever be signalled or reused.
+async function startPathMentioners(configPath: string): Promise<number[]> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-viewer-"));
+  const viewer = path.join(dir, "viewer");
+  fs.writeFileSync(viewer, "#!/usr/bin/env bash\nsleep 60\n", { mode: 0o755 });
+  const children = [
+    spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)", configPath], { stdio: "ignore", detached: true }),
+    spawn(viewer, ["-c", configPath], { stdio: "ignore", detached: true }),
+  ];
+  cleanups.push(() => {
+    for (const child of children) {
+      try {
+        process.kill(-child.pid!, "SIGKILL");
+      } catch {
+        // already gone
+      }
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  // Let both finish exec, so their command lines are their own when the CLI reads them.
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  return children.map((child) => child.pid!);
+}
+
+function workdirOf(home: string, previewId: string): string {
+  return path.join(home, ".instafy", "cli-preview-workdirs", previewId);
 }
 
 async function unusedPort(): Promise<number> {
@@ -283,6 +313,124 @@ describe("instafy preview", () => {
       expect(parseViewerHostSuffix(bad), String(bad)).toBeUndefined();
     }
   });
+
+  it("accepts the same paths and titles as the server", () => {
+    expect(parsePreviewPath("/app?x=1")).toBe("/app?x=1");
+    expect(parsePreviewPath(" /site/ ")).toBe("/site/");
+    expect(parsePreviewPath(undefined)).toBe("/");
+    for (const bad of ["app", "//evil.example/", "/a b", "/a\\b", "/a#b", "/caf\u00e9", "/a\u0001", `/${"a".repeat(512)}`]) {
+      expect(() => parsePreviewPath(bad), bad).toThrow(/Path must start with \//);
+    }
+    expect(parsePreviewTitle("  Site \t preview \n")).toBe("Site preview");
+    expect(parsePreviewTitle("Caf\u00e9 \u{1F600}")).toBe("Caf\u00e9 \u{1F600}");
+    for (const bad of ["Site\u0007", "Site\u007f", "Site\u0085"]) {
+      expect(() => parsePreviewTitle(bad), JSON.stringify(bad)).toThrow(/control characters/);
+    }
+  });
+
+  it("treats only `<rathole> -c <config>` as the preview's client", () => {
+    const config = "/home/me/.instafy/cli-preview-workdirs/p 1/rathole.toml";
+    expect(commandLineIsRatholeClient(`/usr/local/bin/rathole -c ${config}`, config)).toBe(true);
+    expect(commandLineIsRatholeClient(`rathole -c ${config}`, config)).toBe(true);
+    expect(commandLineIsRatholeClient(`"C:\\Tools\\rathole.exe" -c "${config}"`, config)).toBe(true);
+    expect(commandLineIsRatholeClient(`bash /tmp/stub/rathole -c ${config}`, config)).toBe(true);
+    // A binary under another name counts only when it is the one recorded as spawned.
+    expect(commandLineIsRatholeClient(`/opt/rh -c ${config}`, config)).toBe(false);
+    expect(commandLineIsRatholeClient(`/opt/rh -c ${config}`, config, "/opt/rh")).toBe(true);
+    expect(commandLineIsRatholeClient(`/opt/xrh -c ${config}`, config, "rh")).toBe(false);
+    for (const stranger of [
+      `tail -f ${config}`,
+      `less -c ${config}`,
+      `vim ${config}`,
+      `grep token ${config}`,
+      `/usr/local/bin/rathole -c ${config}.bak`,
+      `/usr/local/bin/rathole -c ${config} --extra`,
+      `/usr/local/bin/rathole ${config}`,
+      `-c ${config}`,
+    ]) {
+      expect(commandLineIsRatholeClient(stranger, config), stranger).toBe(false);
+    }
+    expect(commandLineIsRatholeClient(`rathole -c `, "")).toBe(false);
+  });
+
+  it("refuses a path or title the server would refuse before any request", async () => {
+    const projectId = randomUUID();
+    const controller = await startMockController({ projectId });
+    const sitePort = await startSite();
+    const home = makeHome();
+
+    const badPath = await execCli(
+      openArgs({ projectId, controllerUrl: controller.url, port: sitePort, rathole: "/usr/bin/false", path: "/caf\u00e9" }),
+      home,
+    );
+    expect(badPath.code).toBe(1);
+    expect(badPath.stderr).toContain("printable ASCII");
+
+    const args = openArgs({ projectId, controllerUrl: controller.url, port: sitePort, rathole: "/usr/bin/false" });
+    args[args.indexOf("--title") + 1] = "Site\u0007";
+    const badTitle = await execCli(args, home);
+    expect(badTitle.code).toBe(1);
+    expect(badTitle.stderr).toContain("control characters");
+    expect(controller.captures).toHaveLength(0);
+  }, 30000);
+
+  it("opens a path with a query string", async () => {
+    const projectId = randomUUID();
+    const rathole = makeStubRathole();
+    const controller = await startMockController({ projectId });
+    const seen: string[] = [];
+    const sitePort = await startSite(200, seen);
+
+    const result = await execCli(
+      openArgs({ projectId, controllerUrl: controller.url, port: sitePort, rathole: rathole.file, path: "/app?x=1" }),
+      makeHome(),
+    );
+    expect(result.code, result.stderr).toBe(0);
+    expect(seen).toEqual(["/app?x=1"]);
+    expect(JSON.parse(controller.captures[0]!.body)).toMatchObject({ path: "/app?x=1" });
+  }, 30000);
+
+  it("says a site that answers only on [::1] is running and must bind 127.0.0.1", async () => {
+    const projectId = randomUUID();
+    const controller = await startMockController({ projectId });
+    const site = http.createServer((_req, res) => res.end("ok"));
+    try {
+      site.listen({ port: 0, host: "::1", ipv6Only: true });
+      await once(site, "listening");
+    } catch {
+      // No IPv6 loopback here: nothing to test.
+      return;
+    }
+    cleanups.push(() => new Promise<void>((resolve) => site.close(() => resolve())));
+    const sitePort = (site.address() as { port: number }).port;
+
+    const result = await execCli(
+      openArgs({ projectId, controllerUrl: controller.url, port: sitePort, rathole: "/usr/bin/false" }),
+      makeHome(),
+    );
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain(`answers only on [::1]:${sitePort}`);
+    expect(result.stderr).toContain("do not start it again");
+    expect(result.stderr).not.toContain("Start the site first");
+    expect(controller.captures).toHaveLength(0);
+  }, 30000);
+
+  it("starts one client when two opens for the same port run at once", async () => {
+    const projectId = randomUUID();
+    const rathole = makeStubRathole();
+    const controller = await startMockController({ projectId, previewIds: ["preview-1", "preview-1"] });
+    const sitePort = await startSite();
+    const home = makeHome();
+    const args = openArgs({ projectId, controllerUrl: controller.url, port: sitePort, rathole: rathole.file });
+
+    const [first, second] = await Promise.all([execCli(args, home), execCli(args, home)]);
+    expect(first.code, first.stderr).toBe(0);
+    expect(second.code, second.stderr).toBe(0);
+    const live = rathole.pids().filter(isAlive);
+    expect(live).toHaveLength(1);
+    expect(readState(home).previews.map((entry) => entry.pid)).toEqual(live);
+    expect(fs.existsSync(path.join(home, ".instafy", "cli-preview-state.lock"))).toBe(false);
+  }, 30000);
 
   it("exits 2 without calling the controller when nothing listens on the port", async () => {
     const projectId = randomUUID();
@@ -476,6 +624,8 @@ describe("instafy preview", () => {
     expect(ready?.liveClients).toHaveLength(1);
     expect(isAlive(ready!.liveClients[0]!)).toBe(false);
     expect(readState(home).previews).toEqual([]);
+    // Its config, which holds the service token, is gone with it.
+    expect(fs.existsSync(workdirOf(home, "preview-1"))).toBe(false);
   }, 30000);
 
   it("opens a preview, calls ready once the client is up, and prints no URL", async () => {
@@ -499,6 +649,7 @@ describe("instafy preview", () => {
       port: sitePort,
       path: "/",
       status: "live",
+      httpStatus: 200,
       messageId: "message-preview-1",
       viewerHostSuffix: "preview.localhost:8083",
     });
@@ -528,10 +679,12 @@ describe("instafy preview", () => {
     const sitePort = await startSite();
     // An existing binary that exits 1 at once; a fresh stub script can take longer than 250 ms to
     // start while macOS scans it.
-    const result = await execCli(openArgs({ projectId, controllerUrl: controller.url, port: sitePort, rathole: "/usr/bin/false" }), makeHome());
+    const home = makeHome();
+    const result = await execCli(openArgs({ projectId, controllerUrl: controller.url, port: sitePort, rathole: "/usr/bin/false" }), home);
 
     expect(result.code, result.stdout + result.stderr).toBe(1);
     expect(result.stderr).toContain("Preview tunnel exited (code 1). The preview was closed.");
+    expect(fs.existsSync(workdirOf(home, "preview-1"))).toBe(false);
     const paths = controller.captures.map((capture) => `${capture.method} ${capture.path}`);
     expect(paths).toEqual([
       `POST /projects/${projectId}/previews`,
@@ -566,6 +719,8 @@ describe("instafy preview", () => {
     expect(state[0]!.pid).not.toBe(firstPid);
     expect(isAlive(firstPid)).toBe(false);
     expect(isAlive(state[0]!.pid)).toBe(true);
+    expect(fs.existsSync(workdirOf(home, "preview-1"))).toBe(false);
+    expect(fs.existsSync(workdirOf(home, "preview-2"))).toBe(true);
     // The replaced preview is closed on the server, so its card does not outlive its tunnel.
     expect(controller.captures.map((capture) => `${capture.method} ${capture.path}`)).toContain(
       `POST /projects/${projectId}/previews/preview-1/close`,
@@ -654,7 +809,63 @@ describe("instafy preview", () => {
 
     const result = await execCli(openArgs({ projectId, controllerUrl: controller.url, port: sitePort, rathole: rathole.file }), makeHome());
     expect(result.code, result.stderr).toBe(0);
-    expect(JSON.parse(result.stdout)).toMatchObject({ status: "unknown", messageId: "m-1" });
+    expect(JSON.parse(result.stdout)).toMatchObject({ status: "unknown", httpStatus: null, messageId: "m-1" });
+  }, 30000);
+
+  it("reports the HTTP status the server's check got through the preview", async () => {
+    const projectId = randomUUID();
+    const rathole = makeStubRathole();
+    const controller = await startMockController({
+      projectId,
+      readyStatus: 200,
+      readyBody: { messageId: "m-1", health: { listening: true, status: 403 } },
+    });
+    const sitePort = await startSite();
+
+    const result = await execCli(openArgs({ projectId, controllerUrl: controller.url, port: sitePort, rathole: rathole.file }), makeHome());
+    expect(result.code, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ status: "live", httpStatus: 403 });
+  }, 30000);
+
+  it("never signals a process that only mentions a preview's config path", async () => {
+    const projectId = randomUUID();
+    const rathole = makeStubRathole();
+    const controller = await startMockController({ projectId, previewIds: ["preview-1"] });
+    const sitePort = await startSite();
+    const home = makeHome();
+    const oldEntry = (previewId: string, pid: number) => ({
+      previewId,
+      projectId,
+      title: "Old",
+      localPort: sitePort,
+      path: "/",
+      controllerUrl: controller.url,
+      pid,
+      logFile: path.join(home, `${previewId}.log`),
+      workdir: workdirOf(home, previewId),
+      startedAt: new Date().toISOString(),
+    });
+    const [mentionA] = await startPathMentioners(path.join(workdirOf(home, "preview-a"), "rathole.toml"));
+    const [, mentionB] = await startPathMentioners(path.join(workdirOf(home, "preview-b"), "rathole.toml"));
+    writeState(home, [oldEntry("preview-a", mentionA!), oldEntry("preview-b", mentionB!)]);
+
+    const opened = await execCli(openArgs({ projectId, controllerUrl: controller.url, port: sitePort, rathole: rathole.file }), home);
+    expect(opened.code, opened.stderr).toBe(0);
+    expect(isAlive(mentionA!)).toBe(true);
+    expect(isAlive(mentionB!)).toBe(true);
+
+    const recorded = readState(home).previews[0]!;
+    const mentioners = await startPathMentioners(path.join(recorded.workdir, "rathole.toml"));
+    for (const pid of mentioners) {
+      writeState(home, [{ ...recorded, pid }]);
+      const closed = await execCli(
+        ["preview", "close", "preview-1", "--server-url", controller.url, "--access-token", "test-token", "--json"],
+        home,
+      );
+      expect(closed.code, closed.stderr).toBe(0);
+      expect(isAlive(pid)).toBe(true);
+    }
+    process.kill(recorded.pid, "SIGKILL");
   }, 30000);
 
   it("quotes the title in the retry command it suggests", async () => {
