@@ -121,11 +121,13 @@ const INTEGRATION_ONBOARDING_TEMPLATE: &str = include_str!(concat!(
     "/assets/instafy/.agents/skills/instafy-integration-onboarding/SKILL.md"
 ));
 // The setup flow routes this skill into every kickoff, so a workspace still holding a
-// bundled version that predates the browser offer is upgraded; an edited one is kept.
+// bundled version that predates the browser offer, or the routing keywords for repo
+// imports and auth failures (v4), is upgraded; an edited one is kept.
 const LEGACY_INTEGRATION_ONBOARDING_TEMPLATES: &[&str] = &[
     include_str!("legacy/integration-onboarding-v1.md"),
     include_str!("legacy/integration-onboarding-v2.md"),
     include_str!("legacy/integration-onboarding-v3.md"),
+    include_str!("legacy/integration-onboarding-v4.md"),
 ];
 const BYOC_AI_CREDENTIALS_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -1675,8 +1677,17 @@ mod tests {
         );
         assert!(INTEGRATION_ONBOARDING_TEMPLATE.contains("`request_browser`"));
         assert!(INTEGRATION_ONBOARDING_TEMPLATE.contains("open Instafy's browser without asking"));
-        for previous in LEGACY_INTEGRATION_ONBOARDING_TEMPLATES {
+        // Every earlier copy predates the browser offer, except the last, which
+        // predates the repo-import and auth-failure routing keywords.
+        let (last, earlier) = LEGACY_INTEGRATION_ONBOARDING_TEMPLATES
+            .split_last()
+            .expect("legacy copies");
+        for previous in earlier {
             assert!(!previous.contains("open Instafy's browser without asking"));
+        }
+        assert!(INTEGRATION_ONBOARDING_TEMPLATE.contains("permission denied, 401, 403"));
+        assert!(!last.contains("permission denied, 401, 403"));
+        for previous in LEGACY_INTEGRATION_ONBOARDING_TEMPLATES {
             fs::write(&skill, previous).unwrap();
             ensure_project_memory_scaffold(workspace.path());
             assert_eq!(

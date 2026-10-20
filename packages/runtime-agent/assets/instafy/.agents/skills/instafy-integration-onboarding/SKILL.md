@@ -1,7 +1,7 @@
 ---
 name: instafy-integration-onboarding
 description: Action-card policy for integration setup and guided onboarding in Instafy's browser.
-routing_keywords: token, api key, secret, connection, portal, dashboard, developer, walk me through, set up, integration, connect
+routing_keywords: token, api key, secret, connection, portal, dashboard, developer, walk me through, set up, integration, connect, github, repo, import, unauthorized, permission denied, 401, 403
 ---
 
 # Integration onboarding (action-card contract)
