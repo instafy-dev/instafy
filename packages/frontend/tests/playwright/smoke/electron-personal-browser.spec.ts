@@ -391,25 +391,25 @@ test.describe("Electron Personal Browser", () => {
     expect(formSemantics).toHaveLength(9);
     const associatedOwner = formSemantics.find(row => row.id === "fixture-default")?.formOwnerIdentity;
     expect(associatedOwner).toBeTruthy();
+    // Routine is the owner tier (approval policy version 2): every submit and
+    // every other button asks in routine as well as in Ask mode.
     for (const id of ["fixture-default", "fixture-submit", "fixture-normalized"]) {
       expect(formSemantics.find(row => row.id === id)).toMatchObject({
         type: "submit", formOwnerIdentity: associatedOwner, formActionText: "Continue",
-        activationNeedsConfirmation: false, askActivationNeedsConfirmation: true,
+        activationNeedsConfirmation: true, askActivationNeedsConfirmation: true,
       });
     }
     for (const id of ["fixture-button", "fixture-reset"]) {
       expect(formSemantics.find(row => row.id === id)).toMatchObject({
-        formOwnerIdentity: associatedOwner, activationNeedsConfirmation: false,
+        formOwnerIdentity: associatedOwner, activationNeedsConfirmation: true,
       });
     }
     expect(formSemantics.find(row => row.id === "fixture-no-owner")).toMatchObject({
-      formOwnerIdentity: "", formActionText: "", activationNeedsConfirmation: false,
+      formOwnerIdentity: "", formActionText: "", activationNeedsConfirmation: true,
     });
     expect(formSemantics.find(row => row.id === "fixture-notes")).toMatchObject({
-      formOwnerIdentity: associatedOwner, enterNeedsConfirmation: true, routineEnterNeedsConfirmation: false,
+      formOwnerIdentity: associatedOwner, enterNeedsConfirmation: true, routineEnterNeedsConfirmation: true,
     });
-    // Routine consent covers ordinary form submissions, while consequential
-    // actions still require confirmation through both click and Enter.
     expect(formSemantics.find(row => row.id === "fixture-order")).toMatchObject({
       type: "submit", formActionText: "Place order", activationNeedsConfirmation: true,
       askActivationNeedsConfirmation: true, routineEnterNeedsConfirmation: true,

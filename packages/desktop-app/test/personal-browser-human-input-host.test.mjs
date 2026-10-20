@@ -27,6 +27,7 @@ async function waitForStart(started) {
 
 async function fixture(highlight = async () => true, options = {}) {
   const pauses = [];
+  const dialogs = [];
   const highlights = [];
   const shieldStates = [];
   const timers = [];
@@ -40,13 +41,14 @@ async function fixture(highlight = async () => true, options = {}) {
   const descriptor = { found: true, disabled: false, identity: "fixture-document:1", tag: "input", type: "password", name: "Verification code" };
   const module = { exports: {} };
   const dependencies = {
-    electron: { WebContentsView: class {}, dialog: { showMessageBox: async () => ({ response: 1 }) } },
+    electron: { WebContentsView: class {}, dialog: { showMessageBox: async (_owner, options) => { dialogs.push(options); return { response: 1 }; } } },
     "./browserTabCapture": require(path.join(packageRoot, "dist/browserTabCapture.js")),
     "./browserTabInput": require(path.join(packageRoot, "dist/browserTabInput.js")),
     "./browserTabExplorePage": { createBrowserTabExplorePage() { throw new Error("Unexpected native Explore page"); } },
     "./personalBrowserSecurity": security,
     "./personalBrowserRedaction": require(path.join(packageRoot, "dist/personalBrowserRedaction.js")),
     "./personalBrowserActionPolicy": require(path.join(packageRoot, "dist/personalBrowserActionPolicy.js")),
+    "./personalBrowserTeammateActivity": require(path.join(packageRoot, "dist/personalBrowserTeammateActivity.js")),
     "./personalBrowserPageBridge": {
       ...pageBridge,
       snapshotPersonalBrowserPage: async () => ({
@@ -79,9 +81,9 @@ async function fixture(highlight = async () => true, options = {}) {
   host.currentProjectId = "project-fixture";
   host.currentPartition = security.derivePersonalBrowserPartition("fixture-profile");
   host.currentOwnerId = "owner-fixture";
-  host.enablePreparedAgentControl(await host.prepareAgentControl());
+  host.enablePreparedAgentControl(await host.prepareAgentControl(options.mode, options.knownHosts));
   await host.handleControlOperation("snapshot", {});
-  return { host, highlights, pauses, shieldStates, timers, getClears: () => clears };
+  return { host, dialogs, highlights, pauses, shieldStates, timers, getClears: () => clears };
 }
 
 test("Personal host handoff revokes credentials before requesting runtime stop and clears guidance on Resume", async () => {
@@ -227,3 +229,91 @@ test("shared tab control waits for paused agent operations and blocks Resume unt
   host.enablePreparedAgentControl(await host.prepareAgentControl());
   assert.equal(host.getStatus().agentControlEnabled, true);
 });
+
+// --- A sign-in handoff keeps the run's approval mode ---
+
+function routineStarts(dialogs) {
+  return dialogs.filter((options) => options.buttons?.length === 3).length;
+}
+
+test("Let AI continue after a routine handoff keeps routine without a second start dialog", async () => {
+  const { host, dialogs } = await fixture(undefined, { mode: "routine", knownHosts: ["example.test"] });
+  assert.equal(routineStarts(dialogs), 1);
+  await host.handleControlOperation("request_human_input", { indices: [0] });
+  assert.equal(host.getStatus().agentControlEnabled, false);
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine"));
+  assert.equal(routineStarts(dialogs), 1, "no second start dialog");
+  assert.equal(host.getStatus().approvalMode, "routine");
+  assert.equal(host.runKnownHosts.join(","), "example.test", "the card's hosts carry over");
+  // The kept mode is used once.
+  host.pauseAgentControl();
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine"));
+  assert.equal(routineStarts(dialogs), 2);
+});
+
+test("a changed mode after a handoff shows the start dialog", async () => {
+  const fromAsk = await fixture();
+  await fromAsk.host.handleControlOperation("request_human_input", { indices: [0] });
+  fromAsk.host.enablePreparedAgentControl(await fromAsk.host.prepareAgentControl("routine"));
+  assert.equal(routineStarts(fromAsk.dialogs), 1, "an Ask run that continues as routine asks once");
+
+  const fromRoutine = await fixture(undefined, { mode: "routine" });
+  await fromRoutine.host.handleControlOperation("request_human_input", { indices: [0] });
+  fromRoutine.host.enablePreparedAgentControl(await fromRoutine.host.prepareAgentControl("ask"));
+  assert.equal(fromRoutine.host.getStatus().approvalMode, "ask");
+  fromRoutine.host.pauseAgentControl();
+  fromRoutine.host.enablePreparedAgentControl(await fromRoutine.host.prepareAgentControl("routine"));
+  assert.equal(routineStarts(fromRoutine.dialogs), 2, "switching modes used up the kept mode");
+});
+
+test("a resume that names a host the owner has not seen shows the start dialog", async () => {
+  const subset = await fixture(undefined, { mode: "routine", knownHosts: ["example.test", "docs.example.test"] });
+  await subset.host.handleControlOperation("request_human_input", { indices: [0] });
+  subset.host.enablePreparedAgentControl(await subset.host.prepareAgentControl("routine", ["example.test"]));
+  assert.equal(routineStarts(subset.dialogs), 1, "hosts the owner already saw keep the mode");
+  assert.equal(subset.host.runKnownHosts.join(","), "example.test,docs.example.test");
+
+  const { host, dialogs } = await fixture(undefined, { mode: "routine", knownHosts: ["example.test"] });
+  await host.handleControlOperation("request_human_input", { indices: [0] });
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine", ["example.test", "unseen-a.test", "unseen-b.test"]));
+  assert.equal(routineStarts(dialogs), 2);
+  const start = dialogs.filter((options) => options.buttons?.length === 3).at(-1);
+  assert.match(start.detail, /unseen-a\.test, unseen-b\.test/);
+  assert.equal(host.runKnownHosts.join(","), "example.test,unseen-a.test,unseen-b.test");
+});
+
+test("a Studio that names the handoff binds the kept mode to it", async () => {
+  const mismatch = await fixture(undefined, { mode: "routine" });
+  await mismatch.host.handleControlOperation("request_human_input", { indices: [0] });
+  mismatch.host.enablePreparedAgentControl(await mismatch.host.prepareAgentControl("routine", [], "another-handoff"));
+  assert.equal(routineStarts(mismatch.dialogs), 2);
+
+  const { host, dialogs } = await fixture(undefined, { mode: "routine" });
+  await host.handleControlOperation("request_human_input", { indices: [0] });
+  const handoffId = host.getStatus().humanInputRequest.handoffId;
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine", [], handoffId));
+  assert.equal(routineStarts(dialogs), 1);
+});
+
+for (const { name, cancel } of [
+  { name: "expiry", cancel: (host) => { host.handoffResume.expiresAtMs = Date.now() - 1; } },
+  { name: "Pause", cancel: (host) => host.pauseAgentControl() },
+  { name: "the emergency pause", cancel: (host) => host.emergencyPauseAgentControl() },
+  { name: "an owner change", cancel: (host) => { host.currentOwnerId = "another-owner"; } },
+  { name: "Clear data", cancel: async (host) => {
+    Object.assign(host.view.webContents, {
+      loadURL: async () => {},
+      navigationHistory: { ...host.view.webContents.navigationHistory, clear() {} },
+      session: { clearStorageData: async () => {}, clearCache: async () => {}, clearAuthCache: async () => {}, flushStorageData() {} },
+    });
+    await host.clearData();
+  } },
+]) {
+  test(`${name} cancels the kept mode of a handoff`, async () => {
+    const { host, dialogs } = await fixture(undefined, { mode: "routine" });
+    await host.handleControlOperation("request_human_input", { indices: [0] });
+    await cancel(host);
+    host.enablePreparedAgentControl(await host.prepareAgentControl("routine"));
+    assert.equal(routineStarts(dialogs), 2);
+  });
+}

@@ -27,6 +27,11 @@ import {
 } from "./personalBrowserPageBridge";
 import { PersonalBrowserInputShield } from "./personalBrowserInputShield";
 import {
+  createMemoryTeammateActivityStore,
+  type PersonalBrowserTeammateActivity,
+  type PersonalBrowserTeammateActivityStore,
+} from "./personalBrowserTeammateActivity";
+import {
   hasCredentialWord,
   redactLogValue,
   redactPageObservation,
@@ -35,6 +40,8 @@ import {
 } from "./personalBrowserRedaction";
 import {
   categoryTitle,
+  classifyAddress,
+  isEditable as isEditableStepTarget,
   refusalFor,
   stepLabels,
   type PersonalBrowserStepClassification,
@@ -50,11 +57,11 @@ import {
   classifyPersonalBrowserStep,
   derivePersonalBrowserPartition,
   getPersonalBrowserOrigin,
-  isHighImpactPersonalBrowserAction,
   isPersonalBrowserActivationKey,
   isSensitivePersonalBrowserEditable,
   normalizePersonalBrowserApprovalMode,
   normalizePersonalBrowserBounds,
+  normalizePersonalBrowserKnownHosts,
   normalizePersonalBrowserPressKey,
   normalizePersonalBrowserScroll,
   normalizePersonalBrowserText,
@@ -66,6 +73,7 @@ import {
   personalBrowserKeyMutatesSensitiveField,
   requirePersonalBrowserTarget,
   sanitizePersonalBrowserBrokerStatus,
+  PERSONAL_BROWSER_APPROVAL_POLICY_VERSION,
   type PersonalBrowserBounds,
   type PersonalBrowserApprovalMode,
 } from "./personalBrowserSecurity";
@@ -90,6 +98,8 @@ export type PersonalBrowserStatus = {
   humanInputRequest?: PersonalBrowserHumanInputRequest;
   approvalMode: PersonalBrowserApprovalMode;
   approvalModes: PersonalBrowserApprovalMode[];
+  /** 2: "routine" is the owner tier (see PERSONAL_BROWSER_APPROVAL_POLICY_VERSION). */
+  approvalPolicyVersion: number;
   sharing?: boolean;
   tabControlActive?: boolean;
   ownerId?: string;
@@ -118,6 +128,8 @@ type PersonalBrowserHostOptions = {
   onReleaseExpiry: (lease: PersonalBrowserReleaseLease) => void;
   onEmergencyPause?: (projectId: string) => void;
   onStatus?: (status: PersonalBrowserStatus) => void;
+  /** Where teammate activity in a profile is kept; in memory when absent. */
+  teammateActivity?: PersonalBrowserTeammateActivityStore;
   logger?: (
     level: "info" | "warn" | "error",
     message: string,
@@ -129,6 +141,19 @@ type PersonalBrowserResolvedTarget = {
   url: string;
   origin: string | null;
   descriptor: PersonalBrowserTargetDescriptor;
+};
+
+// A sign-in handoff keeps the run's approval mode: Let AI continue within the
+// handoff's window, for the same project, profile and owner, in the same mode,
+// does not show the start confirmation again.
+type PersonalBrowserHandoffResume = {
+  handoffId: string;
+  projectId: string;
+  partition: string;
+  ownerId: string;
+  approvalMode: PersonalBrowserApprovalMode;
+  knownHosts: string[];
+  expiresAtMs: number;
 };
 
 type PersonalBrowserSnapshotState = {
@@ -219,6 +244,10 @@ const STEP_DIALOG_DETAILS: Record<string, string> = {
   change: "This may change something on the site.",
 };
 
+// An approved step's navigation is not asked about again: one use, shortly after.
+const APPROVED_NAVIGATION_TTL_MS = 30_000;
+const MAX_TYPING_APPROVALS = 256;
+
 // Steps after which the page, and a page they open, stay withheld.
 const SECRET_REVEALING_CATEGORIES = new Set(["credential", "may_show_secret"]);
 // Withheld documents remembered at once, so going back to an earlier
@@ -243,12 +272,45 @@ function formSubmissionDescription(descriptor: PersonalBrowserTargetDescriptor):
     : "this form";
 }
 
+function siteName(value: string): string | null {
+  try {
+    const host = new URL(value).hostname.toLowerCase();
+    return host ? host.replace(/^www\./, "") : null;
+  } catch {
+    return null;
+  }
+}
+
+// The text a type step enters, so the owner sees what a fill-in-and-submit
+// approval sends. Typing into password, code and payment fields is refused
+// before any dialog.
+const TYPED_TEXT_PREVIEW_CHARACTERS = 300;
+
+function typedTextDetail(text: string | undefined): string {
+  if (text === undefined) return "";
+  const flat = text.replace(/\s+/g, " ").trim();
+  if (!flat) return "The agent types no text.";
+  const preview = flat.length > TYPED_TEXT_PREVIEW_CHARACTERS
+    ? `${flat.slice(0, TYPED_TEXT_PREVIEW_CHARACTERS)}… (${flat.length} characters)`
+    : flat;
+  return `The agent types: “${preview}”.`;
+}
+
+function fillDescription(descriptor: PersonalBrowserTargetDescriptor): string {
+  if (descriptor.formOwnerIdentity?.trim()) {
+    return formSubmissionDescription(descriptor);
+  }
+  const label = (descriptor.ariaLabel || descriptor.placeholder || descriptor.name || descriptor.title)?.trim();
+  return label ? `the field “${label.slice(0, 160)}”` : "this field";
+}
+
 export class PersonalBrowserHost {
   private readonly enabled: boolean;
   private readonly supported: boolean;
   private readonly onReleaseExpiry: PersonalBrowserHostOptions["onReleaseExpiry"];
   private readonly onEmergencyPause: NonNullable<PersonalBrowserHostOptions["onEmergencyPause"]>;
   private readonly onStatus: NonNullable<PersonalBrowserHostOptions["onStatus"]>;
+  private readonly teammateActivity: PersonalBrowserTeammateActivityStore;
   private readonly logger: NonNullable<PersonalBrowserHostOptions["logger"]>;
   private readonly controlServer: PersonalBrowserControlServer;
   private readonly inputShield: PersonalBrowserInputShield;
@@ -274,6 +336,17 @@ export class PersonalBrowserHost {
   private humanNavigationEpoch = 0;
   private approvedOrigins = new Set<string>();
   private pendingOriginApprovals = new Map<string, Promise<boolean>>();
+  // The card's hosts for a routine run, shown in its start dialog.
+  private runKnownHosts: string[] = [];
+  // Addresses (origin and path) an approved step is about to open.
+  private approvedNavigations = new Map<string, number>();
+  private pendingNavigationApprovals = new Map<string, Promise<boolean>>();
+  // One typing approval covers a form, or a field outside forms, per page.
+  private typingApprovals = new Set<string>();
+  private handoffResume: PersonalBrowserHandoffResume | null = null;
+  // A navigation the page started after an agent step and the owner denied;
+  // the agent's next operation in that control epoch reports it.
+  private deniedPageNavigationEpoch: number | null = null;
   private controlEpoch = 0;
   private latestAgentSnapshot: PersonalBrowserSnapshotState | null = null;
   // A document stays withheld from the agent until a new page loads once it
@@ -301,10 +374,25 @@ export class PersonalBrowserHost {
               return {sourceId:contents.getMediaSourceId(requester),width:Math.max(1,Math.floor(bounds.width*scale)),height:Math.max(1,Math.floor(bounds.height*scale))};
             },
           },
-          createExplore: viewport => createBrowserTabExplorePage(contents.session, contents.getURL(), viewport),
+          createExplore: viewport => {
+            // Explore runs in the owner's browser session: the profile now
+            // carries a teammate's activity.
+            const partition = this.currentPartition;
+            this.markTeammateActivity(partition, contents.getURL());
+            return createBrowserTabExplorePage(contents.session, contents.getURL(), viewport, undefined,
+              url => this.markTeammateActivity(partition, url));
+          },
           dispatchInput: (input, current) => this.inputShield.withInjectedInput(() => dispatchBrowserTabInput(contents,this.fitBoundsToOwner(this.currentBounds),input,current)),
         } : null;
-  }, () => { this.takeoverRequestId = undefined; this.syncInputShield(); this.emitStatus(); });
+  }, () => {
+    this.takeoverRequestId = undefined;
+    // A participant's tab control acts in the owner's profile and sign-ins.
+    if (this.tabCapture.controlActive) {
+      this.markTeammateActivity(this.currentPartition, this.getWebContents()?.getURL() ?? null);
+    }
+    this.syncInputShield();
+    this.emitStatus();
+  });
 
   startTabShare(ownerId: string) {
     if (!this.currentVisible) throw new Error("Open your browser before sharing this tab.");
@@ -338,6 +426,9 @@ export class PersonalBrowserHost {
     this.onReleaseExpiry = options.onReleaseExpiry;
     this.onEmergencyPause = options.onEmergencyPause ?? (() => undefined);
     this.onStatus = options.onStatus ?? (() => undefined);
+    // The default keeps marks for this Desktop session only; main.ts passes
+    // the userData file store.
+    this.teammateActivity = options.teammateActivity ?? createMemoryTeammateActivityStore();
     const logger = options.logger ?? (() => undefined);
     // Error messages can carry page addresses. Mask them before they reach
     // Desktop's log files.
@@ -416,6 +507,7 @@ export class PersonalBrowserHost {
       ...(this.humanInputRequest ? { humanInputRequest: this.humanInputRequest } : {}),
       approvalMode: this.approvalMode,
       approvalModes: ["ask", "routine"],
+      approvalPolicyVersion: PERSONAL_BROWSER_APPROVAL_POLICY_VERSION,
       sharing: this.tabCapture.active,
       tabControlActive: this.tabCapture.controlActive,
       ...(this.currentOwnerId ? { ownerId: this.currentOwnerId } : {}),
@@ -458,8 +550,7 @@ export class PersonalBrowserHost {
       this.setAgentControlState(false);
       this.clearHumanNavigationAllowance();
       this.currentRuntimeId = null;
-      this.approvedOrigins.clear();
-      this.pendingOriginApprovals.clear();
+      this.resetRunApprovals();
       this.currentProjectId = projectId;
       this.currentPartition = partition;
       this.applyVisibility();
@@ -616,21 +707,25 @@ export class PersonalBrowserHost {
     this.controlEpoch += 1;
     this.invalidateAgentSnapshot();
     this.controlServer.clearBinding();
-    this.approvedOrigins.clear();
-    this.pendingOriginApprovals.clear();
+    this.resetRunApprovals();
     this.setAgentControlState(false);
     this.emitStatus();
     return this.getStatus();
   }
 
-  async prepareAgentControl(requestedApprovalMode?: unknown): Promise<number> {
+  async prepareAgentControl(
+    requestedApprovalMode?: unknown,
+    requestedKnownHosts?: unknown,
+    requestedHandoffId?: unknown,
+  ): Promise<number> {
     if (this.tabCapture.controlActive) throw new Error("Take back tab control before enabling the agent.");
     if (!this.agentControlEnabled && this.activeControlOperations > 0) {
       throw new Error("The previous Personal Browser operation is still stopping. Wait for control to return before resuming.");
     }
-    const approvalMode = requestedApprovalMode === undefined && this.agentControlEnabled
+    const requestedMode = requestedApprovalMode === undefined && this.agentControlEnabled
       ? this.approvalMode
       : normalizePersonalBrowserApprovalMode(requestedApprovalMode);
+    let approvalMode = requestedMode;
     if (this.currentState !== "ready") {
       throw new Error("Personal Browser must be ready before agent control is enabled.");
     }
@@ -643,24 +738,44 @@ export class PersonalBrowserHost {
     if (this.agentControlEnabled && approvalMode !== this.approvalMode) {
       throw new Error("Pause Personal Browser before changing its approval mode.");
     }
-    if (approvalMode === "routine" && !this.agentControlEnabled) {
+    // The card's hosts only mean something to a routine run.
+    const requestedHosts = approvalMode === "routine"
+      ? normalizePersonalBrowserKnownHosts(Array.isArray(requestedKnownHosts) ? requestedKnownHosts : [])
+      : [];
+    // Let AI continue after a sign-in handoff keeps the run's mode and its
+    // hosts. A start that names a host the owner has not seen in a start
+    // dialog shows the dialog again.
+    const handoff = this.agentControlEnabled
+      ? null
+      : this.takeHandoffResume(projectId, partition, ownerId, requestedHandoffId);
+    const resumesHandoff = handoff !== null && handoff.approvalMode === approvalMode &&
+      requestedHosts.every((host) => handoff.knownHosts.includes(host));
+    const knownHosts = this.agentControlEnabled
+      ? this.runKnownHosts
+      : resumesHandoff
+        ? handoff.knownHosts
+        : requestedHosts;
+    if (approvalMode === "routine" && !this.agentControlEnabled && !resumesHandoff) {
       const epoch = this.controlEpoch;
       const owner = this.ownerWindow;
       if (!owner || owner.isDestroyed() || !owner.isVisible()) {
         throw new Error("Personal Browser requires a visible window to approve routine browsing.");
       }
-      const result = await dialog.showMessageBox(owner, {
-        type: "warning",
-        title: "Allow routine browsing for this session?",
-        message: "Always allow routine browsing in this project while agent control is resumed?",
-        detail: "The agent may navigate, search, click ordinary controls, and fill or submit non-sensitive forms without asking each time. Recognized consequential actions still ask; passwords, verification codes and payment details stay manual. Pause or Escape ends this permission.",
-        buttons: ["Cancel", "Allow routine browsing"],
-        defaultId: 0,
-        cancelId: 0,
-        noLink: true,
-      });
-      if (result.response !== 1 || !this.isOpenOwnerCurrent(epoch, projectId, partition, ownerId)) {
+      // One native confirmation per run. "Ask me each step" starts the run in
+      // Ask mode instead of failing it.
+      const teammate = this.currentTeammateActivity();
+      const result = await dialog.showMessageBox(owner, this.routineStartDialog(knownHosts, teammate));
+      if (result.response !== 1 && result.response !== 2) {
         throw new Error("Routine browsing was not approved or the browser session changed.");
+      }
+      if (!this.isOpenOwnerCurrent(epoch, projectId, partition, ownerId)) {
+        throw new Error("Routine browsing was not approved or the browser session changed.");
+      }
+      if (teammate && result.checkboxChecked === true) {
+        this.forgetTeammateActivity(partition);
+      }
+      if (result.response === 2) {
+        approvalMode = "ask";
       }
     }
     const clearEpoch = this.controlEpoch;
@@ -673,8 +788,7 @@ export class PersonalBrowserHost {
       this.controlEpoch += 1;
       this.invalidateAgentSnapshot();
       const preparedEpoch = this.controlEpoch;
-      this.approvedOrigins.clear();
-      this.pendingOriginApprovals.clear();
+      this.resetRunApprovals();
       await this.controlServer.bindProject(projectId);
       if (!this.isOpenOwnerCurrent(preparedEpoch, projectId, partition, ownerId)) {
         this.controlServer.clearBinding();
@@ -682,7 +796,69 @@ export class PersonalBrowserHost {
       }
     }
     this.approvalMode = approvalMode;
+    this.runKnownHosts = approvalMode === "routine" ? knownHosts : [];
     return this.controlEpoch;
+  }
+
+  private routineStartDialog(
+    knownHosts: string[],
+    teammate: PersonalBrowserTeammateActivity | null,
+  ): Electron.MessageBoxOptions {
+    const sites = knownHosts.length > 0 ? ` Sites on this card: ${knownHosts.join(", ")}.` : "";
+    const teammateNote = teammate
+      ? ` A teammate used this browser profile${teammate.sites.length > 0 ? ` (sites: ${teammate.sites.slice(-8).join(", ")})` : ""}. ` +
+        "Until you forget that activity, the agent asks before using each site that is not on this card."
+      : "";
+    return {
+      ...(teammate ? { checkboxLabel: "Forget teammate activity", checkboxChecked: false } : {}),
+      type: "question",
+      title: "Let the agent browse on its own?",
+      message: "Let the agent browse in this project without asking for each site?",
+      detail:
+        "Reading pages, scrolling, following links, menus, tabs and searches go ahead without asking. " +
+        "Other buttons, filling in forms, submitting, purchases, messages, downloads, sign-outs and key changes still ask each time. " +
+        "Signing in, revealing keys and choosing files stay yours. Pause or Escape ends this permission." +
+        sites +
+        teammateNote,
+      buttons: ["Cancel", "Allow", "Ask me each step"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    };
+  }
+
+  private takeHandoffResume(
+    projectId: string,
+    partition: string,
+    ownerId: string,
+    handoffId: unknown,
+  ): PersonalBrowserHandoffResume | null {
+    const handoff = this.handoffResume;
+    this.handoffResume = null;
+    if (
+      !handoff ||
+      // A Studio that names the handoff it continues binds the resume to it.
+      (handoffId !== undefined && handoffId !== handoff.handoffId) ||
+      handoff.projectId !== projectId ||
+      handoff.partition !== partition ||
+      handoff.ownerId !== ownerId ||
+      Date.now() >= handoff.expiresAtMs
+    ) {
+      return null;
+    }
+    return handoff;
+  }
+
+  private resetRunApprovals() {
+    // Pause, Escape, Clear data, close and an owner or identity change all
+    // pass through here, and each cancels a handoff's kept mode.
+    this.handoffResume = null;
+    this.deniedPageNavigationEpoch = null;
+    this.approvedOrigins.clear();
+    this.pendingOriginApprovals.clear();
+    this.approvedNavigations.clear();
+    this.pendingNavigationApprovals.clear();
+    this.typingApprovals.clear();
   }
 
   isControlEpoch(epoch: number): boolean {
@@ -725,8 +901,7 @@ export class PersonalBrowserHost {
     this.currentOccluded = false;
     this.setAgentControlState(false);
     this.clearHumanNavigationAllowance();
-    this.approvedOrigins.clear();
-    this.pendingOriginApprovals.clear();
+    this.resetRunApprovals();
     if (this.view && this.currentProjectId && this.currentPartition) {
       this.scheduleReleaseExpiry();
     } else {
@@ -776,8 +951,7 @@ export class PersonalBrowserHost {
     this.setAgentControlState(false);
     this.stopInFlightNavigation();
     this.clearHumanNavigationAllowance();
-    this.approvedOrigins.clear();
-    this.pendingOriginApprovals.clear();
+    this.resetRunApprovals();
     this.applyVisibility();
     this.scheduleReleaseExpiry();
     this.emitStatus();
@@ -806,14 +980,15 @@ export class PersonalBrowserHost {
     this.controlEpoch += 1;
     this.invalidateAgentSnapshot();
     this.controlServer.clearBinding();
-    this.approvedOrigins.clear();
-    this.pendingOriginApprovals.clear();
+    this.resetRunApprovals();
     await this.runHumanNavigation(() => contents.loadURL("about:blank"));
     contents.navigationHistory.clear();
     await contents.session.clearStorageData();
     await contents.session.clearCache();
     await contents.session.clearAuthCache();
     contents.session.flushStorageData();
+    // Cleared sign-ins leave nothing of a teammate's activity behind.
+    this.forgetTeammateActivity(this.currentPartition);
     this.emitStatus();
     return this.getStatus();
   }
@@ -839,8 +1014,7 @@ export class PersonalBrowserHost {
     this.currentError = null;
     this.setAgentControlState(false);
     this.clearHumanNavigationAllowance();
-    this.approvedOrigins.clear();
-    this.pendingOriginApprovals.clear();
+    this.resetRunApprovals();
     this.emitStatus();
     return this.getStatus();
   }
@@ -878,7 +1052,12 @@ export class PersonalBrowserHost {
     });
     view.webContents.on("will-navigate", (event, url) => this.guardPageNavigation(event, url));
     view.webContents.on("will-redirect", (event, url) => this.guardPageNavigation(event, url));
-    view.webContents.on("did-navigate", () => {
+    view.webContents.on("did-navigate", (_event, url) => {
+      if (this.tabCapture.controlActive) {
+        this.markTeammateActivity(this.currentPartition, url);
+      }
+      // An approval for a navigation that never happened ends with the page.
+      this.approvedNavigations.clear();
       this.humanInputRequest = null;
       this.invalidateAgentSnapshot();
       this.emitStatus();
@@ -1015,6 +1194,7 @@ export class PersonalBrowserHost {
   private setAgentControlState(enabled: boolean) {
     if (!enabled) {
       this.approvalMode = "ask";
+      this.runKnownHosts = [];
       this.takeoverRequestId = undefined;
     }
     this.agentControlEnabled = enabled;
@@ -1056,6 +1236,8 @@ export class PersonalBrowserHost {
   }
 
   private emergencyPauseAgentControl() {
+    // Escape also cancels a sign-in handoff's kept mode.
+    this.handoffResume = null;
     if (this.tabCapture.controlActive) { this.tabCapture.revokeControl(); return; }
     if (!this.agentControlEnabled) {
       return;
@@ -1169,11 +1351,39 @@ export class PersonalBrowserHost {
     }
     const targetOrigin = getPersonalBrowserOrigin(targetUrl);
     const currentOrigin = getPersonalBrowserOrigin(this.getWebContents()?.getURL() || "about:blank");
-    if (!targetOrigin || targetOrigin === currentOrigin || this.approvalMode === "routine" || this.approvedOrigins.has(targetOrigin)) {
+    // A risky address asks in every mode, also when the page or a redirect
+    // opens it, unless an approved step is opening exactly that address.
+    const risky = classifyAddress(targetUrl);
+    if (risky && !this.consumeApprovedNavigation(targetUrl)) {
+      event.preventDefault();
+      const epoch = this.controlEpoch;
+      void this.requestNavigationApproval(targetUrl, risky.category).then(async (approved) => {
+        if (!approved) {
+          this.recordDeniedPageNavigation(epoch);
+          return;
+        }
+        if (epoch !== this.controlEpoch) return;
+        if (targetOrigin && targetOrigin !== currentOrigin && !(await this.requestOriginApproval(targetOrigin))) {
+          this.recordDeniedPageNavigation(epoch);
+          return;
+        }
+        if (epoch !== this.controlEpoch || !this.getWebContents()) return;
+        this.approveNavigation(targetUrl);
+        void this.requireWebContents().loadURL(targetUrl).catch((error) => {
+          this.logger("warn", "[instafy-desktop] personal-browser-approved-navigation-failed", {
+            message: error instanceof Error ? error.message : String(error),
+          });
+        });
+      });
+      return;
+    }
+    if (!targetOrigin || targetOrigin === currentOrigin || this.siteSkipsPrompt(targetOrigin) || this.approvedOrigins.has(targetOrigin)) {
       return;
     }
     event.preventDefault();
+    const originEpoch = this.controlEpoch;
     void this.requestOriginApproval(targetOrigin).then((approved) => {
+      if (!approved) this.recordDeniedPageNavigation(originEpoch);
       if (approved && this.getWebContents()) {
         void this.requireWebContents().loadURL(targetUrl).catch((error) => {
           this.logger("warn", "[instafy-desktop] personal-browser-approved-navigation-failed", {
@@ -1184,8 +1394,122 @@ export class PersonalBrowserHost {
     });
   }
 
+  private recordDeniedPageNavigation(epoch: number) {
+    if (epoch === this.controlEpoch && this.agentControlEnabled) {
+      this.deniedPageNavigationEpoch = epoch;
+    }
+  }
+
+  /**
+   * Routine runs show no per-site prompt, unless a teammate acted in this
+   * profile: then every site asks except the card's hosts the owner allowed
+   * in the start dialog.
+   */
+  private siteSkipsPrompt(origin: string): boolean {
+    if (this.approvalMode !== "routine") return false;
+    if (!this.currentTeammateActivity()) return true;
+    const site = siteName(origin);
+    return site !== null && this.runKnownHosts.some((host) => host.replace(/^www\./, "") === site);
+  }
+
+  private currentTeammateActivity(): PersonalBrowserTeammateActivity | null {
+    const partition = this.currentPartition;
+    if (!partition) return null;
+    try {
+      return this.teammateActivity.read(partition);
+    } catch {
+      // Unknown means marked: the prompts come back.
+      return { sites: [], markedAtMs: 0 };
+    }
+  }
+
+  private markTeammateActivity(partition: string | null, url: string | null) {
+    if (!partition) return;
+    try {
+      this.teammateActivity.mark(partition, url);
+    } catch (error) {
+      this.logger("warn", "[instafy-desktop] personal-browser-teammate-activity-failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private forgetTeammateActivity(partition: string | null) {
+    if (!partition) return;
+    try {
+      this.teammateActivity.clear(partition);
+    } catch (error) {
+      this.logger("warn", "[instafy-desktop] personal-browser-teammate-activity-failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  // A link or address is approved with its query. A form's action is
+  // approved by its path, because a GET form adds its fields as the query.
+  private navigationKey(url: string, anyQuery: boolean): string | null {
+    try {
+      const parsed = new URL(url);
+      return anyQuery
+        ? `path:${parsed.origin}${parsed.pathname}`
+        : `url:${parsed.origin}${parsed.pathname}${parsed.search}`;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Lets the navigation an approved step starts through without a second
+   * prompt: one use, shortly after, and only until the next page loads.
+   */
+  private approveNavigation(url: string | null | undefined, options: { anyQuery?: boolean } = {}) {
+    const key = url ? this.navigationKey(url, options.anyQuery === true) : null;
+    if (!key) return;
+    const now = Date.now();
+    for (const [entry, expiresAt] of this.approvedNavigations) {
+      if (expiresAt <= now) this.approvedNavigations.delete(entry);
+    }
+    this.approvedNavigations.set(key, now + APPROVED_NAVIGATION_TTL_MS);
+  }
+
+  private consumeApprovedNavigation(url: string): boolean {
+    for (const key of [this.navigationKey(url, false), this.navigationKey(url, true)]) {
+      const expiresAt = key ? this.approvedNavigations.get(key) : undefined;
+      if (!key || expiresAt === undefined) continue;
+      this.approvedNavigations.delete(key);
+      if (expiresAt > Date.now()) return true;
+    }
+    return false;
+  }
+
+  private requestNavigationApproval(url: string, category: string): Promise<boolean> {
+    const pending = this.pendingNavigationApprovals.get(url);
+    if (pending) return pending;
+    const approval = this.confirmAgentNavigation(url, category).finally(() => {
+      if (this.pendingNavigationApprovals.get(url) === approval) {
+        this.pendingNavigationApprovals.delete(url);
+      }
+    });
+    this.pendingNavigationApprovals.set(url, approval);
+    return approval;
+  }
+
+  private typingApprovalKey(descriptor: PersonalBrowserTargetDescriptor, category: string): string {
+    const form = descriptor.formOwnerIdentity?.trim();
+    return `${this.controlEpoch}|${category}|${form ? `form:${form}` : `field:${descriptor.identity ?? ""}`}`;
+  }
+
+  private rememberTypingApproval(key: string) {
+    this.typingApprovals.add(key);
+    while (this.typingApprovals.size > MAX_TYPING_APPROVALS) {
+      const oldest = this.typingApprovals.values().next().value;
+      if (oldest === undefined) break;
+      this.typingApprovals.delete(oldest);
+    }
+  }
+
   private async requestOriginApproval(origin: string): Promise<boolean> {
-    if (this.approvalMode === "routine" || this.approvedOrigins.has(origin)) {
+    if (this.siteSkipsPrompt(origin) || this.approvedOrigins.has(origin)) {
       return true;
     }
     const pending = this.pendingOriginApprovals.get(origin);
@@ -1215,12 +1539,15 @@ export class PersonalBrowserHost {
       return false;
     }
     const host = new URL(origin).host;
+    const teammateNote = this.approvalMode === "routine" && this.currentTeammateActivity()
+      ? "A teammate used this browser profile, so the agent asks for each site until you forget that activity. "
+      : "";
     const result = await dialog.showMessageBox(owner, {
       type: "question",
       title: "Allow agent browser access?",
       message: `Allow the agent to use ${host}?`,
       detail:
-        "This lets the current project read and interact with this site in your Personal Browser for this session. Password, verification-code, and payment fields remain blocked.",
+        `${teammateNote}This lets the current project read and interact with this site in your Personal Browser for this session. Password, verification-code, and payment fields remain blocked.`,
       buttons: ["Deny", "Allow for this session"],
       defaultId: 0,
       cancelId: 0,
@@ -1231,7 +1558,7 @@ export class PersonalBrowserHost {
 
   private async confirmAgentActivation(
     descriptor: PersonalBrowserTargetDescriptor,
-    options: { formSubmission?: boolean; category?: string } = {},
+    options: { formSubmission?: boolean; fill?: boolean; category?: string; typedText?: string } = {},
   ): Promise<boolean> {
     const owner = this.ownerWindow;
     if (!owner || owner.isDestroyed() || !owner.isVisible()) {
@@ -1240,17 +1567,24 @@ export class PersonalBrowserHost {
     const epoch = this.controlEpoch;
     const categoryName = options.category ? categoryTitle(options.category) : null;
     const categoryDetail = options.category ? STEP_DIALOG_DETAILS[options.category] : undefined;
+    const fillDetail = descriptor.formOwnerIdentity?.trim()
+      ? "One approval covers every field of this form on this page."
+      : "One approval covers this field on this page.";
     const genericDetail = options.formSubmission
-      ? "This sends the form to the site and may navigate or change site state. Review it before allowing once."
-      : "This activates the selected page control and may navigate or change site state. Review it before allowing once.";
+      ? `${options.fill ? `${fillDetail} ` : ""}This sends the form to the site and may navigate or change site state. Review it before allowing once.`
+      : options.fill
+        ? `${fillDetail} Submitting still asks. Review it before allowing.`
+        : "This activates the selected page control and may navigate or change site state. Review it before allowing once.";
     const result = await dialog.showMessageBox(owner, {
       type: "warning",
       // The title names what kind of step this is.
       title: categoryName ?? (options.formSubmission ? "Confirm form submission" : "Confirm agent action"),
       message: options.formSubmission
-        ? `Allow the agent to submit ${formSubmissionDescription(descriptor)}?`
-        : `Allow the agent to activate ${activationLabel(descriptor)}?`,
-      detail: categoryDetail ? `${categoryDetail} ${genericDetail}` : genericDetail,
+        ? `Allow the agent to ${options.fill ? "fill in and submit" : "submit"} ${formSubmissionDescription(descriptor)}?`
+        : options.fill
+          ? `Allow the agent to fill in ${fillDescription(descriptor)}?`
+          : `Allow the agent to activate ${activationLabel(descriptor)}?`,
+      detail: [typedTextDetail(options.typedText), categoryDetail, genericDetail].filter(Boolean).join(" "),
       buttons: ["Deny", "Allow once"],
       defaultId: 0,
       cancelId: 0,
@@ -1259,7 +1593,7 @@ export class PersonalBrowserHost {
     return result.response === 1 && epoch === this.controlEpoch;
   }
 
-  private async confirmAgentNavigation(url: string): Promise<boolean> {
+  private async confirmAgentNavigation(url: string, category?: string): Promise<boolean> {
     const owner = this.ownerWindow;
     if (!owner || owner.isDestroyed() || !owner.isVisible()) {
       return false;
@@ -1267,12 +1601,13 @@ export class PersonalBrowserHost {
     const epoch = this.controlEpoch;
     const parsed = new URL(url);
     const label = `${parsed.host}${parsed.pathname}${parsed.search}`.slice(0, 240);
+    const categoryDetail = category ? STEP_DIALOG_DETAILS[category] : undefined;
+    const genericDetail = "This is a one-time navigation in your Personal Browser. Review the destination before allowing it.";
     const result = await dialog.showMessageBox(owner, {
       type: "question",
-      title: "Confirm agent navigation",
+      title: (category ? categoryTitle(category) : null) ?? "Confirm agent navigation",
       message: `Allow the agent to open “${label}”?`,
-      detail:
-        "This is a one-time navigation in your Personal Browser. Review the destination before allowing it.",
+      detail: categoryDetail ? `${categoryDetail} ${genericDetail}` : genericDetail,
       buttons: ["Deny", "Allow once"],
       defaultId: 0,
       cancelId: 0,
@@ -1310,7 +1645,7 @@ export class PersonalBrowserHost {
     if (this.agentControlEnabled) {
       try {
         const origin = getPersonalBrowserOrigin(status.url || "about:blank");
-        originApproved = !origin || this.approvalMode === "routine" || this.approvedOrigins.has(origin);
+        originApproved = !origin || this.siteSkipsPrompt(origin) || this.approvedOrigins.has(origin);
       } catch {
         originApproved = false;
       }
@@ -1646,6 +1981,16 @@ export class PersonalBrowserHost {
     const operationEpoch = this.controlEpoch;
     this.assertAgentControlReady();
     const contents = this.requireWebContents();
+    if (this.deniedPageNavigationEpoch === operationEpoch) {
+      // The previous step's click or key went through, but the page it tried
+      // to open was denied. Report that once instead of failing silently.
+      this.deniedPageNavigationEpoch = null;
+      throw new PersonalBrowserControlError(
+        403,
+        "navigation_denied",
+        "The user denied the page navigation your previous step started. Treat that step as denied and do not retry it.",
+      );
+    }
 
     if (operation === "navigate") {
       const payload = payloadRecord(rawPayload);
@@ -1655,16 +2000,18 @@ export class PersonalBrowserHost {
       if (origin && !(await this.requestOriginApproval(origin))) {
         throw new PersonalBrowserControlError(403, "origin_not_approved", "The user denied navigation to this origin.");
       }
-      // The first visit is covered by the origin prompt. Once an origin is
-      // approved, require a one-shot decision for every explicit URL so a
-      // state-changing same-origin GET cannot bypass confirmation.
-      const navigationNeedsConfirmation = this.approvalMode === "routine"
-        ? isHighImpactPersonalBrowserAction({ href: url })
-        : originWasApproved;
-      if (navigationNeedsConfirmation && !(await this.confirmAgentNavigation(url))) {
+      // Risky addresses (sign-out, downloads and exports, action links with
+      // an id or one-time token) ask in every mode. In Ask mode the first
+      // visit is covered by the origin prompt; once an origin is approved,
+      // every explicit URL needs a one-shot decision so a state-changing
+      // same-origin GET cannot bypass confirmation.
+      const risky = classifyAddress(url);
+      const navigationNeedsConfirmation = Boolean(risky) || (this.approvalMode === "ask" && originWasApproved);
+      if (navigationNeedsConfirmation && !(await this.confirmAgentNavigation(url, risky?.category))) {
         throw new PersonalBrowserControlError(403, "navigation_denied", "The user denied browser navigation.");
       }
       this.assertControlEpoch(operationEpoch);
+      if (risky) this.approveNavigation(url);
       this.invalidateAgentSnapshot();
       // An address the agent opens itself is not the page a credential step opened.
       this.withholdNextDocumentAfter = null;
@@ -1702,12 +2049,25 @@ export class PersonalBrowserHost {
         throw new PersonalBrowserControlError(409, "page_changed", "The fields changed; take a fresh snapshot.");
       }
       const createdAtMs = Date.now();
+      const handoffMode = this.approvalMode;
+      const handoffHosts = this.runKnownHosts;
       this.humanInputRequest = {
         version: 1, handoffId: randomUUID(), origin, createdAtMs,
         expiresAtMs: createdAtMs + 600_000,
         fields: indices.map((_, index) => ({ label: `Highlighted field ${index + 1}` })),
       };
       this.pauseAgentControl();
+      if (this.currentProjectId && this.currentPartition && this.currentOwnerId) {
+        this.handoffResume = {
+          handoffId: this.humanInputRequest.handoffId,
+          projectId: this.currentProjectId,
+          partition: this.currentPartition,
+          ownerId: this.currentOwnerId,
+          approvalMode: handoffMode,
+          knownHosts: handoffHosts,
+          expiresAtMs: this.humanInputRequest.expiresAtMs,
+        };
+      }
       if (this.currentProjectId) this.onEmergencyPause(this.currentProjectId);
       this.emitStatus();
       return { humanInputRequired: true, message: "Control has been revoked. The user will fill the highlighted fields directly and explicitly start a fresh browser turn. Do not request or repeat their values." };
@@ -1746,7 +2106,12 @@ export class PersonalBrowserHost {
         this.assertControlEpoch(operationEpoch);
         resolvedTarget = await this.revalidateControlTarget(contents, target, resolvedTarget);
       }
-      if (personalBrowserActivationRequiresConfirmation(resolvedTarget.descriptor, this.approvalMode)) {
+      const activationApproved = personalBrowserActivationRequiresConfirmation(
+        resolvedTarget.descriptor,
+        this.approvalMode,
+        { pageUrl },
+      );
+      if (activationApproved) {
         if (!(await this.confirmAgentActivation(resolvedTarget.descriptor, { category: step.category }))) {
           throw new PersonalBrowserControlError(403, "activation_denied", "The user denied the browser activation.");
         }
@@ -1759,6 +2124,11 @@ export class PersonalBrowserHost {
       step = classifyPersonalBrowserStep("click", resolvedTarget.descriptor, { pageUrl });
       this.assertStepNotRefused(step);
       this.assertControlEpoch(operationEpoch);
+      if (activationApproved) {
+        // The address the approved link or form opens does not ask again.
+        this.approveNavigation(resolvedTarget.descriptor.href);
+        this.approveNavigation(resolvedTarget.descriptor.formActionUrl, { anyQuery: true });
+      }
       // Withhold before the step runs: a pause or rotation after the in-page
       // click must not leave the page it revealed readable.
       this.withholdIfSecretRevealing(step, resolvedTarget.descriptor, true);
@@ -1791,8 +2161,45 @@ export class PersonalBrowserHost {
         );
       }
       const pageUrl = contents.getURL() || "about:blank";
-      this.assertStepNotRefused(classifyPersonalBrowserStep("type", resolvedTarget.descriptor, { pageUrl }));
+      const typeStep = classifyPersonalBrowserStep("type", resolvedTarget.descriptor, { pageUrl });
+      this.assertStepNotRefused(typeStep);
       const text = normalizePersonalBrowserText(payload.text);
+      // Typing outside search asks once per form on this page, or once per
+      // field outside forms, in every mode. With submit, one dialog covers
+      // filling in and sending.
+      const typingKey = typeStep.verdict === "allow"
+        ? null
+        : this.typingApprovalKey(resolvedTarget.descriptor, typeStep.category);
+      const typingNeedsApproval = typingKey !== null && !this.typingApprovals.has(typingKey);
+      let approvedSubmitCategory: string | null = null;
+      let plannedSubmit: PersonalBrowserStepClassification | null = null;
+      if (payload.submit === true) {
+        plannedSubmit = classifyPersonalBrowserStep("submit", resolvedTarget.descriptor, { pageUrl });
+        this.assertStepNotRefused(plannedSubmit);
+      }
+      const plannedSubmitNeedsApproval = plannedSubmit !== null && (this.approvalMode === "ask" ||
+        personalBrowserKeyRequiresConfirmation("Enter", resolvedTarget.descriptor, this.approvalMode, { pageUrl }));
+      if (typingNeedsApproval || plannedSubmitNeedsApproval) {
+        // The dialog shows the exact text, so approving the submit before
+        // typing never sends something the owner has not seen.
+        const approved = await this.confirmAgentActivation(resolvedTarget.descriptor, {
+          formSubmission: plannedSubmitNeedsApproval,
+          fill: typingNeedsApproval,
+          category: plannedSubmitNeedsApproval && plannedSubmit ? plannedSubmit.category : typeStep.category,
+          typedText: text,
+        });
+        if (!approved) {
+          throw new PersonalBrowserControlError(
+            403,
+            plannedSubmitNeedsApproval ? "form_submission_denied" : "typing_denied",
+            plannedSubmitNeedsApproval ? "The user denied form submission." : "The user denied typing into this form.",
+          );
+        }
+        this.assertControlEpoch(operationEpoch);
+        resolvedTarget = await this.revalidateControlTarget(contents, target, resolvedTarget);
+        if (typingKey) this.rememberTypingApproval(typingKey);
+        if (plannedSubmitNeedsApproval && plannedSubmit) approvedSubmitCategory = plannedSubmit.category;
+      }
       this.assertControlEpoch(operationEpoch);
       const result = await typeIntoPersonalBrowserTarget(
         contents,
@@ -1825,8 +2232,11 @@ export class PersonalBrowserHost {
         let submitStep = classifyPersonalBrowserStep("submit", submitTarget.descriptor, { pageUrl });
         this.assertStepNotRefused(submitStep);
         const submissionNeedsConfirmation = this.approvalMode === "ask" ||
-          personalBrowserKeyRequiresConfirmation("Enter", submitTarget.descriptor, this.approvalMode);
-        if (submissionNeedsConfirmation &&
+          personalBrowserKeyRequiresConfirmation("Enter", submitTarget.descriptor, this.approvalMode, { pageUrl });
+        // Typing can change what the form does: a submission that became a
+        // different kind of step asks again.
+        const alreadyApproved = approvedSubmitCategory !== null && approvedSubmitCategory === submitStep.category;
+        if (submissionNeedsConfirmation && !alreadyApproved &&
           !(await this.confirmAgentActivation(submitTarget.descriptor, {
             formSubmission: true,
             category: submitStep.category,
@@ -1841,6 +2251,7 @@ export class PersonalBrowserHost {
         this.assertStepNotRefused(submitStep);
         this.assertControlEpoch(operationEpoch);
         this.withholdIfSecretRevealing(submitStep, submitTarget.descriptor, true);
+        if (submissionNeedsConfirmation) this.approveNavigation(submitTarget.descriptor.formActionUrl, { anyQuery: true });
         const submitResult = await pressPersonalBrowserTarget(
           contents,
           target,
@@ -1875,7 +2286,30 @@ export class PersonalBrowserHost {
       this.assertNonSensitiveActivation(resolvedTarget.descriptor);
     }
     this.assertStepNotRefused(pressStep);
-    if (personalBrowserKeyRequiresConfirmation(key, resolvedTarget.descriptor, this.approvalMode)) {
+    // Space, Backspace and Delete in a field are typing: they share the
+    // form's typing approval. So do arrow keys in an editable combobox, which
+    // pick an autocomplete option.
+    const editableTarget = isEditableStepTarget(resolvedTarget.descriptor);
+    const comboboxArrow = key.startsWith("Arrow") && editableTarget &&
+      resolvedTarget.descriptor.role?.trim().toLowerCase() === "combobox";
+    const typingKeyPress = ((key === " " || key === "Backspace" || key === "Delete") && editableTarget) || comboboxArrow;
+    let keyApproved = false;
+    if (typingKeyPress) {
+      const typingStep = comboboxArrow
+        ? classifyPersonalBrowserStep("type", resolvedTarget.descriptor, { pageUrl: pressPageUrl })
+        : pressStep;
+      this.assertStepNotRefused(typingStep);
+      const typingKey = typingStep.verdict === "allow"
+        ? null
+        : this.typingApprovalKey(resolvedTarget.descriptor, typingStep.category);
+      if (typingKey && !this.typingApprovals.has(typingKey)) {
+        if (!(await this.confirmAgentActivation(resolvedTarget.descriptor, { fill: true, category: typingStep.category }))) {
+          throw new PersonalBrowserControlError(403, "typing_denied", "The user denied typing into this form.");
+        }
+        this.assertControlEpoch(operationEpoch);
+        this.rememberTypingApproval(typingKey);
+      }
+    } else if (personalBrowserKeyRequiresConfirmation(key, resolvedTarget.descriptor, this.approvalMode, { pageUrl: pressPageUrl })) {
       if (
         !(await this.confirmAgentActivation(resolvedTarget.descriptor, {
           formSubmission: isImplicitFormSubmission,
@@ -1885,6 +2319,7 @@ export class PersonalBrowserHost {
         throw new PersonalBrowserControlError(403, "activation_denied", "The user denied browser activation.");
       }
       this.assertControlEpoch(operationEpoch);
+      keyApproved = true;
     }
     resolvedTarget = await this.revalidateControlTarget(contents, target, resolvedTarget);
     if (
@@ -1899,6 +2334,10 @@ export class PersonalBrowserHost {
     this.assertControlEpoch(operationEpoch);
     if (isPersonalBrowserActivationKey(key)) {
       this.withholdIfSecretRevealing(pressStep, resolvedTarget.descriptor, true);
+    }
+    if (keyApproved) {
+      this.approveNavigation(resolvedTarget.descriptor.href);
+      this.approveNavigation(resolvedTarget.descriptor.formActionUrl, { anyQuery: true });
     }
     const pressResult = await pressPersonalBrowserTarget(
       contents,

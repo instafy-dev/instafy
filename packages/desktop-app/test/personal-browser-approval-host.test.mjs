@@ -17,6 +17,8 @@ const hostCode = ts.transpileModule(
   { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } },
 ).outputText;
 
+const NO_SECRET_SIGNALS = { credentialContext: false, secretField: false, secretCode: false, maskedNearReveal: false };
+
 function fixture(choose = async () => ({ response: 1 }), pageOverrides = {}, hostOptions = {}) {
   const dialogs = [];
   class ControlServer {
@@ -41,6 +43,7 @@ function fixture(choose = async () => ({ response: 1 }), pageOverrides = {}, hos
     "./personalBrowserSecurity": security,
     "./personalBrowserRedaction": require(path.join(packageRoot, "dist/personalBrowserRedaction.js")),
     "./personalBrowserActionPolicy": require(path.join(packageRoot, "dist/personalBrowserActionPolicy.js")),
+    "./personalBrowserTeammateActivity": require(path.join(packageRoot, "dist/personalBrowserTeammateActivity.js")),
     "./personalBrowserPageBridge": { ...pageBridge, clearPersonalBrowserHumanInput: async () => {}, ...pageOverrides },
     "./personalBrowserHumanInput": {},
     "./personalBrowserInputShield": { PersonalBrowserInputShield: InputShield },
@@ -92,23 +95,30 @@ test("Personal routine grant requires native consent and ends synchronously on P
   assert.equal(host.getStatus().approvalMode, "ask", "a later Resume must not inherit routine trust");
 });
 
-for (const { mode, formAction, confirmSubmission, title } of [
-  { mode: "routine", formAction: "Search", confirmSubmission: false },
-  // The dialog title names the step's category.
-  { mode: "ask", formAction: "Search", confirmSubmission: true, title: "Change something" },
-  { mode: "routine", formAction: "Place order", confirmSubmission: true, title: "Purchase or payment" },
+// Routine is the owner tier: these cases are rewritten on purpose from the
+// earlier routine, which submitted ordinary forms without asking.
+for (const { name, mode, field, after, dialogs: expectedDialogs, title } of [
+  { name: "a same-site GET search", mode: "routine", after: "Search", dialogs: 0,
+    field: { type: "search", formMethod: "get", formActionText: "Search" } },
+  { name: "an ordinary form in Ask mode", mode: "ask", after: "Search", dialogs: 1, title: "Change something",
+    field: { type: "text", formActionText: "Search" } },
+  { name: "an ordinary form", mode: "routine", after: "Save", dialogs: 1, title: "Change something",
+    field: { type: "text", formActionText: "Save" } },
+  // Typing changed what the form does: the submission asks again.
+  { name: "a form that became an order while typing", mode: "routine", after: "Place order", dialogs: 2, title: "Purchase or payment",
+    field: { type: "text", formActionText: "Search" } },
 ]) {
-  test(`type-and-submit uses ${mode} approval for the post-typing ${formAction} form`, async () => {
-    const descriptor = { found: true, disabled: false, identity: "fixture-document:1", tag: "input", type: "text", formOwnerIdentity: "fixture-form", formActionText: "Search" };
+  test(`type-and-submit in ${mode} mode on ${name} asks ${expectedDialogs} time(s)`, async () => {
+    const descriptor = { found: true, disabled: false, identity: "fixture-document:1", tag: "input", formOwnerIdentity: "fixture-document:form", ...field };
     const keys = [];
     const { host, dialogs } = fixture(undefined, {
       snapshotPersonalBrowserPage: async () => ({
-        url: "https://example.test/", documentToken: "fixture-document",
-        interactive: [{ index: 0, tag: "input", type: "text", identity: descriptor.identity, descriptor: { ...descriptor } }],
+        url: "https://example.test/", documentToken: "fixture-document", signals: NO_SECRET_SIGNALS,
+        interactive: [{ index: 0, tag: "input", type: field.type, identity: descriptor.identity, descriptor: { ...descriptor } }],
       }),
       inspectPersonalBrowserTarget: async () => ({ ...descriptor }),
       typeIntoPersonalBrowserTarget: async () => {
-        descriptor.formActionText = formAction;
+        descriptor.formActionText = after;
         return { typed: true, targetChanged: false, descriptor: { ...descriptor } };
       },
       pressPersonalBrowserTarget: async (_contents, _target, key) => {
@@ -122,8 +132,9 @@ for (const { mode, formAction, confirmSubmission, title } of [
     const result = await host.handleControlOperation("type", { index: 0, text: "Ada Lovelace", submit: true });
     assert.equal(result.submitted, true);
     assert.deepEqual(keys, ["Enter"]);
-    assert.equal(dialogs.length - priorDialogs, confirmSubmission ? 1 : 0);
-    if (confirmSubmission) assert.equal(dialogs.at(-1).title, title);
+    assert.equal(dialogs.length - priorDialogs, expectedDialogs);
+    if (expectedDialogs > 0) assert.equal(dialogs.at(-1).title, title);
+    if (expectedDialogs > 0) assert.match(dialogs[priorDialogs].message, /fill in and submit/);
   });
 }
 
@@ -226,7 +237,6 @@ test("an explicit tab share survives hiding its pane but not owner or project re
 });
 
 const CANARY = ["sk", "test", ["INSTAFY", "CANARY", "7Qm2Xr9Lp4Vb8Nc1"].join("")].join("_");
-const NO_SECRET_SIGNALS = { credentialContext: false, secretField: false, secretCode: false, maskedNearReveal: false };
 
 function snapshotPage({ documentToken = "doc-a", text = "", title = "Page", url = "https://example.test/", signals = NO_SECRET_SIGNALS, names = [] } = {}) {
   return {
@@ -437,4 +447,380 @@ test("status masks the title from its own words and masks a load error", async (
   assert.ok(!serialized.includes(sha), serialized);
   assert.ok(!serialized.includes(CANARY), serialized);
   assert.ok(serialized.includes("ERR_CONNECTION_REFUSED"));
+});
+
+// --- Routine as the owner tier (approval policy version 2) ---
+
+function pageFixture(targets, choose, { url = "https://example.test/list" } = {}) {
+  const calls = { clicks: [], typed: [], keys: [], loads: [] };
+  const byIndex = targets.map((descriptor, index) => ({
+    found: true, disabled: false, identity: `doc-a:${index}`, ...descriptor,
+  }));
+  const harness = fixture(choose, {
+    snapshotPersonalBrowserPage: async () => ({
+      ...snapshotPage({ url }),
+      interactive: byIndex.map((descriptor, index) => ({
+        index, tag: descriptor.tag, name: descriptor.text, disabled: false, identity: descriptor.identity, descriptor: { ...descriptor },
+      })),
+    }),
+    inspectPersonalBrowserTarget: async (_contents, { index }) => ({ ...byIndex[index] }),
+    clickPersonalBrowserTarget: async (_contents, { index }) => { calls.clicks.push(index); return { clicked: true, targetChanged: false }; },
+    typeIntoPersonalBrowserTarget: async (_contents, { index }) => {
+      calls.typed.push(index);
+      return { typed: true, targetChanged: false, descriptor: { ...byIndex[index] } };
+    },
+    pressPersonalBrowserTarget: async (_contents, { index }, key) => { calls.keys.push([index, key]); return { pressed: true, targetChanged: false }; },
+  });
+  harness.host.view.webContents.getURL = () => url;
+  harness.host.view.webContents.loadURL = async (target) => { calls.loads.push(target); };
+  return { ...harness, calls };
+}
+
+function navigationEvent() {
+  const event = { prevented: false, preventDefault() { event.prevented = true; } };
+  return event;
+}
+
+async function settle() {
+  for (let round = 0; round < 10; round += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+test("status reports approval policy version 2", () => {
+  const { host } = fixture();
+  assert.equal(host.getStatus().approvalPolicyVersion, 2);
+  assert.deepEqual([...host.getStatus().approvalModes], ["ask", "routine"]);
+});
+
+test("a routine start shows one three-button dialog that lists the card's hosts", async () => {
+  const { host, dialogs } = fixture();
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine", ["App.Example.test", "bad host", "docs.example.test"]));
+  assert.equal(dialogs.length, 1);
+  assert.deepEqual([...dialogs[0].buttons], ["Cancel", "Allow", "Ask me each step"]);
+  assert.equal(dialogs[0].defaultId, 0);
+  assert.equal(dialogs[0].cancelId, 0);
+  assert.match(dialogs[0].detail, /Sites on this card: app\.example\.test, docs\.example\.test\./);
+  assert.doesNotMatch(dialogs[0].detail, /bad host/);
+  assert.equal(host.getStatus().approvalMode, "routine");
+  // No site prompt anywhere in routine, including a site that is not on the card.
+  assert.equal(await host.requestOriginApproval("https://elsewhere.test"), true);
+  assert.equal(dialogs.length, 1);
+});
+
+test("Ask me each step starts the run in Ask mode instead of failing it", async () => {
+  const { host, dialogs } = fixture(async (options) => ({ response: options.buttons.length === 3 ? 2 : 1 }));
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine", ["example.test"]));
+  assert.equal(host.getStatus().agentControlEnabled, true);
+  assert.equal(host.getStatus().approvalMode, "ask");
+  assert.equal(await host.requestOriginApproval("https://elsewhere.test"), true);
+  assert.equal(dialogs.length, 2, "Ask mode prompts for a new site");
+  assert.equal(dialogs[1].title, "Allow agent browser access?");
+});
+
+test("card hosts are ignored outside routine", async () => {
+  const { host, dialogs } = fixture();
+  host.enablePreparedAgentControl(await host.prepareAgentControl("ask", ["example.test"]));
+  assert.equal(dialogs.length, 0);
+  assert.equal(host.runKnownHosts.length, 0);
+});
+
+test("routine: a typed address on a new site is free, a risky address asks with its category", async () => {
+  const { host, dialogs, calls } = pageFixture([], async () => ({ response: 1 }));
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine"));
+  const before = dialogs.length;
+  await host.handleControlOperation("navigate", { url: "https://other.example/page?d=hello" });
+  assert.equal(dialogs.length, before, "no new-site prompt in routine");
+  assert.deepEqual(calls.loads, ["https://other.example/page?d=hello"]);
+
+  await host.handleControlOperation("navigate", { url: "https://other.example/logout" });
+  assert.equal(dialogs.length, before + 1);
+  assert.equal(dialogs.at(-1).title, "Delete, cancel or sign out");
+
+  const denied = pageFixture([], async (options) => ({ response: options.buttons.length === 3 ? 1 : 0 }));
+  denied.host.enablePreparedAgentControl(await denied.host.prepareAgentControl("routine"));
+  await assert.rejects(
+    denied.host.handleControlOperation("navigate", { url: "https://other.example/export/2026.csv" }),
+    (error) => error.code === "navigation_denied",
+  );
+  assert.equal(denied.dialogs.at(-1).title, "Download or export");
+  assert.deepEqual(denied.calls.loads, []);
+});
+
+for (const mode of ["ask", "routine"]) {
+  test(`${mode}: a page-started navigation or redirect to a risky address is held until approved`, async () => {
+    const { host, dialogs, calls } = pageFixture([], async () => ({ response: 1 }));
+    host.enablePreparedAgentControl(await host.prepareAgentControl(mode));
+    const before = dialogs.length;
+    const ordinary = navigationEvent();
+    host.guardPageNavigation(ordinary, "https://example.test/next");
+    assert.equal(ordinary.prevented, false);
+
+    const risky = navigationEvent();
+    host.guardPageNavigation(risky, "https://example.test/account/logout");
+    assert.equal(risky.prevented, true);
+    await settle();
+    assert.equal(dialogs.length, before + 1);
+    assert.equal(dialogs.at(-1).title, "Delete, cancel or sign out");
+    assert.deepEqual(calls.loads, ["https://example.test/account/logout"]);
+  });
+}
+
+test("routine: a denied risky redirect never loads", async () => {
+  const { host, calls } = pageFixture([], async (options) => ({ response: options.buttons.length === 3 ? 1 : 0 }));
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine"));
+  const event = navigationEvent();
+  host.guardPageNavigation(event, "https://example.test/invite/Qx7vN2mR8tLp4Wz9Kd3s");
+  assert.equal(event.prevented, true);
+  await settle();
+  assert.deepEqual(calls.loads, []);
+});
+
+test("routine: plain links are free and an approved risky link does not ask again when it navigates", async () => {
+  const { host, dialogs, calls } = pageFixture([
+    { tag: "a", text: "Docs", href: "https://docs.example.test/start", linkSelf: true },
+    { tag: "a", text: "Export", href: "https://example.test/reports/2026.csv", linkSelf: true },
+  ]);
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine"));
+  const before = dialogs.length;
+  await host.handleControlOperation("snapshot", {});
+  await host.handleControlOperation("click", { index: 0 });
+  assert.equal(dialogs.length, before, "a plain link to another site is free");
+
+  await host.handleControlOperation("snapshot", {});
+  await host.handleControlOperation("click", { index: 1 });
+  assert.equal(dialogs.length, before + 1);
+  assert.equal(dialogs.at(-1).title, "Download or export");
+  const follow = navigationEvent();
+  host.guardPageNavigation(follow, "https://example.test/reports/2026.csv");
+  assert.equal(follow.prevented, false, "the approved click's own navigation is not asked about again");
+  const again = navigationEvent();
+  host.guardPageNavigation(again, "https://example.test/reports/2026.csv");
+  assert.equal(again.prevented, true, "the approval is used once");
+  assert.deepEqual(calls.clicks, [0, 1]);
+});
+
+test("routine: menus and navigation items are free, other buttons ask as a change", async () => {
+  const { host, dialogs, calls } = pageFixture([
+    { tag: "div", role: "menuitem", text: "Verbundene Apps", areas: "menu" },
+    { tag: "button", type: "button", text: "Neuen Mandant anlegen" },
+  ]);
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine"));
+  const before = dialogs.length;
+  await host.handleControlOperation("snapshot", {});
+  await host.handleControlOperation("click", { index: 0 });
+  assert.equal(dialogs.length, before);
+  await host.handleControlOperation("snapshot", {});
+  await host.handleControlOperation("click", { index: 1 });
+  assert.equal(dialogs.length, before + 1);
+  assert.equal(dialogs.at(-1).title, "Change something");
+  assert.deepEqual(calls.clicks, [0, 1]);
+});
+
+for (const mode of ["ask", "routine"]) {
+  test(`${mode}: one typing approval covers a form on this page; fields outside forms ask each`, async () => {
+    const { host, dialogs, calls } = pageFixture([
+      { tag: "input", type: "text", ariaLabel: "Name", formOwnerIdentity: "doc-a:form-1" },
+      { tag: "input", type: "text", ariaLabel: "City", formOwnerIdentity: "doc-a:form-1" },
+      { tag: "input", type: "text", ariaLabel: "Note A" },
+      { tag: "input", type: "text", ariaLabel: "Note B" },
+      { tag: "input", type: "search", ariaLabel: "Suche" },
+    ]);
+    host.enablePreparedAgentControl(await host.prepareAgentControl(mode));
+    // Ask mode's site prompt comes with the first snapshot.
+    await host.handleControlOperation("snapshot", {});
+    const before = dialogs.length;
+    const type = async (index) => {
+      await host.handleControlOperation("snapshot", {});
+      await host.handleControlOperation("type", { index, text: "x" });
+    };
+    await type(0);
+    assert.equal(dialogs.length, before + 1);
+    assert.equal(dialogs.at(-1).title, "Change something");
+    assert.match(dialogs.at(-1).message, /fill in/);
+    await type(1);
+    await host.handleControlOperation("snapshot", {});
+    await host.handleControlOperation("press", { index: 1, key: "Backspace" });
+    assert.equal(dialogs.length, before + 1, "the form's approval covers its other fields and edit keys");
+    await type(2);
+    await type(3);
+    assert.equal(dialogs.length, before + 3, "each field outside a form asks");
+    await type(4);
+    assert.equal(dialogs.length, before + 3, "a search field is free");
+    assert.deepEqual(calls.typed, [0, 1, 2, 3, 4]);
+  });
+}
+
+test("routine: a denied typing approval types nothing", async () => {
+  const { host, calls } = pageFixture(
+    [{ tag: "input", type: "text", ariaLabel: "Name", formOwnerIdentity: "doc-a:form-1" }],
+    async (options) => ({ response: options.buttons.length === 3 ? 1 : 0 }),
+  );
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine"));
+  await host.handleControlOperation("snapshot", {});
+  await assert.rejects(host.handleControlOperation("type", { index: 0, text: "x" }), (error) => error.code === "typing_denied");
+  assert.deepEqual(calls.typed, []);
+});
+
+test("routine: a POST search asks to fill in and submit, Enter in a chat box asks as a message", async () => {
+  const { host, dialogs, calls } = pageFixture([
+    { tag: "input", type: "search", ariaLabel: "Search", formOwnerIdentity: "doc-a:form-1", formMethod: "post" },
+    { tag: "div", role: "textbox", ariaLabel: "Message", contentEditable: true },
+  ]);
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine"));
+  const before = dialogs.length;
+  await host.handleControlOperation("snapshot", {});
+  await host.handleControlOperation("type", { index: 0, text: "invoices", submit: true });
+  assert.equal(dialogs.length, before + 1);
+  assert.match(dialogs.at(-1).message, /fill in and submit/);
+  assert.match(dialogs.at(-1).detail, /The agent types: “invoices”\./, "the owner sees what the approval sends");
+  await host.handleControlOperation("snapshot", {});
+  await host.handleControlOperation("press", { index: 1, key: "Enter" });
+  assert.equal(dialogs.length, before + 2);
+  assert.equal(dialogs.at(-1).title, "Send a message");
+  assert.deepEqual(calls.keys, [[0, "Enter"], [1, "Enter"]]);
+});
+
+test("a type-and-submit dialog shows the exact text, bounded, every time it asks", async () => {
+  const { host, dialogs } = pageFixture([
+    { tag: "textarea", ariaLabel: "Message", formOwnerIdentity: "doc-a:form-1", formSubmitLabels: "Send" },
+  ]);
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine"));
+  const before = dialogs.length;
+  await host.handleControlOperation("snapshot", {});
+  await host.handleControlOperation("type", { index: 0, text: "Hello\n  team", submit: true });
+  assert.equal(dialogs.length, before + 1);
+  assert.match(dialogs.at(-1).detail, /The agent types: “Hello team”\./);
+  // The form's typing approval does not cover a second send with new text.
+  const long = "x".repeat(400);
+  await host.handleControlOperation("snapshot", {});
+  await host.handleControlOperation("type", { index: 0, text: long, submit: true });
+  assert.equal(dialogs.length, before + 2);
+  assert.match(dialogs.at(-1).detail, /x{300}… \(400 characters\)/);
+});
+
+test("arrow keys in an editable combobox share the form's typing approval", async () => {
+  const { host, dialogs, calls } = pageFixture([
+    { tag: "input", type: "text", role: "combobox", ariaLabel: "Customer", formOwnerIdentity: "doc-a:form-1" },
+  ]);
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine"));
+  const before = dialogs.length;
+  await host.handleControlOperation("snapshot", {});
+  await host.handleControlOperation("type", { index: 0, text: "Acme" });
+  assert.equal(dialogs.length, before + 1);
+  for (const key of ["ArrowDown", "ArrowDown", "ArrowUp"]) {
+    await host.handleControlOperation("snapshot", {});
+    await host.handleControlOperation("press", { index: 0, key });
+  }
+  assert.equal(dialogs.length, before + 1, "picking an option asks no more");
+  assert.equal(calls.keys.length, 3);
+});
+
+test("a denied page-started navigation is reported to the agent's next operation once", async () => {
+  const { host, calls } = pageFixture([], async (options) => ({ response: options.buttons.length === 3 ? 1 : 0 }));
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine"));
+  const event = navigationEvent();
+  host.guardPageNavigation(event, "https://example.test/account/logout");
+  assert.equal(event.prevented, true);
+  await settle();
+  await assert.rejects(host.handleControlOperation("snapshot", {}), (error) => error.code === "navigation_denied");
+  await host.handleControlOperation("snapshot", {});
+  assert.deepEqual(calls.loads, []);
+});
+
+test("an approved link's navigation is matched with its query", async () => {
+  const { host } = pageFixture([
+    { tag: "a", text: "Report", href: "https://example.test/reports/2026.csv", linkSelf: true },
+  ]);
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine"));
+  await host.handleControlOperation("snapshot", {});
+  await host.handleControlOperation("click", { index: 0 });
+  const other = navigationEvent();
+  host.guardPageNavigation(other, "https://example.test/reports/2026.csv?scope=all");
+  assert.equal(other.prevented, true, "another query is not the approved address");
+  const own = navigationEvent();
+  host.guardPageNavigation(own, "https://example.test/reports/2026.csv");
+  assert.equal(own.prevented, false);
+});
+
+// --- Teammate activity in the owner's profile ---
+
+const teammateStore = require(path.join(packageRoot, "dist/personalBrowserTeammateActivity.js"));
+
+function teammateFixture(choose) {
+  const store = teammateStore.createMemoryTeammateActivityStore();
+  const harness = fixture(choose, {}, { teammateActivity: store });
+  harness.host.currentVisible = true;
+  harness.host.view.webContents.getURL = () => "https://bank.example.test/accounts";
+  harness.host.view.webContents.loadURL = async () => {};
+  return { ...harness, store };
+}
+
+function giveTeammateTabControl(host) {
+  const { captureId } = host.startTabShare("owner-fixture");
+  host.controlSharedTab("owner-fixture", captureId, "11111111-2222-4333-8444-555555555555");
+  assert.equal(host.getStatus().tabControlActive, true);
+  host.controlSharedTab("owner-fixture", captureId, null);
+  host.stopTabShare("owner-fixture", captureId);
+}
+
+test("after a teammate had tab control, routine asks for each site except the card's hosts", async () => {
+  const { host, dialogs, store } = teammateFixture();
+  giveTeammateTabControl(host);
+  assert.deepEqual([...store.read("partition-fixture").sites], ["bank.example.test"]);
+
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine", ["example.test"]));
+  const start = dialogs.at(-1);
+  assert.match(start.detail, /A teammate used this browser profile \(sites: bank\.example\.test\)/);
+  assert.equal(start.checkboxLabel, "Forget teammate activity");
+  assert.equal(start.checkboxChecked, false);
+
+  const before = dialogs.length;
+  assert.equal(await host.requestOriginApproval("https://example.test"), true);
+  assert.equal(await host.requestOriginApproval("https://www.example.test"), true);
+  assert.equal(dialogs.length, before, "the card's hosts allowed in the start dialog do not ask");
+  assert.equal(await host.requestOriginApproval("https://bank.example.test"), true);
+  assert.equal(dialogs.length, before + 1, "every other site asks again");
+  assert.match(dialogs.at(-1).detail, /A teammate used this browser profile/);
+  // A redirect to an unapproved site is held as well.
+  const event = { prevented: false, preventDefault() { this.prevented = true; } };
+  host.guardPageNavigation(event, "https://sso.elsewhere.test/login");
+  assert.equal(event.prevented, true);
+});
+
+test("Forget teammate activity in the start dialog brings back routine without site prompts", async () => {
+  const { host, dialogs, store } = teammateFixture(async (options) => ({
+    response: 1,
+    checkboxChecked: options.checkboxLabel === "Forget teammate activity",
+  }));
+  giveTeammateTabControl(host);
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine"));
+  assert.equal(store.read("partition-fixture"), null);
+  const before = dialogs.length;
+  assert.equal(await host.requestOriginApproval("https://bank.example.test"), true);
+  assert.equal(dialogs.length, before);
+});
+
+test("a cancelled start keeps the teammate mark even with Forget ticked", async () => {
+  const { host, store } = teammateFixture(async () => ({ response: 0, checkboxChecked: true }));
+  giveTeammateTabControl(host);
+  await assert.rejects(host.prepareAgentControl("routine"), /not approved/);
+  assert.notEqual(store.read("partition-fixture"), null);
+});
+
+test("Clear data removes the teammate mark", async () => {
+  const { host, store } = teammateFixture();
+  giveTeammateTabControl(host);
+  Object.assign(host.view.webContents, {
+    loadURL: async () => {},
+    navigationHistory: { ...host.view.webContents.navigationHistory, clear() {} },
+    session: { clearStorageData: async () => {}, clearCache: async () => {}, clearAuthCache: async () => {}, flushStorageData() {} },
+  });
+  await host.clearData();
+  assert.equal(store.read("partition-fixture"), null);
+});
+
+test("Ask mode is unchanged by a teammate mark and an unmarked profile has no note", async () => {
+  const { host, dialogs } = teammateFixture();
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine"));
+  assert.equal(dialogs.at(-1).checkboxLabel, undefined);
+  assert.doesNotMatch(dialogs.at(-1).detail, /teammate/);
 });

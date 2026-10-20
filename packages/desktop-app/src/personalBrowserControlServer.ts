@@ -450,9 +450,11 @@ export class PersonalBrowserControlServer {
         result: {
           protocolVersion: PERSONAL_BROWSER_MCP_PROTOCOL_VERSION,
           capabilities: { tools: { listChanged: false } },
-          serverInfo: { name: "instafy-personal-browser", version: "1.0.0" },
+          serverInfo: { name: "instafy-personal-browser", version: "1.1.0" },
           instructions:
-            "Use snapshot before indexed actions. The user must resume control and approve each origin; sensitive typing is blocked. " +
+            "Use snapshot before indexed actions. The user must resume control; in Ask mode they approve each site, and sensitive typing is blocked. " +
+            "Reading, scrolling, plain links, menus, tabs and searches may run without a prompt; other clicks, typing into forms, submissions and " +
+            "risky addresses ask the user. activation_denied, typing_denied, form_submission_denied, navigation_denied and origin_not_approved are final for that step: do not retry it. " +
             "Snapshots and status mask values that look like keys, tokens or codes. When a snapshot has secretScreen: true its text is withheld: " +
             "do not try to reveal or read the value; stop and tell the user which control on the page shows it. " +
             "step_refused_secret, step_refused_sign_in and step_refused_upload are final: those steps are the user's.",

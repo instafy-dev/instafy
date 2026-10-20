@@ -60,6 +60,10 @@ export type PersonalBrowserStatus = {
   canGoBack: boolean;
   canGoForward: boolean;
   agentControlEnabled: boolean;
+  approvalMode?: "ask" | "routine";
+  approvalModes?: Array<"ask" | "routine">;
+  /** 2: "routine" is the owner tier; reading and plain links are free, other steps ask. */
+  approvalPolicyVersion?: number;
   takeoverRequestId?: string;
   sharing?: boolean;
   ownerId?: string;
@@ -454,6 +458,10 @@ contextBridge.exposeInMainWorld("instafyDesktop", {
     enabled: boolean;
     ownerId: string;
     approvalMode?: "ask" | "routine";
+    /** The card's hosts, at most three; used only by a routine run. */
+    knownHosts?: string[];
+    /** The sign-in handoff that Let AI continue resumes, when known. */
+    handoffId?: string;
   }): Promise<PersonalBrowserStatus> => {
     return (await ipcRenderer.invoke(
       "instafy:personalBrowserSetAgentControlEnabled",

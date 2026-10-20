@@ -58,17 +58,23 @@
     "invite", "share", "grant", "permission", "permissions", "access", "role", "roles",
     "add\\s+(?:member|members|user|users|people|collaborator|collaborators|seat|seats)",
     "make\\s+public", "authori[sz]e", "allow", "approve", "connect",
+    "make\\s+(?:an?\\s+)?(?:admin|administrator|owner|member|moderator)", "(?:set|mark)\\s+as\\s+(?:admin|owner)",
+    "promote", "demote", "transfer\\s+ownership", "change\\s+role",
     "einladen", "freigeben", "berechtigung", "berechtigungen", "rolle", "rollen", "zugriff",
     "teilen", "autorisieren", "erlauben", "genehmigen", "verbinden",
+    "zum\\s+(?:admin|administrator|eigentümer|inhaber)\\s+machen", "als\\s+(?:admin|administrator)",
   ]);
   const DESTRUCTIVE = words([
     "delete", "remove", "erase", "destroy", "archive", "cancel", "deactivate", "disable", "leave",
     "unsubscribe", "discard", "clear", "sign\\s*out", "log\\s*out", "logout", "signout", "unlink",
     "disconnect", "close\\s+account", "close\\s+(?:workspace|organi[sz]ation|team|subscription)",
     "log\\s*off", "logoff", "terminate", "reset", "revoke", "wipe", "purge",
+    "trash", "move\\s+to\\s+(?:trash|bin)", "bin", "block", "unblock", "ban", "kick",
+    "report\\s+(?:spam|abuse|user|account|this|message|post|as)", "mark\\s+as\\s+spam",
     "löschen", "entfernen", "kündigen", "stornieren", "archivieren", "deaktivieren", "abmelden",
     "austragen", "verwerfen", "leeren", "trennen", "abbestellen", "beenden", "ausloggen", "auflösen",
     "widerrufen", "zurücksetzen", "(?:konto|account|abo|abonnement|mandant|firma|unternehmen)\\s+schließen",
+    "papierkorb", "in\\s+den\\s+papierkorb", "blockieren", "sperren", "melden", "als\\s+spam\\s+markieren",
   ]);
   const DOWNLOAD = new RegExp(
     `${START}(?:backup|herunterladen|exportieren|datev|csv|tsv|xlsx?|pdf|ofx|qif|zip|mt940|camt)${END}|export|download`,
@@ -89,6 +95,7 @@
     "abschließen", "zuordnen", "akzeptieren", "zustimmen", "weiter", "fertig", "aktivieren",
     "importieren", "hochladen", "ja", "starten", "ausführen", "umbenennen", "verschieben", "kopieren",
     "mark", "markieren", "pay\\s+off", "settle", "verbuchen", "ausgleichen",
+    "duplicate", "duplizieren", "clone", "klonen", "restore", "wiederherstellen",
   ]);
   const REVEAL = words([
     "reveal", "show", "view", "copy", "unhide", "display", "unmask",
@@ -112,7 +119,7 @@
     "iu",
   );
   const SEARCH_LABEL = words(["search", "suche", "suchen", "filter", "find", "finden", "durchsuchen"]);
-  const DISMISS_EXACT = /^(?:reject\s+all|decline\s+all|decline|only\s+necessary|necessary\s+only|use\s+necessary\s+only|essential\s+only|only\s+essential|close|dismiss|alle\s+ablehnen|ablehnen|nur\s+notwendige|nur\s+notwendige\s+cookies|nur\s+erforderliche|nur\s+essenzielle|schließen|×|✕)$/iu;
+  const DISMISS_EXACT = /^(?:reject\s+all|decline\s+all|only\s+necessary|necessary\s+only|use\s+necessary\s+only|essential\s+only|only\s+essential|close|dismiss|alle\s+ablehnen|nur\s+notwendige|nur\s+notwendige\s+cookies|nur\s+erforderliche|nur\s+essenzielle|schließen|×|✕)$/iu;
   const PAGE_LABEL = /^(?:\d{1,4}|next|next\s+page|previous|previous\s+page|prev|first|last|older|newer|weiter|zurück|vor|nächste|nächste\s+seite|vorherige|vorherige\s+seite|erste|letzte|seite\s+\d{1,4}|page\s+\d{1,4}|[‹›«»<>…]|\.\.\.)$/iu;
   const FILE_EXTENSION = /\.(?:csv|tsv|xls|xlsx|json|xml|txt|pdf|zip|gz|ofx|qif|mt940|sta|camt|053|xbrl)$/i;
   const FREE_KEYS = new Set(["Tab", "Escape", "PageUp", "PageDown", "Home", "End"]);
@@ -426,7 +433,13 @@
         !isSamePageAnchor(href, ctx && ctx.pageUrl) &&
         !credentialEntry &&
         !["button", "menuitem", "menuitemcheckbox", "menuitemradio", "switch", "checkbox", "radio", "tab", "option"].includes(role);
-      if (plain) return allow("navigation", "plain link");
+      if (plain) {
+        // Words only add risk: a link named "Delete", "Pay now" or "Abmelden"
+        // can run a script or a data-method request whatever its address.
+        const linkCategory = categoryOfLabel(label);
+        if (linkCategory && linkCategory !== "may_show_secret") return ask(linkCategory, "labelled link");
+        return allow("navigation", "plain link");
+      }
     }
 
     // A submit control is checked before the disclosure rules: a submit
@@ -516,7 +529,8 @@
     }
     const editable = isEditable(target);
     if (key === "Backspace" || key === "Delete") {
-      return editable ? classifyTyping(target, ctx) : allow("keyboard", "key on a non-editable target");
+      // Off a field these keys delete the selected mail, file or row.
+      return editable ? classifyTyping(target, ctx) : ask("destructive", "delete key on a selection");
     }
     if (key === "Enter") return editable ? classifySubmit(target, ctx) : classifyActivation(target, ctx);
     if (key === " ") return editable ? classifyTyping(target, ctx) : classifyActivation(target, ctx);

@@ -13,12 +13,39 @@ export const PERSONAL_BROWSER_PARTITION_PREFIX = "persist:instafy-personal-";
 export const MAX_PERSONAL_BROWSER_URL_LENGTH = 4_096;
 export const MAX_PERSONAL_BROWSER_TEXT_LENGTH = 16_384;
 export type PersonalBrowserApprovalMode = "ask" | "routine";
+/**
+ * 2: "routine" is the owner's tier. Reading, scrolling, plain links, menus,
+ * tabs and searches go ahead without asking; other clicks, typing outside
+ * search, submissions and risky addresses ask, and no site prompt is shown.
+ * Studio asks for routine on automatic starts only from a host reporting it.
+ */
+export const PERSONAL_BROWSER_APPROVAL_POLICY_VERSION = 2;
+export const MAX_PERSONAL_BROWSER_KNOWN_HOSTS = 3;
+const KNOWN_HOST_PATTERN = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
 export function normalizePersonalBrowserApprovalMode(value: unknown): PersonalBrowserApprovalMode {
   if (value === undefined || value === "ask") return "ask";
   if (value === "routine") return "routine";
   throw new Error("Personal Browser approval mode must be ask or routine.");
 }
+/**
+ * The card's hosts, which a routine run treats as its own sites. Invalid
+ * entries are dropped rather than failing the start: the list can only ever
+ * remove site prompts that a marked profile would otherwise show.
+ */
+export function normalizePersonalBrowserKnownHosts(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const hosts: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string") continue;
+    const host = entry.trim().toLowerCase().replace(/\.$/, "");
+    if (!host || host.length > 253 || !KNOWN_HOST_PATTERN.test(host) || hosts.includes(host)) continue;
+    hosts.push(host);
+    if (hosts.length === MAX_PERSONAL_BROWSER_KNOWN_HOSTS) break;
+  }
+  return hosts;
+}
+
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export type PersonalBrowserBounds = {
@@ -367,15 +394,24 @@ export function classifyPersonalBrowserStep(
   });
 }
 
+// Free categories the classifier already judged in full: a link by its
+// address and its own label, a field by its structure.
+const ROUTINE_STRUCTURAL_CATEGORIES = new Set(["navigation", "focus", "search", "keyboard"]);
+
 export function personalBrowserActivationRequiresConfirmation(
   value: PersonalBrowserActionDescriptor,
   approvalMode: PersonalBrowserApprovalMode = "ask",
+  context: { pageUrl?: string } = {},
 ): boolean {
   const tag = value.tag?.trim().toLowerCase();
   const role = value.role?.trim().toLowerCase();
   const type = value.type?.trim().toLowerCase();
   if (approvalMode === "routine") {
-    return isHighImpactPersonalBrowserAction(value);
+    // Owner tier: only structurally free steps go ahead. Every other click,
+    // including every submit, asks.
+    const step = classifyPersonalBrowserStep("click", value, context);
+    if (step.verdict !== "allow") return true;
+    return !ROUTINE_STRUCTURAL_CATEGORIES.has(step.category) && isHighImpactPersonalBrowserAction(value);
   }
   return (
     isHighImpactPersonalBrowserAction(value) ||
@@ -399,13 +435,23 @@ export function personalBrowserKeyRequiresConfirmation(
   key: string,
   value: PersonalBrowserActionDescriptor,
   approvalMode: PersonalBrowserApprovalMode = "ask",
+  context: { pageUrl?: string } = {},
 ): boolean {
-  // The session-wide routine grant also covers ordinary keyboard submissions.
+  // Keys other than Enter and Space follow the step rules in both modes:
+  // arrows on value controls change them, and Backspace or Delete off a field
+  // deletes the selection.
+  if (!isPersonalBrowserActivationKey(key)) {
+    return classifyPersonalBrowserStep("press", value, { ...context, key }).verdict !== "allow";
+  }
+  // Owner tier: Enter submits only a same-site GET search without asking;
+  // activation keys follow the click rules.
   if (approvalMode === "routine") {
-    return isPersonalBrowserActivationKey(key) && isHighImpactPersonalBrowserAction(value);
+    if (isPolicyEditable(value)) {
+      return classifyPersonalBrowserStep("press", value, { ...context, key }).verdict !== "allow";
+    }
+    return personalBrowserActivationRequiresConfirmation(value, "routine", context);
   }
   return (
-    isPersonalBrowserActivationKey(key) &&
     (personalBrowserActivationRequiresConfirmation(value) ||
       (key === "Enter" && Boolean(value.formOwnerIdentity?.trim() || value.formActionText?.trim())) ||
       // A chat box can send on keydown without any form. Enter on a field

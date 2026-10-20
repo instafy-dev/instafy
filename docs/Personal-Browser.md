@@ -96,9 +96,24 @@ This means:
 - a different Instafy user gets a different partition;
 - projects do not receive the cookie database or encryption material;
 - each project still needs its own live control capability and per-origin approval before its agent can read or act on a page;
-- **Clear personal browser data** pauses agent control, navigates to `about:blank`, and clears storage, cache, and HTTP authentication state.
+- **Clear personal browser data** pauses agent control, navigates to `about:blank`, and clears storage, cache, HTTP authentication state and the profile's teammate activity.
 
 The partition is user-scoped, not project-scoped: a login can therefore follow that user between projects on the same device. The stored profile is never exported to teammates, and every project must still receive an explicit session origin approval before its agent can use the logged-in page. Explicitly approved human tab control and Explore use that same logged-in account on this device; share only with people you trust to use it.
+
+### Teammate activity
+
+When a participant takes tab control, or opens Explore, Desktop marks the profile
+and records the host names they visit (at most 20, never paths or page content)
+in `personal-browser-teammate-activity.json` in Desktop's userData folder, keyed
+by the profile's partition. A file that exists but cannot be read counts as a
+mark on every profile; the file keeps that state when it is rewritten, until
+each profile is forgotten or cleared. While a profile is marked, a routine run asks per site
+again on every site except the card's hosts the owner allowed in the start
+dialog, because a teammate may have signed in to accounts in it and single
+sign-on can carry that to other sites. The routine start dialog names the
+teammate's sites and offers **Forget teammate activity**; Clear data removes the
+mark too. A teammate cannot approve anything on the owner's device, so the owner
+is always the one asked. Ask mode is unchanged.
 
 This is normal local Electron/Chromium profile storage. Do not describe it as zero-knowledge storage or as importing Chrome's protected profile. Page text returned by a snapshot, and task-relevant content derived from it, can still be sent to the configured AI provider during an agent turn even though cookies remain local.
 
@@ -124,7 +139,7 @@ Personal Browser is gated at several layers.
 
 In Ask mode, the first agent navigation to, or interaction with, an HTTP(S) origin shows a native Electron confirmation. The positive choice is **Allow for this session**. Approval is held in memory for the current project/browser session and is cleared when the browser closes, its identity changes, or browser data is cleared.
 
-The user can navigate manually without granting agent access. Cross-origin agent navigation and link activation require approval for the destination origin, unless routine browsing was explicitly granted as described below.
+The user can navigate manually without granting agent access. Cross-origin agent navigation and link activation require approval for the destination origin, unless routine browsing was explicitly granted as described below. A routine run shows no site prompt, unless its profile is marked by teammate activity.
 
 ### Routine browsing and stricter approval
 
@@ -144,29 +159,86 @@ browser instead, because dispatch refuses a turn on this device's runtime, and t
 waits for a press. Existing active control keeps its approval mode. Older Desktop hosts
 without routine-mode support use Ask mode.
 
-The rest of this section describes routine on Desktop hosts without policy version 2.
+Desktop reports `approvalPolicyVersion: 2` in its status. On such a host
+"routine" is the owner's tier, the same for a press, Resume, **Let AI continue**
+and a start Studio makes by itself. Electron shows one native confirmation per
+run with three buttons: **Cancel** ends the start, **Ask me each step** starts
+the run in Ask mode, and **Allow** starts routine. When Studio passes the card's
+hosts as `knownHosts` (at most three valid host names; others are dropped), the
+dialog lists them.
 
-Electron requires one native confirmation before enabling routine mode. It permits
+Routine shows no per-site prompt, including for an address the agent types
+itself, unless the profile is marked by teammate activity (see above). What it
+does:
+
+- **Free, never prompted:** reading (snapshot and status, always redacted),
+  scrolling, following a plain link (the clicked element is the link itself,
+  an `http(s)` address that is not a same-page anchor, a download or a risky
+  address, not a link that declares a request or script such as `data-method`,
+  `data-turbo-method`, `hx-post` or `onclick`, not an entry in a credential row
+  or dialog, and not labelled with a purchase, transfer, delete, cancel,
+  sign-out, sharing, key, download or message word), tabs, `<summary>`,
+  menu and popup openers, neutral menu, tree, tab and navigation items, page
+  numbers, privacy-preserving cookie dismissals (Reject all, Necessary only,
+  Close, Alle ablehnen, Nur notwendige, Schließen; a bare Decline or Ablehnen
+  asks), clicking into a field, typing
+  into a search field, submitting a search that uses GET to the same site or no
+  form, and Tab, Escape, PageUp, PageDown, Home, End and arrow keys outside
+  value controls.
+- **Asks ("Allow once"), titled by category:** every other click (buttons,
+  icon-only and script-driven controls, checkboxes, selects, rows), every other
+  submit including every POST form, Enter on a field that is not proven to be
+  search, arrow keys on sliders and option lists, Backspace and Delete outside
+  a field, and risky addresses.
+  Typing outside search asks once per form on the page, or once per field
+  outside forms; Space, Backspace and Delete in a field, and arrow keys in an
+  editable combobox, share that approval. `type` with `submit` asks once to
+  fill in and submit, and that dialog shows the exact text (up to 300
+  characters) the agent will type; the submission asks again only when typing
+  changed what kind of step it is.
+- **Risky addresses** are judged by the address: sign-out and unsubscribe,
+  an action word next to an id or token (delete, remove, cancel, confirm,
+  approve, accept, join, forward, verify, activate, reset, revoke, unlink,
+  löschen, stornieren, kündigen), invite, magic and reset links with a long
+  random token, export and download paths, and file extensions such as csv,
+  xlsx, json, pdf, zip, ofx, qif, mt940, camt and DATEV. Search terms never
+  count. The check runs on the agent's `navigate`, on links, and on navigations
+  the page starts and redirects, in both modes. The address an approved step
+  opens, with the same query, is not asked about again before the next page
+  loads; a redirect to another risky address is held until the person allows
+  it. When the person denies a navigation the page started, the agent's next
+  operation fails once with `navigation_denied`.
+- **Refused in every mode:** see the step categories below.
+
+Denials are final for that step: `activation_denied`, `typing_denied`,
+`form_submission_denied`, `navigation_denied` and `origin_not_approved`.
+
+On a Desktop host without policy version 2, routine keeps its older meaning: Electron requires one native confirmation before enabling routine mode. It permits
 ordinary navigation, searches, clicks, non-sensitive field filling and form
 submissions, including Enter/Space activation, across sites in the
 current project/browser control session without repeated site/action prompts.
 Recognized consequential controls and URLs still ask; secret-entry blocks and
 fresh-target validation remain.
+
 Pause, Escape, closing, clearing data, or changing the user/project/renderer
-revokes this grant. The visible checkbox may retain its selection while this
-browser surface stays open, but a later Resume requires a fresh native
-confirmation; no permission is saved to the browser profile or shared with teammates.
+revokes this grant. A later Resume shows the start confirmation again; no
+permission is saved to the browser profile or shared with teammates.
 
-Uncheck the setting to use **Ask** mode. Every agent activation of a button, link,
-submit-like input, or form submission then shows a native **Allow once**
-confirmation, independent of its label. Explicit same-origin URL navigation is
-also confirmed after that origin has already been approved. Form ownership is
-part of the fresh-target check in either mode, so a changed association requires
-a new observation.
+Uncheck the setting to use **Ask** mode. It keeps the per-site prompt, and every
+agent activation of a button, link, submit-like input, or form submission shows a
+native **Allow once** confirmation, independent of its label. Explicit
+same-origin URL navigation is also confirmed after that origin has already been
+approved, and typing outside search asks once per form as in routine, so Ask is
+never freer than routine. Form ownership is part of the fresh-target check in
+either mode, so a changed association requires a new observation.
 
-Routine mode uses a conservative text/descriptor classifier, not a proof that
-ordinary controls are harmless. A website can attach unexpected side effects to
-an ordinary click. Keep Ask mode when every activation needs human review.
+A desktop host without `approvalPolicyVersion` used an earlier routine that
+also clicked ordinary controls and submitted non-sensitive forms without asking;
+Studio requests routine from such a host only on the person's explicit choice.
+
+A website can still attach side effects to a free control, such as a link or
+menu item with a click handler, or a GET address that is not on the risky list.
+Keep Ask mode when every activation needs human review.
 
 The text-based high-impact classifier remains defense in depth for custom controls and activation keys, not a proof that every consequential control is detected. Keep adversarial coverage against real applications and conservative classifier updates in the release loop.
 
@@ -224,8 +296,8 @@ until a real page load or an agent `navigate`.
 and script-driven controls unless they are structurally free (tabs, `<summary>`, menu openers,
 neutral menu or navigation items, page numbers and privacy-preserving cookie
 dismissals), and asks for Enter on any editable field that is not a search
-field, because a chat box can send on keydown without a form. Routine mode
-keeps its existing rules apart from the refusals and the category titles.
+field, because a chat box can send on keydown without a form. Routine frees
+only the structurally free steps listed above.
 
 Snapshots include `<summary>`, menu, tree, tab, switch, checkbox, radio and
 option roles, `aria-expanded`/`aria-haspopup` openers and elements with an
@@ -369,7 +441,17 @@ available during continuation startup; Escape can always revoke native agent
 control. If startup fails before a fresh runtime can be identified,
 use Pause to return manual control before retrying continuation.
 Continuation clears highlights and creates fresh control authority; the new
-turn observes the page again instead of replaying old indices. Changing the
+turn observes the page again instead of replaying old indices.
+A handoff keeps the run's approval mode: **Let AI continue** within the
+request's 10-minute window, for the same project, browser profile and owner,
+and in the same mode, does not show the routine start confirmation again, and
+the card's hosts carry over. A start that names a host the owner has not seen
+in a start dialog shows the confirmation again, and when Studio passes the
+request's `handoffId`, the kept mode applies only to that handoff. It is used
+once. Turning agent control off, Clear data, closing or releasing the browser,
+or a change of owner or project cancels it (Escape does not apply while the
+handoff has already paused control), and a different mode shows the
+confirmation as usual. Changing the
 account/project/page binding or an expired request cannot silently continue work.
 Passwords, codes and payment values stay in the page and must not be entered in
 chat. The continuation message contains none of those values, but a later page

@@ -16,6 +16,8 @@ export function createBrowserTabExplorePage(
   createWindow: (options: BrowserWindowConstructorOptions) => BrowserWindow = (
     options,
   ) => new BrowserWindow(options),
+  /** Reports each page this view loads, so the owner's profile can record teammate activity. */
+  onVisit?: (url: string) => void,
 ): ExplorePage {
   const url = normalizePersonalBrowserUrl(startUrl);
   if (!/^https?:/.test(url))
@@ -60,6 +62,7 @@ export function createBrowserTabExplorePage(
   contents.on("will-navigate", guard);
   contents.on("will-redirect", guard);
   contents.on("will-frame-navigate", (event) => guard(event, event.url));
+  if (onVisit) contents.on("did-navigate", (_event, url) => onVisit(url));
   contents.on("render-process-gone", () => {
     failure = new Error("Explore renderer stopped.");
   });

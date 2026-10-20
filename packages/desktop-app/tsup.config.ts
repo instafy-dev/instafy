@@ -37,6 +37,7 @@ export default defineConfig({
     personalBrowserPageBridge: "src/personalBrowserPageBridge.ts",
     personalBrowserHumanInput: "src/personalBrowserHumanInput.ts",
     personalBrowserInputShield: "src/personalBrowserInputShield.ts",
+    personalBrowserTeammateActivity: "src/personalBrowserTeammateActivity.ts",
     browserTabVideo: "src/browserTabVideo.ts",
     browserTabVideoWorker: "src/browserTabVideoWorker.ts",
     browserTabCapture: "src/browserTabCapture.ts",

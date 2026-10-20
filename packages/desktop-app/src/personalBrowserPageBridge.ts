@@ -526,7 +526,12 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
         // Keep a non-empty description even for an unlabeled implicit form.
         formActionText,
         disabled: Boolean("disabled" in element && element.disabled) || read("aria-disabled") === "true",
-        linkSelf: link instanceof HTMLAnchorElement && link === element,
+        // A link that sends a request or runs a declared script (Rails UJS,
+        // Turbo, htmx, an onclick attribute) is not a plain link.
+        linkSelf: link instanceof HTMLAnchorElement && link === element &&
+          !["data-method", "data-turbo-method", "data-remote", "data-confirm", "data-turbo-confirm",
+            "hx-get", "hx-post", "hx-put", "hx-patch", "hx-delete", "onclick"]
+            .some((name) => typeof link.getAttribute === "function" && link.getAttribute(name) !== null),
         download: link instanceof HTMLAnchorElement && typeof link.getAttribute === "function" && link.getAttribute("download") !== null,
         formMethod: form ? clean(form.getAttribute("method") || "get", 16).toLowerCase() : "",
         formActionUrl: form ? clean(typeof form.action === "string" ? form.action : form.getAttribute("action"), 4096) : "",
