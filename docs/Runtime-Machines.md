@@ -280,17 +280,21 @@ history.
 The resumed attempt may find its cut-off attempt's work already in its
 folder, or run somewhere else: the requeue clears the job's target, so any
 runtime of the project that takes untargeted work can lease it. So a write
-turn records its folder's `git status` for the job as it begins, in the
-checkout's own git directory (which `git status` never lists and no save
-publishes), and the job's end removes the record. A turn that lost its lease
-keeps it, and a new record removes those older than a week. A lease after the
-first (the job's `lease_attempts` above one) that finds the job's record
-counts the paths whose status changed since then (by the save's publish
-filter) among its turn's files, so a turn that finds the work already done
-saves it rather than failing as a file-modifying request that changed
-nothing. What the folder held when the job first began there (the person's
-own edits, other turns' unsaved work, the runtime's memory files) is not
-counted, and a lease that finds no record counts only what its turn changes.
+turn records its folder's `git status` and the commit `HEAD` names for the
+job as it begins, in the checkout's own git directory (which `git status`
+never lists and no save publishes), and the job's end removes the record. A
+turn that lost its lease keeps it, and a new record removes those older than
+a week. A lease after the first (the job's `lease_attempts` above one) that
+finds the job's record counts among its turn's files (by the save's publish
+filter) the paths whose status changed since then, and the paths that
+commits made since then changed, up to the commit it finds the folder on
+before its pre-turn refresh: a cut-off attempt's model may have committed
+its work, which the refresh then publishes, possibly under a merge of other
+people's work. So a turn that finds the work already done saves it rather
+than failing as a file-modifying request that changed nothing. What the
+folder held when the job first began there (the person's own edits, other
+turns' unsaved work, the runtime's memory files) is not counted, and a lease
+that finds no record counts only what its turn changes.
 Those paths count only toward the file-change requirement and the save: the
 retry after a transient upstream error and the check for a usable result
 weigh what the turn itself produced.

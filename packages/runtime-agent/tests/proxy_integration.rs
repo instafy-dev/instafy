@@ -115,10 +115,12 @@ enum StubResponse {
     /// A final answer that is a retryable gateway error, with no files.
     UpstreamErrorSummary,
     /// A stop cuts the turn off while this request is open (optionally after
-    /// the turn wrote `UNPUBLISHED_FILE`): the stub cancels `stop` and answers
-    /// only once `stopped_request_released` is cancelled.
+    /// the turn wrote `UNPUBLISHED_FILE`, and its model committed it): the
+    /// stub cancels `stop` and answers only once `stopped_request_released`
+    /// is cancelled.
     CutOff {
         writes_file: bool,
+        commits_it: bool,
     },
     /// [`StubResponse::ReadReference`], after the turn's model wrote
     /// `COMMITTED_FILE` and committed it itself, as a `git commit` in its
@@ -303,8 +305,13 @@ async fn handle_stub_chatgpt(
             )
                 .into_response()
         }
-        StubResponse::CutOff { writes_file } => {
-            if writes_file {
+        StubResponse::CutOff {
+            writes_file,
+            commits_it,
+        } => {
+            if commits_it {
+                commit_file(&state.workspace, UNPUBLISHED_FILE, UNPUBLISHED_FILE_CONTENT);
+            } else if writes_file {
                 fs::write(
                     state.workspace.join(UNPUBLISHED_FILE),
                     UNPUBLISHED_FILE_CONTENT,
@@ -326,25 +333,7 @@ async fn handle_stub_chatgpt(
         | StubResponse::EmptyFinal
         | StubResponse::UpstreamErrorSummary) => {
             if matches!(response, StubResponse::CommitThenReadReference) {
-                let file = state.workspace.join(COMMITTED_FILE);
-                fs::create_dir_all(file.parent().expect("committed file folder"))
-                    .expect("create the committed file's folder");
-                fs::write(&file, COMMITTED_FILE_CONTENT).expect("write the committed file");
-                git_in(&state.workspace, &["add", COMMITTED_FILE]).expect("stage it");
-                git_in(
-                    &state.workspace,
-                    &[
-                        "-c",
-                        "user.name=Instafy Test",
-                        "-c",
-                        "user.email=test@instafy.invalid",
-                        "commit",
-                        "-q",
-                        "-m",
-                        "add the wave skill",
-                    ],
-                )
-                .expect("commit it");
+                commit_file(&state.workspace, COMMITTED_FILE, COMMITTED_FILE_CONTENT);
             }
             // Unlike Success, this fixture changes the workspace only by the
             // commit above. Any other changed bytes therefore came from
@@ -751,6 +740,9 @@ enum ReadReferenceCase {
     ResumedRequiredWriteWithoutAFinalAnswer,
     /// A resumed required write whose cut-off attempt wrote nothing.
     ResumedRequiredWriteWithNothingNew,
+    /// [`ReadReferenceCase::ResumedRequiredWrite`], with the cut-off
+    /// attempt's model having committed `UNPUBLISHED_FILE` itself.
+    ResumedRequiredWriteTheCutOffAttemptCommitted,
     /// A required write whose model commits its file itself and reports no
     /// file: the commit is the turn's write, which the turn reports and saves.
     RequiredWriteTheModelCommits,
@@ -768,6 +760,7 @@ impl ReadReferenceCase {
                 | Self::ResumedRequiredWriteAfterTransientError
                 | Self::ResumedRequiredWriteWithoutAFinalAnswer
                 | Self::ResumedRequiredWriteWithNothingNew
+                | Self::ResumedRequiredWriteTheCutOffAttemptCommitted
         )
     }
 
@@ -822,6 +815,7 @@ impl ReadReferenceCase {
             Self::Initial
             | Self::Recovery
             | Self::ResumedRequiredWrite
+            | Self::ResumedRequiredWriteTheCutOffAttemptCommitted
             | Self::RequiredWriteTheModelCommits => None,
             Self::ResumedRequiredWriteAfterTransientError => Some("transient_upstream_error"),
             Self::ResumedRequiredWriteWithoutAFinalAnswer => {
@@ -843,6 +837,29 @@ const PARKED_FILE_CONTENT: &str = "# Parked\n";
 /// What the model of `RequiredWriteTheModelCommits` writes and commits.
 const COMMITTED_FILE: &str = ".agents/skills/wave/SKILL.md";
 const COMMITTED_FILE_CONTENT: &str = "# Wave\n";
+
+/// Writes `path` in `dir` and commits it, as a `git commit` in a turn's
+/// shell does.
+fn commit_file(dir: &Path, path: &str, content: &str) {
+    let file = dir.join(path);
+    fs::create_dir_all(file.parent().expect("the file's folder")).expect("create its folder");
+    fs::write(&file, content).expect("write the file");
+    git_in(dir, &["add", path]).expect("stage it");
+    git_in(
+        dir,
+        &[
+            "-c",
+            "user.name=Instafy Test",
+            "-c",
+            "user.email=test@instafy.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "the turn's own commit",
+        ],
+    )
+    .expect("commit it");
+}
 
 /// Runs git in `dir` without the operator's own git configuration.
 fn git_in(dir: &Path, args: &[&str]) -> Result<()> {
@@ -904,6 +921,12 @@ fn codex_read_reference_on_resumed_job_with_nothing_new_does_not_satisfy_require
 fn codex_read_reference_beside_a_file_the_model_committed_satisfies_required_write_via_proxy()
 -> Result<()> {
     run_read_reference_proxy_case(ReadReferenceCase::RequiredWriteTheModelCommits)
+}
+
+#[test]
+fn codex_read_reference_on_resumed_job_saves_the_file_the_interrupted_attempt_committed_via_proxy()
+-> Result<()> {
+    run_read_reference_proxy_case(ReadReferenceCase::ResumedRequiredWriteTheCutOffAttemptCommitted)
 }
 
 fn run_read_reference_proxy_case(case: ReadReferenceCase) -> Result<()> {
@@ -1006,6 +1029,7 @@ async fn read_reference_proxy_case(case: ReadReferenceCase) -> Result<()> {
     if case.resumed() {
         responses.push(StubResponse::CutOff {
             writes_file: case.cut_off_attempt_writes(),
+            commits_it: case == ReadReferenceCase::ResumedRequiredWriteTheCutOffAttemptCommitted,
         });
     }
     responses.extend(match case {
@@ -1210,6 +1234,7 @@ async fn read_reference_proxy_case(case: ReadReferenceCase) -> Result<()> {
         case,
         ReadReferenceCase::Initial
             | ReadReferenceCase::ResumedRequiredWrite
+            | ReadReferenceCase::ResumedRequiredWriteTheCutOffAttemptCommitted
             | ReadReferenceCase::RequiredWriteTheModelCommits
     ));
     let result_diagnostics = match &result {
