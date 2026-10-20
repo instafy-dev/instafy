@@ -595,14 +595,16 @@ machine on the exact managed provider gets a controller-owned attestation next
 to the webdev one:
 
 ```json
-{"_instafyManagedBrowserHost": {"version": 1, "mode": "lazy", "generation": "<leaseId>", "profilePersist": true}}
+{"_instafyManagedBrowserHost": {"version": 1, "mode": "lazy", "generation": "<leaseId>"}}
 ```
 
 - **Which launches.** Not a webdev launch (a browser session of its own), not a
   request for the boot-time browser (`INSTAFY_ENABLE_BROWSER_SESSION=1`), not a
   tenant lease, and not a multi-agent worker slot. A worker is recognised by its
   lease `source` and by any earlier lease of the same runtime that a spread
-  launched, because a reconnect or requeue rewrites `source`.
+  launched, because a reconnect or requeue launches a successor with its own
+  `source`. Reuse keeps a worker lease's `source`, so a reconnect to its live
+  lease does not erase that record.
 - **Request boundary.** The key and its launch settings are not on the request
   allowlist, so a client cannot set them. Reconnect metadata drops the old
   generation's key, and the successor lease gets one only when the controller
@@ -621,6 +623,8 @@ to the webdev one:
   persistence, through the same encrypted store, `agent.browser_profile` token
   scope and launch settings that `BROWSER_PROFILE_PERSIST_PROJECT_IDS` enables
   (see [Shared profile persistence and clearing](#shared-profile-persistence-and-clearing)).
+  Persistence is always on for a covered space, so the attestation carries no
+  persistence switch.
   The persistence rollout barrier below therefore applies before turning the
   policy on. **Clear shared browser data** still stops every managed machine
   of the space that may hold the profile, which includes a browser host.

@@ -2452,10 +2452,12 @@ async fn replace_stalled_launch_before_ensure(
 /// `managed::attest_new_managed_runtime_launch`, which also refuses webdev,
 /// eager-browser and worker requests).
 ///
-/// A dispatch reconnect or a requeue rewrites the lease's `source`, so a
-/// multi-agent worker slot is also recognised by any earlier lease of the
-/// same runtime that a spread launched. The query runs only while the policy
-/// covers the space.
+/// A dispatch reconnect or a requeue launches a successor lease with its own
+/// `source`, so a multi-agent worker slot is also recognised by any earlier
+/// lease of the same runtime that a spread launched. Reuse keeps a worker
+/// lease's `source` (`managed::reconcile_reused_managed_runtime_metadata`),
+/// so that record survives a reconnect to the live lease. The query runs
+/// only while the policy covers the space.
 async fn browser_host_launch_for_new_lease(
     state: &AppState,
     transaction: &tokio_postgres::Transaction<'_>,
@@ -2494,11 +2496,7 @@ async fn browser_host_launch_for_new_lease(
     if launched_as_worker {
         return Ok(BrowserHostLaunch::Off);
     }
-    Ok(BrowserHostLaunch::Host {
-        profile_persist: state
-            .config
-            .browser_profile_persistence_enabled_for_project(project_id),
-    })
+    Ok(BrowserHostLaunch::Host)
 }
 
 async fn ensure_runtime_launch_inner(
@@ -4051,9 +4049,7 @@ mod tests {
             sanitize_managed_runtime_request_metadata, BrowserHostLaunch,
             MANAGED_BROWSER_HOST_ATTESTATION,
         };
-        const HOST: BrowserHostLaunch = BrowserHostLaunch::Host {
-            profile_persist: true,
-        };
+        const HOST: BrowserHostLaunch = BrowserHostLaunch::Host;
 
         let runtime_id = Uuid::new_v4();
         let lease_id = Uuid::new_v4();

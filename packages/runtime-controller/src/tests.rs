@@ -31144,7 +31144,6 @@ fn browser_host_lease_metadata(lease_id: Uuid) -> serde_json::Value {
             "version": 1,
             "mode": "lazy",
             "generation": lease_id.to_string(),
-            "profilePersist": true,
         },
     })
 }
@@ -31247,7 +31246,6 @@ async fn browser_host_policy_attests_only_covered_space_machines() -> anyhow::Re
                 "version": 1,
                 "mode": "lazy",
                 "generation": covered_lease.to_string(),
-                "profilePersist": true,
             }),
             "{metadata}"
         );
@@ -31388,6 +31386,140 @@ async fn browser_host_policy_skips_a_worker_slot_after_its_reconnect() -> anyhow
             "{metadata}"
         );
 
+        let calls = provider.calls.lock().await.clone();
+        let launch = calls
+            .iter()
+            .find(|(kind, body)| {
+                *kind == "launch" && body["lease_id"] == json!(successor_id.to_string())
+            })
+            .map(|(_, body)| body.clone())
+            .expect("the provider launched the successor");
+        assert!(launch["metadata"]
+            .get("_instafyManagedBrowserHost")
+            .is_none());
+        assert!(
+            launch["metadata"]["env"]
+                .get("INSTAFY_BROWSER_VIEWPORT_ONLY")
+                .is_none(),
+            "{launch}"
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// A reconnect to a worker slot's live lease reuses it and writes its own
+/// request over the lease. Reuse keeps the worker `source`, so once that
+/// lease ends, the slot's successor is still not attested as a browser host.
+#[tokio::test]
+async fn browser_host_policy_skips_a_worker_slot_reconnected_while_live() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("browser host live worker reuse test").await?;
+    let org_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let fixture = SharedDbFixture {
+        organizations: vec![org_id],
+        projects: vec![project_id],
+    };
+
+    with_shared_db_fixture(fixture, async {
+        let label = "browser-host-live-worker";
+        seed_dispatch_reconnect_projects(&pool, org_id, &[project_id], label).await?;
+        let provider = spawn_recording_hosted_provider().await?;
+        let mut config = dispatch_reconnect_test_config(label);
+        config.runtime_providers[0].endpoint = Some(provider.endpoint.clone());
+        config.hosted_browser_host = crate::config::HostedBrowserHostPolicy::All;
+        let state = build_test_state(pool.clone(), config);
+
+        // A spread's worker slot whose agent has not registered yet.
+        let runtime_id = Uuid::new_v4();
+        let worker_lease_id = Uuid::new_v4();
+        {
+            let connection = pool.get().await?;
+            connection
+                .execute(
+                    "insert into runtimes (id, project_id, provider, status, idle_ttl_seconds, display_name)
+                     values ($1, $2, 'instafy-cloud', 'requested', 600, 'Team worker 2')",
+                    &[&runtime_id, &project_id],
+                )
+                .await?;
+            connection
+                .execute(
+                    "insert into runtime_leases
+                       (id, project_id, runtime_id, status, scope, metadata, requested_at)
+                     values ($1, $2, $3, 'active', 'exclusive', $4, now() - interval '30 seconds')",
+                    &[
+                        &worker_lease_id,
+                        &project_id,
+                        &runtime_id,
+                        &PgJson(json!({
+                            "source": "skill_multi_agent_plan",
+                            "sizeId": "standard",
+                        })),
+                    ],
+                )
+                .await?;
+            connection
+                .execute(
+                    "update runtimes set active_lease_id = $2 where id = $1",
+                    &[&runtime_id, &worker_lease_id],
+                )
+                .await?;
+        }
+
+        let dispatched = dispatch_prompt_to_seeded_runtime(
+            &pool,
+            &state,
+            project_id,
+            runtime_id,
+            Some(worker_lease_id),
+        )
+        .await?;
+        assert_eq!(
+            dispatched.reconnect["leaseId"],
+            json!(worker_lease_id.to_string()),
+            "the reconnect reuses the live worker lease: {}",
+            dispatched.reconnect
+        );
+        let metadata = lease_metadata(&pool, worker_lease_id).await?;
+        assert_eq!(
+            metadata["source"],
+            json!("skill_multi_agent_plan"),
+            "{metadata}"
+        );
+        assert!(
+            metadata.get("_instafyManagedBrowserHost").is_none(),
+            "{metadata}"
+        );
+
+        // The worker idles out, and the next prompt relaunches the slot.
+        {
+            let connection = pool.get().await?;
+            connection
+                .execute(
+                    "update runtime_leases
+                     set status = 'released', released_at = now() - interval '1 minute'
+                     where id = $1",
+                    &[&worker_lease_id],
+                )
+                .await?;
+            connection
+                .execute(
+                    "update runtimes
+                     set status = 'stopped', active_lease_id = null,
+                         last_seen_at = now() - interval '20 minutes'
+                     where id = $1",
+                    &[&runtime_id],
+                )
+                .await?;
+        }
+        let dispatched =
+            dispatch_prompt_to_seeded_runtime(&pool, &state, project_id, runtime_id, None).await?;
+        let (successor_id, metadata) = reconnect_successor_lease(&pool, &dispatched).await?;
+        assert!(successor_id != worker_lease_id);
+        assert!(
+            metadata.get("_instafyManagedBrowserHost").is_none(),
+            "{metadata}"
+        );
         let calls = provider.calls.lock().await.clone();
         let launch = calls
             .iter()
