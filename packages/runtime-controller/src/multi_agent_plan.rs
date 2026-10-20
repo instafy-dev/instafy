@@ -805,6 +805,27 @@ async fn checkpoint_plan_group(
         return Ok(false);
     }
 
+    // A lane that stopped on a short provider rate limit before it acted runs once more after
+    // the stated wait: its retry keeps the group open, so the failure wakes no one meanwhile.
+    if rate_limit_retry::maybe_dispatch_rate_limit_retry(
+        &transaction,
+        state,
+        project_id,
+        conversation_id,
+        group_id,
+        trigger_job_id,
+        trigger_job_payload,
+        plan_meta,
+        &workers,
+    )
+    .await
+    {
+        transaction.commit().await.map_err(|error| {
+            internal_error(format!("failed to release checkpoint lock: {error}"))
+        })?;
+        return Ok(true);
+    }
+
     let all_terminal = workers
         .iter()
         .all(|worker| is_terminal_job_status(worker.status.as_str()));
@@ -826,10 +847,12 @@ async fn checkpoint_plan_group(
         // Early checkpoint: wake the lead as soon as one lane fails so it can
         // replan or cancel instead of waiting for every sibling to finish. The
         // final checkpoint still fires once all lanes are terminal.
+        // A failure that already started a rate-limit retry waits for that retry instead: the
+        // same completion seen again wakes no one.
         let trigger_worker_failed = workers
             .iter()
             .find(|worker| worker.id == trigger_job_id)
-            .map(|worker| worker.status == "failed")
+            .map(|worker| worker.status == "failed" && worker.retried_as.is_none())
             .unwrap_or(false);
         if trigger_worker_failed {
             dispatch_lead_checkpoint(
@@ -1032,10 +1055,15 @@ where
                     jobs.completed_at, jobs.lease_attempts, jobs.leased_by_runtime_id,
                     jobs.agent_role, jobs.conversation_id,
                     coalesce(tool_counts.tool_update_count, 0)::bigint as tool_update_count,
+                    coalesce(tool_counts.acting_tool_count, 0)::bigint as acting_tool_count,
                     last_messages.content as last_message_content
              from agent_jobs jobs
              left join lateral (
-                 select count(*)::bigint as tool_update_count
+                 select count(*)::bigint as tool_update_count,
+                        count(*) filter (
+                            where lower(coalesce(messages.metadata #>> '{messageType}', messages.metadata #>> '{message_type}', ''))
+                                  <> 'web_search'
+                        )::bigint as acting_tool_count
                  from conversation_messages messages
                  where messages.conversation_id = jobs.conversation_id
                    and coalesce(messages.metadata #>> '{jobId}', messages.metadata #>> '{job_id}') = jobs.id::text
@@ -1127,7 +1155,23 @@ where
             last_message: row
                 .get::<_, Option<String>>("last_message_content")
                 .map(|content| truncate_for_status(content.as_str(), 300)),
+            acting_tool_count: row.get("acting_tool_count"),
+            retried_as: None,
+            rate_limit_retry_of: plan_meta
+                .and_then(|plan| plan.get("rateLimitRetry"))
+                .and_then(|retry| retry.get("of"))
+                .and_then(JsonValue::as_str)
+                .and_then(|value| Uuid::from_str(value.trim()).ok()),
         });
+    }
+    let retries: Vec<(Uuid, Uuid)> = workers
+        .iter()
+        .filter_map(|worker| worker.rate_limit_retry_of.map(|of| (of, worker.id)))
+        .collect();
+    for (of, retry) in retries {
+        if let Some(worker) = workers.iter_mut().find(|worker| worker.id == of) {
+            worker.retried_as = Some(retry);
+        }
     }
 
     Ok(PlanGroupSnapshot {
@@ -1160,6 +1204,7 @@ pub(crate) fn sibling_snapshot_to_json(worker: &SiblingJobSnapshot) -> JsonValue
         "paths": worker.paths,
         "lastMessage": worker.last_message,
         "terminal": is_terminal_job_status(worker.status.as_str()),
+        "retriedAs": worker.retried_as,
     })
 }
 
@@ -2042,7 +2087,7 @@ fn parse_lead_from_plan_meta(plan_meta: &JsonMap<String, JsonValue>) -> SkillMul
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct SiblingJobSnapshot {
     id: Uuid,
     status: String,
@@ -2055,6 +2100,25 @@ pub(crate) struct SiblingJobSnapshot {
     paths: Vec<String>,
     initial_evidence_gaps: Option<JsonValue>,
     last_message: Option<String>,
+    /// The run's tool calls that act rather than read: commands, MCP tool calls and file changes
+    /// (every recorded tool update but a web search).
+    acting_tool_count: i64,
+    /// The job of the group that ran this one's agent again after it stopped on a short provider
+    /// rate limit (its result stands for this one's).
+    retried_as: Option<Uuid>,
+    /// The job this one ran again after a short provider rate limit, from
+    /// `metadata.multiAgentPlan.rateLimitRetry.of`.
+    rate_limit_retry_of: Option<Uuid>,
+}
+
+/// For a run the controller started again after a short provider rate limit: where its result is.
+fn retried_note(worker: &SiblingJobSnapshot) -> String {
+    worker
+        .retried_as
+        .map(|retry| {
+            format!(" (stopped on a short provider rate limit; the controller ran it again as job={retry}, whose line is this lane's result)")
+        })
+        .unwrap_or_default()
 }
 
 // Preserve bounded runtime evidence metadata even when a worker omits gaps from
@@ -2344,11 +2408,12 @@ fn build_lead_continuation_prompt(
             format!("paths={}", worker.paths.join(", "))
         };
         out.push_str(&format!(
-            "- @{handle} ({scope}) job={} status={} outcome={} {lease_metrics} {paths}: {}\n",
+            "- @{handle} ({scope}) job={} status={} outcome={} {lease_metrics} {paths}: {}{}\n",
             worker.id,
             worker.status,
             worker.outcome.as_deref().unwrap_or("n/a"),
-            result
+            result,
+            retried_note(worker)
         ));
     }
     out.push_str(
@@ -2395,11 +2460,12 @@ fn build_lead_early_checkpoint_prompt(
             "RUNNING"
         };
         out.push_str(&format!(
-            "- @{handle} ({scope}) job={} status={} [{terminal}] outcome={}: {}\n",
+            "- @{handle} ({scope}) job={} status={} [{terminal}] outcome={}: {}{}\n",
             worker.id,
             worker.status,
             worker.outcome.as_deref().unwrap_or("n/a"),
-            result
+            result,
+            retried_note(worker)
         ));
     }
     out.push_str(&format!(
@@ -2631,6 +2697,9 @@ fn normalize_agent_handle(raw: &str) -> Option<String> {
     }
     Some(value)
 }
+
+#[path = "multi_agent_plan/rate_limit_retry.rs"]
+mod rate_limit_retry;
 
 #[cfg(test)]
 #[path = "multi_agent_plan/completion_tests.rs"]
@@ -3336,6 +3405,9 @@ mod tests {
                     "paths": [{"path":"src/auth.ts", "status":"read", "truncated":true}],
                 }])),
                 last_message: None,
+                acting_tool_count: 0,
+                retried_as: None,
+                rate_limit_retry_of: None,
             },
             SiblingJobSnapshot {
                 id: Uuid::nil(),
@@ -3361,6 +3433,9 @@ mod tests {
                 paths: vec!["packages/api/auth.rs".to_string()],
                 initial_evidence_gaps: None,
                 last_message: None,
+                acting_tool_count: 0,
+                retried_as: None,
+                rate_limit_retry_of: None,
             },
         ];
 
@@ -3440,6 +3515,9 @@ mod tests {
                 paths: Vec::new(),
                 initial_evidence_gaps: None,
                 last_message: None,
+                acting_tool_count: 0,
+                retried_as: None,
+                rate_limit_retry_of: None,
             },
             SiblingJobSnapshot {
                 id: Uuid::nil(),
@@ -3453,6 +3531,9 @@ mod tests {
                 paths: Vec::new(),
                 initial_evidence_gaps: None,
                 last_message: None,
+                acting_tool_count: 0,
+                retried_as: None,
+                rate_limit_retry_of: None,
             },
         ];
 

@@ -4385,6 +4385,19 @@ pub(crate) async fn lease_next_agent_job(
                         and aj.credential_id is null
                         and lower(btrim(coalesce(aj.intent, ''))) <> 'terminal_command'
                   )
+                  -- A plan lane started again after a short provider rate
+                  -- limit waits out the stated delay first
+                  -- (`multi_agent_plan::rate_limit_retry`).
+                  and not (
+                        case
+                            when jsonb_typeof(aj.payload #> '{metadata,multiAgentPlan,rateLimitRetry,holdMs}') = 'number'
+                            then aj.created_at
+                                 + (aj.payload #>> '{metadata,multiAgentPlan,rateLimitRetry,holdMs}')::double precision
+                                   * interval '1 millisecond'
+                                 > statement_timestamp()
+                            else false
+                        end
+                  )
              ),
              candidate as (
                 select id
@@ -5097,8 +5110,14 @@ fn failed_run_history_label(content: &str) -> String {
 ///
 /// A 429 that names a spent quota or plan limit will not clear after a short
 /// wait, so it keeps its own reason rather than a label that says it passed.
-fn is_provider_rate_limited_failure(text: &str) -> bool {
+/// Neither does a spent usage window ("You've hit your usage limit"), which the
+/// Studio names before it looks for a rate limit. The plan's rate-limit retry
+/// (`multi_agent_plan::rate_limit_retry`) builds on this too.
+pub(crate) fn is_provider_rate_limited_failure(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
+    if lower.contains("hit your usage limit") {
+        return false;
+    }
     let rate_limited = retry_limit_ended_on_429(&lower)
         || contains_word(&lower, "backend responded with 429")
         || contains_word(&lower, "upstream_rate_limit")

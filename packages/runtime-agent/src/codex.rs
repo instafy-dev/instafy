@@ -4944,7 +4944,9 @@ fn should_retry_codex_run(message: &str) -> bool {
         || normalized.contains("rate_limit_error")
         || normalized.contains("rate limit reached")
         // Codex already retried a proxy 429 within the turn before giving up with this text.
-        // Replaying the whole turn on top of that could repeat browser side effects.
+        // Replaying the whole turn on top of that could repeat browser side effects. A team
+        // lane's run that stopped here before it acted is started again by the controller
+        // instead (multi_agent_plan::rate_limit_retry), which knows whether it acted.
         || normalized.contains("rate limit was reached")
         || normalized.contains("stream disconnected before completion: 429")
         || normalized.contains("controller forced credential refresh failed")

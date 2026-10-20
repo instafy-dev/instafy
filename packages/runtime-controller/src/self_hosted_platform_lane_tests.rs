@@ -3074,3 +3074,279 @@ async fn a_plan_worker_failed_by_the_idle_sweep_waits_for_its_running_sibling() 
     test_result?;
     cleanup
 }
+
+/// Insert a finished plan job of the plan in `plan` that ran `handle` from `plan_seed` on the
+/// hosted runtime, in `conversation_id` when given (else a new conversation).
+async fn insert_finished_plan_lane(
+    space: &ManagedSpace,
+    conversation_id: Option<Uuid>,
+    handle: &str,
+    plan: serde_json::Value,
+    plan_seed: serde_json::Value,
+) -> anyhow::Result<(Uuid, Uuid, serde_json::Value)> {
+    let (new_conversation_id, run_id, job_id, _) = insert_leased_plan_job(
+        space,
+        space.hosted_runtime_id,
+        None,
+        json!({ "agent": { "handle": handle }, "multiAgentPlan": plan }),
+    )
+    .await?;
+    let connection = space.pool.get().await?;
+    if let Some(conversation_id) = conversation_id {
+        connection
+            .execute(
+                "update runs set conversation_id = $2 where id = $1",
+                &[&run_id, &conversation_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "update agent_jobs set conversation_id = $2,
+                     payload = jsonb_set(payload, '{conversation_id}', to_jsonb($2::uuid::text)) where id = $1",
+                &[&job_id, &conversation_id],
+            )
+            .await?;
+    }
+    let payload = connection
+        .query_one(
+            "update agent_jobs
+             set status = 'completed', outcome = 'succeeded', summary = 'Read it.',
+                 completed_at = now(), payload = jsonb_set(payload, '{plan_seed}', $2)
+             where id = $1
+             returning payload",
+            &[&job_id, &PgJson(plan_seed)],
+        )
+        .await?
+        .get::<_, PgJson<serde_json::Value>>(0)
+        .0;
+    connection
+        .execute(
+            "update runs set status = 'success' where id = $1",
+            &[&run_id],
+        )
+        .await?;
+    Ok((
+        conversation_id.unwrap_or(new_conversation_id),
+        job_id,
+        payload,
+    ))
+}
+
+/// A plan lane that stopped on a short upstream rate limit before it acted runs once more in the
+/// same group, on the runtime that ran it, and is not leased before the stated wait has passed.
+/// The lead is not woken for that failure. A retry that fails the same way is not retried again
+/// (the early checkpoint wakes the lead, and the failed original seen last still lets the final
+/// checkpoint run). A usage limit, and a lane that ran a command first, are never retried.
+#[tokio::test]
+async fn a_plan_lane_that_hit_a_short_rate_limit_runs_once_more_after_the_wait(
+) -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping plan rate-limit retry test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let space = ManagedSpace::seed(pool, "plan-rate-limit-retry").await?;
+    let test_result: anyhow::Result<()> = async {
+        const RATE_LIMITED: &str = "rate limit exceeded: The upstream provider rate limit was reached (upstream_rate_limit, 429). Please try again in 7.632s.";
+        const USAGE_LIMITED: &str = "You\u{2019}ve hit your usage limit for GPT-5. Upgrade to Pro, or try again in 3 days 2 hours.";
+        let state = build_test_state(space.pool.clone(), space.config("plan-rate-limit-retry"));
+        let seed = json!({
+            "type": "multi_agent_plan", "mode": "read_only",
+            "agents": [
+                { "handle": "tokyo", "label": "Tokyo", "prompt": "Research Tokyo lodging.", "scopeSummary": "Tokyo" },
+                { "handle": "kyoto", "label": "Kyoto", "prompt": "Research Kyoto lodging.", "scopeSummary": "Kyoto" },
+            ],
+            "lead": { "leadHandle": "octo", "continuationPrompt": "Report the trip.", "expectedReportFormat": "text" },
+        });
+        let plan_for = |group_id: Uuid| json!({
+            "groupId": group_id, "role": "worker", "mode": "read_only",
+            "lead": { "leadHandle": "octo", "continuationPrompt": "Report the trip.", "expectedReportFormat": "text" },
+            "parentRuntimeId": space.hosted_runtime_id,
+        });
+        let fail = |job: Uuid, message: &'static str| {
+            let pool = space.pool.clone();
+            async move {
+                pool.get()
+                    .await?
+                    .execute(
+                        "update agent_jobs set status = 'failed', outcome = 'failed', summary = null,
+                             error_message = $2, completed_at = now() where id = $1",
+                        &[&job, &message],
+                    )
+                    .await?;
+                anyhow::Ok(())
+            }
+        };
+        let still_running = |job: Uuid| {
+            let pool = space.pool.clone();
+            async move {
+                pool.get()
+                    .await?
+                    .execute(
+                        "update agent_jobs set status = 'leased', outcome = null, completed_at = null where id = $1",
+                        &[&job],
+                    )
+                    .await?;
+                anyhow::Ok(())
+            }
+        };
+        let enqueue = |job: Uuid, payload: serde_json::Value| {
+            let state = state.clone();
+            async move {
+                crate::multi_agent_plan::maybe_enqueue_lead_continuation_after_completion(&state, job, &payload)
+                    .await
+                    .map_err(|error| controller_error("plan job completion", error))
+            }
+        };
+        let jobs = |conversation_id: Uuid| {
+            let pool = space.pool.clone();
+            async move {
+                let rows = pool
+                    .get()
+                    .await?
+                    .query(
+                        "select id, payload, target_runtime_id, artifacts from agent_jobs
+                         where conversation_id = $1 order by created_at asc, id",
+                        &[&conversation_id],
+                    )
+                    .await?;
+                anyhow::Ok(
+                    rows.iter()
+                        .map(|row| {
+                            (
+                                row.get::<_, Uuid>("id"),
+                                row.get::<_, PgJson<serde_json::Value>>("payload").0,
+                                row.get::<_, Option<Uuid>>("target_runtime_id"),
+                                row.get::<_, PgJson<serde_json::Value>>("artifacts").0,
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            }
+        };
+        let role = |payload: &serde_json::Value| {
+            payload["metadata"]["multiAgentPlan"]["role"].as_str().unwrap_or_default().to_string()
+        };
+
+        // Two lanes run; Tokyo stops on a short rate limit while Kyoto still works.
+        let group_id = Uuid::new_v4();
+        let (conversation_id, tokyo, tokyo_payload) =
+            insert_finished_plan_lane(&space, None, "tokyo", plan_for(group_id), seed.clone()).await?;
+        let (_, kyoto, _) =
+            insert_finished_plan_lane(&space, Some(conversation_id), "kyoto", plan_for(group_id), seed.clone()).await?;
+        still_running(kyoto).await?;
+        fail(tokyo, RATE_LIMITED).await?;
+
+        // 1. Tokyo is queued once more, held for the stated wait; the lead is not woken
+        assert!(enqueue(tokyo, tokyo_payload.clone()).await?, "the retry keeps the group going");
+        let all = jobs(conversation_id).await?;
+        assert_eq!(all.len(), 3, "the two lanes and Tokyo's retry: {all:?}");
+        assert!(all.iter().all(|(_, payload, _, _)| role(payload) == "worker"), "no lead checkpoint");
+        let (retry, retry_payload, retry_target, _) =
+            all.iter().find(|(id, _, _, _)| *id != tokyo && *id != kyoto).cloned().expect("the retry");
+        let plan = &retry_payload["metadata"]["multiAgentPlan"];
+        assert_eq!(plan["groupId"], json!(group_id.to_string()));
+        assert_eq!(plan["role"], "worker");
+        assert_eq!(plan["rateLimitRetry"]["of"], json!(tokyo.to_string()));
+        assert_eq!(plan["rateLimitRetry"]["waitMs"], 7_632);
+        let hold_ms = plan["rateLimitRetry"]["holdMs"].as_u64().expect("holdMs");
+        assert!((7_632..=7_632 + 3_816).contains(&hold_ms), "{hold_ms}");
+        assert_eq!(retry_target, Some(space.hosted_runtime_id), "on the runtime that ran it");
+        let prompt = retry_payload["prompt_text"].as_str().unwrap_or_default();
+        assert!(prompt.contains("Research Tokyo lodging."), "{prompt}");
+        assert!(!prompt.contains("Research Kyoto lodging."), "{prompt}");
+        assert!(prompt.contains("short provider rate limit"), "{prompt}");
+        let tokyo_artifacts = &all.iter().find(|(id, _, _, _)| *id == tokyo).expect("tokyo").3;
+        assert!(
+            tokyo_artifacts.as_array().into_iter().flatten().any(|artifact| {
+                artifact["kind"] == "agent/rate-limit-retry" && artifact["retriedBy"] == json!(retry.to_string())
+            }),
+            "{tokyo_artifacts}"
+        );
+
+        // 2. the same completion seen again starts nothing more
+        assert!(!enqueue(tokyo, tokyo_payload.clone()).await?);
+        assert_eq!(jobs(conversation_id).await?.len(), 3);
+
+        // 3. not leased before the wait has passed, then leased
+        let lease = || lease_plan_group_job(&space.pool, space.project_id, space.hosted_runtime_id, false, group_id);
+        assert_eq!(lease().await?, None, "held for the stated wait");
+        space
+            .pool
+            .get()
+            .await?
+            .execute("update agent_jobs set created_at = created_at - interval '60 seconds' where id = $1", &[&retry])
+            .await?;
+        assert_eq!(lease().await?, Some(retry), "leased once the wait has passed");
+
+        // 4. the retry stops on a rate limit again: no third run, the lead is woken early
+        fail(retry, RATE_LIMITED).await?;
+        assert!(enqueue(retry, retry_payload).await?, "the early checkpoint");
+        let all = jobs(conversation_id).await?;
+        assert_eq!(all.len(), 4, "{all:?}");
+        assert_eq!(all.iter().filter(|(_, payload, _, _)| role(payload) == "worker").count(), 3, "no third Tokyo run");
+        let lead = all.iter().find(|(_, payload, _, _)| role(payload) == "lead_continuation").expect("the lead");
+        assert_eq!(lead.1["metadata"]["multiAgentPlan"]["checkpointKind"], "early_failure");
+
+        // 5. Kyoto ends; the failed original's completion is seen last: the final checkpoint
+        space
+            .pool
+            .get()
+            .await?
+            .execute(
+                "update agent_jobs set status = 'completed', outcome = 'succeeded', completed_at = now() where id = $1",
+                &[&kyoto],
+            )
+            .await?;
+        assert!(enqueue(tokyo, tokyo_payload).await?, "the final checkpoint");
+        let all = jobs(conversation_id).await?;
+        assert_eq!(all.len(), 5, "{all:?}");
+        assert_eq!(all.iter().filter(|(_, payload, _, _)| role(payload) == "lead_continuation").count(), 2);
+
+        // 6. a usage limit is never retried: the lead is woken early
+        let group_id = Uuid::new_v4();
+        let (conversation_id, osaka, osaka_payload) =
+            insert_finished_plan_lane(&space, None, "tokyo", plan_for(group_id), seed.clone()).await?;
+        let (_, nara, _) =
+            insert_finished_plan_lane(&space, Some(conversation_id), "kyoto", plan_for(group_id), seed.clone()).await?;
+        still_running(nara).await?;
+        fail(osaka, USAGE_LIMITED).await?;
+        assert!(enqueue(osaka, osaka_payload).await?);
+        let all = jobs(conversation_id).await?;
+        assert_eq!(all.len(), 3, "{all:?}");
+        assert_eq!(all.iter().filter(|(_, payload, _, _)| role(payload) == "worker").count(), 2, "no retry");
+        assert!(all.iter().any(|(_, payload, _, _)| role(payload) == "lead_continuation"
+            && payload["metadata"]["multiAgentPlan"]["checkpointKind"] == "early_failure"));
+
+        // 7. a lane that ran a command before the rate limit is not started again
+        let group_id = Uuid::new_v4();
+        let (conversation_id, acted, acted_payload) =
+            insert_finished_plan_lane(&space, None, "tokyo", plan_for(group_id), seed.clone()).await?;
+        let (_, other, _) =
+            insert_finished_plan_lane(&space, Some(conversation_id), "kyoto", plan_for(group_id), seed).await?;
+        still_running(other).await?;
+        space
+            .pool
+            .get()
+            .await?
+            .execute(
+                "insert into conversation_messages (id, conversation_id, project_id, role, content, metadata)
+                 values ($1, $2, $3, 'assistant', 'curl -X POST https://example.com/book', $4::jsonb)",
+                &[
+                    &Uuid::new_v4(),
+                    &conversation_id,
+                    &space.project_id,
+                    &PgJson(json!({ "jobId": acted, "messageType": "command_execution", "source": "agent" })),
+                ],
+            )
+            .await?;
+        fail(acted, RATE_LIMITED).await?;
+        assert!(enqueue(acted, acted_payload).await?, "the early checkpoint");
+        let all = jobs(conversation_id).await?;
+        assert_eq!(all.iter().filter(|(_, payload, _, _)| role(payload) == "worker").count(), 2, "not started again: {all:?}");
+        Ok(())
+    }
+    .await;
+    let cleanup = space.cleanup().await;
+    test_result?;
+    cleanup
+}
