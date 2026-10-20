@@ -615,8 +615,12 @@ test("runtime Rust builds share one persistent target mount and release cooks al
       "COPY packages/runtime-agent/src/ packages/runtime-agent/src/",
       "COPY packages/runtime-agent/assets/instafy/ packages/runtime-agent/assets/instafy/",
       "COPY packages/runtime-agent/assets/*.js packages/runtime-agent/assets/",
+      "COPY packages/browser-action-policy/*.js packages/browser-action-policy/",
     ],
   );
+  // The embedded policy scripts take part in the content stamps, so editing
+  // them rebuilds runtime-agent even on a shared target/.
+  assert.ok(build[0].includes("cargo-source-stamps prepare \"$target\" /src/packages/runtime-agent /src/packages/browser-action-policy "));
 
   // One registry layer cache per image and architecture cell, in a dedicated
   // package that is never the release package. This deliberately reverses the
@@ -1324,5 +1328,45 @@ test("runtime images build the code-mode host with its V8 and install it beside 
   const ignore = fs.readFileSync(path.join(repositoryRoot, ".dockerignore"), "utf8").split("\n");
   for (const entry of ["!codex/third_party/v8/**", "!scripts/fetch-rusty-v8.sh"]) {
     assert.ok(ignore.includes(entry), entry);
+  }
+});
+
+test("the runtime entrypoint blocks Shared Browser downloads in the profile before Chromium starts", () => {
+  // A CDP download override ends with the connection that set it; viewers
+  // drive the page between agent steps. The profile preference behind the
+  // DownloadRestrictions policy holds across both, so the entrypoint writes it
+  // on every launch, keeping every other preference of a restored profile.
+  const entrypoint = read("docker/runtime/entrypoint.sh");
+  const launcher = entrypointFunction(entrypoint, "start_headed_chromium_daemon");
+  assertOrdered(launcher, "download block before launch",
+    'if ! block_browser_downloads "${INSTAFY_PLAYWRIGHT_PROFILE_DIR}"; then', "return 1", "cleanup_chromium_profile_locks", '"${chrome_path}" \\');
+  const block = entrypointFunction(entrypoint, "block_browser_downloads");
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-download-block-"));
+  try {
+    const run = (profile) => spawnSync("bash", ["-c", `${block}\nblock_browser_downloads "$1"`, "block", profile], { encoding: "utf8" });
+    const preferences = (profile) => JSON.parse(fs.readFileSync(path.join(profile, "Default", "Preferences"), "utf8"));
+
+    const fresh = path.join(fixture, "fresh");
+    assert.equal(run(fresh).status, 0);
+    assert.deepEqual(preferences(fresh), { download_restrictions: 3 });
+
+    const restored = path.join(fixture, "restored");
+    fs.mkdirSync(path.join(restored, "Default"), { recursive: true });
+    fs.writeFileSync(path.join(restored, "Default", "Preferences"),
+      JSON.stringify({ download_restrictions: 0, profile: { name: "Person" }, download: { prompt_for_download: false } }));
+    assert.equal(run(restored).status, 0);
+    assert.deepEqual(preferences(restored),
+      { download_restrictions: 3, profile: { name: "Person" }, download: { prompt_for_download: false } });
+    assert.deepEqual(fs.readdirSync(path.join(restored, "Default")), ["Preferences"]);
+
+    const corrupt = path.join(fixture, "corrupt");
+    fs.mkdirSync(path.join(corrupt, "Default"), { recursive: true });
+    fs.writeFileSync(path.join(corrupt, "Default", "Preferences"), "{not json");
+    assert.equal(run(corrupt).status, 0);
+    assert.deepEqual(preferences(corrupt), { download_restrictions: 3 });
+
+    assert.notEqual(spawnSync("bash", ["-c", `${block}\nblock_browser_downloads ""`], { encoding: "utf8" }).status, 0);
+  } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
   }
 });

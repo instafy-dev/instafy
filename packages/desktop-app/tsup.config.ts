@@ -32,8 +32,8 @@ export default defineConfig({
     codexCredentialBridge: "src/codexCredentialBridge.ts",
     personalBrowserIdentity: "src/personalBrowserIdentity.ts",
     personalBrowserSecurity: "src/personalBrowserSecurity.ts",
-    personalBrowserRedaction: "src/personalBrowserRedaction.js",
-    personalBrowserActionPolicy: "src/personalBrowserActionPolicy.js",
+    personalBrowserRedaction: "src/personalBrowserRedaction.ts",
+    personalBrowserActionPolicy: "src/personalBrowserActionPolicy.ts",
     personalBrowserPageBridge: "src/personalBrowserPageBridge.ts",
     personalBrowserHumanInput: "src/personalBrowserHumanInput.ts",
     personalBrowserInputShield: "src/personalBrowserInputShield.ts",
@@ -58,7 +58,7 @@ export default defineConfig({
   format: ["cjs"],
   target: "node20",
   external: ["electron"],
-  noExternal: ["@instafy/sdk", "electron-updater", "fs-extra"],
+  noExternal: ["@instafy/sdk", "@instafy/browser-action-policy", "electron-updater", "fs-extra"],
   esbuildOptions(options) {
     options.alias = {
       ...(options.alias ?? {}),

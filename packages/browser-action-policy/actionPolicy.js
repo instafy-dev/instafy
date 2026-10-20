@@ -1,7 +1,8 @@
 "use strict";
 
 /*
- * Personal Browser step classifier.
+ * Browser step classifier, shared by the Desktop Personal Browser and the
+ * hosted Shared Browser.
  *
  * classifyStep(op, target, ctx) -> { verdict, category, reason, code? }
  *   verdict  "allow" | "ask" | "refuse"
@@ -14,12 +15,14 @@
  * the right structure.
  *
  * Plain script: it uses the redaction module's credential words and nothing
- * else, so it can be embedded beside that module in other browser hosts.
+ * else. Evaluated where `module` is undefined, it reads
+ * `globalThis.__instafyBrowserRedaction` and sets
+ * `globalThis.__instafyBrowserActionPolicy`, so a host can embed both files.
  */
 (function defineBrowserActionPolicy(root, factory) {
   const redaction =
     typeof module === "object" && module && module.exports && typeof require === "function"
-      ? require("./personalBrowserRedaction")
+      ? require("./redaction")
       : root && root.__instafyBrowserRedaction;
   const api = factory(redaction);
   if (typeof module === "object" && module && module.exports) {

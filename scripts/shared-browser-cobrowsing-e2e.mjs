@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { createServer } from "node:http";
@@ -19,9 +19,22 @@ const { chromium } = playwrightRequire("playwright");
 const playwrightDirectory = fs.realpathSync(path.dirname(playwrightRequire.resolve("playwright/package.json")));
 const executablePath = chromium.executablePath();
 const resultDirectory = path.join(repositoryRoot, "packages/frontend/test-results/browser-ci/shared-cobrowsing");
-const scriptSource = ["shared-browser-approval.js", "shared-browser-cli.js"]
-  .map((name) => fs.readFileSync(path.join(repositoryRoot, "packages/runtime-agent/assets", name), "utf8"))
-  .join("\n");
+// Composed exactly as runtime-agent's embedded_shared_browser_script(): the
+// browser-action-policy scripts publish their API on globalThis, then the
+// approval protocol and controller follow. The runtime passes it on stdin.
+const policyScript = (name) => `(function (module, require) {\n${
+  fs.readFileSync(path.join(repositoryRoot, "packages/browser-action-policy", name), "utf8")
+}\n})(undefined, undefined);`;
+const scriptSource = [
+  policyScript("redaction.js"),
+  policyScript("actionPolicy.js"),
+  ...["shared-browser-approval.js", "shared-browser-cli.js"]
+    .map((name) => fs.readFileSync(path.join(repositoryRoot, "packages/runtime-agent/assets", name), "utf8")),
+].join("\n");
+const entrypointSource = fs.readFileSync(path.join(repositoryRoot, "docker/runtime/entrypoint.sh"), "utf8");
+// Inert canary in the page text; it must never reach tool output or telemetry.
+// Assembled at run time so the source holds no key-shaped literal.
+const CANARY = ["sk", "test", "INSTAFYCANARY0123456789abcdef"].join("_");
 const SAMPLE_COUNT = 5;
 
 export function fixtureEnvironment(source, directory) {
@@ -49,6 +62,7 @@ const fixtureHtml = `<!doctype html><html lang="en"><meta charset="utf-8">
 <label>Display name<input id="display-name" aria-label="Display name" autocomplete="off" style="outline:1px solid rgb(100, 116, 139);outline-offset:1px"></label>
 <label>Verification code<input id="verification-code" aria-label="Verification code" type="password" autocomplete="one-time-code"></label>
 <form id="details-form"><button id="details" type="button">Show details</button> <output id="count">0</output></form><section id="extra"></section>
+<p id="note">Order note ${CANARY}</p><a id="export" href="/export.csv" download>Export CSV</a>
 <script>document.getElementById('details').onclick=()=>{const output=document.getElementById('count');output.textContent=String(Number(output.textContent)+1)};</script>
 </html>`;
 
@@ -56,6 +70,15 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function listenFixture() {
   const server = createServer((request, response) => {
+    if (request.url === "/export.csv") {
+      response.writeHead(200, {
+        "content-type": "text/csv",
+        "content-disposition": "attachment; filename=inert-export.csv",
+        "cache-control": "no-store",
+      });
+      response.end("inert,fixture\n1,2\n");
+      return;
+    }
     if (request.url !== "/") {
       response.writeHead(404).end();
       return;
@@ -74,6 +97,128 @@ function writeProtectedJson(destination, value) {
   const temporary = `${destination}.${randomUUID()}.tmp`;
   fs.writeFileSync(temporary, `${JSON.stringify(value)}\n`, { mode: 0o600, flag: "wx" });
   fs.renameSync(temporary, destination);
+}
+
+// Runs the runtime entrypoint's own block_browser_downloads on a profile.
+function blockDownloadsInProfile(profileDirectory, environment) {
+  const start = entrypointSource.indexOf("\nblock_browser_downloads() {\n");
+  const end = entrypointSource.indexOf("\n}\n", start + 1);
+  assert.ok(start >= 0 && end > start, "The runtime entrypoint must define block_browser_downloads");
+  // The function arrives on stdin; the profile is the only argument.
+  const result = spawnSync("bash", ["-s", "--", profileDirectory], {
+    input: `${entrypointSource.slice(start + 1, end + 3)}\nblock_browser_downloads "$1"\n`,
+    env: environment, encoding: "utf8", timeout: 10_000,
+  });
+  assert.equal(result.status, 0, `block_browser_downloads failed: ${result.stderr}`);
+}
+
+// Regular files under a directory whose content is the fixture export.
+function exportedCopies(directory) {
+  const found = [];
+  const visit = (current) => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const entryPath = path.join(current, entry.name);
+      if (entry.isDirectory()) visit(entryPath);
+      else if (entry.isFile() && fs.statSync(entryPath).size < 4096
+        && fs.readFileSync(entryPath, "utf8").includes("inert,fixture")) found.push(entryPath);
+    }
+  };
+  visit(directory);
+  return found;
+}
+
+class RawCdp {
+  constructor(url) { this.url = url; this.nextId = 0; this.pending = new Map(); }
+  async open() {
+    this.socket = new WebSocket(this.url);
+    await new Promise((resolve, reject) => { this.socket.onopen = resolve; this.socket.onerror = reject; });
+    this.socket.onmessage = (event) => {
+      const message = JSON.parse(event.data);
+      const waiter = message.id ? this.pending.get(message.id) : null;
+      if (!waiter) return;
+      this.pending.delete(message.id);
+      if (message.error) waiter.reject(new Error(JSON.stringify(message.error)));
+      else waiter.resolve(message.result);
+    };
+    return this;
+  }
+  send(method, params = {}) {
+    const id = ++this.nextId;
+    this.socket.send(JSON.stringify({ id, method, params }));
+    return new Promise((resolve, reject) => this.pending.set(id, { resolve, reject }));
+  }
+  async close() {
+    this.socket.close();
+    await delay(300);
+  }
+}
+
+// Which download block survives the end of a controller connection and a
+// viewer's trusted click? Plain Chromium, with no Playwright connection that
+// would install its own download behavior. A controller session denies
+// downloads and disconnects; a second session then clicks the export link the
+// way viewer input arrives.
+async function downloadAfterReconnect({ temporary, environment, siteUrl, profileBlocked }) {
+  const root = fs.mkdtempSync(path.join(temporary, profileBlocked ? "download-blocked-" : "download-control-"));
+  const profile = path.join(root, "profile");
+  const downloads = path.join(root, "downloads");
+  fs.mkdirSync(path.join(profile, "Default"), { recursive: true });
+  fs.mkdirSync(downloads);
+  fs.writeFileSync(path.join(profile, "Default", "Preferences"), JSON.stringify({
+    download: { default_directory: downloads, prompt_for_download: false, directory_upgrade: true },
+    savefile: { default_directory: downloads },
+  }));
+  if (profileBlocked) blockDownloadsInProfile(profile, environment);
+  const browser = spawn(executablePath, [
+    // The same isolation flags Playwright passes: no OS keychain or password store.
+    "--headless=new", "--no-first-run", "--no-default-browser-check", "--no-sandbox",
+    "--use-mock-keychain", "--password-store=basic",
+    "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0", `--user-data-dir=${profile}`, "about:blank",
+  ], { env: environment, stdio: "ignore" });
+  try {
+    let port;
+    for (let attempt = 0; attempt < 200 && !port; attempt += 1) {
+      try {
+        port = Number(fs.readFileSync(path.join(profile, "DevToolsActivePort"), "utf8").split("\n")[0]);
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+      await delay(25);
+    }
+    assert.ok(Number.isInteger(port) && port > 0, "Plain Chromium did not expose its loopback CDP port");
+    const version = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
+    const controller = await new RawCdp(version.webSocketDebuggerUrl).open();
+    await controller.send("Browser.setDownloadBehavior", { behavior: "deny" });
+    await controller.close();
+    let pageTarget;
+    for (let attempt = 0; attempt < 100 && !pageTarget; attempt += 1) {
+      const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+      pageTarget = targets.find((target) => target.type === "page");
+      if (!pageTarget) await delay(50);
+    }
+    assert.ok(pageTarget, "Plain Chromium did not open the fixture page");
+    const viewer = await new RawCdp(pageTarget.webSocketDebuggerUrl).open();
+    await viewer.send("Page.navigate", { url: siteUrl });
+    let box;
+    for (let attempt = 0; attempt < 100 && !box; attempt += 1) {
+      const evaluated = await viewer.send("Runtime.evaluate", {
+        expression: "(() => { const link = document.getElementById('export'); if (!link) return null; link.scrollIntoView(); const r = link.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()",
+        returnByValue: true,
+      });
+      box = evaluated.result.value;
+      if (!box) await delay(50);
+    }
+    assert.ok(box, "The export link did not render");
+    for (const type of ["mousePressed", "mouseReleased"]) {
+      await viewer.send("Input.dispatchMouseEvent", { type, x: box.x, y: box.y, button: "left", clickCount: 1 });
+    }
+    await delay(2_500);
+    await viewer.close();
+    return exportedCopies(root).length > 0 ? "downloaded" : "blocked";
+  } finally {
+    browser.kill("SIGKILL");
+    await delay(200);
+  }
 }
 
 function timingSummary(samples) {
@@ -97,8 +242,11 @@ export async function runSharedBrowserCobrowsingFixture() {
   const approvalDirectory = path.join(temporary, "approvals");
   const markerPath = path.join(temporary, "agent-control.json");
   const actionsPath = path.join(temporary, "actions.jsonl");
+  const driverDownloads = path.join(temporary, "driver-downloads");
   fs.mkdirSync(approvalDirectory, { mode: 0o700 });
   const environment = fixtureEnvironment(process.env, temporary);
+  // The runtime entrypoint blocks downloads in the profile before every launch.
+  blockDownloadsInProfile(profileDirectory, environment);
   const children = new Set();
   const servers = [];
   let context;
@@ -120,6 +268,8 @@ export async function runSharedBrowserCobrowsingFixture() {
       executablePath,
       headless: true,
       viewport: { width: 1100, height: 900 },
+      acceptDownloads: true,
+      downloadsPath: driverDownloads,
       env: environment,
       args: ["--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0"],
     });
@@ -147,7 +297,7 @@ export async function runSharedBrowserCobrowsingFixture() {
     let authority;
     function freshTurn() {
       assert.equal(children.size, 0, "A fresh fixture turn requires previous CLI process exit");
-      for (const name of ["request.json", "decision.json", "state.json"]) {
+      for (const name of ["request.json", "decision.json", "state.json", "withhold-next.json"]) {
         fs.rmSync(path.join(approvalDirectory, name), { force: true });
       }
       authority = {
@@ -162,7 +312,7 @@ export async function runSharedBrowserCobrowsingFixture() {
     async function runTool(method, requestPath, body, decision = null, beforeDecision = null) {
       assert.equal(interrupted, false, "Fixture interrupted");
       const started = performance.now();
-      const child = spawn(process.execPath, ["-e", scriptSource, "--", method, requestPath, ...(body ? [JSON.stringify(body)] : [])], {
+      const child = spawn(process.execPath, ["-", method, requestPath, ...(body ? [JSON.stringify(body)] : [])], {
         cwd: temporary,
         env: {
           ...environment,
@@ -175,9 +325,10 @@ export async function runSharedBrowserCobrowsingFixture() {
           INSTAFY_SHARED_BROWSER_APPROVAL_TIMEOUT_MS: "5000",
           INSTAFY_BROWSER_ACTIONS_FILE: actionsPath,
         },
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: ["pipe", "pipe", "pipe"],
       });
       children.add(child);
+      child.stdin.end(scriptSource);
       let stdout = "";
       let stderr = "";
       let failure;
@@ -242,6 +393,10 @@ export async function runSharedBrowserCobrowsingFixture() {
 
     let snapshot = (await successfulTool("GET", "/v1/snapshot", null, "allow_routine")).payload;
     assert.equal(observedApprovals.length, 1);
+    // Page text is masked on every site in every mode; the canary never leaves.
+    assert.ok(!JSON.stringify(snapshot).includes("INSTAFYCANARY"), "A page secret reached the snapshot");
+    assert.match(snapshot.visibleText, /Order note \[redacted secret\]/);
+    assert.equal(snapshot.secretScreen, false);
     assert.equal(JSON.parse(fs.readFileSync(path.join(approvalDirectory, "state.json"), "utf8")).routineBrowsingAllowed, true);
     // A genuinely different loopback origin proves no repeated origin prompt.
     snapshot = (await successfulTool("POST", "/v1/navigate", { url: secondSite.url })).payload;
@@ -334,15 +489,17 @@ export async function runSharedBrowserCobrowsingFixture() {
         event.preventDefault();
         form.dataset.submissions = String(Number(form.dataset.submissions) + 1);
       });
+      // "Clear" names a destructive step in the shared step categories, so the
+      // inert reset control carries a neutral label.
       const reset = document.createElement("button");
       reset.type = "reset";
-      reset.textContent = "Clear filters";
+      reset.textContent = "Show all";
       form.append(reset);
     });
     const resetSnapshot = (await successfulTool("GET", "/v1/snapshot")).payload;
     assert.equal(resetSnapshot.interactiveElements.find((entry) => entry.label === "Show details").inputType, "button");
-    assert.equal(resetSnapshot.interactiveElements.find((entry) => entry.label === "Clear filters").inputType, "reset");
-    await successfulTool("POST", "/v1/click", target(resetSnapshot, "Clear filters"));
+    assert.equal(resetSnapshot.interactiveElements.find((entry) => entry.label === "Show all").inputType, "reset");
+    await successfulTool("POST", "/v1/click", target(resetSnapshot, "Show all"));
     assert.equal(observedApprovals.length, 2, "A non-submitting form button repeated approval");
     let expectedSubmissions = 0;
     for (const type of ["submit", null, "unrecognized-type"]) {
@@ -366,6 +523,33 @@ export async function runSharedBrowserCobrowsingFixture() {
       assert.equal(await page.locator("#details-form").getAttribute("data-submissions"), String(expectedSubmissions));
       assert.equal(observedApprovals.length, 2 + expectedSubmissions, "Each form submission needs its own action confirmation");
     }
+    // A download link asks under routine with its category in the label, and
+    // even an approved download never lands: the controller denies downloads
+    // for its connection, and the profile blocks them after it.
+    const exportSnapshot = (await successfulTool("GET", "/v1/snapshot")).payload;
+    const exported = await runTool("POST", "/v1/click", target(exportSnapshot, "Export CSV"), "allow_once", async (request) => {
+      assert.equal(request.operation, "click");
+      assert.equal(request.display.label, "Download or export: Export CSV");
+    });
+    assert.equal(exported.code, 0, `Approved export click failed: ${exported.stderr}`);
+    assert.equal(observedApprovals.length, 2 + expectedSubmissions + 1, "The export link must ask under routine");
+    await delay(2_500);
+    assert.deepEqual(exportedCopies(temporary), [], "An approved agent click downloaded a file");
+    const actionTelemetry = fs.readFileSync(actionsPath, "utf8");
+    assert.ok(!actionTelemetry.includes("INSTAFYCANARY"), "A page secret reached the action log");
+
+    const downloadSite = await listenFixture();
+    servers.push(downloadSite.server);
+    const downloads = {
+      // The control: without the profile block, a controller's deny ends with
+      // its connection and a viewer's click downloads.
+      sessionDenyAfterReconnect: await downloadAfterReconnect({ temporary, environment, siteUrl: downloadSite.url, profileBlocked: false }),
+      // The entrypoint's profile preference survives the reconnect.
+      profileBlockAfterReconnect: await downloadAfterReconnect({ temporary, environment, siteUrl: downloadSite.url, profileBlocked: true }),
+    };
+    assert.equal(downloads.sessionDenyAfterReconnect, "downloaded", "The download control did not download; the proof cannot tell blocks apart");
+    assert.equal(downloads.profileBlockAfterReconnect, "blocked", "The profile download block did not survive a reconnect and viewer click");
+
     const result = {
       status: "passed", fixtureVersion: 1, browserVersion: context.browser()?.version() ?? "unknown",
       platform: process.platform, architecture: process.arch, nodeVersion: process.version,
@@ -376,8 +560,11 @@ export async function runSharedBrowserCobrowsingFixture() {
         freshTurnClearsHighlights: true, previousRunSnapshotRejected: true,
         secretValueAbsentFromToolOutputAndTelemetry: true,
         routineNonSubmittingFormButtons: true, formSubmissionControlsRequireConfirmation: true,
+        pageSecretsMasked: true, downloadLinkAsksWithCategory: true, approvedAgentDownloadDenied: true,
+        profileDownloadBlockSurvivesReconnect: true,
       },
       measurements,
+      downloads,
       limitations: [
         "Synthetic loopback pages, one headless browser, five samples per operation and page size; no latency SLA.",
         "Wall time includes fresh Node process, Playwright/CDP attachment and production settle/snapshot work.",

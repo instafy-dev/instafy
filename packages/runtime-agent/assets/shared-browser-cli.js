@@ -1,6 +1,16 @@
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+// Redaction and step classification come from @instafy/browser-action-policy,
+// embedded ahead of this script by the runtime agent.
+const redaction = globalThis.__instafyBrowserRedaction;
+const actionPolicy = globalThis.__instafyBrowserActionPolicy;
+if (
+  !redaction || typeof redaction.redactPageObservation !== "function" ||
+  !actionPolicy || typeof actionPolicy.classifyStep !== "function"
+) {
+  throw new Error("Shared Browser redaction and step policy are unavailable");
+}
 const { chromium } = require(
   validatePlaywrightModulePath(
     process.env.INSTAFY_SHARED_BROWSER_PLAYWRIGHT_PATH,
@@ -44,6 +54,7 @@ const INTERACTIVE_SELECTOR = [
   "[tabindex]:not([tabindex='-1'])",
 ].join(",");
 const MAX_INTERACTIVE_ELEMENTS = 200;
+const MAX_LABEL_CHARS = 240;
 const MAX_VISIBLE_TEXT_CHARS = 12_000;
 const MAX_URL_CHARS = 4_096;
 const MAX_TEXT_CHARS = 16_384;
@@ -66,6 +77,33 @@ const ALLOWED_PRESS_KEYS = new Set([
   " ",
   "Space",
 ]);
+// Regular-expression sources the page-side checks need. Values are tested in
+// the page and only yes/no answers come back.
+const PAGE_POLICY_SOURCES = Object.freeze({
+  kind: "page-policy",
+  secretPatterns: [...redaction.KNOWN_SECRET_PATTERN_SOURCES],
+  credentialContext: redaction.CREDENTIAL_CONTEXT_SOURCE,
+  placeholder: redaction.PLACEHOLDER_SOURCE,
+  maskedText: redaction.MASKED_TEXT_SOURCE,
+});
+// A document keeps this mark until a new page loads. It makes a page that was
+// a secret screen, or on which a credential step ran, stay withheld across the
+// separate controller processes of one run.
+const WITHHELD_DOCUMENT_KEY = "instafy.sharedBrowser.withheldDocument";
+// Named categories ask even under routine browsing. Ordinary record changes
+// ("change") still ask only at submission, as before.
+const ROUTINE_CONFIRMED_CATEGORIES = new Set([
+  "purchase",
+  "transfer",
+  "message",
+  "permission",
+  "credential",
+  "download",
+  "destructive",
+  "may_show_secret",
+]);
+// Before one of these steps runs, the page and the page it opens are withheld.
+const WITHHOLDING_CATEGORIES = new Set(["credential", "may_show_secret"]);
 let actionOrdinal = 0;
 
 function validatePlaywrightModulePath(modulePath, trustedRootPath) {
@@ -119,6 +157,38 @@ function validateBrowserPageId(raw) {
   return pageId;
 }
 
+function strictlyMasked(value) {
+  return redaction.redactText(String(value || ""), { strict: true }).text;
+}
+
+const DISPLAY_URL_PATTERN = /https?:\/\/[^\s'"<>]+/gi;
+
+// Text for the action log, approvals and errors. Anyone who can read the
+// project sees the action log, so every random-looking run between addresses
+// is masked here. An address is masked like the snapshot's own address, so it
+// keeps its host and path ("Go to https://github.com/org/repo/pull/615").
+function maskedDisplayText(value) {
+  const text = String(value || "");
+  let masked = "";
+  let last = 0;
+  for (const match of text.matchAll(DISPLAY_URL_PATTERN)) {
+    masked += strictlyMasked(text.slice(last, match.index));
+    let address;
+    try {
+      address = new URL(match[0]).hostname ? redaction.redactUrl(match[0]).text : strictlyMasked(match[0]);
+    } catch (_) {
+      address = strictlyMasked(match[0]);
+    }
+    masked += address;
+    last = match.index + match[0].length;
+  }
+  return masked + strictlyMasked(text.slice(last));
+}
+
+function maskedUrl(value) {
+  return value ? redaction.redactUrl(String(value)).text : null;
+}
+
 function emitAction(event) {
   try {
     fs.mkdirSync(path.dirname(ACTIONS_FILE), { recursive: true });
@@ -128,8 +198,8 @@ function emitAction(event) {
         seq: Date.now() * 100 + ++actionOrdinal,
         ts: Date.now(),
         type: event.type,
-        label: event.label || "",
-        url: event.url || null,
+        label: maskedDisplayText(event.label),
+        url: maskedUrl(event.url),
         x: event.x ?? null,
         y: event.y ?? null,
         viewportW: event.viewportW ?? null,
@@ -180,70 +250,282 @@ async function resolveExpectedPage(browser) {
   );
 }
 
+// Runs inside the page through Playwright, so it must not use anything from
+// this file's scope. It reads attributes and structure around the element,
+// never field values; `policy` holds the structural facts the step classifier
+// needs, the same ones the Desktop Personal Browser collects.
+function describeInPage(element, sources) {
+  const bounded = (value, max = 2_000) =>
+    typeof value === "string"
+      ? value.replace(/\s+/g, " ").trim().slice(0, max)
+      : "";
+  const labels = bounded(
+    "labels" in element && element.labels
+      ? Array.from(element.labels)
+          .map((label) => label.textContent || "")
+          .join(" ")
+      : "",
+  );
+  const ariaLabelledBy = bounded(element.getAttribute("aria-labelledby"));
+  const ariaLabelledByText = bounded(
+    [...new Set(ariaLabelledBy.split(/\s+/).filter(Boolean))]
+      .slice(0, 32)
+      .map((id) => element.ownerDocument?.getElementById(id)?.textContent || "")
+      .join(" "),
+  );
+  const form =
+    "form" in element && element.form
+      ? element.form
+      : element instanceof HTMLElement
+        ? element.closest("form")
+        : null;
+  const formAction = bounded(
+    form ? form.getAttribute("action") || form.action || "" : "",
+    4_096,
+  );
+  const formMethod = bounded(
+    form ? form.getAttribute("method") || form.method || "get" : "",
+    32,
+  );
+  const formText = bounded(form ? form.textContent || "" : "");
+
+  const policyFacts = () => {
+    const attribute = (node, name) =>
+      node && typeof node.getAttribute === "function" ? node.getAttribute(name) : null;
+    const tagOf = (node) =>
+      node && typeof node.tagName === "string" ? node.tagName.toUpperCase() : "";
+    const roleOf = (node) => bounded(attribute(node, "role"), 64).toLowerCase();
+    const textOf = (node, max) =>
+      bounded(
+        node && typeof node.textContent === "string" ? node.textContent.slice(0, 4_000) : "",
+        max,
+      );
+    const idText = (node, name) =>
+      bounded(attribute(node, name))
+        .split(/\s+/)
+        .filter(Boolean)
+        .slice(0, 32)
+        .map((id) => node.ownerDocument?.getElementById(id)?.textContent || "")
+        .join(" ");
+    const credentialPattern = new RegExp(sources.credentialContext, "iu");
+    const maskedPattern = new RegExp(sources.maskedText, "u");
+    const headingSelector = "h1, h2, h3, h4, h5, h6, [role='heading'], legend, caption";
+    const dialogSelector = "dialog, [role='dialog'], [role='alertdialog'], [aria-modal='true']";
+    const isRow = (node) =>
+      ["TR", "LI", "DT", "DD"].includes(tagOf(node)) ||
+      ["row", "listitem", "option", "gridcell", "treeitem", "article"].includes(roleOf(node));
+
+    // Enclosing areas, the nearest dialog's label and the nearest row.
+    const areas = [];
+    let dialogLabel = "";
+    let row = isRow(element) ? element : null;
+    for (
+      let node = element.parentElement, depth = 0;
+      node && depth < 64;
+      node = node.parentElement, depth += 1
+    ) {
+      const role = roleOf(node);
+      const tag = tagOf(node);
+      let area = "";
+      if (tag === "DIALOG" || role === "dialog" || role === "alertdialog" || attribute(node, "aria-modal") === "true") {
+        area = "dialog";
+      } else if (tag === "SEARCH" || role === "search") {
+        area = "search";
+      } else if (
+        /pagination|pager|paginat|seitennavigation/i.test(
+          [attribute(node, "aria-label"), attribute(node, "class"), attribute(node, "data-testid")]
+            .filter(Boolean)
+            .join(" "),
+        )
+      ) {
+        area = "pagination";
+      } else if (tag === "NAV" || role === "navigation") {
+        area = "nav";
+      } else if (["menu", "menubar", "tree", "tablist"].includes(role)) {
+        area = role;
+      }
+      if (area && !areas.includes(area)) areas.push(area);
+      if (area === "dialog" && !dialogLabel) {
+        const heading = typeof node.querySelector === "function" ? node.querySelector(headingSelector) : null;
+        dialogLabel = bounded(
+          attribute(node, "aria-label") || idText(node, "aria-labelledby") || (heading ? heading.textContent || "" : ""),
+          200,
+        );
+      }
+      if (!row && isRow(node)) row = node;
+    }
+
+    // The nearest heading before the element, within six levels of it and not
+    // inside a dialog the element is outside of.
+    let heading = "";
+    const headings = Array.from(document.querySelectorAll(headingSelector));
+    let low = 0;
+    let high = headings.length - 1;
+    let found = -1;
+    while (low <= high) {
+      const middle = (low + high) >> 1;
+      const candidate = headings[middle];
+      // 4 is DOCUMENT_POSITION_FOLLOWING: the element comes after the heading.
+      if (candidate === element || (candidate.compareDocumentPosition(element) & 4) !== 0) {
+        found = middle;
+        low = middle + 1;
+      } else {
+        high = middle - 1;
+      }
+    }
+    let scope = element;
+    for (let depth = 0; depth < 6 && scope.parentElement; depth += 1) scope = scope.parentElement;
+    for (let index = found, steps = 0; index >= 0 && steps < 25; index -= 1, steps += 1) {
+      const candidate = headings[index];
+      if (candidate === element) continue;
+      if (!scope.contains(candidate)) break;
+      const dialog = candidate.closest(dialogSelector);
+      if (dialog && !dialog.contains(element)) continue;
+      heading = textOf(candidate, 200);
+      break;
+    }
+
+    // The column header of the element's table cell, or the header row for a
+    // row target.
+    let header = "";
+    if (tagOf(row) === "TR") {
+      const table = row.closest("table");
+      const headerRow = table
+        ? table.tHead?.rows?.[0] ??
+          Array.from(table.rows ?? []).find((candidate) => candidate.querySelector("th"))
+        : null;
+      if (headerRow && headerRow !== row) {
+        if (element === row) {
+          header = bounded(Array.from(headerRow.cells ?? []).map((cell) => cell.textContent || "").join(" "), 200);
+        } else {
+          const cell = element.closest("td, th");
+          if (cell && cell.parentElement === row && Number.isInteger(cell.cellIndex)) {
+            header = textOf(headerRow.cells?.[cell.cellIndex], 200);
+          }
+        }
+      }
+    }
+    const rowText = row ? textOf(row, 500) : "";
+
+    // Masked text counts only in the element's row or a small container
+    // around it, never a whole card or page.
+    const smallMasked = (node) => {
+      const raw = node && typeof node.textContent === "string" ? node.textContent : "";
+      return raw.length <= 400 && maskedPattern.test(bounded(raw));
+    };
+    let nearMaskedText = false;
+    for (
+      let node = element.parentElement, depth = 0;
+      node && depth < 3 && !nearMaskedText;
+      node = node.parentElement, depth += 1
+    ) {
+      nearMaskedText = smallMasked(node);
+    }
+    if (!nearMaskedText && row && row !== element) nearMaskedText = smallMasked(row);
+
+    const iconChild = element.querySelector("svg, i, img, use");
+    const iconHint = bounded(
+      [
+        attribute(element, "class"), attribute(element, "data-icon"), attribute(element, "data-testid"),
+        attribute(iconChild, "class"), attribute(iconChild, "aria-label"), attribute(iconChild, "alt"),
+        attribute(iconChild, "data-icon"), attribute(iconChild, "href"),
+      ].filter(Boolean).join(" "),
+      160,
+    );
+    const link = element.closest("a[href]");
+    const expanded = attribute(element, "aria-expanded") ?? attribute(link, "aria-expanded");
+    const popup = attribute(element, "aria-haspopup");
+
+    const controls = form ? Array.from(form.elements || []) : [];
+    const isSubmit = (control) =>
+      control.form === form &&
+      ((control instanceof HTMLButtonElement && control.type === "submit") ||
+        (control instanceof HTMLInputElement && ["submit", "image"].includes(control.type)));
+    const submitLabel = (control) =>
+      bounded(control.getAttribute("aria-label") || control.textContent || control.getAttribute("value") || "", 80);
+    const submit = controls.find(isSubmit) ?? null;
+    const editableTypes = ["", "text", "search", "email", "url", "tel", "number", "password", "date", "time", "datetime-local", "month", "week"];
+    const isPassword = (control) =>
+      control instanceof HTMLInputElement && String(control.type || "").toLowerCase() === "password";
+    const firstPassword = controls.findIndex(isPassword);
+    const identifier = firstPassword > 0
+      ? controls.slice(0, firstPassword).reverse().find((control) =>
+        control instanceof HTMLInputElement && ["", "text", "email", "tel"].includes(String(control.type || "").toLowerCase()))
+      : null;
+    const formPasswordCount = controls.filter(isPassword).length;
+    return {
+      href: link instanceof HTMLAnchorElement ? bounded(link.href, 4_096) : "",
+      linkSelf: link instanceof HTMLAnchorElement && link === element,
+      download: link instanceof HTMLAnchorElement && link.getAttribute("download") !== null,
+      formActionUrl: form ? bounded(typeof form.action === "string" ? form.action : attribute(form, "action") || "", 4_096) : "",
+      formName: form
+        ? bounded(
+          (submit ? submitLabel(submit) : "") ||
+            attribute(form, "aria-label") || idText(form, "aria-labelledby") ||
+            attribute(form, "title") || attribute(form, "name") || "this form",
+          200,
+        )
+        : "",
+      formSubmitLabels: bounded(controls.filter(isSubmit).map(submitLabel).filter(Boolean).join(" | "), 200),
+      formHasPassword: formPasswordCount > 0,
+      formPasswordCount,
+      formFieldCount: controls.filter((control) =>
+        control.form === form && (
+          (control instanceof HTMLInputElement && editableTypes.includes(String(control.type || "").toLowerCase())) ||
+          control instanceof HTMLTextAreaElement ||
+          String(control.tagName || "").toUpperCase() === "SELECT"
+        )).length,
+      signInIdentifier: Boolean(identifier) && identifier === element,
+      contentEditable: element.isContentEditable === true,
+      areas: areas.join(" "),
+      menuOpener: expanded !== null || (popup !== null && popup !== "false"),
+      credentialContext: credentialPattern.test([dialogLabel, heading, header, rowText].join(" ")),
+      row: Boolean(row),
+      nearMaskedText,
+      iconHint,
+    };
+  };
+  let policy = null;
+  try {
+    policy = policyFacts();
+  } catch (_) {
+    // Missing facts make every step ask.
+    policy = null;
+  }
+
+  return {
+    tag: bounded(element.tagName.toLowerCase(), 64),
+    role: bounded(element.getAttribute("role"), 128),
+    idAttribute: bounded(element.getAttribute("id")),
+    ariaLabel: bounded(element.getAttribute("aria-label")),
+    ariaLabelledBy,
+    ariaLabelledByText,
+    placeholder: bounded(element.getAttribute("placeholder")),
+    nameAttribute: bounded(element.getAttribute("name")),
+    titleAttribute: bounded(element.getAttribute("title")),
+    valueAttribute: bounded(element.getAttribute("value")),
+    href: element instanceof HTMLAnchorElement ? bounded(element.href, 4_096) : "",
+    inputType:
+      element instanceof HTMLInputElement || element instanceof HTMLButtonElement
+        ? bounded(element.type, 64)
+        : "",
+    autocomplete: bounded(element.getAttribute("autocomplete"), 512),
+    inputMode: bounded(element.getAttribute("inputmode"), 64),
+    formAction,
+    formMethod,
+    formActionText: form
+      ? `form ${formMethod} ${formAction} ${formText}`.slice(0, 2_000)
+      : "",
+    labels,
+    text: bounded(element.textContent || ""),
+    policy,
+  };
+}
+
 async function describeElement(locator, index) {
   const box = await locator.boundingBox().catch(() => null);
   const attributes = await locator
-    .evaluate((element) => {
-      const bounded = (value, max = 2_000) =>
-        typeof value === "string"
-          ? value.replace(/\s+/g, " ").trim().slice(0, max)
-          : "";
-      const labels = bounded(
-        "labels" in element && element.labels
-          ? Array.from(element.labels)
-              .map((label) => label.textContent || "")
-              .join(" ")
-          : "",
-      );
-      const ariaLabelledBy = bounded(element.getAttribute("aria-labelledby"));
-      const ariaLabelledByText = bounded(
-        [...new Set(ariaLabelledBy.split(/\s+/).filter(Boolean))]
-          .slice(0, 32)
-          .map((id) => element.ownerDocument?.getElementById(id)?.textContent || "")
-          .join(" "),
-      );
-      const form =
-        "form" in element && element.form
-          ? element.form
-          : element instanceof HTMLElement
-            ? element.closest("form")
-            : null;
-      const formAction = bounded(
-        form ? form.getAttribute("action") || form.action || "" : "",
-        4_096,
-      );
-      const formMethod = bounded(
-        form ? form.getAttribute("method") || form.method || "get" : "",
-        32,
-      );
-      const formText = bounded(form ? form.textContent || "" : "");
-      return {
-        tag: bounded(element.tagName.toLowerCase(), 64),
-        role: bounded(element.getAttribute("role"), 128),
-        idAttribute: bounded(element.getAttribute("id")),
-        ariaLabel: bounded(element.getAttribute("aria-label")),
-        ariaLabelledBy,
-        ariaLabelledByText,
-        placeholder: bounded(element.getAttribute("placeholder")),
-        nameAttribute: bounded(element.getAttribute("name")),
-        titleAttribute: bounded(element.getAttribute("title")),
-        valueAttribute: bounded(element.getAttribute("value")),
-        href: element instanceof HTMLAnchorElement ? bounded(element.href, 4_096) : "",
-        inputType:
-          element instanceof HTMLInputElement || element instanceof HTMLButtonElement
-            ? bounded(element.type, 64)
-            : "",
-        autocomplete: bounded(element.getAttribute("autocomplete"), 512),
-        inputMode: bounded(element.getAttribute("inputmode"), 64),
-        formAction,
-        formMethod,
-        formActionText: form
-          ? `form ${formMethod} ${formAction} ${formText}`.slice(0, 2_000)
-          : "",
-        labels,
-        text: bounded(element.textContent || ""),
-      };
-    })
+    .evaluate(describeInPage, PAGE_POLICY_SOURCES)
     .catch(() => null);
   if (!attributes || !box) {
     return null;
@@ -259,7 +541,7 @@ async function describeElement(locator, index) {
   ]
     .find((value) => typeof value === "string" && value.trim())
     ?.trim()
-    .slice(0, 240) || `${attributes.tag} ${index}`;
+    .slice(0, MAX_LABEL_CHARS) || `${attributes.tag} ${index}`;
   return {
     index,
     label,
@@ -282,6 +564,7 @@ async function describeElement(locator, index) {
     formAction: attributes.formAction,
     formMethod: attributes.formMethod,
     formActionText: attributes.formActionText,
+    policy: policyFactsOf(attributes.policy),
     box: {
       x: Math.round(box.x),
       y: Math.round(box.y),
@@ -289,6 +572,122 @@ async function describeElement(locator, index) {
       height: Math.round(box.height),
     },
   };
+}
+
+// Bounds and types the page's answers; anything malformed counts as missing.
+function policyFactsOf(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return null;
+  }
+  const text = (value, max) => (typeof value === "string" ? value.slice(0, max) : "");
+  const count = (value) => (Number.isSafeInteger(value) && value >= 0 ? Math.min(value, 10_000) : 0);
+  return {
+    href: text(raw.href, MAX_URL_CHARS),
+    linkSelf: raw.linkSelf === true,
+    download: raw.download === true,
+    formActionUrl: text(raw.formActionUrl, MAX_URL_CHARS),
+    formName: text(raw.formName, 200),
+    formSubmitLabels: text(raw.formSubmitLabels, 200),
+    formHasPassword: raw.formHasPassword === true,
+    formPasswordCount: count(raw.formPasswordCount),
+    formFieldCount: count(raw.formFieldCount),
+    signInIdentifier: raw.signInIdentifier === true,
+    contentEditable: raw.contentEditable === true,
+    areas: text(raw.areas, 200),
+    menuOpener: raw.menuOpener === true,
+    credentialContext: raw.credentialContext === true,
+    row: raw.row === true,
+    nearMaskedText: raw.nearMaskedText === true,
+    iconHint: text(raw.iconHint, 160),
+  };
+}
+
+// The classifier's view of one observed element.
+function policyTarget(description) {
+  const facts = description.policy || {};
+  const tag = String(description.tag || "").toLowerCase();
+  const type = String(description.inputType || "").toLowerCase();
+  const buttonLike =
+    tag === "button" || (tag === "input" && ["button", "submit", "reset", "image"].includes(type));
+  return {
+    tag,
+    role: description.role || "",
+    type,
+    ariaLabel: description.ariaLabel || description.ariaLabelledByText || description.labels || "",
+    text: description.text || "",
+    title: description.titleAttribute || "",
+    value: buttonLike ? description.valueAttribute || "" : "",
+    placeholder: description.placeholder || "",
+    name: description.nameAttribute || "",
+    id: description.idAttribute || "",
+    autocomplete: description.autocomplete || "",
+    href: facts.href || "",
+    linkSelf: facts.linkSelf === true,
+    download: facts.download === true,
+    formOwnerIdentity: description.formMethod ? "form" : "",
+    formMethod: String(description.formMethod || "").toLowerCase(),
+    formActionUrl: facts.formActionUrl || "",
+    formActionText: facts.formName || "",
+    formSubmitLabels: facts.formSubmitLabels || "",
+    formHasPassword: facts.formHasPassword === true,
+    formPasswordCount: facts.formPasswordCount || 0,
+    formFieldCount: facts.formFieldCount || 0,
+    signInIdentifier: facts.signInIdentifier === true,
+    contentEditable: facts.contentEditable === true,
+    areas: facts.areas || "",
+    menuOpener: facts.menuOpener === true,
+    credentialContext: facts.credentialContext === true,
+    row: facts.row === true,
+    nearMaskedText: facts.nearMaskedText === true,
+    iconHint: facts.iconHint || "",
+  };
+}
+
+function classifyStep(op, description, context) {
+  try {
+    return actionPolicy.classifyStep(op, description ? policyTarget(description) : {}, context);
+  } catch (_) {
+    return { verdict: "ask", category: "change", reason: "classification failed" };
+  }
+}
+
+// Revealing or copying a credential, signing in and choosing files are the
+// user's steps in every mode. Refused before any prompt is shown.
+function refuseUserStep(classification) {
+  if (classification.verdict !== "refuse") {
+    return;
+  }
+  const refusal = actionPolicy.refusalFor(classification.category);
+  const message = refusal ? refusal.message : "This step is the user's.";
+  throw new Error(`${message} [${classification.code || "step_refused"}]`);
+}
+
+// Under routine browsing a step still asks when its category is named, when
+// the older consequential pattern matches, or when the page's structural
+// facts are missing.
+function routineCovers(classification, description, { consequential = true } = {}) {
+  if (!description.policy) {
+    return false;
+  }
+  if (classification.verdict === "ask" && ROUTINE_CONFIRMED_CATEGORIES.has(classification.category)) {
+    return false;
+  }
+  return !consequential || !isConsequentialAction(description);
+}
+
+function approvalCategoryTitle(classification) {
+  return actionPolicy.categoryTitle(classification.category) || "";
+}
+
+// The masked control name for prompts and the action log. Both labels are
+// shown when the accessible name and visible text differ.
+function controlLabel(description) {
+  const labels = actionPolicy.stepLabels(policyTarget(description));
+  const bounded = (value) => Array.from(String(value || "")).slice(0, MAX_LABEL_CHARS).join("");
+  const label = labels.differ
+    ? `${bounded(labels.accessible)} (shown as "${bounded(labels.visible)}")`
+    : description.label;
+  return maskedDisplayText(label);
 }
 
 async function collectInteractiveElements(page) {
@@ -340,6 +739,7 @@ function snapshotFingerprint(url, interactive) {
     formAction: description.formAction,
     formMethod: description.formMethod,
     formActionText: description.formActionText,
+    policy: description.policy,
   }));
   return crypto
     .createHash("sha256")
@@ -372,6 +772,7 @@ function targetFingerprint(description) {
         formAction: description.formAction,
         formMethod: description.formMethod,
         formActionText: description.formActionText,
+        policy: description.policy,
       }),
     )
     .digest("hex");
@@ -390,29 +791,299 @@ function publicElementDescription(description) {
   };
 }
 
-async function snapshot(page) {
+// Runs inside the page. Every check returns a boolean; no field value, code
+// block text or masked text is part of the result. Open shadow roots are
+// searched too. A failure returns null and the page is withheld.
+function pageSecretSignalsInPage(sources) {
+  try {
+    const clean = (value, limit = 2_000) =>
+      typeof value === "string" ? value.replace(/\s+/g, " ").trim().slice(0, limit) : "";
+    const secretPatterns = sources.secretPatterns.map((source) => new RegExp(source));
+    const credentialContextPattern = new RegExp(sources.credentialContext, "iu");
+    const placeholderPattern = new RegExp(sources.placeholder, "i");
+    const maskedTextPattern = new RegExp(sources.maskedText, "u");
+    const revealLabelPattern = /(?<![\p{L}\p{N}])(?:reveal|show|view|copy|unhide|display|anzeigen|einblenden|kopieren|zeigen|ansehen)(?![\p{L}\p{N}])|(?<![\p{L}])eye(?:[-_]?(?:icon|open|off|slash|closed|fill|outline))?(?![\p{L}])|(?<![\p{L}])eye(?=icon|open|off|slash)|visibility|clipboard/iu;
+    const uuidValuePattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const hexValuePattern = /^(?:[0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{64})$/i;
+    const valueEntropy = (value) => {
+      const counts = new Map();
+      for (const character of value) counts.set(character, (counts.get(character) || 0) + 1);
+      let entropy = 0;
+      for (const count of counts.values()) {
+        const probability = count / value.length;
+        entropy -= probability * Math.log2(probability);
+      }
+      return entropy;
+    };
+    const looksLikeSecretValue = (raw, credentialContext) => {
+      if (typeof raw !== "string") return false;
+      const value = raw.trim();
+      if (value.length < 16 || value.length > 16_384 || placeholderPattern.test(value)) return false;
+      if (secretPatterns.some((pattern) => pattern.test(value))) return true;
+      if (/\s/.test(value) || value.length < 20 || value.length > 512) return false;
+      if (!credentialContext && (uuidValuePattern.test(value) || hexValuePattern.test(value))) return false;
+      return /[A-Za-z]/.test(value) && /[0-9]/.test(value) && valueEntropy(value) >= 3.5;
+    };
+    const scanElements = (visit) => {
+      const roots = [document];
+      let scanned = 0;
+      while (roots.length > 0 && scanned < 20_000) {
+        const root = roots.shift();
+        const elements = typeof root?.querySelectorAll === "function" ? Array.from(root.querySelectorAll("*")) : [];
+        for (const element of elements) {
+          scanned += 1;
+          if (visit(element) === true) return true;
+          if (element && element.shadowRoot && typeof element.shadowRoot.querySelectorAll === "function") {
+            roots.push(element.shadowRoot);
+          }
+          if (scanned >= 20_000) break;
+        }
+      }
+      return false;
+    };
+    const elementTag = (element) => (typeof element?.tagName === "string" ? element.tagName.toUpperCase() : "");
+    const elementAttribute = (element, name) =>
+      typeof element?.getAttribute === "function" ? element.getAttribute(name) : null;
+    const elementText = (element) => clean(element?.textContent ?? element?.innerText ?? "", 2_000);
+    const isDialog = (element) =>
+      elementTag(element) === "DIALOG" ||
+      ["dialog", "alertdialog"].includes(elementAttribute(element, "role")) ||
+      elementAttribute(element, "aria-modal") === "true";
+    const labelTags = new Set(["H1", "H2", "H3", "H4", "H5", "H6", "LEGEND", "TH", "LABEL", "DT", "CAPTION"]);
+    const credentialContext =
+      credentialContextPattern.test(clean(document.title, 1_000)) ||
+      scanElements((element) => {
+        const label =
+          labelTags.has(elementTag(element)) || elementAttribute(element, "role") === "heading"
+            ? elementText(element)
+            : isDialog(element)
+              ? clean(elementAttribute(element, "aria-label"))
+              : "";
+        return Boolean(label) && credentialContextPattern.test(label);
+      });
+    const codeTags = new Set(["CODE", "PRE", "KBD", "SAMP", "OUTPUT"]);
+    let secretField = false;
+    let secretCode = false;
+    let maskedNearReveal = false;
+    scanElements((element) => {
+      const tag = elementTag(element);
+      if (!secretField && (tag === "INPUT" || tag === "TEXTAREA")) {
+        const type = String(element.type || elementAttribute(element, "type") || "").toLowerCase();
+        const readOnly =
+          element.readOnly === true || elementAttribute(element, "readonly") !== null ||
+          element.disabled === true || elementAttribute(element, "disabled") !== null;
+        if (readOnly && type !== "password" && type !== "hidden" && looksLikeSecretValue(element.value, credentialContext)) {
+          secretField = true;
+        }
+      }
+      if (!secretCode && codeTags.has(tag) && looksLikeSecretValue(elementText(element), credentialContext)) {
+        secretCode = true;
+      }
+      if (
+        !maskedNearReveal &&
+        (tag === "BUTTON" || tag === "A" || elementAttribute(element, "role") === "button" ||
+          elementAttribute(element, "onclick") !== null)
+      ) {
+        const label = [
+          elementAttribute(element, "aria-label"), elementAttribute(element, "title"),
+          elementAttribute(element, "class"), elementAttribute(element, "data-icon"), elementText(element),
+        ].filter(Boolean).join(" ");
+        // A link to another page counts only when its own label names a
+        // credential; "View invoice" beside a masked card number does not.
+        let pageLink = false;
+        if (tag === "A") {
+          try {
+            pageLink =
+              ["http:", "https:"].includes(new URL(String(element.href || "")).protocol) &&
+              !String(elementAttribute(element, "href") || "").startsWith("#");
+          } catch (_) {
+            pageLink = false;
+          }
+        }
+        if (revealLabelPattern.test(label) && (!pageLink || credentialContextPattern.test(label))) {
+          let ancestor = element.parentElement;
+          for (let depth = 0; ancestor && depth < 3; depth += 1, ancestor = ancestor.parentElement) {
+            // Only a small container around the control, never a whole card or page.
+            const ancestorText = typeof ancestor.textContent === "string" ? ancestor.textContent : "";
+            if (ancestorText.length <= 400 && maskedTextPattern.test(elementText(ancestor))) {
+              maskedNearReveal = true;
+              break;
+            }
+          }
+        }
+      }
+      return secretField && secretCode && maskedNearReveal;
+    });
+    return { credentialContext, secretField, secretCode, maskedNearReveal };
+  } catch (_) {
+    return null;
+  }
+}
+
+// Runs inside the page. The mark is a non-configurable property, so page
+// scripts cannot remove it; a document that refuses new properties counts as
+// marked.
+function documentWithheldInPage(request) {
+  const key = Symbol.for(request.key);
+  return Object.getOwnPropertyDescriptor(document, key) !== undefined || !Object.isExtensible(document);
+}
+
+function withholdDocumentInPage(request) {
+  const key = Symbol.for(request.key);
+  if (Object.getOwnPropertyDescriptor(document, key) === undefined) {
+    Object.defineProperty(document, key, { value: true });
+  }
+  return Object.getOwnPropertyDescriptor(document, key) !== undefined;
+}
+
+// The main frame's loader id names one loaded document. It changes on every
+// new document and stays across same-document history changes; page scripts
+// cannot set it. Null when it cannot be read.
+async function documentIdentity(page) {
+  let session = null;
+  try {
+    session = await page.context().newCDPSession(page);
+    const response = await session.send("Page.getFrameTree");
+    const loaderId = String(response?.frameTree?.frame?.loaderId || "");
+    return /^[A-Za-z0-9_-]{1,128}$/.test(loaderId) ? loaderId : null;
+  } catch (_) {
+    return null;
+  } finally {
+    if (session) await session.detach().catch(() => {});
+  }
+}
+
+// True when a key change or "may show a secret" step ran on another document
+// of this run and this is the first snapshot since: the page the step opened,
+// however late it loaded. That document is marked and the record cleared.
+// An unknown document stays withheld and keeps the record.
+async function carriedWithholding(page) {
+  const afterDocument = approvalProtocol.withholdNextDocumentAfter();
+  if (afterDocument === null) {
+    return false;
+  }
+  const current = await documentIdentity(page);
+  if (current === null) {
+    return true;
+  }
+  if (current === afterDocument) {
+    // Still the page the step ran on, which the step marked itself.
+    return false;
+  }
+  if (await withholdDocument(page)) {
+    approvalProtocol.clearWithholdNextDocument();
+  }
+  return true;
+}
+
+async function pageSecretSignals(page) {
+  const signals = await page.evaluate(pageSecretSignalsInPage, PAGE_POLICY_SOURCES).catch(() => null);
+  if (!signals || typeof signals !== "object") {
+    return null;
+  }
+  return {
+    credentialContext: signals.credentialContext === true,
+    secretField: signals.secretField === true,
+    secretCode: signals.secretCode === true,
+    maskedNearReveal: signals.maskedNearReveal === true,
+  };
+}
+
+async function documentWithheld(page) {
+  const withheld = await page
+    .evaluate(documentWithheldInPage, { kind: "withheld-read", key: WITHHELD_DOCUMENT_KEY })
+    .catch(() => null);
+  // Anything but a plain "no" withholds the page.
+  return withheld !== false;
+}
+
+async function withholdDocument(page) {
+  const marked = await page
+    .evaluate(withholdDocumentInPage, { kind: "withheld-mark", key: WITHHELD_DOCUMENT_KEY })
+    .catch(() => false);
+  return marked === true;
+}
+
+// The model-facing view of the page. Text, title, address, control names and
+// link targets are masked on every site and in every approval mode; a secret
+// screen withholds the text and stays withheld until a new page loads.
+async function snapshot(page, { withhold = false } = {}) {
   const interactive = await collectInteractiveElements(page);
+  const rawUrl = page.url();
   const visibleText = await page
     .locator("body")
     .innerText({ timeout: 5_000 })
     .catch(() => "");
+  const title = await page.title().catch(() => "");
+  let signals = await pageSecretSignals(page);
+  if (signals === null) {
+    // A page that was still changing documents fails the check; try once
+    // more after it settles.
+    await page.waitForLoadState("domcontentloaded", { timeout: 2_000 }).catch(() => {});
+    signals = await pageSecretSignals(page);
+  }
+  // Read after the page content, so a document that loaded meanwhile is the
+  // one these answers describe.
+  const carried = await carriedWithholding(page);
+  const marked = await documentWithheld(page);
+  const checkFailed = signals === null;
+  const observe = (forceWithhold) =>
+    redaction.redactPageObservation({
+      url: rawUrl,
+      title,
+      text: String(visibleText || "").slice(0, MAX_VISIBLE_TEXT_CHARS * 5),
+      names: interactive.map(({ description }) => description.label),
+      signals,
+      withhold: forceWithhold,
+    });
+  let view;
+  let detected = false;
+  try {
+    view = observe(withhold || carried || marked || checkFailed);
+    // A failed page check withholds this observation only. The document is
+    // marked when a credential step ran or the page itself shows a secret,
+    // so a page caught mid-navigation is read normally next time.
+    detected = view.secretScreen && !marked &&
+      (withhold || carried || !checkFailed || observe(false).secretScreen);
+  } catch (_) {
+    throw new Error("Shared Browser could not mask this page, so it was not read");
+  }
+  if (detected) {
+    await withholdDocument(page);
+  }
+  const maskLink = (href) => {
+    if (!href) return href;
+    const masked = redaction.redactUrl(href).text;
+    return view.secretScreen ? strictlyMasked(masked) : masked;
+  };
   return {
-    snapshotId: snapshotFingerprint(page.url(), interactive),
+    snapshotId: snapshotFingerprint(rawUrl, interactive),
     browserPageId: EXPECTED_BROWSER_PAGE_ID,
-    url: page.url(),
-    title: await page.title().catch(() => ""),
-    visibleText: visibleText.slice(0, MAX_VISIBLE_TEXT_CHARS),
-    interactiveElements: interactive.map(({ description }) =>
-      publicElementDescription(description),
+    url: view.url,
+    title: view.title,
+    visibleText: view.text.slice(0, MAX_VISIBLE_TEXT_CHARS),
+    secretScreen: view.secretScreen,
+    ...(view.message ? { message: view.message } : {}),
+    interactiveElements: interactive.map(({ description }, index) =>
+      publicElementDescription({
+        ...description,
+        label: view.names[index],
+        href: maskLink(description.href),
+        // Page-controlled attributes, masked like control names.
+        role: description.role ? strictlyMasked(description.role) : description.role,
+        autocomplete: description.autocomplete
+          ? strictlyMasked(description.autocomplete)
+          : description.autocomplete,
+      }),
     ),
   };
 }
 
-async function snapshotForResult(page) {
+async function snapshotForResult(page, options = {}) {
   if (!approvalProtocol.isOriginApproved(page.url())) {
     return approvalProtocol.redactedPageResult();
   }
-  return await snapshot(page);
+  return await snapshot(page, options);
 }
 
 async function emitNavigationResult(page) {
@@ -424,9 +1095,12 @@ async function emitNavigationResult(page) {
     });
     return;
   }
+  const title = await page.title().catch(() => "");
   emitAction({
     type: "nav_result",
-    label: await page.title().catch(() => page.url()),
+    label: title
+      ? redaction.redactText(title, { credentialContext: redaction.hasCredentialWord(title) }).text
+      : page.url(),
     url: page.url(),
   });
 }
@@ -696,6 +1370,31 @@ async function clearHumanInputHighlights(page) {
   });
 }
 
+// A credential or "may show a secret" step withholds the page before it runs,
+// and the next other document a snapshot sees, however late it loads (see
+// carriedWithholding). The step does not run when the page cannot be marked
+// or identified.
+async function withholdBeforeStep(page, classification) {
+  if (!WITHHOLDING_CATEGORIES.has(classification.category)) {
+    return false;
+  }
+  const documentId = await documentIdentity(page);
+  if (!documentId || !(await withholdDocument(page))) {
+    throw new Error(
+      "Shared Browser could not keep this page withheld, so the step was not performed",
+    );
+  }
+  approvalProtocol.withholdNextDocument(documentId);
+  return true;
+}
+
+async function snapshotAfterStep(page, withholding) {
+  if (withholding) {
+    await withholdDocument(page);
+  }
+  return await snapshotForResult(page, { withhold: withholding });
+}
+
 async function execute(browser, method, requestPath, body) {
   approvalProtocol.authority();
   let page = await resolveExpectedPage(browser);
@@ -711,12 +1410,13 @@ async function execute(browser, method, requestPath, body) {
     if (!approvalProtocol.isOriginApproved(page.url())) {
       return approvalProtocol.redactedPageResult(shared);
     }
+    const title = await page.title().catch(() => "");
     return {
       ...shared,
       originApproved: true,
       redacted: false,
-      url: page.url(),
-      title: await page.title().catch(() => ""),
+      url: redaction.redactUrl(page.url()).text,
+      title: redaction.redactText(title, { credentialContext: redaction.hasCredentialWord(title) }).text,
     };
   }
 
@@ -786,6 +1486,10 @@ async function execute(browser, method, requestPath, body) {
   if (method === "POST" && requestPath === "/v1/navigate") {
     const url = validateNavigationUrl(body.url);
     const sourceOrigin = approvalProtocol.normalizedOrigin(page.url());
+    // Risky addresses (sign-out, exports, files, one-time links, action
+    // addresses) are judged by the address alone and ask even under routine
+    // browsing. Typing an address for a new site never asks on its own.
+    const step = classifyStep("navigate", null, { url });
     await approvalProtocol.ensureOriginApproved(
       url,
       "Allow the assistant to access this destination for this run",
@@ -794,17 +1498,21 @@ async function execute(browser, method, requestPath, body) {
     await approvalProtocol.allowOnce({
       operation: "navigate",
       label: "Navigate the Shared Browser",
+      categoryTitle: step.verdict === "ask" ? approvalCategoryTitle(step) : "",
       sourceOrigin,
       ...destination,
       snapshotId: null,
       targetFingerprint: null,
       payloadFingerprint: approvalProtocol.sha256("navigate"),
-    }, { routine: !CONSEQUENTIAL_ACTION_PATTERN.test(url) });
+    }, { routine: step.verdict !== "ask" && !CONSEQUENTIAL_ACTION_PATTERN.test(url) });
     page = await resolveExpectedPage(browser);
     if (sourceOrigin) {
       assertSameOrigin(page.url(), sourceOrigin);
     }
     const revalidatedUrl = validateNavigationUrl(body.url);
+    // An address the agent opens itself is not the page a credential step
+    // opened.
+    approvalProtocol.clearWithholdNextDocument();
     emitAction({ type: "navigate", label: `Go to ${url}`, url });
     await page.goto(revalidatedUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
     await settleAfterAction(page);
@@ -821,6 +1529,8 @@ async function execute(browser, method, requestPath, body) {
     page = await resolveExpectedPage(browser);
     assertSameOrigin(page.url(), sourceOrigin);
     let target = await targetLocator(page, body);
+    const step = classifyStep("click", target.description, { pageUrl: page.url() });
+    refuseUserStep(step);
     const approvedTargetFingerprint = targetFingerprint(target.description);
     const rawDestination = resolvedTargetDestination(target.description, page.url());
     const destination = approvalProtocol.destinationBinding(rawDestination);
@@ -835,14 +1545,15 @@ async function execute(browser, method, requestPath, body) {
     }
     await approvalProtocol.allowOnce({
       operation: "click",
-      label: target.description.label || "Activate this control",
+      label: controlLabel(target.description) || "Activate this control",
+      categoryTitle: approvalCategoryTitle(step),
       sourceOrigin,
       ...destination,
       snapshotId: body.snapshotId,
       targetFingerprint: approvedTargetFingerprint,
       payloadFingerprint: approvalProtocol.sha256("click"),
     }, {
-      routine: !isConsequentialAction(target.description) &&
+      routine: routineCovers(step, target.description) &&
         !isFormSubmissionControl(target.description),
     });
     page = await resolveExpectedPage(browser);
@@ -854,11 +1565,12 @@ async function execute(browser, method, requestPath, body) {
       approvedTargetFingerprint,
       destination,
     );
+    const withholding = await withholdBeforeStep(page, step);
     const box = target.description.box;
     const size = await viewport(page);
     emitAction({
       type: "click",
-      label: `Click "${target.description.label}"`,
+      label: `Click "${controlLabel(target.description)}"`,
       url: page.url(),
       x: box.x + box.width / 2,
       y: box.y + box.height / 2,
@@ -872,7 +1584,7 @@ async function execute(browser, method, requestPath, body) {
     if (page.url() !== beforeUrl) {
       await emitNavigationResult(page);
     }
-    return await snapshotForResult(page);
+    return await snapshotAfterStep(page, withholding);
   }
 
   if (method === "POST" && requestPath === "/v1/type") {
@@ -887,8 +1599,17 @@ async function execute(browser, method, requestPath, body) {
     assertSameOrigin(page.url(), sourceOrigin);
     let target = await targetLocator(page, body);
     assertSafeTypeTarget(target.description);
-    const approvedTargetFingerprint = targetFingerprint(target.description);
     const submitting = body.submit === true;
+    const typingStep = classifyStep("type", target.description, { pageUrl: page.url() });
+    refuseUserStep(typingStep);
+    const submitStep = submitting
+      ? classifyStep("submit", target.description, { pageUrl: page.url() })
+      : null;
+    if (submitStep) {
+      refuseUserStep(submitStep);
+    }
+    const step = submitStep || typingStep;
+    const approvedTargetFingerprint = targetFingerprint(target.description);
     const rawDestination = submitting
       ? resolvedTargetDestination(target.description, page.url()) || page.url()
       : null;
@@ -907,8 +1628,9 @@ async function execute(browser, method, requestPath, body) {
     await approvalProtocol.allowOnce({
       operation: submitting ? "form-submit" : "type",
       label: submitting
-        ? target.description.label || "Submit this form"
-        : target.description.label || "Type into this field",
+        ? controlLabel(target.description) || "Submit this form"
+        : controlLabel(target.description) || "Type into this field",
+      categoryTitle: approvalCategoryTitle(step),
       sourceOrigin,
       ...destination,
       snapshotId: body.snapshotId,
@@ -916,7 +1638,9 @@ async function execute(browser, method, requestPath, body) {
       payloadFingerprint: approvalProtocol.sha256(
         JSON.stringify({ text: body.text, submit: submitting }),
       ),
-    }, { routine: !submitting });
+    }, {
+      routine: !submitting && routineCovers(step, target.description, { consequential: false }),
+    });
     page = await resolveExpectedPage(browser);
     assertSameOrigin(page.url(), sourceOrigin);
     target = await targetLocator(page, body, true);
@@ -930,7 +1654,7 @@ async function execute(browser, method, requestPath, body) {
     assertSafeTypeTarget(target.description);
     emitAction({
       type: "type",
-      label: `Type into "${target.description.label}"`,
+      label: `Type into "${controlLabel(target.description)}"`,
       url: page.url(),
     });
     await target.locator.focus();
@@ -945,6 +1669,7 @@ async function execute(browser, method, requestPath, body) {
       destination,
       submitting ? "target-or-page" : "none",
     );
+    const withholding = submitting ? await withholdBeforeStep(page, step) : false;
     await target.locator.fill(body.text);
     if (submitting) {
       await target.locator.press("Enter");
@@ -953,7 +1678,7 @@ async function execute(browser, method, requestPath, body) {
       await emitNavigationResult(page);
     }
     page = await resolveExpectedPage(browser);
-    return await snapshotForResult(page);
+    return await snapshotAfterStep(page, withholding);
   }
 
   if (method === "POST" && requestPath === "/v1/press") {
@@ -972,6 +1697,11 @@ async function execute(browser, method, requestPath, body) {
     // sensitive/high-impact classification on the same fresh descriptor used
     // by click and type.
     assertSafeTypeTarget(target.description);
+    const step = classifyStep("press", target.description, {
+      pageUrl: page.url(),
+      key: body.key === "Space" ? " " : body.key,
+    });
+    refuseUserStep(step);
     const approvedTargetFingerprint = targetFingerprint(target.description);
     const pressKey = body.key === " " ? "Space" : body.key;
     const activationKey = ["Enter", "Space"].includes(pressKey);
@@ -997,14 +1727,15 @@ async function execute(browser, method, requestPath, body) {
           : "press-space"
         : "press-key",
       label: activationKey
-        ? target.description.label || "Activate this control"
-        : `Press ${pressKey} on ${target.description.label || "this field"}`,
+        ? controlLabel(target.description) || "Activate this control"
+        : `Press ${pressKey} on ${controlLabel(target.description) || "this field"}`,
+      categoryTitle: approvalCategoryTitle(step),
       sourceOrigin,
       ...destination,
       snapshotId: body.snapshotId,
       targetFingerprint: approvedTargetFingerprint,
       payloadFingerprint: approvalProtocol.sha256(body.key),
-    }, { routine: !activationKey && !isConsequentialAction(target.description) });
+    }, { routine: !activationKey && routineCovers(step, target.description) });
     page = await resolveExpectedPage(browser);
     assertSameOrigin(page.url(), sourceOrigin);
     target = await targetLocator(page, body, true);
@@ -1016,6 +1747,7 @@ async function execute(browser, method, requestPath, body) {
       activationKey ? "target-or-page" : "none",
     );
     assertSafeTypeTarget(target.description);
+    const withholding = activationKey ? await withholdBeforeStep(page, step) : false;
     emitAction({
       type: "type",
       label: `Press ${pressKey}`,
@@ -1024,7 +1756,7 @@ async function execute(browser, method, requestPath, body) {
     await target.locator.press(pressKey);
     await settleAfterAction(page);
     page = await resolveExpectedPage(browser);
-    return await snapshotForResult(page);
+    return await snapshotAfterStep(page, withholding);
   }
 
   if (method === "POST" && requestPath === "/v1/scroll") {
@@ -1046,21 +1778,37 @@ async function execute(browser, method, requestPath, body) {
   throw new Error("Unsupported Shared Browser method/path combination");
 }
 
+// Playwright lets this connection download into its own temporary folder
+// from the moment it connects. The hosted browser has no copy-out, so a
+// download would only land where an ordinary turn could read it: deny
+// downloads for as long as this connection lasts, and close the connection
+// with browser.close(), which for a CDP connection leaves Chromium running and
+// removes that temporary folder. The override ends when the connection does;
+// the profile's download_restrictions preference, set by the runtime
+// entrypoint, covers everything else.
+async function denyDownloads(browser) {
+  const session = await browser.newBrowserCDPSession();
+  await session.send("Browser.setDownloadBehavior", { behavior: "deny" });
+  return session;
+}
+
 async function main() {
-  const method = String(process.argv[1] || "").toUpperCase();
-  const requestPath = String(process.argv[2] || "");
-  const body = process.argv[3] ? JSON.parse(process.argv[3]) : null;
+  // The runtime agent runs `node - <method> <path> [body]` with this script on
+  // stdin, so the arguments follow the "-".
+  const args = process.argv[1] === "-" ? process.argv.slice(2) : process.argv.slice(1);
+  const method = String(args[0] || "").toUpperCase();
+  const requestPath = String(args[1] || "");
+  const body = args[2] ? JSON.parse(args[2]) : null;
   if (method === "POST") {
     validateRequestBody(requestPath, body);
   }
   const browser = await chromium.connectOverCDP(CDP_URL, { timeout: 15_000 });
   try {
+    await denyDownloads(browser);
     const result = await execute(browser, method, requestPath, body || {});
     await writeStdout(`${JSON.stringify({ ok: true, ...result }, null, 2)}\n`);
   } finally {
-    if (typeof browser.disconnect === "function") {
-      await browser.disconnect().catch(() => {});
-    }
+    await browser.close().catch(() => {});
   }
 }
 
@@ -1068,7 +1816,14 @@ main().then(
   () => process.exit(0),
   (error) => {
     const message = error && error.message ? error.message : String(error);
-    process.stderr.write(`Shared Browser command failed: ${message}\n`);
+    // Errors reach the model and logs; browser errors can quote page markup.
+    let masked = "Shared Browser command failed and its error could not be masked";
+    try {
+      masked = maskedDisplayText(message);
+    } catch (_) {
+      // Keep the fixed message.
+    }
+    process.stderr.write(`Shared Browser command failed: ${masked}\n`);
     process.exit(1);
   },
 );

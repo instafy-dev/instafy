@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Proves a runtime image starts the Shared Browser. By default it boots the
 # image's own entrypoint with the browser session enabled and requires headed
-# Chromium to answer on its CDP port (webdev images).
+# Chromium to answer on its CDP port (webdev images). It then proves the
+# profile blocks downloads after a controller connection that denied them has
+# closed, which is when viewers drive the page.
 #
 # With --lazy it proves the on-demand browser host instead, for every image
 # flavor: the image boots with the browser off and must run no browser process
@@ -209,6 +211,8 @@ if [[ "$mode" == "lazy" ]]; then
     [[ "$oom" == "1000" ]] || lazy_fail "The browser host's OOM score is ${oom}, not 1000."
     docker exec "$name" test -f "$profile_dir/instafy-smoke-marker" \
       || lazy_fail "The ${label} browser host removed data from the persisted profile."
+    docker exec "$name" grep -q '"download_restrictions":3' "$profile_dir/Default/Preferences" \
+      || lazy_fail "The ${label} browser host started Chromium on a profile that does not block downloads."
   }
 
   stop_host() {
@@ -261,6 +265,76 @@ report() {
   echo "::endgroup::"
 }
 
+# Runs inside the container with the image's Node. A control first proves a
+# click on the probe link downloads when a CDP session allows it; then, after a
+# controller-style session denied downloads and disconnected, the same click
+# must not write a file anywhere.
+download_probe='
+const fs = require("fs");
+const { execFileSync } = require("child_process");
+const port = process.argv[1];
+const profile = process.argv[2];
+const controlDirectory = "/tmp/instafy-download-probe";
+const name = "instafy-smoke-download";
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+class Cdp {
+  constructor(url) { this.url = url; this.id = 0; this.pending = new Map(); }
+  async open() {
+    this.socket = new WebSocket(this.url);
+    await new Promise((resolve, reject) => { this.socket.onopen = resolve; this.socket.onerror = reject; });
+    this.socket.onmessage = (event) => {
+      const message = JSON.parse(event.data);
+      const waiter = message.id ? this.pending.get(message.id) : null;
+      if (!waiter) return;
+      this.pending.delete(message.id);
+      if (message.error) waiter.reject(new Error(JSON.stringify(message.error)));
+      else waiter.resolve(message.result);
+    };
+    return this;
+  }
+  send(method, params = {}) {
+    const id = ++this.id;
+    this.socket.send(JSON.stringify({ id, method, params }));
+    return new Promise((resolve, reject) => this.pending.set(id, { resolve, reject }));
+  }
+  async close() { this.socket.close(); await delay(500); }
+}
+const copies = () => execFileSync("find", ["/root", "/tmp", "/home", "-xdev", "-name", `${name}*`, "-not", "-path", `${controlDirectory}/*`], { encoding: "utf8" }).trim();
+(async () => {
+  const preferences = JSON.parse(fs.readFileSync(`${profile}/Default/Preferences`, "utf8"));
+  if (preferences.download_restrictions !== 3) throw new Error("the profile does not block downloads");
+  const base = `http://127.0.0.1:${port}`;
+  const version = await (await fetch(`${base}/json/version`)).json();
+  const page = (await (await fetch(`${base}/json/list`)).json()).find((target) => target.type === "page");
+  if (!page) throw new Error("no page target");
+  const viewer = await new Cdp(page.webSocketDebuggerUrl).open();
+  const link = `<a href="data:text/csv,inert" download="${name}.csv" style="position:fixed;left:20px;top:20px;width:300px;height:80px;display:block">Export</a>`;
+  const click = async () => {
+    await viewer.send("Page.navigate", { url: `data:text/html,${encodeURIComponent(link)}` });
+    await delay(1500);
+    for (const type of ["mousePressed", "mouseReleased"]) {
+      await viewer.send("Input.dispatchMouseEvent", { type, x: 120, y: 60, button: "left", clickCount: 1 });
+    }
+    await delay(3000);
+  };
+  const control = await new Cdp(version.webSocketDebuggerUrl).open();
+  await control.send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: controlDirectory });
+  await click();
+  await control.close();
+  if (!fs.existsSync(controlDirectory) || fs.readdirSync(controlDirectory).length === 0) {
+    throw new Error("the control click did not download, so the probe cannot tell");
+  }
+  const controller = await new Cdp(version.webSocketDebuggerUrl).open();
+  await controller.send("Browser.setDownloadBehavior", { behavior: "deny" });
+  await controller.close();
+  await click();
+  const found = copies();
+  if (found) throw new Error(`a download landed after the controller disconnected: ${found}`);
+  await viewer.close();
+  console.log("Downloads stay blocked after a controller reconnect and a viewer click.");
+})().then(() => process.exit(0), (error) => { console.error(error.message); process.exit(1); });
+'
+
 deadline=$((SECONDS + timeout_seconds))
 while (( SECONDS < deadline )); do
   if [[ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" != "true" ]]; then
@@ -271,6 +345,11 @@ while (( SECONDS < deadline )); do
   if version="$(docker exec "$name" curl --noproxy '*' -fsS --max-time 2 "http://127.0.0.1:${cdp_port}/json/version" 2>/dev/null)"; then
     browser="$(printf '%s' "$version" | sed -n 's/.*"Browser"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
     echo "Shared Browser started: ${browser:-Chromium} answers on CDP port ${cdp_port}."
+    if ! docker exec "$name" /usr/bin/node -e "$download_probe" "$cdp_port" /tmp/instafy/playwright/profile; then
+      report
+      echo "::error::The Shared Browser profile does not block downloads after a controller reconnect."
+      exit 1
+    fi
     exit 0
   fi
   sleep 2

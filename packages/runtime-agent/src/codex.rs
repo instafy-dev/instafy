@@ -124,7 +124,10 @@ const SHARED_BROWSER_DEVELOPER_INSTRUCTIONS: &str = r#"Shared Browser transport 
 - Never type authentication, payment, or identity secrets. A sign-in, one-time code or consent step is a manual step for the user: pause on it with `request_human_input` on its fields, so the user completes it on the page and then chooses Let AI continue. Never ask for those values in chat.
 - Never open or reveal a screen, dialog or field that shows a credential value such as an API secret, token, key or recovery code, and never ask the user to open one in this browser: the next snapshot would show the value to you. When the user needs one, stop on the screen that lists it, tell them in words which control opens it, and ask them to open that same page in a tab of their own browser to see and copy the value there; do not use `request_human_input` for it. If an observation shows a value anyway, never repeat, store or act on it.
 - For a manual field step, use `request_human_input` with one to eight indices and the fresh snapshotId. It highlights the actual fields and ends this turn. Do not issue any further browser calls; the user explicitly continues after entering values directly, and the next turn must take a fresh snapshot. Never request or repeat those values in chat.
-- By default, the authenticated initiating user approves each site and every navigation, click, type, submission and key press for this run. The user may explicitly grant routine browsing at the first site prompt; the runtime then handles routine actions without repeated prompts while recognized consequential actions, submissions and activation keys still require **Allow once**. Never assume, request through a tool, or synthesize that grant; it is only a user-facing policy choice. Secret-entry restrictions always apply.
+- By default, the authenticated initiating user approves each site and every navigation, click, type, submission and key press for this run. The user may explicitly grant routine browsing at the first site prompt; the runtime then handles routine actions without repeated prompts, while purchases, transfers, messages, sharing or access changes, key or password changes, downloads or exports, deletions, cancellations and sign-outs, entries that may show a secret, submissions and activation keys still require **Allow once**. Never assume, request through a tool, or synthesize that grant; it is only a user-facing policy choice. Secret-entry restrictions always apply.
+- Snapshots, status, results and errors mask values that look like keys, tokens or codes as `[redacted secret]` or `REDACTED`. Never try to recover a masked value. When a snapshot has `secretScreen: true`, the page text is withheld until a new page loads: stop, do not click anything on that page to reveal or copy the value, and tell the user in words which control on that page shows it, using the control names the snapshot still lists.
+- An error ending in `[step_refused_secret]`, `[step_refused_sign_in]` or `[step_refused_upload]` is final in every approval mode: revealing or copying a credential, signing in, and choosing files are the user's steps. Do not retry or look for another control that does the same; tell the user which step is theirs, and for a sign-in use `request_human_input` on its fields.
+- Downloads are blocked in this browser. Do not try to download or export files through it.
 - A denial, timeout, stale target, changed page, or replayed approval is final for that attempted action. Do not retry it automatically; report the exact returned error and wait for a new user instruction.
 - Approval is never a model-visible tool. Do not search for, inspect, edit, or simulate runtime approval files."#;
 const PERSONAL_BROWSER_DEVELOPER_INSTRUCTIONS: &str = r#"Personal Browser transport (managed runtime policy):
@@ -5229,6 +5232,21 @@ mod tests {
             SHARED_BROWSER_DEVELOPER_INSTRUCTIONS
                 .contains("Never assume, request through a tool, or synthesize that grant")
         );
+        for instructions in [
+            PERSONAL_BROWSER_DEVELOPER_INSTRUCTIONS,
+            SHARED_BROWSER_DEVELOPER_INSTRUCTIONS,
+        ] {
+            assert!(instructions.contains("`secretScreen: true`"));
+            assert!(instructions.contains("Never try to recover a masked value"));
+            for code in [
+                "step_refused_secret",
+                "step_refused_sign_in",
+                "step_refused_upload",
+            ] {
+                assert!(instructions.contains(code), "{code}");
+            }
+        }
+        assert!(SHARED_BROWSER_DEVELOPER_INSTRUCTIONS.contains("Downloads are blocked"));
         assert!(PERSONAL_BROWSER_DEVELOPER_INSTRUCTIONS.contains("`secretScreen: true`"));
         assert!(
             PERSONAL_BROWSER_DEVELOPER_INSTRUCTIONS

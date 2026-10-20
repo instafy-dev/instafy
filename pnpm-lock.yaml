@@ -52,10 +52,15 @@ importers:
         specifier: ^2.92.0
         version: 2.92.0
 
+  packages/browser-action-policy: {}
+
   packages/codex-adapter: {}
 
   packages/desktop-app:
     dependencies:
+      '@instafy/browser-action-policy':
+        specifier: workspace:*
+        version: link:../browser-action-policy
       '@instafy/desktop-runtime-agent':
         specifier: workspace:*
         version: link:../desktop-runtime-agent
