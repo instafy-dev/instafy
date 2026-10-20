@@ -3,6 +3,20 @@ import type { SubmitConversationRuntimeOverride } from "../../../conversations/u
 import { runtimeEntryIsDispatchable } from "../../../runtime/utils/runtimeEntry";
 import { controllerClient } from "../../../sdk/instafy";
 import { normalizeBrowserAddress } from "./browserAddress";
+import {
+  personalBrowserRoutineAvailable,
+  resolvePersonalBrowserApprovalMode,
+  type PersonalBrowserApprovalMode,
+} from "./personalBrowserApprovalPolicy";
+
+export {
+  PERSONAL_BROWSER_OWNER_TIER_POLICY_VERSION,
+  personalBrowserKnownHosts,
+  personalBrowserOwnerTier,
+  personalBrowserRoutineAvailable,
+  resolvePersonalBrowserApprovalMode,
+  type PersonalBrowserApprovalMode,
+} from "./personalBrowserApprovalPolicy";
 
 export type BrowserTransport = "personal" | "shared";
 export type PersonalBrowserAgentPhase = "idle" | "starting" | "ready" | "unavailable";
@@ -119,7 +133,8 @@ export function usePersonalBrowserBridge({
 }) {
   const [checked, setChecked] = useState(false);
   const [status, setStatus] = useState<InstafyDesktopPersonalBrowserStatus | null>(null);
-  const [preferredApprovalMode, setPreferredApprovalMode] = useState<"ask" | "routine">("routine");
+  // Unset until the person chooses; the default follows the Desktop's policy.
+  const [approvalModeChoice, setPreferredApprovalMode] = useState<PersonalBrowserApprovalMode | null>(null);
   const [runtimeStartState, setRuntimeStartState] = useState<
     "idle" | "starting" | "succeeded" | "failed"
   >("idle");
@@ -646,7 +661,7 @@ export function usePersonalBrowserBridge({
     [invoke],
   );
   const setAgentControlEnabled = useCallback(
-    async (enabled: boolean, approvalMode?: "ask" | "routine") => {
+    async (enabled: boolean, approvalMode?: PersonalBrowserApprovalMode, knownHosts?: readonly string[]) => {
       const bridge = browserBridge();
       const ownerId = personalBrowserOwnerIdRef.current;
       if (
@@ -661,6 +676,7 @@ export function usePersonalBrowserBridge({
           enabled,
           ownerId,
           ...(approvalMode ? { approvalMode } : {}),
+          ...(enabled && knownHosts && knownHosts.length > 0 ? { knownHosts: [...knownHosts] } : {}),
         });
         if (
           !mountedRef.current ||
@@ -718,9 +734,10 @@ export function usePersonalBrowserBridge({
     if (!paused) {
       return null;
     }
-    return setAgentControlEnabled(true,
-      paused.approvalModes?.includes("routine") ? preferredApprovalMode : undefined);
-  }, [preferredApprovalMode, setAgentControlEnabled]);
+    return setAgentControlEnabled(true, personalBrowserRoutineAvailable(paused)
+      ? resolvePersonalBrowserApprovalMode({ status: paused, choice: approvalModeChoice })
+      : undefined);
+  }, [approvalModeChoice, setAgentControlEnabled]);
   const clearData = useCallback(
     async () => {
       const bridge = browserBridge();
@@ -793,7 +810,12 @@ export function usePersonalBrowserBridge({
     });
   }, [agentPhase, identityScope, runtimeId, status?.agentControlEnabled, status?.ownerId, status?.state]);
 
+  const preferredApprovalMode = resolvePersonalBrowserApprovalMode({ status, choice: approvalModeChoice });
+
   return {
+    /** The person's own choice; null until they pick one. */
+    approvalModeChoice,
+    /** The mode a press, Resume, Retry or Let AI continue asks for. */
     preferredApprovalMode,
     setPreferredApprovalMode,
     agentError,

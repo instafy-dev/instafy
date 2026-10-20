@@ -76,9 +76,14 @@ run that took the lane first, counts as sent: the notice stays and the card read
 **Opened**. A press, or an opened card, reads **Opened** from then on, also after a reload,
 so displaying an old message never runs it again. **Try again** on a failed browser run
 sends the card's task again through the browser, with the card it continues, never the
-notice text. A browser Studio opened by itself grants nothing a press does not: it uses
-the person's own approval settings, so the browser's site and action prompts ask exactly
-as for a press.
+notice text. A browser Studio opened by itself grants nothing a press does not. It asks
+for routine browsing only from a Desktop whose routine is the owner tier (approval policy
+version 2: reading and plain links free, forms, purchases, messages and credentials still
+ask), and only when the person has not chosen Ask; on an older Desktop it uses Ask, so it
+never requests the earlier routine that submits ordinary forms. A start, pressed or
+automatic, also gives an owner-tier Desktop in routine the hosts the card shows (at most
+three) as the run's own sites; they are not recorded with the prompt, and an older Desktop
+never receives them.
 The card shows the host its task opens. The card says nothing about which browsers exist,
 because the Workspace browser starts on demand as a runtime of its own; Studio disables the
 button, with the reason, only when the Workspace browser is known not to open and there is no
@@ -98,8 +103,10 @@ credential value: it stops on the screen that lists it, names the control that o
 asks the person to open that page in a tab of their own browser to see and copy the value.
 That is turn guidance for the model, not a block the browser enforces.
 Paused native control uses the existing Resume flow with the Browser settings
-approval choice (routine browsing by default on supported Desktop hosts); already active
-control keeps its settings. A pending manual step must be finished with **Let AI continue** before another task can start.
+approval choice. Until the person chooses, it defaults to routine on a Desktop reporting
+approval policy version 2 and to Ask on an older one; an explicit choice, either way, is
+kept for presses, Resume, Retry and **Let AI continue**. Already active control keeps its
+settings. A pending manual step must be finished with **Let AI continue** before another task can start.
 
 Studio first reuses the browser location saved for this conversation on this
 device. For a new conversation, it uses the user's explicit location preference,
@@ -183,11 +190,15 @@ It fills the app viewport; it does not create a different browser, profile or
 OS window. Collapse returns to the docked browser with the same page.
 
 Shared offers **Always allow routine browsing** at the first site prompt for that
-turn. Personal Browser defaults to **Allow routine browsing without asking each
-time** in Browser settings and confirms that choice once when control starts.
-Uncheck it before Resume for stricter Ask mode. Routine browsing covers ordinary
-navigation, search, clicks and non-sensitive forms without repeated site/action
-prompts; it does not change cookie sharing.
+turn. Personal Browser keeps the routine choice in Browser settings. Until the
+person chooses, it is on for a Desktop reporting approval policy version 2 and
+off (Ask) for an older one; a choice either way is kept. On a version 2 Desktop
+the setting reads **Let Octo browse and read without asking for each site**:
+reading, tabs, menus and plain links go ahead, while forms, other buttons and
+messages still ask. On an older Desktop it reads **Allow routine browsing without
+asking each time**, confirms once when control starts, and also covers ordinary
+clicks and non-sensitive forms. Uncheck it before Resume for stricter Ask mode.
+Routine browsing does not change cookie sharing.
 Recognized high-impact actions still ask and secret entry remains manual; a
 website can attach unexpected side effects to an otherwise ordinary control.
 See each mode's policy for scope and revocation.

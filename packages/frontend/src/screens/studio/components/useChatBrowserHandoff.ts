@@ -5,16 +5,25 @@ import type { RunRecord } from "../../../types";
 import { sharedBrowserTakeoverJob } from "./browserHandoffRouting";
 import type { BrowserSessionPageTarget } from "./browserSessionPages";
 import { buildSharedBrowserSubmitMetadata, withPersonalBrowserRuntimeExpectations } from "./sharedBrowserSubmitRouting";
+import { BROWSER_AUTO_STARTED_METADATA_KEY } from "./browserRequest";
+import {
+  personalBrowserKnownHosts,
+  resolvePersonalBrowserApprovalMode,
+  type PersonalBrowserApprovalMode,
+} from "./personalBrowserApprovalPolicy";
 import type { BrowserTransport, usePersonalBrowserBridge } from "./usePersonalBrowserBridge";
 
 /**
  * How a continuation is shown and recorded. `display` replaces the task in the
  * chat (the task is still what the browser turn receives, and the record keeps
  * it as the dispatched content); `metadata` joins the prompt's metadata.
+ * `knownHosts` are the card's hosts, which an owner-tier Desktop treats as the
+ * run's sites in routine; they are never recorded.
  */
 export type BrowserContinuationExtras = {
   display?: string | null;
   metadata?: Record<string, unknown> | null;
+  knownHosts?: readonly string[] | null;
 };
 
 function displayOptions(message: string, extras: BrowserContinuationExtras | null | undefined) {
@@ -111,7 +120,7 @@ export function useChatBrowserHandoff(options: Options) {
 
   const continuePersonal = useCallback(async (
     message: string,
-    approvalMode: "ask" | "routine",
+    approvalMode: PersonalBrowserApprovalMode,
     extras?: BrowserContinuationExtras | null,
   ) => {
     const captured = latest.current;
@@ -121,7 +130,10 @@ export function useChatBrowserHandoff(options: Options) {
     const previousRuntimeId = captured.personal.runtimeOverride?.runtimeId ?? captured.personal.status?.runtimeId;
     let resumedRuntimeId: string | null = null;
     try {
-      const resumed = await captured.personal.setAgentControlEnabled(true, approvalMode);
+      const knownHosts = personalBrowserKnownHosts(captured.personal.status, approvalMode, extras?.knownHosts);
+      const resumed = knownHosts.length > 0
+        ? await captured.personal.setAgentControlEnabled(true, approvalMode, knownHosts)
+        : await captured.personal.setAgentControlEnabled(true, approvalMode);
       resumedRuntimeId = resumed?.runtimeId ?? null;
       assertCurrent(captured, epoch);
       if (!resumed?.agentControlEnabled) return false;
@@ -194,10 +206,16 @@ export function useChatBrowserHandoff(options: Options) {
     }
     const runtimeOverride = captured.personal.runtimeOverride;
     if (!runtimeOverride) {
-      // The person's own approval mode, whether they pressed the card or
-      // Studio opened the browser by itself.
-      return continuePersonal(message, captured.personal.status?.approvalModes?.includes("routine")
-        ? captured.personal.preferredApprovalMode : "ask", extras);
+      // A press uses the person's own approval mode. Studio opening the
+      // browser by itself asks for routine only from an owner-tier Desktop
+      // (never an older host's routine, which submits forms), and never
+      // when the person chose Ask.
+      const automatic = extras?.metadata?.[BROWSER_AUTO_STARTED_METADATA_KEY] === true;
+      return continuePersonal(message, resolvePersonalBrowserApprovalMode({
+        status: captured.personal.status,
+        choice: captured.personal.approvalModeChoice ?? null,
+        automatic,
+      }), extras);
     }
     const shown = displayOptions(message, extras);
     await captured.onSubmit(captured.conversationId, shown.text, {

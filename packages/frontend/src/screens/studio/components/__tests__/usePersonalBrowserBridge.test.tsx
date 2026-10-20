@@ -20,7 +20,11 @@ vi.mock("../../../../services/runtimeController/core", () => ({
   controllerBaseUrl: "https://controller.example.test",
 }));
 
-import { usePersonalBrowserBridge } from "../usePersonalBrowserBridge";
+import {
+  personalBrowserKnownHosts,
+  resolvePersonalBrowserApprovalMode,
+  usePersonalBrowserBridge,
+} from "../usePersonalBrowserBridge";
 
 type HookResult = ReturnType<typeof usePersonalBrowserBridge>;
 
@@ -93,6 +97,43 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
   }
   expect(predicate()).toBe(true);
 }
+
+describe("Personal Browser approval policy", () => {
+  const legacy = { approvalModes: undefined };
+  const older = { approvalModes: ["ask", "routine"] as Array<"ask" | "routine"> };
+  const ownerTier = { ...older, approvalPolicyVersion: 2 };
+
+  it.each([
+    // Nothing chosen: the default follows the Desktop.
+    { status: ownerTier, choice: null, automatic: false, expected: "routine" },
+    { status: older, choice: null, automatic: false, expected: "ask" },
+    { status: legacy, choice: null, automatic: false, expected: "ask" },
+    // A choice is kept for a press, Resume, Retry and Let AI continue.
+    { status: older, choice: "routine", automatic: false, expected: "routine" },
+    { status: ownerTier, choice: "ask", automatic: false, expected: "ask" },
+    { status: legacy, choice: "routine", automatic: false, expected: "ask" },
+    // Studio's own start: routine only from the owner tier, never over Ask.
+    { status: ownerTier, choice: null, automatic: true, expected: "routine" },
+    { status: ownerTier, choice: "routine", automatic: true, expected: "routine" },
+    { status: ownerTier, choice: "ask", automatic: true, expected: "ask" },
+    { status: older, choice: "routine", automatic: true, expected: "ask" },
+    { status: older, choice: null, automatic: true, expected: "ask" },
+    { status: { ...ownerTier, approvalPolicyVersion: 1 }, choice: "routine", automatic: true, expected: "ask" },
+    { status: null, choice: "routine", automatic: true, expected: "ask" },
+  ] as const)("resolves $expected for %j", ({ status, choice, automatic, expected }) => {
+    expect(resolvePersonalBrowserApprovalMode({ status, choice, automatic })).toBe(expected);
+  });
+
+  it("gives the card's hosts only to an owner-tier Desktop in routine", () => {
+    const hosts = ["App.Example.test.", "docs.example.test", "app.example.test", "bad host", "-x.test", "a.test", "b.test"];
+    expect(personalBrowserKnownHosts(ownerTier, "routine", hosts)).toEqual(["app.example.test", "docs.example.test", "a.test"]);
+    expect(personalBrowserKnownHosts(ownerTier, "ask", hosts)).toEqual([]);
+    expect(personalBrowserKnownHosts(older, "routine", hosts)).toEqual([]);
+    expect(personalBrowserKnownHosts(legacy, "routine", hosts)).toEqual([]);
+    expect(personalBrowserKnownHosts(ownerTier, "routine", null)).toEqual([]);
+    expect(personalBrowserKnownHosts(ownerTier, "routine", ["127.0.0.1"])).toEqual(["127.0.0.1"]);
+  });
+});
 
 describe("usePersonalBrowserBridge lifecycle", () => {
   let container: HTMLDivElement;
