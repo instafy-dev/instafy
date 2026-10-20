@@ -75,7 +75,8 @@ Stop everything with `pnpm runtime:down`, which tears down the controller stack.
   Chromium) for the on-demand browser host, so the base image is larger than
   it was. Nothing in that stack runs until something calls
   `runtime-entrypoint start-browser-host`; see
-  [On-demand browser host](../docs/Shared-Browser.md#on-demand-browser-host).
+  [On-demand browser host](../docs/Shared-Browser.md#on-demand-browser-host) and
+  [Browser host cost](../docs/Runtime-Image-Builds.md#browser-host-cost).
 - Pin hosted/provider launches to an immutable OCI manifest reference, for example
   `RUNTIME_AGENT_IMAGE=<registry>/<organization>/instafy-runtime-agent@sha256:<digest>` and
   `RUNTIME_PROXY_IMAGE=<registry>/<organization>/instafy-openai-proxy-server@sha256:<digest>`.

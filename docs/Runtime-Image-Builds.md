@@ -108,6 +108,37 @@ To keep builds fast, raise the cap (for example to 60–100 GB, disk space
 permitting) in Docker Desktop, under Settings, Docker Engine, then restart
 Docker.
 
+## Browser host cost
+
+Both runtime images carry the on-demand browser host (see
+[Shared Browser](Shared-Browser.md#on-demand-browser-host)). No browser process
+runs until something starts the host, so on an idle machine its cost should be
+image bytes and a few milliseconds at boot. The manual **Runtime browser cost**
+workflow (`.github/workflows/runtime-browser-cost.yml`) measures that on a
+hosted runner, with no secrets, between an image without the stack and one with
+it. Pass two public image references, for example the amd64 architecture tags
+`ghcr.io/instafy-dev/instafy-runtime-agent:<commit>-linux-amd64` of a release
+before and after the browser host. Locally:
+
+```bash
+scripts/runtime-browser-cost.sh <before-image> <after-image>
+```
+
+It records image size and a cold pull, boot time to the entrypoint's final
+`exec` line (median of 5) and memory after 60 s idle for both images, then, for
+the after image: 20 host starts on one persisted profile (start to CDP ready),
+memory at about:blank and after a 5,000-row table and an animated canvas page,
+container CPU during 60 s of CDP screencast, and `/tmp` growth. The gates are
+an image increase of at most 400 MB, a boot increase of at most 0.5 s, an idle
+memory increase of at most 16 MiB and a start p95 of at most 15 s. CPU is
+reported, not gated. The run fails when a gate fails, and its artifact holds
+this page with the section below replaced by the new numbers.
+
+<!-- runtime-browser-cost:start -->
+Not measured yet: the first images with the browser host have not been
+published.
+<!-- runtime-browser-cost:end -->
+
 ## Forcing a clean build
 
 - **Re-run the Docker layers but keep the compiled crates:**

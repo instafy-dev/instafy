@@ -1,0 +1,86 @@
+name: Runtime browser cost
+
+# Measures what the on-demand browser host costs a runtime machine by comparing
+# an image without the browser stack with one that has it: image size, cold
+# pull, boot time, idle memory with the browser never started, host start
+# latency, memory with pages open, CPU during screencast and /tmp growth.
+# scripts/runtime-browser-cost.sh does the work and fails the run when a gate
+# from docs/Runtime-Image-Builds.md fails.
+#
+# Manual only, on a hosted runner, with a read-only token and no secrets: the
+# images are public and only pulled. Nothing is pushed or committed; the report
+# is the job summary, and the artifact holds docs/Runtime-Image-Builds.md with
+# the measured section replaced, for a person to commit.
+
+on:
+  workflow_dispatch:
+    inputs:
+      before_image:
+        description: Runtime image without the browser host stack, e.g. ghcr.io/instafy-dev/instafy-runtime-agent:<commit>-linux-amd64
+        required: true
+        type: string
+      after_image:
+        description: Runtime image with the browser host stack
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-browser-cost
+  cancel-in-progress: false
+
+jobs:
+  measure:
+    name: Measure the browser host cost
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Require two runtime image references
+        env:
+          BEFORE_IMAGE: ${{ inputs.before_image }}
+          AFTER_IMAGE: ${{ inputs.after_image }}
+        run: |
+          set -euo pipefail
+          pattern='^ghcr\.io/instafy-dev/instafy-runtime-agent(:[A-Za-z0-9][A-Za-z0-9._-]{0,127}|@sha256:[0-9a-f]{64})$'
+          for image in "$BEFORE_IMAGE" "$AFTER_IMAGE"; do
+            if [[ ! "$image" =~ $pattern ]]; then
+              echo "::error::Image references must be ghcr.io/instafy-dev/instafy-runtime-agent tags or digests."
+              exit 1
+            fi
+          done
+          if [[ "$BEFORE_IMAGE" == "$AFTER_IMAGE" ]]; then
+            echo "::error::The before and after images must differ."
+            exit 1
+          fi
+
+      # Two runtime images need more than a standard hosted runner's free
+      # disk. These preinstalled SDKs are unrelated to this Docker-only job.
+      - name: Reclaim hosted-runner disk for the images
+        if: runner.environment == 'github-hosted'
+        run: |
+          set -euo pipefail
+          sudo rm -rf -- /opt/ghc /usr/local/lib/android /usr/share/dotnet
+
+      - name: Measure
+        env:
+          BEFORE_IMAGE: ${{ inputs.before_image }}
+          AFTER_IMAGE: ${{ inputs.after_image }}
+          COST_OUTPUT_DIR: ${{ runner.temp }}/runtime-browser-cost
+        run: bash scripts/runtime-browser-cost.sh "$BEFORE_IMAGE" "$AFTER_IMAGE"
+
+      - name: Upload the measurements and updated page
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: runtime-browser-cost-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runtime-browser-cost/
+          if-no-files-found: ignore
+          retention-days: 30
