@@ -13,6 +13,10 @@ use tokio::task;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use super::address_pools::{
+    is_address_pool_exhaustion, reclaim_runtime_address_space, ControllerSpaceDirectory, DockerCli,
+    NoSpaceDirectory, ReclaimedAddressSpace, SpaceDirectory, SystemDocker,
+};
 use super::census::{group_containers, ContainerFacts, RuntimeCensus, MAX_CENSUS_CONTAINERS};
 use super::checkout_eviction::{
     sweep_checkouts, touch_checkout, CheckoutEvictionPolicy, CheckoutHost, CheckoutSweepReport,
@@ -91,6 +95,9 @@ pub struct DockerRuntimeAllocator {
     /// Held by a start for its project's checkout, and by the eviction sweep
     /// while it decides about and removes a checkout.
     checkout_locks: CheckoutLocks,
+    /// Which spaces are gone, for a start that ran out of address pools
+    /// (see [`super::address_pools`]).
+    space_directory: Arc<dyn SpaceDirectory>,
 }
 
 type CheckoutLocks = Arc<std::sync::Mutex<HashMap<Uuid, Arc<Mutex<()>>>>>;
@@ -193,6 +200,10 @@ impl DockerRuntimeAllocator {
             built_images: Mutex::new(HashSet::new()),
             checkout_eviction: config.runtime_checkout_eviction.clone(),
             checkout_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            space_directory: match ControllerSpaceDirectory::from_env() {
+                Some(directory) => Arc::new(directory),
+                None => Arc::new(NoSpaceDirectory),
+            },
         })
     }
 
@@ -483,6 +494,7 @@ impl DockerRuntimeAllocator {
         } else {
             false
         };
+        let space_directory = self.space_directory.clone();
         let permit = self.acquire_compose_permit().await?;
         task::spawn_blocking(move || -> anyhow::Result<()> {
             let _permit = permit;
@@ -670,6 +682,14 @@ impl DockerRuntimeAllocator {
             );
 
             cleanup_project_artifacts(&project_name, &service);
+
+            reclaim_after_failed_start(
+                &SystemDocker,
+                &project_prefix,
+                &project_name,
+                space_directory.as_ref(),
+                &summarize_command_output(&first_output),
+            );
 
             match cleanup_global_runtime_artifacts(&project_prefix) {
                 Ok((stale_container_count, stale_network_count))
@@ -974,6 +994,41 @@ impl DockerRuntimeAllocator {
             ),
             Some(other) => anyhow::bail!("unsupported managed runtime flavor {other:?}"),
             None => anyhow::bail!("managed runtime launch attestation is missing its flavor"),
+        }
+    }
+}
+
+/// Before a failed start's retry: when Docker ran out of address pools,
+/// free what no space needs ([`reclaim_runtime_address_space`]) so the retry
+/// can get a subnet. Any other failure reclaims nothing. Never fails the
+/// start: what it could not do is logged.
+fn reclaim_after_failed_start(
+    cli: &dyn DockerCli,
+    prefix: &str,
+    starting: &str,
+    spaces: &dyn SpaceDirectory,
+    failure: &str,
+) -> Option<ReclaimedAddressSpace> {
+    if !is_address_pool_exhaustion(failure) {
+        return None;
+    }
+    match reclaim_runtime_address_space(cli, prefix, starting, spaces) {
+        Ok(reclaimed) => {
+            warn!(
+                project_name = %starting,
+                removed_projects = reclaimed.projects.len(),
+                removed_networks = reclaimed.networks.len(),
+                "docker ran out of address pools; freed runtime networks before retrying"
+            );
+            Some(reclaimed)
+        }
+        Err(error) => {
+            warn!(
+                project_name = %starting,
+                %error,
+                "docker ran out of address pools and the runtime networks could not be listed"
+            );
+            None
         }
     }
 }
@@ -1978,6 +2033,47 @@ mod tests {
                 std::env::remove_var(key);
             }
         }
+    }
+
+    /// A start that ran out of address pools frees the runtime networks no
+    /// space needs before its one retry; any other failure frees nothing.
+    #[test]
+    fn only_an_address_pool_exhaustion_reclaims_before_the_retry() {
+        use super::super::address_pools::tests::{runtime_project, FakeDocker};
+        let prefix = "instafy-runtime-";
+        let starting = runtime_project(prefix, Uuid::new_v4());
+        let leftover = runtime_project(prefix, Uuid::new_v4());
+        let docker = FakeDocker::default();
+        *docker.networks.lock().unwrap() = vec![
+            format!("{leftover}_default"),
+            "instafy-runtime_default".to_string(),
+        ];
+
+        let other = reclaim_after_failed_start(
+            &docker,
+            prefix,
+            &starting,
+            &NoSpaceDirectory,
+            "exit=1 stderr=\"Bind for 0.0.0.0:55990 failed: port is already allocated\"",
+        );
+        assert_eq!(other, None);
+        assert!(docker.calls.lock().unwrap().is_empty());
+
+        let reclaimed = reclaim_after_failed_start(
+            &docker,
+            prefix,
+            &starting,
+            &NoSpaceDirectory,
+            &format!(
+                "exit=1 stderr=\"failed to create network {starting}_default: Error response from daemon: all predefined address pools have been fully subnetted\""
+            ),
+        )
+        .expect("reclaimed");
+        assert_eq!(reclaimed.networks, vec![format!("{leftover}_default")]);
+        assert_eq!(
+            docker.networks.lock().unwrap().clone(),
+            vec!["instafy-runtime_default".to_string()]
+        );
     }
 
     #[tokio::test]
