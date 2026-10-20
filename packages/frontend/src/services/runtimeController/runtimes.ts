@@ -717,6 +717,12 @@ export interface ControllerTunnelGrant {
   expiresAt: string | null;
   metadata?: Record<string, unknown> | null;
   credentials?: Record<string, unknown> | null;
+  /**
+   * The controller's mark on a `tunnel.*` event for a tunnel that is not the
+   * runtime's own, such as a site preview. Only events carry it, and only
+   * the controller sets it: a client's metadata never becomes a `kind`.
+   */
+  kind?: string | null;
 }
 
 export interface DesktopRuntimeRequestResult {
@@ -967,11 +973,10 @@ export function mapTunnelGrantFromPayload(
   const url = readString(data["url"]) ?? null;
   const status = (readString(data["status"]) ?? "").toLowerCase();
   const expiresAt = readString(data["expiresAt"]) ?? null;
-  // Tunnel events carry no metadata, only the tunnel's `kind` when it has one
-  // of its own (a site preview, say), so the store can keep it apart.
-  const kind = readString(data["kind"]);
-  const payloadMetadata = readRecord(data["metadata"] ?? null);
-  const metadata = kind ? { kind, ...payloadMetadata } : payloadMetadata;
+  // Tunnel events carry no metadata, only the tunnel's `kind` when it is not
+  // the runtime's own (a site preview, say), so the store can keep it apart.
+  const kind = readString(data["kind"]) ?? null;
+  const metadata = readRecord(data["metadata"] ?? null);
   const credentials = readRecord(data["credentials"] ?? null);
   return {
     id,
@@ -988,5 +993,6 @@ export function mapTunnelGrantFromPayload(
     expiresAt,
     metadata,
     credentials,
+    kind,
   };
 }

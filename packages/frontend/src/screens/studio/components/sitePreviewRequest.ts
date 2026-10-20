@@ -15,12 +15,6 @@ export function isSitePreviewId(value: unknown): value is string {
 }
 
 /**
- * A "Ready to preview" card: an assistant `action_request` whose details name
- * a preview by id. The card carries ids only. A url or href in the message is
- * never read, so a look-alike card can at most ask the controller about a
- * preview this viewer may already open.
- */
-/**
  * Whether a stored card declares a site preview at all (its details carry a
  * `preview`), whether or not `sitePreviewFromMessage` accepts what it names.
  */
@@ -30,6 +24,12 @@ export function declaresSitePreview(message: ChatMessage): boolean {
   return value !== undefined && value !== null;
 }
 
+/**
+ * A "Ready to preview" card: an assistant `action_request` whose details name
+ * a preview by id. The card carries ids only. A url or href in the message is
+ * never read, so a look-alike card can at most ask the controller about a
+ * preview this viewer may already open.
+ */
 export function sitePreviewFromMessage(message: ChatMessage): SitePreviewRequest | null {
   if (message.role !== "assistant") return null;
   if (getMessageType(message) !== "action_request") return null;

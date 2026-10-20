@@ -6,7 +6,7 @@ import { ControllerApiError } from "../../../services/runtimeController/core";
 import {
   getSitePreview,
   sitePreviewProblem,
-  sitePreviewRecordState,
+  sitePreviewShownState,
   type ControllerSitePreview,
 } from "../../../services/runtimeController/previews";
 import { useConversationPreviewOpener } from "../../../workspace/ConversationPreviewContext";
@@ -15,7 +15,11 @@ import type { SitePreviewRequest } from "./sitePreviewRequest";
 
 export type SitePreviewState = "checking" | "live" | "not_responding" | "unavailable" | "stopped";
 
-/** How often a card whose pane is on screen, or whose site has no settled state, asks again. */
+/**
+ * How often a card whose pane is on screen, or whose site has no settled
+ * state, asks again. Only the newest card for a preview asks; every card for
+ * it reads the answer.
+ */
 const SITE_PREVIEW_FOLLOW_MS = 15_000;
 /**
  * How many times a card whose pane is not on screen follows a site with no
@@ -35,7 +39,7 @@ const ENDED_RUNTIME_STATUSES: ReadonlySet<string> = new Set(["stopped", "stoppin
  * What a card says about its site. Only the controller's record (grant and
  * probe) and the store's tunnel and runtime events decide it, never the
  * message's text, and Live needs a probe that saw the site answer, so an old
- * card never claims Live.
+ * card never claims Live. The record reads as it does in the pane.
  */
 export function sitePreviewState(input: {
   preview: Pick<ControllerSitePreview, "status" | "health"> | null;
@@ -50,17 +54,54 @@ export function sitePreviewState(input: {
   if (input.runtimeStatus && ENDED_RUNTIME_STATUSES.has(input.runtimeStatus)) return "stopped";
   if (input.unavailable) return "unavailable";
   if (!input.preview) return "checking";
-  switch (sitePreviewRecordState(input.preview)) {
-    case "stopped":
-      return "stopped";
-    case "live":
-      return "live";
-    case "not_responding":
-      return "not_responding";
-    case "unverified":
-      return "unavailable";
-    default:
-      return "checking";
+  return sitePreviewShownState(input.preview);
+}
+
+/** A settled answer about a preview, which every card for it reads. */
+type SharedAnswer = { preview: ControllerSitePreview } | { gone: true };
+type CardMember = {
+  read: (answer: SharedAnswer) => void;
+  setLeads: (leads: boolean) => void;
+  /** Whether this card would follow its site now, if it were the one to. */
+  wants: boolean;
+};
+type PreviewCards = { members: Set<CardMember>; unseenFollows: number };
+
+/**
+ * The cards on the page for each preview, oldest first. Octo may post several
+ * for one site (each time it opens it again). Only the newest card that would
+ * follow the site does, every card reads each answer, and follow-ups made
+ * while the pane is not on screen are counted once per preview, so N cards
+ * never ask N times.
+ */
+const cardsByPreview = new Map<string, PreviewCards>();
+
+function electFollower(cards: PreviewCards) {
+  const follower = [...cards.members].reverse().find((member) => member.wants) ?? null;
+  for (const member of cards.members) member.setLeads(member === follower);
+}
+
+function joinPreviewCards(previewId: string, member: CardMember): () => void {
+  const cards = cardsByPreview.get(previewId) ?? { members: new Set<CardMember>(), unseenFollows: 0 };
+  cardsByPreview.set(previewId, cards);
+  cards.members.add(member);
+  electFollower(cards);
+  return () => {
+    cards.members.delete(member);
+    if (cards.members.size) electFollower(cards);
+    else cardsByPreview.delete(previewId);
+  };
+}
+
+function setWantsToFollow(previewId: string, member: CardMember, wants: boolean) {
+  member.wants = wants;
+  const cards = cardsByPreview.get(previewId);
+  if (cards?.members.has(member)) electFollower(cards);
+}
+
+function shareAnswer(previewId: string, from: CardMember, answer: SharedAnswer) {
+  for (const member of cardsByPreview.get(previewId)?.members ?? []) {
+    if (member !== from) member.read(answer);
   }
 }
 
@@ -151,12 +192,28 @@ export function SitePreviewCard({
   // Failed checks in a row, and whether the controller said it will not answer.
   const [failures, setFailures] = useState(0);
   const [cannotCheck, setCannotCheck] = useState(false);
-  // Follow-up checks made while the card's pane was not on screen, and
-  // whether they ran out.
-  const unseenFollows = useRef(0);
+  // Whether the follow-up checks made while the pane was not on screen (counted
+  // per preview, in cardsByPreview) ran out.
   const [followsSpent, setFollowsSpent] = useState(false);
   const signals = useStoreSignals(preview.previewId, server?.runtimeId ?? null);
   const request = useRef<AbortController | null>(null);
+  // Whether this is the card that follows its preview for every card of it.
+  const [leads, setLeads] = useState(false);
+  const member = useMemo<CardMember>(() => ({
+    read: (answer) => {
+      if ("gone" in answer) {
+        setGone(true);
+        return;
+      }
+      setServer(answer.preview);
+      setGone(false);
+      setFailures(0);
+      setCannotCheck(false);
+    },
+    setLeads,
+    wants: false,
+  }), []);
+  useEffect(() => joinPreviewCards(preview.previewId, member), [member, preview.previewId]);
 
   const refresh = useCallback(async () => {
     if (!projectId) return;
@@ -166,28 +223,29 @@ export function SitePreviewCard({
     try {
       const next = await getSitePreview(projectId, preview.previewId, controller.signal);
       if (controller.signal.aborted) return;
-      setServer(next);
-      setGone(false);
-      setFailures(0);
-      setCannotCheck(false);
+      member.read({ preview: next });
+      shareAnswer(preview.previewId, member, { preview: next });
     } catch (error) {
       if (controller.signal.aborted) return;
       const failure = checkFailure(error);
-      if (failure === "gone") setGone(true);
-      else if (failure === "final") setCannotCheck(true);
+      if (failure === "gone") {
+        member.read({ gone: true });
+        shareAnswer(preview.previewId, member, { gone: true });
+      } else if (failure === "final") setCannotCheck(true);
       else setFailures((count) => count + 1);
     }
-  }, [preview.previewId, projectId]);
+  }, [member, preview.previewId, projectId]);
 
   // Something new happened (a press, a tunnel or runtime event): every
   // automatic check the card gave up on may answer now, so ask again.
   const renew = useCallback(() => {
     setFailures(0);
     setCannotCheck(false);
-    unseenFollows.current = 0;
+    const cards = cardsByPreview.get(preview.previewId);
+    if (cards) cards.unseenFollows = 0;
     setFollowsSpent(false);
     void refresh();
-  }, [refresh]);
+  }, [preview.previewId, refresh]);
 
   // A failed check is no answer: ask again a few times, more slowly each
   // time and only while the page is visible, then stop.
@@ -234,27 +292,31 @@ export function SitePreviewCard({
   // While its pane is on screen, the card keeps up with the site, so it never
   // reads Live beside a site that stopped answering. A card whose site has no
   // settled state keeps asking for a while too, so it sees the site come up.
+  // Only the newest card for the preview asks; the others read its answers.
   // Nothing follows while a failed check is being retried or after the
   // controller said it will not answer.
   const settled = state === "live" || state === "stopped";
-  const following = !failures && !cannotCheck && !gone &&
+  const wantsToFollow = !failures && !cannotCheck && !gone &&
     (showing || (!settled && !followsSpent));
+  useEffect(() => setWantsToFollow(preview.previewId, member, wantsToFollow), [member, preview.previewId, wantsToFollow]);
+  const following = leads && wantsToFollow;
   useEffect(() => {
     if (!following) return;
     const timer = window.setInterval(() => {
       if (document.visibilityState === "hidden") return;
       if (!showing) {
-        if (unseenFollows.current >= MAX_UNSEEN_FOLLOWS) {
+        const cards = cardsByPreview.get(preview.previewId);
+        if (!cards || cards.unseenFollows >= MAX_UNSEEN_FOLLOWS) {
           window.clearInterval(timer);
           setFollowsSpent(true);
           return;
         }
-        unseenFollows.current += 1;
+        cards.unseenFollows += 1;
       }
       void refresh();
     }, SITE_PREVIEW_FOLLOW_MS);
     return () => window.clearInterval(timer);
-  }, [following, refresh, showing]);
+  }, [following, preview.previewId, refresh, showing]);
 
   // The preview comes from the stored card, parsed once: nothing a press
   // carries is trusted. Opening only selects the conversation's view; the
@@ -296,10 +358,13 @@ export function SitePreviewCard({
           <span className={`h-2 w-2 shrink-0 rounded-full ${STATE_DOT[state]}`} aria-hidden="true" />
           {label}
         </span>
-        <span className="inline-flex items-center gap-1">
-          <Lock className="h-3 w-3" aria-hidden="true" />
-          Only space members
-        </span>
+        {/* Said only when the controller's record says so. */}
+        {server?.visibility === "private" ? (
+          <span className="inline-flex items-center gap-1" data-testid="preview-ready-visibility">
+            <Lock className="h-3 w-3" aria-hidden="true" />
+            Only space members
+          </span>
+        ) : null}
       </Text>
     </ChatActionCard>
   );

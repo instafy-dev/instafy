@@ -2,8 +2,10 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createInitialRuntimeStoreState, runtimeReducer } from "../../../../runtime/runtimeStore";
 import { ControllerApiError } from "../../../../services/runtimeController/core";
 import type { ControllerSitePreview } from "../../../../services/runtimeController/previews";
+import { mapTunnelGrantFromPayload } from "../../../../services/runtimeController/runtimes";
 import { ConversationPreviewContext, type ConversationPreviewOpener } from "../../../../workspace/ConversationPreviewContext";
 import { SitePreviewCard } from "../SitePreviewCard";
 
@@ -23,7 +25,7 @@ const preview = { previewId: PREVIEW_ID, title: "Site preview", port: 4173 };
 function server(overrides: Partial<ControllerSitePreview> = {}): ControllerSitePreview {
   return {
     previewId: PREVIEW_ID, title: "Site preview", port: 4173, path: "/", runtimeId: "runtime-1", status: "active",
-    health: { listening: true, status: 200 }, messageId: "card-1", createdAt: null, ...overrides,
+    health: { listening: true, status: 200 }, messageId: "card-1", createdAt: null, visibility: "private", ...overrides,
   };
 }
 const apiError = (status: number) => new ControllerApiError({ status, message: "error", code: null, details: null });
@@ -40,10 +42,10 @@ describe("SitePreviewCard", () => {
     }
   }
 
-  async function render() {
+  async function render(cards = 1) {
     await act(async () => root.render(
       <ConversationPreviewContext.Provider value={opener}>
-        <SitePreviewCard preview={preview} projectId="project-1" />
+        {Array.from({ length: cards }, (_, index) => <SitePreviewCard key={index} preview={preview} projectId="project-1" />)}
       </ConversationPreviewContext.Provider>,
     ));
     await act(async () => { await Promise.resolve(); });
@@ -75,8 +77,22 @@ describe("SitePreviewCard", () => {
     expect(status().textContent).toBe("Checking…");
     expect(card().textContent).toContain("Ready to preview");
     expect(card().textContent).toContain("Site preview");
-    expect(card().textContent).toContain("Only space members");
+    // Who may open it is said only once the controller says so.
+    expect(card().textContent).not.toContain("Only space members");
     expect(card().querySelector("a, [href], iframe")).toBeNull();
+  });
+
+  it("says Only space members only when the controller's record says the preview is private", async () => {
+    mocks.getSitePreview.mockResolvedValue(server());
+    await render();
+    expect(card().textContent).toContain("Only space members");
+
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    mocks.getSitePreview.mockResolvedValue(server({ visibility: null }));
+    await render();
+    expect(status().textContent).toBe("Live");
+    expect(card().textContent).not.toContain("Only space members");
   });
 
   it("reads Live from the grant and the probe, with Open", async () => {
@@ -101,11 +117,12 @@ describe("SitePreviewCard", () => {
   });
 
   // Live needs proof: a probe that saw the site answer on an active tunnel.
-  it("says Status unavailable, never Live, when the broker could not probe the site", async () => {
+  // The pane reads the same record as Checking too, so the two never disagree.
+  it("reads Checking, never Live, when the broker could not probe the site, as the pane does", async () => {
     mocks.getSitePreview.mockResolvedValue(server({ health: null }));
     await render();
-    expect(status().dataset.state).toBe("unavailable");
-    expect(status().textContent).toBe("Status unavailable");
+    expect(status().dataset.state).toBe("checking");
+    expect(status().textContent).toBe("Checking…");
   });
 
   it("reads Checking, never Live, while the tunnel is not active yet", async () => {
@@ -138,6 +155,25 @@ describe("SitePreviewCard", () => {
     opener = { ...opener!, visiblePreviewId: PREVIEW_ID };
     await render();
     expect(openButton()?.textContent).toBe("Open");
+  });
+
+  it("reads Stopped from a revoked tunnel event even when asking again fails", async () => {
+    // The store as the real reducer leaves it: the preview's tunnel came up, then was revoked.
+    const grant = mapTunnelGrantFromPayload({ id: "grant-1", tunnelId: PREVIEW_ID, projectId: "project-1", runtimeId: "runtime-1",
+      provider: "self_hosted", status: "active", kind: "preview" })!;
+    let store = runtimeReducer(createInitialRuntimeStoreState(), { type: "upsertTunnelGrant", grant });
+    mocks.runtime = store as unknown as Record<string, unknown>;
+    mocks.getSitePreview.mockResolvedValue(server());
+    await render();
+    expect(status().textContent).toBe("Live");
+
+    store = runtimeReducer(store, { type: "upsertTunnelGrant", grant: { ...grant, status: "revoked" } });
+    mocks.runtime = store as unknown as Record<string, unknown>;
+    mocks.getSitePreview.mockRejectedValue(new TypeError("Failed to fetch"));
+    await render();
+    expect(mocks.getSitePreview).toHaveBeenCalledTimes(2);
+    expect(status().dataset.state).toBe("stopped");
+    expect(status().textContent).toBe("Stopped");
   });
 
   it("says Status unavailable after a failed check, and asks again", async () => {
@@ -235,6 +271,36 @@ describe("SitePreviewCard", () => {
     await render();
     await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
     expect(status().textContent).toBe("Not responding on port 4173");
+  });
+
+  it("lets only one of several cards for a preview follow it while its pane is on screen, and tells them all", async () => {
+    vi.useFakeTimers();
+    mocks.getSitePreview.mockResolvedValue(server());
+    opener = { ...opener!, visiblePreviewId: PREVIEW_ID };
+    await render(3);
+    // Each card checks once when it is drawn.
+    expect(mocks.getSitePreview).toHaveBeenCalledTimes(3);
+    mocks.getSitePreview.mockResolvedValue(server({ health: { listening: false, status: null } }));
+    await advanceMinutes(1);
+    // One follow-up every 15 seconds for the preview, not one per card.
+    expect(mocks.getSitePreview).toHaveBeenCalledTimes(7);
+    const states = [...container.querySelectorAll<HTMLElement>("[data-testid=preview-ready-status]")].map((element) => element.textContent);
+    expect(states).toEqual(Array(3).fill("Not responding on port 4173"));
+
+    // The follower goes away: another card takes over.
+    await render(2);
+    const before = mocks.getSitePreview.mock.calls.length;
+    await advanceMinutes(1);
+    expect(mocks.getSitePreview.mock.calls.length - before).toBe(4);
+  });
+
+  it("follows a site that is not responding a bounded number of times for all its cards together", async () => {
+    vi.useFakeTimers();
+    mocks.getSitePreview.mockResolvedValue(server({ health: { listening: false, status: null } }));
+    await render(3);
+    await advanceMinutes(60);
+    // Three first checks and eight follow-ups for the preview, not eight per card.
+    expect(mocks.getSitePreview).toHaveBeenCalledTimes(11);
   });
 
   it("opens nothing by itself, and on a press opens the preview it was drawn for", async () => {

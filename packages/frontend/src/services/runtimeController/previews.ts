@@ -20,6 +20,8 @@ export type ControllerSitePreview = {
   health: SitePreviewHealth | null;
   messageId: string | null;
   createdAt: string | null;
+  /** Who may open it, as the controller recorded it (`private`: space members only). Absent when it did not say. */
+  visibility?: string | null;
 };
 
 /** A member-only capability address. Keep it in memory only: never store, log or show it. */
@@ -132,6 +134,7 @@ export function mapControllerSitePreview(value: unknown): ControllerSitePreview 
     health: mapSitePreviewHealth(value.health),
     messageId: readString(value.messageId),
     createdAt: readString(value.createdAt),
+    visibility: readString(value.visibility),
   };
 }
 
@@ -149,6 +152,18 @@ export function sitePreviewRecordState(preview: Pick<ControllerSitePreview, "sta
   if (!health) return "unverified";
   if (!health.listening || (health.status !== null && health.status >= 502 && health.status <= 504)) return "not_responding";
   return "live";
+}
+
+/**
+ * What the card and the pane both say from the record alone, so one record
+ * never reads two ways side by side: a tunnel not active yet, or one the
+ * broker could not probe, reads Checking, never Live.
+ */
+export type SitePreviewShownState = "checking" | "live" | "not_responding" | "stopped";
+
+export function sitePreviewShownState(preview: Pick<ControllerSitePreview, "status" | "health">): SitePreviewShownState {
+  const state = sitePreviewRecordState(preview);
+  return state === "pending" || state === "unverified" ? "checking" : state;
 }
 
 /** `fresh` asks for a new probe (a person's Reload) instead of the controller's short cache. */

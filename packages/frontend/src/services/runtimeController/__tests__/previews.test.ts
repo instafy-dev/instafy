@@ -52,10 +52,11 @@ describe("site preview controller client", () => {
   it("reads a preview with its health and no address", async () => {
     fetchMock.mockImplementation(async () => new Response(JSON.stringify({ previewId: PREVIEW_ID, title: "Docs site", port: 4173, path: "/",
       runtimeId: "runtime-1", status: "ACTIVE", health: { listening: false, status: null }, messageId: "m-1", createdAt: "2026-10-12T00:00:00Z",
-      viewerUrl: VIEWER })));
+      visibility: "private", viewerUrl: VIEWER })));
     const preview = await getSitePreview(PROJECT_ID, PREVIEW_ID);
     expect(preview).toEqual({ previewId: PREVIEW_ID, title: "Docs site", port: 4173, path: "/",
-      runtimeId: "runtime-1", status: "active", health: { listening: false, status: null }, messageId: "m-1", createdAt: "2026-10-12T00:00:00Z" });
+      runtimeId: "runtime-1", status: "active", health: { listening: false, status: null }, messageId: "m-1", createdAt: "2026-10-12T00:00:00Z",
+      visibility: "private" });
     expect(JSON.stringify(preview)).not.toContain("p-aaaa");
     expect(fetchMock).toHaveBeenCalledWith(BASE, expect.objectContaining({ method: "GET", headers: expect.objectContaining({ authorization: "Bearer token-123" }) }));
     await getSitePreview(PROJECT_ID, PREVIEW_ID, undefined, { fresh: true });

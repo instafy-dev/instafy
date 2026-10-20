@@ -431,49 +431,50 @@ function storeRunRecord(
   };
 }
 
-// The names the controller reads a tunnel's purpose from, in its order (see
-// `extract_tunnel_purpose_from_metadata`).
-const TUNNEL_PURPOSE_KEYS = ["purpose", "tunnelPurpose", "tunnel_purpose", "kind"] as const;
 const ENDED_TUNNEL_GRANT_STATUSES: ReadonlySet<string> = new Set(["revoked", "expired", "closed", "failed"]);
-
-/**
- * A tunnel's purpose as the controller reads it: the first of its keys that is
- * present, if it is a string, normalized like `normalize_tunnel_purpose`
- * (lowercase ASCII letters, digits, `_` and `-`, anything else `_`, at most
- * 48 characters, `_` trimmed). Null when there is none.
- */
-export function tunnelGrantPurpose(metadata: Record<string, unknown> | null | undefined): string | null {
-  if (!metadata) {
-    return null;
-  }
-  const key = TUNNEL_PURPOSE_KEYS.find((candidate) => Object.prototype.hasOwnProperty.call(metadata, candidate));
-  const raw = key ? metadata[key] : null;
-  if (typeof raw !== "string") {
-    return null;
-  }
-  let normalized = "";
-  for (const char of raw.trim()) {
-    if (normalized.length >= 48) {
-      break;
-    }
-    const lower = /^[A-Za-z]$/.test(char) ? char.toLowerCase() : char;
-    normalized += /^[a-z0-9_-]$/.test(lower) ? lower : "_";
-  }
-  normalized = normalized.replace(/^_+|_+$/g, "");
-  return normalized || null;
-}
+/** How many ended side tunnels the store remembers, oldest dropped first. */
+export const MAX_ENDED_SIDE_TUNNEL_GRANTS = 32;
 
 /**
  * Where the store keeps a tunnel grant. A runtime's own tunnel is kept under
- * its runtime id, where readers look it up. Any other tunnel on that runtime,
- * one opened for a purpose of its own such as a site preview, is kept under
- * its grant id, so it never replaces the runtime's own.
+ * its runtime id, where readers look it up. A tunnel the controller marks as
+ * not the runtime's own (its events carry a `kind`, such as a site preview's)
+ * is kept under its grant id, so it never replaces the runtime's own. Grant
+ * metadata never decides this: a client may write any metadata it likes.
  */
 export function tunnelGrantStoreKey(grant: ControllerTunnelGrant): string | null {
   if (!grant.runtimeId) {
     return null;
   }
-  return tunnelGrantPurpose(grant.metadata) ? grant.id : grant.runtimeId;
+  return grant.kind ? grant.id : grant.runtimeId;
+}
+
+/**
+ * What the store keeps of a side tunnel: who it is and its status. Readers
+ * reach such a site another way (a preview through its own viewer session),
+ * so its address, host and credentials are not kept.
+ */
+function sideTunnelGrantRecord(grant: ControllerTunnelGrant): ControllerTunnelGrant {
+  return { ...grant, hostname: null, url: null, metadata: null, credentials: null };
+}
+
+/**
+ * Keeps an ended side tunnel's status (readers say Stopped from it without
+ * asking the controller) while bounding how many are kept: past
+ * MAX_ENDED_SIDE_TUNNEL_GRANTS, the oldest ended ones are dropped.
+ */
+function boundEndedSideTunnelGrants(tunnelGrants: Record<string, ControllerTunnelGrant>): Record<string, ControllerTunnelGrant> {
+  const ended = Object.entries(tunnelGrants)
+    .filter(([key, grant]) => key !== grant.runtimeId && ENDED_TUNNEL_GRANT_STATUSES.has(grant.status))
+    .map(([key]) => key);
+  if (ended.length <= MAX_ENDED_SIDE_TUNNEL_GRANTS) {
+    return tunnelGrants;
+  }
+  const next = { ...tunnelGrants };
+  for (const key of ended.slice(0, ended.length - MAX_ENDED_SIDE_TUNNEL_GRANTS)) {
+    delete next[key];
+  }
+  return next;
 }
 
 export function runtimeReducer(
@@ -772,23 +773,22 @@ export function runtimeReducer(
       if (!key) {
         return state;
       }
-      // A purpose tunnel that ended is dropped, so ended grants never pile up
-      // on a long-lived runtime. The runtime's own grant keeps its last status.
-      if (key !== action.grant.runtimeId && ENDED_TUNNEL_GRANT_STATUSES.has(action.grant.status)) {
-        if (!(key in state.tunnelGrants)) {
-          return state;
-        }
-        const tunnelGrants = { ...state.tunnelGrants };
-        delete tunnelGrants[key];
-        return { ...state, tunnelGrants };
+      if (key === action.grant.runtimeId) {
+        return {
+          ...state,
+          tunnelGrants: {
+            ...state.tunnelGrants,
+            [key]: action.grant,
+          },
+        };
       }
-      return {
-        ...state,
-        tunnelGrants: {
-          ...state.tunnelGrants,
-          [key]: action.grant,
-        },
-      };
+      // A side tunnel that ended keeps its status, stripped and bounded, so
+      // ended grants never pile up on a long-lived runtime.
+      // Re-inserted last, so the oldest ended ones are the first dropped.
+      const tunnelGrants = { ...state.tunnelGrants };
+      delete tunnelGrants[key];
+      tunnelGrants[key] = sideTunnelGrantRecord(action.grant);
+      return { ...state, tunnelGrants: boundEndedSideTunnelGrants(tunnelGrants) };
     }
     default:
       return state;
