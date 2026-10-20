@@ -32,19 +32,26 @@ something up, to check a page, or to walk the person through a provider's screen
 Every interactive Chat turn carries that rule, whichever skills it loaded. When an
 interactive browser is not attached to the turn, Octo returns an **Open browser and
 continue** card. In the desktop app, for a person on their own AI connection, Studio
-presses it by itself once the turn is finished, in the browser on this device. Everywhere
-else, including Instafy's hosted browser on the web, the card waits for the person's
-press. Either way the task goes to that exact browser once it is ready, and the chat
+presses it by itself once the turn is finished, in the browser on this device. In a space
+whose controller policy covers it, Studio also presses it by itself for Instafy's browser
+on the conversation's own machine, which starts that browser on demand, on the web as in
+the desktop app. Everywhere else the card waits for the person's press. Either way the task
+goes to that exact browser once it is ready, and the chat
 records a one-line notice ("Octo opened Instafy's browser at dashboard.stripe.com") in
 place of the task, which the record keeps as the dispatched prompt. Studio starts a card
 by itself only:
 
-- in the desktop app's browser, for a person on their own AI connection. It never opens
-  Instafy's hosted browser by itself: the controller does not record who started a
-  running browser session, so Studio cannot tell the person's own session from a
-  teammate's, and opening a new one would start a machine or switch the space's own
-  machine to the browser, which stops whatever it still runs, such as a preview, a dev
-  server or a terminal session, and Studio cannot see those;
+- in the desktop app's browser, for a person on their own AI connection; or in
+  Instafy's browser on the conversation's own machine, when the controller covers the
+  space and reports that the machine starts the browser on demand, the machine is
+  running, and nobody else has that browser open, controls it, runs an agent in it or is
+  starting it (see [Shared Browser](Shared-Browser.md)). Studio opens only that exact
+  machine's browser and never starts the machine for it. It never opens a separate
+  browser session by itself: the controller does not record who started one, so Studio
+  cannot tell the person's own session from a teammate's. Nor does it open a new one,
+  which would start a machine or switch the space's own machine to the browser and stop
+  whatever it still runs, such as a preview, a dev server or a terminal session, which
+  Studio cannot see;
 - in the tab whose prompt started the run that sent the card, by the person who sent
   it; never for history, another viewer or device, a reload, an automation, a space
   review or a multi-agent worker;
@@ -65,7 +72,13 @@ by itself only:
 
 Once the browser is ready and before the task goes out, Studio checks again: if someone
 wrote after the card, another run started, a draft appeared, or someone else holds the
-browser, the task is not sent and the card keeps its button. Where Studio does not start a
+browser, the task is not sent and the card keeps its button. For Instafy's browser on the
+space's machine, Studio also waits, within the same two minutes, until the browser shows
+that machine, its roster has connected and a fresh reading after the open says it is
+ready; it refuses only when someone else is known to have it open or in control, or
+another person's run works in it. Instafy's browser that failed, or that needs the
+space's machine to restart, also leaves the button, with the reason. While someone else
+has it, Studio reads it again every ten seconds and opens it once it is free. Where Studio does not start a
 card, it keeps its button, with the reason when there is one, such as "A browser session is
 already running in this space. Open it when you are ready." or "This restarts this space's
 cloud machine as the browser, which stops anything still running on it." A draft or a
@@ -76,7 +89,8 @@ run that took the lane first, counts as sent: the notice stays and the card read
 **Opened**. A press, or an opened card, reads **Opened** from then on, also after a reload,
 so displaying an old message never runs it again. **Try again** on a failed browser run
 sends the card's task again through the browser, with the card it continues, never the
-notice text. A browser Studio opened by itself grants nothing a press does not. It asks
+notice text. A browser Studio opened by itself grants nothing a press does not: Instafy's browser starts
+in Ask with the per-run site approval, as a press does. In the browser on this device, it asks
 for routine browsing only from a Desktop whose routine is the owner tier (approval policy
 version 2: reading and plain links free, forms, purchases, messages and credentials still
 ask), and only when the person has not chosen Ask; on an older Desktop it uses Ask, so it
@@ -85,7 +99,8 @@ automatic, also gives an owner-tier Desktop in routine the hosts the card shows 
 three) as the run's own sites; they are not recorded with the prompt, and an older Desktop
 never receives them.
 The card shows the host its task opens. The card says nothing about which browsers exist,
-because the Workspace browser starts on demand as a runtime of its own; Studio disables the
+because the Workspace browser starts on demand, on the space's own machine or as a runtime
+of its own; Studio disables the
 button, with the reason, only when the Workspace browser is known not to open and there is no
 Personal Browser. Until then it counts as available.
 A skill setup offers the same card once, to walk to the provider screen that lists a value

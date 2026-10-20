@@ -156,7 +156,8 @@ the card's hosts (at most three) as `knownHosts` to a policy version 2 Desktop i
 an older Desktop ignores the field and never receives it. Only a person on their own AI
 connection gets that automatic start: with Instafy AI, a card resolves to Instafy's
 browser instead, because dispatch refuses a turn on this device's runtime, and that card
-waits for a press. Existing active control keeps its approval mode. Older Desktop hosts
+waits for a press unless Studio may open Instafy's browser on the conversation's own
+machine by itself (see [Browser Profiles](Browser-Profiles.md)). Existing active control keeps its approval mode. Older Desktop hosts
 without routine-mode support use Ask mode.
 
 Desktop reports `approvalPolicyVersion: 2` in its status. On such a host

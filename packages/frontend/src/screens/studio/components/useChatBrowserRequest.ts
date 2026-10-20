@@ -13,7 +13,9 @@ import {
   isBrowserAutoStartClaimed,
   isBrowserAutoStartDeclined,
   recordBrowserAutoStart,
+  sharedBrowserHostHeldByOther,
   type BrowserAutoStartPlan,
+  type SharedBrowserPresence,
 } from "./browserAutoStart";
 import {
   BROWSER_AUTO_STARTED_METADATA_KEY,
@@ -35,6 +37,7 @@ import {
   type BrowserRequestHost,
 } from "./browserRequest";
 import type { BrowserTransport } from "./usePersonalBrowserBridge";
+import type { SharedBrowserHostRefresh } from "./useSharedBrowserHostSnapshot";
 
 /** How a continuation is shown and recorded. */
 export type BrowserTaskExtras = {
@@ -65,9 +68,18 @@ export type BrowserAutoStartOptions = {
   heldByOther: boolean;
   plan: (request: BrowserRequest, transport: BrowserTransport) => BrowserAutoStartPlan;
   /**
+   * Reads Instafy's browser on the conversation's machine again (see
+   * useSharedBrowserHostSnapshot). A `pending` plan asks for it; an `attach`
+   * start forces one before it sends.
+   */
+  refreshHost?: SharedBrowserHostRefresh;
+  /** Who else is in Instafy's browser, from its collaboration roster; null before it is open. */
+  presence?: SharedBrowserPresence | null;
+  /**
    * Changes whenever something the decision reads changes (a draft, the
-   * layout, who holds the browser, this space's runtimes), so a card held by
-   * one of them is looked at again once it clears.
+   * layout, who holds the browser, this space's runtimes, the last reading
+   * of the space's browser), so a card held by one of them is looked at
+   * again once it clears.
    */
   revision: string;
 };
@@ -85,6 +97,8 @@ type Options = {
   personalTurnsAllowed?: boolean;
   personalReady: boolean;
   sharedReady: boolean;
+  /** The machine Instafy's browser is open on (or opening on). */
+  sharedRuntimeId?: string | null;
   /** The Workspace browser is already known not to open here; unknown counts as available. */
   sharedUnavailable: boolean;
   /** The agent the notice names, as in "Octo opened Instafy's browser". */
@@ -97,7 +111,9 @@ type Options = {
 
 /**
  * How long an automatic start may take to open the browser: a profile restore
- * plus a start of Instafy's browser on the space's machine fit in it.
+ * plus a start of Instafy's browser on the space's machine fit in it. It also
+ * bounds every wait before the task is sent, such as for the browser's
+ * roster to connect.
  */
 export const BROWSER_REQUEST_HANDOFF_DEADLINE_MS = 120_000;
 /**
@@ -137,6 +153,11 @@ class BrowserAutoStartDropped extends Error {
   }
 }
 
+/** How often an automatic start into Instafy's browser reads it again while it waits to send. */
+export const BROWSER_AUTO_START_HOST_CHECK_MS = 1_000;
+
+const BROWSER_CHANGED_MESSAGE = "The browser or conversation changed before this task could continue.";
+
 /**
  * Whether an automatic start still applies right before its continuation is
  * sent: the card is still the newest, nobody wrote after it or continued it,
@@ -168,11 +189,17 @@ function autoStartStillApplies(current: Options, key: string): boolean {
  * - once that run is finished, and once the tab is visible;
  * - once per card on this page, at most once per conversation in ten minutes,
  *   and never after the person closed, paused or stopped the browser there;
- * - only in the desktop app's browser, for a person on their own AI (see
- *   browserAutoStartPlan): Instafy's hosted browser, and every other case,
- *   leaves the card a button, with the reason;
+ * - only where browserAutoStartPlan allows it: the browser in the desktop app
+ *   for a person on their own AI, or Instafy's browser on the conversation's
+ *   own machine in a space the controller covers, when nobody else has it,
+ *   controls it, runs in it or is starting it. A separate browser session
+ *   and every other case leave the card a button, with the reason;
  * - and, checked again once the browser is ready, only while nobody wrote
- *   after the card, the conversation is idle and no one else holds the browser.
+ *   after the card, the conversation is idle and no one else holds the
+ *   browser. For Instafy's browser, Studio also waits for its roster to
+ *   connect and for a fresh reading that says it is ready, and it stays on
+ *   the machine it opened; only a known conflict refuses, and the two-minute
+ *   bound ends every wait.
  * A start opens with the person's own approval settings, exactly as a press
  * does. A failed start leaves the button and says why.
  */
@@ -188,6 +215,9 @@ export function useChatBrowserRequest(options: Options) {
     openedAt.current = Date.now();
   }
   const pending = useRef(false);
+  // A card Studio has not claimed yet because it waits on a reading of
+  // Instafy's browser, or because that browser is someone else's for now.
+  const [autoWaiting, setAutoWaiting] = useState(false);
   const [cardStates, setCardStates] = useState<ReadonlyMap<string, BrowserRequestCardState>>(() => new Map());
   const [visible, setVisible] = useState(isDocumentVisible);
 
@@ -217,9 +247,14 @@ export function useChatBrowserRequest(options: Options) {
     if (unavailable) throw new Error(unavailable);
     const transport = browserRequestTransport(request, captured.transport, host);
     const autoStarted = plan !== null;
-    // Studio starts only the browser on this device by itself, never
-    // Instafy's hosted browser (see browserAutoStartPlan).
-    if (autoStarted && (plan.kind !== "personal" || transport !== "personal")) throw new BrowserAutoStartDropped();
+    // Studio starts by itself only the browser on this device, or Instafy's
+    // browser on the conversation's own machine (see browserAutoStartPlan).
+    if (autoStarted &&
+        !(plan.kind === "personal" && transport === "personal") &&
+        !(plan.kind === "attach" && transport === "shared")) {
+      throw new BrowserAutoStartDropped();
+    }
+    const attachRuntimeId = plan?.kind === "attach" ? plan.runtimeId : null;
     pending.current = true;
     try {
       captured.activate(transport, plan);
@@ -228,6 +263,12 @@ export function useChatBrowserRequest(options: Options) {
       const deadline = Date.now() +
         (!autoStarted && transport === "shared" ? BROWSER_REQUEST_PRESS_DEADLINE_MS : BROWSER_REQUEST_HANDOFF_DEADLINE_MS);
       let activated = false;
+      let activatedAtMs = 0;
+      // Instafy's browser on the space's machine: whether the browser has
+      // shown that machine yet, and the last forced reading of it.
+      let attachBound = false;
+      let hostReading: Awaited<ReturnType<SharedBrowserHostRefresh>> = null;
+      let hostCheckedAtMs = Number.NEGATIVE_INFINITY;
       // Let React commit the chosen surface before considering a cached
       // ready runtime. Identity, closure and explicit location changes cancel
       // the handoff instead of sending it to a different browser.
@@ -236,19 +277,65 @@ export function useChatBrowserRequest(options: Options) {
         const current = latest.current;
         if (generation.current !== epoch || !current.canWrite ||
             (activated && (!current.open || current.transport !== transport))) {
-          throw new Error("The browser or conversation changed before this task could continue.");
+          throw new Error(BROWSER_CHANGED_MESSAGE);
         }
-        activated ||= current.open && current.transport === transport;
+        if (!activated && current.open && current.transport === transport) {
+          activated = true;
+          activatedAtMs = Date.now();
+        }
+        if (attachRuntimeId && activated) {
+          const sameRuntime = (current.sharedRuntimeId ?? null) === attachRuntimeId;
+          // Once the browser showed that machine, it never moves elsewhere.
+          if (attachBound && !sameRuntime) throw new Error(BROWSER_CHANGED_MESSAGE);
+          attachBound ||= sameRuntime;
+        }
         if (activated && !current.busy &&
-            (transport === "personal" ? current.personalReady : current.sharedReady)) {
+            (transport === "personal" ? current.personalReady : current.sharedReady) &&
+            (!attachRuntimeId || attachBound)) {
           if (autoStarted) {
             // Nobody wrote or started anything while the browser opened.
             if (!autoStartStillApplies(current, key)) throw new BrowserAutoStartDropped();
-            // Never a browser in use.
-            if (current.auto?.heldByOther) throw new Error(BROWSER_AUTO_START_COPY.inUse);
           }
-          const sent = await current.continueTask(transport, browserRequestContinuation(request), {
-            display: browserRequestNotice(current.agentName ?? "Octo", request.task),
+          if (attachRuntimeId) {
+            const auto = current.auto!;
+            // The roster has not connected yet: wait for it rather than
+            // guess who else is there.
+            let wait = auto.presence?.status !== "known";
+            if (!wait) {
+              const now = Date.now();
+              if (now - hostCheckedAtMs >= BROWSER_AUTO_START_HOST_CHECK_MS) {
+                hostCheckedAtMs = now;
+                hostReading = (await auto.refreshHost?.({ force: true })) ?? null;
+              }
+              // A reading from before the browser opened, or one that is not
+              // ready yet, is waited out.
+              wait = !hostReading?.snapshot || hostReading.fetchedAtMs < activatedAtMs ||
+                hostReading.snapshot.state !== "ready";
+            }
+            if (wait) {
+              if (Date.now() >= deadline) throw new Error(BROWSER_AUTO_START_COPY.timedOut);
+              await new Promise((resolve) => window.setTimeout(resolve, 100));
+              continue;
+            }
+            // Re-read after the await: the conversation may have moved on.
+            const settled = latest.current;
+            if (generation.current !== epoch || !settled.open || settled.transport !== transport ||
+                (settled.sharedRuntimeId ?? null) !== attachRuntimeId) {
+              throw new Error(BROWSER_CHANGED_MESSAGE);
+            }
+            if (!autoStartStillApplies(settled, key)) throw new BrowserAutoStartDropped();
+            // Only a known conflict refuses.
+            if (settled.auto?.heldByOther || settled.auto?.presence?.remoteController === true ||
+                sharedBrowserHostHeldByOther(hostReading!.snapshot!)) {
+              throw new Error(BROWSER_AUTO_START_COPY.inUse);
+            }
+          } else if (autoStarted && current.auto?.heldByOther) {
+            // Never a browser in use.
+            throw new Error(BROWSER_AUTO_START_COPY.inUse);
+          }
+          const sending = latest.current;
+          const sent = await sending.continueTask(transport, browserRequestContinuation(request), {
+            display: browserRequestNotice(sending.agentName ?? "Octo", request.task),
             metadata: {
               ...(extraMetadata ?? {}),
               [BROWSER_REQUEST_OF_METADATA_KEY]: key,
@@ -348,37 +435,42 @@ export function useChatBrowserRequest(options: Options) {
   const autoRevision = options.auto?.revision ?? "";
   const activeRunIdsKey = options.auto ? [...options.auto.activeRunIds].sort().join(",") : "";
 
-  useEffect(() => {
+  /**
+   * Decides the newest card once: starts it, leaves it a button, or waits.
+   * True only while it is left unclaimed until a reading of Instafy's
+   * browser says more (a `pending` plan, or the browser is in use for now).
+   */
+  function decideNewestCard(): boolean {
     const current = latest.current;
     const auto = current.auto;
-    if (!auto || !current.canWrite || !current.ready || pending.current) return;
+    if (!auto || !current.canWrite || !current.ready || pending.current) return false;
     const index = newestCardIndex;
-    if (index < 0 || index >= current.messages.length) return;
+    if (index < 0 || index >= current.messages.length) return false;
     const message = current.messages[index]!;
     const request = browserRequestFromMessage(message)!;
     const key = browserRequestKey(message);
-    if (isBrowserAutoStartClaimed(key)) return;
+    if (isBrowserAutoStartClaimed(key)) return false;
     // Answered already: someone wrote after it, or it was continued.
-    if (current.messages.slice(index + 1).some((entry) => entry.role === "user")) return;
-    if (browserRequestContinuedKeys(current.messages).has(key)) return;
+    if (current.messages.slice(index + 1).some((entry) => entry.role === "user")) return false;
+    if (browserRequestContinuedKeys(current.messages).has(key)) return false;
     // History never starts a browser: only a card that arrived after this
     // conversation was opened, and within ten minutes.
-    if (!isRunFailureRecentForAutoRetry(message) || message.timestamp < openedAt.current - 1_000) return;
+    if (!isRunFailureRecentForAutoRetry(message) || message.timestamp < openedAt.current - 1_000) return false;
     // Only the tab whose own prompt started the run that sent the card, by
     // the person who sent it, and never for a card a browser turn sent.
     const jobId = browserRequestJobId(message);
     const sent = jobId ? findPromptSentFromThisPageForRun(jobId) : null;
-    if (!jobId || !sent) return;
+    if (!jobId || !sent) return false;
     const sentMetadata = typeof sent.metadata === "object" && sent.metadata !== null && !Array.isArray(sent.metadata)
       ? sent.metadata as Record<string, unknown> : null;
     if (!isRunFailurePromptFromThisClient({
       promptMessage: { authorId: null, metadata: sentMetadata },
       currentUserId: auto.currentUserId,
       chatClientSessionId: auto.chatClientSessionId,
-    })) return;
-    if (isBrowserTurnPromptMetadata(sent.metadata)) return;
+    })) return false;
+    if (isBrowserTurnPromptMetadata(sent.metadata)) return false;
     // Wait for that run to finish and for the person to see this tab.
-    if (current.busy || auto.activeRunIds.has(jobId) || !visible) return;
+    if (current.busy || auto.activeRunIds.has(jobId) || !visible) return false;
 
     // Settled for good: the card is left to the person on this page.
     const leave = (reason: string | null) => {
@@ -388,7 +480,7 @@ export function useChatBrowserRequest(options: Options) {
     const conversation = current.identity;
     if (isBrowserAutoStartDeclined(conversation) || browserAutoStartedRecently(conversation)) {
       leave(null);
-      return;
+      return false;
     }
     // An address Octo found itself, such as on a page or in a search result,
     // is the person's to check first.
@@ -399,27 +491,34 @@ export function useChatBrowserRequest(options: Options) {
       currentUserId: auto.currentUserId,
     })) {
       leave(BROWSER_AUTO_START_COPY.unseenAddress);
-      return;
+      return false;
     }
     const host = hostOf(current);
     // The card says itself why no browser opens here.
-    if (browserRequestUnavailableReason(request, host)) return;
+    if (browserRequestUnavailableReason(request, host)) return false;
     // Held for now: the button shows why, and the card is looked at again
     // once that changes.
     if (auto.blocked) {
       setCardState(key, { kind: "button", reason: auto.blocked.reason });
-      return;
+      return false;
     }
     if (auto.heldByOther) {
       setCardState(key, { kind: "button", reason: BROWSER_AUTO_START_COPY.inUse });
-      return;
+      return false;
     }
     const plan = auto.plan(request, browserRequestTransport(request, current.transport, host));
+    // Instafy's browser on the space's machine needs a fresh reading first:
+    // the reading changes the revision, and the card is decided again.
+    if (plan.kind === "pending") {
+      void auto.refreshHost?.();
+      return true;
+    }
     if (plan.kind === "button") {
       setCardState(key, { kind: "button", reason: plan.reason });
-      return;
+      // In use for now: read the browser again until it is free.
+      return plan.reason === BROWSER_AUTO_START_COPY.inUse;
     }
-    if (!claimBrowserAutoStart(key)) return;
+    if (!claimBrowserAutoStart(key)) return false;
     recordBrowserAutoStart(conversation);
     setCardState(key, { kind: "opening", note: null });
     const epoch = generation.current;
@@ -435,6 +534,13 @@ export function useChatBrowserRequest(options: Options) {
         if (generation.current === epoch) latest.current.onError(reason);
       },
     );
+    return false;
+  }
+
+  useEffect(() => {
+    // Whether the newest card waits on Instafy's browser (see autoWaiting).
+    setAutoWaiting(decideNewestCard());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     activeRunIdsKey,
     autoEnabled,
@@ -450,5 +556,5 @@ export function useChatBrowserRequest(options: Options) {
     visible,
   ]);
 
-  return { cardStates, retryContinuation };
+  return { cardStates, retryContinuation, autoWaiting };
 }

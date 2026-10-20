@@ -1,7 +1,12 @@
-import type { ControllerRuntimeStatusEntry } from "../../../services/runtimeController";
+import type {
+  ControllerRuntimeStatusEntry,
+  SharedBrowserHostPolicy,
+} from "../../../services/runtimeController";
+import type { SharedBrowserHostSnapshot } from "../../../services/runtimeController/browserSession";
 import type { ChatMessage } from "../types";
 import {
   isManagedInstafyCloudProvider,
+  listBrowserRuntimeCandidates,
   listBrowserSessionCandidates,
   runtimeEntryIsLazyBrowserHost,
 } from "./browserSessionRuntimeEnsure";
@@ -11,23 +16,32 @@ import { shouldDisplayChatMessage } from "./chatMessagePresentation";
 import type { BrowserTransport } from "./usePersonalBrowserBridge";
 
 /**
- * How Studio starts a request_browser card by itself (owner decision, Oct 19:
- * Octo opens Instafy's browser on its own, and never starts or restarts a
- * cloud machine to do it).
+ * How Studio starts a request_browser card by itself (owner decisions, Oct 19
+ * and wave 3: Octo opens Instafy's browser on its own, and never starts or
+ * restarts a cloud machine to do it).
  *
  * - `personal`: the browser in this desktop app, for a person on their own AI.
  *   It asks for the person's chosen approval mode, as a press does.
+ * - `attach`: Instafy's browser on the conversation's own machine, which
+ *   starts it on demand (the controller reports `sharedBrowserHost` and the
+ *   space is covered). Studio opens that exact machine's browser and never
+ *   starts, stops or replaces the machine for it.
+ * - `pending`: Studio needs a fresh reading of that browser first; it fetches
+ *   one and decides again. Never claimed.
  * - `button`: the card stays a button, with the reason when there is one.
  *
- * Instafy's hosted browser always waits for a press. Studio cannot tell whose
- * running session it is (the controller does not record who started one, so
- * it may be a teammate's, with their pages and sign-ins), and opening a new
- * one starts a machine or switches the space's own machine to the browser,
- * which stops whatever it still runs, such as a preview, a dev server or a
- * terminal session, that Studio cannot see.
+ * A separate browser session machine, and the space's machine without
+ * Instafy's browser on demand, still wait for a press. Studio cannot tell
+ * whose running session it is (the controller does not record who started
+ * one, so it may be a teammate's, with their pages and sign-ins), and opening
+ * a new one starts a machine or switches the space's own machine to the
+ * browser, which stops whatever it still runs, such as a preview, a dev
+ * server or a terminal session, that Studio cannot see.
  */
 export type BrowserAutoStartPlan =
   | { kind: "personal" }
+  | { kind: "attach"; runtimeId: string }
+  | { kind: "pending" }
   | { kind: "button"; reason: string | null };
 
 /**
@@ -39,7 +53,7 @@ export type SharedBrowserPresence = {
   status: "unknown" | "known" | "unavailable";
   /** Someone else has this browser open. */
   othersPresent: boolean;
-  /** Another person or an agent run controls it. */
+  /** Another person or agent run controls it. */
   remoteController: boolean;
 };
 
@@ -54,7 +68,12 @@ export const BROWSER_AUTO_START_COPY = {
   personalNeedsOwnAi: "The browser on this device needs your own AI connection.",
   unseenAddress: "Octo found this address itself. Check where it goes, then open it.",
   timedOut: "Instafy's browser did not start in time. Open it from the message to try again.",
+  hostFailed: "Instafy's browser stopped unexpectedly. Open it to start it again.",
+  hostPoisoned: "Instafy's browser needs this space's machine to restart before it can open again.",
 } as const;
+
+/** How old a reading of Instafy's browser on the space's machine may be for a decision. */
+export const SHARED_BROWSER_HOST_SNAPSHOT_MAX_AGE_MS = 5_000;
 
 /** The display name Studio gives the space's own standard hosted machine. */
 const GENERIC_HOSTED_RUNTIME_DISPLAY_NAME = "hosted runtime";
@@ -77,6 +96,18 @@ export type BrowserAutoStartPlanInput = {
   projectId: string | null;
   /** This space's runtimes as the controller last reported them; null when unknown. */
   runtimes: readonly ControllerRuntimeStatusEntry[] | null;
+  /**
+   * Whether the controller opens Instafy's browser on this space's own
+   * machine; absent or null from an older controller.
+   */
+  sharedBrowserHostPolicy?: SharedBrowserHostPolicy | null;
+  /** The machine this conversation runs on. */
+  conversationRuntimeId?: string | null;
+  /** The last reading of that machine's browser; null when none (or a 404). */
+  host?: SharedBrowserHostSnapshot | null;
+  /** When that reading was asked for; null before the first one. */
+  hostFetchedAtMs?: number | null;
+  nowMs?: number;
 };
 
 function isLiveHostedMachine(entry: ControllerRuntimeStatusEntry): boolean {
@@ -86,7 +117,47 @@ function isLiveHostedMachine(entry: ControllerRuntimeStatusEntry): boolean {
     !ENDED_RUNTIME_STATUSES.has(entry.status.trim().toLowerCase());
 }
 
-/** What Studio may do by itself for a card. */
+/**
+ * The conversation's own machine when the space is covered and that machine
+ * is a live, dispatchable machine with an origin that starts Instafy's
+ * browser on demand; null otherwise.
+ */
+export function conversationBrowserHostId(
+  input: Pick<BrowserAutoStartPlanInput, "sharedBrowserHostPolicy" | "conversationRuntimeId" | "runtimes">,
+): string | null {
+  const runtimeId = input.conversationRuntimeId?.trim() ?? "";
+  if (input.sharedBrowserHostPolicy !== "covered" || !runtimeId || !input.runtimes) return null;
+  const candidate = listBrowserRuntimeCandidates([...input.runtimes])
+    .find((entry) => entry.runtimeId === runtimeId && entry.mode === "lazy");
+  return candidate ? candidate.runtimeId : null;
+}
+
+/**
+ * Whether Instafy's browser on the space's machine is someone else's right
+ * now: someone else has it open or controls it, another person's agent run
+ * works in it, or someone else is starting it.
+ */
+export function sharedBrowserHostHeldByOther(host: SharedBrowserHostSnapshot): boolean {
+  return host.othersPresent ||
+    host.controlledByOther ||
+    (host.agentRunActive && !host.agentRunStartedByYou) ||
+    (host.state === "starting" && !host.startedByYou);
+}
+
+/**
+ * What Studio may do by itself for a card. The first matching row wins:
+ *
+ * | # | Condition                                                   | Result                          |
+ * |---|-------------------------------------------------------------|---------------------------------|
+ * | 1 | the browser on this device                                  | personal, or a button           |
+ * | 2 | no host policy, or it is off                                | today's hosted buttons          |
+ * | 3 | the conversation's machine is not a live host               | today's hosted buttons          |
+ * | 4 | a separate browser session is running                       | button (other or several)       |
+ * | 5 | no reading of the host, or one older than five seconds     | pending                         |
+ * | 6 | the host is poisoned, failed or in an unknown state         | button                          |
+ * | 7 | someone else has it, controls it, runs in it or starts it   | button (in use), decided again  |
+ * | 8 | otherwise (idle, ready, starting by you, stopping)          | attach                          |
+ */
 export function browserAutoStartPlan(input: BrowserAutoStartPlanInput): BrowserAutoStartPlan {
   if (input.transport === "personal") {
     if (!input.personalAvailable) return { kind: "button", reason: null };
@@ -94,19 +165,40 @@ export function browserAutoStartPlan(input: BrowserAutoStartPlanInput): BrowserA
       ? { kind: "personal" }
       : { kind: "button", reason: BROWSER_AUTO_START_COPY.personalNeedsOwnAi };
   }
-  // Instafy's hosted browser: the card stays a button, saying what a press
-  // would open.
+  // Instafy's hosted browser.
   const projectId = input.projectId?.trim() ?? "";
   if (!projectId || !input.runtimes) return { kind: "button", reason: null };
   // Only separate browser session machines count as a running session; the
   // space's own machine with Instafy's browser on demand is not one.
   const sessions = listBrowserSessionCandidates([...input.runtimes]);
+  const hostRuntimeId = conversationBrowserHostId(input);
+  // Rows 2 to 4: a press decides, as before.
+  if (!hostRuntimeId || sessions.length > 0) return hostedButton(input.runtimes, sessions);
+  const now = input.nowMs ?? Date.now();
+  const fetchedAt = input.hostFetchedAtMs ?? null;
+  if (fetchedAt === null || now - fetchedAt > SHARED_BROWSER_HOST_SNAPSHOT_MAX_AGE_MS) return { kind: "pending" };
+  const host = input.host ?? null;
+  // The machine answered that it has no such browser right now: a press
+  // takes the usual path.
+  if (!host) return { kind: "button", reason: null };
+  if (host.state === "poisoned") return { kind: "button", reason: BROWSER_AUTO_START_COPY.hostPoisoned };
+  if (host.state === "failed") return { kind: "button", reason: BROWSER_AUTO_START_COPY.hostFailed };
+  if (host.state === "unknown") return { kind: "button", reason: null };
+  if (sharedBrowserHostHeldByOther(host)) return { kind: "button", reason: BROWSER_AUTO_START_COPY.inUse };
+  return { kind: "attach", runtimeId: hostRuntimeId };
+}
+
+/** What a press would open, when Studio does not open Instafy's browser by itself. */
+function hostedButton(
+  runtimes: readonly ControllerRuntimeStatusEntry[],
+  sessions: readonly unknown[],
+): BrowserAutoStartPlan {
   if (sessions.length > 1) return { kind: "button", reason: BROWSER_AUTO_START_COPY.severalSessions };
   // Whoever started it: the controller does not record that.
   if (sessions.length === 1) return { kind: "button", reason: BROWSER_AUTO_START_COPY.otherSession };
   // Opening a browser here would start a machine, or restart this space's
   // own one.
-  const machines = input.runtimes.filter(isLiveHostedMachine);
+  const machines = runtimes.filter(isLiveHostedMachine);
   if (machines.length === 0) return { kind: "button", reason: BROWSER_AUTO_START_COPY.firstMachine };
   if (machines.length > 1) return { kind: "button", reason: BROWSER_AUTO_START_COPY.anotherMachine };
   // Instafy's browser on the space's own machine opens in place; a press
