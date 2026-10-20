@@ -2518,12 +2518,7 @@ export function FilesPanel({
 
   if (!runtimeControllerEnabled) {
     const message = (
-      <Surface
-        tone="default"
-        radius="2xl"
-        shadow="none"
-        className="flex h-full flex-col text-sm text-slate-600 dark:text-slate-300"
-      >
+      <div className="flex h-full flex-col text-sm text-slate-600 dark:text-slate-300">
         {explorerToolbar}
         <div className="flex flex-1 flex-col items-center justify-center gap-3 p-4 text-center">
           <Text variant="body" tone="subtle" className="max-w-[22rem]">
@@ -2535,7 +2530,7 @@ export function FilesPanel({
             </Button>
           </div>
         </div>
-      </Surface>
+      </div>
     );
 
     if (renderMode === "portal") {
@@ -2549,12 +2544,7 @@ export function FilesPanel({
 
   if (!activeProjectId) {
     const message = (
-      <Surface
-        tone="default"
-        radius="2xl"
-        shadow="none"
-        className="flex h-full flex-col text-sm text-slate-600 dark:text-slate-300"
-      >
+      <div className="flex h-full flex-col text-sm text-slate-600 dark:text-slate-300">
         {explorerToolbar}
         <div className="flex flex-1 flex-col items-center justify-center gap-3 p-4 text-center">
           <Text variant="body" tone="subtle" className="max-w-[22rem]">
@@ -2569,7 +2559,7 @@ export function FilesPanel({
             </Button>
           </div>
         </div>
-      </Surface>
+      </div>
     );
 
     if (renderMode === "portal") {

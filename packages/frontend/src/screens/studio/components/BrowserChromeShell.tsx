@@ -157,7 +157,7 @@ export function BrowserChromeShell({
         <div className={`min-w-0 flex-1 ${compact ? "" : "max-[540px]:basis-24"}`}>{address}</div>
         {status || actions ? (
           <div
-            className={`flex shrink-0 items-center gap-1 ${compact ? "" : "max-[540px]:order-last max-[540px]:min-h-10 max-[540px]:w-full max-[540px]:basis-full max-[540px]:justify-between max-[540px]:border-t max-[540px]:border-slate-200/80 dark:max-[540px]:border-[color:var(--color-studio-dark-divider)]"}`}
+            className={`flex shrink-0 items-center gap-1 ${compact ? "" : "max-[540px]:order-last max-[540px]:min-h-10 max-[540px]:w-full max-[540px]:basis-full max-[540px]:justify-between"}`}
             data-testid="browser-chrome-context-row"
           >
             {status ? (

@@ -3,7 +3,14 @@
   --studio-context-height: 52px;
   --studio-context-column-width: 14rem;
   --studio-context-inset: 8px;
+  --studio-navigation-bend: 14px;
+  --studio-working-surface: white;
 }
+.dark .studio-context-layout { --studio-working-surface: var(--color-studio-dark-panel); }
+/* Page content, docked panes and search share the same flat working surface.
+   The surrounding shell owns the outline; pages do not add another frame. */
+.studio-content-surface,
+.studio-context-search-screen { background: var(--studio-working-surface); }
 .studio-context-header {
   position: absolute;
   left: calc(64px + var(--instafy-safe-area-inset-left));
@@ -20,9 +27,9 @@
   -webkit-app-region: drag;
 }
 .studio-context-header .studio-search-control { -webkit-app-region: no-drag; }
-/* The rail clears 64px; a further 24px clears Electron's traffic-light corner.
+/* The native cap adds two corner radii to the rail, then leaves 16px before controls.
    Tabs no longer need their own native inset because context is to their left. */
-.studio-context-layout[data-titlebar-free="true"] .studio-context-header { --studio-context-inset: 24px; }
+.studio-context-layout[data-titlebar-free="true"] .studio-context-header { --studio-context-inset: calc(2 * var(--studio-navigation-bend) + 16px); }
 /* Subtract the header's leading inset and 8px gap, including Electron's inset.
    Keep this column even when navigation collapses so the pickers remain usable. */
 .studio-desktop-context-column { width: calc(var(--studio-context-column-width) - var(--studio-context-inset) - 8px); min-width: 0; flex: none; display: flex; align-items: center; gap: 4px; }
@@ -89,31 +96,40 @@
 .studio-context-header[data-org-accent] .studio-desktop-drawer-header { background: transparent; }
 @media (max-width: 1279px) { .studio-org-context-name { display: none; } }
 
-/* The header and inner rail share one flat surface. The working area's
-   outline turns through the inside corner without cutting across navigation. */
-.studio-context-layout[data-linked-navigation="true"] {
-  --studio-navigation-bend: 14px;
+/* Every wide view shares the working surface's outline and corner geometry.
+   Organization context adds tonal separation and the selected team's bridge;
+   Home, account and search keep a single neutral navigation surface. */
+.studio-context-layout[data-wide="true"] {
   --studio-navigation-divider: var(--color-slate-200);
   --studio-navigation-surface: var(--color-slate-50);
-  --studio-organization-surface: var(--color-slate-100);
-  --studio-working-surface: white;
+  --studio-organization-surface: var(--color-slate-50);
 }
-.dark .studio-context-layout[data-linked-navigation="true"] {
+.dark .studio-context-layout[data-wide="true"] {
   --studio-navigation-divider: var(--color-studio-dark-divider);
   --studio-navigation-surface: var(--color-studio-dark-rail);
-  --studio-organization-surface: var(--color-studio-dark-canvas);
-  --studio-working-surface: var(--color-studio-dark-panel);
+  --studio-organization-surface: var(--color-studio-dark-rail);
 }
-.studio-context-layout[data-linked-navigation="true"] .studio-context-header.org-context-tint {
+.studio-context-layout[data-linked-navigation="true"] {
+  --studio-organization-surface: var(--color-slate-200);
+}
+.dark .studio-context-layout[data-linked-navigation="true"] {
+  --studio-navigation-surface: color-mix(in srgb, var(--color-studio-dark-rail), white 5%);
+  --studio-organization-surface: var(--color-studio-dark-canvas);
+}
+.studio-context-layout[data-wide="true"] .studio-context-header {
   --studio-header-navigation-width: var(--studio-context-column-width);
   border-bottom: 0;
-  border-bottom-left-radius: var(--studio-navigation-bend);
+  /* The header's left edge continues straight into the inner rail below. */
   background: var(--studio-navigation-surface);
 }
-.studio-context-layout[data-linked-navigation="true"] .studio-context-header[data-navigation-collapsed="true"] {
+.studio-context-layout[data-wide="true"] .studio-context-header[data-navigation-collapsed="true"] {
   --studio-header-navigation-width: 4rem;
 }
-.studio-context-layout[data-linked-navigation="true"] .studio-context-header::before {
+.studio-context-layout[data-wide="true"] .studio-context-header[data-navigation-hidden="true"],
+.studio-context-layout[data-wide="true"] .studio-context-header[data-search-open="true"] {
+  --studio-header-navigation-width: 0px;
+}
+.studio-context-layout[data-wide="true"] .studio-context-header::before {
   content: "";
   position: absolute;
   pointer-events: none;
@@ -126,7 +142,7 @@
 }
 /* Continue the rail's right edge into the underside of the header with an
    inside curve. Anchor it to the header so the rail's overflow cannot clip it. */
-.studio-context-layout[data-linked-navigation="true"] .studio-context-header::after {
+.studio-context-layout[data-wide="true"] .studio-context-header::after {
   content: "";
   position: absolute;
   pointer-events: none;
@@ -140,8 +156,8 @@
     var(--studio-navigation-divider) calc(var(--studio-navigation-bend) + 0.5px),
     var(--studio-navigation-surface) calc(var(--studio-navigation-bend) + 1px));
 }
-.studio-context-layout[data-linked-navigation="true"] [data-testid="sidebar-organization-rail"],
-.studio-context-layout[data-linked-navigation="true"] [data-testid="sidebar-organization-rail"] > [data-rail-surface],
+.studio-context-layout[data-wide="true"] [data-testid="sidebar-organization-rail"],
+.studio-context-layout[data-wide="true"] [data-testid="sidebar-organization-rail"] > [data-rail-surface],
 .studio-context-layout[data-linked-navigation="true"] [data-testid="sidebar-context-navigation"] > [data-rail-surface] {
   border-right: 0;
 }
@@ -168,6 +184,18 @@
   top: var(--studio-navigation-bend);
   border-right: 1px solid var(--studio-navigation-divider);
 }
+/* With no inner navigation, the working surface meets the organization rail.
+   Start its vertical edge below the shared arc, never through the corner. */
+.studio-context-layout[data-wide="true"][data-linked-navigation="false"] [data-testid="sidebar-organization-rail"]::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  top: calc(var(--studio-context-top) + var(--studio-context-height) + var(--studio-navigation-bend));
+  right: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--studio-navigation-divider);
+}
 
 /* A flat neutral bridge connects the selected team to its controls. The
    wider, eased shoulders flow into the 64px rail edge instead of ending as
@@ -175,6 +203,7 @@
 .studio-context-layout[data-linked-navigation="true"] [data-testid="sidebar-organization-rail"],
 .studio-context-layout[data-linked-navigation="true"] [data-testid="sidebar-organization-rail"] > [data-rail-surface] {
   background: var(--studio-organization-surface);
+  --studio-organization-icon-surface: var(--studio-organization-surface);
 }
 .studio-context-layout[data-linked-navigation="true"] [data-testid="sidebar-team-rail-list"] {
   padding-block: 16px;
@@ -182,6 +211,7 @@
 .studio-context-layout[data-linked-navigation="true"] [data-testid="sidebar-organization-rail"] .org-accent-selection[aria-current="page"] {
   isolation: isolate;
   background: transparent;
+  --studio-organization-icon-surface: var(--studio-navigation-surface);
 }
 .studio-context-layout[data-linked-navigation="true"] [data-testid="sidebar-organization-rail"] .org-accent-selection[aria-current="page"] > .org-accent-marker {
   background: var(--color-slate-500);
@@ -198,6 +228,44 @@
   clip-path: path("M 64 0 C 64 11 58 14 44 14 H 20 C 10 14 6 20 6 30 V 42 C 6 52 10 58 20 58 H 44 C 58 58 64 61 64 72 Z");
   background: var(--studio-navigation-surface);
 }
+/* The native rail widens by two shared corner radii around the window controls.
+   Its shoulder and top-edge join use the same circular bend as the workspace.
+   Paint only the extension above the header so rail buttons stay unobscured. */
+.studio-context-layout[data-wide="true"][data-titlebar-free="true"] [data-testid="sidebar-organization-rail"] {
+  background: var(--studio-organization-surface, var(--color-slate-50));
+}
+.studio-context-layout[data-wide="true"][data-titlebar-free="true"] [data-testid="sidebar-organization-rail"]::before {
+  --studio-native-cap-foot: #000;
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  z-index: 46;
+  left: 100%;
+  top: 0;
+  width: calc(3 * var(--studio-navigation-bend));
+  height: calc(var(--studio-context-height) + var(--studio-navigation-bend));
+  /* Two rectangles, the cap's outward turn, then inward turns at its foot
+     and at the window's top edge. The mask shapes one flat surface. */
+  mask:
+    linear-gradient(#000, #000) left top / calc(2 * var(--studio-navigation-bend)) calc(var(--studio-context-height) - var(--studio-navigation-bend)) no-repeat,
+    linear-gradient(#000, #000) left top / var(--studio-navigation-bend) var(--studio-context-height) no-repeat,
+    radial-gradient(circle at top left, #000 calc(var(--studio-navigation-bend) - 0.5px), transparent var(--studio-navigation-bend))
+      var(--studio-navigation-bend) calc(var(--studio-context-height) - var(--studio-navigation-bend)) / var(--studio-navigation-bend) var(--studio-navigation-bend) no-repeat,
+    radial-gradient(circle at bottom right, transparent calc(var(--studio-navigation-bend) - 0.5px), var(--studio-native-cap-foot) var(--studio-navigation-bend))
+      left var(--studio-context-height) / var(--studio-navigation-bend) var(--studio-navigation-bend) no-repeat,
+    radial-gradient(circle at bottom right, transparent calc(var(--studio-navigation-bend) - 0.5px), #000 var(--studio-navigation-bend))
+      calc(2 * var(--studio-navigation-bend)) top / var(--studio-navigation-bend) var(--studio-navigation-bend) no-repeat;
+  background: var(--studio-organization-surface, var(--color-slate-50));
+}
+/* The global working-surface corner occupies this same area. Let its shared
+   arc supply the fill and outline instead of covering the stroke with the cap. */
+.studio-context-layout[data-wide="true"][data-titlebar-free="true"][data-linked-navigation="false"] [data-testid="sidebar-organization-rail"]::before {
+  --studio-native-cap-foot: transparent;
+}
+.dark .studio-context-layout[data-wide="true"][data-titlebar-free="true"] [data-testid="sidebar-organization-rail"],
+.dark .studio-context-layout[data-wide="true"][data-titlebar-free="true"] [data-testid="sidebar-organization-rail"]::before {
+  background: var(--studio-organization-surface, var(--color-studio-dark-rail));
+}
 @media (forced-colors: active) {
   .studio-context-layout[data-linked-navigation="true"],
   .dark .studio-context-layout[data-linked-navigation="true"] {
@@ -206,5 +274,8 @@
   }
   .studio-context-layout[data-linked-navigation="true"] [data-testid="sidebar-organization-rail"] .org-accent-selection[aria-current="page"]::after {
     display: none;
+  }
+  .studio-context-layout[data-linked-navigation="true"] [data-testid="sidebar-organization-rail"] .org-accent-selection[aria-current="page"] > .org-accent-marker {
+    background: Highlight;
   }
 }

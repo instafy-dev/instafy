@@ -624,8 +624,9 @@ function createMainWindow(initialUrl?: string) {
     // loaded frontend providing them. The shell hides the bar and the shell
     // makes the window movable, atomically, so a frontend of any version
     // (including one rolled back below this release) is always draggable.
+    // Center the 14px native controls in Studio's 52px integrated header.
     ...(process.platform === "darwin"
-      ? { titleBarStyle: "hiddenInset" as const, trafficLightPosition: { x: 14, y: 12 } }
+      ? { titleBarStyle: "hiddenInset" as const, trafficLightPosition: { x: 14, y: 19 } }
       : {}),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),

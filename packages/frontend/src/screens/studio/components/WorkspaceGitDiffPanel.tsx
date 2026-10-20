@@ -6,6 +6,7 @@ import { Heading } from "../../../components/Heading";
 import { InlineNotice } from "../../../components/InlineNotice";
 import { Spinner } from "../../../components/Spinner";
 import { Text } from "../../../components/Text";
+import { DARK_DIVIDER_BORDER_CLASS, DARK_DIVIDER_CLASS, DARK_PANEL_BG_CLASS, DARK_PANEL_SOFT_BG_CLASS, DARK_RAIL_BG_CLASS } from "../../../theme/darkSurfaces";
 import { controllerClient } from "../../../sdk/instafy";
 import {
   buildSplitDiffRows,
@@ -153,7 +154,7 @@ function getSplitDiffCellClass(kind: SplitDiffCell["kind"] | "empty"): string {
     case "del":
       return "bg-rose-50 text-rose-900 dark:bg-rose-500/10 dark:text-rose-200";
     case "empty":
-      return "bg-slate-50/60 text-slate-300 dark:bg-slate-950/20 dark:text-slate-700";
+      return `bg-slate-50/60 text-slate-300 ${DARK_PANEL_SOFT_BG_CLASS} dark:text-slate-700`;
     case "context":
     default:
       return "text-slate-700 dark:text-slate-200";
@@ -185,6 +186,8 @@ export interface WorkspaceGitDiffPanelProps {
   showRefreshButton?: boolean;
   showOpenFileButton?: boolean;
   compactHeader?: boolean;
+  /** The containing review owns its frame; keep only meaningful content dividers. */
+  frame?: "standalone" | "embedded";
   showDiffHeaderSummary?: boolean;
   diffViewMode?: "unified" | "split";
   collapsed?: boolean;
@@ -219,6 +222,7 @@ export function WorkspaceGitDiffPanel({
   showRefreshButton = true,
   showOpenFileButton = true,
   compactHeader = false,
+  frame = "standalone",
   showDiffHeaderSummary = true,
   diffViewMode = "unified",
   collapsed = false,
@@ -348,7 +352,7 @@ export function WorkspaceGitDiffPanel({
     <div
       className={[
         "flex h-full flex-col overflow-hidden",
-        integratedCompactPanel ? "rounded-lg border border-slate-200/70 bg-white/90 dark:border-slate-800 dark:bg-slate-950/40" : "",
+        integratedCompactPanel && frame === "standalone" ? `rounded-lg border border-slate-200/70 bg-white/90 ${DARK_DIVIDER_BORDER_CLASS} ${DARK_PANEL_BG_CLASS}` : "",
         className,
       ]
         .filter(Boolean)
@@ -357,9 +361,9 @@ export function WorkspaceGitDiffPanel({
     >
       <div
         className={[
-          "flex items-center justify-between gap-3 border-b border-slate-200/70 dark:border-slate-800",
+          `flex items-center justify-between gap-3 border-b border-slate-200/70 ${DARK_DIVIDER_BORDER_CLASS}`,
           integratedCompactPanel
-            ? "bg-slate-50/80 px-3 py-1.5 dark:bg-slate-900/50"
+            ? `bg-slate-50/80 px-3 py-1.5 ${DARK_PANEL_SOFT_BG_CLASS}`
             : compactHeader
               ? "px-3 py-2"
               : "px-4 py-3",
@@ -371,7 +375,7 @@ export function WorkspaceGitDiffPanel({
           ) : (
             <span
               className={[
-                "inline-flex items-center justify-center rounded-lg border border-transparent bg-slate-50 text-slate-500 dark:bg-slate-900/40 dark:text-slate-300",
+                `inline-flex items-center justify-center rounded-lg border border-transparent bg-slate-50 text-slate-500 ${DARK_PANEL_SOFT_BG_CLASS} dark:text-slate-300`,
                 compactHeader ? "h-7 w-7" : "h-8 w-8",
               ].join(" ")}
             >
@@ -450,7 +454,7 @@ export function WorkspaceGitDiffPanel({
           <Text tone="secondary">Loading diff…</Text>
         ) : transientBusy && diff.trim().length === 0 ? (
           <div
-            className="flex items-center gap-2 rounded-xl border border-slate-200/70 bg-slate-50 px-3 py-2 text-sm text-slate-600 dark:border-slate-800 dark:bg-slate-900/30 dark:text-slate-300"
+            className={`flex items-center gap-2 rounded-xl border border-slate-200/70 bg-slate-50 px-3 py-2 text-sm text-slate-600 ${DARK_DIVIDER_BORDER_CLASS} ${DARK_PANEL_SOFT_BG_CLASS} dark:text-slate-300`}
             data-testid={`${testIdPrefix}-transient-busy`}
           >
             <Spinner aria-hidden="true" tone="slate" size="xs" />
@@ -463,15 +467,15 @@ export function WorkspaceGitDiffPanel({
         ) : diff.trim().length === 0 ? (
           <Text tone="secondary">No diff available.</Text>
         ) : previewMode === "content" ? (
-          <div className="overflow-hidden rounded-xl border border-slate-200/70 bg-slate-50 font-mono text-xs shadow-sm shadow-slate-900/5 dark:border-slate-800 dark:bg-slate-900/30 dark:shadow-none">
-            <div className="border-b border-slate-200/70 px-3 py-2 text-xxs font-medium uppercase tracking-[0.08em] text-slate-500 dark:border-slate-800 dark:text-slate-400">
+          <div className={frame === "embedded" ? "overflow-hidden font-mono text-xs" : `overflow-hidden rounded-xl border border-slate-200/70 bg-slate-50 font-mono text-xs ${DARK_DIVIDER_BORDER_CLASS} ${DARK_PANEL_SOFT_BG_CLASS}`}>
+            <div className={`border-b border-slate-200/70 px-3 py-2 text-xxs font-medium uppercase tracking-[0.08em] text-slate-500 ${DARK_DIVIDER_BORDER_CLASS} dark:text-slate-400`}>
               Current file contents
             </div>
             <pre className="overflow-x-auto whitespace-pre-wrap break-words px-3 py-2 text-slate-700 dark:text-slate-200">
               {diff.length > 0 ? diff : "No preview available."}
             </pre>
             {diffTruncated ? (
-              <div className="border-t border-slate-200/70 px-3 py-2 text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400">
+              <div className={`border-t border-slate-200/70 px-3 py-2 text-xs text-slate-500 ${DARK_DIVIDER_BORDER_CLASS} dark:text-slate-400`}>
                 File preview truncated.
               </div>
             ) : null}
@@ -480,7 +484,7 @@ export function WorkspaceGitDiffPanel({
           <div className={integratedCompactPanel ? "space-y-0" : "space-y-3"}>
             {transientBusy ? (
               <div
-                className="flex items-center gap-2 rounded-xl border border-slate-200/70 bg-slate-50 px-3 py-2 text-sm text-slate-600 dark:border-slate-800 dark:bg-slate-900/30 dark:text-slate-300"
+                className={`flex items-center gap-2 rounded-xl border border-slate-200/70 bg-slate-50 px-3 py-2 text-sm text-slate-600 ${DARK_DIVIDER_BORDER_CLASS} ${DARK_PANEL_SOFT_BG_CLASS} dark:text-slate-300`}
                 data-testid={`${testIdPrefix}-transient-busy`}
               >
                 <Spinner aria-hidden="true" tone="slate" size="xs" />
@@ -500,7 +504,7 @@ export function WorkspaceGitDiffPanel({
             ) : null}
             {showDiffHeaderSummary && diffHeader ? (
               <div
-                className="rounded-xl border border-slate-200/70 bg-white/80 px-3 py-2 text-sm dark:border-slate-800 dark:bg-slate-950/40"
+                className={frame === "embedded" ? "px-3 py-2 text-sm" : `rounded-xl border border-slate-200/70 bg-white/80 px-3 py-2 text-sm ${DARK_DIVIDER_BORDER_CLASS} ${DARK_PANEL_BG_CLASS}`}
                 data-testid={`${testIdPrefix}-header`}
               >
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -559,9 +563,9 @@ export function WorkspaceGitDiffPanel({
               <div
                 className={[
                   "overflow-hidden font-mono text-xs",
-                  integratedCompactPanel
+                  integratedCompactPanel || frame === "embedded"
                     ? "bg-transparent"
-                    : "rounded-xl border border-slate-200/70 bg-slate-50 dark:border-slate-800 dark:bg-slate-900/30",
+                    : `rounded-xl border border-slate-200/70 bg-slate-50 ${DARK_DIVIDER_BORDER_CLASS} ${DARK_PANEL_SOFT_BG_CLASS}`,
                 ].join(" ")}
               >
                 {diffViewMode === "split" ? (
@@ -569,10 +573,10 @@ export function WorkspaceGitDiffPanel({
                     <div
                       className={[
                         "grid min-w-[52rem] grid-cols-2 text-xxs font-medium uppercase tracking-[0.08em] text-slate-500 dark:text-slate-400",
-                        integratedCompactPanel ? "border-b border-slate-200/70 dark:border-slate-800" : "border-b border-slate-200/70 dark:border-slate-800",
+                        `border-b border-slate-200/70 ${DARK_DIVIDER_BORDER_CLASS}`,
                       ].join(" ")}
                     >
-                      <div className="border-r border-slate-200/70 px-3 py-2 dark:border-slate-800">Old</div>
+                      <div className={`border-r border-slate-200/70 px-3 py-2 ${DARK_DIVIDER_BORDER_CLASS}`}>Old</div>
                       <div className="px-3 py-2">New</div>
                     </div>
                     {splitDiffRows.map((row, index) => {
@@ -580,7 +584,7 @@ export function WorkspaceGitDiffPanel({
                         return (
                           <div
                             key={`split-hunk-${index}`}
-                            className="border-y border-slate-200/70 bg-slate-100 px-3 py-1 text-slate-700 dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-200"
+                            className={`border-y border-slate-200/70 bg-slate-100 px-3 py-1 text-slate-700 ${DARK_DIVIDER_BORDER_CLASS} ${DARK_RAIL_BG_CLASS} dark:text-slate-200`}
                           >
                             {row.text}
                           </div>
@@ -590,7 +594,7 @@ export function WorkspaceGitDiffPanel({
                         return (
                           <div
                             key={`split-meta-${index}`}
-                            className="border-t border-slate-200/70 px-3 py-1 text-slate-500 dark:border-slate-800 dark:text-slate-400"
+                            className={`border-t border-slate-200/70 px-3 py-1 text-slate-500 ${DARK_DIVIDER_BORDER_CLASS} dark:text-slate-400`}
                           >
                             {row.text}
                           </div>
@@ -615,9 +619,9 @@ export function WorkspaceGitDiffPanel({
                       return (
                         <div
                           key={`split-line-${index}`}
-                          className="grid min-w-[52rem] grid-cols-2 border-t border-slate-200/70 dark:border-slate-800"
+                          className={`grid min-w-[52rem] grid-cols-2 border-t border-slate-200/70 ${DARK_DIVIDER_BORDER_CLASS}`}
                         >
-                          <div className="border-r border-slate-200/70 dark:border-slate-800">{renderCell(row.left, "left")}</div>
+                          <div className={`border-r border-slate-200/70 ${DARK_DIVIDER_BORDER_CLASS}`}>{renderCell(row.left, "left")}</div>
                           <div>{renderCell(row.right, "right")}</div>
                         </div>
                       );
@@ -631,7 +635,7 @@ export function WorkspaceGitDiffPanel({
                       }
                       return (
                         <div key={`hunk-${index}`} className="px-3 py-1">
-                          <div className="h-px bg-slate-200/70 dark:bg-slate-800" />
+                          <div className={`h-px bg-slate-200/70 ${DARK_DIVIDER_CLASS}`} />
                         </div>
                       );
                     }
