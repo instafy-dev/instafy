@@ -746,8 +746,9 @@ loses only work that never reached the remote:
   only when it holds nothing unpublished. The outcome is recorded on the turn
   as an `origin/refresh` artifact; a failure never fails the turn.
 - After a model turn the agent saves the files the model reported plus every
-  file whose `git status` changed during the turn, minus paths that are never
-  published. A client's `autoSyncAfterApply: false` is ignored: every turn
+  file whose `git status` changed during the turn, or that commits made during
+  the turn changed (a model may run `git commit` itself), minus paths that are
+  never published. A client's `autoSyncAfterApply: false` is ignored: every turn
   saves (only the runtime-wide `RUNTIME_GIT_SYNC_AFTER_APPLY=0` turns saving
   off). Multi-agent write-scoped workers save their files through the same
   checkpoint.

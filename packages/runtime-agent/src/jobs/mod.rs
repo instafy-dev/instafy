@@ -6708,8 +6708,9 @@ impl JobProcessor {
         }
 
         // Always taken, so the checkpoint can save files the turn changed
-        // without reporting them.
+        // without reporting them, or committed itself.
         let git_status_before = collect_git_status_porcelain(&workspace_dir).await;
+        let head_before = collect_git_head(&workspace_dir).await;
         // How the folder began this job's earliest attempt here, when this
         // lease resumes one a stop cut off (see `turn_baseline`).
         let earlier_attempt_status = git_status_before
@@ -6973,6 +6974,7 @@ impl JobProcessor {
             &mut outcome.files,
             tracks_workspace_file_changes,
             git_status_before.as_ref(),
+            head_before.as_deref(),
             earlier_attempt_status.as_ref(),
         )
         .await?
@@ -7566,6 +7568,7 @@ impl JobProcessor {
                 &mut retry_outcome.files,
                 tracks_workspace_file_changes,
                 git_status_before.as_ref(),
+                head_before.as_deref(),
                 earlier_attempt_status.as_ref(),
             )
             .await?;
@@ -7978,6 +7981,7 @@ impl JobProcessor {
                     Box::pin(checkpoint_files_with_status_delta(
                         &workspace_dir,
                         git_status_before.as_ref(),
+                        head_before.as_deref(),
                         &retry_outcome.files,
                     ))
                     .await
@@ -8157,6 +8161,7 @@ impl JobProcessor {
                 Box::pin(checkpoint_files_with_status_delta(
                     &workspace_dir,
                     git_status_before.as_ref(),
+                    head_before.as_deref(),
                     &outcome.files,
                 ))
                 .await
@@ -9529,12 +9534,13 @@ async fn collect_workspace_change_receipts(
     files: &mut Vec<CodexFileDescriptor>,
     tracks_changes: bool,
     before: Option<&HashMap<String, GitStatusEntry>>,
+    head_before: Option<&str>,
     earlier_attempt: Option<&HashMap<String, GitStatusEntry>>,
 ) -> Result<usize> {
     if tracks_changes
         && files.is_empty()
         && let Some(before) = before
-        && let Some(after) = collect_git_status_porcelain(workspace_dir).await
+        && let Some(after) = collect_turn_end_status(workspace_dir, head_before).await
     {
         *files = normalize_codex_files(
             workspace_dir,
@@ -15447,22 +15453,29 @@ async fn fetch_agent_context_cards_for_scope(
     Ok(filter_project_context_cards(cards, terms))
 }
 
-fn git_status_command_args(workspace_dir: &Path) -> Vec<String> {
-    let status_args = vec![
-        "status".to_string(),
-        "--porcelain=v1".to_string(),
-        "-z".to_string(),
-        "--no-renames".to_string(),
-        "--untracked-files=all".to_string(),
-    ];
-    // Canonical workspaces keep the repository at `.instafy/.git` with no
-    // top-level `.git`, so a plain `git status` fails and silently disables
-    // the only file-change evidence channel for write jobs.
+/// `args` for the folder's own repository. Canonical workspaces keep it at
+/// `.instafy/.git` with no top-level `.git`, so a plain `git status` fails and
+/// silently disables the only file-change evidence channel for write jobs.
+fn workspace_git_args(workspace_dir: &Path, args: &[&str]) -> Vec<String> {
+    let args = args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
     if workspace_uses_instafy_canonical_git(workspace_dir) {
-        canonical_git_args(workspace_dir, &status_args)
+        canonical_git_args(workspace_dir, &args)
     } else {
-        status_args
+        args
     }
+}
+
+fn git_status_command_args(workspace_dir: &Path) -> Vec<String> {
+    workspace_git_args(
+        workspace_dir,
+        &[
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--no-renames",
+            "--untracked-files=all",
+        ],
+    )
 }
 
 async fn collect_git_status_porcelain(
@@ -15473,6 +15486,52 @@ async fn collect_git_status_porcelain(
         &git_status_command_args(workspace_dir),
     )
     .await
+}
+
+/// The commit the folder's `HEAD` names, taken as a write turn begins: the
+/// turn's own commits are counted from it (see [`collect_turn_end_status`]).
+async fn collect_git_head(workspace_dir: &Path) -> Option<String> {
+    workspace_change_detection::git_commit_id(
+        workspace_dir,
+        &workspace_git_args(
+            workspace_dir,
+            &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+        ),
+    )
+    .await
+}
+
+/// The folder's `git status` at the end of a turn that began on commit
+/// `head_before`, plus every path the commits made on top of it changed. A
+/// turn's model may run `git commit` itself: its work is then clean in `git
+/// status`, but it is still the turn's work, which the turn reports and its
+/// checkpoint saves (a checkpoint with no files publishes nothing).
+async fn collect_turn_end_status(
+    workspace_dir: &Path,
+    head_before: Option<&str>,
+) -> Option<HashMap<String, GitStatusEntry>> {
+    let mut status = collect_git_status_porcelain(workspace_dir).await?;
+    if let Some(head_before) = head_before {
+        let commits = format!("{head_before}...HEAD");
+        workspace_change_detection::add_committed_paths(
+            workspace_dir,
+            &workspace_git_args(
+                workspace_dir,
+                &[
+                    "diff",
+                    "--no-color",
+                    "--name-status",
+                    "-z",
+                    "--no-renames",
+                    &commits,
+                    "--",
+                ],
+            ),
+            &mut status,
+        )
+        .await;
+    }
+    Some(status)
 }
 
 fn git_status_delta_paths(
@@ -15584,19 +15643,21 @@ async fn restore_clean_baseline_git_status_delta_excluding(
 
 /// The files a turn's checkpoint saves: what the turn reported, plus every
 /// path whose `git status` changed during the turn (tools, generators and
-/// installs write files nobody reports). Changed paths that may never be
+/// installs write files nobody reports), and every path the turn's own
+/// commits on top of `head_before` changed. Changed paths that may never be
 /// published are left out here rather than reported as "Not saved": nobody
 /// asked for them, and they stay on this machine.
 async fn checkpoint_files_with_status_delta(
     workspace_dir: &Path,
     before: Option<&HashMap<String, GitStatusEntry>>,
+    head_before: Option<&str>,
     reported: &[CodexFileDescriptor],
 ) -> Vec<CodexFileDescriptor> {
     let mut files = reported.to_vec();
     let Some(before) = before else {
         return files;
     };
-    let Some(after) = collect_git_status_porcelain(workspace_dir).await else {
+    let Some(after) = collect_turn_end_status(workspace_dir, head_before).await else {
         return files;
     };
     files.extend(status_delta_files_for_checkpoint(before, &after, reported));
@@ -23316,6 +23377,7 @@ mod tests {
             &mut resumed,
             tracking,
             Some(&before),
+            None,
             Some(&earlier),
         )
         .await
@@ -23350,6 +23412,7 @@ mod tests {
                 &mut files,
                 tracking,
                 Some(&before),
+                None,
                 Some(&earlier),
             )
             .await
@@ -23369,6 +23432,7 @@ mod tests {
                 &mut files,
                 tracking,
                 Some(&before),
+                None,
                 Some(&earlier)
             )
             .await
@@ -23408,6 +23472,7 @@ mod tests {
                 &mut unchanged,
                 tracking,
                 Some(&after),
+                None,
                 None
             )
             .await
@@ -23417,6 +23482,120 @@ mod tests {
         assert!(
             unchanged.is_empty(),
             "a completed no-change review has no invented file receipt"
+        );
+    }
+
+    /// A model that runs `git commit` itself leaves its work clean in `git
+    /// status`. The turn still reports that work and its checkpoint still
+    /// sends it to the origin; before, both were empty and nothing reached
+    /// `main` until a later turn's refresh.
+    #[tokio::test]
+    async fn a_turn_that_commits_its_own_work_still_reports_and_saves_it() {
+        let tmp = tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=Instafy Test",
+                    "-c",
+                    "user.email=test@instafy.dev",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .current_dir(&workspace)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "--quiet"]);
+        fs::write(workspace.join("personal.md"), "saved\n").unwrap();
+        fs::write(workspace.join("old.md"), "to remove\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "start"]);
+        fs::write(workspace.join("personal.md"), "the person's own edit\n").unwrap();
+        let before = collect_git_status_porcelain(&workspace).await.unwrap();
+        let head_before = collect_git_head(&workspace).await;
+        assert!(head_before.is_some());
+
+        // The model's turn: a new file and a removal it commits itself, and
+        // one more file it leaves uncommitted.
+        fs::create_dir_all(workspace.join(".agents/skills/wave")).unwrap();
+        fs::write(workspace.join(".agents/skills/wave/SKILL.md"), "# Wave\n").unwrap();
+        git(&["add", ".agents"]);
+        git(&["rm", "--quiet", "old.md"]);
+        git(&["commit", "--quiet", "-m", "add the wave skill"]);
+        fs::write(workspace.join("notes.md"), "not committed\n").unwrap();
+
+        let kinds = |files: &[CodexFileDescriptor]| {
+            let mut kinds = files
+                .iter()
+                .map(|file| {
+                    let kind = match file.change.as_ref().map(|change| &change.kind) {
+                        Some(FileChangeKind::Created) => "created",
+                        Some(FileChangeKind::Deleted) => "deleted",
+                        _ => "changed",
+                    };
+                    (file.workspace_path.clone(), kind)
+                })
+                .collect::<Vec<_>>();
+            kinds.sort();
+            kinds
+        };
+        let turns_work = vec![
+            (".agents/skills/wave/SKILL.md".to_string(), "created"),
+            ("notes.md".to_string(), "created"),
+            ("old.md".to_string(), "deleted"),
+        ];
+
+        let checkpoint = checkpoint_files_with_status_delta(
+            &workspace,
+            Some(&before),
+            head_before.as_deref(),
+            &[],
+        )
+        .await;
+        assert_eq!(kinds(&checkpoint), turns_work);
+        let mut receipts = Vec::new();
+        let own = collect_workspace_change_receipts(
+            &workspace,
+            &mut receipts,
+            true,
+            Some(&before),
+            head_before.as_deref(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(own, 3, "the turn made changes, so it is not retried");
+        assert_eq!(kinds(&receipts), turns_work);
+
+        // Without the commit the turn began on, only the uncommitted file.
+        let status_only =
+            checkpoint_files_with_status_delta(&workspace, Some(&before), None, &[]).await;
+        assert_eq!(
+            kinds(&status_only),
+            vec![("notes.md".to_string(), "created")]
+        );
+
+        // A turn that commits nothing adds nothing.
+        let unchanged = collect_git_status_porcelain(&workspace).await.unwrap();
+        let head_now = collect_git_head(&workspace).await;
+        assert!(
+            checkpoint_files_with_status_delta(
+                &workspace,
+                Some(&unchanged),
+                head_now.as_deref(),
+                &[],
+            )
+            .await
+            .is_empty()
         );
     }
 

@@ -39,6 +39,77 @@ pub(super) async fn collect_git_status_porcelain(
     workspace_dir: &Path,
     git_args: &[String],
 ) -> Option<HashMap<String, GitStatusEntry>> {
+    let stdout = match run_git(workspace_dir, git_args).await {
+        Ok(stdout) => stdout,
+        Err(error) => {
+            warn!(
+                workspace_dir = %workspace_dir.display(),
+                %error,
+                "git status failed; workspace file-change detection is unavailable"
+            );
+            return None;
+        }
+    };
+
+    let Some(mut statuses) = parse_porcelain_status(&stdout) else {
+        warn!(
+            workspace_dir = %workspace_dir.display(),
+            "git status returned an invalid path; workspace file-change detection is unavailable"
+        );
+        return None;
+    };
+    expand_embedded_repo_statuses(workspace_dir, &mut statuses).await;
+    let paths = statuses.keys().cloned().collect();
+    fingerprint(workspace_dir, &mut statuses, paths).await;
+    Some(statuses)
+}
+
+/// The commit `git_args` (a `rev-parse` of one revision) names, or `None`
+/// when there is none, as before a folder's first commit.
+pub(super) async fn git_commit_id(workspace_dir: &Path, git_args: &[String]) -> Option<String> {
+    let stdout = run_git(workspace_dir, git_args).await.ok()?;
+    let commit = String::from_utf8(stdout).ok()?.trim().to_string();
+    (!commit.is_empty()).then_some(commit)
+}
+
+/// Adds to `statuses`, a `git status` of the folder, each path that
+/// `git_args` (a `diff --name-status -z --no-renames` between two commits)
+/// lists and the status does not. Work committed in the folder is clean in
+/// its status, but it changed all the same: a commit status code (`A `,
+/// `D ` or `M `) and a fingerprint of the folder's copy say how.
+pub(super) async fn add_committed_paths(
+    workspace_dir: &Path,
+    git_args: &[String],
+    statuses: &mut HashMap<String, GitStatusEntry>,
+) {
+    let committed = run_git(workspace_dir, git_args).await.and_then(|stdout| {
+        parse_name_status(&stdout).ok_or_else(|| "it printed an invalid path".to_string())
+    });
+    let committed = match committed {
+        Ok(committed) => committed,
+        Err(error) => {
+            warn!(
+                workspace_dir = %workspace_dir.display(),
+                %error,
+                "git diff failed; committed work is left out of the file changes"
+            );
+            return;
+        }
+    };
+    let mut added = Vec::new();
+    for (path, code) in committed {
+        if !statuses.contains_key(&path) {
+            statuses.insert(path.clone(), GitStatusEntry::new(code, None));
+            added.push(path);
+        }
+    }
+    fingerprint(workspace_dir, statuses, added).await;
+}
+
+/// Runs `git` in `workspace_dir` the way change detection reads a folder:
+/// no fsmonitor, no optional locks, the allowlisted environment, and at
+/// most [`GIT_STATUS_TIMEOUT`]. The stdout of a successful run.
+async fn run_git(workspace_dir: &Path, git_args: &[String]) -> Result<Vec<u8>, String> {
     let mut command = Command::new("git");
     command
         .args(["-c", "core.fsmonitor=false"])
@@ -47,49 +118,25 @@ pub(super) async fn collect_git_status_porcelain(
     apply_allowlisted_tokio_environment(&mut command, &[]);
     command.env("GIT_OPTIONAL_LOCKS", "0");
     command.kill_on_drop(true);
-    let output = match tokio::time::timeout(GIT_STATUS_TIMEOUT, command.output()).await {
-        Ok(Ok(output)) => output,
-        Ok(Err(error)) => {
-            warn!(
-                workspace_dir = %workspace_dir.display(),
-                %error,
-                "failed to run git status; workspace file-change detection is unavailable"
-            );
-            return None;
-        }
-        Err(_) => {
-            warn!(
-                workspace_dir = %workspace_dir.display(),
-                "git status timed out; workspace file-change detection is unavailable"
-            );
-            return None;
-        }
-    };
-
-    if !output.status.success() {
-        warn!(
-            workspace_dir = %workspace_dir.display(),
-            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
-            "git status failed; workspace file-change detection is unavailable"
-        );
-        return None;
+    match tokio::time::timeout(GIT_STATUS_TIMEOUT, command.output()).await {
+        Ok(Ok(output)) if output.status.success() => Ok(output.stdout),
+        Ok(Ok(output)) => Err(String::from_utf8_lossy(&output.stderr).trim().to_string()),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(_) => Err("timed out".to_string()),
     }
+}
 
-    let Some(mut statuses) = parse_porcelain_status(&output.stdout) else {
-        warn!(
-            workspace_dir = %workspace_dir.display(),
-            "git status returned an invalid path; workspace file-change detection is unavailable"
-        );
-        return None;
-    };
-    expand_embedded_repo_statuses(workspace_dir, &mut statuses).await;
-
+/// Sets the fingerprint of each of `paths` in `statuses`.
+async fn fingerprint(
+    workspace_dir: &Path,
+    statuses: &mut HashMap<String, GitStatusEntry>,
+    mut paths: Vec<String>,
+) {
     let fingerprint_root = workspace_dir.to_path_buf();
-    let mut fingerprint_paths = statuses.keys().cloned().collect::<Vec<_>>();
-    fingerprint_paths.sort();
+    paths.sort();
     let fingerprints = tokio::task::spawn_blocking(move || {
         let mut budget = FingerprintBudget::default();
-        fingerprint_paths
+        paths
             .into_iter()
             .map(|path| {
                 let fingerprint = workspace_path_fingerprint(&fingerprint_root, &path, &mut budget);
@@ -99,11 +146,11 @@ pub(super) async fn collect_git_status_porcelain(
     })
     .await
     .unwrap_or_default();
-    for (path, status) in &mut statuses {
-        status.fingerprint = fingerprints.get(path).cloned().flatten();
+    for (path, fingerprint) in fingerprints {
+        if let Some(status) = statuses.get_mut(&path) {
+            status.fingerprint = fingerprint;
+        }
     }
-
-    Some(statuses)
 }
 
 fn parse_porcelain_status(raw: &[u8]) -> Option<HashMap<String, GitStatusEntry>> {
@@ -116,21 +163,50 @@ fn parse_porcelain_status(raw: &[u8]) -> Option<HashMap<String, GitStatusEntry>>
             return None;
         }
         let status = std::str::from_utf8(&record[..2]).ok()?;
-        let path = std::str::from_utf8(&record[3..]).ok()?.replace('\\', "/");
-        let relative = Path::new(&path);
-        if relative.as_os_str().is_empty()
-            || !relative
-                .components()
-                .all(|component| matches!(component, std::path::Component::Normal(_)))
-        {
-            return None;
+        let path = workspace_relative_path(&record[3..])?;
+        if !is_git_metadata(&path) {
+            statuses.insert(path, GitStatusEntry::new(status, None));
         }
-        if path == ".git" || path.starts_with(".git/") {
-            continue;
-        }
-        statuses.insert(path, GitStatusEntry::new(status, None));
     }
     Some(statuses)
+}
+
+/// The `(path, status code)` of each entry of a `diff --name-status -z
+/// --no-renames`: `A ` for a path the commits added, `D ` for one they
+/// deleted, and `M ` for any other change.
+fn parse_name_status(raw: &[u8]) -> Option<Vec<(String, &'static str)>> {
+    let mut fields = raw
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty());
+    let mut entries = Vec::new();
+    while let Some(status) = fields.next() {
+        let path = workspace_relative_path(fields.next()?)?;
+        let code = match status.first()? {
+            b'A' => "A ",
+            b'D' => "D ",
+            _ => "M ",
+        };
+        if !is_git_metadata(&path) {
+            entries.push((path, code));
+        }
+    }
+    Some(entries)
+}
+
+/// A path git printed, with `/` separators, when it names something inside
+/// the folder: not empty, not absolute, and with no `.` or `..` in it.
+fn workspace_relative_path(raw: &[u8]) -> Option<String> {
+    let path = std::str::from_utf8(raw).ok()?.replace('\\', "/");
+    let relative = Path::new(&path);
+    let inside = !relative.as_os_str().is_empty()
+        && relative
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)));
+    inside.then_some(path)
+}
+
+fn is_git_metadata(path: &str) -> bool {
+    path == ".git" || path.starts_with(".git/")
 }
 
 async fn expand_embedded_repo_statuses(
