@@ -1,5 +1,5 @@
 use anyhow::Result;
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use uuid::Uuid;
@@ -52,20 +52,29 @@ pub async fn check_acl(client: &Client, cfg: &HookConfig, body: &AclRequest) -> 
         .await?;
 
     let status = resp.status();
+    let body = resp.bytes().await.unwrap_or_default();
+    acl_decision(status, &body)
+}
+
+/// The ACL hook's answer. Only a 2xx whose body says `{"allowed": true}` allows; any other 2xx
+/// body and any 4xx deny, so a hook that answers something unexpected never opens a tunnel. A
+/// 5xx is an error.
+fn acl_decision(status: StatusCode, body: &[u8]) -> Result<bool> {
     if status.is_success() {
-        let acl: AclResponse = resp.json().await.unwrap_or(AclResponse {
-            allowed: true,
-            reason: None,
-        });
-        return Ok(acl.allowed);
+        return Ok(serde_json::from_slice::<AclResponse>(body)
+            .map(|acl| acl.allowed)
+            .unwrap_or(false));
     }
 
     if status.is_client_error() {
         return Ok(false);
     }
 
-    let body = resp.text().await.unwrap_or_default();
-    anyhow::bail!("acl hook returned {}: {}", status, body);
+    anyhow::bail!(
+        "acl hook returned {}: {}",
+        status,
+        String::from_utf8_lossy(body)
+    );
 }
 
 pub async fn emit_event(client: &Client, cfg: &HookConfig, payload: &EventPayload<'_>) {
@@ -75,4 +84,44 @@ pub async fn emit_event(client: &Client, cfg: &HookConfig, payload: &EventPayloa
         .json(payload)
         .send()
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn acl_allows_only_an_explicit_allowed_true() {
+        assert!(acl_decision(StatusCode::OK, br#"{"allowed":true}"#).unwrap());
+        assert!(!acl_decision(
+            StatusCode::OK,
+            br#"{"allowed":false,"reason":"no credits"}"#
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn acl_denies_a_2xx_it_cannot_read() {
+        for body in [
+            &b""[..],
+            b"ok",
+            b"{}",
+            br#"{"allowed":"yes"}"#,
+            b"<html></html>",
+        ] {
+            assert!(
+                !acl_decision(StatusCode::OK, body).unwrap(),
+                "body {:?} must deny",
+                String::from_utf8_lossy(body)
+            );
+        }
+        assert!(!acl_decision(StatusCode::NO_CONTENT, b"").unwrap());
+    }
+
+    #[test]
+    fn acl_denies_a_4xx_and_errors_on_a_5xx() {
+        assert!(!acl_decision(StatusCode::UNAUTHORIZED, b"").unwrap());
+        assert!(!acl_decision(StatusCode::NOT_FOUND, b"").unwrap());
+        assert!(acl_decision(StatusCode::SERVICE_UNAVAILABLE, b"down").is_err());
+    }
 }
