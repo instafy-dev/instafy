@@ -9,6 +9,7 @@ import {
   type MutableRefObject,
 } from "react";
 import { getChatScrollObstructionPaddingPx } from "./browserSessionLayout";
+import { hasNotScrolledUpFromPin } from "./useChatScrollOrchestration";
 import { isNativeKeyboardViewportOpen } from "../../../utils/keyboardViewport";
 export { isNativeKeyboardViewportOpen } from "../../../utils/keyboardViewport";
 
@@ -45,6 +46,7 @@ type UseChatComposerLayoutStateOptions = {
   isHistoryLoading: boolean;
   lastComposerScrollTopRef: MutableRefObject<number>;
   lastScrollHeightRef: MutableRefObject<number>;
+  pinnedScrollTopRef: MutableRefObject<number | null>;
   queuedSummaryItemCount: number;
   recordScrollPosition: () => void;
   requestOlderMessages: () => void;
@@ -76,6 +78,7 @@ export function useChatComposerLayoutState({
   isHistoryLoading,
   lastComposerScrollTopRef,
   lastScrollHeightRef,
+  pinnedScrollTopRef,
   queuedSummaryItemCount,
   recordScrollPosition,
   requestOlderMessages,
@@ -175,9 +178,19 @@ export function useChatComposerLayoutState({
     const reflowed = previousViewportSize !== null
       && (previousViewportSize.width !== viewportSize.width || previousViewportSize.height !== viewportSize.height);
     const distanceFromBottom = node.scrollHeight - (node.scrollTop + node.clientHeight);
-    if (reflowed && shouldAutoScrollRef.current && distanceFromBottom > AUTO_SCROLL_BOTTOM_THRESHOLD_PX) {
+    // The same holds for the echo of our own bottom pin: rows that rendered
+    // since only moved the bottom further down, and scroll anchoring may have
+    // carried the view down with rows that grew above it. Only a move up from
+    // the pin is the reader leaving the bottom; later moves are measured from
+    // wherever this event left the view.
+    const fromPin = hasNotScrolledUpFromPin(node, pinnedScrollTopRef.current);
+    pinnedScrollTopRef.current = fromPin ? node.scrollTop : null;
+    const grewBelowPin = fromPin && distanceFromBottom > 1;
+    const reflowedAway = reflowed && distanceFromBottom > AUTO_SCROLL_BOTTOM_THRESHOLD_PX;
+    if (shouldAutoScrollRef.current && (grewBelowPin || reflowedAway)) {
       // Still following the latest message: put it back in view instead.
       node.scrollTop = Math.max(0, node.scrollHeight - node.clientHeight);
+      pinnedScrollTopRef.current = node.scrollTop;
       lastScrollHeightRef.current = node.scrollHeight;
       lastComposerScrollTopRef.current = node.scrollTop;
       return;
@@ -221,6 +234,7 @@ export function useChatComposerLayoutState({
     isHistoryLoading,
     lastComposerScrollTopRef,
     lastScrollHeightRef,
+    pinnedScrollTopRef,
     recordScrollPosition,
     requestOlderMessages,
     scrollContainerRef,

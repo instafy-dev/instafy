@@ -577,6 +577,59 @@ describe("useChatScrollController", () => {
     expect((container.querySelector('[data-testid="anchor-scroll"]') as HTMLDivElement).scrollTop).toBe(600);
   });
 
+  it("keeps following the bottom when a row grows between the pin and its scroll event", async () => {
+    // Measured on a cold load: the history pin landed at the bottom, a late row
+    // grew the transcript by 31px before the browser reported the pin as a
+    // scroll event, and that event was saved as a reading position. The next
+    // render restored it, so the newest message stayed under the composer.
+    const conversationId = "pin-echo-growth";
+    const rows = [{ id: "older", top: 0, height: 800 }, { id: "newest", top: 800, height: 455 }];
+    await act(async () => root.render(<AnchorHarness conversationId={conversationId} loading rows={[]} scrollHeight={200} />));
+    await act(async () => root.render(<AnchorHarness conversationId={conversationId} rows={rows} scrollHeight={1255} />));
+    const scroller = container.querySelector('[data-testid="anchor-scroll"]') as HTMLDivElement;
+    expect(scroller.scrollTop).toBe(1055);
+
+    Object.defineProperty(scroller, "scrollHeight", { get: () => 1286, configurable: true });
+    scroller.dispatchEvent(new Event("scroll"));
+    expect(savedAnchor(conversationId)).toBeNull();
+
+    await act(async () => root.render(<AnchorHarness conversationId={conversationId} rows={rows} scrollHeight={1286} />));
+    expect(scroller.scrollTop).toBe(1086);
+  });
+
+  it("keeps following when scroll anchoring carried the view down past the pin", async () => {
+    const conversationId = "pin-echo-anchoring";
+    const rows = [{ id: "older", top: 0, height: 800 }, { id: "newest", top: 800, height: 455 }];
+    await act(async () => root.render(<AnchorHarness conversationId={conversationId} loading rows={[]} scrollHeight={200} />));
+    await act(async () => root.render(<AnchorHarness conversationId={conversationId} rows={rows} scrollHeight={1255} />));
+    const scroller = container.querySelector('[data-testid="anchor-scroll"]') as HTMLDivElement;
+    expect(scroller.scrollTop).toBe(1055);
+
+    // 20px grew above the browser's scroll anchor (the view moved down with it)
+    // and 31px below.
+    Object.defineProperty(scroller, "scrollHeight", { get: () => 1306, configurable: true });
+    scroller.scrollTop = 1075;
+    scroller.dispatchEvent(new Event("scroll"));
+    expect(savedAnchor(conversationId)).toBeNull();
+
+    await act(async () => root.render(<AnchorHarness conversationId={conversationId} rows={rows} scrollHeight={1306} />));
+    expect(scroller.scrollTop).toBe(1106);
+  });
+
+  it("still saves a reading position when the reader scrolls off the pin as rows grow", async () => {
+    const conversationId = "pin-echo-reader";
+    const rows = [{ id: "older", top: 0, height: 800 }, { id: "newest", top: 800, height: 455 }];
+    await act(async () => root.render(<AnchorHarness conversationId={conversationId} loading rows={[]} scrollHeight={200} />));
+    await act(async () => root.render(<AnchorHarness conversationId={conversationId} rows={rows} scrollHeight={1255} />));
+    const scroller = container.querySelector('[data-testid="anchor-scroll"]') as HTMLDivElement;
+    expect(scroller.scrollTop).toBe(1055);
+
+    Object.defineProperty(scroller, "scrollHeight", { get: () => 1286, configurable: true });
+    scroller.scrollTop = 700;
+    scroller.dispatchEvent(new Event("scroll"));
+    expect(savedAnchor(conversationId)).toBe("older");
+  });
+
   it("keeps separate message anchors when conversations switch within the same mounted panel", async () => {
     const rows = [{ id: "first", top: 0, height: 400 }, { id: "second", top: 400, height: 400 }, { id: "third", top: 800, height: 400 }];
     await act(async () => root.render(<AnchorHarness conversationId="anchor-switch-a" scrollHeight={1200} rows={rows} />));
