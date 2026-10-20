@@ -294,7 +294,7 @@ pub async fn preview_auth(State(state): State<AppState>, headers: HeaderMap) -> 
     else {
         return denied();
     };
-    let Some(hook) = state.config().preview_auth_hook.as_ref() else {
+    let Some(hook) = state.config().ready_preview_auth_hook() else {
         return denied();
     };
 
@@ -981,6 +981,21 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn never_calls_the_hook_without_a_token() {
+        let (url, calls, _) =
+            spawn_hook(serde_json::json!({"allow": true, "ttlSeconds": 30})).await;
+        let mut config = test_broker_config();
+        config.preview_auth_hook = Some(HookConfig { url, token: None });
+        let response = preview_auth(
+            State(AppState::for_tests(config)),
+            forwarded(&host(LABEL, HEX, "preview.localhost")),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

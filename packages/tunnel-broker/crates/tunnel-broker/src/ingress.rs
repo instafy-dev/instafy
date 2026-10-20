@@ -77,7 +77,11 @@ pub fn render_traefik_dynamic_config(cfg: &BrokerConfig, bindings: &[RatholeBind
         };
         out.push_str(&format!("      service: \"{name}\"\n"));
         out.push_str("      entryPoints:\n");
-        out.push_str("        - web\n");
+        // A capability host carries its credential in the Host header, so once TLS is set up
+        // it is never served over plain HTTP. Local stacks without TLS keep `web`.
+        if !(binding.is_private() && tls_resolver.is_some()) {
+            out.push_str("        - web\n");
+        }
         out.push_str("        - websecure\n");
         if binding.is_private() {
             out.push_str("      middlewares:\n");
@@ -361,8 +365,24 @@ mod tests {
             .1;
         assert!(public.contains("- main: \"rt.test\""));
         assert!(!public.contains("middlewares"));
+        assert!(public.contains("        - web\n        - websecure\n"));
         assert!(private.contains("- main: \"preview.test\""));
         assert!(private.contains("- \"*.preview.test\""));
+    }
+
+    #[test]
+    fn private_routers_skip_plain_http_when_tls_is_configured() {
+        let cfg = test_cfg();
+        let rendered = render_traefik_dynamic_config(&cfg, &[private_binding()]);
+        let (_, block) = &router_blocks(&rendered)[0];
+        assert!(block.contains("      entryPoints:\n        - websecure\n"));
+        assert!(!block.contains("- web\n"));
+
+        // Without a certificate resolver (local stacks) there is only plain HTTP to serve on.
+        let mut local = test_cfg();
+        local.traefik_cert_resolver = None;
+        let rendered = render_traefik_dynamic_config(&local, &[private_binding()]);
+        assert!(rendered.contains("      entryPoints:\n        - web\n        - websecure\n"));
     }
 
     #[test]

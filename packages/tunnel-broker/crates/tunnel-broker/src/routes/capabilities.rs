@@ -43,6 +43,7 @@ mod tests {
         for strip in [
             |cfg: &mut BrokerConfig| cfg.preview = None,
             |cfg: &mut BrokerConfig| cfg.preview_auth_hook = None,
+            |cfg: &mut BrokerConfig| cfg.preview_auth_hook.as_mut().unwrap().token = None,
             |cfg: &mut BrokerConfig| {
                 cfg.preview = None;
                 cfg.preview_auth_hook = None;

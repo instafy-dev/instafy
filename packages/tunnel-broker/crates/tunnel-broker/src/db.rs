@@ -54,6 +54,33 @@ pub struct TunnelRecord {
     pub metadata: Option<serde_json::Value>,
 }
 
+/// An active public tunnel row for handler tests.
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn test_tunnel_record() -> TunnelRecord {
+    let now = Utc::now();
+    TunnelRecord {
+        id: Uuid::new_v4(),
+        project_id: Uuid::new_v4(),
+        org_id: None,
+        runtime_id: None,
+        lease_id: None,
+        idempotency_key: Some("preview:rt:lease:4173".into()),
+        ingress_id: Uuid::new_v4(),
+        hostname: "abc.rt.test".into(),
+        rathole_service: Some("tunnel_abc".into()),
+        rathole_port: Some(20000),
+        status: "active".into(),
+        token: "tok".into(),
+        token_expires_at: None,
+        url: None,
+        created_at: now,
+        updated_at: now,
+        expires_at: None,
+        metadata: None,
+    }
+}
+
 pub struct TunnelInsert {
     pub id: Uuid,
     pub project_id: Uuid,
@@ -462,10 +489,7 @@ pub async fn ensure_dns_node(
 }
 
 pub async fn ensure_ingress(pool: &DbPool, cfg: &BrokerConfig) -> Result<IngressRecord> {
-    let id = Uuid::new_v5(
-        &Uuid::NAMESPACE_DNS,
-        format!("{}:{}", cfg.ingress_host, cfg.ingress_port).as_bytes(),
-    );
+    let id = cfg.ingress_id();
 
     let record = sqlx::query_as::<_, IngressRecord>(
         r#"

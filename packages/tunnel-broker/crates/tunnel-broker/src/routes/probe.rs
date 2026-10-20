@@ -12,7 +12,8 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
-    db,
+    config::BrokerConfig,
+    db::{self, TunnelRecord},
     error::{AppError, AppResult},
     state::AppState,
 };
@@ -49,11 +50,7 @@ pub async fn probe(
     let Some(record) = db::get_tunnel(state.pool(), id).await? else {
         return Err(db::not_found(id));
     };
-    let port = record
-        .rathole_port
-        .filter(|_| !record.status.trim().eq_ignore_ascii_case("revoked"))
-        .and_then(|port| u16::try_from(port).ok());
-    let Some(port) = port else {
+    let Some(port) = probe_port(state.config(), &record) else {
         return Ok(Json(ProbeResponse::DOWN));
     };
     Ok(Json(
@@ -65,6 +62,20 @@ pub async fn probe(
         )
         .await,
     ))
+}
+
+/// The rathole port to dial for `record`, or `None` when probing it would say nothing about
+/// this tunnel. Ports are allocated per ingress and `RATHOLE_UPSTREAM_HOST` is this broker's
+/// own ingress, so a tunnel on another ingress is never probed: that port could belong to a
+/// different site here.
+fn probe_port(cfg: &BrokerConfig, record: &TunnelRecord) -> Option<u16> {
+    if record.status.trim().eq_ignore_ascii_case("revoked") || record.ingress_id != cfg.ingress_id()
+    {
+        return None;
+    }
+    record
+        .rathole_port
+        .and_then(|port| u16::try_from(port).ok())
 }
 
 /// The path goes straight into a request line, so only visible ASCII is accepted.
@@ -193,6 +204,32 @@ mod tests {
         let port = serve_once(Some(b"")).await;
         let result = probe_http("127.0.0.1", port, "/", PROBE_TIMEOUT).await;
         assert_eq!(result, ProbeResponse::DOWN);
+    }
+
+    #[test]
+    fn probes_only_live_tunnels_on_this_ingress() {
+        let cfg = crate::config::test_broker_config();
+        let here = TunnelRecord {
+            ingress_id: cfg.ingress_id(),
+            ..db::test_tunnel_record()
+        };
+        assert_eq!(probe_port(&cfg, &here), Some(20000));
+
+        // Another ingress allocates the same port numbers for other sites.
+        let elsewhere = db::test_tunnel_record();
+        assert_ne!(elsewhere.ingress_id, cfg.ingress_id());
+        assert_eq!(probe_port(&cfg, &elsewhere), None);
+
+        let revoked = TunnelRecord {
+            status: "revoked".into(),
+            ..here.clone()
+        };
+        assert_eq!(probe_port(&cfg, &revoked), None);
+        let unbound = TunnelRecord {
+            rathole_port: None,
+            ..here
+        };
+        assert_eq!(probe_port(&cfg, &unbound), None);
     }
 
     #[test]
