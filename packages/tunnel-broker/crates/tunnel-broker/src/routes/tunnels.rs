@@ -2,12 +2,13 @@ use axum::{
     extract::{Path, State},
     Json,
 };
-use chrono::{Duration, Utc};
-use tunnel_broker_types::{CreateTunnelRequest, TunnelResponse, TunnelStatus};
+use chrono::{DateTime, Duration, Utc};
+use tunnel_broker_types::{CreateTunnelRequest, LabelMap, TunnelResponse, TunnelStatus};
 use uuid::Uuid;
 
 use crate::{
-    db::{self, TunnelInsert},
+    config::BrokerConfig,
+    db::{self, TunnelInsert, TunnelRecord},
     error::{AppError, AppResult},
     hooks::{check_acl, emit_event, AclRequest, EventPayload},
     state::AppState,
@@ -32,6 +33,7 @@ pub async fn create(
     State(state): State<AppState>,
     Json(body): Json<CreateTunnelRequest>,
 ) -> AppResult<Json<TunnelResponse>> {
+    ensure_visibility_supported(state.config(), body.labels.as_ref())?;
     let now = Utc::now();
     let idempotency_key = body
         .idempotency_key
@@ -44,6 +46,7 @@ pub async fn create(
         if let Some(existing) =
             db::get_tunnel_by_idempotency_key(state.pool(), body.project_id, key).await?
         {
+            ensure_same_visibility(&existing, body.labels.as_ref())?;
             if should_return_existing_tunnel(&existing.status, existing.expires_at, now) {
                 let ingress = db::get_ingress(state.pool(), existing.ingress_id)
                     .await?
@@ -85,15 +88,7 @@ pub async fn create(
         let allowed = check_acl(
             state.http(),
             acl,
-            &AclRequest {
-                intent: "create_tunnel".to_string(),
-                project_id: body.project_id,
-                org_id: body.org_id,
-                runtime_id: body.runtime_id,
-                lease_id: body.lease_id,
-                idempotency_key: idempotency_key.map(|value| value.to_string()),
-                metadata: None,
-            },
+            &create_acl_request(&body, idempotency_key),
         )
         .await
         .map_err(|error| AppError::internal(format!("acl check failed: {error}")))?;
@@ -126,8 +121,14 @@ pub async fn create(
         .rathole_shared_token
         .clone()
         .unwrap_or(signed_token);
-    let url = Some(state.config().tunnel_url(&hostname));
-    let expires_at = tokens::resolve_tunnel_expiry(requested_expires_at, token_expires_at);
+    let url = advertised_url(state.config(), body.labels.as_ref(), &hostname);
+    let expires_at = resolve_expires_at(
+        state.config(),
+        body.labels.as_ref(),
+        requested_expires_at,
+        token_expires_at,
+        now,
+    );
 
     let insert = TunnelInsert {
         id: tunnel_id,
@@ -145,7 +146,7 @@ pub async fn create(
         token,
         token_expires_at: Some(token_expires_at),
         expires_at: Some(expires_at),
-        metadata: labels_to_metadata(body.labels),
+        metadata: labels_to_metadata(body.labels.clone()),
         ttl_seconds: state.config().default_ttl_seconds,
     };
 
@@ -167,7 +168,12 @@ pub async fn create(
             )
             .await?
         }
-        None => db::create_tunnel(state.pool(), state.config(), &ingress, insert).await?,
+        None => {
+            let record = db::create_tunnel(state.pool(), state.config(), &ingress, insert).await?;
+            // A concurrent create with the same key may have won the insert.
+            ensure_same_visibility(&record, body.labels.as_ref())?;
+            record
+        }
     };
     let descriptor = record.into_descriptor(state.config(), &ingress);
 
@@ -248,15 +254,296 @@ pub async fn revoke(
     }))
 }
 
-fn labels_to_metadata(
-    labels: Option<std::collections::HashMap<String, String>>,
-) -> Option<serde_json::Value> {
+fn labels_to_metadata(labels: Option<LabelMap>) -> Option<serde_json::Value> {
     labels.map(|map| serde_json::json!({ "labels": map }))
+}
+
+/// The ACL hook sees the same `{labels}` metadata the tunnel row stores, so the controller can
+/// tell a private preview from a public tunnel before it burns credits.
+fn create_acl_request(body: &CreateTunnelRequest, idempotency_key: Option<&str>) -> AclRequest {
+    AclRequest {
+        intent: "create_tunnel".to_string(),
+        project_id: body.project_id,
+        org_id: body.org_id,
+        runtime_id: body.runtime_id,
+        lease_id: body.lease_id,
+        idempotency_key: idempotency_key.map(|value| value.to_string()),
+        metadata: labels_to_metadata(body.labels.clone()),
+    }
+}
+
+/// Whether the request asks for a private tunnel. Unset visibility means public.
+fn requests_private(labels: Option<&LabelMap>) -> bool {
+    labels
+        .and_then(|labels| labels.get("visibility"))
+        .is_some_and(|visibility| db::visibility_is_private(visibility))
+}
+
+/// Whether a stored tunnel is private, read the way the binding query reads it:
+/// `metadata.labels.visibility`, public when unset, and private for anything but `public`.
+fn stored_private(metadata: Option<&serde_json::Value>) -> bool {
+    match metadata
+        .and_then(|metadata| metadata.get("labels"))
+        .and_then(|labels| labels.get("visibility"))
+    {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::String(visibility)) => db::visibility_is_private(visibility),
+        Some(_) => true,
+    }
+}
+
+/// An idempotency key stays bound to the visibility it was first used with. Returning a public
+/// tunnel to a caller that asked for a private one would leave it open to anyone with the URL,
+/// so a mismatch is refused instead of resolved.
+fn ensure_same_visibility(existing: &TunnelRecord, labels: Option<&LabelMap>) -> AppResult<()> {
+    if stored_private(existing.metadata.as_ref()) != requests_private(labels) {
+        return Err(AppError::conflict(
+            "idempotency key already names a tunnel with a different visibility",
+        ));
+    }
+    Ok(())
+}
+
+/// A private tunnel has no router on its tunnel hostname, so it gets no URL; callers build the
+/// capability host from their own label and the `previewDomain` in `/capabilities`.
+fn advertised_url(cfg: &BrokerConfig, labels: Option<&LabelMap>, hostname: &str) -> Option<String> {
+    (!requests_private(labels)).then(|| cfg.tunnel_url(hostname))
+}
+
+/// A private tunnel only has a capability router, so without preview routing and its auth
+/// hook it could never be opened; refuse it up front instead.
+fn ensure_visibility_supported(cfg: &BrokerConfig, labels: Option<&LabelMap>) -> AppResult<()> {
+    if requests_private(labels) && !cfg.private_previews_enabled() {
+        return Err(AppError::bad_request(
+            "private tunnels require PREVIEW_DOMAIN, PREVIEW_AUTH_ADDRESS and PREVIEW_AUTH_HOOK_URL",
+        ));
+    }
+    Ok(())
+}
+
+/// Preview tunnels live as long as the caller asks, up to `PREVIEW_MAX_TTL_SECONDS`; everything
+/// else stays capped at the token TTL.
+fn resolve_expires_at(
+    cfg: &BrokerConfig,
+    labels: Option<&LabelMap>,
+    requested: Option<DateTime<Utc>>,
+    token_expires_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> DateTime<Utc> {
+    let preview = labels
+        .and_then(|labels| labels.get("kind"))
+        .is_some_and(|kind| kind == "preview");
+    match requested {
+        Some(requested) if preview => std::cmp::min(
+            requested,
+            now + Duration::seconds(cfg.preview_max_ttl_seconds),
+        ),
+        _ => tokens::resolve_tunnel_expiry(requested, token_expires_at),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::test_broker_config;
+    use axum::http::StatusCode;
+
+    fn labels(pairs: &[(&str, &str)]) -> LabelMap {
+        pairs
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect()
+    }
+
+    fn create_body(labels: Option<LabelMap>) -> CreateTunnelRequest {
+        CreateTunnelRequest {
+            project_id: Uuid::new_v4(),
+            org_id: None,
+            runtime_id: Some(Uuid::new_v4()),
+            lease_id: Some(Uuid::new_v4()),
+            idempotency_key: Some("preview:rt:lease:4173".into()),
+            expires_in_seconds: Some(43_200),
+            labels,
+        }
+    }
+
+    #[test]
+    fn preview_tunnels_get_up_to_twelve_hours() {
+        let cfg = test_broker_config();
+        let now = Utc::now();
+        let token_expiry = now + Duration::seconds(cfg.token_ttl_seconds);
+        let preview = labels(&[("kind", "preview"), ("visibility", "private")]);
+
+        let twelve_hours = now + Duration::seconds(43_200);
+        assert_eq!(
+            resolve_expires_at(&cfg, Some(&preview), Some(twelve_hours), token_expiry, now),
+            twelve_hours
+        );
+        let a_day = now + Duration::seconds(86_400);
+        assert_eq!(
+            resolve_expires_at(&cfg, Some(&preview), Some(a_day), token_expiry, now),
+            twelve_hours
+        );
+        let ten_minutes = now + Duration::seconds(600);
+        assert_eq!(
+            resolve_expires_at(&cfg, Some(&preview), Some(ten_minutes), token_expiry, now),
+            ten_minutes
+        );
+        assert_eq!(
+            resolve_expires_at(&cfg, Some(&preview), None, token_expiry, now),
+            token_expiry
+        );
+    }
+
+    #[test]
+    fn other_tunnels_stay_capped_at_the_token_ttl() {
+        let cfg = test_broker_config();
+        let now = Utc::now();
+        let token_expiry = now + Duration::seconds(cfg.token_ttl_seconds);
+        let twelve_hours = now + Duration::seconds(43_200);
+        for tunnel_labels in [
+            None,
+            Some(labels(&[("source", "cli")])),
+            Some(labels(&[("kind", "tunnel"), ("visibility", "public")])),
+            Some(labels(&[("kind", "Preview")])),
+        ] {
+            assert_eq!(
+                resolve_expires_at(
+                    &cfg,
+                    tunnel_labels.as_ref(),
+                    Some(twelve_hours),
+                    token_expiry,
+                    now
+                ),
+                token_expiry
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn private_tunnels_without_preview_config_are_rejected() {
+        for strip in [
+            |cfg: &mut BrokerConfig| cfg.preview = None,
+            |cfg: &mut BrokerConfig| cfg.preview_auth_hook = None,
+            |cfg: &mut BrokerConfig| cfg.preview_auth_hook.as_mut().unwrap().token = None,
+        ] {
+            let mut cfg = test_broker_config();
+            strip(&mut cfg);
+            let state = AppState::for_tests(cfg);
+            // Rejected before the handler touches Postgres (the test pool never connects).
+            let body = create_body(Some(labels(&[
+                ("kind", "preview"),
+                ("visibility", "private"),
+            ])));
+            let error = create(State(state), Json(body)).await.unwrap_err();
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[test]
+    fn visibility_check_allows_public_and_configured_private() {
+        let configured = test_broker_config();
+        let mut bare = test_broker_config();
+        bare.preview = None;
+        let private = labels(&[("visibility", "private")]);
+        let public = labels(&[("visibility", "public")]);
+        let other = labels(&[("visibility", "members")]);
+
+        assert!(ensure_visibility_supported(&configured, Some(&private)).is_ok());
+        assert!(ensure_visibility_supported(&bare, None).is_ok());
+        assert!(ensure_visibility_supported(&bare, Some(&public)).is_ok());
+        assert!(ensure_visibility_supported(&bare, Some(&labels(&[("kind", "preview")]))).is_ok());
+        assert!(ensure_visibility_supported(&bare, Some(&private)).is_err());
+        assert!(ensure_visibility_supported(&bare, Some(&other)).is_err());
+    }
+
+    #[test]
+    fn labels_reach_acl_metadata() {
+        let body = create_body(Some(labels(&[
+            ("kind", "preview"),
+            ("visibility", "private"),
+        ])));
+        let request = create_acl_request(&body, Some("preview:rt:lease:4173"));
+        assert_eq!(
+            serde_json::to_value(&request).unwrap()["metadata"],
+            serde_json::json!({"labels": {"kind": "preview", "visibility": "private"}})
+        );
+
+        let unlabeled = create_acl_request(&create_body(None), None);
+        assert!(serde_json::to_value(&unlabeled)
+            .unwrap()
+            .get("metadata")
+            .is_none());
+    }
+
+    fn stored(metadata: Option<serde_json::Value>) -> TunnelRecord {
+        TunnelRecord {
+            metadata,
+            ..db::test_tunnel_record()
+        }
+    }
+
+    #[test]
+    fn idempotent_reuse_never_returns_a_public_tunnel_for_a_private_request() {
+        let private = labels(&[("kind", "preview"), ("visibility", "private")]);
+        for public_row in [
+            stored(None),
+            stored(Some(serde_json::json!({}))),
+            stored(Some(serde_json::json!({"labels": {"source": "cli"}}))),
+            stored(Some(
+                serde_json::json!({"labels": {"visibility": "Public"}}),
+            )),
+        ] {
+            let error = ensure_same_visibility(&public_row, Some(&private)).unwrap_err();
+            assert_eq!(error.status, StatusCode::CONFLICT);
+        }
+    }
+
+    #[test]
+    fn idempotent_reuse_keeps_matching_visibility() {
+        let private_row = stored(Some(
+            serde_json::json!({"labels": {"kind": "preview", "visibility": "private"}}),
+        ));
+        let private = labels(&[("visibility", "private")]);
+        let public = labels(&[("visibility", "public")]);
+        assert!(ensure_same_visibility(&private_row, Some(&private)).is_ok());
+        assert!(ensure_same_visibility(&stored(None), None).is_ok());
+        assert!(ensure_same_visibility(&stored(None), Some(&public)).is_ok());
+        // The opposite mismatch is refused too, so a key means one thing.
+        assert_eq!(
+            ensure_same_visibility(&private_row, None)
+                .unwrap_err()
+                .status,
+            StatusCode::CONFLICT
+        );
+        // Stored values the binding query treats as private count as private here as well.
+        for odd in [
+            serde_json::json!({"labels": {"visibility": "members"}}),
+            serde_json::json!({"labels": {"visibility": 1}}),
+        ] {
+            assert!(ensure_same_visibility(&stored(Some(odd.clone())), Some(&private)).is_ok());
+            assert!(ensure_same_visibility(&stored(Some(odd)), None).is_err());
+        }
+    }
+
+    #[test]
+    fn private_tunnels_advertise_no_url() {
+        let cfg = test_broker_config();
+        let private = labels(&[("kind", "preview"), ("visibility", "private")]);
+        assert_eq!(advertised_url(&cfg, Some(&private), "abc.rt.test"), None);
+        assert_eq!(
+            advertised_url(&cfg, None, "abc.rt.test"),
+            Some(cfg.tunnel_url("abc.rt.test"))
+        );
+        assert_eq!(
+            advertised_url(
+                &cfg,
+                Some(&labels(&[("visibility", "public")])),
+                "abc.rt.test"
+            ),
+            Some(cfg.tunnel_url("abc.rt.test"))
+        );
+    }
 
     #[test]
     fn returns_existing_for_active_and_unexpired() {

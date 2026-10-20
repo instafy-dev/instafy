@@ -54,6 +54,33 @@ pub struct TunnelRecord {
     pub metadata: Option<serde_json::Value>,
 }
 
+/// An active public tunnel row for handler tests.
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn test_tunnel_record() -> TunnelRecord {
+    let now = Utc::now();
+    TunnelRecord {
+        id: Uuid::new_v4(),
+        project_id: Uuid::new_v4(),
+        org_id: None,
+        runtime_id: None,
+        lease_id: None,
+        idempotency_key: Some("preview:rt:lease:4173".into()),
+        ingress_id: Uuid::new_v4(),
+        hostname: "abc.rt.test".into(),
+        rathole_service: Some("tunnel_abc".into()),
+        rathole_port: Some(20000),
+        status: "active".into(),
+        token: "tok".into(),
+        token_expires_at: None,
+        url: None,
+        created_at: now,
+        updated_at: now,
+        expires_at: None,
+        metadata: None,
+    }
+}
+
 pub struct TunnelInsert {
     pub id: Uuid,
     pub project_id: Uuid,
@@ -462,10 +489,7 @@ pub async fn ensure_dns_node(
 }
 
 pub async fn ensure_ingress(pool: &DbPool, cfg: &BrokerConfig) -> Result<IngressRecord> {
-    let id = Uuid::new_v5(
-        &Uuid::NAMESPACE_DNS,
-        format!("{}:{}", cfg.ingress_host, cfg.ingress_port).as_bytes(),
-    );
+    let id = cfg.ingress_id();
 
     let record = sqlx::query_as::<_, IngressRecord>(
         r#"
@@ -997,27 +1021,57 @@ pub async fn revoke_expired_tunnels_for_ingress(
 #[derive(Debug, Clone, FromRow)]
 #[allow(dead_code)]
 pub struct RatholeBinding {
+    pub tunnel_id: Uuid,
     pub rathole_service: String,
     pub rathole_port: i32,
     pub token: String,
     pub hostname: String,
+    /// `labels.visibility`, `public` when unset.
+    pub visibility: String,
+    /// `labels.kind`, `tunnel` when unset.
+    pub kind: String,
 }
 
 #[allow(dead_code)]
+impl RatholeBinding {
+    /// Anything other than an explicit `public` routes through preview auth.
+    pub fn is_private(&self) -> bool {
+        visibility_is_private(&self.visibility)
+    }
+
+    /// The tunnel id as it appears in preview hostnames.
+    pub fn tunnel_hex(&self) -> String {
+        self.tunnel_id.simple().to_string()
+    }
+}
+
+#[allow(dead_code)]
+pub fn visibility_is_private(visibility: &str) -> bool {
+    !visibility.trim().eq_ignore_ascii_case("public")
+}
+
+/// Shared by both binding queries so routing never sees a binding without its labels.
+const RATHOLE_BINDING_COLUMNS: &str =
+    "id as tunnel_id, rathole_service, rathole_port, token, hostname, \
+    coalesce(metadata->'labels'->>'visibility', 'public') as visibility, \
+    coalesce(metadata->'labels'->>'kind', 'tunnel') as kind";
+
+#[allow(dead_code)]
 pub async fn list_active_rathole_bindings(pool: &DbPool) -> Result<Vec<RatholeBinding>> {
-    let bindings = sqlx::query_as::<_, RatholeBinding>(
+    let query = format!(
         r#"
-        select rathole_service, rathole_port, token, hostname
+        select {RATHOLE_BINDING_COLUMNS}
         from tunnels
         where rathole_service is not null
           and rathole_port is not null
           and status != 'revoked'
           and (expires_at is null or expires_at > now())
         order by rathole_port asc
-        "#,
-    )
-    .fetch_all(pool)
-    .await?;
+        "#
+    );
+    let bindings = sqlx::query_as::<_, RatholeBinding>(&query)
+        .fetch_all(pool)
+        .await?;
     Ok(bindings)
 }
 
@@ -1026,9 +1080,9 @@ pub async fn list_active_rathole_bindings_for_ingress(
     pool: &DbPool,
     ingress_id: Uuid,
 ) -> Result<Vec<RatholeBinding>> {
-    let bindings = sqlx::query_as::<_, RatholeBinding>(
+    let query = format!(
         r#"
-        select rathole_service, rathole_port, token, hostname
+        select {RATHOLE_BINDING_COLUMNS}
         from tunnels
         where ingress_id = $1
           and rathole_service is not null
@@ -1036,11 +1090,12 @@ pub async fn list_active_rathole_bindings_for_ingress(
           and status != 'revoked'
           and (expires_at is null or expires_at > now())
         order by rathole_port asc
-        "#,
-    )
-    .bind(ingress_id)
-    .fetch_all(pool)
-    .await?;
+        "#
+    );
+    let bindings = sqlx::query_as::<_, RatholeBinding>(&query)
+        .bind(ingress_id)
+        .fetch_all(pool)
+        .await?;
     Ok(bindings)
 }
 
@@ -1090,6 +1145,40 @@ mod tests {
             let parsed = status_from_str(as_str);
             assert_eq!(parsed as u8, status as u8);
         }
+    }
+
+    #[test]
+    fn binding_queries_read_visibility_and_kind_from_labels() {
+        let source = include_str!("db.rs");
+        assert!(RATHOLE_BINDING_COLUMNS.contains("id as tunnel_id"));
+        assert!(RATHOLE_BINDING_COLUMNS
+            .contains("coalesce(metadata->'labels'->>'visibility', 'public') as visibility"));
+        assert!(RATHOLE_BINDING_COLUMNS
+            .contains("coalesce(metadata->'labels'->>'kind', 'tunnel') as kind"));
+        let uses = ["select {", "RATHOLE_BINDING_COLUMNS}"].concat();
+        assert_eq!(source.matches(&uses).count(), 2);
+    }
+
+    #[test]
+    fn binding_visibility_fails_closed() {
+        let binding = |visibility: &str| RatholeBinding {
+            tunnel_id: Uuid::parse_str("0123456789abcdef0123456789abcdef").unwrap(),
+            rathole_service: "tunnel_abc".into(),
+            rathole_port: 20000,
+            token: "tok".into(),
+            hostname: "abc.rt.test".into(),
+            visibility: visibility.into(),
+            kind: "preview".into(),
+        };
+        assert!(!binding("public").is_private());
+        assert!(!binding(" Public ").is_private());
+        assert!(binding("private").is_private());
+        assert!(binding("members").is_private());
+        assert!(binding("").is_private());
+        assert_eq!(
+            binding("private").tunnel_hex(),
+            "0123456789abcdef0123456789abcdef"
+        );
     }
 
     #[test]

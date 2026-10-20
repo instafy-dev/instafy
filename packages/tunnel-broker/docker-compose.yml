@@ -40,6 +40,16 @@ services:
       ACL_HOOK_TOKEN: ${ACL_HOOK_TOKEN-}
       EVENT_HOOK_URL: ${EVENT_HOOK_URL-}
       EVENT_HOOK_TOKEN: ${EVENT_HOOK_TOKEN-}
+      # Private previews are off unless all three PREVIEW_* values below are set: Traefik then
+      # asks this broker (`broker` on tunnelnet) to check each `p-<label>--<tunnel>.<PREVIEW_DOMAIN>`
+      # request, and the broker asks PREVIEW_AUTH_HOOK_URL. Unset, private tunnels are refused.
+      PREVIEW_DOMAIN: ${PREVIEW_DOMAIN-}
+      PREVIEW_AUTH_ADDRESS: ${PREVIEW_AUTH_ADDRESS-}
+      PREVIEW_AUTH_HOOK_URL: ${PREVIEW_AUTH_HOOK_URL-}
+      PREVIEW_MAX_TTL_SECONDS: ${PREVIEW_MAX_TTL_SECONDS:-43200}
+      RATHOLE_UPSTREAM_HOST: ${RATHOLE_UPSTREAM_HOST:-rathole}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "8082:8080"
     command: ["tunnel-broker"]
@@ -97,6 +107,9 @@ services:
       # Requires pid namespace sharing so the sidecar can signal the rathole process.
       RATHOLE_RELOAD_COMMAND: "kill -HUP 1"
       TRAEFIK_CONFIG_OUTPUT: /etc/traefik/dynamic.yml
+      # Must match the broker: private bindings render no router without both.
+      PREVIEW_DOMAIN: ${PREVIEW_DOMAIN-}
+      PREVIEW_AUTH_ADDRESS: ${PREVIEW_AUTH_ADDRESS-}
     volumes:
       - ./config/rathole:/etc/rathole
       - ./config/traefik:/etc/traefik

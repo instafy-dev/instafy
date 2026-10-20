@@ -125,3 +125,16 @@ impl Default for ClientProtocol {
         ClientProtocol::Tcp
     }
 }
+
+/// `GET /capabilities`: optional features this broker is configured to serve, so a caller can
+/// detect them before relying on them. A feature that is not configured reads as off.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrokerCapabilities {
+    /// Private tunnels (`labels.visibility` other than `public`) are routed on capability hosts.
+    #[serde(default)]
+    pub private_previews: bool,
+    /// The domain those capability hosts live under; present only when `private_previews` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_domain: Option<String>,
+}
