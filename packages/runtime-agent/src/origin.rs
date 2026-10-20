@@ -207,6 +207,11 @@ impl OriginService {
 
         let register_token_source = server_config.controller_token_source.clone();
         let mut server = OriginHttpServer::new(server_config)?;
+        // The process's lazy browser host, which outlives this origin across
+        // registration renewals.
+        if let Some(handle) = crate::browser_host::origin_handle() {
+            server.set_browser_host(handle);
+        }
         // The origin is registered below, after the server is up. A beat that
         // reached the controller first was refused with 401 and had this agent
         // renew its registration, which restarted the origin and its tunnel on

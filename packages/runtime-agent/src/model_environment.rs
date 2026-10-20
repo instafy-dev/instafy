@@ -125,6 +125,40 @@ pub(crate) const PERSISTENT_HELPER_BASE_ENV_KEYS: &[&str] = &[
     "SSL_CERT_DIR",
 ];
 
+/// What the on-demand browser host (`runtime-entrypoint start-browser-host`)
+/// may inherit from the runtime agent: the persistent helper baseline without
+/// `HOME` (the host gets its own), plus the browser's display and egress
+/// settings. The agent sets every location, port and isolation setting itself
+/// (`browser_host::process`), and never passes relay credentials, runtime
+/// settings or tokens.
+pub(crate) const BROWSER_HOST_ENV_KEYS: &[&str] = &[
+    "PATH",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "LANG",
+    "LANGUAGE",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TZ",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "TERM",
+    "COLORTERM",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "INSTAFY_BROWSER_EGRESS_ALLOWED_PORTS",
+    "INSTAFY_BROWSER_EGRESS_MAX_CONNECTIONS",
+    "INSTAFY_BROWSER_VIEWPORT_ONLY",
+    "INSTAFY_BROWSER_ADBLOCK",
+    "INSTAFY_BROWSER_RENDER_SCALE",
+    "INSTAFY_BROWSER_MAX_FRAMEBUFFER_PIXELS",
+    "INSTAFY_VNC_GEOMETRY",
+    "INSTAFY_VNC_DEPTH",
+    "INSTAFY_CHROMIUM_CDP_READY_TIMEOUT_SECS",
+];
+
 pub(crate) const BROWSER_HELPER_ENV_KEYS: &[&str] = &[
     "WORKSPACE_DIR",
     "CODEX_HOME",

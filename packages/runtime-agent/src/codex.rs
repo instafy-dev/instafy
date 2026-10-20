@@ -68,6 +68,7 @@ use crate::required_execution::RequiredExecutionGate;
 
 mod project_preferences;
 
+use crate::browser_host::mode::SHARED_BROWSER_NODE_BINARY_ENV;
 use crate::job_cancel::JobCancelSignal;
 use crate::model_environment::{
     INTERNAL_CREDENTIAL_ENV_KEYS, MODEL_CHILD_ONLY_EXCLUDED_ENV_KEYS,
@@ -1193,7 +1194,10 @@ impl CodexClient {
         let browser_mode = options.expect_browser_session;
         let personal_browser_mode =
             options.personal_browser && personal_browser_capability_is_present();
-        let shared_browser_mode = options.shared_browser && shared_browser_capability_is_present();
+        let shared_browser_mode = shared_browser_mode_for_turn(
+            options.shared_browser,
+            crate::browser_host::shared_browser_capability_is_present(),
+        )?;
         let local_browser_config = if options.personal_browser || options.shared_browser {
             None
         } else {
@@ -1539,7 +1543,7 @@ impl CodexClient {
         let mut shared_browser_process_groups = install_browser_mcp_servers(
             &mut config,
             options.personal_browser,
-            options.shared_browser,
+            shared_browser_mode,
             options.shared_browser_page_id.as_deref(),
             local_browser_config.as_ref(),
             self.workspace_dir(),
@@ -3190,10 +3194,15 @@ fn scope_runtime_model_shell_environment(policy: &mut ShellEnvironmentPolicy) {
     }
 }
 
-fn shared_browser_capability_is_present() -> bool {
-    optional_env(SHARED_BROWSER_SESSION_ENV)
-        .map(|value| value.trim().to_ascii_lowercase())
-        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
+/// The Shared Browser MCP is installed exactly when the turn's browser mode
+/// is on, and the mode needs this runtime's static capability (the boot-time
+/// session or a lazy browser host). A turn asking for it elsewhere fails
+/// instead of running without its browser.
+fn shared_browser_mode_for_turn(requested: bool, capable: bool) -> Result<bool> {
+    if requested && !capable {
+        return Err(anyhow!("Shared Browser is not available on this runtime"));
+    }
+    Ok(requested)
 }
 
 fn scope_browser_capabilities_from_shell_environment(policy: &mut ShellEnvironmentPolicy) {
@@ -3212,6 +3221,7 @@ fn scope_browser_capabilities_from_shell_environment(policy: &mut ShellEnvironme
         SHARED_BROWSER_PAGE_ID_ENV,
         SHARED_BROWSER_PLAYWRIGHT_MODULE_PATH_ENV,
         SHARED_BROWSER_TRUSTED_NODE_MODULES_ROOT_ENV,
+        SHARED_BROWSER_NODE_BINARY_ENV,
         crate::local_browser::ENABLED_ENV,
         crate::local_browser::PLAYWRIGHT_PATH_ENV,
         crate::local_browser::CHROMIUM_PATH_ENV,
@@ -3267,6 +3277,47 @@ fn scope_configured_mcp_server_environment(servers: &mut HashMap<String, McpServ
             );
         }
     }
+}
+
+/// The Shared Browser MCP relay's explicit environment: the page, the
+/// runtime's browser settings (a lazy host's CDP port, private Playwright and
+/// Node among them) and the session flag the relay checks.
+fn shared_browser_mcp_environment(
+    page_id: String,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<HashMap<String, String>> {
+    let mut environment =
+        HashMap::from([(SHARED_BROWSER_SESSION_ENV.to_string(), "1".to_string())]);
+    environment.insert(SHARED_BROWSER_PAGE_ID_ENV.to_string(), page_id);
+    for key in [
+        SHARED_BROWSER_ACTIONS_FILE_ENV,
+        SHARED_BROWSER_AGENT_CONTROL_FILE_ENV,
+        SHARED_BROWSER_APPROVAL_DIR_ENV,
+        SHARED_BROWSER_APPROVAL_TIMEOUT_MS_ENV,
+        SHARED_BROWSER_CDP_PORT_ENV,
+        SHARED_BROWSER_CDP_URL_ENV,
+        SHARED_BROWSER_PLAYWRIGHT_MODULE_PATH_ENV,
+        SHARED_BROWSER_TRUSTED_NODE_MODULES_ROOT_ENV,
+        SHARED_BROWSER_NODE_BINARY_ENV,
+    ] {
+        if let Some(value) = lookup(key) {
+            environment.insert(key.to_string(), value);
+        }
+    }
+    for key in [
+        SHARED_BROWSER_PLAYWRIGHT_MODULE_PATH_ENV,
+        SHARED_BROWSER_TRUSTED_NODE_MODULES_ROOT_ENV,
+    ] {
+        let value = environment.get(key).with_context(|| {
+            format!("Shared Browser trusted runtime environment is missing {key}")
+        })?;
+        if !Path::new(value).is_absolute() {
+            return Err(anyhow!(
+                "Shared Browser trusted runtime environment {key} must be an absolute path"
+            ));
+        }
+    }
+    Ok(environment)
 }
 
 /// Returns the process-group registry of the Shared Browser MCP when this turn installs it.
@@ -3338,36 +3389,7 @@ fn install_browser_mcp_servers(
             .parent()
             .context("runtime-agent executable has no trusted parent directory")?
             .to_path_buf();
-        let mut environment =
-            HashMap::from([(SHARED_BROWSER_SESSION_ENV.to_string(), "1".to_string())]);
-        environment.insert(SHARED_BROWSER_PAGE_ID_ENV.to_string(), page_id);
-        for key in [
-            SHARED_BROWSER_ACTIONS_FILE_ENV,
-            SHARED_BROWSER_AGENT_CONTROL_FILE_ENV,
-            SHARED_BROWSER_APPROVAL_DIR_ENV,
-            SHARED_BROWSER_APPROVAL_TIMEOUT_MS_ENV,
-            SHARED_BROWSER_CDP_PORT_ENV,
-            SHARED_BROWSER_CDP_URL_ENV,
-            SHARED_BROWSER_PLAYWRIGHT_MODULE_PATH_ENV,
-            SHARED_BROWSER_TRUSTED_NODE_MODULES_ROOT_ENV,
-        ] {
-            if let Some(value) = optional_env(key) {
-                environment.insert(key.to_string(), value);
-            }
-        }
-        for key in [
-            SHARED_BROWSER_PLAYWRIGHT_MODULE_PATH_ENV,
-            SHARED_BROWSER_TRUSTED_NODE_MODULES_ROOT_ENV,
-        ] {
-            let value = environment.get(key).with_context(|| {
-                format!("Shared Browser trusted runtime environment is missing {key}")
-            })?;
-            if !Path::new(value).is_absolute() {
-                return Err(anyhow!(
-                    "Shared Browser trusted runtime environment {key} must be an absolute path"
-                ));
-            }
-        }
+        let mut environment = shared_browser_mcp_environment(page_id, optional_env)?;
         let process_groups = crate::mcp_process_groups::McpProcessGroupRegistry::create()?;
         environment.insert(
             crate::mcp_process_groups::REGISTRY_ENV.to_string(),
@@ -5662,11 +5684,99 @@ mod tests {
         ] {
             assert!(!policy.r#set.contains_key(key));
         }
-        assert_eq!(policy.exclude.len(), 20);
+        assert_eq!(policy.exclude.len(), 21);
 
         let mut fresh_policy = ShellEnvironmentPolicy::default();
         scope_browser_capabilities_from_shell_environment(&mut fresh_policy);
-        assert_eq!(fresh_policy.exclude.len(), 20);
+        assert_eq!(fresh_policy.exclude.len(), 21);
+    }
+
+    #[test]
+    fn model_shells_never_see_the_shared_browser_node_binary() {
+        let mut policy = ShellEnvironmentPolicy::default();
+        policy.r#set.insert(
+            SHARED_BROWSER_NODE_BINARY_ENV.to_string(),
+            "/opt/instafy/browser-host/bin/node".to_string(),
+        );
+        scope_browser_capabilities_from_shell_environment(&mut policy);
+        assert!(!policy.r#set.contains_key(SHARED_BROWSER_NODE_BINARY_ENV));
+    }
+
+    #[test]
+    fn shared_browser_mode_follows_the_static_capability() {
+        assert!(!shared_browser_mode_for_turn(false, false).unwrap());
+        assert!(!shared_browser_mode_for_turn(false, true).unwrap());
+        assert!(shared_browser_mode_for_turn(true, true).unwrap());
+        let error = shared_browser_mode_for_turn(true, false).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Shared Browser is not available on this runtime"
+        );
+
+        use crate::browser_host::mode::{LazyMode, force_lazy_mode_for_tests};
+        {
+            let _off = force_lazy_mode_for_tests(None);
+            assert!(!crate::browser_host::shared_browser_capability_is_present());
+        }
+        let _lazy = force_lazy_mode_for_tests(Some(LazyMode { persist: true }));
+        assert!(
+            shared_browser_mode_for_turn(
+                true,
+                crate::browser_host::shared_browser_capability_is_present()
+            )
+            .unwrap(),
+            "a lazy browser host turns the mode on"
+        );
+    }
+
+    #[test]
+    fn a_lazy_hosts_mcp_relay_gets_its_port_playwright_and_node() {
+        // The values `browser_host::mode` fixes in a lazy host's environment.
+        let lazy_environment = HashMap::from([
+            (SHARED_BROWSER_CDP_PORT_ENV, "19223"),
+            (
+                SHARED_BROWSER_PLAYWRIGHT_MODULE_PATH_ENV,
+                "/opt/instafy/browser-host/node_modules/playwright",
+            ),
+            (
+                SHARED_BROWSER_TRUSTED_NODE_MODULES_ROOT_ENV,
+                "/opt/instafy/browser-host/node_modules",
+            ),
+            (
+                SHARED_BROWSER_NODE_BINARY_ENV,
+                "/opt/instafy/browser-host/bin/node",
+            ),
+            ("INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON", "turn-secret"),
+            ("RUNTIME_ACCESS_TOKEN", "runtime-secret"),
+        ]);
+        let environment = shared_browser_mcp_environment("page-1".to_string(), |key| {
+            lazy_environment.get(key).map(|value| value.to_string())
+        })
+        .expect("relay environment");
+        assert_eq!(environment[SHARED_BROWSER_SESSION_ENV], "1");
+        assert_eq!(environment[SHARED_BROWSER_PAGE_ID_ENV], "page-1");
+        assert_eq!(environment[SHARED_BROWSER_CDP_PORT_ENV], "19223");
+        assert_eq!(
+            environment[SHARED_BROWSER_PLAYWRIGHT_MODULE_PATH_ENV],
+            crate::browser_host::mode::HOST_PLAYWRIGHT_PATH
+        );
+        assert_eq!(
+            environment[SHARED_BROWSER_TRUSTED_NODE_MODULES_ROOT_ENV],
+            crate::browser_host::mode::HOST_NODE_MODULES_ROOT
+        );
+        assert_eq!(
+            environment[SHARED_BROWSER_NODE_BINARY_ENV],
+            crate::browser_host::mode::HOST_NODE_BINARY
+        );
+        assert!(!environment.contains_key(SHARED_BROWSER_CDP_URL_ENV));
+        assert!(!environment.contains_key("INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON"));
+        assert!(!environment.contains_key("RUNTIME_ACCESS_TOKEN"));
+
+        let missing = shared_browser_mcp_environment("page-1".to_string(), |_| None);
+        assert!(
+            missing.is_err(),
+            "the trusted Playwright paths are required"
+        );
     }
 
     #[tokio::test]

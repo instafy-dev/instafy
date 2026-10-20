@@ -43,6 +43,9 @@ fn runtime_reuse_is_safe() -> bool {
 /// report a failure. No other exit of the process uses it.
 pub const SPACE_DELETED_EXIT_CODE: i32 = 3;
 
+/// How long a lazy browser host may take to stop at the runtime's shutdown.
+const BROWSER_HOST_SHUTDOWN_BUDGET: Duration = Duration::from_secs(10);
+
 /// How [`RuntimeAgent::run`] ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentExit {
@@ -702,6 +705,9 @@ impl RuntimeAgent {
 
         let client = Arc::new(ControllerClient::new(&config)?);
         let executor = Arc::new(AgentExecutor::new(config.clone()));
+        // A lazy browser host lives as long as this process, across
+        // registration renewals; it is published only on an attested lease.
+        crate::browser_host::install(client.clone());
 
         Self::run_registration_loop(
             config.clone(),
@@ -777,6 +783,8 @@ impl RuntimeAgent {
             None => match client.register_runtime(&config).await {
                 Ok(registration) => registration,
                 Err(error) if error.is::<SpaceDeleted>() => {
+                    // A deleted space has no use for its browser or a save of it.
+                    crate::browser_host::kill_now();
                     return Ok(RegistrationOutcome::SpaceDeleted);
                 }
                 Err(error) => return Err(error.context("failed to register runtime")),
@@ -950,6 +958,7 @@ impl RuntimeAgent {
             .as_ref()
             .is_err_and(|error| error.is::<SpaceDeleted>())
         {
+            crate::browser_host::kill_now();
             return Ok(RegistrationOutcome::SpaceDeleted);
         }
 
@@ -964,6 +973,10 @@ impl RuntimeAgent {
             // Prefer the freshest tokens for the final calls: the original agent
             // token may have lapsed during a long job that spanned a renewal.
             let registration = renewed_registration.as_ref().unwrap_or(&registration);
+
+            // A lazy browser host stops with the runtime (re-registration
+            // never stops it). Origin and its git flush went first, above.
+            crate::browser_host::shutdown(BROWSER_HOST_SHUTDOWN_BUDGET).await;
 
             // Flag-gated: snapshot the browser profile back to the controller
             // before we tear the runtime down, so the next runtime restores it.

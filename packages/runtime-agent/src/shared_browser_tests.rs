@@ -982,6 +982,39 @@ async fn unconfirmed_guard_drop_preserves_marker_and_requests_runtime_recycle() 
 }
 
 #[tokio::test]
+async fn a_lazy_browser_host_is_poisoned_instead_of_recycling_the_runtime() {
+    use crate::browser_host::mode::{LazyMode, force_lazy_mode_for_tests};
+    use crate::browser_host::{BrowserHost, HostConfig, install_host_for_tests};
+    use origin_http_server::browser_host::BrowserHostState;
+
+    let _lazy = force_lazy_mode_for_tests(Some(LazyMode { persist: true }));
+    let directory = tempfile::tempdir().expect("marker tempdir");
+    let host = BrowserHost::spawn(HostConfig::inert_for_tests(directory.path()));
+    let _installed = install_host_for_tests(host.clone());
+    let path = directory.path().join("agent-control.json");
+    let guard = SharedBrowserAgentControlGuard::acquire_with_path(
+        path.clone(),
+        directory.path().join("approvals"),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        "page-target",
+        "Octo",
+        JobCancelSignal::new(),
+        Duration::from_secs(60),
+    )
+    .expect("acquire marker");
+
+    drop(guard);
+
+    assert!(
+        path.is_file(),
+        "unconfirmed authority must remain fail-closed"
+    );
+    assert_eq!(host.snapshot().state, BrowserHostState::Poisoned);
+    assert!(host.request_start("user").is_err());
+}
+
+#[tokio::test]
 async fn caller_abort_preserves_marker_and_requests_runtime_recycle() {
     RUNTIME_RECYCLE_REQUESTED.store(false, Ordering::SeqCst);
     let directory = tempfile::tempdir().expect("marker tempdir");
@@ -1026,6 +1059,30 @@ fn runtime_startup_clears_only_a_leftover_agent_control_marker() {
 
     std::fs::create_dir(&path).expect("create non-file marker path");
     assert!(clear_stale_agent_control_marker(&path).is_err());
+}
+
+#[test]
+fn a_lazy_browser_host_clears_a_leftover_marker_at_startup() {
+    use crate::browser_host::mode::{LazyMode, force_lazy_mode_for_tests};
+    {
+        let _off = force_lazy_mode_for_tests(None);
+        assert!(!runtime_runs_shared_browser_turns());
+    }
+    let _lazy = force_lazy_mode_for_tests(Some(LazyMode { persist: true }));
+    assert!(runtime_runs_shared_browser_turns());
+
+    let directory = tempfile::tempdir().expect("startup tempdir");
+    let marker_path = directory.path().join("agent-control.json");
+    let approval_path = directory.path().join("approvals");
+    std::fs::write(&marker_path, b"leftover").expect("write leftover marker");
+    clear_stale_agent_control_marker_on_startup_for_mode(
+        runtime_runs_shared_browser_turns(),
+        &marker_path,
+        &approval_path,
+    )
+    .expect("clear leftover authority");
+    assert!(!marker_path.exists());
+    assert!(approval_path.is_dir());
 }
 
 #[test]
@@ -1162,7 +1219,32 @@ fn embedded_controller_loads_only_the_image_installed_playwright_package() {
     assert!(!SHARED_BROWSER_SCRIPT.contains("require(\"playwright\")"));
     assert!(SHARED_BROWSER_SCRIPT.contains("INSTAFY_SHARED_BROWSER_PLAYWRIGHT_PATH"));
     assert!(SHARED_BROWSER_SCRIPT.contains("path.relative(trustedRoot, resolvedModule)"));
-    assert!(Path::new(SHARED_BROWSER_NODE_BINARY).is_absolute());
+    assert!(Path::new(DEFAULT_SHARED_BROWSER_NODE_BINARY).is_absolute());
+}
+
+#[test]
+fn the_controller_runs_only_an_allowed_node_binary() {
+    assert_eq!(shared_browser_node_binary_from(None), "/usr/bin/node");
+    assert_eq!(
+        shared_browser_node_binary_from(Some("/opt/instafy/browser-host/bin/node")),
+        "/opt/instafy/browser-host/bin/node"
+    );
+    for refused in [
+        "",
+        "node",
+        "/workspace/node",
+        "/usr/local/bin/node",
+        "/opt/instafy/browser-host/bin/node/../../../../workspace/node",
+    ] {
+        assert_eq!(
+            shared_browser_node_binary_from(Some(refused)),
+            "/usr/bin/node",
+            "{refused}"
+        );
+    }
+    for allowed in ALLOWED_SHARED_BROWSER_NODE_BINARIES {
+        assert!(Path::new(allowed).is_absolute());
+    }
 }
 
 #[test]

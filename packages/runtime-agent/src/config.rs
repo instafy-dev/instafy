@@ -72,6 +72,12 @@ fn launch_metadata() -> Option<String> {
     }
 }
 
+/// The launch metadata as captured at startup (or, without a capture, as the
+/// environment holds it). The browser host reads its attestation from it.
+pub(crate) fn captured_launch_metadata() -> Option<String> {
+    launch_metadata()
+}
+
 fn launch_credential(key: &str) -> Option<String> {
     debug_assert!(
         CONFIGURED_LAUNCH_CREDENTIAL_KEYS.contains(&key),
@@ -295,6 +301,10 @@ impl Config {
         apply_local_browser_capability(
             &mut capabilities,
             crate::local_browser::registration_capability(),
+        );
+        apply_browser_host_capability(
+            &mut capabilities,
+            crate::browser_host::registration_capability(),
         );
 
         let metadata = launch_metadata()
@@ -626,6 +636,19 @@ fn apply_local_browser_capability(capabilities: &mut Value, local_browser: Optio
     }
 }
 
+/// `browserHost` reports a lazy browser host this process runs. Like
+/// `localBrowser`, a value from the launch capabilities is never trusted.
+fn apply_browser_host_capability(capabilities: &mut Value, browser_host: Option<Value>) {
+    let Some(map) = capabilities.as_object_mut() else {
+        return;
+    };
+    map.remove("browserHost");
+    map.remove("browser_host");
+    if let Some(capability) = browser_host {
+        map.insert("browserHost".to_string(), capability);
+    }
+}
+
 fn detect_rathole_use_subcommands(bin: &str) -> bool {
     let Ok(output) = Command::new(bin).arg("--help").output() else {
         return false;
@@ -647,8 +670,8 @@ fn detect_rathole_use_subcommands(bin: &str) -> bool {
 mod tests {
     use super::{
         CONFIGURED_LAUNCH_CREDENTIAL_KEYS, Config, LAUNCH_METADATA_ENV_KEY,
-        apply_local_browser_capability, capture_and_scrub_launch_credentials,
-        normalize_lease_max_jobs,
+        apply_browser_host_capability, apply_local_browser_capability,
+        capture_and_scrub_launch_credentials, normalize_lease_max_jobs,
     };
     use crate::model_environment::LAUNCH_CREDENTIAL_ENV_KEYS;
     use serde_json::json;
@@ -784,6 +807,50 @@ mod tests {
         assert_eq!(
             capabilities["localBrowser"],
             json!({ "enabled": true, "tools": ["observe"] })
+        );
+    }
+
+    #[test]
+    fn browser_host_registration_is_process_owned() {
+        let mut capabilities = json!({
+            "custom": { "preserved": true },
+            "browserHost": { "version": 1, "modes": ["lazy"], "spoofed": true },
+            "browser_host": { "version": 1 }
+        });
+        apply_browser_host_capability(&mut capabilities, None);
+        assert_eq!(capabilities, json!({ "custom": { "preserved": true } }));
+
+        apply_browser_host_capability(
+            &mut capabilities,
+            Some(json!({ "version": 1, "modes": ["lazy"] })),
+        );
+        assert_eq!(capabilities["custom"], json!({ "preserved": true }));
+        assert_eq!(
+            capabilities["browserHost"],
+            json!({ "version": 1, "modes": ["lazy"] })
+        );
+        assert!(capabilities.get("browser_host").is_none());
+    }
+
+    #[test]
+    fn registration_reports_the_browser_host_only_in_lazy_mode() {
+        use crate::browser_host::mode::{LazyMode, force_lazy_mode_for_tests};
+        let load = || {
+            let mut capabilities = json!({ "browserHost": { "version": 1, "modes": ["lazy"] } });
+            apply_browser_host_capability(
+                &mut capabilities,
+                crate::browser_host::registration_capability(),
+            );
+            capabilities
+        };
+        {
+            let _off = force_lazy_mode_for_tests(None);
+            assert!(load().get("browserHost").is_none());
+        }
+        let _lazy = force_lazy_mode_for_tests(Some(LazyMode { persist: true }));
+        assert_eq!(
+            load()["browserHost"],
+            json!({ "version": 1, "modes": ["lazy"] })
         );
     }
 }
