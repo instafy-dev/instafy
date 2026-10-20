@@ -46,6 +46,7 @@ export const DARK_CANVAS_CLASS = "dark:bg-[var(--color-studio-dark-canvas)]";
 
 export const DARK_DIVIDER_CLASS = "dark:bg-[var(--color-studio-dark-divider)]";
 export const DARK_DIVIDER_BORDER_CLASS = "dark:border-[color:var(--color-studio-dark-divider)]";
+export const DARK_DIVIDER_DIVIDE_CLASS = "dark:divide-[color:var(--color-studio-dark-divider)]";
 
 export const DARK_RAIL_BG_CLASS = "dark:bg-[var(--color-studio-dark-rail)]";
 export const DARK_RAIL_MUTED_BG_CLASS = "dark:bg-[var(--color-studio-dark-rail-muted)]";

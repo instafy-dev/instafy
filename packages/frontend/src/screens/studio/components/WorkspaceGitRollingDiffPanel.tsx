@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Button } from "../../../components/Button";
 import { Text } from "../../../components/Text";
 import { WorkspaceGitDiffPanel } from "./WorkspaceGitDiffPanel";
+import { DARK_DIVIDER_BORDER_CLASS, DARK_DIVIDER_DIVIDE_CLASS, DARK_PANEL_BG_CLASS } from "../../../theme/darkSurfaces";
 
 function sanitizeTestId(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]+/g, "-");
@@ -112,7 +113,7 @@ export function WorkspaceGitRollingDiffPanel({
   return (
     <div className="flex h-full min-h-0 flex-col" data-testid={dataTestId}>
       {showHeader ? (
-        <div className="flex items-center justify-between gap-3 border-b border-slate-200/70 px-4 py-3 dark:border-slate-800">
+        <div className={`flex items-center justify-between gap-3 border-b border-slate-200/70 px-4 py-3 ${DARK_DIVIDER_BORDER_CLASS}`}>
           <div className="min-w-0">
             <Text as="div" variant="bodyStrong" tone="inherit" className="text-sm text-slate-800 dark:text-slate-100">
               All changes
@@ -131,7 +132,7 @@ export function WorkspaceGitRollingDiffPanel({
         <div
           className={
             layoutStyle === "flat"
-              ? "divide-y divide-slate-200/70 dark:divide-slate-800"
+              ? `divide-y divide-slate-200/70 ${DARK_DIVIDER_DIVIDE_CLASS}`
               : "flex flex-col gap-3"
           }
         >
@@ -150,11 +151,12 @@ export function WorkspaceGitRollingDiffPanel({
                 className={
                   layoutStyle === "flat"
                     ? ""
-                    : "overflow-hidden rounded-2xl border border-slate-200/70 bg-white/80 dark:border-slate-800 dark:bg-slate-950/40"
+                    : `overflow-hidden rounded-2xl border border-slate-200/70 bg-white/80 ${DARK_DIVIDER_BORDER_CLASS} ${DARK_PANEL_BG_CLASS}`
                 }
                 data-testid={itemTestId}
               >
                 <WorkspaceGitDiffPanel
+                  frame="embedded"
                   path={path}
                   commit={commit}
                   base={base}
@@ -167,7 +169,6 @@ export function WorkspaceGitRollingDiffPanel({
                   diffOverride={diffOverrides?.[path] ?? null}
                   dataTestId={`${itemTestId}-panel`}
                   testIdPrefix={`${itemTestId}-diff`}
-                  className={layoutStyle === "flat" ? "rounded-none border-0 bg-transparent" : undefined}
                   bodyClassName={layoutStyle === "flat" ? "p-0" : "p-3"}
                   showModeLabel={false}
                   showDiffHeaderSummary={false}

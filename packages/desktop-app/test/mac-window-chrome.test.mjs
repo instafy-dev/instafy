@@ -7,11 +7,13 @@ import test from "node:test";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const mainSource = readFileSync(path.join(__dirname, "..", "src", "main.ts"), "utf8");
 const preloadSource = readFileSync(path.join(__dirname, "..", "src", "preload.ts"), "utf8");
+const layoutSource = readFileSync(path.join(__dirname, "..", "..", "frontend", "src", "screens", "studio", "StudioContextLayout.css"), "utf8");
 
 // Geometry the frontend's integrated title bar depends on. These live in two
 // packages that ship on different schedules, so the numbers are asserted here
 // rather than trusted to stay in sync by inspection.
-const TRAFFIC_LIGHTS_END_X = 65; // three 12px dots on a 20px pitch from x=13
+const TRAFFIC_LIGHT_DIAMETER_PX = 14;
+const TRAFFIC_LIGHTS_END_X = 74; // three 14px native buttons on a 23px pitch from x=14
 const RAIL_WIDTH_PX = 64; // w-[4rem] in StudioSidebar
 const FIRST_TAB_OFFSET_PX = 24; // DESKTOP_TITLE_BAR_TAB_OFFSET_PX
 
@@ -20,6 +22,17 @@ function constant(name) {
   assert.ok(match, `expected ${name} to be declared in main.ts`);
   return Number(match[1]);
 }
+
+test("native window buttons align with Studio's header and fit inside the reserved corner", () => {
+  const position = mainSource.match(/trafficLightPosition:\s*\{\s*x:\s*(\d+),\s*y:\s*(\d+)\s*\}/);
+  const header = layoutSource.match(/--studio-context-height:\s*(\d+)px/);
+  assert.ok(position && header, "native position and integrated header height must be available");
+  const top = Number(position[2]);
+  assert.equal(top + TRAFFIC_LIGHT_DIAMETER_PX / 2, Number(header[1]) / 2,
+    "native buttons must share the header controls' vertical center");
+  assert.ok(top + TRAFFIC_LIGHT_DIAMETER_PX <= constant("MAC_WINDOW_CHROME_INSET_PX"),
+    "window controls must remain inside the inset reserved by older frontends");
+});
 
 test("the drag region is a corner, never a full-width bar", () => {
   // A full-width strip at maximum z-index makes the entire top row unusable

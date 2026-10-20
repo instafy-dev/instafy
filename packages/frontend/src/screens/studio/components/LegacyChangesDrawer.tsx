@@ -1486,10 +1486,11 @@ export function LegacyChangesDrawer({
                     </div>
                   ) : showDesktopRollingDiffPreview ? (
                     <div
-                      className={`h-full min-h-0 overflow-hidden rounded-2xl border border-slate-200/70 bg-white/80 ${DARK_DIVIDER_BORDER_CLASS} ${DARK_PANEL_BG_CLASS}`}
+                      className={`h-full min-h-0 overflow-hidden bg-white ${DARK_PANEL_BG_CLASS}`}
                       data-testid="source-control-rolling-diff-preview"
                     >
                       <WorkspaceGitRollingDiffPanel
+                        layoutStyle="flat"
                         paths={visibleDirtyPaths}
                         initialPath={previewPath}
                         projectId={activeProjectId}
@@ -1504,8 +1505,9 @@ export function LegacyChangesDrawer({
                       <div className="min-h-0 overflow-y-auto pr-1" data-testid="source-control-changes">
                         <div className="flex flex-col gap-1 px-1">{changesListContent}</div>
                       </div>
-                      <div className={`min-h-0 overflow-hidden rounded-2xl border border-slate-200/70 bg-white/80 ${DARK_DIVIDER_BORDER_CLASS} ${DARK_PANEL_BG_CLASS}`} data-testid="source-control-diff-preview">
+                      <div className={`min-h-0 overflow-hidden bg-white ${DARK_PANEL_BG_CLASS}`} data-testid="source-control-diff-preview">
                         <WorkspaceGitDiffPanel
+                          frame="embedded"
                           path={previewPath}
                           projectId={activeProjectId}
                           runtimeId={effectiveRuntimeId ?? null}
@@ -1712,6 +1714,7 @@ export function LegacyChangesDrawer({
               </IconButton>
             </div>
             <WorkspaceGitRollingDiffPanel
+              layoutStyle="flat"
               paths={visibleDirtyPaths}
               initialPath={previewPath}
               projectId={activeProjectId}
@@ -1741,6 +1744,7 @@ export function LegacyChangesDrawer({
               <div className="h-1.5 w-12 rounded-full bg-slate-300 dark:bg-slate-700" />
             </div>
             <WorkspaceGitDiffPanel
+              frame="embedded"
               path={previewPath}
               projectId={activeProjectId}
               runtimeId={effectiveRuntimeId ?? null}

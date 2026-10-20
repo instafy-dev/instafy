@@ -28,6 +28,12 @@ For Files, use `?panel=files&filesScenario=read-only` to inspect the real permis
 `filesScenario=read-error` to fail reading `docs/guide.md`, or `filesScenario=write-error`
 to reject saves while keeping the editor draft. Reload resets contents; remove filesScenario
 from the URL to return to the normal example. Add `filesList=long` for a scrollable folder with 30 local notes. The `docs` folder includes a deliberately long filename for truncation checks.
+Use `filesScenario=unavailable` or `filesScenario=no-space` for the controller-off and
+missing-space empty states.
+
+`?panel=changes` mounts the production Changes drawer and its single-file and all-files
+diff viewers with two inert Git diffs. Discard and revert return local review-only errors;
+refresh reads the same fixture data and never runs Git or contacts a controller.
 
 These are rendered product-surface checks with simulated data, not authenticated integration,
 backend, Electron or native-device coverage. The fixture is not a production entrypoint.

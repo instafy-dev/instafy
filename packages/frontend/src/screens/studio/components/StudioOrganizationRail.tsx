@@ -149,7 +149,7 @@ export function StudioOrganizationRail({
           <span aria-hidden="true"><OctoMark className="h-6 w-6 text-brand-ink dark:text-brand-paper" /></span>
           <AttentionBadge count={homeAttentionCount} aria-hidden testId="sidebar-home-badge"
             title={`${unreadUpdatesDescription(homeAttentionCount)} across teams`}
-            className="absolute right-0 top-0 ring-2 ring-slate-50 dark:ring-[color:var(--color-studio-dark-rail)]" />
+            className="absolute right-0 top-0 ring-2 ring-[color:var(--studio-organization-icon-surface,var(--color-slate-50))] dark:ring-[color:var(--studio-organization-icon-surface,var(--color-studio-dark-rail))]" />
         </IconButton>
         {homeAttentionCount > 0 ? <span id={homeAttentionId} className="sr-only">{unreadUpdatesDescription(homeAttentionCount)} across teams</span> : null}
       </div>
@@ -205,7 +205,7 @@ export function StudioOrganizationRail({
               className={`h-8 w-8 text-xs ${pending ? "animate-pulse" : ""}`} />
             <AttentionBadge count={attention} aria-hidden testId={`sidebar-team-attention-${org.key}`}
               title={unreadUpdatesDescription(attention)}
-              className="absolute right-0 top-0 ring-2 ring-slate-50 dark:ring-[color:var(--color-studio-dark-rail)]" />
+              className="absolute right-0 top-0 ring-2 ring-[color:var(--studio-organization-icon-surface,var(--color-slate-50))] dark:ring-[color:var(--studio-organization-icon-surface,var(--color-studio-dark-rail))]" />
           </IconButton>
           </SortableOrganization>;
         })}

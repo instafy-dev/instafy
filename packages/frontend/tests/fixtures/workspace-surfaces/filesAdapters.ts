@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { changesApi } from "./changesAdapters";
 import type { CodeWorkspace } from "../../../src/types";
 import type { ControllerWorkspaceEntry, ControllerWorkspaceFileContent } from "../../../src/sdk/instafy";
 
@@ -19,10 +20,10 @@ const directories = new Set(["", "docs", "src", "src/styles"]);
 const normalize = (path = "") => path.replace(/^\/+|\/+$/g, "");
 const parent = (path: string) => path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
 const modified = "2026-10-17T08:00:00.000Z";
-export type FilesReviewScenario = "normal" | "read-only" | "read-error" | "write-error";
+export type FilesReviewScenario = "normal" | "read-only" | "read-error" | "write-error" | "unavailable" | "no-space";
 export function getFilesReviewScenario(): FilesReviewScenario {
   const value = new URLSearchParams(window.location.search).get("filesScenario");
-  return value === "read-only" || value === "read-error" || value === "write-error" ? value : "normal";
+  return value === "read-only" || value === "read-error" || value === "write-error" || value === "unavailable" || value === "no-space" ? value : "normal";
 }
 export const isFilesReviewReadOnly = () => getFilesReviewScenario() === "read-only";
 const failRead = (path: string) => getFilesReviewScenario() === "read-error" && normalize(path) === "docs/guide.md";
@@ -93,7 +94,7 @@ export const filesApi = {
 export const filesControllerExtras = {
   workspace: {
     git: {
-      fetchStatus: async () => null,
+      ...changesApi,
       // Acknowledges a fixture-only version; no Git or network transport exists here.
       syncToRemote: async () => { assertCanSave(); localVersion += 1; return { ok: true, rev: `review-version-${localVersion}` }; },
     },

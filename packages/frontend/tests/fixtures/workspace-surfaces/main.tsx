@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { createMemoryRouter, RouterProvider, useNavigate, useSearchParams } from "react-router-dom";
 import { Button } from "../../../src/components/Button";
@@ -10,13 +10,17 @@ import { SkillsPanel } from "../../../src/screens/studio/components/SkillsPanel"
 import { MachinesPanel } from "../../../src/screens/studio/components/MachinesPanel";
 import { ThemeProvider, useTheme } from "../../../src/theme/ThemeProvider";
 import { setReviewAgentCount, type ReviewAgentCount } from "./adapters";
+import { setChangesReviewActive } from "./changesAdapters";
 import "../../../src/styles/tailwind.css";
 
 const FilesPreview = lazy(() => import("./FilesPreview").then(module => ({ default: module.FilesPreview })));
+const ChangesPreview = lazy(() => import("./ChangesPreview").then(module => ({ default: module.ChangesPreview })));
 
 function ReviewSurface() {
   const [params, setParams] = useSearchParams();
   const panel = params.get("panel") ?? "skills";
+  // Set the local data scenario before production child effects request status.
+  useLayoutEffect(() => { setChangesReviewActive(panel === "changes"); }, [panel]);
   const navigate = useNavigate();
   const { resolvedTheme, setThemeMode } = useTheme();
   const [status, setStatus] = useState("All data and actions stay in this review. Reload to reset.");
@@ -40,7 +44,7 @@ function ReviewSurface() {
       </div>
       <nav aria-label="Review pages" className="flex flex-wrap items-center gap-1">
         <Button variant="ghost" size="xs" onPress={() => navigate(-1)}>Back</Button>
-        {["files", "skills", "machines"].map(value => <Button key={value} variant={panel === value ? "secondary" : "ghost"} elevation="none" size="sm"
+        {["files", "changes", "skills", "machines"].map(value => <Button key={value} variant={panel === value ? "secondary" : "ghost"} elevation="none" size="sm"
           aria-current={panel === value ? "page" : undefined} onPress={() => setParams({ panel: value })}>{value[0].toUpperCase() + value.slice(1)}</Button>)}
         {panel === "machines" ? <div className="ml-auto flex items-center gap-2">
           <Text variant="caption" tone="muted">Agents</Text>
@@ -51,9 +55,9 @@ function ReviewSurface() {
       </nav>
       <Text variant="caption" tone="muted" role="status" data-testid="review-status">{status}</Text>
     </header>
-    <div className="min-h-0 flex-1 overflow-auto" data-testid="review-panel">
+    <div className="min-h-0 flex-1 overflow-auto bg-white dark:bg-[var(--color-studio-dark-panel)]" data-testid="review-panel">
       <Suspense fallback={<Text className="p-4">Loading review surface…</Text>}>
-        {panel === "files" ? <FilesPreview /> : panel === "machines" ? <MachinesPanel key={agentCount} /> : <SkillsPanel />}
+        {panel === "files" ? <FilesPreview /> : panel === "changes" ? <ChangesPreview /> : panel === "machines" ? <MachinesPanel key={agentCount} /> : <SkillsPanel />}
       </Suspense>
     </div>
   </main>;

@@ -507,13 +507,55 @@ menu remains the visible touch entry point.
 Team profile settings and new-team onboarding offer a shared color alongside the name and
 picture. Use `OrgIdentity` for team avatars and `TeamAccentPicker` for the fixed palette:
 neutral, blue, violet, pink, red, orange, green and teal. A picture takes precedence over
-initials; the accent still identifies the selected team in its rail marker. In the header,
+initials. In the header,
 keep color on the identity itself, without a second tinted tile around the avatar. Search
 scope chips use the same neutral surface for teams and spaces. These colors adapt to light
 and dark mode. Home uses a small selection marker rather than a colored logo background;
 the mobile context and navigation rows share one neutral surface, separated from the page
 by a single divider. Keep workspace surfaces, primary
 actions and notification counts on their existing semantic colors.
+
+In linked desktop navigation, the selected team, inner sidebar and header form one flat
+neutral surface. Keep the outer organization rail a distinct darker shade in both themes
+so the curved connection stays visible; identity color remains on the avatar. Surface
+values belong to `StudioContextLayout.css`, and notification badge rings inherit the
+surface beneath them. The selection marker and keyboard focus remain separate cues.
+Home, account and search omit the selected-team bridge and use one neutral navigation
+surface. They retain the same desktop content frame: a 1px divider and 14px top-left
+corner, with the vertical divider beginning below the curve. Its horizontal location
+follows the visible navigation width (224px expanded, 64px collapsed, 0px hidden) after
+the 64px organization rail. Mobile does not use this desktop frame.
+
+Content and toolbar boundaries have one owner:
+
+- The shell owns the content frame, including its curved corner. Pages and
+  unavailable/empty states inside it remain flat, without a second outline.
+- Page content, docked panes and Search use the same working-surface fill.
+  Navigation uses its separate neutral surface; do not use a page fill to
+  communicate selection or loading state.
+- A toolbar can own one bottom divider above the content it controls, especially
+  when that content scrolls independently. The content below must not also add
+  a top border at that same boundary.
+- Rows of controls belonging to one toolbar use spacing and alignment instead
+  of an internal rule. Separate panes, repeated list rows, diff-file headers and
+  diff hunks can retain meaningful dividers.
+- Embedded diff previews are flat. Standalone previews can own a single frame;
+  nested preview components must use their embedded presentation.
+- Inline content surfaces do not need elevation shadows. Reserve surface
+  shadows for overlapping menus, popovers and dialogs. Selection uses a fill,
+  text/icon treatment and an accessible focus indicator.
+
+Use the neutral divider and panel helpers in `theme/darkSurfaces.ts`; do not
+substitute slate-ramp borders or unrelated dark fills on one page. These rules
+describe container boundaries, not input outlines or semantic warning borders.
+
+On macOS Desktop, the outer organization rail reaches the top of the window and
+widens from 64px to a 92px cap around the native window controls. The cap's shoulder
+and its inward turn at the window's top edge use the workspace's shared 14px corner
+radius. The shoulder returns to the rail's normal width beside the first navigation
+row. Center the traffic lights in the 52px desktop header and leave 16px between the
+cap's straight edge and the first interactive header control, beyond the shell's
+80px drag corner.
 
 Mobile breadcrumb pickers keep a 48px tap target, but hover, open-menu and keyboard-focus
 feedback follows a compact 32px shape around the content. Give text pickers 8px horizontal

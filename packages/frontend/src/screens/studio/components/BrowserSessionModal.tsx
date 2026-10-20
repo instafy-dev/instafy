@@ -2991,7 +2991,7 @@ export function BrowserSessionModal({
         ref={dockedRootRef}
         className={
           fillContainer
-            ? "flex h-full w-full flex-col overflow-hidden border-t border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-950"
+            ? "flex h-full w-full flex-col overflow-hidden bg-white dark:bg-slate-950"
             : shouldCollapseDocked
               ? "w-full"
               : "mx-auto w-full overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xl dark:border-slate-800 dark:bg-slate-950"

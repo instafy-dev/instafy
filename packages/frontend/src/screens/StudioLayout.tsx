@@ -1882,14 +1882,14 @@ function StudioLayoutInner() {
     );
   }
   const workspaceSurface = shouldShowFilesWorkspace ? (
-    <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-white text-slate-700 dark:bg-[var(--color-studio-dark-panel)] dark:text-slate-200">
+    <div className="studio-content-surface flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden text-slate-700 dark:text-slate-200">
       <div key={activeProjectId ?? "files-workspace"} className="min-h-0 flex-1">
         {workspaceContent}
       </div>
       {!showMobileLeftDrawerOverlay ? mobileOverviewDock : null}
     </div>
   ) : (
-    <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-white text-slate-700 dark:bg-[var(--color-studio-dark-panel)] dark:text-slate-200">
+    <div className="studio-content-surface flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden text-slate-700 dark:text-slate-200">
       {workspaceTabsElement}
       {conversationWorkspace ? <ConversationWorkspaceViews /> : null}
       <div className="flex-1 overflow-hidden">
@@ -2125,7 +2125,7 @@ function StudioLayoutInner() {
               className="studio-context-drawer relative flex h-full shrink-0"
               style={{ width: `${leftDrawerWidth}px` }}
             >
-              <div className="flex h-full min-w-0 flex-1 flex-col border-r border-slate-200/70 bg-white dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-panel)]">
+              <div className="studio-content-surface flex h-full min-w-0 flex-1 flex-col border-r border-slate-200/70 dark:border-[color:var(--color-studio-dark-divider)]">
                 {leftDrawer === "history" ? (
                   <ConversationHistoryTab
                     headerPortalTarget={desktopPaneHeaderTarget}

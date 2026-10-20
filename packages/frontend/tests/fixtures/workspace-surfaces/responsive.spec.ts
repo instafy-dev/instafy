@@ -107,6 +107,60 @@ for (const { width, hasTouch } of [
 }
 
 const longFilePath = "docs/product-navigation-review-with-a-deliberately-long-file-name-for-small-screens.md";
+
+for (const { width, hasTouch } of [{ width: 390, hasTouch: true }, { width: 1440, hasTouch: false }]) {
+  test.describe(`Changes surfaces at ${width}px`, () => {
+    test.use({ hasTouch });
+    for (const theme of ["Light", "Dark"]) {
+      test(`${theme.toLowerCase()} diff switching and unavailable Files remain usable`, async ({ page }, testInfo) => {
+        const errors: string[] = [];
+        page.on("pageerror", error => errors.push(error.message));
+        await page.setViewportSize({ width, height: 950 });
+        await page.goto("/tests/fixtures/workspace-surfaces/index.html?panel=changes");
+        await page.getByRole("radiogroup", { name: "Review theme" }).getByText(theme, { exact: true }).click();
+        const rolling = page.getByTestId(hasTouch ? "source-control-rolling-diff-sheet-panel" : "source-control-rolling-diff-view");
+        await expect(rolling).toBeVisible();
+        const welcome = rolling.getByTestId("source-control-rolling-diff-item-src-welcome-ts-panel");
+        const changedLine = welcome.getByText('const displayName = name.trim() || "there";', { exact: false });
+        await expect(changedLine).toBeVisible();
+        const toggle = welcome.getByRole("button", { name: "Collapse diff", exact: true });
+        await toggle.click();
+        await expect(changedLine).toHaveCount(0);
+        await welcome.getByRole("button", { name: "Expand diff", exact: true }).click();
+        await expect(changedLine).toBeVisible();
+        await page.screenshot({ path: testInfo.outputPath("changes-all.png"), animations: "disabled" });
+
+        if (hasTouch) await page.getByTestId("source-control-rolling-diff-close").click();
+        else await page.getByTestId("source-control-review-mode-focused").click();
+        const focused = page.getByTestId(hasTouch ? "source-control-diff-sheet-panel" : "source-control-diff-view");
+        await expect(focused).toBeVisible();
+        await expect(focused).toContainText('const displayName = name.trim() || "there";');
+        await page.screenshot({ path: testInfo.outputPath("changes-focused.png"), animations: "disabled" });
+        if (hasTouch) await page.getByTestId("source-control-diff-close").click();
+        await page.getByTestId("source-control-review-mode-all").click();
+        await expect(rolling).toBeVisible();
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+
+        for (const [scenario, message, action] of [
+          ["unavailable", "Connect the runtime controller to browse space files.", "Back to Assistant"],
+          ["no-space", "Select or create a space to view its files.", "Browse spaces"],
+        ]) {
+          await page.goto(`/tests/fixtures/workspace-surfaces/index.html?panel=files&filesScenario=${scenario}`);
+          await expect(page.getByText(message, { exact: true })).toBeVisible();
+          const button = page.getByRole("button", { name: action, exact: true });
+          await expect(button).toBeEnabled();
+          const bounds = (await button.boundingBox())!;
+          expect(bounds.x).toBeGreaterThanOrEqual(0);
+          expect(bounds.x + bounds.width).toBeLessThanOrEqual(width);
+          expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+          await page.screenshot({ path: testInfo.outputPath(`files-${scenario}.png`), animations: "disabled" });
+        }
+        expect(errors).toEqual([]);
+      });
+    }
+  });
+}
+
 const fileEntry = (page: Page, path: string) => page.getByTestId(`files-entry-${path.replace(/[^a-zA-Z0-9]/g, "-")}`);
 
 async function openDocs(page: Page, hasTouch: boolean) {

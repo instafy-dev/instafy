@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import { filesApi, filesControllerExtras, isFilesReviewReadOnly } from "./filesAdapters";
+import { filesApi, filesControllerExtras, getFilesReviewScenario, isFilesReviewReadOnly } from "./filesAdapters";
 
 export const REVIEW_PROJECT_ID = "review-space";
 let revision = 0;
@@ -15,7 +15,7 @@ export function navigateReview(panel: string) {
 }
 const noop = () => {};
 const project = { id: REVIEW_PROJECT_ID, name: "Product workshop", runtimeSize: "standard" };
-export const useProject = () => ({ activeProjectId: REVIEW_PROJECT_ID, activeProject: project, projectCapabilitiesResolved: true, canWriteProject: !isFilesReviewReadOnly() });
+export const useProject = () => ({ activeProjectId: getFilesReviewScenario() === "no-space" ? null : REVIEW_PROJECT_ID, activeProject: project, projectCapabilitiesResolved: true, canWriteProject: !isFilesReviewReadOnly() });
 export const useProjects = () => ({ activeProjectId: REVIEW_PROJECT_ID, activeProject: project, projects: [project] });
 export const useActiveWorkspaceVersioning = () => ({ mode: "legacy", originId: null, historyReady: false });
 const availability = { issue: null, reportFailure: noop, recoveryVersion: 0 };
@@ -31,6 +31,7 @@ const tabs = {
   openConversationTab: () => showStatus("Review only: chat navigation is outside these three surfaces."),
   requestUrlPush: noop,
   openFileTab: noop,
+  openGitReviewTab: () => showStatus("Review only: Git review tabs are not connected."),
 };
 export const useWorkspaceTabs = () => tabs;
 
@@ -115,7 +116,7 @@ for (const [method, handler] of Object.entries(skillApi)) {
 }
 export const controllerClient = {
   ...filesControllerExtras,
-  core: { enabled: true },
+  core: { enabled: getFilesReviewScenario() !== "unavailable" },
   workspace: { ...(filesControllerExtras as { workspace?: object }).workspace, files: mergedFiles },
   projects: { bootstrapMemory: async () => ({ ok: true, committed: false, reason: "Fixture data is already installed." }) },
 };
