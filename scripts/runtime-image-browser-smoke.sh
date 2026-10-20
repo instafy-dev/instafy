@@ -4,8 +4,9 @@
 # Chromium to answer on its CDP port (webdev images).
 #
 # With --lazy it proves the on-demand browser host instead, for every image
-# flavor: the image boots with the browser off and must run no browser process,
-# then `runtime-entrypoint start-browser-host` must bring Chromium up on the
+# flavor: the image boots with the browser off and must run no browser process
+# (the base image must run none even with the browser session on), then
+# `runtime-entrypoint start-browser-host` must bring Chromium up on the
 # caller's own display and ports with a persisted profile, stop cleanly, and
 # start again on the same profile with its data intact.
 #
@@ -31,7 +32,7 @@ cdp_port=9223
 name="instafy-browser-smoke-${RANDOM}-$$"
 
 cleanup() {
-  docker rm -f "$name" >/dev/null 2>&1 || true
+  docker rm -f "$name" "${name}-session" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -109,23 +110,44 @@ if [[ "$mode" == "lazy" ]]; then
     exit 1
   }
 
-  deadline=$((SECONDS + timeout_seconds))
-  until docker exec "$name" test -f /tmp/browser-smoke-booted 2>/dev/null; do
-    if [[ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" != "true" ]]; then
-      docker logs "$name" 2>&1 | tail -n 40 || true
-      echo "::error::The runtime container exited before it finished booting."
-      exit 1
-    fi
-    if (( SECONDS >= deadline )); then
-      echo "::error::The runtime container did not finish booting within ${timeout_seconds}s."
-      exit 1
-    fi
-    sleep 1
-  done
+  await_booted() {
+    local container="$1" deadline=$((SECONDS + timeout_seconds))
+    until docker exec "$container" test -f /tmp/browser-smoke-booted 2>/dev/null; do
+      if [[ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null)" != "true" ]]; then
+        docker logs "$container" 2>&1 | tail -n 40 || true
+        echo "::error::The runtime container exited before it finished booting."
+        exit 1
+      fi
+      if (( SECONDS >= deadline )); then
+        echo "::error::The runtime container did not finish booting within ${timeout_seconds}s."
+        exit 1
+      fi
+      sleep 1
+    done
+  }
 
+  await_booted "$name"
   at_boot="$(docker exec "$name" sh -c "$browser_processes")"
   if [[ -n "$at_boot" ]]; then
     lazy_fail "The image started browser processes at boot: ${at_boot//$'\n'/; }"
+  fi
+
+  # The base image carries the browser stack only for the on-demand host.
+  # Booted with the browser session on, it must still start no display or
+  # browser (only the egress proxy, as before the stack was added).
+  if [[ "$(docker exec "$name" printenv INSTAFY_RUNTIME_FLAVOR 2>/dev/null || true)" == "base" ]]; then
+    docker run -d --name "${name}-session" ${mount[@]+"${mount[@]}"} --entrypoint bash \
+      -e RUNTIME_ID=00000000-0000-4000-8000-00000000b5e3 \
+      -e ORIGIN_MODE=hosted \
+      -e INSTAFY_ENABLE_BROWSER_SESSION=1 \
+      "$image" -c "$hold" >/dev/null
+    await_booted "${name}-session"
+    with_session="$(docker exec "${name}-session" sh -c "$browser_processes" | awk '$4 !~ /^browser-egress/')"
+    docker rm -f "${name}-session" >/dev/null 2>&1 || true
+    if [[ -n "$with_session" ]]; then
+      lazy_fail "The base image started a browser at boot with INSTAFY_ENABLE_BROWSER_SESSION=1: ${with_session//$'\n'/; }"
+    fi
+    echo "The base image booted with the browser session on and started no display or browser."
   fi
 
   # A profile saved by an earlier session: its data must survive every start

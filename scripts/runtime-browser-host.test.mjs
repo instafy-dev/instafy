@@ -5,7 +5,7 @@
 // exercised without Docker. scripts/runtime-image-browser-smoke.sh --lazy
 // proves the same subcommand against a real image in CI.
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -15,6 +15,10 @@ import test from "node:test";
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 const entrypointPath = path.join(repositoryRoot, "docker/runtime/entrypoint.sh");
 const entrypoint = fs.readFileSync(entrypointPath, "utf8");
+// Both runtime images ship util-linux's flock, so Linux runs use the real
+// one and the one-host-per-state-directory test. macOS has none; there a
+// stand-in that always grants the lock keeps the other cases running.
+const realFlock = spawnSync("sh", ["-c", "command -v flock"]).status === 0;
 
 function fakeBinaries(fixture) {
   const bin = path.join(fixture, "bin");
@@ -36,6 +40,7 @@ exec sleep 60`);
   longLived("browser-egress-proxy");
   longLived("browser-webrtc-sender");
   write("ffmpeg", "exit 0");
+  if (!realFlock) write("flock", "exit 0");
   // The image's npm is not needed by the host; keep the entrypoint's
   // NODE_PATH probe fast and hermetic.
   write("npm", "exit 1");
@@ -216,6 +221,7 @@ test("a started host reports ready, keeps a persisted profile and stops every ch
     "--window-size=2560,1440",
     "--kiosk",
     "--disk-cache-size=67108864",
+    "--password-store=basic",
   ]) {
     assert.ok(chromiumArgs.includes(flag), `${flag} in ${chromiumArgs.join(" ")}`);
   }
@@ -242,6 +248,11 @@ test("a started host reports ready, keeps a persisted profile and stops every ch
   if (process.platform === "linux") {
     assert.equal(read(fixture, "chromium.nice").trim(), "10");
     assert.equal(read(fixture, "chromium.pgid").trim(), String(host.child.pid));
+    // The host itself re-executed without the TURN credentials: its own
+    // environment, readable by any same-user process, no longer has them.
+    const hostEnvironment = fs.readFileSync(`/proc/${host.child.pid}/environ`, "utf8").split("\0");
+    assert.equal(hostEnvironment.some((entry) => entry.startsWith("INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON=")), false);
+    assert.ok(hostEnvironment.includes("RUNTIME_ACCESS_TOKEN=runtime-token-fixture"), "the caller's own allowlist is its responsibility");
   }
 
   for (const name of ["Xtigervnc", "fluxbox", "browser-egress-proxy", "chromium"]) assert.ok(alive(fixture, name), name);
@@ -276,15 +287,18 @@ test("the WebRTC sender gets its own port and never the TURN credentials", withF
 }));
 
 test("invalid, reserved and shared settings fail before anything starts", withFixture(async (fixture, bin) => {
+  fs.writeFileSync(path.join(fixture, "not-a-directory"), "");
   const cases = [
     [{ INSTAFY_BROWSER_HOST_PROFILE_DIR: "" }, "config_invalid", 64],
     [{ INSTAFY_BROWSER_HOST_PROFILE_DIR: "relative/profile" }, "config_invalid", 64],
     [{ INSTAFY_BROWSER_HOST_HOME: "/tmp/../root" }, "config_invalid", 64],
     [{ INSTAFY_BROWSER_HOST_DISPLAY: "1" }, "config_invalid", 64],
     [{ INSTAFY_BROWSER_HOST_CDP_PORT: "80" }, "config_invalid", 64],
+    [{ INSTAFY_BROWSER_HOST_CDP_PORT: "1023" }, "config_invalid", 64],
     [{ INSTAFY_BROWSER_HOST_CDP_PORT: "65536" }, "config_invalid", 64],
     [{ INSTAFY_BROWSER_HOST_VNC_PORT: "47001", INSTAFY_BROWSER_HOST_EGRESS_PORT: "47001" }, "config_invalid", 64],
     [{ INSTAFY_BROWSER_WEBRTC_ENABLED: "1" }, "config_invalid", 64],
+    [{ INSTAFY_BROWSER_HOST_STATE_DIR: path.join(fixture, "not-a-directory", "state") }, "config_invalid", 64],
     [{ INSTAFY_BROWSER_HOST_DISPLAY: ":1" }, "port_reserved", 65],
     [{ INSTAFY_BROWSER_HOST_DISPLAY: ":01" }, "port_reserved", 65],
     [{ INSTAFY_BROWSER_HOST_CDP_PORT: "9223" }, "port_reserved", 65],
@@ -364,12 +378,19 @@ test("start failures stop the helpers that already started", withFixture(async (
     [{ FAKE_EGRESS: "unhealthy" }, "egress_unavailable", 68, ["browser-egress-proxy"]],
     [{ FAKE_X: "never" }, "display_failed", 69, ["browser-egress-proxy", "Xtigervnc"]],
     [{ FAKE_CHROMIUM: "exits" }, "chromium_failed", 70, ["browser-egress-proxy", "Xtigervnc", "fluxbox"]],
+    // A write that fails mid-start (here the window manager's settings
+    // directory is a file) still ends with one status line.
+    [{ INSTAFY_BROWSER_HOST_HOME: path.join(fixture, "broken-home") }, "host_error", 72, ["browser-egress-proxy", "Xtigervnc"]],
   ]) {
     for (const name of ["Xtigervnc", "fluxbox", "browser-egress-proxy", "chromium"]) fs.rmSync(path.join(fixture, `${name}.pid`), { force: true });
     for (const name of ["Xtigervnc", "browser-egress-proxy", "chromium"]) fs.rmSync(path.join(fixture, `${name}.up`), { force: true });
+    fs.mkdirSync(path.join(fixture, "broken-home"), { recursive: true });
+    fs.writeFileSync(path.join(fixture, "broken-home", ".fluxbox"), "");
     const host = startHost(hostEnvironment(fixture, bin, overrides));
     assert.equal(await host.firstStatus, `instafy-browser-host: failed ${reason}`);
-    assert.equal((await host.finish()).code, code);
+    const ended = await host.finish();
+    assert.equal(ended.code, code, ended.stderr);
+    assert.equal(ended.stdout.trim().split("\n").length, 1, `exactly one status line for ${reason}`);
     for (const name of started) {
       assert.ok(fs.existsSync(path.join(fixture, `${name}.pid`)), `${name} should have started for ${reason}`);
       assert.equal(alive(fixture, name), false, `${name} still runs after ${reason}`);
@@ -385,6 +406,56 @@ test("a Chromium crash after ready ends the host and its helpers", withFixture(a
   assert.match(ended.stdout, /^instafy-browser-host: exited chromium$/mu);
   for (const name of ["Xtigervnc", "fluxbox", "browser-egress-proxy"]) assert.equal(alive(fixture, name), false, name);
 }));
+
+test("a second start on the same state directory is refused while the first runs", withFixture(async (fixture, bin) => {
+  if (!realFlock) return; // The stand-in flock always grants the lock.
+  const first = startHost(hostEnvironment(fixture, bin));
+  assert.match(await first.firstStatus, /^instafy-browser-host: ready /u);
+  const firstChromium = read(fixture, "chromium.pid");
+  const second = startHost(hostEnvironment(fixture, bin, { INSTAFY_BROWSER_HOST_DISPLAY: ":48" }));
+  assert.equal(await second.firstStatus, "instafy-browser-host: failed host_in_use");
+  assert.equal((await second.finish()).code, 66);
+  assert.equal(read(fixture, "chromium.pid"), firstChromium, "the second start launched Chromium");
+  assert.ok(alive(fixture, "chromium"));
+  first.child.kill("SIGTERM");
+  assert.equal((await first.finish()).code, 0);
+}));
+
+test("the base image's boot path starts no display or browser, even with the browser session on", () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-browser-boot-"));
+  try {
+    const bin = fakeBinaries(fixture);
+    // Everything before the runtime-agent exec, as the image smoke runs it.
+    const boot = path.join(fixture, "boot.sh");
+    const lines = entrypoint.trimEnd().split("\n");
+    assert.equal(lines.at(-1), "exec /usr/local/bin/runtime-agent");
+    fs.writeFileSync(boot, `${lines.slice(0, -1).join("\n")}\necho boot-finished\n`);
+    const result = spawnSync("bash", [boot], {
+      encoding: "utf8",
+      timeout: 20_000,
+      env: {
+        PATH: `${bin}:${process.env.PATH}`,
+        HOME: path.join(fixture, "home"),
+        WORKSPACE_DIR: path.join(fixture, "workspace"),
+        INSTAFY_RUNTIME_FLAVOR: "base",
+        INSTAFY_ENABLE_BROWSER_SESSION: "1",
+        RUNTIME_ID: "00000000-0000-4000-8000-00000000b5e3",
+        // Keeps the boot-time egress proxy (which the base image may still
+        // start, as before) out of this host's /tmp.
+        INSTAFY_BROWSER_EGRESS_ISOLATION: "0",
+        INSTAFY_BROWSER_EGRESS_ALLOW_UNSAFE_DEV: "1",
+      },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), "boot-finished");
+    assert.match(result.stderr, /the base image starts its browser only on demand/u);
+    for (const name of ["Xtigervnc", "fluxbox", "chromium", "browser-webrtc-sender"]) {
+      assert.equal(fs.existsSync(path.join(fixture, `${name}.pid`)), false, `${name} started at boot`);
+    }
+  } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
 
 test("the boot path still starts only the boot-time browser and execs runtime-agent", () => {
   const lines = entrypoint.trimEnd().split("\n");

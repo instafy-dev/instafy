@@ -826,7 +826,10 @@ is needed, on the space's own machine. `runtime-entrypoint start-browser-host`
 starts the egress proxy, X/VNC, the window manager, Chromium and, with
 `INSTAFY_BROWSER_WEBRTC_ENABLED=1`, the WebRTC sender. Nothing calls it yet, so
 it is inert: the boot path and the boot-time Shared Browser are unchanged, and a
-machine that never opens a browser runs no browser process.
+machine that never opens a browser runs no browser process. The base image
+keeps its earlier boot behaviour too: with `INSTAFY_ENABLE_BROWSER_SESSION=1` it
+may start the egress proxy but starts no display or browser at boot, because
+it carries that stack only for the on-demand host.
 
 The caller passes every location and port in the environment
 (`INSTAFY_BROWSER_HOST_HOME`, `_PROFILE_DIR`, `_STATE_DIR`, `_DISPLAY`,
@@ -835,28 +838,35 @@ display and ports must differ from the boot-time defaults (`:1`, 5900, 9223,
 9225, 9226). The profile directory is used as given and never wiped, so a
 persisted profile keeps its sign-ins across starts; a stale Chromium lock from
 another machine is cleared, and a profile that a running Chromium holds is
-refused. Each start launches fresh processes: the host never reuses pid files,
-deletes X locks or kills processes it did not start, and an occupied display or
-port fails the start instead of being taken over.
+refused. Chromium uses `--password-store=basic`, so a persisted profile's
+cookies are encrypted the same way on every machine and image. One host runs per
+state directory at a time; a second start for it fails with `host_in_use`. Each
+start launches fresh processes: the host never reuses pid files, deletes X
+locks or kills processes it did not start, and an occupied display or port
+fails the start instead of being taken over.
 
 The host leads its own process group at nice 10 with OOM score 1000, so the
 workspace keeps priority and signalling the group stops the whole browser,
 including Chromium's own helpers. Its children get the same positive
 environment allowlists as the boot-time helpers, and the WebRTC sender never
 receives `INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON`; it takes ICE servers from
-each offer. Chromium runs Debian's real binary rather than its
-`/usr/bin/chromium` wrapper, with a capped HTTP cache
+each offer. A host started with that variable re-executes without it, so it is
+not left in the host's own process environment either. The caller still owns
+the rest of the host's environment and should pass only the settings above.
+Chromium runs Debian's real binary rather than its `/usr/bin/chromium` wrapper
+(Playwright's Chromium in the webdev image), with a capped HTTP cache
 (`INSTAFY_BROWSER_HOST_DISK_CACHE_MB`, 64 by default).
 
 The host prints one status line on stdout: `ready` with its display, ports,
 WebRTC state, render scale and start time; `failed <reason>` (`config_invalid`
 64, `port_reserved` 65, `display_in_use`/`port_in_use`/`profile_in_use` 66,
-`stack_missing` 67, `egress_unavailable` 68, `display_failed` 69,
-`chromium_failed` 70); `exited <child>` (71) when the egress proxy, X server or
-Chromium stops on its own; or `stopped` after SIGTERM. Publication and the image
-scan require `scripts/runtime-image-browser-smoke.sh --lazy` for both flavors:
-the image must boot with no browser process, and the host must start, stop and
-start again on one persisted profile.
+`host_in_use` 66, `stack_missing` 67, `egress_unavailable` 68, `display_failed`
+69, `chromium_failed` 70, `host_error` 72 for any other failure such as a full
+disk); `exited <child>` (71) when the egress proxy, X server or Chromium stops on
+its own; or `stopped` after SIGTERM. Publication and the image scan require
+`scripts/runtime-image-browser-smoke.sh --lazy` for both flavors: the image must
+boot with no browser process (the base image also with the browser session on),
+and the host must start, stop and start again on one persisted profile.
 
 Operational invariants:
 
