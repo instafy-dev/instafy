@@ -9,10 +9,9 @@ import { BROWSER_AUTO_STARTED_METADATA_KEY } from "./browserRequest";
 import {
   personalBrowserKnownHosts,
   resolvePersonalBrowserApprovalMode,
-  type BrowserTransport,
   type PersonalBrowserApprovalMode,
-  type usePersonalBrowserBridge,
-} from "./usePersonalBrowserBridge";
+} from "./personalBrowserApprovalPolicy";
+import type { BrowserTransport, usePersonalBrowserBridge } from "./usePersonalBrowserBridge";
 
 /**
  * How a continuation is shown and recorded. `display` replaces the task in the

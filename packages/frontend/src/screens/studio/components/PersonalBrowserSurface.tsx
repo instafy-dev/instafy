@@ -34,11 +34,10 @@ import {
   BrowserStatusPill,
   type BrowserChromeState,
 } from "./BrowserChromeShell";
-import {
-  personalBrowserOwnerTier,
-  personalBrowserRoutineAvailable,
-  type BrowserTransport,
-  type usePersonalBrowserBridge,
+import { personalBrowserOwnerTier, personalBrowserRoutineAvailable } from "./personalBrowserApprovalPolicy";
+import type {
+  BrowserTransport,
+  usePersonalBrowserBridge,
 } from "./usePersonalBrowserBridge";
 
 type PersonalBrowserModel = ReturnType<typeof usePersonalBrowserBridge>;
