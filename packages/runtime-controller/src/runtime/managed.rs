@@ -282,6 +282,103 @@ pub(crate) fn managed_browser_host_is_attested(
     exact_managed_provider(provider) && browser_host_attestation_names(metadata, lease_id)
 }
 
+/// The capability through which a runtime reports, and the controller then
+/// records, that it hosts Instafy's browser on demand. The runtime reports
+/// `{"version":1,"modes":["lazy"]}`. Registration always removes the
+/// reported value and, only for an attested live generation, stores
+/// [`browser_host_capability`] in its place, so a stored value is always the
+/// controller's.
+pub(crate) const BROWSER_HOST_CAPABILITY: &str = "browserHost";
+/// The snake_case spelling, removed with the camelCase one so no runtime can
+/// leave a look-alike next to the controller's value.
+pub(crate) const BROWSER_HOST_CAPABILITY_SNAKE: &str = "browser_host";
+const BROWSER_HOST_CAPABILITY_VERSION: u64 = 1;
+
+/// Whether a runtime's registration payload reports that it can host the
+/// browser lazily: exactly `browserHost.version == 1` with `browserHost.modes`
+/// containing `"lazy"`. The report alone grants nothing; registration also
+/// needs the controller's attestation for the active lease.
+pub(crate) fn runtime_reports_lazy_browser_host(capabilities: Option<&JsonValue>) -> bool {
+    let Some(report) = capabilities
+        .and_then(|capabilities| capabilities.get(BROWSER_HOST_CAPABILITY))
+        .and_then(JsonValue::as_object)
+    else {
+        return false;
+    };
+    report.get("version").and_then(JsonValue::as_u64) == Some(BROWSER_HOST_CAPABILITY_VERSION)
+        && report
+            .get("modes")
+            .and_then(JsonValue::as_array)
+            .is_some_and(|modes| {
+                modes
+                    .iter()
+                    .any(|mode| mode.as_str() == Some(MANAGED_BROWSER_HOST_LAZY_MODE))
+            })
+}
+
+/// The controller-owned capability registration stores for a browser host's
+/// live lease generation.
+pub(crate) fn browser_host_capability(lease_id: Uuid) -> JsonValue {
+    json!({
+        "version": BROWSER_HOST_CAPABILITY_VERSION,
+        "mode": MANAGED_BROWSER_HOST_LAZY_MODE,
+        "generation": lease_id.to_string(),
+    })
+}
+
+/// Whether an exact managed runtime row holds a controller-written
+/// `browserHost` capability of any generation. Policy gates use this wider
+/// test so a value left from an earlier lease can never slip past them; only
+/// registration writes the key, so a runtime cannot set it.
+pub(crate) fn runtime_holds_browser_host_capability(
+    provider: &str,
+    capabilities: &JsonValue,
+) -> bool {
+    if !exact_managed_provider(provider) {
+        return false;
+    }
+    capabilities
+        .get(BROWSER_HOST_CAPABILITY)
+        .and_then(JsonValue::as_object)
+        .is_some_and(|host| {
+            host.get("version").and_then(JsonValue::as_u64) == Some(BROWSER_HOST_CAPABILITY_VERSION)
+                && host.get("mode").and_then(JsonValue::as_str)
+                    == Some(MANAGED_BROWSER_HOST_LAZY_MODE)
+        })
+}
+
+/// Whether a runtime row is a registered browser host for its active lease:
+/// the exact managed provider, the controller's Shared Browser consent, and a
+/// stored `browserHost` capability for exactly `active_lease_id`. A value
+/// left from an earlier generation never counts.
+pub(crate) fn runtime_is_registered_browser_host(
+    provider: &str,
+    capabilities: &JsonValue,
+    active_lease_id: Option<Uuid>,
+) -> bool {
+    let Some(active_lease_id) = active_lease_id else {
+        return false;
+    };
+    if !exact_managed_provider(provider)
+        || !runtime_supports_shared_browser_agent_consent(capabilities)
+    {
+        return false;
+    }
+    let Some(host) = capabilities
+        .get(BROWSER_HOST_CAPABILITY)
+        .and_then(JsonValue::as_object)
+    else {
+        return false;
+    };
+    host.get("version").and_then(JsonValue::as_u64) == Some(BROWSER_HOST_CAPABILITY_VERSION)
+        && host.get("mode").and_then(JsonValue::as_str) == Some(MANAGED_BROWSER_HOST_LAZY_MODE)
+        && host
+            .get("generation")
+            .and_then(JsonValue::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok())
+            == Some(active_lease_id)
+}
+
 /// Whether a sanitized launch request describes a space's own machine that
 /// may host the browser lazily: not the webdev image (that is a browser
 /// session of its own), not one asking for the eager boot-time browser, and
@@ -918,6 +1015,131 @@ mod tests {
         .expect("reuse")
         .expect("reused metadata");
         assert_eq!(reused["source"], json!("dispatch_runtime_alert"));
+    }
+
+    #[test]
+    fn a_lazy_browser_host_report_must_be_exact() {
+        for report in [
+            json!({ "browserHost": { "version": 1, "modes": ["lazy"] } }),
+            json!({ "browserHost": { "version": 1, "modes": ["eager", "lazy"] } }),
+        ] {
+            assert!(runtime_reports_lazy_browser_host(Some(&report)), "{report}");
+        }
+        for report in [
+            json!({}),
+            json!({ "browserHost": true }),
+            json!({ "browserHost": { "version": 2, "modes": ["lazy"] } }),
+            json!({ "browserHost": { "version": "1", "modes": ["lazy"] } }),
+            json!({ "browserHost": { "version": 1, "modes": ["eager"] } }),
+            json!({ "browserHost": { "version": 1, "modes": "lazy" } }),
+            json!({ "browserHost": { "version": 1, "mode": "lazy" } }),
+            json!({ "browser_host": { "version": 1, "modes": ["lazy"] } }),
+        ] {
+            assert!(
+                !runtime_reports_lazy_browser_host(Some(&report)),
+                "{report}"
+            );
+        }
+        assert!(!runtime_reports_lazy_browser_host(None));
+    }
+
+    #[test]
+    fn a_registered_browser_host_names_the_active_generation() {
+        let lease_id = Uuid::new_v4();
+        let registered = json!({
+            (SHARED_BROWSER_AGENT_CONSENT_CAPABILITY): { "version": 1 },
+            (BROWSER_HOST_CAPABILITY): browser_host_capability(lease_id),
+        });
+        assert_eq!(
+            registered[BROWSER_HOST_CAPABILITY],
+            json!({ "version": 1, "mode": "lazy", "generation": lease_id.to_string() })
+        );
+        assert!(runtime_is_registered_browser_host(
+            "instafy-cloud",
+            &registered,
+            Some(lease_id)
+        ));
+
+        // Another generation, no active lease, or another provider.
+        assert!(!runtime_is_registered_browser_host(
+            "instafy-cloud",
+            &registered,
+            Some(Uuid::new_v4())
+        ));
+        assert!(!runtime_is_registered_browser_host(
+            "instafy-cloud",
+            &registered,
+            None
+        ));
+        for provider in ["instafy-cloud-custom", "self-hosted", "runtime"] {
+            assert!(
+                !runtime_is_registered_browser_host(provider, &registered, Some(lease_id)),
+                "{provider}"
+            );
+        }
+
+        // Without the controller's consent, or with a reported shape.
+        let mut no_consent = registered.clone();
+        no_consent
+            .as_object_mut()
+            .expect("object")
+            .remove(SHARED_BROWSER_AGENT_CONSENT_CAPABILITY);
+        assert!(!runtime_is_registered_browser_host(
+            "instafy-cloud",
+            &no_consent,
+            Some(lease_id)
+        ));
+        for host in [
+            json!({ "version": 1, "modes": ["lazy"] }),
+            json!({ "version": 2, "mode": "lazy", "generation": lease_id.to_string() }),
+            json!({ "version": 1, "mode": "eager", "generation": lease_id.to_string() }),
+            json!({ "version": 1, "mode": "lazy", "generation": "not-a-uuid" }),
+        ] {
+            let mut capabilities = registered.clone();
+            capabilities[BROWSER_HOST_CAPABILITY] = host.clone();
+            assert!(
+                !runtime_is_registered_browser_host("instafy-cloud", &capabilities, Some(lease_id)),
+                "{host}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stored_browser_host_of_any_generation_counts_for_policy_gates() {
+        let lease_id = Uuid::new_v4();
+        let stored = json!({ (BROWSER_HOST_CAPABILITY): browser_host_capability(lease_id) });
+        assert!(runtime_holds_browser_host_capability(
+            "instafy-cloud",
+            &stored
+        ));
+        // An earlier generation still counts, and consent is not required.
+        let earlier = json!({
+            (BROWSER_HOST_CAPABILITY): browser_host_capability(Uuid::new_v4()),
+            (SHARED_BROWSER_AGENT_CONSENT_CAPABILITY): { "version": 1 },
+        });
+        assert!(runtime_holds_browser_host_capability(
+            "instafy-cloud",
+            &earlier
+        ));
+
+        for provider in ["instafy-cloud-custom", "self-hosted", "runtime"] {
+            assert!(
+                !runtime_holds_browser_host_capability(provider, &stored),
+                "{provider}"
+            );
+        }
+        for capabilities in [
+            json!({}),
+            json!({ (BROWSER_HOST_CAPABILITY): { "version": 1, "modes": ["lazy"] } }),
+            json!({ (BROWSER_HOST_CAPABILITY): { "version": 2, "mode": "lazy" } }),
+            json!({ (BROWSER_HOST_CAPABILITY): { "version": 1, "mode": "eager" } }),
+            json!({ (BROWSER_HOST_CAPABILITY): true }),
+        ] {
+            assert!(
+                !runtime_holds_browser_host_capability("instafy-cloud", &capabilities),
+                "{capabilities}"
+            );
+        }
     }
 
     #[test]

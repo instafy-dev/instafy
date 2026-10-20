@@ -30,8 +30,12 @@ and cannot establish the bytes a new runtime will pull.
 Runtime registration cannot self-assert this provenance. The controller always
 removes `_instafySharedBrowserAgentConsent` from reported capabilities and
 re-adds exactly `{ "version": 1 }` only when the locked active lease carries a
-valid exact-provider webdev launch attestation for that same generation. This
-capability records trusted Shared Browser agent-lane provenance; it is not a
+valid exact-provider webdev launch attestation for that same generation, or
+when a space's own machine hosts the browser on demand: it reports
+`browserHost` `{ "version": 1, "modes": ["lazy"] }` and its active lease
+carries the controller's browser-host attestation for that same generation
+(see [Browser on the space's own machine](#browser-on-the-spaces-own-machine-controller-policy)).
+This capability records trusted Shared Browser agent-lane provenance; it is not a
 grant for any origin or action. The human confirmation policy below remains
 the authorization boundary.
 
@@ -707,10 +711,47 @@ to the webdev one:
   loses it.
 - **Launch settings.** After the runtime and provider metadata are merged, an
   attested lease launches with the boot-time browser off, viewport-only
-  rendering and CDP screencast on. WebRTC is on only when managed TURN serves
-  the project, and then with `INSTAFY_BROWSER_WEBRTC_REQUIRE_TURN=1` and no ICE
-  servers at launch; the origin injects fresh relay credentials into each
-  capabilities and offer request. A provider's static ICE list is removed.
+  rendering and CDP screencast on. WebRTC is off
+  (`INSTAFY_BROWSER_WEBRTC_ENABLED=0`, no `INSTAFY_BROWSER_WEBRTC_REQUIRE_TURN`,
+  no ICE servers), even when managed TURN serves the project, and a preferred
+  WebRTC viewer becomes CDP screencast. The browser shares the machine with the
+  space's terminals and model tools, which run as root; the origin hands each
+  negotiation's fresh TURN relay credentials to a loopback WebRTC sender, so a
+  root shell could capture them. WebRTC returns for hosts once the browser runs
+  in a container of its own (Phase 2). CDP screencast is the viewer, with RFB as
+  the fallback. A provider's static ICE list is removed, and the origin proxy
+  mints no relay credential for an origin whose runtime holds a stored
+  `browserHost`: its `browser/capabilities` and `browser/webrtc/offer` requests
+  carry the `disabled` WebRTC policy instead.
+- **Registration.** The runtime reports `browserHost`
+  `{"version": 1, "modes": ["lazy"]}`. The controller always removes the
+  reported `browserHost` (and `browser_host`) and, only when the active lease
+  carries the attestation for that same generation, stores its own value with
+  Shared Browser agent consent:
+
+  ```json
+  {"browserHost": {"version": 1, "mode": "lazy", "generation": "<leaseId>"},
+   "_instafySharedBrowserAgentConsent": {"version": 1}}
+  ```
+
+  A report without the attestation, or an attestation without the report,
+  grants neither. Webdev consent is unchanged.
+- **Status.** `GET /projects/:project_id/runtime/status` adds
+  `"sharedBrowserHostPolicy": "covered" | "off"` to every response, and
+  `"sharedBrowserHost": {"version": 1, "mode": "lazy"}` to the entry of a
+  registered host whose lease is live (not released, failed or quarantined by
+  a stop), that is not a private self-hosted runtime, while the policy covers
+  the space. Neither field names a lease or a person.
+- **Origin routes.** The controller proxies exactly `GET`/`HEAD browser/host`
+  (`browser.view`) and `POST browser/host/start` (`browser.control`, body at
+  most 4 KiB). Both answer 404 `origin path not found` unless the policy covers
+  the origin's space.
+- **Dispatch.** Shared dispatch to a registered host answers 409 when the
+  policy does not cover its space, and the request is not sent to another
+  runtime. Registration does not read the policy: the stored consent lasts
+  until a reuse with the policy off drops the lease's attestation, or until the
+  machine's next lease. This check is what enforces the policy, so turning it
+  off stops new browser turns at once.
 - **Sign-ins are kept.** A space the policy covers also has durable profile
   persistence, through the same encrypted store, `agent.browser_profile` token
   scope and launch settings that `BROWSER_PROFILE_PERSIST_PROJECT_IDS` enables
@@ -719,13 +760,22 @@ to the webdev one:
   persistence switch.
   The persistence rollout barrier below therefore applies before turning the
   policy on. **Clear shared browser data** still stops every managed machine
-  of the space that may hold the profile, which includes a browser host.
+  of the space that may hold the profile, which includes a browser host: the
+  space's own machine restarts, which ends its previews, terminals and running
+  work, and Studio's browser-host attach starts the same machine again
+  afterwards.
 
 The attestation is inert on its own: a runtime that does not implement the lazy
-host ignores it. The browser then shares the runtime container with ordinary
+host ignores it and reports no `browserHost`, so it gets neither consent nor
+the status field. The browser then shares the runtime container with ordinary
 workspace processes, the same boundary described under
-[Human approval policy](#human-approval-policy). Rollback is `HOSTED_BROWSER_HOST=off`; machines
-already launched keep their launch settings until their next lease.
+[Human approval policy](#human-approval-policy). Rollback is `HOSTED_BROWSER_HOST=off`:
+status hides the host at the next read, the proxy answers 404 for
+`browser/host*`, and Shared dispatch to a host answers 409. Persistence for those
+spaces stops at once at the profile API and at the next registration renewal in
+the token scope. A browser already open keeps running until it stops or the
+machine's next lease, and machines already launched keep their launch settings
+until then.
 
 ### How Studio opens it
 
@@ -978,7 +1028,8 @@ rollback cannot strand stored login material.
 Viewers cannot invoke it. A successful clear ends the current shared session
 and Studio starts one fresh browser; the client suppresses automatic reconnect
 while deletion is in flight. For Instafy's browser on the space's own machine,
-the fresh browser is that same machine started again under its runtime id (see
+the clear stops that machine too (it may hold the profile), and the fresh
+browser is that same machine started again under its runtime id (see
 [How Studio opens it](#how-studio-opens-it)).
 
 This lifecycle deliberately adds neither a second secret system nor a new

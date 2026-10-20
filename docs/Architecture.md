@@ -184,7 +184,11 @@ Runtimes can be provisioned with different runtime-agent container images (for e
   provenance because registry tags remain mutable.
 - An active managed lease cannot change flavor in place; stop it and create a
   new provider generation. Runtime registration cannot spoof the protected
-  `_instafySharedBrowserAgentConsent` capability.
+  `_instafySharedBrowserAgentConsent` capability. A space's own machine gets it,
+  with a controller-written `browserHost` for its lease generation, only when it
+  reports the lazy browser host and its lease carries the controller's
+  browser-host attestation; `HOSTED_BROWSER_HOST` also gates its status field,
+  its `browser/host*` proxy routes and Shared dispatch to it.
 - A dispatch reconnect to a runtime that holds a live lease keeps that lease's
   settings: it asks for the lease's attested flavor, size and browser
   settings, so it reuses a live webdev runtime (or replaces a stale one with

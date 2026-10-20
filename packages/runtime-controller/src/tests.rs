@@ -31165,7 +31165,7 @@ async fn lease_metadata(pool: &PgPool, lease_id: Uuid) -> anyhow::Result<serde_j
 /// A space the browser-host policy covers relaunches its own machine as a
 /// browser host attested for the new generation, never by carrying the old
 /// generation's key, with the host launch settings: boot-time browser off,
-/// CDP on, WebRTC relay-only without launch-time ICE, and sign-ins kept. A
+/// CDP on, WebRTC off even with managed TURN, and sign-ins kept. A
 /// space outside the policy launches exactly as before. Reusing the live
 /// lease keeps the attestation and never answers 409; with the policy off
 /// the reuse drops it.
@@ -31259,10 +31259,9 @@ async fn browser_host_policy_attests_only_covered_space_machines() -> anyhow::Re
         assert_eq!(env["INSTAFY_ENABLE_BROWSER_SESSION"], json!("0"), "{env}");
         assert_eq!(env["INSTAFY_BROWSER_VIEWPORT_ONLY"], json!("1"), "{env}");
         assert_eq!(env["INSTAFY_BROWSER_CDP_SCREENCAST"], json!("1"), "{env}");
-        assert_eq!(env["INSTAFY_BROWSER_WEBRTC_ENABLED"], json!("1"), "{env}");
-        assert_eq!(
-            env["INSTAFY_BROWSER_WEBRTC_REQUIRE_TURN"],
-            json!("1"),
+        assert_eq!(env["INSTAFY_BROWSER_WEBRTC_ENABLED"], json!("0"), "{env}");
+        assert!(
+            env.get("INSTAFY_BROWSER_WEBRTC_REQUIRE_TURN").is_none(),
             "{env}"
         );
         assert!(

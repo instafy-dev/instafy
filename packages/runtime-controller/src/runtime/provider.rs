@@ -256,6 +256,26 @@ pub(super) fn apply_controller_turn_credentials(
     metadata
 }
 
+/// The transport settings of a managed launch, applied after the runtime
+/// and provider metadata are merged so neither source can change them. A
+/// lease attested as a lazy browser host takes
+/// [`apply_browser_host_launch_policy`]; every other launch takes
+/// [`apply_controller_turn_credentials`].
+pub(super) fn apply_managed_transport_policy(
+    turn: Option<&BrowserTurnRestConfig>,
+    browser_host: bool,
+    project_id: Uuid,
+    runtime_id: Uuid,
+    now_unix: i64,
+    metadata: Option<JsonValue>,
+) -> Option<JsonValue> {
+    if browser_host {
+        apply_browser_host_launch_policy(metadata)
+    } else {
+        apply_controller_turn_credentials(turn, project_id, runtime_id, now_unix, metadata)
+    }
+}
+
 /// Launch settings of a lease attested as a lazy browser host (see
 /// `managed::MANAGED_BROWSER_HOST_ATTESTATION`). Runs after the runtime and
 /// provider metadata are merged, in place of
@@ -264,17 +284,15 @@ pub(super) fn apply_controller_turn_credentials(
 /// - Nothing browser-related starts at boot: the eager browser session switch
 ///   is forced off, and the runtime starts the browser on first use.
 /// - The browser renders viewport-only with CDP screencast, which needs no
-///   relay.
-/// - WebRTC is on only when managed TURN serves the project, and then relay
-///   only. No ICE servers are written at launch: lease metadata reaches the
-///   runtime's environment, and the origin injects fresh relay credentials
-///   into each capabilities and offer request instead. A provider's static
-///   ICE list is removed as well.
-pub(super) fn apply_browser_host_launch_policy(
-    turn: Option<&BrowserTurnRestConfig>,
-    project_id: Uuid,
-    metadata: Option<JsonValue>,
-) -> Option<JsonValue> {
+///   relay. A preferred WebRTC viewer becomes CDP screencast.
+/// - WebRTC is always off, even when managed TURN serves the project, and no
+///   ICE servers are written. A browser host shares its machine with the
+///   space's terminals and model tools, which run as root. The origin copies
+///   each negotiation's fresh TURN relay credentials to a loopback WebRTC
+///   sender over plain HTTP, and a root shell on the same machine could bind
+///   or read that port and capture them. WebRTC returns for hosts once the
+///   browser runs in a container of its own (Phase 2).
+pub(super) fn apply_browser_host_launch_policy(metadata: Option<JsonValue>) -> Option<JsonValue> {
     let mut root = match metadata {
         Some(JsonValue::Object(map)) => map,
         Some(other) => {
@@ -295,25 +313,19 @@ pub(super) fn apply_browser_host_launch_policy(
     set(&mut env, "INSTAFY_ENABLE_BROWSER_SESSION", "0");
     set(&mut env, "INSTAFY_BROWSER_VIEWPORT_ONLY", "1");
     set(&mut env, "INSTAFY_BROWSER_CDP_SCREENCAST", "1");
+    set(&mut env, "INSTAFY_BROWSER_WEBRTC_ENABLED", "0");
+    env.remove("INSTAFY_BROWSER_WEBRTC_REQUIRE_TURN");
     env.remove("INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON");
-
-    if turn.is_some_and(|turn| turn.allows_project(project_id)) {
-        set(&mut env, "INSTAFY_BROWSER_WEBRTC_ENABLED", "1");
-        set(&mut env, "INSTAFY_BROWSER_WEBRTC_REQUIRE_TURN", "1");
-    } else {
-        set(&mut env, "INSTAFY_BROWSER_WEBRTC_ENABLED", "0");
-        env.remove("INSTAFY_BROWSER_WEBRTC_REQUIRE_TURN");
-        if env
-            .get("INSTAFY_BROWSER_PREFERRED_VIEWER")
-            .and_then(JsonValue::as_str)
-            == Some("webrtc")
-        {
-            set(
-                &mut env,
-                "INSTAFY_BROWSER_PREFERRED_VIEWER",
-                "cdp-screencast",
-            );
-        }
+    if env
+        .get("INSTAFY_BROWSER_PREFERRED_VIEWER")
+        .and_then(JsonValue::as_str)
+        == Some("webrtc")
+    {
+        set(
+            &mut env,
+            "INSTAFY_BROWSER_PREFERRED_VIEWER",
+            "cdp-screencast",
+        );
     }
 
     root.insert("env".to_string(), JsonValue::Object(env));
@@ -648,9 +660,9 @@ pub(super) fn authorize_provider_config_for_project(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_browser_host_launch_policy, apply_browser_profile_persistence_env,
-        apply_browser_profile_persistence_policy, apply_controller_turn_credentials,
-        call_provider_endpoint, merge_provider_metadata, provider_call_status_is_final_success,
+        apply_browser_profile_persistence_env, apply_browser_profile_persistence_policy,
+        apply_controller_turn_credentials, apply_managed_transport_policy, call_provider_endpoint,
+        merge_provider_metadata, provider_call_status_is_final_success,
         resolve_provider_auth_tokens,
     };
     use crate::browser_turn::BrowserTurnRestConfig;
@@ -1067,14 +1079,21 @@ mod tests {
         let launched = apply_browser_profile_persistence_policy(
             config,
             project_id,
-            apply_browser_host_launch_policy(turn, project_id, merged),
+            apply_managed_transport_policy(
+                turn,
+                true,
+                project_id,
+                Uuid::new_v4(),
+                1_700_000_000,
+                merged,
+            ),
         )
         .expect("host metadata");
         launched["env"].as_object().expect("environment").clone()
     }
 
     #[test]
-    fn browser_host_launch_requires_turn_without_launch_ice_when_turn_serves_the_project() {
+    fn browser_host_launch_turns_webrtc_off_even_when_turn_serves_the_project() {
         let project_id = Uuid::new_v4();
         let turn = BrowserTurnRestConfig::for_test_projects(
             "turns:turn.example.test:443",
@@ -1104,10 +1123,11 @@ mod tests {
             })),
         );
 
-        assert_eq!(env["INSTAFY_BROWSER_WEBRTC_ENABLED"], "1");
-        assert_eq!(env["INSTAFY_BROWSER_WEBRTC_REQUIRE_TURN"], "1");
+        // Root shells share the machine, so no relay credentials may reach it.
+        assert_eq!(env["INSTAFY_BROWSER_WEBRTC_ENABLED"], "0");
+        assert!(!env.contains_key("INSTAFY_BROWSER_WEBRTC_REQUIRE_TURN"));
         assert!(!env.contains_key("INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON"));
-        assert_eq!(env["INSTAFY_BROWSER_PREFERRED_VIEWER"], "webrtc");
+        assert_eq!(env["INSTAFY_BROWSER_PREFERRED_VIEWER"], "cdp-screencast");
         assert_eq!(env["INSTAFY_BROWSER_VIEWPORT_ONLY"], "1");
         assert_eq!(env["INSTAFY_BROWSER_CDP_SCREENCAST"], "1");
         assert_eq!(env["INSTAFY_ENABLE_BROWSER_SESSION"], "0");
@@ -1117,6 +1137,20 @@ mod tests {
         assert!(!env.values().any(|value| value
             .as_str()
             .is_some_and(|value| value.contains(TEST_TURN_SECRET))));
+
+        // Any other managed launch keeps the managed relay, as before.
+        let other = apply_managed_transport_policy(
+            Some(&turn),
+            false,
+            project_id,
+            Uuid::new_v4(),
+            1_700_000_000,
+            Some(json!({ "env": { "INSTAFY_BROWSER_WEBRTC_ENABLED": "1" } })),
+        )
+        .expect("non-host metadata");
+        assert_eq!(other["env"]["INSTAFY_BROWSER_WEBRTC_ENABLED"], "1");
+        assert_eq!(other["env"]["INSTAFY_BROWSER_WEBRTC_REQUIRE_TURN"], "1");
+        assert!(other["env"]["INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON"].is_string());
     }
 
     #[test]
