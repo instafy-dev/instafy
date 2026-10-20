@@ -17,7 +17,10 @@ This broker + PDNS path is meant to stay isolated from the controller/frontend c
   ```
   Response: `{ tunnel: { tunnel_id, hostname, ingress_host, ingress_port, token, token_expires_at, url?, client: { server, token, hostname, protocol } }, credit?: null }`
 - `GET /tunnels/:id` — fetch descriptor.
+- `GET /capabilities` — optional features this broker is configured for: `{ privatePreviews: true, previewDomain }` when private previews are set up (below), otherwise `{ privatePreviews: false }`. Callers check it before asking for a private tunnel.
+- `GET /tunnels/:id/probe?path=/` — `HEAD <path>` through `RATHOLE_UPSTREAM_HOST:<rathole port>` with a 2 s timeout. Returns `{ listening, status }`; `listening` is true only when an HTTP status line comes back, because rathole accepts the TCP connection even when nothing is behind it.
 - `DELETE /tunnels/:id` — revoke + expire DNS records.
+- Labels: `labels.kind = "preview"` lets `expires_in_seconds` run up to `PREVIEW_MAX_TTL_SECONDS` (default 43200) instead of the token TTL. `labels.visibility = "private"` (anything other than `public`) makes a private tunnel, described below; without the preview config the request fails with 400.
   - Optional hooks:
   - `ACL_HOOK_URL` (POST) receives `{ intent, project_id, org_id?, runtime_id?, lease_id?, idempotency_key?, metadata? }` and returns `{ allowed: bool }`. When `allowed: false`, broker denies creation. When you burn credits here, require an `idempotency_key` so repeated calls don’t double-charge.
   - `EVENT_HOOK_URL` receives fire-and-forget events `{ kind: tunnel.created|tunnel.revoked|tunnel.expired, project_id, org_id?, runtime_id?, lease_id?, data }` (`tunnel.expired` is emitted by `ingress_sidecar` when it revokes expired tunnels).
@@ -25,6 +28,23 @@ This broker + PDNS path is meant to stay isolated from the controller/frontend c
     - `ACL_HOOK_URL=https://<controller>/tunnel-broker/hooks/acl`
     - `EVENT_HOOK_URL=https://<controller>/tunnel-broker/hooks/events`
     - `ACL_HOOK_TOKEN`/`EVENT_HOOK_TOKEN` must match controller `TUNNEL_BROKER_HOOK_SECRET`.
+
+## Private previews
+A private tunnel gets no router on `<uuid>.<TUNNEL_DOMAIN>`. Instead `ingress_sidecar` renders a Traefik `HostRegexp` router for `p-<26 base32>--<tunnel hex>.<PREVIEW_DOMAIN>` with three shared middlewares: `instafy-preview-auth` (forwardAuth to `PREVIEW_AUTH_ADDRESS/preview-auth`), `instafy-preview-headers` (drops `X-Frame-Options`, adds `no-referrer` and `noindex`) and `instafy-preview-errors` (502-504 pages from `/preview-error/{status}`). Private previews are off by default: if `PREVIEW_DOMAIN` or `PREVIEW_AUTH_ADDRESS` is unset, private bindings render nothing, and without all three of `PREVIEW_DOMAIN`, `PREVIEW_AUTH_ADDRESS` and `PREVIEW_AUTH_HOOK_URL` the broker refuses private tunnels with 400 and `GET /capabilities` reports `privatePreviews: false`.
+
+- `GET /preview-auth` (no API token; Traefik calls it) reads `X-Forwarded-Host`, refuses `Service-Worker: script` with 403, and asks `PREVIEW_AUTH_HOOK_URL` with bearer `ACL_HOOK_TOKEN`:
+  ```json
+  { "tunnelId": "<tunnel uuid>", "capabilityHash": "<lowercase hex sha256 of the label>" }
+  → { "allow": true, "ttlSeconds": 30 }
+  ```
+  Allows are cached for `ttlSeconds` (at most 30 s), denials for 5 s, in separate maps so made-up labels cannot evict a member's allow. Requests that miss the cache for the same label wait on one hook call. Each tunnel gets 60 hook calls at once and 10 a second after that; past it, unknown labels are denied without asking. A key the hook allowed in the last 10 minutes is asked again outside that budget when its cached allow lapses, so a flood of made-up labels on a known tunnel cannot lock members out; the hook is still asked, so revocation keeps its delay. A hook error denies without caching. Denials return a 401 page that posts `{ type: "instafy-preview", status: 401 }` to the parent frame.
+- `GET /preview-error/:status` returns the same kind of page for the given status.
+- The broker API process needs `PREVIEW_DOMAIN`, `PREVIEW_AUTH_ADDRESS` and `PREVIEW_AUTH_HOOK_URL`; the ingress sidecar needs the first two.
+
+Known limits of the capability host:
+- forwardAuth runs once per HTTP request or upgrade. A WebSocket or an SSE response that is already open keeps flowing after its label is revoked, its member is removed, or it idles out; only new requests get the 401. Revoking the tunnel or stopping the runtime takes the rathole service away, which should end those streams as well (not verified yet). A site that wants its streams re-checked can end them periodically so the reconnect passes forwardAuth again; the broker does not cut them. Hosted launches need entrypoint timeouts for these.
+- The label is the hostname, so it also reaches places `no-referrer` does not cover: the `Origin` header of the site's own cross-origin fetches and WebSockets (for example requests to a third-party API), DNS resolvers and TLS SNI. Whoever sees it can use it while it is live, so the hook should let labels idle out and be revoked; the broker re-asks it at least every 30 s.
+- Hosted use needs more than this broker: `PREVIEW_DOMAIN` should be its own registrable domain, listed on the Public Suffix List, with wildcard DNS and TLS, so preview sites cannot set cookies for each other or for Studio; binding a label to the viewer (for example a partitioned `__Host-` cookie) needs Traefik 3.1 or later.
 
 ## Controller wiring (recommended)
 1. Configure broker base URL + bearer token in controller env (keep separate from runtime/Studio env).

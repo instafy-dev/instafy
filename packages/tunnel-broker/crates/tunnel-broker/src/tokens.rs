@@ -85,6 +85,10 @@ mod tests {
             traefik_cert_resolver: None,
             acl_hook: None,
             event_hook: None,
+            preview: None,
+            preview_auth_hook: None,
+            preview_max_ttl_seconds: 43_200,
+            rathole_upstream_host: "rathole".into(),
         };
         let tunnel_id = Uuid::nil();
         let project_id = Uuid::new_v4();

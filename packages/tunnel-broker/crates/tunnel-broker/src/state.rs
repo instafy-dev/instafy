@@ -1,4 +1,4 @@
-use crate::config::BrokerConfig;
+use crate::{config::BrokerConfig, routes::preview_auth::DecisionCache};
 use reqwest::Client;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -12,6 +12,7 @@ struct AppStateInner {
     pub pool: PgPool,
     pub config: BrokerConfig,
     pub http: Client,
+    pub preview_auth_cache: DecisionCache,
 }
 
 impl AppState {
@@ -21,6 +22,7 @@ impl AppState {
                 pool,
                 config,
                 http: Client::new(),
+                preview_auth_cache: DecisionCache::new(),
             }),
         }
     }
@@ -35,5 +37,20 @@ impl AppState {
 
     pub fn http(&self) -> &Client {
         &self.inner.http
+    }
+
+    pub fn preview_auth_cache(&self) -> &DecisionCache {
+        &self.inner.preview_auth_cache
+    }
+}
+
+#[cfg(test)]
+impl AppState {
+    /// State whose pool never connects; for handlers that answer before touching Postgres.
+    pub(crate) fn for_tests(config: BrokerConfig) -> Self {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy(&config.database_url)
+            .expect("lazy pool");
+        Self::new(pool, config)
     }
 }

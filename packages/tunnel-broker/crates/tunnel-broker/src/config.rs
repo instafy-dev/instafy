@@ -29,6 +29,16 @@ pub struct BrokerConfig {
     pub traefik_cert_resolver: Option<String>,
     pub acl_hook: Option<HookConfig>,
     pub event_hook: Option<HookConfig>,
+    /// Private preview routing. `None` when `PREVIEW_DOMAIN` or `PREVIEW_AUTH_ADDRESS` is unset
+    /// or invalid; private bindings then render no router and private tunnels are refused.
+    pub preview: Option<PreviewConfig>,
+    /// Controller hook that decides each preview capability (`PREVIEW_AUTH_HOOK_URL`, called
+    /// with the `ACL_HOOK_TOKEN` bearer). Without it every preview request is denied.
+    pub preview_auth_hook: Option<HookConfig>,
+    /// Upper bound for `labels.kind == "preview"` tunnels, which outlive the token TTL cap.
+    pub preview_max_ttl_seconds: i64,
+    /// Host the broker dials to probe a binding's rathole port.
+    pub rathole_upstream_host: String,
 }
 
 #[derive(Debug, Clone)]
@@ -36,6 +46,18 @@ pub struct HookConfig {
     pub url: String,
     pub token: Option<String>,
 }
+
+#[derive(Debug, Clone)]
+pub struct PreviewConfig {
+    /// Registrable domain that carries `p-<label>--<tunnel>.<domain>` capability hosts.
+    pub domain: String,
+    /// Broker base URL as Traefik sees it; serves `/preview-auth` and `/preview-error/:status`.
+    /// Only the ingress renderer reads it.
+    #[allow(dead_code)]
+    pub auth_address: String,
+}
+
+pub const DEFAULT_PREVIEW_MAX_TTL_SECONDS: i64 = 43_200;
 
 impl BrokerConfig {
     pub fn from_env() -> Result<Self> {
@@ -122,6 +144,28 @@ impl BrokerConfig {
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
+        let preview = preview_config(
+            env::var("PREVIEW_DOMAIN").ok().as_deref(),
+            env::var("PREVIEW_AUTH_ADDRESS").ok().as_deref(),
+        );
+        let preview_auth_hook = env::var("PREVIEW_AUTH_HOOK_URL")
+            .ok()
+            .map(|url| url.trim().to_string())
+            .filter(|url| !url.is_empty())
+            .map(|url| HookConfig {
+                url: url.trim_end_matches('/').to_string(),
+                token: env::var("ACL_HOOK_TOKEN").ok(),
+            });
+        let preview_max_ttl_seconds = env::var("PREVIEW_MAX_TTL_SECONDS")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_PREVIEW_MAX_TTL_SECONDS);
+        let rathole_upstream_host = env::var("RATHOLE_UPSTREAM_HOST")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "rathole".to_string());
 
         Ok(Self {
             database_url,
@@ -146,7 +190,17 @@ impl BrokerConfig {
             traefik_cert_resolver,
             acl_hook,
             event_hook,
+            preview,
+            preview_auth_hook,
+            preview_max_ttl_seconds,
+            rathole_upstream_host,
         })
+    }
+
+    /// Private tunnels need a routable preview domain and an auth hook; without either the
+    /// broker refuses to issue one rather than leave it reachable or permanently 401.
+    pub fn private_previews_enabled(&self) -> bool {
+        self.preview.is_some() && self.preview_auth_hook.is_some()
     }
 
     pub fn hostname_for(&self, tunnel_id: &Uuid) -> String {
@@ -177,9 +231,91 @@ impl BrokerConfig {
     }
 }
 
+/// A complete local-style config for handler tests; no field reaches the network.
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn test_broker_config() -> BrokerConfig {
+    BrokerConfig {
+        database_url: "postgres://localhost/unused".into(),
+        database_pool_size: 1,
+        rathole_config_notify_channel: "tunnel_config_refresh".into(),
+        http_bind: "127.0.0.1:0".into(),
+        tunnel_domain: "rt.test".into(),
+        ingress_host: "ingress.rt.test".into(),
+        ingress_port: 7000,
+        public_ingress_port: 8083,
+        ingress_ipv4: None,
+        ingress_ipv6: None,
+        rathole_shared_token: None,
+        rathole_port_range_start: 20000,
+        rathole_port_range_end: 40000,
+        default_ttl_seconds: 60,
+        token_signing_key: "secret".into(),
+        api_tokens: vec![],
+        token_issuer: "issuer".into(),
+        token_audience: None,
+        token_ttl_seconds: 900,
+        traefik_cert_resolver: None,
+        acl_hook: None,
+        event_hook: None,
+        preview: Some(PreviewConfig {
+            domain: "preview.localhost".into(),
+            auth_address: "http://broker:8080".into(),
+        }),
+        preview_auth_hook: Some(HookConfig {
+            url: "http://127.0.0.1:9/hook".into(),
+            token: Some("hook-secret".into()),
+        }),
+        preview_max_ttl_seconds: DEFAULT_PREVIEW_MAX_TTL_SECONDS,
+        rathole_upstream_host: "rathole".into(),
+    }
+}
+
+/// Validates the preview pair. The domain is interpolated into a Traefik regex and the address
+/// into forwardAuth config, so anything unexpected disables private routing instead.
+fn preview_config(domain: Option<&str>, auth_address: Option<&str>) -> Option<PreviewConfig> {
+    let domain = domain?.trim().trim_end_matches('.').to_ascii_lowercase();
+    let valid_domain = !domain.is_empty()
+        && domain.split('.').all(|part| {
+            !part.is_empty()
+                && !part.starts_with('-')
+                && !part.ends_with('-')
+                && part
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        });
+    let auth_address = auth_address?.trim().trim_end_matches('/').to_string();
+    let valid_address = (auth_address.starts_with("http://")
+        || auth_address.starts_with("https://"))
+        && !auth_address.contains(|c: char| c.is_whitespace() || c == '"' || c == '`');
+    if !valid_domain || !valid_address {
+        tracing::warn!("ignoring invalid PREVIEW_DOMAIN or PREVIEW_AUTH_ADDRESS");
+        return None;
+    }
+    Some(PreviewConfig {
+        domain,
+        auth_address,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_config_requires_both_values() {
+        let cfg = preview_config(Some(" Preview.Localhost. "), Some("http://broker:8080/"))
+            .expect("valid preview config");
+        assert_eq!(cfg.domain, "preview.localhost");
+        assert_eq!(cfg.auth_address, "http://broker:8080");
+
+        assert!(preview_config(None, Some("http://broker:8080")).is_none());
+        assert!(preview_config(Some("preview.localhost"), None).is_none());
+        assert!(preview_config(Some(""), Some("http://broker:8080")).is_none());
+        assert!(preview_config(Some("preview.localhost"), Some("broker:8080")).is_none());
+        assert!(preview_config(Some("pre$view.test"), Some("http://broker:8080")).is_none());
+        assert!(preview_config(Some("a..test"), Some("http://broker:8080")).is_none());
+    }
 
     #[test]
     fn builds_hostname() {
@@ -206,6 +342,10 @@ mod tests {
             traefik_cert_resolver: None,
             acl_hook: None,
             event_hook: None,
+            preview: None,
+            preview_auth_hook: None,
+            preview_max_ttl_seconds: DEFAULT_PREVIEW_MAX_TTL_SECONDS,
+            rathole_upstream_host: "rathole".into(),
         };
 
         let id = Uuid::nil();
