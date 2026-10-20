@@ -1159,6 +1159,12 @@ async fn post_tunnel_broker_acl_hook(
     headers: HeaderMap,
     Json(payload): Json<TunnelBrokerAclPayload>,
 ) -> Result<Json<TunnelBrokerAclResponse>, (StatusCode, Json<ApiError>)> {
+    // The bearer is checked before anything in the body is used. The dev
+    // launcher relies on that order to ask a running controller whether it
+    // holds a hook secret (an empty project answers 400 with the right bearer
+    // and 401 with a wrong one, and writes nothing): see
+    // scripts/lib/localTunnelBroker.mjs and the test
+    // `acl_hook_checks_the_bearer_before_the_project`.
     authorize_hook(&headers, state.config.tunnel_broker_hook_secret.as_ref())?;
 
     let project_id = parse_required_uuid(&payload.project_id, "project_id")?;
@@ -3089,6 +3095,63 @@ pub(crate) fn authorize_hook(
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    /// The ACL hook's answer to an empty project, with no reachable database.
+    async fn acl_hook_status_for_empty_project(
+        secret: Option<&str>,
+        bearer: &str,
+    ) -> anyhow::Result<StatusCode> {
+        use tower::ServiceExt;
+
+        let mut config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "test-acl-hook-order",
+        );
+        config.tunnel_broker_hook_secret = secret.map(str::to_string);
+        // Nothing listens here: the answer must come before any database use.
+        let manager = bb8_postgres::PostgresConnectionManager::new_from_stringlike(
+            "postgresql://postgres:postgres@127.0.0.1:1/postgres",
+            crate::config::database_tls(),
+        )?;
+        let pool = bb8::Pool::builder().max_size(1).build_unchecked(manager);
+        let app = router().with_state(crate::tests::build_test_state(pool, config));
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/tunnel-broker/hooks/acl")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .header(
+                        axum::http::header::AUTHORIZATION,
+                        format!("Bearer {bearer}"),
+                    )
+                    .body(axum::body::Body::from(
+                        serde_json::json!({ "intent": "check", "project_id": "" }).to_string(),
+                    ))?,
+            )
+            .await?;
+        Ok(response.status())
+    }
+
+    // The dev launcher (scripts/lib/localTunnelBroker.mjs) tells whether a
+    // running controller holds its hook secret by this answer.
+    #[tokio::test]
+    async fn acl_hook_checks_the_bearer_before_the_project() -> anyhow::Result<()> {
+        assert_eq!(
+            acl_hook_status_for_empty_project(Some("hook-secret"), "hook-secret").await?,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            acl_hook_status_for_empty_project(Some("hook-secret"), "other-secret").await?,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            acl_hook_status_for_empty_project(None, "hook-secret").await?,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        Ok(())
+    }
 
     #[test]
     fn tunnel_usage_bucket_increments_per_interval() {

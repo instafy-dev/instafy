@@ -14,6 +14,8 @@ export const ADDED_BUILD_CONTRACT_TESTS = [
   "scripts/lib/supabaseStartMode.test.mjs",
   "scripts/lib/supabaseSerialPull.test.mjs",
   "scripts/check-origin-git-compat-ci.test.mjs",
+  "scripts/lib/localSecret.test.mjs",
+  "scripts/lib/localTunnelBroker.test.mjs",
 ];
 
 export const addedBuildContractTestLine = (file) => `            ${file} \\\n`;
