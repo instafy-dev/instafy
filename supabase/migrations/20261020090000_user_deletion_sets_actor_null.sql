@@ -3,6 +3,9 @@
 -- DELETE action ("update or delete on table users violates foreign key
 -- constraint org_invite_links_created_by_fkey"). Each of these columns only
 -- records who acted, so the record stays and forgets the person.
+-- conversation_participants.added_by follows in 20261020090100: that table is
+-- one live requests lock, so it changes in a migration of its own
+-- (supabase/MIGRATIONS.md).
 do $$
 declare
   target record;
@@ -15,8 +18,7 @@ begin
       ('org_invitations', 'accepted_by'),
       ('org_invite_links', 'created_by'),
       ('org_invite_links', 'revoked_by'),
-      ('project_memberships', 'invited_by'),
-      ('conversation_participants', 'added_by')
+      ('project_memberships', 'invited_by')
     ) as t(table_name, column_name)
   loop
     if to_regclass('public.' || target.table_name) is null then
