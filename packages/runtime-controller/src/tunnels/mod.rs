@@ -1559,18 +1559,33 @@ async fn update_tunnel_status_record(
 
     let normalized_status = normalize_tunnel_status(status);
     let metadata_param = protect_controller_metadata(record.metadata.as_ref(), metadata_override);
+    // A closed preview stays closed here: re-opening goes through
+    // `POST /previews`, which also ends the sessions of the stopped grant.
+    // Checked in the update itself, so it holds against a concurrent close.
+    let reopens = tunnel_status_is_active(&normalized_status);
     let row = connection
-        .query_one(
+        .query_opt(
             "update runtime_tunnel_grants
              set status = $1,
                  metadata = coalesce($2, metadata),
                  updated_at = now()
              where id = $3
+               and not ($4
+                        and jsonb_typeof(metadata->'_instafyPreview') = 'object'
+                        and lower(btrim(status)) in ('revoked', 'expired', 'failed'))
              returning *",
-            &[&normalized_status, &metadata_param, &record.id],
+            &[&normalized_status, &metadata_param, &record.id, &reopens],
         )
         .await
-        .map_err(|error| internal_error(format!("failed to update tunnel status: {error:?}")))?;
+        .map_err(|error| internal_error(format!("failed to update tunnel status: {error:?}")))?
+        .ok_or_else(|| {
+            (
+                StatusCode::CONFLICT,
+                Json(ApiError::new(
+                    "this preview is closed; open it again to make it active",
+                )),
+            )
+        })?;
     drop(connection);
 
     let updated = runtime_tunnel_grant_from_row(&row);

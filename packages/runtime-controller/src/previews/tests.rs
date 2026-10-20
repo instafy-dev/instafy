@@ -11,8 +11,8 @@ use tokio_postgres::types::Json as PgJson;
 use tower::ServiceExt;
 
 use super::sessions::{
-    capability_hash, forget_viewer_access, mint_capability_label, parse_viewer_host,
-    preview_domain_overlaps,
+    capability_hash, forget_viewer_access, insert_preview_session, mint_capability_label,
+    parse_viewer_host, preview_cookie_scope_warning, preview_domain_overlaps,
 };
 use super::*;
 use crate::config::PreviewSettings;
@@ -49,11 +49,76 @@ fn preview_ports_follow_the_denylist() {
         assert_eq!(error.1 .0.code.as_deref(), Some("port_not_allowed"));
     }
     // PREVIEW_DENY_PORTS adds to the list; it never removes a built-in port.
-    let settings = PreviewSettings::from_values(None, None, Some("4173, 8080 x 70000"), None);
+    let settings = PreviewSettings::from_values(None, None, Some("4173, 8080 ,"), None);
     assert_eq!(settings.deny_ports, vec![4173, 8080]);
+    assert!(settings.invalid_deny_ports.is_empty());
     assert!(validate_preview_port(4173, &settings.deny_ports).is_err());
     assert!(validate_preview_port(9222, &settings.deny_ports).is_err());
     assert!(validate_preview_port(4174, &settings.deny_ports).is_ok());
+}
+
+#[test]
+fn an_entry_in_preview_deny_ports_that_is_not_a_port_stops_startup() {
+    let settings = PreviewSettings::from_values(None, None, Some("4173, 9222x 70000;-1"), None);
+    assert_eq!(settings.deny_ports, vec![4173]);
+    assert_eq!(settings.invalid_deny_ports, vec!["9222x", "70000;-1"]);
+    // Refused even with previews off: the typo is an operator's to fix.
+    for previews in [
+        settings.clone(),
+        PreviewSettings {
+            base_url: Some(PREVIEW_BASE_URL.to_string()),
+            ..settings
+        },
+    ] {
+        let mut config = build_app_config(
+            test_origin_private_key(),
+            test_origin_public_key(),
+            "previews-deny-ports",
+        );
+        config.previews = previews;
+        let error = check_preview_domain(&config).expect_err("bad entry refused");
+        assert!(error.to_string().contains("PREVIEW_DENY_PORTS"), "{error}");
+        assert!(error.to_string().contains("9222x"), "{error}");
+    }
+}
+
+#[test]
+fn an_unreadable_tunnel_domain_stops_startup_instead_of_skipping_the_overlap_check() {
+    let mut config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "previews-tunnel-domain",
+    );
+    config.previews = PreviewSettings {
+        domain: Some("previews.app".to_string()),
+        tunnel_domain: Some("rt example".to_string()),
+        ..PreviewSettings::default()
+    };
+    let error = check_preview_domain(&config).expect_err("unreadable TUNNEL_DOMAIN refused");
+    assert!(error.to_string().contains("TUNNEL_DOMAIN"), "{error}");
+}
+
+#[test]
+fn a_preview_domain_off_the_public_suffix_list_is_flagged_as_one_shared_cookie_scope() {
+    for domain in [
+        "previews.app",
+        "preview.example.co.uk",
+        "instafy-preview.dev",
+    ] {
+        let warning = preview_cookie_scope_warning(domain).expect("warned");
+        assert!(warning.contains("Public Suffix List"), "{warning}");
+        assert!(warning.contains(domain), "{warning}");
+    }
+    // A listed suffix separates each viewer host, and local stacks are exempt.
+    for domain in [
+        "github.io",
+        "co.uk",
+        "localhost",
+        "preview.localhost",
+        "127.0.0.1",
+    ] {
+        assert_eq!(preview_cookie_scope_warning(domain), None, "{domain}");
+    }
 }
 
 #[test]
@@ -1439,6 +1504,113 @@ async fn preview_grant_revocation_ends_its_sessions() -> anyhow::Result<()> {
             assert_eq!(status, StatusCode::OK);
             assert_eq!(preview["status"], "revoked");
             assert_eq!(preview["health"], Value::Null);
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_session_is_not_stored_for_a_preview_revoked_after_the_open_check() -> anyhow::Result<()>
+{
+    run(|f| {
+        Box::pin(async move {
+            let job = f.job(None).await?;
+            let preview_id = f.open(&job).await?;
+            // The revoke lands between the Open's own check and its insert.
+            f.state
+                .pool
+                .get()
+                .await?
+                .execute(
+                    "update runtime_tunnel_grants set status = 'revoked' where tunnel_id = $1",
+                    &[&preview_id],
+                )
+                .await?;
+            let label = mint_capability_label();
+            let result = insert_preview_session(
+                &f.state.pool,
+                &capability_hash(&label),
+                &preview_id,
+                &f.project,
+                &f.users[0],
+                false,
+            )
+            .await;
+            let Err((status, _)) = result else {
+                anyhow::bail!("a session was stored for a revoked preview");
+            };
+            assert_eq!(status, StatusCode::CONFLICT);
+            let stored: i64 = f
+                .state
+                .pool
+                .get()
+                .await?
+                .query_one(
+                    "select count(*) from runtime_preview_sessions where tunnel_id = $1",
+                    &[&preview_id],
+                )
+                .await?
+                .get(0);
+            assert_eq!(stored, 0);
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn the_tunnel_status_route_cannot_reopen_a_closed_preview() -> anyhow::Result<()> {
+    run(|f| {
+        Box::pin(async move {
+            let job = f.job(None).await?;
+            let preview_id = f.open(&job).await?;
+            let (_, label) = f.view(0, &preview_id).await?;
+            let close = f.path(&format!("/{preview_id}/close"));
+            let (status, _) = f.request(&job.token, "POST", &close, json!({})).await?;
+            assert_eq!(status, StatusCode::NO_CONTENT);
+            // A session the revoke missed, as a race could leave.
+            f.state
+                .pool
+                .get()
+                .await?
+                .execute(
+                    "update runtime_preview_sessions set revoked_at = null
+                     where capability_hash = $1",
+                    &[&capability_hash(&label)],
+                )
+                .await?;
+            let machine = f.machine_token(&job, f.users[0])?;
+            let status_path = format!("/projects/{}/tunnels/{preview_id}/status", f.project);
+            for value in ["active", "issuing", "something-else"] {
+                let (status, result) = f
+                    .request(&machine, "POST", &status_path, json!({ "status": value }))
+                    .await?;
+                assert_eq!(status, StatusCode::CONFLICT, "{value}: {result}");
+            }
+            let stored: String = f
+                .state
+                .pool
+                .get()
+                .await?
+                .query_one(
+                    "select status from runtime_tunnel_grants where tunnel_id = $1",
+                    &[&preview_id],
+                )
+                .await?
+                .get(0);
+            assert_eq!(stored, "revoked");
+            assert!(!f.allowed(&preview_id, &label).await?);
+            // Moving it between stopped states is still fine.
+            let (status, result) = f
+                .request(
+                    &machine,
+                    "POST",
+                    &status_path,
+                    json!({ "status": "expired" }),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{result}");
             Ok(())
         })
     })
