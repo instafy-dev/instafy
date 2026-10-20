@@ -217,6 +217,36 @@ describe("Personal handoff with the real React browser bridge", () => {
     expect(await pending).toBe(true);
   });
 
+  it("keeps refusing a card press after Let AI continue failed before Desktop took the handoff", async () => {
+    let listener: ((status: InstafyDesktopPersonalBrowserStatus) => void) | null = null;
+    window.instafyDesktop = { ...window.instafyDesktop!, onPersonalBrowserStatus: (next) => {
+      listener = next;
+      return () => { listener = null; };
+    } };
+    const emit = async (overrides: Partial<InstafyDesktopPersonalBrowserStatus>) => {
+      nativeStatus = { ...nativeStatus, ...overrides };
+      await act(async () => listener?.(nativeStatus));
+    };
+    await render();
+    await emit({ humanInputRequest: {
+      version: 1, handoffId: "handoff-1", origin: "https://example.test",
+      createdAtMs: 1000, expiresAtMs: 601_000, fields: [{ label: "Highlighted field 1" }],
+    } });
+    // The sign-in redirect failed to load: the request is gone and Desktop is not ready.
+    await emit({ url: "https://example.test/callback", humanInputRequest: undefined, state: "error", humanControlReady: false });
+    setEnabled.mockRejectedValueOnce(new Error("Personal Browser must be ready before agent control is enabled."));
+    await act(async () => {
+      expect(await resultRef.current!.handoff.continuePersonal("Continue", "ask")).toBe(false);
+    });
+    expect(setEnabled).toHaveBeenLastCalledWith(expect.objectContaining({ handoffId: "handoff-1" }));
+    expect(resultRef.current!.personal.pendingHandoff).toMatchObject({ handoffId: "handoff-1" });
+
+    // The page is ready again after a reload; a new card is still refused.
+    await emit({ state: "ready", humanControlReady: true });
+    await expect(resultRef.current!.handoff.startPersonal("Start another task")).rejects.toThrow("Finish the current manual step");
+    expect(setEnabled).toHaveBeenCalledTimes(1);
+  });
+
   it("retries Done after a native failure without reading the pre-Resume unavailable phase as a new failure", async () => {
     await failFirstResume();
     const attempt = await retry();

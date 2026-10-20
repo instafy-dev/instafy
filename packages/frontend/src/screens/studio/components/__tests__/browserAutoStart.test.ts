@@ -5,6 +5,7 @@ import {
   BROWSER_AUTO_START_COPY,
   browserAutoStartAddressesSeen,
   browserAutoStartHeldByComposerOrLayout,
+  browserAutoStartHeldByOther,
   browserAutoStartPlan,
   browserAutoStartedRecently,
   claimBrowserAutoStart,
@@ -86,6 +87,17 @@ describe("browserAutoStartPlan", () => {
     expect(browserAutoStartHeldByComposerOrLayout({ draft: "", wideSurfaces: false, splitView: true })).toBe(true);
     expect(browserAutoStartHeldByComposerOrLayout({ draft: " Wait ", wideSurfaces: true, splitView: true })).toBe(true);
     expect(browserAutoStartHeldByComposerOrLayout({ draft: "  ", wideSurfaces: true, splitView: true })).toBe(false);
+  });
+
+  it("holds a card while a sign-in handoff is pending after its request cleared", () => {
+    const idle = { browserRunActive: false, remoteController: false, humanInputRequest: false, pendingHandoff: false };
+    expect(browserAutoStartHeldByOther(idle)).toBe(false);
+    // Desktop drops humanInputRequest on the sign-in redirect; the handoff
+    // Studio saw still holds the card.
+    expect(browserAutoStartHeldByOther({ ...idle, pendingHandoff: true })).toBe(true);
+    expect(browserAutoStartHeldByOther({ ...idle, humanInputRequest: true })).toBe(true);
+    expect(browserAutoStartHeldByOther({ ...idle, browserRunActive: true })).toBe(true);
+    expect(browserAutoStartHeldByOther({ ...idle, remoteController: true })).toBe(true);
   });
 
   it("writes its copy without em dashes", () => {

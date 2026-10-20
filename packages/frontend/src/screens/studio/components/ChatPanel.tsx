@@ -394,6 +394,7 @@ import {
 } from "./browserRequest";
 import {
   browserAutoStartHeldByComposerOrLayout,
+  browserAutoStartHeldByOther,
   browserAutoStartPlan,
   markBrowserAutoStartDeclined,
   type SharedBrowserPresence,
@@ -4461,9 +4462,12 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     wideSurfaces,
     splitView: surfaces.split,
   });
-  const browserHeldByOther = browserRunActive ||
-    sharedBrowserPresence?.remoteController === true ||
-    Boolean(personalBrowser.status?.humanInputRequest || personalBrowser.pendingHandoff);
+  const browserHeldByOther = browserAutoStartHeldByOther({
+    browserRunActive,
+    remoteController: sharedBrowserPresence?.remoteController === true,
+    humanInputRequest: Boolean(personalBrowser.status?.humanInputRequest),
+    pendingHandoff: personalBrowser.pendingHandoff !== null,
+  });
   const personalOwnAi = credentialRequirements.hasDefaultCredential === true;
   const runtimeStatusKey = (runtimeStatuses ?? [])
     .map((entry) => `${entry.runtimeId}:${entry.status}:${entry.displayName ?? ""}:${entry.origin?.originId ?? ""}`)

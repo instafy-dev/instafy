@@ -920,6 +920,40 @@ describe("usePersonalBrowserBridge sign-in handoff", () => {
     expect(await enable(true)).toMatchObject({ handoffId: "handoff-2" });
   });
 
+  it("keeps the guard when Desktop refused the enable before taking the handoff", async () => {
+    await handoff("handoff-1");
+    await navigate("https://accounts.example.test/callback");
+    // The redirect failed to load, so Desktop refuses before it reads its slot.
+    current = { ...current, state: "error", humanControlReady: false };
+    setAgentControl.mockRejectedValueOnce(new Error("Personal Browser must be ready before agent control is enabled."));
+    expect(await enable(true)).toEqual({ enabled: true, ownerId, handoffId: "handoff-1" });
+    expect(resultRef.current?.agentError).toContain("must be ready");
+    expect(resultRef.current?.pendingHandoff).toMatchObject({ handoffId: "handoff-1" });
+
+    // Tab control is another refusal that leaves Desktop's slot full.
+    current = { ...current, state: "ready", humanControlReady: false, tabControlActive: true };
+    setAgentControl.mockRejectedValueOnce(new Error("Take back tab control before enabling the agent."));
+    await enable(true);
+    expect(resultRef.current?.pendingHandoff).toMatchObject({ handoffId: "handoff-1" });
+
+    current = { ...current, humanControlReady: true, tabControlActive: false };
+    expect(await enable(true)).toEqual({ enabled: true, ownerId, handoffId: "handoff-1" });
+    expect(resultRef.current?.pendingHandoff).toBeNull();
+  });
+
+  it("binds a handoff whose status was batched with the navigation after it", async () => {
+    const withRequest = { ...current, agentControlEnabled: false, humanInputRequest: request("handoff-1") };
+    const afterRedirect = { ...withRequest, url: "https://app.example.test/dashboard", humanInputRequest: undefined };
+    current = afterRedirect;
+    await act(async () => {
+      statusListener?.(withRequest);
+      statusListener?.(afterRedirect);
+    });
+    expect(resultRef.current?.status?.humanInputRequest).toBeUndefined();
+    expect(resultRef.current?.pendingHandoff).toMatchObject({ handoffId: "handoff-1" });
+    expect(await enable(true)).toEqual({ enabled: true, ownerId, handoffId: "handoff-1" });
+  });
+
   it("ends the guard when control is back on, and on a pause from Studio", async () => {
     await handoff("handoff-1");
     await push({ agentControlEnabled: true, humanInputRequest: undefined });

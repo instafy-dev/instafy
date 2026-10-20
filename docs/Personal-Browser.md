@@ -460,7 +460,9 @@ different handoff. Desktop clears the request from its status on every
 navigation, including a sign-in redirect, but Studio keeps the manual step
 pending: a press on a new browser card during a pending manual step is
 refused until the handoff is used, paused from Studio, cleared, closed or
-expired. A Pause or Escape inside Desktop sends Studio no signal, so that
+expired. An enable that Desktop refuses before it reads the handoff (the
+browser is not ready, tab control is active or an earlier operation is still
+stopping) leaves the handoff pending. A Pause or Escape inside Desktop sends Studio no signal, so that
 refusal can last until the handoff's window ends. Changing the
 account/project/page binding or an expired request cannot silently continue work.
 Passwords, codes and payment values stay in the page and must not be entered in

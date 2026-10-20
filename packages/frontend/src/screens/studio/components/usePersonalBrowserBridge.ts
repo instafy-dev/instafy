@@ -258,13 +258,44 @@ export function usePersonalBrowserBridge({
     }
   }, [identityScope, profileIdentityScope, resetHandoff]);
 
+  // Runs on every status Desktop sends, before React batches it with the
+  // next one, so a navigation status right after the request never hides it.
+  const observeHandoffStatus = useCallback((next: InstafyDesktopPersonalBrowserStatus) => {
+    const ownerId = personalBrowserOwnerIdRef.current;
+    if (!ownerId || next.ownerId !== ownerId) {
+      return;
+    }
+    if (next.agentControlEnabled) {
+      // Control is back on: Desktop has used or emptied its handoff slot.
+      clearPendingHandoff();
+      return;
+    }
+    // A later status without the request (a navigation) never ends the guard.
+    const request = next.humanInputRequest;
+    const handoffId = typeof request?.handoffId === "string" ? request.handoffId.trim() : "";
+    if (
+      !request ||
+      !handoffId ||
+      !Number.isFinite(request.expiresAtMs) ||
+      request.expiresAtMs <= Date.now() ||
+      retiredHandoffIdsRef.current.includes(handoffId) ||
+      pendingHandoffRef.current?.handoffId === handoffId
+    ) {
+      return;
+    }
+    const handoff = { handoffId, expiresAtMs: request.expiresAtMs, ownerId };
+    boundHandoffRef.current = handoff;
+    setPendingHandoff(handoff);
+  }, [clearPendingHandoff, setPendingHandoff]);
+
   const updateStatus = useCallback((next: InstafyDesktopPersonalBrowserStatus) => {
     if (!next.agentControlEnabled) {
       runtimeStartAttemptEpochRef.current += 1;
     }
+    observeHandoffStatus(next);
     setStatus(next);
     setChecked(true);
-  }, []);
+  }, [observeHandoffStatus]);
 
   useEffect(() => {
     const bridge = browserBridge();
@@ -454,34 +485,6 @@ export function usePersonalBrowserBridge({
       }
     })();
   }, [active, available, identityScope, openRetryRevision, profileUserId, projectId, resetHandoff, status?.projectId, status?.state, updateStatus]);
-
-  useEffect(() => {
-    const ownerId = personalBrowserOwnerIdRef.current;
-    if (!status || !ownerId || status.ownerId !== ownerId) {
-      return;
-    }
-    if (status.agentControlEnabled) {
-      // Control is back on: Desktop has used or emptied its handoff slot.
-      clearPendingHandoff();
-      return;
-    }
-    // A later status without the request (a navigation) never ends the guard.
-    const request = status.humanInputRequest;
-    const handoffId = typeof request?.handoffId === "string" ? request.handoffId.trim() : "";
-    if (
-      !request ||
-      !handoffId ||
-      !Number.isFinite(request.expiresAtMs) ||
-      request.expiresAtMs <= Date.now() ||
-      retiredHandoffIdsRef.current.includes(handoffId) ||
-      pendingHandoffRef.current?.handoffId === handoffId
-    ) {
-      return;
-    }
-    const handoff = { handoffId, expiresAtMs: request.expiresAtMs, ownerId };
-    boundHandoffRef.current = handoff;
-    setPendingHandoff(handoff);
-  }, [clearPendingHandoff, setPendingHandoff, status]);
 
   useEffect(() => {
     if (!pendingHandoff) {
@@ -783,6 +786,9 @@ export function usePersonalBrowserBridge({
       if (handoffId) {
         retireHandoffId(handoffId);
       }
+      // A throw before Desktop takes the handoff (not ready, tab control,
+      // a stopping operation) leaves its slot full, so the guard stays.
+      let handoffKept = false;
       try {
         const next = await bridge.personalBrowserSetAgentControlEnabled({
           enabled,
@@ -828,23 +834,35 @@ export function usePersonalBrowserBridge({
           );
         }
         const refreshed = await bridge.personalBrowserStatus?.().catch(() => null);
-        if (
-          refreshed &&
+        const current =
           mountedRef.current &&
           agentControlMutationEpochRef.current === mutationEpoch &&
-          personalBrowserOwnerIdRef.current === ownerId &&
-          refreshed.ownerId === ownerId
-        ) {
+          personalBrowserOwnerIdRef.current === ownerId;
+        if (current && refreshed && refreshed.ownerId === ownerId) {
           updateStatus(refreshed);
         }
+        // Desktop takes the handoff only after these checks pass; when it
+        // cannot be told whether it did, the guard stays until the handoff
+        // is used, paused or expired.
+        handoffKept = Boolean(
+          enabled &&
+            handoffId &&
+            current &&
+            (!refreshed ||
+              (refreshed.ownerId === ownerId &&
+                !refreshed.agentControlEnabled &&
+                (refreshed.state !== "ready" ||
+                  refreshed.tabControlActive === true ||
+                  refreshed.humanControlReady === false))),
+        );
         return null;
       } finally {
-        // Desktop has used or emptied its handoff slot by now, whether the
-        // enable succeeded or threw (a cancelled dialog), and a pause always
-        // empties it.
+        // Otherwise Desktop has used or emptied its handoff slot by now,
+        // whether the enable succeeded or threw (a cancelled dialog), and a
+        // pause always empties it.
         if (!enabled) {
           clearPendingHandoff();
-        } else if (handoffId) {
+        } else if (handoffId && !handoffKept) {
           clearPendingHandoff(handoffId);
         }
       }
