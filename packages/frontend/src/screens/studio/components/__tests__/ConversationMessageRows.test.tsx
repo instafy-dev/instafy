@@ -57,6 +57,12 @@ vi.mock("../../../../workspace/WorkspaceTabsProvider", () => ({
   }),
 }));
 
+// A site preview card checks its status on mount; here it stays "Checking".
+vi.mock("../../../../services/runtimeController/previews", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../../services/runtimeController/previews")>()),
+  getSitePreview: () => new Promise(() => {}),
+}));
+
 vi.mock("../../../../runtime/useRuntime", () => ({
   useRuntime: () => ({
     runs: [],
@@ -376,6 +382,27 @@ describe("ConversationMessageRows", () => {
 
     expect(container.querySelector('[data-testid="chat-controller-notice"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="chat-controller-notice-action"]')).toBeNull();
+  });
+
+  it("routes a site preview action request to its card and other action requests to the generic card", async () => {
+    const metadata = (extra: Record<string, unknown>) => ({ messageType: "action_request", details: { messageType: "action_request", details: {
+      testId: "generic-action-card", icon: "preview", title: "Site preview",
+      actions: [{ id: "open-preview", label: "Open", variant: "primary", event: "instafy:open-preview", testId: "preview-ready-open" }],
+      ...extra,
+    } } });
+    const preview = createMessage({ id: "preview-card", content: "Site preview is ready to preview.", messageType: "action_request",
+      metadata: metadata({ preview: { previewId: "11111111-1111-4111-8111-111111111111", port: 4173, path: "/" } }) });
+    // A URL where the id belongs is not a preview: the generic card draws it, with no preview behaviour.
+    const generic = createMessage({ id: "generic-card", content: "Site preview is ready to preview.", messageType: "action_request",
+      metadata: metadata({ preview: { previewId: "https://p-x--y.preview.test/", port: 4173 } }) });
+    await renderSpeakerBoundaryMessages([preview, generic]);
+    const rowOf = (element: Element | null | undefined) =>
+      element?.closest("[data-chat-scroll-message-id]")?.getAttribute("data-chat-scroll-message-id");
+    const cards = container.querySelectorAll('[data-testid="preview-ready-card"]');
+    expect(cards).toHaveLength(1);
+    expect(rowOf(cards[0])).toBe("preview-card");
+    expect(cards[0].textContent).toContain("Checking…");
+    expect(rowOf(container.querySelector('[data-testid="generic-action-card"]'))).toBe("generic-card");
   });
 
   it("renders normal chat messages without decorative corner notches", async () => {

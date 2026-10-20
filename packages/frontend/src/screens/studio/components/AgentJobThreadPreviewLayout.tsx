@@ -26,7 +26,7 @@ import {
 } from "../../../utils/agentAvatar";
 import type { ChatMessage, ChatMessageCommitRange,
   ChatMessageFileChange, ChatMessageUnsavedReason } from "../types";
-import { ActionRequestEntry } from "./ActionRequestEntry";
+import { ActionRequestOrPreviewEntry } from "./ActionRequestOrPreviewEntry";
 import { ChatMessageAvatar } from "./ChatMessageAvatar";
 import type { AssistantAvatarMotion } from "./chatAssistantIdentity";
 import { IntegrationRequestEntry, SecretRequestEntry } from "./ChatCredentialRequestEntries";
@@ -1054,7 +1054,7 @@ export function AgentJobThreadPreviewLayout({
             <div key={update.id} className={runDetailSectionClass}>
               {renderRunDetailSectionNotch()}
               <div className="min-w-0">
-                <ActionRequestEntry message={update} details={updateDetails} />
+                <ActionRequestOrPreviewEntry message={update} details={updateDetails} projectId={projectId ?? null} />
               </div>
             </div>
           );

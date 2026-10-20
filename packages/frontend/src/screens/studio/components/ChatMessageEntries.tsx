@@ -23,7 +23,7 @@ import { loadChatAttachmentPreview } from "../../../lib/chatAttachmentPreviews";
 import { controllerClient } from "../../../sdk/instafy";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
 import type { ChatMessage } from "../types";
-import { ActionRequestEntry } from "./ActionRequestEntry";
+import { ActionRequestOrPreviewEntry } from "./ActionRequestOrPreviewEntry";
 import { isUnsentBrowserRequestNotice, readBrowserRequestOf } from "./browserRequest";
 import { CHAT_BUBBLE_MAX_WIDTH } from "./chatBubbleWidth";
 import {
@@ -1137,7 +1137,7 @@ export function AssistantMessageEntry({
   }
 
   if (messageType === "action_request") {
-    return <ActionRequestEntry message={message} details={details} />;
+    return <ActionRequestOrPreviewEntry message={message} details={details} projectId={projectId ?? null} />;
   }
 
   if (messageType === "multi_agent_plan") {

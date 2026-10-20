@@ -967,7 +967,11 @@ export function mapTunnelGrantFromPayload(
   const url = readString(data["url"]) ?? null;
   const status = (readString(data["status"]) ?? "").toLowerCase();
   const expiresAt = readString(data["expiresAt"]) ?? null;
-  const metadata = readRecord(data["metadata"] ?? null);
+  // Tunnel events carry no metadata, only the tunnel's `kind` when it has one
+  // of its own (a site preview, say), so the store can keep it apart.
+  const kind = readString(data["kind"]);
+  const payloadMetadata = readRecord(data["metadata"] ?? null);
+  const metadata = kind ? { kind, ...payloadMetadata } : payloadMetadata;
   const credentials = readRecord(data["credentials"] ?? null);
   return {
     id,

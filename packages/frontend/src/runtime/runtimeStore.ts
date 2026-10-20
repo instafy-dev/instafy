@@ -431,6 +431,28 @@ function storeRunRecord(
   };
 }
 
+// The names the controller reads a tunnel's purpose from (see
+// `extract_tunnel_purpose_from_metadata`).
+const TUNNEL_PURPOSE_KEYS = ["purpose", "tunnelPurpose", "tunnel_purpose", "kind"] as const;
+
+/**
+ * Where the store keeps a tunnel grant. A runtime's own tunnel is kept under
+ * its runtime id, where readers look it up. Any other tunnel on that runtime,
+ * one opened for a purpose of its own such as a site preview, is kept under
+ * its grant id, so it never replaces the runtime's own.
+ */
+export function tunnelGrantStoreKey(grant: ControllerTunnelGrant): string | null {
+  if (!grant.runtimeId) {
+    return null;
+  }
+  const metadata = grant.metadata;
+  const ownPurpose = TUNNEL_PURPOSE_KEYS.some((key) => {
+    const value = metadata?.[key];
+    return typeof value === "string" && value.trim().length > 0;
+  });
+  return ownPurpose ? grant.id : grant.runtimeId;
+}
+
 export function runtimeReducer(
   state: RuntimeStoreState,
   action: RuntimeAction,
@@ -684,8 +706,8 @@ export function runtimeReducer(
         }
       }
       const nextTunnelGrants = Object.fromEntries(
-        Object.entries(state.tunnelGrants).filter(([runtimeId]) =>
-          retainedRuntimeIds.has(runtimeId),
+        Object.entries(state.tunnelGrants).filter(([, grant]) =>
+          Boolean(grant.runtimeId && retainedRuntimeIds.has(grant.runtimeId)),
         ),
       );
       return {
@@ -723,15 +745,15 @@ export function runtimeReducer(
       };
     }
     case "upsertTunnelGrant": {
-      const runtimeId = action.grant.runtimeId;
-      if (!runtimeId) {
+      const key = tunnelGrantStoreKey(action.grant);
+      if (!key) {
         return state;
       }
       return {
         ...state,
         tunnelGrants: {
           ...state.tunnelGrants,
-          [runtimeId]: action.grant,
+          [key]: action.grant,
         },
       };
     }

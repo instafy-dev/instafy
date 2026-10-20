@@ -13,6 +13,8 @@ import {
   expectAvatarCoinLightEdge,
   expectCanonicalOctoCoin,
 } from "../../../../components/__tests__/octoCoinExpectations";
+import { getSitePreview } from "../../../../services/runtimeController/previews";
+import { ConversationPreviewContext } from "../../../../workspace/ConversationPreviewContext";
 import type { ChatMessage } from "../../types";
 import {
   AgentJobThreadPreviewLayout,
@@ -39,6 +41,11 @@ vi.mock("../../../../services/runtimeController/jobs", () => ({
   cancelPlanGroup: vi.fn(() =>
     Promise.resolve({ ok: true, canceledRunIds: ["run-1"], canceledJobIds: ["job-1"] }),
   ),
+}));
+
+vi.mock("../../../../services/runtimeController/previews", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../../services/runtimeController/previews")>()),
+  getSitePreview: vi.fn(),
 }));
 
 function createMessage(overrides: Partial<ChatMessage> = {}): ChatMessage {
@@ -2623,6 +2630,85 @@ describe("AgentJobThreadPreviewLayout", () => {
       openButton?.click();
     });
     expect(openBranchThread).toHaveBeenCalledWith("child-thread-local");
+  });
+
+  it.each([
+    ["while it is the job's latest message", false],
+    ["after the job has written its summary", true],
+  ])("draws a site preview card posted from inside the job as its card %s", async (_when, followedBySummary) => {
+    // `instafy preview open` run inside a job: the controller stamps the job's
+    // id, so the card lands in this thread instead of the top-level list.
+    const previewId = "a2cbcbb4-6a8f-4c43-9d55-2b8a8f1f7c11";
+    vi.mocked(getSitePreview).mockResolvedValue({
+      previewId, title: "Site preview", port: 4173, path: "/", runtimeId: "runtime-1",
+      status: "active", health: { listening: true, status: 200 }, messageId: null, createdAt: null,
+    });
+    const controllerMessage = (id: string, content: string, metadata: Record<string, unknown>, at: number) =>
+      mapControllerMessageToChat({
+        id,
+        conversationId: "44444444-4444-4444-4444-444444444444",
+        projectId: "55555555-5555-5555-5555-555555555555",
+        sessionId: null,
+        createdBy: null,
+        promptId: null,
+        runId: null,
+        role: "assistant",
+        content,
+        metadata,
+        createdAt: new Date(at).toISOString(),
+      });
+    const now = Date.now();
+    const card = controllerMessage("1e947a46-65cf-48d1-ae6a-c96f0fd323fa", "Site preview is ready to preview.", {
+      kind: "update",
+      source: "agent",
+      messageType: "action_request",
+      jobId: JOB_ID,
+      details: {
+        messageType: "action_request",
+        details: {
+          testId: "preview-ready-card",
+          icon: "preview",
+          overline: "Ready to preview",
+          title: "Site preview",
+          preview: { previewId, port: 4173, path: "/" },
+          actions: [{ id: "open-preview", label: "Open", variant: "primary", event: "instafy:open-preview" }],
+        },
+      },
+    }, now);
+    const summary = controllerMessage("1e947a46-65cf-48d1-ae6a-c96f0fd323fb", "The site is up: open the card to look at it.",
+      { jobId: JOB_ID, source: "agent", outcome: "completed" }, now + 1_000);
+    const baseMessage = createMessage();
+    const message = createMessage({
+      metadata: { ...baseMessage.metadata, threadMessages: followedBySummary ? [card, summary] : [card] },
+    });
+    const opener = { openPreview: vi.fn(), visiblePreviewId: null as string | null };
+    const render = async () => {
+      await act(async () => {
+        root.render(
+          <ConversationPreviewContext.Provider value={{ ...opener }}>
+            <LiveAgentJobThreadPreview message={message} />
+          </ConversationPreviewContext.Provider>,
+        );
+      });
+      await act(async () => { await Promise.resolve(); });
+    };
+
+    await render();
+    const status = container.querySelector<HTMLElement>('[data-testid="preview-ready-status"]');
+    expect(status?.dataset.state).toBe("live");
+    expect(status?.textContent).toBe("Live");
+    expect(container.querySelector('[data-testid="preview-ready-card"]')?.textContent).toContain("Only space members");
+    expect(container.querySelector('[data-testid="preview-ready-open"]')?.textContent).toBe("Open");
+    // Drawn once, as the card: never also as the thread's summary text.
+    expect(container.querySelectorAll('[data-testid="preview-ready-card"]')).toHaveLength(1);
+    expect(container.textContent).not.toContain("is ready to preview.");
+    if (followedBySummary) {
+      expect(container.textContent).toContain("The site is up");
+    }
+
+    opener.visiblePreviewId = previewId;
+    await render();
+    expect(container.querySelector('[data-testid="preview-ready-open"]')?.textContent).toBe("Showing");
   });
 
   it("renders generic multi-agent plan metadata as team progress", async () => {

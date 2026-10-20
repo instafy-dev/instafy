@@ -5,6 +5,7 @@ import { isRecoverableRuntimeStartAlert as runtimeStartAlertIsRecoverable } from
 import { normalizeAssistantStatusText } from "./assistantStatusHeuristics";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 import { isGenericProgressLabel } from "./threadPreviewHelpers";
+import { sitePreviewFromMessage } from "./sitePreviewRequest";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -443,6 +444,11 @@ export function synthesizeAgentJobThreadMessages(
       return;
     }
     if (multiAgentWorkerJobIds.has(jobId)) {
+      // A lane's work stays behind the Team plan card, but a site it started
+      // is what the person waits for: its "Ready to preview" card stays here.
+      if (sitePreviewFromMessage(message)) {
+        output.push(message);
+      }
       return;
     }
     const startMessageId = threadStartMessageIdByJobId.get(jobId);

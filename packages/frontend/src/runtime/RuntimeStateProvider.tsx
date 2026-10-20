@@ -169,6 +169,11 @@ export function useRuntimeState(): RuntimeStatePublicValue {
   return context.publicValue;
 }
 
+/** The runtime state, or null outside a provider, for views that also render without one. */
+export function useOptionalRuntimeState(): RuntimeStatePublicValue | null {
+  return useContext(RuntimeStateContext)?.publicValue ?? null;
+}
+
 export function useRuntimeStateInternal(): RuntimeStateContextValue {
   const context = useContext(RuntimeStateContext);
   if (!context) {
