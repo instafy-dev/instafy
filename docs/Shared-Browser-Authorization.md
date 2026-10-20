@@ -5,8 +5,8 @@ two browser-specific scopes:
 
 | Scope | Allows |
 | --- | --- |
-| `browser.view` | Capabilities, page metadata, the action feed, and browser pixels. |
-| `browser.control` | Focusing a page, navigation/history/reload commands, and pointer/keyboard input. |
+| `browser.view` | Capabilities, page metadata, the action feed, browser pixels, and the browser host's state (`GET /browser/host`). |
+| `browser.control` | Focusing a page, navigation/history/reload commands, pointer/keyboard input, and starting the browser host (`POST /browser/host/start`). |
 
 `fs.read` and `fs.write` do not grant browser access. Browser scopes are valid
 only for an `http` origin token and do not require a workspace lease: browser
@@ -28,6 +28,12 @@ input changes an ephemeral Chromium session, not the canonical workspace.
 - RFB requires both scopes and the live driver lease because raw pixels and
   input share one protocol. The origin rechecks ownership before every
   client-to-VNC packet.
+- `GET /browser/host` requires `browser.view` and `POST /browser/host/start`
+  requires `browser.control`. Both answer 404 on an origin without a browser
+  host. The state reports only caller-relative flags, never a subject or user
+  id. While a host is not ready, pages, page commands, CDP screencast, input
+  and RFB answer 503 `browser_host_not_ready` before any CDP request or
+  WebSocket upgrade.
 
 Builder-or-higher Shared Browser surfaces request both scopes; Viewer surfaces
 request `browser.view` only. Narrow metadata and command helpers request only

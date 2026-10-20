@@ -519,7 +519,7 @@ impl BrowserCollaborationHub {
     }
 
     #[cfg(test)]
-    fn new_with_agent_control_path(path: PathBuf) -> Self {
+    pub(crate) fn new_with_agent_control_path(path: PathBuf) -> Self {
         let approval_dir = path
             .parent()
             .unwrap_or_else(|| std::path::Path::new("/tmp"))
@@ -1010,6 +1010,41 @@ impl BrowserCollaborationHub {
     pub async fn has_human_control(&self, claims: &OriginClaims) -> bool {
         self.assert_human_control(claims).await.is_ok()
     }
+
+    /// Who else is here, relative to `subject`: whether a live participant
+    /// with another subject is present, and whether a person with another
+    /// subject holds control. The same person on several sessions counts as
+    /// the caller. Never names anyone.
+    pub(crate) async fn occupancy_for(&self, subject: &str) -> (bool, bool) {
+        let mut state = self.state.lock().await;
+        if state.expire_stale(Instant::now()) {
+            state.publish();
+        }
+        let others_present = state
+            .participants
+            .values()
+            .any(|participant| participant.subject != subject);
+        let controlled_by_other = match state.control_owner.as_ref() {
+            Some(ControlOwner::Human { participant_id }) => state
+                .participants
+                .get(participant_id)
+                .is_some_and(|participant| participant.subject != subject),
+            _ => false,
+        };
+        (others_present, controlled_by_other)
+    }
+
+    /// Join as `claims` without a socket, for tests in other modules.
+    #[cfg(test)]
+    pub(crate) async fn join_for_test(
+        &self,
+        claims: &OriginClaims,
+        session_id: &str,
+    ) -> Result<String, OriginError> {
+        self.join(claims, session_id, None)
+            .await
+            .map(|joined| joined.participant_id)
+    }
 }
 
 fn ensure_participant_can_control<'a>(
@@ -1258,6 +1293,7 @@ async fn run_collaboration_socket(mut socket: WebSocket, state: AppState, claims
             return;
         }
     };
+    state.note_browser_host_seen(&claims.sub);
 
     let welcome = serde_json::to_string(&ServerMessage::Welcome {
         participant_id: joined.participant_id.clone(),
@@ -1356,7 +1392,9 @@ async fn run_collaboration_socket(mut socket: WebSocket, state: AppState, claims
                     .apply_message(&participant_id, connection_id, message)
                     .await
                 {
-                    Ok(true) => {}
+                    // Every accepted frame, heartbeats included, is a use of
+                    // the browser for the machine's browser host.
+                    Ok(true) => state.note_browser_host_seen(&claims.sub),
                     Ok(false) => break,
                     Err(error) => {
                         warn!(

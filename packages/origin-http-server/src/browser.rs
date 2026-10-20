@@ -19,6 +19,7 @@ use tokio_tungstenite::tungstenite::Message as TungMessage;
 use tracing::warn;
 
 use crate::auth::OriginClaims;
+use crate::browser_host::BrowserHostReady;
 use crate::error::OriginError;
 use crate::routes::AppState;
 
@@ -224,6 +225,10 @@ struct BrowserActionsReadPlan {
 pub fn view_routes() -> Router<AppState> {
     Router::new()
         .route("/browser/capabilities", get(handle_browser_capabilities))
+        .route(
+            "/browser/host",
+            get(crate::browser_host::handle_browser_host),
+        )
         .route("/browser/pages", get(handle_browser_pages))
         .route("/browser/actions", get(handle_browser_actions))
         .route(
@@ -249,6 +254,12 @@ pub fn view_routes() -> Router<AppState> {
 /// `browser.control`, independently of workspace write access.
 pub fn control_routes() -> Router<AppState> {
     Router::new()
+        .route(
+            "/browser/host/start",
+            post(crate::browser_host::handle_browser_host_start).layer(DefaultBodyLimit::max(
+                crate::browser_host::BROWSER_HOST_START_BODY_LIMIT_BYTES,
+            )),
+        )
         .route(
             "/browser/input",
             get(crate::browser_screencast::handle_browser_input_ws),
@@ -485,6 +496,7 @@ fn resolve_vnc_target() -> (String, u16) {
 }
 
 async fn handle_vnc_ws(
+    _ready: BrowserHostReady,
     State(state): State<AppState>,
     Extension(claims): Extension<OriginClaims>,
     ws: WebSocketUpgrade,
@@ -975,6 +987,7 @@ fn validate_browser_page_command(
 }
 
 async fn handle_browser_pages(
+    _ready: BrowserHostReady,
     State(state): State<AppState>,
     Query(query): Query<BrowserPagesQuery>,
 ) -> Result<Json<BrowserPagesResponse>, OriginError> {
@@ -1053,6 +1066,7 @@ async fn handle_browser_actions(
 }
 
 async fn handle_focus_browser_page(
+    _ready: BrowserHostReady,
     State(state): State<AppState>,
     Extension(claims): Extension<OriginClaims>,
     Path(params): Path<BrowserTargetPathParams>,
@@ -1121,6 +1135,7 @@ fn browser_history_destination(
 }
 
 async fn handle_browser_page_command(
+    _ready: BrowserHostReady,
     State(state): State<AppState>,
     Extension(claims): Extension<OriginClaims>,
     Path(params): Path<BrowserTargetPathParams>,

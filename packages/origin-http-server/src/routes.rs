@@ -79,6 +79,10 @@ pub struct AppState {
     pub stop_flag: StopFlag,
     /// What this process last confirmed about the working folder's own save.
     pub working_memory: WorkingMemory,
+    /// The browser host on this machine, when the process hosting the origin
+    /// runs one (see [`crate::browser_host`]). `None` serves no host routes
+    /// and leaves the browser transports unguarded.
+    pub browser_host: Option<crate::browser_host::BrowserHostHandle>,
 }
 
 /// How long the fence a pre-stop flush raises holds without a refresh or a
@@ -160,6 +164,7 @@ impl AppState {
             stopping: StopFence::default(),
             stop_flag: StopFlag::default(),
             working_memory: WorkingMemory::default(),
+            browser_host: None,
         })
     }
 
@@ -5213,6 +5218,50 @@ mod tests {
                 .expect("view request")
                 .status(),
             StatusCode::OK
+        );
+        // The browser host routes keep the browser scopes, and an origin
+        // without a host answers 404 behind them.
+        assert_eq!(
+            client
+                .get(format!("{base}/browser/host"))
+                .bearer_auth(token(&["fs.read"]))
+                .send()
+                .await
+                .expect("fs host request")
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            client
+                .get(format!("{base}/browser/host"))
+                .bearer_auth(&view)
+                .send()
+                .await
+                .expect("view host request")
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            client
+                .post(format!("{base}/browser/host/start"))
+                .bearer_auth(&view)
+                .json(&json!({ "version": 1 }))
+                .send()
+                .await
+                .expect("view host start request")
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            client
+                .post(format!("{base}/browser/host/start"))
+                .bearer_auth(token(&["browser.control"]))
+                .json(&json!({ "version": 1 }))
+                .send()
+                .await
+                .expect("control host start request")
+                .status(),
+            StatusCode::NOT_FOUND
         );
         assert_eq!(
             client

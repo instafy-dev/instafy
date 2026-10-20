@@ -846,8 +846,10 @@ agent processes or for the server-side WebRTC sender.
 
 Browser access is separate from workspace file access:
 
-- `browser.view` covers capabilities, page metadata, actions, and pixels;
-- `browser.control` covers focus, navigation, pointer, and keyboard input;
+- `browser.view` covers capabilities, page metadata, actions, pixels, and the
+  browser host's state (`GET /browser/host`);
+- `browser.control` covers focus, navigation, pointer, and keyboard input, and
+  starting the browser host (`POST /browser/host/start`);
 - CDP/WebRTC pixels require `browser.view`; their separate input requires
   `browser.control` plus the live driver lease; RFB requires both and is
   driver-exclusive.
@@ -1072,6 +1074,48 @@ its own; or `stopped` after SIGTERM. Publication and the image scan require
 `scripts/runtime-image-browser-smoke.sh --lazy` for both flavors: the image must
 boot with no browser process (the base image also with the browser session on),
 and the host must start, stop and start again on one persisted profile.
+
+#### Host endpoints
+
+Origin serves the host only when the process that runs it hands it one
+(runtime-agent, through `OriginHttpServer::set_browser_host`). Desktop, the
+boot-time Shared Browser and the multi-tenant gateway have none: there
+`/browser/host` and `/browser/host/start` answer 404 and every other browser
+route behaves as before.
+
+- `GET /browser/host` (`browser.view`, `Cache-Control: no-store`) answers
+  `{"version":1,"mode":"lazy","state":"idle|starting|ready|stopping|failed|poisoned","generation":"<uuid>|null","failure":"<token>|null","startedByYou":false,"othersPresent":false,"controlledByOther":false,"agentRunActive":false,"agentRunStartedByYou":false}`.
+  `generation` is new for every host start. `failure` is set only in `failed`
+  or `poisoned`, and only to a known token: a start reason above, or the
+  agent's `exited_egress_proxy`, `exited_display`, `exited_chromium`,
+  `exited_unknown`, `start_timeout`, `spawn_failed` or `unconfirmed_shutdown`;
+  anything else reads `host_error`. The flags are relative to the caller and
+  name nobody: `othersPresent` means a collaboration participant with another
+  subject, or another subject the agent saw in the last 30 seconds (which
+  outlives an origin restart); `controlledByOther` means a person with another
+  subject holds control; `agentRunActive` follows the agent-control marker and
+  is true when the marker cannot be read; `agentRunStartedByYou` means the
+  active run is the caller's. The same person on several tabs counts as the
+  caller.
+- `POST /browser/host/start` (`browser.control`) takes exactly
+  `{"version":1}` (unknown fields and other versions are 400, more than 1 KiB
+  is 413). It never waits for the browser: it answers 200 with the same body
+  when the host is already ready and 202 otherwise, and the caller polls
+  `GET /browser/host`. It answers 409 `machine_stopping` while a pre-stop
+  flush holds the machine's stop fence, and 409 `browser_host_poisoned` or
+  `browser_host_stopping` when the host refuses, each with a fixed message.
+- With a host, `/browser/pages`, the page focus and command routes, CDP
+  screencast, the input socket and RFB answer 503 `browser_host_not_ready`
+  with `Retry-After: 1` until it is ready, before any CDP request or WebSocket
+  upgrade. Capabilities, actions, approvals, collaboration and the WebRTC
+  offer stay available. The controller's proxy accepts a WebSocket upgrade
+  before it reaches origin, so a client behind it sees the screencast, input
+  or RFB socket close instead of the 503: open those sockets only once
+  `GET /browser/host` reports `ready`.
+- Joining collaboration, every accepted collaboration frame (heartbeats
+  included), page reads and commands, and the pixel and input sockets count
+  as a use of the browser for the host's presence and idle clock. Reading
+  `GET /browser/host` does not.
 
 Operational invariants:
 

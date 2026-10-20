@@ -128,6 +128,8 @@ pub struct OriginHttpServer {
     sweeper: Option<JoinHandle<()>>,
     /// [`SHUTDOWN_DRAIN_LIMIT`]; tests shorten it.
     drain_limit: Duration,
+    /// Set by [`OriginHttpServer::set_browser_host`].
+    browser_host: Option<crate::browser_host::BrowserHostHandle>,
 }
 
 pub struct ServerStart {
@@ -232,6 +234,7 @@ impl OriginHttpServer {
             hosted,
             sweeper: None,
             drain_limit: SHUTDOWN_DRAIN_LIMIT,
+            browser_host: None,
         })
     }
 
@@ -269,6 +272,14 @@ impl OriginHttpServer {
     /// `start` begins beating once that registration has landed.
     pub fn defer_presence_until_registered(&mut self) {
         self.presence_deferred = true;
+    }
+
+    /// Serves this machine's browser host (see [`crate::browser_host`]):
+    /// `GET /browser/host`, `POST /browser/host/start`, and the readiness
+    /// guard on the browser transports. Call it before
+    /// [`OriginHttpServer::start`]; the multi-tenant gateway ignores it.
+    pub fn set_browser_host(&mut self, handle: crate::browser_host::BrowserHostHandle) {
+        self.browser_host = Some(handle);
     }
 
     /// Starts the presence loop held back by
@@ -367,7 +378,7 @@ impl OriginHttpServer {
                     .ok()
                     .filter(|_| self.config.controller_internal_token.is_some());
 
-                let state = AppState::new(
+                let mut state = AppState::new(
                     self.config.clone(),
                     token_validator,
                     self.http_client.clone(),
@@ -375,6 +386,7 @@ impl OriginHttpServer {
                     commit_url,
                 )
                 .context("failed to open workspace root capability")?;
+                state.browser_host = self.browser_host.clone();
                 self.state = Some(state.clone());
                 routes::router(state)
             }
@@ -1343,6 +1355,9 @@ mod hosted_start_tests {
         std::fs::write(root.join(&space).join("draft.md"), "draft\n").unwrap();
 
         let mut server = OriginHttpServer::new(gateway_config(&root)).unwrap();
+        // A browser host handed to the gateway is ignored: it serves no
+        // single machine's browser.
+        server.set_browser_host(std::sync::Arc::new(NoBrowserHost));
         let start = server.start().await.unwrap();
 
         assert!(!root.join(&space).exists());
@@ -1359,8 +1374,34 @@ mod hosted_start_tests {
             .await
             .unwrap();
         assert_eq!(browser.status(), reqwest::StatusCode::NOT_FOUND);
+        let host = reqwest::get(format!("http://{}/browser/host", start.address))
+            .await
+            .unwrap();
+        assert_eq!(host.status(), reqwest::StatusCode::NOT_FOUND);
         assert!(server.checkout_refresher().is_none());
         server.stop().await.unwrap();
+    }
+
+    /// A browser host that must never be reached.
+    struct NoBrowserHost;
+
+    impl crate::browser_host::BrowserHostControl for NoBrowserHost {
+        fn snapshot(&self) -> crate::browser_host::BrowserHostSnapshot {
+            unreachable!("the gateway has no browser host")
+        }
+        fn caller_facts(&self, _: &str) -> crate::browser_host::BrowserHostCallerFacts {
+            unreachable!("the gateway has no browser host")
+        }
+        fn request_start(
+            &self,
+            _: &str,
+        ) -> Result<crate::browser_host::BrowserHostSnapshot, crate::browser_host::BrowserHostRefusal>
+        {
+            unreachable!("the gateway has no browser host")
+        }
+        fn note_seen(&self, _: &str) {
+            unreachable!("the gateway has no browser host")
+        }
     }
 
     #[cfg(unix)]

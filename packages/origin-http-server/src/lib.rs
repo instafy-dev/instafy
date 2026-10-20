@@ -5,6 +5,7 @@ pub mod auth;
 pub mod browser;
 mod browser_approval;
 pub mod browser_collaboration;
+pub mod browser_host;
 pub mod browser_screencast;
 pub mod browser_webrtc;
 mod checkout_versions;
