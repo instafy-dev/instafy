@@ -753,6 +753,9 @@ pub struct AppConfig {
     /// as invitation emails. This is validated at startup so invitation tokens
     /// are never accidentally placed in an unsupported or insecure URL.
     pub public_app_url: String,
+    /// Private site previews. Off (every preview route answers 503) unless
+    /// a preview domain is set.
+    pub previews: PreviewSettings,
     pub workspace_root: Option<PathBuf>,
     pub strict_mode: bool,
     pub dev_isolation_mode: bool,
@@ -825,6 +828,49 @@ pub struct RuntimeProviderConfig {
     pub auth_token: Option<String>,
     #[serde(default)]
     pub metadata: Option<JsonValue>,
+}
+
+/// Private site previews: where viewer hosts live and which ports they may
+/// not reach. See `previews` for how they are served.
+#[derive(Clone, Debug, Default)]
+pub struct PreviewSettings {
+    /// `PREVIEW_BASE_URL`: the viewer origin with scheme and port, for a
+    /// local stack (`http://preview.localhost:8083`). Wins over the domain.
+    pub base_url: Option<String>,
+    /// `PREVIEW_DOMAIN`: viewers open `https://p-<label>--<id>.<domain>`.
+    pub domain: Option<String>,
+    /// `PREVIEW_DENY_PORTS`: more ports no preview may expose, on top of the
+    /// built-in list. It never removes one.
+    pub deny_ports: Vec<u16>,
+    /// `TUNNEL_DOMAIN`, when set here too: public tunnel hosts, which the
+    /// preview domain must not overlap.
+    pub tunnel_domain: Option<String>,
+}
+
+impl PreviewSettings {
+    pub(crate) fn from_values(
+        base_url: Option<&str>,
+        domain: Option<&str>,
+        deny_ports: Option<&str>,
+        tunnel_domain: Option<&str>,
+    ) -> Self {
+        let present = |value: Option<&str>| {
+            value
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        };
+        Self {
+            base_url: present(base_url),
+            domain: present(domain),
+            deny_ports: deny_ports
+                .unwrap_or_default()
+                .split(|ch: char| ch == ',' || ch.is_whitespace())
+                .filter_map(|value| value.trim().parse::<u16>().ok())
+                .collect(),
+            tunnel_domain: present(tunnel_domain),
+        }
+    }
 }
 
 fn normalize_public_app_url(configured: Option<&str>, dev_mode: bool) -> anyhow::Result<String> {
@@ -1585,6 +1631,12 @@ impl AppConfig {
             git_event_hook_secret,
             _controller_external_url: std::env::var("CONTROLLER_EXTERNAL_URL").ok(),
             public_app_url,
+            previews: PreviewSettings::from_values(
+                std::env::var("PREVIEW_BASE_URL").ok().as_deref(),
+                std::env::var("PREVIEW_DOMAIN").ok().as_deref(),
+                std::env::var("PREVIEW_DENY_PORTS").ok().as_deref(),
+                std::env::var("TUNNEL_DOMAIN").ok().as_deref(),
+            ),
             workspace_root,
             strict_mode,
             dev_isolation_mode,

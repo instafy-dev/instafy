@@ -382,7 +382,7 @@ fn attested_self_hosted_owner(
     })
 }
 
-fn runtime_token_subject_is_controller_service(
+pub(crate) fn runtime_token_subject_is_controller_service(
     subject: &str,
     service_runtime_user_id: Option<Uuid>,
 ) -> bool {

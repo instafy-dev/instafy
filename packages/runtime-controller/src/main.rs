@@ -64,6 +64,7 @@ mod org_limits;
 mod organization_deletion;
 mod origins;
 mod ota;
+mod previews;
 mod project_memory_origin;
 mod project_work_cancellation;
 mod projects;
@@ -173,6 +174,9 @@ async fn main() -> anyhow::Result<()> {
     let mut config = tokio::task::spawn_blocking(AppConfig::from_env)
         .await
         .map_err(|_| anyhow::anyhow!("controller configuration task failed"))??;
+    // A preview domain that overlaps Studio's, the API's or public tunnels'
+    // would let any previewed site set cookies they trust.
+    previews::check_preview_domain(&config)?;
     let pool = config.build_pool().await?;
     browser_profile::ensure_browser_profiles_table(&pool)
         .await
@@ -376,6 +380,9 @@ async fn main() -> anyhow::Result<()> {
             if let Err(error) = origins::prune_expired_access_grants(&retention_state.pool).await {
                 tracing::warn!(?error, "origin_access_grants retention prune failed");
             }
+            if let Err(error) = previews::prune_preview_sessions(&retention_state.pool).await {
+                tracing::warn!(?error, "runtime_preview_sessions retention prune failed");
+            }
         }
     });
 
@@ -523,7 +530,8 @@ async fn main() -> anyhow::Result<()> {
         .merge(telemetry::router())
         .merge(events::router())
         .merge(git_events::router())
-        .merge(tunnels::router());
+        .merge(tunnels::router())
+        .merge(previews::router());
     app = app.merge(auth::router());
     app = app.merge(dev::router(config.dev_project_registry_path.clone()));
 

@@ -999,6 +999,7 @@ mod tests {
             git_event_hook_secret: None,
             _controller_external_url: None,
             public_app_url: "https://instafy.dev".to_string(),
+            previews: Default::default(),
             workspace_root: None,
             strict_mode: false,
             dev_isolation_mode: false,
