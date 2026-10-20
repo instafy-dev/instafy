@@ -30,6 +30,7 @@ use crate::{
 };
 
 const ACTIVE_TURN_INPUT_KIND: &str = "active_turn_input";
+const BROWSER_TURN_STEER_FORBIDDEN_CODE: &str = "browser_turn_steer_forbidden";
 const MAX_CLIENT_SEND_ID_CHARS: usize = 200;
 const MAX_TARGET_AGENT_HANDLES: usize = 16;
 const MAX_TARGET_AGENT_HANDLE_CHARS: usize = 64;
@@ -203,6 +204,9 @@ struct ActiveJobTarget {
     turn_id: String,
     payload: JsonValue,
     capabilities: JsonValue,
+    /// `prompts.user_id` of the prompt that started the job: the signed-in
+    /// caller recorded by dispatch, never client-supplied metadata.
+    prompt_author_id: Option<Uuid>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -401,6 +405,27 @@ pub(crate) fn runtime_supports_active_turn_input(capabilities: &JsonValue) -> bo
             })
             .and_then(JsonValue::as_bool)
             == Some(true)
+}
+
+/// True when the job drives a Shared Browser or Desktop Personal Browser.
+/// Mirrors the lease query's reading of `metadata.browserTransport`, but
+/// checks both spellings so a conflicting pair fails closed.
+fn active_job_uses_browser(payload: &JsonValue) -> bool {
+    let Some(metadata) = payload.get("metadata").and_then(JsonValue::as_object) else {
+        return false;
+    };
+    ["browserTransport", "browser_transport"]
+        .iter()
+        .filter_map(|key| metadata.get(*key).and_then(JsonValue::as_str))
+        .map(|value| value.trim().to_ascii_lowercase().replace('_', "-"))
+        .any(|value| matches!(value.as_str(), "desktop-personal" | "shared"))
+}
+
+/// Steering a browser turn requires a signed-in caller who is the recorded
+/// author of the prompt that started it. A turn with no recorded author
+/// cannot be steered by anyone.
+fn browser_turn_steer_allowed(prompt_author_id: Option<Uuid>, caller_id: Option<Uuid>) -> bool {
+    matches!((prompt_author_id, caller_id), (Some(author), Some(caller)) if author == caller)
 }
 
 fn normalized_steer_envelope(
@@ -651,9 +676,11 @@ pub(crate) async fn apply_steer_send_intent(
                     jobs.leased_by_runtime_id,
                     jobs.active_input_ready_turn_id,
                     jobs.payload,
-                    runtimes.capabilities
+                    runtimes.capabilities,
+                    prompts.user_id as prompt_author_id
              from agent_jobs jobs
              join runtimes on runtimes.id = jobs.leased_by_runtime_id
+             left join prompts on prompts.id = jobs.prompt_id
              where jobs.project_id = $1
                and jobs.conversation_id = $2
                and jobs.status = 'leased'
@@ -680,6 +707,7 @@ pub(crate) async fn apply_steer_send_intent(
             turn_id: row.get("active_input_ready_turn_id"),
             payload: row.get::<_, PgJson<JsonValue>>("payload").0,
             capabilities: row.get::<_, PgJson<JsonValue>>("capabilities").0,
+            prompt_author_id: row.get("prompt_author_id"),
         })
         .collect::<Vec<_>>();
 
@@ -721,6 +749,20 @@ pub(crate) async fn apply_steer_send_intent(
         }
     };
     let target = &active_jobs[target_index];
+
+    // A browser turn acts inside one person's signed-in browser session, and
+    // steer text reaches the model without an author. Only the person whose
+    // prompt started the turn may add to it; everyone else can still queue.
+    if active_job_uses_browser(&target.payload)
+        && !browser_turn_steer_allowed(target.prompt_author_id, context.user_id)
+    {
+        return Err(send_intent_error(
+            StatusCode::FORBIDDEN,
+            "only the person who started this browser task can steer it",
+            BROWSER_TURN_STEER_FORBIDDEN_CODE,
+            Some(json!({ "jobId": target.id })),
+        ));
+    }
 
     if !runtime_supports_active_turn_input(&target.capabilities) {
         return Err(send_intent_error(
@@ -1513,6 +1555,10 @@ pub(crate) async fn reject_unacknowledged_inputs_for_job(
 }
 
 #[cfg(test)]
+#[path = "send_intents_browser_steer_tests.rs"]
+mod browser_steer_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1572,7 +1618,46 @@ mod tests {
             turn_id: "turn-1".to_string(),
             payload: json!({ "metadata": { "agent": { "handle": handle } } }),
             capabilities: json!({ "activeTurnInput": true }),
+            prompt_author_id: None,
         }
+    }
+
+    #[test]
+    fn browser_jobs_are_recognized_from_either_transport_spelling() {
+        for transport in ["desktop-personal", "desktop_personal", " Shared ", "SHARED"] {
+            assert!(
+                active_job_uses_browser(&json!({ "metadata": { "browserTransport": transport } })),
+                "{transport} should be a browser turn"
+            );
+            assert!(
+                active_job_uses_browser(&json!({ "metadata": { "browser_transport": transport } })),
+                "{transport} should be a browser turn"
+            );
+        }
+        // A conflicting pair still counts as a browser turn.
+        assert!(active_job_uses_browser(&json!({
+            "metadata": { "browserTransport": "none", "browser_transport": "shared" }
+        })));
+        for payload in [
+            json!({}),
+            json!({ "metadata": {} }),
+            json!({ "metadata": { "browserTransport": "none" } }),
+            json!({ "metadata": { "browserTransport": 1 } }),
+            json!({ "browserTransport": "shared" }),
+        ] {
+            assert!(!active_job_uses_browser(&payload), "{payload}");
+        }
+    }
+
+    #[test]
+    fn only_the_recorded_prompt_author_may_steer_a_browser_turn() {
+        let author = Uuid::new_v4();
+        let teammate = Uuid::new_v4();
+        assert!(browser_turn_steer_allowed(Some(author), Some(author)));
+        assert!(!browser_turn_steer_allowed(Some(author), Some(teammate)));
+        assert!(!browser_turn_steer_allowed(Some(author), None));
+        assert!(!browser_turn_steer_allowed(None, Some(author)));
+        assert!(!browser_turn_steer_allowed(None, None));
     }
 
     #[test]
