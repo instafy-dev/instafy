@@ -415,6 +415,11 @@ struct PreviewStubBroker {
     /// What `GET /capabilities` answers; `None` is a broker that serves
     /// private previews on the fixture's domain.
     capabilities: StdMutex<Option<TunnelBrokerCapabilities>>,
+    /// The status a new tunnel comes back with; `None` is "active". The real
+    /// broker answers "issuing" and never says when the client connected.
+    assignment_status: StdMutex<Option<String>>,
+    /// What a probe that reaches the tunnel answers; `None` is a site's 200.
+    probe_status: StdMutex<Option<u16>>,
 }
 
 #[async_trait]
@@ -439,7 +444,12 @@ impl TunnelBroker for PreviewStubBroker {
             tunnel_id: tunnel_id.to_string(),
             hostname: hostname.clone(),
             url: format!("https://{hostname}"),
-            status: "active".to_string(),
+            status: self
+                .assignment_status
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| "active".to_string()),
             credentials: json!({
                 "provider": "self_hosted",
                 "server": "rathole:2333",
@@ -488,7 +498,7 @@ impl TunnelBroker for PreviewStubBroker {
         } else {
             TunnelProbe {
                 listening: true,
-                status: Some(200),
+                status: Some(self.probe_status.lock().unwrap().unwrap_or(200)),
             }
         })
     }
@@ -1860,6 +1870,132 @@ async fn preview_ready_waits_for_a_starting_client_and_reload_reads_fresh_health
             assert_eq!(cached["health"]["listening"], json!(true));
             let (_, fresh) = get(true).await?;
             assert_eq!(fresh["health"]["listening"], json!(false));
+            Ok(())
+        })
+    })
+    .await
+}
+
+impl Fixture {
+    async fn grant_status(&self, preview_id: &str) -> anyhow::Result<String> {
+        Ok(self
+            .state
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select status from runtime_tunnel_grants where tunnel_id = $1 and project_id = $2",
+                &[&preview_id, &self.project],
+            )
+            .await?
+            .get(0))
+    }
+}
+
+/// The next `tunnel.status_updated` saying this preview became active.
+fn active_event(
+    events: &mut tokio::sync::broadcast::Receiver<crate::state::ControllerEvent>,
+    preview_id: &str,
+) -> anyhow::Result<()> {
+    loop {
+        let event = events.try_recv().context("tunnel.status_updated")?;
+        if event.kind == "tunnel.status_updated" && event.data["tunnelId"] == json!(preview_id) {
+            assert_eq!(event.data["status"], "active", "{}", event.data);
+            return Ok(());
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_issuing_preview_becomes_active_when_ready_sees_its_site() -> anyhow::Result<()> {
+    run(|f| {
+        Box::pin(async move {
+            *f.broker.assignment_status.lock().unwrap() = Some("issuing".to_string());
+            let job = f.job(None).await?;
+            let preview_id = f.open(&job).await?;
+            assert_eq!(f.grant_status(&preview_id).await?, "issuing");
+
+            let mut events = f.state.events.subscribe();
+            let ready = f.ready(&job.token, &preview_id).await?;
+            assert_eq!(ready["health"], json!({ "listening": true, "status": 200 }));
+            assert_eq!(f.grant_status(&preview_id).await?, "active");
+            active_event(&mut events, &preview_id)?;
+
+            // What the card reads: active and answering, so Live.
+            let path = f.path(&format!("/{preview_id}"));
+            let (status, preview) = f.request(&f.tokens[0], "GET", &path, Value::Null).await?;
+            assert_eq!(status, StatusCode::OK, "{preview}");
+            assert_eq!(preview["status"], "active", "{preview}");
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn an_issuing_preview_becomes_active_on_a_read_only_once_its_site_answers(
+) -> anyhow::Result<()> {
+    use std::sync::atomic::Ordering;
+    run(|f| {
+        Box::pin(async move {
+            *f.broker.assignment_status.lock().unwrap() = Some("issuing".to_string());
+            let job = f.job(None).await?;
+            // `ready` is never called: only the pane or card reads the preview.
+            let preview_id = f.open(&job).await?;
+            let path = f.path(&format!("/{preview_id}?fresh=1"));
+            let read = |f: Arc<Fixture>, path: String| async move {
+                let (status, preview) = f.request(&f.tokens[0], "GET", &path, Value::Null).await?;
+                assert_eq!(status, StatusCode::OK, "{preview}");
+                anyhow::Ok(preview)
+            };
+
+            // Nothing listening yet, then the broker's 502 for a site that is
+            // down behind it: neither proves the site, so the record stays.
+            f.broker.silent_probes.store(1, Ordering::SeqCst);
+            let preview = read(f.clone(), path.clone()).await?;
+            assert_eq!(preview["health"]["listening"], json!(false));
+            assert_eq!(preview["status"], "issuing", "{preview}");
+            *f.broker.probe_status.lock().unwrap() = Some(502);
+            let preview = read(f.clone(), path.clone()).await?;
+            assert_eq!(preview["status"], "issuing", "{preview}");
+            assert_eq!(f.grant_status(&preview_id).await?, "issuing");
+
+            // The site answers: the record says active, and Studio hears it.
+            *f.broker.probe_status.lock().unwrap() = None;
+            let mut events = f.state.events.subscribe();
+            let preview = read(f.clone(), path.clone()).await?;
+            assert_eq!(
+                preview["health"],
+                json!({ "listening": true, "status": 200 })
+            );
+            assert_eq!(preview["status"], "active", "{preview}");
+            assert_eq!(f.grant_status(&preview_id).await?, "active");
+            active_event(&mut events, &preview_id)?;
+
+            // A closed preview is never brought back by a probe.
+            let (status, body) = f
+                .request(
+                    &f.tokens[0],
+                    "POST",
+                    &f.path(&format!("/{preview_id}/close")),
+                    json!({}),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+            let record =
+                load_runtime_tunnel_grant_by_tunnel_id(&f.state.pool, &f.project, &preview_id)
+                    .await
+                    .map_err(|(_, error)| anyhow::anyhow!(error.0.message))?
+                    .context("grant")?;
+            let mut issuing = record.clone();
+            issuing.status = "issuing".to_string();
+            assert!(
+                crate::tunnels::mark_issuing_tunnel_active(&f.state, &issuing)
+                    .await
+                    .map_err(|(_, error)| anyhow::anyhow!(error.0.message))?
+                    .is_none()
+            );
+            assert_ne!(f.grant_status(&preview_id).await?, "active");
             Ok(())
         })
     })

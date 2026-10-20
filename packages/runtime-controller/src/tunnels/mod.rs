@@ -1599,6 +1599,50 @@ async fn update_tunnel_status_record(
     Ok(updated)
 }
 
+/// The broker reports a new tunnel as issuing, and nothing else tells the
+/// controller once its client connects. A probe that reached the site through
+/// the tunnel is that proof: the grant becomes active (and
+/// `tunnel.status_updated` says so), so a record that says "issuing" means
+/// "not proven to serve yet". Only an issuing, unexpired grant changes; a
+/// closed or expired one is left as it is, even against a concurrent close.
+pub(crate) async fn mark_issuing_tunnel_active(
+    state: &AppState,
+    record: &RuntimeTunnelGrantRecord,
+) -> Result<Option<RuntimeTunnelGrantRecord>, (StatusCode, Json<ApiError>)> {
+    let connection = state
+        .pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to acquire connection: {error}")))?;
+    let row = connection
+        .query_opt(
+            "update runtime_tunnel_grants
+             set status = 'active', updated_at = now()
+             where id = $1
+               and lower(btrim(status)) = 'issuing'
+               and expires_at > now()
+             returning *",
+            &[&record.id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to mark tunnel active: {error}")))?;
+    drop(connection);
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let updated = runtime_tunnel_grant_from_row(&row);
+    publish_controller_event(
+        &state.events,
+        "tunnel.status_updated",
+        Some(updated.project_id),
+        None,
+        None,
+        None,
+        tunnel_event_payload(&updated),
+    );
+    Ok(Some(updated))
+}
+
 /// How long a stop or removal waits on the tunnel broker to revoke one tunnel.
 /// The shared HTTP client has no timeout of its own; giving up leaves the
 /// grant active until it expires, as a broker error does.
