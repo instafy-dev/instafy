@@ -36,11 +36,28 @@ localStorage) with a picker in the runtime menu; it applies on next start.
 
 Runtime containers started from the runtime compose files and by
 `instafy runtime start` drop the `SYS_PTRACE` and `NET_RAW` capabilities. The
-runtime agent reads `RUNTIME_ACCESS_TOKEN` and `ORIGIN_INTERNAL_TOKEN` into its
-configuration at startup and then clears all four launch credentials
-(`RUNTIME_ACCESS_TOKEN`, `RUNTIME_TOKEN`, `ORIGIN_INTERNAL_TOKEN`,
+runtime agent reads `RUNTIME_ACCESS_TOKEN`, `ORIGIN_INTERNAL_TOKEN` and the
+launch metadata `RUNTIME_METADATA` into its configuration at startup. It then
+clears those and the other launch credentials (`RUNTIME_TOKEN`,
 `ORIGIN_ACCESS_TOKEN`) from its environment, so the processes it spawns, git
-included, do not inherit them.
+and Codex hooks included, do not inherit them. The metadata is cleared because
+it repeats the launch environment, which can include browser relay (TURN)
+credentials.
+
+Model shells also never receive the runtime's internal credentials. These
+include controller and proxy secrets such as `PROXY_CREDENTIAL_LEASE_TOKEN` and
+`MANAGED_AI_OPENAI_API_KEY`, which can reach a runtime started from a shell that
+holds them, and `RUNTIME_METADATA` as a second layer. An MCP server from Codex
+configuration that names one of these variables in `env_vars`,
+`bearer_token_env_var` or `env_http_headers` has that entry removed. The
+per-job `CONTROLLER_ACCESS_TOKEN`, the proxy envelope key `CODEX_API_KEY` and
+granted project secrets are still passed through. The exclusion list lives in
+`packages/runtime-agent/src/model_environment.rs`.
+
+The browser relay variable `INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON` is
+excluded from model shells but stays in the agent's environment, because the
+origin server reads it per request. Processes the agent starts with its whole
+environment, such as Codex hooks and plugin MCP servers, can still see it.
 
 ## Tenant leases
 
