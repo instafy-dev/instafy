@@ -42,6 +42,18 @@ configuration at startup and then clears all four launch credentials
 `ORIGIN_ACCESS_TOKEN`) from its environment, so the processes it spawns, git
 included, do not inherit them.
 
+Model shells and MCP servers from configuration also never receive the runtime's
+internal credentials or `RUNTIME_METADATA`. The agent reads the launch metadata
+once at startup and keeps it, but the metadata repeats the launch environment,
+which can include browser relay (TURN) credentials. Internal credentials include
+controller and proxy secrets such as `PROXY_CREDENTIAL_LEASE_TOKEN` and
+`MANAGED_AI_OPENAI_API_KEY`, which can reach a runtime started from a shell that
+holds them. A configured MCP server that names one of these variables in
+`env_vars`, `bearer_token_env_var` or `env_http_headers` has that entry removed.
+The per-job `CONTROLLER_ACCESS_TOKEN`, the proxy envelope key `CODEX_API_KEY`
+and granted project secrets are still passed through. The exclusion list lives
+in `packages/runtime-agent/src/model_environment.rs`.
+
 ## Tenant leases
 
 `POST /runtime/ensure` with `scope: "tenant"` and a `runtimeId` attaches the

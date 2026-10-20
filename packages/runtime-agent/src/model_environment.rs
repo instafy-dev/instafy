@@ -37,6 +37,16 @@ pub(crate) const INTERNAL_CREDENTIAL_ENV_KEYS: &[&str] = &[
     "USER_TOKEN_SECRET",
     "RUNTIME_SIGNING_PRIVATE_KEY",
     "RUNTIME_SIGNING_PRIVATE_KEY_B64",
+    // The controller-to-proxy bearer for credential leases and the platform
+    // model key. Only the proxy reads them; a model holding either could
+    // fetch provider credentials or call a model provider around the proxy.
+    "PROXY_CREDENTIAL_LEASE_TOKEN",
+    "MANAGED_AI_OPENAI_API_KEY",
+    // Other controller-only credentials an operator shell may carry into a
+    // locally launched runtime.
+    "SERVICE_RUNTIME_USER_PASSWORD",
+    "DESKTOP_RELEASE_GITHUB_TOKEN",
+    "WEB_PUSH_VAPID_PRIVATE_KEY",
     // Runtime allocator/provider credentials.
     "PROVIDER_AUTH_TOKEN",
     "DEV_PROVIDER_AUTH_TOKEN",
@@ -77,10 +87,17 @@ pub(crate) const LAUNCH_CREDENTIAL_ENV_KEYS: &[&str] = INTERNAL_CREDENTIAL_ENV_K
     .split_at(LAUNCH_CREDENTIAL_KEY_COUNT)
     .0;
 
-/// Credentials the parent runtime must retain for in-process features but a
+/// Values the parent runtime must retain for in-process features but a
 /// model-controlled subprocess must never inherit.
-pub(crate) const MODEL_CHILD_ONLY_EXCLUDED_ENV_KEYS: &[&str] =
-    &["INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON"];
+///
+/// `RUNTIME_METADATA` is the launch metadata, read once by
+/// `Config::from_env`. It repeats the launch `env` object, which can carry
+/// `INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON` and its TURN credentials, and any
+/// later controller attestation, so it is withheld as a whole.
+pub(crate) const MODEL_CHILD_ONLY_EXCLUDED_ENV_KEYS: &[&str] = &[
+    "INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON",
+    "RUNTIME_METADATA",
+];
 
 /// Non-secret process settings that persistent helper processes may inherit.
 /// Callers add the smallest feature-specific set on top of this baseline.
@@ -281,6 +298,65 @@ mod tests {
         assert!(!is_internal_credential_env_key(
             "INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON"
         ));
+    }
+
+    #[test]
+    fn runtime_launch_metadata_stays_with_the_agent() {
+        // The agent reads the launch metadata at startup, so the job-time
+        // scrub of internal credentials must leave it in place; model
+        // children must never see it, in any case spelling.
+        for key in ["RUNTIME_METADATA", "runtime_metadata", "Runtime_Metadata"] {
+            assert!(is_model_child_excluded_env_key(key), "{key}");
+            assert!(!is_internal_credential_env_key(key), "{key}");
+        }
+        assert!(!LAUNCH_CREDENTIAL_ENV_KEYS.contains(&"RUNTIME_METADATA"));
+        // Its non-secret siblings stay visible to the model's tooling.
+        for key in [
+            "RUNTIME_ID",
+            "RUNTIME_LEASE_ID",
+            "RUNTIME_CAPABILITIES",
+            "ORIGIN_METADATA",
+            "ORIGIN_GIT_REMOTE_URL",
+        ] {
+            assert!(!is_model_child_excluded_env_key(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn proxy_and_controller_only_credentials_are_internal_credentials() {
+        for key in [
+            "PROXY_CREDENTIAL_LEASE_TOKEN",
+            "MANAGED_AI_OPENAI_API_KEY",
+            "SERVICE_RUNTIME_USER_PASSWORD",
+            "DESKTOP_RELEASE_GITHUB_TOKEN",
+            "WEB_PUSH_VAPID_PRIVATE_KEY",
+        ] {
+            assert!(is_internal_credential_env_key(key), "{key}");
+            assert!(is_model_child_excluded_env_key(key), "{key}");
+            assert!(!LAUNCH_CREDENTIAL_ENV_KEYS.contains(&key), "{key}");
+        }
+        // The per-job controller token and the proxy envelope keys are how a
+        // model shell legitimately reaches the controller and the proxy.
+        for key in ["CONTROLLER_ACCESS_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY"] {
+            assert!(!is_model_child_excluded_env_key(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn runtime_compose_files_forward_launch_metadata_only_to_the_agent() {
+        // The compose files hand the runtime its launch metadata; this test
+        // pins the name the exclusion above must match.
+        for compose in [
+            include_str!("../../../docker/docker-compose.runtime.yml"),
+            include_str!("../../../docker/docker-compose.runtime.provider.yml"),
+        ] {
+            assert!(
+                compose
+                    .lines()
+                    .any(|line| line.trim() == "RUNTIME_METADATA: ${RUNTIME_METADATA:-}"),
+                "runtime compose no longer forwards RUNTIME_METADATA under the excluded name"
+            );
+        }
     }
 
     #[test]

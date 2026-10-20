@@ -3220,6 +3220,49 @@ fn scope_browser_capabilities_from_shell_environment(policy: &mut ShellEnvironme
     }
 }
 
+/// Configured MCP servers come from files a model shell can write (`CODEX_HOME` and project
+/// configuration). Codex lets such a server name parent variables to inherit (`env_vars`) or to
+/// send as HTTP credentials (`bearer_token_env_var`, `env_http_headers`), so drop every reference
+/// to a variable a model shell may not see. Literal values in `env` and `http_headers` come from
+/// the configuration itself and are left alone.
+fn scope_configured_mcp_server_environment(servers: &mut HashMap<String, McpServerConfig>) {
+    for (name, server) in servers.iter_mut() {
+        let mut withheld = 0usize;
+        match &mut server.transport {
+            McpServerTransportConfig::Stdio { env_vars, .. } => {
+                let before = env_vars.len();
+                env_vars.retain(|variable| !is_model_child_excluded_env_key(variable.name()));
+                withheld += before - env_vars.len();
+            }
+            McpServerTransportConfig::StreamableHttp {
+                bearer_token_env_var,
+                env_http_headers,
+                ..
+            } => {
+                if bearer_token_env_var
+                    .as_deref()
+                    .is_some_and(is_model_child_excluded_env_key)
+                {
+                    *bearer_token_env_var = None;
+                    withheld += 1;
+                }
+                if let Some(headers) = env_http_headers.as_mut() {
+                    let before = headers.len();
+                    headers.retain(|_, variable| !is_model_child_excluded_env_key(variable));
+                    withheld += before - headers.len();
+                }
+            }
+        }
+        if withheld > 0 {
+            tracing::warn!(
+                mcp_server = %name,
+                withheld,
+                "withheld runtime-internal environment variables from a configured MCP server"
+            );
+        }
+    }
+}
+
 /// Returns the process-group registry of the Shared Browser MCP when this turn installs it.
 fn install_browser_mcp_servers(
     config: &mut Config,
@@ -3250,6 +3293,7 @@ fn install_browser_mcp_servers(
     } else {
         (*config.mcp_servers).clone()
     };
+    scope_configured_mcp_server_environment(&mut servers);
     servers.remove(PERSONAL_BROWSER_MCP_SERVER_NAME);
     servers.remove(SHARED_BROWSER_MCP_SERVER_NAME);
     servers.remove(crate::local_browser::MCP_SERVER_NAME);
@@ -5764,6 +5808,167 @@ mod tests {
             assert!(is_model_child_excluded_env_key(alias));
             assert!(!child_env.contains_key(alias));
         }
+    }
+
+    #[test]
+    fn model_shell_never_inherits_runtime_launch_metadata() {
+        use codex_protocol::shell_environment::create_env_from_vars;
+
+        let mut policy = ShellEnvironmentPolicy::default();
+        policy
+            .r#set
+            .insert("runtime_metadata".to_string(), "{}".to_string());
+        scope_runtime_model_shell_environment(&mut policy);
+
+        let launch_metadata = r#"{"env":{"INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON":"[{\"credential\":\"turn-secret\"}]"}}"#;
+        let child_env = create_env_from_vars(
+            [
+                ("RUNTIME_METADATA".to_string(), launch_metadata.to_string()),
+                ("RUNTIME_ID".to_string(), "runtime-id".to_string()),
+                ("RUNTIME_LEASE_ID".to_string(), "lease-id".to_string()),
+            ],
+            &policy,
+            None,
+        );
+        assert!(
+            !child_env
+                .keys()
+                .any(|key| key.eq_ignore_ascii_case("RUNTIME_METADATA")),
+            "model shell inherited the runtime launch metadata"
+        );
+        assert!(
+            !child_env
+                .values()
+                .any(|value| value.contains("turn-secret")),
+            "model shell inherited launch-time TURN credentials"
+        );
+        assert_eq!(
+            child_env.get("RUNTIME_ID").map(String::as_str),
+            Some("runtime-id")
+        );
+        assert_eq!(
+            child_env.get("RUNTIME_LEASE_ID").map(String::as_str),
+            Some("lease-id")
+        );
+    }
+
+    #[test]
+    fn configured_mcp_servers_cannot_request_runtime_internal_variables() {
+        use codex_config::McpServerEnvVar;
+
+        let mut servers = HashMap::from([
+            (
+                "project_stdio".to_string(),
+                browser_mcp_server_config(McpServerTransportConfig::Stdio {
+                    command: "project-mcp".to_string(),
+                    args: Vec::new(),
+                    env: Some(HashMap::from([(
+                        "PROJECT_LITERAL".to_string(),
+                        "configured-value".to_string(),
+                    )])),
+                    env_vars: vec![
+                        McpServerEnvVar::Name("RUNTIME_METADATA".to_string()),
+                        McpServerEnvVar::Name("runtime_metadata".to_string()),
+                        McpServerEnvVar::Name(
+                            "INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON".to_string(),
+                        ),
+                        McpServerEnvVar::Name("PROXY_CREDENTIAL_LEASE_TOKEN".to_string()),
+                        McpServerEnvVar::Config {
+                            name: "CONTROLLER_INTERNAL_TOKEN".to_string(),
+                            source: Some("local".to_string()),
+                        },
+                        McpServerEnvVar::Name("GITHUB_TOKEN".to_string()),
+                        McpServerEnvVar::Name("CONTROLLER_ACCESS_TOKEN".to_string()),
+                    ],
+                    cwd: None,
+                }),
+            ),
+            (
+                "project_http".to_string(),
+                browser_mcp_server_config(McpServerTransportConfig::StreamableHttp {
+                    url: "https://mcp.example.test/".to_string(),
+                    bearer_token_env_var: Some("RUNTIME_METADATA".to_string()),
+                    http_headers: Some(HashMap::from([(
+                        "X-Static".to_string(),
+                        "configured-value".to_string(),
+                    )])),
+                    env_http_headers: Some(HashMap::from([
+                        (
+                            "X-Launch".to_string(),
+                            "INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON".to_string(),
+                        ),
+                        ("X-Machine".to_string(), "ORIGIN_INTERNAL_TOKEN".to_string()),
+                        ("X-Project".to_string(), "PROJECT_API_KEY".to_string()),
+                    ])),
+                    http_headers_helper: None,
+                }),
+            ),
+            (
+                "project_http_project_bearer".to_string(),
+                browser_mcp_server_config(McpServerTransportConfig::StreamableHttp {
+                    url: "https://mcp.example.test/".to_string(),
+                    bearer_token_env_var: Some("PROJECT_API_KEY".to_string()),
+                    http_headers: None,
+                    env_http_headers: None,
+                    http_headers_helper: None,
+                }),
+            ),
+        ]);
+
+        scope_configured_mcp_server_environment(&mut servers);
+
+        let McpServerTransportConfig::Stdio { env, env_vars, .. } =
+            &servers["project_stdio"].transport
+        else {
+            panic!("stdio server changed transport");
+        };
+        assert_eq!(
+            env_vars
+                .iter()
+                .map(McpServerEnvVar::name)
+                .collect::<Vec<_>>(),
+            ["GITHUB_TOKEN", "CONTROLLER_ACCESS_TOKEN"]
+        );
+        assert_eq!(
+            env.as_ref()
+                .and_then(|env| env.get("PROJECT_LITERAL"))
+                .map(String::as_str),
+            Some("configured-value")
+        );
+
+        let McpServerTransportConfig::StreamableHttp {
+            bearer_token_env_var,
+            http_headers,
+            env_http_headers,
+            ..
+        } = &servers["project_http"].transport
+        else {
+            panic!("http server changed transport");
+        };
+        assert_eq!(bearer_token_env_var, &None);
+        assert_eq!(
+            http_headers
+                .as_ref()
+                .and_then(|headers| headers.get("X-Static"))
+                .map(String::as_str),
+            Some("configured-value")
+        );
+        assert_eq!(
+            env_http_headers,
+            &Some(HashMap::from([(
+                "X-Project".to_string(),
+                "PROJECT_API_KEY".to_string()
+            )]))
+        );
+
+        let McpServerTransportConfig::StreamableHttp {
+            bearer_token_env_var,
+            ..
+        } = &servers["project_http_project_bearer"].transport
+        else {
+            panic!("http server changed transport");
+        };
+        assert_eq!(bearer_token_env_var.as_deref(), Some("PROJECT_API_KEY"));
     }
 
     #[test]
