@@ -104,6 +104,30 @@ describe("SharedBrowserDataClearAction", () => {
     expect(onClearSettled).not.toHaveBeenCalled();
   });
 
+  it("asks for the given confirmation and announces the given success", async () => {
+    clearForProjectMock.mockResolvedValue({ success: true });
+    const showStatus = vi.fn();
+    await act(async () => {
+      root.render(
+        <SharedBrowserDataClearAction
+          canClear
+          confirmation="Clear it and restart this space's machine?"
+          successMessage="Cleared. Restarting this space's machine…"
+          onClearSettled={vi.fn()}
+          onClearStart={vi.fn()}
+          projectId="project-1"
+          showStatus={showStatus}
+        />,
+      );
+    });
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>("button")?.click();
+    });
+    expect(window.confirm).toHaveBeenCalledWith("Clear it and restart this space's machine?");
+    expect(window.confirm).not.toHaveBeenCalledWith(CLEAR_SHARED_BROWSER_DATA_CONFIRMATION);
+    expect(showStatus).toHaveBeenCalledWith("Cleared. Restarting this space's machine…", "success", 3500);
+  });
+
   it("locks duplicate requests, announces success, and reconnects after settlement", async () => {
     const request = deferred<{ success: true }>();
     clearForProjectMock.mockReturnValue(request.promise);

@@ -118,12 +118,68 @@ const WEBRTC_ICE_CREDENTIAL_MAX_BYTES = 4096;
 
 export class BrowserSessionUnavailableError extends Error {
   readonly status: number;
+  /** The origin's error `code`, when its JSON body carried one. */
+  readonly code: string | null;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, code: string | null = null) {
     super(message);
     this.name = "BrowserSessionUnavailableError";
     this.status = status;
+    this.code = code;
   }
+}
+
+/** Instafy's browser on the space's own machine refused to start. */
+export class SharedBrowserHostRefusedError extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "SharedBrowserHostRefusedError";
+    this.code = code;
+  }
+}
+
+export function isSharedBrowserHostRefusedError(
+  error: unknown,
+): error is SharedBrowserHostRefusedError {
+  return error instanceof SharedBrowserHostRefusedError;
+}
+
+const BROWSER_ERROR_CODE_MAX_LENGTH = 64;
+
+/** The `code` of an origin error body (`{error, code}`), when there is one. */
+export function readBrowserErrorCode(text: string): string | null {
+  if (!text) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    const code = (parsed as { code?: unknown }).code;
+    return typeof code === "string" &&
+      code.length > 0 &&
+      code.length <= BROWSER_ERROR_CODE_MAX_LENGTH &&
+      /^[a-z0-9_]+$/.test(code)
+      ? code
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+async function browserSessionUnavailableError(
+  response: Response,
+  label: string,
+): Promise<BrowserSessionUnavailableError> {
+  const text = await response.text().catch(() => "");
+  return new BrowserSessionUnavailableError(
+    response.status,
+    `${label} unavailable (${response.status}): ${text}`,
+    readBrowserErrorCode(text),
+  );
 }
 
 export class BrowserSessionCapabilitiesIncompatibleError extends Error {
@@ -357,11 +413,7 @@ export async function fetchRuntimeBrowserSessionCapabilities(params: {
   });
 
   if (browserSessionStatusIndicatesUnavailable(response.status)) {
-    const text = await response.text().catch(() => "");
-    throw new BrowserSessionUnavailableError(
-      response.status,
-      `browser capabilities unavailable (${response.status}): ${text}`,
-    );
+    throw await browserSessionUnavailableError(response, "browser capabilities");
   }
 
   if (!response.ok) {
@@ -375,6 +427,208 @@ export async function fetchRuntimeBrowserSessionCapabilities(params: {
     throw new BrowserSessionCapabilitiesIncompatibleError();
   }
   return capabilities;
+}
+
+/**
+ * Instafy's browser on the space's own machine (`GET browser/host`), relative
+ * to the person asking. `unknown` stands for any state this client does not
+ * know yet; callers poll again on it.
+ */
+export type SharedBrowserHostState =
+  | "idle"
+  | "starting"
+  | "ready"
+  | "stopping"
+  | "failed"
+  | "poisoned"
+  | "unknown";
+
+export type SharedBrowserHostSnapshot = {
+  version: 1;
+  mode: "lazy";
+  state: SharedBrowserHostState;
+  /** New for every start; null while idle. */
+  generation: string | null;
+  /** Why it failed, as a short token; null unless failed or poisoned. */
+  failure: string | null;
+  /** The person asking started the current run of the browser. */
+  startedByYou: boolean;
+  /** Someone else has it open, or used it in the last 30 seconds. */
+  othersPresent: boolean;
+  /** Someone else has control of it. */
+  controlledByOther: boolean;
+  /** An agent run works in it, or that cannot be read. */
+  agentRunActive: boolean;
+  /** That agent run is the person's own. */
+  agentRunStartedByYou: boolean;
+};
+
+const SHARED_BROWSER_HOST_STATES = new Set<SharedBrowserHostState>([
+  "idle",
+  "starting",
+  "ready",
+  "stopping",
+  "failed",
+  "poisoned",
+]);
+const SHARED_BROWSER_HOST_FLAGS = [
+  "startedByYou",
+  "othersPresent",
+  "controlledByOther",
+  "agentRunActive",
+  "agentRunStartedByYou",
+] as const;
+const SHARED_BROWSER_HOST_TOKEN_MAX_LENGTH = 64;
+
+function sharedBrowserHostToken(value: unknown): string | null {
+  return typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= SHARED_BROWSER_HOST_TOKEN_MAX_LENGTH &&
+    /^[A-Za-z0-9_-]+$/.test(value)
+    ? value
+    : null;
+}
+
+/**
+ * Reads `GET browser/host`. Only version 1 in `lazy` mode is understood;
+ * anything else is null. A state this client does not know maps to
+ * `unknown`, so a later state does not break older tabs.
+ */
+export function mapSharedBrowserHostPayload(
+  payload: unknown,
+): SharedBrowserHostSnapshot | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+  const record = payload as Record<string, unknown>;
+  if (record.version !== 1 || record.mode !== "lazy") {
+    return null;
+  }
+  if (SHARED_BROWSER_HOST_FLAGS.some((flag) => typeof record[flag] !== "boolean")) {
+    return null;
+  }
+  const state =
+    typeof record.state === "string" &&
+    SHARED_BROWSER_HOST_STATES.has(record.state as SharedBrowserHostState)
+      ? (record.state as SharedBrowserHostState)
+      : "unknown";
+  return {
+    version: 1,
+    mode: "lazy",
+    state,
+    generation: sharedBrowserHostToken(record.generation),
+    failure: sharedBrowserHostToken(record.failure),
+    startedByYou: record.startedByYou === true,
+    othersPresent: record.othersPresent === true,
+    controlledByOther: record.controlledByOther === true,
+    agentRunActive: record.agentRunActive === true,
+    agentRunStartedByYou: record.agentRunStartedByYou === true,
+  };
+}
+
+type SharedBrowserHostRequestParams = {
+  projectId: string;
+  runtimeId: string;
+  browserSessionId: string;
+  accessToken?: string | null;
+  signal?: AbortSignal;
+};
+
+/** The origin token request failed; callers may ask again. */
+export class SharedBrowserHostTokenError extends Error {
+  constructor() {
+    super("Instafy's browser could not be reached (origin token request failed).");
+    this.name = "SharedBrowserHostTokenError";
+  }
+}
+
+async function requestSharedBrowserHostToken(
+  params: SharedBrowserHostRequestParams,
+  scope: "browser.view" | "browser.control",
+) {
+  const token = await requestOriginAccessToken({
+    projectId: params.projectId,
+    protocol: "http",
+    scopes: [scope],
+    preferRuntime: params.runtimeId,
+    accessToken: params.accessToken ?? null,
+    browserSessionId: params.browserSessionId,
+    signal: params.signal,
+  });
+  if (!token) {
+    throw new SharedBrowserHostTokenError();
+  }
+  return token;
+}
+
+async function readSharedBrowserHostResponse(
+  response: Response,
+  label: string,
+): Promise<SharedBrowserHostSnapshot | null> {
+  if (response.status === 404) {
+    return null;
+  }
+  if (response.status === 409) {
+    const text = await response.text().catch(() => "");
+    const code = readBrowserErrorCode(text) ?? "conflict";
+    throw new SharedBrowserHostRefusedError(code, `${label} refused (409): ${code}`);
+  }
+  if (browserSessionStatusIndicatesUnavailable(response.status)) {
+    throw await browserSessionUnavailableError(response, label);
+  }
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`${label} failed (${response.status}): ${text}`);
+  }
+  const payload = (await response.json()) as unknown;
+  const snapshot = mapSharedBrowserHostPayload(payload);
+  if (!snapshot) {
+    throw new BrowserSessionCapabilitiesIncompatibleError();
+  }
+  return snapshot;
+}
+
+/**
+ * Instafy's browser on the space's own machine, as the person sees it. Null
+ * when the machine has none (404, also when the space's policy is off).
+ * Throws BrowserSessionUnavailableError on 502, 503 and 504.
+ */
+export async function fetchSharedBrowserHost(
+  params: SharedBrowserHostRequestParams,
+): Promise<SharedBrowserHostSnapshot | null> {
+  const token = await requestSharedBrowserHostToken(params, "browser.view");
+  const response = await fetch(buildOriginEndpointUrl(token.endpoint, "/browser/host"), {
+    headers: {
+      authorization: `Bearer ${token.token}`,
+      accept: "application/json",
+    },
+    cache: "no-store",
+    signal: params.signal,
+  });
+  return readSharedBrowserHostResponse(response, "browser host");
+}
+
+/**
+ * Asks the space's machine to start Instafy's browser. It never waits for
+ * the browser to be ready; poll fetchSharedBrowserHost for that. A refusal
+ * (409) throws SharedBrowserHostRefusedError with the origin's code, such as
+ * `browser_host_stopping`, `browser_host_poisoned` or `machine_stopping`.
+ */
+export async function startSharedBrowserHost(
+  params: SharedBrowserHostRequestParams,
+): Promise<SharedBrowserHostSnapshot | null> {
+  const token = await requestSharedBrowserHostToken(params, "browser.control");
+  const response = await fetch(buildOriginEndpointUrl(token.endpoint, "/browser/host/start"), {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token.token}`,
+      accept: "application/json",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ version: 1 }),
+    signal: params.signal,
+  });
+  return readSharedBrowserHostResponse(response, "browser host start");
 }
 
 export async function fetchRuntimeBrowserSessionPages(params: {
@@ -409,11 +663,7 @@ export async function fetchRuntimeBrowserSessionPages(params: {
   );
 
   if (browserSessionStatusIndicatesUnavailable(response.status)) {
-    const text = await response.text().catch(() => "");
-    throw new BrowserSessionUnavailableError(
-      response.status,
-      `browser pages unavailable (${response.status}): ${text}`,
-    );
+    throw await browserSessionUnavailableError(response, "browser pages");
   }
 
   if (!response.ok) {
@@ -684,11 +934,7 @@ export async function fetchRuntimeBrowserSessionActions(params: {
   );
 
   if (browserSessionStatusIndicatesUnavailable(response.status)) {
-    const text = await response.text().catch(() => "");
-    throw new BrowserSessionUnavailableError(
-      response.status,
-      `browser actions unavailable (${response.status}): ${text}`,
-    );
+    throw await browserSessionUnavailableError(response, "browser actions");
   }
 
   if (!response.ok) {

@@ -8,6 +8,12 @@ import {
 import type { BrowserSessionPage } from "./browserSessionPages";
 
 const BROWSER_SESSION_POLL_INTERVAL_MS = 2500;
+/**
+ * The origin's answer while Instafy's browser on the space's own machine is
+ * not running yet (or any more). The open modal starts it; until then the
+ * pages are simply not there.
+ */
+const BROWSER_HOST_NOT_READY_CODE = "browser_host_not_ready";
 
 export type LiveBrowserSessionPage = BrowserSessionPage & {
   canGoBack: boolean;
@@ -194,6 +200,18 @@ export function useBrowserSessionPages(params: {
           return false;
         }
         if (controllerClient.browserSessions.isUnavailableError(error)) {
+          // An open session waits for the space's machine to start its
+          // browser: no unavailable notice and no suspend, so polling goes
+          // on. A hidden one suspends as before, so an idle browser behind a
+          // hidden tab is never polled and never started.
+          if (
+            !suspendOnUnavailable &&
+            (error as { code?: string | null }).code === BROWSER_HOST_NOT_READY_CODE
+          ) {
+            preferredActivePageIdRef.current = { scopeKey: requestScope, pageId: null };
+            setPageState({ scopeKey: requestScope, pages: [], resolved: false });
+            return false;
+          }
           return handleUnavailable(requestScope);
         }
         throw error;
@@ -240,7 +258,7 @@ export function useBrowserSessionPages(params: {
     };
     void request.then(clearInFlight, clearInFlight);
     return request;
-  }, [browserSessionId, enabled, handleUnavailable, includePlaceholder, preferRuntimeId, projectId, scopeIsCurrent, scopeKey]);
+  }, [browserSessionId, enabled, handleUnavailable, includePlaceholder, preferRuntimeId, projectId, scopeIsCurrent, scopeKey, suspendOnUnavailable]);
 
   const refreshAfterMutation = useCallback(async (): Promise<boolean> => {
     const requestScope = scopeKey;

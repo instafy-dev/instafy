@@ -212,12 +212,29 @@ describe("Chat browser request handoff", () => {
     });
   });
 
-  it("bounds a press at two minutes and retains a retry path", async () => {
+  it("bounds a press for Instafy's browser at four minutes and retains a retry path", async () => {
+    value.transport = "shared"; value.personalAvailable = false;
     await render(); const attempt = await begin(); await advance(60_100);
     // A browser runtime that starts cold can take longer than a minute.
     expect(value.onError).not.toHaveBeenCalled();
+    // A press may also start the space's machine first (up to three minutes)
+    // and then its browser, so two minutes is not the end of it.
+    await advance(120_000);
+    expect(value.onError).not.toHaveBeenCalled();
     await advance(60_000);
     expect(await attempt.result).toMatchObject({ message: expect.stringContaining("not ready") });
+    expect(value.activate).toHaveBeenCalledWith("shared", null);
+    expect(value.onError).toHaveBeenCalled(); expect(value.continueTask).not.toHaveBeenCalled();
+    value.open = true; value.sharedReady = true; await render(); const retry = await begin(); await advance();
+    expect(await retry.result).toBeNull(); expect(value.continueTask).toHaveBeenCalledTimes(1);
+  });
+
+  it("bounds a press for the browser on this device at two minutes and retains a retry path", async () => {
+    await render(); const attempt = await begin(); await advance(60_100);
+    expect(value.onError).not.toHaveBeenCalled();
+    await advance(60_000);
+    expect(await attempt.result).toMatchObject({ message: expect.stringContaining("not ready") });
+    expect(value.activate).toHaveBeenCalledWith("personal", null);
     expect(value.onError).toHaveBeenCalled(); expect(value.continueTask).not.toHaveBeenCalled();
     value.open = true; value.personalReady = true; await render(); const retry = await begin(); await advance();
     expect(await retry.result).toBeNull(); expect(value.continueTask).toHaveBeenCalledTimes(1);

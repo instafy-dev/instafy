@@ -2,7 +2,8 @@ import type { ControllerRuntimeStatusEntry } from "../../../services/runtimeCont
 import type { ChatMessage } from "../types";
 import {
   isManagedInstafyCloudProvider,
-  listBrowserRuntimeCandidates,
+  listBrowserSessionCandidates,
+  runtimeEntryIsLazyBrowserHost,
 } from "./browserSessionRuntimeEnsure";
 import { browserRequestJobId, readBrowserRequestOf } from "./browserRequest";
 import { getMessageType } from "./chatMessageMetadata";
@@ -97,7 +98,9 @@ export function browserAutoStartPlan(input: BrowserAutoStartPlanInput): BrowserA
   // would open.
   const projectId = input.projectId?.trim() ?? "";
   if (!projectId || !input.runtimes) return { kind: "button", reason: null };
-  const sessions = listBrowserRuntimeCandidates([...input.runtimes]);
+  // Only separate browser session machines count as a running session; the
+  // space's own machine with Instafy's browser on demand is not one.
+  const sessions = listBrowserSessionCandidates([...input.runtimes]);
   if (sessions.length > 1) return { kind: "button", reason: BROWSER_AUTO_START_COPY.severalSessions };
   // Whoever started it: the controller does not record that.
   if (sessions.length === 1) return { kind: "button", reason: BROWSER_AUTO_START_COPY.otherSession };
@@ -106,6 +109,9 @@ export function browserAutoStartPlan(input: BrowserAutoStartPlanInput): BrowserA
   const machines = input.runtimes.filter(isLiveHostedMachine);
   if (machines.length === 0) return { kind: "button", reason: BROWSER_AUTO_START_COPY.firstMachine };
   if (machines.length > 1) return { kind: "button", reason: BROWSER_AUTO_START_COPY.anotherMachine };
+  // Instafy's browser on the space's own machine opens in place; a press
+  // neither restarts nor adds a machine.
+  if (runtimeEntryIsLazyBrowserHost(machines[0])) return { kind: "button", reason: null };
   const displayName = machines[0]!.displayName?.trim().toLowerCase() ?? "";
   return {
     kind: "button",

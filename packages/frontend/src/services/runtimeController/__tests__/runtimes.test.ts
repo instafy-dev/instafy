@@ -58,6 +58,8 @@ describe("fetchRuntimeStatus", () => {
     await expect(fetchRuntimeStatus({ projectId: "project/one", accessToken: "provided-session" })).resolves.toEqual({
       ...snapshot,
       runtimes: [{ ...snapshot.runtimes[0], runtimeImage: "image@sha256:example" }],
+      // An older controller sends no browser-host policy.
+      sharedBrowserHostPolicy: null,
     });
     expect(resolveContext).toHaveBeenCalledWith("provided-session");
     expect(fetch).toHaveBeenCalledWith("https://controller.test/projects/project%2Fone/runtime/status", {
@@ -66,6 +68,42 @@ describe("fetchRuntimeStatus", () => {
     });
     expect(vi.getTimerCount()).toBe(0);
   });
+
+  it("reads the browser-host policy and keeps only the known host shape on entries", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({
+      preferredRuntimeId: null,
+      sharedBrowserHostPolicy: "covered",
+      runtimes: [
+        { runtimeId: "host", sharedBrowserHost: { version: 1, mode: "lazy" } },
+        { runtimeId: "future", sharedBrowserHost: { version: 2, mode: "lazy" } },
+        { runtimeId: "plain" },
+      ],
+    })));
+    const result = await fetchRuntimeStatus({ projectId: "project-1" });
+    expect(result?.sharedBrowserHostPolicy).toBe("covered");
+    expect(result?.runtimes.map((entry) => entry.sharedBrowserHost ?? null)).toEqual([
+      { version: 1, mode: "lazy" },
+      null,
+      null,
+    ]);
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({ runtimes: [], sharedBrowserHostPolicy: "sometimes" })));
+    expect((await fetchRuntimeStatus({ projectId: "project-1" }))?.sharedBrowserHostPolicy).toBeNull();
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({ runtimes: [], sharedBrowserHostPolicy: "off" })));
+    expect((await fetchRuntimeStatus({ projectId: "project-1" }))?.sharedBrowserHostPolicy).toBe("off");
+  });
+
+  it.each(["off", undefined, "sometimes"])(
+    "drops a host marker unless the space is covered (policy %s)",
+    async (policy) => {
+      vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({
+        preferredRuntimeId: null,
+        ...(policy === undefined ? {} : { sharedBrowserHostPolicy: policy }),
+        runtimes: [{ runtimeId: "host", sharedBrowserHost: { version: 1, mode: "lazy" } }],
+      })));
+      const result = await fetchRuntimeStatus({ projectId: "project-1" });
+      expect(result?.runtimes[0]?.sharedBrowserHost).toBeUndefined();
+    },
+  );
 
   it.each(["credentials", "request", "success body", "error body"])(
     "settles a stalled %s so browser discovery and refresh can retry",

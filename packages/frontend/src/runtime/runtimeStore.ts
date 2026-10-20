@@ -13,6 +13,7 @@ import type {
   ControllerRuntimeStatusEntry,
   ControllerTunnelGrant,
   LocalWorkspacePresence,
+  SharedBrowserHostPolicy,
 } from "../sdk/instafy";
 
 export interface AgentTokenSnapshot {
@@ -42,6 +43,11 @@ export interface RuntimeStoreState {
   desktopOriginProjectId: string | null;
   runtimeStatuses: ControllerRuntimeStatusEntry[];
   preferredRuntimeId: string | null;
+  /**
+   * Whether this space opens Instafy's browser on its own machine, from the
+   * last runtime status answer; null when unknown or from an older controller.
+   */
+  sharedBrowserHostPolicy: SharedBrowserHostPolicy | null;
   sessionRuntimeId: string | null;
   agentTokens: Record<string, AgentTokenSnapshot>;
   tunnelGrants: Record<string, ControllerTunnelGrant>;
@@ -72,6 +78,8 @@ export type RuntimeAction =
       type: "setRuntimeStatuses";
       statuses: ControllerRuntimeStatusEntry[];
       preferredRuntimeId: string | null;
+      /** Omitted (null) when the answer did not carry it. */
+      sharedBrowserHostPolicy?: SharedBrowserHostPolicy | null;
     }
   | {
       type: "applyOriginSummary";
@@ -120,6 +128,7 @@ export function createInitialRuntimeStoreState(): RuntimeStoreState {
     desktopOriginProjectId: null,
     runtimeStatuses: [],
     preferredRuntimeId: null,
+    sharedBrowserHostPolicy: null,
     sessionRuntimeId: null,
     agentTokens: {},
     tunnelGrants: {},
@@ -738,6 +747,7 @@ export function runtimeReducer(
         ...state,
         runtimeStatuses: statusesWithTokens,
         preferredRuntimeId: action.preferredRuntimeId,
+        sharedBrowserHostPolicy: action.sharedBrowserHostPolicy ?? null,
         agentTokens: nextAgentTokens,
         tunnelGrants: nextTunnelGrants,
       };

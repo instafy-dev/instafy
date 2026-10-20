@@ -64,6 +64,13 @@ import {
   waitForBrowserRuntimeOrigin,
 } from "./browserSessionRuntimeEnsure";
 import {
+  liveSharedBrowserHostCandidate,
+  SHARED_BROWSER_HOST_COPY,
+  shouldStartSpaceMachineForBrowser,
+  startSpaceMachineForBrowser,
+  waitForSharedBrowserHostReady,
+} from "./sharedBrowserHostAttach";
+import {
   SharedBrowserChrome,
   type SharedBrowserChromeProps,
 } from "./SharedBrowserChrome";
@@ -136,6 +143,11 @@ type BrowserSessionRfbModule = {
   RFB?: BrowserSessionRfbConstructor;
 };
 const BROWSER_RUNTIME_DISPLAY_NAME = "Browser session";
+export const CLEAR_SHARED_BROWSER_HOST_DATA_CONFIRMATION =
+  "Clear Shared Browser data for everyone in this space? This signs everyone out of websites, deletes shared cookies and site data, and restarts this space's machine, which stops its previews and terminals. This cannot be undone.";
+export const CLEAR_SHARED_BROWSER_HOST_DATA_BUSY_NOTE = "Octo's running work in this space stops too.";
+const CLEAR_SHARED_BROWSER_HOST_DATA_SUCCESS =
+  "Shared Browser data cleared. Restarting this space's machine…";
 const controllerBaseUrl = controllerClient.core.baseUrl;
 const CDP_SCREENCAST_REQUESTED =
   (import.meta.env.VITE_INSTAFY_SHARED_BROWSER_CDP_SCREENCAST ?? "").trim() === "1";
@@ -441,6 +453,11 @@ export function BrowserSessionModal({
   sharedBrowserRfbCapabilities = null,
   sharedBrowserWebRtcCapabilities = null,
   onPresenceChange,
+  ensureSpaceMachine = null,
+  conversationRuntimeId = null,
+  attachOnly = false,
+  openedByPerson = true,
+  spaceBusy = false,
 }: {
   isOpen: boolean;
   onOpenChange: (open: boolean) => void;
@@ -482,6 +499,28 @@ export function BrowserSessionModal({
   sharedBrowserWebRtcCapabilities?: RuntimeBrowserSessionCapabilities["webrtc"] | null;
   /** Who else is in this browser, from its collaboration roster; null once it closes. */
   onPresenceChange?: ((presence: SharedBrowserPresence | null) => void) | null;
+  /**
+   * Starts this space's own machine (the generic hosted ensure), for a press
+   * that opens Instafy's browser while the machine is not running. Null when
+   * the person cannot start it.
+   */
+  ensureSpaceMachine?: (() => Promise<boolean>) | null;
+  /** The machine the conversation runs on; the cold path waits for it. */
+  conversationRuntimeId?: string | null;
+  /**
+   * Set for an open Studio started by itself: it only attaches to the
+   * space's running machine and never starts or ensures one.
+   */
+  attachOnly?: boolean;
+  /**
+   * False for an open Studio restored by itself (a reload or a return to the
+   * conversation with the browser left open): it never starts the space's
+   * machine until the person presses Retry. A press, a link or a card that
+   * opens the browser leaves it true.
+   */
+  openedByPerson?: boolean;
+  /** Some run is actively progressing in this space. */
+  spaceBusy?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [containerNode, setContainerNode] = useState<HTMLDivElement | null>(null);
@@ -579,6 +618,19 @@ export function BrowserSessionModal({
   const webRtcProjectIdRef = useRef<string | null>(null);
   const preferRuntimeIdRef = useRef(preferRuntimeId);
   const humanInputEnabledRef = useRef(humanInputEnabled);
+  const ensureSpaceMachineRef = useRef(ensureSpaceMachine);
+  const conversationRuntimeIdRef = useRef(conversationRuntimeId);
+  const attachOnlyRef = useRef(attachOnly);
+  const openedByPersonRef = useRef(openedByPerson);
+  // Set by the person's own actions inside this open (Retry, Clear data):
+  // they may start the space's machine even when the open itself was
+  // automatic (`attachOnly`) or restored. Cleared when the browser closes or
+  // its scope changes.
+  const personRetryRef = useRef(false);
+  ensureSpaceMachineRef.current = ensureSpaceMachine;
+  conversationRuntimeIdRef.current = conversationRuntimeId;
+  attachOnlyRef.current = attachOnly;
+  openedByPersonRef.current = openedByPerson;
   preferRuntimeIdRef.current = preferRuntimeId;
   humanInputEnabledRef.current = humanInputEnabled;
   webRtcConnectionRef.current = webRtcConnection;
@@ -637,6 +689,11 @@ export function BrowserSessionModal({
   const [runtimeChoice, setRuntimeChoice] = useState<{ scope: string; runtimeId: string } | null>(null);
   const [sessionIdentity, setSessionIdentity] = useState<{ scope: string; runtimeId: string } | null>(null);
   const [sessionChooserOpen, setSessionChooserOpen] = useState(false);
+  // Set while the open session is Instafy's browser on the space's own
+  // machine ("attach mode"): no new sessions, no runtime-limit takeover, and
+  // Clear data restarts that same machine.
+  const [hostAttach, setHostAttach] = useState<{ scope: string; runtimeId: string } | null>(null);
+  const attachMode = hostAttach?.scope === selectionScope;
   const sessionControlsVisible = isOpen && transportActive;
   const sessionControlsVisibleRef = useRef(sessionControlsVisible);
   sessionControlsVisibleRef.current = sessionControlsVisible;
@@ -655,7 +712,9 @@ export function BrowserSessionModal({
     setRuntimeChoice(null);
     setSessionIdentity(null);
     setSessionChooserOpen(false);
+    setHostAttach(null);
     pinnedSessionRef.current = null;
+    personRetryRef.current = false;
   }, [selectionScope]);
   const chosenRuntimeId = runtimeChoice?.scope === selectionScope ? runtimeChoice.runtimeId : null;
   const selectedSessionRuntimeId = sessionIdentity?.scope === selectionScope ? sessionIdentity.runtimeId : null;
@@ -689,12 +748,12 @@ export function BrowserSessionModal({
     setConnectAttempt((value) => value + 1);
   }, [selectionScope, sessionChoices]);
   const startNewSession = useCallback(() => {
-    if (!canControlBrowser || !projectId || !window.confirm("Start a separate Shared Browser session? This does not close another running session. Saved logins are restored only when this space has persistence enabled.")) return;
+    if (attachMode || !canControlBrowser || !projectId || !window.confirm("Start a separate Shared Browser session? This does not close another running session. Saved logins are restored only when this space has persistence enabled.")) return;
     setSessionChooserOpen(false);
     setSessionChoices({ scope: selectionScope, candidates: [], loading: false, error: null });
     setForcedRuntimeId(generateUUID());
     setConnectAttempt((value) => value + 1);
-  }, [canControlBrowser, projectId, selectionScope]);
+  }, [attachMode, canControlBrowser, projectId, selectionScope]);
   const permittedSharedBrowserViewerKinds = useMemo(
     () =>
       humanInputEnabled
@@ -717,7 +776,9 @@ export function BrowserSessionModal({
     () => parseHostedRuntimeLimitError(error, runtimeLimitDetails),
     [error, runtimeLimitDetails],
   );
-  const limitReached = limitDetails.limitReached;
+  // Instafy's browser on the space's own machine never takes over another
+  // machine's slot, so attach mode has no limit takeover.
+  const limitReached = !attachMode && limitDetails.limitReached;
   const blockerRuntimeLabel =
     limitDetails.blockerRuntimeLabel ?? "Active runtime";
   const blockerProjectLabel = limitDetails.blockerProjectLabel?.trim() || null;
@@ -733,7 +794,7 @@ export function BrowserSessionModal({
         ? "The team's Instafy Cloud runtime is already in use."
         : `All ${limitDetails.maxActiveCount} Instafy Cloud runtimes for this team are in use.`
       : "All Instafy Cloud runtime slots are in use.";
-  const hasTakeoverBlocker = Boolean(limitDetails.blockerRuntimeId);
+  const hasTakeoverBlocker = !attachMode && Boolean(limitDetails.blockerRuntimeId);
   const setContainerElement = useCallback((node: HTMLDivElement | null) => {
     containerRef.current = node;
     setContainerNode((current) => (current === node ? current : node));
@@ -930,6 +991,9 @@ export function BrowserSessionModal({
   }, []);
 
   const retryConnection = useCallback(() => {
+    // Only the person's own actions call this (Retry, Try again, Clear data);
+    // automatic reconnects schedule their own attempt.
+    personRetryRef.current = true;
     if (reconnectTimerRef.current !== null) {
       window.clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
@@ -1047,7 +1111,31 @@ export function BrowserSessionModal({
       projectId,
     ],
   );
+  // A separate browser session claims the project's runtime while open, so
+  // generic recovery stands down while its ensure, takeover or recycle runs.
+  // Attach mode claims only while Clear data runs (the controller fails the
+  // reset if a managed machine relaunches before its recheck): otherwise
+  // generic recovery keeps the space's own machine up, and the cold path
+  // relies on the generic ensure.
+  const browserRuntimeClaimRef = useRef<{ projectId: string; release: () => void } | null>(null);
+  const releaseBrowserRuntimeClaim = useCallback(() => {
+    const claim = browserRuntimeClaimRef.current;
+    browserRuntimeClaimRef.current = null;
+    claim?.release();
+  }, []);
+  const holdBrowserRuntimeClaim = useCallback((claimProjectId: string) => {
+    if (browserRuntimeClaimRef.current?.projectId === claimProjectId) return;
+    browserRuntimeClaimRef.current?.release();
+    browserRuntimeClaimRef.current = {
+      projectId: claimProjectId,
+      release: beginBrowserRuntimeClaim(claimProjectId),
+    };
+  }, []);
   const handleBrowserDataClearStart = useCallback(() => {
+    // Keep generic recovery from relaunching the space's machine between the
+    // controller's stop and its recheck. The retry after the clear releases
+    // it again on the attach or cold path.
+    if (projectId) holdBrowserRuntimeClaim(projectId);
     setSessionChooserOpen(false);
     browserDataClearInFlightRef.current = true;
     browserConnectionGenerationRef.current += 1;
@@ -1077,25 +1165,29 @@ export function BrowserSessionModal({
     webRtcConnectionRef.current = null;
     webRtcProjectIdRef.current = null;
     runtimeDebugLog("browser-session:reset-start", { projectId });
-  }, [connectedScopeKey, projectId]);
+  }, [connectedScopeKey, holdBrowserRuntimeClaim, projectId]);
   const handleBrowserDataClearSettled = useCallback(
     (succeeded: boolean) => {
       browserDataClearInFlightRef.current = false;
       setBrowserDataClearInFlight(false);
-      if (succeeded) {
+      if (succeeded && !attachMode) {
         // Use a new ensure identity so a just-completed reset cannot reuse an
         // in-flight/coalesced ensure for the runtime that the controller stopped.
         setForcedRuntimeId(generateUUID());
       }
+      // In attach mode the controller stopped this space's own machine. The
+      // retry below finds the same runtime stopped and starts it again (the
+      // cold path), so Studio keeps that runtime id.
       runtimeDebugLog("browser-session:reset-settled", {
         projectId,
         succeeded,
+        attachMode,
       });
       // The reset endpoint may have stopped the viewer even when it returns an
       // error. Retry exactly once after either outcome to restore a useful tab.
       retryConnection();
     },
-    [projectId, retryConnection],
+    [attachMode, projectId, retryConnection],
   );
   const closeBrowserSession = useCallback(() => {
     if (connectedScopeKey) {
@@ -1154,10 +1246,14 @@ export function BrowserSessionModal({
 
   useEffect(() => {
     if (!isOpen || !projectId) {
+      releaseBrowserRuntimeClaim();
       return;
     }
-    return beginBrowserRuntimeClaim(projectId);
-  }, [isOpen, projectId]);
+    // Claimed from open, as before; attach mode and the cold path release it
+    // once the first status read shows they apply.
+    holdBrowserRuntimeClaim(projectId);
+    return releaseBrowserRuntimeClaim;
+  }, [holdBrowserRuntimeClaim, isOpen, projectId, releaseBrowserRuntimeClaim]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -1180,6 +1276,8 @@ export function BrowserSessionModal({
       setViewerOverride(null);
       setRuntimeLimitActionBusy(false);
       setForcedRuntimeId(null);
+      setHostAttach(null);
+      personRetryRef.current = false;
       setDesktopDockedCard(false);
       setFullscreen(false);
       return;
@@ -1247,9 +1345,82 @@ export function BrowserSessionModal({
       }
       const candidates = listBrowserRuntimeCandidates(statusEntries);
       setSessionChoices({ scope: selectionScope, candidates, loading: false, error: null });
+      const hostPolicy = statusSnapshot.sharedBrowserHostPolicy ?? null;
+      let attachHost = false;
       if (!forcedRuntimeId) {
-        const selection = resolveBrowserRuntimeSelection(statusEntries, exactRuntimeId);
+        let selection = resolveBrowserRuntimeSelection(statusEntries, exactRuntimeId);
+        if (selection.kind === "missing" && hostPolicy === "covered") {
+          // A stale pin in a covered space: open the space's own live
+          // browser instead, and re-pin it below.
+          const liveHost = liveSharedBrowserHostCandidate(statusEntries);
+          if (liveHost) selection = { kind: "selected", candidate: liveHost };
+        }
+        if (shouldStartSpaceMachineForBrowser({
+          policy: hostPolicy,
+          selection,
+          exactRuntimeId,
+          entries: statusEntries,
+        })) {
+          const ensureSpaceMachineForPress = ensureSpaceMachineRef.current;
+          const personRetry = personRetryRef.current;
+          if (attachOnlyRef.current && !personRetry) {
+            // Studio opened this by itself: it never starts a machine.
+            releaseBrowserRuntimeClaim();
+            setStatus("error");
+            setError(SHARED_BROWSER_HOST_COPY.machineStopped);
+            return;
+          }
+          const canStartSpaceMachine = canControlBrowser && Boolean(ensureSpaceMachineForPress);
+          if (canStartSpaceMachine && !openedByPersonRef.current && !personRetry) {
+            // A restored open (a reload or a return to the conversation)
+            // never wakes a machine that stopped while nobody was here.
+            releaseBrowserRuntimeClaim();
+            setStatus("error");
+            setError(SHARED_BROWSER_HOST_COPY.machineNotRunning);
+            return;
+          }
+          if (canStartSpaceMachine && ensureSpaceMachineForPress) {
+            // The cold path: start this space's own machine for the press
+            // and open its browser once it is up. The generic ensure skips
+            // while a browser claim is held, so none is.
+            releaseBrowserRuntimeClaim();
+            runtimeDebugLog("browser-session:space-machine-cold-start", {
+              projectId,
+              exactRuntimeId,
+            });
+            const coldStart = await startSpaceMachineForBrowser({
+              projectId,
+              pinnedRuntimeId: exactRuntimeId,
+              conversationRuntimeId: conversationRuntimeIdRef.current?.trim() || null,
+              ensureSpaceMachine: ensureSpaceMachineForPress,
+              fetchStatus: controllerClient.runtimes.fetchStatus,
+              signal: startupAbortController.signal,
+            });
+            if (connectionCancelled() || coldStart.kind === "cancelled") {
+              return;
+            }
+            if (coldStart.kind === "error") {
+              setStatus("error");
+              setError(coldStart.message);
+              return;
+            }
+            if (coldStart.kind === "attach") {
+              selection = { kind: "selected", candidate: coldStart.candidate };
+              setSessionChoices({
+                scope: selectionScope,
+                candidates: candidates.some((item) => item.runtimeId === coldStart.candidate.runtimeId)
+                  ? candidates
+                  : [...candidates, coldStart.candidate],
+                loading: false,
+                error: null,
+              });
+            }
+            // `legacy`: the machine came up without Instafy's browser on
+            // demand, so the original selection goes on as before.
+          }
+        }
         if (selection.kind === "choose" || selection.kind === "missing" || (selection.kind === "new" && !canControlBrowser)) {
+          holdBrowserRuntimeClaim(projectId);
           const message = selection.kind === "missing"
             ? "The requested Shared session is not available. Refresh or explicitly choose another session."
             : selection.kind === "new"
@@ -1272,13 +1443,30 @@ export function BrowserSessionModal({
           runtimeId = existingBrowserRuntime.runtimeId;
           originId = existingBrowserRuntime.originId;
           originEndpoint = existingBrowserRuntime.endpoint;
+          attachHost = existingBrowserRuntime.mode === "lazy";
           runtimeDebugLog("browser-session:reuse-runtime", {
             projectId,
             runtimeId,
             originId,
             originEndpoint,
+            mode: existingBrowserRuntime.mode,
           });
         }
+      }
+      if (attachHost && runtimeId) {
+        releaseBrowserRuntimeClaim();
+        setHostAttach({ scope: selectionScope, runtimeId });
+      } else {
+        holdBrowserRuntimeClaim(projectId);
+        setHostAttach(null);
+      }
+
+      if ((!runtimeId || !originId) && attachOnlyRef.current && !personRetryRef.current) {
+        // Studio opened this by itself: it never ensures a browser runtime.
+        releaseBrowserRuntimeClaim();
+        setStatus("error");
+        setError(SHARED_BROWSER_HOST_COPY.machineStopped);
+        return;
       }
 
       if (!runtimeId || !originId) {
@@ -1495,6 +1683,33 @@ export function BrowserSessionModal({
       pinnedSessionRef.current = { scope: selectionScope, runtimeId };
       setSessionIdentity({ scope: selectionScope, runtimeId });
 
+      if (attachHost) {
+        // Instafy's browser on the space's machine starts on demand: start
+        // it when it is idle and wait until it is ready before any viewer or
+        // capability-driven connection.
+        const hostWait = await waitForSharedBrowserHostReady({
+          projectId,
+          runtimeId,
+          browserSessionId,
+          canControl: canControlBrowser,
+          client: controllerClient.browserSessions,
+          signal: startupAbortController.signal,
+        });
+        if (connectionCancelled() || hostWait.kind === "cancelled") {
+          return;
+        }
+        runtimeDebugLog("browser-session:host-wait", {
+          projectId,
+          runtimeId,
+          result: hostWait.kind,
+        });
+        if (hostWait.kind === "error") {
+          setStatus("error");
+          setError(hostWait.message);
+          return;
+        }
+      }
+
       // Runtime discovery is also what unlocks the versioned capability
       // request in the parent. Do not briefly connect the legacy RFB lane and
       // then tear it down when the final WebRTC/CDP choice arrives.
@@ -1570,6 +1785,8 @@ export function BrowserSessionModal({
     selectionScope,
     sharedBrowserCapabilitiesAvailable,
     sharedBrowserCapabilitiesResolved,
+    holdBrowserRuntimeClaim,
+    releaseBrowserRuntimeClaim,
   ]);
 
   useEffect(() => {
@@ -2536,7 +2753,7 @@ export function BrowserSessionModal({
       candidates={sessionChoices.scope === selectionScope ? sessionChoices.candidates : []}
       error={sessionChoices.scope === selectionScope ? sessionChoices.error : null}
       selectionRequired={status === "selecting"}
-      canStart={canControlBrowser}
+      canStart={canControlBrowser && !attachMode}
       onOpenChange={(open) => { setSessionChooserOpen(open && sessionControlsVisible); if (open && sessionControlsVisible) void refreshSessionChoices(); }}
       onChoose={chooseSession}
       onStart={startNewSession}
@@ -2548,6 +2765,14 @@ export function BrowserSessionModal({
           onClearStart={handleBrowserDataClearStart}
           projectId={projectId}
           showStatus={onStatus}
+          {...(attachMode
+            ? {
+                confirmation: spaceBusy
+                  ? `${CLEAR_SHARED_BROWSER_HOST_DATA_CONFIRMATION} ${CLEAR_SHARED_BROWSER_HOST_DATA_BUSY_NOTE}`
+                  : CLEAR_SHARED_BROWSER_HOST_DATA_CONFIRMATION,
+                successMessage: CLEAR_SHARED_BROWSER_HOST_DATA_SUCCESS,
+              }
+            : {})}
         />
       </div> : null}
     >

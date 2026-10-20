@@ -58,26 +58,69 @@ function runtimeNameLooksBrowserCapable(
   );
 }
 
+/**
+ * A Shared Browser Studio can open:
+ * - `lazy`: Instafy's browser on the space's own machine, which the machine
+ *   starts on demand (the controller reports `sharedBrowserHost`);
+ * - `session`: a separate browser session machine (found by its name).
+ */
+export type BrowserRuntimeCandidateMode = "lazy" | "session";
+
 export interface BrowserRuntimeCandidate {
   runtimeId: string;
   originId: string;
   endpoint: string | null;
+  mode: BrowserRuntimeCandidateMode;
+}
+
+/** A separate browser session machine, by the name Studio gives it. */
+export function runtimeEntryLooksLikeBrowserSession(
+  entry: ControllerRuntimeStatusEntry | null | undefined,
+): boolean {
+  return runtimeNameLooksBrowserCapable(entry?.displayName);
+}
+
+/** The space's own machine reports Instafy's browser on demand. */
+export function runtimeEntryIsLazyBrowserHost(
+  entry: ControllerRuntimeStatusEntry | null | undefined,
+): boolean {
+  return entry?.sharedBrowserHost?.version === 1 && entry.sharedBrowserHost.mode === "lazy";
+}
+
+function runtimeEntryIsLiveManagedBrowserMachine(entry: ControllerRuntimeStatusEntry): boolean {
+  return isManagedInstafyCloudProvider(entry.provider) &&
+    entry.isPrivateSelfHosted !== true &&
+    runtimeEntryIsDispatchable(entry) &&
+    runtimeEntryHasOriginId(entry);
 }
 
 export function listBrowserRuntimeCandidates(
   entries: ControllerRuntimeStatusEntry[],
 ): BrowserRuntimeCandidate[] {
-  return entries.filter((entry) =>
-    isManagedInstafyCloudProvider(entry.provider) &&
-    entry.isPrivateSelfHosted !== true &&
-    runtimeEntryIsDispatchable(entry) &&
-    runtimeEntryHasOriginId(entry) &&
-    runtimeNameLooksBrowserCapable(entry.displayName),
-  ).map((entry) => ({
-    runtimeId: entry.runtimeId,
-    originId: entry.origin!.originId!.trim(),
-    endpoint: runtimeEntryOriginEndpoint(entry),
-  }));
+  const candidates: BrowserRuntimeCandidate[] = [];
+  for (const entry of entries) {
+    if (!runtimeEntryIsLiveManagedBrowserMachine(entry)) continue;
+    const mode: BrowserRuntimeCandidateMode | null = runtimeEntryIsLazyBrowserHost(entry)
+      ? "lazy"
+      : runtimeNameLooksBrowserCapable(entry.displayName)
+        ? "session"
+        : null;
+    if (!mode) continue;
+    candidates.push({
+      runtimeId: entry.runtimeId,
+      originId: entry.origin!.originId!.trim(),
+      endpoint: runtimeEntryOriginEndpoint(entry),
+      mode,
+    });
+  }
+  return candidates;
+}
+
+/** Only separate browser session machines, never the space's own machine. */
+export function listBrowserSessionCandidates(
+  entries: ControllerRuntimeStatusEntry[],
+): BrowserRuntimeCandidate[] {
+  return listBrowserRuntimeCandidates(entries).filter((candidate) => candidate.mode === "session");
 }
 
 export type BrowserRuntimeSelection =

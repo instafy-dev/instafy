@@ -92,7 +92,7 @@ export function SharedBrowserSessionControl({ runtimeId, resumeUrl, open, busy, 
             {error ? <p className="px-2.5 py-1 text-xs" role={selectionRequired ? "status" : "alert"}>{error}</p> : null}
             {candidates.map((candidate) => <Button key={candidate.runtimeId} size="sm" variant="ghost" isDisabled={busy}
               className="w-full justify-start text-left" onPress={() => onChoose(candidate.runtimeId)} aria-label={`Resume Shared session ${candidate.runtimeId}`}>
-              <span className="min-w-0 flex-1 truncate">Session {candidate.runtimeId.slice(0, 8)}</span>
+              <span className="min-w-0 flex-1 truncate">{candidate.mode === "lazy" ? "This space's machine" : `Session ${candidate.runtimeId.slice(0, 8)}`}</span>
               {candidate.runtimeId === runtimeId ? <><span className="text-xs text-slate-500 dark:text-slate-400">Current</span><Check className="h-4 w-4 shrink-0" aria-hidden="true" /></> : null}
             </Button>)}
           </div>

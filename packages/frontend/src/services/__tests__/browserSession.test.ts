@@ -16,8 +16,15 @@ import {
   fetchRuntimeBrowserSessionActions,
   fetchRuntimeBrowserSessionCapabilities,
   fetchRuntimeBrowserSessionPages,
+  fetchSharedBrowserHost,
   focusRuntimeBrowserSessionPage,
   isBrowserSessionUnavailableError,
+  isSharedBrowserHostRefusedError,
+  mapSharedBrowserHostPayload,
+  readBrowserErrorCode,
+  SharedBrowserHostRefusedError,
+  SharedBrowserHostTokenError,
+  startSharedBrowserHost,
   mapRuntimeBrowserSessionActionsPayload,
   mapRuntimeBrowserSessionCapabilitiesPayload,
   mapRuntimeBrowserSessionPagesPayload,
@@ -489,4 +496,113 @@ describe("mapRuntimeBrowserSessionActionsPayload", () => {
       cursor: 0,
     });
   });
+});
+
+describe("Instafy's browser on the space's machine", () => {
+  const hostBody = {
+    version: 1,
+    mode: "lazy",
+    state: "starting",
+    generation: "4b0f3d1e-8f5f-4c4e-9b8d-2f6a9b3c1d20",
+    failure: null,
+    startedByYou: true,
+    othersPresent: false,
+    controlledByOther: false,
+    agentRunActive: false,
+    agentRunStartedByYou: false,
+  };
+  const request = { projectId: "project-1", runtimeId: "runtime-1", browserSessionId: "browser-session-1" };
+
+  it("reads only version 1 in lazy mode and maps an unknown state to unknown", () => {
+    expect(mapSharedBrowserHostPayload(hostBody)).toEqual(hostBody);
+    expect(mapSharedBrowserHostPayload({ ...hostBody, version: 2 })).toBeNull();
+    expect(mapSharedBrowserHostPayload({ ...hostBody, mode: "eager" })).toBeNull();
+    expect(mapSharedBrowserHostPayload({ ...hostBody, othersPresent: "no" })).toBeNull();
+    expect(mapSharedBrowserHostPayload(null)).toBeNull();
+    expect(mapSharedBrowserHostPayload([])).toBeNull();
+    // A later state (for example a reset in progress) keeps older tabs polling.
+    expect(mapSharedBrowserHostPayload({ ...hostBody, state: "clearing" })).toMatchObject({ state: "unknown" });
+    expect(mapSharedBrowserHostPayload({ ...hostBody, state: "failed", failure: "chromium_failed" }))
+      .toMatchObject({ state: "failed", failure: "chromium_failed" });
+    expect(mapSharedBrowserHostPayload({ ...hostBody, generation: 42, failure: "not a token!" }))
+      .toMatchObject({ generation: null, failure: null });
+  });
+
+  it("parses an origin error code, and nothing else", () => {
+    expect(readBrowserErrorCode(JSON.stringify({ error: "x", code: "browser_host_not_ready" }))).toBe("browser_host_not_ready");
+    expect(readBrowserErrorCode("upstream timed out")).toBeNull();
+    expect(readBrowserErrorCode(JSON.stringify({ code: "Not A Code" }))).toBeNull();
+    expect(readBrowserErrorCode(JSON.stringify({ code: 7 }))).toBeNull();
+    expect(readBrowserErrorCode("")).toBeNull();
+  });
+
+  it("carries the code on an unavailable pages answer", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      JSON.stringify({ error: "Instafy's browser is not running", code: "browser_host_not_ready" }),
+      { status: 503, headers: { "retry-after": "1" } },
+    )));
+    const error = await fetchRuntimeBrowserSessionPages({ projectId: "project-1", browserSessionId: "browser-session-1" })
+      .catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(BrowserSessionUnavailableError);
+    expect(error).toMatchObject({ status: 503, code: "browser_host_not_ready" });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("bad gateway", { status: 502 })));
+    await expect(fetchRuntimeBrowserSessionPages({ projectId: "project-1", browserSessionId: "browser-session-1" }))
+      .rejects.toMatchObject({ status: 502, code: null });
+  });
+
+  it("reads the host with a browser-view token, pinned to the machine, never from a cache", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(hostBody)));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(fetchSharedBrowserHost(request)).resolves.toEqual(hostBody);
+    expect(requestOriginAccessTokenMock).toHaveBeenCalledWith(expect.objectContaining({
+      projectId: "project-1",
+      protocol: "http",
+      scopes: ["browser.view"],
+      preferRuntime: "runtime-1",
+      browserSessionId: "browser-session-1",
+    }));
+    expect(fetchMock).toHaveBeenCalledWith("https://origin.example.test/browser/host", expect.objectContaining({
+      headers: { authorization: "Bearer origin-token", accept: "application/json" },
+      cache: "no-store",
+    }));
+  });
+
+  it("maps host answers: 404 is no host, gateway errors are unavailable, others fail", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "not found", code: "not_found" }), { status: 404 })));
+    await expect(fetchSharedBrowserHost(request)).resolves.toBeNull();
+    for (const status of [502, 503, 504]) {
+      vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status })));
+      const error = await fetchSharedBrowserHost(request).catch((cause: unknown) => cause);
+      expect(isBrowserSessionUnavailableError(error)).toBe(true);
+      expect(error).toMatchObject({ status });
+    }
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("denied", { status: 403 })));
+    await expect(fetchSharedBrowserHost(request)).rejects.toThrow("browser host failed (403)");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ...hostBody, version: 2 }))));
+    await expect(fetchSharedBrowserHost(request)).rejects.toBeInstanceOf(BrowserSessionCapabilitiesIncompatibleError);
+    requestOriginAccessTokenMock.mockResolvedValueOnce(null);
+    await expect(fetchSharedBrowserHost(request)).rejects.toBeInstanceOf(SharedBrowserHostTokenError);
+  });
+
+  it("starts the host with a browser-control token and exactly the version body", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(hostBody), { status: 202 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(startSharedBrowserHost(request)).resolves.toEqual(hostBody);
+    expect(requestOriginAccessTokenMock).toHaveBeenCalledWith(expect.objectContaining({ scopes: ["browser.control"], preferRuntime: "runtime-1" }));
+    expect(fetchMock).toHaveBeenCalledWith("https://origin.example.test/browser/host/start", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ version: 1 }),
+    }));
+  });
+
+  it.each(["browser_host_stopping", "browser_host_poisoned", "machine_stopping"])(
+    "turns a refused start (%s) into a refusal with its code",
+    async (code) => {
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "refused", code }), { status: 409 })));
+      const error = await startSharedBrowserHost(request).catch((cause: unknown) => cause);
+      expect(error).toBeInstanceOf(SharedBrowserHostRefusedError);
+      expect(isSharedBrowserHostRefusedError(error)).toBe(true);
+      expect(error).toMatchObject({ code });
+    },
+  );
 });

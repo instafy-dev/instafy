@@ -6,6 +6,8 @@ import type { StatusIntent } from "../../../status/useStatus";
 
 export const CLEAR_SHARED_BROWSER_DATA_CONFIRMATION =
   "Clear Shared Browser data for everyone in this space? This signs everyone out of websites, deletes shared cookies and site data, and restarts the Shared Browser. This cannot be undone.";
+const CLEAR_SHARED_BROWSER_DATA_SUCCESS =
+  "Shared Browser data cleared. Starting a fresh browser…";
 
 type ShowStatus = (
   message: string,
@@ -19,12 +21,18 @@ export function SharedBrowserDataClearAction({
   onClearStart,
   onClearSettled,
   showStatus,
+  confirmation = CLEAR_SHARED_BROWSER_DATA_CONFIRMATION,
+  successMessage = CLEAR_SHARED_BROWSER_DATA_SUCCESS,
 }: {
   canClear: boolean;
   projectId: string | null;
   onClearStart: () => void;
   onClearSettled: (succeeded: boolean) => void;
   showStatus?: ShowStatus;
+  /** What the person confirms; the default fits a separate browser session. */
+  confirmation?: string;
+  /** Shown once the data is cleared. */
+  successMessage?: string;
 }) {
   const [clearing, setClearing] = useState(false);
   const clearingRef = useRef(false);
@@ -36,7 +44,7 @@ export function SharedBrowserDataClearAction({
     }
     if (
       typeof window !== "undefined" &&
-      !window.confirm(CLEAR_SHARED_BROWSER_DATA_CONFIRMATION)
+      !window.confirm(confirmation)
     ) {
       return;
     }
@@ -51,11 +59,7 @@ export function SharedBrowserDataClearAction({
       );
       succeeded = result.success;
       if (result.success) {
-        showStatus?.(
-          "Shared Browser data cleared. Starting a fresh browser…",
-          "success",
-          3500,
-        );
+        showStatus?.(successMessage, "success", 3500);
       } else {
         showStatus?.(
           result.error ?? "Unable to clear Shared Browser data.",
@@ -75,7 +79,7 @@ export function SharedBrowserDataClearAction({
       setClearing(false);
       onClearSettled(succeeded);
     }
-  }, [canClear, onClearSettled, onClearStart, projectId, showStatus]);
+  }, [canClear, confirmation, onClearSettled, onClearStart, projectId, showStatus, successMessage]);
 
   if (!canClear || !projectId?.trim()) {
     return null;

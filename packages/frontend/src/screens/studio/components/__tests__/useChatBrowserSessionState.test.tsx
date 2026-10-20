@@ -56,6 +56,40 @@ describe("useChatBrowserSessionState", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
+  it("tells a restored open from one made in this page", async () => {
+    const key = "instafy:browser-session:user-1:project-1:conversation-1";
+    window.sessionStorage.setItem(key, JSON.stringify({ open: true, runtimeId: "runtime-1", exactRuntimeId: "runtime-1" }));
+    await act(async () => {
+      root.render(<TestHarness resultRef={resultRef} />);
+    });
+    // Restored from storage: open, but never by this page.
+    expect(resultRef.current?.browserSessionOpen).toBe(true);
+    expect(resultRef.current?.browserSessionOpenedInPage).toBe(false);
+
+    await act(async () => {
+      resultRef.current?.handleBrowserSessionOpenChange(false);
+    });
+    expect(resultRef.current?.browserSessionOpenedInPage).toBe(false);
+    await act(async () => {
+      resultRef.current?.handleToggleBrowserSession();
+    });
+    expect(resultRef.current?.browserSessionOpenedInPage).toBe(true);
+
+    await act(async () => {
+      resultRef.current?.handleBrowserSessionOpenChange(false);
+    });
+    await act(async () => {
+      resultRef.current?.resumeBrowserSession("runtime-1");
+    });
+    expect(resultRef.current?.browserSessionOpenedInPage).toBe(true);
+
+    // Another scope starts over as restored.
+    await act(async () => {
+      root.render(<TestHarness resultRef={resultRef} projectId="project-2" />);
+    });
+    expect(resultRef.current?.browserSessionOpenedInPage).toBe(false);
+  });
+
   it("reopens a hidden browser session with its resolved runtime", async () => {
     await act(async () => {
       root.render(<TestHarness resultRef={resultRef} />);
@@ -125,6 +159,24 @@ describe("useChatBrowserSessionState", () => {
     await act(async () => root.render(<TestHarness resultRef={resultRef} />));
     expect(resultRef.current?.resolvedBrowserRuntimeId).toBe("saved-browser");
     expect(resultRef.current?.exactBrowserRuntimeId).toBe("saved-browser");
+  });
+
+  it("moves a stale exact pin to the space's own browser once the modal re-pins it", async () => {
+    // A pin to a browser that is gone: in a covered space the modal opens the
+    // space's own live browser instead and reports it, which replaces the pin.
+    const key = "instafy:browser-session:user-1:project-1:conversation-1";
+    window.sessionStorage.setItem(key, JSON.stringify({ open: true, runtimeId: "gone-browser", exactRuntimeId: "gone-browser" }));
+    await act(async () => root.render(<TestHarness resultRef={resultRef} />));
+    expect(resultRef.current?.exactBrowserRuntimeId).toBe("gone-browser");
+    await act(async () => resultRef.current?.handleBrowserRuntimeIdResolved("space-machine"));
+    expect(resultRef.current?.exactBrowserRuntimeId).toBe("space-machine");
+    expect(resultRef.current?.resolvedBrowserRuntimeId).toBe("space-machine");
+    expect(setSessionRuntimeOverride).toHaveBeenLastCalledWith("space-machine");
+    expect(JSON.parse(window.sessionStorage.getItem(key)!)).toMatchObject({ runtimeId: "space-machine", exactRuntimeId: "space-machine" });
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await act(async () => root.render(<TestHarness resultRef={resultRef} />));
+    expect(resultRef.current?.exactBrowserRuntimeId).toBe("space-machine");
   });
 
   it("clears an unavailable hidden runtime preference that was never confirmed", async () => {
