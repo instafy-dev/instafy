@@ -40,6 +40,8 @@ import { computeGitServicesImageFingerprint } from "./lib/gitServicesImageFinger
 import { resolveRustBinaryLaunch } from "./lib/prebuiltRustBinary.mjs";
 import { ensureLocalAuthorPseudonymKeys } from "./lib/localAuthorPseudonymKeys.mjs";
 import { ensureLocalUserTokenSecret } from "./lib/localUserTokenSecret.mjs";
+import { ensureLocalSecret } from "./lib/localSecret.mjs";
+import { localPreviewEnv } from "./lib/localPreviewEnv.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -139,6 +141,12 @@ const tunnelBrokerComposeOverride = path.join(tunnelBrokerDir, "docker-compose.s
 const tunnelBrokerFlag = path.join(repoRoot, "tmp", ".tunnel-broker-stack-started");
 const tunnelBrokerPort = Number(process.env.TUNNEL_BROKER_PORT || 8082);
 const tunnelBrokerBaseUrlDefault = `http://127.0.0.1:${tunnelBrokerPort}`;
+// The local Traefik's plain-HTTP port, where preview viewer hosts are served.
+const tunnelBrokerIngressPort = Number(process.env.PUBLIC_INGRESS_PORT || 8083);
+// The broker calls the controller's hooks with this bearer. It is random per
+// checkout and kept here so restarts agree: the dev controller listens on every
+// interface, so a well-known value would open its hooks to the network.
+const tunnelBrokerHookSecretPath = path.join(repoRoot, "tmp", "tunnel-broker-hook-secret");
 
 // ───────────────────────── helpers ─────────────────────────
 function run(command, args, options = {}) {
@@ -1886,6 +1894,26 @@ async function stopGitCompose(options = {}) {
   }
 }
 
+/**
+ * Private preview settings for the broker this script starts and for the
+ * controller beside it (docs/Previews.md); `{}` when `PREVIEW_DOMAIN` is set
+ * empty. A hook secret already in `env` wins; otherwise one is kept per
+ * checkout.
+ */
+export function tunnelBrokerPreviewEnv(env = process.env) {
+  return localPreviewEnv({
+    env,
+    controllerPort,
+    ingressPort: tunnelBrokerIngressPort,
+    resolveHookSecret: () =>
+      ensureLocalSecret({
+        explicit: env.TUNNEL_BROKER_HOOK_SECRET || env.ACL_HOOK_TOKEN,
+        filePath: tunnelBrokerHookSecretPath,
+        label: "tunnel broker hook secret",
+      }),
+  });
+}
+
 async function startTunnelBrokerIngressIfNeeded() {
   if ((process.env.RUNTIME_SKIP_TUNNEL_BROKER || "").trim() === "1") {
     return { running: false, started: false, skipped: true };
@@ -1898,6 +1926,11 @@ async function startTunnelBrokerIngressIfNeeded() {
     }
     return { running: false, started: false, configured: true };
   }
+
+  // Private previews only for the broker this script starts. The broker, its
+  // ingress sidecar (compose) and the controller (spawned with process.env)
+  // read the same values.
+  Object.assign(process.env, tunnelBrokerPreviewEnv(process.env));
 
   console.log("[runtime-dev] Launching tunnel-broker ingress fixture...");
   run(
