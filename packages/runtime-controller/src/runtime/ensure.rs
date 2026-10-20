@@ -34,8 +34,9 @@ use super::db::{
 };
 use super::lease::{parse_lease_scope, RuntimeLeaseScope};
 use super::limit_waits::{
-    is_runtime_limit_refusal, record_hosted_runtime_limit_refusal, LimitWaitEnsureRequest,
-    LimitWaitSource,
+    is_provider_launch_failure, is_runtime_limit_refusal, record_hosted_runtime_limit_refusal,
+    LimitWaitEnsureRequest, LimitWaitSource, PROVIDER_LAUNCH_FAILED_CODE,
+    RUNTIME_LIMIT_REACHED_CODE,
 };
 use super::provider::{
     apply_browser_profile_persistence_policy, apply_controller_turn_credentials,
@@ -986,6 +987,7 @@ async fn reclaim_idle_hosted_runtime_blocker(
                     runtime.project_id,
                     &wait_request,
                     LimitWaitSource::Server,
+                    RUNTIME_LIMIT_REACHED_CODE,
                 )
                 .await;
             }
@@ -2010,9 +2012,10 @@ fn is_stalled_launch(
 }
 
 /// [`ensure_runtime_launch`] for a request that must not be forgotten when the
-/// organization's hosted runtime limit refuses it: the refusal is recorded so
-/// the limit-wait sweep can replay this exact request once work is queued in
-/// the space and a slot may be free (see `limit_waits.rs`).
+/// organization's hosted runtime limit refuses it, or the provider fails to
+/// start it: the refusal is recorded so the limit-wait sweep can replay this
+/// exact request while work is queued in the space, and gives that work a
+/// plain failure if no machine starts (see `limit_waits.rs`).
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn ensure_runtime_launch_recording_limit_wait(
     state: &AppState,
@@ -2053,9 +2056,22 @@ pub(super) async fn ensure_runtime_launch_recording_limit_wait(
     )
     .await;
     if let Err(error) = &result {
-        if is_runtime_limit_refusal(error) {
-            record_hosted_runtime_limit_refusal(state, project_id, &wait_request, wait_source)
-                .await;
+        let code = if is_runtime_limit_refusal(error) {
+            Some(RUNTIME_LIMIT_REACHED_CODE)
+        } else if is_provider_launch_failure(error) {
+            Some(PROVIDER_LAUNCH_FAILED_CODE)
+        } else {
+            None
+        };
+        if let Some(code) = code {
+            record_hosted_runtime_limit_refusal(
+                state,
+                project_id,
+                &wait_request,
+                wait_source,
+                code,
+            )
+            .await;
         }
     }
     result
