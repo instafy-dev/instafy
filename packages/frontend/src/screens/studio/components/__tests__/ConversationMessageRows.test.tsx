@@ -392,10 +392,18 @@ describe("ConversationMessageRows", () => {
     } } });
     const preview = createMessage({ id: "preview-card", content: "Site preview is ready to preview.", messageType: "action_request",
       metadata: metadata({ preview: { previewId: "11111111-1111-4111-8111-111111111111", port: 4173, path: "/" } }) });
-    // A URL where the id belongs is not a preview: the generic card draws it, with no preview behaviour.
+    // A URL where the id belongs is not a preview: the generic card draws it,
+    // with no preview behaviour and none of the card's own actions, so it
+    // offers no Open that goes nowhere.
     const generic = createMessage({ id: "generic-card", content: "Site preview is ready to preview.", messageType: "action_request",
       metadata: metadata({ preview: { previewId: "https://p-x--y.preview.test/", port: 4173 } }) });
-    await renderSpeakerBoundaryMessages([preview, generic]);
+    // A card that declares no preview keeps its actions.
+    const other = createMessage({ id: "other-card", content: "Pick one.", messageType: "action_request",
+      metadata: { messageType: "action_request", details: { messageType: "action_request", details: {
+        testId: "other-action-card", title: "Pick one",
+        actions: [{ id: "go", label: "Go", event: "instafy:something-else", testId: "other-action-go" }],
+      } } } });
+    await renderSpeakerBoundaryMessages([preview, generic, other]);
     const rowOf = (element: Element | null | undefined) =>
       element?.closest("[data-chat-scroll-message-id]")?.getAttribute("data-chat-scroll-message-id");
     const cards = container.querySelectorAll('[data-testid="preview-ready-card"]');
@@ -403,6 +411,8 @@ describe("ConversationMessageRows", () => {
     expect(rowOf(cards[0])).toBe("preview-card");
     expect(cards[0].textContent).toContain("Checking…");
     expect(rowOf(container.querySelector('[data-testid="generic-action-card"]'))).toBe("generic-card");
+    expect(container.querySelector('[data-testid="generic-action-card"] button')).toBeNull();
+    expect(rowOf(container.querySelector('[data-testid="other-action-go"]'))).toBe("other-card");
   });
 
   it("renders normal chat messages without decorative corner notches", async () => {

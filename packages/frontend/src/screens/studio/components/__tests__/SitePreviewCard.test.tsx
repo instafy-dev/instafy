@@ -33,6 +33,13 @@ describe("SitePreviewCard", () => {
   let container: HTMLDivElement;
   let opener: ConversationPreviewOpener | null;
 
+  // One minute at a time, so each step's re-render sets the next timer.
+  async function advanceMinutes(minutes: number) {
+    for (let minute = 0; minute < minutes; minute += 1) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    }
+  }
+
   async function render() {
     await act(async () => root.render(
       <ConversationPreviewContext.Provider value={opener}>
@@ -93,15 +100,25 @@ describe("SitePreviewCard", () => {
     expect(openButton()?.disabled).toBe(false);
   });
 
-  it("reads Live when the broker could not be asked", async () => {
+  // Live needs proof: a probe that saw the site answer on an active tunnel.
+  it("says Status unavailable, never Live, when the broker could not probe the site", async () => {
     mocks.getSitePreview.mockResolvedValue(server({ health: null }));
     await render();
-    expect(status().textContent).toBe("Live");
+    expect(status().dataset.state).toBe("unavailable");
+    expect(status().textContent).toBe("Status unavailable");
+  });
+
+  it("reads Checking, never Live, while the tunnel is not active yet", async () => {
+    mocks.getSitePreview.mockResolvedValue(server({ status: "issuing" }));
+    await render();
+    expect(status().dataset.state).toBe("checking");
+    expect(status().textContent).toBe("Checking…");
   });
 
   it.each([
     ["the preview is gone", () => mocks.getSitePreview.mockRejectedValue(apiError(404))],
     ["this viewer may not see it", () => mocks.getSitePreview.mockRejectedValue(apiError(403))],
+    ["the controller says it stopped", () => mocks.getSitePreview.mockRejectedValue(apiError(409))],
     ["its grant is revoked on the controller", () => mocks.getSitePreview.mockResolvedValue(server({ status: "revoked" }))],
     ["a tunnel event revoked its grant", () => {
       mocks.getSitePreview.mockResolvedValue(server());
@@ -125,13 +142,76 @@ describe("SitePreviewCard", () => {
 
   it("says Status unavailable after a failed check, and asks again", async () => {
     vi.useFakeTimers();
-    mocks.getSitePreview.mockRejectedValueOnce(apiError(503));
+    mocks.getSitePreview.mockRejectedValueOnce(apiError(500));
     mocks.getSitePreview.mockResolvedValue(server());
     await render();
-    expect(status().dataset.state).toBe("checking");
+    expect(status().dataset.state).toBe("unavailable");
     expect(status().textContent).toBe("Status unavailable");
     await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
     expect(mocks.getSitePreview).toHaveBeenCalledTimes(2);
+    expect(status().textContent).toBe("Live");
+  });
+
+  it("stops asking after a few failed checks, until a press", async () => {
+    vi.useFakeTimers();
+    mocks.getSitePreview.mockRejectedValue(new TypeError("Failed to fetch"));
+    await render();
+    await advanceMinutes(10);
+    // The first check and four retries, then nothing for the rest of the ten minutes.
+    expect(mocks.getSitePreview).toHaveBeenCalledTimes(5);
+    expect(status().textContent).toBe("Status unavailable");
+
+    mocks.getSitePreview.mockResolvedValue(server());
+    await act(async () => openButton()!.click());
+    expect(mocks.getSitePreview).toHaveBeenCalledTimes(6);
+    expect(status().textContent).toBe("Live");
+  });
+
+  it.each([
+    ["previews are not configured", 503],
+    ["the session is gone", 401],
+  ])("asks once and stops when %s", async (_name, code) => {
+    vi.useFakeTimers();
+    mocks.getSitePreview.mockRejectedValue(apiError(code));
+    await render();
+    await advanceMinutes(10);
+    expect(mocks.getSitePreview).toHaveBeenCalledTimes(1);
+    expect(status().textContent).toBe("Status unavailable");
+  });
+
+  it("waits for the page to be visible before it retries", async () => {
+    vi.useFakeTimers();
+    let visibility: DocumentVisibilityState = "hidden";
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => visibility });
+    try {
+      mocks.getSitePreview.mockRejectedValueOnce(apiError(500));
+      mocks.getSitePreview.mockResolvedValue(server());
+      await render();
+      await advanceMinutes(3);
+      expect(mocks.getSitePreview).toHaveBeenCalledTimes(1);
+      visibility = "visible";
+      await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+      expect(mocks.getSitePreview).toHaveBeenCalledTimes(2);
+      expect(status().textContent).toBe("Live");
+    } finally {
+      // Back to jsdom's own (visible) value.
+      delete (document as { visibilityState?: unknown }).visibilityState;
+    }
+  });
+
+  it("follows a site that is not responding for a while, then stops until a tunnel event", async () => {
+    vi.useFakeTimers();
+    mocks.getSitePreview.mockResolvedValue(server({ health: { listening: false, status: null } }));
+    await render();
+    await advanceMinutes(60);
+    // The first check and eight follow-ups, then nothing for the rest of the hour.
+    expect(mocks.getSitePreview).toHaveBeenCalledTimes(9);
+
+    // A tunnel event for the preview asks again, and the site is back.
+    mocks.getSitePreview.mockResolvedValue(server());
+    mocks.runtime = { tunnelGrants: { [PREVIEW_ID]: { id: PREVIEW_ID, tunnelId: "tunnel-1", status: "issuing" } }, runtimeStatuses: [] };
+    await render();
+    expect(mocks.getSitePreview).toHaveBeenCalledTimes(10);
     expect(status().textContent).toBe("Live");
   });
 

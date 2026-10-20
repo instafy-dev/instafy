@@ -20,6 +20,16 @@ export function isSitePreviewId(value: unknown): value is string {
  * never read, so a look-alike card can at most ask the controller about a
  * preview this viewer may already open.
  */
+/**
+ * Whether a stored card declares a site preview at all (its details carry a
+ * `preview`), whether or not `sitePreviewFromMessage` accepts what it names.
+ */
+export function declaresSitePreview(message: ChatMessage): boolean {
+  if (getMessageType(message) !== "action_request") return false;
+  const value = extractMessageDetails(message.metadata)?.preview;
+  return value !== undefined && value !== null;
+}
+
 export function sitePreviewFromMessage(message: ChatMessage): SitePreviewRequest | null {
   if (message.role !== "assistant") return null;
   if (getMessageType(message) !== "action_request") return null;

@@ -4,8 +4,7 @@ import type { ChatMessage } from "../types";
 import { isRecoverableRuntimeStartAlert as runtimeStartAlertIsRecoverable } from "./runtimeAlertPresentation";
 import { normalizeAssistantStatusText } from "./assistantStatusHeuristics";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
-import { isGenericProgressLabel } from "./threadPreviewHelpers";
-import { sitePreviewFromMessage } from "./sitePreviewRequest";
+import { isGenericProgressLabel, THREAD_ACTION_CARD_TYPES } from "./threadPreviewHelpers";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -444,9 +443,10 @@ export function synthesizeAgentJobThreadMessages(
       return;
     }
     if (multiAgentWorkerJobIds.has(jobId)) {
-      // A lane's work stays behind the Team plan card, but a site it started
-      // is what the person waits for: its "Ready to preview" card stays here.
-      if (sitePreviewFromMessage(message)) {
+      // A lane's work stays behind the Team plan card, but a card that asks
+      // the person for something (an input, a secret, an integration, a look
+      // at a site) is theirs to answer: it stays in the main transcript.
+      if (THREAD_ACTION_CARD_TYPES.has((getMessageType(message) ?? "").trim().toLowerCase())) {
         output.push(message);
       }
       return;
