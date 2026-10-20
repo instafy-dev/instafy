@@ -716,9 +716,10 @@ const SKILL_START_PROMPT_BODY: &str = "Start them now, in this conversation. Wor
 /// does not block such a screen.
 ///
 /// The walk is opened whatever the kickoff's own runtime runs: Instafy's
-/// Shared Browser is a separate on-demand runtime, so the one running this
-/// turn never has `INSTAFY_ENABLE_BROWSER_SESSION` set. Studio disables the
-/// card where it knows no browser can open.
+/// Shared Browser runs on demand, either as a separate session runtime or as a
+/// browser the space's own machine starts when it is opened, so the runtime
+/// running this turn never has `INSTAFY_ENABLE_BROWSER_SESSION` set. Studio
+/// disables the card where it knows no browser can open.
 ///
 /// The sign-in is the person's: the task asks the walk to pause for it, and the
 /// browser turn's policy pauses with `request_human_input`, so the walk goes on
@@ -3369,8 +3370,9 @@ mod tests {
     /// The walk is opened whatever `INSTAFY_ENABLE_BROWSER_SESSION` says on the
     /// runtime building the kickoff (unset under `cargo test`, as on a hosted
     /// space's default runtime): Instafy's Shared Browser is a separate
-    /// runtime, and gating on the turn's own setting dropped the offer on
-    /// every hosted space.
+    /// session runtime or a browser the space's own machine starts on demand,
+    /// and gating on the turn's own setting dropped the offer on every hosted
+    /// space.
     #[test]
     fn build_skill_start_prompt_walks_to_the_list_and_sends_the_value_to_the_persons_own_tab() {
         let workspace = tempdir().expect("workspace");

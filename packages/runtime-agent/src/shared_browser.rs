@@ -41,7 +41,7 @@ pub const AGENT_CONTROL_FILE_ENV: &str = "INSTAFY_BROWSER_AGENT_CONTROL_FILE";
 pub const APPROVAL_DIR_ENV: &str = "INSTAFY_SHARED_BROWSER_APPROVAL_DIR";
 pub const APPROVAL_TIMEOUT_MS_ENV: &str = "INSTAFY_SHARED_BROWSER_APPROVAL_TIMEOUT_MS";
 pub const MCP_COMMAND: &str = "shared-browser-mcp";
-const DEFAULT_ACTIONS_FILE: &str = "/tmp/instafy/playwright/actions.jsonl";
+pub(crate) const DEFAULT_ACTIONS_FILE: &str = "/tmp/instafy/playwright/actions.jsonl";
 const DEFAULT_AGENT_CONTROL_FILE: &str = "/run/instafy/browser/agent-control.json";
 const DEFAULT_APPROVAL_DIR: &str = "/run/instafy/browser/approvals";
 const AGENT_CONTROL_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(3);
@@ -55,7 +55,13 @@ const BROWSER_REDACTION_SCRIPT: &str = include_str!("../../browser-action-policy
 const BROWSER_ACTION_POLICY_SCRIPT: &str =
     include_str!("../../browser-action-policy/actionPolicy.js");
 
-const SHARED_BROWSER_NODE_BINARY: &str = "/usr/bin/node";
+const DEFAULT_SHARED_BROWSER_NODE_BINARY: &str = "/usr/bin/node";
+/// The Node binaries the Shared Browser controller may run with: the image's
+/// default, or a lazy browser host's private copy.
+const ALLOWED_SHARED_BROWSER_NODE_BINARIES: [&str; 2] = [
+    DEFAULT_SHARED_BROWSER_NODE_BINARY,
+    crate::browser_host::mode::HOST_NODE_BINARY,
+];
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
 const MAX_URL_CHARS: usize = 4_096;
 const MAX_TEXT_CHARS: usize = 16_384;
@@ -127,6 +133,13 @@ pub struct SharedBrowserAgentControlGuard {
 static RUNTIME_RECYCLE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 fn recycle_runtime_after_unconfirmed_browser_shutdown() {
+    // A lazy browser host fails closed without ending the machine: the host
+    // is killed and refuses to start again until the process exits, and the
+    // marker stays in place, so origin keeps refusing human input.
+    if crate::browser_host::lazy_mode() {
+        crate::browser_host::poison();
+        return;
+    }
     #[cfg(test)]
     {
         RUNTIME_RECYCLE_REQUESTED.store(true, Ordering::SeqCst);
@@ -161,10 +174,17 @@ fn approval_dir_path() -> PathBuf {
 /// leftover marker cannot represent a still-running browser turn.
 pub fn clear_stale_agent_control_marker_on_startup() -> Result<()> {
     clear_stale_agent_control_marker_on_startup_for_mode(
-        browser_session_enabled(std::env::var(BROWSER_SESSION_ENV).ok().as_deref()),
+        runtime_runs_shared_browser_turns(),
         &agent_control_file_path(),
         &approval_dir_path(),
     )
+}
+
+/// The boot-time browser session or a lazy browser host: either may have
+/// left a marker from an earlier process.
+fn runtime_runs_shared_browser_turns() -> bool {
+    browser_session_enabled(std::env::var(BROWSER_SESSION_ENV).ok().as_deref())
+        || crate::browser_host::lazy_mode()
 }
 
 fn clear_stale_agent_control_marker_on_startup_for_mode(
@@ -1199,7 +1219,7 @@ async fn execute_request(request: &SharedBrowserRequest) -> Result<JsonValue> {
         .parent()
         .map(Path::to_path_buf)
         .context("Shared Browser controller executable has no trusted parent directory")?;
-    let mut command = Command::new(SHARED_BROWSER_NODE_BINARY);
+    let mut command = Command::new(shared_browser_node_binary());
     // The script is read from stdin. Linux caps one argv string at 128 KiB
     // (MAX_ARG_STRLEN), and the script with its embedded policy modules is
     // larger than that.
@@ -1277,6 +1297,27 @@ fn embedded_shared_browser_script() -> String {
 /// API on `globalThis`, where the controller script reads it.
 fn embedded_plain_script(source: &str) -> String {
     format!("(function (module, require) {{\n{source}\n}})(undefined, undefined);")
+}
+
+/// `INSTAFY_SHARED_BROWSER_NODE_BINARY` when it names an allowed binary,
+/// otherwise the image's default.
+fn shared_browser_node_binary() -> &'static str {
+    shared_browser_node_binary_from(
+        std::env::var(crate::browser_host::mode::SHARED_BROWSER_NODE_BINARY_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn shared_browser_node_binary_from(raw: Option<&str>) -> &'static str {
+    raw.map(str::trim)
+        .and_then(|value| {
+            ALLOWED_SHARED_BROWSER_NODE_BINARIES
+                .iter()
+                .copied()
+                .find(|allowed| *allowed == value)
+        })
+        .unwrap_or(DEFAULT_SHARED_BROWSER_NODE_BINARY)
 }
 
 fn browser_session_enabled(raw: Option<&str>) -> bool {

@@ -98,6 +98,12 @@ fn main() -> anyhow::Result<()> {
     // implicitly (a stale pin in a dev template used to override the controller this way).
     // SAFETY: no other thread exists yet.
     unsafe { runtime_agent::job_model::capture_and_scrub_launch_model() };
+    // Decide once whether this runtime hosts Instafy's browser on demand, from the launch
+    // metadata captured above, and in that mode fix the browser ports, paths and isolation
+    // settings origin, Codex and the profile code read from the environment.
+    // SAFETY: no other thread exists yet.
+    unsafe { runtime_agent::browser_host::capture_process_mode() }
+        .context("failed to capture the browser host mode")?;
     let runtime = build_tokio_runtime()?;
     let exit = runtime.block_on(async move { run_runtime_agent().await })?;
     if exit == AgentExit::SpaceDeleted {

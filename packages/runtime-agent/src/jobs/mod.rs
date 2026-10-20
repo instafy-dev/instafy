@@ -6058,11 +6058,12 @@ impl JobProcessor {
             .map(|raw| raw.trim().to_ascii_lowercase())
             .map(|raw| matches!(raw.as_str(), "1" | "true" | "yes" | "on"))
             .unwrap_or(false);
-        if explicit_shared_browser_execution && !runtime_is_browser_session {
-            bail!(
-                "Shared Browser job was routed to a runtime without INSTAFY_ENABLE_BROWSER_SESSION"
-            );
-        }
+        // A lazy browser host must be Ready; the guard keeps it from its idle
+        // stop for the whole job and is taken before the readiness check.
+        let _browser_host_job = crate::browser_host::admit_shared_browser_job(
+            explicit_shared_browser_execution,
+            runtime_is_browser_session,
+        )?;
         // Shared Browser marker health is an input-authority boundary. Ensure
         // this lane always owns a cancellation signal so a heartbeat write
         // failure can stop the agent before its last valid marker expires.
@@ -30695,9 +30696,11 @@ mod tests {
     /// provider's screen on their own.
     ///
     /// The offer does not depend on `INSTAFY_ENABLE_BROWSER_SESSION` on the
-    /// runtime running the turn: Instafy's Shared Browser is a separate
-    /// on-demand runtime, so the one running the kickoff never has that set.
-    /// Gating on it dropped the offer and this routing on every hosted space.
+    /// runtime running the turn: Instafy's Shared Browser runs on demand,
+    /// either as a separate session runtime or as a browser the space's own
+    /// machine starts when it is opened, so the runtime running the kickoff
+    /// never has that set. Gating on it dropped the offer and this routing on
+    /// every hosted space.
     #[test]
     fn skill_kickoff_routes_the_onboarding_skill_with_its_browser_offer() {
         let tmp = tempdir().expect("temp dir");

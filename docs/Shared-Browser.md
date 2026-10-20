@@ -770,9 +770,28 @@ to the webdev one:
   work, and Studio's browser-host attach starts the same machine again
   afterwards.
 
-The attestation is inert on its own: a runtime that does not implement the lazy
-host ignores it and reports no `browserHost`, so it gets neither consent nor
-the status field. The browser then shares the runtime container with ordinary
+A runtime image without the lazy host ignores the attestation and reports no
+`browserHost`, so it gets neither consent nor the status field. A runtime-agent
+that has it acts on it only when all of these hold: Linux, the boot-time
+browser off, the attestation names exactly this process's `RUNTIME_LEASE_ID`,
+the metadata marks neither a webdev launch nor a multi-agent worker slot, and
+the image carries the host's entrypoint (always
+`/usr/local/bin/runtime-entrypoint`; `INSTAFY_RUNTIME_ENTRYPOINT` is ignored
+here, because `$CODEX_HOME/.env` on the workspace volume can set it), private
+Node and private Playwright. Then, before any thread starts, it fixes the environment that
+origin, the Codex MCP copy and the profile code read: CDP on 19223 (no CDP URL),
+RFB on `127.0.0.1:15900`, `INSTAFY_BROWSER_WEBRTC_ENABLED=0` with no TURN
+requirement or ICE list, egress isolation on with the unsafe-dev override
+removed, the host's profile directory and the private Playwright and Node. It
+reports `browserHost: {"version": 1, "modes": ["lazy"]}` at registration, starts
+no browser at boot, and runs Shared Browser turns only while its host is Ready
+(see [On-demand browser host](#on-demand-browser-host)). WebRTC stays off on a
+host even when the controller launched it with managed TURN: the origin then
+refuses an offer before it reads any relay credential, which keeps TURN
+credentials away from model shells that share the machine. Viewers use CDP
+screencast, with RFB as the fallback.
+
+The browser shares the runtime container with ordinary
 workspace processes, the same boundary described under
 [Human approval policy](#human-approval-policy). Rollback is `HOSTED_BROWSER_HOST=off`:
 status hides the host at the next read, the proxy answers 404 for
@@ -1108,9 +1127,11 @@ and the default keeps it inside the controller's 60-second heartbeat window for 
 Both runtime images also carry the stack for a browser that starts only when it
 is needed, on the space's own machine. `runtime-entrypoint start-browser-host`
 starts the egress proxy, X/VNC, the window manager, Chromium and, with
-`INSTAFY_BROWSER_WEBRTC_ENABLED=1`, the WebRTC sender. Nothing calls it yet, so
-it is inert: the boot path and the boot-time Shared Browser are unchanged, and a
-machine that never opens a browser runs no browser process. The base image
+`INSTAFY_BROWSER_WEBRTC_ENABLED=1`, the WebRTC sender. Only runtime-agent calls
+it, and only on a lease the controller attested as a browser host (see
+[Browser on the space's own machine](#browser-on-the-spaces-own-machine-controller-policy)).
+Elsewhere it is inert: the boot path and the boot-time Shared Browser are
+unchanged, and a machine that never opens a browser runs no browser process. The base image
 keeps its earlier boot behaviour too: with `INSTAFY_ENABLE_BROWSER_SESSION=1` it
 may start the egress proxy but starts no display or browser at boot, because
 it carries that stack only for the on-demand host.
@@ -1151,6 +1172,59 @@ its own; or `stopped` after SIGTERM. Publication and the image scan require
 `scripts/runtime-image-browser-smoke.sh --lazy` for both flavors: the image must
 boot with no browser process (the base image also with the browser session on),
 and the host must start, stop and start again on one persisted profile.
+
+On an attested lease, runtime-agent supervises the host with one actor that
+owns the child and makes every state change:
+
+- **Fixed settings.** Display `:47`, CDP 19223, RFB 15900, egress proxy 19226,
+  no WebRTC port. Its directories are `/var/lib/instafy/browser-host/{profile,home,state}`
+  in the container's writable layer (not a workspace volume, and not `/tmp`,
+  which model tools clean), created with mode 0700; a symlink there, or at
+  `/var/lib/instafy`, fails the start closed. Chromium is the pinned `/usr/lib/chromium/chromium` when
+  present, and the render scale is the launch value of
+  `INSTAFY_BROWSER_RENDER_SCALE`.
+- **Environment.** The host starts from an empty environment: the helper
+  baseline without `HOME`, the egress, viewport, ad-block, render-scale, VNC
+  geometry and CDP-timeout settings, and the locations, ports,
+  `INSTAFY_BROWSER_EGRESS_ISOLATION=1` and `INSTAFY_BROWSER_WEBRTC_ENABLED=0`
+  that the agent sets itself. It never receives relay credentials, the
+  unsafe-dev egress override, `RUNTIME_*` settings, `NODE_PATH` or a token. The
+  host leads its own process group.
+- **States.** `idle`, `starting`, `ready`, `stopping`, `failed` and `poisoned`,
+  with a new generation per start. A start is single-flight and never waits:
+  the host has 75 seconds to print `ready` with exactly these ports, the
+  egress proxy on 19226 and `webrtc=off`, or it is killed and fails with
+  `start_timeout` or `host_error`. A host that ends on its own reads
+  `stopping` until its group is confirmed gone, then `failed`.
+  A failure keeps the host's reason, or `exited_<child>` (egress proxy,
+  display, Chromium), `spawn_failed` or `unconfirmed_shutdown`. The next start
+  after a failure runs a new generation; the container stays up.
+- **Stops.** A stop sends SIGTERM (the host stops its group), kills the group
+  after 10 seconds, and confirms the group is gone. A Ready host with no
+  Shared Browser job and no use for 15 minutes stops on its own; opening it,
+  any viewer activity and the end of a job count as use. The idle stop
+  decides and moves to `stopping` in one step, so it never lands under a job
+  that was admitted. Registration renewals
+  never stop it. The runtime's shutdown stops it within 10 seconds after origin
+  went down; a deleted space kills it at once.
+- **Fail closed.** When a Shared Browser turn ends without confirmed tool
+  shutdown, a lazy host is poisoned instead of the runtime exiting: its group
+  is killed, it refuses every start until the process exits, and the
+  agent-control marker stays, so origin keeps refusing human input. A group
+  that outlives its host by 5 seconds poisons it too.
+- **Profile.** The host's profile directory survives its stops within one
+  container. Restoring it from, and saving it to, the space's durable profile
+  store is a separate change; until then a host starts each container signed
+  out.
+- **Jobs.** A Shared Browser job holds the host for its whole run (taken
+  before the readiness check) and is refused with "Instafy's browser is not
+  open on this space's machine. Open it, then try again." while the host is
+  not Ready. The action log is emptied at a start only when no job holds the
+  host, and only when it is a regular file with one link (never a symlink,
+  hard link or FIFO). The Codex Shared Browser MCP runs with the private Node
+  (`INSTAFY_SHARED_BROWSER_NODE_BINARY`, which accepts only `/usr/bin/node` or
+  `/opt/instafy/browser-host/bin/node`), and model shells never see that
+  setting.
 
 #### Host endpoints
 
