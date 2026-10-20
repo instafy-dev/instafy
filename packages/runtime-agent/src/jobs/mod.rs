@@ -66,12 +66,16 @@ mod project_preferences_tests;
 mod read_reference_tests;
 pub(crate) mod rolling_saves;
 mod skill_declaration;
+mod skill_routing;
+#[cfg(test)]
+mod skill_routing_eval_tests;
 mod skills;
 mod turn_baseline;
 mod workspace_change_detection;
 mod workspace_commit;
 
 use self::routing_evidence::{RoutingEvidenceRequirements, routing_evidence_progress};
+use self::skill_routing::{PromptRoutingTerms, SkillRoutingProfile};
 
 use self::conversation_context::{
     build_prompt_conversation_context, enrich_prompt_context_metrics, estimate_prompt_token_count,
@@ -1168,15 +1172,6 @@ struct ProjectMemorySnapshot {
     loaded_learned_blocks: Vec<LoadedLearnedBlock>,
 }
 
-fn tokenize_for_routing(input: &str) -> HashSet<String> {
-    input
-        .to_ascii_lowercase()
-        .split(|ch: char| !ch.is_ascii_alphanumeric())
-        .filter(|token| token.len() >= 3)
-        .map(|token| token.to_string())
-        .collect()
-}
-
 fn normalize_exact_cue_value(value: &str) -> Option<String> {
     let normalized = value
         .trim()
@@ -1298,40 +1293,42 @@ fn exact_routing_score_delta(prompt: &ExactRoutingCues, candidate: &ExactRouting
     delta
 }
 
-fn read_skill_routing_text(path: &Path, metadata: &SkillMetadata) -> String {
-    // Learned-block routing should look at a compact excerpt of the actual skill body, not only
-    // name/description. This gives the router access to "apply when" clues without loading the
-    // full file into prompt context.
-    const MAX_BYTES: usize = 4096;
+/// Routing evidence of one SKILL.md, by source: declared `routing_keywords`, the name and
+/// description, and a window of the body read after the frontmatter (a long frontmatter no longer
+/// pushes the body out of the window). Exact cues (quoted literals, `/routes`) come from the same
+/// text.
+fn read_skill_routing(
+    id: &str,
+    path: &Path,
+    metadata: &SkillMetadata,
+) -> (SkillRoutingProfile, ExactRoutingCues) {
+    let raw = read_text_file_lossy_truncated(path, skill_routing::MAX_ROUTING_FILE_BYTES)
+        .map(|(text, _)| text)
+        .unwrap_or_default();
+    let (_front_matter, body) = skill_routing::split_front_matter(&raw);
+    let window = skill_routing::body_window(body);
+    let profile = SkillRoutingProfile::build(
+        id,
+        metadata.name.as_deref(),
+        metadata.description.as_deref(),
+        &metadata.routing_keywords,
+        window,
+    );
 
-    let mut text = String::new();
-    if let Some(name) = metadata.name.as_deref() {
-        text.push_str(name);
-        text.push('\n');
+    let mut cue_text = String::new();
+    for part in [metadata.name.as_deref(), metadata.description.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        cue_text.push_str(part);
+        cue_text.push('\n');
     }
-    if let Some(description) = metadata.description.as_deref() {
-        text.push_str(description);
-        text.push('\n');
+    for keyword in &metadata.routing_keywords {
+        cue_text.push_str(keyword);
+        cue_text.push('\n');
     }
-    if let Some(context_kind) = metadata.context_kind.as_deref() {
-        text.push_str(context_kind);
-        text.push('\n');
-    }
-    if !metadata.routing_keywords.is_empty() {
-        text.push_str(&metadata.routing_keywords.join("\n"));
-        text.push('\n');
-    }
-
-    if let Ok(data) = fs::read(path) {
-        let slice = if data.len() > MAX_BYTES {
-            &data[..MAX_BYTES]
-        } else {
-            &data[..]
-        };
-        text.push_str(String::from_utf8_lossy(slice).as_ref());
-    }
-
-    text
+    cue_text.push_str(window);
+    (profile, extract_exact_routing_cues(&cue_text))
 }
 
 #[derive(Debug, Clone)]
@@ -1339,7 +1336,7 @@ struct ContextNode {
     id: String,
     metadata: SkillMetadata,
     path: PathBuf,
-    route_tokens: HashSet<String>,
+    routing: SkillRoutingProfile,
     exact_cues: ExactRoutingCues,
 }
 
@@ -1361,34 +1358,19 @@ struct LearnedBlockCandidate {
     matched_tokens: Vec<String>,
 }
 
+/// Score of one context for a prompt: weighted keyword/summary/body hits
+/// (`skill_routing::score_routing_profile`), +6 when the prompt names the context, and the exact
+/// cue bonus or penalty.
 fn score_context_route(
-    prompt_tokens: &HashSet<String>,
+    prompt: &PromptRoutingTerms,
     prompt_exact_cues: &ExactRoutingCues,
     doc_freq: &HashMap<String, usize>,
     normalized_prompt: &str,
     candidate_name: &str,
-    candidate_tokens: &HashSet<String>,
+    candidate: &SkillRoutingProfile,
     candidate_exact_cues: &ExactRoutingCues,
 ) -> (usize, Vec<String>) {
-    const MAX_MATCHES: usize = 12;
-
-    let mut matched: Vec<String> = prompt_tokens
-        .intersection(candidate_tokens)
-        .cloned()
-        .collect();
-    matched.sort();
-    matched.truncate(MAX_MATCHES);
-
-    let mut score = 0usize;
-    for token in &matched {
-        let weight = match doc_freq.get(token).copied().unwrap_or(1) {
-            0 | 1 => 4,
-            2 => 2,
-            3 => 1,
-            _ => 0,
-        };
-        score = score.saturating_add(weight);
-    }
+    let (mut score, matched) = skill_routing::score_routing_profile(prompt, doc_freq, candidate);
     if !candidate_name.is_empty() && normalized_prompt.contains(candidate_name) {
         score = score.saturating_add(6);
     }
@@ -1425,14 +1407,12 @@ fn build_top_level_context_nodes(workspace_dir: &Path) -> Vec<ContextNode> {
                 .unwrap_or("skill")
                 .to_string();
             let metadata = read_skill_metadata(&skill_md);
-            let routing_text = read_skill_routing_text(&skill_md, &metadata);
-            let route_tokens = tokenize_for_routing(routing_text.as_str());
-            let exact_cues = extract_exact_routing_cues(routing_text.as_str());
+            let (routing, exact_cues) = read_skill_routing(&id, &skill_md, &metadata);
             contexts.push(ContextNode {
                 id,
                 metadata,
                 path: skill_md,
-                route_tokens,
+                routing,
                 exact_cues,
             });
         }
@@ -1510,15 +1490,10 @@ fn select_recursive_context_nodes(
     prompt_text: &str,
 ) -> Vec<SelectedContextNode> {
     let normalized_prompt = prompt_text.trim().to_ascii_lowercase();
-    let prompt_tokens = tokenize_for_routing(normalized_prompt.as_str());
+    let prompt_terms = PromptRoutingTerms::new(prompt_text);
     let prompt_exact_cues = extract_exact_routing_cues(prompt_text);
 
-    let mut doc_freq: HashMap<String, usize> = HashMap::new();
-    for context in contexts {
-        for token in &context.route_tokens {
-            *doc_freq.entry(token.clone()).or_default() += 1;
-        }
-    }
+    let doc_freq = skill_routing::routing_doc_freq(contexts.iter().map(|context| &context.routing));
 
     let contexts_by_id: HashMap<String, ContextNode> = contexts
         .iter()
@@ -1530,12 +1505,12 @@ fn select_recursive_context_nodes(
     let mut matched_tokens: HashMap<String, Vec<String>> = HashMap::new();
     for context in contexts {
         let (score, matched) = score_context_route(
-            &prompt_tokens,
+            &prompt_terms,
             &prompt_exact_cues,
             &doc_freq,
             normalized_prompt.as_str(),
             context.id.as_str(),
-            &context.route_tokens,
+            &context.routing,
             &context.exact_cues,
         );
         scores.insert(context.id.clone(), score);
@@ -1697,7 +1672,7 @@ fn select_learned_block_candidates(
     }
 
     let normalized_prompt = prompt_text.trim().to_ascii_lowercase();
-    let prompt_tokens = tokenize_for_routing(normalized_prompt.as_str());
+    let prompt_terms = PromptRoutingTerms::new(prompt_text);
     let prompt_exact_cues = extract_exact_routing_cues(prompt_text);
 
     let mut candidates = Vec::new();
@@ -1716,32 +1691,29 @@ fn select_learned_block_candidates(
                 continue;
             }
             let metadata = read_skill_metadata(&skill_md);
-            let routing_text = read_skill_routing_text(&skill_md, &metadata);
-            let route_tokens = tokenize_for_routing(routing_text.as_str());
-            let exact_cues = extract_exact_routing_cues(routing_text.as_str());
-            if route_tokens.is_empty() {
+            let (routing, exact_cues) = read_skill_routing(&name, &skill_md, &metadata);
+            if routing.is_empty() {
                 continue;
             }
-            candidates.push((name, skill_md, metadata, route_tokens, exact_cues));
+            candidates.push((name, skill_md, metadata, routing, exact_cues));
         }
     }
 
-    let mut doc_freq: HashMap<String, usize> = HashMap::new();
-    for (_name, _path, _metadata, route_tokens, _exact_cues) in &candidates {
-        for token in route_tokens {
-            *doc_freq.entry(token.clone()).or_default() += 1;
-        }
-    }
+    let doc_freq = skill_routing::routing_doc_freq(
+        candidates
+            .iter()
+            .map(|(_name, _path, _metadata, routing, _exact_cues)| routing),
+    );
 
     let mut scored = Vec::new();
-    for (name, path, metadata, route_tokens, exact_cues) in candidates {
+    for (name, path, metadata, routing, exact_cues) in candidates {
         let (score, matched_tokens) = score_context_route(
-            &prompt_tokens,
+            &prompt_terms,
             &prompt_exact_cues,
             &doc_freq,
             normalized_prompt.as_str(),
             name.as_str(),
-            &route_tokens,
+            &routing,
             &exact_cues,
         );
         if score == 0 {
@@ -30792,8 +30764,8 @@ mod tests {
         assert!(!ordinary.contains("## Context: instafy-integration-onboarding"));
     }
 
-    /// The router reads a skill through `read_skill_routing_text`, which sees
-    /// only the first 4,096 bytes of its SKILL.md. On Oct 19 longer browser
+    /// The router reads a skill through `read_skill_routing`, which sees
+    /// only a 4,096-byte window of its SKILL.md body. On Oct 19 longer browser
     /// guidance at the top of the onboarding skill pushed "## Failure recovery
     /// rule" and "## GitHub repo onboarding" past that window, and requests
     /// like these stopped loading the skill. That guidance sits at the end of
