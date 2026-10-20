@@ -1,5 +1,5 @@
 import { useCallback, useContext, useMemo, useRef, useState } from "react";
-import { Key, MapPin, NavArrowDown, Terminal } from "iconoir-react";
+import { Key, MapPin, NavArrowDown, Terminal, WebWindow } from "iconoir-react";
 import { Button } from "../../../components/Button";
 import { Input } from "../../../components/Input";
 import { Text } from "../../../components/Text";
@@ -20,7 +20,7 @@ import type { ChatMessage } from "../types";
 
 type ParsedActionRequest = {
   testId: string | null;
-  icon: "terminal" | "key" | "location" | null;
+  icon: "terminal" | "key" | "location" | "preview" | null;
   overline: string | null;
   title: string | null;
   description: string | null;
@@ -200,7 +200,7 @@ function parseActionRequestDetails(details: Record<string, unknown> | null | und
   return {
     testId,
     icon:
-      parsedIcon === "terminal" || parsedIcon === "key" || parsedIcon === "location"
+      parsedIcon === "terminal" || parsedIcon === "key" || parsedIcon === "location" || parsedIcon === "preview"
         ? parsedIcon
         : null,
     overline,
@@ -220,6 +220,8 @@ function resolveIcon(icon: ParsedActionRequest["icon"]) {
       return <Key className="h-4 w-4 text-slate-500 dark:text-slate-400" aria-hidden="true" />;
     case "location":
       return <MapPin className="h-4 w-4 text-slate-500 dark:text-slate-400" aria-hidden="true" />;
+    case "preview":
+      return <WebWindow className="h-4 w-4 text-slate-500 dark:text-slate-400" aria-hidden="true" />;
     default:
       return null;
   }

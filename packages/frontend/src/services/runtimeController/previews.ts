@@ -29,8 +29,11 @@ export type SitePreviewViewer = {
   expiresAt: string | null;
 };
 
-/** What the record alone says about the site. */
-export type SitePreviewRecordState = "live" | "not_responding" | "stopped";
+/**
+ * What the record alone says about the site. `pending` is a tunnel that is not
+ * active yet; `unverified` is an active tunnel the broker could not probe.
+ */
+export type SitePreviewRecordState = "live" | "not_responding" | "stopped" | "pending" | "unverified";
 
 const ENDED_PREVIEW_STATUSES: ReadonlySet<string> = new Set(["revoked", "expired", "closed", "failed"]);
 
@@ -121,15 +124,18 @@ export function mapControllerSitePreview(value: unknown): ControllerSitePreview 
 }
 
 /**
- * Only the controller's record decides: an ended tunnel is stopped, a probe that
- * found nothing listening (or the broker's 502 to 504) is not responding, and
- * anything else is live. No health means the broker could not be asked, not
- * that the site is down.
+ * Only the controller's record decides, and Live needs proof: an ended tunnel
+ * is stopped, a tunnel not yet active is pending, an active tunnel with no
+ * probe is unverified (the broker could not be asked, which says nothing about
+ * the site), a probe that found nothing listening (or the broker's 502 to 504)
+ * is not responding, and only a probe that saw the site answer is live.
  */
 export function sitePreviewRecordState(preview: Pick<ControllerSitePreview, "status" | "health">): SitePreviewRecordState {
   if (ENDED_PREVIEW_STATUSES.has(preview.status)) return "stopped";
+  if (preview.status !== "active") return "pending";
   const health = preview.health;
-  if (health && (!health.listening || (health.status !== null && health.status >= 502 && health.status <= 504))) return "not_responding";
+  if (!health) return "unverified";
+  if (!health.listening || (health.status !== null && health.status >= 502 && health.status <= 504)) return "not_responding";
   return "live";
 }
 

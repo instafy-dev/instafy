@@ -242,6 +242,60 @@ describe("chatMessagePresentation", () => {
     expect(synthesized).toEqual([]);
   });
 
+  it("keeps the cards a multi-agent worker lane posts for the person in the main transcript", () => {
+    const workerJob = { jobId: "builder-job-1" };
+    const card = (id: string, messageType: string, details: Record<string, unknown>) => createMessage({
+      id,
+      content: "The lane needs you.",
+      timestamp: 150,
+      metadata: {
+        ...workerJob,
+        source: "agent",
+        messageType,
+        details: { messageType, details },
+      },
+    });
+    const messages: ChatMessage[] = [
+      createMessage({
+        id: "builder-command",
+        content: "Running command...",
+        timestamp: 100,
+        messageType: "command_execution",
+        metadata: { ...workerJob, messageType: "command_execution" },
+      }),
+      card("builder-preview", "action_request", {
+        title: "Site preview",
+        preview: { previewId: "11111111-1111-4111-8111-111111111111", port: 4173, path: "/" },
+      }),
+      // Every card that asks the person for something stays, whatever it asks.
+      card("builder-question", "action_request", { title: "Which colour?", inputPlaceholder: "Colour" }),
+      card("builder-secret", "secret_request", { secretName: "SHOP_TOKEN" }),
+      // The lane's other output stays behind the plan with the rest of its work.
+      createMessage({
+        id: "builder-status",
+        content: "Wrote the page.",
+        timestamp: 160,
+        messageType: "status",
+        metadata: { ...workerJob, messageType: "status" },
+      }),
+      createMessage({
+        id: "builder-result",
+        content: "Built the site from five handoff files.",
+        timestamp: 200,
+        metadata: {
+          ...workerJob,
+          multiAgentPlan: { role: "worker", parentJobId: "plan-job-1", groupId: "group-1" },
+        },
+      }),
+    ];
+
+    const collapsedAll = collapseLifecycleMessages(messages);
+    const collapsedVisible = collapsedAll.filter((message) => shouldDisplayChatMessage(message));
+    const rows = synthesizeAgentJobThreadMessages(collapsedAll, collapsedVisible);
+
+    expect(rows.map((message) => message.id)).toEqual(["builder-preview", "builder-question", "builder-secret"]);
+  });
+
   it("removes a recoverable runtime-start alert even before agent output", () => {
     const messages: ChatMessage[] = [
       createMessage({

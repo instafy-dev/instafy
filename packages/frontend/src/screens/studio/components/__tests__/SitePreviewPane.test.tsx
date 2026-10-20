@@ -185,6 +185,16 @@ describe("SitePreviewPane", () => {
     expect(frame()).toBeNull();
   });
 
+  it.each([
+    ["the broker could not probe the site", { health: null }],
+    ["the tunnel is not active yet", { status: "issuing" }],
+  ])("reads Checking, never Live, while %s, and keeps the frame", async (_name, overrides) => {
+    mocks.getSitePreview.mockResolvedValue(record(overrides));
+    await render();
+    expect(pane().dataset.state).toBe("checking");
+    expect(frame()).not.toBeNull();
+  });
+
   it("revokes its session when it unmounts (the tab's ×)", async () => {
     await render();
     expect(mocks.revokeSitePreviewViewer).not.toHaveBeenCalled();

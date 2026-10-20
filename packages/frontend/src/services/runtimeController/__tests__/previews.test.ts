@@ -55,7 +55,9 @@ describe("site preview controller client", () => {
 
   it("decides live, not responding and stopped from the record alone", () => {
     expect(sitePreviewRecordState({ status: "active", health: { listening: true, status: 200 } })).toBe("live");
-    expect(sitePreviewRecordState({ status: "active", health: null })).toBe("live");
+    // Live needs proof: no probe, or a tunnel not active yet, is never Live.
+    expect(sitePreviewRecordState({ status: "active", health: null })).toBe("unverified");
+    expect(sitePreviewRecordState({ status: "issuing", health: { listening: true, status: 200 } })).toBe("pending");
     expect(sitePreviewRecordState({ status: "active", health: { listening: false, status: null } })).toBe("not_responding");
     expect(sitePreviewRecordState({ status: "active", health: { listening: true, status: 502 } })).toBe("not_responding");
     expect(sitePreviewRecordState({ status: "revoked", health: { listening: true, status: 200 } })).toBe("stopped");

@@ -30,7 +30,16 @@ export const SITE_PREVIEW_FRAME_ALLOW = "fullscreen; clipboard-write";
 export const SITE_PREVIEW_MESSAGE_TYPE = "instafy-preview";
 
 type SessionState = "opening" | "ready" | "ended" | SitePreviewProblem;
-type HealthState = "checking" | SitePreviewRecordState | Exclude<SitePreviewProblem, "unavailable">;
+type HealthState = "checking" | Exclude<SitePreviewRecordState, "pending" | "unverified"> | Exclude<SitePreviewProblem, "unavailable">;
+
+/**
+ * What the pane says from the record: a tunnel not active yet, or one the
+ * broker could not probe, reads Checking (the frame stays, so the person sees
+ * for themselves), never Live.
+ */
+function paneHealth(state: SitePreviewRecordState): HealthState {
+  return state === "pending" || state === "unverified" ? "checking" : state;
+}
 export type SitePreviewPaneState = "opening" | "ended" | HealthState | SitePreviewProblem;
 
 const UNAVAILABLE_TEXT = "Previews are not available here";
@@ -182,7 +191,7 @@ export function SitePreviewPane({ projectId, previewId, title, visible }: {
       const preview = await getSitePreview(projectId, previewId, signal, fresh ? { fresh } : undefined);
       if (signal?.aborted || !mounted.current) return;
       setPort(preview.port);
-      setHealth(sitePreviewRecordState(preview));
+      setHealth(paneHealth(sitePreviewRecordState(preview)));
     } catch (cause) {
       if (signal?.aborted || !mounted.current) return;
       const problem = sitePreviewProblem(cause);
