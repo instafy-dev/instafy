@@ -84,10 +84,19 @@ const PREVIEW_MIN_PORT: i64 = 1024;
 /// the Playwright CDP port 9223, `INSTAFY_PLAYWRIGHT_CDP_PORT`), the WebRTC
 /// sender (9225), the browser egress proxy (9226,
 /// `INSTAFY_BROWSER_EGRESS_PROXY_BIND`), personal-browser control (43127)
-/// and the origin server (54332, `ORIGIN_BIND_PORT`). An operator who moves
-/// one of these adds its new port to `PREVIEW_DENY_PORTS`, which adds to this
-/// list and never removes from it.
-const PREVIEW_DENIED_PORTS: [u16; 8] = [5900, 8789, 9222, 9223, 9225, 9226, 43127, 54332];
+/// and the origin server (54332, `ORIGIN_BIND_PORT`). Instafy's browser on a
+/// space's own machine uses fixed ports of its own: VNC (15900), Chrome
+/// DevTools (19223), the WebRTC sender (19225) and the browser egress proxy
+/// (19226). An operator who moves one of these adds its new port to
+/// `PREVIEW_DENY_PORTS`, which adds to this list and never removes from it.
+///
+/// This list is an accident guard, not a boundary: the CLI inside the
+/// runtime chooses the tunnel's local address itself, so code on the
+/// machine can forward any port through an allowed preview. It stops a
+/// mistaken or prompted `instafy preview open` of one of these ports.
+const PREVIEW_DENIED_PORTS: [u16; 12] = [
+    5900, 8789, 9222, 9223, 9225, 9226, 15900, 19223, 19225, 19226, 43127, 54332,
+];
 const PREVIEW_TITLE_MAX_CHARS: usize = 120;
 const PREVIEW_PATH_MAX_CHARS: usize = 512;
 const PREVIEW_SOURCE_MAX_CHARS: usize = 64;

@@ -108,7 +108,32 @@ pub(crate) struct RuntimeStatusEntry {
     resources: Option<RuntimeResourceUsageEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     runtime_image: Option<String>,
+    /// Present only on a space's own machine that hosts Instafy's browser on
+    /// demand for its live lease, while the policy covers the space.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shared_browser_host: Option<SharedBrowserHostStatus>,
 }
+
+/// `sharedBrowserHost` on a runtime status entry:
+/// `{"version":1,"mode":"lazy"}`. It carries no lease or generation id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct SharedBrowserHostStatus {
+    version: u8,
+    mode: &'static str,
+}
+
+impl SharedBrowserHostStatus {
+    const LAZY: Self = Self {
+        version: 1,
+        mode: super::managed::MANAGED_BROWSER_HOST_LAZY_MODE,
+    };
+}
+
+/// `sharedBrowserHostPolicy`: whether the hosted browser policy covers the
+/// space. Always present, so a client can also tell a controller that knows
+/// about browser hosts from one that does not.
+pub(crate) const SHARED_BROWSER_HOST_POLICY_COVERED: &str = "covered";
+pub(crate) const SHARED_BROWSER_HOST_POLICY_OFF: &str = "off";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -116,6 +141,31 @@ pub(crate) struct RuntimeStatusResponse {
     runtimes: Vec<RuntimeStatusEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     preferred_runtime_id: Option<String>,
+    shared_browser_host_policy: &'static str,
+}
+
+/// Whether a status row shows `sharedBrowserHost`: its active lease is live
+/// (not released or failed, not quarantined by a stop), the runtime is not a private
+/// self-hosted one, it registered as a browser host for exactly that lease,
+/// and the policy covers the space.
+fn shared_browser_host_status(
+    policy_covers_project: bool,
+    is_private_self_hosted: bool,
+    provider: &str,
+    capabilities: &JsonValue,
+    lease_id: Option<Uuid>,
+    lease_status: Option<&str>,
+    lease_released_at: Option<DateTime<Utc>>,
+) -> Option<SharedBrowserHostStatus> {
+    let lease_is_live = lease_id.is_some()
+        && lease_released_at.is_none()
+        && lease_status
+            .is_some_and(|status| !matches!(status, "cleanup_pending" | "released" | "failed"));
+    (policy_covers_project
+        && lease_is_live
+        && !is_private_self_hosted
+        && super::managed::runtime_is_registered_browser_host(provider, capabilities, lease_id))
+    .then_some(SharedBrowserHostStatus::LAZY)
 }
 
 #[derive(Debug, Serialize)]
@@ -862,6 +912,9 @@ async fn load_runtime_status_response_for_viewer(
                     oi.metadata as origin_metadata,
                     rl.metadata as lease_metadata,
                     rl.requested_at as lease_requested_at,
+                    rl.id as lease_id,
+                    rl.status as lease_status,
+                    rl.released_at as lease_released_at,
                     quarantine.created_at as stop_requested_at,
                     quarantine.reason as stop_reason
              from runtimes r
@@ -922,6 +975,7 @@ async fn load_runtime_status_response_for_viewer(
         .and_then(|entry| entry.runtime_id)
         .map(|id| id.to_string());
 
+    let policy_covers_project = state.config.hosted_browser_host.allows_project(project_id);
     let mut entries: Vec<RuntimeStatusEntry> = Vec::with_capacity(rows.len());
     for row in rows {
         let runtime_id: Uuid = row.get("id");
@@ -967,6 +1021,15 @@ async fn load_runtime_status_response_for_viewer(
             .map(RuntimeResourceUsageEntry::from);
         let lease_metadata: Option<JsonValue> = row.get("lease_metadata");
         let runtime_image = extract_runtime_image_from_metadata(lease_metadata.as_ref());
+        let shared_browser_host = shared_browser_host_status(
+            policy_covers_project,
+            is_private_self_hosted,
+            &provider,
+            &capabilities,
+            row.get("lease_id"),
+            row.get("lease_status"),
+            row.get("lease_released_at"),
+        );
 
         entries.push(RuntimeStatusEntry {
             runtime_id: runtime_id.to_string(),
@@ -991,6 +1054,7 @@ async fn load_runtime_status_response_for_viewer(
             origin,
             resources,
             runtime_image,
+            shared_browser_host,
         });
         // Apply the public response cap only after private-runtime ownership
         // filtering. Otherwise another user's private rows can consume the SQL
@@ -1009,6 +1073,11 @@ async fn load_runtime_status_response_for_viewer(
     Ok(RuntimeStatusResponse {
         runtimes: entries,
         preferred_runtime_id,
+        shared_browser_host_policy: if policy_covers_project {
+            SHARED_BROWSER_HOST_POLICY_COVERED
+        } else {
+            SHARED_BROWSER_HOST_POLICY_OFF
+        },
     })
 }
 
@@ -1672,6 +1741,127 @@ pub(crate) fn determine_runtime_health(
 mod tests {
     use super::*;
     use chrono::Duration as ChronoDuration;
+
+    #[test]
+    fn shared_browser_host_shows_only_for_a_live_covered_registered_host() {
+        let lease_id = Uuid::new_v4();
+        let registered = json!({
+            "_instafySharedBrowserAgentConsent": { "version": 1 },
+            "browserHost": super::super::managed::browser_host_capability(lease_id),
+        });
+        let derive = |covered: bool,
+                      private: bool,
+                      provider: &str,
+                      lease: Option<Uuid>,
+                      status: Option<&str>,
+                      released_at: Option<DateTime<Utc>>| {
+            shared_browser_host_status(
+                covered,
+                private,
+                provider,
+                &registered,
+                lease,
+                status,
+                released_at,
+            )
+        };
+
+        let shown = derive(
+            true,
+            false,
+            "instafy-cloud",
+            Some(lease_id),
+            Some("active"),
+            None,
+        )
+        .expect("live covered host");
+        assert_eq!(
+            serde_json::to_value(shown).expect("serialize"),
+            json!({ "version": 1, "mode": "lazy" })
+        );
+        // A lease still coming up is live too.
+        assert!(derive(
+            true,
+            false,
+            "instafy-cloud",
+            Some(lease_id),
+            Some("launching"),
+            None
+        )
+        .is_some());
+
+        // Policy off, private self-hosted, another provider.
+        assert!(derive(
+            false,
+            false,
+            "instafy-cloud",
+            Some(lease_id),
+            Some("active"),
+            None
+        )
+        .is_none());
+        assert!(derive(
+            true,
+            true,
+            "instafy-cloud",
+            Some(lease_id),
+            Some("active"),
+            None
+        )
+        .is_none());
+        assert!(derive(
+            true,
+            false,
+            "self-hosted",
+            Some(lease_id),
+            Some("active"),
+            None
+        )
+        .is_none());
+        // A stop's quarantine, an ended lease, no lease, another generation.
+        for ended in ["cleanup_pending", "released", "failed"] {
+            assert!(
+                derive(
+                    true,
+                    false,
+                    "instafy-cloud",
+                    Some(lease_id),
+                    Some(ended),
+                    None
+                )
+                .is_none(),
+                "{ended}"
+            );
+        }
+        assert!(derive(
+            true,
+            false,
+            "instafy-cloud",
+            Some(lease_id),
+            Some("released"),
+            Some(Utc::now())
+        )
+        .is_none());
+        assert!(derive(
+            true,
+            false,
+            "instafy-cloud",
+            Some(lease_id),
+            Some("active"),
+            Some(Utc::now())
+        )
+        .is_none());
+        assert!(derive(true, false, "instafy-cloud", None, None, None).is_none());
+        assert!(derive(
+            true,
+            false,
+            "instafy-cloud",
+            Some(Uuid::new_v4()),
+            Some("active"),
+            None
+        )
+        .is_none());
+    }
 
     #[test]
     fn runtime_logs_query_filters_unsafe_project_wide_events_before_pagination() {

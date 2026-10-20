@@ -221,8 +221,11 @@ Agent control is paused before the clear.
 **Clear Shared Browser data** affects the project browser for everyone. It
 requires Builder-or-higher permission, stops managed runtimes that may hold the
 profile, and deletes the durable snapshot only after that shutdown is confirmed.
-It does not clear Personal Browser. A failed shutdown leaves the saved profile
-in place so the clear can be retried safely.
+When Instafy's browser runs on the space's own machine, that machine is one of
+them: it restarts, which ends its previews, terminals and running work, and
+Studio starts the same machine again afterwards. It does not clear Personal
+Browser. A failed shutdown leaves the saved profile in place so the clear can be
+retried safely.
 
 ## Security and verification
 

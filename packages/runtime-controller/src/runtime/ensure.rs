@@ -39,9 +39,8 @@ use super::limit_waits::{
     RUNTIME_LIMIT_REACHED_CODE,
 };
 use super::provider::{
-    apply_browser_host_launch_policy, apply_browser_profile_persistence_policy,
-    apply_controller_turn_credentials, apply_git_remote_env, authorize_provider_config_for_project,
-    authorize_provider_for_project, call_provider_endpoint,
+    apply_browser_profile_persistence_policy, apply_git_remote_env, apply_managed_transport_policy,
+    authorize_provider_config_for_project, authorize_provider_for_project, call_provider_endpoint,
     lock_and_load_authoritative_provider_config, merge_provider_metadata, ProviderEnsureRequest,
     ProviderReleaseRequest,
 };
@@ -3197,27 +3196,19 @@ async fn launch_committed_runtime_lease(
         &provider,
         merge_provider_metadata(&launch_metadata, &provider_cfg.metadata),
     );
-    let managed_transport_metadata = if super::managed::managed_browser_host_is_attested(
-        &provider,
-        launch_metadata.as_ref(),
-        lease.id,
-    ) {
-        // A browser host takes its relay credentials per request from the
-        // origin, never at launch.
-        apply_browser_host_launch_policy(
-            state.config.browser_turn_rest.as_ref(),
-            project_id,
-            merged_metadata,
-        )
-    } else {
-        apply_controller_turn_credentials(
-            state.config.browser_turn_rest.as_ref(),
-            project_id,
-            runtime.id,
-            Utc::now().timestamp(),
-            merged_metadata,
-        )
-    };
+    // A browser host launches with WebRTC off and no relay credentials.
+    let managed_transport_metadata = apply_managed_transport_policy(
+        state.config.browser_turn_rest.as_ref(),
+        super::managed::managed_browser_host_is_attested(
+            &provider,
+            launch_metadata.as_ref(),
+            lease.id,
+        ),
+        project_id,
+        runtime.id,
+        Utc::now().timestamp(),
+        merged_metadata,
+    );
     let allocator_metadata = apply_browser_profile_persistence_policy(
         &state.config,
         project_id,

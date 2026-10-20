@@ -47,7 +47,9 @@ pub(crate) use ensure::{
     ensure_runtime_for_dispatch_reconnect,
 };
 pub(crate) use limit_waits::{spawn_hosted_runtime_limit_wait_sweep, RUNTIME_LIMIT_REACHED_CODE};
-pub(crate) use managed::runtime_supports_shared_browser_agent_consent;
+pub(crate) use managed::{
+    runtime_is_registered_browser_host, runtime_supports_shared_browser_agent_consent,
+};
 pub(crate) use pre_stop_flush::{authorize_pre_stop_save_grant, PRE_STOP_SAVE_SCOPE};
 pub(crate) use provider::provider_is_self_hosted;
 pub(crate) use register::{runtime_token_subject_is_controller_service, RuntimeRegisterResponse};

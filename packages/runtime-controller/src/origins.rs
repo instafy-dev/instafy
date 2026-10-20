@@ -3591,6 +3591,8 @@ const ORIGIN_PROXY_BROWSER_INTERACTIVE_SCOPES: &[&str] = &["browser.view", "brow
 const ORIGIN_PROXY_MAX_BODY_BYTES: usize = 300 * 1024 * 1024;
 const ORIGIN_PROXY_WEBRTC_BODY_BYTES: usize = 256 * 1024;
 const ORIGIN_PROXY_BROWSER_APPROVAL_BODY_BYTES: usize = 16 * 1024;
+/// `POST browser/host/start` takes `{"version":1}`; origin caps it at 1 KiB.
+const ORIGIN_PROXY_BROWSER_HOST_BODY_BYTES: usize = 4 * 1024;
 
 fn controller_base_url_for_headers(config: &AppConfig, headers: &HeaderMap) -> Option<String> {
     if let Some(base) = config._controller_external_url.as_ref() {
@@ -4010,6 +4012,7 @@ fn classify_canonical_origin_proxy_request(
                 || normalized == "browser/pages"
                 || normalized == "browser/actions"
                 || normalized == "browser/approval/pending"
+                || normalized == BROWSER_HOST_STATUS_PATH
             {
                 Ok(ORIGIN_PROXY_BROWSER_VIEW_SCOPES)
             } else if normalized == "healthz"
@@ -4038,7 +4041,9 @@ fn classify_canonical_origin_proxy_request(
                 Ok(ORIGIN_PROXY_WRITE_SCOPES)
             } else if normalized == "browser/webrtc/offer" {
                 Ok(ORIGIN_PROXY_BROWSER_VIEW_SCOPES)
-            } else if normalized == "browser/approval/decision" {
+            } else if normalized == "browser/approval/decision"
+                || normalized == BROWSER_HOST_START_PATH
+            {
                 Ok(ORIGIN_PROXY_BROWSER_CONTROL_SCOPES)
             } else if is_exact_browser_page_action(normalized, "focus")
                 || is_exact_browser_page_action(normalized, "command")
@@ -4092,10 +4097,39 @@ fn ensure_origin_proxy_client_label(
     Ok(())
 }
 
+/// Instafy's browser on a space's own machine: its state (view) and its
+/// start (control). Both are proxied only while the hosted browser policy
+/// covers the origin's space; see [`ensure_browser_host_route_allowed`].
+const BROWSER_HOST_STATUS_PATH: &str = "browser/host";
+const BROWSER_HOST_START_PATH: &str = "browser/host/start";
+
+fn is_browser_host_route(path: &CanonicalOriginProxyPath) -> bool {
+    matches!(
+        path.normalized.as_str(),
+        BROWSER_HOST_STATUS_PATH | BROWSER_HOST_START_PATH
+    )
+}
+
+/// The rollback lever for the browser host routes: when the hosted browser
+/// policy does not cover the space, they answer 404 like any unlisted path,
+/// so turning the policy off stops new starts at once, not only at the next
+/// relaunch.
+fn ensure_browser_host_route_allowed(
+    config: &crate::config::AppConfig,
+    path: &CanonicalOriginProxyPath,
+    project_id: &Uuid,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    if is_browser_host_route(path) && !config.hosted_browser_host.allows_project(project_id) {
+        return Err(not_found("origin path not found"));
+    }
+    Ok(())
+}
+
 fn origin_proxy_request_body_limit(method: &Method, path: &str) -> usize {
     match (method, path.trim().trim_start_matches('/')) {
         (&Method::POST, "browser/webrtc/offer") => ORIGIN_PROXY_WEBRTC_BODY_BYTES,
         (&Method::POST, "browser/approval/decision") => ORIGIN_PROXY_BROWSER_APPROVAL_BODY_BYTES,
+        (&Method::POST, BROWSER_HOST_START_PATH) => ORIGIN_PROXY_BROWSER_HOST_BODY_BYTES,
         _ => ORIGIN_PROXY_MAX_BODY_BYTES,
     }
 }
@@ -4490,6 +4524,8 @@ async fn proxy_origin_request(
         method == Method::POST && canonical_path.normalized == "browser/webrtc/offer";
     let is_browser_approval_decision =
         method == Method::POST && canonical_path.normalized == "browser/approval/decision";
+    let is_browser_host_start =
+        method == Method::POST && canonical_path.normalized == BROWSER_HOST_START_PATH;
     let request_body_limit =
         origin_proxy_request_body_limit(&method, canonical_path.normalized.as_str());
 
@@ -4527,6 +4563,7 @@ async fn proxy_origin_request(
     if project_deleted {
         return Err(not_found("project not found"));
     }
+    ensure_browser_host_route_allowed(&state.config, &canonical_path, &origin.project_id)?;
 
     authorize_origin_proxy_token_runtime(&state, &origin, &claims).await?;
 
@@ -4617,6 +4654,11 @@ async fn proxy_origin_request(
                 (
                     StatusCode::PAYLOAD_TOO_LARGE,
                     Json(ApiError::new("browser approval decision exceeds 16 KiB")),
+                )
+            } else if is_browser_host_start {
+                (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    Json(ApiError::new("browser host start request exceeds 4 KiB")),
                 )
             } else {
                 internal_error(format!("failed to read origin proxy request body: {error}"))
@@ -5811,6 +5853,90 @@ MCowBQYDK2VwAyEAFQAEX0aYqix3VQUBg05FFISGxhx2Ry93VE51GzM5iXA=
                 "unexpected proxy allowlist match: {path}"
             );
         }
+    }
+
+    #[test]
+    fn classify_origin_proxy_request_allows_exactly_the_two_browser_host_routes() {
+        for method in [Method::GET, Method::HEAD] {
+            assert_eq!(
+                classify_origin_proxy_request(&method, "/browser/host")
+                    .expect("browser host state should be proxyable"),
+                ORIGIN_PROXY_BROWSER_VIEW_SCOPES,
+                "{method}"
+            );
+        }
+        assert_eq!(
+            classify_origin_proxy_request(&Method::POST, "/browser/host/start")
+                .expect("browser host start should be proxyable"),
+            ORIGIN_PROXY_BROWSER_CONTROL_SCOPES
+        );
+        assert_eq!(
+            origin_proxy_request_body_limit(&Method::POST, "/browser/host/start"),
+            ORIGIN_PROXY_BROWSER_HOST_BODY_BYTES
+        );
+        assert_eq!(ORIGIN_PROXY_BROWSER_HOST_BODY_BYTES, 4 * 1024);
+        assert_eq!(
+            origin_proxy_request_body_limit(&Method::POST, "/browser/host/start/"),
+            ORIGIN_PROXY_MAX_BODY_BYTES,
+            "nearby paths must not inherit the browser host body limit",
+        );
+
+        for (method, path) in [
+            (Method::GET, "/browser/host/"),
+            (Method::GET, "/browser/hosts"),
+            (Method::POST, "/browser/host/start/"),
+            (Method::POST, "/browser/host/nested/start"),
+            (Method::POST, "/browser/host/restart"),
+            (Method::POST, "/browser/host/reset"),
+            (Method::GET, "/browser/host/start"),
+            (Method::HEAD, "/browser/host/start"),
+            (Method::POST, "/browser/host"),
+            (Method::DELETE, "/browser/host"),
+            (Method::PUT, "/browser/host/start"),
+        ] {
+            assert!(
+                classify_origin_proxy_request(&method, path).is_err(),
+                "unexpected proxy allowlist match: {method} {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn browser_host_routes_follow_the_hosted_browser_policy() {
+        let covered = Uuid::new_v4();
+        let outside = Uuid::new_v4();
+        let mut config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "browser-host-route-policy",
+        );
+        let host = canonical_origin_proxy_path("/browser/host").unwrap();
+        let start = canonical_origin_proxy_path("/browser/host/start").unwrap();
+        let pages = canonical_origin_proxy_path("/browser/pages").unwrap();
+
+        // Off by default: both host routes are 404, other routes are untouched.
+        for path in [&host, &start] {
+            let refused =
+                ensure_browser_host_route_allowed(&config, path, &covered).expect_err("policy off");
+            assert_eq!(refused.0, StatusCode::NOT_FOUND);
+            assert_eq!(refused.1 .0.message, "origin path not found");
+        }
+        assert!(ensure_browser_host_route_allowed(&config, &pages, &covered).is_ok());
+
+        config.hosted_browser_host =
+            crate::config::HostedBrowserHostPolicy::Projects(vec![covered]);
+        for path in [&host, &start] {
+            assert!(ensure_browser_host_route_allowed(&config, path, &covered).is_ok());
+            assert_eq!(
+                ensure_browser_host_route_allowed(&config, path, &outside)
+                    .expect_err("outside the policy")
+                    .0,
+                StatusCode::NOT_FOUND
+            );
+        }
+
+        config.hosted_browser_host = crate::config::HostedBrowserHostPolicy::All;
+        assert!(ensure_browser_host_route_allowed(&config, &start, &outside).is_ok());
     }
 
     #[test]

@@ -288,11 +288,55 @@ fn attested_personal_browser_owner(
     })
 }
 
+/// What registration grants a managed runtime's lease for Shared Browser
+/// work, before the capabilities are stored.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RegistrationSharedBrowserConsent {
+    /// The controller's Shared Browser agent consent.
+    consent: bool,
+    /// The lease generation stored as the runtime's `browserHost`, when the
+    /// runtime hosts Instafy's browser on demand.
+    browser_host: Option<Uuid>,
+}
+
+/// Consent follows the controller's own launch attestation for the active
+/// lease, never the runtime's word alone:
+///
+/// - a webdev launch keeps its consent, as before;
+/// - a space's own machine gets consent and `browserHost` only when it
+///   reports `browserHost` `{version: 1, modes: ["lazy"]}` and the
+///   controller launched exactly this lease generation as a browser host.
+///
+/// The attestation already encodes the hosted browser policy: a reuse with
+/// the policy off drops it, so there is no separate policy check here.
+fn registration_shared_browser_consent(
+    provider: &str,
+    active_lease_id: Option<Uuid>,
+    lease_id: Uuid,
+    lease_metadata: Option<&JsonValue>,
+    reported_capabilities: Option<&JsonValue>,
+) -> RegistrationSharedBrowserConsent {
+    if active_lease_id != Some(lease_id) {
+        return RegistrationSharedBrowserConsent::default();
+    }
+    let webdev =
+        super::managed::managed_webdev_launch_is_attested(provider, lease_metadata, lease_id);
+    let browser_host = (!webdev
+        && super::managed::runtime_reports_lazy_browser_host(reported_capabilities)
+        && super::managed::managed_browser_host_is_attested(provider, lease_metadata, lease_id))
+    .then_some(lease_id);
+    RegistrationSharedBrowserConsent {
+        consent: webdev || browser_host.is_some(),
+        browser_host,
+    }
+}
+
 fn attest_runtime_capabilities(
     supplied: Option<JsonValue>,
     personal_browser_owner: Option<Uuid>,
     self_hosted_owner: Option<Uuid>,
     shared_browser_agent_consent: bool,
+    browser_host: Option<Uuid>,
 ) -> JsonValue {
     let mut capabilities = match supplied {
         Some(JsonValue::Object(map)) => map,
@@ -304,6 +348,10 @@ fn attest_runtime_capabilities(
     capabilities.remove("personal_browser");
     capabilities.remove(RUNTIME_TOKEN_GENERATION_CAPABILITY);
     capabilities.remove(super::managed::SHARED_BROWSER_AGENT_CONSENT_CAPABILITY);
+    // The runtime reports `browserHost` as `{version, modes}`; the stored
+    // value is the controller's, bound to the attested lease generation.
+    capabilities.remove(super::managed::BROWSER_HOST_CAPABILITY);
+    capabilities.remove(super::managed::BROWSER_HOST_CAPABILITY_SNAKE);
     super::access::remove_self_hosted_access_attestation(&mut capabilities);
     if let Some(owner_user_id) = self_hosted_owner {
         super::access::set_self_hosted_access_attestation(&mut capabilities, owner_user_id);
@@ -323,6 +371,12 @@ fn attest_runtime_capabilities(
             json!({
                 "version": super::managed::SHARED_BROWSER_AGENT_CONSENT_VERSION,
             }),
+        );
+    }
+    if let Some(lease_id) = browser_host {
+        capabilities.insert(
+            super::managed::BROWSER_HOST_CAPABILITY.to_string(),
+            super::managed::browser_host_capability(lease_id),
         );
     }
     JsonValue::Object(capabilities)
@@ -801,19 +855,24 @@ pub(crate) async fn runtime_register(
         mark_runtime_lease_active(&transaction, &lease.id).await?;
     }
 
-    let shared_browser_agent_consent = lease_details.as_ref().is_some_and(|lease| {
-        runtime.active_lease_id == Some(lease.id)
-            && super::managed::managed_webdev_launch_is_attested(
+    let shared_browser = lease_details
+        .as_ref()
+        .map(|lease| {
+            registration_shared_browser_consent(
                 &runtime.provider,
-                lease.metadata.as_ref(),
+                runtime.active_lease_id,
                 lease.id,
+                lease.metadata.as_ref(),
+                payload.capabilities.as_ref(),
             )
-    });
+        })
+        .unwrap_or_default();
     let mut capabilities = attest_runtime_capabilities(
         payload.capabilities,
         personal_browser_owner,
         self_hosted_owner,
-        shared_browser_agent_consent,
+        shared_browser.consent,
+        shared_browser.browser_host,
     );
     if let Some(generation) = runtime_generation {
         set_runtime_generation_capability(&mut capabilities, generation);
@@ -1368,6 +1427,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         );
         assert_eq!(spoofed["agent"], json!(true));
         assert!(spoofed.get("personalBrowser").is_none());
@@ -1379,6 +1439,7 @@ mod tests {
             Some(owner_user_id),
             Some(owner_user_id),
             false,
+            None,
         );
         assert_eq!(attested["personalBrowser"]["enabled"], json!(true));
         assert_eq!(
@@ -1402,6 +1463,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         );
         assert_eq!(spoofed["agent"], true);
         assert!(spoofed.get(protected).is_none());
@@ -1414,8 +1476,197 @@ mod tests {
             None,
             None,
             true,
+            None,
         );
         assert_eq!(attested[protected], json!({ "version": 1 }));
+    }
+
+    #[test]
+    fn browser_host_capability_is_controller_attested() {
+        use crate::runtime::managed::{BROWSER_HOST_CAPABILITY, BROWSER_HOST_CAPABILITY_SNAKE};
+        let lease_id = Uuid::new_v4();
+        let reported = json!({
+            "agent": true,
+            (BROWSER_HOST_CAPABILITY): {
+                "version": 1,
+                "mode": "lazy",
+                "generation": Uuid::new_v4().to_string(),
+            },
+            (BROWSER_HOST_CAPABILITY_SNAKE): { "version": 1, "modes": ["lazy"] },
+        });
+        // A spoofed value is always stripped.
+        let spoofed = attest_runtime_capabilities(Some(reported.clone()), None, None, false, None);
+        assert_eq!(spoofed["agent"], true);
+        assert!(spoofed.get(BROWSER_HOST_CAPABILITY).is_none());
+        assert!(spoofed.get(BROWSER_HOST_CAPABILITY_SNAKE).is_none());
+
+        let attested =
+            attest_runtime_capabilities(Some(reported), None, None, true, Some(lease_id));
+        assert_eq!(
+            attested[BROWSER_HOST_CAPABILITY],
+            json!({ "version": 1, "mode": "lazy", "generation": lease_id.to_string() })
+        );
+        assert!(attested.get(BROWSER_HOST_CAPABILITY_SNAKE).is_none());
+        assert!(crate::runtime::runtime_is_registered_browser_host(
+            "instafy-cloud",
+            &attested,
+            Some(lease_id)
+        ));
+    }
+
+    fn host_launch_metadata(lease_id: Uuid) -> JsonValue {
+        crate::runtime::managed::attest_new_managed_runtime_launch(
+            "instafy-cloud",
+            Some(json!({ "source": "studio" })),
+            lease_id,
+            crate::runtime::managed::BrowserHostLaunch::Host,
+        )
+        .expect("host launch metadata")
+    }
+
+    fn webdev_launch_metadata(lease_id: Uuid) -> JsonValue {
+        crate::runtime::managed::attest_new_managed_runtime_launch(
+            "instafy-cloud",
+            Some(json!({ "runtimeFlavor": "webdev" })),
+            lease_id,
+            crate::runtime::managed::BrowserHostLaunch::Off,
+        )
+        .expect("webdev launch metadata")
+    }
+
+    #[test]
+    fn host_consent_needs_the_report_and_the_active_generations_attestation() {
+        let lease_id = Uuid::new_v4();
+        let report = json!({ "agent": true, "browserHost": { "version": 1, "modes": ["lazy"] } });
+        let host = host_launch_metadata(lease_id);
+
+        let granted = registration_shared_browser_consent(
+            "instafy-cloud",
+            Some(lease_id),
+            lease_id,
+            Some(&host),
+            Some(&report),
+        );
+        assert_eq!(
+            granted,
+            RegistrationSharedBrowserConsent {
+                consent: true,
+                browser_host: Some(lease_id),
+            }
+        );
+
+        let none = RegistrationSharedBrowserConsent::default();
+        // The attestation without the report.
+        assert_eq!(
+            registration_shared_browser_consent(
+                "instafy-cloud",
+                Some(lease_id),
+                lease_id,
+                Some(&host),
+                Some(&json!({ "agent": true })),
+            ),
+            none
+        );
+        // The report without the attestation.
+        assert_eq!(
+            registration_shared_browser_consent(
+                "instafy-cloud",
+                Some(lease_id),
+                lease_id,
+                Some(&json!({ "source": "studio" })),
+                Some(&report),
+            ),
+            none
+        );
+        // An earlier generation's attestation.
+        let earlier = host_launch_metadata(Uuid::new_v4());
+        assert_eq!(
+            registration_shared_browser_consent(
+                "instafy-cloud",
+                Some(lease_id),
+                lease_id,
+                Some(&earlier),
+                Some(&report),
+            ),
+            none
+        );
+        // A lease that is not the runtime's active one.
+        assert_eq!(
+            registration_shared_browser_consent(
+                "instafy-cloud",
+                Some(Uuid::new_v4()),
+                lease_id,
+                Some(&host),
+                Some(&report),
+            ),
+            none
+        );
+        // Another provider.
+        assert_eq!(
+            registration_shared_browser_consent(
+                "instafy-cloud-custom",
+                Some(lease_id),
+                lease_id,
+                Some(&host),
+                Some(&report),
+            ),
+            none
+        );
+        // A wrong version or mode in the report.
+        for wrong in [
+            json!({ "browserHost": { "version": 2, "modes": ["lazy"] } }),
+            json!({ "browserHost": { "version": 1, "modes": ["eager"] } }),
+            json!({ "browserHost": { "version": 1, "mode": "lazy" } }),
+        ] {
+            assert_eq!(
+                registration_shared_browser_consent(
+                    "instafy-cloud",
+                    Some(lease_id),
+                    lease_id,
+                    Some(&host),
+                    Some(&wrong),
+                ),
+                none,
+                "{wrong}"
+            );
+        }
+    }
+
+    #[test]
+    fn webdev_consent_is_unchanged_by_the_browser_host_report() {
+        let lease_id = Uuid::new_v4();
+        let webdev = webdev_launch_metadata(lease_id);
+        for reported in [
+            None,
+            Some(json!({ "agent": true })),
+            Some(json!({ "browserHost": { "version": 1, "modes": ["lazy"] } })),
+        ] {
+            assert_eq!(
+                registration_shared_browser_consent(
+                    "instafy-cloud",
+                    Some(lease_id),
+                    lease_id,
+                    Some(&webdev),
+                    reported.as_ref(),
+                ),
+                RegistrationSharedBrowserConsent {
+                    consent: true,
+                    browser_host: None,
+                },
+                "{reported:?}"
+            );
+        }
+        // An earlier webdev generation still gives nothing.
+        assert_eq!(
+            registration_shared_browser_consent(
+                "instafy-cloud",
+                Some(lease_id),
+                lease_id,
+                Some(&webdev_launch_metadata(Uuid::new_v4())),
+                None,
+            ),
+            RegistrationSharedBrowserConsent::default()
+        );
     }
 
     #[test]

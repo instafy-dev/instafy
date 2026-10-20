@@ -42,7 +42,8 @@ fn preview_ports_follow_the_denylist() {
         assert_eq!(validate_preview_port(port, &[]).ok(), Some(port as u16));
     }
     for port in [
-        0, 80, 1023, 5900, 8789, 9222, 9223, 9225, 9226, 43127, 54332, 65536, -1,
+        0, 80, 1023, 5900, 8789, 9222, 9223, 9225, 9226, 15900, 19223, 19225, 19226, 43127, 54332,
+        65536, -1,
     ] {
         let error = validate_preview_port(port, &[]).expect_err("port must be refused");
         assert_eq!(error.0, StatusCode::BAD_REQUEST);
