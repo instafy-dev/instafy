@@ -536,7 +536,9 @@ token, for example in an end-to-end test.
 Exit codes:
 
 - `2`: nothing answers on the port, or the site answered with a server error (`5xx`). Start or fix the
-  site, then retry.
+  site, then retry. When a server takes the connection but sends no answer within 5 s (often a dev server
+  still compiling its first request), the message says so instead: wait for it rather than starting a second
+  server.
 - `3`: the port is not allowed: outside 1024-65535 or one of Instafy's own (the same rules as `check`,
   below), or refused by the server (`400` with code `port_not_allowed`).
 - `5`: previews are not available on this server ("Previews are not available on this server"). The server
@@ -572,8 +574,10 @@ instafy preview check --port 4173 --path "/docs/?tab=setup#install" --phone --js
 
 It loads `http://127.0.0.1:<port><path>` in a headless Chromium (or `http://[::1]:<port>` when only IPv6
 `localhost` answers), waits for the page to settle, and lists the page title, console errors, uncaught errors,
-failed requests and HTTP errors (the site's own are errors; other origins' are warnings) and a blank page. It writes
-`desktop.png` (1280×800) and `phone.png` (390×844) to `--out <dir>` (default: a temporary folder per port).
+failed requests and HTTP errors (the site's own are errors; other origins' are warnings) and a blank page (when the
+screenshot cannot be read, the report says the blank check is incomplete; on a page with no text that is an error). It writes
+`desktop.png` (1280×800) and `phone.png` (390×844) to `--out <dir>` (default: a new folder under the temp folder
+for each run, readable only by you; the report names the files).
 `--framed` loads the site inside a frame on another origin instead, and then also reports a site that refuses to be
 framed (`X-Frame-Options` or CSP `frame-ancestors`).
 
@@ -581,7 +585,7 @@ framed (`X-Frame-Options` or CSP `frame-ancestors`).
 |---|---|
 | 0 | No problems found |
 | 1 | Problems found (listed) |
-| 2 | Nothing answers on the port |
+| 2 | Nothing answers on the port within `--timeout` (the message says whether a server took the connection) |
 | 3 | The port is not allowed |
 | 4 | No browser here, so nothing was checked |
 | 64 | Bad options |

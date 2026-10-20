@@ -3,7 +3,7 @@ import http from "node:http";
 import net from "node:net";
 import { once } from "node:events";
 import { afterAll, describe, expect, it } from "vitest";
-import { PREVIEW_EXIT_PORT_NOT_ALLOWED, PreviewCommandError, parsePreviewPort, probeLocalSite, reservedPreviewPorts } from "../src/local-site.js";
+import { PREVIEW_EXIT_PORT_NOT_ALLOWED, PreviewCommandError, noAnswerMessage, parsePreviewPort, probeLocalSite, reservedPreviewPorts } from "../src/local-site.js";
 
 const closers: Array<() => void> = [];
 afterAll(() => {
@@ -103,6 +103,8 @@ describe("probeLocalSite", () => {
     expect(probe).toMatchObject({ listening: false, status: null, host: null });
     expect(probe.reason).toMatch(/127\.0\.0\.1: ECONNREFUSED/);
     if (hasIpv6) expect(probe.reason).toMatch(/\[::1\]: ECONNREFUSED/);
+    expect(probe.timedOut).toBeFalsy();
+    expect(noAnswerMessage(port, probe, `port ${port}`, "retry")).toMatch(/^Nothing is answering on port \d+ \(.*\)\. Start the site first, then retry\.$/);
   });
 
   it("a 500 is an answer: a host and status, but not `listening` (which means below 500)", async () => {
@@ -124,6 +126,8 @@ describe("probeLocalSite", () => {
     const probe = await probeLocalSite(port, "/", 300);
     expect(probe).toMatchObject({ listening: false, status: null, host: null });
     expect(probe.reason).toBe("127.0.0.1: no answer within 0.3 s");
+    expect(probe.timedOut).toBe(true);
+    expect(noAnswerMessage(port, probe, `port ${port}`, "retry")).toMatch(/accepted the connection .* still be starting or compiling: do not start a second server/);
   });
 
   it.skipIf(!hasIpv6)("a server on [::1] only is found there", async () => {

@@ -105,7 +105,23 @@ export type LocalSiteProbe = {
   reason?: string;
   /** the loopback host that answered, as it goes in a URL: 127.0.0.1 or [::1] */
   host: string | null;
+  /** a server took the connection but sent no answer in time: it is running, perhaps still starting or compiling */
+  timedOut?: boolean;
 };
+
+/**
+ * Why nothing usable answered, in words an agent can act on. A server that took the connection but did not answer in
+ * time is running (often a dev server compiling its first request), so it is never told to start the site again.
+ */
+export function noAnswerMessage(port: number, probe: LocalSiteProbe, where: string, retry: string): string {
+  if (probe.timedOut) {
+    return (
+      `A server accepted the connection on port ${port} but did not answer (${probe.reason ?? "no answer"}). ` +
+      `It may still be starting or compiling: do not start a second server; wait for it, then ${retry}.`
+    );
+  }
+  return `Nothing is answering on ${where} (${probe.reason ?? "no answer"}). Start the site first, then ${retry}.`;
+}
 
 /** The loopback hosts tried, in order: IPv4 first, then IPv6 for servers bound to `localhost` that resolves to ::1. */
 export const LOOPBACK_HOSTS = ["127.0.0.1", "::1"] as const;
@@ -150,7 +166,7 @@ export async function probeLocalSite(
     if (result.status !== null) return result;
     tried.push(`${urlHost(host)}: ${result.reason}`);
     last = { ...result, reason: tried.join(", ") };
-    if (code === "TIMEOUT") break;
+    if (code === "TIMEOUT") return { ...last, timedOut: true };
   }
   return last;
 }

@@ -11,7 +11,7 @@
 // project's own node_modules is used only with --workspace-playwright. The Shared Browser's CDP port is deliberately
 // not used: it carries the user's signed-in profile and is reachable only through its own broker.
 //
-// Exit codes: 0 no problems, 1 problems found (listed), 2 nothing answers on the port, 3 the port is not allowed,
+// Exit codes: 0 no problems, 1 problems found (listed), 2 nothing answers on the port (in time), 3 the port is not allowed,
 // 4 no browser available (nothing was checked), 64 bad options, 70 the check itself failed (nothing was checked).
 import { spawnSync } from "node:child_process";
 import { once } from "node:events";
@@ -25,6 +25,7 @@ import type { Command } from "commander";
 import {
   PREVIEW_EXIT_NOT_LISTENING,
   PreviewCommandError,
+  noAnswerMessage,
   parsePreviewPort,
   probeLocalSite,
 } from "./local-site.js";
@@ -317,8 +318,12 @@ export function isSiteUrl(url: string, siteOrigin: string): boolean {
   }
 }
 
-export function defaultOutDir(port: number): string {
-  return path.join(os.tmpdir(), "instafy-preview-check", `port-${port}`);
+/**
+ * A new folder for one run's screenshots: a random name under the temp folder, made by mkdtemp, so it is readable
+ * only by this user and nobody can create it first, swap the screenshots or plant links in it on a shared /tmp.
+ */
+export function makeDefaultOutDir(port: number): string {
+  return fs.mkdtempSync(path.join(os.tmpdir(), `instafy-preview-check-${port}-`));
 }
 
 function escapeAttribute(value: string): string {
@@ -350,9 +355,12 @@ async function startFrameHost(siteUrl: string): Promise<{ url: string; close: ()
   return { url: `http://localhost:${port}/`, close: () => server.close() };
 }
 
-/** Is a screenshot one colour? `dominant` is the share of the most common (coarsely quantized) colour. */
+/**
+ * Is a screenshot one colour? `dominant` is the share of the most common (coarsely quantized) colour, or null when it
+ * could not be measured; then the single-colour rule cannot apply (see `incompleteBlankCheck`).
+ */
 export function blankVerdict(input: {
-  dominant: number;
+  dominant: number | null;
   text: number;
   media: number;
   elements: number;
@@ -365,9 +373,31 @@ export function blankVerdict(input: {
   if (input.framed === "missing") return { blank: true, reason: "the page did not load" };
   // One colour with no visible text: a canvas or app that drew nothing. Text alone on a plain background (a minimal
   // page) is not blank, though it covers far less than 0.5% of the screen.
-  if (input.dominant >= 0.995 && input.text === 0) return { blank: true, reason: "the screen is a single colour" };
+  if (input.dominant !== null && input.dominant >= 0.995 && input.text === 0) return { blank: true, reason: "the screen is a single colour" };
   if (input.text === 0 && input.media === 0 && input.elements < 3) return { blank: true, reason: "the page has no text, images or canvas" };
   return { blank: false, reason: null };
+}
+
+/** The dominant-colour share, or null when measuring failed or gave something that is not a share. */
+export async function measureDominantShare(measure: () => Promise<number>): Promise<number | null> {
+  try {
+    const share = await measure();
+    return Number.isFinite(share) && share >= 0 && share <= 1 ? share : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Said out loud when the screenshot could not be measured, never silently passed. With no text on the page only the
+ * screenshot could show it drew something (a canvas that drew nothing still counts as media), so that is a problem;
+ * with text it is a warning.
+ */
+export function incompleteBlankCheck(dominant: number | null, text: number): { error: boolean; message: string } | null {
+  if (dominant !== null) return null;
+  return text === 0
+    ? { error: true, message: "blank check incomplete: could not read the screenshot, and the page has no text to show it drew anything" }
+    : { error: false, message: "blank check incomplete: could not read the screenshot, so a single-colour screen would not be caught" };
 }
 
 const FRAME_SNAPSHOT = () => {
@@ -489,11 +519,20 @@ async function checkViewport(
     if (status !== null && status >= 400) framed = "missing";
     const file = path.join(outDir, `${vp.name}.png`);
     const png: Buffer = await page.screenshot({ path: file });
-    const helper = await context.newPage();
-    const dominant = await helper.evaluate(DOMINANT_COLOUR, png.toString("base64")).catch(() => 0);
-    await helper.close();
+    const dominant = await measureDominantShare(async () => {
+      const helper = await context.newPage();
+      try {
+        return await helper.evaluate(DOMINANT_COLOUR, png.toString("base64"));
+      } finally {
+        await helper.close().catch(() => {});
+      }
+    });
     const blank = blankVerdict({ dominant, text: snap.text, media: snap.media, elements: snap.elements, framed });
     if (blank.blank) errors.push(`blank page: ${blank.reason}`);
+    else {
+      const incomplete = incompleteBlankCheck(dominant, snap.text);
+      if (incomplete) (incomplete.error ? errors : warnings).push(incomplete.message);
+    }
     return {
       name: vp.name,
       width: vp.width,
@@ -529,23 +568,26 @@ export async function runSiteCheck(opts: SiteCheckOptions): Promise<{ code: numb
   const env = opts.env ?? process.env;
   const port = parsePreviewPort(opts.port, env);
   const sitePath = parseCheckPath(opts.path);
-  const outDir = path.resolve(opts.outDir ?? defaultOutDir(port));
+  const timeoutMs = opts.timeoutMs ?? 30_000;
   const viewports = VIEWPORTS.filter((v) => !opts.phone || v.name === "phone");
-  // An unusable --out fails here, before anything else, as the tool's own failure (exit 70).
-  fs.mkdirSync(outDir, { recursive: true });
-  // old screenshots would look like a check that happened
-  for (const v of VIEWPORTS) fs.rmSync(path.join(outDir, `${v.name}.png`), { force: true });
+  let outDir: string | null = null;
+  if (opts.outDir !== undefined) {
+    outDir = path.resolve(opts.outDir);
+    // An unusable --out fails here, before anything else, as the tool's own failure (exit 70).
+    fs.mkdirSync(outDir, { recursive: true });
+    // old screenshots would look like a check that happened
+    for (const v of VIEWPORTS) fs.rmSync(path.join(outDir, `${v.name}.png`), { force: true });
+  }
 
   const probePath = sitePath.replace(/[?#].*$/, "") || "/";
-  const probe = await probeLocalSite(port, probePath);
+  // As long as the page load may take: a dev server compiling its first request is running, not missing.
+  const probe = await probeLocalSite(port, probePath, timeoutMs);
   // Any HTTP answer means a server is up: a 500 is a problem the browser pass lists (exit 1), not "start the site".
   if (!probe.host) {
     return {
       code: CHECK_EXIT_NOT_LISTENING,
       report: null,
-      message:
-        `Nothing is answering on port ${port} at 127.0.0.1 or [::1] (${probe.reason ?? "no answer"}). ` +
-        "Start the site first, then check again.",
+      message: noAnswerMessage(port, probe, `port ${port} at 127.0.0.1 or [::1]`, "check again"),
     };
   }
 
@@ -565,10 +607,11 @@ export async function runSiteCheck(opts: SiteCheckOptions): Promise<{ code: numb
   const reports: ViewportReport[] = [];
   let host: { url: string; close: () => void } | null = null;
   try {
+    const shots = outDir ?? makeDefaultOutDir(port);
     host = opts.framed ? await startFrameHost(url) : null;
     const target = { pageUrl: host?.url ?? url, framed: Boolean(opts.framed) };
     for (const vp of viewports) {
-      reports.push(await checkViewport(launched.browser, target, vp, siteOrigin, outDir, opts.timeoutMs ?? 30_000, opts.waitMs ?? 600));
+      reports.push(await checkViewport(launched.browser, target, vp, siteOrigin, shots, timeoutMs, opts.waitMs ?? 600));
     }
   } finally {
     await launched.browser.close().catch(() => {});
@@ -665,7 +708,7 @@ export function registerPreviewCheckCommand(preview: Command): Command {
     .description(
       "Load a local site in a headless browser and report its title, errors, failed requests and a blank page; " +
         "writes desktop and phone screenshots " +
-        "(exit 1: problems, 2: nothing listening, 3: port not allowed, 4: no browser, 64: bad options, " +
+        "(exit 1: problems, 2: nothing answering, 3: port not allowed, 4: no browser, 64: bad options, " +
         "70: the check itself failed)",
     )
     .option("--port <port>", "Local port the site listens on (1024-65535)")
@@ -673,7 +716,7 @@ export function registerPreviewCheckCommand(preview: Command): Command {
     .option("--phone", "Only the phone size (390×844); default: desktop 1280×800 and phone")
     .option("--framed", "Load the site inside a frame on another origin, and report a site that refuses to be framed")
     .option("--workspace-playwright", "Also look for Playwright in this project's node_modules (runs the project's own copy)")
-    .option("--out <dir>", "Folder for desktop.png and phone.png (default: <tmp>/instafy-preview-check/port-<port>)")
+    .option("--out <dir>", "Folder for desktop.png and phone.png (default: a new private folder under the temp folder each run; the report names it)")
     .option("--timeout <ms>", "Page load timeout in ms (default 30000)")
     .option("--wait <ms>", "Extra settle time after load in ms (default 600)")
     .option("--json", "Output JSON")

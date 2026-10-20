@@ -9,6 +9,7 @@ import {
   PREVIEW_EXIT_NOT_LISTENING,
   PREVIEW_EXIT_PORT_NOT_ALLOWED,
   PreviewCommandError,
+  noAnswerMessage,
   parsePreviewPort,
   probeLocalSite,
 } from "./local-site.js";
@@ -374,7 +375,7 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
     throw new PreviewCommandError(
       probe.status !== null
         ? `The site at http://127.0.0.1:${port}${sitePath} answered HTTP ${probe.status}. Fix the server error, then retry.`
-        : `Nothing is answering on http://127.0.0.1:${port}${sitePath} (${probe.reason ?? "no answer"}). Start the site first, then retry.`,
+        : noAnswerMessage(port, probe, `http://127.0.0.1:${port}${sitePath}`, "retry"),
       PREVIEW_EXIT_NOT_LISTENING,
     );
   }
