@@ -61,6 +61,10 @@ export type PersonalBrowserActionDescriptor = {
   formMethod?: string | null;
   formActionUrl?: string | null;
   formHasPassword?: boolean;
+  /** Number of password fields in the owning form. */
+  formPasswordCount?: number;
+  /** The element is the text field right before its form's first password field. */
+  signInIdentifier?: boolean;
   formFieldCount?: number;
   /** Every submit label of the owning form, at most 200 characters. */
   formSubmitLabels?: string | null;

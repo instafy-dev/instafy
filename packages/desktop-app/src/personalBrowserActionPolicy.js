@@ -64,9 +64,11 @@
   const DESTRUCTIVE = words([
     "delete", "remove", "erase", "destroy", "archive", "cancel", "deactivate", "disable", "leave",
     "unsubscribe", "discard", "clear", "sign\\s*out", "log\\s*out", "logout", "signout", "unlink",
-    "disconnect", "close\\s+account",
+    "disconnect", "close\\s+account", "close\\s+(?:workspace|organi[sz]ation|team|subscription)",
+    "log\\s*off", "logoff", "terminate", "reset", "revoke", "wipe", "purge",
     "löschen", "entfernen", "kündigen", "stornieren", "archivieren", "deaktivieren", "abmelden",
-    "austragen", "verwerfen", "leeren", "trennen", "abbestellen",
+    "austragen", "verwerfen", "leeren", "trennen", "abbestellen", "beenden", "ausloggen", "auflösen",
+    "widerrufen", "zurücksetzen", "(?:konto|account|abo|abonnement|mandant|firma|unternehmen)\\s+schließen",
   ]);
   const DOWNLOAD = new RegExp(
     `${START}(?:backup|herunterladen|exportieren|datev|csv|tsv|xlsx?|pdf|ofx|qif|zip|mt940|camt)${END}|export|download`,
@@ -86,19 +88,26 @@
     "neues", "bearbeiten", "ändern", "aktualisieren", "übernehmen", "buchen", "festschreiben",
     "abschließen", "zuordnen", "akzeptieren", "zustimmen", "weiter", "fertig", "aktivieren",
     "importieren", "hochladen", "ja", "starten", "ausführen", "umbenennen", "verschieben", "kopieren",
+    "mark", "markieren", "pay\\s+off", "settle", "verbuchen", "ausgleichen",
   ]);
   const REVEAL = words([
     "reveal", "show", "view", "copy", "unhide", "display", "unmask",
     "anzeigen", "einblenden", "kopieren", "zeigen", "ansehen", "aufdecken",
   ]);
-  const REVEAL_ICON = /eye|visibility|reveal|clipboard|(?<![\p{L}])copy/iu;
+  // "eye" only as its own word or icon name (fa-eye, eye-off, EyeIcon), never
+  // inside words such as "eyebrow" or "survey".
+  const REVEAL_ICON =
+    /(?<![\p{L}])eye(?:[-_]?(?:icon|open|off|slash|closed|fill|outline))?(?![\p{L}])|(?<![\p{L}])eye(?=icon|open|off|slash)|visibility|reveal|clipboard|(?<![\p{L}])copy/iu;
   const SIGN_IN_EXACT = /^(?:sign\s*in|log\s*in|login|sign\s*on|anmelden|einloggen|jetzt\s+anmelden|login\s+now)$/iu;
+  // Identity providers. Sign-in phrasing only counts with one of these, so
+  // "Mit Import fortfahren" or "Log in with your email below" stay ordinary.
+  const IDENTITY_PROVIDERS =
+    "(?:google|apple|microsoft|github|gitlab|bitbucket|facebook|linkedin|twitter|x|sso|saml|okta|slack|discord|amazon|azure|keycloak|passkeys?|single\\s+sign[\\s-]?on|security\\s+key|e-?mail|id\\s+austria|handy-?signatur)";
   const FEDERATED_SIGN_IN = new RegExp(
     [
-      "(?:sign\\s*in|log\\s*in|login|sign\\s*up|register)\\s+(?:with|via|using)\\s+\\S+",
-      "continue\\s+with\\s+(?:google|apple|microsoft|github|gitlab|bitbucket|facebook|linkedin|twitter|x|sso|saml|okta|slack|discord|amazon|azure|keycloak|passkey|e-?mail)",
-      "(?:anmelden|einloggen|registrieren)\\s+mit\\s+\\S+",
-      "mit\\s+\\S+(?:\\s+\\S+)?\\s+(?:anmelden|einloggen|fortfahren)",
+      `(?:sign\\s*in|log\\s*in|login|sign\\s*up|register|continue|connect)\\s+(?:with|via|using)\\s+${IDENTITY_PROVIDERS}(?![\\p{L}\\p{N}])`,
+      `(?:anmelden|einloggen|registrieren|fortfahren|weiter)\\s+mit\\s+(?:(?:ihrem|deinem|dem|der)\\s+)?${IDENTITY_PROVIDERS}(?![\\p{L}\\p{N}])`,
+      `mit\\s+(?:(?:ihrem|deinem|dem|der)\\s+)?${IDENTITY_PROVIDERS}(?:[\\s-]?(?:konto|account|id))?\\s+(?:anmelden|einloggen|fortfahren|registrieren)`,
     ].join("|"),
     "iu",
   );
@@ -245,8 +254,21 @@
     return SEARCH_LABEL.test(cleanText([target.ariaLabel, target.placeholder, target.name, target.id, target.title].filter(Boolean).join(" ")));
   }
 
+  // A short form with exactly one password field. Change-password and
+  // sign-up forms with a confirmation field have more than one.
   function isSignInForm(target) {
-    return target.formHasPassword === true && Number(target.formFieldCount || 0) <= 4;
+    const passwords = target.formPasswordCount === undefined ? 1 : Number(target.formPasswordCount);
+    return target.formHasPassword === true && passwords === 1 && Number(target.formFieldCount || 0) <= 4;
+  }
+
+  function isPlainHttpLink(target) {
+    if (target.linkSelf !== true) return false;
+    try {
+      const protocol = new URL(cleanText(target.href)).protocol;
+      return protocol === "http:" || protocol === "https:";
+    } catch {
+      return false;
+    }
   }
 
   function credentialish(target, label) {
@@ -358,15 +380,30 @@
 
     if (tag === "input" && type === "file") return refuse("upload", "file chooser");
 
-    const revealLike = REVEAL.test(label) || REVEAL_ICON.test(cleanText(target.iconHint));
-    if (revealLike && credentialish(target, label)) return refuse("reveal_secret", "reveal or copy control in a credential context");
+    // A whole row's label is the text of every control in it, so a row is
+    // never a reveal control because a button inside it says "Anzeigen". A
+    // row in a credential context still asks as "may show a secret" below.
+    const rowTarget = ["tr", "li"].includes(tag) || ["row", "listitem"].includes(role);
+    const revealLike = !rowTarget && (REVEAL.test(label) || REVEAL_ICON.test(cleanText(target.iconHint)));
+    const plainHttpLink = isPlainHttpLink(target);
+    // A link to another page ("View invoice", "View documentation") is a
+    // reveal only when its own label names a credential; otherwise the page
+    // it opens is checked on its own.
+    if (revealLike && (plainHttpLink ? credentialNoun.test(label) : credentialish(target, label))) {
+      return refuse("reveal_secret", "reveal or copy control in a credential context");
+    }
 
     // Clicking into a field only focuses it; typing is classified on its own.
     if (isEditable(target) && !FEDERATED_SIGN_IN.test(label)) return allow("focus", "focus a field");
 
     if (FEDERATED_SIGN_IN.test(label)) return refuse("sign_in", "sign-in with another account");
     if (isSubmitControl(target) && isSignInForm(target)) return refuse("sign_in", "sign-in form submit");
-    if (isButtonLike(target) && SIGN_IN_EXACT.test(label)) return refuse("sign_in", "sign-in button");
+    // A bare "Log in" button only signs in inside a form with a password
+    // field. A header button or link that opens the sign-in page stays free
+    // of this refusal, so the agent can reach the page and hand it over.
+    if (!plainHttpLink && isButtonLike(target) && SIGN_IN_EXACT.test(label) && target.formHasPassword === true) {
+      return refuse("sign_in", "sign-in button");
+    }
 
     const href = cleanText(target.href);
     if (href) {
@@ -381,10 +418,13 @@
       if (target.download === true || (protocol === "http:" || protocol === "https:") && FILE_EXTENSION.test(new URL(href).pathname)) {
         return ask("download", "download link");
       }
+      // A link inside a credential row or dialog may open the secret; a link
+      // elsewhere under a credential heading is ordinary navigation.
+      const credentialEntry = target.credentialContext === true && (target.row === true || inDialog);
       const plain = target.linkSelf === true &&
         (protocol === "http:" || protocol === "https:") &&
         !isSamePageAnchor(href, ctx && ctx.pageUrl) &&
-        target.credentialContext !== true &&
+        !credentialEntry &&
         !["button", "menuitem", "menuitemcheckbox", "menuitemradio", "switch", "checkbox", "radio", "tab", "option"].includes(role);
       if (plain) return allow("navigation", "plain link");
     }
@@ -414,6 +454,9 @@
       }
     }
 
+    // A row's words come from the controls inside it; in a credential
+    // context the row itself may open the secret.
+    if (rowTarget && credentialish(target, label)) return ask("may_show_secret", "row in a credential context");
     if (namedCategory) return ask(namedCategory, "labelled control");
     if (credentialish(target, label)) return ask("may_show_secret", "entry in a credential context");
     return ask("change", "control");
@@ -424,11 +467,18 @@
     const type = lower(target.type);
     if (tag === "input" && type === "file") return refuse("upload", "file chooser");
     if (ctx && ctx.sensitive === true) return refuse("sensitive", "sensitive field");
-    if (target.formHasPassword === true && lower(target.type) !== "password") {
-      // In a short sign-in form every field is part of the sign-in; in a long
-      // form that also has a password, only a clear username or email field is.
-      const strongIdentifier = type === "email" || /(?:^|\s)(?:username|email|webauthn)(?:\s|$)/.test(lower(target.autocomplete));
-      if (isSignInForm(target) ? isEditable(target) : strongIdentifier) return refuse("sign_in", "sign-in identifier field");
+    const autocomplete = lower(target.autocomplete);
+    if (target.formHasPassword === true && type !== "password") {
+      // Only the account identifier of a form with a password field: an email
+      // field, a field marked as the username, or the text field right before
+      // the password. Other fields of a sign-up form stay ordinary.
+      const identifier = type === "email" ||
+        /(?:^|\s)(?:username|email|webauthn)(?:\s|$)/.test(autocomplete) ||
+        target.signInIdentifier === true;
+      if (identifier) return refuse("sign_in", "sign-in identifier field");
+    } else if (/(?:^|\s)(?:username|webauthn)(?:\s|$)/.test(autocomplete)) {
+      // Email-first sign-in shows the username field before any password field.
+      return refuse("sign_in", "sign-in identifier field");
     }
     if (isSearchField(target)) return allow("search", "search field");
     const labels = cleanText(`${cleanText(target.formSubmitLabels)} ${cleanText(target.formActionText)}`);

@@ -169,20 +169,33 @@ press before it runs (`personalBrowserActionPolicy.js`). The classifier works on
 the element's structure: tag, role, whether the target is the link itself,
 the link's address and `download` attribute, the owning form's method, action,
 password field, editable-field count and submit labels, and the enclosing page
-area (dialog, search, navigation, menu, tree, tab list or pagination). Label
+area (dialog, search, navigation, menu, tree, tab list or pagination). An
+element is in a credential context when the nearest heading before it, its
+dialog title, its table column header or its row names a credential. Label
 words in English and German only add risk; verbs match whole words and
 credential nouns also match inside compounds such as Zugangsschlüssel.
+Bookkeeping compounds such as Buchungsschlüssel or Steuerschlüssel are not
+credential words.
 
 **Refused in every mode, with no dialog.** The agent receives a 403 and must stop
 and tell the person:
 
 - `step_refused_secret`: a reveal, show, view or copy control (including
   Anzeigen, Einblenden, Kopieren and eye or copy icons) in a credential context,
-  next to masked text, or labelled with a credential word;
-- `step_refused_sign_in`: a sign-in form's submit, a sign-in button, a
-  "Continue with …", "Sign in with …" or "Mit … anmelden" control, and typing
-  into the username or email field of a sign-in form. Plain links to a sign-in
-  page stay allowed;
+  next to masked text in its row or a small container, or labelled with a
+  credential word. A link to another page counts only when its own label names
+  a credential, so "View invoice" beside a masked card number stays a link.
+  Masked card or account numbers that end in visible digits (`•••• 4242`) are
+  not masked secrets;
+- `step_refused_sign_in`: a sign-in form's submit, a "Log in" or "Anmelden"
+  button inside a form with a password field, a "Continue with …", "Sign in
+  with …" or "Mit … anmelden" control naming an identity provider (Google,
+  Apple, Microsoft, SSO, passkey, ID Austria and similar), and typing the
+  account identifier: an email field, a field marked as the username, or the
+  text field right before the password in a form with a password field, and a
+  username field of an email-first sign-in. Other fields of a sign-up form,
+  header sign-in buttons and plain links to a sign-in page stay allowed, so the
+  agent can reach the sign-in page and hand it over;
 - `step_refused_upload`: file inputs.
 
 Password, code and payment fields stay blocked as before.
@@ -194,10 +207,13 @@ change, key or password change, download or export, delete/cancel/sign out,
 something" by default. When a control's accessible name and visible text differ,
 the dialog shows both. After a key or password step, or a step that may show a
 secret, the page stays withheld from the agent until a new page loads, and so
-does the page that step opens.
+does the page that step opens. Withholding starts before the step runs, so a
+pause or rotation after the click cannot leave the page readable. It is kept
+per document: a single-page app stays withheld across its own route changes
+until a real page load or an agent `navigate`.
 
-**Ask mode** also asks for checkboxes, switches, menu items and script-driven
-controls unless they are structurally free (tabs, `<summary>`, menu openers,
+**Ask mode** also asks for selects, checkboxes, switches, menu items, focusable
+and script-driven controls unless they are structurally free (tabs, `<summary>`, menu openers,
 neutral menu or navigation items, page numbers and privacy-preserving cookie
 dismissals), and asks for Enter on any editable field that is not a search
 field, because a chat box can send on keydown without a form. Routine mode
@@ -227,20 +243,23 @@ Detection checks input type, autocomplete tokens, accessible labels, names, plac
 
 Every page observation the agent receives is redacted in Electron main before it
 leaves Desktop, in Ask and routine mode and on every site. This covers the
-snapshot's address, title, visible text and control names, the `status` address
-and title, and Desktop's own log messages.
+snapshot's address, title, visible text and control names, the `status` address,
+title and load error, and Desktop's own log messages.
 
 - **Known key formats** are masked in place as `[redacted secret]`: provider API
   keys and tokens (OpenAI- and Anthropic-style `sk-` keys, payment `sk_`/`rk_`
   keys, webhook secrets, GitHub, GitLab, Slack, AWS, Google, npm, Hugging Face,
   Shopify, Notion and SendGrid tokens), JWTs, PEM private keys and `Bearer`
   values.
-- **Unknown formats** are masked only near a credential word: a value of 20 or
-  more characters that mixes letters and digits and looks random, within about
-  120 characters of a word such as key, token, secret, Schlüssel, Zugangsdaten
-  or Client Secret. UUIDs and 32/40/64-character hex values stay readable unless
-  the page is a credential context.
-- **Codes:** six to eight digits next to the word "code" are masked.
+- **Unknown formats:** a value of 20 or more characters that mixes letters and
+  digits and looks random is masked anywhere on a credential page, and elsewhere
+  within about 120 characters of a word such as key, token, secret, Schlüssel,
+  Zugangsdaten or Client Secret. UUIDs and 32/40/64-character hex values are
+  masked on a credential page or within about 32 characters of such a word,
+  unless they are labelled as an id or commit ("Token id …").
+- **Codes:** six to eight digits, or two groups of three or four, right after a
+  code word such as code, PIN, TAN, OTP or Bestätigungscode are masked. Words
+  that only contain "code", such as Postcode or Steuercode, do not count.
 - **Addresses** stay navigable. Fragments and ordinary paths are kept; a query
   value on a key such as `token`, `code`, `key` or `state` is masked only when it
   is long and random, and a path segment only after an action word such as
@@ -256,7 +275,10 @@ next to a reveal or copy control, or a credential context shows a key-like value
 in text or a code block. The snapshot then carries `secretScreen: true`, an
 empty `text` and a fixed message, while the masked control names stay so the
 agent can tell the person which control shows the value. Pages that only show
-example keys, such as documentation, are masked in place instead.
+example keys, such as documentation, are masked in place instead. On a withheld
+page every random-looking value, UUID or hex run in a control name is masked as
+well, because a control such as a click-to-copy chip can be named by the value
+itself.
 
 A secret screen stays withheld until a new page loads, even after the value is
 hidden again. This also covers a dialog that shows a value without changing the

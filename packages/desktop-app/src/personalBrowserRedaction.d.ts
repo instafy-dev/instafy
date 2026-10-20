@@ -44,7 +44,7 @@ export declare function looksRandom(value: unknown, minimumLength?: number): boo
 export declare function matchesKnownFormat(value: unknown): boolean;
 export declare function redactText(
   value: unknown,
-  options?: { credentialContext?: boolean },
+  options?: { credentialContext?: boolean; strict?: boolean },
 ): RedactionResult;
 export declare function redactUrl(value: unknown): RedactionResult;
 export declare function redactPageObservation(input: PageObservationInput): RedactedPageObservation;

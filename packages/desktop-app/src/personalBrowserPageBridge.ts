@@ -84,8 +84,8 @@ const PAGE_SECRET_SIGNAL_SCRIPT = `
     const secretPatternSources = ${serializeForScript(KNOWN_SECRET_PATTERN_SOURCES)};
     const credentialContextPattern = new RegExp(${serializeForScript(CREDENTIAL_CONTEXT_SOURCE)}, "iu");
     const placeholderPattern = new RegExp(${serializeForScript(PLACEHOLDER_SOURCE)}, "i");
-    const maskedTextPattern = new RegExp(${serializeForScript(MASKED_TEXT_SOURCE)});
-    const revealLabelPattern = /(?<![\\p{L}\\p{N}])(?:reveal|show|view|copy|unhide|display|anzeigen|einblenden|kopieren|zeigen|ansehen)(?![\\p{L}\\p{N}])|eye|visibility|clipboard/iu;
+    const maskedTextPattern = new RegExp(${serializeForScript(MASKED_TEXT_SOURCE)}, "u");
+    const revealLabelPattern = /(?<![\\p{L}\\p{N}])(?:reveal|show|view|copy|unhide|display|anzeigen|einblenden|kopieren|zeigen|ansehen)(?![\\p{L}\\p{N}])|(?<![\\p{L}])eye(?:[-_]?(?:icon|open|off|slash|closed|fill|outline))?(?![\\p{L}])|(?<![\\p{L}])eye(?=icon|open|off|slash)|visibility|clipboard/iu;
     const uuidValuePattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     const hexValuePattern = /^(?:[0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{64})$/i;
     const valueEntropy = (value) => {
@@ -164,10 +164,23 @@ const PAGE_SECRET_SIGNAL_SCRIPT = `
               elementAttribute(element, "aria-label"), elementAttribute(element, "title"),
               elementAttribute(element, "class"), elementAttribute(element, "data-icon"), elementText(element),
             ].filter(Boolean).join(" ");
-            if (revealLabelPattern.test(label)) {
+            // A link to another page counts only when its own label names a
+            // credential; "View invoice" beside a masked card number does not.
+            let pageLink = false;
+            if (tag === "A") {
+              try {
+                pageLink = ["http:", "https:"].includes(new URL(String(element.href || "")).protocol)
+                  && !String(elementAttribute(element, "href") || "").startsWith("#");
+              } catch {
+                pageLink = false;
+              }
+            }
+            if (revealLabelPattern.test(label) && (!pageLink || credentialContextPattern.test(label))) {
               let ancestor = element.parentElement;
               for (let depth = 0; ancestor && depth < 3; depth += 1, ancestor = ancestor.parentElement) {
-                if (maskedTextPattern.test(elementText(ancestor))) {
+                // Only a small container around the control, never a whole card or page.
+                const ancestorText = typeof ancestor.textContent === "string" ? ancestor.textContent : (ancestor.innerText ?? "");
+                if (ancestorText.length <= 400 && maskedTextPattern.test(elementText(ancestor))) {
                   maskedNearReveal = true;
                   break;
                 }
@@ -240,77 +253,167 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
       }
       return null;
     };
-    // Structure around the element, walked through parentElement only. Text
-    // is bounded and stays in the main process; it is never sent to the agent.
+    // Structure around the element. Ancestor facts and bounded text are
+    // computed once per node in each run, so a page with hundreds of rows
+    // stays fast. Text stays in the main process; it is never sent to the agent.
+    const structureAttribute = (node, name) => typeof node?.getAttribute === "function" ? node.getAttribute(name) : null;
+    const structureTag = (node) => typeof node?.tagName === "string" ? node.tagName.toUpperCase() : "";
+    const structureHeadingSelector = "h1, h2, h3, h4, h5, h6, [role='heading'], legend, caption";
+    const structureDialogSelector = "dialog, [role='dialog'], [role='alertdialog'], [aria-modal='true']";
+    const SMALL_CONTAINER_CHARACTERS = 400;
+    const areaOf = (node) => {
+      const role = clean(structureAttribute(node, "role")).toLowerCase();
+      const tag = structureTag(node);
+      if (tag === "DIALOG" || role === "dialog" || role === "alertdialog" || structureAttribute(node, "aria-modal") === "true") return "dialog";
+      if (tag === "SEARCH" || role === "search") return "search";
+      const pagination = /pagination|pager|paginat|seitennavigation/i.test(
+        [structureAttribute(node, "aria-label"), structureAttribute(node, "class"), structureAttribute(node, "data-testid")].filter(Boolean).join(" "),
+      );
+      if (pagination) return "pagination";
+      if (tag === "NAV" || role === "navigation") return "nav";
+      if (role === "menu" || role === "menubar") return role;
+      if (role === "tree" || role === "tablist") return role;
+      return "";
+    };
+    const rowOf = (node) => {
+      const role = clean(structureAttribute(node, "role")).toLowerCase();
+      return ["TR", "LI", "DT", "DD"].includes(structureTag(node)) || ["row", "listitem", "option", "gridcell", "treeitem", "article"].includes(role);
+    };
+    const dialogLabelOf = (node) => {
+      const labelledBy = clean(structureAttribute(node, "aria-labelledby")).split(/\\s+/)
+        .map((id) => id ? document.getElementById(id) : null).filter(Boolean)
+        .map((label) => clean(label.textContent)).join(" ");
+      const dialogHeading = typeof node.querySelector === "function" ? node.querySelector(structureHeadingSelector) : null;
+      return clean(structureAttribute(node, "aria-label") || labelledBy || dialogHeading?.textContent || "", 200);
+    };
+    const emptyFacts = { areas: [], dialogLabel: "", row: null };
+    const nodeFacts = new Map();
+    // Enclosing areas (nearest first), the nearest dialog's label and the
+    // nearest row, inherited from the parent's cached facts.
+    const factsOf = (start) => {
+      if (!start) return emptyFacts;
+      const chain = [];
+      let node = start;
+      while (node && !nodeFacts.has(node) && chain.length < 200) {
+        chain.push(node);
+        node = node.parentElement;
+      }
+      let inherited = node && nodeFacts.has(node) ? nodeFacts.get(node) : emptyFacts;
+      for (let index = chain.length - 1; index >= 0; index -= 1) {
+        const current = chain[index];
+        const area = areaOf(current);
+        const facts = {
+          areas: area && !inherited.areas.includes(area) ? [area, ...inherited.areas] : inherited.areas,
+          dialogLabel: area === "dialog" ? dialogLabelOf(current) : inherited.dialogLabel,
+          row: rowOf(current) ? current : inherited.row,
+        };
+        nodeFacts.set(current, facts);
+        inherited = facts;
+      }
+      return nodeFacts.get(start) ?? emptyFacts;
+    };
+    const textFacts = new Map();
+    const boundedText = (node) => {
+      let facts = textFacts.get(node);
+      if (!facts) {
+        const raw = typeof node?.textContent === "string" ? node.textContent : "";
+        facts = { text: clean(raw.slice(0, 4_000), 2_000), length: raw.length };
+        textFacts.set(node, facts);
+      }
+      return facts;
+    };
+    let headingList = null;
+    const headingsInOrder = () => {
+      if (headingList === null) {
+        try {
+          headingList = Array.from(document.querySelectorAll(structureHeadingSelector)).filter((node) =>
+            typeof node?.matches === "function" && node.matches(structureHeadingSelector) &&
+            typeof node.compareDocumentPosition === "function");
+        } catch {
+          headingList = [];
+        }
+      }
+      return headingList;
+    };
+    // The nearest heading before the element in document order, within six
+    // levels of it and not inside a dialog the element is outside of.
+    const nearestHeading = (element) => {
+      if (typeof element?.compareDocumentPosition !== "function") return "";
+      const list = headingsInOrder();
+      let low = 0;
+      let high = list.length - 1;
+      let found = -1;
+      while (low <= high) {
+        const middle = (low + high) >> 1;
+        const candidate = list[middle];
+        // 4 is DOCUMENT_POSITION_FOLLOWING: the element comes after the heading.
+        if (candidate === element || (candidate.compareDocumentPosition(element) & 4) !== 0) {
+          found = middle;
+          low = middle + 1;
+        } else {
+          high = middle - 1;
+        }
+      }
+      let scope = element;
+      for (let depth = 0; depth < 6 && scope.parentElement; depth += 1) scope = scope.parentElement;
+      for (let index = found, steps = 0; index >= 0 && steps < 25; index -= 1, steps += 1) {
+        const candidate = list[index];
+        if (candidate === element) continue;
+        if (typeof scope.contains !== "function" || !scope.contains(candidate)) return "";
+        const dialog = typeof candidate.closest === "function" ? candidate.closest(structureDialogSelector) : null;
+        if (dialog && !(typeof dialog.contains === "function" && dialog.contains(element))) continue;
+        return clean(candidate.textContent ?? "", 200);
+      }
+      return "";
+    };
+    // The column header of the element's table cell, or the whole header row
+    // for a row target.
+    const columnHeader = (element, row) => {
+      if (structureTag(row) !== "TR" || typeof row.closest !== "function") return "";
+      const table = row.closest("table");
+      if (!table) return "";
+      const headerRow = table.tHead?.rows?.[0]
+        ?? Array.from(table.rows ?? []).find((candidate) => typeof candidate.querySelector === "function" && candidate.querySelector("th"));
+      if (!headerRow || headerRow === row) return "";
+      if (element === row) {
+        return clean(Array.from(headerRow.cells ?? []).map((cell) => cell.textContent ?? "").join(" "), 200);
+      }
+      const cell = typeof element.closest === "function" ? element.closest("td, th") : null;
+      if (!cell || cell.parentElement !== row || !Number.isInteger(cell.cellIndex)) return "";
+      return clean(headerRow.cells?.[cell.cellIndex]?.textContent ?? "", 200);
+    };
     const describeStructure = (element, link) => {
-      const attribute = (node, name) => typeof node?.getAttribute === "function" ? node.getAttribute(name) : null;
-      const tagOf = (node) => typeof node?.tagName === "string" ? node.tagName.toUpperCase() : "";
-      const areaOf = (node) => {
-        const role = clean(attribute(node, "role")).toLowerCase();
-        const tag = tagOf(node);
-        if (tag === "DIALOG" || role === "dialog" || role === "alertdialog" || attribute(node, "aria-modal") === "true") return "dialog";
-        if (tag === "SEARCH" || role === "search") return "search";
-        const pagination = /pagination|pager|paginat|seitennavigation/i.test(
-          [attribute(node, "aria-label"), attribute(node, "class"), attribute(node, "data-testid")].filter(Boolean).join(" "),
-        );
-        if (pagination) return "pagination";
-        if (tag === "NAV" || role === "navigation") return "nav";
-        if (role === "menu" || role === "menubar") return role;
-        if (role === "tree" || role === "tablist") return role;
-        return "";
-      };
-      const areas = [];
-      let dialogLabel = "";
-      let heading = "";
-      let rowText = "";
-      let isRow = false;
+      const parentFacts = factsOf(element.parentElement);
+      const row = rowOf(element) ? element : parentFacts.row;
+      const rowText = row ? clean(boundedText(row).text, 500) : "";
+      const heading = nearestHeading(element);
+      const header = row ? columnHeader(element, row) : "";
+      // Masked text counts only in the element's row or a small container
+      // around it, never a whole card or page.
       let nearMaskedText = false;
-      const headingSelector = "h1, h2, h3, h4, h5, h6, [role='heading'], legend, caption";
-      const rowOf = (node) => {
-        const role = clean(attribute(node, "role")).toLowerCase();
-        return ["TR", "LI", "DT", "DD"].includes(tagOf(node)) || ["row", "listitem", "option", "gridcell", "treeitem", "article"].includes(role);
+      const smallMasked = (node) => {
+        const facts = boundedText(node);
+        return facts.length <= SMALL_CONTAINER_CHARACTERS && maskedTextPattern.test(facts.text);
       };
-      if (rowOf(element)) {
-        isRow = true;
-        rowText = clean(element.textContent ?? "", 500);
-      }
       let node = element.parentElement;
-      for (let depth = 0; node && depth < 40; depth += 1, node = node.parentElement) {
-        const area = areaOf(node);
-        if (area && !areas.includes(area)) areas.push(area);
-        if (area === "dialog" && !dialogLabel) {
-          const labelledBy = clean(attribute(node, "aria-labelledby")).split(/\s+/)
-            .map((id) => id ? document.getElementById(id) : null).filter(Boolean)
-            .map((label) => clean(label.textContent)).join(" ");
-          const dialogHeading = typeof node.querySelector === "function" ? node.querySelector(headingSelector) : null;
-          dialogLabel = clean(attribute(node, "aria-label") || labelledBy || dialogHeading?.textContent || "", 200);
-        }
-        if (!isRow && rowOf(node)) {
-          isRow = true;
-          rowText = clean(node.textContent ?? "", 500);
-        }
-        if (!heading && depth < 6 && typeof node.querySelector === "function") {
-          const found = node.querySelector(headingSelector);
-          if (found && found !== element) heading = clean(found.textContent ?? "", 200);
-        }
-        if (!nearMaskedText && depth < 3 && maskedTextPattern.test(clean(node.textContent ?? "", 2_000))) {
-          nearMaskedText = true;
-        }
+      for (let depth = 0; node && depth < 3 && !nearMaskedText; depth += 1, node = node.parentElement) {
+        nearMaskedText = smallMasked(node);
       }
-      const contextLabel = clean([dialogLabel, heading, rowText].filter(Boolean).join(" · "), 200);
+      if (!nearMaskedText && row && row !== element) nearMaskedText = smallMasked(row);
+      const contextLabel = clean([parentFacts.dialogLabel, heading, header, rowText].filter(Boolean).join(" · "), 200);
       const iconChild = typeof element.querySelector === "function" ? element.querySelector("svg, i, img, use") : null;
       const iconHint = clean([
-        attribute(element, "class"), attribute(element, "data-icon"), attribute(element, "data-testid"),
-        attribute(iconChild, "class"), attribute(iconChild, "aria-label"), attribute(iconChild, "alt"),
-        attribute(iconChild, "data-icon"), attribute(iconChild, "href"),
+        structureAttribute(element, "class"), structureAttribute(element, "data-icon"), structureAttribute(element, "data-testid"),
+        structureAttribute(iconChild, "class"), structureAttribute(iconChild, "aria-label"), structureAttribute(iconChild, "alt"),
+        structureAttribute(iconChild, "data-icon"), structureAttribute(iconChild, "href"),
       ].filter(Boolean).join(" "), 160);
-      const expanded = attribute(element, "aria-expanded") ?? attribute(link, "aria-expanded");
-      const popup = attribute(element, "aria-haspopup");
+      const expanded = structureAttribute(element, "aria-expanded") ?? structureAttribute(link, "aria-expanded");
+      const popup = structureAttribute(element, "aria-haspopup");
       return {
-        areas: areas.join(" "),
+        areas: parentFacts.areas.join(" "),
         menuOpener: expanded !== null || (popup !== null && popup !== "false"),
-        credentialContext: credentialContextPattern.test([dialogLabel, heading, rowText].join(" ")),
-        row: isRow,
+        credentialContext: credentialContextPattern.test([parentFacts.dialogLabel, heading, header, rowText].join(" ")),
+        row: Boolean(row),
         contextLabel,
         nearMaskedText,
         iconHint,
@@ -356,8 +459,18 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
           control instanceof HTMLTextAreaElement ||
           String(control.tagName || "").toUpperCase() === "SELECT"
         )).length;
-      const formHasPassword = formControls.some((control) =>
-        control instanceof HTMLInputElement && String(control.type || "").toLowerCase() === "password");
+      const isPasswordControl = (control) =>
+        control instanceof HTMLInputElement && String(control.type || "").toLowerCase() === "password";
+      const formPasswordCount = formControls.filter(isPasswordControl).length;
+      const formHasPassword = formPasswordCount > 0;
+      // The text field right before the form's first password field is the
+      // account identifier of a sign-in form.
+      const firstPassword = formControls.findIndex(isPasswordControl);
+      const identifierCandidate = firstPassword > 0
+        ? formControls.slice(0, firstPassword).reverse().find((control) =>
+          control instanceof HTMLInputElement && ["", "text", "email", "tel"].includes(String(control.type || "").toLowerCase()))
+        : null;
+      const signInIdentifier = Boolean(identifierCandidate) && identifierCandidate === element;
       const formLabelledBy = clean(form?.getAttribute("aria-labelledby"))
         .split(/\\s+/)
         .map((id) => document.getElementById(id))
@@ -418,6 +531,8 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
         formMethod: form ? clean(form.getAttribute("method") || "get", 16).toLowerCase() : "",
         formActionUrl: form ? clean(typeof form.action === "string" ? form.action : form.getAttribute("action"), 4096) : "",
         formHasPassword,
+        formPasswordCount,
+        signInIdentifier,
         formFieldCount,
         formSubmitLabels,
         contentEditable: element.isContentEditable === true,

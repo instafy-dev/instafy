@@ -85,10 +85,80 @@ test("UUIDs and long hex values are left alone outside a credential context", ()
   assert.ok(!inContext.text.includes(sha));
 });
 
+test("a UUID or hex value right after a credential word is masked even outside a credential page", () => {
+  const sha = "3f2a9c1e8b7d4e6fa5b4c3d2e1f0a9b812345678";
+  const result = redaction.redactText(`API token ${sha}`);
+  assert.equal(result.text, "API token [redacted secret]");
+  assert.equal(result.matches, 1);
+});
+
+test("on a credential page an unknown value is masked however far it is from the word", () => {
+  const opaque = random(28);
+  const filler = "Mit diesem Wert verbinden Sie externe Anwendungen mit Ihrer Buchhaltung. ".repeat(3);
+  const observation = redaction.redactPageObservation({
+    url: "https://books.example.test/apps", title: "Verbundene Apps",
+    text: `API-Schlüssel\n${filler}\n${opaque}`, names: [],
+    signals: { credentialContext: true },
+  });
+  assert.ok(filler.length > 140);
+  assert.equal(observation.secretScreen, true);
+  assert.ok(!JSON.stringify(observation).includes(opaque));
+});
+
+test("control names on a withheld page lose every random-looking run, known format or not", () => {
+  const opaque = random(32);
+  const uuid = "3f2a9c1e-8b7d-4e6f-a5b4-c3d2e1f0a9b8";
+  for (const input of [
+    { signals: { secretField: true } },
+    { signals: {}, withhold: true },
+  ]) {
+    const observation = redaction.redactPageObservation({
+      url: "https://app.example.test/", title: "Settings", text: "", names: [opaque, `Copy ${uuid}`, "Done"], ...input,
+    });
+    assert.equal(observation.secretScreen, true);
+    assert.deepEqual(observation.names, ["[redacted secret]", "Copy [redacted secret]", "Done"]);
+  }
+  const ordinary = redaction.redactPageObservation({
+    url: "https://app.example.test/", title: "Orders", text: "", names: [`Order ${uuid}`], signals: {},
+  });
+  assert.deepEqual(ordinary.names, [`Order ${uuid}`], "names on an ordinary page keep their ids");
+});
+
 test("six to eight digit codes are masked next to the word code", () => {
   assert.equal(redaction.redactText("Your verification code is 482913.").text, "Your verification code is [redacted secret].");
   assert.equal(redaction.redactText("Bestätigungscode: 48291377").text, "Bestätigungscode: [redacted secret]");
+  assert.equal(redaction.redactText("Code: 482 913").text, "Code: [redacted secret]");
   assert.equal(redaction.redactText("Invoice 48291377 total 1.234.567,00").text, "Invoice 48291377 total 1.234.567,00");
+});
+
+test("ordinary numbers near words that only contain code stay readable", () => {
+  for (const sentence of [
+    "Steuercode\tBetrag\n20.10.2026\t20260012",
+    "Postcode 1010 Kundennummer 10042311",
+    "Order 11223344 · Promo code SUMMER",
+    "Barcode 40012345",
+  ]) {
+    assert.equal(redaction.redactText(sentence).text, sentence);
+  }
+});
+
+test("bookkeeping compounds of Schlüssel are not credential words", () => {
+  for (const word of ["Buchungsschlüssel", "Steuerschlüssel", "Umsatzsteuerschlüssel", "Kostenschlüssel", "Verteilungsschlüssel"]) {
+    assert.equal(redaction.hasCredentialWord(word), false, word);
+  }
+  for (const word of ["Zugangsschlüssel", "API-Schlüssel", "Lizenzschlüssel", "Zugangsdaten", "Client Secret"]) {
+    assert.equal(redaction.hasCredentialWord(word), true, word);
+  }
+});
+
+test("masked card and account numbers are not masked secrets", () => {
+  const masked = new RegExp(redaction.MASKED_TEXT_SOURCE, "u");
+  for (const text of ["Visa •••• 4242", "Visa •••• 4242View", "DE89 •••• •••• 1234", "**** **** **** 4242", "Konto ••••1234 · Anzeigen"]) {
+    assert.equal(masked.test(text), false, text);
+  }
+  for (const text of ["••••••••••••", "sk-••••••••4f2a", "Passwort ******** ändern", "Token •••• •••• · Anzeigen"]) {
+    assert.equal(masked.test(text), true, text);
+  }
 });
 
 test("addresses keep fragments and ordinary paths and mask only random sensitive parts", () => {
@@ -103,6 +173,8 @@ test("addresses keep fragments and ordinary paths and mask only random sensitive
     [`https://app.example.test/callback?code=${token}&lang=de`, "https://app.example.test/callback?code=REDACTED&lang=de"],
     [`https://app.example.test/#/done?access_token=${token}&token_type=bearer`, "https://app.example.test/#/done?access_token=REDACTED&token_type=bearer"],
     [`https://app.example.test/x?key=${CANARY}`, "https://app.example.test/x?key=REDACTED"],
+    [`https://app.example.test/settings/api-keys/${token}`, "https://app.example.test/settings/api-keys/REDACTED"],
+    ["https://app.example.test/settings/api-keys/new", "https://app.example.test/settings/api-keys/new"],
     ["https://app.example.test/items/1234/edit#section-2", "https://app.example.test/items/1234/edit#section-2"],
   ];
   for (const [input, expected] of cases) {

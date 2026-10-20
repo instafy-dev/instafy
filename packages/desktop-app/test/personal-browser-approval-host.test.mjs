@@ -389,3 +389,52 @@ test("after a step that may show a secret, the page and the page it opens stay w
   setPage(snapshotPage({ documentToken: "doc-c", text: "A later page" }));
   assert.equal((await host.handleControlOperation("snapshot", {})).snapshot.text, "A later page");
 });
+
+// Not a known key format: only the withheld-page rule can catch it.
+const OPAQUE_CANARY = ["Zq8v", "N3xR", "7mKp", "W2tY", "9bLc", "4HdS"].join("");
+
+test("a control named by an unknown-format value is masked once the page is withheld", async () => {
+  let page = snapshotPage({ names: [OPAQUE_CANARY, "Done"], signals: { ...NO_SECRET_SIGNALS, secretField: true } });
+  const { host } = fixture(undefined, { snapshotPersonalBrowserPage: async () => page });
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine"));
+  let result = await host.handleControlOperation("snapshot", {});
+  assert.equal(result.snapshot.secretScreen, true);
+  assert.deepEqual(result.snapshot.interactive.map((entry) => entry.name), ["[redacted secret]", "Done"]);
+  // The same document stays withheld after the signal goes away.
+  page = snapshotPage({ names: [`Copy ${OPAQUE_CANARY}`] });
+  result = await host.handleControlOperation("snapshot", {});
+  assert.equal(result.snapshot.interactive[0].name, "Copy [redacted secret]");
+  assert.ok(!JSON.stringify(result).includes(OPAQUE_CANARY));
+});
+
+test("a step that may show a secret withholds the page even when the click fails afterwards", async () => {
+  const target = { found: true, disabled: false, identity: "doc-a:0", tag: "button", type: "button", text: "Token erstellen" };
+  let page = snapshotPage();
+  page.interactive = [{ index: 0, tag: "button", name: target.text, disabled: false, identity: target.identity, descriptor: { ...target } }];
+  const { host } = fixture(undefined, {
+    snapshotPersonalBrowserPage: async () => page,
+    inspectPersonalBrowserTarget: async () => ({ ...target }),
+    // The in-page click ran, then the page reported the target as gone.
+    clickPersonalBrowserTarget: async () => ({ clicked: false, targetChanged: false, descriptor: { ...target } }),
+  });
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine"));
+  await host.handleControlOperation("snapshot", {});
+  await assert.rejects(host.handleControlOperation("click", { index: 0 }), (error) => error.code === "target_not_clickable");
+  page = snapshotPage({ documentToken: "doc-a", text: "Your new key is ready" });
+  const result = await host.handleControlOperation("snapshot", {});
+  assert.equal(result.snapshot.secretScreen, true);
+  assert.equal(result.snapshot.text, "");
+});
+
+test("status masks the title from its own words and masks a load error", async () => {
+  const sha = "3f2a9c1e8b7d4e6fa5b4c3d2e1f0a9b812345678";
+  const { host } = fixture();
+  host.view.webContents.getTitle = () => `API token ${sha}`;
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine"));
+  host.currentError = `ERR_CONNECTION_REFUSED loading 'https://example.test/x?token=${CANARY}'`;
+  const status = await host.handleControlOperation("status", {});
+  const serialized = JSON.stringify(status);
+  assert.ok(!serialized.includes(sha), serialized);
+  assert.ok(!serialized.includes(CANARY), serialized);
+  assert.ok(serialized.includes("ERR_CONNECTION_REFUSED"));
+});

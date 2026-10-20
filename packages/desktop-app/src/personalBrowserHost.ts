@@ -26,7 +26,13 @@ import {
   type PersonalBrowserTargetDescriptor,
 } from "./personalBrowserPageBridge";
 import { PersonalBrowserInputShield } from "./personalBrowserInputShield";
-import { redactLogValue, redactPageObservation, redactText, redactUrl } from "./personalBrowserRedaction";
+import {
+  hasCredentialWord,
+  redactLogValue,
+  redactPageObservation,
+  redactText,
+  redactUrl,
+} from "./personalBrowserRedaction";
 import {
   categoryTitle,
   refusalFor,
@@ -215,6 +221,9 @@ const STEP_DIALOG_DETAILS: Record<string, string> = {
 
 // Steps after which the page, and a page they open, stay withheld.
 const SECRET_REVEALING_CATEGORIES = new Set(["credential", "may_show_secret"]);
+// Withheld documents remembered at once, so going back to an earlier
+// withheld page keeps it withheld.
+const MAX_WITHHELD_DOCUMENTS = 32;
 
 function formSubmissionDescription(descriptor: PersonalBrowserTargetDescriptor): string {
   const formLabel = descriptor.formActionText?.trim();
@@ -269,7 +278,7 @@ export class PersonalBrowserHost {
   private latestAgentSnapshot: PersonalBrowserSnapshotState | null = null;
   // A document stays withheld from the agent until a new page loads once it
   // was a secret screen or a credential step ran on it.
-  private withheldDocumentToken: string | null = null;
+  private withheldDocumentTokens = new Set<string>();
   // Set by a credential step that may open another page: the next new
   // document is withheld too.
   private withholdNextDocumentAfter: string | null = null;
@@ -1310,13 +1319,17 @@ export class PersonalBrowserHost {
       return sanitizePersonalBrowserBrokerStatus(status, false);
     }
     try {
-      // Status is read without a page observation, so the title gets the
-      // same masking a snapshot title gets on an ordinary page.
+      // Status is read without a page observation. The title gets the same
+      // masking a snapshot title gets from its own words, and a load error,
+      // which can quote the full address, is masked like a log line.
       const url = redactUrl(status.url).text;
-      const title = status.title === undefined ? undefined : redactText(status.title).text;
+      const title = status.title === undefined
+        ? undefined
+        : redactText(status.title, { credentialContext: hasCredentialWord(status.title) }).text;
       const redacted = { ...status, url };
       if (title === undefined) delete redacted.title;
       else redacted.title = title;
+      if (typeof redacted.error === "string") redacted.error = redactLogValue(redacted.error);
       return redacted;
     } catch {
       return sanitizePersonalBrowserBrokerStatus(status, false);
@@ -1378,7 +1391,7 @@ export class PersonalBrowserHost {
   }
 
   private shouldWithholdDocument(documentToken: string): boolean {
-    if (documentToken === this.withheldDocumentToken) {
+    if (this.withheldDocumentTokens.has(documentToken)) {
       return true;
     }
     if (this.withholdNextDocumentAfter !== null && this.withholdNextDocumentAfter !== documentToken) {
@@ -1386,6 +1399,16 @@ export class PersonalBrowserHost {
       return true;
     }
     return false;
+  }
+
+  private withholdDocument(documentToken: string) {
+    this.withheldDocumentTokens.delete(documentToken);
+    this.withheldDocumentTokens.add(documentToken);
+    while (this.withheldDocumentTokens.size > MAX_WITHHELD_DOCUMENTS) {
+      const oldest = this.withheldDocumentTokens.values().next().value;
+      if (oldest === undefined) break;
+      this.withheldDocumentTokens.delete(oldest);
+    }
   }
 
   /**
@@ -1397,7 +1420,7 @@ export class PersonalBrowserHost {
     if (!documentToken) {
       return;
     }
-    this.withheldDocumentToken = documentToken;
+    this.withholdDocument(documentToken);
     if (opensPage) {
       this.withholdNextDocumentAfter = documentToken;
     }
@@ -1432,7 +1455,7 @@ export class PersonalBrowserHost {
         withhold,
       });
       if (redacted.secretScreen) {
-        this.withheldDocumentToken = snapshot.documentToken;
+        this.withholdDocument(snapshot.documentToken);
       }
       return {
         url: redacted.url,
@@ -1443,7 +1466,7 @@ export class PersonalBrowserHost {
         interactive: snapshot.interactive.map((entry, position) => describe(entry, redacted.names[position])),
       };
     } catch {
-      this.withheldDocumentToken = snapshot.documentToken;
+      this.withholdDocument(snapshot.documentToken);
       return {
         url: "",
         title: "",
@@ -1736,6 +1759,9 @@ export class PersonalBrowserHost {
       step = classifyPersonalBrowserStep("click", resolvedTarget.descriptor, { pageUrl });
       this.assertStepNotRefused(step);
       this.assertControlEpoch(operationEpoch);
+      // Withhold before the step runs: a pause or rotation after the in-page
+      // click must not leave the page it revealed readable.
+      this.withholdIfSecretRevealing(step, resolvedTarget.descriptor, true);
       const result = await clickPersonalBrowserTarget(
         contents,
         target,
@@ -1753,7 +1779,6 @@ export class PersonalBrowserHost {
           "Browser target is no longer clickable.",
         );
       }
-      this.withholdIfSecretRevealing(step, resolvedTarget.descriptor, true);
       return { clicked: true, status: this.getBrokerStatus() };
     }
 
@@ -1797,7 +1822,7 @@ export class PersonalBrowserHost {
           compareSecurity: false,
         });
         this.assertNonSensitiveActivation(submitTarget.descriptor);
-        const submitStep = classifyPersonalBrowserStep("submit", submitTarget.descriptor, { pageUrl });
+        let submitStep = classifyPersonalBrowserStep("submit", submitTarget.descriptor, { pageUrl });
         this.assertStepNotRefused(submitStep);
         const submissionNeedsConfirmation = this.approvalMode === "ask" ||
           personalBrowserKeyRequiresConfirmation("Enter", submitTarget.descriptor, this.approvalMode);
@@ -1811,7 +1836,11 @@ export class PersonalBrowserHost {
         this.assertControlEpoch(operationEpoch);
         submitTarget = await this.revalidateControlTarget(contents, target, submitTarget);
         this.assertNonSensitiveActivation(submitTarget.descriptor);
+        // Context outside the fingerprint can change while a dialog is open.
+        submitStep = classifyPersonalBrowserStep("submit", submitTarget.descriptor, { pageUrl });
+        this.assertStepNotRefused(submitStep);
         this.assertControlEpoch(operationEpoch);
+        this.withholdIfSecretRevealing(submitStep, submitTarget.descriptor, true);
         const submitResult = await pressPersonalBrowserTarget(
           contents,
           target,
@@ -1830,14 +1859,13 @@ export class PersonalBrowserHost {
             "Browser target no longer accepts the submit key.",
           );
         }
-        this.withholdIfSecretRevealing(submitStep, submitTarget.descriptor, true);
       }
       return { typed: true, submitted: payload.submit === true };
     }
 
     const key = normalizePersonalBrowserPressKey(payload.key);
     const pressPageUrl = contents.getURL() || "about:blank";
-    const pressStep = classifyPersonalBrowserStep("press", resolvedTarget.descriptor, { key, pageUrl: pressPageUrl });
+    let pressStep = classifyPersonalBrowserStep("press", resolvedTarget.descriptor, { key, pageUrl: pressPageUrl });
     const isImplicitFormSubmission =
       key === "Enter" && Boolean(resolvedTarget.descriptor.formActionText?.trim());
     if (
@@ -1865,7 +1893,13 @@ export class PersonalBrowserHost {
     ) {
       this.assertNonSensitiveActivation(resolvedTarget.descriptor);
     }
+    // Context outside the fingerprint can change while a dialog is open.
+    pressStep = classifyPersonalBrowserStep("press", resolvedTarget.descriptor, { key, pageUrl: pressPageUrl });
+    this.assertStepNotRefused(pressStep);
     this.assertControlEpoch(operationEpoch);
+    if (isPersonalBrowserActivationKey(key)) {
+      this.withholdIfSecretRevealing(pressStep, resolvedTarget.descriptor, true);
+    }
     const pressResult = await pressPersonalBrowserTarget(
       contents,
       target,
@@ -1883,9 +1917,6 @@ export class PersonalBrowserHost {
         "target_not_pressable",
         "Browser target no longer accepts key input.",
       );
-    }
-    if (isPersonalBrowserActivationKey(key)) {
-      this.withholdIfSecretRevealing(pressStep, resolvedTarget.descriptor, true);
     }
     return { pressed: key };
   }
