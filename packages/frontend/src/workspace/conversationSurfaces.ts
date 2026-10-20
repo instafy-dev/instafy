@@ -6,16 +6,33 @@ export type ConversationFileView = {
   line?: number;
   markdownView?: "edit" | "preview";
 };
+/**
+ * A running site shown in the pane. Only its id and title are kept: the pane
+ * mints a viewer address in memory when it mounts, so no address is stored.
+ */
+export type ConversationSitePreviewView = {
+  id: string;
+  previewId: string;
+  title: string;
+};
 export type ConversationSurfaces = {
   activeId: string;
   resourceId: string;
   split: boolean;
   ratio: number;
   files: ConversationFileView[];
+  previews: ConversationSitePreviewView[];
 };
 export const DEFAULT_CONVERSATION_SURFACES: ConversationSurfaces = {
-  activeId: "chat", resourceId: "browser", split: true, ratio: 0.55, files: [],
+  activeId: "chat", resourceId: "browser", split: true, ratio: 0.55, files: [], previews: [],
 };
+const MAX_SITE_PREVIEWS = 10;
+const MAX_SITE_PREVIEW_TITLE = 120;
+// Controller preview ids (uuids). Anything shaped like an address or a host is refused.
+const SITE_PREVIEW_ID = /^[A-Za-z0-9-]{8,64}$/;
+export const isSitePreviewId = (value: unknown): value is string => typeof value === "string" && SITE_PREVIEW_ID.test(value);
+export const sitePreviewViewId = (previewId: string) => `preview:${previewId}`;
+const sitePreviewTitle = (value: string) => value.trim().slice(0, MAX_SITE_PREVIEW_TITLE);
 export function conversationSurfaceScope(userId: string | null, projectId: string | null, conversationId: string | null): string | null {
   return userId && projectId && conversationId ? JSON.stringify([userId, projectId, conversationId]) : null;
 }
@@ -33,13 +50,21 @@ export function readConversationSurfaces(scope: string): ConversationSurfaces {
       ...(typeof file.line === "number" && Number.isFinite(file.line) ? { line: Math.max(1, Math.floor(file.line)) } : {}),
       ...(file.markdownView === "preview" || file.markdownView === "edit" ? { markdownView: file.markdownView } : {}),
     }));
-    const valid = (id: string) => id === "browser" || files.some(file => file.id === id);
+    // Rebuilt field by field, so nothing but the id and title survives a reload.
+    const previews: ConversationSitePreviewView[] = (Array.isArray(value.previews) ? value.previews : []).filter((preview: ConversationSitePreviewView) =>
+      preview && isSitePreviewId(preview.previewId) && preview.id === sitePreviewViewId(preview.previewId)
+      && typeof preview.title === "string" && sitePreviewTitle(preview.title).length > 0,
+    ).slice(-MAX_SITE_PREVIEWS).map((preview: ConversationSitePreviewView) => ({
+      id: preview.id, previewId: preview.previewId, title: sitePreviewTitle(preview.title),
+    }));
+    const valid = (id: string) => id === "browser" || files.some(file => file.id === id) || previews.some(preview => preview.id === id);
     return {
       activeId: value.activeId === "chat" || valid(value.activeId) ? value.activeId : "chat",
       resourceId: valid(value.resourceId) ? value.resourceId : "browser",
       split: value.split !== false,
       ratio: typeof value.ratio === "number" && Number.isFinite(value.ratio) ? Math.min(0.7, Math.max(0.35, value.ratio)) : 0.55,
       files,
+      previews,
     };
   } catch { return DEFAULT_CONVERSATION_SURFACES; }
 }
@@ -88,12 +113,56 @@ export function closeConversationFile(state: ConversationSurfaces, id: string, h
   const index = state.files.findIndex(file => file.id === id);
   if (index < 0) return state;
   const files = state.files.filter(file => file.id !== id);
-  const nextId = files[Math.min(index, files.length - 1)]?.id ?? (hasBrowser ? "browser" : "chat");
+  const nextId = files[Math.min(index, files.length - 1)]?.id ?? state.previews.at(-1)?.id ?? (hasBrowser ? "browser" : "chat");
   return {
     ...state, files,
     activeId: state.activeId === id ? nextId : state.activeId,
     resourceId: state.resourceId === id ? nextId : state.resourceId,
   };
+}
+
+export function openConversationPreview(state: ConversationSurfaces, preview: { previewId: string; title: string }): ConversationSurfaces {
+  if (!isSitePreviewId(preview.previewId)) return state;
+  const view: ConversationSitePreviewView = {
+    id: sitePreviewViewId(preview.previewId), previewId: preview.previewId, title: sitePreviewTitle(preview.title) || "Preview",
+  };
+  return {
+    ...selectConversationView(state, view.id),
+    previews: state.previews.some(item => item.id === view.id)
+      ? state.previews.map(item => item.id === view.id ? view : item)
+      : [...state.previews, view].slice(-MAX_SITE_PREVIEWS),
+  };
+}
+
+/** Mirrors closeConversationFile: the next preview, then the previous, then the last file, Browser or Chat. */
+export function closeConversationPreview(state: ConversationSurfaces, id: string, hasBrowser: boolean): ConversationSurfaces {
+  const index = state.previews.findIndex(preview => preview.id === id);
+  if (index < 0) return state;
+  const previews = state.previews.filter(preview => preview.id !== id);
+  const nextId = previews[Math.min(index, previews.length - 1)]?.id ?? state.files.at(-1)?.id ?? (hasBrowser ? "browser" : "chat");
+  return {
+    ...state, previews,
+    activeId: state.activeId === id ? nextId : state.activeId,
+    resourceId: state.resourceId === id ? nextId : state.resourceId,
+  };
+}
+
+/**
+ * The view shown beside Chat. A stored Browser choice with no browser open
+ * falls back to the first file, then the first preview.
+ */
+export function conversationResourceId(state: ConversationSurfaces, hasBrowser: boolean): string {
+  return state.resourceId === "browser" && !hasBrowser
+    ? state.files[0]?.id ?? state.previews[0]?.id ?? "browser" : state.resourceId;
+}
+
+/**
+ * The preview whose pane is on screen: the view beside Chat when it is a
+ * preview, while the pane is split or that view is the active one.
+ */
+export function visibleSitePreviewId(state: ConversationSurfaces, view: { resourceId: string; activeId: string; split: boolean }): string | null {
+  const preview = state.previews.find(item => item.id === view.resourceId);
+  return preview && (view.split || view.activeId === preview.id) ? preview.previewId : null;
 }
 
 export function conversationFileLabel(file: ConversationFileView, files: ConversationFileView[]): string {
