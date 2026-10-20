@@ -159,6 +159,42 @@ impl Shared {
         }
     }
 
+    /// The idle stop's decision and its move to Stopping, in one critical
+    /// section. A job takes its guard (a job count and an activity bump under
+    /// this lock) before it checks readiness, so either this sees the job or
+    /// the job sees Stopping: an idle stop never lands under an admitted job.
+    fn begin_idle_stop(&self, generation: Uuid, idle_after: Duration) -> bool {
+        let mut inner = self.inner();
+        if inner.generation != Some(generation)
+            || !should_idle_stop(
+                inner.state,
+                inner.last_activity,
+                Instant::now(),
+                self.active_jobs.load(Ordering::SeqCst),
+                idle_after,
+            )
+        {
+            return false;
+        }
+        inner.state = BrowserHostState::Stopping;
+        true
+    }
+
+    /// A host whose process ended without a requested stop is no longer
+    /// Ready (or Starting) while the agent confirms its group is gone; it
+    /// settles to Failed afterwards.
+    fn mark_exiting(&self, generation: Uuid) {
+        let mut inner = self.inner();
+        if inner.generation == Some(generation)
+            && matches!(
+                inner.state,
+                BrowserHostState::Starting | BrowserHostState::Ready
+            )
+        {
+            inner.state = BrowserHostState::Stopping;
+        }
+    }
+
     /// Moves `generation` to Failed, unless it is no longer current or the
     /// host is Poisoned.
     fn fail(&self, generation: Uuid, token: &'static str) {
@@ -471,9 +507,20 @@ async fn run_actor(
                     continue;
                 }
                 let current = {
-                    let inner = shared.inner();
-                    inner.state == BrowserHostState::Starting
-                        && inner.generation == Some(generation)
+                    let mut inner = shared.inner();
+                    let current = inner.state == BrowserHostState::Starting
+                        && inner.generation == Some(generation);
+                    if current && inner.shutting_down {
+                        // Requested just before the runtime's shutdown: the
+                        // host never runs, and the start settles as stopped.
+                        inner.state = BrowserHostState::Idle;
+                        inner.generation = None;
+                        inner.failure = None;
+                        inner.started_by = None;
+                        false
+                    } else {
+                        current
+                    }
                 };
                 if current {
                     running = start(&shared, &config, generation).await;
@@ -522,16 +569,9 @@ async fn run_actor(
                 }
             }
             Event::IdleTick => {
-                let stop = running.is_some() && {
-                    let inner = shared.inner();
-                    should_idle_stop(
-                        inner.state,
-                        inner.last_activity,
-                        Instant::now(),
-                        shared.active_jobs.load(Ordering::SeqCst),
-                        config.idle_stop_after,
-                    )
-                };
+                let stop = running.as_ref().is_some_and(|host| {
+                    shared.begin_idle_stop(host.generation, config.idle_stop_after)
+                });
                 if stop && let Some(host) = running.take() {
                     tracing::info!("stopping the idle browser host");
                     stop_running(&shared, &config, host).await;
@@ -648,6 +688,7 @@ async fn start(shared: &Shared, config: &HostConfig, generation: Uuid) -> Option
 
 /// SIGTERM to the host (it stops its own group), then SIGKILL to the group
 /// after the grace, then [`finish`]. Ends Idle unless the host is Poisoned.
+/// The idle stop has already moved the host to Stopping.
 async fn stop_running(shared: &Shared, config: &HostConfig, mut host: Running) {
     {
         let mut inner = shared.inner();
@@ -672,11 +713,13 @@ async fn stop_running(shared: &Shared, config: &HostConfig, mut host: Running) {
     finish(shared, config, host).await;
 }
 
-/// After the host exits: reap it, read its last status lines, clear the
-/// stored group, make sure nothing of the group is left, then move to Idle
-/// (a requested stop) or Failed. A group that outlives the confirmation
-/// window poisons the host.
+/// After the host exits: reap it, clear the stored group, read its last
+/// status lines, make sure nothing of the group is left, then move to Idle (a
+/// requested stop) or Failed. A group that outlives the confirmation window
+/// poisons the host. Until then a host that ended on its own reads as
+/// Stopping, so no job is admitted to it and no start joins it.
 async fn finish(shared: &Shared, config: &HostConfig, mut host: Running) {
+    shared.mark_exiting(host.generation);
     if tokio::time::timeout(config.group_confirm, host.child.wait())
         .await
         .is_err()
@@ -685,6 +728,12 @@ async fn finish(shared: &Shared, config: &HostConfig, mut host: Running) {
         shared.poison(UNCONFIRMED_SHUTDOWN);
         return;
     }
+    // The host pid is reaped, so it may be reused: `poison` and `kill_now`
+    // stop signalling it. Leftovers of the group are killed below, and by
+    // `Running`'s drop while it is armed.
+    let _ = shared
+        .host_pgid
+        .compare_exchange(host.pid, 0, Ordering::SeqCst, Ordering::SeqCst);
     while host.lines_open {
         match tokio::time::timeout(EXIT_LINE_DRAIN, host.lines.recv()).await {
             Ok(Some(HostLine::Failed(token) | HostLine::Exited(token))) => {
@@ -694,9 +743,6 @@ async fn finish(shared: &Shared, config: &HostConfig, mut host: Running) {
             Ok(None) | Err(_) => host.lines_open = false,
         }
     }
-    let _ = shared
-        .host_pgid
-        .compare_exchange(host.pid, 0, Ordering::SeqCst, Ordering::SeqCst);
 
     // The host pid is reaped (above), so waiting on its group reaps only
     // leftovers this process inherited.

@@ -472,3 +472,65 @@ async fn a_deleted_space_kills_the_browser_host() {
     )
     .await;
 }
+
+/// A shutdown that arrives while the agent waits to retry a failed
+/// registration stops the browser host too: no lease cycle is running then.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_shutdown_during_the_registration_retry_stops_the_browser_host() {
+    use crate::browser_host::test_support::{Fake, eventually, process_alive, wait_for_state};
+    use origin_http_server::browser_host::BrowserHostState;
+
+    let fake = Fake::new("ready");
+    let host = fake.spawn();
+    let _installed = crate::browser_host::install_host_for_tests(host.clone());
+    host.request_start("user").unwrap();
+    wait_for_state(&host, BrowserHostState::Ready).await;
+    let browser = fake.child_pid();
+
+    // The stand-in answers a runtime registration with 404, so the loop
+    // fails the cycle and waits five seconds before it retries.
+    let fixture = Fixture::new().await;
+    let executor = Arc::new(AgentExecutor::new(fixture.config.clone()));
+    let client = Arc::new(ControllerClient::new(&fixture.config).unwrap());
+    let shutdown = ShutdownSignal::new();
+    let run = Box::pin(RuntimeAgent::run_registration_loop(
+        fixture.config.clone(),
+        client,
+        executor,
+        shutdown.clone(),
+        Arc::new(Mutex::new(HashSet::new())),
+    ));
+    let cancel = async {
+        eventually(
+            "the registration to be refused",
+            Duration::from_secs(15),
+            || {
+                fixture
+                    .stand_in
+                    .events()
+                    .iter()
+                    .any(|event| event.starts_with("other:"))
+            },
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            host.snapshot().state,
+            BrowserHostState::Ready,
+            "a failed registration leaves the host"
+        );
+        shutdown.cancel();
+    };
+    let (exit, ()) = tokio::join!(run, cancel);
+    assert!(matches!(exit, Ok(AgentExit::Stopped)));
+    assert_eq!(host.snapshot().state, BrowserHostState::Idle);
+    eventually("the browser to end", Duration::from_secs(15), || {
+        !process_alive(browser)
+    })
+    .await;
+    assert!(
+        host.request_start("user").is_err(),
+        "no start after shutdown"
+    );
+}

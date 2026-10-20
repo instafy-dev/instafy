@@ -46,6 +46,11 @@ if [ "$mode" = "ignoreterm" ]; then
   trap '' TERM
 fi
 while true; do
+  if [ -f "$dir/vanish" ]; then
+    # Exits on its own and leaves its child (holding stdout) to the agent.
+    rm -f "$dir/vanish"
+    exit 72
+  fi
   if [ -f "$dir/crash" ]; then
     rm -f "$dir/crash"
     kill -KILL "$child"

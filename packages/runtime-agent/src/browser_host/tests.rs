@@ -27,6 +27,16 @@ fn attested_inputs(lease: Uuid) -> ModeInputs {
     }
 }
 
+/// The attested metadata with one more top-level `key`.
+fn with_metadata(lease: Uuid, key: &str, value: serde_json::Value) -> ModeInputs {
+    let mut inputs = attested_inputs(lease);
+    let mut metadata: serde_json::Value =
+        serde_json::from_str(inputs.metadata.as_deref().unwrap()).unwrap();
+    metadata[key] = value;
+    inputs.metadata = Some(metadata.to_string());
+    inputs
+}
+
 #[test]
 fn lazy_mode_needs_the_attestation_for_this_exact_lease() {
     let lease = Uuid::new_v4();
@@ -106,7 +116,28 @@ fn lazy_mode_needs_the_attestation_for_this_exact_lease() {
             inputs.is_linux = false;
             inputs
         }),
+        (
+            "a webdev flavor",
+            with_metadata(lease, "runtimeFlavor", json!("webdev")),
+        ),
+        (
+            "a webdev launch attestation",
+            with_metadata(
+                lease,
+                "_instafyManagedRuntimeLaunch",
+                json!({"version": 1, "generation": generation}),
+            ),
+        ),
+        (
+            "a multi-agent worker slot",
+            with_metadata(lease, "source", json!("skill_multi_agent_plan")),
+        ),
     ];
+    assert_eq!(
+        resolve_lazy_mode(&with_metadata(lease, "source", json!("studio"))),
+        Some(LazyMode { persist: true }),
+        "another source is a space's own machine"
+    );
     for (case, inputs) in refused {
         assert_eq!(resolve_lazy_mode(&inputs), None, "{case}");
     }

@@ -765,6 +765,8 @@ impl RuntimeAgent {
             }
             if Self::sleep_or_shutdown(Duration::from_secs(5), shutdown.clone()).await {
                 info!("shutdown requested; exiting registration retry loop");
+                // No lease cycle is running to stop the browser host here.
+                crate::browser_host::shutdown(BROWSER_HOST_SHUTDOWN_BUDGET).await;
                 return Ok(AgentExit::Stopped);
             }
         }

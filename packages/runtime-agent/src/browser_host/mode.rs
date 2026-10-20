@@ -39,8 +39,17 @@ pub const HOST_NODE_MODULES_ROOT: &str = "/opt/instafy/browser-host/node_modules
 pub const HOST_PLAYWRIGHT_PATH: &str = "/opt/instafy/browser-host/node_modules/playwright";
 /// Debian's real Chromium binary, preferred over its shell wrapper.
 pub const PINNED_CHROMIUM: &str = "/usr/lib/chromium/chromium";
-pub const ENTRYPOINT_ENV: &str = "INSTAFY_RUNTIME_ENTRYPOINT";
+/// The image's entrypoint, which runs the host. It is never taken from the
+/// environment: `$CODEX_HOME/.env` (a workspace volume) is loaded into this
+/// process before the mode is captured, so an override there would run a
+/// workspace script as the host in every later container.
 pub const DEFAULT_ENTRYPOINT: &str = "/usr/local/bin/runtime-entrypoint";
+/// Launch metadata that marks a webdev launch (a browser session of its own),
+/// and the `source` a multi-agent worker slot carries. The controller never
+/// attests either as a host; the agent refuses them too.
+const WEBDEV_FLAVOR_KEY: &str = "runtimeFlavor";
+const WEBDEV_LAUNCH_ATTESTATION_KEY: &str = "_instafyManagedRuntimeLaunch";
+const MULTI_AGENT_WORKER_SOURCE: &str = "skill_multi_agent_plan";
 /// The Node binary the Shared Browser controller runs with. Only
 /// [`ALLOWED_SHARED_BROWSER_NODE_BINARIES`] are accepted.
 pub const SHARED_BROWSER_NODE_BINARY_ENV: &str = "INSTAFY_SHARED_BROWSER_NODE_BINARY";
@@ -127,17 +136,10 @@ fn stack_present(entrypoint: &Path) -> bool {
         && Path::new(HOST_PLAYWRIGHT_PATH).is_dir()
 }
 
-fn entrypoint_path() -> PathBuf {
-    std::env::var(ENTRYPOINT_ENV)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| Path::new(value).is_absolute())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_ENTRYPOINT))
-}
-
 /// Whether the launch metadata attests this exact lease as a lazy browser
-/// host. Mirrors the controller's `managed_browser_host_is_attested`.
+/// host. Mirrors the controller's `managed_browser_host_is_attested`, and,
+/// as a second check, its launch eligibility: never a webdev launch or a
+/// multi-agent worker slot.
 pub(crate) fn metadata_attests_lease(metadata: Option<&str>, lease_id: Option<&str>) -> bool {
     let Some(lease_id) = lease_id.and_then(|raw| Uuid::parse_str(raw.trim()).ok()) else {
         return false;
@@ -146,11 +148,16 @@ pub(crate) fn metadata_attests_lease(metadata: Option<&str>, lease_id: Option<&s
     else {
         return false;
     };
-    let Some(attestation) = metadata
-        .as_object()
-        .and_then(|root| root.get(ATTESTATION_KEY))
-        .and_then(JsonValue::as_object)
-    else {
+    let Some(root) = metadata.as_object() else {
+        return false;
+    };
+    if root.contains_key(WEBDEV_FLAVOR_KEY)
+        || root.contains_key(WEBDEV_LAUNCH_ATTESTATION_KEY)
+        || root.get("source").and_then(JsonValue::as_str) == Some(MULTI_AGENT_WORKER_SOURCE)
+    {
+        return false;
+    }
+    let Some(attestation) = root.get(ATTESTATION_KEY).and_then(JsonValue::as_object) else {
         return false;
     };
     attestation.get("version").and_then(JsonValue::as_u64) == Some(ATTESTATION_VERSION)
@@ -235,7 +242,7 @@ pub(crate) fn lazy_env_overrides(
 /// Mutates the process environment. Call it before any other thread exists,
 /// after `config::capture_and_scrub_launch_credentials`.
 pub unsafe fn capture_process_mode() -> anyhow::Result<()> {
-    let entrypoint = entrypoint_path();
+    let entrypoint = PathBuf::from(DEFAULT_ENTRYPOINT);
     let inputs = ModeInputs::from_process(&entrypoint);
     // SAFETY: forwarded from the caller.
     unsafe { capture_with(inputs, entrypoint) }

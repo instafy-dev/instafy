@@ -42,7 +42,8 @@ pub(crate) const HOST_ERROR: &str = "host_error";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum HostLine {
-    /// `ready` with exactly the agent's ports and WebRTC off.
+    /// `ready` with exactly the agent's ports, egress isolation running and
+    /// WebRTC off.
     Ready,
     /// `failed <reason>`; an unknown reason reads as `host_error`.
     Failed(&'static str),
@@ -52,8 +53,8 @@ pub(crate) enum HostLine {
 }
 
 /// Reads one stdout line of the host. `None` for anything without the
-/// status prefix. A `ready` line that does not report the agent's own ports
-/// with WebRTC off is a `host_error`.
+/// status prefix. A `ready` line that does not report the agent's own ports,
+/// the egress proxy on its port and WebRTC off is a `host_error`.
 pub(crate) fn parse_status_line(line: &str) -> Option<HostLine> {
     let rest = line.trim_end().strip_prefix(STATUS_PREFIX)?;
     let mut words = rest.split_whitespace();
@@ -61,6 +62,7 @@ pub(crate) fn parse_status_line(line: &str) -> Option<HostLine> {
         "ready" => {
             let mut cdp = None;
             let mut vnc = None;
+            let mut egress = None;
             let mut webrtc = None;
             let mut display = None;
             for word in words {
@@ -70,6 +72,7 @@ pub(crate) fn parse_status_line(line: &str) -> Option<HostLine> {
                 match key {
                     "cdp" => cdp = Some(value),
                     "vnc" => vnc = Some(value),
+                    "egress" => egress = Some(value),
                     "webrtc" => webrtc = Some(value),
                     "display" => display = Some(value),
                     _ => {}
@@ -77,8 +80,10 @@ pub(crate) fn parse_status_line(line: &str) -> Option<HostLine> {
             }
             let cdp_port = HOST_CDP_PORT.to_string();
             let vnc_port = HOST_VNC_PORT.to_string();
+            let egress_port = HOST_EGRESS_PORT.to_string();
             if cdp == Some(cdp_port.as_str())
                 && vnc == Some(vnc_port.as_str())
+                && egress == Some(egress_port.as_str())
                 && webrtc == Some("off")
                 && display.is_none_or(|display| display == HOST_DISPLAY)
             {
@@ -133,8 +138,22 @@ impl HostDirs {
 }
 
 /// Creates the root and its `profile`, `home` and `state` with mode 0700,
-/// then checks each is a real directory. A symlink anywhere fails closed.
+/// then checks each is a real directory. A symlink at any of them, or at the
+/// root's parent (`/var/lib/instafy`), fails closed.
 pub(crate) fn prepare_dirs(dirs: &HostDirs) -> std::io::Result<()> {
+    if let Some(parent) = dirs.root.parent() {
+        match std::fs::symlink_metadata(parent) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(std::io::Error::other(format!(
+                    "browser host directory {} must not be a symlink",
+                    parent.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
     for dir in dirs.all() {
         let mut builder = std::fs::DirBuilder::new();
         builder.recursive(true);
@@ -235,17 +254,35 @@ pub(crate) fn pinned_chromium() -> Option<PathBuf> {
 }
 
 /// Empties the Shared Browser action log, so a new browser never replays an
-/// earlier one's cursor. Never follows a symlink and never creates the file.
+/// earlier one's cursor. Never follows a symlink, never creates the file,
+/// never blocks on a FIFO, and empties only a regular file with one link, so
+/// a hard link planted in its place never truncates another file.
 pub(crate) fn truncate_actions_file(path: &Path) {
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).truncate(true);
+    options.write(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
-    match options.open(path) {
-        Ok(_) => {}
+    let result = options.open(path).and_then(|file| {
+        let metadata = file.metadata()?;
+        #[cfg(unix)]
+        let single_link = {
+            use std::os::unix::fs::MetadataExt;
+            metadata.nlink() == 1
+        };
+        #[cfg(not(unix))]
+        let single_link = true;
+        if !metadata.is_file() || !single_link {
+            return Err(std::io::Error::other(
+                "the action log is not a regular file with one link",
+            ));
+        }
+        file.set_len(0)
+    });
+    match result {
+        Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => tracing::warn!(
             %error,
@@ -403,6 +440,9 @@ mod tests {
             "ready display=:47 cdp=19223 vnc=15900 egress=19226 webrtc=19225 scale=1 elapsed_ms=1",
             "ready display=:47 cdp=19223 vnc=15900 egress=19226 webrtc=unavailable scale=1",
             "ready display=:2 cdp=19223 vnc=15900 egress=19226 webrtc=off scale=1",
+            "ready display=:47 cdp=19223 vnc=15900 egress=off webrtc=off scale=1",
+            "ready display=:47 cdp=19223 vnc=15900 egress=9226 webrtc=off scale=1",
+            "ready display=:47 cdp=19223 vnc=15900 webrtc=off scale=1",
             "ready cdp=19223 vnc=15900",
             "ready",
         ] {
@@ -589,6 +629,17 @@ mod tests {
         std::os::unix::fs::symlink(&root, &linked_root).unwrap();
         std::fs::remove_file(&dirs.profile).unwrap();
         assert!(prepare_dirs(&HostDirs::under(&linked_root)).is_err());
+
+        // A symlinked parent (`/var/lib/instafy`) would move the profile.
+        let real_parent = temp.path().join("real-parent");
+        std::fs::create_dir(&real_parent).unwrap();
+        let linked_parent = temp.path().join("linked-parent");
+        std::os::unix::fs::symlink(&real_parent, &linked_parent).unwrap();
+        assert!(prepare_dirs(&HostDirs::under(&linked_parent.join("browser-host"))).is_err());
+        assert!(
+            !real_parent.join("browser-host").exists(),
+            "nothing is created through a symlinked parent"
+        );
     }
 
     #[cfg(unix)]
@@ -609,6 +660,36 @@ mod tests {
 
         truncate_actions_file(&temp.path().join("missing.jsonl"));
         assert!(!temp.path().join("missing.jsonl").exists());
+
+        // A hard link in the log's place never truncates the linked file.
+        let shared = temp.path().join("shared");
+        std::fs::write(&shared, b"keep").unwrap();
+        let hard = temp.path().join("hard.jsonl");
+        std::fs::hard_link(&shared, &hard).unwrap();
+        truncate_actions_file(&hard);
+        assert_eq!(std::fs::read(&shared).unwrap(), b"keep");
+
+        // A FIFO in the log's place neither blocks the start nor changes.
+        let fifo = temp.path().join("fifo.jsonl");
+        let c_path = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        // SAFETY: a valid C path in a private temporary directory.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        let (done, finished) = std::sync::mpsc::channel();
+        let truncating = fifo.clone();
+        std::thread::spawn(move || {
+            truncate_actions_file(&truncating);
+            let _ = done.send(());
+        });
+        finished
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("emptying a FIFO action log returns at once");
+        use std::os::unix::fs::FileTypeExt;
+        assert!(
+            std::fs::symlink_metadata(&fifo)
+                .unwrap()
+                .file_type()
+                .is_fifo()
+        );
     }
 
     /// The entrypoint's side of the contract: the prefix, the variables the

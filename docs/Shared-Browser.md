@@ -769,8 +769,11 @@ A runtime image without the lazy host ignores the attestation and reports no
 `browserHost`, so it gets neither consent nor the status field. A runtime-agent
 that has it acts on it only when all of these hold: Linux, the boot-time
 browser off, the attestation names exactly this process's `RUNTIME_LEASE_ID`,
-and the image carries the host's entrypoint, private Node and private
-Playwright. Then, before any thread starts, it fixes the environment that
+the metadata marks neither a webdev launch nor a multi-agent worker slot, and
+the image carries the host's entrypoint (always
+`/usr/local/bin/runtime-entrypoint`; `INSTAFY_RUNTIME_ENTRYPOINT` is ignored
+here, because `$CODEX_HOME/.env` on the workspace volume can set it), private
+Node and private Playwright. Then, before any thread starts, it fixes the environment that
 origin, the Codex MCP copy and the profile code read: CDP on 19223 (no CDP URL),
 RFB on `127.0.0.1:15900`, `INSTAFY_BROWSER_WEBRTC_ENABLED=0` with no TURN
 requirement or ICE list, egress isolation on with the unsafe-dev override
@@ -1150,8 +1153,8 @@ owns the child and makes every state change:
 - **Fixed settings.** Display `:47`, CDP 19223, RFB 15900, egress proxy 19226,
   no WebRTC port. Its directories are `/var/lib/instafy/browser-host/{profile,home,state}`
   in the container's writable layer (not a workspace volume, and not `/tmp`,
-  which model tools clean), created with mode 0700; a symlink there fails the
-  start closed. Chromium is the pinned `/usr/lib/chromium/chromium` when
+  which model tools clean), created with mode 0700; a symlink there, or at
+  `/var/lib/instafy`, fails the start closed. Chromium is the pinned `/usr/lib/chromium/chromium` when
   present, and the render scale is the launch value of
   `INSTAFY_BROWSER_RENDER_SCALE`.
 - **Environment.** The host starts from an empty environment: the helper
@@ -1163,15 +1166,19 @@ owns the child and makes every state change:
   host leads its own process group.
 - **States.** `idle`, `starting`, `ready`, `stopping`, `failed` and `poisoned`,
   with a new generation per start. A start is single-flight and never waits:
-  the host has 75 seconds to print `ready` with exactly these ports and
-  `webrtc=off`, or it is killed and fails with `start_timeout` or `host_error`.
+  the host has 75 seconds to print `ready` with exactly these ports, the
+  egress proxy on 19226 and `webrtc=off`, or it is killed and fails with
+  `start_timeout` or `host_error`. A host that ends on its own reads
+  `stopping` until its group is confirmed gone, then `failed`.
   A failure keeps the host's reason, or `exited_<child>` (egress proxy,
   display, Chromium), `spawn_failed` or `unconfirmed_shutdown`. The next start
   after a failure runs a new generation; the container stays up.
 - **Stops.** A stop sends SIGTERM (the host stops its group), kills the group
   after 10 seconds, and confirms the group is gone. A Ready host with no
   Shared Browser job and no use for 15 minutes stops on its own; opening it,
-  any viewer activity and the end of a job count as use. Registration renewals
+  any viewer activity and the end of a job count as use. The idle stop
+  decides and moves to `stopping` in one step, so it never lands under a job
+  that was admitted. Registration renewals
   never stop it. The runtime's shutdown stops it within 10 seconds after origin
   went down; a deleted space kills it at once.
 - **Fail closed.** When a Shared Browser turn ends without confirmed tool
@@ -1187,7 +1194,8 @@ owns the child and makes every state change:
   before the readiness check) and is refused with "Instafy's browser is not
   open on this space's machine. Open it, then try again." while the host is
   not Ready. The action log is emptied at a start only when no job holds the
-  host. The Codex Shared Browser MCP runs with the private Node
+  host, and only when it is a regular file with one link (never a symlink,
+  hard link or FIFO). The Codex Shared Browser MCP runs with the private Node
   (`INSTAFY_SHARED_BROWSER_NODE_BINARY`, which accepts only `/usr/bin/node` or
   `/opt/instafy/browser-host/bin/node`), and model shells never see that
   setting.

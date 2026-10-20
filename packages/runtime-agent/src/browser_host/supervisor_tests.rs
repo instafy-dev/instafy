@@ -426,3 +426,95 @@ async fn origin_sees_the_host_through_its_handle() {
     assert_eq!(handle.snapshot().generation, started.generation);
     host.stop("test").await;
 }
+
+#[tokio::test]
+async fn the_idle_stop_decides_and_moves_to_stopping_in_one_step() {
+    let _lazy = force_lazy_mode_for_tests(Some(LazyMode { persist: false }));
+    let temp = tempfile::tempdir().unwrap();
+    let host = BrowserHost::spawn(HostConfig::inert_for_tests(temp.path()));
+    let _installed = crate::browser_host::install_host_for_tests(host.clone());
+    let generation = Uuid::new_v4();
+    let idle_after = Duration::from_secs(60);
+    let ready_and_quiet = || {
+        let mut inner = host.shared.inner();
+        inner.state = BrowserHostState::Ready;
+        inner.generation = Some(generation);
+        inner.last_activity = Instant::now() - Duration::from_secs(120);
+    };
+
+    // A job holding its guard keeps the host, even with old activity.
+    ready_and_quiet();
+    let guard = crate::browser_host::admit_shared_browser_job(true, false)
+        .unwrap()
+        .expect("a Ready host admits the job");
+    ready_and_quiet();
+    assert!(!host.shared.begin_idle_stop(generation, idle_after));
+    assert!(host.is_ready());
+    drop(guard);
+
+    // An earlier generation's decision changes nothing.
+    ready_and_quiet();
+    assert!(!host.shared.begin_idle_stop(Uuid::new_v4(), idle_after));
+    assert!(host.is_ready());
+
+    // Once the stop is decided the host already reads Stopping, so a job
+    // that arrives after the decision is refused, and so is a start.
+    assert!(host.shared.begin_idle_stop(generation, idle_after));
+    assert_eq!(host.snapshot().state, BrowserHostState::Stopping);
+    assert!(crate::browser_host::admit_shared_browser_job(true, false).is_err());
+    assert_eq!(host.active_jobs(), 0);
+    assert_eq!(
+        host.request_start("user").unwrap_err().code,
+        REFUSAL_STOPPING
+    );
+}
+
+#[tokio::test]
+async fn a_host_that_ended_on_its_own_is_not_ready_while_it_is_cleaned_up() {
+    let fake = Fake::new("ready");
+    let host = fake.spawn();
+    host.request_start("user").unwrap();
+    wait_for_state(&host, BrowserHostState::Ready).await;
+    let child = fake.child_pid();
+
+    // The host exits and leaves its child holding stdout, so the agent
+    // reads the last lines for a while before it ends the group.
+    fake.touch("vanish");
+    eventually("the host to leave Ready", Duration::from_secs(15), || {
+        host.snapshot().state != BrowserHostState::Ready
+    })
+    .await;
+    assert!(!host.is_ready());
+    assert!(
+        process_alive(child),
+        "the host left Ready only after its group was gone"
+    );
+    let failed = wait_for_state(&host, BrowserHostState::Failed).await;
+    assert_eq!(failed.failure, Some(EXITED_UNKNOWN));
+    assert_eq!(host.host_pgid(), 0);
+    eventually("the left child to end", Duration::from_secs(15), || {
+        !process_alive(child)
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_start_queued_before_the_shutdown_never_runs() {
+    let fake = Fake::new("ready");
+    let host = fake.spawn();
+    // The actor has not run yet: the start is queued ahead of the shutdown.
+    let started = host.request_start("user").unwrap();
+    assert_eq!(started.state, BrowserHostState::Starting);
+    host.shutdown(Duration::from_secs(5)).await;
+
+    let after = host.snapshot();
+    assert_eq!(after.state, BrowserHostState::Idle);
+    assert_eq!(after.generation, None);
+    assert_eq!(host.host_pgid(), 0);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(fake.starts(), 0, "no host ran after the shutdown began");
+    assert_eq!(
+        host.request_start("user").unwrap_err().code,
+        REFUSAL_STOPPING
+    );
+}
