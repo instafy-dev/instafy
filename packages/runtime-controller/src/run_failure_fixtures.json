@@ -1,5 +1,5 @@
 {
-  "note": "The one list both provider rate-limit classifiers are pinned to: is_provider_rate_limited_failure in packages/runtime-controller/src/agent.rs, which labels a failed run in the agent's history, and the provider_rate_limited kind of classifyRunFailureText in packages/frontend/src/conversations/runFailurePresentation.ts, which picks the Studio's failure card. A pattern changed on one side and not the other fails a test on both. `providerRateLimited` is whether the text is that kind. `providerUsageLimit` is whether the text is a spent usage window (the Studio's provider_usage_limit kind); the controller's telemetry treats each such text as an expected provider limit.",
+  "note": "The one list both provider rate-limit classifiers are pinned to: is_provider_rate_limited_failure in packages/runtime-controller/src/agent.rs, which labels a failed run in the agent's history, and the provider_rate_limited kind of classifyRunFailureText in packages/frontend/src/conversations/runFailurePresentation.ts, which picks the Studio's failure card. A pattern changed on one side and not the other fails a test on both. `providerRateLimited` is whether the text is that kind. `providerUsageLimit` is whether the text is a spent usage window (the Studio's provider_usage_limit kind); the controller's telemetry treats each such text as an expected provider limit. `shortRateLimitWaitMs` (absent: none) is the wait after which multi_agent_plan::rate_limit_retry starts a team agent once more: only a provider rate limit that states a wait of at most 30 s has one.",
   "cases": [
     {
       "name": "codex gives up after the provider answered 429",
@@ -85,7 +85,8 @@
     {
       "name": "the proxy's streamed rate limit after codex gave up",
       "text": "stream disconnected before completion: The upstream provider rate limit was reached (upstream_rate_limit, 429). Please try again in 5.5s.",
-      "providerRateLimited": true
+      "providerRateLimited": true,
+      "shortRateLimitWaitMs": 5500
     },
     {
       "name": "a quota in words keeps its own reason",
@@ -128,6 +129,40 @@
       "text": "You've hit your usage limit. Upgrade to Pro or try again later.",
       "providerRateLimited": false,
       "providerUsageLimit": true
+    },
+    {
+      "name": "the proxy's streamed rate limit as a team lane reports it",
+      "text": "rate limit exceeded: The upstream provider rate limit was reached (upstream_rate_limit, 429). Please try again in 5.968s.",
+      "providerRateLimited": true,
+      "shortRateLimitWaitMs": 5968
+    },
+    {
+      "name": "the proxy's streamed rate limit with a wait in milliseconds",
+      "text": "rate limit exceeded: The upstream provider rate limit was reached (upstream_rate_limit, 429). Please try again in 850ms.",
+      "providerRateLimited": true,
+      "shortRateLimitWaitMs": 850
+    },
+    {
+      "name": "the proxy's streamed rate limit with a long wait",
+      "text": "rate limit exceeded: The upstream provider rate limit was reached (upstream_rate_limit, 429). Please try again in 169s.",
+      "providerRateLimited": true
+    },
+    {
+      "name": "a spent usage window that also names the rate limit code and a wait",
+      "text": "You’ve hit your usage limit (upstream_rate_limit, 429). Please try again in 5s.",
+      "providerRateLimited": false,
+      "providerUsageLimit": true
+    },
+    {
+      "name": "a spent plan limit through the proxy, with a wait",
+      "text": "rate limit exceeded: The upstream plan usage limit was reached (usage_limit_reached, 429). Please try again in 7s.",
+      "providerRateLimited": false,
+      "providerUsageLimit": true
+    },
+    {
+      "name": "a spent quota through the proxy, with a wait",
+      "text": "rate limit exceeded: insufficient_quota (upstream_rate_limit, 429). Please try again in 7s.",
+      "providerRateLimited": false
     }
   ]
 }
