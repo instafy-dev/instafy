@@ -133,6 +133,21 @@ function normalizeHost(host: string): string {
 }
 
 /**
+ * Whether a browser is busy elsewhere, so a card waits for the person: an
+ * agent run or another person controls Instafy's browser, or the browser on
+ * this device is in a manual step. The pending handoff outlives the manual
+ * step's status request, which Desktop clears on a sign-in redirect.
+ */
+export function browserAutoStartHeldByOther(input: {
+  browserRunActive: boolean;
+  remoteController: boolean;
+  humanInputRequest: boolean;
+  pendingHandoff: boolean;
+}): boolean {
+  return input.browserRunActive || input.remoteController || input.humanInputRequest || input.pendingHandoff;
+}
+
+/**
  * Whether the person's draft or layout leaves a card to them for now: a draft
  * in the composer, a layout too narrow to show the browser beside the chat, or
  * side-by-side view turned off, where the browser would cover the chat.

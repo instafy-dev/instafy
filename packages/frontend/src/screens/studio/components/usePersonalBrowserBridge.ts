@@ -24,6 +24,18 @@ export type PersonalBrowserClearDataState = "idle" | "clearing" | "succeeded" | 
 
 const PERSONAL_BROWSER_RUNTIME_READY_TIMEOUT_MS = 45_000;
 const PERSONAL_BROWSER_RUNTIME_POLL_MS = 1_500;
+// Handoff ids Studio already sent or retired; a late status that still
+// carries one of them never arms the manual-step guard again.
+const PERSONAL_BROWSER_RETIRED_HANDOFF_LIMIT = 8;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+/** A sign-in handoff Studio saw from this hook's own Personal Browser owner. */
+export type PersonalBrowserHandoff = {
+  handoffId: string;
+  expiresAtMs: number;
+};
+
+type OwnedPersonalBrowserHandoff = PersonalBrowserHandoff & { ownerId: string };
 
 export function resolveDefaultBrowserTransport(input: {
   checked: boolean;
@@ -162,6 +174,17 @@ export function usePersonalBrowserBridge({
   const agentControlMutationEpochRef = useRef(0);
   const clearDataMutationEpochRef = useRef(0);
   const observedHostRuntimeIdRef = useRef<string | null>(null);
+  // The last handoff Studio saw. Every enable names it until it expires or a
+  // newer one replaces it, so Desktop resumes only that handoff.
+  const boundHandoffRef = useRef<OwnedPersonalBrowserHandoff | null>(null);
+  // The manual-step guard. Desktop clears its humanInputRequest on every
+  // navigation (a sign-in redirect included) but keeps the handoff, so the
+  // guard outlives that status and ends only when the handoff is used,
+  // paused, cleared, closed or expired.
+  const pendingHandoffRef = useRef<OwnedPersonalBrowserHandoff | null>(null);
+  const [pendingHandoff, setPendingHandoffState] =
+    useState<OwnedPersonalBrowserHandoff | null>(null);
+  const retiredHandoffIdsRef = useRef<string[]>([]);
   const profileIdentityScope = personalBrowserIdentityScope(projectId, profileUserId);
   const identityScope = !profileIdentityScope || conversationBindingKey === null
     ? null
@@ -171,6 +194,34 @@ export function usePersonalBrowserBridge({
   const previousIdentityScopeRef = useRef(identityScope);
   const previousProfileIdentityScopeRef = useRef(profileIdentityScope);
   desiredIdentityScopeRef.current = identityScope;
+
+  const retireHandoffId = useCallback((handoffId: string) => {
+    const retired = retiredHandoffIdsRef.current.filter((id) => id !== handoffId);
+    retired.push(handoffId);
+    retiredHandoffIdsRef.current = retired.slice(-PERSONAL_BROWSER_RETIRED_HANDOFF_LIMIT);
+  }, []);
+  const setPendingHandoff = useCallback((next: OwnedPersonalBrowserHandoff | null) => {
+    pendingHandoffRef.current = next;
+    setPendingHandoffState(next);
+  }, []);
+  /** Ends the guard; with an id, only when that handoff is still the pending one. */
+  const clearPendingHandoff = useCallback((handoffId?: string) => {
+    const current = pendingHandoffRef.current;
+    if (!current || (handoffId !== undefined && current.handoffId !== handoffId)) {
+      return;
+    }
+    retireHandoffId(current.handoffId);
+    setPendingHandoff(null);
+  }, [retireHandoffId, setPendingHandoff]);
+  /** Clear data, close and an owner change end both the bound id and the guard. */
+  const resetHandoff = useCallback(() => {
+    const bound = boundHandoffRef.current;
+    if (bound) {
+      retireHandoffId(bound.handoffId);
+    }
+    boundHandoffRef.current = null;
+    clearPendingHandoff();
+  }, [clearPendingHandoff, retireHandoffId]);
 
   useLayoutEffect(() => {
     if (previousIdentityScopeRef.current !== identityScope) {
@@ -189,6 +240,7 @@ export function usePersonalBrowserBridge({
       agentControlMutationEpochRef.current += 1;
       clearDataMutationEpochRef.current += 1;
       openRetryRequestedRef.current = false;
+      resetHandoff();
       setRecovering(false);
       setNavigationError(null);
       setClearDataState("idle");
@@ -204,15 +256,46 @@ export function usePersonalBrowserBridge({
       setAgentError(null);
       observedHostRuntimeIdRef.current = null;
     }
-  }, [identityScope, profileIdentityScope]);
+  }, [identityScope, profileIdentityScope, resetHandoff]);
+
+  // Runs on every status Desktop sends, before React batches it with the
+  // next one, so a navigation status right after the request never hides it.
+  const observeHandoffStatus = useCallback((next: InstafyDesktopPersonalBrowserStatus) => {
+    const ownerId = personalBrowserOwnerIdRef.current;
+    if (!ownerId || next.ownerId !== ownerId) {
+      return;
+    }
+    if (next.agentControlEnabled) {
+      // Control is back on: Desktop has used or emptied its handoff slot.
+      clearPendingHandoff();
+      return;
+    }
+    // A later status without the request (a navigation) never ends the guard.
+    const request = next.humanInputRequest;
+    const handoffId = typeof request?.handoffId === "string" ? request.handoffId.trim() : "";
+    if (
+      !request ||
+      !handoffId ||
+      !Number.isFinite(request.expiresAtMs) ||
+      request.expiresAtMs <= Date.now() ||
+      retiredHandoffIdsRef.current.includes(handoffId) ||
+      pendingHandoffRef.current?.handoffId === handoffId
+    ) {
+      return;
+    }
+    const handoff = { handoffId, expiresAtMs: request.expiresAtMs, ownerId };
+    boundHandoffRef.current = handoff;
+    setPendingHandoff(handoff);
+  }, [clearPendingHandoff, setPendingHandoff]);
 
   const updateStatus = useCallback((next: InstafyDesktopPersonalBrowserStatus) => {
     if (!next.agentControlEnabled) {
       runtimeStartAttemptEpochRef.current += 1;
     }
+    observeHandoffStatus(next);
     setStatus(next);
     setChecked(true);
-  }, []);
+  }, [observeHandoffStatus]);
 
   useEffect(() => {
     const bridge = browserBridge();
@@ -334,6 +417,7 @@ export function usePersonalBrowserBridge({
     const openingIdentityScope = identityScope;
     const openingOwnerId = createPersonalBrowserOwnerId();
     personalBrowserOwnerIdRef.current = openingOwnerId;
+    resetHandoff();
     const openingAttemptEpoch = ++openAttemptEpochRef.current;
     void (async () => {
       let shouldRetry = false;
@@ -400,7 +484,27 @@ export function usePersonalBrowserBridge({
         }
       }
     })();
-  }, [active, available, identityScope, openRetryRevision, profileUserId, projectId, status?.projectId, status?.state, updateStatus]);
+  }, [active, available, identityScope, openRetryRevision, profileUserId, projectId, resetHandoff, status?.projectId, status?.state, updateStatus]);
+
+  useEffect(() => {
+    if (!pendingHandoff) {
+      return undefined;
+    }
+    const { handoffId, expiresAtMs } = pendingHandoff;
+    const expire = () => {
+      if (boundHandoffRef.current?.handoffId === handoffId) {
+        boundHandoffRef.current = null;
+      }
+      clearPendingHandoff(handoffId);
+    };
+    const remaining = expiresAtMs - Date.now();
+    if (remaining <= 0) {
+      expire();
+      return undefined;
+    }
+    const timer = setTimeout(expire, Math.min(remaining, MAX_TIMER_DELAY_MS));
+    return () => clearTimeout(timer);
+  }, [clearPendingHandoff, pendingHandoff]);
 
   useEffect(() => {
     if (status?.agentControlEnabled !== false) {
@@ -671,12 +775,27 @@ export function usePersonalBrowserBridge({
         return null;
       }
       const mutationEpoch = ++agentControlMutationEpochRef.current;
+      // Every enable names the handoff Studio saw, so Desktop never resumes
+      // a different pending handoff. Toast, pill, Retry and Let AI continue
+      // all pass through here.
+      const bound = boundHandoffRef.current;
+      if (bound && (bound.ownerId !== ownerId || Date.now() >= bound.expiresAtMs)) {
+        boundHandoffRef.current = null;
+      }
+      const handoffId = enabled ? boundHandoffRef.current?.handoffId ?? null : null;
+      if (handoffId) {
+        retireHandoffId(handoffId);
+      }
+      // A throw before Desktop takes the handoff (not ready, tab control,
+      // a stopping operation) leaves its slot full, so the guard stays.
+      let handoffKept = false;
       try {
         const next = await bridge.personalBrowserSetAgentControlEnabled({
           enabled,
           ownerId,
           ...(approvalMode ? { approvalMode } : {}),
           ...(enabled && knownHosts && knownHosts.length > 0 ? { knownHosts: [...knownHosts] } : {}),
+          ...(enabled && handoffId ? { handoffId } : {}),
         });
         if (
           !mountedRef.current ||
@@ -715,19 +834,40 @@ export function usePersonalBrowserBridge({
           );
         }
         const refreshed = await bridge.personalBrowserStatus?.().catch(() => null);
-        if (
-          refreshed &&
+        const current =
           mountedRef.current &&
           agentControlMutationEpochRef.current === mutationEpoch &&
-          personalBrowserOwnerIdRef.current === ownerId &&
-          refreshed.ownerId === ownerId
-        ) {
+          personalBrowserOwnerIdRef.current === ownerId;
+        if (current && refreshed && refreshed.ownerId === ownerId) {
           updateStatus(refreshed);
         }
+        // Desktop takes the handoff only after these checks pass; when it
+        // cannot be told whether it did, the guard stays until the handoff
+        // is used, paused or expired.
+        handoffKept = Boolean(
+          enabled &&
+            handoffId &&
+            current &&
+            (!refreshed ||
+              (refreshed.ownerId === ownerId &&
+                !refreshed.agentControlEnabled &&
+                (refreshed.state !== "ready" ||
+                  refreshed.tabControlActive === true ||
+                  refreshed.humanControlReady === false))),
+        );
         return null;
+      } finally {
+        // Otherwise Desktop has used or emptied its handoff slot by now,
+        // whether the enable succeeded or threw (a cancelled dialog), and a
+        // pause always empties it.
+        if (!enabled) {
+          clearPendingHandoff();
+        } else if (handoffId && !handoffKept) {
+          clearPendingHandoff(handoffId);
+        }
       }
     },
-    [updateStatus],
+    [clearPendingHandoff, retireHandoffId, updateStatus],
   );
   const retryAgentControl = useCallback(async () => {
     const paused = await setAgentControlEnabled(false);
@@ -766,6 +906,7 @@ export function usePersonalBrowserBridge({
           return null;
         }
         updateStatus(next);
+        resetHandoff();
         setNavigationError(null);
         setClearDataState("succeeded");
         return next;
@@ -781,11 +922,14 @@ export function usePersonalBrowserBridge({
         return null;
       }
     },
-    [updateStatus],
+    [resetHandoff, updateStatus],
   );
   const close = useCallback(
-    () => invoke((bridge, ownerId) => bridge.personalBrowserClose?.({ ownerId })),
-    [invoke],
+    () => {
+      resetHandoff();
+      return invoke((bridge, ownerId) => bridge.personalBrowserClose?.({ ownerId }));
+    },
+    [invoke, resetHandoff],
   );
   const retryOpen = useCallback(() => {
     if (openInFlightRef.current) {
@@ -811,6 +955,10 @@ export function usePersonalBrowserBridge({
   }, [agentPhase, identityScope, runtimeId, status?.agentControlEnabled, status?.ownerId, status?.state]);
 
   const preferredApprovalMode = resolvePersonalBrowserApprovalMode({ status, choice: approvalModeChoice });
+  const ownedPendingHandoff: PersonalBrowserHandoff | null =
+    pendingHandoff && pendingHandoff.ownerId === personalBrowserOwnerIdRef.current
+      ? pendingHandoff
+      : null;
 
   return {
     /** The person's own choice; null until they pick one. */
@@ -835,6 +983,12 @@ export function usePersonalBrowserBridge({
       identityScope !== null && openedIdentityScopeRef.current === identityScope && status?.ownerId === personalBrowserOwnerIdRef.current
         ? status.ownerId
         : null,
+    /**
+     * A sign-in handoff still waiting for Let AI continue. Unlike
+     * `status.humanInputRequest`, it survives the navigations that follow a
+     * sign-in, so a new browser task stays blocked until the handoff is used.
+     */
+    pendingHandoff: ownedPendingHandoff,
     reload,
     recovering,
     retryAgentControl,

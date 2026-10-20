@@ -783,3 +783,231 @@ describe("usePersonalBrowserBridge lifecycle", () => {
     expect(resultRef.current?.runtimeOverride).toBeNull();
   });
 });
+
+describe("usePersonalBrowserBridge sign-in handoff", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+  let statusListener: ((status: InstafyDesktopPersonalBrowserStatus) => void) | null;
+  let current: InstafyDesktopPersonalBrowserStatus;
+  let ownerId: string;
+  let setAgentControl: ReturnType<
+    typeof vi.fn<NonNullable<NonNullable<Window["instafyDesktop"]>["personalBrowserSetAgentControlEnabled"]>>
+  >;
+  let resultRef: MutableRefObject<HookResult | null>;
+
+  function request(handoffId: string, expiresAtMs = Date.now() + 600_000) {
+    return {
+      version: 1 as const,
+      handoffId,
+      origin: "https://accounts.example.test",
+      createdAtMs: Date.now(),
+      expiresAtMs,
+      fields: [{ label: "Highlighted field 1" }],
+    };
+  }
+
+  async function push(overrides: Partial<InstafyDesktopPersonalBrowserStatus>) {
+    current = { ...current, ...overrides };
+    await act(async () => statusListener?.(current));
+  }
+
+  /** Desktop pauses control and keeps the handoff when it asks for a sign-in. */
+  async function handoff(handoffId: string, expiresAtMs?: number) {
+    await push({ agentControlEnabled: false, humanInputRequest: request(handoffId, expiresAtMs) });
+  }
+
+  /** Desktop clears humanInputRequest on every navigation but keeps the handoff. */
+  async function navigate(url: string) {
+    await push({ url, humanInputRequest: undefined });
+  }
+
+  async function enable(...args: Parameters<HookResult["setAgentControlEnabled"]>) {
+    await act(async () => {
+      await resultRef.current?.setAgentControlEnabled(...args);
+    });
+    return setAgentControl.mock.calls.at(-1)?.[0];
+  }
+
+  beforeEach(async () => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    statusListener = null;
+    ownerId = "";
+    controllerMocks.fetchStatus.mockReset();
+    controllerMocks.resolveRequestContext.mockReset();
+    controllerMocks.resolveRequestContext.mockResolvedValue(controllerRequestContext());
+    current = personalBrowserStatus();
+    setAgentControl = vi.fn(async ({ enabled }) => {
+      current = { ...current, agentControlEnabled: enabled, humanInputRequest: enabled ? undefined : current.humanInputRequest };
+      return current;
+    });
+    window.instafyDesktop = {
+      notify: vi.fn(async () => undefined),
+      onPersonalBrowserStatus: vi.fn((listener) => {
+        statusListener = listener;
+        return () => {
+          statusListener = null;
+        };
+      }),
+      personalBrowserClearData: vi.fn(async () => (current = { ...current, humanInputRequest: undefined })),
+      personalBrowserClose: vi.fn(async () => (current = personalBrowserStatus())),
+      personalBrowserOpen: vi.fn(async (options) => {
+        ownerId = options.ownerId;
+        current = personalBrowserStatus({ state: "ready", ownerId, projectId: "project-1", url: "https://app.example.test/" });
+        return current;
+      }),
+      personalBrowserSetAgentControlEnabled: setAgentControl,
+      personalBrowserSetBounds: vi.fn(async () => current),
+      personalBrowserStatus: vi.fn(async () => current),
+    };
+    resultRef = { current: null };
+    await act(async () => {
+      root.render(<Harness resultRef={resultRef} />);
+    });
+    await waitUntil(() => resultRef.current?.status?.state === "ready");
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    delete window.instafyDesktop;
+    delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("names the handoff on a plain Resume after the sign-in redirect cleared the request", async () => {
+    await handoff("handoff-1");
+    expect(resultRef.current?.pendingHandoff).toMatchObject({ handoffId: "handoff-1" });
+
+    await navigate("https://accounts.example.test/callback");
+    await navigate("https://app.example.test/dashboard");
+    expect(resultRef.current?.status?.humanInputRequest).toBeUndefined();
+    expect(resultRef.current?.pendingHandoff).toMatchObject({ handoffId: "handoff-1" });
+
+    // The toast and pill call setAgentControlEnabled(true) with no handoff of their own.
+    expect(await enable(true)).toEqual({ enabled: true, ownerId, handoffId: "handoff-1" });
+    expect(resultRef.current?.pendingHandoff).toBeNull();
+
+    expect(await enable(false)).toEqual({ enabled: false, ownerId });
+    // Still bound and unexpired: Desktop's slot is empty, so the id is harmless.
+    expect(await enable(true, "routine", ["app.example.test"])).toEqual({
+      enabled: true,
+      ownerId,
+      approvalMode: "routine",
+      knownHosts: ["app.example.test"],
+      handoffId: "handoff-1",
+    });
+    expect(resultRef.current?.pendingHandoff).toBeNull();
+  });
+
+  it("ends the guard after an enable that throws and never re-arms it for that id", async () => {
+    await handoff("handoff-1");
+    setAgentControl.mockRejectedValueOnce(new Error("Routine browsing was not approved or the browser session changed."));
+    expect(await enable(true, "routine")).toEqual({ enabled: true, ownerId, approvalMode: "routine", handoffId: "handoff-1" });
+    expect(resultRef.current?.agentError).toContain("not approved");
+    expect(resultRef.current?.pendingHandoff).toBeNull();
+
+    // A late status that still carries the sent id.
+    await handoff("handoff-1");
+    expect(resultRef.current?.pendingHandoff).toBeNull();
+
+    // A newer handoff replaces the bound id and arms the guard again.
+    await handoff("handoff-2");
+    expect(resultRef.current?.pendingHandoff).toMatchObject({ handoffId: "handoff-2" });
+    expect(await enable(true)).toMatchObject({ handoffId: "handoff-2" });
+  });
+
+  it("keeps the guard when Desktop refused the enable before taking the handoff", async () => {
+    await handoff("handoff-1");
+    await navigate("https://accounts.example.test/callback");
+    // The redirect failed to load, so Desktop refuses before it reads its slot.
+    current = { ...current, state: "error", humanControlReady: false };
+    setAgentControl.mockRejectedValueOnce(new Error("Personal Browser must be ready before agent control is enabled."));
+    expect(await enable(true)).toEqual({ enabled: true, ownerId, handoffId: "handoff-1" });
+    expect(resultRef.current?.agentError).toContain("must be ready");
+    expect(resultRef.current?.pendingHandoff).toMatchObject({ handoffId: "handoff-1" });
+
+    // Tab control is another refusal that leaves Desktop's slot full.
+    current = { ...current, state: "ready", humanControlReady: false, tabControlActive: true };
+    setAgentControl.mockRejectedValueOnce(new Error("Take back tab control before enabling the agent."));
+    await enable(true);
+    expect(resultRef.current?.pendingHandoff).toMatchObject({ handoffId: "handoff-1" });
+
+    current = { ...current, humanControlReady: true, tabControlActive: false };
+    expect(await enable(true)).toEqual({ enabled: true, ownerId, handoffId: "handoff-1" });
+    expect(resultRef.current?.pendingHandoff).toBeNull();
+  });
+
+  it("binds a handoff whose status was batched with the navigation after it", async () => {
+    const withRequest = { ...current, agentControlEnabled: false, humanInputRequest: request("handoff-1") };
+    const afterRedirect = { ...withRequest, url: "https://app.example.test/dashboard", humanInputRequest: undefined };
+    current = afterRedirect;
+    await act(async () => {
+      statusListener?.(withRequest);
+      statusListener?.(afterRedirect);
+    });
+    expect(resultRef.current?.status?.humanInputRequest).toBeUndefined();
+    expect(resultRef.current?.pendingHandoff).toMatchObject({ handoffId: "handoff-1" });
+    expect(await enable(true)).toEqual({ enabled: true, ownerId, handoffId: "handoff-1" });
+  });
+
+  it("ends the guard when control is back on, and on a pause from Studio", async () => {
+    await handoff("handoff-1");
+    await push({ agentControlEnabled: true, humanInputRequest: undefined });
+    expect(resultRef.current?.pendingHandoff).toBeNull();
+    await handoff("handoff-1");
+    expect(resultRef.current?.pendingHandoff).toBeNull();
+
+    await handoff("handoff-2");
+    expect(await enable(false)).toEqual({ enabled: false, ownerId });
+    expect(resultRef.current?.pendingHandoff).toBeNull();
+    // Desktop's pause keeps the request in its status; that never re-arms the guard.
+    await push({ url: "https://app.example.test/again" });
+    expect(resultRef.current?.status?.humanInputRequest?.handoffId).toBe("handoff-2");
+    expect(resultRef.current?.pendingHandoff).toBeNull();
+  });
+
+  it("ignores another owner's handoff and an expired one", async () => {
+    await push({ ownerId: "someone-else", humanInputRequest: request("other-owner") });
+    expect(resultRef.current?.pendingHandoff).toBeNull();
+    await push({ ownerId, humanInputRequest: request("expired", Date.now() - 1) });
+    expect(resultRef.current?.pendingHandoff).toBeNull();
+    expect(await enable(true)).toEqual({ enabled: true, ownerId });
+  });
+
+  it("drops the handoff at its expiry through a timer", async () => {
+    vi.useFakeTimers({ now: Date.now(), toFake: ["setTimeout", "clearTimeout", "Date"] });
+    await handoff("handoff-1", Date.now() + 5_000);
+    await navigate("https://app.example.test/after-sign-in");
+    expect(resultRef.current?.pendingHandoff).toMatchObject({ handoffId: "handoff-1" });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4_999);
+    });
+    expect(resultRef.current?.pendingHandoff).toMatchObject({ handoffId: "handoff-1" });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(resultRef.current?.pendingHandoff).toBeNull();
+    expect(await enable(true)).toEqual({ enabled: true, ownerId });
+  });
+
+  it("drops the handoff on Clear data and close", async () => {
+    await handoff("handoff-1");
+    await act(async () => {
+      await resultRef.current?.clearData();
+    });
+    expect(resultRef.current?.pendingHandoff).toBeNull();
+    expect(await enable(true)).toEqual({ enabled: true, ownerId });
+
+    await handoff("handoff-2");
+    expect(resultRef.current?.pendingHandoff).toMatchObject({ handoffId: "handoff-2" });
+    await act(async () => {
+      await resultRef.current?.close();
+    });
+    expect(resultRef.current?.pendingHandoff).toBeNull();
+  });
+});

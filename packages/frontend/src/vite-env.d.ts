@@ -475,6 +475,11 @@ interface Window {
       approvalMode?: "ask" | "routine";
       /** The card's hosts (at most 3); read only by policy version 2 hosts in routine. */
       knownHosts?: string[];
+      /**
+       * The sign-in handoff this enable continues. Desktop resumes a kept
+       * handoff only when the id matches; older Desktops ignore the key.
+       */
+      handoffId?: string;
     }) => Promise<InstafyDesktopPersonalBrowserStatus>;
     personalBrowserClearData?: (options: {
       ownerId: string;

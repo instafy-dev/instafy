@@ -184,6 +184,69 @@ describe("Personal handoff with the real React browser bridge", () => {
     else expect(call).not.toHaveProperty("knownHosts");
   });
 
+  it("binds Let AI continue to the sign-in handoff and refuses a card press until it is used", async () => {
+    let listener: ((status: InstafyDesktopPersonalBrowserStatus) => void) | null = null;
+    window.instafyDesktop = { ...window.instafyDesktop!, onPersonalBrowserStatus: (next) => {
+      listener = next;
+      return () => { listener = null; };
+    } };
+    const emit = async (overrides: Partial<InstafyDesktopPersonalBrowserStatus>) => {
+      nativeStatus = { ...nativeStatus, ...overrides };
+      await act(async () => listener?.(nativeStatus));
+    };
+    await render();
+    expect(resultRef.current!.personal.ownerId).toBeTruthy();
+    await emit({ humanInputRequest: {
+      version: 1, handoffId: "handoff-1", origin: "https://example.test",
+      createdAtMs: 1000, expiresAtMs: 601_000, fields: [{ label: "Highlighted field 1" }],
+    } });
+    // The sign-in redirect: Desktop clears the request but keeps the handoff.
+    await emit({ url: "https://example.test/form", humanInputRequest: undefined });
+    expect(resultRef.current!.personal.pendingHandoff).toMatchObject({ handoffId: "handoff-1" });
+    await expect(resultRef.current!.handoff.startPersonal("Start another task")).rejects.toThrow("Finish the current manual step");
+    expect(setEnabled).not.toHaveBeenCalled();
+
+    let pending!: Promise<boolean>;
+    await act(async () => { pending = resultRef.current!.handoff.continuePersonal("Continue", "ask"); });
+    expect(setEnabled).toHaveBeenCalledExactlyOnceWith({
+      enabled: true, ownerId: nativeStatus.ownerId, approvalMode: "ask", handoffId: "handoff-1",
+    });
+    expect(resultRef.current!.personal.pendingHandoff).toBeNull();
+    await act(async () => startup.resolve({ pid: 42, runtimeId: "personal-fresh" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(await pending).toBe(true);
+  });
+
+  it("keeps refusing a card press after Let AI continue failed before Desktop took the handoff", async () => {
+    let listener: ((status: InstafyDesktopPersonalBrowserStatus) => void) | null = null;
+    window.instafyDesktop = { ...window.instafyDesktop!, onPersonalBrowserStatus: (next) => {
+      listener = next;
+      return () => { listener = null; };
+    } };
+    const emit = async (overrides: Partial<InstafyDesktopPersonalBrowserStatus>) => {
+      nativeStatus = { ...nativeStatus, ...overrides };
+      await act(async () => listener?.(nativeStatus));
+    };
+    await render();
+    await emit({ humanInputRequest: {
+      version: 1, handoffId: "handoff-1", origin: "https://example.test",
+      createdAtMs: 1000, expiresAtMs: 601_000, fields: [{ label: "Highlighted field 1" }],
+    } });
+    // The sign-in redirect failed to load: the request is gone and Desktop is not ready.
+    await emit({ url: "https://example.test/callback", humanInputRequest: undefined, state: "error", humanControlReady: false });
+    setEnabled.mockRejectedValueOnce(new Error("Personal Browser must be ready before agent control is enabled."));
+    await act(async () => {
+      expect(await resultRef.current!.handoff.continuePersonal("Continue", "ask")).toBe(false);
+    });
+    expect(setEnabled).toHaveBeenLastCalledWith(expect.objectContaining({ handoffId: "handoff-1" }));
+    expect(resultRef.current!.personal.pendingHandoff).toMatchObject({ handoffId: "handoff-1" });
+
+    // The page is ready again after a reload; a new card is still refused.
+    await emit({ state: "ready", humanControlReady: true });
+    await expect(resultRef.current!.handoff.startPersonal("Start another task")).rejects.toThrow("Finish the current manual step");
+    expect(setEnabled).toHaveBeenCalledTimes(1);
+  });
+
   it("retries Done after a native failure without reading the pre-Resume unavailable phase as a new failure", async () => {
     await failFirstResume();
     const attempt = await retry();

@@ -453,7 +453,17 @@ request's `handoffId`, the kept mode applies only to that handoff. It is used
 once. Turning agent control off, Clear data, closing or releasing the browser,
 or a change of owner or project cancels it (Escape does not apply while the
 handoff has already paused control), and a different mode shows the
-confirmation as usual. Changing the
+confirmation as usual. Studio passes the handoff's `handoffId` on every enable,
+including toolbar Resume, the status pill and Let AI continue, until the
+handoff expires or a newer one replaces it, so Desktop never resumes a
+different handoff. Desktop clears the request from its status on every
+navigation, including a sign-in redirect, but Studio keeps the manual step
+pending: a press on a new browser card during a pending manual step is
+refused until the handoff is used, paused from Studio, cleared, closed or
+expired. An enable that Desktop refuses before it reads the handoff (the
+browser is not ready, tab control is active or an earlier operation is still
+stopping) leaves the handoff pending. A Pause or Escape inside Desktop sends Studio no signal, so that
+refusal can last until the handoff's window ends. Changing the
 account/project/page binding or an expired request cannot silently continue work.
 Passwords, codes and payment values stay in the page and must not be entered in
 chat. The continuation message contains none of those values, but a later page
