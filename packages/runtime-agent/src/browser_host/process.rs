@@ -455,6 +455,28 @@ mod tests {
     }
 
     #[test]
+    fn every_failure_token_is_one_origin_reports() {
+        // Origin reports any token outside its list as `host_error`, so a
+        // token the agent adds without origin would reach clients as that.
+        let agent_tokens = [
+            EXITED_EGRESS_PROXY,
+            EXITED_DISPLAY,
+            EXITED_CHROMIUM,
+            EXITED_UNKNOWN,
+            START_TIMEOUT,
+            SPAWN_FAILED,
+            UNCONFIRMED_SHUTDOWN,
+            HOST_ERROR,
+        ];
+        for token in HOST_FAILURE_REASONS.into_iter().chain(agent_tokens) {
+            assert!(
+                origin_http_server::browser_host::BROWSER_HOST_FAILURE_TOKENS.contains(&token),
+                "origin does not report {token}"
+            );
+        }
+    }
+
+    #[test]
     fn every_failure_reason_and_exit_is_a_known_token() {
         for reason in HOST_FAILURE_REASONS {
             assert_eq!(

@@ -18,7 +18,7 @@ use uuid::Uuid;
 /// The launch-metadata key the controller attests a browser host with.
 pub const ATTESTATION_KEY: &str = "_instafyManagedBrowserHost";
 pub const ATTESTATION_VERSION: u64 = 1;
-pub const LAZY_MODE: &str = "lazy";
+pub const LAZY_MODE: &str = origin_http_server::browser_host::BROWSER_HOST_MODE_LAZY;
 /// The registration capability's version (`browserHost.version`).
 pub const CAPABILITY_VERSION: u64 = 1;
 

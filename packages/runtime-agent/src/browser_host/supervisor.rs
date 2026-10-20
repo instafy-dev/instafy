@@ -14,7 +14,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use origin_http_server::browser_host::{
-    BrowserHostCallerFacts, BrowserHostRefusal, BrowserHostSnapshot, BrowserHostState,
+    BROWSER_HOST_POISONED_CODE, BROWSER_HOST_STOPPING_CODE, BrowserHostCallerFacts,
+    BrowserHostRefusal, BrowserHostSnapshot, BrowserHostState,
 };
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
@@ -25,8 +26,9 @@ use super::process::{
     START_TIMEOUT, UNCONFIRMED_SHUTDOWN, group,
 };
 
-pub const REFUSAL_POISONED: &str = "browser_host_poisoned";
-pub const REFUSAL_STOPPING: &str = "browser_host_stopping";
+/// The refusal codes origin documents for a start (409).
+pub const REFUSAL_POISONED: &str = BROWSER_HOST_POISONED_CODE;
+pub const REFUSAL_STOPPING: &str = BROWSER_HOST_STOPPING_CODE;
 
 /// How long the group may linger after the host exits before the host is
 /// poisoned.
