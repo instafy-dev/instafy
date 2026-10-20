@@ -4,8 +4,6 @@
   "version": "0.0.0",
   "license": "AGPL-3.0-only",
   "type": "commonjs",
-  "main": "./redaction.js",
-  "types": "./redaction.d.ts",
   "description": "Secret redaction and step classification shared by the Desktop Personal Browser and the hosted Shared Browser. Plain scripts with no dependencies.",
   "exports": {
     "./redaction": {

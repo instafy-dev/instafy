@@ -54,6 +54,7 @@ const INTERACTIVE_SELECTOR = [
   "[tabindex]:not([tabindex='-1'])",
 ].join(",");
 const MAX_INTERACTIVE_ELEMENTS = 200;
+const MAX_LABEL_CHARS = 240;
 const MAX_VISIBLE_TEXT_CHARS = 12_000;
 const MAX_URL_CHARS = 4_096;
 const MAX_TEXT_CHARS = 16_384;
@@ -156,12 +157,32 @@ function validateBrowserPageId(raw) {
   return pageId;
 }
 
+function strictlyMasked(value) {
+  return redaction.redactText(String(value || ""), { strict: true }).text;
+}
+
+const DISPLAY_URL_PATTERN = /https?:\/\/[^\s'"<>]+/gi;
+
 // Text for the action log, approvals and errors. Anyone who can read the
-// project sees the action log, so every random-looking run is masked here.
+// project sees the action log, so every random-looking run between addresses
+// is masked here. An address is masked like the snapshot's own address, so it
+// keeps its host and path ("Go to https://github.com/org/repo/pull/615").
 function maskedDisplayText(value) {
-  return redaction.redactText(redaction.redactLogValue(String(value || "")), {
-    strict: true,
-  }).text;
+  const text = String(value || "");
+  let masked = "";
+  let last = 0;
+  for (const match of text.matchAll(DISPLAY_URL_PATTERN)) {
+    masked += strictlyMasked(text.slice(last, match.index));
+    let address;
+    try {
+      address = new URL(match[0]).hostname ? redaction.redactUrl(match[0]).text : strictlyMasked(match[0]);
+    } catch (_) {
+      address = strictlyMasked(match[0]);
+    }
+    masked += address;
+    last = match.index + match[0].length;
+  }
+  return masked + strictlyMasked(text.slice(last));
 }
 
 function maskedUrl(value) {
@@ -520,7 +541,7 @@ async function describeElement(locator, index) {
   ]
     .find((value) => typeof value === "string" && value.trim())
     ?.trim()
-    .slice(0, 240) || `${attributes.tag} ${index}`;
+    .slice(0, MAX_LABEL_CHARS) || `${attributes.tag} ${index}`;
   return {
     index,
     label,
@@ -662,8 +683,9 @@ function approvalCategoryTitle(classification) {
 // shown when the accessible name and visible text differ.
 function controlLabel(description) {
   const labels = actionPolicy.stepLabels(policyTarget(description));
+  const bounded = (value) => Array.from(String(value || "")).slice(0, MAX_LABEL_CHARS).join("");
   const label = labels.differ
-    ? `${labels.accessible} (shown as "${labels.visible}")`
+    ? `${bounded(labels.accessible)} (shown as "${bounded(labels.visible)}")`
     : description.label;
   return maskedDisplayText(label);
 }
@@ -914,6 +936,46 @@ function withholdDocumentInPage(request) {
   return Object.getOwnPropertyDescriptor(document, key) !== undefined;
 }
 
+// The main frame's loader id names one loaded document. It changes on every
+// new document and stays across same-document history changes; page scripts
+// cannot set it. Null when it cannot be read.
+async function documentIdentity(page) {
+  let session = null;
+  try {
+    session = await page.context().newCDPSession(page);
+    const response = await session.send("Page.getFrameTree");
+    const loaderId = String(response?.frameTree?.frame?.loaderId || "");
+    return /^[A-Za-z0-9_-]{1,128}$/.test(loaderId) ? loaderId : null;
+  } catch (_) {
+    return null;
+  } finally {
+    if (session) await session.detach().catch(() => {});
+  }
+}
+
+// True when a key change or "may show a secret" step ran on another document
+// of this run and this is the first snapshot since: the page the step opened,
+// however late it loaded. That document is marked and the record cleared.
+// An unknown document stays withheld and keeps the record.
+async function carriedWithholding(page) {
+  const afterDocument = approvalProtocol.withholdNextDocumentAfter();
+  if (afterDocument === null) {
+    return false;
+  }
+  const current = await documentIdentity(page);
+  if (current === null) {
+    return true;
+  }
+  if (current === afterDocument) {
+    // Still the page the step ran on, which the step marked itself.
+    return false;
+  }
+  if (await withholdDocument(page)) {
+    approvalProtocol.clearWithholdNextDocument();
+  }
+  return true;
+}
+
 async function pageSecretSignals(page) {
   const signals = await page.evaluate(pageSecretSignalsInPage, PAGE_POLICY_SOURCES).catch(() => null);
   if (!signals || typeof signals !== "object") {
@@ -953,28 +1015,46 @@ async function snapshot(page, { withhold = false } = {}) {
     .innerText({ timeout: 5_000 })
     .catch(() => "");
   const title = await page.title().catch(() => "");
-  const signals = await pageSecretSignals(page);
-  const withheld = withhold || signals === null || (await documentWithheld(page));
-  let view;
-  try {
-    view = redaction.redactPageObservation({
+  let signals = await pageSecretSignals(page);
+  if (signals === null) {
+    // A page that was still changing documents fails the check; try once
+    // more after it settles.
+    await page.waitForLoadState("domcontentloaded", { timeout: 2_000 }).catch(() => {});
+    signals = await pageSecretSignals(page);
+  }
+  // Read after the page content, so a document that loaded meanwhile is the
+  // one these answers describe.
+  const carried = await carriedWithholding(page);
+  const marked = await documentWithheld(page);
+  const checkFailed = signals === null;
+  const observe = (forceWithhold) =>
+    redaction.redactPageObservation({
       url: rawUrl,
       title,
       text: String(visibleText || "").slice(0, MAX_VISIBLE_TEXT_CHARS * 5),
       names: interactive.map(({ description }) => description.label),
       signals,
-      withhold: withheld,
+      withhold: forceWithhold,
     });
+  let view;
+  let detected = false;
+  try {
+    view = observe(withhold || carried || marked || checkFailed);
+    // A failed page check withholds this observation only. The document is
+    // marked when a credential step ran or the page itself shows a secret,
+    // so a page caught mid-navigation is read normally next time.
+    detected = view.secretScreen && !marked &&
+      (withhold || carried || !checkFailed || observe(false).secretScreen);
   } catch (_) {
     throw new Error("Shared Browser could not mask this page, so it was not read");
   }
-  if (view.secretScreen) {
+  if (detected) {
     await withholdDocument(page);
   }
   const maskLink = (href) => {
     if (!href) return href;
     const masked = redaction.redactUrl(href).text;
-    return view.secretScreen ? redaction.redactText(masked, { strict: true }).text : masked;
+    return view.secretScreen ? strictlyMasked(masked) : masked;
   };
   return {
     snapshotId: snapshotFingerprint(rawUrl, interactive),
@@ -989,6 +1069,11 @@ async function snapshot(page, { withhold = false } = {}) {
         ...description,
         label: view.names[index],
         href: maskLink(description.href),
+        // Page-controlled attributes, masked like control names.
+        role: description.role ? strictlyMasked(description.role) : description.role,
+        autocomplete: description.autocomplete
+          ? strictlyMasked(description.autocomplete)
+          : description.autocomplete,
       }),
     ),
   };
@@ -1286,17 +1371,20 @@ async function clearHumanInputHighlights(page) {
 }
 
 // A credential or "may show a secret" step withholds the page before it runs,
-// and the page it leads to afterwards. The step does not run when the page
-// cannot be marked.
+// and the next other document a snapshot sees, however late it loads (see
+// carriedWithholding). The step does not run when the page cannot be marked
+// or identified.
 async function withholdBeforeStep(page, classification) {
   if (!WITHHOLDING_CATEGORIES.has(classification.category)) {
     return false;
   }
-  if (!(await withholdDocument(page))) {
+  const documentId = await documentIdentity(page);
+  if (!documentId || !(await withholdDocument(page))) {
     throw new Error(
       "Shared Browser could not keep this page withheld, so the step was not performed",
     );
   }
+  approvalProtocol.withholdNextDocument(documentId);
   return true;
 }
 
@@ -1422,6 +1510,9 @@ async function execute(browser, method, requestPath, body) {
       assertSameOrigin(page.url(), sourceOrigin);
     }
     const revalidatedUrl = validateNavigationUrl(body.url);
+    // An address the agent opens itself is not the page a credential step
+    // opened.
+    approvalProtocol.clearWithholdNextDocument();
     emitAction({ type: "navigate", label: `Go to ${url}`, url });
     await page.goto(revalidatedUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
     await settleAfterAction(page);
@@ -1687,12 +1778,14 @@ async function execute(browser, method, requestPath, body) {
   throw new Error("Unsupported Shared Browser method/path combination");
 }
 
-// Playwright lets this connection download into its own temporary folder.
-// The hosted browser has no copy-out, so a download would only land where an
-// ordinary turn could read it: deny downloads for as long as this connection
-// lasts. The override ends when the connection does; the profile's
-// download_restrictions preference, set by the runtime entrypoint, covers
-// everything else.
+// Playwright lets this connection download into its own temporary folder
+// from the moment it connects. The hosted browser has no copy-out, so a
+// download would only land where an ordinary turn could read it: deny
+// downloads for as long as this connection lasts, and close the connection
+// with browser.close(), which for a CDP connection leaves Chromium running and
+// removes that temporary folder. The override ends when the connection does;
+// the profile's download_restrictions preference, set by the runtime
+// entrypoint, covers everything else.
 async function denyDownloads(browser) {
   const session = await browser.newBrowserCDPSession();
   await session.send("Browser.setDownloadBehavior", { behavior: "deny" });
@@ -1715,9 +1808,7 @@ async function main() {
     const result = await execute(browser, method, requestPath, body || {});
     await writeStdout(`${JSON.stringify({ ok: true, ...result }, null, 2)}\n`);
   } finally {
-    if (typeof browser.disconnect === "function") {
-      await browser.disconnect().catch(() => {});
-    }
+    await browser.close().catch(() => {});
   }
 }
 

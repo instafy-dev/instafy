@@ -20,6 +20,16 @@ const mode = process.env.INSTAFY_SHARED_BROWSER_FAKE_MODE || "safe";
 const CANARY = ["sk", "live", "INSTAFYCANARY0123456789abcdef"].join("_");
 const markPath = process.env.INSTAFY_SHARED_BROWSER_FAKE_MARK;
 const cdpLogPath = process.env.INSTAFY_SHARED_BROWSER_FAKE_CDP_LOG;
+// The loaded document's CDP loader id, kept in a file so it lasts across
+// controller processes the way one Chromium document does.
+const documentPath = process.env.INSTAFY_SHARED_BROWSER_FAKE_DOCUMENT;
+const currentDocument = () => {
+  try {
+    return fs.readFileSync(documentPath, "utf8").trim() || "DOCUMENT1";
+  } catch (_) {
+    return "DOCUMENT1";
+  }
+};
 const formButtonTypes = { "form-button": "button", "form-reset": "reset", "form-submit-button": "submit" };
 const formInputTypes = { "form-submit-input": "submit", "form-image-input": "image" };
 const isFormButton = Object.hasOwn(formButtonTypes, mode);
@@ -71,7 +81,22 @@ const special = {
   "canary-label": { description: control(`Copy ${CANARY}`) },
   "click-error-canary": { description: control("Show details") },
   "no-policy": { description: control("Show details"), policy: null },
+  "url-label": {
+    description: control(`Open https://github.com/instafy-dev/instafy/pull/615/files?token=${CANARY}`),
+  },
 };
+// "long-label-<n>": an accessible name and a long visible text that differ,
+// shifted by n characters so the label cut lands on every position of a
+// space and a four-byte character.
+if (mode.startsWith("long-label-")) {
+  const shift = "x".repeat(Number(mode.slice("long-label-".length)));
+  special[mode] = {
+    description: control(`${shift}Quarterly ${"team \u{1F600} ".repeat(40)}`, {
+      tag: "a", inputType: "", ariaLabel: "Open report", href: "https://example.test/reports/q3",
+    }),
+    policy: { href: "https://example.test/reports/q3", linkSelf: true },
+  };
+}
 const descriptionFor = (targetId) => ({
   tag: isFormButton || mode === "localized-button" || mode === "icon-button" ? "button" : "input",
   role: mode === "icon-button" ? "button" : null,
@@ -163,6 +188,7 @@ const makePage = (targetId) => {
       currentUrl = String(url);
       // A new document drops the page's withheld mark.
       if (markPath) fs.rmSync(markPath, { force: true });
+      if (documentPath) fs.writeFileSync(documentPath, `DOCUMENT${Date.now()}`);
     },
     waitForLoadState: async () => {},
     waitForTimeout: async () => {},
@@ -186,7 +212,9 @@ context = {
   newCDPSession: async (page) => ({
     send: async (method) => method === "Target.getTargetInfo"
       ? { targetInfo: { targetId: page.targetId, type: "page" } }
-      : {},
+      : method === "Page.getFrameTree"
+        ? { frameTree: { frame: { id: "main", loaderId: currentDocument() } } }
+        : {},
     detach: async () => {},
   }),
 };
@@ -199,7 +227,9 @@ const browser = {
     },
     detach: async () => {},
   }),
-  disconnect: async () => {},
+  close: async () => {
+    if (cdpLogPath) fs.appendFileSync(cdpLogPath, `${JSON.stringify({ method: "close" })}\n`);
+  },
 };
 module.exports = { chromium: { connectOverCDP: async () => browser } };
 "#;
@@ -237,6 +267,7 @@ struct EmbeddedControllerFixture {
     approval_dir: PathBuf,
     actions_path: PathBuf,
     document_mark: PathBuf,
+    document_id: PathBuf,
     cdp_log: PathBuf,
     owner_id: Uuid,
     run_id: Uuid,
@@ -265,6 +296,7 @@ impl EmbeddedControllerFixture {
         let approval_dir = tempdir.path().join("approvals");
         let actions_path = tempdir.path().join("actions.jsonl");
         let document_mark = tempdir.path().join("document-withheld");
+        let document_id = tempdir.path().join("document-id");
         let cdp_log = tempdir.path().join("browser-cdp.jsonl");
         std::fs::create_dir_all(&approval_dir).expect("approval fixture directory");
 
@@ -278,6 +310,7 @@ impl EmbeddedControllerFixture {
             approval_dir,
             actions_path,
             document_mark,
+            document_id,
             cdp_log,
             owner_id: Uuid::new_v4(),
             run_id: Uuid::new_v4(),
@@ -372,6 +405,7 @@ impl EmbeddedControllerFixture {
             .env(ACTIONS_FILE_ENV, &self.actions_path)
             .env("INSTAFY_SHARED_BROWSER_FAKE_MODE", mode)
             .env("INSTAFY_SHARED_BROWSER_FAKE_MARK", &self.document_mark)
+            .env("INSTAFY_SHARED_BROWSER_FAKE_DOCUMENT", &self.document_id)
             .env("INSTAFY_SHARED_BROWSER_FAKE_CDP_LOG", &self.cdp_log)
             .env("HOSTILE_MARKER", &self.hostile_marker);
         if let Some(body) = body {
@@ -2363,11 +2397,16 @@ fn secret_screens_withhold_text_and_stay_withheld_until_a_new_page() {
     assert_eq!(payload["secretScreen"], false);
     assert_eq!(payload["visibleText"], "Fixture page");
 
-    // Missing page answers withhold the page.
+    // Missing page answers withhold that observation, but do not mark the
+    // document: a page caught mid-navigation is read normally next time.
     let fixture = EmbeddedControllerFixture::new();
     let payload = payload_of(&fixture.run("signals-fail", "GET", "/v1/snapshot", None));
     assert_eq!(payload["secretScreen"], true);
     assert_eq!(payload["visibleText"], "");
+    assert!(!fixture.document_mark.exists());
+    let payload = payload_of(&fixture.run("safe", "GET", "/v1/snapshot", None));
+    assert_eq!(payload["secretScreen"], false);
+    assert_eq!(payload["visibleText"], "Fixture page");
 }
 
 #[test]
@@ -2544,6 +2583,138 @@ fn credential_steps_withhold_the_page_before_they_run() {
 }
 
 #[test]
+fn credential_steps_withhold_the_page_they_open_even_when_it_loads_late() {
+    let fixture = EmbeddedControllerFixture::new();
+    let snapshot = fixture.routine_snapshot("credential-row");
+    let body = json!({"index": 0, "snapshotId": snapshot["snapshotId"]});
+    let (output, requests) = fixture.run_with_decisions(
+        "credential-row",
+        "page-target",
+        "POST",
+        "/v1/click",
+        Some(&body.to_string()),
+        &[],
+        &["allow_routine", "allow_once"],
+    );
+    assert_eq!(requests.len(), 2);
+    assert_eq!(payload_of(&output)["secretScreen"], true);
+    let record_path = fixture.approval_dir.join("withhold-next.json");
+    let record: JsonValue =
+        serde_json::from_slice(&std::fs::read(&record_path).expect("withheld-document record"))
+            .expect("record JSON");
+    assert_eq!(record["afterDocument"], "DOCUMENT1");
+    assert_eq!(record["runId"], fixture.run_id.to_string());
+
+    // The step's page navigates after the click returned: a new document
+    // without the in-page mark, on the same address, showing nothing the
+    // page checks recognize.
+    std::fs::remove_file(&fixture.document_mark).expect("new document drops the mark");
+    std::fs::write(&fixture.document_id, "DOCUMENT2").expect("late navigation");
+    let snapshot_now = || {
+        payload_of(
+            &fixture
+                .command_for("safe", "page-target", "GET", "/v1/snapshot", None)
+                .output()
+                .expect("snapshot after a late navigation"),
+        )
+    };
+    let payload = snapshot_now();
+    assert_eq!(payload["secretScreen"], true);
+    assert_eq!(payload["visibleText"], "");
+    assert!(fixture.document_mark.exists());
+    assert!(!record_path.exists());
+    // It stays withheld as long as that document does.
+    assert_eq!(snapshot_now()["secretScreen"], true);
+
+    // An address the agent opens itself is read normally, and clears a record
+    // that no document consumed yet.
+    std::fs::write(
+        &record_path,
+        serde_json::to_vec(&record).expect("record bytes"),
+    )
+    .expect("restore record");
+    #[cfg(unix)]
+    std::fs::set_permissions(&record_path, std::fs::Permissions::from_mode(0o600))
+        .expect("protect record");
+    let output = fixture
+        .command_for(
+            "safe",
+            "page-target",
+            "POST",
+            "/v1/navigate",
+            Some(r#"{"url":"https://example.test/next"}"#),
+        )
+        .output()
+        .expect("routine navigation");
+    let payload = payload_of(&output);
+    assert_eq!(payload["secretScreen"], false);
+    assert_eq!(payload["visibleText"], "Fixture page");
+    assert!(!record_path.exists());
+}
+
+#[test]
+fn long_approval_labels_stay_valid_for_the_origin() {
+    for shift in 0..=10 {
+        let mode = format!("long-label-{shift}");
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(&mode);
+        let body = json!({"index": 0, "snapshotId": snapshot_id});
+        let (output, requests) = fixture.run_with_decisions(
+            &mode,
+            "page-target",
+            "POST",
+            "/v1/click",
+            Some(&body.to_string()),
+            &["https://example.test"],
+            &["allow_once"],
+        );
+        payload_of(&output);
+        assert_eq!(requests.len(), 1, "{mode}");
+        let label = requests[0]["display"]["label"].as_str().expect("label");
+        // The origin's own check: non-empty, bounded, and equal to its
+        // whitespace-joined form.
+        assert!(!label.is_empty() && label.len() <= 240, "{mode}: {label}");
+        assert_eq!(
+            label.split_whitespace().collect::<Vec<_>>().join(" "),
+            label,
+            "{mode}"
+        );
+        assert!(label.contains("Open report (shown as"), "{mode}: {label}");
+        assert!(!label.contains('\u{FFFD}'), "{mode}: {label}");
+    }
+}
+
+#[test]
+fn masked_display_text_keeps_ordinary_addresses() {
+    let fixture = EmbeddedControllerFixture::new();
+    let snapshot_id = fixture.snapshot_id("url-label");
+    let body = json!({"index": 0, "snapshotId": snapshot_id});
+    let (output, requests) = fixture.run_with_decisions(
+        "url-label",
+        "page-target",
+        "POST",
+        "/v1/click",
+        Some(&body.to_string()),
+        &["https://example.test"],
+        &["allow_once"],
+    );
+    payload_of(&output);
+    assert_eq!(requests.len(), 1);
+    let label = requests[0]["display"]["label"].as_str().expect("label");
+    assert!(
+        label.contains("https://github.com/instafy-dev/instafy/pull/615/files?token=REDACTED"),
+        "{label}"
+    );
+    assert_no_canary("approval label", label);
+    let log = fixture.action_log();
+    assert!(
+        log.contains("https://github.com/instafy-dev/instafy/pull/615/files?token=REDACTED"),
+        "{log}"
+    );
+    assert_no_canary("action log", &log);
+}
+
+#[test]
 fn stderr_approval_labels_and_action_log_never_carry_page_secrets() {
     let fixture = EmbeddedControllerFixture::new();
     let snapshot_id = fixture.snapshot_id("click-error-canary");
@@ -2599,9 +2770,12 @@ fn every_controller_connection_denies_downloads() {
         .lines()
         .map(|line| serde_json::from_str(line).expect("CDP log line"))
         .collect();
-    assert_eq!(calls.len(), 2);
-    for call in calls {
-        assert_eq!(call["method"], "Browser.setDownloadBehavior");
-        assert_eq!(call["params"], json!({"behavior": "deny"}));
+    // Each connection denies downloads first and closes at the end, which
+    // removes Playwright's temporary download folder.
+    assert_eq!(calls.len(), 4);
+    for pair in calls.chunks(2) {
+        assert_eq!(pair[0]["method"], "Browser.setDownloadBehavior");
+        assert_eq!(pair[0]["params"], json!({"behavior": "deny"}));
+        assert_eq!(pair[1]["method"], "close");
     }
 }

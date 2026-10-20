@@ -326,13 +326,20 @@ control names and link targets, `status`, the action log (`actions.jsonl`, which
 anyone with read access to the project can see), approval labels and the
 controller's error text are masked before they leave the controller. Known key
 formats become `[redacted secret]`; unknown random values are masked near a
-credential word; sensitive address parameters become `REDACTED`. The page
+credential word; sensitive address parameters become `REDACTED`. In the action
+log, approval labels and errors every random-looking run is masked, while an
+address in them is masked like the snapshot's address and keeps its host and
+path. Element roles and `autocomplete` values in a snapshot are masked like
+control names. The page
 computes yes/no secret signals in the page and never returns the values it
 tested. A page that shows a key becomes a secret screen: its text is withheld,
 `secretScreen: true` is set with a fixed message, and control names stay
 (masked) so the agent can name the control. The document keeps a
 non-configurable mark, so it stays withheld across the run's separate controller
-processes until a new page loads. Missing page answers withhold the page.
+processes until a new page loads. When the page's own checks fail (for example
+while it is still changing documents), the controller retries once; if they
+still fail, that observation is withheld but the document is not marked, so the
+next snapshot reads it normally.
 
 **Step categories.** Every click, typing step, submission and key press is
 classified from the element's structure (tag, role, link shape, form method and
@@ -353,7 +360,13 @@ and the origin. In Ask mode every step still asks.
 (`step_refused_secret`), sign-in submits, identity-provider sign-in buttons and
 typing a sign-in form's account identifier (`step_refused_sign_in`), and file
 inputs (`step_refused_upload`). Before a key change or "may show a secret" step
-runs, the page is marked withheld, and so is the page it leads to.
+runs, the page is marked withheld, and so is the page it leads to: the step
+records the document it ran on (the main frame's CDP loader id, which page
+scripts cannot set) in the run's approval directory as `withhold-next.json`, and
+the next snapshot of any other document marks and withholds that document,
+however late it loaded, then clears the record. An address the agent opens
+itself clears the record, as on Desktop. The record is cleared with the rest of
+the approval directory when the run starts and ends.
 
 **Downloads are denied.** The hosted browser has no copy-out, so a download would
 only land where an ordinary turn could read it. Two blocks cover it:
@@ -361,12 +374,20 @@ only land where an ordinary turn could read it. Two blocks cover it:
 - Each controller connection sends `Browser.setDownloadBehavior` with `deny`.
   Playwright's own connection otherwise lets downloads into its temporary
   folder, and a CDP session that allows downloads overrides the profile
-  setting. The override ends when the connection does.
+  setting. The override ends when the connection does. Playwright allows
+  downloads for the few milliseconds between connecting and that deny; the
+  controller closes every connection with `browser.close()`, which leaves
+  Chromium running and deletes that temporary folder.
 - The runtime entrypoint writes `download_restrictions: 3` (block all
   downloads, the preference behind Chromium's DownloadRestrictions policy) into
   the profile before every Chromium launch, keeping the rest of a restored
   profile. This holds after the controller disconnects, when viewers drive the
-  page.
+  page. It blocks downloads for the people using the Shared Browser too, not
+  only for the agent.
+
+Printing is not blocked: a viewer who prints the page to PDF writes a file
+inside the runtime, where an ordinary turn could read it. The agent cannot
+print, because its allowed keys exclude the print shortcut.
 
 `scripts/shared-browser-cobrowsing-e2e.mjs` proves both in real Chromium: an
 approved agent click on an export link writes no file, a controller's deny

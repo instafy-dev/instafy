@@ -215,8 +215,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # Only the runtime-agent files that are compiled in are copied here: the path
 # crates come from builder-deps exactly as they were cooked, and runtime-agent's
 # tests and README stay out, so changing them does not rerun this build. The
-# Shared Browser controller embeds the browser-action-policy scripts as source
-# (.dockerignore drops dist/, and the package has no build step).
+# Shared Browser controller embeds the browser-action-policy scripts as source;
+# only their plain *.js files are copied, since the package has no build step.
 FROM builder-deps AS builder
 ARG BUILD_PROFILE=dev
 ARG BUILD_ARTIFACT_DIR=debug

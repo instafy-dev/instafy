@@ -7,6 +7,7 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
   const REQUEST_MAX_BYTES = 16 * 1024;
   const DECISION_MAX_BYTES = 8 * 1024;
   const STATE_MAX_BYTES = 16 * 1024;
+  const WITHHOLD_MAX_BYTES = 4 * 1024;
   const MAX_APPROVED_ORIGINS = 32;
   const MAX_CONSUMED_APPROVALS = 64;
   const MAX_ORIGIN_BYTES = 512;
@@ -21,7 +22,13 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const HEX_64_PATTERN = /^[0-9a-f]{64}$/;
   const PAGE_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
-  const FIXED_FILES = new Set(["request.json", "decision.json", "state.json"]);
+  const DOCUMENT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+  const FIXED_FILES = new Set([
+    "request.json",
+    "decision.json",
+    "state.json",
+    "withhold-next.json",
+  ]);
 
   function fail(code, message) {
     throw new Error(`${message} [${code}_non_retryable]`);
@@ -45,16 +52,29 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
     return Buffer.byteLength(String(value || ""), "utf8");
   }
 
+  // The origin accepts a label only when it equals its own whitespace-joined
+  // form (Rust `split_whitespace`, which also splits on U+0085) and is valid
+  // UTF-8. Cut on code points and trim again after the cut, so a long label
+  // never ends in a space or half of a surrogate pair.
   function boundedText(value, maxBytes) {
-    const normalized = String(value || "").replace(/\s+/g, " ").trim();
+    const normalized = String(value || "")
+      .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "\uFFFD")
+      .replace(/[\s\u0085]+/g, " ")
+      .trim();
     if (byteLength(normalized) <= maxBytes) {
       return normalized;
     }
-    let end = normalized.length;
-    while (end > 0 && byteLength(normalized.slice(0, end)) > maxBytes) {
-      end -= 1;
+    let bounded = "";
+    let bytes = 0;
+    for (const character of normalized) {
+      const size = byteLength(character);
+      if (bytes + size > maxBytes) {
+        break;
+      }
+      bounded += character;
+      bytes += size;
     }
-    return normalized.slice(0, end);
+    return bounded.trimEnd();
   }
 
   function sha256(value) {
@@ -300,6 +320,7 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
     const requestPath = path.join(approvalDir, "request.json");
     const decisionPath = path.join(approvalDir, "decision.json");
     const statePath = path.join(approvalDir, "state.json");
+    const withholdPath = path.join(approvalDir, "withhold-next.json");
 
     function readAuthority(expected = null) {
       const marker = exactObject(
@@ -601,6 +622,49 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       return request;
     }
 
+    // A key change or "may show a secret" step can open its page later than
+    // the step's own call waits. The step records the document it ran on; the
+    // next snapshot of any other document withholds that document and clears
+    // the record. The run's approval directory, and with it the record, is
+    // cleared when the run starts and ends.
+    function withholdNextDocumentAfter() {
+      const authority = readAuthority(initialAuthority);
+      const raw = readJson(withholdPath, WITHHOLD_MAX_BYTES, false);
+      if (raw === null) {
+        return null;
+      }
+      const record = exactObject(
+        raw,
+        ["version", "ownerId", "runId", "initiatorUserId", "browserPageId", "afterDocument"],
+        "Shared Browser withheld-document record",
+      );
+      if (
+        record.version !== 1 ||
+        Object.keys(authority).some((key) => record[key] !== authority[key]) ||
+        typeof record.afterDocument !== "string" ||
+        !DOCUMENT_ID_PATTERN.test(record.afterDocument)
+      ) {
+        fail("approval_state_invalid", "Shared Browser withheld-document record is invalid or belongs to another run");
+      }
+      return record.afterDocument;
+    }
+
+    function withholdNextDocument(afterDocument) {
+      if (typeof afterDocument !== "string" || !DOCUMENT_ID_PATTERN.test(afterDocument)) {
+        fail("approval_protocol_invalid", "Shared Browser document identity is invalid");
+      }
+      const authority = readAuthority(initialAuthority);
+      atomicWriteJson(
+        withholdPath,
+        { version: 1, ...authority, afterDocument },
+        WITHHOLD_MAX_BYTES,
+      );
+    }
+
+    function clearWithholdNextDocument() {
+      removeRegularFile(withholdPath, false);
+    }
+
     function redactedPageResult(extra = {}) {
       return {
         ...extra,
@@ -624,6 +688,9 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       isOriginApproved,
       ensureOriginApproved,
       allowOnce,
+      withholdNextDocumentAfter,
+      withholdNextDocument,
+      clearWithholdNextDocument,
       redactedPageResult,
     };
   }

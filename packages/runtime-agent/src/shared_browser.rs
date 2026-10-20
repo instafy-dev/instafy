@@ -65,7 +65,15 @@ const MAX_SCROLL_DELTA: f64 = 10_000.0;
 const MAX_PAGE_ID_BYTES: usize = 256;
 const SHARED_BROWSER_CONSENT_VERSION: u64 = 1;
 const APPROVAL_DIRECTORY_MAX_ENTRIES: usize = 16;
-const APPROVAL_FIXED_FILES: [&str; 3] = ["request.json", "decision.json", "state.json"];
+// `withhold-next.json` records the document a key change or "may show a
+// secret" step ran on, so the page it opens stays withheld; it is run-scoped
+// like the rest of this directory.
+const APPROVAL_FIXED_FILES: [&str; 4] = [
+    "request.json",
+    "decision.json",
+    "state.json",
+    "withhold-next.json",
+];
 const TERMINAL_APPROVAL_FAILURE_CODES: [&str; 10] = [
     "human_input_required",
     "approval_denied",
@@ -1217,15 +1225,28 @@ async fn execute_request(request: &SharedBrowserRequest) -> Result<JsonValue> {
         .context("Shared Browser controller has no stdin")?;
     // Node reads the whole script before it runs it, so nothing is written to
     // stdout or stderr until stdin closes.
-    stdin
+    let script_written = stdin
         .write_all(embedded_shared_browser_script().as_bytes())
-        .await
-        .context("failed to pass the Shared Browser controller script")?;
+        .await;
     drop(stdin);
     let output = child
         .wait_with_output()
         .await
         .context("failed to run the Shared Browser controller")?;
+    if let Err(error) = script_written {
+        // Node exited before it read the script; its stderr says why.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let message = stderr.trim();
+        bail!(
+            "failed to pass the Shared Browser controller script ({error}); Node exited with {}: {}",
+            output.status,
+            if message.is_empty() {
+                "no error details"
+            } else {
+                message
+            }
+        );
+    }
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let message = stderr.trim();
