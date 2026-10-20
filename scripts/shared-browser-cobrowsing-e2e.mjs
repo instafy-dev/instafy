@@ -104,7 +104,9 @@ function blockDownloadsInProfile(profileDirectory, environment) {
   const start = entrypointSource.indexOf("\nblock_browser_downloads() {\n");
   const end = entrypointSource.indexOf("\n}\n", start + 1);
   assert.ok(start >= 0 && end > start, "The runtime entrypoint must define block_browser_downloads");
-  const result = spawnSync("bash", ["-c", `${entrypointSource.slice(start + 1, end + 3)}\nblock_browser_downloads "$1"`, "block", profileDirectory], {
+  // The function arrives on stdin; the profile is the only argument.
+  const result = spawnSync("bash", ["-s", "--", profileDirectory], {
+    input: `${entrypointSource.slice(start + 1, end + 3)}\nblock_browser_downloads "$1"\n`,
     env: environment, encoding: "utf8", timeout: 10_000,
   });
   assert.equal(result.status, 0, `block_browser_downloads failed: ${result.stderr}`);
