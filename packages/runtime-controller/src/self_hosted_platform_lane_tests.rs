@@ -3120,9 +3120,16 @@ async fn insert_finished_plan_lane(
         .get::<_, PgJson<serde_json::Value>>(0)
         .0;
     connection
-        .execute("update runs set status = 'success' where id = $1", &[&run_id])
+        .execute(
+            "update runs set status = 'success' where id = $1",
+            &[&run_id],
+        )
         .await?;
-    Ok((conversation_id.unwrap_or(new_conversation_id), job_id, payload))
+    Ok((
+        conversation_id.unwrap_or(new_conversation_id),
+        job_id,
+        payload,
+    ))
 }
 
 /// A plan lane that stopped on a short upstream rate limit before it acted runs once more in the
@@ -3131,8 +3138,8 @@ async fn insert_finished_plan_lane(
 /// (the early checkpoint wakes the lead, and the failed original seen last still lets the final
 /// checkpoint run). A usage limit, and a lane that ran a command first, are never retried.
 #[tokio::test]
-async fn a_plan_lane_that_hit_a_short_rate_limit_runs_once_more_after_the_wait() -> anyhow::Result<()>
-{
+async fn a_plan_lane_that_hit_a_short_rate_limit_runs_once_more_after_the_wait(
+) -> anyhow::Result<()> {
     let Some(pool) = setup_origin_test_pool().await? else {
         eprintln!("skipping plan rate-limit retry test: TEST_DATABASE_URL not set");
         return Ok(());

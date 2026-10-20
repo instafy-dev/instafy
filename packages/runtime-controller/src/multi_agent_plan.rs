@@ -820,10 +820,9 @@ async fn checkpoint_plan_group(
     )
     .await
     {
-        transaction
-            .commit()
-            .await
-            .map_err(|error| internal_error(format!("failed to release checkpoint lock: {error}")))?;
+        transaction.commit().await.map_err(|error| {
+            internal_error(format!("failed to release checkpoint lock: {error}"))
+        })?;
         return Ok(true);
     }
 
