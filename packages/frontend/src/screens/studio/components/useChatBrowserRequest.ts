@@ -156,6 +156,18 @@ class BrowserAutoStartDropped extends Error {
 /** How often an automatic start into Instafy's browser reads it again while it waits to send. */
 export const BROWSER_AUTO_START_HOST_CHECK_MS = 1_000;
 
+/** What a promise settles to before the deadline; null when it fails or is later. */
+function settledBefore<T>(promise: Promise<T | null> | null, deadline: number): Promise<T | null> {
+  if (!promise) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const timer = window.setTimeout(() => resolve(null), Math.max(0, deadline - Date.now()));
+    promise.then(
+      (value) => { window.clearTimeout(timer); resolve(value); },
+      () => { window.clearTimeout(timer); resolve(null); },
+    );
+  });
+}
+
 const BROWSER_CHANGED_MESSAGE = "The browser or conversation changed before this task could continue.";
 
 /**
@@ -305,7 +317,9 @@ export function useChatBrowserRequest(options: Options) {
               const now = Date.now();
               if (now - hostCheckedAtMs >= BROWSER_AUTO_START_HOST_CHECK_MS) {
                 hostCheckedAtMs = now;
-                hostReading = (await auto.refreshHost?.({ force: true })) ?? null;
+                // A reading that does not answer before the deadline counts
+                // as none, so the deadline still ends the wait.
+                hostReading = await settledBefore(auto.refreshHost?.({ force: true }) ?? null, deadline);
               }
               // A reading from before the browser opened, or one that is not
               // ready yet, is waited out.
@@ -313,7 +327,13 @@ export function useChatBrowserRequest(options: Options) {
                 hostReading.snapshot.state !== "ready";
             }
             if (wait) {
-              if (Date.now() >= deadline) throw new Error(BROWSER_AUTO_START_COPY.timedOut);
+              if (Date.now() >= deadline) {
+                // The roster could not connect: say so rather than that the
+                // browser did not start.
+                throw new Error(latest.current.auto?.presence?.status === "unavailable"
+                  ? BROWSER_AUTO_START_COPY.presenceUnavailable
+                  : BROWSER_AUTO_START_COPY.timedOut);
+              }
               await new Promise((resolve) => window.setTimeout(resolve, 100));
               continue;
             }
@@ -516,7 +536,7 @@ export function useChatBrowserRequest(options: Options) {
     if (plan.kind === "button") {
       setCardState(key, { kind: "button", reason: plan.reason });
       // In use for now: read the browser again until it is free.
-      return plan.reason === BROWSER_AUTO_START_COPY.inUse;
+      return plan.reason === BROWSER_AUTO_START_COPY.hostInUse;
     }
     if (!claimBrowserAutoStart(key)) return false;
     recordBrowserAutoStart(conversation);

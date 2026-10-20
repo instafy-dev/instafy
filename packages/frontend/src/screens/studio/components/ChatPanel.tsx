@@ -4543,7 +4543,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       sharedBrowserHostPolicy: sharedBrowserHostPolicy ?? null,
       conversationRuntimeId: effectiveRuntimeId ?? null,
       host: sharedBrowserHost.snapshot,
-      hostFetchedAtMs: sharedBrowserHost.fetchedAtMs,
+      hostReadAtMs: sharedBrowserHost.receivedAtMs,
       nowMs: Date.now(),
     }),
     refreshHost: sharedBrowserHost.refresh,
@@ -4557,7 +4557,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       sharedBrowserHostPolicy ?? null,
       effectiveRuntimeId ?? null,
       sharedBrowserHostKey,
-      sharedBrowserHost.fetchedAtMs,
+      sharedBrowserHost.receivedAtMs,
+      // A failed reading also decides a waiting card again, which stops
+      // reading once the card is too old to open by itself.
+      sharedBrowserHost.failedAtMs,
     ]),
   };
   const browserRequestState = useChatBrowserRequest({

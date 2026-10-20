@@ -10,6 +10,7 @@ vi.mock("../../../../sdk/instafy", () => ({
 }));
 
 import {
+  SHARED_BROWSER_HOST_READ_TIMEOUT_MS,
   SHARED_BROWSER_HOST_REFRESH_MIN_GAP_MS,
   SHARED_BROWSER_HOST_SNAPSHOT_POLL_MS,
   useSharedBrowserHostSnapshot,
@@ -69,11 +70,13 @@ describe("useSharedBrowserHostSnapshot", () => {
 
   it("reads the conversation machine's browser with the surface's session id", async () => {
     await render();
-    expect(latest).toMatchObject({ snapshot: null, fetchedAtMs: null });
+    expect(latest).toMatchObject({ snapshot: null, fetchedAtMs: null, receivedAtMs: null, failedAtMs: null });
     const reading = await refresh();
-    expect(fetchHostMock).toHaveBeenCalledExactlyOnceWith({ projectId: "project-1", runtimeId: "host-1", browserSessionId: "surface-1" });
-    expect(reading).toEqual({ snapshot: snapshot(), fetchedAtMs: Date.now() });
-    expect(latest).toMatchObject({ snapshot: snapshot(), fetchedAtMs: Date.now() });
+    expect(fetchHostMock).toHaveBeenCalledExactlyOnceWith({
+      projectId: "project-1", runtimeId: "host-1", browserSessionId: "surface-1", signal: expect.any(AbortSignal),
+    });
+    expect(reading).toEqual({ snapshot: snapshot(), fetchedAtMs: Date.now(), receivedAtMs: Date.now() });
+    expect(latest).toMatchObject({ snapshot: snapshot(), fetchedAtMs: Date.now(), receivedAtMs: Date.now() });
   });
 
   it("reads once at a time and at most every two seconds, unless forced", async () => {
@@ -112,18 +115,64 @@ describe("useSharedBrowserHostSnapshot", () => {
     expect(latest?.snapshot?.state).toBe("ready");
   });
 
-  it("keeps the last reading when one fails, and reads a 404 as no browser", async () => {
+  it("keeps the last reading when one fails, marks the failure, and reads a 404 as no browser", async () => {
     await render();
     await refresh();
     const fetchedAt = latest!.fetchedAtMs;
     fetchHostMock.mockRejectedValueOnce(new Error("502"));
     await advance(SHARED_BROWSER_HOST_REFRESH_MIN_GAP_MS);
     expect(await refresh()).toBeNull();
-    expect(latest).toMatchObject({ snapshot: snapshot(), fetchedAtMs: fetchedAt });
+    // The failure changes what a waiting card reads, so it is decided again.
+    expect(latest).toMatchObject({ snapshot: snapshot(), fetchedAtMs: fetchedAt, failedAtMs: Date.now() });
     fetchHostMock.mockResolvedValueOnce(null);
     await advance(SHARED_BROWSER_HOST_REFRESH_MIN_GAP_MS);
-    expect(await refresh()).toEqual({ snapshot: null, fetchedAtMs: Date.now() });
+    expect(await refresh()).toEqual({ snapshot: null, fetchedAtMs: Date.now(), receivedAtMs: Date.now() });
     expect(latest).toMatchObject({ snapshot: null, fetchedAtMs: Date.now() });
+  });
+
+  it("marks every failure, and does not read again at once after one", async () => {
+    fetchHostMock.mockRejectedValue(new Error("offline"));
+    await render();
+    expect(await refresh()).toBeNull();
+    const firstFailure = latest!.failedAtMs;
+    expect(firstFailure).toBe(Date.now());
+    // Deciding the card again right after the failure does not read again.
+    expect(await refresh()).toBeNull();
+    expect(fetchHostMock).toHaveBeenCalledTimes(1);
+    await advance(SHARED_BROWSER_HOST_REFRESH_MIN_GAP_MS);
+    expect(await refresh()).toBeNull();
+    expect(fetchHostMock).toHaveBeenCalledTimes(2);
+    expect(latest!.failedAtMs).toBeGreaterThan(firstFailure!);
+  });
+
+  it("fails a reading that does not answer in ten seconds, so nothing waits on it", async () => {
+    await render();
+    fetchHostMock.mockReturnValueOnce(new Promise(() => {}));
+    let result: Promise<unknown> | undefined;
+    await act(async () => { result = latest!.refresh({ force: true }); });
+    const signal = (fetchHostMock.mock.calls[0]![0] as { signal: AbortSignal }).signal;
+    await advance(SHARED_BROWSER_HOST_READ_TIMEOUT_MS - 1);
+    expect(signal.aborted).toBe(false);
+    await advance(1);
+    expect(signal.aborted).toBe(true);
+    expect(await result).toBeNull();
+    expect(latest!.failedAtMs).toBe(Date.now());
+    // The next reading is not handed the hung one.
+    await advance(SHARED_BROWSER_HOST_REFRESH_MIN_GAP_MS);
+    expect(await refresh()).toMatchObject({ snapshot: snapshot() });
+    expect(fetchHostMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("measures a slow reading's age from when it arrived", async () => {
+    await render();
+    const slow = deferred<SharedBrowserHostSnapshot | null>();
+    fetchHostMock.mockReturnValueOnce(slow.promise);
+    const startedAt = Date.now();
+    let result: Promise<unknown> | undefined;
+    await act(async () => { result = latest!.refresh(); });
+    await advance(6_000);
+    await act(async () => { slow.resolve(snapshot({ state: "ready" })); await result; });
+    expect(latest).toMatchObject({ fetchedAtMs: startedAt, receivedAtMs: startedAt + 6_000 });
   });
 
   it("polls every ten seconds only while a card waits and the page is visible", async () => {

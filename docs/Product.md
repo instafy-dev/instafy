@@ -792,7 +792,8 @@ the walk goes on only through the browser's own controls (see
 [Browser Profiles](Browser-Profiles.md)). A skill that declares no address gets no browser;
 one that declares several (such as live and demo) gets it once the person has picked one. The
 walk does not depend on the runtime running the chat turn, since Instafy's browser starts
-on demand, on the space's own machine or as a runtime of its own; the card's button is disabled, with the reason, only where Studio knows
+on demand, on the space's own machine or as a runtime of its own; the card's button is
+disabled, with the reason, only where Studio knows
 no browser can open. A card's own where-to-get line still names a screen, never an address. Every later turn in that chat,
 including one that only saves a file the setup asked for, picks the setup up at its next
 question until the section is done. An opener the runtime answered without the model, such as

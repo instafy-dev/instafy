@@ -316,7 +316,7 @@ describe("Studio starting a request_browser card by itself", () => {
       snapshot: snapshot(overrides),
       last: null as SharedBrowserHostReading | null,
       refreshHost: vi.fn<(options?: { force?: boolean }) => Promise<SharedBrowserHostReading | null>>(async (): Promise<SharedBrowserHostReading | null> => {
-        host.last = { snapshot: host.snapshot, fetchedAtMs: Date.now() };
+        host.last = { snapshot: host.snapshot, fetchedAtMs: Date.now(), receivedAtMs: Date.now() };
         auto.revision = String(host.last.fetchedAtMs);
         return host.last;
       }),
@@ -327,7 +327,7 @@ describe("Studio starting a request_browser card by itself", () => {
     plan.mockImplementation((_request, transport) => browserAutoStartPlan({
       transport: transport as "shared", personalAvailable: value.personalAvailable, personalOwnAi: true,
       projectId: "project-1", runtimes, sharedBrowserHostPolicy: "covered", conversationRuntimeId: HOST_ID,
-      host: host.last?.snapshot ?? null, hostFetchedAtMs: host.last?.fetchedAtMs ?? null, nowMs: Date.now(),
+      host: host.last?.snapshot ?? null, hostReadAtMs: host.last?.receivedAtMs ?? null, nowMs: Date.now(),
     }));
     return host;
   }
@@ -463,10 +463,10 @@ describe("Studio starting a request_browser card by itself", () => {
     ["a browser someone else is using", () => { auto.heldByOther = true; }, BROWSER_AUTO_START_COPY.inUse],
     ["a conversation where the person closed the browser", () => { markBrowserAutoStartDeclined(IDENTITY); }, null],
     ["a person on Instafy AI", () => { plan.mockReturnValue({ kind: "button", reason: BROWSER_AUTO_START_COPY.personalNeedsOwnAi }); }, BROWSER_AUTO_START_COPY.personalNeedsOwnAi],
-    ["a host someone else has open", () => { coveredHost({ othersPresent: true }); }, BROWSER_AUTO_START_COPY.inUse],
-    ["a host someone else controls", () => { coveredHost({ controlledByOther: true }); }, BROWSER_AUTO_START_COPY.inUse],
-    ["a host another person's run works in", () => { coveredHost({ agentRunActive: true }); }, BROWSER_AUTO_START_COPY.inUse],
-    ["a host someone else is starting", () => { coveredHost({ state: "starting" }); }, BROWSER_AUTO_START_COPY.inUse],
+    ["a host someone else has open", () => { coveredHost({ othersPresent: true }); }, BROWSER_AUTO_START_COPY.hostInUse],
+    ["a host someone else controls", () => { coveredHost({ controlledByOther: true }); }, BROWSER_AUTO_START_COPY.hostInUse],
+    ["a host another person's run works in", () => { coveredHost({ agentRunActive: true }); }, BROWSER_AUTO_START_COPY.hostInUse],
+    ["a host someone else is starting", () => { coveredHost({ state: "starting" }); }, BROWSER_AUTO_START_COPY.hostInUse],
     ["a failed host", () => { coveredHost({ state: "failed" }); }, BROWSER_AUTO_START_COPY.hostFailed],
     ["a poisoned host", () => { coveredHost({ state: "poisoned" }); }, BROWSER_AUTO_START_COPY.hostPoisoned],
   ] as const)("leaves the button for %s, with the reason", async (_name, arrange, reason) => {
@@ -497,7 +497,7 @@ describe("Studio starting a request_browser card by itself", () => {
     expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.unseenAddress });
   });
 
-  it("attaches to an idle or ready host on the conversation's machine; a legacy session stays a button", async () => {
+  it("leaves a legacy browser session a button in a covered space", async () => {
     // The controller does not record who started a separate session: it may
     // be a teammate's, with their pages and sign-ins.
     const now = new Date().toISOString();
@@ -670,6 +670,50 @@ describe("Studio starting a request_browser card by itself", () => {
     expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.timedOut });
   });
 
+  it("says the roster could not connect when it stays unavailable until the deadline", async () => {
+    coveredHost();
+    await cardArrives(); await settleReading();
+    await openHost({ status: "unavailable", othersPresent: false, remoteController: false });
+    await advance(121_000);
+    expect(value.onError).toHaveBeenCalledWith(BROWSER_AUTO_START_COPY.presenceUnavailable);
+    expect(value.continueTask).not.toHaveBeenCalled();
+    expect(lastState?.cardStates.get("job:job-1"))
+      .toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.presenceUnavailable });
+  });
+
+  it("ends the wait at the deadline when a forced reading never answers", async () => {
+    const host = coveredHost();
+    await cardArrives(); await settleReading();
+    host.refreshHost.mockImplementation(() => new Promise(() => {}));
+    await openHost();
+    expect(host.refreshHost).toHaveBeenCalledWith({ force: true });
+    await advance(119_000);
+    expect(value.onError).not.toHaveBeenCalled();
+    await advance(1_200);
+    expect(value.onError).toHaveBeenCalledWith(BROWSER_AUTO_START_COPY.timedOut);
+    expect(value.continueTask).not.toHaveBeenCalled();
+    expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.timedOut });
+  });
+
+  it("stops waiting on the host once the card is too old to open, while every reading fails", async () => {
+    const host = coveredHost();
+    // Each failed reading changes the revision, as ChatPanel's failedAtMs does.
+    host.refreshHost.mockImplementation(async () => {
+      auto.revision = `failed:${Date.now()}`;
+      return null;
+    });
+    await cardArrives();
+    await settleReading();
+    expect(lastState?.autoWaiting).toBe(true);
+    for (let elapsed = 0; elapsed <= 10 * 60_000; elapsed += 10_000) {
+      await advance(10_000);
+      await act(async () => { await host.refreshHost(); });
+      await render();
+    }
+    expect(lastState?.autoWaiting).toBe(false);
+    expect(value.activate).not.toHaveBeenCalled();
+  });
+
   it("never claims a card while it waits for a reading of the host", async () => {
     const host = coveredHost();
     host.refreshHost.mockImplementation(async () => null);
@@ -684,7 +728,7 @@ describe("Studio starting a request_browser card by itself", () => {
   it("decides a held card again after the next reading", async () => {
     const host = coveredHost({ othersPresent: true });
     await cardArrives(); await settleReading();
-    expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.inUse });
+    expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.hostInUse });
     expect(lastState?.autoWaiting).toBe(true);
     expect(isBrowserAutoStartClaimed("job:job-1")).toBe(false);
     host.snapshot = snapshot();

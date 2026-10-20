@@ -777,18 +777,21 @@ unless the policy is `"covered"`.
   browser by itself only on the conversation's own machine, when that machine
   is live, can take work, has an origin and reports `sharedBrowserHost`, and
   the response says `sharedBrowserHostPolicy: "covered"`. It reads
-  `GET browser/host` first (a reading older than five seconds is read again)
-  and leaves the card a button when a separate browser session is running,
+  `GET browser/host` first (a reading that arrived more than five seconds ago
+  is read again, and a read that does not answer in ten seconds fails) and
+  leaves the card a button when a separate browser session is running,
   when the browser is poisoned or failed, or while someone else has it open,
   controls it, runs an agent in it or is starting it. A card held that way is
   read again every ten seconds while the tab is visible, and opens once the
-  browser is free. Studio then opens that exact machine's browser as
-  `attachOnly`, so it may start the browser but never the machine, and sends
-  the task only once the browser shows that machine's first page, the
-  browser's roster has connected and a fresh `GET browser/host` read after the
-  open says `ready`. It waits for each of these within the two-minute bound,
-  and refuses only on a known conflict: someone else has it open or controls
-  it, or another person's run works in it. A stopped machine, a machine
+  browser is free; a card that keeps failing to read, or stays held, stops
+  being read once it is too old to open by itself. Studio then opens that exact
+  machine's browser as `attachOnly`, so it may start the browser but never the
+  machine, and sends the task only once the browser shows that machine's first
+  page, the browser's roster has connected and a fresh `GET browser/host` read
+  after the open says `ready`. It waits for each of these within the two-minute
+  bound, which also ends a read that has not answered, and refuses only on a
+  known conflict: someone else has it open or controls it, or another person's
+  run works in it. A stopped machine, a machine
   without `sharedBrowserHost` and an uncovered space keep the press. The
   person's own Retry or press inside the browser still may start the machine.
 - **Stale pins.** A pin to a session that is gone moves to the space's own live

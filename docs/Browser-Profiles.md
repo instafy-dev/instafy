@@ -35,10 +35,10 @@ continue** card. In the desktop app, for a person on their own AI connection, St
 presses it by itself once the turn is finished, in the browser on this device. In a space
 whose controller policy covers it, Studio also presses it by itself for Instafy's browser
 on the conversation's own machine, which starts that browser on demand, on the web as in
-the desktop app. Everywhere else the card waits for the person's press. Either way the task
-goes to that exact browser once it is ready, and the chat
-records a one-line notice ("Octo opened Instafy's browser at dashboard.stripe.com") in
-place of the task, which the record keeps as the dispatched prompt. Studio starts a card
+the desktop app. Everywhere else the card waits for the person's press. Either way the
+task goes to that exact browser once it is ready, and the chat records a one-line notice
+("Octo opened Instafy's browser at dashboard.stripe.com") in place of the task, which the
+record keeps as the dispatched prompt. Studio starts a card
 by itself only:
 
 - in the desktop app's browser, for a person on their own AI connection; or in
@@ -76,10 +76,14 @@ browser, the task is not sent and the card keeps its button. For Instafy's brows
 space's machine, Studio also waits, within the same two minutes, until the browser shows
 that machine, its roster has connected and a fresh reading after the open says it is
 ready; it refuses only when someone else is known to have it open or in control, or
-another person's run works in it. Instafy's browser that failed, or that needs the
-space's machine to restart, also leaves the button, with the reason. While someone else
-has it, Studio reads it again every ten seconds and opens it once it is free. Where Studio does not start a
-card, it keeps its button, with the reason when there is one, such as "A browser session is
+another person's run works in it. If the roster cannot connect at all, the card keeps
+its button with "Studio could not check who else is in Instafy's browser." Instafy's
+browser that failed, or that needs the space's machine to restart, also leaves the button,
+with the reason. While someone else has it, the card says "Instafy's browser is in use. It
+opens here by itself once it is free.", and Studio reads it again every ten seconds while
+the tab is visible and opens it once it is free, for as long as the card is recent enough
+to open by itself. Where Studio does not start a card, it keeps its button, with the
+reason when there is one, such as "A browser session is
 already running in this space. Open it when you are ready." or "This restarts this space's
 cloud machine as the browser, which stops anything still running on it." A draft or a
 browser in use only holds the card: it is looked at again once that clears. A failed start,
@@ -89,9 +93,10 @@ run that took the lane first, counts as sent: the notice stays and the card read
 **Opened**. A press, or an opened card, reads **Opened** from then on, also after a reload,
 so displaying an old message never runs it again. **Try again** on a failed browser run
 sends the card's task again through the browser, with the card it continues, never the
-notice text. A browser Studio opened by itself grants nothing a press does not: Instafy's browser starts
-in Ask with the per-run site approval, as a press does. In the browser on this device, it asks
-for routine browsing only from a Desktop whose routine is the owner tier (approval policy
+notice text. A browser Studio opened by itself grants nothing a press does not: Instafy's
+browser starts in Ask with the per-run site approval, as a press does. In the browser on
+this device, it asks for routine browsing only from a Desktop whose routine is the owner
+tier (approval policy
 version 2: reading and plain links free, forms, purchases, messages and credentials still
 ask), and only when the person has not chosen Ask; on an older Desktop it uses Ask, so it
 never requests the earlier routine that submits ordinary forms. A start, pressed or
@@ -100,9 +105,8 @@ three) as the run's own sites; they are not recorded with the prompt, and an old
 never receives them.
 The card shows the host its task opens. The card says nothing about which browsers exist,
 because the Workspace browser starts on demand, on the space's own machine or as a runtime
-of its own; Studio disables the
-button, with the reason, only when the Workspace browser is known not to open and there is no
-Personal Browser. Until then it counts as available.
+of its own; Studio disables the button, with the reason, only when the Workspace browser
+is known not to open and there is no Personal Browser. Until then it counts as available.
 A skill setup offers the same card once, to walk to the provider screen that lists a value
 the skill asks for (see [Product](Product.md)). In a chat opened with
 `/skills import <source> --start` or `/skills start <name>`, the composer stays a chat

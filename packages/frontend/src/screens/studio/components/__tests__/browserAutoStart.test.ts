@@ -88,7 +88,7 @@ describe("browserAutoStartPlan", () => {
   it("never opens by itself in a covered space whose machine has no browser on demand, or is stopped (row 3)", () => {
     // A live machine that did not report Instafy's browser on demand (an
     // older image) would have to restart as the browser.
-    const covered = { sharedBrowserHostPolicy: "covered" as const, conversationRuntimeId: MACHINE_ID, host: readyHost(), hostFetchedAtMs: NOW_MS, nowMs: NOW_MS };
+    const covered = { sharedBrowserHostPolicy: "covered" as const, conversationRuntimeId: MACHINE_ID, host: readyHost(), hostReadAtMs: NOW_MS, nowMs: NOW_MS };
     expect(plan({ ...covered, runtimes: [runtime()] }))
       .toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.restartsMachine });
     // A stopped machine is never started by itself.
@@ -162,7 +162,7 @@ describe("browserAutoStartPlan for Instafy's browser on the conversation's own m
   function hostPlan(overrides: Partial<BrowserAutoStartPlanInput> = {}) {
     return plan({
       runtimes: [lazyHost()], sharedBrowserHostPolicy: "covered", conversationRuntimeId: MACHINE_ID,
-      host: readyHost(), hostFetchedAtMs: NOW_MS - 1_000, nowMs: NOW_MS, ...overrides,
+      host: readyHost(), hostReadAtMs: NOW_MS - 1_000, nowMs: NOW_MS, ...overrides,
     });
   }
 
@@ -191,11 +191,11 @@ describe("browserAutoStartPlan for Instafy's browser on the conversation's own m
       .toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.severalSessions });
   });
 
-  it("asks for a fresh reading first when it has none or the last is older than five seconds (row 5)", () => {
-    expect(hostPlan({ host: null, hostFetchedAtMs: null })).toEqual({ kind: "pending" });
-    expect(hostPlan({ hostFetchedAtMs: undefined })).toEqual({ kind: "pending" });
-    expect(hostPlan({ hostFetchedAtMs: NOW_MS - 5_001 })).toEqual({ kind: "pending" });
-    expect(hostPlan({ hostFetchedAtMs: NOW_MS - 5_000 })).toEqual({ kind: "attach", runtimeId: MACHINE_ID });
+  it("asks for a fresh reading first when it has none or the last arrived over five seconds ago (row 5)", () => {
+    expect(hostPlan({ host: null, hostReadAtMs: null })).toEqual({ kind: "pending" });
+    expect(hostPlan({ hostReadAtMs: undefined })).toEqual({ kind: "pending" });
+    expect(hostPlan({ hostReadAtMs: NOW_MS - 5_001 })).toEqual({ kind: "pending" });
+    expect(hostPlan({ hostReadAtMs: NOW_MS - 5_000 })).toEqual({ kind: "attach", runtimeId: MACHINE_ID });
   });
 
   it("leaves a fresh answer of no browser on that machine to a press", () => {
@@ -216,7 +216,7 @@ describe("browserAutoStartPlan for Instafy's browser on the conversation's own m
     ["another person's agent run works in it", { agentRunActive: true }],
     ["someone else is starting it", { state: "starting" as const }],
   ])("holds the card while %s (row 7)", (_name, overrides) => {
-    expect(hostPlan({ host: readyHost(overrides) })).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.inUse });
+    expect(hostPlan({ host: readyHost(overrides) })).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.hostInUse });
   });
 
   it("never opens Instafy's browser for the browser on this device (row 1)", () => {

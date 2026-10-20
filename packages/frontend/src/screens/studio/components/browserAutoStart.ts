@@ -63,6 +63,7 @@ export const BROWSER_AUTO_START_COPY = {
   firstMachine: "This starts a cloud machine for this space.",
   restartsMachine: "This restarts this space's cloud machine as the browser, which stops anything still running on it.",
   inUse: "Instafy's browser is in use. Open it when it is free.",
+  hostInUse: "Instafy's browser is in use. It opens here by itself once it is free.",
   otherSession: "A browser session is already running in this space. Open it when you are ready.",
   severalSessions: "Several browser sessions are running in this space. Open the one you want.",
   personalNeedsOwnAi: "The browser on this device needs your own AI connection.",
@@ -70,6 +71,7 @@ export const BROWSER_AUTO_START_COPY = {
   timedOut: "Instafy's browser did not start in time. Open it from the message to try again.",
   hostFailed: "Instafy's browser stopped unexpectedly. Open it to start it again.",
   hostPoisoned: "Instafy's browser needs this space's machine to restart before it can open again.",
+  presenceUnavailable: "Studio could not check who else is in Instafy's browser. Open it from the message to continue.",
 } as const;
 
 /** How old a reading of Instafy's browser on the space's machine may be for a decision. */
@@ -105,8 +107,8 @@ export type BrowserAutoStartPlanInput = {
   conversationRuntimeId?: string | null;
   /** The last reading of that machine's browser; null when none (or a 404). */
   host?: SharedBrowserHostSnapshot | null;
-  /** When that reading was asked for; null before the first one. */
-  hostFetchedAtMs?: number | null;
+  /** When that reading arrived; null before the first one. */
+  hostReadAtMs?: number | null;
   nowMs?: number;
 };
 
@@ -155,7 +157,7 @@ export function sharedBrowserHostHeldByOther(host: SharedBrowserHostSnapshot): b
  * | 4 | a separate browser session is running                       | button (other or several)       |
  * | 5 | no reading of the host, or one older than five seconds     | pending                         |
  * | 6 | the host is poisoned, failed or in an unknown state         | button                          |
- * | 7 | someone else has it, controls it, runs in it or starts it   | button (in use), decided again  |
+ * | 7 | someone else has it, controls it, runs in it or starts it   | button (opens once free)        |
  * | 8 | otherwise (idle, ready, starting by you, stopping)          | attach                          |
  */
 export function browserAutoStartPlan(input: BrowserAutoStartPlanInput): BrowserAutoStartPlan {
@@ -175,8 +177,8 @@ export function browserAutoStartPlan(input: BrowserAutoStartPlanInput): BrowserA
   // Rows 2 to 4: a press decides, as before.
   if (!hostRuntimeId || sessions.length > 0) return hostedButton(input.runtimes, sessions);
   const now = input.nowMs ?? Date.now();
-  const fetchedAt = input.hostFetchedAtMs ?? null;
-  if (fetchedAt === null || now - fetchedAt > SHARED_BROWSER_HOST_SNAPSHOT_MAX_AGE_MS) return { kind: "pending" };
+  const readAt = input.hostReadAtMs ?? null;
+  if (readAt === null || now - readAt > SHARED_BROWSER_HOST_SNAPSHOT_MAX_AGE_MS) return { kind: "pending" };
   const host = input.host ?? null;
   // The machine answered that it has no such browser right now: a press
   // takes the usual path.
@@ -184,7 +186,9 @@ export function browserAutoStartPlan(input: BrowserAutoStartPlanInput): BrowserA
   if (host.state === "poisoned") return { kind: "button", reason: BROWSER_AUTO_START_COPY.hostPoisoned };
   if (host.state === "failed") return { kind: "button", reason: BROWSER_AUTO_START_COPY.hostFailed };
   if (host.state === "unknown") return { kind: "button", reason: null };
-  if (sharedBrowserHostHeldByOther(host)) return { kind: "button", reason: BROWSER_AUTO_START_COPY.inUse };
+  // Held for now: decided again with the next reading, so the copy says it
+  // opens by itself.
+  if (sharedBrowserHostHeldByOther(host)) return { kind: "button", reason: BROWSER_AUTO_START_COPY.hostInUse };
   return { kind: "attach", runtimeId: hostRuntimeId };
 }
 
