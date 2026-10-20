@@ -21,6 +21,7 @@ import {
   jobsQuery,
   jobsSettled,
   loadCases,
+  markdownCell,
   rankRunOf,
   redactDeep,
   redactText,
@@ -597,4 +598,10 @@ test("the default cases need no particular skill: none expects, offers or forbid
       assert.equal(c.expect?.[key], undefined, `${c.id} sets expect.${key}`);
     }
   }
+});
+
+test("a report cell keeps a backslash before a pipe from escaping the pipe", () => {
+  assert.equal(markdownCell("a\\|b"), "a\\\\\\|b");
+  assert.equal(markdownCell("x|y\nz"), "x\\|y z");
+  assert.equal(markdownCell(null), "-");
 });

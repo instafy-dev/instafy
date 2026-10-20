@@ -852,7 +852,11 @@ export function gradeRun({ run, evidence, cases }) {
 }
 
 const fmtNum = (n) => (n == null || !Number.isFinite(n) ? "-" : n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n));
-const cell = (s) => String(s ?? "-").replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+/** Text for one markdown table cell: backslashes and pipes escaped, line breaks flattened. */
+export function markdownCell(s) {
+  return String(s ?? "-").replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+}
+const cell = markdownCell;
 
 export function renderReport(grade) {
   const lines = [];
