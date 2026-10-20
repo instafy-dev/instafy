@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
 
+mod address_pools;
 mod census;
 mod checkout_eviction;
 mod docker;
@@ -12,6 +13,7 @@ mod external_http;
 mod hetzner;
 mod noop;
 
+pub use address_pools::{ControllerSpaceDirectory, NoSpaceDirectory, SpaceDirectory};
 pub use census::{CensusContainer, RuntimeCensus};
 pub use checkout_eviction::{CheckoutEvictionPolicy, CheckoutSweepReport};
 pub use docker::DockerRuntimeAllocator;
