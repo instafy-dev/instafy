@@ -414,7 +414,13 @@ available during continuation startup; Escape can always revoke native agent
 control. If startup fails before a fresh runtime can be identified,
 use Pause to return manual control before retrying continuation.
 Continuation clears highlights and creates fresh control authority; the new
-turn observes the page again instead of replaying old indices. Changing the
+turn observes the page again instead of replaying old indices.
+A handoff keeps the run's approval mode: **Let AI continue** within the
+request's 10-minute window, for the same project, browser profile and owner,
+and in the same mode, does not show the routine start confirmation again, and
+the card's hosts carry over. It is used once. Pause, Escape, Clear data, closing
+the browser, or a change of owner or project cancels it, and a different mode
+shows the confirmation as usual. Changing the
 account/project/page binding or an expired request cannot silently continue work.
 Passwords, codes and payment values stay in the page and must not be entered in
 chat. The continuation message contains none of those values, but a later page

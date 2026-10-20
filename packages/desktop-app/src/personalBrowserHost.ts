@@ -136,6 +136,18 @@ type PersonalBrowserResolvedTarget = {
   descriptor: PersonalBrowserTargetDescriptor;
 };
 
+// A sign-in handoff keeps the run's approval mode: Let AI continue within the
+// handoff's window, for the same project, profile and owner, in the same mode,
+// does not show the start confirmation again.
+type PersonalBrowserHandoffResume = {
+  projectId: string;
+  partition: string;
+  ownerId: string;
+  approvalMode: PersonalBrowserApprovalMode;
+  knownHosts: string[];
+  expiresAtMs: number;
+};
+
 type PersonalBrowserSnapshotState = {
   controlEpoch: number;
   url: string;
@@ -298,6 +310,7 @@ export class PersonalBrowserHost {
   private pendingNavigationApprovals = new Map<string, Promise<boolean>>();
   // One typing approval covers a form, or a field outside forms, per page.
   private typingApprovals = new Set<string>();
+  private handoffResume: PersonalBrowserHandoffResume | null = null;
   private controlEpoch = 0;
   private latestAgentSnapshot: PersonalBrowserSnapshotState | null = null;
   // A document stays withheld from the agent until a new page loads once it
@@ -667,11 +680,19 @@ export class PersonalBrowserHost {
     if (this.agentControlEnabled && approvalMode !== this.approvalMode) {
       throw new Error("Pause Personal Browser before changing its approval mode.");
     }
+    // Let AI continue after a sign-in handoff keeps the run's mode.
+    const handoff = this.agentControlEnabled ? null : this.takeHandoffResume(projectId, partition, ownerId);
+    const resumesHandoff = handoff !== null && handoff.approvalMode === approvalMode;
     // The card's hosts only mean something to a routine run.
     const knownHosts = this.agentControlEnabled
       ? this.runKnownHosts
-      : approvalMode === "routine" ? normalizePersonalBrowserKnownHosts(requestedKnownHosts) : [];
-    if (approvalMode === "routine" && !this.agentControlEnabled) {
+      : approvalMode === "routine"
+        ? normalizePersonalBrowserKnownHosts([
+          ...(resumesHandoff ? handoff.knownHosts : []),
+          ...(Array.isArray(requestedKnownHosts) ? requestedKnownHosts : []),
+        ])
+        : [];
+    if (approvalMode === "routine" && !this.agentControlEnabled && !resumesHandoff) {
       const epoch = this.controlEpoch;
       const owner = this.ownerWindow;
       if (!owner || owner.isDestroyed() || !owner.isVisible()) {
@@ -730,7 +751,25 @@ export class PersonalBrowserHost {
     };
   }
 
+  private takeHandoffResume(projectId: string, partition: string, ownerId: string): PersonalBrowserHandoffResume | null {
+    const handoff = this.handoffResume;
+    this.handoffResume = null;
+    if (
+      !handoff ||
+      handoff.projectId !== projectId ||
+      handoff.partition !== partition ||
+      handoff.ownerId !== ownerId ||
+      Date.now() >= handoff.expiresAtMs
+    ) {
+      return null;
+    }
+    return handoff;
+  }
+
   private resetRunApprovals() {
+    // Pause, Escape, Clear data, close and an owner or identity change all
+    // pass through here, and each cancels a handoff's kept mode.
+    this.handoffResume = null;
     this.approvedOrigins.clear();
     this.pendingOriginApprovals.clear();
     this.approvedNavigations.clear();
@@ -1106,6 +1145,8 @@ export class PersonalBrowserHost {
   }
 
   private emergencyPauseAgentControl() {
+    // Escape also cancels a sign-in handoff's kept mode.
+    this.handoffResume = null;
     if (this.tabCapture.controlActive) { this.tabCapture.revokeControl(); return; }
     if (!this.agentControlEnabled) {
       return;
@@ -1840,12 +1881,24 @@ export class PersonalBrowserHost {
         throw new PersonalBrowserControlError(409, "page_changed", "The fields changed; take a fresh snapshot.");
       }
       const createdAtMs = Date.now();
+      const handoffMode = this.approvalMode;
+      const handoffHosts = this.runKnownHosts;
       this.humanInputRequest = {
         version: 1, handoffId: randomUUID(), origin, createdAtMs,
         expiresAtMs: createdAtMs + 600_000,
         fields: indices.map((_, index) => ({ label: `Highlighted field ${index + 1}` })),
       };
       this.pauseAgentControl();
+      if (this.currentProjectId && this.currentPartition && this.currentOwnerId) {
+        this.handoffResume = {
+          projectId: this.currentProjectId,
+          partition: this.currentPartition,
+          ownerId: this.currentOwnerId,
+          approvalMode: handoffMode,
+          knownHosts: handoffHosts,
+          expiresAtMs: this.humanInputRequest.expiresAtMs,
+        };
+      }
       if (this.currentProjectId) this.onEmergencyPause(this.currentProjectId);
       this.emitStatus();
       return { humanInputRequired: true, message: "Control has been revoked. The user will fill the highlighted fields directly and explicitly start a fresh browser turn. Do not request or repeat their values." };
