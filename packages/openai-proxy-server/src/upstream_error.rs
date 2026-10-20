@@ -15,8 +15,8 @@ use uuid::Uuid;
 const DEFAULT_RATE_LIMIT_RETRY_AFTER_SECS: u64 = 5;
 /// Bounds for a delay the proxy derives from x-ratelimit-reset-* headers. Those headers report
 /// when a whole bucket refills, which can be minutes away, and the client sleeps for whatever
-/// it is given. A zero reset would send the retry straight back into the exhausted window. A
-/// streamed rate limit keeps its wait within the same bounds.
+/// it is given. A zero reset would send the retry straight back into the exhausted window.
+/// These bounds do not shorten the provider's explicit Retry-After.
 const MIN_DERIVED_RETRY_AFTER_SECS: u64 = 1;
 const MAX_DERIVED_RETRY_AFTER_SECS: u64 = 30;
 /// The provider's error code that codex reads, in a `response.failed` event, as a retryable rate
@@ -24,7 +24,7 @@ const MAX_DERIVED_RETRY_AFTER_SECS: u64 = 30;
 const STREAM_RATE_LIMIT_CODE: &str = "rate_limit_exceeded";
 /// Managed runtimes share one upstream key, so turns that hit the same limit get the same delay
 /// and would all retry at the same instant. A streamed rate limit asks each to wait up to this
-/// much longer, never shorter, within the 30 second bound.
+/// much longer, never shorter, within the 30 second bound. Longer provider waits are unchanged.
 const STREAM_RATE_LIMIT_MAX_JITTER_PERCENT: u32 = 20;
 /// Reset beyond which the exhausted bucket is not worth waiting for. A per-minute bucket is
 /// completely full again within about a minute, while a daily requests or tokens limit reports
@@ -300,9 +300,9 @@ impl ErrorResponse {
     /// message that ends "Please try again in {d}s.", which codex retries after `d` seconds
     /// within its stream retry budget. Codex does not retry an HTTP 429 by itself (its
     /// `retry_429` is off for every provider), so the stream is what keeps a short rate limit from
-    /// ending the turn. `d` is the Retry-After this
-    /// response carries, the provider's own or the one the proxy derived, or 5 seconds, clamped
-    /// to 1-30 seconds and spread by up to 20% (see [`stream_retry_delay`]). The message keeps
+    /// ending the turn. `d` preserves the Retry-After this response carries, with a minimum
+    /// of one second and upward-only jitter for short waits (see [`stream_retry_delay`]).
+    /// Without a usable hint the wait is 5 seconds. The message keeps
     /// this response's own words and code, which the Studio and the runtime match on.
     ///
     /// `None` for every other failure, a plan limit and a rate limit window too long to wait out
@@ -315,6 +315,18 @@ impl ErrorResponse {
             return None;
         }
         let delay = stream_retry_delay(self.retry_after.as_ref(), now, jitter);
+        let seconds = format_delay_seconds(delay);
+        // Codex parses this number as f64 and creates a monotonic deadline. If that cannot
+        // represent the provider's whole-second minimum, retain HTTP 429 and Retry-After
+        // instead of losing the hint and causing an early retry.
+        let client_delay = Duration::try_from_secs_f64(seconds.parse().ok()?).ok()?;
+        if client_delay < Duration::from_secs(delay.as_secs())
+            || std::time::Instant::now()
+                .checked_add(client_delay)
+                .is_none()
+        {
+            return None;
+        }
         Some(json!({
             "code": STREAM_RATE_LIMIT_CODE,
             "message": format!(
@@ -322,33 +334,32 @@ impl ErrorResponse {
                 self.message.trim_end_matches('.'),
                 self.code,
                 self.status.as_u16(),
-                format_delay_seconds(delay),
+                seconds,
             ),
         }))
     }
 }
 
-/// The wait a streamed rate limit asks for. The Retry-After, whole seconds or an HTTP date, is
-/// clamped to 1-30 seconds; without a readable one the wait is 5 seconds. `jitter`, a sample
-/// from [0, 1], then spreads it by up to 20% so runtimes sharing a key do not all retry at once:
-/// below the 30 second bound the spread only lengthens the wait, into the room left under the
-/// bound; a Retry-After of 30 seconds or more is already cut short, so its spread goes below the
-/// bound instead of pinning every retry to exactly 30 seconds.
+/// Preserve Retry-After seconds or an HTTP date as a minimum, using 5 seconds without a readable
+/// hint and at least one second for zero/past hints. Derived hints are already bounded during
+/// classification. `jitter`, a sample from [0, 1], only lengthens waits below 30 seconds, by up
+/// to 20% within that bound. Longer provider waits are unchanged; the runtime owns cancellation
+/// and its overall deadline, rather than asking the provider again before its stated wait.
 fn stream_retry_delay(retry_after: Option<&HeaderValue>, now: SystemTime, jitter: f64) -> Duration {
     let asked = retry_after
         .and_then(|value| retry_after_delay(value, now))
         .unwrap_or(Duration::from_secs(DEFAULT_RATE_LIMIT_RETRY_AFTER_SECS));
     let max = Duration::from_secs(MAX_DERIVED_RETRY_AFTER_SECS);
-    let requested = asked.clamp(Duration::from_secs(MIN_DERIVED_RETRY_AFTER_SECS), max);
+    let requested = asked.max(Duration::from_secs(MIN_DERIVED_RETRY_AFTER_SECS));
+    if requested >= max {
+        return requested;
+    }
     let jitter = if jitter.is_finite() {
         jitter.clamp(0.0, 1.0)
     } else {
         0.0
     };
     let max_spread = requested * STREAM_RATE_LIMIT_MAX_JITTER_PERCENT / 100;
-    if asked >= max {
-        return max - max_spread.mul_f64(jitter);
-    }
     let room = max_spread.min(max - requested);
     requested + room.mul_f64(jitter)
 }
@@ -373,7 +384,7 @@ fn retry_after_delay(value: &HeaderValue, now: SystemTime) -> Option<Duration> {
 /// {d}s" (a number of seconds with an optional fraction): whole seconds without a fraction, and
 /// a fraction without trailing zeros. Codex then waits exactly the delay the message states.
 fn format_delay_seconds(delay: Duration) -> String {
-    let millis = (delay.as_secs_f64() * 1000.0).round() as u64;
+    let millis = (delay.as_nanos() + 500_000) / 1_000_000;
     let (secs, millis) = (millis / 1000, millis % 1000);
     if millis == 0 {
         return secs.to_string();
@@ -998,7 +1009,25 @@ mod tests {
     }
 
     #[test]
-    fn a_streamed_rate_limit_wait_is_clamped_defaulted_and_spread_upwards() {
+    fn a_streamed_rate_limit_never_shortens_the_provider_wait() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_millis(1_700_000_000_400);
+        let date =
+            httpdate::fmt_http_date(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_169));
+        for retry_after in ["169", date.as_str()] {
+            let mut headers = HeaderMap::new();
+            headers.insert(RETRY_AFTER, HeaderValue::from_str(retry_after).unwrap());
+            let classified = classify(
+                &UpstreamFailure::http_body(StatusCode::TOO_MANY_REQUESTS, &headers, "{}").into(),
+            );
+            for jitter in [0.0, 0.5, 1.0] {
+                let error = classified.stream_rate_limit_error(now, jitter).unwrap();
+                assert_eq!(stated_delay(&error), "169", "{retry_after}, {jitter}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_streamed_rate_limit_wait_is_defaulted_and_spread_only_upwards() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_millis(1_700_000_000_400);
         let date =
             |secs: u64| httpdate::fmt_http_date(SystemTime::UNIX_EPOCH + Duration::from_secs(secs));
@@ -1034,11 +1063,15 @@ mod tests {
             // The spread never takes a wait past 30 seconds.
             (&[("retry-after", "29")], 0.5, "29.5"),
             (&[("retry-after", "29")], 1.0, "30"),
-            // A wait of 30 seconds or more is cut to 30 and spreads below it.
+            // A provider wait of 30 seconds or more is never shortened.
             (&[("retry-after", "30")], 0.0, "30"),
-            (&[("retry-after", "120")], 0.0, "30"),
-            (&[("retry-after", "120")], 0.5, "27"),
-            (&[("retry-after", "120")], 1.0, "24"),
+            (&[("retry-after", "30")], 1.0, "30"),
+            (&[("retry-after", "31")], 1.0, "31"),
+            (&[("retry-after", "120")], 0.0, "120"),
+            (&[("retry-after", "120")], 0.5, "120"),
+            (&[("retry-after", "120")], 1.0, "120"),
+            // Derived waits retain their existing bound.
+            (&[("x-ratelimit-reset-tokens", "120s")], 1.0, "30"),
             // A sample outside [0, 1] is held to it.
             (&[("retry-after", "7")], -1.0, "7"),
             (&[("retry-after", "7")], 2.0, "8.4"),
@@ -1068,7 +1101,8 @@ mod tests {
             ("1", 1.0, 1.2),
             ("5", 5.0, 6.0),
             ("26", 26.0, 30.0),
-            ("600", 24.0, 30.0),
+            ("169", 169.0, 169.0),
+            ("600", 600.0, 600.0),
         ] {
             let classified = classify_headers(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -1089,6 +1123,30 @@ mod tests {
                 assert!(fraction.len() <= 3 && !fraction.ends_with('0'), "{stated}");
             }
         }
+    }
+
+    #[test]
+    fn an_unrepresentable_stream_wait_keeps_the_http_retry_after() {
+        let retry_after = u64::MAX.to_string();
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_str(&retry_after).unwrap());
+        let classified = classify(
+            &UpstreamFailure::http_body(StatusCode::TOO_MANY_REQUESTS, &headers, "{}").into(),
+        );
+        assert!(
+            classified
+                .stream_rate_limit_error(SystemTime::UNIX_EPOCH, 1.0)
+                .is_none()
+        );
+        assert_eq!(classified.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            classified.retry_after.as_ref().unwrap().to_str().unwrap(),
+            retry_after
+        );
+        assert_eq!(
+            format_delay_seconds(Duration::from_secs(u64::MAX)),
+            retry_after
+        );
     }
 
     #[test]
