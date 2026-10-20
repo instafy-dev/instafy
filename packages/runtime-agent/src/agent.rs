@@ -1009,12 +1009,14 @@ impl RuntimeAgent {
     ) -> Result<bool> {
         let poll_interval = client.poll_interval();
         let heartbeat_seconds = client.heartbeat_seconds().max(30);
+        let mut early_repolls = 0;
 
         loop {
             if !runtime_reuse_is_safe() {
                 warn!("AI worker cleanup requires attention; no more jobs will be leased");
                 return Ok(true);
             }
+            let lease_started = std::time::Instant::now();
             let jobs = tokio::select! {
                 _ = shutdown.cancelled() => {
                     info!("shutdown requested; exiting lease loop");
@@ -1027,8 +1029,8 @@ impl RuntimeAgent {
                 result = client.lease_once(registration) => result,
             };
 
-            let jobs = match jobs {
-                Ok(jobs) => jobs,
+            let (jobs, waited) = match jobs {
+                Ok(leased) => (leased.jobs, leased.waited),
                 Err(LeaseError::Unauthorized) => {
                     warn!("lease request returned 401; agent token expired. Re-registering.");
                     return Err(anyhow!("agent token expired"));
@@ -1069,6 +1071,18 @@ impl RuntimeAgent {
 
             if jobs.is_empty() {
                 debug!("lease returned no jobs");
+                if repoll_at_once(
+                    waited,
+                    lease_started.elapsed(),
+                    poll_interval,
+                    &mut early_repolls,
+                ) {
+                    if Self::renewal_pending(renewal) {
+                        info!("registration renewed while waiting for work; exiting lease loop");
+                        return Ok(false);
+                    }
+                    continue;
+                }
                 match Self::sleep_or_signal(
                     poll_interval,
                     shutdown.clone(),
@@ -1094,6 +1108,7 @@ impl RuntimeAgent {
                 continue;
             }
 
+            early_repolls = 0;
             Self::handle_job_batch(
                 client.clone(),
                 executor.clone(),
@@ -1912,6 +1927,12 @@ impl RuntimeAgent {
         }
     }
 
+    /// The check `wait_for_renewal` makes, without waiting: a renewed
+    /// registration was published and this loop has not acted on it yet.
+    fn renewal_pending(renewal: &watch::Receiver<Option<Registration>>) -> bool {
+        renewal.has_changed().unwrap_or(false) && renewal.borrow().is_some()
+    }
+
     /// Resolves once the renewal task has published a renewed registration.
     /// `watch` is level-triggered: a value published while the loop was busy
     /// executing a job is observed at the next idle point instead of being lost.
@@ -1925,6 +1946,35 @@ impl RuntimeAgent {
         }
         pending::<()>().await;
     }
+}
+
+/// Whether to poll again at once after an empty lease answer instead of
+/// sleeping a poll interval. A controller holds a poll that asks to wait and
+/// answers when its wait runs out or when there may be work, so the runtime
+/// asks again at once and leases in a fresh request. Older controllers never
+/// hold a poll and the runtime sleeps as before. Only one early answer in a
+/// row skips the sleep, so a controller that answers held polls at once cannot
+/// spin this loop.
+fn repoll_at_once(
+    waited: bool,
+    held_for: Duration,
+    poll_interval: Duration,
+    early_repolls: &mut u32,
+) -> bool {
+    if !waited {
+        *early_repolls = 0;
+        return false;
+    }
+    if held_for >= poll_interval {
+        *early_repolls = 0;
+        return true;
+    }
+    *early_repolls += 1;
+    if *early_repolls == 1 {
+        return true;
+    }
+    *early_repolls = 0;
+    false
 }
 
 pub(crate) fn resolved_job_environment(secrets: &JobSecrets) -> HashMap<String, String> {
@@ -2184,6 +2234,65 @@ fn push_unique_case_insensitive(values: &mut Vec<String>, candidate: &str) {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn a_held_lease_poll_is_followed_at_once_and_a_quick_one_only_once() {
+        let poll = Duration::from_secs(2);
+        let mut early = 0;
+        // A controller that does not hold polls: sleep as before.
+        assert!(!repoll_at_once(
+            false,
+            Duration::from_millis(30),
+            poll,
+            &mut early
+        ));
+        // Held for its wait: ask again at once, every time.
+        for _ in 0..3 {
+            assert!(repoll_at_once(
+                true,
+                Duration::from_secs(10),
+                poll,
+                &mut early
+            ));
+        }
+        // Answered early because work may be queued: ask again at once...
+        assert!(repoll_at_once(
+            true,
+            Duration::from_millis(300),
+            poll,
+            &mut early
+        ));
+        // ...but a second early answer in a row sleeps, so nothing can spin.
+        assert!(!repoll_at_once(
+            true,
+            Duration::from_millis(300),
+            poll,
+            &mut early
+        ));
+        assert!(repoll_at_once(
+            true,
+            Duration::from_millis(300),
+            poll,
+            &mut early
+        ));
+        assert!(!repoll_at_once(
+            true,
+            Duration::from_millis(5),
+            poll,
+            &mut early
+        ));
+    }
+
+    #[test]
+    fn a_renewed_registration_is_pending_until_the_loop_takes_it() {
+        let (sender, mut receiver) = watch::channel::<Option<Registration>>(None);
+        assert!(!RuntimeAgent::renewal_pending(&receiver));
+        sender.send_replace(None);
+        assert!(!RuntimeAgent::renewal_pending(&receiver));
+        receiver.borrow_and_update();
+        sender.send_replace(Some(test_registration()));
+        assert!(RuntimeAgent::renewal_pending(&receiver));
+    }
 
     #[test]
     fn a_failed_secrets_fetch_clears_the_previous_jobs_secrets_and_model() {

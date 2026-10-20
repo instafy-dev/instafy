@@ -383,6 +383,7 @@ fn test_config(addr: SocketAddr, project_id: Uuid, workspace_root: &Path) -> Con
         tenant_projects: Vec::new(),
         parent_lease_id: None,
         poll_interval: Duration::from_millis(10),
+        lease_wait: Duration::ZERO,
         lease_max_jobs: 3,
         lease_seconds: 120,
         heartbeat_seconds: 60,
@@ -605,7 +606,9 @@ async fn controller_client_registers_and_leases() {
         Some("fresh-runtime-token")
     );
 
-    let jobs = client.lease_once(&registration).await.expect("lease once");
+    let leased = client.lease_once(&registration).await.expect("lease once");
+    assert!(!leased.waited);
+    let jobs = leased.jobs;
     assert_eq!(jobs.len(), 1);
     let job = &jobs[0];
     assert_eq!(job.intent.as_deref(), Some("apply"));
@@ -691,6 +694,8 @@ async fn controller_client_registers_and_leases() {
         lease_request.body["supports_workspace_token"].as_bool(),
         Some(true)
     );
+    // A runtime configured not to wait polls the way it always did.
+    assert!(lease_request.body.get("wait_ms").is_none());
 
     let heartbeat_request = &captured.heartbeat[0];
     assert_eq!(
@@ -1217,4 +1222,36 @@ async fn job_secrets_401_without_a_renewer_fails_without_retrying() {
         1,
         "the consumer must not register on its own behalf"
     );
+}
+
+#[tokio::test]
+async fn controller_client_asks_the_controller_to_wait_for_work() {
+    let shared = Arc::new(Mutex::new(ReceivedRequests::default()));
+    let project_id = Uuid::new_v4();
+    let key_id = "test-agent-key".to_string();
+    let jwks = build_jwks(test_origin_public_key(), &key_id);
+    let state = ControllerState {
+        requests: shared.clone(),
+        private_key_pem: Arc::new(test_origin_private_key().to_string()),
+        jwks_body: Arc::new(jwks),
+        key_id,
+        project_id,
+        register_requires_bearer: None,
+        secrets_accepts: None,
+    };
+    let addr = spawn_controller(state).await;
+
+    let workspace_root = tempfile::tempdir().expect("temp workspace root");
+    let mut config = test_config(addr, project_id, workspace_root.path());
+    config.lease_wait = Duration::from_secs(3);
+
+    let client = ControllerClient::new(&config).expect("client init");
+    let registration = client
+        .register_runtime(&config)
+        .await
+        .expect("register runtime");
+    client.lease_once(&registration).await.expect("lease once");
+
+    let captured = shared.lock().unwrap();
+    assert_eq!(captured.lease[0].body["wait_ms"].as_u64(), Some(3_000));
 }

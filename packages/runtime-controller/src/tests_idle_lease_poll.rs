@@ -15,7 +15,8 @@ use uuid::Uuid;
 use crate::config::{AppConfig, PgPool, RuntimeProviderConfig};
 use crate::tests::{
     build_app_config, build_test_state, pool_gets, require_origin_test_pool,
-    test_origin_private_key, test_origin_public_key, with_shared_db_fixture, SharedDbFixture,
+    require_origin_test_pool_with_max_size, test_origin_private_key, test_origin_public_key,
+    with_shared_db_fixture, SharedDbFixture,
 };
 use crate::{agent, AppState};
 
@@ -138,6 +139,23 @@ async fn lease(
     runtime_id: &Uuid,
     lease_id: Option<&Uuid>,
 ) -> anyhow::Result<(StatusCode, JsonValue)> {
+    lease_with_body(
+        state,
+        project_id,
+        runtime_id,
+        lease_id,
+        json!({ "max": 1, "lease_seconds": 120 }),
+    )
+    .await
+}
+
+async fn lease_with_body(
+    state: &AppState,
+    project_id: &Uuid,
+    runtime_id: &Uuid,
+    lease_id: Option<&Uuid>,
+    body: JsonValue,
+) -> anyhow::Result<(StatusCode, JsonValue)> {
     let bearer =
         crate::auth::issue_agent_token(&state.config, project_id, runtime_id, lease_id, None)
             .map_err(|(status, error)| {
@@ -152,9 +170,7 @@ async fn lease(
             axum::http::header::AUTHORIZATION,
             format!("Bearer {bearer}"),
         )
-        .body(Body::from(
-            json!({ "max": 1, "lease_seconds": 120 }).to_string(),
-        ))?;
+        .body(Body::from(body.to_string()))?;
     let response = tokio::time::timeout(
         LEASE_ANSWER_TIMEOUT,
         agent::router().with_state(state.clone()).oneshot(request),
@@ -397,6 +413,126 @@ async fn a_pinned_runtime_preference_is_checked_on_the_poll_connection() -> anyh
         let (status, body) = lease(&state, &project_id, &preferred, None).await?;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(leased_job_ids(&body), vec![job_id.to_string()]);
+        Ok(())
+    })
+    .await
+}
+
+/// A poll that may wait for `wait_ms`, spawned, answering with how long it took.
+fn spawn_waiting_lease(
+    state: &AppState,
+    project_id: Uuid,
+    runtime_id: Uuid,
+    wait_ms: u64,
+) -> tokio::task::JoinHandle<anyhow::Result<(StatusCode, JsonValue, Duration)>> {
+    let state = state.clone();
+    tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        let (status, body) = lease_with_body(
+            &state,
+            &project_id,
+            &runtime_id,
+            None,
+            json!({ "max": 1, "lease_seconds": 120, "wait_ms": wait_ms }),
+        )
+        .await?;
+        Ok((status, body, started.elapsed()))
+    })
+}
+
+/// A held poll answers as soon as a run event shows there may be work, and
+/// leaves the job queued: the runtime leases it in the next, fresh poll, so a
+/// runtime that gave up on a long request can never be leased a job.
+#[tokio::test]
+async fn a_held_lease_poll_answers_at_once_when_work_is_queued() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("a_held_lease_poll_answers_at_once").await?;
+    let project_id = Uuid::new_v4();
+    let fixture = SharedDbFixture {
+        projects: vec![project_id],
+        ..SharedDbFixture::default()
+    };
+    with_shared_db_fixture(fixture, async {
+        seed_project(&pool, &project_id).await?;
+        let runtime_id = add_runtime(&pool, &project_id, Some(5)).await?;
+        let state = build_test_state(pool.clone(), hosted_config("lease-wait-wake"));
+
+        let poll = spawn_waiting_lease(&state, project_id, runtime_id, 8_000);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let job_id = queue_job(&pool, &project_id, Some(&runtime_id), json!({})).await?;
+        crate::publish_controller_event(
+            &state.events,
+            "run.queued",
+            Some(project_id),
+            None,
+            None,
+            Some(job_id),
+            json!({ "status": "queued" }),
+        );
+
+        let (status, body, elapsed) = poll.await??;
+        assert_eq!(
+            (status, body),
+            (StatusCode::OK, json!({ "jobs": [], "waited": true }))
+        );
+        // Woken by the event, well before the two-second re-check.
+        assert!(elapsed < Duration::from_millis(1_500), "took {elapsed:?}");
+        let job_status: String = pool
+            .get()
+            .await?
+            .query_one("select status from agent_jobs where id = $1", &[&job_id])
+            .await?
+            .get(0);
+        assert_eq!(job_status, "queued", "a held poll never leases");
+
+        let (status, body, _) =
+            spawn_waiting_lease(&state, project_id, runtime_id, 8_000).await??;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(leased_job_ids(&body), vec![job_id.to_string()]);
+        Ok(())
+    })
+    .await
+}
+
+/// While it waits a poll holds no pool connection, other projects' runs do
+/// not end its wait, and it then answers empty and says it waited.
+#[tokio::test]
+async fn a_waiting_lease_poll_frees_its_connection_and_answers_empty_after_its_wait(
+) -> anyhow::Result<()> {
+    let pool =
+        require_origin_test_pool_with_max_size("a_waiting_lease_poll_frees_its_connection", 1)
+            .await?;
+    let project_id = Uuid::new_v4();
+    let fixture = SharedDbFixture {
+        projects: vec![project_id],
+        ..SharedDbFixture::default()
+    };
+    with_shared_db_fixture(fixture, async {
+        seed_project(&pool, &project_id).await?;
+        let runtime_id = add_runtime(&pool, &project_id, Some(5)).await?;
+        let state = build_test_state(pool.clone(), hosted_config("lease-wait-empty"));
+
+        let poll = spawn_waiting_lease(&state, project_id, runtime_id, 700);
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let connection = tokio::time::timeout(Duration::from_millis(300), pool.get())
+            .await
+            .map_err(|_| anyhow::anyhow!("the waiting poll held the only pool connection"))??;
+        drop(connection);
+        crate::publish_controller_event(
+            &state.events,
+            "run.queued",
+            Some(Uuid::new_v4()),
+            None,
+            None,
+            None,
+            json!({ "status": "queued" }),
+        );
+
+        let (status, body, elapsed) = poll.await??;
+        assert_eq!(
+            (status, body),
+            (StatusCode::OK, json!({ "jobs": [], "waited": true }))
+        );
+        assert!(elapsed >= Duration::from_millis(700), "took {elapsed:?}");
         Ok(())
     })
     .await

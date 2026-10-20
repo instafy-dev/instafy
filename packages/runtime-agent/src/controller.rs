@@ -43,6 +43,7 @@ pub struct ControllerClient {
     // at spawn, so requests resolve their bearer from here first (#144).
     current_agent_token: Mutex<Option<String>>,
     poll_interval: Duration,
+    lease_wait: Duration,
     lease_max_jobs: u32,
     lease_seconds: u32,
     #[allow(dead_code)]
@@ -163,14 +164,28 @@ impl LeaseJob {
 #[derive(Debug, Deserialize)]
 struct LeaseResponse {
     jobs: Vec<LeaseJob>,
+    #[serde(default)]
+    waited: bool,
+}
+
+/// One lease poll's answer.
+#[derive(Debug)]
+pub struct LeasedJobs {
+    pub jobs: Vec<LeaseJob>,
+    /// The controller held the poll open waiting for work. Controllers that
+    /// predate waiting answer at once and never set it.
+    pub waited: bool,
 }
 
 /// A leased job carries tokens and signed attachment URLs, so no part of a
 /// successful lease's body goes into an error or a log. serde's own message
 /// can quote the value it rejected, so only its category and position are kept.
-fn parse_lease_response(text: &str) -> Result<Vec<LeaseJob>, LeaseError> {
+fn parse_lease_response(text: &str) -> Result<LeasedJobs, LeaseError> {
     serde_json::from_str::<LeaseResponse>(text)
-        .map(|parsed| parsed.jobs)
+        .map(|parsed| LeasedJobs {
+            jobs: parsed.jobs,
+            waited: parsed.waited,
+        })
         .map_err(|error| {
             LeaseError::Other(anyhow!(
                 "failed to parse lease response ({} bytes): {:?} error at line {} column {}",
@@ -296,6 +311,7 @@ impl ControllerClient {
             )),
             current_agent_token: Mutex::new(None),
             poll_interval: config.poll_interval,
+            lease_wait: config.lease_wait,
             lease_max_jobs: config.lease_max_jobs,
             lease_seconds: config.lease_seconds,
             heartbeat_seconds: config.heartbeat_seconds,
@@ -611,7 +627,7 @@ impl ControllerClient {
         })
     }
 
-    pub async fn lease_once(&self, reg: &Registration) -> Result<Vec<LeaseJob>, LeaseError> {
+    pub async fn lease_once(&self, reg: &Registration) -> Result<LeasedJobs, LeaseError> {
         let request = self
             .http
             .post(reg.lease_url.clone())
@@ -619,15 +635,21 @@ impl ControllerClient {
             .bearer_auth(self.bearer_for_agent(reg));
 
         let resources = self.resources.lock().sample();
-        let payload = json!({
+        let mut payload = json!({
             "runtime_id": reg.runtime_id,
             "max": self.lease_max_jobs,
             "lease_seconds": self.lease_seconds,
             "resources": resources,
             "supports_workspace_token": true,
         });
+        if !self.lease_wait.is_zero() {
+            payload["wait_ms"] = json!(self.lease_wait.as_millis() as u64);
+        }
 
+        // A controller may hold the poll for up to `lease_wait`; the usual
+        // request budget starts after that.
         let response = request
+            .timeout(self.lease_wait + Duration::from_secs(20))
             .json(&payload)
             .send()
             .await
@@ -829,6 +851,10 @@ impl ControllerClient {
 
     pub fn poll_interval(&self) -> Duration {
         self.poll_interval
+    }
+
+    pub fn lease_wait(&self) -> Duration {
+        self.lease_wait
     }
 
     #[allow(dead_code)]
@@ -1346,6 +1372,7 @@ mod tests {
             });
             parse_lease_response(&body.to_string())
                 .expect("parse lease response")
+                .jobs
                 .remove(0)
         };
         assert!(!lease(1).resumes_an_interrupted_attempt());
@@ -1377,7 +1404,15 @@ mod tests {
             assert!(!message.contains(marker), "{message}");
             assert!(!message.contains("storage.invalid"), "{message}");
         }
-        assert_eq!(parse_lease_response(r#"{"jobs":[]}"#).unwrap().len(), 0);
+        let empty = parse_lease_response(r#"{"jobs":[]}"#).unwrap();
+        assert_eq!(empty.jobs.len(), 0);
+        // A controller that predates waiting never says it waited.
+        assert!(!empty.waited);
+        assert!(
+            parse_lease_response(r#"{"jobs":[],"waited":true}"#)
+                .unwrap()
+                .waited
+        );
     }
 
     #[test]

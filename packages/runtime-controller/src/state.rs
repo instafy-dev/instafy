@@ -347,6 +347,9 @@ pub(crate) struct EventHub {
     outbound: Option<mpsc::Sender<ControllerEvent>>,
     /// Open `/events` streams on this node, per project.
     project_watchers: Arc<StdMutex<HashMap<Uuid, usize>>>,
+    /// Lease polls waiting on this node for work, per project. Held weakly:
+    /// an entry lives as long as one of its waiting polls.
+    lease_wakers: Arc<StdMutex<HashMap<Uuid, std::sync::Weak<tokio::sync::Notify>>>>,
     /// Per-org spacing of `credits.updated`.
     pub(crate) credit_signals: SignalCoalescer,
 }
@@ -553,6 +556,7 @@ impl EventHub {
             sender,
             outbound,
             project_watchers: Arc::new(StdMutex::new(HashMap::new())),
+            lease_wakers: Arc::new(StdMutex::new(HashMap::new())),
             credit_signals: SignalCoalescer::new(CREDITS_UPDATED_INTERVAL),
         }
     }
@@ -574,6 +578,21 @@ impl EventHub {
         }
     }
 
+    /// Wakes when a run event of `project_id` reaches this node, from here or
+    /// over the bus: a queued run is new work, and a run that ends can queue
+    /// more. Lease polls wait on it instead of on the shared broadcast, which
+    /// would hand each of them a copy of every event on the node.
+    pub(crate) fn lease_waker(&self, project_id: Uuid) -> Arc<tokio::sync::Notify> {
+        let mut wakers = lock_unpoisoned(&self.lease_wakers);
+        if let Some(waker) = wakers.get(&project_id).and_then(std::sync::Weak::upgrade) {
+            return waker;
+        }
+        wakers.retain(|_, waker| waker.strong_count() > 0);
+        let waker = Arc::new(tokio::sync::Notify::new());
+        wakers.insert(project_id, Arc::downgrade(&waker));
+        waker
+    }
+
     pub(crate) fn publish(&self, event: ControllerEvent) {
         if let Some(outbound) = &self.outbound {
             let _ = outbound.try_send(event.clone());
@@ -592,6 +611,15 @@ impl EventHub {
     /// broadcast. The bus still carries them: other nodes apply the same check
     /// to their own streams in `publish_local`.
     fn send_local(&self, event: ControllerEvent) {
+        if event.kind.starts_with("run.") {
+            if let Some(waker) = event.project_id.and_then(|project_id| {
+                lock_unpoisoned(&self.lease_wakers)
+                    .get(&project_id)
+                    .and_then(std::sync::Weak::upgrade)
+            }) {
+                waker.notify_waiters();
+            }
+        }
         if PROJECT_SIGNAL_KINDS.contains(&event.kind.as_str())
             && !event.project_id.is_some_and(|project_id| {
                 lock_unpoisoned(&self.project_watchers).contains_key(&project_id)
@@ -947,6 +975,68 @@ fn conversation_channel(conversation_id: Option<Uuid>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A held lease poll wakes for a run event of its own project, whether
+    /// published here or arriving over the bus, and for nothing else.
+    #[tokio::test]
+    async fn a_lease_waker_wakes_only_on_its_projects_run_events() {
+        let hub = EventHub::new();
+        let project_id = Uuid::new_v4();
+        let waker = hub.lease_waker(project_id);
+        {
+            let notified = waker.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let quick = std::time::Duration::from_millis(50);
+
+            let other_project = Some(Uuid::new_v4());
+            publish_controller_event(
+                &hub,
+                "run.queued",
+                other_project,
+                None,
+                None,
+                None,
+                JsonValue::Null,
+            );
+            publish_controller_event(
+                &hub,
+                "conversation.updated",
+                Some(project_id),
+                None,
+                None,
+                None,
+                JsonValue::Null,
+            );
+            assert!(tokio::time::timeout(quick, notified.as_mut())
+                .await
+                .is_err());
+
+            // An event from another node arrives through `publish_local`.
+            hub.publish_local(ControllerEvent {
+                kind: "run.completed".to_string(),
+                project_id: Some(project_id),
+                session_id: None,
+                conversation_id: None,
+                run_id: None,
+                job_id: None,
+                channel: None,
+                channels: Vec::new(),
+                target_user_id: None,
+                data: JsonValue::Null,
+                timestamp: Utc::now(),
+            });
+            assert!(tokio::time::timeout(quick, notified.as_mut()).await.is_ok());
+        }
+
+        // Polls of one project share a waker while one of them waits, and the
+        // registry does not keep it alive after that.
+        assert!(Arc::ptr_eq(&waker, &hub.lease_waker(project_id)));
+        drop(waker);
+        assert!(lock_unpoisoned(&hub.lease_wakers)[&project_id]
+            .upgrade()
+            .is_none());
+    }
 
     /// A republished record keeps the time it was stored at, and the
     /// ordinary publish still stamps the moment it is sent.
