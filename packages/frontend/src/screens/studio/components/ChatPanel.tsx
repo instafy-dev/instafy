@@ -344,6 +344,7 @@ import {
 } from "../../../services/runtimeController/sendIntents";
 import { ControllerApiError } from "../../../services/runtimeController/core";
 import { normalizeChatMessageStashEnvelope } from "./chatMessageStashEnvelope";
+import { describeSendIntentError } from "./sendIntentErrorMessage";
 import {
   requireExpectedJobForSteer,
   resolveComposerPrimaryActionMode,
@@ -4291,23 +4292,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           if (sendIntentAttemptRef.current?.key === attemptKey) {
             sendIntentAttemptRef.current = null;
           }
-          const message = (() => {
-            switch (error.code) {
-              case "no_active_job":
-                return "That reply finished before the steer arrived. Your message is still in the composer.";
-              case "ambiguous_active_job":
-                return "More than one matching reply is active. Mention one agent, then try Steer again.";
-              case "active_job_conflict":
-                return "The active reply changed before the steer arrived. Review the current reply and try again.";
-              case "active_turn_input_unavailable":
-                return "This agent cannot accept Steer during its current turn. Queue the message instead.";
-              case "send_intent_idempotency_conflict":
-                return "This message conflicts with an earlier send attempt. Edit it slightly and try again.";
-              default:
-                return error.message;
-            }
-          })();
-          showStatus(message, "warning", 5500);
+          showStatus(describeSendIntentError(error.code, error.message), "warning", 5500);
           return false;
         }
         const message = error instanceof Error ? error.message : "Unable to apply this message action.";
