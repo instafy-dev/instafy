@@ -493,6 +493,46 @@ The runtime origin serves space files over HTTP. When the origin is reachable fr
 
 - Do **not** run with `ORIGIN_SKIP_AUTH=1` for any non-local usage.
 
+## Previews
+
+`instafy preview check --port <port>` looks at a site served on this machine before anyone sees it. It is meant
+for agents that build sites, and works for any site or framework. It is local only: it calls no Instafy server
+and needs no login.
+
+```bash
+instafy preview check --port 4173
+instafy preview check --port 4173 --path "/docs/?tab=setup#install" --phone --json
+```
+
+It loads `http://127.0.0.1:<port><path>` in a headless Chromium (or `http://[::1]:<port>` when only IPv6
+`localhost` answers), waits for the page to settle, and lists the page title, console errors, uncaught errors,
+failed requests and HTTP errors (the site's own are errors; other origins' are warnings) and a blank page. It writes
+`desktop.png` (1280×800) and `phone.png` (390×844) to `--out <dir>` (default: a temporary folder per port).
+`--framed` loads the site inside a frame on another origin instead, and then also reports a site that refuses to be
+framed (`X-Frame-Options` or CSP `frame-ancestors`).
+
+| Exit | Meaning |
+|---|---|
+| 0 | No problems found |
+| 1 | Problems found (listed) |
+| 2 | Nothing answers on the port |
+| 3 | The port is not allowed |
+| 4 | No browser here, so nothing was checked |
+| 64 | Bad options |
+| 70 | The check itself failed, so nothing was checked |
+
+It downloads nothing. It uses, in order, the runtime's trusted Playwright
+(`INSTAFY_SHARED_BROWSER_PLAYWRIGHT_PATH` or `INSTAFY_SHARED_BROWSER_TRUSTED_NODE_MODULES_ROOT`, as the runtime
+image sets them for the Shared Browser), then a global install (`NODE_PATH`, `npm root -g`). A project's own
+`node_modules` copy runs only with `--workspace-playwright`. The Shared Browser and its signed-in profile are never
+used.
+
+Ports that belong to Instafy are refused: VNC, the provider host, the browser's DevTools ports, the browser egress
+proxy and stream sender, the loopback MCP proxy and the origin, at their defaults and at any port their settings
+(`INSTAFY_VNC_PORT`, `INSTAFY_PLAYWRIGHT_CDP_PORT`, `INSTAFY_BROWSER_EGRESS_PROXY_BIND`, `ORIGIN_BIND_PORT`,
+`PROXY_BASE_URL`, `INSTAFY_PROVIDER_HOST_URL`, `INSTAFY_PERSONAL_BROWSER_CONTROL_URL`) move them to. Add more with
+`INSTAFY_PREVIEW_DENY_PORTS` (comma separated); an entry that is not a port refuses every port until it is fixed.
+
 ## AI-readable diagnostics
 
 `instafy diagnostics` exposes existing, user-authorized diagnostic records as stable JSON for
