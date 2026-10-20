@@ -816,31 +816,48 @@ async fn allocate_rathole_binding(
     .execute(&mut **tx)
     .await?;
 
-    let last_port: Option<i32> = sqlx::query_scalar(
+    let start = cfg.rathole_port_range_start.max(1024);
+    let end = cfg.rathole_port_range_end.max(start);
+    let used: Vec<i32> = sqlx::query_scalar(
         r#"
         select rathole_port
         from tunnels
         where ingress_id = $1
-          and rathole_port is not null
+          and rathole_port between $2 and $3
           and status != 'revoked'
           and (expires_at is null or expires_at > now())
-        order by rathole_port desc
-        limit 1
+        order by rathole_port
         "#,
     )
     .bind(ingress_id)
-    .fetch_optional(&mut **tx)
+    .bind(start)
+    .bind(end)
+    .fetch_all(&mut **tx)
     .await?;
-
-    let start = cfg.rathole_port_range_start.max(1024);
-    let end = cfg.rathole_port_range_end.max(start);
-    let port = last_port.unwrap_or(start - 1) + 1;
-    if port > end {
+    let Some(port) = lowest_free_port(&used, start, end) else {
         anyhow::bail!("rathole port range exhausted ({start}-{end})");
-    }
+    };
 
     let service = format!("tunnel_{}", tunnel_id.simple());
     Ok((service, port))
+}
+
+/// The lowest port in `start..=end` that `used` (sorted ascending) does not
+/// hold. Ports freed below the highest live one are reused, so a single
+/// long-lived tunnel near the top of the range cannot pin the allocator and
+/// exhaust the range for every tenant while the ports below it sit free.
+fn lowest_free_port(used: &[i32], start: i32, end: i32) -> Option<i32> {
+    let mut candidate = start;
+    for &port in used {
+        if port < candidate {
+            continue;
+        }
+        if port > candidate {
+            break;
+        }
+        candidate += 1;
+    }
+    (candidate <= end).then_some(candidate)
 }
 
 pub async fn get_tunnel(pool: &DbPool, id: Uuid) -> Result<Option<TunnelRecord>> {
@@ -1073,6 +1090,27 @@ mod tests {
             let parsed = status_from_str(as_str);
             assert_eq!(parsed as u8, status as u8);
         }
+    }
+
+    #[test]
+    fn rathole_ports_freed_below_the_highest_live_one_are_reused() {
+        assert_eq!(lowest_free_port(&[], 20000, 20003), Some(20000));
+        assert_eq!(lowest_free_port(&[20000, 20001], 20000, 20003), Some(20002));
+        // A tunnel left at the top of the range no longer pins it.
+        assert_eq!(lowest_free_port(&[20003], 20000, 20003), Some(20000));
+        // A port freed in the middle is the next one handed out.
+        assert_eq!(
+            lowest_free_port(&[20000, 20002, 20003], 20000, 20003),
+            Some(20001)
+        );
+        assert_eq!(
+            lowest_free_port(&[20000, 20000, 20001], 20000, 20003),
+            Some(20002)
+        );
+        assert_eq!(
+            lowest_free_port(&[20000, 20001, 20002, 20003], 20000, 20003),
+            None
+        );
     }
 
     #[test]
