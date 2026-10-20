@@ -369,6 +369,46 @@ browser_display_dpi() {
   awk -v scale="${scale}" 'BEGIN { printf "%d", int(96 * scale + 0.5); }'
 }
 
+# Blocks every download in the Shared Browser profile before Chromium starts.
+# This is the profile preference behind Chromium's DownloadRestrictions policy
+# (3 blocks all downloads). The Shared Browser controller also denies downloads
+# over CDP, but that override ends when its connection closes, and viewers
+# drive the page between agent steps. The profile preference holds across
+# reconnects, viewer input and a restored profile. The hosted browser has no
+# copy-out, so a download would only land where an ordinary turn could read it.
+# Chromium must not be running while this writes.
+block_browser_downloads() {
+  local profile_dir="$1"
+  local node_binary=/usr/bin/node
+  if [ ! -x "${node_binary}" ]; then
+    node_binary="$(command -v node 2>/dev/null || true)"
+  fi
+  if [ -z "${node_binary}" ] || [ -z "${profile_dir}" ]; then
+    return 1
+  fi
+  "${node_binary}" -e '
+    const fs = require("fs");
+    const path = require("path");
+    const directory = path.join(process.argv[1], "Default");
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const file = path.join(directory, "Preferences");
+    let preferences = {};
+    try {
+      preferences = JSON.parse(fs.readFileSync(file, "utf8"));
+    } catch (error) {
+      // Missing or unreadable preferences start empty; Chromium resets a corrupt file too.
+      preferences = {};
+    }
+    if (!preferences || typeof preferences !== "object" || Array.isArray(preferences)) {
+      preferences = {};
+    }
+    preferences.download_restrictions = 3;
+    const temporary = `${file}.instafy-${process.pid}`;
+    fs.writeFileSync(temporary, JSON.stringify(preferences), { mode: 0o600, flag: "wx" });
+    fs.renameSync(temporary, file);
+  ' "${profile_dir}"
+}
+
 # Chromium's command line for the Shared Browser, shared by the boot-time
 # launch and the on-demand browser host. It reads the profile directory, CDP
 # port, egress proxy address, render scale and view settings from the
@@ -495,6 +535,14 @@ start_headed_chromium_daemon() {
     printf '%s\n' "${warning_text}" > "$(chromium_warning_file)"
     echo "[instafy] ${warning_text}" >&2
     return
+  fi
+
+  if ! block_browser_downloads "${INSTAFY_PLAYWRIGHT_PROFILE_DIR}"; then
+    local warning_text
+    warning_text="Shared Browser downloads could not be blocked; Chromium was not launched."
+    printf '%s\n' "${warning_text}" > "$(chromium_warning_file)"
+    echo "[instafy] ${warning_text}" >&2
+    return 1
   fi
 
   cleanup_chromium_profile_locks
@@ -1084,6 +1132,9 @@ start_browser_host() {
 
   if ! browser_host_release_profile_lock "${profile_dir}"; then
     browser_host_fail profile_in_use 66 "a running Chromium holds the profile"
+  fi
+  if ! block_browser_downloads "${profile_dir}"; then
+    browser_host_fail host_error 72 "cannot block downloads in the profile"
   fi
 
   export HOME="${home_dir}"

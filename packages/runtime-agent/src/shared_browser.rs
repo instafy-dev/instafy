@@ -22,6 +22,7 @@ use rmcp::model::{
 use serde_json::Map as JsonMap;
 use serde_json::Value as JsonValue;
 use serde_json::json;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
@@ -48,6 +49,12 @@ const AGENT_CONTROL_TTL: Duration = Duration::from_secs(12);
 const AGENT_CONTROL_DISPLAY_NAME_MAX_BYTES: usize = 80;
 const SHARED_BROWSER_SCRIPT: &str = include_str!("../assets/shared-browser-cli.js");
 const SHARED_BROWSER_APPROVAL_SCRIPT: &str = include_str!("../assets/shared-browser-approval.js");
+// Redaction and step classification shared with the Desktop Personal Browser.
+// The package holds plain scripts, so the source is embedded as-is.
+const BROWSER_REDACTION_SCRIPT: &str = include_str!("../../browser-action-policy/redaction.js");
+const BROWSER_ACTION_POLICY_SCRIPT: &str =
+    include_str!("../../browser-action-policy/actionPolicy.js");
+
 const SHARED_BROWSER_NODE_BINARY: &str = "/usr/bin/node";
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
 const MAX_URL_CHARS: usize = 4_096;
@@ -1185,15 +1192,15 @@ async fn execute_request(request: &SharedBrowserRequest) -> Result<JsonValue> {
         .map(Path::to_path_buf)
         .context("Shared Browser controller executable has no trusted parent directory")?;
     let mut command = Command::new(SHARED_BROWSER_NODE_BINARY);
-    let controller_script = embedded_shared_browser_script();
+    // The script is read from stdin. Linux caps one argv string at 128 KiB
+    // (MAX_ARG_STRLEN), and the script with its embedded policy modules is
+    // larger than that.
     command
         .current_dir(trusted_cwd)
-        .arg("-e")
-        .arg(controller_script)
-        .arg("--")
+        .arg("-")
         .arg(&request.method)
         .arg(&request.path)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -1201,10 +1208,24 @@ async fn execute_request(request: &SharedBrowserRequest) -> Result<JsonValue> {
         command.arg(serde_json::to_string(body)?);
     }
 
-    let output = command
-        .output()
-        .await
+    let mut child = command
+        .spawn()
         .context("failed to launch the Shared Browser controller")?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .context("Shared Browser controller has no stdin")?;
+    // Node reads the whole script before it runs it, so nothing is written to
+    // stdout or stderr until stdin closes.
+    stdin
+        .write_all(embedded_shared_browser_script().as_bytes())
+        .await
+        .context("failed to pass the Shared Browser controller script")?;
+    drop(stdin);
+    let output = child
+        .wait_with_output()
+        .await
+        .context("failed to run the Shared Browser controller")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let message = stderr.trim();
@@ -1223,7 +1244,18 @@ async fn execute_request(request: &SharedBrowserRequest) -> Result<JsonValue> {
 }
 
 fn embedded_shared_browser_script() -> String {
-    format!("{SHARED_BROWSER_APPROVAL_SCRIPT}\n{SHARED_BROWSER_SCRIPT}")
+    format!(
+        "{}\n{}\n{SHARED_BROWSER_APPROVAL_SCRIPT}\n{SHARED_BROWSER_SCRIPT}",
+        embedded_plain_script(BROWSER_REDACTION_SCRIPT),
+        embedded_plain_script(BROWSER_ACTION_POLICY_SCRIPT),
+    )
+}
+
+/// `node -e` defines `module` and `require`, which would make the package
+/// scripts export through CommonJS. Hiding both makes each one publish its
+/// API on `globalThis`, where the controller script reads it.
+fn embedded_plain_script(source: &str) -> String {
+    format!("(function (module, require) {{\n{source}\n}})(undefined, undefined);")
 }
 
 fn browser_session_enabled(raw: Option<&str>) -> bool {

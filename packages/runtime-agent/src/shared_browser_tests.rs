@@ -16,6 +16,10 @@ fn strings(values: &[&str]) -> Vec<String> {
 const FAKE_PLAYWRIGHT: &str = r#"
 const fs = require("fs");
 const mode = process.env.INSTAFY_SHARED_BROWSER_FAKE_MODE || "safe";
+// Assembled at run time so the source holds no key-shaped literal.
+const CANARY = ["sk", "live", "INSTAFYCANARY0123456789abcdef"].join("_");
+const markPath = process.env.INSTAFY_SHARED_BROWSER_FAKE_MARK;
+const cdpLogPath = process.env.INSTAFY_SHARED_BROWSER_FAKE_CDP_LOG;
 const formButtonTypes = { "form-button": "button", "form-reset": "reset", "form-submit-button": "submit" };
 const formInputTypes = { "form-submit-input": "submit", "form-image-input": "image" };
 const isFormButton = Object.hasOwn(formButtonTypes, mode);
@@ -31,6 +35,42 @@ const approvalWasConsumed = () => {
   } catch (_) {
     return false;
   }
+};
+// Structural facts as the page-side describer reports them.
+const basePolicy = {
+  href: "", linkSelf: false, download: false, formActionUrl: "", formName: "",
+  formSubmitLabels: "", formHasPassword: false, formPasswordCount: 0, formFieldCount: 0,
+  signInIdentifier: false, contentEditable: false, areas: "", menuOpener: false,
+  credentialContext: false, row: false, nearMaskedText: false, iconHint: "",
+};
+const control = (text, extra = {}) => ({
+  tag: "button", role: null, ariaLabel: "", labels: "", placeholder: "", inputType: "button",
+  text, ...extra,
+});
+const special = {
+  "invite-button": { description: control("Invite member") },
+  "generate-key": { description: control("Generate API key") },
+  "plain-button": { description: control("Show details") },
+  "export-link": {
+    description: control("Export CSV", { tag: "a", inputType: "", href: "https://example.test/reports/export.csv" }),
+    policy: { href: "https://example.test/reports/export.csv", linkSelf: true },
+  },
+  "reveal-key": { description: control("Show"), policy: { credentialContext: true, row: true } },
+  "credential-row": {
+    description: control("Production key ••••••••", { tag: "tr", inputType: "" }),
+    policy: { credentialContext: true, row: true, nearMaskedText: true },
+  },
+  "sign-in-email": {
+    description: control("", {
+      tag: "input", inputType: "email", ariaLabel: "Email", labels: "Email", autocomplete: "email",
+      formMethod: "post", formAction: "https://example.test/session", formActionText: "form post Sign in",
+    }),
+    policy: { formHasPassword: true, formPasswordCount: 1, formFieldCount: 2, signInIdentifier: true },
+  },
+  "file-input": { description: control("", { tag: "input", inputType: "file", ariaLabel: "Receipt" }) },
+  "canary-label": { description: control(`Copy ${CANARY}`) },
+  "click-error-canary": { description: control("Show details") },
+  "no-policy": { description: control("Show details"), policy: null },
 };
 const descriptionFor = (targetId) => ({
   tag: isFormButton || mode === "localized-button" || mode === "icon-button" ? "button" : "input",
@@ -60,7 +100,23 @@ const descriptionFor = (targetId) => ({
   formActionText: hasForm ? "Search form" : "",
   labels: mode === "localized-button" || mode === "icon-button" ? "" : "Search",
   text: mode === "localized-button" ? "Eliminar" : "",
+  ...(special[mode]?.description || {}),
+  policy: special[mode] && special[mode].policy === null
+    ? null
+    : { ...basePolicy, ...(special[mode]?.policy || {}) },
 });
+const signalsFor = () => mode === "secret-screen"
+  ? { credentialContext: true, secretField: true, secretCode: false, maskedNearReveal: false }
+  : mode === "signals-fail"
+    ? null
+    : { credentialContext: false, secretField: false, secretCode: false, maskedNearReveal: false };
+const bodyTextFor = (currentUrl, targetId) => {
+  if (currentUrl.includes("unapproved-secret")) return "Secret destination contents";
+  if (targetId === "decoy-target" && !decoyLooksIdentical) return "Decoy page";
+  if (mode === "canary-text") return `Order note ${CANARY} for the fixture`;
+  if (mode === "secret-screen") return `Production key ${CANARY}`;
+  return "Fixture page";
+};
 let context;
 const makePage = (targetId) => {
   let currentUrl = targetId === "decoy-target" && !decoyLooksIdentical
@@ -70,11 +126,14 @@ const makePage = (targetId) => {
     isVisible: async () => true,
     boundingBox: async () => ({ x: 10, y: 20, width: 120, height: 32 }),
     evaluate: async () => {
-      return { ...descriptionFor(targetId) };
+      return descriptionFor(targetId);
     },
     click: async () => {
       if (mode === "new-origin-after-click") {
         currentUrl = "https://unapproved-secret.example/hidden?token=must-not-leak";
+      }
+      if (mode === "click-error-canary") {
+        throw new Error(`element <button data-key="${CANARY}"> is not attached to the DOM`);
       }
     },
     focus: async () => {},
@@ -84,21 +143,32 @@ const makePage = (targetId) => {
   return {
     targetId,
     context: () => context,
-    evaluate: async () => targetId === "decoy-target",
+    // Page-side helpers identify themselves by their argument.
+    evaluate: async (_fn, arg) => {
+      if (arg && arg.kind === "page-policy") return signalsFor();
+      if (arg && arg.kind === "withheld-read") return Boolean(markPath && fs.existsSync(markPath));
+      if (arg && arg.kind === "withheld-mark") {
+        if (markPath) fs.writeFileSync(markPath, "withheld");
+        return Boolean(markPath);
+      }
+      return undefined;
+    },
     url: () => currentUrl,
     title: async () => currentUrl.includes("unapproved-secret")
       ? "Secret destination title"
       : targetId === "decoy-target" && !decoyLooksIdentical ? "Decoy" : "Fixture",
     bringToFront: async () => {},
     setDefaultTimeout: () => {},
-    goto: async (url) => { currentUrl = String(url); },
+    goto: async (url) => {
+      currentUrl = String(url);
+      // A new document drops the page's withheld mark.
+      if (markPath) fs.rmSync(markPath, { force: true });
+    },
     waitForLoadState: async () => {},
     waitForTimeout: async () => {},
     viewportSize: () => ({ width: 800, height: 600 }),
     locator: (selector) => selector === "body"
-      ? { innerText: async () => currentUrl.includes("unapproved-secret")
-          ? "Secret destination contents"
-          : targetId === "decoy-target" && !decoyLooksIdentical ? "Decoy page" : "Fixture page" }
+      ? { innerText: async () => bodyTextFor(currentUrl, targetId) }
       : {
           count: async () => 1,
           nth: () => ({ elementHandle: async () => handle }),
@@ -122,10 +192,40 @@ context = {
 };
 const browser = {
   contexts: () => [context],
+  newBrowserCDPSession: async () => ({
+    send: async (method, params) => {
+      if (cdpLogPath) fs.appendFileSync(cdpLogPath, `${JSON.stringify({ method, params })}\n`);
+      return {};
+    },
+    detach: async () => {},
+  }),
   disconnect: async () => {},
 };
 module.exports = { chromium: { connectOverCDP: async () => browser } };
 "#;
+
+/// Runs the embedded controller the way the runtime does: `node -` with the
+/// script on stdin.
+struct EmbeddedControllerCommand(StdCommand);
+
+impl EmbeddedControllerCommand {
+    fn spawn(mut self) -> std::io::Result<std::process::Child> {
+        use std::process::Stdio;
+        self.0
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = self.0.spawn()?;
+        let mut stdin = child.stdin.take().expect("controller stdin");
+        stdin.write_all(embedded_shared_browser_script().as_bytes())?;
+        drop(stdin);
+        Ok(child)
+    }
+
+    fn output(self) -> std::io::Result<Output> {
+        self.spawn()?.wait_with_output()
+    }
+}
 
 struct EmbeddedControllerFixture {
     _tempdir: tempfile::TempDir,
@@ -136,6 +236,8 @@ struct EmbeddedControllerFixture {
     authority_path: PathBuf,
     approval_dir: PathBuf,
     actions_path: PathBuf,
+    document_mark: PathBuf,
+    cdp_log: PathBuf,
     owner_id: Uuid,
     run_id: Uuid,
     initiator_user_id: Uuid,
@@ -162,6 +264,8 @@ impl EmbeddedControllerFixture {
         let authority_path = tempdir.path().join("agent-control.json");
         let approval_dir = tempdir.path().join("approvals");
         let actions_path = tempdir.path().join("actions.jsonl");
+        let document_mark = tempdir.path().join("document-withheld");
+        let cdp_log = tempdir.path().join("browser-cdp.jsonl");
         std::fs::create_dir_all(&approval_dir).expect("approval fixture directory");
 
         Self {
@@ -173,6 +277,8 @@ impl EmbeddedControllerFixture {
             authority_path,
             approval_dir,
             actions_path,
+            document_mark,
+            cdp_log,
             owner_id: Uuid::new_v4(),
             run_id: Uuid::new_v4(),
             initiator_user_id: Uuid::new_v4(),
@@ -235,7 +341,7 @@ impl EmbeddedControllerFixture {
         method: &str,
         path: &str,
         body: Option<&str>,
-    ) -> StdCommand {
+    ) -> EmbeddedControllerCommand {
         // Decision-driven runs get a generous window: 250ms flaked on loaded
         // 2-core CI runners (approval file lands, poller misses the deadline).
         // Timeout-behavior tests override with a short window explicitly.
@@ -250,12 +356,10 @@ impl EmbeddedControllerFixture {
         path: &str,
         body: Option<&str>,
         approval_timeout_ms: &str,
-    ) -> StdCommand {
+    ) -> EmbeddedControllerCommand {
         let mut command = StdCommand::new("node");
         command
-            .arg("-e")
-            .arg(embedded_shared_browser_script())
-            .arg("--")
+            .arg("-")
             .arg(method)
             .arg(path)
             .current_dir(&self.hostile_cwd)
@@ -267,11 +371,13 @@ impl EmbeddedControllerFixture {
             .env(APPROVAL_TIMEOUT_MS_ENV, approval_timeout_ms)
             .env(ACTIONS_FILE_ENV, &self.actions_path)
             .env("INSTAFY_SHARED_BROWSER_FAKE_MODE", mode)
+            .env("INSTAFY_SHARED_BROWSER_FAKE_MARK", &self.document_mark)
+            .env("INSTAFY_SHARED_BROWSER_FAKE_CDP_LOG", &self.cdp_log)
             .env("HOSTILE_MARKER", &self.hostile_marker);
         if let Some(body) = body {
             command.arg(body);
         }
-        command
+        EmbeddedControllerCommand(command)
     }
 
     fn run(&self, mode: &str, method: &str, path: &str, body: Option<&str>) -> Output {
@@ -305,12 +411,10 @@ impl EmbeddedControllerFixture {
         approved_origins: &[&str],
         decisions: &[&str],
     ) -> (Output, Vec<JsonValue>) {
-        use std::process::Stdio;
         use std::time::{Duration, Instant};
 
         self.prepare_authority(page_id, approved_origins);
-        let mut command = self.command_for(mode, page_id, method, request_path, body);
-        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let command = self.command_for(mode, page_id, method, request_path, body);
         let mut child = command
             .spawn()
             .expect("spawn embedded Shared Browser controller");
@@ -2073,4 +2177,431 @@ async fn human_input_latch_blocks_every_later_observation_or_action() {
         result.structured_content.unwrap()["terminalConsent"]["retryable"],
         false
     );
+}
+
+const CANARY_MARKER: &str = "INSTAFYCANARY";
+
+fn payload_of(output: &Output) -> JsonValue {
+    assert!(
+        output.status.success(),
+        "controller failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("controller JSON")
+}
+
+fn assert_no_canary(label: &str, text: &str) {
+    assert!(
+        !text.contains(CANARY_MARKER),
+        "{label} carried the canary: {text}"
+    );
+}
+
+impl EmbeddedControllerFixture {
+    fn action_log(&self) -> String {
+        std::fs::read_to_string(&self.actions_path).unwrap_or_default()
+    }
+
+    /// Grants routine browsing at the first site prompt and returns the
+    /// snapshot taken under it. Later `command_for` runs keep the grant.
+    fn routine_snapshot(&self, mode: &str) -> JsonValue {
+        let (output, requests) = self.run_with_decisions(
+            mode,
+            "page-target",
+            "GET",
+            "/v1/snapshot",
+            None,
+            &[],
+            &["allow_routine"],
+        );
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["kind"], "origin");
+        payload_of(&output)
+    }
+}
+
+#[test]
+fn embedded_policy_modules_publish_their_api_without_commonjs() {
+    use std::process::Stdio;
+    let script = format!(
+        "{}\n{}\nprocess.stdout.write(JSON.stringify([typeof module, typeof globalThis.__instafyBrowserRedaction.redactPageObservation, typeof globalThis.__instafyBrowserActionPolicy.classifyStep]));",
+        embedded_plain_script(BROWSER_REDACTION_SCRIPT),
+        embedded_plain_script(BROWSER_ACTION_POLICY_SCRIPT),
+    );
+    let mut child = StdCommand::new("node")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn node");
+    child
+        .stdin
+        .take()
+        .expect("node stdin")
+        .write_all(script.as_bytes())
+        .expect("write script");
+    let output = child.wait_with_output().expect("node output");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // `node -` defines `module`; the wrapper is what keeps the package
+    // scripts on their global path.
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        r#"["object","function","function"]"#
+    );
+    let embedded = embedded_shared_browser_script();
+    assert!(
+        embedded.find("__instafyBrowserRedaction") < embedded.find("__instafyBrowserActionPolicy")
+    );
+    // Larger than one Linux argv string may be, which is why it travels on stdin.
+    assert!(embedded.len() > 64 * 1024);
+}
+
+#[test]
+fn snapshots_mask_secrets_on_every_site_in_ask_and_routine() {
+    // Ask mode: the site is approved, every action still asks.
+    let fixture = EmbeddedControllerFixture::new();
+    let output = fixture.run("canary-text", "GET", "/v1/snapshot", None);
+    let payload = payload_of(&output);
+    assert_no_canary(
+        "ask-mode snapshot",
+        &String::from_utf8_lossy(&output.stdout),
+    );
+    assert_eq!(payload["secretScreen"], false);
+    assert!(
+        payload["visibleText"]
+            .as_str()
+            .unwrap()
+            .contains("[redacted secret]")
+    );
+
+    // Routine browsing, on the first site and on a site opened by address.
+    let fixture = EmbeddedControllerFixture::new();
+    let payload = fixture.routine_snapshot("canary-text");
+    assert_no_canary("routine snapshot", &payload.to_string());
+    assert!(
+        payload["visibleText"]
+            .as_str()
+            .unwrap()
+            .contains("[redacted secret]")
+    );
+    let navigate = json!({"url": "https://another-site.example/notes?session=INSTAFYCANARY9f8e7d6c5b4a3f2e1d"});
+    let output = fixture
+        .command_for(
+            "canary-text",
+            "page-target",
+            "POST",
+            "/v1/navigate",
+            Some(&navigate.to_string()),
+        )
+        .output()
+        .expect("navigate under routine");
+    let payload = payload_of(&output);
+    assert!(!fixture.approval_dir.join("request.json").exists());
+    assert_no_canary("navigation result", &payload.to_string());
+    assert!(
+        payload["url"]
+            .as_str()
+            .unwrap()
+            .contains("session=REDACTED")
+    );
+    assert!(
+        payload["visibleText"]
+            .as_str()
+            .unwrap()
+            .contains("[redacted secret]")
+    );
+    assert_no_canary("action log", &fixture.action_log());
+    assert!(fixture.action_log().contains("session=REDACTED"));
+
+    let status = fixture
+        .command_for("canary-text", "page-target", "GET", "/v1/status", None)
+        .output()
+        .expect("status");
+    assert_no_canary("status", &payload_of(&status).to_string());
+}
+
+#[test]
+fn secret_screens_withhold_text_and_stay_withheld_until_a_new_page() {
+    let fixture = EmbeddedControllerFixture::new();
+    let output = fixture.run("secret-screen", "GET", "/v1/snapshot", None);
+    let payload = payload_of(&output);
+    assert_no_canary("secret screen", &String::from_utf8_lossy(&output.stdout));
+    assert_eq!(payload["secretScreen"], true);
+    assert_eq!(payload["visibleText"], "");
+    assert!(
+        payload["message"]
+            .as_str()
+            .unwrap()
+            .contains("tell the user in words which control")
+    );
+    // Control names stay so the agent can name the control.
+    assert_eq!(payload["interactiveElements"][0]["label"], "Search");
+    assert!(fixture.document_mark.exists());
+
+    // The same document stays withheld even when nothing on it matches now.
+    let payload = payload_of(&fixture.run("safe", "GET", "/v1/snapshot", None));
+    assert_eq!(payload["secretScreen"], true);
+    assert_eq!(payload["visibleText"], "");
+
+    // A new page lifts it.
+    let (output, requests) = fixture.run_with_decisions(
+        "safe",
+        "page-target",
+        "POST",
+        "/v1/navigate",
+        Some(r#"{"url":"https://example.test/next"}"#),
+        &["https://example.test"],
+        &["allow_once"],
+    );
+    assert_eq!(requests.len(), 1);
+    let payload = payload_of(&output);
+    assert_eq!(payload["secretScreen"], false);
+    assert_eq!(payload["visibleText"], "Fixture page");
+
+    // Missing page answers withhold the page.
+    let fixture = EmbeddedControllerFixture::new();
+    let payload = payload_of(&fixture.run("signals-fail", "GET", "/v1/snapshot", None));
+    assert_eq!(payload["secretScreen"], true);
+    assert_eq!(payload["visibleText"], "");
+}
+
+#[test]
+fn routine_asks_for_named_categories_with_the_category_in_the_label() {
+    for (mode, label) in [
+        ("invite-button", "Sharing or access change: Invite member"),
+        ("export-link", "Download or export: Export CSV"),
+        ("generate-key", "Key or password change: Generate API key"),
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(mode);
+        let body = json!({"index": 0, "snapshotId": snapshot_id});
+        let (output, requests) = fixture.run_with_decisions(
+            mode,
+            "page-target",
+            "POST",
+            "/v1/click",
+            Some(&body.to_string()),
+            &[],
+            &["allow_routine", "deny"],
+        );
+        assert!(!output.status.success(), "{mode} ran without asking");
+        assert_eq!(requests.len(), 2, "{mode}");
+        assert_eq!(requests[1]["kind"], "action");
+        assert_eq!(requests[1]["display"]["label"], label);
+        assert!(String::from_utf8_lossy(&output.stderr).contains("approval_denied"));
+        assert!(!fixture.action_log().contains("\"type\":\"click\""));
+    }
+
+    // An ordinary control stays free under routine, and so does typing an
+    // address for a site the run has not used yet.
+    let fixture = EmbeddedControllerFixture::new();
+    let snapshot = fixture.routine_snapshot("plain-button");
+    let body = json!({"index": 0, "snapshotId": snapshot["snapshotId"]});
+    let output = fixture
+        .command_for(
+            "plain-button",
+            "page-target",
+            "POST",
+            "/v1/click",
+            Some(&body.to_string()),
+        )
+        .output()
+        .expect("routine click");
+    payload_of(&output);
+    let output = fixture
+        .command_for(
+            "plain-button",
+            "page-target",
+            "POST",
+            "/v1/navigate",
+            Some(r#"{"url":"https://never-used.example/start"}"#),
+        )
+        .output()
+        .expect("routine navigation to a new site");
+    payload_of(&output);
+    assert!(!fixture.approval_dir.join("request.json").exists());
+
+    // A risky address asks under routine, by its address alone.
+    let fixture = EmbeddedControllerFixture::new();
+    let (output, requests) = fixture.run_with_decisions(
+        "safe",
+        "page-target",
+        "POST",
+        "/v1/navigate",
+        Some(r#"{"url":"https://example.test/reports/export.csv"}"#),
+        &[],
+        &["allow_routine", "deny"],
+    );
+    assert!(!output.status.success());
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[1]["display"]["label"],
+        "Download or export: Navigate the Shared Browser"
+    );
+
+    // Without the page's structural facts nothing is assumed safe.
+    let fixture = EmbeddedControllerFixture::new();
+    let snapshot_id = fixture.snapshot_id("no-policy");
+    let body = json!({"index": 0, "snapshotId": snapshot_id});
+    let (output, requests) = fixture.run_with_decisions(
+        "no-policy",
+        "page-target",
+        "POST",
+        "/v1/click",
+        Some(&body.to_string()),
+        &[],
+        &["allow_routine", "deny"],
+    );
+    assert!(!output.status.success());
+    assert_eq!(requests.len(), 2);
+}
+
+#[test]
+fn reveal_sign_in_and_upload_steps_are_refused_without_a_prompt_in_every_mode() {
+    for (mode, path, extra, code) in [
+        ("reveal-key", "/v1/click", json!({}), "step_refused_secret"),
+        (
+            "sign-in-email",
+            "/v1/type",
+            json!({"text": "person@example.test"}),
+            "step_refused_sign_in",
+        ),
+        ("file-input", "/v1/click", json!({}), "step_refused_upload"),
+    ] {
+        // Ask mode.
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(mode);
+        let mut body = json!({"index": 0, "snapshotId": snapshot_id});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let (output, requests) = fixture.run_with_decisions(
+            mode,
+            "page-target",
+            "POST",
+            path,
+            Some(&body.to_string()),
+            &["https://example.test"],
+            &["allow_once"],
+        );
+        assert!(!output.status.success(), "{mode} ask mode");
+        assert!(requests.is_empty(), "{mode} prompted in ask mode");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(code),
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // Routine browsing.
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot = fixture.routine_snapshot(mode);
+        let mut body = json!({"index": 0, "snapshotId": snapshot["snapshotId"]});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let output = fixture
+            .command_for(mode, "page-target", "POST", path, Some(&body.to_string()))
+            .output()
+            .expect("refused routine step");
+        assert!(!output.status.success(), "{mode} routine");
+        assert!(String::from_utf8_lossy(&output.stderr).contains(code));
+        assert!(!fixture.approval_dir.join("request.json").exists());
+        let log = fixture.action_log();
+        assert!(!log.contains("\"type\":\"click\"") && !log.contains("\"type\":\"type\""));
+    }
+}
+
+#[test]
+fn credential_steps_withhold_the_page_before_they_run() {
+    let fixture = EmbeddedControllerFixture::new();
+    let snapshot_id = fixture.snapshot_id("credential-row");
+    let body = json!({"index": 0, "snapshotId": snapshot_id});
+    let (output, requests) = fixture.run_with_decisions(
+        "credential-row",
+        "page-target",
+        "POST",
+        "/v1/click",
+        Some(&body.to_string()),
+        &[],
+        &["allow_routine", "allow_once"],
+    );
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[1]["display"]["label"],
+        "May show a secret: Production key ••••••••"
+    );
+    let payload = payload_of(&output);
+    assert_eq!(payload["secretScreen"], true);
+    assert_eq!(payload["visibleText"], "");
+    assert!(fixture.document_mark.exists());
+    let payload = payload_of(&fixture.run("safe", "GET", "/v1/snapshot", None));
+    assert_eq!(payload["secretScreen"], true);
+}
+
+#[test]
+fn stderr_approval_labels_and_action_log_never_carry_page_secrets() {
+    let fixture = EmbeddedControllerFixture::new();
+    let snapshot_id = fixture.snapshot_id("click-error-canary");
+    let body = json!({"index": 0, "snapshotId": snapshot_id});
+    let (output, _) = fixture.run_with_decisions(
+        "click-error-canary",
+        "page-target",
+        "POST",
+        "/v1/click",
+        Some(&body.to_string()),
+        &["https://example.test"],
+        &["allow_once"],
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_no_canary("stderr", &stderr);
+    assert!(stderr.contains("[redacted secret]"), "{stderr}");
+
+    let fixture = EmbeddedControllerFixture::new();
+    let snapshot = payload_of(&fixture.run("canary-label", "GET", "/v1/snapshot", None));
+    assert_no_canary("snapshot names", &snapshot.to_string());
+    let body = json!({"index": 0, "snapshotId": snapshot["snapshotId"]});
+    let (output, requests) = fixture.run_with_decisions(
+        "canary-label",
+        "page-target",
+        "POST",
+        "/v1/click",
+        Some(&body.to_string()),
+        &["https://example.test"],
+        &["allow_once"],
+    );
+    payload_of(&output);
+    assert_eq!(requests.len(), 1);
+    assert_no_canary("approval request", &requests[0].to_string());
+    assert!(
+        requests[0]["display"]["label"]
+            .as_str()
+            .unwrap()
+            .contains("[redacted secret]")
+    );
+    let log = fixture.action_log();
+    assert!(log.contains("\"type\":\"click\""));
+    assert_no_canary("action log", &log);
+}
+
+#[test]
+fn every_controller_connection_denies_downloads() {
+    let fixture = EmbeddedControllerFixture::new();
+    payload_of(&fixture.run("safe", "GET", "/v1/snapshot", None));
+    payload_of(&fixture.run("safe", "GET", "/v1/status", None));
+    let calls: Vec<JsonValue> = std::fs::read_to_string(&fixture.cdp_log)
+        .expect("browser CDP log")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("CDP log line"))
+        .collect();
+    assert_eq!(calls.len(), 2);
+    for call in calls {
+        assert_eq!(call["method"], "Browser.setDownloadBehavior");
+        assert_eq!(call["params"], json!({"behavior": "deny"}));
+    }
 }

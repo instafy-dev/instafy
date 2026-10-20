@@ -126,7 +126,8 @@ and control requests only. Typed text, keys, clipboard contents, field values,
 URLs, and page content are rejected by this strict collaboration protocol and
 are never placed in Postgres. The separate ephemeral agent action log contains
 bounded action labels, URLs, target labels, and key names for the visible cursor
-and ticker, but never typed values, clipboard contents, or full page content.
+and ticker, masked like the agent's observations, but never typed values,
+clipboard contents, or full page content.
 
 The origin owns one driver lease for the entire browser runtime because tab
 focus, navigation, viewport, and keyboard focus are shared Chromium state. The
@@ -296,7 +297,8 @@ explicit grant across HTTP(S) sites for the exact current run, initiating user,
 runtime generation and selected page—not permanent site trust, a project-wide
 default, or permission inherited by the next turn. Ordinary navigation, clicks,
 non-sensitive field filling and non-activation keys then proceed without another
-site/action prompt. Recognized consequential controls or URLs, form submissions,
+site/action prompt, including an address typed for a site the run has not used
+yet. Steps in a named risk category (below), risky addresses, form submissions,
 and Enter/Space activation still require one-shot confirmation. Secret entry,
 fresh-target checks, exact authority, denial and cancellation boundaries are
 unchanged. Stopping or completing the turn ends the grant.
@@ -310,6 +312,73 @@ Routine mode deliberately relaxes universal confirmation. Its consequence
 classifier uses page descriptors and URL text; it cannot prove that arbitrary
 website JavaScript has no side effects or recognize every language/custom control.
 Use **Ask** when reviewing every state-changing interaction is important.
+
+### Redaction, step categories and downloads
+
+The controller embeds the private workspace package
+`@instafy/browser-action-policy` (`redaction.js` and `actionPolicy.js`), the same
+plain scripts the Desktop Personal Browser uses. runtime-agent compiles the
+source into its binary and passes the composed controller script to Node on
+stdin, because together they exceed the 128 KiB Linux limit for one argument.
+
+**Redaction, on every site and in both modes.** Snapshot text, title, address,
+control names and link targets, `status`, the action log (`actions.jsonl`, which
+anyone with read access to the project can see), approval labels and the
+controller's error text are masked before they leave the controller. Known key
+formats become `[redacted secret]`; unknown random values are masked near a
+credential word; sensitive address parameters become `REDACTED`. The page
+computes yes/no secret signals in the page and never returns the values it
+tested. A page that shows a key becomes a secret screen: its text is withheld,
+`secretScreen: true` is set with a fixed message, and control names stay
+(masked) so the agent can name the control. The document keeps a
+non-configurable mark, so it stays withheld across the run's separate controller
+processes until a new page loads. Missing page answers withhold the page.
+
+**Step categories.** Every click, typing step, submission and key press is
+classified from the element's structure (tag, role, link shape, form method and
+password fields, enclosing dialog, navigation, menu or pagination, credential
+context from headings, dialog titles, table headers and rows). Under routine
+browsing these ask with **Allow once**: purchase, money transfer, message,
+sharing or access change, key or password change, download or export, delete,
+cancel or sign out, and "may show a secret" (an entry in a credential context).
+Ordinary record changes still ask only when they submit. Risky addresses
+(sign-out and unsubscribe, exports and files, one-time invite or reset links,
+action words followed by an id) ask by address alone, for navigation too. The
+earlier consequential-word check stays as a floor, and a step whose structural
+facts are missing asks. The category leads the approval label, for example
+`Download or export: Export CSV`, so the request shape is unchanged for Studio
+and the origin. In Ask mode every step still asks.
+
+**Refused in every mode, before any prompt.** Revealing or copying a credential
+(`step_refused_secret`), sign-in submits, identity-provider sign-in buttons and
+typing a sign-in form's account identifier (`step_refused_sign_in`), and file
+inputs (`step_refused_upload`). Before a key change or "may show a secret" step
+runs, the page is marked withheld, and so is the page it leads to.
+
+**Downloads are denied.** The hosted browser has no copy-out, so a download would
+only land where an ordinary turn could read it. Two blocks cover it:
+
+- Each controller connection sends `Browser.setDownloadBehavior` with `deny`.
+  Playwright's own connection otherwise lets downloads into its temporary
+  folder, and a CDP session that allows downloads overrides the profile
+  setting. The override ends when the connection does.
+- The runtime entrypoint writes `download_restrictions: 3` (block all
+  downloads, the preference behind Chromium's DownloadRestrictions policy) into
+  the profile before every Chromium launch, keeping the rest of a restored
+  profile. This holds after the controller disconnects, when viewers drive the
+  page.
+
+`scripts/shared-browser-cobrowsing-e2e.mjs` proves both in real Chromium: an
+approved agent click on an export link writes no file, a controller's deny
+followed by a reconnect and a trusted viewer-style click downloads on a plain
+profile (the control), and the same sequence is blocked on a profile the
+entrypoint prepared. `scripts/runtime-image-browser-smoke.sh` repeats the
+reconnect check inside the runtime image with its entrypoint.
+
+Redaction and classification are heuristics and advisory hardening, not an
+isolation boundary: every viewer still sees the pixels, page scripts run in the
+same world the controller reads, and a value in an unknown format with no
+credential word nearby can slip through.
 
 Studio never opens the Shared Browser by itself for Octo's `request_browser`
 card: the card waits for the person's press (see

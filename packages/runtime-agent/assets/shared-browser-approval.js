@@ -422,8 +422,13 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       if (!operation) {
         fail("approval_protocol_invalid", "Shared Browser approval operation is missing");
       }
+      // The step's category leads the label, so the person sees what kind of
+      // step this is ("Download or export: Export CSV") without a protocol
+      // change. Callers pass labels that are already masked.
+      const categoryTitle = boundedText(details.categoryTitle, MAX_LABEL_BYTES);
+      const label = boundedText(details.label, MAX_LABEL_BYTES);
       const display = {
-        label: boundedText(details.label, MAX_LABEL_BYTES),
+        label: boundedText(categoryTitle && label ? `${categoryTitle}: ${label}` : label || categoryTitle, MAX_LABEL_BYTES),
         destinationOrigin: details.destinationOrigin || null,
       };
       const requestCore = {

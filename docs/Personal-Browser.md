@@ -245,7 +245,9 @@ The text-based high-impact classifier remains defense in depth for custom contro
 ### Step categories and refusals
 
 Electron main classifies every agent click, typing step, submission and key
-press before it runs (`personalBrowserActionPolicy.js`). The classifier works on
+press before it runs (`actionPolicy.js` in the private workspace package
+`@instafy/browser-action-policy`, shared with the hosted Shared Browser; the
+redaction rules live in `redaction.js` beside it). The classifier works on
 the element's structure: tag, role, whether the target is the link itself,
 the link's address and `download` attribute, the owning form's method, action,
 password field, editable-field count and submit labels, and the enclosing page

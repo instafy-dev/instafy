@@ -1,10 +1,11 @@
 "use strict";
 
 /*
- * Personal Browser redaction.
+ * Browser redaction, shared by the Desktop Personal Browser and the hosted
+ * Shared Browser.
  *
- * Plain script with no imports so the same file can later be embedded in other
- * browser hosts unchanged. In CommonJS it exports its API; elsewhere it sets
+ * Plain script with no imports, so browser hosts can embed the file unchanged.
+ * In CommonJS it exports its API; evaluated where `module` is undefined it sets
  * `globalThis.__instafyBrowserRedaction`.
  *
  * Everything here is a heuristic that only removes information. It never

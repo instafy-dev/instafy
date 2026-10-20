@@ -214,7 +214,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # the cooked copy. The per-commit compiled workspace stays out of every layer.
 # Only the runtime-agent files that are compiled in are copied here: the path
 # crates come from builder-deps exactly as they were cooked, and runtime-agent's
-# tests and README stay out, so changing them does not rerun this build.
+# tests and README stay out, so changing them does not rerun this build. The
+# Shared Browser controller embeds the browser-action-policy scripts as source
+# (.dockerignore drops dist/, and the package has no build step).
 FROM builder-deps AS builder
 ARG BUILD_PROFILE=dev
 ARG BUILD_ARTIFACT_DIR=debug
@@ -224,6 +226,7 @@ COPY packages/runtime-agent/Cargo.toml packages/runtime-agent/Cargo.lock package
 COPY packages/runtime-agent/src/ packages/runtime-agent/src/
 COPY packages/runtime-agent/assets/instafy/ packages/runtime-agent/assets/instafy/
 COPY packages/runtime-agent/assets/*.js packages/runtime-agent/assets/
+COPY packages/browser-action-policy/*.js packages/browser-action-policy/
 # One cargo command for all three binaries: the sandbox's library is already in
 # runtime-agent's graph, so building it here adds only its binary instead of
 # re-resolving its dependencies with other features and recompiling 63 crates.
@@ -236,7 +239,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
       find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf {} +; \
       cp -a /src/cooked-target/. "$target/"; \
     fi; \
-    cargo-source-stamps prepare "$target" /src/packages/runtime-agent /src/packages/runtime-contracts \
+    cargo-source-stamps prepare "$target" /src/packages/runtime-agent /src/packages/browser-action-policy /src/packages/runtime-contracts \
       /src/packages/openai-proxy-server /src/packages/git-service /src/packages/origin-http-server /src/codex/codex-rs /src/proto; \
     cargo build --profile ${BUILD_PROFILE} --manifest-path packages/runtime-agent/Cargo.toml --features code-mode-host -p runtime-agent -p codex-code-mode-host -p codex-linux-sandbox --locked; \
     cargo-source-stamps commit "$target"; \
