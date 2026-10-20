@@ -26,6 +26,10 @@ import {
   type PersonalBrowserTargetDescriptor,
 } from "./personalBrowserPageBridge";
 import { PersonalBrowserInputShield } from "./personalBrowserInputShield";
+import type {
+  PersonalBrowserTeammateActivity,
+  PersonalBrowserTeammateActivityStore,
+} from "./personalBrowserTeammateActivity";
 import {
   hasCredentialWord,
   redactLogValue,
@@ -123,6 +127,8 @@ type PersonalBrowserHostOptions = {
   onReleaseExpiry: (lease: PersonalBrowserReleaseLease) => void;
   onEmergencyPause?: (projectId: string) => void;
   onStatus?: (status: PersonalBrowserStatus) => void;
+  /** Where teammate activity in a profile is kept; in memory when absent. */
+  teammateActivity?: PersonalBrowserTeammateActivityStore;
   logger?: (
     level: "info" | "warn" | "error",
     message: string,
@@ -264,6 +270,40 @@ function formSubmissionDescription(descriptor: PersonalBrowserTargetDescriptor):
     : "this form";
 }
 
+function siteName(value: string): string | null {
+  try {
+    const host = new URL(value).hostname.toLowerCase();
+    return host ? host.replace(/^www\./, "") : null;
+  } catch {
+    return null;
+  }
+}
+
+// The default store keeps marks for this Desktop session only; main.ts passes
+// the userData file store.
+function memoryTeammateActivity(): PersonalBrowserTeammateActivityStore {
+  const profiles = new Map<string, PersonalBrowserTeammateActivity>();
+  return {
+    read: (partition) => profiles.get(partition) ?? null,
+    mark(partition, url) {
+      const previous = profiles.get(partition);
+      let host: string | null = null;
+      try {
+        const parsed = new URL(url ?? "");
+        if (parsed.protocol === "http:" || parsed.protocol === "https:") host = parsed.hostname.toLowerCase();
+      } catch {
+        host = null;
+      }
+      const sites = (previous?.sites ?? []).filter((site) => site !== host);
+      if (host) sites.push(host);
+      profiles.set(partition, { sites: sites.slice(-20), markedAtMs: previous?.markedAtMs ?? Date.now() });
+    },
+    clear(partition) {
+      profiles.delete(partition);
+    },
+  };
+}
+
 function fillDescription(descriptor: PersonalBrowserTargetDescriptor): string {
   if (descriptor.formOwnerIdentity?.trim()) {
     return formSubmissionDescription(descriptor);
@@ -278,6 +318,7 @@ export class PersonalBrowserHost {
   private readonly onReleaseExpiry: PersonalBrowserHostOptions["onReleaseExpiry"];
   private readonly onEmergencyPause: NonNullable<PersonalBrowserHostOptions["onEmergencyPause"]>;
   private readonly onStatus: NonNullable<PersonalBrowserHostOptions["onStatus"]>;
+  private readonly teammateActivity: PersonalBrowserTeammateActivityStore;
   private readonly logger: NonNullable<PersonalBrowserHostOptions["logger"]>;
   private readonly controlServer: PersonalBrowserControlServer;
   private readonly inputShield: PersonalBrowserInputShield;
@@ -338,10 +379,25 @@ export class PersonalBrowserHost {
               return {sourceId:contents.getMediaSourceId(requester),width:Math.max(1,Math.floor(bounds.width*scale)),height:Math.max(1,Math.floor(bounds.height*scale))};
             },
           },
-          createExplore: viewport => createBrowserTabExplorePage(contents.session, contents.getURL(), viewport),
+          createExplore: viewport => {
+            // Explore runs in the owner's browser session: the profile now
+            // carries a teammate's activity.
+            const partition = this.currentPartition;
+            this.markTeammateActivity(partition, contents.getURL());
+            return createBrowserTabExplorePage(contents.session, contents.getURL(), viewport, undefined,
+              url => this.markTeammateActivity(partition, url));
+          },
           dispatchInput: (input, current) => this.inputShield.withInjectedInput(() => dispatchBrowserTabInput(contents,this.fitBoundsToOwner(this.currentBounds),input,current)),
         } : null;
-  }, () => { this.takeoverRequestId = undefined; this.syncInputShield(); this.emitStatus(); });
+  }, () => {
+    this.takeoverRequestId = undefined;
+    // A participant's tab control acts in the owner's profile and sign-ins.
+    if (this.tabCapture.controlActive) {
+      this.markTeammateActivity(this.currentPartition, this.getWebContents()?.getURL() ?? null);
+    }
+    this.syncInputShield();
+    this.emitStatus();
+  });
 
   startTabShare(ownerId: string) {
     if (!this.currentVisible) throw new Error("Open your browser before sharing this tab.");
@@ -375,6 +431,7 @@ export class PersonalBrowserHost {
     this.onReleaseExpiry = options.onReleaseExpiry;
     this.onEmergencyPause = options.onEmergencyPause ?? (() => undefined);
     this.onStatus = options.onStatus ?? (() => undefined);
+    this.teammateActivity = options.teammateActivity ?? memoryTeammateActivity();
     const logger = options.logger ?? (() => undefined);
     // Error messages can carry page addresses. Mask them before they reach
     // Desktop's log files.
@@ -700,12 +757,16 @@ export class PersonalBrowserHost {
       }
       // One native confirmation per run. "Ask me each step" starts the run in
       // Ask mode instead of failing it.
-      const result = await dialog.showMessageBox(owner, this.routineStartDialog(knownHosts));
+      const teammate = this.currentTeammateActivity();
+      const result = await dialog.showMessageBox(owner, this.routineStartDialog(knownHosts, teammate));
       if (result.response !== 1 && result.response !== 2) {
         throw new Error("Routine browsing was not approved or the browser session changed.");
       }
       if (!this.isOpenOwnerCurrent(epoch, projectId, partition, ownerId)) {
         throw new Error("Routine browsing was not approved or the browser session changed.");
+      }
+      if (teammate && result.checkboxChecked === true) {
+        this.forgetTeammateActivity(partition);
       }
       if (result.response === 2) {
         approvalMode = "ask";
@@ -733,9 +794,17 @@ export class PersonalBrowserHost {
     return this.controlEpoch;
   }
 
-  private routineStartDialog(knownHosts: string[]): Electron.MessageBoxOptions {
+  private routineStartDialog(
+    knownHosts: string[],
+    teammate: PersonalBrowserTeammateActivity | null,
+  ): Electron.MessageBoxOptions {
     const sites = knownHosts.length > 0 ? ` Sites on this card: ${knownHosts.join(", ")}.` : "";
+    const teammateNote = teammate
+      ? ` A teammate used this browser profile${teammate.sites.length > 0 ? ` (sites: ${teammate.sites.slice(-8).join(", ")})` : ""}. ` +
+        "Until you forget that activity, the agent asks before using each site that is not on this card."
+      : "";
     return {
+      ...(teammate ? { checkboxLabel: "Forget teammate activity", checkboxChecked: false } : {}),
       type: "question",
       title: "Let the agent browse on its own?",
       message: "Let the agent browse in this project without asking for each site?",
@@ -743,7 +812,8 @@ export class PersonalBrowserHost {
         "Reading pages, scrolling, following links, menus, tabs and searches go ahead without asking. " +
         "Other buttons, filling in forms, submitting, purchases, messages, downloads, sign-outs and key changes still ask each time. " +
         "Signing in, revealing keys and choosing files stay yours. Pause or Escape ends this permission." +
-        sites,
+        sites +
+        teammateNote,
       buttons: ["Cancel", "Allow", "Ask me each step"],
       defaultId: 0,
       cancelId: 0,
@@ -903,6 +973,8 @@ export class PersonalBrowserHost {
     await contents.session.clearCache();
     await contents.session.clearAuthCache();
     contents.session.flushStorageData();
+    // Cleared sign-ins leave nothing of a teammate's activity behind.
+    this.forgetTeammateActivity(this.currentPartition);
     this.emitStatus();
     return this.getStatus();
   }
@@ -966,7 +1038,10 @@ export class PersonalBrowserHost {
     });
     view.webContents.on("will-navigate", (event, url) => this.guardPageNavigation(event, url));
     view.webContents.on("will-redirect", (event, url) => this.guardPageNavigation(event, url));
-    view.webContents.on("did-navigate", () => {
+    view.webContents.on("did-navigate", (_event, url) => {
+      if (this.tabCapture.controlActive) {
+        this.markTeammateActivity(this.currentPartition, url);
+      }
       this.humanInputRequest = null;
       this.invalidateAgentSnapshot();
       this.emitStatus();
@@ -1294,9 +1369,49 @@ export class PersonalBrowserHost {
     });
   }
 
-  /** Routine runs never show a per-site prompt. */
-  private siteSkipsPrompt(_origin: string): boolean {
-    return this.approvalMode === "routine";
+  /**
+   * Routine runs show no per-site prompt, unless a teammate acted in this
+   * profile: then every site asks except the card's hosts the owner allowed
+   * in the start dialog.
+   */
+  private siteSkipsPrompt(origin: string): boolean {
+    if (this.approvalMode !== "routine") return false;
+    if (!this.currentTeammateActivity()) return true;
+    const site = siteName(origin);
+    return site !== null && this.runKnownHosts.some((host) => host.replace(/^www\./, "") === site);
+  }
+
+  private currentTeammateActivity(): PersonalBrowserTeammateActivity | null {
+    const partition = this.currentPartition;
+    if (!partition) return null;
+    try {
+      return this.teammateActivity.read(partition);
+    } catch {
+      // Unknown means marked: the prompts come back.
+      return { sites: [], markedAtMs: 0 };
+    }
+  }
+
+  private markTeammateActivity(partition: string | null, url: string | null) {
+    if (!partition) return;
+    try {
+      this.teammateActivity.mark(partition, url);
+    } catch (error) {
+      this.logger("warn", "[instafy-desktop] personal-browser-teammate-activity-failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private forgetTeammateActivity(partition: string | null) {
+    if (!partition) return;
+    try {
+      this.teammateActivity.clear(partition);
+    } catch (error) {
+      this.logger("warn", "[instafy-desktop] personal-browser-teammate-activity-failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   private navigationKey(url: string): string | null {
@@ -1384,12 +1499,15 @@ export class PersonalBrowserHost {
       return false;
     }
     const host = new URL(origin).host;
+    const teammateNote = this.approvalMode === "routine" && this.currentTeammateActivity()
+      ? "A teammate used this browser profile, so the agent asks for each site until you forget that activity. "
+      : "";
     const result = await dialog.showMessageBox(owner, {
       type: "question",
       title: "Allow agent browser access?",
       message: `Allow the agent to use ${host}?`,
       detail:
-        "This lets the current project read and interact with this site in your Personal Browser for this session. Password, verification-code, and payment fields remain blocked.",
+        `${teammateNote}This lets the current project read and interact with this site in your Personal Browser for this session. Password, verification-code, and payment fields remain blocked.`,
       buttons: ["Deny", "Allow for this session"],
       defaultId: 0,
       cancelId: 0,

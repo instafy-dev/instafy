@@ -77,6 +77,7 @@ import {
   type PersonalBrowserReleaseLease,
   type PersonalBrowserStatus,
 } from "./personalBrowserHost";
+import { createFileTeammateActivityStore } from "./personalBrowserTeammateActivity";
 import {
   isPersonalBrowserFeatureEnabled,
 } from "./personalBrowserSecurity";
@@ -1830,6 +1831,10 @@ app.whenReady().then(() => {
       );
     },
     onStatus: broadcastPersonalBrowserStatus,
+    teammateActivity: createFileTeammateActivityStore(
+      path.join(app.getPath("userData"), "personal-browser-teammate-activity.json"),
+      (message) => desktopLog("warn", "[instafy-desktop] personal-browser-teammate-activity", { message }),
+    ),
     logger(level, message, payload) {
       desktopLog(level, message, payload ?? {});
     },

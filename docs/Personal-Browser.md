@@ -96,9 +96,23 @@ This means:
 - a different Instafy user gets a different partition;
 - projects do not receive the cookie database or encryption material;
 - each project still needs its own live control capability and per-origin approval before its agent can read or act on a page;
-- **Clear personal browser data** pauses agent control, navigates to `about:blank`, and clears storage, cache, and HTTP authentication state.
+- **Clear personal browser data** pauses agent control, navigates to `about:blank`, and clears storage, cache, HTTP authentication state and the profile's teammate activity.
 
 The partition is user-scoped, not project-scoped: a login can therefore follow that user between projects on the same device. The stored profile is never exported to teammates, and every project must still receive an explicit session origin approval before its agent can use the logged-in page. Explicitly approved human tab control and Explore use that same logged-in account on this device; share only with people you trust to use it.
+
+### Teammate activity
+
+When a participant takes tab control, or opens Explore, Desktop marks the profile
+and records the host names they visit (at most 20, never paths or page content)
+in `personal-browser-teammate-activity.json` in Desktop's userData folder, keyed
+by the profile's partition. A file that exists but cannot be read counts as a
+mark on every profile. While a profile is marked, a routine run asks per site
+again on every site except the card's hosts the owner allowed in the start
+dialog, because a teammate may have signed in to accounts in it and single
+sign-on can carry that to other sites. The routine start dialog names the
+teammate's sites and offers **Forget teammate activity**; Clear data removes the
+mark too. A teammate cannot approve anything on the owner's device, so the owner
+is always the one asked. Ask mode is unchanged.
 
 This is normal local Electron/Chromium profile storage. Do not describe it as zero-knowledge storage or as importing Chrome's protected profile. Page text returned by a snapshot, and task-relevant content derived from it, can still be sent to the configured AI provider during an agent turn even though cookies remain local.
 

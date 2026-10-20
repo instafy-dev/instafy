@@ -90,3 +90,25 @@ test("Explore waits for the initial page before attaching and setting metrics, t
   page.close();
   assert.equal(destroyed, true);
 });
+
+test("Explore reports each page it loads to the owner's teammate activity", () => {
+  const handlers = new Map();
+  const contents = {
+    loadURL: async () => {},
+    setAudioMuted() {},
+    setWindowOpenHandler() {},
+    on(name, handler) { handlers.set(name, handler); },
+    debugger: { attach() {}, async sendCommand() { return {}; } },
+  };
+  const visits = [];
+  const page = createBrowserTabExplorePage(
+    {},
+    "https://fixture.test/",
+    { width: 390, height: 650, dpr: 2 },
+    () => ({ webContents: contents, setContentSize() {}, isDestroyed: () => false, destroy() {} }),
+    (url) => visits.push(url),
+  );
+  handlers.get("did-navigate")({}, "https://other.test/page");
+  assert.deepEqual(visits, ["https://other.test/page"]);
+  page.close();
+});

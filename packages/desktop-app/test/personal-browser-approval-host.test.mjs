@@ -676,3 +676,87 @@ test("routine: a POST search asks to fill in and submit, Enter in a chat box ask
   assert.equal(dialogs.at(-1).title, "Send a message");
   assert.deepEqual(calls.keys, [[0, "Enter"], [1, "Enter"]]);
 });
+
+// --- Teammate activity in the owner's profile ---
+
+const teammateStore = require(path.join(packageRoot, "dist/personalBrowserTeammateActivity.js"));
+
+function teammateFixture(choose) {
+  const store = teammateStore.createMemoryTeammateActivityStore();
+  const harness = fixture(choose, {}, { teammateActivity: store });
+  harness.host.currentVisible = true;
+  harness.host.view.webContents.getURL = () => "https://bank.example.test/accounts";
+  harness.host.view.webContents.loadURL = async () => {};
+  return { ...harness, store };
+}
+
+function giveTeammateTabControl(host) {
+  const { captureId } = host.startTabShare("owner-fixture");
+  host.controlSharedTab("owner-fixture", captureId, "11111111-2222-4333-8444-555555555555");
+  assert.equal(host.getStatus().tabControlActive, true);
+  host.controlSharedTab("owner-fixture", captureId, null);
+  host.stopTabShare("owner-fixture", captureId);
+}
+
+test("after a teammate had tab control, routine asks for each site except the card's hosts", async () => {
+  const { host, dialogs, store } = teammateFixture();
+  giveTeammateTabControl(host);
+  assert.deepEqual([...store.read("partition-fixture").sites], ["bank.example.test"]);
+
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine", ["example.test"]));
+  const start = dialogs.at(-1);
+  assert.match(start.detail, /A teammate used this browser profile \(sites: bank\.example\.test\)/);
+  assert.equal(start.checkboxLabel, "Forget teammate activity");
+  assert.equal(start.checkboxChecked, false);
+
+  const before = dialogs.length;
+  assert.equal(await host.requestOriginApproval("https://example.test"), true);
+  assert.equal(await host.requestOriginApproval("https://www.example.test"), true);
+  assert.equal(dialogs.length, before, "the card's hosts allowed in the start dialog do not ask");
+  assert.equal(await host.requestOriginApproval("https://bank.example.test"), true);
+  assert.equal(dialogs.length, before + 1, "every other site asks again");
+  assert.match(dialogs.at(-1).detail, /A teammate used this browser profile/);
+  // A redirect to an unapproved site is held as well.
+  const event = { prevented: false, preventDefault() { this.prevented = true; } };
+  host.guardPageNavigation(event, "https://sso.elsewhere.test/login");
+  assert.equal(event.prevented, true);
+});
+
+test("Forget teammate activity in the start dialog brings back routine without site prompts", async () => {
+  const { host, dialogs, store } = teammateFixture(async (options) => ({
+    response: 1,
+    checkboxChecked: options.checkboxLabel === "Forget teammate activity",
+  }));
+  giveTeammateTabControl(host);
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine"));
+  assert.equal(store.read("partition-fixture"), null);
+  const before = dialogs.length;
+  assert.equal(await host.requestOriginApproval("https://bank.example.test"), true);
+  assert.equal(dialogs.length, before);
+});
+
+test("a cancelled start keeps the teammate mark even with Forget ticked", async () => {
+  const { host, store } = teammateFixture(async () => ({ response: 0, checkboxChecked: true }));
+  giveTeammateTabControl(host);
+  await assert.rejects(host.prepareAgentControl("routine"), /not approved/);
+  assert.notEqual(store.read("partition-fixture"), null);
+});
+
+test("Clear data removes the teammate mark", async () => {
+  const { host, store } = teammateFixture();
+  giveTeammateTabControl(host);
+  Object.assign(host.view.webContents, {
+    loadURL: async () => {},
+    navigationHistory: { ...host.view.webContents.navigationHistory, clear() {} },
+    session: { clearStorageData: async () => {}, clearCache: async () => {}, clearAuthCache: async () => {}, flushStorageData() {} },
+  });
+  await host.clearData();
+  assert.equal(store.read("partition-fixture"), null);
+});
+
+test("Ask mode is unchanged by a teammate mark and an unmarked profile has no note", async () => {
+  const { host, dialogs } = teammateFixture();
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine"));
+  assert.equal(dialogs.at(-1).checkboxLabel, undefined);
+  assert.doesNotMatch(dialogs.at(-1).detail, /teammate/);
+});
