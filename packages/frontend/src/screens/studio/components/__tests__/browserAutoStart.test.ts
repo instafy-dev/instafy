@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { ControllerRuntimeStatusEntry } from "../../../../services/runtimeController";
+import type { SharedBrowserHostSnapshot } from "../../../../services/runtimeController/browserSession";
 import type { ChatMessage } from "../../types";
 import {
   BROWSER_AUTO_START_COPY,
@@ -33,6 +34,22 @@ const browserSession = runtime({
   origin: { originId: "origin-1", endpoint: "https://origin.test", protocols: ["http"] } as ControllerRuntimeStatusEntry["origin"],
 });
 
+const MACHINE_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const NOW_MS = Date.parse("2026-10-20T12:00:00Z");
+function lazyHost(overrides: Partial<ControllerRuntimeStatusEntry> = {}): ControllerRuntimeStatusEntry {
+  return runtime({
+    origin: { originId: "origin-space", endpoint: "https://origin.test", protocols: ["http"] } as ControllerRuntimeStatusEntry["origin"],
+    sharedBrowserHost: { version: 1, mode: "lazy" },
+    ...overrides,
+  });
+}
+function readyHost(overrides: Partial<SharedBrowserHostSnapshot> = {}): SharedBrowserHostSnapshot {
+  return {
+    version: 1, mode: "lazy", state: "ready", generation: "gen-1", failure: null, startedByYou: false,
+    othersPresent: false, controlledByOther: false, agentRunActive: false, agentRunStartedByYou: false, ...overrides,
+  };
+}
+
 function plan(overrides: Partial<BrowserAutoStartPlanInput> = {}) {
   return browserAutoStartPlan({
     transport: "shared", personalAvailable: false, personalOwnAi: false, projectId: PROJECT,
@@ -41,12 +58,16 @@ function plan(overrides: Partial<BrowserAutoStartPlanInput> = {}) {
 }
 
 describe("browserAutoStartPlan", () => {
-  it("never opens Instafy's hosted browser by itself, whoever started the session running here", () => {
+  it.each([
+    ["no host policy", {}],
+    ["the policy is off", { sharedBrowserHostPolicy: "off" as const }],
+    ["the space is covered", { sharedBrowserHostPolicy: "covered" as const, conversationRuntimeId: SESSION_ID }],
+  ])("never opens a separate browser session by itself, whoever started it (%s)", (_name, overrides) => {
     // The controller does not record who started a session, so Studio cannot
     // tell the person's own from a teammate's: the card waits for a press.
-    expect(plan({ runtimes: [runtime(), browserSession] }))
+    expect(plan({ runtimes: [runtime(), browserSession], ...overrides }))
       .toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.otherSession });
-    expect(plan({ runtimes: [browserSession] }))
+    expect(plan({ runtimes: [browserSession], ...overrides }))
       .toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.otherSession });
   });
 
@@ -62,6 +83,22 @@ describe("browserAutoStartPlan", () => {
     expect(plan()).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.restartsMachine });
     expect(plan({ runtimes: [runtime(), runtime({ runtimeId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", status: "stopped" })] }))
       .toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.restartsMachine });
+  });
+
+  it("never opens by itself in a covered space whose machine has no browser on demand, or is stopped (row 3)", () => {
+    // A live machine that did not report Instafy's browser on demand (an
+    // older image) would have to restart as the browser.
+    const covered = { sharedBrowserHostPolicy: "covered" as const, conversationRuntimeId: MACHINE_ID, host: readyHost(), hostReadAtMs: NOW_MS, nowMs: NOW_MS };
+    expect(plan({ ...covered, runtimes: [runtime()] }))
+      .toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.restartsMachine });
+    // A stopped machine is never started by itself.
+    expect(plan({ ...covered, runtimes: [lazyHost({ status: "stopped" })] }))
+      .toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.firstMachine });
+    // A live host without an origin, or one that is not the conversation's.
+    expect(plan({ ...covered, runtimes: [lazyHost({ origin: undefined })] }))
+      .toEqual({ kind: "button", reason: null });
+    expect(plan({ ...covered, conversationRuntimeId: "ffffffff-ffff-4fff-8fff-ffffffffffff", runtimes: [lazyHost()] }))
+      .toEqual({ kind: "button", reason: null });
   });
 
   it.each([
@@ -118,6 +155,72 @@ describe("browserAutoStartPlan", () => {
 
   it("writes its copy without em dashes", () => {
     for (const copy of Object.values(BROWSER_AUTO_START_COPY)) expect(copy).not.toMatch(/—/);
+  });
+});
+
+describe("browserAutoStartPlan for Instafy's browser on the conversation's own machine", () => {
+  function hostPlan(overrides: Partial<BrowserAutoStartPlanInput> = {}) {
+    return plan({
+      runtimes: [lazyHost()], sharedBrowserHostPolicy: "covered", conversationRuntimeId: MACHINE_ID,
+      host: readyHost(), hostReadAtMs: NOW_MS - 1_000, nowMs: NOW_MS, ...overrides,
+    });
+  }
+
+  it.each(["idle", "ready", "stopping"] as const)("opens it by itself when it is %s and nobody else has it (row 8)", (state) => {
+    expect(hostPlan({ host: readyHost({ state }) })).toEqual({ kind: "attach", runtimeId: MACHINE_ID });
+  });
+
+  it("opens it while the person's own start is still running, and their own agent run works in it", () => {
+    expect(hostPlan({ host: readyHost({ state: "starting", startedByYou: true }) }))
+      .toEqual({ kind: "attach", runtimeId: MACHINE_ID });
+    expect(hostPlan({ host: readyHost({ agentRunActive: true, agentRunStartedByYou: true }) }))
+      .toEqual({ kind: "attach", runtimeId: MACHINE_ID });
+  });
+
+  it("keeps today's buttons without a covering policy (row 2)", () => {
+    expect(hostPlan({ sharedBrowserHostPolicy: null })).toEqual({ kind: "button", reason: null });
+    expect(hostPlan({ sharedBrowserHostPolicy: undefined })).toEqual({ kind: "button", reason: null });
+    expect(hostPlan({ sharedBrowserHostPolicy: "off", runtimes: [lazyHost({ sharedBrowserHost: undefined })] }))
+      .toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.restartsMachine });
+  });
+
+  it("leaves a separate browser session running beside it to a press (row 4)", () => {
+    expect(hostPlan({ runtimes: [lazyHost(), browserSession] }))
+      .toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.otherSession });
+    expect(hostPlan({ runtimes: [lazyHost(), browserSession, { ...browserSession, runtimeId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" }] }))
+      .toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.severalSessions });
+  });
+
+  it("asks for a fresh reading first when it has none or the last arrived over five seconds ago (row 5)", () => {
+    expect(hostPlan({ host: null, hostReadAtMs: null })).toEqual({ kind: "pending" });
+    expect(hostPlan({ hostReadAtMs: undefined })).toEqual({ kind: "pending" });
+    expect(hostPlan({ hostReadAtMs: NOW_MS - 5_001 })).toEqual({ kind: "pending" });
+    expect(hostPlan({ hostReadAtMs: NOW_MS - 5_000 })).toEqual({ kind: "attach", runtimeId: MACHINE_ID });
+  });
+
+  it("leaves a fresh answer of no browser on that machine to a press", () => {
+    expect(hostPlan({ host: null })).toEqual({ kind: "button", reason: null });
+  });
+
+  it.each([
+    ["poisoned", BROWSER_AUTO_START_COPY.hostPoisoned],
+    ["failed", BROWSER_AUTO_START_COPY.hostFailed],
+    ["unknown", null],
+  ] as const)("leaves a %s browser a button, with the reason (row 6)", (state, reason) => {
+    expect(hostPlan({ host: readyHost({ state }) })).toEqual({ kind: "button", reason });
+  });
+
+  it.each([
+    ["someone else has it open", { othersPresent: true }],
+    ["someone else controls it", { controlledByOther: true }],
+    ["another person's agent run works in it", { agentRunActive: true }],
+    ["someone else is starting it", { state: "starting" as const }],
+  ])("holds the card while %s (row 7)", (_name, overrides) => {
+    expect(hostPlan({ host: readyHost(overrides) })).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.hostInUse });
+  });
+
+  it("never opens Instafy's browser for the browser on this device (row 1)", () => {
+    expect(hostPlan({ transport: "personal", personalAvailable: true, personalOwnAi: true })).toEqual({ kind: "personal" });
   });
 });
 

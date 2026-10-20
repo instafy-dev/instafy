@@ -396,9 +396,11 @@ import {
   browserAutoStartHeldByComposerOrLayout,
   browserAutoStartHeldByOther,
   browserAutoStartPlan,
+  conversationBrowserHostId,
   markBrowserAutoStartDeclined,
   type SharedBrowserPresence,
 } from "./browserAutoStart";
+import { useSharedBrowserHostSnapshot } from "./useSharedBrowserHostSnapshot";
 import { isSkillSetupConversation } from "./skillSetupConversation";
 import { sharedBrowserConversationRunIds } from "./browserHandoffRouting";
 
@@ -534,6 +536,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     runtimeEnsureLimit,
     runtimeStatuses,
     runs,
+    sharedBrowserHostPolicy,
   } = runtimeContext;
   const {
     projectKey: conversationsProjectKey,
@@ -4435,9 +4438,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     agentHandle: typingAgentHandle,
     onSubmit,
   });
-  // Octo opens the browser in the desktop app by itself for its
-  // request_browser cards (useChatBrowserRequest says when); Instafy's hosted
-  // browser waits for a press. These are what that decision reads.
+  // Octo opens the browser in the desktop app, or Instafy's browser on the
+  // conversation's own machine in a covered space, by itself for its
+  // request_browser cards (useChatBrowserRequest and browserAutoStartPlan say
+  // when); any other hosted browser waits for a press. These are what that
+  // decision reads.
   const [sharedBrowserPresence, setSharedBrowserPresence] = useState<SharedBrowserPresence | null>(null);
   // Turns in the browser on this device run on this device's runtime, which
   // Instafy AI does not reach.
@@ -4485,9 +4490,43 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   });
   const personalOwnAi = credentialRequirements.hasDefaultCredential === true;
   const runtimeStatusKey = (runtimeStatuses ?? [])
-    .map((entry) => `${entry.runtimeId}:${entry.status}:${entry.displayName ?? ""}:${entry.origin?.originId ?? ""}`)
+    .map((entry) => `${entry.runtimeId}:${entry.status}:${entry.displayName ?? ""}:${entry.origin?.originId ?? ""}:${entry.sharedBrowserHost?.mode ?? ""}`)
     .join("|");
-  const browserAutoStart: BrowserAutoStartOptions | null = jobThread || !canWriteProject ? null : {
+  const browserAutoStartAllowed = !jobThread && canWriteProject;
+  // Instafy's browser on this conversation's own machine, in a space the
+  // controller covers: Studio reads it to decide whether it may open it by
+  // itself, and reads it again while a card waits on it.
+  const conversationBrowserHostRuntimeId = conversationBrowserHostId({
+    sharedBrowserHostPolicy: sharedBrowserHostPolicy ?? null,
+    conversationRuntimeId: effectiveRuntimeId ?? null,
+    runtimes: runtimeStatuses ?? null,
+  });
+  const [browserAutoWaiting, setBrowserAutoWaiting] = useState(false);
+  // An open Studio made by itself never starts the space's machine; that
+  // lasts until the browser closes or the person presses a card.
+  const [browserAttachOnly, setBrowserAttachOnly] = useState(false);
+  useEffect(() => {
+    if (!browserSessionOpen) setBrowserAttachOnly(false);
+  }, [browserSessionOpen]);
+  const sharedBrowserHost = useSharedBrowserHostSnapshot({
+    projectId: activeProjectId ?? null,
+    runtimeId: conversationBrowserHostRuntimeId,
+    browserSessionId: sharedBrowserSurfaceSessionId,
+    enabled: browserAutoStartAllowed && conversationBrowserHostRuntimeId !== null,
+    poll: browserAutoWaiting,
+  });
+  const sharedBrowserHostKey = sharedBrowserHost.snapshot
+    ? [
+      sharedBrowserHost.snapshot.state,
+      sharedBrowserHost.snapshot.generation ?? "",
+      sharedBrowserHost.snapshot.startedByYou,
+      sharedBrowserHost.snapshot.othersPresent,
+      sharedBrowserHost.snapshot.controlledByOther,
+      sharedBrowserHost.snapshot.agentRunActive,
+      sharedBrowserHost.snapshot.agentRunStartedByYou,
+    ].join(":")
+    : "none";
+  const browserAutoStart: BrowserAutoStartOptions | null = !browserAutoStartAllowed ? null : {
     currentUserId,
     chatClientSessionId,
     activeRunIds: activeConversationRunIds,
@@ -4501,13 +4540,27 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       personalOwnAi,
       projectId: activeProjectId ?? null,
       runtimes: runtimeStatuses ?? null,
+      sharedBrowserHostPolicy: sharedBrowserHostPolicy ?? null,
+      conversationRuntimeId: effectiveRuntimeId ?? null,
+      host: sharedBrowserHost.snapshot,
+      hostReadAtMs: sharedBrowserHost.receivedAtMs,
+      nowMs: Date.now(),
     }),
+    refreshHost: sharedBrowserHost.refresh,
+    presence: sharedBrowserPresence,
     revision: JSON.stringify([
       browserAutoStartBlocked,
       browserHeldByOther,
       runtimeStatusKey,
       personalBrowser.available,
       personalOwnAi,
+      sharedBrowserHostPolicy ?? null,
+      effectiveRuntimeId ?? null,
+      sharedBrowserHostKey,
+      sharedBrowserHost.receivedAtMs,
+      // A failed reading also decides a waiting card again, which stops
+      // reading once the card is too old to open by itself.
+      sharedBrowserHost.failedAtMs,
     ]),
   };
   const browserRequestState = useChatBrowserRequest({
@@ -4522,9 +4575,22 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     personalTurnsAllowed,
     personalReady: personalBrowser.status?.state === "ready",
     sharedReady: Boolean(resolvedBrowserRuntimeId && browserHandoffPage),
+    sharedRuntimeId: resolvedBrowserRuntimeId,
     sharedUnavailable: sharedBrowserCapabilitiesUnsupported,
     agentName: typingAgentDisplayName.replace(/^@/, ""),
-    activate: (transport) => {
+    activate: (transport, plan) => {
+      if (plan?.kind === "attach") {
+        // Studio opens Instafy's browser on the conversation's own machine
+        // by itself: exactly that machine, and never starting it.
+        setBrowserTransport("shared");
+        setSharedBrowserActivated(true);
+        setBrowserAttachOnly(true);
+        resumeBrowserSession(plan.runtimeId);
+        setBrowserSubtab("browser");
+        return;
+      }
+      // A press is the person's own: the browser may start the machine.
+      setBrowserAttachOnly(false);
       // This request selects a session, not a new device-wide preference.
       setBrowserTransport(transport);
       if (transport === "shared") setSharedBrowserActivated(true);
@@ -4538,6 +4604,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     auto: browserAutoStart,
   });
   browserRequestRetryRef.current = browserRequestState.retryContinuation;
+  const browserRequestAutoWaiting = browserRequestState.autoWaiting;
+  useEffect(() => {
+    setBrowserAutoWaiting(browserRequestAutoWaiting);
+  }, [browserRequestAutoWaiting]);
   // A continuation whose dispatch failed continues no card; the failure also
   // sets that card's state, which recomputes this.
   const browserRequestContinued = useMemo(
@@ -6158,6 +6228,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     onStatus={showStatus}
                     ensureSpaceMachine={canWriteProject ? ensureSpaceMachineForBrowser : null}
                     openedByPerson={browserSessionOpenedInPage}
+                    attachOnly={browserAttachOnly}
                     conversationRuntimeId={effectiveRuntimeId ?? null}
                     spaceBusy={spaceRunActive}
                   />

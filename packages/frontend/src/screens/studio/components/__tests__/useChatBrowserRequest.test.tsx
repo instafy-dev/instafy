@@ -9,13 +9,17 @@ import {
 } from "../../../../conversations/sentPromptRegistry";
 import type { ChatMessage } from "../../types";
 import type { ControllerRuntimeStatusEntry } from "../../../../services/runtimeController";
+import type { SharedBrowserHostSnapshot } from "../../../../services/runtimeController/browserSession";
 import {
   BROWSER_AUTO_START_COPY,
   browserAutoStartPlan,
   forgetBrowserAutoStartsForTests,
+  isBrowserAutoStartClaimed,
   markBrowserAutoStartDeclined,
   type BrowserAutoStartPlan,
+  type SharedBrowserPresence,
 } from "../browserAutoStart";
+import type { SharedBrowserHostReading } from "../useSharedBrowserHostSnapshot";
 import { useChatBrowserRequest, type BrowserAutoStartOptions } from "../useChatBrowserRequest";
 
 type Options = Parameters<typeof useChatBrowserRequest>[0];
@@ -259,7 +263,7 @@ describe("Studio starting a request_browser card by itself", () => {
   async function render() {
     await act(async () => root.render(<Harness value={{ ...value, auto: value.auto ? {
       ...auto,
-      revision: JSON.stringify([auto.blocked, auto.heldByOther]),
+      revision: JSON.stringify([auto.blocked, auto.heldByOther, auto.revision]),
     } : null }} />));
   }
   async function advance(ms = 100) { await act(async () => { await vi.advanceTimersByTimeAsync(ms); }); }
@@ -289,6 +293,53 @@ describe("Studio starting a request_browser card by itself", () => {
   async function becomeReady() {
     value.open = true; value.sharedReady = true; value.personalReady = true;
     await render(); await advance();
+  }
+
+  const HOST_ID = "host-runtime";
+  const KNOWN_ALONE: SharedBrowserPresence = { status: "known", othersPresent: false, remoteController: false };
+  function snapshot(overrides: Partial<SharedBrowserHostSnapshot> = {}): SharedBrowserHostSnapshot {
+    return { version: 1, mode: "lazy", state: "ready", generation: "gen-1", failure: null, startedByYou: false,
+      othersPresent: false, controlledByOther: false, agentRunActive: false, agentRunStartedByYou: false, ...overrides };
+  }
+  /**
+   * Instafy's browser on the conversation's own machine in a covered space,
+   * planned by the real browserAutoStartPlan. Each reading changes the
+   * revision, as ChatPanel's does.
+   */
+  function coveredHost(overrides: Partial<SharedBrowserHostSnapshot> = {}) {
+    const now = new Date().toISOString();
+    const runtimes = [{ runtimeId: HOST_ID, status: "ready", provider: "instafy-cloud", displayName: "hosted runtime",
+      health: "online", isLocal: false, lastSeenAt: now, idleTtlSeconds: 900, isPreferred: true, createdAt: now,
+      origin: { originId: "origin-space", endpoint: "https://origin.test", protocols: ["http"] },
+      sharedBrowserHost: { version: 1, mode: "lazy" } }] as ControllerRuntimeStatusEntry[];
+    const host = {
+      snapshot: snapshot(overrides),
+      last: null as SharedBrowserHostReading | null,
+      refreshHost: vi.fn<(options?: { force?: boolean }) => Promise<SharedBrowserHostReading | null>>(async (): Promise<SharedBrowserHostReading | null> => {
+        host.last = { snapshot: host.snapshot, fetchedAtMs: Date.now(), receivedAtMs: Date.now() };
+        auto.revision = String(host.last.fetchedAtMs);
+        return host.last;
+      }),
+    };
+    value.transport = "shared"; value.personalAvailable = false;
+    auto.refreshHost = host.refreshHost;
+    auto.presence = KNOWN_ALONE;
+    plan.mockImplementation((_request, transport) => browserAutoStartPlan({
+      transport: transport as "shared", personalAvailable: value.personalAvailable, personalOwnAi: true,
+      projectId: "project-1", runtimes, sharedBrowserHostPolicy: "covered", conversationRuntimeId: HOST_ID,
+      host: host.last?.snapshot ?? null, hostReadAtMs: host.last?.receivedAtMs ?? null, nowMs: Date.now(),
+    }));
+    return host;
+  }
+  /** The reading a pending plan asked for has landed: decide the card again. */
+  async function settleReading() {
+    await advance(10); await render();
+  }
+  /** The browser opens on the host and shows its first page. */
+  async function openHost(presence: SharedBrowserPresence = KNOWN_ALONE) {
+    auto.presence = presence;
+    value.transport = "shared"; value.open = true; value.sharedReady = true; value.sharedRuntimeId = HOST_ID;
+    await render(); await advance(); await advance();
   }
 
   beforeEach(() => {
@@ -412,9 +463,16 @@ describe("Studio starting a request_browser card by itself", () => {
     ["a browser someone else is using", () => { auto.heldByOther = true; }, BROWSER_AUTO_START_COPY.inUse],
     ["a conversation where the person closed the browser", () => { markBrowserAutoStartDeclined(IDENTITY); }, null],
     ["a person on Instafy AI", () => { plan.mockReturnValue({ kind: "button", reason: BROWSER_AUTO_START_COPY.personalNeedsOwnAi }); }, BROWSER_AUTO_START_COPY.personalNeedsOwnAi],
+    ["a host someone else has open", () => { coveredHost({ othersPresent: true }); }, BROWSER_AUTO_START_COPY.hostInUse],
+    ["a host someone else controls", () => { coveredHost({ controlledByOther: true }); }, BROWSER_AUTO_START_COPY.hostInUse],
+    ["a host another person's run works in", () => { coveredHost({ agentRunActive: true }); }, BROWSER_AUTO_START_COPY.hostInUse],
+    ["a host someone else is starting", () => { coveredHost({ state: "starting" }); }, BROWSER_AUTO_START_COPY.hostInUse],
+    ["a failed host", () => { coveredHost({ state: "failed" }); }, BROWSER_AUTO_START_COPY.hostFailed],
+    ["a poisoned host", () => { coveredHost({ state: "poisoned" }); }, BROWSER_AUTO_START_COPY.hostPoisoned],
   ] as const)("leaves the button for %s, with the reason", async (_name, arrange, reason) => {
     arrange();
     await cardArrives();
+    await settleReading();
     expect(value.activate).not.toHaveBeenCalled();
     expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason });
   });
@@ -439,9 +497,9 @@ describe("Studio starting a request_browser card by itself", () => {
     expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.unseenAddress });
   });
 
-  it("never opens Instafy's hosted browser by itself, even in a session already running here", async () => {
-    // The controller does not record who started a session: it may be a
-    // teammate's, with their pages and sign-ins.
+  it("leaves a legacy browser session a button in a covered space", async () => {
+    // The controller does not record who started a separate session: it may
+    // be a teammate's, with their pages and sign-ins.
     const now = new Date().toISOString();
     const runtimes = [{ runtimeId: "session-1", status: "ready", provider: "instafy-cloud", displayName: "Browser session",
       health: "online", isLocal: false, lastSeenAt: now, idleTtlSeconds: 900, isPreferred: false, createdAt: now,
@@ -449,12 +507,33 @@ describe("Studio starting a request_browser card by itself", () => {
     value.transport = "shared"; value.personalAvailable = false;
     plan.mockImplementation((_request, transport) => browserAutoStartPlan({
       transport: transport as "shared", personalAvailable: false, personalOwnAi: true, projectId: "project-1", runtimes,
+      sharedBrowserHostPolicy: "covered", conversationRuntimeId: "session-1",
     }));
     await cardArrives();
     await becomeReady();
     expect(value.activate).not.toHaveBeenCalled();
     expect(value.continueTask).not.toHaveBeenCalled();
     expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.otherSession });
+  });
+
+  it.each(["idle", "ready"] as const)("attaches to the host on the conversation's machine when it is %s, and sends once it is ready", async (state) => {
+    const host = coveredHost({ state });
+    await cardArrives();
+    // The first decision has no reading yet: it reads the browser and waits.
+    expect(value.activate).not.toHaveBeenCalled();
+    expect(host.refreshHost).toHaveBeenCalledWith();
+    await settleReading();
+    expect(value.activate).toHaveBeenCalledExactlyOnceWith("shared", { kind: "attach", runtimeId: HOST_ID });
+    expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "opening", note: null });
+    host.snapshot = snapshot({ state: "ready", startedByYou: state === "idle" });
+    await openHost();
+    expect(host.refreshHost).toHaveBeenCalledWith({ force: true });
+    expect(value.continueTask).toHaveBeenCalledExactlyOnceWith("shared", expect.stringContaining(TASK), {
+      display: "Octo opened Instafy's browser at app.example.test",
+      metadata: { browserRequestOf: "job:job-1", browserAutoStarted: true },
+      knownHosts: ["app.example.test"],
+    });
+    expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "opened" });
   });
 
   it("claims each card once across remounts and starts one card per conversation in ten minutes", async () => {
@@ -490,6 +569,184 @@ describe("Studio starting a request_browser card by itself", () => {
     await becomeReady();
     expect(value.continueTask).not.toHaveBeenCalled();
     expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.inUse });
+  });
+
+  it.each([
+    ["someone else opened the host meanwhile", { othersPresent: true }, null],
+    ["someone else took control of the host", { controlledByOther: true }, null],
+    ["the roster shows another controller", {}, { status: "known", othersPresent: true, remoteController: true }],
+  ] as const)("refuses an attach only on a known conflict: %s", async (_name, conflict, presence) => {
+    const host = coveredHost();
+    await cardArrives(); await settleReading();
+    expect(value.activate).toHaveBeenCalledTimes(1);
+    host.snapshot = snapshot(conflict);
+    await openHost(presence ?? undefined);
+    expect(value.continueTask).not.toHaveBeenCalled();
+    expect(value.onError).toHaveBeenCalledWith(BROWSER_AUTO_START_COPY.inUse);
+    expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.inUse });
+  });
+
+  it("drops an attach when the browser moves to another machine before the task is sent", async () => {
+    coveredHost();
+    auto.presence = { status: "unknown", othersPresent: false, remoteController: false };
+    await cardArrives(); await settleReading();
+    value.transport = "shared"; value.open = true; value.sharedReady = true; value.sharedRuntimeId = HOST_ID;
+    await render(); await advance();
+    expect(value.continueTask).not.toHaveBeenCalled();
+    value.sharedRuntimeId = "other-runtime";
+    await render(); await advance();
+    expect(value.continueTask).not.toHaveBeenCalled();
+    expect(value.onError).toHaveBeenCalledWith("The browser or conversation changed before this task could continue.");
+  });
+
+  it("waits for the browser to show the attached machine instead of sending to another one", async () => {
+    const host = coveredHost();
+    await cardArrives(); await settleReading();
+    // Still on another machine: it waits, and never sends there.
+    value.transport = "shared"; value.open = true; value.sharedReady = true; value.sharedRuntimeId = "other-runtime";
+    auto.presence = KNOWN_ALONE;
+    await render(); await advance(1_000);
+    expect(value.continueTask).not.toHaveBeenCalled();
+    expect(value.onError).not.toHaveBeenCalled();
+    expect(host.refreshHost).not.toHaveBeenCalledWith({ force: true });
+    value.sharedRuntimeId = HOST_ID;
+    await render(); await advance();
+    expect(value.continueTask).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends the task when the roster connects 300 ms after the first page", async () => {
+    const host = coveredHost();
+    await cardArrives(); await settleReading();
+    auto.presence = { status: "unknown", othersPresent: false, remoteController: false };
+    value.transport = "shared"; value.open = true; value.sharedReady = true; value.sharedRuntimeId = HOST_ID;
+    await render(); await advance(100);
+    expect(value.continueTask).not.toHaveBeenCalled();
+    await advance(200);
+    auto.presence = KNOWN_ALONE;
+    await render(); await advance(200);
+    expect(host.refreshHost).toHaveBeenCalledWith({ force: true });
+    expect(value.continueTask).toHaveBeenCalledTimes(1);
+    expect(value.onError).not.toHaveBeenCalled();
+  });
+
+  it("reads the host again, forced, when the last reading is from before the browser opened or not ready yet", async () => {
+    const host = coveredHost({ state: "idle" });
+    await cardArrives(); await settleReading();
+    // The forced readings after the open still show it starting.
+    host.snapshot = snapshot({ state: "starting", startedByYou: true });
+    await openHost();
+    expect(value.continueTask).not.toHaveBeenCalled();
+    const forcedBefore = host.refreshHost.mock.calls.filter(([options]) => options?.force).length;
+    expect(forcedBefore).toBeGreaterThan(0);
+    host.snapshot = snapshot({ state: "ready", startedByYou: true });
+    await advance(1_100);
+    expect(host.refreshHost.mock.calls.filter(([options]) => options?.force).length).toBeGreaterThan(forcedBefore);
+    expect(value.continueTask).toHaveBeenCalledTimes(1);
+  });
+
+  it("never sends on a reading from before the browser opened", async () => {
+    const host = coveredHost();
+    await cardArrives(); await settleReading();
+    // The refresh keeps answering with the reading taken before the open.
+    const stale = host.last!;
+    host.refreshHost.mockImplementation(async () => stale);
+    await openHost();
+    await advance(5_000);
+    expect(value.continueTask).not.toHaveBeenCalled();
+    expect(host.refreshHost).toHaveBeenCalledWith({ force: true });
+  });
+
+  it("times out, not as in use, when the roster never connects", async () => {
+    coveredHost();
+    await cardArrives(); await settleReading();
+    auto.presence = { status: "unknown", othersPresent: false, remoteController: false };
+    value.transport = "shared"; value.open = true; value.sharedReady = true; value.sharedRuntimeId = HOST_ID;
+    await render();
+    await advance(119_000);
+    expect(value.onError).not.toHaveBeenCalled();
+    await advance(1_200);
+    expect(value.onError).toHaveBeenCalledWith(BROWSER_AUTO_START_COPY.timedOut);
+    expect(value.continueTask).not.toHaveBeenCalled();
+    expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.timedOut });
+  });
+
+  it("says the roster could not connect when it stays unavailable until the deadline", async () => {
+    coveredHost();
+    await cardArrives(); await settleReading();
+    await openHost({ status: "unavailable", othersPresent: false, remoteController: false });
+    await advance(121_000);
+    expect(value.onError).toHaveBeenCalledWith(BROWSER_AUTO_START_COPY.presenceUnavailable);
+    expect(value.continueTask).not.toHaveBeenCalled();
+    expect(lastState?.cardStates.get("job:job-1"))
+      .toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.presenceUnavailable });
+  });
+
+  it("ends the wait at the deadline when a forced reading never answers", async () => {
+    const host = coveredHost();
+    await cardArrives(); await settleReading();
+    host.refreshHost.mockImplementation(() => new Promise(() => {}));
+    await openHost();
+    expect(host.refreshHost).toHaveBeenCalledWith({ force: true });
+    await advance(119_000);
+    expect(value.onError).not.toHaveBeenCalled();
+    await advance(1_200);
+    expect(value.onError).toHaveBeenCalledWith(BROWSER_AUTO_START_COPY.timedOut);
+    expect(value.continueTask).not.toHaveBeenCalled();
+    expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.timedOut });
+  });
+
+  it("stops waiting on the host once the card is too old to open, while every reading fails", async () => {
+    const host = coveredHost();
+    // Each failed reading changes the revision, as ChatPanel's failedAtMs does.
+    host.refreshHost.mockImplementation(async () => {
+      auto.revision = `failed:${Date.now()}`;
+      return null;
+    });
+    await cardArrives();
+    await settleReading();
+    expect(lastState?.autoWaiting).toBe(true);
+    for (let elapsed = 0; elapsed <= 10 * 60_000; elapsed += 10_000) {
+      await advance(10_000);
+      await act(async () => { await host.refreshHost(); });
+      await render();
+    }
+    expect(lastState?.autoWaiting).toBe(false);
+    expect(value.activate).not.toHaveBeenCalled();
+  });
+
+  it("never claims a card while it waits for a reading of the host", async () => {
+    const host = coveredHost();
+    host.refreshHost.mockImplementation(async () => null);
+    await cardArrives();
+    await advance(5_000);
+    expect(host.refreshHost).toHaveBeenCalled();
+    expect(value.activate).not.toHaveBeenCalled();
+    expect(isBrowserAutoStartClaimed("job:job-1")).toBe(false);
+    expect(lastState?.autoWaiting).toBe(true);
+  });
+
+  it("decides a held card again after the next reading", async () => {
+    const host = coveredHost({ othersPresent: true });
+    await cardArrives(); await settleReading();
+    expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.hostInUse });
+    expect(lastState?.autoWaiting).toBe(true);
+    expect(isBrowserAutoStartClaimed("job:job-1")).toBe(false);
+    host.snapshot = snapshot();
+    await advance(3_000);
+    await act(async () => { await host.refreshHost(); });
+    await render();
+    expect(value.activate).toHaveBeenCalledExactlyOnceWith("shared", { kind: "attach", runtimeId: HOST_ID });
+    expect(lastState?.autoWaiting).toBe(false);
+  });
+
+  it("does not hold a card for the browser on this device while a teammate views the host", async () => {
+    // Who is in Instafy's browser says nothing about the browser on this
+    // device: the plan holds only Instafy's browser for it.
+    coveredHost({ othersPresent: true, controlledByOther: true });
+    value.transport = "personal"; value.personalAvailable = true;
+    auto.presence = { status: "known", othersPresent: true, remoteController: false };
+    await cardArrives(); await settleReading();
+    expect(value.activate).toHaveBeenCalledExactlyOnceWith("personal", PERSONAL);
   });
 
   it.each([

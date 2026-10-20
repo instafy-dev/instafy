@@ -775,10 +775,12 @@ and schedules are created through the normal automation flow. When a skill decla
 address where the person signs in to the provider, the setup also offers once, beside the
 secret cards, the **Open browser and continue** card: pressing it opens Instafy's browser at
 that address and walks to the screen that lists the value. Studio presses it by itself only
-in the desktop app, for a person on their own AI connection, and only once a reply has shown
-that address (see [Browser Profiles](Browser-Profiles.md)); on the web nothing opens before
-the press. The card names the host it opens. The person signs in themselves: the walk pauses at
-the sign-in, they sign in on the page and choose **Let AI continue**, and the agent types no
+once a reply has shown that address, and only in the desktop app for a person on their own
+AI connection, or in Instafy's browser on the conversation's own machine in a space the
+controller covers, while nobody else is using that browser (see
+[Browser Profiles](Browser-Profiles.md)); everywhere else nothing opens before the press.
+The card names the host it opens. The person signs in themselves: the walk pauses at the
+sign-in, they sign in on the page and choose **Let AI continue**, and the agent types no
 credential. The walk stops on that list: the agent is told never to open, or ask the person
 to open, a screen in Instafy's browser that shows the value itself, because others watching
 that browser can see it, it often cannot be copied out, and a browser turn starts from a
@@ -789,8 +791,9 @@ browser is shown, so each reply continues the setup instead of starting another 
 the walk goes on only through the browser's own controls (see
 [Browser Profiles](Browser-Profiles.md)). A skill that declares no address gets no browser;
 one that declares several (such as live and demo) gets it once the person has picked one. The
-walk does not depend on the runtime running the chat turn, since Instafy's browser starts as
-a runtime of its own; the card's button is disabled, with the reason, only where Studio knows
+walk does not depend on the runtime running the chat turn, since Instafy's browser starts
+on demand, on the space's own machine or as a runtime of its own; the card's button is
+disabled, with the reason, only where Studio knows
 no browser can open. A card's own where-to-get line still names a screen, never an address. Every later turn in that chat,
 including one that only saves a file the setup asked for, picks the setup up at its next
 question until the section is done. An opener the runtime answered without the model, such as
