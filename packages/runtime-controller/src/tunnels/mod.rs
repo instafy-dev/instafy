@@ -40,6 +40,17 @@ use crate::{
 
 pub(crate) const ACTIVE_JOB_TUNNEL_METADATA_KEY: &str = "_instafyActiveJob";
 pub(crate) const ACTIVE_JOB_TUNNEL_SOURCE: &str = "instafy-cli";
+/// Grant metadata the previews module owns: `{ visibility, path, title,
+/// conversationId, tunnelKey, messageIds, messageId }`. A grant is a preview
+/// when it has this object.
+pub(crate) const PREVIEW_TUNNEL_METADATA_KEY: &str = "_instafyPreview";
+/// Grant metadata keys only the controller writes. Clients and the broker
+/// can neither set nor drop them through the generic tunnel routes: the
+/// active job marker decides which job may manage a grant, and the preview
+/// object decides what a preview is, where its viewers land and which card a
+/// run gets. Every other metadata name stays free for clients.
+pub(crate) const CONTROLLER_OWNED_METADATA_KEYS: [&str; 2] =
+    [ACTIVE_JOB_TUNNEL_METADATA_KEY, PREVIEW_TUNNEL_METADATA_KEY];
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ActiveJobTunnelBinding {
@@ -873,9 +884,7 @@ async fn post_tunnel_request(
 
     let mut metadata_map = body.metadata;
     if let Some(JsonValue::Object(map)) = metadata_map.as_mut() {
-        map.remove(ACTIVE_JOB_TUNNEL_METADATA_KEY);
-        // Only the previews module may mark a grant as a preview.
-        for key in PREVIEW_RESERVED_METADATA_KEYS {
+        for key in CONTROLLER_OWNED_METADATA_KEYS {
             map.remove(key);
         }
     }
@@ -1384,15 +1393,20 @@ async fn insert_runtime_tunnel_grant(
                    status = excluded.status,
                    expires_at = excluded.expires_at,
                    metadata = case
-                     when excluded.metadata->>'kind' = 'preview'
-                      and runtime_tunnel_grants.metadata->>'kind' = 'preview'
+                     when jsonb_typeof(excluded.metadata->'_instafyPreview') = 'object'
+                      and jsonb_typeof(runtime_tunnel_grants.metadata->'_instafyPreview') = 'object'
                       and lower(btrim(runtime_tunnel_grants.status)) not in ('revoked', 'expired', 'failed')
                       and runtime_tunnel_grants.expires_at > now()
-                      and runtime_tunnel_grants.metadata->'title' is not distinct from excluded.metadata->'title'
-                      and runtime_tunnel_grants.metadata->'path' is not distinct from excluded.metadata->'path'
-                     then excluded.metadata || jsonb_strip_nulls(jsonb_build_object(
-                       'messageIds', runtime_tunnel_grants.metadata->'messageIds',
-                       'messageId', runtime_tunnel_grants.metadata->'messageId'))
+                      and runtime_tunnel_grants.metadata->'_instafyPreview'->'title'
+                          is not distinct from excluded.metadata->'_instafyPreview'->'title'
+                      and runtime_tunnel_grants.metadata->'_instafyPreview'->'path'
+                          is not distinct from excluded.metadata->'_instafyPreview'->'path'
+                     then jsonb_set(
+                       excluded.metadata,
+                       '{_instafyPreview}',
+                       (excluded.metadata->'_instafyPreview') || jsonb_strip_nulls(jsonb_build_object(
+                         'messageIds', runtime_tunnel_grants.metadata->'_instafyPreview'->'messageIds',
+                         'messageId', runtime_tunnel_grants.metadata->'_instafyPreview'->'messageId')))
                      else coalesce(excluded.metadata, runtime_tunnel_grants.metadata)
                    end
              returning *",
@@ -1538,7 +1552,7 @@ async fn update_tunnel_status_record(
         .map_err(|error| internal_error(format!("failed to acquire connection: {error}")))?;
 
     let normalized_status = normalize_tunnel_status(status);
-    let metadata_param = protect_preview_metadata(record.metadata.as_ref(), metadata_override);
+    let metadata_param = protect_controller_metadata(record.metadata.as_ref(), metadata_override);
     let row = connection
         .query_one(
             "update runtime_tunnel_grants
@@ -2038,7 +2052,8 @@ async fn revoke_tunnel_grant(
         }
     }
 
-    let metadata_override = protect_preview_metadata(record.metadata.as_ref(), metadata_override);
+    let metadata_override =
+        protect_controller_metadata(record.metadata.as_ref(), metadata_override);
     let updated = update_runtime_tunnel_grant_status(
         &state.pool,
         &record.id,
@@ -2911,57 +2926,51 @@ async fn ensure_tunnel_entitlement(
     Ok(JsonValue::Object(entitlement))
 }
 
-/// Grant metadata keys the previews module owns. The previews routes trust
-/// them (`kind` and `visibility` decide what a grant is, `path` is appended
-/// to the viewer host, `messageIds` decides which card a run gets, and
-/// `tunnelKey` is the broker key a re-open reuses), so the generic tunnel
-/// routes never let a client set or drop them.
-pub(crate) const PREVIEW_RESERVED_METADATA_KEYS: [&str; 8] = [
-    "kind",
-    "visibility",
-    "path",
-    "title",
-    "messageIds",
-    "messageId",
-    "conversationId",
-    "tunnelKey",
-];
-
 /// Keys a preview's stored metadata keeps through a revoke or status update:
 /// the port is what the card shows and what a re-open of the same port
 /// matches on (the generic request route sets these when a tunnel is opened,
-/// so they are not reserved there).
+/// so they are not controller-owned there).
 const PREVIEW_PINNED_METADATA_KEYS: [&str; 2] = ["localPort", "source"];
 
-/// A client's metadata override for a revoke or status update. On a preview
-/// it is merged into the stored metadata without touching the reserved keys;
-/// on any other grant it replaces it, as before. `None` keeps the stored
-/// metadata as it is.
-fn protect_preview_metadata(
+/// A client's metadata override for a revoke or status update. On every
+/// grant, the override can neither set nor drop a controller-owned key: those
+/// keep their stored values. On a preview the rest is merged into the stored
+/// metadata, keeping its port and source too; on any other grant the rest
+/// replaces it, as before. `None` keeps the stored metadata as it is.
+fn protect_controller_metadata(
     existing: Option<&JsonValue>,
     metadata_override: Option<&JsonValue>,
 ) -> Option<JsonValue> {
     let metadata_override = metadata_override?;
-    let Some(existing) = existing
-        .filter(|metadata| crate::previews::grant_metadata_is_preview(Some(metadata)))
-        .and_then(JsonValue::as_object)
-    else {
-        return Some(metadata_override.clone());
-    };
+    let existing = existing.and_then(JsonValue::as_object);
+    let owned = |key: &str| CONTROLLER_OWNED_METADATA_KEYS.contains(&key);
     let JsonValue::Object(map) = metadata_override else {
-        return None;
+        // Not an object: replacing would drop the stored owned keys.
+        let holds_owned = existing.is_some_and(|existing| existing.keys().any(|key| owned(key)));
+        return (!holds_owned).then(|| metadata_override.clone());
     };
-    // A preview keeps what the previews module stored (its port and source
-    // too); the override only adds notes such as a stop reason.
-    let mut merged = existing.clone();
+    let is_preview = existing
+        .and_then(|existing| existing.get(PREVIEW_TUNNEL_METADATA_KEY))
+        .is_some_and(JsonValue::is_object);
+    let mut protected = if is_preview {
+        existing.cloned().unwrap_or_default()
+    } else {
+        JsonMap::new()
+    };
     for (key, value) in map {
-        if !PREVIEW_RESERVED_METADATA_KEYS.contains(&key.as_str())
-            && !PREVIEW_PINNED_METADATA_KEYS.contains(&key.as_str())
-        {
-            merged.insert(key.clone(), value.clone());
+        if owned(key) || (is_preview && PREVIEW_PINNED_METADATA_KEYS.contains(&key.as_str())) {
+            continue;
+        }
+        protected.insert(key.clone(), value.clone());
+    }
+    if let Some(existing) = existing {
+        for key in CONTROLLER_OWNED_METADATA_KEYS {
+            if let Some(value) = existing.get(key) {
+                protected.insert(key.to_string(), value.clone());
+            }
         }
     }
-    Some(JsonValue::Object(merged))
+    Some(JsonValue::Object(protected))
 }
 
 fn compose_tunnel_metadata(
@@ -2982,7 +2991,7 @@ fn compose_tunnel_metadata(
     }
     if let Some(JsonValue::Object(map)) = provider_metadata {
         for (key, value) in map {
-            if key == ACTIVE_JOB_TUNNEL_METADATA_KEY {
+            if CONTROLLER_OWNED_METADATA_KEYS.contains(&key.as_str()) {
                 continue;
             }
             root.insert(key.clone(), value.clone());
@@ -3541,6 +3550,67 @@ mod tests {
     }
 
     #[test]
+    fn status_and_revoke_overrides_never_set_or_drop_controller_owned_metadata() {
+        let marker = json!({ "jobId": Uuid::new_v4(), "runId": Uuid::new_v4() });
+        let preview = json!({ "visibility": "private", "path": "/", "title": "Site" });
+        let forged = json!({ "visibility": "private", "path": "@evil.example" });
+
+        // An ordinary grant: the override replaces the rest, as before, but
+        // cannot become a preview or change its job.
+        let plain = json!({ "purpose": "web", (ACTIVE_JOB_TUNNEL_METADATA_KEY): marker });
+        let updated = protect_controller_metadata(
+            Some(&plain),
+            Some(&json!({
+                "note": "kept",
+                (PREVIEW_TUNNEL_METADATA_KEY): forged,
+                (ACTIVE_JOB_TUNNEL_METADATA_KEY): { "jobId": Uuid::new_v4() },
+            })),
+        )
+        .expect("override applies");
+        assert_eq!(
+            updated,
+            json!({ "note": "kept", (ACTIVE_JOB_TUNNEL_METADATA_KEY): marker })
+        );
+        let unbound = protect_controller_metadata(
+            Some(&json!({ "purpose": "web" })),
+            Some(&json!({ (PREVIEW_TUNNEL_METADATA_KEY): forged })),
+        )
+        .expect("override applies");
+        assert_eq!(unbound, json!({}));
+
+        // A preview keeps its object, port and source; notes merge in.
+        let stored = json!({
+            "localPort": 4173,
+            "source": "instafy-cli",
+            (PREVIEW_TUNNEL_METADATA_KEY): preview,
+        });
+        let updated = protect_controller_metadata(
+            Some(&stored),
+            Some(&json!({
+                "localPort": 9222,
+                "autoRevokedSource": "sweep",
+                (PREVIEW_TUNNEL_METADATA_KEY): null,
+            })),
+        )
+        .expect("override applies");
+        assert_eq!(updated["localPort"], json!(4173));
+        assert_eq!(updated["autoRevokedSource"], "sweep");
+        assert_eq!(updated[PREVIEW_TUNNEL_METADATA_KEY], preview);
+
+        // A non-object override would drop owned keys, so it is ignored;
+        // no override keeps the stored metadata.
+        assert_eq!(
+            protect_controller_metadata(Some(&stored), Some(&json!("x"))),
+            None
+        );
+        assert_eq!(
+            protect_controller_metadata(Some(&json!({})), Some(&json!("x"))),
+            Some(json!("x"))
+        );
+        assert_eq!(protect_controller_metadata(Some(&stored), None), None);
+    }
+
+    #[test]
     fn tunnel_event_payload_marks_previews_without_their_metadata() {
         let record = |metadata: JsonValue| RuntimeTunnelGrantRecord {
             id: Uuid::new_v4(),
@@ -3556,15 +3626,21 @@ mod tests {
             metadata: Some(metadata),
         };
 
-        let preview = tunnel_event_payload(&record(
-            json!({ "kind": "preview", "title": "Site preview" }),
-        ));
+        let preview = tunnel_event_payload(&record(json!({
+            (PREVIEW_TUNNEL_METADATA_KEY): { "visibility": "private", "title": "Site preview" },
+        })));
         assert_eq!(preview["kind"], "preview");
         assert!(preview.get("metadata").is_none());
         assert!(!preview.to_string().contains("Site preview"));
 
-        let plain = tunnel_event_payload(&record(json!({ "purpose": "origin" })));
-        assert!(plain.get("kind").is_none());
+        // A client's own `kind` is ordinary metadata, not a preview.
+        for metadata in [
+            json!({ "purpose": "origin" }),
+            json!({ "kind": "preview", "title": "My tunnel" }),
+        ] {
+            let plain = tunnel_event_payload(&record(metadata));
+            assert!(plain.get("kind").is_none(), "{plain}");
+        }
     }
 
     #[tokio::test]

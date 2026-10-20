@@ -49,6 +49,7 @@ use crate::tunnels::{
     resolve_canonical_tunnel_runtime_id, revoke_tunnel_record, runtime_tunnel_grant_from_row,
     tunnel_status_is_active, RuntimeTunnelGenerationState, RuntimeTunnelGrantRecord, TunnelProbe,
     TunnelRequestOverrides, ACTIVE_JOB_TUNNEL_METADATA_KEY, ACTIVE_JOB_TUNNEL_SOURCE,
+    PREVIEW_TUNNEL_METADATA_KEY,
 };
 use crate::{
     bad_request, forbidden, internal_error, load_project_record, not_found, too_many_requests,
@@ -78,8 +79,14 @@ const PREVIEWS_PER_RUNTIME: i64 = 16;
 /// Preview opens (new ports and re-opens) per runtime per minute.
 const PREVIEW_OPENS_PER_MINUTE: usize = 30;
 const PREVIEW_MIN_PORT: i64 = 1024;
-/// VNC, the egress proxy, CDP, the origin and the runtime's own Postgres.
-/// `PREVIEW_DENY_PORTS` adds to these; it never removes one.
+/// The runtime's own services at their default ports: VNC (5900,
+/// `INSTAFY_VNC_PORT`), the OpenAI proxy (8789), Chrome DevTools (9222 and
+/// the Playwright CDP port 9223, `INSTAFY_PLAYWRIGHT_CDP_PORT`), the WebRTC
+/// sender (9225), the browser egress proxy (9226,
+/// `INSTAFY_BROWSER_EGRESS_PROXY_BIND`), personal-browser control (43127)
+/// and the origin server (54332, `ORIGIN_BIND_PORT`). An operator who moves
+/// one of these adds its new port to `PREVIEW_DENY_PORTS`, which adds to this
+/// list and never removes from it.
 const PREVIEW_DENIED_PORTS: [u16; 8] = [5900, 8789, 9222, 9223, 9225, 9226, 43127, 54332];
 const PREVIEW_TITLE_MAX_CHARS: usize = 120;
 const PREVIEW_PATH_MAX_CHARS: usize = 512;
@@ -145,14 +152,24 @@ fn previews_unavailable() -> (StatusCode, Json<ApiError>) {
     )
 }
 
-/// The viewer origin, once previews are configured here and the tunnel
-/// broker says it serves private previews for the same domain (its
-/// `GET /capabilities`, cached). Anything else is 503 `previews_unavailable`
-/// before a route reads or writes a grant: an older broker ignores the
-/// private labels and would publish the site on a public tunnel host.
+/// The viewer origin, once previews are configured here, the broker can ask
+/// about viewers (`TUNNEL_BROKER_HOOK_SECRET`), and the tunnel broker says it
+/// serves private previews for the same domain (its `GET /capabilities`,
+/// cached). Anything else is 503 `previews_unavailable` before a route reads
+/// or writes a grant: an older broker ignores the private labels and would
+/// publish the site on a public tunnel host, and without the hook secret
+/// every viewer would be refused.
 async fn ensure_previews_available(state: &AppState) -> ApiResult<PreviewOrigin> {
     let origin =
         PreviewOrigin::from_settings(&state.config.previews).ok_or_else(previews_unavailable)?;
+    let hook_secret_set = state
+        .config
+        .tunnel_broker_hook_secret
+        .as_deref()
+        .is_some_and(|secret| !secret.trim().is_empty());
+    if !hook_secret_set {
+        return Err(previews_unavailable());
+    }
     let broker = state
         .tunnel_broker
         .as_ref()
@@ -271,6 +288,17 @@ impl PreviewCaller {
     }
 }
 
+/// The person a runtime token acts for, if any. A leased runtime's token
+/// carries the controller's own service subject, which is no person: such a
+/// token may only post into shared conversations.
+fn machine_subject_user_id(subject: &str, service_runtime_user_id: Option<Uuid>) -> Option<Uuid> {
+    if crate::runtime::runtime_token_subject_is_controller_service(subject, service_runtime_user_id)
+    {
+        return None;
+    }
+    Uuid::parse_str(subject.trim()).ok()
+}
+
 async fn identify_preview_caller(
     state: &AppState,
     headers: &HeaderMap,
@@ -286,7 +314,10 @@ async fn identify_preview_caller(
         return Ok(PreviewCaller::Machine {
             runtime_id: binding.runtime_id,
             runtime_lease_id: binding.runtime_lease_id,
-            subject_user_id: Uuid::parse_str(claims.sub.trim()).ok(),
+            subject_user_id: machine_subject_user_id(
+                &claims.sub,
+                state.config.service_runtime_user_id,
+            ),
         });
     }
     let binding = authorize_active_job_tunnel(state, &context, project_id).await?;
@@ -318,14 +349,21 @@ impl PreviewGrant {
         self.record.metadata.as_ref().and_then(JsonValue::as_object)
     }
 
-    fn metadata_str(&self, key: &str) -> Option<&str> {
+    /// The previews module's own object in the grant metadata.
+    fn preview_metadata(&self) -> Option<&JsonMap<String, JsonValue>> {
         self.metadata()
+            .and_then(|metadata| metadata.get(PREVIEW_TUNNEL_METADATA_KEY))
+            .and_then(JsonValue::as_object)
+    }
+
+    fn preview_str(&self, key: &str) -> Option<&str> {
+        self.preview_metadata()
             .and_then(|metadata| metadata.get(key))
             .and_then(JsonValue::as_str)
     }
 
     fn title(&self) -> String {
-        self.metadata_str("title").unwrap_or("Preview").to_string()
+        self.preview_str("title").unwrap_or("Preview").to_string()
     }
 
     fn port(&self) -> u16 {
@@ -337,12 +375,12 @@ impl PreviewGrant {
     }
 
     fn path(&self) -> String {
-        self.metadata_str("path").unwrap_or("/").to_string()
+        self.preview_str("path").unwrap_or("/").to_string()
     }
 
     fn is_private_preview(&self) -> bool {
         grant_metadata_is_preview(self.record.metadata.as_ref())
-            && self.metadata_str("visibility") == Some(PREVIEW_VISIBILITY)
+            && self.preview_str("visibility") == Some(PREVIEW_VISIBILITY)
     }
 
     /// Active, not past its broker expiry.
@@ -367,7 +405,7 @@ impl PreviewGrant {
 
     /// The card of the run that last made this preview ready, else any card.
     fn message_id(&self) -> Option<String> {
-        let metadata = self.metadata()?;
+        let metadata = self.preview_metadata()?;
         if let Some(message_id) = metadata.get("messageId").and_then(JsonValue::as_str) {
             return Some(message_id.to_string());
         }
@@ -393,12 +431,12 @@ impl PreviewGrant {
     }
 }
 
-/// Whether grant metadata belongs to a preview (`kind: "preview"`).
+/// Whether grant metadata belongs to a preview: it holds the previews
+/// module's own object, which only the controller writes.
 pub(crate) fn grant_metadata_is_preview(metadata: Option<&JsonValue>) -> bool {
     metadata
-        .and_then(|metadata| metadata.get("kind"))
-        .and_then(JsonValue::as_str)
-        == Some(PREVIEW_KIND)
+        .and_then(|metadata| metadata.get(PREVIEW_TUNNEL_METADATA_KEY))
+        .is_some_and(JsonValue::is_object)
 }
 
 async fn load_preview_grant(
@@ -633,7 +671,7 @@ async fn revoke_sessions_of_stopped_previews(
                  from runtime_tunnel_grants
                  where project_id = $1
                    and runtime_id = $2
-                   and metadata->>'kind' = 'preview'
+                   and jsonb_typeof(metadata->'_instafyPreview') = 'object'
                    and metadata->'localPort' = to_jsonb($3::int)
                    and (lower(btrim(status)) in ('revoked', 'expired', 'failed')
                         or expires_at <= now())
@@ -751,26 +789,32 @@ async fn post_preview(
     let tunnel_key = preview_tunnel_key(&runtime_id, port);
     ensure_preview_capacity(&state, &project_id, &runtime_id, &tunnel_key).await?;
 
+    // What the preview routes trust lives in one controller-owned object
+    // the generic tunnel routes can neither set nor drop.
+    let mut preview = JsonMap::new();
+    preview.insert("visibility".to_string(), json!(PREVIEW_VISIBILITY));
+    preview.insert("path".to_string(), json!(path));
+    preview.insert("title".to_string(), json!(title));
+    // The grant upsert carries the cards of a still-live preview with the
+    // same title and path over; anything else gets a card of its own.
+    preview.insert("messageIds".to_string(), json!({}));
+    if let Some(conversation_id) = conversation_id {
+        preview.insert("conversationId".to_string(), json!(conversation_id));
+    }
+    preview.insert("tunnelKey".to_string(), json!(tunnel_key));
     let mut metadata = JsonMap::new();
-    metadata.insert("kind".to_string(), json!(PREVIEW_KIND));
-    metadata.insert("visibility".to_string(), json!(PREVIEW_VISIBILITY));
     metadata.insert("localPort".to_string(), json!(port));
-    metadata.insert("path".to_string(), json!(path));
-    metadata.insert("title".to_string(), json!(title));
     metadata.insert(
         "source".to_string(),
         json!(preview_source(body.metadata.as_ref())),
     );
-    // The grant upsert carries the cards of a still-live preview with the
-    // same title and path over; anything else gets a card of its own.
-    metadata.insert("messageIds".to_string(), json!({}));
-    if let Some(conversation_id) = conversation_id {
-        metadata.insert("conversationId".to_string(), json!(conversation_id));
-    }
+    metadata.insert(
+        PREVIEW_TUNNEL_METADATA_KEY.to_string(),
+        JsonValue::Object(preview),
+    );
     if let Some(marker) = active_job_marker {
         metadata.insert(ACTIVE_JOB_TUNNEL_METADATA_KEY.to_string(), marker);
     }
-    metadata.insert("tunnelKey".to_string(), json!(tunnel_key));
 
     revoke_sessions_of_stopped_previews(&state.pool, &project_id, &runtime_id, port).await?;
     let grant = request_runtime_tunnel_with_overrides(
@@ -829,11 +873,11 @@ async fn ensure_preview_capacity(
              from runtime_tunnel_grants
              where project_id = $1
                and runtime_id = $2
-               and metadata->>'kind' = $3
-               and coalesce(metadata->>'tunnelKey', '') <> $4
+               and jsonb_typeof(metadata->'_instafyPreview') = 'object'
+               and coalesce(metadata->'_instafyPreview'->>'tunnelKey', '') <> $3
                and lower(btrim(status)) not in ('revoked', 'expired', 'failed')
                and expires_at > now()",
-            &[project_id, runtime_id, &PREVIEW_KIND, &tunnel_key],
+            &[project_id, runtime_id, &tunnel_key],
         )
         .await
         .map_err(|error| internal_error(format!("failed to count previews: {error}")))?
@@ -972,7 +1016,7 @@ async fn post_preview_ready(
         }
         PreviewCaller::Machine { .. } | PreviewCaller::Human(_) => {
             let conversation_id = grant
-                .metadata_str("conversationId")
+                .preview_str("conversationId")
                 .and_then(|value| Uuid::parse_str(value).ok())
                 .ok_or_else(|| bad_request("preview has no conversation for its card"))?;
             let conversation = load_conversation_record(&transaction, &conversation_id).await?;
@@ -1008,7 +1052,8 @@ async fn post_preview_ready(
         .unwrap_or_else(|| json!({}));
     let run_key = target.run_key();
     let existing = metadata
-        .get("messageIds")
+        .get(PREVIEW_TUNNEL_METADATA_KEY)
+        .and_then(|preview| preview.get("messageIds"))
         .and_then(|ids| ids.get(&run_key))
         .and_then(JsonValue::as_str)
         .and_then(|value| Uuid::parse_str(value).ok());
@@ -1039,7 +1084,10 @@ async fn post_preview_ready(
     )
     .await?;
 
-    if let Some(map) = metadata.as_object_mut() {
+    if let Some(map) = metadata
+        .get_mut(PREVIEW_TUNNEL_METADATA_KEY)
+        .and_then(JsonValue::as_object_mut)
+    {
         let ids = map
             .entry("messageIds".to_string())
             .or_insert_with(|| json!({}));
@@ -1293,7 +1341,7 @@ async fn get_previews(
         .query(
             "select * from runtime_tunnel_grants
              where project_id = $1
-               and metadata->>'kind' = 'preview'
+               and jsonb_typeof(metadata->'_instafyPreview') = 'object'
                and lower(btrim(status)) not in ('revoked', 'expired', 'failed')
                and expires_at > now()
              order by created_at desc

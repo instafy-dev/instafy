@@ -80,15 +80,27 @@ impl PreviewOrigin {
         &self.domain
     }
 
+    /// `None` for anything but a bare origin. Plain `http` is only for a
+    /// loopback host: the label in a viewer host is a capability, and Studio
+    /// refuses a non-local `http` viewer URL anyway.
     pub(super) fn parse(base_url: Option<&str>, domain: Option<&str>) -> Option<Self> {
         if let Some(raw) = base_url.map(str::trim).filter(|value| !value.is_empty()) {
             let url = url::Url::parse(raw).ok()?;
-            if !matches!(url.scheme(), "http" | "https") || url.path() != "/" {
+            let bare_origin = url.path() == "/"
+                && url.query().is_none()
+                && url.fragment().is_none()
+                && url.username().is_empty()
+                && url.password().is_none();
+            if !matches!(url.scheme(), "http" | "https") || !bare_origin {
+                return None;
+            }
+            let domain = normalize_preview_domain(url.host_str()?)?;
+            if url.scheme() == "http" && !is_loopback_host(&domain) {
                 return None;
             }
             return Some(Self {
                 scheme: url.scheme().to_string(),
-                domain: normalize_preview_domain(url.host_str()?)?,
+                domain,
                 port: url.port(),
             });
         }
@@ -123,13 +135,14 @@ impl PreviewOrigin {
 }
 
 /// Refuse to start with a preview domain that shares a cookie scope with
-/// Studio, the API or public tunnels: equal to one of their hosts, under it,
-/// or above it. A viewer host runs whatever site the space serves, so it must
-/// not be able to set or read cookies those hosts trust. Hosted deployments
-/// want a separate registrable domain on the Public Suffix List; this only
-/// catches the overlaps a configuration can show. Loopback development hosts
-/// (`localhost`) are only checked for equality: `preview.localhost` next to a
-/// Studio on `localhost:5173` is the local stack's own layout.
+/// Studio, the API or public tunnels: equal to one of their hosts, under or
+/// above it, or a sibling under the same registrable domain (by the Public
+/// Suffix List). A viewer host runs whatever site the space serves, so it
+/// must not be able to set cookies those hosts receive. Hosted deployments
+/// want a registrable domain of their own, best listed on the Public Suffix
+/// List itself. Loopback development hosts (`localhost`) are only checked
+/// for equality: `preview.localhost` next to a Studio on `localhost:5173` is
+/// the local stack's own layout.
 pub(crate) fn check_preview_domain(config: &crate::config::AppConfig) -> anyhow::Result<()> {
     let settings = &config.previews;
     let configured = settings
@@ -189,19 +202,36 @@ fn is_loopback_host(host: &str) -> bool {
             .is_ok_and(|ip| ip.is_loopback())
 }
 
-/// Whether two hosts are equal or one sits under the other on a label
-/// boundary. Under or above a loopback host does not count.
+/// Whether two hosts share a cookie scope: equal, one under the other on a
+/// label boundary, or both under the same registrable domain, so a site on
+/// one could set `Domain=` cookies the other receives. Loopback hosts only
+/// count when equal.
 pub(super) fn preview_domain_overlaps(preview: &str, other: &str) -> bool {
     if preview == other {
         return true;
     }
+    if is_loopback_host(preview) || is_loopback_host(other) {
+        return false;
+    }
     let under = |child: &str, parent: &str| {
-        !is_loopback_host(parent)
-            && child.len() > parent.len()
+        child.len() > parent.len()
             && child.ends_with(parent)
             && child.as_bytes()[child.len() - parent.len() - 1] == b'.'
     };
-    under(preview, other) || under(other, preview)
+    if under(preview, other) || under(other, preview) {
+        return true;
+    }
+    // An IP address has no registrable domain and takes no `Domain=` cookie.
+    let registrable = |host: &str| {
+        host.parse::<std::net::IpAddr>()
+            .is_err()
+            .then(|| psl::domain_str(host).map(str::to_ascii_lowercase))
+            .flatten()
+    };
+    matches!(
+        (registrable(preview), registrable(other)),
+        (Some(a), Some(b)) if a == b
+    )
 }
 
 pub(super) fn normalize_preview_domain(raw: &str) -> Option<String> {
@@ -326,10 +356,13 @@ pub(super) async fn post_preview_view(
     let user_id = context
         .user_id
         .ok_or_else(|| forbidden("previews are opened by a signed-in member"))?;
+    // Key the budget on the parsed id, so another spelling of the same uuid
+    // shares it.
+    let preview_key = super::parse_preview_id(&params.preview_id)?;
     state
         .rate_limiter
         .enforce(
-            format!("preview-view:{user_id}:{}", params.preview_id.trim()),
+            format!("preview-view:{user_id}:{preview_key}"),
             VIEW_MINTS_PER_MINUTE,
             Duration::from_secs(60),
         )

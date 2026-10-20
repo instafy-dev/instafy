@@ -64,6 +64,11 @@ fn a_preview_domain_must_not_share_a_cookie_scope_with_studio_the_api_or_tunnels
         ("instafy.dev", "studio.instafy.dev"),
         ("p.rt.example", "rt.example"),
         ("localhost", "localhost"),
+        // Siblings under one registrable domain: a site on one can set
+        // `Domain=example.com` cookies the other receives.
+        ("preview.example.com", "studio.example.com"),
+        ("p.preview.example.com", "api.example.com"),
+        ("preview.example.co.uk", "studio.example.co.uk"),
     ] {
         assert!(
             preview_domain_overlaps(preview, other),
@@ -75,6 +80,11 @@ fn a_preview_domain_must_not_share_a_cookie_scope_with_studio_the_api_or_tunnels
         ("xinstafy.dev", "instafy.dev"),
         ("preview.localhost", "localhost"),
         ("preview.localhost", "127.0.0.1"),
+        ("preview.localhost", "tunnel.localhost"),
+        // A public suffix is not a shared parent.
+        ("preview.co.uk", "studio.co.uk"),
+        ("alice.github.io", "bob.github.io"),
+        ("10.0.0.5", "10.1.0.5"),
     ] {
         assert!(
             !preview_domain_overlaps(preview, other),
@@ -112,6 +122,16 @@ fn a_preview_domain_must_not_share_a_cookie_scope_with_studio_the_api_or_tunnels
         ),
         (domain("preview.rt.example", Some("rt.example")), None),
         (domain("example.com", None), None),
+        // Next to Studio, the API or the tunnel hosts: refused too.
+        (domain("preview.example.com", None), None),
+        (
+            domain("preview.api-host.net", None),
+            Some("https://controller.api-host.net"),
+        ),
+        (
+            domain("preview.rt.example", Some("tunnel.rt.example")),
+            None,
+        ),
     ] {
         let error = check_preview_domain(&config(settings, api)).expect_err("overlap refused");
         assert!(error.to_string().contains("cookie scope"), "{error}");
@@ -126,6 +146,42 @@ fn a_preview_domain_must_not_share_a_cookie_scope_with_studio_the_api_or_tunnels
     ))
     .expect_err("invalid origin refused");
     assert!(error.to_string().contains("PREVIEW_BASE_URL"), "{error}");
+    // Only a bare origin, and plain http only on a loopback host: the label
+    // in a viewer host is a capability.
+    for base_url in [
+        "http://preview.example.net",
+        "https://user:secret@previews.app",
+        "https://previews.app/?x=1",
+        "https://previews.app/#x",
+        "https://previews.app/sub",
+    ] {
+        let settings = PreviewSettings {
+            base_url: Some(base_url.to_string()),
+            ..PreviewSettings::default()
+        };
+        assert!(
+            check_preview_domain(&config(settings.clone(), None)).is_err(),
+            "{base_url}"
+        );
+        assert!(
+            PreviewOrigin::from_settings(&settings).is_none(),
+            "the gate refuses {base_url} too"
+        );
+    }
+    for base_url in [
+        "https://previews.app:8443",
+        "http://preview.localhost:8083",
+        "http://127.0.0.1:8083",
+    ] {
+        let settings = PreviewSettings {
+            base_url: Some(base_url.to_string()),
+            ..PreviewSettings::default()
+        };
+        assert!(
+            check_preview_domain(&config(settings, None)).is_ok(),
+            "{base_url}"
+        );
+    }
     // The local stack: Studio on localhost, viewers on preview.localhost.
     let mut local = config(preview_settings(), Some("http://localhost:8788"));
     local.public_app_url = "http://localhost:5174".to_string();
@@ -895,7 +951,7 @@ async fn preview_create_binds_the_job_and_refuses_other_runtimes_ports_and_reade
             let mut forged = f.open_body(&job, 4173);
             forged["metadata"][ACTIVE_JOB_TUNNEL_METADATA_KEY] =
                 json!({ "jobId": other.job_id, "runId": other.run_id });
-            forged["metadata"]["kind"] = json!("tunnel");
+            forged["metadata"][PREVIEW_TUNNEL_METADATA_KEY] = json!({ "path": "@evil.example" });
             let (status, created) = f.request(&job.token, "POST", &f.path(""), forged).await?;
             assert_eq!(status, StatusCode::CREATED, "{created}");
             let preview_id = created["previewId"].as_str().context("previewId")?;
@@ -905,12 +961,24 @@ async fn preview_create_binds_the_job_and_refuses_other_runtimes_ports_and_reade
             assert_eq!(created["viewerHostSuffix"], json!("preview.localhost:8083"));
 
             let metadata = f.grant_metadata(preview_id).await?;
-            assert_eq!(metadata["kind"], "preview");
-            assert_eq!(metadata["visibility"], "private");
+            let preview = &metadata[PREVIEW_TUNNEL_METADATA_KEY];
+            assert_eq!(preview["visibility"], "private");
+            assert_eq!(preview["path"], "/");
             assert_eq!(metadata["localPort"], json!(4173));
-            assert_eq!(metadata["title"], "Site preview");
+            assert_eq!(preview["title"], "Site preview");
             assert_eq!(metadata["source"], "instafy-cli");
-            assert_eq!(metadata["messageIds"], json!({}));
+            assert_eq!(preview["messageIds"], json!({}));
+            // Ordinary metadata names stay free: the preview owns one key.
+            for key in [
+                "kind",
+                "visibility",
+                "path",
+                "title",
+                "messageIds",
+                "tunnelKey",
+            ] {
+                assert!(metadata.get(key).is_none(), "{key} at the top level");
+            }
             let marker = &metadata[ACTIVE_JOB_TUNNEL_METADATA_KEY];
             assert_eq!(marker["jobId"], json!(job.job_id));
             assert_eq!(marker["runId"], json!(job.run_id));
@@ -932,7 +1000,7 @@ async fn preview_create_binds_the_job_and_refuses_other_runtimes_ports_and_reade
                 Some(format!("preview:{}:4173", job.runtime_id).as_str())
             );
             assert_eq!(
-                metadata["tunnelKey"],
+                preview["tunnelKey"],
                 json!(format!("preview:{}:4173", job.runtime_id))
             );
             assert_eq!(request.expires_in_seconds, Some(43_200));
@@ -1067,11 +1135,11 @@ async fn preview_ready_writes_one_card_per_run_and_publishes_it() -> anyhow::Res
             assert_ne!(second["messageId"], json!(message_id));
             let metadata = f.grant_metadata(&preview_id).await?;
             assert_eq!(
-                metadata["messageIds"][job.run_id.to_string()],
+                metadata[PREVIEW_TUNNEL_METADATA_KEY]["messageIds"][job.run_id.to_string()],
                 json!(message_id)
             );
             assert_eq!(
-                metadata["messageIds"][next.run_id.to_string()],
+                metadata[PREVIEW_TUNNEL_METADATA_KEY]["messageIds"][next.run_id.to_string()],
                 second["messageId"]
             );
 
@@ -1184,7 +1252,10 @@ async fn preview_view_mints_bounded_sessions_for_members_who_can_see_the_runtime
                         &f.project,
                         &private_runtime,
                         &private_tunnel,
-                        &json!({ "kind": "preview", "visibility": "private", "localPort": 4173, "path": "/", "title": "Mine" }),
+                        &json!({
+                            "localPort": 4173,
+                            (PREVIEW_TUNNEL_METADATA_KEY): { "visibility": "private", "path": "/", "title": "Mine" },
+                        }),
                     ],
                 )
                 .await?;
@@ -1453,9 +1524,10 @@ async fn preview_cards_follow_the_conversation_title_and_reopen() -> anyhow::Res
             assert_eq!(f.message_conversation(&second).await?, other);
             assert_eq!(f.ready(&writer, &preview_id).await?["messageId"], second);
             let metadata = f.grant_metadata(&preview_id).await?;
-            assert_eq!(metadata["messageId"], second);
+            assert_eq!(metadata[PREVIEW_TUNNEL_METADATA_KEY]["messageId"], second);
             assert_eq!(
-                metadata["messageIds"][format!("manual:{}", f.conversation)],
+                metadata[PREVIEW_TUNNEL_METADATA_KEY]["messageIds"]
+                    [format!("manual:{}", f.conversation)],
                 first
             );
 
@@ -1463,7 +1535,7 @@ async fn preview_cards_follow_the_conversation_title_and_reopen() -> anyhow::Res
             f.open_for(&writer, &job, other, 4180, "Site preview")
                 .await?;
             let metadata = f.grant_metadata(&preview_id).await?;
-            assert_eq!(metadata["messageId"], second);
+            assert_eq!(metadata[PREVIEW_TUNNEL_METADATA_KEY]["messageId"], second);
             assert_eq!(f.ready(&writer, &preview_id).await?["messageId"], second);
 
             // A new title is a new card, as is a re-open after close.
@@ -1525,10 +1597,44 @@ async fn runtime_tokens_post_cards_only_where_their_user_may_read() -> anyhow::R
             let preview_id = created["previewId"].as_str().context("previewId")?;
             let card = f.ready(&owner, preview_id).await?["messageId"].clone();
             assert_eq!(f.message_conversation(&card).await?, private);
+
+            // A leased runtime's token names the controller's service user,
+            // which is no person: even when that user could read the private
+            // conversation, the token may only post into shared ones.
+            let mut state = f.state.clone();
+            state.config.service_runtime_user_id = Some(f.users[0]);
+            let app = router().merge(crate::tunnels::router()).with_state(state);
+            let mut body = f.open_body(&job, 4183);
+            body["conversationId"] = json!(private);
+            let (status, result) = f
+                .request_on(&app, &owner, "POST", &f.path(""), body.clone())
+                .await?;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{result}");
+            body["conversationId"] = json!(f.conversation);
+            let (status, result) = f
+                .request_on(&app, &owner, "POST", &f.path(""), body)
+                .await?;
+            assert_eq!(status, StatusCode::CREATED, "{result}");
             Ok(())
         })
     })
     .await
+}
+
+#[test]
+fn a_runtime_token_with_the_controller_service_subject_acts_for_nobody() {
+    let person = Uuid::new_v4();
+    let service = Uuid::new_v4();
+    assert_eq!(
+        machine_subject_user_id(&person.to_string(), Some(service)),
+        Some(person)
+    );
+    assert_eq!(
+        machine_subject_user_id(&service.to_string(), Some(service)),
+        None
+    );
+    assert_eq!(machine_subject_user_id("runtime.service", None), None);
+    assert_eq!(machine_subject_user_id("not-a-uuid", None), None);
 }
 
 #[tokio::test]
@@ -1572,7 +1678,8 @@ async fn preview_metadata_cannot_be_forged_or_dropped_through_the_tunnel_routes(
     run(|f| {
         Box::pin(async move {
             let job = f.job(None).await?;
-            // An ordinary tunnel cannot pass itself off as a private preview.
+            // An ordinary tunnel cannot pass itself off as a private preview,
+            // nor claim another job. Ordinary metadata names stay free.
             let (status, tunnel) = f
                 .request(
                     &job.token,
@@ -1587,12 +1694,13 @@ async fn preview_metadata_cannot_be_forged_or_dropped_through_the_tunnel_routes(
                             "source": "instafy-cli",
                             "localPort": 5000,
                             "kind": "preview",
-                            "visibility": "private",
-                            "path": "@attacker.example/x",
-                            "title": "Fake",
-                            "messageIds": { "manual": Uuid::new_v4() },
-                            "conversationId": f.conversation,
-                            "tunnelKey": "preview:someone-else",
+                            "title": "My tunnel",
+                            (PREVIEW_TUNNEL_METADATA_KEY): {
+                                "visibility": "private",
+                                "path": "@attacker.example/x",
+                                "conversationId": f.conversation,
+                                "tunnelKey": "preview:someone-else",
+                            },
                         },
                     }),
                 )
@@ -1600,20 +1708,84 @@ async fn preview_metadata_cannot_be_forged_or_dropped_through_the_tunnel_routes(
             assert_eq!(status, StatusCode::OK, "{tunnel}");
             let forged = tunnel["tunnelId"].as_str().context("tunnelId")?.to_string();
             let metadata = f.grant_metadata(&forged).await?;
-            for key in crate::tunnels::PREVIEW_RESERVED_METADATA_KEYS {
-                assert!(metadata.get(key).is_none(), "{key} survived: {metadata}");
-            }
+            assert!(
+                metadata.get(PREVIEW_TUNNEL_METADATA_KEY).is_none(),
+                "{metadata}"
+            );
+            assert_eq!(metadata["title"], "My tunnel");
+            assert_eq!(metadata["kind"], "preview");
+            let job_marker = metadata[ACTIVE_JOB_TUNNEL_METADATA_KEY].clone();
+            assert_eq!(job_marker["jobId"], json!(job.job_id));
+            let is_listed = |list: &Value, id: &str| {
+                list.as_array()
+                    .is_some_and(|items| items.iter().any(|item| item["previewId"] == json!(id)))
+            };
+            let view_forged = f.path(&format!("/{forged}/view"));
             let (status, _) = f
-                .request(
-                    &f.tokens[0],
-                    "POST",
-                    &f.path(&format!("/{forged}/view")),
-                    json!({}),
-                )
+                .request(&f.tokens[0], "POST", &view_forged, json!({}))
                 .await?;
             assert_eq!(status, StatusCode::NOT_FOUND);
 
-            // A revoke override cannot drop `kind` and so skip the sessions.
+            // A status update or a revoke can neither make an ordinary grant
+            // a preview nor move it to another job.
+            let machine = f.machine_token(&job, f.users[0])?;
+            let status_path = format!("/projects/{}/tunnels/{forged}/status", f.project);
+            let (status, result) = f
+                .request(
+                    &machine,
+                    "POST",
+                    &status_path,
+                    json!({
+                        "status": "active",
+                        "metadata": {
+                            "note": "kept",
+                            (PREVIEW_TUNNEL_METADATA_KEY): {
+                                "visibility": "private",
+                                "path": "/",
+                                "title": "Fake",
+                                "messageIds": {},
+                            },
+                            (ACTIVE_JOB_TUNNEL_METADATA_KEY): { "jobId": Uuid::new_v4() },
+                        },
+                    }),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{result}");
+            let metadata = f.grant_metadata(&forged).await?;
+            assert!(
+                metadata.get(PREVIEW_TUNNEL_METADATA_KEY).is_none(),
+                "{metadata}"
+            );
+            assert_eq!(metadata["note"], "kept");
+            assert_eq!(metadata[ACTIVE_JOB_TUNNEL_METADATA_KEY], job_marker);
+            let (status, list) = f.request(&f.tokens[0], "GET", &f.path(""), json!({})).await?;
+            assert_eq!(status, StatusCode::OK, "{list}");
+            assert!(!is_listed(&list, &forged), "{list}");
+            let (status, _) = f
+                .request(&f.tokens[0], "POST", &view_forged, json!({}))
+                .await?;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            let (status, result) = f
+                .request(
+                    &f.tokens[0],
+                    "POST",
+                    &format!("/projects/{}/tunnels/{forged}/revoke", f.project),
+                    json!({ "metadata": {
+                        (PREVIEW_TUNNEL_METADATA_KEY): { "visibility": "private" },
+                        (ACTIVE_JOB_TUNNEL_METADATA_KEY): null,
+                    } }),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{result}");
+            let metadata = f.grant_metadata(&forged).await?;
+            assert!(
+                metadata.get(PREVIEW_TUNNEL_METADATA_KEY).is_none(),
+                "{metadata}"
+            );
+            assert_eq!(metadata[ACTIVE_JOB_TUNNEL_METADATA_KEY], job_marker);
+
+            // A revoke override cannot drop the preview object and so skip
+            // the sessions.
             let preview_id = f.open(&job).await?;
             let (_, label) = f.view(0, &preview_id).await?;
             let (status, result) = f
@@ -1621,11 +1793,11 @@ async fn preview_metadata_cannot_be_forged_or_dropped_through_the_tunnel_routes(
                     &f.tokens[0],
                     "POST",
                     &format!("/projects/{}/tunnels/{preview_id}/revoke", f.project),
-                    json!({ "metadata": {} }),
+                    json!({ "metadata": { (PREVIEW_TUNNEL_METADATA_KEY): null } }),
                 )
                 .await?;
             assert_eq!(status, StatusCode::OK, "{result}");
-            assert_eq!(f.grant_metadata(&preview_id).await?["kind"], "preview");
+            assert!(f.grant_metadata(&preview_id).await?[PREVIEW_TUNNEL_METADATA_KEY].is_object());
             assert_eq!(f.open_sessions(&preview_id).await?, 0);
 
             // Neither can a status update, and a re-open of the same tunnel
@@ -1640,11 +1812,14 @@ async fn preview_metadata_cannot_be_forged_or_dropped_through_the_tunnel_routes(
                     &machine,
                     "POST",
                     &format!("/projects/{}/tunnels/{preview_id}/status", f.project),
-                    json!({ "status": "revoked", "metadata": { "kind": "tunnel" } }),
+                    json!({ "status": "revoked", "metadata": { (PREVIEW_TUNNEL_METADATA_KEY): {} } }),
                 )
                 .await?;
             assert_eq!(status, StatusCode::OK, "{result}");
-            assert_eq!(f.grant_metadata(&preview_id).await?["kind"], "preview");
+            assert_eq!(
+                f.grant_metadata(&preview_id).await?[PREVIEW_TUNNEL_METADATA_KEY]["visibility"],
+                "private"
+            );
             assert_eq!(f.open_sessions(&preview_id).await?, 0);
             // Even a session the status path missed ends on re-open.
             f.state
@@ -1687,6 +1862,13 @@ async fn every_preview_route_fails_closed_when_previews_are_off_or_the_broker_ca
             let no_broker = {
                 let mut state = f.state.clone();
                 state.tunnel_broker = None;
+                state
+            };
+            // Without the hook secret the broker cannot ask about viewers,
+            // so a minted viewer URL could never open.
+            let no_hook_secret = {
+                let mut state = f.state.clone();
+                state.config.tunnel_broker_hook_secret = None;
                 state
             };
             let old_broker = {
@@ -1744,6 +1926,7 @@ async fn every_preview_route_fails_closed_when_previews_are_off_or_the_broker_ca
             for (name, state) in [
                 ("unconfigured", unconfigured),
                 ("no broker", no_broker),
+                ("no hook secret", no_hook_secret),
                 ("a broker without private previews", old_broker),
                 ("a broker serving another domain", other_domain),
             ] {
@@ -1757,7 +1940,13 @@ async fn every_preview_route_fails_closed_when_previews_are_off_or_the_broker_ca
                         StatusCode::SERVICE_UNAVAILABLE,
                         "{name}: {method} {path}: {result}"
                     );
-                    assert_eq!(result["code"], "previews_unavailable", "{name}: {path}");
+                    // The hook itself refuses first when it has no secret to
+                    // check the bearer against.
+                    let hook_without_secret =
+                        name == "no hook secret" && path.starts_with("/tunnel-broker/");
+                    if !hook_without_secret {
+                        assert_eq!(result["code"], "previews_unavailable", "{name}: {path}");
+                    }
                 }
             }
             // Nothing reached the broker or the database.
@@ -1914,6 +2103,18 @@ async fn viewer_urls_are_minted_at_most_twenty_a_minute_per_person_and_preview(
             }
             let (status, body) = f.request(&f.tokens[0], "POST", &view, json!({})).await?;
             assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+            // Another spelling of the same id shares the allowance.
+            let parsed = Uuid::parse_str(&preview_id)?;
+            for spelling in [
+                preview_id.to_ascii_uppercase(),
+                parsed.simple().to_string(),
+                format!("%7B{preview_id}%7D"),
+                parsed.urn().to_string(),
+            ] {
+                let path = f.path(&format!("/{spelling}/view"));
+                let (status, body) = f.request(&f.tokens[0], "POST", &path, json!({})).await?;
+                assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{spelling}: {body}");
+            }
             // Another person has their own allowance.
             let (status, body) = f.request(&f.tokens[1], "POST", &view, json!({})).await?;
             assert_eq!(status, StatusCode::OK, "{body}");
