@@ -495,6 +495,72 @@ The runtime origin serves space files over HTTP. When the origin is reachable fr
 
 ## Previews
 
+### Show a site in Studio: `open`, `list`, `close`
+
+`instafy preview` shows a site that runs in the space inside Studio. The conversation gets a
+"Ready to preview" card with an **Open** button, and only space members can open it. Unlike
+`instafy tunnel`, nothing becomes public and the CLI never prints a URL.
+
+```bash
+instafy preview open --port 4173 --title "Site preview" --json
+instafy preview list
+instafy preview close <previewId>
+```
+
+These commands need a server with the previews API. An older server, or one with previews turned off,
+gives exit `5` and nothing else happens.
+
+`open`:
+
+1. Checks that the site answers on `http://127.0.0.1:<port><path>` (5 s; any status below 500).
+2. Asks the server for a private preview tunnel, then starts a detached rathole client for it
+   (logs: `~/.instafy/cli-preview-logs/*`). If anything fails before the client runs, the preview is
+   closed on the server again.
+3. Once the client has stayed up for 250 ms, asks the server to post the card, and prints the result:
+
+```json
+{"previewId":"<uuid>","title":"Site preview","port":4173,"path":"/","status":"live","messageId":"<uuid>","viewerHostSuffix":"<preview domain>"}
+```
+
+`viewerHostSuffix` is the part of the host name viewers reach the site under after its first label. A dev
+server that checks the `Host` header (for example Vite's `server.allowedHosts`) must allow it, with a
+leading dot. It is `null` when the server does not report it.
+
+`status` is `live` when the server reached the site through the tunnel, `not_responding` when it did not
+(check the site, then run `open` again), and `unknown` when the server does not say.
+
+Options: `--path /<…>` opens a sub-path (default `/`). `--title` is at most 120 characters.
+`--conversation <id>` picks the conversation for the card; it is needed only without a job
+token, for example in an end-to-end test.
+
+Exit codes:
+
+- `2`: nothing answers on the port, or the site answered with a server error (`5xx`). Start or fix the
+  site, then retry.
+- `3`: the port is not allowed: outside 1024-65535 or one of Instafy's own (the same rules as `check`,
+  below), or refused by the server (`400` with code `port_not_allowed`).
+- `5`: previews are not available on this server ("Previews are not available on this server"). The server
+  has them turned off (`503` with code `previews_unavailable`), or it has no previews API (a `404` without
+  the server's own error body). Nothing is downloaded or started and no card is posted. Show the site
+  another way, for example its local URL.
+- `1`: anything else, for example a sign-in problem, a `404` with the server's own error (a wrong space or
+  runtime), or a client that exits at once.
+
+- Running `open` again for the same port reuses the running client and repeats only the card
+  step. A client left over from an older preview on the same port is stopped, and that preview is
+  closed on the server.
+- A recorded client is reused or stopped only while its process is still rathole running that
+  preview's config. A process id that now belongs to something else is never signalled.
+- If the client exits right away, the preview is closed again and `open` exits `1` with the
+  client's last log lines.
+- The server makes its own port decision as well; the local rules only refuse earlier.
+- Inside an agent job, the CLI uses the job's own token and sends it only to
+  `CONTROLLER_BASE_URL`; a different `--server-url` is refused.
+- `list` shows the space's previews from the server. `close` stops the local client and asks the
+  server to close the preview; the server then also revokes its open viewers.
+
+### Check a site: `check`
+
 `instafy preview check --port <port>` looks at a site served on this machine before anyone sees it. It is meant
 for agents that build sites, and works for any site or framework. It is local only: it calls no Instafy server
 and needs no login.

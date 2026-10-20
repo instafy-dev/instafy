@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import kleur from "kleur";
 import { findProjectManifest, resolveRatholeBinaryForCli, type ProjectManifest } from "./runtime.js";
@@ -25,7 +25,7 @@ type TunnelResponse = {
   credentials?: Record<string, unknown>;
 };
 
-type TunnelCliOptions = {
+export type TunnelCliOptions = {
   project?: string;
   controllerUrl?: string;
   controllerToken?: string;
@@ -127,8 +127,11 @@ export function buildRatholeEnvironment(
   return environment;
 }
 
-function cleanUrl(raw: string): string {
-  return raw.replace(/\/+$/, "");
+/** `raw` without trailing slashes. A loop, not a regex, so a long run of slashes stays linear. */
+export function cleanUrl(raw: string): string {
+  let end = raw.length;
+  while (end > 0 && raw[end - 1] === "/") end -= 1;
+  return raw.slice(0, end);
 }
 
 function normalizeTunnelPurpose(raw: string): string | null {
@@ -150,7 +153,7 @@ function normalizeTunnelPurpose(raw: string): string | null {
   return normalized ? normalized : null;
 }
 
-function readEnv(key: string): string | undefined {
+export function readEnv(key: string): string | undefined {
   const value = process.env[key];
   if (value && value.trim()) return value.trim();
   return undefined;
@@ -161,7 +164,7 @@ function resolveWorkingDir(opts: TunnelCliOptions): string {
   return value.length > 0 ? value : process.cwd();
 }
 
-function resolveProject(opts: TunnelCliOptions): string {
+export function resolveProject(opts: TunnelCliOptions): string {
   const explicit =
     opts.project?.trim() ||
     readEnv("SPACE_ID") ||
@@ -259,14 +262,14 @@ function persistTunnelAliasResult(config: TunnelAliasConfig, hostname: string, u
   }
 }
 
-type ResolvedTunnelToken = {
+export type ResolvedTunnelToken = {
   token: string;
   source: AccessTokenSource;
   profile: string | null;
   runtimeControllerUrl: string | null;
 };
 
-function resolveTunnelControllerUrl(
+export function resolveTunnelControllerUrl(
   opts: TunnelCliOptions,
   auth: ResolvedTunnelToken,
 ): string {
@@ -299,7 +302,7 @@ function resolveTunnelControllerUrl(
   return resolveConfiguredControllerUrl() ?? resolveDefaultControllerUrl();
 }
 
-function resolveControllerToken(
+export function resolveControllerToken(
   opts: TunnelCliOptions,
   retryCommand = "instafy tunnel start",
 ): ResolvedTunnelToken {
@@ -379,7 +382,7 @@ function readStateFile(): TunnelStateFile {
   }
 }
 
-function isProcessAlive(pid: number): boolean {
+export function isProcessAlive(pid: number): boolean {
   if (!Number.isFinite(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
@@ -391,13 +394,73 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
-async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean> {
+export async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (!isProcessAlive(pid)) return true;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   return !isProcessAlive(pid);
+}
+
+/** The command line of a live process, or null when it is gone or cannot be read. */
+export function readProcessCommandLine(pid: number): string | null {
+  if (!isProcessAlive(pid)) return null;
+  try {
+    if (process.platform === "linux") {
+      const raw = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8");
+      return raw.split("\0").filter(Boolean).join(" ") || null;
+    }
+    if (process.platform === "win32") {
+      const out = execFileSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          `(Get-CimInstance Win32_Process -Filter 'ProcessId=${Math.trunc(pid)}').CommandLine`,
+        ],
+        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 10_000, windowsHide: true },
+      );
+      return out.trim() || null;
+    }
+    const out = execFileSync("ps", ["-ww", "-o", "command=", "-p", String(Math.trunc(pid))], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 5_000,
+    });
+    return out.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether `pid` is still the rathole client started with `configPath`. A recorded pid can belong to
+ * another process after a restart or reboot, so nothing is reused or signalled unless this holds.
+ * Fails closed: an unreadable command line counts as not ours.
+ */
+export function isRatholeClientFor(pid: number, configPath: string): boolean {
+  if (!configPath) return false;
+  const commandLine = readProcessCommandLine(pid);
+  return commandLine !== null && commandLine.includes(configPath);
+}
+
+/** Stops the rathole client started with `configPath`: SIGTERM, then SIGKILL after 4 s. Any other process is left alone. */
+export async function stopRatholeClient(pid: number, configPath: string): Promise<void> {
+  if (!isRatholeClientFor(pid, configPath)) return;
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    // ignore
+  }
+  if (await waitForProcessExit(pid, 4000)) return;
+  if (!isRatholeClientFor(pid, configPath)) return;
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    // ignore
+  }
 }
 
 function upsertTunnelState(entry: TunnelStateEntry) {
@@ -529,7 +592,7 @@ export function resolveTunnelServerAddress(
   return server;
 }
 
-function buildRatholeConfig(creds: Record<string, unknown>, port: number): string {
+export function buildRatholeConfig(creds: Record<string, unknown>, port: number): string {
   const advertised = typeof creds["server"] === "string" ? (creds["server"] as string) : null;
   const server = advertised ? resolveTunnelServerAddress(advertised) : null;
   const token = typeof creds["token"] === "string" ? (creds["token"] as string) : null;
@@ -663,6 +726,56 @@ export async function runTunnelCommand(opts: TunnelCliOptions, options?: { timeo
   });
 }
 
+// `exit` is null while the client runs; otherwise it says how the client ended, with its last logs.
+export type DetachedRathole = { pid: number; exit: string | null; logTail: string };
+
+// Starts rathole detached, appending its output to `logFile`, then gives it 250 ms to fail fast
+// so the caller can report a bad config or broker instead of leaving a dead client behind.
+export async function spawnRatholeDetached(params: {
+  rathole: string;
+  configPath: string;
+  workdir: string;
+  logFile: string;
+}): Promise<DetachedRathole> {
+  const logFd = fs.openSync(params.logFile, "a");
+  const child = spawn(params.rathole, ["-c", params.configPath], {
+    stdio: ["ignore", logFd, logFd],
+    cwd: params.workdir,
+    detached: true,
+    env: buildRatholeEnvironment(),
+  });
+  fs.closeSync(logFd);
+
+  let exitedEarly = false;
+  let exitMessage = "";
+  child.on("error", (error) => {
+    exitedEarly = true;
+    exitMessage = error.message;
+  });
+  child.on("exit", (code, signal) => {
+    exitedEarly = true;
+    exitMessage = code !== null ? `code ${code}` : `signal ${signal}`;
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 250));
+
+  if (exitedEarly || !isProcessAlive(child.pid ?? -1)) {
+    return { pid: -1, exit: exitMessage || "unknown", logTail: readLogTail(params.logFile) };
+  }
+
+  child.unref();
+  return { pid: child.pid ?? -1, exit: null, logTail: "" };
+}
+
+export function readLogTail(logFile: string, lines = 20): string {
+  try {
+    const text = fs.readFileSync(logFile, "utf8");
+    return text.split(/\r?\n/).filter(Boolean).slice(-lines).join("\n");
+  } catch {
+    return "";
+  }
+}
+
 export async function startTunnelDetached(opts: TunnelStartOptions): Promise<TunnelStateEntry> {
   const projectId = resolveProject(opts);
   const controllerToken = resolveControllerToken(opts);
@@ -708,41 +821,13 @@ export async function startTunnelDetached(opts: TunnelStartOptions): Promise<Tun
   const logFile = opts.logFile?.trim()
     ? path.resolve(opts.logFile.trim())
     : path.join(TUNNEL_LOG_DIR, `tunnel-${tunnelIdSafe}.log`);
-  const logFd = fs.openSync(logFile, "a");
 
-  const child = spawn(rathole, ["-c", configPath], {
-    stdio: ["ignore", logFd, logFd],
-    cwd: workdir,
-    detached: true,
-    env: buildRatholeEnvironment(),
-  });
-
-  let exitedEarly = false;
-  let exitMessage = "";
-  child.on("exit", (code, signal) => {
-    exitedEarly = true;
-    exitMessage = code !== null ? `code ${code}` : `signal ${signal}`;
-  });
-
-  // Give rathole a moment to fail fast, so `instafy tunnel start` can report errors.
-  await new Promise((resolve) => setTimeout(resolve, 250));
-
-  if (exitedEarly || !isProcessAlive(child.pid ?? -1)) {
-    const logTail = (() => {
-      try {
-        const text = fs.readFileSync(logFile, "utf8");
-        const lines = text.split(/\r?\n/).filter(Boolean);
-        return lines.slice(-20).join("\n");
-      } catch {
-        return "";
-      }
-    })();
+  const started = await spawnRatholeDetached({ rathole, configPath, workdir, logFile });
+  if (started.exit !== null) {
     await revokeTunnel(controllerUrl, controllerToken, projectId, grant.tunnelId).catch(() => {});
-    const suffix = logTail ? `\n\nLast logs:\n${logTail}` : "";
-    throw new Error(`Tunnel process exited (${exitMessage || "unknown"}).${suffix}`);
+    const suffix = started.logTail ? `\n\nLast logs:\n${started.logTail}` : "";
+    throw new Error(`Tunnel process exited (${started.exit}).${suffix}`);
   }
-
-  child.unref();
 
   const entry: TunnelStateEntry = {
     tunnelId: grant.tunnelId,
@@ -751,7 +836,7 @@ export async function startTunnelDetached(opts: TunnelStartOptions): Promise<Tun
     url: grant.url ?? `https://${grant.hostname}`,
     localPort: port,
     controllerUrl: cleanUrl(controllerUrl),
-    pid: child.pid ?? -1,
+    pid: started.pid,
     logFile,
     workdir,
     startedAt: new Date().toISOString(),
@@ -784,21 +869,7 @@ export async function stopTunnelSession(opts: TunnelStopOptions): Promise<{ ok: 
     throw new Error(`Tunnel not found in local state: ${tunnelId}`);
   }
 
-  if (isProcessAlive(entry.pid)) {
-    try {
-      process.kill(entry.pid, "SIGTERM");
-    } catch {
-      // ignore
-    }
-    const stopped = await waitForProcessExit(entry.pid, 4000);
-    if (!stopped) {
-      try {
-        process.kill(entry.pid, "SIGKILL");
-      } catch {
-        // ignore
-      }
-    }
-  }
+  await stopRatholeClient(entry.pid, path.join(entry.workdir, "rathole.toml"));
 
   const controllerToken = resolveControllerToken(opts, `instafy tunnel stop ${tunnelId}`);
   if (controllerToken.runtimeControllerUrl) {

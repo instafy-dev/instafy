@@ -155,4 +155,86 @@ describe("tunnel (detached + manage commands)", () => {
       fs.rmSync(homeDir, { recursive: true, force: true });
     }
   }, 30000);
+  it("reports a rathole binary that cannot start and revokes the grant", async () => {
+    const projectId = randomUUID();
+    const { server, revokeCalled } = startMockController(projectId);
+    await once(server, "listening");
+    const address = server.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-cli-home-"));
+    try {
+      const start = await execCli(
+        [
+          "tunnel",
+          "start",
+          "--space",
+          projectId,
+          "--server-url",
+          `http://127.0.0.1:${port}`,
+          "--access-token",
+          "test-token",
+          "--rathole-bin",
+          path.join(homeDir, "missing", "rathole"),
+          "--json",
+        ],
+        undefined,
+        homeDir,
+      );
+      expect(start.code, start.stderr).toBe(1);
+      expect(start.stderr).toContain("Tunnel process exited");
+      expect(start.stderr).toContain("ENOENT");
+      expect(revokeCalled()).toBe(true);
+    } finally {
+      server.close();
+      fs.rmSync(homeDir, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it("stop never signals a recorded pid that is no longer its rathole client", async () => {
+    if (process.platform === "win32") return;
+    const projectId = randomUUID();
+    const { server, revokeCalled } = startMockController(projectId);
+    await once(server, "listening");
+    const address = server.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+    const controllerUrl = `http://127.0.0.1:${port}`;
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-cli-home-"));
+    const stranger = spawn("sleep", ["60"], { stdio: "ignore" });
+    let clientPid = -1;
+    try {
+      const start = await execCli(
+        ["tunnel", "start", "--space", projectId, "--server-url", controllerUrl, "--access-token", "test-token", "--rathole-bin", makeStubRathole(), "--json"],
+        undefined,
+        homeDir,
+      );
+      expect(start.code, start.stderr).toBe(0);
+      clientPid = (JSON.parse(start.stdout) as { pid: number }).pid;
+
+      // After a restart the recorded pid belongs to something else.
+      const stateFile = path.join(homeDir, ".instafy", "cli-tunnel-state.json");
+      const state = JSON.parse(fs.readFileSync(stateFile, "utf8")) as { tunnels: Array<{ pid: number }> };
+      state.tunnels[0]!.pid = stranger.pid!;
+      fs.writeFileSync(stateFile, JSON.stringify(state));
+
+      const stopped = await execCli(
+        ["tunnel", "stop", "tunnel-1", "--server-url", controllerUrl, "--access-token", "test-token"],
+        undefined,
+        homeDir,
+      );
+      expect(stopped.code, stopped.stderr).toBe(0);
+      expect(revokeCalled()).toBe(true);
+      expect(() => process.kill(stranger.pid!, 0)).not.toThrow();
+    } finally {
+      stranger.kill("SIGKILL");
+      if (clientPid > 0) {
+        try {
+          process.kill(clientPid, "SIGKILL");
+        } catch {
+          // already gone
+        }
+      }
+      server.close();
+      fs.rmSync(homeDir, { recursive: true, force: true });
+    }
+  }, 30000);
 });

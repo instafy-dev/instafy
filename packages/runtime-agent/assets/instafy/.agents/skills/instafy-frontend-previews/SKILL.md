@@ -3,9 +3,26 @@ name: instafy-frontend-previews
 description: Runbook for frontend preview, tunneling, and browser assist flows.
 ---
 
-# Frontend previews (shareable dev server + tunnel) · Runbook
+# Frontend previews (Studio preview card, dev server, tunnel) · Runbook
 
-Goal: when a user asks to build or iterate on a frontend, keep a live preview running and share a public URL (mobile-friendly). The assistant should decide *how* to run the preview based on the repo (Vite/Next/etc), and use runtime self-checks so the experience “just works”.
+Goal: when a user asks to build or iterate on a frontend, keep a live preview running and show it in Studio with a private preview card. Share a public URL only when the person wants one. The assistant should decide *how* to run the preview based on the repo (Vite/Next/etc), and use runtime self-checks so the experience “just works”.
+
+## Show a running site in Studio (do this first)
+
+Use this whenever a site runs in the space and the person should see it, on any port and for any kind of site.
+
+1. Start the site (see below) and check it before you show it: `instafy preview check --port <port>` (see “Default behavior”).
+2. Run `instafy preview open --port <port> --title "<short name>" --json` (add `--path /<page>` to open a sub-page).
+   - It posts a "Ready to preview" card in this conversation. Only space members can open it, and nothing becomes public.
+   - It prints no URL. Tell the person to open it from the card. Do not paste a preview, tunnel or localhost URL for it.
+   - Running it again for the same port reuses the preview and its card. `instafy preview list` shows the previews; `instafy preview close <previewId>` closes one.
+3. Read `status` in the JSON: `live` means the card works. `not_responding` means the preview could not reach the site: check the server is up on that port, then run `instafy preview open` again. `unknown` means the server did not say; tell the person to open the card.
+4. If it fails:
+   - Exit `2`: nothing answers on the port, or the site answers with a server error. Start or fix the server, then run it again.
+   - Exit `3`: the port is not allowed. Serve the site on another port from 1024 to 65535.
+   - Exit `5` ("Previews are not available on this server"), or `instafy preview` is not a command here: previews are off. Use the flow below instead: post the local URL, and create a public tunnel only when the person asks for a shareable link, after the consent gate.
+   - Exit `1` (any other error): run it once more. If it fails again, tell the person the error in one line and post the local URL instead. Do not create a public tunnel unless they ask for one.
+5. If the card's page says "Blocked request" or "host is not allowed", the dev server rejects the preview host. Add the `viewerHostSuffix` from the JSON output, with a leading dot, to the server's allowed hosts (for Vite, `server.allowedHosts`), restart the server, and run `instafy preview open` again.
 
 ## Consent gates (required)
 
@@ -17,6 +34,7 @@ Goal: when a user asks to build or iterate on a frontend, keep a live preview ru
 
 Pick one of these modes and state it briefly in chat:
 
+- **Studio preview mode** (default): show the running site with `instafy preview open` (above).
 - **Tunnel preview mode**: user wants a shareable/mobile/public URL.
 - **Live browser assist mode**: env/secret/callback setup is missing or user asks for guided dashboard clicks.
 - **Hybrid mode**: tunnel preview + live browser assist when troubleshooting auth/CORS/callback failures.
@@ -27,8 +45,9 @@ When the user asks for a landing page / website / React UI:
 - Create or update the page.
 - Ensure a preview server is running (don’t just tell the user to run it).
 - Check it before you show it: `instafy preview check --port <port>` loads the page in a headless browser and lists console errors, failed requests and a blank page, and writes desktop and phone screenshots to open. Fix what it lists and check again. Exit 4 (no browser here) or 70 (the check itself failed) means nothing was checked; say so instead of calling the page checked.
-- Ask consent before exposing the preview port via an Instafy tunnel.
-- Post the preview URL as a normal clickable link.
+- Show it with `instafy preview open` and tell the person to open it from the card.
+- Expose the preview port via a public Instafy tunnel only when the person wants a shareable link, and ask consent first.
+- When there is a public tunnel, post its URL as a normal clickable link.
 - If the user reports it’s down, run “preview doctor” and fix it.
 
 ## Fast path (recommended): one-page React landing page without a toolchain
@@ -38,11 +57,11 @@ If the workspace doesn’t already have a frontend toolchain, prefer a **single-
 1) Create `index.html` in the workspace root using React via ESM CDN imports (e.g. `https://esm.sh/react@18` + `react-dom@18/client`). Keep it one page.
 2) Start a simple dev server on a fixed port (recommend `4173`):
    - `python -m http.server 4173 --bind 127.0.0.1`
-3) Expose it:
-   - `instafy tunnel start --port 4173 --json` (parse `url`, `tunnelId`, `localPort`, `pid`)
-4) Post:
-   - `Preview URL: <tunnel url>`
-   - (also include) `Local URL: http://127.0.0.1:4173`
+3) Show it:
+   - `instafy preview open --port 4173 --title "<short name>" --json`, then tell the person to open it from the card.
+4) If that fails, follow “If it fails” above. When it ends with the local URL (exit `5`, the command is missing, or exit `1` twice), post:
+   - `Local URL: http://127.0.0.1:4173`
+   - and, when the person asked for a shareable link and agreed to a public one, `instafy tunnel start --port 4173 --json` (parse `url`, `tunnelId`, `localPort`, `pid`) and `Preview URL: <tunnel url>`.
 
 If `instafy` is not available or tunnel issuance fails, still post the local URL and explain that tunnels require a configured tunnel broker / CLI login.
 
@@ -76,16 +95,17 @@ If `instafy` is not available or tunnel issuance fails, still post the local URL
    - Must bind to a reachable interface for tunneling: prefer `--host 0.0.0.0`.
    - Use an explicit port (Vite often `5173`, Next `3000`).
    - Write logs to `.instafy/agent/logs/…`.
-4. Ask consent before exposure:
+4. Show it in Studio with `instafy preview open --port <port> --title "<short name>" --json` (see “Show a running site in Studio”). If that works, stop here unless the person wants a public link.
+5. Ask consent before a public URL (only when the person wants a shareable link, or previews are not available):
    - Explain this will create a public URL.
-   - If the user declines, stop at local preview URL only.
-5. Expose the port publicly:
+   - If the user declines, stop at the Studio preview or the local preview URL.
+6. Expose the port publicly:
    - Request a tunnel for `localPort=<port>` with purpose `"preview"` (see “Instafy tunnel flow” below).
-6. Verify end-to-end:
+7. Verify end-to-end:
    - Check process is alive.
    - Check `curl -fsS http://127.0.0.1:<port>` responds.
    - Check the public URL responds (HTML, not a 502/404).
-7. Post the preview URL in chat. If the client supports it, suggest opening in a new tab (and provide a QR if available).
+8. Post the preview URL in chat. If the client supports it, suggest opening in a new tab (and provide a QR if available).
 
 ## Missing env/secret onboarding flow
 
@@ -132,6 +152,7 @@ Run a quick “preview doctor”:
 - Confirm dev server PID is still alive; if not, restart it.
 - Confirm the port is listening (`lsof -i :<port>` or equivalent).
 - Confirm local URL works (`curl http://127.0.0.1:<port>`).
+- For a Studio preview, `instafy preview list` shows its status; run `instafy preview open` again for the same port to restart its client and refresh the card.
 - Confirm tunnel process is alive (if applicable) and re-request tunnel if expired.
 - If the public URL is up but page is blank, check for client-side errors (framework/HMR config, base paths, env vars).
 
@@ -139,4 +160,4 @@ Report what you found and what you restarted.
 
 ## Cleanup
 
-When asked to stop previews (or on shutdown), gracefully stop preview server/tunnel processes and revoke tunnel grants.
+When asked to stop previews (or on shutdown), gracefully stop preview server/tunnel processes, close Studio previews (`instafy preview close <previewId>`) and revoke tunnel grants.
