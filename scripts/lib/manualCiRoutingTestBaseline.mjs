@@ -41,8 +41,9 @@ export const MANUAL_CI_BASELINES = {
   // check-rust-ci binds their exact argv.
   // Reviewed additions: the CLI lane runs the git wrapper suite, and the
   // provider lane runs the provider core and service unit tests, and the
-  // contracts lane runs the local author pseudonym key test.
-  "build.yml": { sha256: "35fbc66c6bcf95385bdc2b0ca4216e1a88f03fffb5916eded1ed716379eebb7e" },
+  // contracts lane runs the local author pseudonym key test, and the CLI lane
+  // runs the preview check suites (local-site and site-check).
+  "build.yml": { sha256: "7e21004153d883b8b22341c7ee32043ce9879e0a7750e7ab0000c33bda76a787" },
   "browser-e2e.yml": { sha256: "5a227820568dfe71f344bd816f77fe41c4d1d8980041937792de09ab956c121b" },
   // The reviewed Auth and Controller DB baselines additionally trigger on the
   // GHCR image-mirror helper (and its lock/test for Auth, the serial-pull helper

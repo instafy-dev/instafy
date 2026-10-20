@@ -298,6 +298,30 @@ describe("instafy preview", () => {
     expect(rathole.pids()).toHaveLength(0);
   }, 30000);
 
+  it("exits 2 without telling the agent to start the site when a server takes the connection but has not answered", async () => {
+    const projectId = randomUUID();
+    const controller = await startMockController({ projectId });
+    const rathole = makeStubRathole();
+    // a dev server still compiling its first request: it accepts and answers nothing within the probe's 5 s
+    const hung = http.createServer(() => {});
+    hung.listen(0, "127.0.0.1");
+    await once(hung, "listening");
+    cleanups.push(() => {
+      hung.closeAllConnections();
+      return new Promise<void>((resolve) => hung.close(() => resolve()));
+    });
+    const port = (hung.address() as { port: number }).port;
+
+    const result = await execCli(openArgs({ projectId, controllerUrl: controller.url, port, rathole: rathole.file }), makeHome());
+
+    expect(result.code, result.stderr).toBe(2);
+    expect(result.stderr).toContain(`A server accepted the connection on port ${port}`);
+    expect(result.stderr).toContain("still be starting or compiling");
+    expect(result.stderr).not.toContain("Start the site first");
+    expect(controller.captures).toHaveLength(0);
+    expect(rathole.pids()).toHaveLength(0);
+  }, 30000);
+
   it("exits 3 for a denied port, locally and from the server", async () => {
     const projectId = randomUUID();
     const controller = await startMockController({ projectId });

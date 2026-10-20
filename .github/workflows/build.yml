@@ -554,6 +554,9 @@ jobs:
       - name: Test CLI git wrapper
         run: pnpm --filter @instafy/cli exec vitest run test/git-wrapper.e2e.spec.ts
 
+      - name: Test CLI preview check
+        run: pnpm --filter @instafy/cli exec vitest run test/local-site.spec.ts test/site-check.spec.ts
+
   javascript-desktop:
     name: JavaScript Desktop and runtime
     runs-on: >-

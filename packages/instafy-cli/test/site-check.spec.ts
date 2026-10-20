@@ -1,12 +1,13 @@
 // `instafy preview check`: a headless look at a local site.
 // The browser tests drive the Playwright this checkout has (pnpm store) with Playwright's Chromium or, on a Mac
-// without it, Google Chrome; they skip where neither exists. CI's CLI job does not run this file.
+// without it, Google Chrome; they skip where neither exists. CI's CLI job runs this file; the browser cases skip there when it has no Chromium.
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { once } from "node:events";
+import net from "node:net";
 import { Command } from "commander";
 import { afterAll, describe, expect, it } from "vitest";
 import {
@@ -21,10 +22,13 @@ import {
   defaultGlobalRoots,
   formatSiteCheck,
   framePage,
+  incompleteBlankCheck,
   isSiteUrl,
   launchChromium,
   loadPlaywright,
   locateBrowserEngine,
+  makeDefaultOutDir,
+  measureDominantShare,
   parseCheckPath,
   registerPreviewCheckCommand,
   runPreviewCheckCli,
@@ -186,6 +190,37 @@ describe("preview check: pure parts", () => {
     expect(blankVerdict({ ...base, framed: "missing" }).reason).toMatch(/did not load/);
   });
 
+  it("a screenshot that cannot be measured is said out loud, and is a problem when the page has no text", async () => {
+    // the measuring helper page failing (it crashed, or the image would not decode)
+    expect(await measureDominantShare(() => Promise.reject(new Error("Target closed")))).toBeNull();
+    expect(await measureDominantShare(() => Promise.resolve(Number.NaN))).toBeNull();
+    expect(await measureDominantShare(() => Promise.resolve(0.42))).toBe(0.42);
+    // a canvas page that drew nothing: without the measurement, the single-colour rule cannot catch it
+    const canvasOnly = { dominant: null, text: 0, media: 1, elements: 3, framed: "ok" as const };
+    expect(blankVerdict(canvasOnly).blank).toBe(false);
+    expect(incompleteBlankCheck(null, 0)).toEqual({ error: true, message: expect.stringMatching(/^blank check incomplete: could not read the screenshot/) });
+    expect(incompleteBlankCheck(null, 40)).toEqual({ error: false, message: expect.stringMatching(/^blank check incomplete/) });
+    expect(incompleteBlankCheck(0.4, 0)).toBeNull();
+  });
+
+  it("each run's default screenshot folder is new and private to this user", () => {
+    const a = makeDefaultOutDir(4173);
+    const b = makeDefaultOutDir(4173);
+    try {
+      expect(a).not.toBe(b);
+      for (const dir of [a, b]) {
+        expect(path.dirname(dir)).toBe(path.resolve(os.tmpdir()));
+        expect(path.basename(dir)).toMatch(/^instafy-preview-check-4173-/);
+        const stat = fs.lstatSync(dir);
+        expect(stat.isDirectory() && !stat.isSymbolicLink()).toBe(true);
+        if (process.platform !== "win32") expect(stat.mode & 0o777).toBe(0o700);
+      }
+    } finally {
+      fs.rmSync(a, { recursive: true, force: true });
+      fs.rmSync(b, { recursive: true, force: true });
+    }
+  });
+
   describe("finding Playwright: trusted locations first, the workspace only on request", () => {
     const pkg = (dir: string) => {
       fs.mkdirSync(dir, { recursive: true });
@@ -261,6 +296,27 @@ describe("preview check: exits", () => {
     const result = await runSiteCheck({ port, outDir: path.join(tmp, "none"), ...NO_ENGINE });
     expect(result.code).toBe(CHECK_EXIT_NOT_LISTENING);
     expect(result.message).toMatch(/Nothing is answering on port \d+ at 127\.0\.0\.1 or \[::1\]/);
+  });
+
+  it("a server that takes the connection but has not answered yet is not told to start the site (exit 2, says so)", async () => {
+    const hung = net.createServer((socket) => {
+      setTimeout(() => socket.destroy(), 2_000);
+    });
+    hung.listen(0, "127.0.0.1");
+    await once(hung, "listening");
+    const port = (hung.address() as { port: number }).port;
+    try {
+      // the probe waits as long as the page load may (--timeout), not a fixed 5 s
+      const started = Date.now();
+      const result = await runSiteCheck({ port, timeoutMs: 400, outDir: path.join(tmp, "hung"), ...NO_ENGINE });
+      expect(Date.now() - started).toBeLessThan(1_900);
+      expect(result.code).toBe(CHECK_EXIT_NOT_LISTENING);
+      expect(result.message).toMatch(/^A server accepted the connection on port \d+ but did not answer \(127\.0\.0\.1: no answer within 0\.4 s\)/);
+      expect(result.message).toMatch(/still be starting or compiling/);
+      expect(result.message).not.toMatch(/Start the site first/);
+    } finally {
+      hung.close();
+    }
   });
 
   it.skipIf(!ipv6)("a site listening only on [::1] is found, not reported as nothing listening", async () => {
