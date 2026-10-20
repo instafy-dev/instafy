@@ -191,12 +191,17 @@ Address recall does not restore open tabs or unsaved page contents.
 - **Shared, replacement runtime:** recovery requires enabled durable persistence
   and a usable saved snapshot. Persistence is default-off and controller-owned.
   A space whose own machine hosts the browser (`HOSTED_BROWSER_HOST`) has it on,
-  so its sign-ins are kept.
+  so its sign-ins are kept: the host restores the stored profile at every
+  start and saves it while open and after a clean close at every stop,
+  including its idle stop.
 - **Shared, separate active runtimes:** there is no live cookie synchronization.
   A stored snapshot is not a continuously shared browser session. Conditional
   saves reject stale writers rather than overwriting a newer profile. After a
-  conflict or uncertain save, that process stops saving until it is replaced
-  or restarted with a successfully established baseline.
+  conflict or uncertain save, a boot-time browser's process stops saving until
+  it is replaced or restarted with a successfully established baseline. A
+  browser host on the space's own machine settles an uncertain save by
+  comparing the stored copy's hash, and after a conflict installs the stored
+  copy at its next start.
 - **Fresh, another observation:** there is no login continuity.
 
 Site expiration, session-cookie behavior, and server-side logout still apply.

@@ -8,6 +8,7 @@
 //! nothing here does anything.
 
 pub mod mode;
+pub mod persistence;
 pub mod process;
 pub mod supervisor;
 
@@ -46,15 +47,28 @@ fn current() -> Option<Arc<BrowserHost>> {
 
 /// Publishes the process's host in lazy mode; does nothing otherwise or when
 /// already installed. Call once from the agent, inside the Tokio runtime.
-/// The controller client is where PR-5b restores and saves the profile.
-pub fn install(_client: Arc<ControllerClient>) {
-    if !lazy_mode() || HOST.get().is_some() {
+/// With `INSTAFY_BROWSER_PROFILE_PERSIST=1` the host restores and saves its
+/// profile through `client`, so its sign-ins are kept.
+pub fn install(client: Arc<ControllerClient>) {
+    let Some(settings) = lazy_mode_settings() else {
+        return;
+    };
+    if HOST.get().is_some() {
         return;
     }
     let Some(entrypoint) = mode::captured_entrypoint() else {
         return;
     };
-    let _ = HOST.set(BrowserHost::spawn(HostConfig::for_process(entrypoint)));
+    let persistence = settings.persist.then(|| {
+        Arc::new(persistence::HostPersistence::new(
+            Arc::new(persistence::ControllerProfileStore(client)),
+            persistence::snapshot_interval(),
+        ))
+    });
+    let _ = HOST.set(BrowserHost::spawn(HostConfig::for_process(
+        entrypoint,
+        persistence,
+    )));
 }
 
 /// What origin's browser routes call; `None` without a host.

@@ -534,3 +534,92 @@ async fn a_shutdown_during_the_registration_retry_stops_the_browser_host() {
         "no start after shutdown"
     );
 }
+
+/// The runtime's shutdown saves the browser host's profile before it stops
+/// the runtime, so the next machine restores the sign-ins.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_shutdown_saves_the_browser_profile_before_the_runtime_stops() {
+    use crate::browser_host::persistence::testing::FakeStore;
+    use crate::browser_host::test_support::{Fake, wait_for_state};
+    use origin_http_server::browser_host::BrowserHostState;
+
+    let fixture = Fixture::new().await;
+    let store = FakeStore::logging_to(fixture.stand_in.events.clone());
+    let fake = Fake::new("ready");
+    let host = fake.spawn_persisting(store.clone(), Duration::from_secs(3600));
+    let _installed = crate::browser_host::install_host_for_tests(host.clone());
+    host.request_start("user").unwrap();
+    wait_for_state(&host, BrowserHostState::Ready).await;
+    let cookies = fake.profile().join("Default/Network/Cookies");
+    std::fs::create_dir_all(cookies.parent().unwrap()).unwrap();
+    std::fs::write(&cookies, b"signed in").unwrap();
+
+    let mut registration = fixture.registration.clone();
+    registration.stop_url = Some(registration.lease_url.join("/runtimes/stop").unwrap());
+    let executor = Arc::new(AgentExecutor::new(fixture.config.clone()));
+    let client = Arc::new(ControllerClient::new(&fixture.config).unwrap());
+    let shutdown = ShutdownSignal::new();
+    shutdown.cancel();
+    let outcome = Box::pin(RuntimeAgent::register_and_process(
+        fixture.config.clone(),
+        client,
+        executor,
+        shutdown,
+        Arc::new(Mutex::new(HashSet::new())),
+        Some(registration),
+    ))
+    .await;
+    assert!(matches!(outcome, Ok(RegistrationOutcome::Shutdown)));
+    assert_eq!(store.stored().0, 1);
+    let events = fixture.stand_in.events();
+    let saved = events.iter().position(|event| event == "profile-put");
+    let stopped = events
+        .iter()
+        .position(|event| event == "other:runtimes/stop");
+    assert!(
+        saved.is_some() && stopped.is_some() && saved < stopped,
+        "the save comes before the runtime stops: {events:?}"
+    );
+}
+
+/// A deleted space kills the browser host without saving its profile.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_deleted_space_never_saves_the_browser_profile() {
+    use crate::browser_host::persistence::testing::FakeStore;
+    use crate::browser_host::test_support::{Fake, eventually, wait_for_state};
+    use origin_http_server::browser_host::BrowserHostState;
+
+    let store = FakeStore::new();
+    let fake = Fake::new("ready");
+    let host = fake.spawn_persisting(store.clone(), Duration::from_millis(100));
+    let _installed = crate::browser_host::install_host_for_tests(host.clone());
+    host.request_start("user").unwrap();
+    wait_for_state(&host, BrowserHostState::Ready).await;
+
+    let fixture = Fixture::for_deleted_space().await;
+    let executor = Arc::new(AgentExecutor::new(fixture.config.clone()));
+    let client = Arc::new(ControllerClient::new(&fixture.config).unwrap());
+    let outcome = Box::pin(RuntimeAgent::register_and_process(
+        fixture.config.clone(),
+        client,
+        executor,
+        ShutdownSignal::new(),
+        Arc::new(Mutex::new(HashSet::new())),
+        Some(fixture.registration.clone()),
+    ))
+    .await;
+    assert!(matches!(outcome, Ok(RegistrationOutcome::SpaceDeleted)));
+    let cookies = fake.profile().join("Default/Network/Cookies");
+    std::fs::create_dir_all(cookies.parent().unwrap()).unwrap();
+    std::fs::write(&cookies, b"signed in").unwrap();
+    eventually(
+        "the browser host to be killed",
+        Duration::from_secs(15),
+        || host.snapshot().state == BrowserHostState::Failed,
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(store.uploads_started(), 0);
+}

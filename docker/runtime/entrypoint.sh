@@ -409,6 +409,47 @@ block_browser_downloads() {
   ' "${profile_dir}"
 }
 
+# Makes Chromium continue the last session at its next start in the on-demand
+# browser host's profile (session.restore_on_startup 1). Chromium then keeps
+# cookies that have no expiry across a clean close (Browser.close), so a
+# sign-in that uses one survives the host's idle stop. Preferences are never
+# packed into the durable profile, so this is written on every start and
+# tabs reopen only within one container. Chromium must not be running while
+# this writes.
+keep_browser_session_on_restart() {
+  local profile_dir="$1"
+  local node_binary=/usr/bin/node
+  if [ ! -x "${node_binary}" ]; then
+    node_binary="$(command -v node 2>/dev/null || true)"
+  fi
+  if [ -z "${node_binary}" ] || [ -z "${profile_dir}" ]; then
+    return 1
+  fi
+  "${node_binary}" -e '
+    const fs = require("fs");
+    const path = require("path");
+    const directory = path.join(process.argv[1], "Default");
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const file = path.join(directory, "Preferences");
+    let preferences = {};
+    try {
+      preferences = JSON.parse(fs.readFileSync(file, "utf8"));
+    } catch (error) {
+      preferences = {};
+    }
+    if (!preferences || typeof preferences !== "object" || Array.isArray(preferences)) {
+      preferences = {};
+    }
+    if (!preferences.session || typeof preferences.session !== "object" || Array.isArray(preferences.session)) {
+      preferences.session = {};
+    }
+    preferences.session.restore_on_startup = 1;
+    const temporary = `${file}.instafy-${process.pid}`;
+    fs.writeFileSync(temporary, JSON.stringify(preferences), { mode: 0o600, flag: "wx" });
+    fs.renameSync(temporary, file);
+  ' "${profile_dir}"
+}
+
 # Chromium's command line for the Shared Browser, shared by the boot-time
 # launch and the on-demand browser host. It reads the profile directory, CDP
 # port, egress proxy address, render scale and view settings from the
@@ -1135,6 +1176,11 @@ start_browser_host() {
   fi
   if ! block_browser_downloads "${profile_dir}"; then
     browser_host_fail host_error 72 "cannot block downloads in the profile"
+  fi
+  # Sign-ins that use cookies without an expiry are kept only when Chromium
+  # continues its last session. Without it the browser still works.
+  if ! keep_browser_session_on_restart "${profile_dir}"; then
+    echo "[instafy] browser host: could not set session restore in the profile" >&2
   fi
 
   export HOME="${home_dir}"
