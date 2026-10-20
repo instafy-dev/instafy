@@ -222,6 +222,34 @@ describe("startSpaceMachineForBrowser", () => {
     })).resolves.toMatchObject({ kind: "attach", candidate: { runtimeId: "other" } });
   });
 
+  it("never waits on the person's own Desktop machine, offline or online", async () => {
+    const desktop = (status: string) => entry({
+      runtimeId: "desktop", provider: "desktop", isLocal: true, status, health: status === "ready" ? "online" : "offline",
+      displayName: "My Mac", origin: null,
+    });
+    const space = host({ runtimeId: "space-machine", origin: origin("space-machine") });
+    for (const status of ["offline", "ready"]) {
+      const clock = fakeClock();
+      await expect(startSpaceMachineForBrowser({
+        projectId: "project-1", pinnedRuntimeId: null, conversationRuntimeId: "desktop",
+        ensureSpaceMachine: async () => true,
+        fetchStatus: statusSequence([desktop(status), entry({ runtimeId: "space-machine", status: "starting", origin: null })], [desktop(status), space]),
+        ...clock,
+      })).resolves.toMatchObject({ kind: "attach", candidate: { runtimeId: "space-machine", mode: "lazy" } });
+      expect(clock.sleeps).toEqual([2_000]);
+    }
+  });
+
+  it("never takes a self-hosted or separate browser session machine for the space's own", async () => {
+    const privateMachine = entry({ runtimeId: "private", isPrivateSelfHosted: true });
+    const session = entry({ runtimeId: "session", displayName: "Browser session", origin: origin("session") });
+    const space = host({ runtimeId: "space-machine", origin: origin("space-machine") });
+    await expect(startSpaceMachineForBrowser({
+      projectId: "project-1", pinnedRuntimeId: "session", conversationRuntimeId: "private",
+      ensureSpaceMachine: async () => true, fetchStatus: statusSequence([privateMachine, session, space]), ...fakeClock(),
+    })).resolves.toMatchObject({ kind: "attach", candidate: { runtimeId: "space-machine" } });
+  });
+
   it("fails when the machine does not start or does not come up within three minutes", async () => {
     await expect(startSpaceMachineForBrowser({
       projectId: "project-1", pinnedRuntimeId: null, conversationRuntimeId: null,

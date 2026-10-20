@@ -33,6 +33,10 @@ export function useChatBrowserSessionState({
   const [browserSessionOpen, setBrowserSessionOpen] = useState(false);
   const [browserSessionRuntimeId, setBrowserSessionRuntimeId] = useState<string | null>(null);
   const [exactBrowserRuntimeId, setExactBrowserRuntimeId] = useState<string | null>(null);
+  // The storage scope in which the browser was last opened by an action in
+  // this page (a press, a link, a card), not restored from storage. A restored
+  // open never starts the space's machine by itself.
+  const [openedInPageKey, setOpenedInPageKey] = useState<string | null>(null);
   const browserSessionStateStorageKey = useMemo(() => {
     if (!currentUserId || !activeProjectId || !activeConversationId) {
       return null;
@@ -57,6 +61,7 @@ export function useChatBrowserSessionState({
     setBrowserSessionRuntimeId(null);
     setExactBrowserRuntimeId(null);
     setBrowserSessionOpen(false);
+    setOpenedInPageKey(null);
     setHydratedStorageKey(null);
   }, [browserSessionStateStorageKey]);
 
@@ -150,6 +155,7 @@ export function useChatBrowserSessionState({
       setExactBrowserRuntimeId((current) => current === sanitizedRuntimeId ? current : null);
     }
     setBrowserSessionOpen(true);
+    setOpenedInPageKey(browserSessionStateStorageKey);
     setBrowserSessionExpandRequestToken((current) => current + 1);
   }, [browserSessionStateStorageKey]);
 
@@ -161,6 +167,7 @@ export function useChatBrowserSessionState({
     setBrowserSessionRuntimeId(normalized);
     setExactBrowserRuntimeId(normalized);
     setBrowserSessionOpen(true);
+    setOpenedInPageKey(browserSessionStateStorageKey);
     setBrowserSessionExpandRequestToken((current) => current + 1);
   }, [browserSessionStateStorageKey]);
 
@@ -168,6 +175,7 @@ export function useChatBrowserSessionState({
     if (!browserSessionStateStorageKey || currentIdentityRef.current !== browserSessionStateStorageKey) return;
     browserSessionStateDirtyRef.current = true;
     setBrowserSessionOpen(open);
+    setOpenedInPageKey(open ? browserSessionStateStorageKey : null);
   }, [browserSessionStateStorageKey]);
 
   const requestBrowserSessionExpand = useCallback(() => {
@@ -292,6 +300,8 @@ export function useChatBrowserSessionState({
       browserSessionStateLoadedKeyRef.current === browserSessionStateStorageKey &&
       browserSessionStateScopeKeyRef.current === browserSessionStateStorageKey,
     exactBrowserRuntimeId,
+    browserSessionOpenedInPage: browserSessionOpen &&
+      openedInPageKey !== null && openedInPageKey === browserSessionStateStorageKey,
     browserSessionExpandRequestToken,
     handleBrowserRuntimeIdResolved,
     handleBrowserSessionOpenChange,

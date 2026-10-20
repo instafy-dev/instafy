@@ -29,6 +29,7 @@ export const SHARED_BROWSER_HOST_COPY = {
   machineStopping: "This space's machine is stopping. Try again in a moment.",
   notAvailable: "Instafy's browser is not available on this space's machine right now. Try again.",
   machineStopped: "This space's machine stopped. Open the browser to start it.",
+  machineNotRunning: "This space's machine is not running. Press Retry to start it.",
   machineDidNotStart: "This space's machine did not start. Try again.",
 } as const;
 
@@ -219,10 +220,21 @@ export function shouldStartSpaceMachineForBrowser(input: {
   if (input.selection.kind !== "missing" || !input.exactRuntimeId) return false;
   const pinned = input.entries.find((entry) => entry.runtimeId === input.exactRuntimeId);
   if (!pinned) return true;
-  return isManagedInstafyCloudProvider(pinned.provider) &&
-    pinned.isPrivateSelfHosted !== true &&
-    !runtimeEntryLooksLikeBrowserSession(pinned) &&
-    !runtimeEntryIsDispatchable(pinned);
+  return runtimeEntryIsSpaceMachine(pinned) && !runtimeEntryIsDispatchable(pinned);
+}
+
+/**
+ * The space's own Instafy Cloud machine: managed, not private, and not a
+ * separate browser session. The person's Desktop or self-hosted machine is
+ * never one, even when the conversation runs on it.
+ */
+export function runtimeEntryIsSpaceMachine(
+  entry: ControllerRuntimeStatusEntry | null | undefined,
+): entry is ControllerRuntimeStatusEntry {
+  return Boolean(entry) &&
+    isManagedInstafyCloudProvider(entry!.provider) &&
+    entry!.isPrivateSelfHosted !== true &&
+    !runtimeEntryLooksLikeBrowserSession(entry);
 }
 
 /** A live lazy host to resume in place of a stale pin, when there is one. */
@@ -240,11 +252,13 @@ export type SpaceMachineColdStartResult =
 
 /**
  * The cold path for a press: start the space's machine, then wait until it
- * is dispatchable. The target is the pinned machine when it is listed, else
- * the conversation's machine when listed, else the first lazy host. A target
- * that comes up without `sharedBrowserHost` (an image or lease that is not
- * attested for it) goes back to the legacy path at once; registration writes
- * status and capabilities together, so there is nothing to wait for.
+ * is dispatchable. The target is the pinned machine, else the conversation's
+ * machine, each only when it is listed and is the space's own machine (never
+ * a Desktop, self-hosted or browser session machine). Otherwise it is the
+ * first live lazy host. A target that comes up without `sharedBrowserHost`
+ * (an image or lease that is not attested for it) goes back to the legacy
+ * path at once; registration writes status and capabilities together, so
+ * there is nothing to wait for.
  */
 export async function startSpaceMachineForBrowser(params: {
   projectId: string;
@@ -280,12 +294,17 @@ export async function startSpaceMachineForBrowser(params: {
     }).catch(() => null);
     if (cancelled()) break;
     const entries = Array.isArray(status?.runtimes) ? status.runtimes : [];
-    const listed = (runtimeId: string | null) =>
-      runtimeId ? entries.find((entry) => entry.runtimeId === runtimeId) ?? null : null;
+    const listedSpaceMachine = (runtimeId: string | null) => {
+      const entry = runtimeId ? entries.find((item) => item.runtimeId === runtimeId) : undefined;
+      return runtimeEntryIsSpaceMachine(entry) ? entry : null;
+    };
     const target =
-      listed(params.pinnedRuntimeId) ??
-      listed(params.conversationRuntimeId) ??
-      entries.find((entry) => runtimeEntryIsLazyBrowserHost(entry) && runtimeEntryIsDispatchable(entry)) ??
+      listedSpaceMachine(params.pinnedRuntimeId) ??
+      listedSpaceMachine(params.conversationRuntimeId) ??
+      entries.find((entry) =>
+        runtimeEntryIsSpaceMachine(entry) &&
+        runtimeEntryIsLazyBrowserHost(entry) &&
+        runtimeEntryIsDispatchable(entry)) ??
       null;
     if (target && runtimeEntryIsDispatchable(target)) {
       if (!runtimeEntryIsLazyBrowserHost(target)) {

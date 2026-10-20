@@ -154,6 +154,7 @@ export async function fetchRuntimeStatus(
       sharedBrowserHostPolicy?: unknown;
     };
 
+    const sharedBrowserHostPolicy = mapSharedBrowserHostPolicy(payload.sharedBrowserHostPolicy);
     const runtimes = Array.isArray(payload.runtimes)
       ? payload.runtimes
           .map((entry) => {
@@ -171,8 +172,12 @@ export async function fetchRuntimeStatus(
             return {
               ...record,
               runtimeImage,
-              // Anything but the exact known shape reads as no host.
-              sharedBrowserHost: mapControllerSharedBrowserHost(record.sharedBrowserHost) ?? undefined,
+              // Anything but the exact known shape reads as no host, and so
+              // does every host outside a covered space: Studio attaches only
+              // where the policy says the host routes are open.
+              sharedBrowserHost: sharedBrowserHostPolicy === "covered"
+                ? mapControllerSharedBrowserHost(record.sharedBrowserHost) ?? undefined
+                : undefined,
             } as ControllerRuntimeStatusEntry;
           })
           .filter((entry): entry is ControllerRuntimeStatusEntry => Boolean(entry))
@@ -181,7 +186,7 @@ export async function fetchRuntimeStatus(
     return {
       runtimes,
       preferredRuntimeId: payload.preferredRuntimeId ?? null,
-      sharedBrowserHostPolicy: mapSharedBrowserHostPolicy(payload.sharedBrowserHostPolicy),
+      sharedBrowserHostPolicy,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

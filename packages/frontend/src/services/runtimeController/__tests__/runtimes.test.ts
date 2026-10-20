@@ -92,6 +92,19 @@ describe("fetchRuntimeStatus", () => {
     expect((await fetchRuntimeStatus({ projectId: "project-1" }))?.sharedBrowserHostPolicy).toBe("off");
   });
 
+  it.each(["off", undefined, "sometimes"])(
+    "drops a host marker unless the space is covered (policy %s)",
+    async (policy) => {
+      vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({
+        preferredRuntimeId: null,
+        ...(policy === undefined ? {} : { sharedBrowserHostPolicy: policy }),
+        runtimes: [{ runtimeId: "host", sharedBrowserHost: { version: 1, mode: "lazy" } }],
+      })));
+      const result = await fetchRuntimeStatus({ projectId: "project-1" });
+      expect(result?.runtimes[0]?.sharedBrowserHost).toBeUndefined();
+    },
+  );
+
   it.each(["credentials", "request", "success body", "error body"])(
     "settles a stalled %s so browser discovery and refresh can retry",
     async (phase) => {

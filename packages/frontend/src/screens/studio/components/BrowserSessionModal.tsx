@@ -456,6 +456,7 @@ export function BrowserSessionModal({
   ensureSpaceMachine = null,
   conversationRuntimeId = null,
   attachOnly = false,
+  openedByPerson = true,
   spaceBusy = false,
 }: {
   isOpen: boolean;
@@ -511,6 +512,13 @@ export function BrowserSessionModal({
    * space's running machine and never starts or ensures one.
    */
   attachOnly?: boolean;
+  /**
+   * False for an open Studio restored by itself (a reload or a return to the
+   * conversation with the browser left open): it never starts the space's
+   * machine until the person presses Retry. A press, a link or a card that
+   * opens the browser leaves it true.
+   */
+  openedByPerson?: boolean;
   /** Some run is actively progressing in this space. */
   spaceBusy?: boolean;
 }) {
@@ -613,9 +621,16 @@ export function BrowserSessionModal({
   const ensureSpaceMachineRef = useRef(ensureSpaceMachine);
   const conversationRuntimeIdRef = useRef(conversationRuntimeId);
   const attachOnlyRef = useRef(attachOnly);
+  const openedByPersonRef = useRef(openedByPerson);
+  // Set by the person's own actions inside this open (Retry, Clear data):
+  // they may start the space's machine even when the open itself was
+  // automatic (`attachOnly`) or restored. Cleared when the browser closes or
+  // its scope changes.
+  const personRetryRef = useRef(false);
   ensureSpaceMachineRef.current = ensureSpaceMachine;
   conversationRuntimeIdRef.current = conversationRuntimeId;
   attachOnlyRef.current = attachOnly;
+  openedByPersonRef.current = openedByPerson;
   preferRuntimeIdRef.current = preferRuntimeId;
   humanInputEnabledRef.current = humanInputEnabled;
   webRtcConnectionRef.current = webRtcConnection;
@@ -699,6 +714,7 @@ export function BrowserSessionModal({
     setSessionChooserOpen(false);
     setHostAttach(null);
     pinnedSessionRef.current = null;
+    personRetryRef.current = false;
   }, [selectionScope]);
   const chosenRuntimeId = runtimeChoice?.scope === selectionScope ? runtimeChoice.runtimeId : null;
   const selectedSessionRuntimeId = sessionIdentity?.scope === selectionScope ? sessionIdentity.runtimeId : null;
@@ -975,6 +991,9 @@ export function BrowserSessionModal({
   }, []);
 
   const retryConnection = useCallback(() => {
+    // Only the person's own actions call this (Retry, Try again, Clear data);
+    // automatic reconnects schedule their own attempt.
+    personRetryRef.current = true;
     if (reconnectTimerRef.current !== null) {
       window.clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
@@ -1092,7 +1111,31 @@ export function BrowserSessionModal({
       projectId,
     ],
   );
+  // A separate browser session claims the project's runtime while open, so
+  // generic recovery stands down while its ensure, takeover or recycle runs.
+  // Attach mode claims only while Clear data runs (the controller fails the
+  // reset if a managed machine relaunches before its recheck): otherwise
+  // generic recovery keeps the space's own machine up, and the cold path
+  // relies on the generic ensure.
+  const browserRuntimeClaimRef = useRef<{ projectId: string; release: () => void } | null>(null);
+  const releaseBrowserRuntimeClaim = useCallback(() => {
+    const claim = browserRuntimeClaimRef.current;
+    browserRuntimeClaimRef.current = null;
+    claim?.release();
+  }, []);
+  const holdBrowserRuntimeClaim = useCallback((claimProjectId: string) => {
+    if (browserRuntimeClaimRef.current?.projectId === claimProjectId) return;
+    browserRuntimeClaimRef.current?.release();
+    browserRuntimeClaimRef.current = {
+      projectId: claimProjectId,
+      release: beginBrowserRuntimeClaim(claimProjectId),
+    };
+  }, []);
   const handleBrowserDataClearStart = useCallback(() => {
+    // Keep generic recovery from relaunching the space's machine between the
+    // controller's stop and its recheck. The retry after the clear releases
+    // it again on the attach or cold path.
+    if (projectId) holdBrowserRuntimeClaim(projectId);
     setSessionChooserOpen(false);
     browserDataClearInFlightRef.current = true;
     browserConnectionGenerationRef.current += 1;
@@ -1122,7 +1165,7 @@ export function BrowserSessionModal({
     webRtcConnectionRef.current = null;
     webRtcProjectIdRef.current = null;
     runtimeDebugLog("browser-session:reset-start", { projectId });
-  }, [connectedScopeKey, projectId]);
+  }, [connectedScopeKey, holdBrowserRuntimeClaim, projectId]);
   const handleBrowserDataClearSettled = useCallback(
     (succeeded: boolean) => {
       browserDataClearInFlightRef.current = false;
@@ -1201,31 +1244,16 @@ export function BrowserSessionModal({
     setViewerOverride(null);
   }, [canControlBrowser, projectId, sharedBrowserViewerKind]);
 
-  // A separate browser session claims the project's runtime until close, so
-  // generic recovery stands down while its ensure, takeover or recycle runs.
-  // Attach mode never claims: generic recovery keeps the space's own machine
-  // up, and the cold path relies on the generic ensure.
-  const browserRuntimeClaimRef = useRef<{ projectId: string; release: () => void } | null>(null);
-  const releaseBrowserRuntimeClaim = useCallback(() => {
-    const claim = browserRuntimeClaimRef.current;
-    browserRuntimeClaimRef.current = null;
-    claim?.release();
-  }, []);
-  const holdBrowserRuntimeClaim = useCallback((claimProjectId: string) => {
-    if (browserRuntimeClaimRef.current?.projectId === claimProjectId) return;
-    browserRuntimeClaimRef.current?.release();
-    browserRuntimeClaimRef.current = {
-      projectId: claimProjectId,
-      release: beginBrowserRuntimeClaim(claimProjectId),
-    };
-  }, []);
   useEffect(() => {
     if (!isOpen || !projectId) {
       releaseBrowserRuntimeClaim();
       return;
     }
+    // Claimed from open, as before; attach mode and the cold path release it
+    // once the first status read shows they apply.
+    holdBrowserRuntimeClaim(projectId);
     return releaseBrowserRuntimeClaim;
-  }, [isOpen, projectId, releaseBrowserRuntimeClaim]);
+  }, [holdBrowserRuntimeClaim, isOpen, projectId, releaseBrowserRuntimeClaim]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -1249,6 +1277,7 @@ export function BrowserSessionModal({
       setRuntimeLimitActionBusy(false);
       setForcedRuntimeId(null);
       setHostAttach(null);
+      personRetryRef.current = false;
       setDesktopDockedCard(false);
       setFullscreen(false);
       return;
@@ -1333,14 +1362,24 @@ export function BrowserSessionModal({
           entries: statusEntries,
         })) {
           const ensureSpaceMachineForPress = ensureSpaceMachineRef.current;
-          if (attachOnlyRef.current) {
+          const personRetry = personRetryRef.current;
+          if (attachOnlyRef.current && !personRetry) {
             // Studio opened this by itself: it never starts a machine.
             releaseBrowserRuntimeClaim();
             setStatus("error");
             setError(SHARED_BROWSER_HOST_COPY.machineStopped);
             return;
           }
-          if (canControlBrowser && ensureSpaceMachineForPress) {
+          const canStartSpaceMachine = canControlBrowser && Boolean(ensureSpaceMachineForPress);
+          if (canStartSpaceMachine && !openedByPersonRef.current && !personRetry) {
+            // A restored open (a reload or a return to the conversation)
+            // never wakes a machine that stopped while nobody was here.
+            releaseBrowserRuntimeClaim();
+            setStatus("error");
+            setError(SHARED_BROWSER_HOST_COPY.machineNotRunning);
+            return;
+          }
+          if (canStartSpaceMachine && ensureSpaceMachineForPress) {
             // The cold path: start this space's own machine for the press
             // and open its browser once it is up. The generic ensure skips
             // while a browser claim is held, so none is.
@@ -1422,7 +1461,7 @@ export function BrowserSessionModal({
         setHostAttach(null);
       }
 
-      if ((!runtimeId || !originId) && attachOnlyRef.current) {
+      if ((!runtimeId || !originId) && attachOnlyRef.current && !personRetryRef.current) {
         // Studio opened this by itself: it never ensures a browser runtime.
         releaseBrowserRuntimeClaim();
         setStatus("error");

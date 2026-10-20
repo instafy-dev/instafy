@@ -711,6 +711,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   }, [activeProjectId, activeConversationId, activeConversationControllerId, goToStudio, searchReturn.originToken]);
   const {
     browserSessionOpen,
+    browserSessionOpenedInPage,
     browserSessionStateHydrated,
     exactBrowserRuntimeId,
     browserSessionExpandRequestToken,
@@ -6151,7 +6152,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     }
                     onRuntimeIdResolved={handleSharedBrowserRuntimeResolved}
                     onStatus={showStatus}
-                    ensureSpaceMachine={projectWriteDisabled ? null : ensureSpaceMachineForBrowser}
+                    ensureSpaceMachine={canWriteProject ? ensureSpaceMachineForBrowser : null}
+                    openedByPerson={browserSessionOpenedInPage}
                     conversationRuntimeId={effectiveRuntimeId ?? null}
                     spaceBusy={spaceRunActive}
                   />

@@ -56,6 +56,40 @@ describe("useChatBrowserSessionState", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
+  it("tells a restored open from one made in this page", async () => {
+    const key = "instafy:browser-session:user-1:project-1:conversation-1";
+    window.sessionStorage.setItem(key, JSON.stringify({ open: true, runtimeId: "runtime-1", exactRuntimeId: "runtime-1" }));
+    await act(async () => {
+      root.render(<TestHarness resultRef={resultRef} />);
+    });
+    // Restored from storage: open, but never by this page.
+    expect(resultRef.current?.browserSessionOpen).toBe(true);
+    expect(resultRef.current?.browserSessionOpenedInPage).toBe(false);
+
+    await act(async () => {
+      resultRef.current?.handleBrowserSessionOpenChange(false);
+    });
+    expect(resultRef.current?.browserSessionOpenedInPage).toBe(false);
+    await act(async () => {
+      resultRef.current?.handleToggleBrowserSession();
+    });
+    expect(resultRef.current?.browserSessionOpenedInPage).toBe(true);
+
+    await act(async () => {
+      resultRef.current?.handleBrowserSessionOpenChange(false);
+    });
+    await act(async () => {
+      resultRef.current?.resumeBrowserSession("runtime-1");
+    });
+    expect(resultRef.current?.browserSessionOpenedInPage).toBe(true);
+
+    // Another scope starts over as restored.
+    await act(async () => {
+      root.render(<TestHarness resultRef={resultRef} projectId="project-2" />);
+    });
+    expect(resultRef.current?.browserSessionOpenedInPage).toBe(false);
+  });
+
   it("reopens a hidden browser session with its resolved runtime", async () => {
     await act(async () => {
       root.render(<TestHarness resultRef={resultRef} />);

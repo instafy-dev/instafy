@@ -321,12 +321,12 @@ describe("Shared modal attach mode", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
   async function render(options: { resumeRuntimeId?: string | null; canControlBrowser?: boolean; canClearBrowserData?: boolean;
-    attachOnly?: boolean; spaceBusy?: boolean; conversationRuntimeId?: string | null } = {}) {
+    attachOnly?: boolean; spaceBusy?: boolean; conversationRuntimeId?: string | null; openedByPerson?: boolean } = {}) {
     await act(async () => { root.render(<BrowserSessionModal isOpen onOpenChange={vi.fn()} projectId={projectId}
       currentUserId="user-1" preferRuntimeId={null} resumeRuntimeId={options.resumeRuntimeId ?? null} onRuntimeIdResolved={onResolved}
       presentation="docked" fillContainer canControlBrowser={options.canControlBrowser ?? true} canClearBrowserData={options.canClearBrowserData ?? false}
       ensureSpaceMachine={ensureSpaceMachine} conversationRuntimeId={options.conversationRuntimeId ?? null}
-      attachOnly={options.attachOnly ?? false} spaceBusy={options.spaceBusy ?? false}
+      attachOnly={options.attachOnly ?? false} spaceBusy={options.spaceBusy ?? false} openedByPerson={options.openedByPerson ?? true}
       sharedBrowserCapabilitiesResolved={false} />); });
   }
   const settle = (ms = 0) => act(async () => new Promise<void>(resolve => setTimeout(resolve, ms)));
@@ -342,6 +342,17 @@ describe("Shared modal attach mode", () => {
     expect(mocks.ensure).not.toHaveBeenCalled();
     expect(mocks.stop).not.toHaveBeenCalled(); expect(mocks.stopIfIdle).not.toHaveBeenCalled();
     expect(ensureSpaceMachine).not.toHaveBeenCalled();
+    expect(isBrowserRuntimeClaimActive(projectId)).toBe(false);
+  });
+
+  it("claims from open, as before, and lets go once the first read shows the space's browser", async () => {
+    let resolveStatus!: (value: unknown) => void;
+    mocks.fetchStatus.mockReturnValueOnce(new Promise(resolve => { resolveStatus = resolve; }));
+    await render();
+    expect(isBrowserRuntimeClaimActive(projectId)).toBe(true);
+    await act(async () => resolveStatus(covered(hostEntry())));
+    await settle();
+    expect(onResolved).toHaveBeenCalledWith(hostId);
     expect(isBrowserRuntimeClaimActive(projectId)).toBe(false);
   });
 
@@ -426,6 +437,84 @@ describe("Shared modal attach mode", () => {
     expect(ensureSpaceMachine).toHaveBeenCalledTimes(1);
     expect(mocks.ensure).not.toHaveBeenCalled();
     expect(onResolved).toHaveBeenCalledWith(hostId);
+    expect(onResolved).toHaveBeenLastCalledWith(hostId);
+  });
+
+  it("holds the claim while Clear data runs, so recovery cannot relaunch the machine mid-reset", async () => {
+    mocks.fetchStatus.mockResolvedValue(covered(hostEntry()));
+    let finishClear!: (result: { success: boolean }) => void;
+    mocks.clearForProject.mockImplementation(() => new Promise(resolve => { finishClear = resolve; }));
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    await render({ canClearBrowserData: true });
+    await settle();
+    expect(isBrowserRuntimeClaimActive(projectId)).toBe(false);
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="shared-browser-sessions-toggle"]')!.click());
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="shared-browser-clear-data"]')!.click());
+    expect(mocks.clearForProject).toHaveBeenCalledExactlyOnceWith(projectId);
+    expect(isBrowserRuntimeClaimActive(projectId)).toBe(true);
+    mocks.fetchStatus.mockReset()
+      .mockResolvedValueOnce(covered(stoppedHost()))
+      .mockResolvedValue(covered(hostEntry()));
+    await act(async () => finishClear({ success: true }));
+    await settle();
+    expect(ensureSpaceMachine).toHaveBeenCalledTimes(1);
+    expect(onResolved).toHaveBeenLastCalledWith(hostId);
+    expect(isBrowserRuntimeClaimActive(projectId)).toBe(false);
+  });
+
+  it("restarts the machine after Clear data even in a browser Studio opened by itself", async () => {
+    mocks.fetchStatus.mockResolvedValue(covered(hostEntry()));
+    mocks.clearForProject.mockResolvedValue({ success: true });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    await render({ canClearBrowserData: true, attachOnly: true });
+    await settle();
+    expect(onResolved).toHaveBeenLastCalledWith(hostId);
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="shared-browser-sessions-toggle"]')!.click());
+    mocks.fetchStatus.mockReset()
+      .mockResolvedValueOnce(covered(stoppedHost()))
+      .mockResolvedValue(covered(hostEntry()));
+    onResolved.mockClear();
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="shared-browser-clear-data"]')!.click());
+    await settle();
+    expect(ensureSpaceMachine).toHaveBeenCalledTimes(1);
+    expect(mocks.ensure).not.toHaveBeenCalled();
+    expect(text()).not.toContain(SHARED_BROWSER_HOST_COPY.machineStopped);
+    expect(onResolved).toHaveBeenLastCalledWith(hostId);
+  });
+
+  it.each([
+    ["a pin to the stopped machine", true],
+    ["nothing to open", false],
+  ])("never wakes the space's machine for a restored open (%s) until the person presses Retry", async (_label, pinned) => {
+    mocks.fetchStatus.mockResolvedValue(covered(...(pinned ? [stoppedHost()] : [])));
+    await render({ openedByPerson: false, resumeRuntimeId: pinned ? hostId : null, conversationRuntimeId: hostId });
+    await settle();
+    expect(ensureSpaceMachine).not.toHaveBeenCalled();
+    expect(mocks.ensure).not.toHaveBeenCalled();
+    expect(text()).toContain(SHARED_BROWSER_HOST_COPY.machineNotRunning);
+    expect(isBrowserRuntimeClaimActive(projectId)).toBe(false);
+    mocks.fetchStatus.mockReset()
+      .mockResolvedValueOnce(covered(...(pinned ? [stoppedHost()] : [])))
+      .mockResolvedValue(covered(hostEntry()));
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="browser-session-error-retry"]')!.click());
+    await settle();
+    expect(ensureSpaceMachine).toHaveBeenCalledTimes(1);
+    expect(mocks.ensure).not.toHaveBeenCalled();
+    expect(onResolved).toHaveBeenLastCalledWith(hostId);
+  });
+
+  it("lets the person's Retry start the machine in a browser Studio opened by itself", async () => {
+    mocks.fetchStatus.mockResolvedValue(covered(stoppedHost()));
+    await render({ attachOnly: true, resumeRuntimeId: hostId });
+    await settle();
+    expect(text()).toContain(SHARED_BROWSER_HOST_COPY.machineStopped);
+    expect(ensureSpaceMachine).not.toHaveBeenCalled();
+    mocks.fetchStatus.mockReset()
+      .mockResolvedValueOnce(covered(stoppedHost()))
+      .mockResolvedValue(covered(hostEntry()));
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="browser-session-error-retry"]')!.click());
+    await settle();
+    expect(ensureSpaceMachine).toHaveBeenCalledTimes(1);
     expect(onResolved).toHaveBeenLastCalledWith(hostId);
   });
 

@@ -101,8 +101,8 @@ type Options = {
  */
 export const BROWSER_REQUEST_HANDOFF_DEADLINE_MS = 120_000;
 /**
- * How long a press may take: it can also start the space's machine first
- * (up to three minutes) and then its browser.
+ * How long a press for Instafy's browser may take: it can also start the
+ * space's machine first (up to three minutes) and then its browser.
  */
 export const BROWSER_REQUEST_PRESS_DEADLINE_MS = 240_000;
 
@@ -223,8 +223,10 @@ export function useChatBrowserRequest(options: Options) {
     pending.current = true;
     try {
       captured.activate(transport, plan);
+      // Only a press for Instafy's browser may first start the space's
+      // machine; the browser on this device keeps the shorter bound.
       const deadline = Date.now() +
-        (autoStarted ? BROWSER_REQUEST_HANDOFF_DEADLINE_MS : BROWSER_REQUEST_PRESS_DEADLINE_MS);
+        (!autoStarted && transport === "shared" ? BROWSER_REQUEST_PRESS_DEADLINE_MS : BROWSER_REQUEST_HANDOFF_DEADLINE_MS);
       let activated = false;
       // Let React commit the chosen surface before considering a cached
       // ready runtime. Identity, closure and explicit location changes cancel

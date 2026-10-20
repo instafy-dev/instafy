@@ -137,8 +137,8 @@ Start or Reconnect. Focus reaching the composer on its own does not count.
 The Machines panel only reads status. One exception remains: the shared
 browser dock still asks for a machine itself when it connects without one. In
 a space the browser-host policy covers, that request is the space's own machine
-through the generic ensure, made only for a press, and the browser then opens
-on that machine (see
+through the generic ensure, made only for a press (never for an open restored
+on reload), and the browser then opens on that machine (see
 [Browser on the space's own machine](Shared-Browser.md#how-studio-opens-it)).
 Elsewhere it is a separate browser session runtime, as before.
 
