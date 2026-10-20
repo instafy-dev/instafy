@@ -1,0 +1,48 @@
+<!doctype html>
+<!--
+  German bookkeeping-style fixture. It mimics a script-driven app whose menu
+  entries are generic elements with click handlers rather than links. All
+  names and values are synthetic.
+-->
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Startseite – Buchhaltung</title>
+    <style>
+      body { font: 15px/1.5 system-ui, sans-serif; margin: 0; display: flex; }
+      nav { width: 220px; background: #f2f4f7; padding: 16px; min-height: 100vh; }
+      nav div[onclick] { cursor: pointer; padding: 4px 0; }
+      main { padding: 16px 24px; }
+    </style>
+  </head>
+  <body>
+    <nav aria-label="Hauptmenü">
+      <div onclick="location.href='./index.html'">Startseite</div>
+      <div onclick="location.href='./profil.html'">Mein Profil</div>
+      <div onclick="location.href='./verbundene-apps.html'">Verbundene Apps</div>
+      <div onclick="location.href='./belege.html'">Belege</div>
+      <a href="./datev-export.csv">DATEV-Export</a>
+      <a href="./abmelden">Abmelden</a>
+    </nav>
+    <main>
+      <h1>Willkommen</h1>
+      <div onclick="document.getElementById('status').textContent = 'Mandant angelegt'" role="button" tabindex="0">Neuen Mandant anlegen</div>
+      <p id="status"></p>
+      <form method="get" action="./suche">
+        <input type="text" name="q" placeholder="Suche" />
+        <button type="submit">Suchen</button>
+      </form>
+      <form method="post" action="./buchung">
+        <label>Betrag <input name="betrag" /></label>
+        <label>Buchungstext <input name="text" /></label>
+        <button type="submit">Festschreiben</button>
+      </form>
+      <div role="dialog" aria-label="Cookie-Einstellungen" id="cookies">
+        Wir verwenden Cookies.
+        <button type="button" onclick="cookies.remove()">Alle ablehnen</button>
+        <button type="button" onclick="cookies.remove()">Alle akzeptieren</button>
+      </div>
+    </main>
+  </body>
+</html>
