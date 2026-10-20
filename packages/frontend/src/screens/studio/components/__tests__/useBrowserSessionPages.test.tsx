@@ -41,6 +41,7 @@ describe("useBrowserSessionPages", () => {
   let hookProjectId: string;
   let hookRuntimeId: string;
   let hookSuspendOnUnavailable: boolean;
+  const onUnavailable = vi.fn();
 
   function Harness() {
     latestResult = useBrowserSessionPages({
@@ -50,6 +51,7 @@ describe("useBrowserSessionPages", () => {
       preferRuntimeId: hookRuntimeId,
       includePlaceholder: true,
       suspendOnUnavailable: hookSuspendOnUnavailable,
+      onUnavailable,
     });
     return null;
   }
@@ -63,6 +65,7 @@ describe("useBrowserSessionPages", () => {
     hookProjectId = "project-1";
     hookRuntimeId = "runtime-1";
     hookSuspendOnUnavailable = false;
+    onUnavailable.mockReset();
     commandPageMock.mockReset().mockResolvedValue(true);
     focusPageMock.mockReset().mockResolvedValue(true);
     fetchPagesMock.mockReset().mockResolvedValue([
@@ -310,6 +313,56 @@ describe("useBrowserSessionPages", () => {
       await Promise.resolve();
     });
     expect(latestResult?.capabilities?.viewportOnly).toBe(true);
+  });
+
+  it("keeps polling an open session while Instafy's browser on the space's machine starts", async () => {
+    vi.useFakeTimers();
+    try {
+      const notReady = () => Object.assign(new Error("browser pages unavailable (503)"), {
+        status: 503,
+        code: "browser_host_not_ready",
+      });
+      fetchPagesMock.mockRejectedValueOnce(notReady()).mockRejectedValueOnce(notReady());
+      await renderHook();
+      expect(fetchPagesMock).toHaveBeenCalledTimes(1);
+      expect(latestResult?.pages).toEqual([]);
+      expect(latestResult?.resolved).toBe(false);
+      expect(onUnavailable).not.toHaveBeenCalled();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_500);
+      });
+      expect(fetchPagesMock).toHaveBeenCalledTimes(2);
+      expect(latestResult?.resolved).toBe(false);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_500);
+      });
+      expect(fetchPagesMock).toHaveBeenCalledTimes(3);
+      expect(latestResult?.pages[0]?.id).toBe("page-1");
+      expect(onUnavailable).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("suspends a hidden session that answers not ready, so an idle browser is never polled", async () => {
+    vi.useFakeTimers();
+    try {
+      hookSuspendOnUnavailable = true;
+      fetchPagesMock.mockRejectedValue(Object.assign(new Error("browser pages unavailable (503)"), {
+        status: 503,
+        code: "browser_host_not_ready",
+      }));
+      await renderHook();
+      expect(onUnavailable).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      expect(fetchPagesMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("resumes polling when a hidden unavailable session is reopened", async () => {

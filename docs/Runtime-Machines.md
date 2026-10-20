@@ -135,7 +135,12 @@ time a space becomes the active one the frontend holds its auto-ensure
 that space: clicking into or typing in the composer, Send, or an explicit
 Start or Reconnect. Focus reaching the composer on its own does not count.
 The Machines panel only reads status. One exception remains: the shared
-browser dock still asks for a machine itself when it connects without one.
+browser dock still asks for a machine itself when it connects without one. In
+a space the browser-host policy covers, that request is the space's own machine
+through the generic ensure, made only for a press, and the browser then opens
+on that machine (see
+[Browser on the space's own machine](Shared-Browser.md#how-studio-opens-it)).
+Elsewhere it is a separate browser session runtime, as before.
 
 When Octo asks for Instafy's browser, Studio never opens the hosted browser
 by itself (see [Browser Profiles](Browser-Profiles.md)). It never starts a

@@ -80,6 +80,22 @@ describe("browserAutoStartPlan", () => {
     expect(plan(overrides as Partial<BrowserAutoStartPlanInput>)).toEqual({ kind: "button", reason });
   });
 
+  it("never counts Instafy's browser on the space's own machine as a running session", () => {
+    // Until Studio may open it by itself, a live host is still a press, and
+    // a press opens it in place: it neither restarts nor adds a machine.
+    const host = runtime({
+      origin: { originId: "origin-space", endpoint: "https://origin.test", protocols: ["http"] } as ControllerRuntimeStatusEntry["origin"],
+      sharedBrowserHost: { version: 1, mode: "lazy" },
+    });
+    expect(plan({ runtimes: [host] })).toEqual({ kind: "button", reason: null });
+    expect(plan({ runtimes: [host, browserSession] }))
+      .toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.otherSession });
+    // Without the controller's host field (older controller, policy off),
+    // the same machine keeps today's reason.
+    expect(plan({ runtimes: [{ ...host, sharedBrowserHost: undefined }] }))
+      .toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.restartsMachine });
+  });
+
   it("leaves the card to the person while side-by-side view is off", () => {
     // The browser would open over the chat the person is reading.
     expect(browserAutoStartHeldByComposerOrLayout({ draft: "", wideSurfaces: true, splitView: false })).toBe(true);

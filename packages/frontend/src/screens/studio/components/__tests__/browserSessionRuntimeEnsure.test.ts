@@ -3,6 +3,8 @@ import type { ControllerRuntimeStatusEntry } from "../../../../services/runtimeC
 import {
   coalesceBrowserRuntimeEnsure,
   isManagedInstafyCloudProvider,
+  listBrowserRuntimeCandidates,
+  listBrowserSessionCandidates,
   resolveAutoRecyclableBrowserRuntimeIdentity,
   resolveAutoRecyclableBrowserRuntimeId,
   resolveBrowserRuntimeCandidate,
@@ -111,6 +113,7 @@ describe("resolveBrowserRuntimeCandidate", () => {
       runtimeId: "managed-runtime",
       originId: "origin-2",
       endpoint: "https://origin.example.test",
+      mode: "session",
     });
     expect(resolveBrowserRuntimeCandidate([selfHosted], selfHosted.runtimeId)).toBeNull();
   });
@@ -152,6 +155,47 @@ describe("resolveBrowserRuntimeCandidate", () => {
     expect(
       resolveBrowserRuntimeCandidate([cloudLookingCustom], cloudLookingCustom.runtimeId),
     ).toBeNull();
+  });
+});
+
+describe("Instafy's browser on the space's own machine as a candidate", () => {
+  const origin = (runtimeId: string) => ({ originId: `origin-${runtimeId}`, endpoint: "https://origin.test", protocols: ["http"] });
+  const spaceMachine = (overrides: Partial<ControllerRuntimeStatusEntry> = {}) => createRuntimeEntry({
+    runtimeId: "space", displayName: "Hosted Runtime", lastSeenAt: null, origin: origin("space"),
+    sharedBrowserHost: { version: 1, mode: "lazy" }, ...overrides,
+  });
+  const session = (runtimeId: string) => createRuntimeEntry({ runtimeId, displayName: "Browser session", lastSeenAt: null, origin: origin(runtimeId) });
+
+  it("lists a live, managed, origin-bearing host as lazy and named sessions as session", () => {
+    expect(listBrowserRuntimeCandidates([spaceMachine(), session("legacy")])).toEqual([
+      { runtimeId: "space", originId: "origin-space", endpoint: "https://origin.test", mode: "lazy" },
+      { runtimeId: "legacy", originId: "origin-legacy", endpoint: "https://origin.test", mode: "session" },
+    ]);
+    expect(listBrowserSessionCandidates([spaceMachine(), session("legacy")]).map((item) => item.runtimeId)).toEqual(["legacy"]);
+    expect(resolveBrowserRuntimeSelection([spaceMachine()], null)).toMatchObject({ kind: "selected", candidate: { runtimeId: "space", mode: "lazy" } });
+  });
+
+  it("does not list a host that is stopped, private, unmanaged or without an origin", () => {
+    expect(listBrowserRuntimeCandidates([
+      spaceMachine({ status: "stopped" }),
+      spaceMachine({ runtimeId: "private", isPrivateSelfHosted: true }),
+      spaceMachine({ runtimeId: "custom", provider: "instafy-cloud-custom" }),
+      spaceMachine({ runtimeId: "originless", origin: null }),
+    ])).toEqual([]);
+  });
+
+  it("falls back to the name heuristic alone when the controller sends no host field", () => {
+    // An older controller: no policy and no sharedBrowserHost on any entry.
+    const entries = [createRuntimeEntry({ runtimeId: "space", displayName: "Hosted Runtime", lastSeenAt: null, origin: origin("space") }), session("legacy")];
+    expect(listBrowserRuntimeCandidates(entries)).toEqual([
+      { runtimeId: "legacy", originId: "origin-legacy", endpoint: "https://origin.test", mode: "session" },
+    ]);
+    expect(resolveBrowserRuntimeSelection([entries[0]!], null)).toEqual({ kind: "new", candidates: [] });
+  });
+
+  it("reads a future host shape as no host", () => {
+    const future = spaceMachine({ sharedBrowserHost: { version: 2, mode: "lazy" } as unknown as ControllerRuntimeStatusEntry["sharedBrowserHost"] });
+    expect(listBrowserRuntimeCandidates([future])).toEqual([]);
   });
 });
 

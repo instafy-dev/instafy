@@ -36,7 +36,7 @@ import { useRuntimeControllerSync } from "./hooks/useRuntimeControllerSync";
 import { useRuntimeStatusRefresh } from "./hooks/useRuntimeStatusRefresh";
 import { useRuntimeStatusToasts } from "./hooks/useRuntimeStatusToasts";
 import { useRuntimeStateInternal } from "./RuntimeStateProvider";
-import { cloneRunsMap } from "./runtimeStore";
+import { cloneRunsMap, type RuntimeStoreState } from "./runtimeStore";
 import {
   resolveTunnelHostname,
   resolveTunnelUrl,
@@ -642,6 +642,7 @@ export function RuntimeOperationsProvider({
           ? { ...state.localWorkspace }
           : null,
         runtimeStatuses: state.runtimeStatuses.map((entry) => ({ ...entry })),
+        sharedBrowserHostPolicy: state.sharedBrowserHostPolicy,
         preferredRuntimeId: resolvedPreferredRuntimeId,
         sessionRuntimeId: state.sessionRuntimeId,
         runtimeReady,
@@ -672,6 +673,7 @@ export function RuntimeOperationsProvider({
     state.runs,
     state.runtime,
     state.runtimeStatuses,
+    state.sharedBrowserHostPolicy,
     resolvedPreferredRuntimeId,
     state.preferredRuntimeId,
     state.sessionRuntimeId,
@@ -883,6 +885,7 @@ declare global {
         pendingConversationMessages: ControllerConversationMessage[];
         localWorkspace: LocalWorkspacePresence | null;
         runtimeStatuses: ControllerRuntimeStatusEntry[];
+        sharedBrowserHostPolicy?: RuntimeStoreState["sharedBrowserHostPolicy"];
         preferredRuntimeId: string | null;
         sessionRuntimeId: string | null;
         runtimeReady: boolean;

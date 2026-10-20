@@ -254,6 +254,7 @@ export function useRuntimeStatusRefresh({
           type: "setRuntimeStatuses",
           statuses: rawStatuses,
           preferredRuntimeId: effectivePreferred,
+          sharedBrowserHostPolicy: result.sharedBrowserHostPolicy ?? null,
         });
         lastPreferredRuntimeIdRef.current = effectivePreferred;
         preferenceClearRequestedRef.current = false;

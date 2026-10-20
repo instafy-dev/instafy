@@ -95,8 +95,16 @@ type Options = {
   auto?: BrowserAutoStartOptions | null;
 };
 
-/** How long a press, or an automatic start, may take to open the browser. */
+/**
+ * How long an automatic start may take to open the browser: a profile restore
+ * plus a start of Instafy's browser on the space's machine fit in it.
+ */
 export const BROWSER_REQUEST_HANDOFF_DEADLINE_MS = 120_000;
+/**
+ * How long a press may take: it can also start the space's machine first
+ * (up to three minutes) and then its browser.
+ */
+export const BROWSER_REQUEST_PRESS_DEADLINE_MS = 240_000;
 
 function hostOf(options: Options): BrowserRequestHost {
   return {
@@ -215,7 +223,8 @@ export function useChatBrowserRequest(options: Options) {
     pending.current = true;
     try {
       captured.activate(transport, plan);
-      const deadline = Date.now() + BROWSER_REQUEST_HANDOFF_DEADLINE_MS;
+      const deadline = Date.now() +
+        (autoStarted ? BROWSER_REQUEST_HANDOFF_DEADLINE_MS : BROWSER_REQUEST_PRESS_DEADLINE_MS);
       let activated = false;
       // Let React commit the chosen surface before considering a cached
       // ready runtime. Identity, closure and explicit location changes cancel

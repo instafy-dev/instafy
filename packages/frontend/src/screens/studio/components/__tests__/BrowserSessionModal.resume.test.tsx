@@ -4,16 +4,22 @@ import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ fetchStatus: vi.fn(), ensure: vi.fn(), requestAccessToken: vi.fn(), clearForProject: vi.fn(), writeClipboardText: vi.fn() }));
+const mocks = vi.hoisted(() => ({ fetchStatus: vi.fn(), ensure: vi.fn(), stop: vi.fn(), stopIfIdle: vi.fn(), requestAccessToken: vi.fn(), clearForProject: vi.fn(), writeClipboardText: vi.fn(),
+  fetchHost: vi.fn(), startHost: vi.fn() }));
 vi.mock("../../../../sdk/instafy", () => ({ controllerClient: {
   core: { enabled: true, baseUrl: "" },
-  runtimes: { fetchStatus: mocks.fetchStatus, ensure: mocks.ensure },
+  runtimes: { fetchStatus: mocks.fetchStatus, ensure: mocks.ensure, stop: mocks.stop, stopIfIdle: mocks.stopIfIdle },
   browserProfiles: { clearForProject: mocks.clearForProject },
+  browserSessions: { fetchHost: mocks.fetchHost, startHost: mocks.startHost,
+    isUnavailableError: (error: unknown) => Boolean(error && typeof error === "object" && "status" in error),
+    isHostRefusedError: (error: unknown) => Boolean(error && typeof error === "object" && "code" in error && !("status" in error)) },
   workspace: { origin: { requestAccessToken: mocks.requestAccessToken } },
 } }));
 vi.mock("../../../../runtime/runtimeMenuShared", () => ({ writeClipboardText: mocks.writeClipboardText }));
 vi.mock("../SharedBrowserProfileStatus", () => ({ SharedBrowserProfileStatus: () => null }));
-import { BrowserSessionModal } from "../BrowserSessionModal";
+import { BrowserSessionModal, CLEAR_SHARED_BROWSER_HOST_DATA_BUSY_NOTE, CLEAR_SHARED_BROWSER_HOST_DATA_CONFIRMATION } from "../BrowserSessionModal";
+import { isBrowserRuntimeClaimActive } from "../../../../runtime/browserRuntimeClaimRegistry";
+import { SHARED_BROWSER_HOST_COPY } from "../sharedBrowserHostAttach";
 import { useChatBrowserSessionState } from "../useChatBrowserSessionState";
 import { useSharedBrowserResume } from "../useSharedBrowserResume";
 
@@ -276,5 +282,212 @@ describe("production Shared modal resume selection", () => {
     expect(onResolved).toHaveBeenLastCalledWith(selectedId);
     expect(onResolved).not.toHaveBeenCalledWith(firstId);
     expect(mocks.ensure).toHaveBeenCalledTimes(action === "new session" ? 1 : 0);
+  });
+});
+
+/**
+ * Instafy's browser on the space's own machine ("attach mode"): the machine
+ * starts its browser on demand, so Studio never ensures, recycles or claims a
+ * runtime for it, and Clear data restarts that same machine.
+ */
+describe("Shared modal attach mode", () => {
+  let root: Root;
+  let container: HTMLDivElement;
+  const onResolved = vi.fn();
+  const ensureSpaceMachine = vi.fn<() => Promise<boolean>>();
+  const hostId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const hostEntry = (overrides: Record<string, unknown> = {}) => ({ runtimeId: hostId, status: "ready", provider: "instafy-cloud", displayName: "hosted runtime", health: "online",
+    lastSeenAt: null, isLocal: false, origin: { originId: "origin-space", endpoint: "https://origin.test", protocols: ["http"] },
+    sharedBrowserHost: { version: 1, mode: "lazy" }, ...overrides });
+  const stoppedHost = () => hostEntry({ status: "stopped", health: "offline", origin: null, sharedBrowserHost: undefined });
+  const covered = (...runtimes: unknown[]) => ({ runtimes, preferredRuntimeId: null, sharedBrowserHostPolicy: "covered" });
+  const host = (state: string) => ({ version: 1, mode: "lazy", state, generation: null, failure: null, startedByYou: false,
+    othersPresent: false, controlledByOther: false, agentRunActive: false, agentRunStartedByYou: false });
+  beforeEach(() => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+    for (const mock of Object.values(mocks)) mock.mockReset();
+    onResolved.mockReset(); ensureSpaceMachine.mockReset().mockResolvedValue(true);
+    mocks.fetchHost.mockResolvedValue(host("ready"));
+    mocks.startHost.mockResolvedValue(host("starting"));
+    window.sessionStorage.clear();
+    vi.stubGlobal("CSS", { escape: (value: string) => value });
+    window.matchMedia = vi.fn().mockReturnValue({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn(), addListener: vi.fn(), removeListener: vi.fn() });
+  });
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    await act(async () => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
+    container.remove(); vi.restoreAllMocks(); vi.unstubAllGlobals();
+    delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+  async function render(options: { resumeRuntimeId?: string | null; canControlBrowser?: boolean; canClearBrowserData?: boolean;
+    attachOnly?: boolean; spaceBusy?: boolean; conversationRuntimeId?: string | null } = {}) {
+    await act(async () => { root.render(<BrowserSessionModal isOpen onOpenChange={vi.fn()} projectId={projectId}
+      currentUserId="user-1" preferRuntimeId={null} resumeRuntimeId={options.resumeRuntimeId ?? null} onRuntimeIdResolved={onResolved}
+      presentation="docked" fillContainer canControlBrowser={options.canControlBrowser ?? true} canClearBrowserData={options.canClearBrowserData ?? false}
+      ensureSpaceMachine={ensureSpaceMachine} conversationRuntimeId={options.conversationRuntimeId ?? null}
+      attachOnly={options.attachOnly ?? false} spaceBusy={options.spaceBusy ?? false}
+      sharedBrowserCapabilitiesResolved={false} />); });
+  }
+  const settle = (ms = 0) => act(async () => new Promise<void>(resolve => setTimeout(resolve, ms)));
+  const text = () => document.body.textContent ?? "";
+
+  it("attaches to a live host without ensuring, stopping or claiming a runtime", async () => {
+    mocks.fetchStatus.mockResolvedValue(covered(hostEntry()));
+    await render();
+    await settle();
+    expect(onResolved).toHaveBeenCalledWith(hostId);
+    expect(mocks.fetchHost).toHaveBeenCalledWith(expect.objectContaining({ projectId, runtimeId: hostId }));
+    expect(mocks.startHost).not.toHaveBeenCalled();
+    expect(mocks.ensure).not.toHaveBeenCalled();
+    expect(mocks.stop).not.toHaveBeenCalled(); expect(mocks.stopIfIdle).not.toHaveBeenCalled();
+    expect(ensureSpaceMachine).not.toHaveBeenCalled();
+    expect(isBrowserRuntimeClaimActive(projectId)).toBe(false);
+  });
+
+  it("still claims the runtime for a separate browser session", async () => {
+    mocks.fetchStatus.mockResolvedValue({ ...covered(entry(firstId)) });
+    await render({ resumeRuntimeId: firstId });
+    expect(onResolved).toHaveBeenCalledWith(firstId);
+    expect(isBrowserRuntimeClaimActive(projectId)).toBe(true);
+    await act(async () => root.unmount());
+    expect(isBrowserRuntimeClaimActive(projectId)).toBe(false);
+    root = createRoot(container);
+  });
+
+  it("starts an idle host for a builder and waits until it is ready", async () => {
+    mocks.fetchStatus.mockResolvedValue(covered(hostEntry()));
+    mocks.fetchHost.mockResolvedValueOnce(host("idle")).mockResolvedValueOnce(host("starting")).mockResolvedValue(host("ready"));
+    await render();
+    await settle(1_200);
+    expect(mocks.startHost).toHaveBeenCalledTimes(1);
+    expect(mocks.fetchHost.mock.calls.length).toBeGreaterThanOrEqual(3);
+    expect(text()).not.toContain(SHARED_BROWSER_HOST_COPY.didNotStart);
+  });
+
+  it("polls a state it does not know instead of failing", async () => {
+    mocks.fetchStatus.mockResolvedValue(covered(hostEntry()));
+    mocks.fetchHost.mockResolvedValueOnce(host("unknown")).mockResolvedValue(host("ready"));
+    await render();
+    await settle(700);
+    expect(mocks.fetchHost).toHaveBeenCalledTimes(2);
+    expect(mocks.startHost).not.toHaveBeenCalled();
+    expect(document.querySelector('[data-testid="browser-session-error-notice"]')).toBeNull();
+  });
+
+  it("tells a viewer with an idle host to ask a builder, and never starts it", async () => {
+    mocks.fetchStatus.mockResolvedValue(covered(hostEntry()));
+    mocks.fetchHost.mockResolvedValue(host("idle"));
+    await render({ canControlBrowser: false });
+    await settle();
+    expect(text()).toContain(SHARED_BROWSER_HOST_COPY.askBuilder);
+    expect(mocks.startHost).not.toHaveBeenCalled();
+  });
+
+  it("says a poisoned host needs this space's machine to restart", async () => {
+    mocks.fetchStatus.mockResolvedValue(covered(hostEntry()));
+    mocks.fetchHost.mockResolvedValue(host("poisoned"));
+    await render();
+    await settle();
+    expect(text()).toContain(SHARED_BROWSER_HOST_COPY.poisoned);
+    expect(mocks.startHost).not.toHaveBeenCalled();
+  });
+
+  it("hides Start new session and names the space's machine in the options", async () => {
+    mocks.fetchStatus.mockResolvedValue(covered(hostEntry()));
+    await render({ canClearBrowserData: true });
+    await settle();
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="shared-browser-sessions-toggle"]')!.click());
+    await settle();
+    expect(text()).not.toContain("Start new session");
+    expect(text()).toContain("This space's machine");
+    expect(document.querySelector('[data-testid="shared-browser-clear-data"]')).not.toBeNull();
+  });
+
+  it.each([false, true])("clears data by restarting the same machine (busy: %s)", async (spaceBusy) => {
+    mocks.fetchStatus.mockResolvedValue(covered(hostEntry()));
+    mocks.clearForProject.mockResolvedValue({ success: true });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    await render({ canClearBrowserData: true, spaceBusy });
+    await settle();
+    expect(onResolved).toHaveBeenLastCalledWith(hostId);
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="shared-browser-sessions-toggle"]')!.click());
+    // The controller stopped the machine; once started again it reports its browser.
+    mocks.fetchStatus.mockReset()
+      .mockResolvedValueOnce(covered(stoppedHost()))
+      .mockResolvedValue(covered(hostEntry()));
+    onResolved.mockClear();
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="shared-browser-clear-data"]')!.click());
+    await settle();
+    expect(confirm).toHaveBeenCalledWith(spaceBusy
+      ? `${CLEAR_SHARED_BROWSER_HOST_DATA_CONFIRMATION} ${CLEAR_SHARED_BROWSER_HOST_DATA_BUSY_NOTE}`
+      : CLEAR_SHARED_BROWSER_HOST_DATA_CONFIRMATION);
+    expect(mocks.clearForProject).toHaveBeenCalledExactlyOnceWith(projectId);
+    expect(ensureSpaceMachine).toHaveBeenCalledTimes(1);
+    expect(mocks.ensure).not.toHaveBeenCalled();
+    expect(onResolved).toHaveBeenCalledWith(hostId);
+    expect(onResolved).toHaveBeenLastCalledWith(hostId);
+  });
+
+  it("starts this space's machine for a press when nothing is running, then attaches", async () => {
+    mocks.fetchStatus.mockResolvedValueOnce(covered()).mockResolvedValue(covered(hostEntry()));
+    await render({ conversationRuntimeId: hostId });
+    await settle();
+    expect(ensureSpaceMachine).toHaveBeenCalledTimes(1);
+    expect(mocks.ensure).not.toHaveBeenCalled();
+    expect(onResolved).toHaveBeenCalledWith(hostId);
+    expect(isBrowserRuntimeClaimActive(projectId)).toBe(false);
+  });
+
+  it("restarts a stopped pinned machine instead of saying the session is missing", async () => {
+    mocks.fetchStatus.mockResolvedValueOnce(covered(stoppedHost())).mockResolvedValue(covered(hostEntry()));
+    await render({ resumeRuntimeId: hostId });
+    await settle();
+    expect(ensureSpaceMachine).toHaveBeenCalledTimes(1);
+    expect(text()).not.toContain("requested Shared session is not available");
+    expect(onResolved).toHaveBeenCalledWith(hostId);
+  });
+
+  it("moves a stale pin to the space's live browser", async () => {
+    mocks.fetchStatus.mockResolvedValue(covered(hostEntry()));
+    await render({ resumeRuntimeId: secondId });
+    await settle();
+    expect(onResolved).toHaveBeenCalledWith(hostId);
+    expect(ensureSpaceMachine).not.toHaveBeenCalled();
+    expect(text()).not.toContain("requested Shared session is not available");
+  });
+
+  it("falls back to the legacy browser at once when the machine comes up unattested", async () => {
+    mocks.fetchStatus.mockResolvedValueOnce(covered())
+      .mockResolvedValue(covered(hostEntry({ sharedBrowserHost: undefined })));
+    mocks.ensure.mockResolvedValue({ runtimeId: secondId });
+    const startedAt = Date.now();
+    await render({ conversationRuntimeId: hostId });
+    await settle();
+    expect(ensureSpaceMachine).toHaveBeenCalledTimes(1);
+    expect(mocks.ensure).toHaveBeenCalledTimes(1);
+    expect(mocks.fetchHost).not.toHaveBeenCalled();
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+  });
+
+  it.each([covered(), covered(stoppedHost()), { runtimes: [], preferredRuntimeId: null }])(
+    "never starts or ensures a machine for an open Studio started by itself",
+    async (status) => {
+      mocks.fetchStatus.mockResolvedValue(status);
+      await render({ attachOnly: true, resumeRuntimeId: status.runtimes.length ? hostId : null });
+      await settle();
+      expect(ensureSpaceMachine).not.toHaveBeenCalled();
+      expect(mocks.ensure).not.toHaveBeenCalled();
+      expect(text()).toContain(SHARED_BROWSER_HOST_COPY.machineStopped);
+    },
+  );
+
+  it("keeps today's flow when the controller sends no policy", async () => {
+    mocks.fetchStatus.mockResolvedValue({ runtimes: [hostEntry({ sharedBrowserHost: undefined })], preferredRuntimeId: null });
+    await render({ canControlBrowser: false });
+    await settle();
+    expect(ensureSpaceMachine).not.toHaveBeenCalled();
+    expect(mocks.fetchHost).not.toHaveBeenCalled();
+    expect(text()).toContain("No Shared session is available. Ask a space builder to start one.");
   });
 });

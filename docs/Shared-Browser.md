@@ -727,6 +727,47 @@ workspace processes, the same boundary described under
 [Human approval policy](#human-approval-policy). Rollback is `HOSTED_BROWSER_HOST=off`; machines
 already launched keep their launch settings until their next lease.
 
+### How Studio opens it
+
+Runtime status tells Studio about the policy and the host. The response always
+carries `sharedBrowserHostPolicy` (`"covered"` or `"off"`), and an entry
+carries `sharedBrowserHost: {"version": 1, "mode": "lazy"}` only while that
+machine's live lease is attested for it. A response without the policy comes
+from an older controller, and Studio keeps its earlier flow exactly. An entry
+without the field takes the legacy path.
+
+- **Attach.** When the resolved session, or the exact pinned one, is the
+  space's own machine with `sharedBrowserHost`, Studio opens it in place. It
+  reads `GET browser/host`. If the browser is idle or failed and the person may
+  control the browser, Studio posts `POST browser/host/start` with
+  `{"version": 1}`, then polls every 500 ms until the browser is ready (at most
+  120 s). A viewer is told to ask a space builder, and a poisoned browser says
+  the space's machine must restart first. A state Studio does not know is
+  polled like `starting`. Studio never ensures, recycles or stops a runtime for
+  this, and it holds no browser runtime claim, so generic recovery keeps the
+  space's machine up. **Start new session** and the runtime-limit takeover are
+  hidden.
+- **Pages while it starts.** The origin answers 503 `browser_host_not_ready`
+  until the browser runs. An open browser keeps polling quietly. A hidden one
+  suspends as before, so an idle browser behind a hidden tab is never polled and
+  never started. Only the open browser view starts it.
+- **Cold press.** When the space is covered and a press finds nothing to open,
+  or the exact pin names the space's own machine while it is stopped or no
+  longer listed, Studio first starts that machine through the generic hosted
+  ensure. It then polls status every 2 s, for at most 180 s, until the machine
+  can take work. If the machine comes up without `sharedBrowserHost`, Studio
+  takes the legacy path at once. A press may take up to four minutes in all.
+  An open that Studio started by itself (`attachOnly`) never starts a machine.
+- **Stale pins.** A pin to a session that is gone moves to the space's own live
+  browser when there is one.
+- **Clear data restarts the same machine.** The controller call is unchanged.
+  It stops every managed machine of the space that may hold the profile,
+  including this one, then deletes the profile. Studio confirms that this signs
+  everyone out and restarts the space's machine, which stops its previews and
+  terminals (and running work, when there is some). Afterwards Studio starts
+  the same runtime id again through the cold path instead of asking for a new
+  browser runtime.
+
 ## CDP screencast
 
 The CDP lane gives every newly joined viewer one bounded `Page.captureScreenshot`
@@ -922,7 +963,9 @@ available after a project is removed from the persistence allowlist so policy
 rollback cannot strand stored login material.
 Viewers cannot invoke it. A successful clear ends the current shared session
 and Studio starts one fresh browser; the client suppresses automatic reconnect
-while deletion is in flight.
+while deletion is in flight. For Instafy's browser on the space's own machine,
+the fresh browser is that same machine started again under its runtime id (see
+[How Studio opens it](#how-studio-opens-it)).
 
 This lifecycle deliberately adds neither a second secret system nor a new
 audit ledger. Existing browser access grants retain the actor, project, scope,

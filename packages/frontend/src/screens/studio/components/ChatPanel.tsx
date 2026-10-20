@@ -4447,6 +4447,20 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       isRunActivelyProgressing(run, now) &&
       (run.metadata?.browserTransport === "shared" || run.metadata?.browserTransport === "desktop-personal"));
   }, [activeProjectId, runs]);
+  // Clear data in Instafy's browser on the space's own machine restarts that
+  // machine; its confirmation says so when work is running in the space.
+  const spaceRunActive = useMemo(() => {
+    const now = Date.now();
+    return Object.values(runs ?? {}).some((run) =>
+      (!run.projectId || run.projectId === (activeProjectId ?? null)) &&
+      isRunActivelyProgressing(run, now));
+  }, [activeProjectId, runs]);
+  // A press that opens Instafy's browser while the space's machine is not
+  // running starts it through the generic hosted ensure.
+  const ensureSpaceMachineForBrowser = useCallback(
+    (): Promise<boolean> => ensureHostedRuntime(),
+    [ensureHostedRuntime],
+  );
   const activeConversationRunIds = useMemo(() => {
     const ids = new Set<string>();
     for (const run of activeConversationRuns) {
@@ -6137,6 +6151,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     }
                     onRuntimeIdResolved={handleSharedBrowserRuntimeResolved}
                     onStatus={showStatus}
+                    ensureSpaceMachine={projectWriteDisabled ? null : ensureSpaceMachineForBrowser}
+                    conversationRuntimeId={effectiveRuntimeId ?? null}
+                    spaceBusy={spaceRunActive}
                   />
                 </div>
               ) : null}

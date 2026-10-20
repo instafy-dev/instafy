@@ -60,11 +60,50 @@ export interface ControllerRuntimeStatusEntry {
   agentTokenExpiresAt?: string | null;
   agentTokenTtl?: number | null;
   agentTokenScopes?: string[] | null;
+  /**
+   * Set when this runtime is the space's own machine and can open Instafy's
+   * browser on demand (`GET`/`POST browser/host*` on its origin). The
+   * controller sends it only while the runtime's live lease is attested for
+   * it and the space is covered by the browser-host policy. Absent from older
+   * controllers and images.
+   */
+  sharedBrowserHost?: ControllerSharedBrowserHost | null;
 }
+
+/** The only browser-host shape this client understands. */
+export interface ControllerSharedBrowserHost {
+  version: 1;
+  mode: "lazy";
+}
+
+/**
+ * Whether the controller opens Instafy's browser on this space's own machine.
+ * `null` when the controller is older than the field, which Studio treats
+ * exactly like `"off"`.
+ */
+export type SharedBrowserHostPolicy = "covered" | "off";
 
 export interface FetchRuntimeStatusResult {
   runtimes: ControllerRuntimeStatusEntry[];
   preferredRuntimeId: string | null;
+  /** Absent or null from controllers older than the field. */
+  sharedBrowserHostPolicy?: SharedBrowserHostPolicy | null;
+}
+
+export function mapControllerSharedBrowserHost(
+  value: unknown,
+): ControllerSharedBrowserHost | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  return record.version === 1 && record.mode === "lazy"
+    ? { version: 1, mode: "lazy" }
+    : null;
+}
+
+export function mapSharedBrowserHostPolicy(value: unknown): SharedBrowserHostPolicy | null {
+  return value === "covered" || value === "off" ? value : null;
 }
 
 export async function fetchRuntimeStatus(
@@ -112,6 +151,7 @@ export async function fetchRuntimeStatus(
     const payload = (await budget.wait(() => response.json())) as {
       runtimes?: ControllerRuntimeStatusEntry[];
       preferredRuntimeId?: string | null;
+      sharedBrowserHostPolicy?: unknown;
     };
 
     const runtimes = Array.isArray(payload.runtimes)
@@ -122,6 +162,7 @@ export async function fetchRuntimeStatus(
             }
             const record = entry as ControllerRuntimeStatusEntry & {
               runtimeImage?: unknown;
+              sharedBrowserHost?: unknown;
             };
             const runtimeImage =
               typeof record.runtimeImage === "string" && record.runtimeImage.trim().length > 0
@@ -130,6 +171,8 @@ export async function fetchRuntimeStatus(
             return {
               ...record,
               runtimeImage,
+              // Anything but the exact known shape reads as no host.
+              sharedBrowserHost: mapControllerSharedBrowserHost(record.sharedBrowserHost) ?? undefined,
             } as ControllerRuntimeStatusEntry;
           })
           .filter((entry): entry is ControllerRuntimeStatusEntry => Boolean(entry))
@@ -138,6 +181,7 @@ export async function fetchRuntimeStatus(
     return {
       runtimes,
       preferredRuntimeId: payload.preferredRuntimeId ?? null,
+      sharedBrowserHostPolicy: mapSharedBrowserHostPolicy(payload.sharedBrowserHostPolicy),
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

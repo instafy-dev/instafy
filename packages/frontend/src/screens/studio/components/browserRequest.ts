@@ -21,8 +21,9 @@ export type BrowserRequestCardState =
 
 /**
  * What this Studio can open for a request_browser card. The card itself says
- * nothing about browsers: the runtime that offers it is not the one that runs
- * Instafy's Workspace browser, which starts on demand as a runtime of its own.
+ * nothing about browsers. Instafy's Workspace browser starts on demand: on the
+ * space's own machine where the controller reports `sharedBrowserHost` for it,
+ * and otherwise as a runtime of its own.
  */
 export type BrowserRequestHost = {
   transport: BrowserTransport;
