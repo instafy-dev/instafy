@@ -19,7 +19,8 @@ that works, what makes a build slow again and how to force a clean build.
 | `builder-deps` | apt toolchain, rusty_v8 download, cargo config, then `cargo chef cook` (every dependency plus the path crates) | rusty_v8 download: `Cargo.lock`, `codex/third_party/v8`, `scripts/fetch-rusty-v8.sh`. Cook: anything the `chef` stage copies, `docker/runtime/cargo-config.toml`, `docker/runtime/cargo-source-stamps.sh` |
 | `builder` | one `cargo build` for runtime-agent, codex-code-mode-host and codex-linux-sandbox | the cook, runtime-agent's `Cargo.toml`/`Cargo.lock`, `src/`, `assets/instafy/`, `assets/*.js` |
 | `binary-export` | only the three binaries (`--target binary-export --output type=local,dest=...`) for hot-swapping into a running container | `builder` |
-| `runtime`, `runtime-webdev` | apt/Chromium, npm, rathole/uBlock downloads, entrypoint, Go helpers, CLI, **then** the Rust binaries | each layer only by its own inputs; a binary change re-exports the binary layers and the few small layers after them |
+| `browser-extensions` | downloads and checks the uBlock Origin Lite release once for both runtime images | `UBOLITE_*` arguments |
+| `runtime`, `runtime-webdev` | apt/Chromium and the browser host stack (X/VNC, window manager, `xdpyinfo`, ffmpeg), npm, the browser host's private Node and Playwright (base only), rathole, entrypoint, Go helpers, CLI, **then** the Rust binaries | each layer only by its own inputs; a binary change re-exports the binary layers and the few small layers after them |
 
 runtime-agent's tests and README are not in `builder`'s inputs, so editing them
 rebuilds nothing.

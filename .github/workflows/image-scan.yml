@@ -268,6 +268,14 @@ jobs:
           BROWSER_SMOKE_IMAGE: instafy-image-scan:runtime-${{ matrix.flavor }}-${{ matrix.architecture }}
         run: bash scripts/runtime-image-browser-smoke.sh "$BROWSER_SMOKE_IMAGE"
 
+      # Publication requires the on-demand browser host for every flavor.
+      - name: Prove the image starts the browser host on demand
+        id: host-smoke
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          BROWSER_SMOKE_IMAGE: instafy-image-scan:runtime-${{ matrix.flavor }}-${{ matrix.architecture }}
+        run: bash scripts/runtime-image-browser-smoke.sh --lazy "$BROWSER_SMOKE_IMAGE"
+
       - name: Summarize this image
         if: always()
         env:
@@ -279,6 +287,8 @@ jobs:
           SCAN_OUTCOME: ${{ steps.scan.outcome }}
           SMOKE_OUTCOME: ${{ steps.smoke.outcome }}
           SMOKE_REQUIRED: ${{ matrix.flavor == 'webdev' }}
+          HOST_SMOKE_OUTCOME: ${{ steps.host-smoke.outcome }}
+          HOST_SMOKE_REQUIRED: "true"
           FINDINGS_FILE: ${{ runner.temp }}/trivy-findings.json
           RESULT_FILE: ${{ runner.temp }}/image-scan-result/runtime-${{ matrix.flavor }}-${{ matrix.architecture }}.json
         run: node scripts/image-scan-report.mjs cell

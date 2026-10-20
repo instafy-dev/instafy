@@ -416,6 +416,18 @@ test("each cell builds the publisher's exact Dockerfile, target, platform and ar
   }
   assert.match(smoke, /^        if: \$\{\{ !cancelled\(\) && matrix\.flavor == 'webdev' && steps\.build\.outcome == 'success' \}\}$/mu);
 
+  // Every cell runs the on-demand browser host gate that publication requires
+  // for both flavors.
+  const hostSmoke = step(scan.runtime, "Prove the image starts the browser host on demand");
+  for (const section of runtimePublishers) {
+    const theirs = step(section, "Prove the image starts the browser host on demand");
+    assert.equal(runLine(hostSmoke), runLine(theirs));
+    assert.doesNotMatch(theirs, /^        if:/mu, "publication runs the browser host gate for every flavor");
+  }
+  assert.equal(runLine(hostSmoke), 'bash scripts/runtime-image-browser-smoke.sh --lazy "$BROWSER_SMOKE_IMAGE"');
+  assert.match(hostSmoke, /^        if: \$\{\{ !cancelled\(\) && steps\.build\.outcome == 'success' \}\}$/mu);
+  assert.match(hostSmoke, /^        id: host-smoke$/mu);
+
   // Disk preparation matches the publishers on hosted runners.
   const disk = runBlock(step(scan.runtime, "Require sufficient free disk for the audited image"));
   const buildx = (section) => withInputs(step(section, "Set up Docker Buildx")).version;
@@ -434,7 +446,8 @@ test("steps run in the publisher's order and every action is a publisher's exact
   assert.deepEqual(names(scan.runtime), ["Checkout", "Reclaim hosted-runner disk for the audited image",
     "Require sufficient free disk for the audited image", "Resolve the BuildKit image", "Set up Docker Buildx", "Install pinned Trivy",
     "Build audit image", "Scan audit image", "List the findings that failed the scan",
-    "Prove the webdev image starts the Shared Browser", "Summarize this image", "Upload the failure record"]);
+    "Prove the webdev image starts the Shared Browser", "Prove the image starts the browser host on demand",
+    "Summarize this image", "Upload the failure record"]);
   assert.deepEqual(names(scan.services), ["Checkout", "Resolve the BuildKit image", "Set up Docker Buildx", "Install pinned Trivy", "Build amd64 image",
     "Scan amd64 image", "List the findings that failed the scan", "Summarize this image", "Upload the failure record"]);
   for (const section of [scan.runtime, scan.services]) {
@@ -477,6 +490,9 @@ test("failure records flow from each cell to the report through one artifact pre
   }
   assert.equal(env(step(scan.runtime, "Summarize this image")).SMOKE_OUTCOME, "${{ steps.smoke.outcome }}");
   assert.equal(env(step(scan.runtime, "Summarize this image")).SMOKE_REQUIRED, "${{ matrix.flavor == 'webdev' }}");
+  assert.equal(env(step(scan.runtime, "Summarize this image")).HOST_SMOKE_OUTCOME, "${{ steps.host-smoke.outcome }}");
+  assert.equal(env(step(scan.runtime, "Summarize this image")).HOST_SMOKE_REQUIRED, '"true"');
+  assert.equal(env(step(scan.services, "Summarize this image")).HOST_SMOKE_REQUIRED, undefined);
   assert.match(scan.runtime, /^        id: smoke$/mu);
   const download = withInputs(step(scan.report, "Download the failure records"));
   // Only the current attempt's records, so a cell that passes on a re-run is not reported again.
@@ -545,6 +561,15 @@ test("a cell summary names the image, the failed check and each failing package"
     smoke: "failure", smokeRequired: true, findings: [] });
   assert.equal(browser.passed, false);
   assert.match(cellMarkdown(browser), /Headed Chromium did not answer/u);
+  const host = cellResult({ image: "a", source: "b", platform: "linux/amd64", build: "success", scan: "success",
+    smoke: "", smokeRequired: false, hostSmoke: "failure", hostSmokeRequired: true, findings: [] });
+  assert.equal(host.passed, false);
+  assert.match(cellMarkdown(host), /\| Browser host starts on demand \| failed \|/u);
+  assert.match(cellMarkdown(host), /on-demand browser host did not start, stop and restart cleanly/u);
+  const hostPassed = cellResult({ image: "a", source: "b", platform: "linux/amd64", build: "success", scan: "success",
+    smoke: "", smokeRequired: false, hostSmoke: "success", hostSmokeRequired: true, findings: [] });
+  assert.equal(hostPassed.passed, true);
+  assert.match(cellMarkdown(hostPassed), /\| Browser host starts on demand \| passed \|/u);
   const timedOut = cellResult({ image: "a", source: "b", platform: "linux/amd64", build: "cancelled", scan: "",
     smoke: "", smokeRequired: false, findings: [] });
   assert.equal(timedOut.passed, false);

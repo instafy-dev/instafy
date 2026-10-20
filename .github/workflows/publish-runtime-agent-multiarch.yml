@@ -504,6 +504,15 @@ jobs:
           BROWSER_SMOKE_IMAGE: instafy-runtime-audit:${{ matrix.flavor }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.architecture }}
         run: bash scripts/runtime-image-browser-smoke.sh "$BROWSER_SMOKE_IMAGE"
 
+      # Every flavor must also start the on-demand browser host, which hosted
+      # spaces run on their own machine: the image boots with no browser
+      # process, and the host starts, stops and restarts on a persisted
+      # profile. Like the gate above it needs only the local image.
+      - name: Prove the image starts the browser host on demand
+        env:
+          BROWSER_SMOKE_IMAGE: instafy-runtime-audit:${{ matrix.flavor }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.architecture }}
+        run: bash scripts/runtime-image-browser-smoke.sh --lazy "$BROWSER_SMOKE_IMAGE"
+
       - name: Login to GHCR
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:

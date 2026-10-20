@@ -4,6 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+// The on-demand browser host runs from the same entrypoint and image inputs.
+import "./runtime-browser-host.test.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 const productionDockerfiles = [
@@ -469,11 +471,11 @@ test("runtime downloads verify architecture-bound checksums before extraction", 
     source.indexOf("FROM ${RUNTIME_BASE} AS runtime"),
   );
   const webdev = source.indexOf("FROM ${WEBDEV_BASE} AS runtime-webdev");
-  const uBlockDownload = source.indexOf("ublock.zip", webdev);
-  const secondRathole = source.indexOf(ratholeCurl, uBlockDownload + 1);
+  const uBlockDownload = source.indexOf("ublock.zip", source.indexOf("FROM ${RUNTIME_BASE} AS browser-extensions"));
+  const secondRathole = source.indexOf(ratholeCurl, webdev);
   for (const [label, start, archive, extraction] of [
     ["runtime Rathole", firstRathole, "/tmp/rathole.zip", "unzip -q /tmp/rathole.zip"],
-    ["webdev uBlock", uBlockDownload, "/tmp/ublock.zip", "unzip -q /tmp/ublock.zip"],
+    ["shared uBlock", uBlockDownload, "/tmp/ublock.zip", "unzip -q /tmp/ublock.zip"],
     ["webdev Rathole", secondRathole, "/tmp/rathole.zip", "unzip -q /tmp/rathole.zip"],
   ]) {
     const verify = source.indexOf("sha256sum --check --status", start);
@@ -482,6 +484,36 @@ test("runtime downloads verify architecture-bound checksums before extraction", 
     assert.ok(source.indexOf(archive, start) < verify, `${label} archive is not downloaded`);
     assert.ok(verify > start && verify < use, `${label} must verify before extraction`);
   }
+});
+
+test("both runtime images carry the browser host stack and one shared uBlock download", () => {
+  const source = read("docker/runtime/Dockerfile");
+  const extensions = dockerfileStage(source, "browser-extensions");
+  assert.match(extensions, /^FROM \$\{RUNTIME_BASE\} AS browser-extensions$/mu);
+  assert.equal([...source.matchAll(/uBOLite_\$\{UBOLITE_VERSION\}\.chromium\.zip/gu)].length, 1, "uBlock is downloaded once");
+  assert.ok(extensions.includes("ublock.zip"));
+  for (const stage of ["runtime", "runtime-webdev"]) {
+    const lines = dockerfileStage(source, stage).split("\n");
+    assert.equal(lines.filter((line) => line === "COPY --from=browser-extensions /opt/instafy/extensions /opt/instafy/extensions").length, 1, stage);
+    // X/VNC, the window manager, xdpyinfo and ffmpeg for the WebRTC sender.
+    for (const name of ["fluxbox", "ffmpeg", "tigervnc-standalone-server", "tigervnc-common", "x11-utils"]) {
+      assert.equal(lines.filter((line) => line.trim() === `${name} \\`).length, 1, `${stage} installs ${name}`);
+    }
+  }
+
+  // The base image keeps Debian's Chromium behind its version gate, and the
+  // browser host gets private Node and Playwright copies whose resolution the
+  // build checks.
+  const runtime = dockerfileStage(source, "runtime");
+  assert.match(runtime, /^      chromium \\$/mu);
+  assert.match(runtime, /dpkg --compare-versions[\s\S]*chromium\)" ge "\$\{CHROMIUM_MIN_VERSION\}"/u);
+  assertOrdered(runtime, "private browser host runtime",
+    'npm install -g "playwright@${PLAYWRIGHT_VERSION}"',
+    "host_root=/opt/instafy/browser-host;",
+    'install -m 0755 "$(command -v node)" "${host_root}/bin/node";',
+    'cp -a "${global_root}/playwright" "${host_root}/node_modules/playwright";',
+    'env -u NODE_PATH "${host_root}/bin/node" -e',
+    'if (!resolved.startsWith(root + "/")) throw new Error(');
 });
 
 test("tunnel broker verifies the selected Rathole asset", () => {
@@ -1163,6 +1195,33 @@ test("a webdev image must start the Shared Browser before it is published", () =
   // webdev-<sha> tag exists only once the arm64 lane has succeeded.
   assert.match(pr, /candidate="ghcr\.io\/instafy-dev\/instafy-runtime-agent:webdev-\$\{sha\}-linux-amd64"/u);
   assert.match(pr, /^    runs-on: ubuntu-24\.04$/mu);
+});
+
+test("every runtime image must start the on-demand browser host before it is published", () => {
+  for (const { file } of runtimePublishers) {
+    const publish = read(`.github/workflows/${file}`);
+    const scan = publish.indexOf("- name: Scan audit image");
+    const gate = publish.indexOf("- name: Prove the image starts the browser host on demand");
+    const login = publish.indexOf("- name: Login to GHCR");
+    assert.ok(scan > 0 && gate > scan && login > gate, `${file}: the browser host gate runs after the scan and before any registry login`);
+    const step = publish.slice(gate, login);
+    assert.doesNotMatch(step, /^        if:/mu, `${file}: both flavors run the browser host gate`);
+    assert.match(step, /run: bash scripts\/runtime-image-browser-smoke\.sh --lazy "\$BROWSER_SMOKE_IMAGE"/u);
+  }
+
+  const smoke = read("scripts/runtime-image-browser-smoke.sh");
+  // Boots with the browser off, requires no browser process at boot, then
+  // drives the subcommand twice on one persisted profile.
+  assert.match(smoke, /if \[\[ "\$\{1:-\}" == "--lazy" \]\]; then/u);
+  assert.match(smoke, /bash \/usr\/local\/bin\/runtime-entrypoint start-browser-host/u);
+  assert.match(smoke, /The image started browser processes at boot/u);
+  assert.match(smoke, /INSTAFY_BROWSER_HOST_PROFILE_DIR="\$profile_dir"/u);
+  assert.match(smoke, /instafy-smoke-marker/u);
+  assert.match(smoke, /\n  start_host\n  prove_running_host first\n[\s\S]*\n  stop_host first\n[\s\S]*\n  start_host\n  prove_running_host second\n  stop_host second\n/u);
+  assert.doesNotMatch(smoke, /\$\{\{\s*secrets\.|docker login|ICE_SERVERS_JSON/u);
+
+  const pr = read(".github/workflows/runtime-browser-smoke.yml");
+  assert.match(pr, /runtime-image-browser-smoke\.sh --lazy "\$IMAGE" docker\/runtime\/entrypoint\.sh/u);
 });
 
 const fetchRustyV8 = path.join(repositoryRoot, "scripts/fetch-rusty-v8.sh");
