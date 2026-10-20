@@ -458,8 +458,9 @@ describe("preview check: the previews skill tells the agent to run it", () => {
     const text = fs.readFileSync(skill, "utf8");
     const check = text.indexOf("instafy preview check --port <port>");
     expect(check).toBeGreaterThan(-1);
-    // before the step that asks to expose the port
-    expect(check).toBeLessThan(text.indexOf("Ask consent before exposing"));
+    // before the site is shown in Studio, and before any step that exposes the port
+    expect(check).toBeLessThan(text.indexOf("instafy preview open --port"));
+    expect(check).toBeLessThan(text.indexOf("Expose the preview port"));
     expect(text).toMatch(/exit 4[^\n]*70[^\n]*nothing was checked/i);
   });
 });

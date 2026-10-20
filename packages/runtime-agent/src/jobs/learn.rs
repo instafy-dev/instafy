@@ -111,15 +111,15 @@ const FRONTEND_PREVIEWS_TEMPLATE: &str = include_str!(concat!(
     "/assets/instafy/.agents/skills/instafy-frontend-previews/SKILL.md"
 ));
 // The bundled browser guidance used to ask before opening a browser. Since Oct 19
-// Octo opens it on its own, so a workspace still holding an unedited earlier
-// bundled copy of this skill, browser automation or skill import compat is
-// upgraded; an edited one is kept.
-//
-// v2 is the copy from before `instafy preview check`: an unedited one is upgraded so
-// Octo checks a page before it shows it.
+// Octo opens it on its own (v1). v2 is the copy from before `instafy preview
+// check`, and v3 the one from before `instafy preview open` showed a running
+// site in Studio ahead of any public tunnel. A workspace still holding an
+// unedited earlier bundled copy of this skill, browser automation or skill
+// import compat is upgraded; an edited one is kept.
 const LEGACY_FRONTEND_PREVIEWS_TEMPLATES: &[&str] = &[
     include_str!("legacy/frontend-previews-v1.md"),
     include_str!("legacy/frontend-previews-v2.md"),
+    include_str!("legacy/frontend-previews-v3.md"),
 ];
 const INTEGRATION_ONBOARDING_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -1756,6 +1756,43 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The bundled frontend-previews skill shows a running site with
+    /// `instafy preview open` and keeps the local URL and consent-gated tunnel
+    /// as the fallback when previews are not available. An unedited v3 copy is
+    /// upgraded to it; an edited one is kept.
+    #[test]
+    fn scaffold_upgrades_frontend_previews_to_studio_preview_cards() {
+        for needle in [
+            "instafy preview open --port <port>",
+            "open it from the card",
+            "Previews are not available on this server",
+            "viewerHostSuffix",
+            "`not_responding`",
+            "Exit `1` (any other error): run it once more.",
+            "Never auto-create a public tunnel URL. Ask for explicit consent first.",
+        ] {
+            assert!(FRONTEND_PREVIEWS_TEMPLATE.contains(needle), "{needle}");
+        }
+        let previous = include_str!("legacy/frontend-previews-v3.md");
+        assert!(!previous.contains("instafy preview open"));
+        assert!(FRONTEND_PREVIEWS_TEMPLATE.contains("instafy preview check --port <port>"));
+
+        let workspace = tempdir().expect("workspace tempdir");
+        ensure_project_memory_scaffold(workspace.path());
+        let skill = workspace.path().join(FRONTEND_PREVIEWS_RELATIVE_PATH);
+        fs::write(&skill, previous).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(
+            fs::read_to_string(&skill).unwrap(),
+            FRONTEND_PREVIEWS_TEMPLATE
+        );
+
+        let customized = format!("{previous}\nAlways tunnel port 3000.\n");
+        fs::write(&skill, &customized).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&skill).unwrap(), customized);
     }
 
     #[cfg(unix)]

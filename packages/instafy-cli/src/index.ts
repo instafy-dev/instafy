@@ -30,6 +30,14 @@ import {
   credentialsTest,
 } from "./credentials.js";
 import { listTunnelSessions, startTunnelDetached, stopTunnelSession, tailTunnelLogs, runTunnelCommand } from "./tunnel.js";
+import {
+  PreviewCommandError,
+  previewClose,
+  previewList,
+  previewOpen,
+  printPreviewList,
+  printPreviewOpen,
+} from "./preview.js";
 import { configGet, configList, configPath, configSet, configUnset } from "./config-command.js";
 import { getInstafyProfileConfigPath, listInstafyProfileNames, readInstafyProfileConfig } from "./config.js";
 import { runInstafyGit, runInstafyGitSync } from "./git-wrapper.js";
@@ -2212,12 +2220,104 @@ tunnelCommand
     }
   });
 
+function exitWithPreviewError(error: unknown): never {
+  console.error(kleur.red(error instanceof Error ? error.message : String(error)));
+  process.exit(error instanceof PreviewCommandError ? error.exitCode : 1);
+}
+
 const previewCommand = program
   .command("preview")
-  .description("Look at sites running in this space");
+  .description("Look at sites running in this space, and show them in Studio as a private Ready to preview card");
 
 failWithGroupHelp(previewCommand);
 registerPreviewCheckCommand(previewCommand);
+
+const previewOpenCommand = previewCommand
+  .command("open")
+  .description(
+    "Open a private preview of a local port (exit 2: nothing listening, 3: port not allowed, 5: previews not available)",
+  )
+  .requiredOption("--port <port>", "Local port the site listens on (1024-65535)")
+  .requiredOption("--title <title>", "Card title (at most 120 characters)")
+  .option("--path <path>", "Path the preview opens at (default /)");
+
+addSpaceOption(previewOpenCommand, "Space UUID (defaults to .instafy/space.json or SPACE_ID)");
+addServerUrlOptions(previewOpenCommand);
+addAccessTokenOptions(previewOpenCommand, "Instafy access token (defaults to the job token, then the saved `instafy login` token)");
+
+previewOpenCommand
+  .option("--conversation <id>", "Conversation for the card (only needed without a job token)")
+  .option("--rathole-bin <path>", "Path to rathole binary (or set RATHOLE_BIN)")
+  .option("--json", "Output JSON")
+  .action(async (opts) => {
+    try {
+      const result = await previewOpen({
+        project: resolveSpaceIdOption(opts),
+        controllerUrl: opts.serverUrl,
+        controllerToken: opts.accessToken,
+        conversationId: opts.conversation,
+        port: opts.port,
+        title: opts.title,
+        path: opts.path,
+        ratholeBin: opts.ratholeBin,
+      });
+      printPreviewOpen(result, Boolean(opts.json));
+    } catch (error) {
+      exitWithPreviewError(error);
+    }
+  });
+
+const previewListCommand = previewCommand
+  .command("list")
+  .description("List this space's previews");
+
+addSpaceOption(previewListCommand, "Space UUID (defaults to .instafy/space.json or SPACE_ID)");
+addServerUrlOptions(previewListCommand);
+addAccessTokenOptions(previewListCommand, "Instafy access token (defaults to the job token, then the saved `instafy login` token)");
+
+previewListCommand
+  .option("--json", "Output JSON")
+  .action(async (opts) => {
+    try {
+      const previews = await previewList({
+        project: resolveSpaceIdOption(opts),
+        controllerUrl: opts.serverUrl,
+        controllerToken: opts.accessToken,
+      });
+      printPreviewList(previews, Boolean(opts.json));
+    } catch (error) {
+      exitWithPreviewError(error);
+    }
+  });
+
+const previewCloseCommand = previewCommand
+  .command("close")
+  .description("Close a preview: stop its local client and revoke it")
+  .argument("<previewId>", "Preview ID (from `instafy preview list`)");
+
+addSpaceOption(previewCloseCommand, "Space UUID (defaults to .instafy/space.json or SPACE_ID)");
+addServerUrlOptions(previewCloseCommand);
+addAccessTokenOptions(previewCloseCommand, "Instafy access token (defaults to the job token, then the saved `instafy login` token)");
+
+previewCloseCommand
+  .option("--json", "Output JSON")
+  .action(async (previewId, opts) => {
+    try {
+      const result = await previewClose({
+        previewId,
+        project: resolveSpaceIdOption(opts),
+        controllerUrl: opts.serverUrl,
+        controllerToken: opts.accessToken,
+      });
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+      console.log(kleur.green(`Preview closed: ${result.previewId}`));
+    } catch (error) {
+      exitWithPreviewError(error);
+    }
+  });
 
 const orgCommand = program
   .command("team")
