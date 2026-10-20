@@ -4463,7 +4463,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   });
   const browserHeldByOther = browserRunActive ||
     sharedBrowserPresence?.remoteController === true ||
-    Boolean(personalBrowser.status?.humanInputRequest);
+    Boolean(personalBrowser.status?.humanInputRequest || personalBrowser.pendingHandoff);
   const personalOwnAi = credentialRequirements.hasDefaultCredential === true;
   const runtimeStatusKey = (runtimeStatuses ?? [])
     .map((entry) => `${entry.runtimeId}:${entry.status}:${entry.displayName ?? ""}:${entry.origin?.originId ?? ""}`)

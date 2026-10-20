@@ -230,6 +230,21 @@ describe("useChatBrowserHandoff", () => {
     expect(value.onSubmit).not.toHaveBeenCalled();
   });
 
+  it("keeps a card press blocked while a handoff is pending after the sign-in redirect cleared the request", async () => {
+    // Desktop cleared humanInputRequest on navigation; the bridge's pending
+    // handoff still holds the manual step.
+    const value = options({ transport: "personal", personal: personal({
+      pendingHandoff: { handoffId: "manual-step", expiresAtMs: 60000 },
+    }) });
+    await render(value);
+    expect(value.personal.status?.humanInputRequest).toBeUndefined();
+    await expect(resultRef.current!.startPersonal("Continue shopping")).rejects.toThrow(
+      "Finish the current manual step and choose Let AI continue, or pause the browser, before starting another browser task.",
+    );
+    expect(value.personal.setAgentControlEnabled).not.toHaveBeenCalled();
+    expect(value.onSubmit).not.toHaveBeenCalled();
+  });
+
   it("checks a reused native runtime again at dispatch", async () => {
     const value = options({ transport: "personal", personal: personal({
       runtimeOverride: { runtimeId: "personal-live", runtimeDisplayName: "Personal Browser", preferRuntime: false },

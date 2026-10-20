@@ -36,6 +36,7 @@ function createModel(): PersonalBrowserModel {
     navigate: vi.fn(async () => null),
     navigationError: null,
     ownerId: "owner-1",
+    pendingHandoff: null,
     reload: vi.fn(async () => null),
     recovering: false,
     retryAgentControl: vi.fn(async () => null),

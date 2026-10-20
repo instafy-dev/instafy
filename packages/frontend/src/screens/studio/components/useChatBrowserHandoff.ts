@@ -201,8 +201,10 @@ export function useChatBrowserHandoff(options: Options) {
     const epoch = generation.current;
     assertCurrent(captured, epoch);
     if (captured.transport !== "personal") return false;
-    if (captured.personal.status?.humanInputRequest) {
-      throw new Error("Finish the current manual step and choose Let AI continue before starting another browser task.");
+    // The pending handoff outlives the status request, which Desktop clears
+    // on the navigations that follow a sign-in.
+    if (captured.personal.status?.humanInputRequest || captured.personal.pendingHandoff) {
+      throw new Error("Finish the current manual step and choose Let AI continue, or pause the browser, before starting another browser task.");
     }
     const runtimeOverride = captured.personal.runtimeOverride;
     if (!runtimeOverride) {
