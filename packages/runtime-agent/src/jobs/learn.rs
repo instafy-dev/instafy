@@ -114,8 +114,13 @@ const FRONTEND_PREVIEWS_TEMPLATE: &str = include_str!(concat!(
 // Octo opens it on its own, so a workspace still holding an unedited earlier
 // bundled copy of this skill, browser automation or skill import compat is
 // upgraded; an edited one is kept.
-const LEGACY_FRONTEND_PREVIEWS_TEMPLATES: &[&str] =
-    &[include_str!("legacy/frontend-previews-v1.md")];
+//
+// v2 is the copy from before `instafy preview check`: an unedited one is upgraded so
+// Octo checks a page before it shows it.
+const LEGACY_FRONTEND_PREVIEWS_TEMPLATES: &[&str] = &[
+    include_str!("legacy/frontend-previews-v1.md"),
+    include_str!("legacy/frontend-previews-v2.md"),
+];
 const INTEGRATION_ONBOARDING_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-integration-onboarding/SKILL.md"
