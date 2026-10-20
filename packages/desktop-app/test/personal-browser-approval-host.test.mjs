@@ -17,7 +17,7 @@ const hostCode = ts.transpileModule(
   { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } },
 ).outputText;
 
-function fixture(choose = async () => ({ response: 1 }), pageOverrides = {}) {
+function fixture(choose = async () => ({ response: 1 }), pageOverrides = {}, hostOptions = {}) {
   const dialogs = [];
   class ControlServer {
     credentials = null;
@@ -39,6 +39,7 @@ function fixture(choose = async () => ({ response: 1 }), pageOverrides = {}) {
     "./browserTabInput": require(path.join(packageRoot, "dist/browserTabInput.js")),
     "./browserTabExplorePage": { createBrowserTabExplorePage() { throw new Error("Unexpected native Explore page"); } },
     "./personalBrowserSecurity": security,
+    "./personalBrowserRedaction": require(path.join(packageRoot, "dist/personalBrowserRedaction.js")),
     "./personalBrowserPageBridge": { ...pageBridge, clearPersonalBrowserHumanInput: async () => {}, ...pageOverrides },
     "./personalBrowserHumanInput": {},
     "./personalBrowserInputShield": { PersonalBrowserInputShield: InputShield },
@@ -48,7 +49,7 @@ function fixture(choose = async () => ({ response: 1 }), pageOverrides = {}) {
     module, exports: module.exports, URL, setTimeout, clearTimeout,
     require: (specifier) => dependencies[specifier] ?? require(specifier),
   });
-  const host = new module.exports.PersonalBrowserHost({ enabled: true, onReleaseExpiry() {} });
+  const host = new module.exports.PersonalBrowserHost({ enabled: true, onReleaseExpiry() {}, ...hostOptions });
   host.ownerWindow = {
     isDestroyed: () => false,
     isVisible: () => true,
@@ -220,4 +221,84 @@ test("an explicit tab share survives hiding its pane but not owner or project re
   host.currentOwnerId = null;
   await assert.rejects(host.tabCapture.frame("owner-fixture", captureId), /sharing ended/);
   host.tabCapture.stop();
+});
+
+const CANARY = ["sk", "test", ["INSTAFY", "CANARY", "7Qm2Xr9Lp4Vb8Nc1"].join("")].join("_");
+const NO_SECRET_SIGNALS = { credentialContext: false, secretField: false, secretCode: false, maskedNearReveal: false };
+
+function snapshotPage({ documentToken = "doc-a", text = "", title = "Page", url = "https://example.test/", signals = NO_SECRET_SIGNALS, names = [] } = {}) {
+  return {
+    url, title, text, documentToken, signals,
+    capturedAt: "2026-10-20T00:00:00.000Z",
+    interactive: names.map((name, index) => ({
+      index, tag: "button", name, disabled: false, identity: `${documentToken}:${index}`,
+      descriptor: { found: true, identity: `${documentToken}:${index}`, tag: "button", text: name },
+    })),
+  };
+}
+
+for (const mode of ["ask", "routine"]) {
+  test(`snapshots and status are masked in ${mode} mode and the canary reaches no output or log`, async () => {
+    const logs = [];
+    let page = snapshotPage({
+      text: `Order 1234. Your key ${CANARY} was created.`,
+      title: `Key ${CANARY}`,
+      names: [`Copy ${CANARY}`, "Continue"],
+    });
+    const { host } = fixture(undefined, { snapshotPersonalBrowserPage: async () => page }, {
+      logger: (...entry) => logs.push(entry),
+    });
+    host.view.webContents.getURL = () => page.url;
+    host.view.webContents.getTitle = () => `Key ${CANARY}`;
+    host.enablePreparedAgentControl(await host.prepareAgentControl(mode));
+    const result = await host.handleControlOperation("snapshot", {});
+    assert.ok(result.snapshot.text.includes("Order 1234."));
+    assert.ok(result.snapshot.text.includes("[redacted secret]"));
+    assert.equal(result.snapshot.interactive[0].name, "Copy [redacted secret]");
+    const status = await host.handleControlOperation("status", {});
+    host.logger("warn", "[instafy-desktop] personal-browser-approved-navigation-failed", {
+      message: `ERR_ABORTED loading 'https://example.test/x?token=${CANARY}'`,
+    });
+    for (const output of [result, status, logs]) {
+      assert.ok(!JSON.stringify(output).includes(CANARY), JSON.stringify(output));
+    }
+    page = snapshotPage({ documentToken: "doc-b", text: "Welcome back" });
+    assert.equal((await host.handleControlOperation("snapshot", {})).snapshot.text, "Welcome back");
+  });
+}
+
+test("a secret screen stays withheld until a new page loads", async () => {
+  let page = snapshotPage({
+    text: "API-Schlüssel",
+    names: ["Anzeigen"],
+    signals: { ...NO_SECRET_SIGNALS, secretField: true },
+  });
+  const { host } = fixture(undefined, { snapshotPersonalBrowserPage: async () => page });
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine"));
+  let result = await host.handleControlOperation("snapshot", {});
+  assert.equal(result.snapshot.secretScreen, true);
+  assert.equal(result.snapshot.text, "");
+  assert.equal(result.snapshot.interactive[0].name, "Anzeigen", "Octo can still name the control");
+
+  page = snapshotPage({ text: "Nothing to see", names: ["Anzeigen"] });
+  result = await host.handleControlOperation("snapshot", {});
+  assert.equal(result.snapshot.secretScreen, true, "the same document stays withheld after the value is hidden");
+  assert.equal(result.snapshot.text, "");
+
+  page = snapshotPage({ documentToken: "doc-next", text: "Dashboard" });
+  result = await host.handleControlOperation("snapshot", {});
+  assert.equal(result.snapshot.secretScreen, undefined);
+  assert.equal(result.snapshot.text, "Dashboard");
+});
+
+test("a page whose secret signals are missing is withheld", async () => {
+  const page = snapshotPage({ text: "Unchecked text", names: ["Continue"] });
+  delete page.signals;
+  const { host } = fixture(undefined, { snapshotPersonalBrowserPage: async () => page });
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine"));
+  const result = await host.handleControlOperation("snapshot", {});
+  assert.equal(result.snapshot.secretScreen, true);
+  assert.equal(result.snapshot.text, "");
+  assert.equal(result.snapshot.url, "");
+  assert.equal(result.snapshot.interactive[0].name, undefined, "unchecked names are dropped");
 });

@@ -172,9 +172,11 @@ function createPageHarness() {
     title: "Atomic target fixture",
     body: { innerText: "fixture" },
     elements: [],
-    querySelectorAll() {
+    // Non-interactive elements are only visible to whole-page scans.
+    passive: [],
+    querySelectorAll(selector) {
       for (const element of this.elements) element.ownerDocument = this;
-      return this.elements;
+      return selector === "*" ? [...this.elements, ...this.passive] : this.elements;
     },
     getElementById(id) {
       return this.elements.find((element) => element.id === id) ?? null;
@@ -436,4 +438,56 @@ test("isolated type and press recheck identity after hostile focus-time DOM repl
   assert.equal(pressed.pressed, false);
   assert.equal(safeButton.clickCount, 0);
   assert.equal(deleteButton.clickCount, 0);
+});
+
+const CANARY = ["sk", "test", ["INSTAFY", "CANARY", "7Qm2Xr9Lp4Vb8Nc1"].join("")].join("_");
+
+test("page secret signals answer yes or no and never return the value", async () => {
+  const harness = createPageHarness();
+  const field = new harness.HTMLInputElement({ type: "text", readonly: "", "aria-label": "Client Secret" });
+  field.value = CANARY;
+  harness.document.elements = [field];
+  let snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
+  assert.deepEqual({ ...snapshot.signals }, {
+    credentialContext: false,
+    secretField: true,
+    secretCode: false,
+    maskedNearReveal: false,
+  });
+  assert.ok(!JSON.stringify(snapshot).includes(CANARY));
+
+  field.value = "Ada Lovelace";
+  snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
+  assert.equal(snapshot.signals.secretField, false, "an ordinary read-only value is not a secret");
+});
+
+test("page secret signals find code blocks, credential headings and masked values next to reveal controls", async () => {
+  const harness = createPageHarness();
+  const heading = new harness.Element("h2", { text: "API-Schlüssel" });
+  const code = new harness.Element("code", { text: CANARY });
+  const row = new harness.Element("div", { text: "Instafy Bot •••••••• Anzeigen" });
+  const reveal = new harness.HTMLButtonElement({ type: "button", text: "Anzeigen" });
+  reveal.parentElement = row;
+  harness.document.passive = [heading, code, row];
+  harness.document.elements = [reveal];
+  const snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
+  assert.deepEqual({ ...snapshot.signals }, {
+    credentialContext: true,
+    secretField: false,
+    secretCode: true,
+    maskedNearReveal: true,
+  });
+  assert.ok(!JSON.stringify(snapshot).includes(CANARY));
+});
+
+test("page secret signals look inside open shadow roots", async () => {
+  const harness = createPageHarness();
+  const host = new harness.Element("app-key-view", {});
+  const hidden = new harness.HTMLInputElement({ type: "text", readonly: "" });
+  hidden.value = CANARY;
+  host.shadowRoot = { querySelectorAll: () => [hidden] };
+  harness.document.passive = [host];
+  const snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
+  assert.equal(snapshot.signals.secretField, true);
+  assert.ok(!JSON.stringify(snapshot).includes(CANARY));
 });

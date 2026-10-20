@@ -32,6 +32,7 @@ export default defineConfig({
     codexCredentialBridge: "src/codexCredentialBridge.ts",
     personalBrowserIdentity: "src/personalBrowserIdentity.ts",
     personalBrowserSecurity: "src/personalBrowserSecurity.ts",
+    personalBrowserRedaction: "src/personalBrowserRedaction.js",
     personalBrowserPageBridge: "src/personalBrowserPageBridge.ts",
     personalBrowserHumanInput: "src/personalBrowserHumanInput.ts",
     personalBrowserInputShield: "src/personalBrowserInputShield.ts",

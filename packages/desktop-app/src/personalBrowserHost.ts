@@ -26,6 +26,7 @@ import {
   type PersonalBrowserTargetDescriptor,
 } from "./personalBrowserPageBridge";
 import { PersonalBrowserInputShield } from "./personalBrowserInputShield";
+import { redactLogValue, redactPageObservation, redactText, redactUrl } from "./personalBrowserRedaction";
 import { BrowserTabCapture } from "./browserTabCapture";
 import {
   PersonalBrowserControlError,
@@ -232,6 +233,12 @@ export class PersonalBrowserHost {
   private pendingOriginApprovals = new Map<string, Promise<boolean>>();
   private controlEpoch = 0;
   private latestAgentSnapshot: PersonalBrowserSnapshotState | null = null;
+  // A document stays withheld from the agent until a new page loads once it
+  // was a secret screen or a credential step ran on it.
+  private withheldDocumentToken: string | null = null;
+  // Set by a credential step that may open another page: the next new
+  // document is withheld too.
+  private withholdNextDocumentAfter: string | null = null;
   private lastEmittedStatus = "";
   private releaseCloseTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly tabCapture = new BrowserTabCapture(() => {
@@ -288,7 +295,10 @@ export class PersonalBrowserHost {
     this.onReleaseExpiry = options.onReleaseExpiry;
     this.onEmergencyPause = options.onEmergencyPause ?? (() => undefined);
     this.onStatus = options.onStatus ?? (() => undefined);
-    this.logger = options.logger ?? (() => undefined);
+    const logger = options.logger ?? (() => undefined);
+    // Error messages can carry page addresses. Mask them before they reach
+    // Desktop's log files.
+    this.logger = (level, message, payload) => logger(level, message, payload ? redactLogValue(payload) : payload);
     this.controlServer = new PersonalBrowserControlServer({
       handle: (operation, payload) => this.handleControlOperation(operation, payload),
       logger: this.logger,
@@ -1258,10 +1268,21 @@ export class PersonalBrowserHost {
         originApproved = false;
       }
     }
-    if (originApproved) {
-      return status;
+    if (!originApproved) {
+      return sanitizePersonalBrowserBrokerStatus(status, false);
     }
-    return sanitizePersonalBrowserBrokerStatus(status, false);
+    try {
+      // Status is read without a page observation, so the title gets the
+      // same masking a snapshot title gets on an ordinary page.
+      const url = redactUrl(status.url).text;
+      const title = status.title === undefined ? undefined : redactText(status.title).text;
+      const redacted = { ...status, url };
+      if (title === undefined) delete redacted.title;
+      else redacted.title = title;
+      return redacted;
+    } catch {
+      return sanitizePersonalBrowserBrokerStatus(status, false);
+    }
   }
 
   private invalidateAgentSnapshot() {
@@ -1276,7 +1297,9 @@ export class PersonalBrowserHost {
 
   private rememberAgentSnapshot(
     snapshot: PersonalBrowserPageSnapshot,
-  ): Omit<PersonalBrowserPageSnapshot, "documentToken" | "interactive"> & {
+  ): Omit<PersonalBrowserPageSnapshot, "documentToken" | "interactive" | "signals"> & {
+    secretScreen?: true;
+    message?: string;
     interactive: Array<{
       index: number;
       tag: string;
@@ -1313,20 +1336,86 @@ export class PersonalBrowserHost {
       documentToken: snapshot.documentToken,
       targets,
     };
-    return {
-      url: snapshot.url,
-      title: snapshot.title,
-      text: snapshot.text,
-      capturedAt: snapshot.capturedAt,
-      interactive: snapshot.interactive.map(({ index, tag, role, name, type, disabled }) => ({
-        index,
-        tag,
-        ...(role ? { role } : {}),
-        ...(name ? { name } : {}),
-        ...(type ? { type } : {}),
-        disabled,
-      })),
-    };
+    return this.redactAgentSnapshot(snapshot);
+  }
+
+  private shouldWithholdDocument(documentToken: string): boolean {
+    if (documentToken === this.withheldDocumentToken) {
+      return true;
+    }
+    if (this.withholdNextDocumentAfter !== null && this.withholdNextDocumentAfter !== documentToken) {
+      this.withholdNextDocumentAfter = null;
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Withholds the page a credential step ran on until a new page loads. When
+   * the step may open another page, that page is withheld as well.
+   */
+  private withholdAfterCredentialStep(identity: string | null | undefined, opensPage: boolean) {
+    const documentToken = identity?.split(":", 1)[0];
+    if (!documentToken) {
+      return;
+    }
+    this.withheldDocumentToken = documentToken;
+    if (opensPage) {
+      this.withholdNextDocumentAfter = documentToken;
+    }
+  }
+
+  // Every page observation passes through redaction before it leaves the main
+  // process, in every approval mode and on every site. A failure withholds it.
+  private redactAgentSnapshot(snapshot: PersonalBrowserPageSnapshot) {
+    const withhold = this.shouldWithholdDocument(snapshot.documentToken);
+    const rawNames = snapshot.interactive.map((entry) => entry.name);
+    const describe = (
+      { index, tag, role, type, disabled }: PersonalBrowserPageSnapshot["interactive"][number],
+      name: string | undefined,
+    ) => ({
+      index,
+      tag,
+      ...(role ? { role } : {}),
+      ...(name ? { name } : {}),
+      ...(type ? { type } : {}),
+      disabled,
+    });
+    try {
+      if (!snapshot.signals) {
+        throw new Error("Page secret signals are missing.");
+      }
+      const redacted = redactPageObservation({
+        url: snapshot.url,
+        title: snapshot.title,
+        text: snapshot.text,
+        names: rawNames,
+        signals: snapshot.signals,
+        withhold,
+      });
+      if (redacted.secretScreen) {
+        this.withheldDocumentToken = snapshot.documentToken;
+      }
+      return {
+        url: redacted.url,
+        title: redacted.title,
+        text: redacted.text,
+        capturedAt: snapshot.capturedAt,
+        ...(redacted.secretScreen ? { secretScreen: true as const, message: redacted.message } : {}),
+        interactive: snapshot.interactive.map((entry, position) => describe(entry, redacted.names[position])),
+      };
+    } catch {
+      this.withheldDocumentToken = snapshot.documentToken;
+      return {
+        url: "",
+        title: "",
+        text: "",
+        capturedAt: snapshot.capturedAt,
+        secretScreen: true as const,
+        message: "This page could not be checked for secrets, so it is withheld. Navigate to another page or ask the user to continue.",
+        interactive: snapshot.interactive.map((entry) => describe(entry, undefined)),
+      };
+    }
   }
 
   private consumeAgentSnapshotTarget(index: number): PersonalBrowserResolvedTarget {
@@ -1493,6 +1582,8 @@ export class PersonalBrowserHost {
       }
       this.assertControlEpoch(operationEpoch);
       this.invalidateAgentSnapshot();
+      // An address the agent opens itself is not the page a credential step opened.
+      this.withholdNextDocumentAfter = null;
       await contents.loadURL(url);
       return { status: this.getBrokerStatus() };
     }

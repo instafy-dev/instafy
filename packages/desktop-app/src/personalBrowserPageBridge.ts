@@ -6,6 +6,12 @@ import {
   type PersonalBrowserActionDescriptor,
   type PersonalBrowserEditableDescriptor,
 } from "./personalBrowserSecurity";
+import {
+  CREDENTIAL_CONTEXT_SOURCE,
+  KNOWN_SECRET_PATTERN_SOURCES,
+  MASKED_TEXT_SOURCE,
+  PLACEHOLDER_SOURCE,
+} from "./personalBrowserRedaction";
 
 const PERSONAL_BROWSER_ISOLATED_WORLD_ID = 987;
 
@@ -20,12 +26,25 @@ export type PersonalBrowserInteractiveElement = {
   descriptor: PersonalBrowserTargetDescriptor;
 };
 
+/**
+ * Yes/no answers computed inside the page. Values are tested where they live
+ * and never returned, so a key shown in a read-only field never reaches the
+ * main process.
+ */
+export type PersonalBrowserPageSecretSignals = {
+  credentialContext: boolean;
+  secretField: boolean;
+  secretCode: boolean;
+  maskedNearReveal: boolean;
+};
+
 export type PersonalBrowserPageSnapshot = {
   url: string;
   title: string;
   text: string;
   interactive: PersonalBrowserInteractiveElement[];
   documentToken: string;
+  signals?: PersonalBrowserPageSecretSignals;
   capturedAt: string;
 };
 
@@ -57,6 +76,113 @@ function serializeForScript(value: unknown): string {
     .replace(/\u2028/g, "\\u2028")
     .replace(/\u2029/g, "\\u2029");
 }
+
+// Runs inside the page. Every check returns a boolean; no field value, code
+// block text or masked text is ever part of the result. Open shadow roots are
+// searched too, because querySelectorAll does not enter them.
+const PAGE_SECRET_SIGNAL_SCRIPT = `
+    const secretPatternSources = ${serializeForScript(KNOWN_SECRET_PATTERN_SOURCES)};
+    const credentialContextPattern = new RegExp(${serializeForScript(CREDENTIAL_CONTEXT_SOURCE)}, "iu");
+    const placeholderPattern = new RegExp(${serializeForScript(PLACEHOLDER_SOURCE)}, "i");
+    const maskedTextPattern = new RegExp(${serializeForScript(MASKED_TEXT_SOURCE)});
+    const revealLabelPattern = /(?<![\\p{L}\\p{N}])(?:reveal|show|view|copy|unhide|display|anzeigen|einblenden|kopieren|zeigen|ansehen)(?![\\p{L}\\p{N}])|eye|visibility|clipboard/iu;
+    const uuidValuePattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const hexValuePattern = /^(?:[0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{64})$/i;
+    const valueEntropy = (value) => {
+      const counts = new Map();
+      for (const character of value) counts.set(character, (counts.get(character) || 0) + 1);
+      let entropy = 0;
+      for (const count of counts.values()) {
+        const probability = count / value.length;
+        entropy -= probability * Math.log2(probability);
+      }
+      return entropy;
+    };
+    const looksLikeSecretValue = (raw, credentialContext) => {
+      if (typeof raw !== "string") return false;
+      const value = raw.trim();
+      if (value.length < 16 || value.length > 16_384 || placeholderPattern.test(value)) return false;
+      if (secretPatternSources.some((source) => new RegExp(source).test(value))) return true;
+      if (/\\s/.test(value) || value.length < 20 || value.length > 512) return false;
+      if (!credentialContext && (uuidValuePattern.test(value) || hexValuePattern.test(value))) return false;
+      return /[A-Za-z]/.test(value) && /[0-9]/.test(value) && valueEntropy(value) >= 3.5;
+    };
+    const scanElements = (visit) => {
+      const roots = [document];
+      let scanned = 0;
+      while (roots.length > 0 && scanned < 20_000) {
+        const root = roots.shift();
+        const elements = typeof root?.querySelectorAll === "function" ? Array.from(root.querySelectorAll("*")) : [];
+        for (const element of elements) {
+          scanned += 1;
+          if (visit(element) === true) return true;
+          if (element && element.shadowRoot && typeof element.shadowRoot.querySelectorAll === "function") {
+            roots.push(element.shadowRoot);
+          }
+          if (scanned >= 20_000) break;
+        }
+      }
+      return false;
+    };
+    const elementTag = (element) => typeof element?.tagName === "string" ? element.tagName.toUpperCase() : "";
+    const elementAttribute = (element, name) => typeof element?.getAttribute === "function" ? element.getAttribute(name) : null;
+    const elementText = (element) => clean(element?.textContent ?? element?.innerText ?? "", 2_000);
+    const isDialog = (element) => elementTag(element) === "DIALOG"
+      || ["dialog", "alertdialog"].includes(elementAttribute(element, "role"))
+      || elementAttribute(element, "aria-modal") === "true";
+    const pageSecretSignals = () => {
+      try {
+        const labelTags = new Set(["H1", "H2", "H3", "H4", "H5", "H6", "LEGEND", "TH", "LABEL", "DT", "CAPTION"]);
+        const credentialContext = credentialContextPattern.test(clean(document.title, 1_000)) || scanElements((element) => {
+          const label = labelTags.has(elementTag(element)) || elementAttribute(element, "role") === "heading"
+            ? elementText(element)
+            : isDialog(element)
+              ? clean(elementAttribute(element, "aria-label"))
+              : "";
+          return Boolean(label) && credentialContextPattern.test(label);
+        });
+        const codeTags = new Set(["CODE", "PRE", "KBD", "SAMP", "OUTPUT"]);
+        let secretField = false;
+        let secretCode = false;
+        let maskedNearReveal = false;
+        scanElements((element) => {
+          const tag = elementTag(element);
+          if (!secretField && (tag === "INPUT" || tag === "TEXTAREA")) {
+            const type = String(element.type || elementAttribute(element, "type") || "").toLowerCase();
+            const readOnly = element.readOnly === true || elementAttribute(element, "readonly") !== null
+              || element.disabled === true || elementAttribute(element, "disabled") !== null;
+            if (readOnly && type !== "password" && type !== "hidden" && looksLikeSecretValue(element.value, credentialContext)) {
+              secretField = true;
+            }
+          }
+          if (!secretCode && codeTags.has(tag) && looksLikeSecretValue(elementText(element), credentialContext)) {
+            secretCode = true;
+          }
+          if (!maskedNearReveal && (tag === "BUTTON" || tag === "A" || elementAttribute(element, "role") === "button"
+              || elementAttribute(element, "onclick") !== null)) {
+            const label = [
+              elementAttribute(element, "aria-label"), elementAttribute(element, "title"),
+              elementAttribute(element, "class"), elementAttribute(element, "data-icon"), elementText(element),
+            ].filter(Boolean).join(" ");
+            if (revealLabelPattern.test(label)) {
+              let ancestor = element.parentElement;
+              for (let depth = 0; ancestor && depth < 3; depth += 1, ancestor = ancestor.parentElement) {
+                if (maskedTextPattern.test(elementText(ancestor))) {
+                  maskedNearReveal = true;
+                  break;
+                }
+              }
+            }
+          }
+          return secretField && secretCode && maskedNearReveal;
+        });
+        return { credentialContext, secretField, secretCode, maskedNearReveal };
+      } catch {
+        // The host withholds the page when the answers are missing.
+        return null;
+      }
+    };
+`;
 
 function buildPageScript(argumentsValue: unknown, body: string): string {
   return `(() => {
@@ -211,6 +337,7 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
         || securityFingerprint(item) !== args.expectedSecurityFingerprint;
       return { element, item, targetChanged };
     };
+    ${PAGE_SECRET_SIGNAL_SCRIPT}
     ${body}
   })()`;
 }
@@ -261,6 +388,7 @@ export async function snapshotPersonalBrowserPage(
         text: clean(document.body?.innerText ?? "", 60_000),
         interactive,
         documentToken: registry.documentToken,
+        signals: pageSecretSignals(),
       };
     `),
   );

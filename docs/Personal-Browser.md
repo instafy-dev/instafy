@@ -172,6 +172,50 @@ Agent typing into the following classes of fields is rejected, even after origin
 
 Detection checks input type, autocomplete tokens, accessible labels, names, placeholders, IDs, and related descriptors before and after focus. The user may Pause (or press Escape) and complete these steps manually in the visible browser; the agent cannot type them through the RPC.
 
+### Secrets are masked before the agent sees a page
+
+Every page observation the agent receives is redacted in Electron main before it
+leaves Desktop, in Ask and routine mode and on every site. This covers the
+snapshot's address, title, visible text and control names, the `status` address
+and title, and Desktop's own log messages.
+
+- **Known key formats** are masked in place as `[redacted secret]`: provider API
+  keys and tokens (OpenAI- and Anthropic-style `sk-` keys, payment `sk_`/`rk_`
+  keys, webhook secrets, GitHub, GitLab, Slack, AWS, Google, npm, Hugging Face,
+  Shopify, Notion and SendGrid tokens), JWTs, PEM private keys and `Bearer`
+  values.
+- **Unknown formats** are masked only near a credential word: a value of 20 or
+  more characters that mixes letters and digits and looks random, within about
+  120 characters of a word such as key, token, secret, Schlüssel, Zugangsdaten
+  or Client Secret. UUIDs and 32/40/64-character hex values stay readable unless
+  the page is a credential context.
+- **Codes:** six to eight digits next to the word "code" are masked.
+- **Addresses** stay navigable. Fragments and ordinary paths are kept; a query
+  value on a key such as `token`, `code`, `key` or `state` is masked only when it
+  is long and random, and a path segment only after an action word such as
+  reset, invite, magic or verify.
+
+**Secret screens.** The page computes four yes/no answers inside its isolated
+world and never returns the values it tested: whether a heading, dialog title,
+label or table header names a credential; whether a read-only field holds a
+key-like value; whether a code block holds one; and whether masked text such as
+`••••` sits next to a reveal or copy control. Open shadow roots are searched too.
+A page is a secret screen when a read-only field holds a key, masked text sits
+next to a reveal or copy control, or a credential context shows a key-like value
+in text or a code block. The snapshot then carries `secretScreen: true`, an
+empty `text` and a fixed message, while the masked control names stay so the
+agent can tell the person which control shows the value. Pages that only show
+example keys, such as documentation, are masked in place instead.
+
+A secret screen stays withheld until a new page loads, even after the value is
+hidden again. This also covers a dialog that shows a value without changing the
+address. If redaction fails or the page's answers are missing, the page is
+withheld and its control names are dropped.
+
+Redaction is a heuristic. It can miss a value in an unknown format with no
+credential word nearby, a value split across elements, or text in an image.
+Native dialogs, which only the person sees, keep the unmasked labels.
+
 ### Renderer restrictions
 
 The `WebContentsView` uses context isolation, sandboxing, no Node.js integration, normal web security, disabled DevTools, no `<webview>` attachment, denied popups, and no insecure mixed-content override. The Personal Browser session denies permission requests and downloads.
@@ -211,7 +255,7 @@ instafy_personal_browser.request_human_input
 | MCP tool | Purpose |
 | --- | --- |
 | `status` | Read readiness and whether control is resumed; URL/title stay redacted until control is enabled and the current origin is approved |
-| `snapshot` | Read URL, title, bounded visible text, and indexed interactive descriptors |
+| `snapshot` | Read the redacted URL, title, bounded visible text, and indexed interactive descriptors; `secretScreen: true` means the text is withheld |
 | `navigate` | Navigate the visible page to an absolute credential-free HTTP(S) URL |
 | `click` | Click one target by its fresh snapshot index |
 | `type` | Type bounded text into a non-sensitive editable target, optionally submitting with Enter |
