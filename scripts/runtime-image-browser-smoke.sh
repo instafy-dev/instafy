@@ -15,7 +15,10 @@
 # session-restore and download-block preferences and the rest of the profile
 # after the next start on the same profile. It then keeps only the files the
 # agent packs (as a later machine restores them) and requires both cookies
-# after a third start on that profile.
+# after a third start on that profile. The sign-in cycle runs on images with
+# the private browser host Node and Playwright (the base flavor), the only
+# images where runtime-agent runs the host; the others start, stop and start
+# the host again on one profile with its preferences.
 #
 #   scripts/runtime-image-browser-smoke.sh [--lazy] <image> [<entrypoint to mount>]
 #
@@ -219,6 +222,17 @@ if (!preferences.session || preferences.session.restore_on_startup !== 1) throw 
   # and stop.
   docker exec "$name" sh -c "mkdir -p '$profile_dir' && echo kept > '$profile_dir/instafy-smoke-marker'"
 
+  # runtime-agent runs the host only where the image carries the private Node
+  # and Playwright (browser_host/mode.rs); the webdev flavor has neither, so
+  # it gets the start, stop and start cycle with the image's own Node.
+  if docker exec "$name" test -x "$host_node"; then
+    sign_ins=1
+    probe_node="$host_node"
+  else
+    sign_ins=0
+    probe_node=/usr/bin/node
+  fi
+
   start_host() {
     docker exec -d "$name" bash -c '
       echo $$ > /tmp/browser-smoke-host.pid
@@ -274,7 +288,7 @@ if (!preferences.session || preferences.session.restore_on_startup !== 1) throw 
     [[ "$oom" == "1000" ]] || lazy_fail "The browser host's OOM score is ${oom}, not 1000."
     docker exec "$name" test -f "$profile_dir/instafy-smoke-marker" \
       || lazy_fail "The ${label} browser host removed data from the persisted profile."
-    docker exec "$name" env -i "$host_node" -e "$preferences_probe" "$profile_dir" \
+    docker exec "$name" env -i "$probe_node" -e "$preferences_probe" "$profile_dir" \
       || lazy_fail "The ${label} browser host started Chromium on a profile without its preferences."
   }
 
@@ -289,7 +303,7 @@ if (!preferences.session || preferences.session.restore_on_startup !== 1) throw 
       || lazy_fail "The ${label} browser host did not report Chromium's exit after the close: ${status}"
     remaining="$(docker exec "$name" sh -c "$browser_processes")"
     [[ -z "$remaining" ]] || lazy_fail "Browser processes outlived the closed ${label} host: ${remaining//$'\n'/; }"
-    docker exec "$name" env -i "$host_node" -e "$preferences_probe" "$profile_dir" \
+    docker exec "$name" env -i "$probe_node" -e "$preferences_probe" "$profile_dir" \
       || lazy_fail "The closed ${label} browser left a profile without its preferences."
   }
 
@@ -311,6 +325,14 @@ if (!preferences.session || preferences.session.restore_on_startup !== 1) throw 
       || lazy_fail "Chromium did not use the persisted profile directory ${profile_dir}."
     sleep 1
   done
+  if [[ "$sign_ins" != "1" ]]; then
+    stop_host first
+    start_host
+    prove_running_host second
+    stop_host second
+    echo "Browser host started on demand twice on one profile with its preferences and left no process behind (no private host Node in this image, so runtime-agent never runs the host here)."
+    exit 0
+  fi
   docker exec "$name" env -i "$host_node" -e "$cookie_probe" set "$host_cdp_port" \
     || lazy_fail "Could not set the probe cookies in the first browser host."
   close_host first

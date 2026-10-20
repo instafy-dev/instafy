@@ -1217,13 +1217,19 @@ test("every runtime image must start the on-demand browser host before it is pub
 
   const smoke = read("scripts/runtime-image-browser-smoke.sh");
   // Boots with the browser off, requires no browser process at boot, then
-  // drives the subcommand twice on one persisted profile.
+  // drives the subcommand on one persisted profile: three starts with the
+  // sign-in cycle where the image has the private host Node (the only images
+  // runtime-agent runs the host on), two starts with the preferences elsewhere.
   assert.match(smoke, /if \[\[ "\$\{1:-\}" == "--lazy" \]\]; then/u);
   assert.match(smoke, /bash \/usr\/local\/bin\/runtime-entrypoint start-browser-host/u);
   assert.match(smoke, /The image started browser processes at boot/u);
   assert.match(smoke, /INSTAFY_BROWSER_HOST_PROFILE_DIR="\$profile_dir"/u);
   assert.match(smoke, /instafy-smoke-marker/u);
-  assert.match(smoke, /\n  start_host\n  prove_running_host first\n[\s\S]*\n  stop_host first\n[\s\S]*\n  start_host\n  prove_running_host second\n  stop_host second\n/u);
+  assert.match(smoke, /if docker exec "\$name" test -x "\$host_node"; then\n    sign_ins=1\n/u);
+  assert.match(smoke, /\n  start_host\n  prove_running_host first\n[\s\S]*\n  if \[\[ "\$sign_ins" != "1" \]\]; then\n    stop_host first\n    start_host\n    prove_running_host second\n    stop_host second\n[\s\S]*\n    exit 0\n  fi\n/u);
+  assert.match(smoke, /\$cookie_probe" set [\s\S]*\n  close_host first\n[\s\S]*\n  start_host\n  prove_running_host second\n[\s\S]*\$cookie_probe" get [\s\S]*\n  close_host second\n[\s\S]*\n  start_host\n  prove_running_host third\n[\s\S]*\$cookie_probe" get [\s\S]*\n  stop_host third\n/u);
+  assert.match(smoke, /preferences\.download_restrictions !== 3/u);
+  assert.match(smoke, /preferences\.session\.restore_on_startup !== 1/u);
   assert.doesNotMatch(smoke, /\$\{\{\s*secrets\.|docker login|ICE_SERVERS_JSON/u);
 
   const pr = read(".github/workflows/runtime-browser-smoke.yml");
