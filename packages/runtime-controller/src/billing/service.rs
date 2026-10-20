@@ -10,8 +10,10 @@ pub(crate) async fn ensure_default_org_subscription(
     client: &impl GenericClient,
     org_id: &Uuid,
 ) -> Result<(), String> {
+    // Savepoint statements go over the simple query protocol: one round trip
+    // each instead of a prepare and an execute. This runs on every dispatch.
     let savepoint_created = client
-        .execute("savepoint ensure_default_org_subscription", &[])
+        .batch_execute("savepoint ensure_default_org_subscription")
         .await
         .is_ok();
 
@@ -26,10 +28,10 @@ pub(crate) async fn ensure_default_org_subscription(
         Err(error) => {
             if savepoint_created {
                 let _ = client
-                    .execute("rollback to savepoint ensure_default_org_subscription", &[])
+                    .batch_execute("rollback to savepoint ensure_default_org_subscription")
                     .await;
                 let _ = client
-                    .execute("release savepoint ensure_default_org_subscription", &[])
+                    .batch_execute("release savepoint ensure_default_org_subscription")
                     .await;
             }
 
@@ -43,7 +45,7 @@ pub(crate) async fn ensure_default_org_subscription(
     if existing.is_some() {
         if savepoint_created {
             let _ = client
-                .execute("release savepoint ensure_default_org_subscription", &[])
+                .batch_execute("release savepoint ensure_default_org_subscription")
                 .await;
         }
         return Ok(());
@@ -72,15 +74,15 @@ pub(crate) async fn ensure_default_org_subscription(
         match &result {
             Ok(()) => {
                 let _ = client
-                    .execute("release savepoint ensure_default_org_subscription", &[])
+                    .batch_execute("release savepoint ensure_default_org_subscription")
                     .await;
             }
             Err(_) => {
                 let _ = client
-                    .execute("rollback to savepoint ensure_default_org_subscription", &[])
+                    .batch_execute("rollback to savepoint ensure_default_org_subscription")
                     .await;
                 let _ = client
-                    .execute("release savepoint ensure_default_org_subscription", &[])
+                    .batch_execute("release savepoint ensure_default_org_subscription")
                     .await;
             }
         }

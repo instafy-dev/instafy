@@ -17,8 +17,8 @@ use crate::active_job_auth::{
 };
 use crate::auth::{authenticate_request, RequestContext};
 use crate::dispatch::{
-    process_dispatch_prompt, DispatchPromptNormalized, DispatchPromptRequest,
-    DispatchPromptResponse,
+    process_dispatch_prompt, process_dispatch_prompt_timed, DispatchPhaseTimings,
+    DispatchPromptNormalized, DispatchPromptRequest, DispatchPromptResponse,
 };
 use crate::workspace::{endpoint_matches_local, runtime_is_recent, status_is_viable};
 use crate::{
@@ -2533,7 +2533,8 @@ pub(crate) async fn post_conversation_message(
     headers: HeaderMap,
     AxumPath(conversation_id_raw): AxumPath<String>,
     axum::Json(mut body): axum::Json<ConversationPromptBody>,
-) -> Result<Json<DispatchPromptResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<(HeaderMap, Json<DispatchPromptResponse>), (StatusCode, Json<ApiError>)> {
+    let received = std::time::Instant::now();
     let has_auth = headers.contains_key(axum::http::header::AUTHORIZATION);
     tracing::info!(
         ?conversation_id_raw,
@@ -2541,6 +2542,7 @@ pub(crate) async fn post_conversation_message(
         "post_conversation_message received"
     );
     let context = authenticate_request(&state.config, &headers).await?;
+    let authenticated = std::time::Instant::now();
 
     let conversation_id = Uuid::from_str(conversation_id_raw.trim())
         .map_err(|_| bad_request("conversationId must be a valid UUID"))?;
@@ -2550,6 +2552,10 @@ pub(crate) async fn post_conversation_message(
         .get()
         .await
         .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
+    // A checkout tests the connection with one empty query, so with no pool
+    // wait this is about one database round trip: the unit every statement
+    // below pays at least once.
+    let checked_out = std::time::Instant::now();
     let transaction = connection
         .transaction()
         .await
@@ -2588,6 +2594,7 @@ pub(crate) async fn post_conversation_message(
     // Dispatch acquires its own connection. Release the completed lookup before
     // entering that path so this handler remains viable with a one-slot pool.
     drop(connection);
+    let looked_up = std::time::Instant::now();
 
     if body.session_id.is_none() {
         body.session_id = conversation.session_id.map(|value| value.to_string());
@@ -2632,36 +2639,55 @@ pub(crate) async fn post_conversation_message(
         inject_conversation_metadata(&mut request.metadata, &conversation_id);
     }
 
-    match process_dispatch_prompt(&state, &access_context, request).await {
-        Ok(response) => Ok(Json(response)),
-        Err((StatusCode::CONFLICT, Json(api_error)))
-            if expected_lane_idle && api_error.code.as_deref() == Some("dispatch_lane_busy") =>
-        {
-            // The composer observed an idle lane, but another linearized
-            // dispatch won the shared fence. Preserve the user's message in
-            // the durable queue instead of either losing it or creating a
-            // concurrent same-agent run.
-            let message = queued_message.unwrap_or_else(|| unreachable!());
-            crate::send_queue::enqueue_prompt_with_context(
-                &state,
-                &context,
-                conversation_id,
-                &client_send_id,
-                message,
-            )
-            .await?;
-            Ok(Json(DispatchPromptResponse {
-                run_id: None,
-                run_ids: None,
-                prompt_id: None,
-                job_id: None,
-                job_ids: None,
-                status: "queued".to_string(),
-                conversation_id: Some(conversation_id),
-            }))
-        }
-        Err(error) => Err(error),
+    let mut timings = DispatchPhaseTimings::default();
+    let response =
+        match process_dispatch_prompt_timed(&state, &access_context, request, &mut timings).await {
+            Ok(response) => response,
+            Err((StatusCode::CONFLICT, Json(api_error)))
+                if expected_lane_idle
+                    && api_error.code.as_deref() == Some("dispatch_lane_busy") =>
+            {
+                // The composer observed an idle lane, but another linearized
+                // dispatch won the shared fence. Preserve the user's message in
+                // the durable queue instead of either losing it or creating a
+                // concurrent same-agent run.
+                let message = queued_message.unwrap_or_else(|| unreachable!());
+                crate::send_queue::enqueue_prompt_with_context(
+                    &state,
+                    &context,
+                    conversation_id,
+                    &client_send_id,
+                    message,
+                )
+                .await?;
+                DispatchPromptResponse {
+                    run_id: None,
+                    run_ids: None,
+                    prompt_id: None,
+                    job_id: None,
+                    job_ids: None,
+                    status: "queued".to_string(),
+                    conversation_id: Some(conversation_id),
+                }
+            }
+            Err(error) => return Err(error),
+        };
+
+    let mut response_headers = HeaderMap::new();
+    let server_timing = crate::dispatch::server_timing_value(&[
+        ("auth", Some(authenticated.duration_since(received))),
+        ("checkout", Some(checked_out.duration_since(authenticated))),
+        ("lookup", Some(looked_up.duration_since(checked_out))),
+        ("pre", timings.pre),
+        ("tx", timings.transaction),
+        ("proxy", timings.proxy),
+        ("post", timings.post),
+        ("total", Some(received.elapsed())),
+    ]);
+    if let Ok(value) = axum::http::HeaderValue::from_str(&server_timing) {
+        response_headers.insert(axum::http::HeaderName::from_static("server-timing"), value);
     }
+    Ok((response_headers, Json(response)))
 }
 
 pub(crate) async fn list_conversation_runs(
