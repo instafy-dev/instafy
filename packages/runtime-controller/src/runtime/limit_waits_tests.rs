@@ -29,6 +29,8 @@ struct LimitWaitFixture {
     blocker_lease_id: Uuid,
     waiting_project_ids: Vec<Uuid>,
     provider_events: Arc<Mutex<Vec<&'static str>>>,
+    /// While set, the stand-in provider fails every launch with a 500.
+    ensure_fails: Arc<std::sync::atomic::AtomicBool>,
     _provider_handle: tokio::task::JoinHandle<()>,
 }
 
@@ -286,16 +288,27 @@ async fn setup(
     let pool = crate::tests::require_origin_test_pool(test_name).await?;
 
     let provider_events: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+    let ensure_fails = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let provider_app = axum::Router::new()
         .route(
             "/runtime/ensure",
             axum::routing::post({
                 let provider_events = provider_events.clone();
+                let ensure_fails = ensure_fails.clone();
                 move || {
                     let provider_events = provider_events.clone();
+                    let ensure_fails = ensure_fails.clone();
                     async move {
+                        if ensure_fails.load(std::sync::atomic::Ordering::SeqCst) {
+                            provider_events.lock().await.push("launch_failed");
+                            return Err((
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "ensure failed: docker compose up failed after cleanup retry. \
+                                 all predefined address pools have been fully subnetted",
+                            ));
+                        }
                         provider_events.lock().await.push("launch");
-                        Json(json!({ "message": "runtime ensured" }))
+                        Ok(Json(json!({ "message": "runtime ensured" })))
                     }
                 }
             }),
@@ -418,6 +431,7 @@ async fn setup(
         blocker_lease_id,
         waiting_project_ids,
         provider_events,
+        ensure_fails,
         _provider_handle: provider_handle,
     };
     fixture
@@ -1007,6 +1021,108 @@ async fn a_launch_refused_for_another_reason_fails_the_waiting_work_with_a_plain
         assert!(
             !metadata.to_string().contains("instafy_cloud_gone"),
             "internal refusal text reached the conversation: {metadata}"
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// A space whose machine the provider fails to start (here: the node is out
+/// of network address space) must not keep its message pending: the failed
+/// launch is recorded, retried with the wait's backoff, and after the last
+/// failed retry the message fails with a plain reason, its run fails and the
+/// conversation says so, well before the limit's half-hour window.
+#[tokio::test]
+async fn work_behind_a_launch_the_provider_keeps_failing_fails_with_a_plain_reason(
+) -> anyhow::Result<()> {
+    let fixture = setup("limit-wait-provider-failure", 1, 10).await?;
+    crate::tests::with_shared_db_fixture(fixture.shared_db_fixture(), async {
+        let waiting = fixture.waiting();
+        // The organization has a free slot; only the node fails.
+        let connection = fixture.pool.get().await?;
+        connection
+            .execute(
+                "update runtime_leases set status = 'released', released_at = now()
+                 where id = $1",
+                &[&fixture.blocker_lease_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "update runtimes set status = 'stopped', active_lease_id = null where id = $1",
+                &[&fixture.blocker_runtime_id],
+            )
+            .await?;
+        drop(connection);
+        fixture
+            .ensure_fails
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let error = fixture
+            .user_ensure(waiting)
+            .await
+            .err()
+            .expect("the provider fails the launch");
+        assert!(is_provider_launch_failure(&error), "{error:?}");
+        let (job_id, run_id, conversation_id) = fixture.queue_conversation_job(waiting).await?;
+        let wait = fixture
+            .wait_row(waiting)
+            .await?
+            .expect("the failed launch is recorded");
+        assert_eq!(
+            (wait.attempts, wait.last_error_code.as_deref()),
+            (0, Some(PROVIDER_LAUNCH_FAILED_CODE))
+        );
+
+        let policy = policy();
+        for attempt in 1..policy.provider_failure_attempts {
+            fixture.make_due(waiting).await?;
+            let report = sweep_hosted_runtime_limit_waits(&fixture.state, &policy).await?;
+            assert_eq!(
+                (report.attempted, report.refused_jobs),
+                (1, 0),
+                "{report:?}"
+            );
+            let wait = fixture.wait_row(waiting).await?.expect("still waiting");
+            assert_eq!(wait.attempts, attempt);
+            assert_eq!(fixture.job_state(job_id).await?.0, "queued");
+        }
+
+        fixture.make_due(waiting).await?;
+        let report = sweep_hosted_runtime_limit_waits(&fixture.state, &policy).await?;
+        assert_eq!(
+            (report.attempted, report.refused_jobs, report.launched),
+            (1, 1, 0),
+            "{report:?}"
+        );
+        assert!(fixture.wait_row(waiting).await?.is_none());
+        let (status, _, error_message) = fixture.job_state(job_id).await?;
+        assert_eq!(status, "failed");
+        assert_eq!(
+            error_message.as_deref(),
+            Some(LIMIT_WAIT_REFUSED_FALLBACK_MESSAGE)
+        );
+        let connection = fixture.pool.get().await?;
+        let run = connection
+            .query_one("select status from runs where id = $1", &[&run_id])
+            .await?;
+        assert_eq!(run.get::<_, String>("status"), "failed");
+        let message = connection
+            .query_one(
+                "select content, metadata from conversation_messages
+                 where conversation_id = $1",
+                &[&conversation_id],
+            )
+            .await?;
+        assert_eq!(
+            message.get::<_, String>("content"),
+            LIMIT_WAIT_REFUSED_FALLBACK_MESSAGE
+        );
+        let metadata = message.get::<_, PgJson<JsonValue>>("metadata").0;
+        assert_eq!(metadata["outcome"], json!("failed"));
+        assert!(
+            !metadata.to_string().contains("address pools"),
+            "the provider's text reached the conversation: {metadata}"
         );
         Ok(())
     })

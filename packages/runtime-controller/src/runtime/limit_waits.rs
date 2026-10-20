@@ -27,6 +27,13 @@
 //! take its last hosted slot either: the ensure's organization-limit check and
 //! lease insert run under a per-organization advisory lock (see `ensure.rs`).
 //!
+//! A launch the provider failed (`provider_launch_failed`: the node could not
+//! start the machine, for example out of disk or network address space) is
+//! recorded the same way, so queued work never waits silently behind a machine
+//! that will not start: the sweep retries it with the same backoff and, after
+//! `provider_failure_attempts` failed retries in a row, fails the waiting work
+//! with a plain reason and a "Try again" instead of the full window.
+//!
 //! Bound per controller and tick: at most `batch_size` spaces, each handled
 //! once. Spaces holding a job past the give-up window are claimed before plain
 //! retries, so a give-up never waits behind slow launches of other spaces, and
@@ -55,6 +62,8 @@ use super::lease::RuntimeLeaseScope;
 
 /// Error code of the organization-limit refusal (`hosted_runtime_limit_refusal`).
 pub(crate) const RUNTIME_LIMIT_REACHED_CODE: &str = "runtime_limit_reached";
+/// Error code of a launch the runtime provider failed (`ensure.rs`).
+pub(crate) const PROVIDER_LAUNCH_FAILED_CODE: &str = "provider_launch_failed";
 
 /// A recorded request larger than this is stored without its metadata. The
 /// frontend's is a few hundred bytes; this only bounds a hostile caller.
@@ -91,6 +100,9 @@ pub(crate) struct LimitWaitPolicy {
     /// How long a claim protects a space from other replicas. Longer than any
     /// bounded ensure, so it only matters when a controller dies mid-attempt.
     pub(crate) claim_ttl: Duration,
+    /// A wait whose launch the provider keeps failing gives up after this
+    /// many failed retries in a row, well inside `give_up_after`.
+    pub(crate) provider_failure_attempts: i32,
 }
 
 impl Default for LimitWaitPolicy {
@@ -101,6 +113,9 @@ impl Default for LimitWaitPolicy {
             batch_size: 5,
             give_up_after: Duration::from_secs(30 * 60),
             claim_ttl: Duration::from_secs(20 * 60),
+            // Retries 30 s, 1, 2 and 4 minutes after the failures before them:
+            // about 7.5 minutes after the first failed launch.
+            provider_failure_attempts: 4,
         }
     }
 }
@@ -188,6 +203,12 @@ pub(crate) fn is_runtime_limit_refusal(error: &(StatusCode, Json<ApiError>)) -> 
         && error.1 .0.code.as_deref() == Some(RUNTIME_LIMIT_REACHED_CODE)
 }
 
+/// A launch the runtime provider failed: the machine was asked for and the
+/// node could not start it.
+pub(crate) fn is_provider_launch_failure(error: &(StatusCode, Json<ApiError>)) -> bool {
+    error.0.is_server_error() && error.1 .0.code.as_deref() == Some(PROVIDER_LAUNCH_FAILED_CODE)
+}
+
 /// Refusals other than the limit that the retry keeps waiting through: a
 /// launch that is still settling (409), throttling, and server-side trouble,
 /// including platform capacity (503). Anything else (credits, access, a
@@ -229,8 +250,10 @@ fn wait_is_quiet(window: &str) -> String {
     )
 }
 
-/// Remember that `project_id` was refused a hosted machine by the organization
-/// limit. Best effort: a failure is logged and the caller's refusal stands.
+/// Remember that `project_id` was refused a hosted machine, by the
+/// organization limit or by a provider that failed to start it; `error_code`
+/// says which ([`RUNTIME_LIMIT_REACHED_CODE`], [`PROVIDER_LAUNCH_FAILED_CODE`]).
+/// Best effort: a failure is logged and the caller's refusal stands.
 ///
 /// A refusal inside an active wait keeps its backoff and its start (the
 /// give-up clock); one after the wait went quiet for the whole give-up window
@@ -240,6 +263,7 @@ pub(super) async fn record_hosted_runtime_limit_refusal(
     project_id: Uuid,
     request: &LimitWaitEnsureRequest,
     source: LimitWaitSource,
+    error_code: &str,
 ) {
     let policy = LimitWaitPolicy::default();
     let connection = match state.pool.get().await {
@@ -287,7 +311,7 @@ pub(super) async fn record_hosted_runtime_limit_refusal(
                 &source.as_str(),
                 &policy.retry_delay(0).as_secs_f64(),
                 &policy.give_up_after.as_secs_f64(),
-                &RUNTIME_LIMIT_REACHED_CODE,
+                &error_code,
             ],
         )
         .await;
@@ -863,6 +887,29 @@ async fn process_claimed_wait(
         Err(error) => {
             let (status, Json(api_error)) = &error;
             let limit = is_runtime_limit_refusal(&error);
+            if is_provider_launch_failure(&error)
+                && claim.last_error_code.as_deref() == Some(PROVIDER_LAUNCH_FAILED_CODE)
+                && claim.attempts + 1 >= policy.provider_failure_attempts
+            {
+                // The node failed to start this space's machine on every
+                // retry: say so now rather than keep the work queued for the
+                // rest of the window. The provider's own text is in the log.
+                info!(
+                    %project_id,
+                    attempts = claim.attempts + 1,
+                    error = %api_error.message,
+                    "hosted runtime wait ended: the provider kept failing to start the runtime"
+                );
+                refuse_waiting_jobs(
+                    state,
+                    policy,
+                    &claim,
+                    LIMIT_WAIT_REFUSED_FALLBACK_MESSAGE,
+                    report,
+                )
+                .await?;
+                return Ok(());
+            }
             if !limit && !refusal_is_worth_retrying(*status) {
                 // Waiting cannot fix this (credits, access, a deleted space,
                 // a provider this controller no longer offers). The studio
