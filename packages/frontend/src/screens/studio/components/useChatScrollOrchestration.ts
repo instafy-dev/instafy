@@ -62,6 +62,19 @@ function readVisibleMessageAnchor(node: HTMLDivElement): MessageScrollAnchor | n
     : null;
 }
 
+/**
+ * Whether the reader has not scrolled up since the last bottom pin. Rows that
+ * finish rendering after a pin grow the transcript without the reader moving,
+ * and the browser reports the pin itself as a scroll event a frame later.
+ * Measured from the new bottom, that echo looks like the reader scrolling up;
+ * on a cold load it landed the newest message under the composer. Scroll
+ * anchoring can also carry the view down when rows above it grow. Only a move
+ * up from the pin is the reader leaving the bottom.
+ */
+export function hasNotScrolledUpFromPin(node: HTMLElement, pinnedScrollTop: number | null): boolean {
+  return pinnedScrollTop !== null && node.scrollTop > pinnedScrollTop - 1;
+}
+
 function findMessageAnchorRow(node: HTMLDivElement, anchor: MessageScrollAnchor): HTMLElement | null {
   // Compare dataset values rather than interpolating arbitrary message IDs in a selector.
   for (const row of node.querySelectorAll<HTMLElement>(CHAT_SCROLL_MESSAGE_SELECTOR)) {
@@ -143,6 +156,8 @@ export function useChatScrollController({
   const autoScrollPendingRef = useRef(false);
   const lastScrollHeightRef = useRef(0);
   const lastComposerScrollTopRef = useRef(0);
+  // The scrollTop the last bottom pin wrote, until the reader scrolls up from it.
+  const pinnedScrollTopRef = useRef<number | null>(null);
   const scrollAnimationFrameRef = useRef<number | null>(null);
   const scrollAnimationStartRef = useRef<number | null>(null);
   const scrollAnimationStartTopRef = useRef(0);
@@ -195,7 +210,12 @@ export function useChatScrollController({
       return;
     }
     const distanceFromBottom = node.scrollHeight - (node.scrollTop + node.clientHeight);
-    const followsBottom = !activeMessageTargetRef.current && distanceFromBottom <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX;
+    // Not scrolled up from our own pin while following: the transcript grew
+    // below the reader, who never left the bottom. Saving that as a reading
+    // position made the next render restore it and stop following.
+    const stillPinned = shouldAutoScrollRef.current && hasNotScrolledUpFromPin(node, pinnedScrollTopRef.current);
+    const followsBottom = !activeMessageTargetRef.current
+      && (distanceFromBottom <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX || stillPinned);
     conversationScrollSnapshots.delete(snapshotKey);
     conversationScrollSnapshots.set(snapshotKey, {
       scrollTop: node.scrollTop,
@@ -323,6 +343,7 @@ export function useChatScrollController({
     const currentTop = node.scrollTop;
     if (Math.abs(targetTop - currentTop) < 1) {
       node.scrollTop = targetTop;
+      pinnedScrollTopRef.current = node.scrollTop;
       lastScrollHeightRef.current = node.scrollHeight;
       autoScrollPendingRef.current = false;
       return;
@@ -337,6 +358,7 @@ export function useChatScrollController({
 
     const complete = (finalNode: HTMLDivElement) => {
       autoScrollPendingRef.current = false;
+      pinnedScrollTopRef.current = finalNode.scrollTop;
       lastScrollHeightRef.current = finalNode.scrollHeight;
       saveCurrentConversationScrollSnapshot();
       cancelScrollAnimation();
@@ -399,6 +421,7 @@ export function useChatScrollController({
       // restore a later reading position on Back/Forward.
       pendingMessageTargetRef.current = scrollSnapshotKey && requestedMessageId && saved?.revealedMessageId !== requestedMessageId
         ? requestedMessageId : null;
+      pinnedScrollTopRef.current = null;
       historyPaginationRef.current = { pending: false, scrollHeight: 0 };
       clearHistoryScrollAnchor();
       cancelScrollAnimation();
@@ -780,6 +803,7 @@ export function useChatScrollController({
     historyWindowUnderfilled,
     lastComposerScrollTopRef,
     lastScrollHeightRef,
+    pinnedScrollTopRef,
     recordScrollPosition: saveCurrentConversationScrollSnapshot,
     scrollSnapshotKey,
     requestOlderMessages,

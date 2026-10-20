@@ -27,6 +27,7 @@ function Harness({ mountScroller }: { mountScroller: boolean }) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const flag = useRef(false);
   const num = useRef(0);
+  const pinned = useRef<number | null>(null);
   const state = useChatComposerLayoutState({
     activeConversationId: "conversation-1",
     autoScrollPendingRef: flag,
@@ -44,6 +45,7 @@ function Harness({ mountScroller }: { mountScroller: boolean }) {
     isHistoryLoading: false,
     lastComposerScrollTopRef: num,
     lastScrollHeightRef: num,
+    pinnedScrollTopRef: pinned,
     queuedSummaryItemCount: 0,
     recordScrollPosition: () => {},
     requestOlderMessages: () => {},

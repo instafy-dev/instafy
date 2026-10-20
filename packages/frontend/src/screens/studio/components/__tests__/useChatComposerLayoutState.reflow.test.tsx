@@ -14,6 +14,7 @@ import { useChatComposerLayoutState } from "../useChatComposerLayoutState";
 let state: ReturnType<typeof useChatComposerLayoutState> | null = null;
 let scroller: HTMLDivElement | null = null;
 let autoScrollRef: MutableRefObject<boolean> | null = null;
+let pinnedRef: MutableRefObject<number | null> | null = null;
 const box = { width: 1152, height: 848, scrollHeight: 1578 };
 
 function Harness() {
@@ -25,6 +26,8 @@ function Harness() {
   autoScrollRef = autoScroll;
   const lastTop = useRef(0);
   const lastHeight = useRef(0);
+  const pinned = useRef<number | null>(null);
+  pinnedRef = pinned;
   state = useChatComposerLayoutState({
     activeConversationId: "conversation-1",
     autoScrollPendingRef: pending,
@@ -42,6 +45,7 @@ function Harness() {
     isHistoryLoading: false,
     lastComposerScrollTopRef: lastTop,
     lastScrollHeightRef: lastHeight,
+    pinnedScrollTopRef: pinned,
     queuedSummaryItemCount: 0,
     recordScrollPosition: () => {},
     requestOlderMessages: () => {},
@@ -97,6 +101,7 @@ afterEach(() => {
   state = null;
   scroller = null;
   autoScrollRef = null;
+  pinnedRef = null;
 });
 
 describe("useChatComposerLayoutState: a reflow is not the reader scrolling", () => {
@@ -126,5 +131,64 @@ describe("useChatComposerLayoutState: a reflow is not the reader scrolling", () 
     await scrollEvent(300);
     expect(autoScrollRef!.current).toBe(false);
     expect(scroller!.scrollTop).toBe(300);
+  });
+});
+
+// The same holds when the transcript grows between our own bottom pin and the
+// scroll event the browser raises for it a frame later. Measured on a cold load:
+// the pin landed at the bottom, a late row added 31px before that event, and
+// reading the event as "the reader scrolled up" left the newest message under
+// the composer.
+describe("useChatComposerLayoutState: the echo of our own pin is not the reader scrolling", () => {
+  it("keeps following and closes the gap when rows grew after the pin", async () => {
+    await act(async () => root.render(<Harness />));
+    pinnedRef!.current = 1578 - 848;
+    Object.assign(box, { scrollHeight: 1578 + 31 });
+    await scrollEvent(1578 - 848);
+    expect(autoScrollRef!.current).toBe(true);
+    expect(scroller!.scrollTop).toBe(1609 - 848);
+    expect(pinnedRef!.current).toBe(1609 - 848);
+  });
+
+  it("keeps following when scroll anchoring carried the view down with rows that grew above it", async () => {
+    await act(async () => root.render(<Harness />));
+    pinnedRef!.current = 1578 - 848;
+    // 20px grew above the browser's scroll anchor, which moved the view down by
+    // that much, and 40px grew below it.
+    Object.assign(box, { scrollHeight: 1578 + 60 });
+    await scrollEvent(1578 - 848 + 20);
+    expect(autoScrollRef!.current).toBe(true);
+    expect(scroller!.scrollTop).toBe(1638 - 848);
+    expect(pinnedRef!.current).toBe(1638 - 848);
+
+    // A move up is still measured from where the view was left.
+    await scrollEvent(1638 - 848 - 50);
+    expect(autoScrollRef!.current).toBe(false);
+    expect(pinnedRef!.current).toBeNull();
+  });
+
+  it("still stops following once the reader moves off the pin, even back onto it later", async () => {
+    await act(async () => root.render(<Harness />));
+    pinnedRef!.current = 1578 - 848;
+    Object.assign(box, { scrollHeight: 1578 + 31 });
+
+    await scrollEvent(600);
+    expect(autoScrollRef!.current).toBe(false);
+    expect(pinnedRef!.current).toBeNull();
+
+    // Returning to the old pinned offset is the reader too, not our echo.
+    await scrollEvent(1578 - 848);
+    expect(autoScrollRef!.current).toBe(false);
+    expect(scroller!.scrollTop).toBe(1578 - 848);
+  });
+
+  it("does not start following on an echo the reader had already left", async () => {
+    await act(async () => root.render(<Harness />));
+    autoScrollRef!.current = false;
+    pinnedRef!.current = 1578 - 848;
+    Object.assign(box, { scrollHeight: 1578 + 31 });
+    await scrollEvent(1578 - 848);
+    expect(autoScrollRef!.current).toBe(false);
+    expect(scroller!.scrollTop).toBe(1578 - 848);
   });
 });
