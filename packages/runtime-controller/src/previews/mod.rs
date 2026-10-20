@@ -246,6 +246,11 @@ struct PreviewResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     health: Option<Option<TunnelProbe>>,
     message_id: Option<String>,
+    /// Who may open it, as recorded when it was opened (today always
+    /// `private`: only members who can see its runtime). Studio says so only
+    /// when this says so.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    visibility: Option<String>,
     created_at: String,
 }
 
@@ -426,6 +431,7 @@ impl PreviewGrant {
             status: self.status(),
             health,
             message_id: self.message_id(),
+            visibility: self.preview_str("visibility").map(str::to_string),
             created_at: self.created_at.to_rfc3339(),
         }
     }
@@ -1141,7 +1147,10 @@ async fn ensure_preview_card_conversation(
 /// The card: an `action_request` wrapped the way agent updates are, so the
 /// frontend's `details.details` unwrap applies. It names the preview by id
 /// only. No URL and no `href`: an `href` would make the generic action card
-/// open a window, and the viewer URL is minted per Open, per user.
+/// open a window, and the viewer URL is minted per Open, per user. No stored
+/// actions either: Studio draws the card's Open from `preview` itself, so a
+/// client that does not know `preview` shows a card with no button rather
+/// than one that does nothing.
 fn build_preview_card_metadata(
     job_id: Option<&Uuid>,
     preview_id: &str,
@@ -1166,14 +1175,6 @@ fn build_preview_card_metadata(
                 "overline": "Ready to preview",
                 "title": title,
                 "preview": { "previewId": preview_id, "port": port, "path": path },
-                "actions": [{
-                    "id": "open-preview",
-                    "label": "Open",
-                    "variant": "primary",
-                    "event": "instafy:open-preview",
-                    "busyLabel": "Opening…",
-                    "testId": "preview-ready-open",
-                }],
             },
         }),
     );

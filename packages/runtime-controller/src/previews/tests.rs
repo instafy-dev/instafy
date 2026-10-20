@@ -364,20 +364,42 @@ fn preview_card_is_the_contract_shape_without_any_url() {
                     "overline": "Ready to preview",
                     "title": "Site preview",
                     "preview": { "previewId": preview_id, "port": 4173, "path": "/" },
-                    "actions": [{
-                        "id": "open-preview",
-                        "label": "Open",
-                        "variant": "primary",
-                        "event": "instafy:open-preview",
-                        "busyLabel": "Opening…",
-                        "testId": "preview-ready-open",
-                    }],
                 },
             },
         })
     );
     let text = metadata.to_string();
     assert!(!text.contains("href") && !text.contains("http") && !text.contains("url"));
+    // Studio draws Open from `preview`; a stored action would be a button
+    // that does nothing wherever `preview` is not understood.
+    assert!(!text.contains("actions") && !text.contains("event"));
+}
+
+#[test]
+fn a_preview_says_who_may_open_it_only_as_recorded() {
+    let grant = |metadata: Value| PreviewGrant {
+        record: RuntimeTunnelGrantRecord {
+            id: Uuid::new_v4(),
+            project_id: Uuid::new_v4(),
+            runtime_id: Some(Uuid::new_v4()),
+            runtime_lease_id: None,
+            provider: "self_hosted".to_string(),
+            tunnel_id: Uuid::new_v4().to_string(),
+            hostname: "abc.rt.test".to_string(),
+            url: "http://abc.rt.test".to_string(),
+            status: "active".to_string(),
+            expires_at: Utc::now(),
+            metadata: Some(metadata),
+        },
+        created_at: Utc::now(),
+    };
+    let private = grant(json!({ (PREVIEW_TUNNEL_METADATA_KEY): { "visibility": "private" } }));
+    let body = serde_json::to_value(private.response(None)).unwrap();
+    assert_eq!(body["visibility"], "private");
+    // No recorded visibility, no claim: the field is absent.
+    let unrecorded = grant(json!({ (PREVIEW_TUNNEL_METADATA_KEY): {} }));
+    let body = serde_json::to_value(unrecorded.response(None)).unwrap();
+    assert!(body.get("visibility").is_none());
 }
 
 /// A broker that, like the real one, hands back the same tunnel for a

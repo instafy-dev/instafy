@@ -10,9 +10,9 @@ import {
   isSitePreviewRateLimited,
   revokeSitePreviewViewer,
   sitePreviewProblem,
-  sitePreviewRecordState,
+  sitePreviewShownState,
   type SitePreviewProblem,
-  type SitePreviewRecordState,
+  type SitePreviewShownState,
 } from "../../../services/runtimeController/previews";
 import { reserveExternalWindow } from "../../../utils/openExternalUrl";
 import { BrowserChromeShell, BrowserStatusPill, type BrowserChromeState } from "./BrowserChromeShell";
@@ -32,16 +32,13 @@ export const SITE_PREVIEW_MESSAGE_TYPE = "instafy-preview";
 
 /** `busy`: the controller refused a new session because too many were opened in the last minute. */
 type SessionState = "opening" | "ready" | "ended" | "busy" | SitePreviewProblem;
-type HealthState = "checking" | Exclude<SitePreviewRecordState, "pending" | "unverified"> | Exclude<SitePreviewProblem, "unavailable">;
 
 /**
- * What the pane says from the record: a tunnel not active yet, or one the
- * broker could not probe, reads Checking (the frame stays, so the person sees
- * for themselves), never Live.
+ * What the pane says from the record, as the card does (a tunnel not active
+ * yet, or one the broker could not probe, reads Checking and the frame stays,
+ * so the person sees for themselves), or why it could not ask.
  */
-function paneHealth(state: SitePreviewRecordState): HealthState {
-  return state === "pending" || state === "unverified" ? "checking" : state;
-}
+type HealthState = SitePreviewShownState | Exclude<SitePreviewProblem, "unavailable">;
 export type SitePreviewPaneState = "opening" | "ended" | "busy" | HealthState | SitePreviewProblem;
 
 const UNAVAILABLE_TEXT = "Previews are not available here";
@@ -231,7 +228,7 @@ export function SitePreviewPane({ projectId, previewId, title, visible }: {
       const preview = await getSitePreview(projectId, previewId, signal, fresh ? { fresh } : undefined);
       if (signal?.aborted || !mounted.current) return;
       setPort(preview.port);
-      setHealth(paneHealth(sitePreviewRecordState(preview)));
+      setHealth(sitePreviewShownState(preview));
     } catch (cause) {
       if (signal?.aborted || !mounted.current) return;
       const problem = sitePreviewProblem(cause);

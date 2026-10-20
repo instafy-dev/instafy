@@ -2641,7 +2641,7 @@ describe("AgentJobThreadPreviewLayout", () => {
     const previewId = "a2cbcbb4-6a8f-4c43-9d55-2b8a8f1f7c11";
     vi.mocked(getSitePreview).mockResolvedValue({
       previewId, title: "Site preview", port: 4173, path: "/", runtimeId: "runtime-1",
-      status: "active", health: { listening: true, status: 200 }, messageId: null, createdAt: null,
+      status: "active", health: { listening: true, status: 200 }, messageId: null, createdAt: null, visibility: "private",
     });
     const controllerMessage = (id: string, content: string, metadata: Record<string, unknown>, at: number) =>
       mapControllerMessageToChat({
