@@ -202,6 +202,23 @@ fn public_failure(snapshot: &BrowserHostSnapshot) -> Option<&'static str> {
     })
 }
 
+/// The code and message a start refusal answers with. Only the two
+/// documented codes reach clients, each with a fixed message; the host's own
+/// message is never passed on, and any other code reads as stopping.
+fn public_refusal(refusal: &BrowserHostRefusal) -> (&'static str, &'static str) {
+    if refusal.code == BROWSER_HOST_POISONED_CODE {
+        (
+            BROWSER_HOST_POISONED_CODE,
+            "Instafy's browser needs this space's machine to restart before it can open again",
+        )
+    } else {
+        (
+            BROWSER_HOST_STOPPING_CODE,
+            "Instafy's browser is stopping; try again in a moment",
+        )
+    }
+}
+
 /// The caller-relative view of `snapshot`.
 pub(crate) async fn host_view(
     state: &AppState,
@@ -285,12 +302,8 @@ pub(crate) async fn handle_browser_host_start(
     }
     handle.note_seen(&claims.sub);
     let snapshot = handle.request_start(&claims.sub).map_err(|refusal| {
-        OriginError::with_report(
-            StatusCode::CONFLICT,
-            refusal.code,
-            refusal.message,
-            serde_json::json!({}),
-        )
+        let (code, message) = public_refusal(&refusal);
+        OriginError::with_report(StatusCode::CONFLICT, code, message, serde_json::json!({}))
     })?;
     let status = if snapshot.state == BrowserHostState::Ready {
         StatusCode::OK

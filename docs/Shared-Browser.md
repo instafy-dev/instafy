@@ -1048,12 +1048,15 @@ route behaves as before.
   when the host is already ready and 202 otherwise, and the caller polls
   `GET /browser/host`. It answers 409 `machine_stopping` while a pre-stop
   flush holds the machine's stop fence, and 409 `browser_host_poisoned` or
-  `browser_host_stopping` when the host refuses.
+  `browser_host_stopping` when the host refuses, each with a fixed message.
 - With a host, `/browser/pages`, the page focus and command routes, CDP
   screencast, the input socket and RFB answer 503 `browser_host_not_ready`
   with `Retry-After: 1` until it is ready, before any CDP request or WebSocket
   upgrade. Capabilities, actions, approvals, collaboration and the WebRTC
-  offer stay available.
+  offer stay available. The controller's proxy accepts a WebSocket upgrade
+  before it reaches origin, so a client behind it sees the screencast, input
+  or RFB socket close instead of the 503: open those sockets only once
+  `GET /browser/host` reports `ready`.
 - Joining collaboration, every accepted collaboration frame (heartbeats
   included), page reads and commands, and the pixel and input sockets count
   as a use of the browser for the host's presence and idle clock. Reading

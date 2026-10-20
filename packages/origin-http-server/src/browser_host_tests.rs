@@ -527,17 +527,27 @@ async fn the_start_body_is_exactly_version_one() {
     assert_eq!(host.inner().start_calls, 0);
     states[0].stopping.lift();
 
-    // The host's own refusals are 409 with their code.
-    for code in [BROWSER_HOST_POISONED_CODE, BROWSER_HOST_STOPPING_CODE] {
+    // The host's own refusals are 409 with their code and a fixed message;
+    // the host's message and any undocumented code never reach the client.
+    for (given, code) in [
+        (BROWSER_HOST_POISONED_CODE, BROWSER_HOST_POISONED_CODE),
+        (BROWSER_HOST_STOPPING_CODE, BROWSER_HOST_STOPPING_CODE),
+        ("disk_full_at_/home/someone", BROWSER_HOST_STOPPING_CODE),
+    ] {
         host.inner().refusal = Some(BrowserHostRefusal {
-            code,
-            message: "refused".to_string(),
+            code: given,
+            message: "failed at /home/someone/secret".to_string(),
         });
         let refused = post(br#"{"version":1}"#.to_vec()).await.unwrap();
         assert_eq!(refused.status(), StatusCode::CONFLICT);
+        let refused = body(refused).await;
+        assert_eq!(refused["code"], code);
+        let message = refused["error"].as_str().expect("a message");
+        assert!(!message.contains("someone"), "{message}");
         assert_eq!(
-            body(refused).await,
-            json!({ "error": "refused", "code": code })
+            refused.as_object().unwrap().len(),
+            2,
+            "only error and code: {refused}"
         );
     }
     host.inner().refusal = None;
@@ -987,4 +997,60 @@ async fn uses_of_the_browser_reach_the_host() {
         .await
         .unwrap();
     assert_eq!(host.seen_by(&user), 5, "command");
+}
+
+// ---------------------------------------------------------------------------
+// The server API runtime-agent calls.
+
+/// `set_browser_host` before `start` is how runtime-agent installs its host:
+/// the single-tenant server must hand it to the routes it serves.
+#[tokio::test]
+async fn a_started_single_tenant_server_serves_the_host_it_was_given() {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut config = config(
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        workspace.path(),
+        "http://127.0.0.1:1",
+    );
+    // Synthetic claims for subject `origin-test-user` with the route's scopes.
+    config.skip_auth = true;
+
+    let host = FakeHost::new(BrowserHostState::Idle);
+    let mut server = crate::server::OriginHttpServer::new(config).unwrap();
+    server.set_browser_host(host.handle());
+    let start = server.start().await.unwrap();
+    let base = format!("http://{}", start.address);
+    let client = reqwest::Client::new();
+
+    let view = client
+        .get(format!("{base}/browser/host"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(view.status(), StatusCode::OK);
+    assert_eq!(body(view).await["state"], "idle");
+
+    let started = client
+        .post(format!("{base}/browser/host/start"))
+        .header("content-type", "application/json")
+        .body(r#"{"version":1}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(started.status(), StatusCode::ACCEPTED);
+    assert_eq!(body(started).await["startedByYou"], true);
+    assert_eq!(host.inner().start_calls, 1);
+    assert_eq!(host.seen_by("origin-test-user"), 1);
+
+    // The guard is live too: the host is starting, not ready.
+    let pages = client
+        .get(format!("{base}/browser/pages"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(pages.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body(pages).await["code"], BROWSER_HOST_NOT_READY_CODE);
+
+    server.stop().await.unwrap();
 }
