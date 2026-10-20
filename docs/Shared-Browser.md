@@ -1026,6 +1026,61 @@ must finish before fencing; profile reset must continue to fence old writers
 without accepting a late upload. Periodic live-profile copies are best-effort,
 not a transactional Chromium database backup.
 
+### Sign-ins on a browser host
+
+A browser host on the space's own machine (see
+[On-demand browser host](#on-demand-browser-host)) uses the same store and
+versioned writes, with its own writer state in runtime-agent. The boot-time
+persistence above and the host's never run in one process: the host needs
+the boot-time browser off, and the boot-time persistence needs it on.
+
+- **Restore before every start.** While the host is down, runtime-agent reads
+  the stored version and archive (within 30 seconds) and compares the
+  archive's SHA-256 with what this process last stored or sent. If it is this
+  process's own last save, or a save whose result was unknown and is now
+  settled by that hash, the local profile is used as is. Otherwise the stored
+  copy is installed as an exact baseline. If the store cannot be read, a
+  process that can still write keeps its local profile; one that installed a
+  baseline earlier keeps it with saves off; one with neither starts with an
+  empty profile (removed without following symlinks).
+- **Saves while Ready.** Every `INSTAFY_BROWSER_PROFILE_SNAPSHOT_SECS` (the
+  controller sets 30 for covered spaces) the profile is packed and uploaded
+  when it changed. What each upload sends is recorded before it is sent.
+- **Saves at every stop.** An idle or explicit stop first ends the periodic
+  saves and waits for an upload in flight (it is never aborted). It then
+  closes Chromium over CDP (`Browser.close`, with the private Node and
+  Playwright and only `PATH` in the environment), waits up to 5 seconds for
+  the host to report that Chromium exited, and only then packs and uploads.
+  A close that cannot be confirmed falls back to SIGTERM and never packs a
+  live profile. A host stop does not end saving: later starts in the same
+  process save again.
+- **The runtime's shutdown** does the same within its 10-second budget,
+  before the runtime stops itself. If a periodic upload is still running when
+  the budget ends, there is no final save. The final upload is bounded by the
+  remaining budget, and nothing saves after it.
+- **Results.** A 409 means another writer won: saving stops until the next
+  start installs the stored copy. A refusal (400, 401, 403, 404, 413 or 428)
+  stored nothing, so the writer is kept and that same copy is not sent again.
+  An unknown result (network error, timeout, 5xx or an unexpected
+  acknowledgement) stays recorded and is settled by the next save's read or
+  the next start, by comparing hashes. Unlike the boot-time persistence, one
+  uncertain save does not stop saving for the process.
+- **No save** after a poisoned host or for a deleted space: the last
+  successful save stands.
+- **Cookies without an expiry.** Chromium keeps a cookie that has no expiry
+  across a clean close only when it continues its last session. The host
+  therefore writes `session.restore_on_startup = 1` into the profile's
+  `Default/Preferences` on every start, next to the download block. Neither
+  preference is packed, so tabs open at a stop reopen at the next start only
+  within the same container. Publication's image smoke proves a persistent
+  cookie and one without an expiry both survive a clean close and the next
+  start.
+- **Loss window.** A controller- or provider-initiated machine stop fences
+  the lease before the runtime's shutdown, so its final upload is refused.
+  A sign-in made less than about one save interval (plus Chromium's own
+  cookie commit delay of about 30 seconds) before such a stop can be lost.
+  The host's own idle stop saves while its lease is active.
+
 Legacy `PUT /agent/browser-profile` requests on an upgraded controller are
 authorized normally but then fail with `428`, even if they carry a version.
 New runtimes require the `versioned-v2` policy and never fall back to the
@@ -1144,7 +1199,9 @@ display and ports must differ from the boot-time defaults (`:1`, 5900, 9223,
 persisted profile keeps its sign-ins across starts; a stale Chromium lock from
 another machine is cleared, and a profile that a running Chromium holds is
 refused. Chromium uses `--password-store=basic`, so a persisted profile's
-cookies are encrypted the same way on every machine and image. One host runs per
+cookies are encrypted the same way on every machine and image. Each start
+also sets the profile to continue its last session, so Chromium keeps
+cookies without an expiry across a clean close. One host runs per
 state directory at a time; a second start for it fails with `host_in_use`. Each
 start launches fresh processes: the host never reuses pid files, deletes X
 locks or kills processes it did not start, and an occupied display or port
@@ -1171,7 +1228,9 @@ disk); `exited <child>` (71) when the egress proxy, X server or Chromium stops o
 its own; or `stopped` after SIGTERM. Publication and the image scan require
 `scripts/runtime-image-browser-smoke.sh --lazy` for both flavors: the image must
 boot with no browser process (the base image also with the browser session on),
-and the host must start, stop and start again on one persisted profile.
+and the host must start on the agent's own root and ports with WebRTC off,
+keep a persistent cookie and one without an expiry across a close with the
+agent's CDP close helper, and start again on that profile.
 
 On an attested lease, runtime-agent supervises the host with one actor that
 owns the child and makes every state change:
@@ -1200,7 +1259,9 @@ owns the child and makes every state change:
   display, Chromium), `spawn_failed` or `unconfirmed_shutdown`. The next start
   after a failure runs a new generation; the container stays up.
 - **Stops.** A stop sends SIGTERM (the host stops its group), kills the group
-  after 10 seconds, and confirms the group is gone. A Ready host with no
+  after 10 seconds, and confirms the group is gone. With sign-ins kept
+  (below) a stop first closes Chromium over CDP and saves the profile once
+  Chromium's exit is confirmed. A Ready host with no
   Shared Browser job and no use for 15 minutes stops on its own; opening it,
   any viewer activity and the end of a job count as use. The idle stop
   decides and moves to `stopping` in one step, so it never lands under a job
@@ -1212,10 +1273,12 @@ owns the child and makes every state change:
   is killed, it refuses every start until the process exits, and the
   agent-control marker stays, so origin keeps refusing human input. A group
   that outlives its host by 5 seconds poisons it too.
-- **Profile.** The host's profile directory survives its stops within one
-  container. Restoring it from, and saving it to, the space's durable profile
-  store is a separate change; until then a host starts each container signed
-  out.
+- **Profile.** With `INSTAFY_BROWSER_PROFILE_PERSIST=1` (always set for a
+  covered space), every start restores the space's stored profile, saves run
+  while the host is Ready, and every stop saves after a clean close, so
+  sign-ins survive idle stops and machine restarts (see
+  [Sign-ins on a browser host](#sign-ins-on-a-browser-host)). An idle stop
+  never wipes the profile.
 - **Jobs.** A Shared Browser job holds the host for its whole run (taken
   before the readiness check) and is refused with "Instafy's browser is not
   open on this space's machine. Open it, then try again." while the host is

@@ -9,8 +9,11 @@
 # flavor: the image boots with the browser off and must run no browser process
 # (the base image must run none even with the browser session on), then
 # `runtime-entrypoint start-browser-host` must bring Chromium up on the
-# caller's own display and ports with a persisted profile, stop cleanly, and
-# start again on the same profile with its data intact.
+# runtime agent's display, ports and profile directory, with WebRTC off. It
+# sets a persistent cookie and one with no expiry, closes Chromium over CDP
+# with the agent's own close helper, and requires both cookies, the
+# session-restore and download-block preferences and the rest of the profile
+# after the next start on the same profile.
 #
 #   scripts/runtime-image-browser-smoke.sh [--lazy] <image> [<entrypoint to mount>]
 #
@@ -67,13 +70,14 @@ if [[ "$mode" == "lazy" ]]; then
     -e ORIGIN_MODE=hosted \
     "$image" -c "$hold" >/dev/null
 
-  host_root=/var/lib/instafy-browser-smoke
+  # The runtime agent's own root and ports (runtime-agent browser_host).
+  host_root=/var/lib/instafy/browser-host
   profile_dir="$host_root/profile"
-  state_dir=/tmp/instafy-browser-smoke/state
+  state_dir="$host_root/state"
   host_cdp_port=19223
-  host_webrtc_port=19225
-  # What a caller passes: an explicit allowlist with the host's own display,
-  # ports and a persisted profile directory.
+  host_node=/opt/instafy/browser-host/bin/node
+  # What the agent passes: an explicit allowlist with the host's own display,
+  # ports and persisted profile directory, egress isolation on and WebRTC off.
   host_env=(
     PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     INSTAFY_BROWSER_HOST_HOME="$host_root/home"
@@ -83,13 +87,67 @@ if [[ "$mode" == "lazy" ]]; then
     INSTAFY_BROWSER_HOST_CDP_PORT="$host_cdp_port"
     INSTAFY_BROWSER_HOST_VNC_PORT=15900
     INSTAFY_BROWSER_HOST_EGRESS_PORT=19226
-    INSTAFY_BROWSER_HOST_WEBRTC_PORT="$host_webrtc_port"
-    INSTAFY_BROWSER_WEBRTC_ENABLED=1
-    INSTAFY_BROWSER_WEBRTC_REQUIRE_TURN=1
+    INSTAFY_BROWSER_EGRESS_ISOLATION=1
+    INSTAFY_BROWSER_WEBRTC_ENABLED=0
     INSTAFY_BROWSER_VIEWPORT_ONLY=1
     INSTAFY_VNC_GEOMETRY=1280x720
-    INSTAFY_BROWSER_RENDER_SCALE=2
+    INSTAFY_BROWSER_RENDER_SCALE=1
   )
+  # The agent's CDP close helper, byte for byte (runtime-agent
+  # browser_host/persistence.rs CLOSE_SCRIPT); it runs with only PATH set.
+  close_script="$(cat <<'CLOSE'
+const {chromium}=require('/opt/instafy/browser-host/node_modules/playwright');chromium.connectOverCDP(process.argv[1]).then(async b=>{const s=await b.newBrowserCDPSession();try{await s.send('Browser.close')}catch(e){}process.exit(0)}).catch(()=>process.exit(1));
+CLOSE
+)"
+  # Sets (set) or requires (get) a persistent cookie and one with no expiry
+  # over CDP, with the host's own Node.
+  cookie_probe='
+const [mode, port] = process.argv.slice(1);
+const names = ["instafy_smoke_persistent", "instafy_smoke_session"];
+class Cdp {
+  constructor(url) { this.url = url; this.id = 0; this.pending = new Map(); }
+  async open() {
+    this.socket = new WebSocket(this.url);
+    await new Promise((resolve, reject) => { this.socket.onopen = resolve; this.socket.onerror = reject; });
+    this.socket.onmessage = (event) => {
+      const message = JSON.parse(event.data);
+      const waiter = message.id ? this.pending.get(message.id) : null;
+      if (!waiter) return;
+      this.pending.delete(message.id);
+      if (message.error) waiter.reject(new Error(JSON.stringify(message.error)));
+      else waiter.resolve(message.result);
+    };
+    return this;
+  }
+  send(method, params = {}) {
+    const id = ++this.id;
+    this.socket.send(JSON.stringify({ id, method, params }));
+    return new Promise((resolve, reject) => this.pending.set(id, { resolve, reject }));
+  }
+}
+(async () => {
+  const version = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
+  const browser = await new Cdp(version.webSocketDebuggerUrl).open();
+  if (mode === "set") {
+    await browser.send("Storage.setCookies", { cookies: [
+      { name: names[0], value: "kept", domain: "instafy-smoke.example", path: "/", expires: Math.floor(Date.now() / 1000) + 86400 },
+      { name: names[1], value: "kept", domain: "instafy-smoke.example", path: "/" },
+    ] });
+  }
+  const { cookies } = await browser.send("Storage.getCookies", {});
+  const missing = names.filter((name) => !cookies.some((cookie) => cookie.name === name && cookie.value === "kept"));
+  if (missing.length > 0) throw new Error(`missing cookies: ${missing.join(", ")}`);
+  const session = cookies.find((cookie) => cookie.name === names[1]);
+  if (!session.session) throw new Error("the cookie without an expiry is not a session cookie");
+  console.log(mode === "set" ? "Set a persistent cookie and one with no expiry." : "Both cookies survived a clean close and the next start.");
+})().then(() => process.exit(0), (error) => { console.error(error.message); process.exit(1); });
+'
+  # The profile keeps blocking downloads and continues the last session.
+  preferences_probe='
+const preferences = JSON.parse(require("fs").readFileSync(`${process.argv[1]}/Default/Preferences`, "utf8"));
+if (preferences.download_restrictions !== 3) throw new Error("the profile does not block downloads");
+if (!preferences.session || preferences.session.restore_on_startup !== 1) throw new Error("the profile does not continue the last session");
+'
   # Live browser processes as "pid nice state command". The held container's
   # PID 1 never reaps orphans, so exited processes (state Z) are left out.
   browser_processes='ps -eo pid=,ni=,stat=,comm= | awk '"'"'$3 !~ /^Z/ && $4 ~ /^(Xtigervnc|Xvnc|fluxbox|fbsetbg|xmessage|chrom|ffmpeg|browser-)/'"'"''
@@ -191,8 +249,8 @@ if [[ "$mode" == "lazy" ]]; then
       *) lazy_fail "The ${label} browser host reported the wrong CDP port: ${status}" ;;
     esac
     case " $status " in
-      *" webrtc=${host_webrtc_port} "*) ;;
-      *) lazy_fail "The ${label} browser host's WebRTC sender is unavailable: ${status}" ;;
+      *" webrtc=off "*) ;;
+      *) lazy_fail "The ${label} browser host did not keep WebRTC off: ${status}" ;;
     esac
     local version
     version="$(docker exec "$name" curl --noproxy '*' -fsS --max-time 2 "http://127.0.0.1:${host_cdp_port}/json/version")" \
@@ -211,8 +269,23 @@ if [[ "$mode" == "lazy" ]]; then
     [[ "$oom" == "1000" ]] || lazy_fail "The browser host's OOM score is ${oom}, not 1000."
     docker exec "$name" test -f "$profile_dir/instafy-smoke-marker" \
       || lazy_fail "The ${label} browser host removed data from the persisted profile."
-    docker exec "$name" grep -q '"download_restrictions":3' "$profile_dir/Default/Preferences" \
-      || lazy_fail "The ${label} browser host started Chromium on a profile that does not block downloads."
+    docker exec "$name" env -i "$host_node" -e "$preferences_probe" "$profile_dir" \
+      || lazy_fail "The ${label} browser host started Chromium on a profile without its preferences."
+  }
+
+  # The agent's stop: Browser.close over CDP, then the host reports that
+  # Chromium exited and stops its group. Only then is the profile saved.
+  close_host() {
+    local label="$1" status remaining
+    docker exec "$name" env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+      "$host_node" -e "$close_script" "http://127.0.0.1:${host_cdp_port}" \
+      || lazy_fail "The agent's close helper could not close the ${label} browser over CDP."
+    status="$(host_status "exited chromium")" \
+      || lazy_fail "The ${label} browser host did not report Chromium's exit after the close: ${status}"
+    remaining="$(docker exec "$name" sh -c "$browser_processes")"
+    [[ -z "$remaining" ]] || lazy_fail "Browser processes outlived the closed ${label} host: ${remaining//$'\n'/; }"
+    docker exec "$name" env -i "$host_node" -e "$preferences_probe" "$profile_dir" \
+      || lazy_fail "The closed ${label} browser left a profile without its preferences."
   }
 
   stop_host() {
@@ -233,14 +306,21 @@ if [[ "$mode" == "lazy" ]]; then
       || lazy_fail "Chromium did not use the persisted profile directory ${profile_dir}."
     sleep 1
   done
-  stop_host first
+  docker exec "$name" env -i "$host_node" -e "$cookie_probe" set "$host_cdp_port" \
+    || lazy_fail "Could not set the probe cookies in the first browser host."
+  close_host first
 
-  # The next start reuses the same profile, including its sign-ins.
+  # The next start reuses the same profile, including its sign-ins: Chromium
+  # keeps the cookie without an expiry because it continues its last session.
   start_host
   prove_running_host second
+  docker exec "$name" env -i "$host_node" -e "$cookie_probe" get "$host_cdp_port" \
+    || lazy_fail "The second browser host lost a sign-in cookie across a clean close."
+  # A SIGTERM-only stop is not relied on to keep sign-ins: it does not flush
+  # Chromium's cookie store, so the agent never saves a profile after one.
   stop_host second
 
-  echo "Browser host started on demand twice on one persisted profile and left no process behind."
+  echo "Browser host started on demand twice on one persisted profile, kept both sign-in cookies across a clean close and left no process behind."
   exit 0
 fi
 

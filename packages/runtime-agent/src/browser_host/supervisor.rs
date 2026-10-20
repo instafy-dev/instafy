@@ -21,9 +21,13 @@ use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use super::mode;
+use super::persistence::{
+    CLOSE_CONFIRM_BUDGET, CLOSE_HELPER_BUDGET, CloseCommand, HostPersistence, SaveKind, Saver,
+    remaining,
+};
 use super::process::{
-    self, EXITED_UNKNOWN, HOST_ERROR, HostDirs, HostLine, SPAWN_FAILED, START_SUBCOMMAND,
-    START_TIMEOUT, UNCONFIRMED_SHUTDOWN, group,
+    self, EXITED_CHROMIUM, EXITED_UNKNOWN, HOST_ERROR, HostDirs, HostLine, SPAWN_FAILED,
+    START_SUBCOMMAND, START_TIMEOUT, UNCONFIRMED_SHUTDOWN, group,
 };
 
 /// The refusal codes origin documents for a start (409).
@@ -36,6 +40,9 @@ const GROUP_CONFIRM: Duration = Duration::from_secs(5);
 /// How long status lines printed just before an exit are still read.
 const EXIT_LINE_DRAIN: Duration = Duration::from_millis(200);
 const GROUP_POLL: Duration = Duration::from_millis(50);
+/// Kept back from the runtime's shutdown budget, so the actor's last step
+/// (the final save) ends before the caller stops waiting for it.
+const SHUTDOWN_MARGIN: Duration = Duration::from_millis(250);
 
 /// Everything the supervisor needs; tests inject a fake entrypoint, a
 /// temporary root and short budgets.
@@ -51,11 +58,18 @@ pub struct HostConfig {
     pub(crate) idle_tick: Duration,
     pub(crate) presence_grace: Duration,
     pub(crate) group_confirm: Duration,
+    /// Restores and saves the profile (`INSTAFY_BROWSER_PROFILE_PERSIST=1`).
+    pub(crate) persistence: Option<Arc<HostPersistence>>,
+    /// Closes Chromium cleanly before a save.
+    pub(crate) close: Option<CloseCommand>,
 }
 
 impl HostConfig {
     /// The production host: the image's entrypoint and the fixed root.
-    pub(crate) fn for_process(entrypoint: PathBuf) -> Self {
+    pub(crate) fn for_process(
+        entrypoint: PathBuf,
+        persistence: Option<Arc<HostPersistence>>,
+    ) -> Self {
         let dirs = HostDirs::under(std::path::Path::new(mode::HOST_ROOT));
         let environment =
             process::host_environment(&dirs, process::pinned_chromium().as_deref(), |key| {
@@ -76,6 +90,8 @@ impl HostConfig {
             idle_tick: mode::IDLE_TICK,
             presence_grace: mode::PRESENCE_GRACE,
             group_confirm: GROUP_CONFIRM,
+            persistence,
+            close: Some(CloseCommand::for_host()),
         }
     }
 
@@ -94,6 +110,8 @@ impl HostConfig {
             idle_tick: Duration::from_secs(3600),
             presence_grace: mode::PRESENCE_GRACE,
             group_confirm: Duration::from_secs(1),
+            persistence: None,
+            close: None,
         }
     }
 }
@@ -107,6 +125,7 @@ enum Command {
         reply: oneshot::Sender<()>,
     },
     Shutdown {
+        deadline: tokio::time::Instant,
         reply: oneshot::Sender<()>,
     },
 }
@@ -129,6 +148,7 @@ struct Shared {
     active_jobs: AtomicUsize,
     presence: Mutex<HashMap<String, Instant>>,
     presence_grace: Duration,
+    persistence: Option<Arc<HostPersistence>>,
 }
 
 impl Shared {
@@ -146,8 +166,12 @@ impl Shared {
         snapshot_of(&self.inner())
     }
 
-    /// Marks the host Poisoned and kills its group. Synchronous; never awaits.
+    /// Marks the host Poisoned and kills its group, without a save.
+    /// Synchronous; never awaits.
     fn poison(&self, token: &'static str) {
+        if let Some(persistence) = &self.persistence {
+            persistence.disable();
+        }
         {
             let mut inner = self.inner();
             if inner.state != BrowserHostState::Poisoned {
@@ -195,6 +219,12 @@ impl Shared {
         {
             inner.state = BrowserHostState::Stopping;
         }
+    }
+
+    /// Whether `generation` is the current host and Ready.
+    fn is_ready_generation(&self, generation: Uuid) -> bool {
+        let inner = self.inner();
+        inner.state == BrowserHostState::Ready && inner.generation == Some(generation)
     }
 
     /// Moves `generation` to Failed, unless it is no longer current or the
@@ -279,6 +309,7 @@ impl BrowserHost {
             active_jobs: AtomicUsize::new(0),
             presence: Mutex::new(HashMap::new()),
             presence_grace: config.presence_grace,
+            persistence: config.persistence.clone(),
         });
         let (commands, receiver) = mpsc::unbounded_channel();
         tokio::spawn(run_actor(shared.clone(), config, receiver));
@@ -379,6 +410,9 @@ impl BrowserHost {
 
     /// SIGKILL to the host's group, without a save.
     pub fn kill_now(&self) {
+        if let Some(persistence) = &self.shared.persistence {
+            persistence.disable();
+        }
         let pgid = self.shared.host_pgid.load(Ordering::SeqCst);
         if pgid != 0 {
             group::kill(pgid);
@@ -393,12 +427,16 @@ impl BrowserHost {
         }
     }
 
-    /// Stops the host for good within `budget`; later starts are refused.
-    /// Past the budget the group is killed.
+    /// Stops the host for good within `budget`, with a final save; later
+    /// starts and saves are refused. Past the budget the group is killed.
     pub async fn shutdown(&self, budget: Duration) {
         self.shared.inner().shutting_down = true;
+        let deadline = tokio::time::Instant::now() + budget.saturating_sub(SHUTDOWN_MARGIN);
         let (reply, done) = oneshot::channel();
-        let sent = self.commands.send(Command::Shutdown { reply }).is_ok();
+        let sent = self
+            .commands
+            .send(Command::Shutdown { deadline, reply })
+            .is_ok();
         if !sent || tokio::time::timeout(budget, done).await.is_err() {
             self.kill_now();
         }
@@ -429,6 +467,8 @@ struct Running {
     /// Cleared once the group is confirmed gone; while set, dropping this
     /// (the actor ending with the runtime) kills the group.
     armed: bool,
+    /// The periodic profile saves, from Ready until the host stops.
+    saver: Option<Saver>,
 }
 
 impl Drop for Running {
@@ -531,14 +571,19 @@ async fn run_actor(
             Event::Command(Some(Command::Stop { reason, reply })) => {
                 if let Some(host) = running.take() {
                     tracing::info!(reason, "stopping the browser host");
-                    stop_running(&shared, &config, host).await;
+                    stop_running(&shared, &config, host, None, SaveKind::HostStop).await;
                 }
                 let _ = reply.send(());
             }
-            Event::Command(Some(Command::Shutdown { reply })) => {
+            Event::Command(Some(Command::Shutdown { deadline, reply })) => {
                 if let Some(host) = running.take() {
                     tracing::info!("stopping the browser host for the runtime's shutdown");
-                    stop_running(&shared, &config, host).await;
+                    stop_running(&shared, &config, host, Some(deadline), SaveKind::Final).await;
+                }
+                // Nothing saves after the runtime's shutdown, whether or not
+                // a host ran.
+                if let Some(persistence) = &config.persistence {
+                    persistence.disable();
                 }
                 let _ = reply.send(());
             }
@@ -547,7 +592,7 @@ async fn run_actor(
                     continue;
                 };
                 match line {
-                    Some(line) => on_status_line(&shared, host, line),
+                    Some(line) => on_status_line(&shared, &config, host, line),
                     None => {
                         host.lines_open = false;
                         if host.ready_deadline.take().is_some() {
@@ -576,23 +621,34 @@ async fn run_actor(
                 });
                 if stop && let Some(host) = running.take() {
                     tracing::info!("stopping the idle browser host");
-                    stop_running(&shared, &config, host).await;
+                    stop_running(&shared, &config, host, None, SaveKind::HostStop).await;
                 }
             }
         }
     }
 }
 
-fn on_status_line(shared: &Shared, host: &mut Running, line: HostLine) {
+fn on_status_line(shared: &Arc<Shared>, config: &HostConfig, host: &mut Running, line: HostLine) {
     match line {
         HostLine::Ready => {
-            let mut inner = shared.inner();
-            if inner.state == BrowserHostState::Starting
-                && inner.generation == Some(host.generation)
-                && host.ready_deadline.is_some()
-            {
-                inner.state = BrowserHostState::Ready;
-                host.ready_deadline = None;
+            let became_ready = {
+                let mut inner = shared.inner();
+                let current = inner.state == BrowserHostState::Starting
+                    && inner.generation == Some(host.generation)
+                    && host.ready_deadline.is_some();
+                if current {
+                    inner.state = BrowserHostState::Ready;
+                    host.ready_deadline = None;
+                }
+                current
+            };
+            if became_ready && let Some(persistence) = &config.persistence {
+                let shared = shared.clone();
+                let generation = host.generation;
+                host.saver = persistence.start_saver(
+                    config.dirs.profile.clone(),
+                    Arc::new(move || shared.is_ready_generation(generation)),
+                );
             }
         }
         HostLine::Failed(token) => {
@@ -609,14 +665,49 @@ fn on_status_line(shared: &Shared, host: &mut Running, line: HostLine) {
     }
 }
 
-/// PR-5b restores the stored profile here, while the host is down. A no-op
-/// until then.
-async fn prepare_for_start(_dirs: &HostDirs) {}
-
-async fn start(shared: &Shared, config: &HostConfig, generation: Uuid) -> Option<Running> {
-    prepare_for_start(&config.dirs).await;
+/// Restores the stored profile while the host is down, then checks the
+/// directories again (a restore replaces the profile directory). False when
+/// the start must not run.
+async fn prepare_for_start(shared: &Shared, config: &HostConfig, generation: Uuid) -> bool {
+    let Some(persistence) = &config.persistence else {
+        return true;
+    };
+    match persistence.restore(&config.dirs.profile).await {
+        Ok(outcome) => tracing::info!(?outcome, "prepared the browser profile"),
+        Err(error) => {
+            tracing::error!(%error, "could not empty the browser profile");
+            return false;
+        }
+    }
     if let Err(error) = process::prepare_dirs(&config.dirs) {
         tracing::error!(%error, "the browser host's directories are unusable");
+        return false;
+    }
+    // The restore may take a while: a shutdown requested meanwhile settles
+    // the start as stopped, and a poisoned host never starts.
+    let mut inner = shared.inner();
+    if inner.state != BrowserHostState::Starting || inner.generation != Some(generation) {
+        return false;
+    }
+    if inner.shutting_down {
+        inner.state = BrowserHostState::Idle;
+        inner.generation = None;
+        inner.failure = None;
+        inner.started_by = None;
+        return false;
+    }
+    true
+}
+
+async fn start(shared: &Shared, config: &HostConfig, generation: Uuid) -> Option<Running> {
+    // The directories are checked (no symlinks) before the restore writes
+    // under them.
+    if let Err(error) = process::prepare_dirs(&config.dirs) {
+        tracing::error!(%error, "the browser host's directories are unusable");
+        shared.fail(generation, SPAWN_FAILED);
+        return None;
+    }
+    if !prepare_for_start(shared, config, generation).await {
         shared.fail(generation, SPAWN_FAILED);
         return None;
     }
@@ -685,13 +776,27 @@ async fn start(shared: &Shared, config: &HostConfig, generation: Uuid) -> Option
         failure: None,
         stop_requested: false,
         armed: pid != 0,
+        saver: None,
     })
 }
 
-/// SIGTERM to the host (it stops its own group), then SIGKILL to the group
-/// after the grace, then [`finish`]. Ends Idle unless the host is Poisoned.
-/// The idle stop has already moved the host to Stopping.
-async fn stop_running(shared: &Shared, config: &HostConfig, mut host: Running) {
+/// Stops a running host and ends Idle unless it is Poisoned. The idle stop
+/// has already moved the host to Stopping.
+///
+/// Without persistence: SIGTERM to the host (it stops its own group), then
+/// SIGKILL to the group after the grace, then [`finish`]. With persistence:
+/// the periodic saves stop first (an upload in flight finishes), Chromium is
+/// closed over CDP so it flushes its cookies, and only once its exit is
+/// confirmed is the profile packed and saved. A close that cannot be
+/// confirmed falls back to SIGTERM and never packs a live profile.
+/// `deadline` bounds the whole stop for the runtime's shutdown.
+async fn stop_running(
+    shared: &Shared,
+    config: &HostConfig,
+    mut host: Running,
+    deadline: Option<tokio::time::Instant>,
+    kind: SaveKind,
+) {
     {
         let mut inner = shared.inner();
         if inner.generation == Some(host.generation)
@@ -705,30 +810,110 @@ async fn stop_running(shared: &Shared, config: &HostConfig, mut host: Running) {
     }
     host.stop_requested = true;
     host.ready_deadline = None;
-    group::terminate(host.pid);
-    if tokio::time::timeout(config.stop_grace, host.child.wait())
+    let closed = match &config.persistence {
+        Some(_) => {
+            let saver_stopped = match host.saver.take() {
+                Some(saver) => saver.stop(deadline).await,
+                None => true,
+            };
+            if !saver_stopped {
+                tracing::warn!("a browser profile save outlasted the stop; no final save");
+            }
+            saver_stopped && close_browser(config, &mut host, deadline).await
+        }
+        None => false,
+    };
+    if !closed {
+        group::terminate(host.pid);
+    }
+    if tokio::time::timeout(remaining(config.stop_grace, deadline), host.child.wait())
         .await
         .is_err()
     {
         group::kill(host.pid);
     }
-    finish(shared, config, host).await;
+    let confirmed = finish(shared, config, host).await;
+    if let Some(persistence) = &config.persistence
+        && closed
+        && confirmed
+    {
+        persistence
+            .save(&config.dirs.profile, kind, deadline, None)
+            .await;
+    }
+}
+
+/// Asks Chromium to close over CDP and waits for it to exit: an `exited
+/// chromium` line, or the host's own exit with no other child reported.
+async fn close_browser(
+    config: &HostConfig,
+    host: &mut Running,
+    deadline: Option<tokio::time::Instant>,
+) -> bool {
+    let Some(close) = &config.close else {
+        return false;
+    };
+    if !close.run(remaining(CLOSE_HELPER_BUDGET, deadline)).await {
+        tracing::warn!("could not close the browser over CDP; stopping it without a save");
+        return false;
+    }
+    enum Seen {
+        Line(Option<HostLine>),
+        Exited,
+        Deadline,
+    }
+    let until = tokio::time::Instant::now() + remaining(CLOSE_CONFIRM_BUDGET, deadline);
+    let mut other_exit = false;
+    loop {
+        let seen = {
+            let lines = host.lines_open.then_some(&mut host.lines);
+            tokio::select! {
+                line = async {
+                    match lines {
+                        Some(lines) => lines.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => Seen::Line(line),
+                _ = host.child.wait() => Seen::Exited,
+                _ = tokio::time::sleep_until(until) => Seen::Deadline,
+            }
+        };
+        match seen {
+            Seen::Line(Some(HostLine::Exited(token))) if token == EXITED_CHROMIUM => return true,
+            Seen::Line(Some(HostLine::Exited(token) | HostLine::Failed(token))) => {
+                host.failure.get_or_insert(token);
+                other_exit = true;
+            }
+            Seen::Line(Some(_)) => {}
+            Seen::Line(None) => host.lines_open = false,
+            Seen::Exited => return !other_exit,
+            Seen::Deadline => {
+                tracing::warn!("the browser did not exit after the close; no save");
+                return false;
+            }
+        }
+    }
 }
 
 /// After the host exits: reap it, clear the stored group, read its last
 /// status lines, make sure nothing of the group is left, then move to Idle (a
 /// requested stop) or Failed. A group that outlives the confirmation window
 /// poisons the host. Until then a host that ended on its own reads as
-/// Stopping, so no job is admitted to it and no start joins it.
-async fn finish(shared: &Shared, config: &HostConfig, mut host: Running) {
+/// Stopping, so no job is admitted to it and no start joins it. True when
+/// the group is confirmed gone and the host is not Poisoned.
+async fn finish(shared: &Shared, config: &HostConfig, mut host: Running) -> bool {
     shared.mark_exiting(host.generation);
+    if let Some(saver) = host.saver.take() {
+        // Not Ready any more, so no new save starts; one in flight finishes.
+        saver.stop(None).await;
+    }
     if tokio::time::timeout(config.group_confirm, host.child.wait())
         .await
         .is_err()
     {
         tracing::error!("the browser host did not exit after SIGKILL");
         shared.poison(UNCONFIRMED_SHUTDOWN);
-        return;
+        return false;
     }
     // The host pid is reaped, so it may be reused: `poison` and `kill_now`
     // stop signalling it. Leftovers of the group are killed below, and by
@@ -763,13 +948,16 @@ async fn finish(shared: &Shared, config: &HostConfig, mut host: Running) {
     if !confirmed {
         tracing::error!("the browser host's processes outlived it; Instafy's browser stays off");
         shared.poison(UNCONFIRMED_SHUTDOWN);
-        return;
+        return false;
     }
     host.armed = false;
 
     let mut inner = shared.inner();
-    if inner.state == BrowserHostState::Poisoned || inner.generation != Some(host.generation) {
-        return;
+    if inner.state == BrowserHostState::Poisoned {
+        return false;
+    }
+    if inner.generation != Some(host.generation) {
+        return true;
     }
     if host.stop_requested {
         inner.state = BrowserHostState::Idle;
@@ -783,8 +971,13 @@ async fn finish(shared: &Shared, config: &HostConfig, mut host: Running) {
         inner.failure = Some(token);
         inner.started_by = None;
     }
+    true
 }
 
 #[cfg(all(test, unix))]
 #[path = "supervisor_tests.rs"]
 mod tests;
+
+#[cfg(all(test, unix))]
+#[path = "supervisor_persistence_tests.rs"]
+mod persistence_tests;

@@ -1,6 +1,7 @@
 //! A fake `runtime-entrypoint start-browser-host` for supervisor and agent
 //! tests. It reads its behaviour from a `mode` file and keeps one `sleep`
-//! child in its group, as Chromium would be.
+//! child in its group, as Chromium would be. A fake CDP close helper asks it
+//! to end the way Chromium's `Browser.close` ends the real host.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -8,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use origin_http_server::browser_host::{BrowserHostSnapshot, BrowserHostState};
 
+use super::persistence::{CloseCommand, HostPersistence, ProfileStore};
 use super::process::{self, HostDirs};
 use super::supervisor::{BrowserHost, HostConfig};
 
@@ -57,8 +59,25 @@ while true; do
     echo "instafy-browser-host: exited chromium"
     exit 71
   fi
+  if [ -f "$dir/close" ] && [ "$mode" != "ignoreclose" ]; then
+    # Chromium closed over CDP: the host stops its group and reports it.
+    rm -f "$dir/close"
+    kill -KILL "$child"
+    echo "instafy-browser-host: exited chromium"
+    exit 71
+  fi
   sleep 0.05
 done
+"#;
+
+/// The CDP close helper: records the call, then asks the fake host to close
+/// unless `close-fails` exists.
+const FAKE_CLOSE: &str = r#"#!/bin/bash
+dir="$1"
+echo "$$" >> "$dir/closes"
+[ -f "$dir/close-fails" ] && exit 1
+: > "$dir/close"
+exit 0
 "#;
 
 pub(crate) struct Fake {
@@ -68,10 +87,15 @@ pub(crate) struct Fake {
 impl Fake {
     pub(crate) fn new(mode: &str) -> Self {
         let temp = tempfile::tempdir().expect("fake host directory");
-        let entrypoint = temp.path().join("runtime-entrypoint");
-        std::fs::write(&entrypoint, FAKE_HOST).unwrap();
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&entrypoint, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for (name, script) in [
+            ("runtime-entrypoint", FAKE_HOST),
+            ("fake-close", FAKE_CLOSE),
+        ] {
+            let path = temp.path().join(name);
+            std::fs::write(&path, script).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         let fake = Self { temp };
         fake.set_mode(mode);
         fake
@@ -93,6 +117,17 @@ impl Fake {
         std::fs::read_to_string(self.dir().join("starts"))
             .map(|starts| starts.lines().count())
             .unwrap_or(0)
+    }
+
+    pub(crate) fn closes(&self) -> usize {
+        std::fs::read_to_string(self.dir().join("closes"))
+            .map(|closes| closes.lines().count())
+            .unwrap_or(0)
+    }
+
+    /// The host's profile directory.
+    pub(crate) fn profile(&self) -> std::path::PathBuf {
+        self.dir().join("browser-host").join("profile")
     }
 
     pub(crate) fn child_pid(&self) -> i32 {
@@ -121,11 +156,36 @@ impl Fake {
             idle_tick: Duration::from_millis(50),
             presence_grace: Duration::from_millis(300),
             group_confirm: Duration::from_secs(10),
+            persistence: None,
+            close: Some(CloseCommand {
+                program: self.dir().join("fake-close"),
+                args: vec![self.dir().to_string_lossy().into_owned()],
+            }),
         }
     }
 
     pub(crate) fn spawn(&self) -> Arc<BrowserHost> {
         BrowserHost::spawn(self.config())
+    }
+
+    /// [`Fake::config`] for a host that restores from and saves to `store`,
+    /// periodically every `interval`.
+    pub(crate) fn persisting_config(
+        &self,
+        store: Arc<dyn ProfileStore>,
+        interval: Duration,
+    ) -> HostConfig {
+        let mut config = self.config();
+        config.persistence = Some(Arc::new(HostPersistence::new(store, interval)));
+        config
+    }
+
+    pub(crate) fn spawn_persisting(
+        &self,
+        store: Arc<dyn ProfileStore>,
+        interval: Duration,
+    ) -> Arc<BrowserHost> {
+        BrowserHost::spawn(self.persisting_config(store, interval))
     }
 }
 

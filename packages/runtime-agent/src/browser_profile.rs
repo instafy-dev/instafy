@@ -111,7 +111,7 @@ const PROFILE_DIRECTORY_ALLOWLIST: &[&str] = &[
 ];
 
 #[derive(Clone, Copy, Debug)]
-struct ProfileArchiveLimits {
+pub(crate) struct ProfileArchiveLimits {
     archive_bytes: u64,
     total_uncompressed_bytes: u64,
     file_bytes: u64,
@@ -168,7 +168,10 @@ impl BrowserProfileSession {
 /// absent from the stored snapshot. Validate/unpack entirely before replacing
 /// the old directory. On restore failure the old local profile is retained,
 /// but the caller never enables uploads from it.
-fn restore_profile_baseline(snapshot: BrowserProfileSnapshot, dir: &Path) -> Result<u64> {
+pub(crate) fn restore_profile_baseline(
+    snapshot: BrowserProfileSnapshot,
+    dir: &Path,
+) -> Result<u64> {
     anyhow::ensure!(
         (snapshot.version == 0 && snapshot.archive.is_none())
             || ((1..i64::MAX).contains(&snapshot.version) && snapshot.archive.is_some()),
@@ -447,7 +450,7 @@ async fn prepare_profile_snapshot(
     pack.await.map(Some)
 }
 
-fn hash_bytes(bytes: &[u8]) -> u64 {
+pub(crate) fn hash_bytes(bytes: &[u8]) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     bytes.hash(&mut hasher);
     hasher.finish()
@@ -788,7 +791,7 @@ impl ProfilePackBudget {
 
 /// Pack the allowlisted login surface under `profile_dir` into a zip. Returns an
 /// empty vec when none of the allowlisted paths exist (nothing to snapshot).
-fn pack_profile(profile_dir: &Path) -> Result<Vec<u8>> {
+pub(crate) fn pack_profile(profile_dir: &Path) -> Result<Vec<u8>> {
     pack_profile_with_limits(profile_dir, PROFILE_ARCHIVE_LIMITS)
 }
 

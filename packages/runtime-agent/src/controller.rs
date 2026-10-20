@@ -62,6 +62,44 @@ pub struct BrowserProfileSnapshot {
     pub archive: Option<Vec<u8>>,
 }
 
+/// Why a versioned profile upload did not land, by what it means for the
+/// stored copy. `Conflict` (409): another writer's version is stored.
+/// `Rejected` (400, 401, 403, 404, 413 or 428): the controller refused the
+/// request, so nothing was written. `Uncertain`: a network error, timeout,
+/// other status or unexpected acknowledgement; the write may have committed.
+#[derive(Debug)]
+pub enum UploadFailure {
+    Conflict,
+    Rejected(StatusCode),
+    Uncertain(anyhow::Error),
+}
+
+impl UploadFailure {
+    fn from_status(status: StatusCode) -> Self {
+        match status {
+            StatusCode::CONFLICT => Self::Conflict,
+            StatusCode::BAD_REQUEST
+            | StatusCode::UNAUTHORIZED
+            | StatusCode::FORBIDDEN
+            | StatusCode::NOT_FOUND
+            | StatusCode::PAYLOAD_TOO_LARGE
+            | StatusCode::PRECONDITION_REQUIRED => Self::Rejected(status),
+            _ => Self::Uncertain(anyhow!("browser profile upload failed: status={status}")),
+        }
+    }
+
+    pub fn into_error(self) -> anyhow::Error {
+        match self {
+            Self::Conflict => anyhow!(
+                "browser profile upload failed: status={}",
+                StatusCode::CONFLICT
+            ),
+            Self::Rejected(status) => anyhow!("browser profile upload failed: status={status}"),
+            Self::Uncertain(error) => error,
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct BrowserProfileManifest {
     scope: String,
@@ -1098,11 +1136,28 @@ impl ControllerClient {
         &self,
         registration: &Registration,
     ) -> Result<BrowserProfileSnapshot> {
+        self.fetch_browser_profile(self.bearer_for_agent(registration))
+            .await
+    }
+
+    /// [`Self::get_browser_profile`] with the freshest agent token, for the
+    /// browser host, which runs outside any one registration. Fails before
+    /// the first registration has landed.
+    pub async fn get_browser_profile_with_current_token(&self) -> Result<BrowserProfileSnapshot> {
+        let bearer = self
+            .current_agent_token
+            .lock()
+            .clone()
+            .context("no agent token yet for the browser profile fetch")?;
+        self.fetch_browser_profile(bearer).await
+    }
+
+    async fn fetch_browser_profile(&self, bearer: String) -> Result<BrowserProfileSnapshot> {
         let url = self.base_url.join("/agent/browser-profile")?;
         let response = self
             .http
             .get(url)
-            .bearer_auth(self.bearer_for_agent(registration))
+            .bearer_auth(bearer)
             .send()
             .await
             .context("browser profile fetch request failed")?;
@@ -1151,37 +1206,64 @@ impl ControllerClient {
         body: Vec<u8>,
         expected_version: i64,
     ) -> Result<i64> {
-        anyhow::ensure!(
-            (0..i64::MAX).contains(&expected_version),
-            "browser profile upload requires a valid restored version"
-        );
+        self.put_browser_profile_classified(Some(registration), body, expected_version)
+            .await
+            .map_err(UploadFailure::into_error)
+    }
+
+    /// [`Self::put_browser_profile`], with the failure classified by what it
+    /// means for the stored copy. Uses the freshest agent token, else the
+    /// registration's; without either nothing is sent (`Rejected(401)`).
+    pub async fn put_browser_profile_classified(
+        &self,
+        registration: Option<&Registration>,
+        body: Vec<u8>,
+        expected_version: i64,
+    ) -> std::result::Result<i64, UploadFailure> {
+        if !(0..i64::MAX).contains(&expected_version) {
+            return Err(UploadFailure::Rejected(StatusCode::BAD_REQUEST));
+        }
+        let bearer = self
+            .current_agent_token
+            .lock()
+            .clone()
+            .or_else(|| registration.map(|registration| registration.agent_token.clone()));
+        let Some(bearer) = bearer else {
+            return Err(UploadFailure::Rejected(StatusCode::UNAUTHORIZED));
+        };
         // Old controllers must reject this route, including a rollback after
         // GET negotiated the new protocol. Never fall back to the legacy PUT.
-        let mut url = self.base_url.join("/agent/browser-profile/v2")?;
+        let mut url = self
+            .base_url
+            .join("/agent/browser-profile/v2")
+            .map_err(|error| UploadFailure::Uncertain(error.into()))?;
         url.query_pairs_mut()
             .append_pair("version", &expected_version.to_string());
         let response = self
             .http
             .put(url)
-            .bearer_auth(self.bearer_for_agent(registration))
+            .bearer_auth(bearer)
             .header("content-type", "application/octet-stream")
             .body(body)
             .send()
             .await
-            .context("browser profile upload request failed")?;
+            .context("browser profile upload request failed")
+            .map_err(UploadFailure::Uncertain)?;
 
         let status = response.status();
         if !status.is_success() {
-            return Err(anyhow!("browser profile upload failed: status={status}"));
+            return Err(UploadFailure::from_status(status));
         }
         let manifest: BrowserProfileManifest = response
             .json()
             .await
-            .context("invalid browser profile upload response")?;
-        anyhow::ensure!(
-            manifest.scope == "project" && manifest.version == expected_version + 1,
-            "browser profile upload returned an unexpected version or scope"
-        );
+            .context("invalid browser profile upload response")
+            .map_err(UploadFailure::Uncertain)?;
+        if manifest.scope != "project" || manifest.version != expected_version + 1 {
+            return Err(UploadFailure::Uncertain(anyhow!(
+                "browser profile upload returned an unexpected version or scope"
+            )));
+        }
         Ok(manifest.version)
     }
 

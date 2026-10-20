@@ -977,7 +977,9 @@ impl RuntimeAgent {
             let registration = renewed_registration.as_ref().unwrap_or(&registration);
 
             // A lazy browser host stops with the runtime (re-registration
-            // never stops it). Origin and its git flush went first, above.
+            // never stops it), closing Chromium and saving its profile before
+            // the runtime stops itself below. Origin and its git flush went
+            // first, above.
             crate::browser_host::shutdown(BROWSER_HOST_SHUTDOWN_BUDGET).await;
 
             // Flag-gated: snapshot the browser profile back to the controller

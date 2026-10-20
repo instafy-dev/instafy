@@ -525,6 +525,104 @@ async fn browser_profile_client_pairs_archive_version_and_validates_upload_ack()
 }
 
 #[tokio::test]
+async fn classified_browser_profile_uploads_say_whether_anything_was_stored() {
+    use runtime_agent::controller::UploadFailure;
+
+    let reply: Arc<Mutex<(StatusCode, Value)>> = Arc::new(Mutex::new((
+        StatusCode::OK,
+        serde_json::json!({ "scope": "project", "version": 4 }),
+    )));
+    let response = reply.clone();
+    let router = Router::new().route(
+        "/agent/browser-profile/v2",
+        axum::routing::put(move || {
+            let response = response.clone();
+            async move {
+                let (status, body) = response.lock().unwrap().clone();
+                (status, Json(body))
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let dir = tempfile::tempdir().unwrap();
+    let client = ControllerClient::new(&test_config(addr, Uuid::new_v4(), dir.path())).unwrap();
+    let reg = profile_registration(addr);
+    let upload = || client.put_browser_profile_classified(Some(&reg), b"archive".to_vec(), 3);
+
+    assert_eq!(upload().await.unwrap(), 4);
+    let mut outcomes = Vec::new();
+    for status in [
+        StatusCode::CONFLICT,
+        StatusCode::BAD_REQUEST,
+        StatusCode::UNAUTHORIZED,
+        StatusCode::FORBIDDEN,
+        StatusCode::NOT_FOUND,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        StatusCode::PRECONDITION_REQUIRED,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        StatusCode::BAD_GATEWAY,
+    ] {
+        reply.lock().unwrap().0 = status;
+        outcomes.push(match upload().await.unwrap_err() {
+            UploadFailure::Conflict => "conflict".to_string(),
+            UploadFailure::Rejected(rejected) => format!("rejected {}", rejected.as_u16()),
+            UploadFailure::Uncertain(_) => "uncertain".to_string(),
+        });
+    }
+    assert_eq!(
+        outcomes,
+        [
+            "conflict",
+            "rejected 400",
+            "rejected 401",
+            "rejected 403",
+            "rejected 404",
+            "rejected 413",
+            "rejected 428",
+            "uncertain",
+            "uncertain",
+        ]
+    );
+
+    // A success with another version may have stored the copy.
+    *reply.lock().unwrap() = (
+        StatusCode::OK,
+        serde_json::json!({ "scope": "project", "version": 9 }),
+    );
+    assert!(matches!(
+        upload().await.unwrap_err(),
+        UploadFailure::Uncertain(_)
+    ));
+    // Without any agent token nothing is sent or read.
+    assert!(
+        client
+            .get_browser_profile_with_current_token()
+            .await
+            .is_err()
+    );
+    assert!(matches!(
+        client
+            .put_browser_profile_classified(None, b"archive".to_vec(), 3)
+            .await
+            .unwrap_err(),
+        UploadFailure::Rejected(status) if status.as_u16() == 401
+    ));
+    server.abort();
+
+    // An unreachable controller is uncertain too.
+    let client = ControllerClient::new(&test_config(addr, Uuid::new_v4(), dir.path())).unwrap();
+    assert!(matches!(
+        client
+            .put_browser_profile_classified(Some(&reg), b"archive".to_vec(), 3)
+            .await
+            .unwrap_err(),
+        UploadFailure::Uncertain(_)
+    ));
+}
+
+#[tokio::test]
 async fn browser_profile_client_rejects_missing_policy_and_invalid_archive_versions() {
     for (status, policy, version) in [
         (StatusCode::NOT_FOUND, None, None),
