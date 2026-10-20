@@ -38,34 +38,34 @@ use crate::{
     ApiError, AppState,
 };
 
-const ACTIVE_JOB_TUNNEL_METADATA_KEY: &str = "_instafyActiveJob";
-const ACTIVE_JOB_TUNNEL_SOURCE: &str = "instafy-cli";
+pub(crate) const ACTIVE_JOB_TUNNEL_METADATA_KEY: &str = "_instafyActiveJob";
+pub(crate) const ACTIVE_JOB_TUNNEL_SOURCE: &str = "instafy-cli";
 
 #[derive(Clone, Copy, Debug)]
-struct ActiveJobTunnelBinding {
-    job_id: Uuid,
-    run_id: Uuid,
-    runtime_id: Uuid,
-    runtime_lease_id: Option<Uuid>,
+pub(crate) struct ActiveJobTunnelBinding {
+    pub(crate) job_id: Uuid,
+    pub(crate) run_id: Uuid,
+    pub(crate) runtime_id: Uuid,
+    pub(crate) runtime_lease_id: Option<Uuid>,
 }
 
 #[derive(Clone, Copy, Debug)]
-struct RuntimeMachineTunnelBinding {
-    runtime_id: Uuid,
-    runtime_lease_id: Option<Uuid>,
+pub(crate) struct RuntimeMachineTunnelBinding {
+    pub(crate) runtime_id: Uuid,
+    pub(crate) runtime_lease_id: Option<Uuid>,
 }
 
 #[derive(Clone, Copy, Debug)]
-struct RuntimeTunnelGenerationState<'a> {
-    private_self_hosted: bool,
-    status: &'a str,
-    active_lease_id: Option<Uuid>,
-    lease_project_id: Option<Uuid>,
-    lease_runtime_id: Option<Uuid>,
-    lease_status: Option<&'a str>,
-    lease_released: bool,
+pub(crate) struct RuntimeTunnelGenerationState<'a> {
+    pub(crate) private_self_hosted: bool,
+    pub(crate) status: &'a str,
+    pub(crate) active_lease_id: Option<Uuid>,
+    pub(crate) lease_project_id: Option<Uuid>,
+    pub(crate) lease_runtime_id: Option<Uuid>,
+    pub(crate) lease_status: Option<&'a str>,
+    pub(crate) lease_released: bool,
     /// The runtime's space was deleted, for a call that refuses one.
-    space_deleted: bool,
+    pub(crate) space_deleted: bool,
 }
 
 #[allow(dead_code)]
@@ -119,6 +119,29 @@ pub(crate) struct TunnelRequestContext {
     pub(crate) org_id: Option<Uuid>,
     pub(crate) idempotency_key: Option<String>,
     pub(crate) expires_in_seconds: Option<i64>,
+    /// String labels the broker stores as `metadata.labels` and routes on
+    /// (`kind`, `visibility`). Unset for ordinary tunnels.
+    pub(crate) labels: Option<JsonValue>,
+}
+
+/// What a caller of [`request_runtime_tunnel_with_overrides`] may set instead
+/// of the billing-bucket defaults. Previews use a stable key per port and a
+/// lease-length lifetime, so a repeated `instafy preview open` reuses its
+/// tunnel instead of minting one per credit interval.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TunnelRequestOverrides {
+    pub(crate) idempotency_key: Option<String>,
+    pub(crate) expires_in_seconds: Option<i64>,
+    pub(crate) labels: Option<JsonValue>,
+}
+
+/// Whether the broker reaches the tunnel's local service: `status` is the
+/// HTTP status of a `HEAD`, absent when nothing answered.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct TunnelProbe {
+    pub(crate) listening: bool,
+    #[serde(default)]
+    pub(crate) status: Option<u16>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -140,7 +163,34 @@ pub(crate) trait TunnelBroker: Send + Sync {
     async fn request_tunnel(&self, ctx: TunnelRequestContext) -> Result<TunnelAssignment>;
     #[allow(dead_code)]
     async fn revoke_tunnel(&self, tunnel_id: &str, metadata: Option<&JsonValue>) -> Result<()>;
+    /// `HEAD <path>` against the tunnel's upstream, from the broker's side.
+    async fn probe_tunnel(&self, tunnel_id: &str, path: &str) -> Result<TunnelProbe> {
+        let _ = (tunnel_id, path);
+        anyhow::bail!("tunnel broker does not support probes")
+    }
+    /// What the broker serves beyond public tunnels. A broker that cannot
+    /// say serves nothing more.
+    async fn capabilities(&self) -> TunnelBrokerCapabilities {
+        TunnelBrokerCapabilities::default()
+    }
 }
+
+/// A broker's `GET /capabilities`. `private_previews` is true only when it
+/// routes private tunnels to member-only capability hosts under
+/// `preview_domain`; an older broker has no such route and serves none.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TunnelBrokerCapabilities {
+    #[serde(default, alias = "private_previews")]
+    pub(crate) private_previews: bool,
+    #[serde(default, alias = "preview_domain")]
+    pub(crate) preview_domain: Option<String>,
+}
+
+/// How long a broker's answer is reused. A failed request is retried sooner,
+/// so one blip does not switch previews off for a minute.
+const TUNNEL_BROKER_CAPABILITIES_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+const TUNNEL_BROKER_CAPABILITIES_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub(crate) type DynTunnelBroker = Arc<dyn TunnelBroker>;
 
@@ -149,6 +199,13 @@ pub(crate) struct SelfHostedTunnelBroker {
     http: Client,
     credit_burn_interval_seconds: i64,
     credit_burn_lead_seconds: i64,
+    capabilities: std::sync::Mutex<
+        Option<(
+            std::time::Instant,
+            std::time::Duration,
+            TunnelBrokerCapabilities,
+        )>,
+    >,
 }
 
 impl SelfHostedTunnelBroker {
@@ -163,7 +220,25 @@ impl SelfHostedTunnelBroker {
             http,
             credit_burn_interval_seconds,
             credit_burn_lead_seconds,
+            capabilities: std::sync::Mutex::new(None),
         }
+    }
+
+    async fn fetch_capabilities(&self) -> Result<TunnelBrokerCapabilities> {
+        let response = self
+            .auth(self.http.get(self.base("/capabilities")))
+            .timeout(TUNNEL_BROKER_PROBE_TIMEOUT)
+            .send()
+            .await?;
+        let status = response.status();
+        // A broker without the route predates private previews.
+        if matches!(status.as_u16(), 404 | 405) {
+            return Ok(TunnelBrokerCapabilities::default());
+        }
+        if !status.is_success() {
+            anyhow::bail!("tunnel broker capabilities failed ({})", status.as_u16());
+        }
+        Ok(response.json().await?)
     }
 
     fn base(&self, path: &str) -> String {
@@ -249,7 +324,7 @@ impl TunnelBroker for SelfHostedTunnelBroker {
                 interval_seconds,
             )
         });
-        let body = json!({
+        let mut body = json!({
             "project_id": ctx.project_id,
             "org_id": ctx.org_id,
             "runtime_id": ctx.runtime_id,
@@ -257,6 +332,9 @@ impl TunnelBroker for SelfHostedTunnelBroker {
             "idempotency_key": idempotency_key,
             "expires_in_seconds": expires_in_seconds,
         });
+        if let (Some(labels), Some(map)) = (ctx.labels, body.as_object_mut()) {
+            map.insert("labels".to_string(), labels);
+        }
 
         let response = self
             .auth(self.http.post(self.base("/tunnels")))
@@ -346,6 +424,52 @@ impl TunnelBroker for SelfHostedTunnelBroker {
         }
         Ok(())
     }
+
+    async fn probe_tunnel(&self, tunnel_id: &str, path: &str) -> Result<TunnelProbe> {
+        let route = format!("/tunnels/{tunnel_id}/probe");
+        let response = self
+            .auth(self.http.get(self.base(&route)))
+            .query(&[("path", path)])
+            .timeout(TUNNEL_BROKER_PROBE_TIMEOUT)
+            .send()
+            .await?;
+        let status = response.status();
+        let bytes = response.bytes().await?;
+        if !status.is_success() {
+            anyhow::bail!(
+                "tunnel broker probe failed ({} {}): {}",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or("unknown"),
+                String::from_utf8_lossy(&bytes)
+            );
+        }
+        serde_json::from_slice(&bytes)
+            .map_err(|error| anyhow::anyhow!("failed to parse tunnel broker probe: {error}"))
+    }
+
+    async fn capabilities(&self) -> TunnelBrokerCapabilities {
+        if let Ok(cached) = self.capabilities.lock() {
+            if let Some((at, ttl, capabilities)) = cached.as_ref() {
+                if at.elapsed() < *ttl {
+                    return capabilities.clone();
+                }
+            }
+        }
+        let (capabilities, ttl) = match self.fetch_capabilities().await {
+            Ok(capabilities) => (capabilities, TUNNEL_BROKER_CAPABILITIES_TTL),
+            Err(error) => {
+                warn!(?error, "tunnel broker capabilities unavailable");
+                (
+                    TunnelBrokerCapabilities::default(),
+                    TUNNEL_BROKER_CAPABILITIES_RETRY,
+                )
+            }
+        };
+        if let Ok(mut cached) = self.capabilities.lock() {
+            *cached = Some((std::time::Instant::now(), ttl, capabilities.clone()));
+        }
+        capabilities
+    }
 }
 
 pub(crate) fn build_tunnel_broker(
@@ -424,7 +548,6 @@ struct TunnelBrokerAclPayload {
     #[serde(default, alias = "idempotencyKey")]
     idempotency_key: Option<String>,
     #[serde(default)]
-    #[allow(dead_code)]
     metadata: Option<JsonValue>,
 }
 
@@ -495,19 +618,19 @@ struct TunnelStatusBody {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TunnelGrantResponse {
-    id: Uuid,
-    project_id: Uuid,
-    runtime_id: Option<Uuid>,
-    runtime_lease_id: Option<Uuid>,
-    provider: String,
-    tunnel_id: String,
-    hostname: String,
-    url: String,
-    status: String,
-    expires_at: String,
-    metadata: Option<JsonValue>,
+    pub(crate) id: Uuid,
+    pub(crate) project_id: Uuid,
+    pub(crate) runtime_id: Option<Uuid>,
+    pub(crate) runtime_lease_id: Option<Uuid>,
+    pub(crate) provider: String,
+    pub(crate) tunnel_id: String,
+    pub(crate) hostname: String,
+    pub(crate) url: String,
+    pub(crate) status: String,
+    pub(crate) expires_at: String,
+    pub(crate) metadata: Option<JsonValue>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    credentials: Option<JsonValue>,
+    pub(crate) credentials: Option<JsonValue>,
 }
 
 #[derive(Debug, Serialize)]
@@ -524,6 +647,25 @@ pub(crate) async fn request_runtime_tunnel(
     runtime_lease_id: Option<&Uuid>,
     request_metadata: Option<JsonValue>,
 ) -> Result<TunnelGrantResponse, (StatusCode, Json<ApiError>)> {
+    request_runtime_tunnel_with_overrides(
+        state,
+        project_id,
+        runtime_id,
+        runtime_lease_id,
+        request_metadata,
+        TunnelRequestOverrides::default(),
+    )
+    .await
+}
+
+pub(crate) async fn request_runtime_tunnel_with_overrides(
+    state: &AppState,
+    project_id: &Uuid,
+    runtime_id: Option<&Uuid>,
+    runtime_lease_id: Option<&Uuid>,
+    request_metadata: Option<JsonValue>,
+    overrides: TunnelRequestOverrides,
+) -> Result<TunnelGrantResponse, (StatusCode, Json<ApiError>)> {
     tracing::warn!(
         project_id = %project_id,
         runtime_id = ?runtime_id,
@@ -539,12 +681,14 @@ pub(crate) async fn request_runtime_tunnel(
 
     let provider_kind = broker.provider_kind();
     let runtime_uuid = runtime_id.copied();
+    let private_visibility = labels_mark_private(overrides.labels.as_ref());
     let entitlement_details = ensure_tunnel_entitlement(
         state,
         project_id,
         runtime_uuid,
         runtime_lease_id.copied(),
         &provider_kind,
+        private_visibility,
     )
     .await?;
     let org_id = entitlement_details
@@ -562,7 +706,9 @@ pub(crate) async fn request_runtime_tunnel(
     let local_port = request_metadata
         .as_ref()
         .and_then(extract_local_port_from_metadata);
-    let broker_idempotency_key = if matches!(provider_kind, TunnelProvider::SelfHosted) {
+    let broker_idempotency_key = if overrides.idempotency_key.is_some() {
+        overrides.idempotency_key.clone()
+    } else if matches!(provider_kind, TunnelProvider::SelfHosted) {
         match (runtime_uuid, runtime_lease_id.copied()) {
             (Some(runtime_id), Some(lease_id)) => {
                 let lease_started_at =
@@ -590,8 +736,12 @@ pub(crate) async fn request_runtime_tunnel(
             purpose: purpose.clone(),
             org_id,
             idempotency_key: broker_idempotency_key,
-            expires_in_seconds: matches!(provider_kind, TunnelProvider::SelfHosted)
-                .then_some(broker_expires_in_seconds),
+            expires_in_seconds: matches!(provider_kind, TunnelProvider::SelfHosted).then_some(
+                overrides
+                    .expires_in_seconds
+                    .unwrap_or(broker_expires_in_seconds),
+            ),
+            labels: overrides.labels,
         })
         .await
         .map_err(|error| internal_error(format!("failed to request tunnel: {error}")))?;
@@ -724,6 +874,10 @@ async fn post_tunnel_request(
     let mut metadata_map = body.metadata;
     if let Some(JsonValue::Object(map)) = metadata_map.as_mut() {
         map.remove(ACTIVE_JOB_TUNNEL_METADATA_KEY);
+        // Only the previews module may mark a grant as a preview.
+        for key in PREVIEW_RESERVED_METADATA_KEYS {
+            map.remove(key);
+        }
     }
     if body
         .purpose
@@ -1000,7 +1154,13 @@ async fn post_tunnel_broker_acl_hook(
 
     let project_id = parse_required_uuid(&payload.project_id, "project_id")?;
     let org_id_param = parse_optional_uuid_param(payload.org_id.clone(), "org_id")?;
-    let burn_amount = state.config.tunnel_credit_burn_amount.max(0);
+    // The broker passes a tunnel's labels as metadata. A private preview is
+    // only reachable by space members and burns nothing (design Q2).
+    let burn_amount = if acl_metadata_marks_private(payload.metadata.as_ref()) {
+        0
+    } else {
+        state.config.tunnel_credit_burn_amount.max(0)
+    };
     let idempotency_key = payload
         .idempotency_key
         .as_deref()
@@ -1157,18 +1317,18 @@ async fn post_tunnel_broker_event_hook(
 }
 
 #[derive(Clone, Debug)]
-struct RuntimeTunnelGrantRecord {
-    id: Uuid,
-    project_id: Uuid,
-    runtime_id: Option<Uuid>,
-    runtime_lease_id: Option<Uuid>,
-    provider: String,
-    tunnel_id: String,
-    hostname: String,
-    url: String,
-    status: String,
-    expires_at: DateTime<Utc>,
-    metadata: Option<JsonValue>,
+pub(crate) struct RuntimeTunnelGrantRecord {
+    pub(crate) id: Uuid,
+    pub(crate) project_id: Uuid,
+    pub(crate) runtime_id: Option<Uuid>,
+    pub(crate) runtime_lease_id: Option<Uuid>,
+    pub(crate) provider: String,
+    pub(crate) tunnel_id: String,
+    pub(crate) hostname: String,
+    pub(crate) url: String,
+    pub(crate) status: String,
+    pub(crate) expires_at: DateTime<Utc>,
+    pub(crate) metadata: Option<JsonValue>,
 }
 
 async fn insert_runtime_tunnel_grant(
@@ -1205,6 +1365,10 @@ async fn insert_runtime_tunnel_grant(
     }
 
     let metadata_param = metadata.cloned();
+    // The broker hands a preview the same tunnel for the same runtime, lease
+    // and port. Re-opening a still-live preview with the same title and path
+    // keeps the cards it already has, merged under the row lock so a /ready
+    // racing this upsert keeps its card; anything else starts without cards.
     let row = match connection
         .query_one(
             "insert into runtime_tunnel_grants
@@ -1219,7 +1383,18 @@ async fn insert_runtime_tunnel_grant(
                    url = excluded.url,
                    status = excluded.status,
                    expires_at = excluded.expires_at,
-                   metadata = coalesce(excluded.metadata, runtime_tunnel_grants.metadata)
+                   metadata = case
+                     when excluded.metadata->>'kind' = 'preview'
+                      and runtime_tunnel_grants.metadata->>'kind' = 'preview'
+                      and lower(btrim(runtime_tunnel_grants.status)) not in ('revoked', 'expired', 'failed')
+                      and runtime_tunnel_grants.expires_at > now()
+                      and runtime_tunnel_grants.metadata->'title' is not distinct from excluded.metadata->'title'
+                      and runtime_tunnel_grants.metadata->'path' is not distinct from excluded.metadata->'path'
+                     then excluded.metadata || jsonb_strip_nulls(jsonb_build_object(
+                       'messageIds', runtime_tunnel_grants.metadata->'messageIds',
+                       'messageId', runtime_tunnel_grants.metadata->'messageId'))
+                     else coalesce(excluded.metadata, runtime_tunnel_grants.metadata)
+                   end
              returning *",
             &[
                 project_id,
@@ -1363,7 +1538,7 @@ async fn update_tunnel_status_record(
         .map_err(|error| internal_error(format!("failed to acquire connection: {error}")))?;
 
     let normalized_status = normalize_tunnel_status(status);
-    let metadata_param = metadata_override.cloned();
+    let metadata_param = protect_preview_metadata(record.metadata.as_ref(), metadata_override);
     let row = connection
         .query_one(
             "update runtime_tunnel_grants
@@ -1376,14 +1551,26 @@ async fn update_tunnel_status_record(
         )
         .await
         .map_err(|error| internal_error(format!("failed to update tunnel status: {error:?}")))?;
+    drop(connection);
 
-    Ok(runtime_tunnel_grant_from_row(&row))
+    let updated = runtime_tunnel_grant_from_row(&row);
+    // A preview that stops this way ends its viewers too, or they would come
+    // back if the broker later re-issues the same tunnel id.
+    if !tunnel_status_is_active(&updated.status)
+        && crate::previews::grant_metadata_is_preview(record.metadata.as_ref())
+    {
+        crate::previews::revoke_preview_sessions_for_tunnel(pool, &updated.tunnel_id).await;
+    }
+    Ok(updated)
 }
 
 /// How long a stop or removal waits on the tunnel broker to revoke one tunnel.
 /// The shared HTTP client has no timeout of its own; giving up leaves the
 /// grant active until it expires, as a broker error does.
 const TUNNEL_BROKER_REVOKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// The broker's own probe gives up after 2 s; this bounds the round trip.
+const TUNNEL_BROKER_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The project's grants a revocation for `runtime_id` (or, without one,
 /// `runtime_lease_id`) acts on: still active and bound to it. The SQL
@@ -1456,7 +1643,7 @@ async fn fetch_runtime_tunnel_grants(
     Ok(rows.iter().map(runtime_tunnel_grant_from_row).collect())
 }
 
-async fn load_runtime_tunnel_grant_by_tunnel_id(
+pub(crate) async fn load_runtime_tunnel_grant_by_tunnel_id(
     pool: &PgPool,
     project_id: &Uuid,
     tunnel_id: &str,
@@ -1562,7 +1749,7 @@ async fn update_runtime_tunnel_grant_status(
     Ok(runtime_tunnel_grant_from_row(&row))
 }
 
-fn runtime_tunnel_grant_from_row(row: &Row) -> RuntimeTunnelGrantRecord {
+pub(crate) fn runtime_tunnel_grant_from_row(row: &Row) -> RuntimeTunnelGrantRecord {
     RuntimeTunnelGrantRecord {
         id: row.get("id"),
         project_id: row.get("project_id"),
@@ -1616,6 +1803,20 @@ pub(crate) async fn revoke_tunnels_for_scope(
     }
 
     Ok(revoked)
+}
+
+/// Whether broker labels mark a tunnel private (`visibility: "private"`).
+pub(crate) fn labels_mark_private(labels: Option<&JsonValue>) -> bool {
+    labels
+        .and_then(|labels| labels.get("visibility"))
+        .and_then(JsonValue::as_str)
+        .is_some_and(|visibility| visibility.trim().eq_ignore_ascii_case("private"))
+}
+
+/// ACL metadata is the labels map; accept it nested under `labels` as well,
+/// which is how the broker stores it on the tunnel row.
+fn acl_metadata_marks_private(metadata: Option<&JsonValue>) -> bool {
+    labels_mark_private(metadata) || labels_mark_private(metadata.and_then(|m| m.get("labels")))
 }
 
 /// Revoke every grant of a deleted space that is still active, whatever
@@ -1693,7 +1894,7 @@ fn auto_revoked_metadata(grant: &RuntimeTunnelGrantRecord, source: &str) -> Opti
     metadata_override
 }
 
-fn normalize_tunnel_status(raw: &str) -> String {
+pub(crate) fn normalize_tunnel_status(raw: &str) -> String {
     let normalized = raw.trim().to_ascii_lowercase();
     match normalized.as_str() {
         "requested" | "refreshing" | "issuing" => "issuing".to_string(),
@@ -1794,7 +1995,7 @@ fn inject_purpose_into_credentials(credentials: &mut JsonValue, purpose: &str) {
     }
 }
 
-async fn revoke_tunnel_record(
+pub(crate) async fn revoke_tunnel_record(
     state: &AppState,
     record: RuntimeTunnelGrantRecord,
     metadata_override: Option<&JsonValue>,
@@ -1837,17 +2038,28 @@ async fn revoke_tunnel_grant(
         }
     }
 
-    update_runtime_tunnel_grant_status(
+    let metadata_override = protect_preview_metadata(record.metadata.as_ref(), metadata_override);
+    let updated = update_runtime_tunnel_grant_status(
         &state.pool,
         &record.id,
         &record.project_id,
         "revoked",
-        metadata_override,
+        metadata_override.as_ref(),
     )
-    .await
+    .await?;
+    // Every revocation path (close, runtime stop, the sweeps, a deleted
+    // space) lands here, so this is where a preview's viewer sessions end
+    // with its grant. Ask the stored metadata too, so no override can skip it.
+    if crate::previews::grant_metadata_is_preview(record.metadata.as_ref())
+        || crate::previews::grant_metadata_is_preview(updated.metadata.as_ref())
+    {
+        crate::previews::revoke_preview_sessions_for_tunnel(&state.pool, &updated.tunnel_id).await;
+    }
+
+    Ok(updated)
 }
 
-fn tunnel_status_is_active(status: &str) -> bool {
+pub(crate) fn tunnel_status_is_active(status: &str) -> bool {
     let normalized = status.trim().to_ascii_lowercase();
     !matches!(normalized.as_str(), "revoked" | "expired" | "failed")
 }
@@ -1891,6 +2103,11 @@ fn tunnel_event_payload(record: &RuntimeTunnelGrantRecord) -> JsonValue {
         "expiresAt".to_string(),
         json!(record.expires_at.to_rfc3339()),
     );
+    // Metadata is never broadcast, but Studio must tell a preview from the
+    // runtime's own tunnel: both carry the same runtimeId.
+    if crate::previews::grant_metadata_is_preview(record.metadata.as_ref()) {
+        data.insert("kind".to_string(), json!("preview"));
+    }
     sanitize_tunnel_broadcast_data(JsonValue::Object(data))
 }
 
@@ -1930,7 +2147,7 @@ fn tunnel_broadcast_key_is_sensitive(key: &str) -> bool {
         )
 }
 
-async fn ensure_private_runtime_access(
+pub(crate) async fn ensure_private_runtime_access(
     state: &AppState,
     project_id: &Uuid,
     runtime_id: &Uuid,
@@ -1965,7 +2182,7 @@ async fn ensure_private_runtime_access(
     )
 }
 
-async fn resolve_canonical_tunnel_runtime_id(
+pub(crate) async fn resolve_canonical_tunnel_runtime_id(
     state: &AppState,
     project_id: &Uuid,
     requested_runtime_id: Option<Uuid>,
@@ -2005,7 +2222,7 @@ async fn resolve_canonical_tunnel_runtime_id(
 
 /// `refuse_deleted_space`: refuse a runtime of a deleted space with
 /// [`space_deleted`], once its token matches the runtime's live generation.
-async fn authorize_live_runtime_machine_tunnel(
+pub(crate) async fn authorize_live_runtime_machine_tunnel(
     state: &AppState,
     claims: &runtime_contracts::AccessTokenClaims,
     project_id: &Uuid,
@@ -2106,7 +2323,7 @@ async fn authorize_live_runtime_machine_tunnel(
     })
 }
 
-fn ensure_runtime_tunnel_generation_is_live(
+pub(crate) fn ensure_runtime_tunnel_generation_is_live(
     project_id: &Uuid,
     runtime_id: &Uuid,
     token_lease_id: Option<Uuid>,
@@ -2279,7 +2496,7 @@ fn ensure_active_job_tunnel_ownership(
     Ok(())
 }
 
-async fn authorize_active_job_tunnel(
+pub(crate) async fn authorize_active_job_tunnel(
     state: &AppState,
     context: &RequestContext,
     project_id: &Uuid,
@@ -2345,6 +2562,7 @@ async fn ensure_tunnel_entitlement(
     runtime_id: Option<Uuid>,
     runtime_lease_id: Option<Uuid>,
     provider: &TunnelProvider,
+    private_visibility: bool,
 ) -> Result<JsonValue, (StatusCode, Json<ApiError>)> {
     let mut connection = state
         .pool
@@ -2564,7 +2782,8 @@ async fn ensure_tunnel_entitlement(
     let burn_via_hook = matches!(*provider, TunnelProvider::SelfHosted)
         && state.config.tunnel_broker_hook_secret.is_some();
     let mut burn_amount = state.config.tunnel_credit_burn_amount.max(0);
-    if burn_via_hook {
+    // A private preview is part of the runtime the space already pays for.
+    if burn_via_hook || private_visibility {
         burn_amount = 0;
     }
     entitlement.insert("burnAmount".to_string(), JsonValue::from(burn_amount));
@@ -2692,6 +2911,59 @@ async fn ensure_tunnel_entitlement(
     Ok(JsonValue::Object(entitlement))
 }
 
+/// Grant metadata keys the previews module owns. The previews routes trust
+/// them (`kind` and `visibility` decide what a grant is, `path` is appended
+/// to the viewer host, `messageIds` decides which card a run gets, and
+/// `tunnelKey` is the broker key a re-open reuses), so the generic tunnel
+/// routes never let a client set or drop them.
+pub(crate) const PREVIEW_RESERVED_METADATA_KEYS: [&str; 8] = [
+    "kind",
+    "visibility",
+    "path",
+    "title",
+    "messageIds",
+    "messageId",
+    "conversationId",
+    "tunnelKey",
+];
+
+/// Keys a preview's stored metadata keeps through a revoke or status update:
+/// the port is what the card shows and what a re-open of the same port
+/// matches on (the generic request route sets these when a tunnel is opened,
+/// so they are not reserved there).
+const PREVIEW_PINNED_METADATA_KEYS: [&str; 2] = ["localPort", "source"];
+
+/// A client's metadata override for a revoke or status update. On a preview
+/// it is merged into the stored metadata without touching the reserved keys;
+/// on any other grant it replaces it, as before. `None` keeps the stored
+/// metadata as it is.
+fn protect_preview_metadata(
+    existing: Option<&JsonValue>,
+    metadata_override: Option<&JsonValue>,
+) -> Option<JsonValue> {
+    let metadata_override = metadata_override?;
+    let Some(existing) = existing
+        .filter(|metadata| crate::previews::grant_metadata_is_preview(Some(metadata)))
+        .and_then(JsonValue::as_object)
+    else {
+        return Some(metadata_override.clone());
+    };
+    let JsonValue::Object(map) = metadata_override else {
+        return None;
+    };
+    // A preview keeps what the previews module stored (its port and source
+    // too); the override only adds notes such as a stop reason.
+    let mut merged = existing.clone();
+    for (key, value) in map {
+        if !PREVIEW_RESERVED_METADATA_KEYS.contains(&key.as_str())
+            && !PREVIEW_PINNED_METADATA_KEYS.contains(&key.as_str())
+        {
+            merged.insert(key.clone(), value.clone());
+        }
+    }
+    Some(JsonValue::Object(merged))
+}
+
 fn compose_tunnel_metadata(
     request_metadata: Option<&JsonValue>,
     entitlement: Option<&JsonValue>,
@@ -2725,7 +2997,7 @@ fn compose_tunnel_metadata(
     }
 }
 
-async fn ensure_project_authorized(
+pub(crate) async fn ensure_project_authorized(
     state: &AppState,
     project_id: &Uuid,
     context: &RequestContext,
@@ -2748,7 +3020,7 @@ async fn ensure_project_authorized(
     Ok(())
 }
 
-async fn ensure_project_write_authorized(
+pub(crate) async fn ensure_project_write_authorized(
     state: &AppState,
     project_id: &Uuid,
     context: &RequestContext,
@@ -2771,7 +3043,10 @@ async fn ensure_project_write_authorized(
     Ok(())
 }
 
-fn parse_required_uuid(value: &str, field: &str) -> Result<Uuid, (StatusCode, Json<ApiError>)> {
+pub(crate) fn parse_required_uuid(
+    value: &str,
+    field: &str,
+) -> Result<Uuid, (StatusCode, Json<ApiError>)> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err(bad_request(format!("{field} is required")));
@@ -2779,7 +3054,7 @@ fn parse_required_uuid(value: &str, field: &str) -> Result<Uuid, (StatusCode, Js
     Uuid::from_str(trimmed).map_err(|_| bad_request(format!("{field} must be a valid UUID")))
 }
 
-fn authorize_hook(
+pub(crate) fn authorize_hook(
     headers: &HeaderMap,
     secret: Option<&String>,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
@@ -3263,6 +3538,196 @@ mod tests {
         assert!(sanitized.get("credentials").is_none());
         assert!(sanitized.get("metadata").is_none());
         assert!(sanitized["client"].get("accessToken").is_none());
+    }
+
+    #[test]
+    fn tunnel_event_payload_marks_previews_without_their_metadata() {
+        let record = |metadata: JsonValue| RuntimeTunnelGrantRecord {
+            id: Uuid::new_v4(),
+            project_id: Uuid::new_v4(),
+            runtime_id: Some(Uuid::new_v4()),
+            runtime_lease_id: None,
+            provider: "self_hosted".to_string(),
+            tunnel_id: Uuid::new_v4().to_string(),
+            hostname: "abc.rt.test".to_string(),
+            url: "http://abc.rt.test".to_string(),
+            status: "active".to_string(),
+            expires_at: Utc::now(),
+            metadata: Some(metadata),
+        };
+
+        let preview = tunnel_event_payload(&record(
+            json!({ "kind": "preview", "title": "Site preview" }),
+        ));
+        assert_eq!(preview["kind"], "preview");
+        assert!(preview.get("metadata").is_none());
+        assert!(!preview.to_string().contains("Site preview"));
+
+        let plain = tunnel_event_payload(&record(json!({ "purpose": "origin" })));
+        assert!(plain.get("kind").is_none());
+    }
+
+    #[tokio::test]
+    async fn self_hosted_broker_sends_labels_and_probes_the_preview_path() {
+        use httpmock::Method::{GET, POST};
+        use httpmock::MockServer;
+
+        let server = MockServer::start_async().await;
+        let tunnel_id = Uuid::new_v4();
+        let create = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/tunnels")
+                    .header("authorization", "Bearer broker-token")
+                    .json_body_partial(
+                        json!({
+                            "idempotency_key": "preview:key",
+                            "expires_in_seconds": 43200,
+                            "labels": { "kind": "preview", "visibility": "private" },
+                        })
+                        .to_string(),
+                    );
+                then.status(200).json_body(json!({
+                    "tunnel": {
+                        "tunnel_id": tunnel_id,
+                        "hostname": format!("{tunnel_id}.rt.localhost"),
+                        "status": "active",
+                        "token": "rathole-token",
+                        "client": {
+                            "server": "rathole:2333",
+                            "token": "rathole-token",
+                            "hostname": format!("{tunnel_id}.rt.localhost"),
+                        },
+                    }
+                }));
+            })
+            .await;
+        let probe = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path(format!("/tunnels/{tunnel_id}/probe"))
+                    .query_param("path", "/site/");
+                then.status(200)
+                    .json_body(json!({ "listening": true, "status": 204 }));
+            })
+            .await;
+        let broker = SelfHostedTunnelBroker::new(
+            SelfHostedTunnelConfig {
+                base_url: server.base_url(),
+                api_token: "broker-token".to_string(),
+            },
+            Client::new(),
+            600,
+            60,
+        );
+
+        let assignment = broker
+            .request_tunnel(TunnelRequestContext {
+                project_id: Uuid::new_v4(),
+                runtime_id: None,
+                lease_id: None,
+                purpose: None,
+                org_id: None,
+                idempotency_key: Some("preview:key".to_string()),
+                expires_in_seconds: Some(43_200),
+                labels: Some(json!({ "kind": "preview", "visibility": "private" })),
+            })
+            .await
+            .expect("labelled tunnel request");
+        assert_eq!(assignment.tunnel_id, tunnel_id.to_string());
+        create.assert_async().await;
+
+        let health = broker
+            .probe_tunnel(&tunnel_id.to_string(), "/site/")
+            .await
+            .expect("probe");
+        assert_eq!(
+            health,
+            TunnelProbe {
+                listening: true,
+                status: Some(204)
+            }
+        );
+        probe.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn broker_capabilities_are_read_cached_and_absent_on_an_older_broker() {
+        use httpmock::Method::GET;
+        use httpmock::MockServer;
+
+        let broker_at = |server: &MockServer| {
+            SelfHostedTunnelBroker::new(
+                SelfHostedTunnelConfig {
+                    base_url: server.base_url(),
+                    api_token: "broker-token".to_string(),
+                },
+                Client::new(),
+                600,
+                60,
+            )
+        };
+
+        let server = MockServer::start_async().await;
+        let route = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/capabilities")
+                    .header("authorization", "Bearer broker-token");
+                then.status(200).json_body(json!({
+                    "privatePreviews": true,
+                    "previewDomain": "preview.localhost",
+                }));
+            })
+            .await;
+        let broker = broker_at(&server);
+        let expected = TunnelBrokerCapabilities {
+            private_previews: true,
+            preview_domain: Some("preview.localhost".to_string()),
+        };
+        assert_eq!(broker.capabilities().await, expected);
+        assert_eq!(broker.capabilities().await, expected);
+        route.assert_hits_async(1).await;
+
+        // A broker without the route, or one that fails, serves no private
+        // previews.
+        let older = MockServer::start_async().await;
+        let missing = older
+            .mock_async(|when, then| {
+                when.method(GET).path("/capabilities");
+                then.status(404);
+            })
+            .await;
+        assert_eq!(
+            broker_at(&older).capabilities().await,
+            TunnelBrokerCapabilities::default()
+        );
+        missing.assert_async().await;
+        let failing = MockServer::start_async().await;
+        failing
+            .mock_async(|when, then| {
+                when.method(GET).path("/capabilities");
+                then.status(500);
+            })
+            .await;
+        assert!(!broker_at(&failing).capabilities().await.private_previews);
+    }
+
+    #[test]
+    fn private_labels_are_read_flat_or_nested() {
+        assert!(labels_mark_private(Some(
+            &json!({ "visibility": "private" })
+        )));
+        assert!(!labels_mark_private(Some(
+            &json!({ "visibility": "public" })
+        )));
+        assert!(!labels_mark_private(None));
+        assert!(acl_metadata_marks_private(Some(
+            &json!({ "labels": { "visibility": "private" } })
+        )));
+        assert!(!acl_metadata_marks_private(Some(
+            &json!({ "kind": "preview" })
+        )));
     }
 
     #[test]
