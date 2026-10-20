@@ -441,8 +441,8 @@ async fn machine_counts(pool: &PgPool, project_id: &Uuid) -> anyhow::Result<(i64
 }
 
 /// Shared dispatch to the space's own machine follows the policy at once:
-/// the stored consent lasts until the next registration renewal, so the
-/// dispatch check is the immediate rollback.
+/// registration does not read the policy, so the stored consent outlives it
+/// and the dispatch check is the immediate rollback.
 #[tokio::test]
 async fn shared_dispatch_to_a_browser_host_follows_the_policy() -> anyhow::Result<()> {
     let pool = require_origin_test_pool("browser host dispatch test").await?;
@@ -540,6 +540,33 @@ async fn shared_dispatch_to_a_browser_host_follows_the_policy() -> anyhow::Resul
             .await?
             .get(0);
         assert_eq!(target, Some(host));
+
+        // A stored host value naming another generation is still gated.
+        pool.get()
+            .await?
+            .execute(
+                "update runtimes
+                 set capabilities = jsonb_set(
+                     capabilities, '{browserHost,generation}', to_jsonb($2::text))
+                 where id = $1",
+                &[&host, &Uuid::new_v4().to_string()],
+            )
+            .await?;
+        let before = machine_counts(&pool, &project_id).await?;
+        let normalized =
+            dispatch::normalize_dispatch_request(shared_dispatch_request(&project_id, &host))
+                .map_err(|(status, body)| {
+                    anyhow::anyhow!("normalize: {status} {}", body.0.message)
+                })?;
+        let (status, error) = dispatch::process_dispatch_prompt(&off, &context, normalized)
+            .await
+            .expect_err("an earlier generation's host value is still gated");
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            error.0.message,
+            "Instafy's browser on this space's machine is turned off for this space; this request was not sent to another runtime."
+        );
+        assert_eq!(machine_counts(&pool, &project_id).await?, before);
         Ok(())
     })
     .await
@@ -795,9 +822,219 @@ async fn origin_proxy_browser_host_routes_follow_the_policy() -> anyhow::Result<
         let (status, body) = send(off.clone(), "GET", "browser/host", &view, vec![]).await?;
         assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
         assert!(body.contains("origin path not found"), "{body}");
-        let (status, body) = send(off, "POST", "browser/host/start", &control, start_body).await?;
+        let (status, body) = send(
+            off.clone(),
+            "POST",
+            "browser/host/start",
+            &control,
+            start_body.clone(),
+        )
+        .await?;
         assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
         assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+        // A token whose runtime is no longer authorized learns nothing about
+        // the policy: it is refused the same way whether or not it covers
+        // the space.
+        let stale = mint_scoped_token(
+            &covered,
+            ScopedTokenRequest {
+                audience: origin_id.to_string(),
+                subject: Uuid::new_v4().to_string(),
+                project_id: project_id.to_string(),
+                origin_id: Some(origin_id.to_string()),
+                runtime_id: Some(Uuid::new_v4().to_string()),
+                protocol: Some("http".to_string()),
+                scopes: vec!["browser.view".to_string(), "browser.control".to_string()],
+                lease_id: None,
+                run_id: None,
+                prefer_runtime: None,
+                ttl_seconds: None,
+            },
+        )
+        .map(|minted| minted.token)
+        .map_err(|(status, body)| anyhow::anyhow!("mint: {status} {}", body.0.message))?;
+        for state in [state.clone(), off] {
+            let (status, body) = send(state.clone(), "GET", "browser/host", &stale, vec![]).await?;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+            let (status, body) = send(
+                state,
+                "POST",
+                "browser/host/start",
+                &stale,
+                start_body.clone(),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        Ok(())
+    })
+    .await
+}
+
+/// Managed TURN never mints a relay credential for a browser host's origin:
+/// the host runs with WebRTC off and shares its machine with root model
+/// shells. Another managed machine on a TURN-covered space still gets one.
+#[tokio::test]
+async fn origin_proxy_mints_no_relay_credential_for_a_browser_host() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("browser host relay credential test").await?;
+    let host_project = Uuid::new_v4();
+    let other_project = Uuid::new_v4();
+    let fixture = SharedDbFixture {
+        projects: vec![host_project, other_project],
+        ..SharedDbFixture::default()
+    };
+    with_shared_db_fixture(fixture, async {
+        let seen: Arc<std::sync::Mutex<Vec<(Option<String>, bool)>>> = Arc::default();
+        let gateway = axum::Router::new().route(
+            "/browser/capabilities",
+            axum::routing::get({
+                let seen = seen.clone();
+                move |headers: axum::http::HeaderMap| {
+                    let seen = seen.clone();
+                    async move {
+                        let policy = headers
+                            .get("x-instafy-browser-webrtc-policy")
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
+                        let ice = headers.contains_key("x-instafy-browser-webrtc-ice-servers");
+                        seen.lock().expect("headers").push((policy, ice));
+                        axum::Json(json!({ "webrtc": false }))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let _gateway = spawn_aborting(async move {
+            axum::serve(listener, gateway)
+                .await
+                .expect("serve the stand-in gateway");
+        });
+
+        let mut config = config(
+            "browser-host-relay-credential",
+            HostedBrowserHostPolicy::Projects(vec![host_project]),
+        );
+        config.hosted_origin_endpoint = Some(endpoint.clone());
+        config.browser_turn_rest = Some(
+            crate::browser_turn::BrowserTurnRestConfig::for_test_projects(
+                "turns:turn.example.test:443",
+                "0123456789abcdef0123456789abcdef",
+                600,
+                &format!("{host_project},{other_project}"),
+            ),
+        );
+        let state = build_test_state(pool.clone(), config.clone());
+
+        let mut origins = Vec::new();
+        for (project_id, browser_host) in [(host_project, true), (other_project, false)] {
+            let runtime_id = Uuid::new_v4();
+            let lease_id = Uuid::new_v4();
+            let mut capabilities = json!({
+                "agent": true,
+                "origin": true,
+                "_instafySharedBrowserAgentConsent": { "version": 1 },
+            });
+            if browser_host {
+                capabilities["browserHost"] = json!({
+                    "version": 1,
+                    "mode": "lazy",
+                    "generation": lease_id.to_string(),
+                });
+            }
+            let origin_id = crate::origins::hosted_origin_id_for_project(&project_id);
+            let connection = pool.get().await?;
+            connection
+                .execute(
+                    "insert into projects (id, project_type, status)
+                     values ($1, 'customer', 'active')",
+                    &[&project_id],
+                )
+                .await?;
+            connection
+                .execute(
+                    "insert into runtimes
+                        (id, project_id, provider, status, idle_ttl_seconds, capabilities, last_seen_at)
+                     values ($1, $2, $3, 'ready', 600, $4, now())",
+                    &[&runtime_id, &project_id, &HOSTED_PROVIDER, &PgJson(capabilities)],
+                )
+                .await?;
+            connection
+                .execute(
+                    "insert into runtime_leases
+                        (id, project_id, runtime_id, status, scope, requested_at, metadata)
+                     values ($1, $2, $3, 'active', 'exclusive', now(), '{}'::jsonb)",
+                    &[&lease_id, &project_id, &runtime_id],
+                )
+                .await?;
+            connection
+                .execute(
+                    "update runtimes set active_lease_id = $2 where id = $1",
+                    &[&runtime_id, &lease_id],
+                )
+                .await?;
+            connection
+                .execute(
+                    "insert into workspace_origins (id, project_id, mode, endpoint, protocols)
+                     values ($1, $2, 'hosted', $3, array['http'])",
+                    &[&origin_id, &project_id, &endpoint],
+                )
+                .await?;
+            connection
+                .execute(
+                    "insert into origin_instances
+                        (project_id, runtime_id, lease_id, origin_id, mode, status, endpoint, protocols)
+                     values ($1, $2, $3, $4, 'hosted', 'online', $5, array['http'])",
+                    &[&project_id, &runtime_id, &lease_id, &origin_id, &endpoint],
+                )
+                .await?;
+            let token = mint_scoped_token(
+                &config,
+                ScopedTokenRequest {
+                    audience: origin_id.to_string(),
+                    subject: Uuid::new_v4().to_string(),
+                    project_id: project_id.to_string(),
+                    origin_id: Some(origin_id.to_string()),
+                    runtime_id: Some(runtime_id.to_string()),
+                    protocol: Some("http".to_string()),
+                    scopes: vec!["browser.view".to_string()],
+                    lease_id: None,
+                    run_id: None,
+                    prefer_runtime: None,
+                    ttl_seconds: None,
+                },
+            )
+            .map(|minted| minted.token)
+            .map_err(|(status, body)| anyhow::anyhow!("mint: {status} {}", body.0.message))?;
+            origins.push((origin_id, token));
+        }
+
+        for (origin_id, token) in &origins {
+            let response = crate::origins::router()
+                .with_state(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(format!("/origin/{origin_id}/browser/capabilities"))
+                        .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                        .body(Body::empty())?,
+                )
+                .await?;
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), usize::MAX).await?;
+            assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
+        }
+
+        let seen = seen.lock().expect("headers").clone();
+        assert_eq!(
+            seen,
+            vec![
+                (Some("disabled".to_string()), false),
+                (Some("relay".to_string()), true),
+            ]
+        );
         Ok(())
     })
     .await

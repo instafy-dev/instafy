@@ -1507,7 +1507,7 @@ mod tests {
             json!({ "version": 1, "mode": "lazy", "generation": lease_id.to_string() })
         );
         assert!(attested.get(BROWSER_HOST_CAPABILITY_SNAKE).is_none());
-        assert!(crate::runtime::runtime_is_registered_browser_host(
+        assert!(crate::runtime::managed::runtime_is_registered_browser_host(
             "instafy-cloud",
             &attested,
             Some(lease_id)

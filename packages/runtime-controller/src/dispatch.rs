@@ -4408,16 +4408,16 @@ fn shared_browser_runtime_is_dispatchable(
 
 const SHARED_BROWSER_HOST_POLICY_OFF_MESSAGE: &str = "Instafy's browser on this space's machine is turned off for this space; this request was not sent to another runtime.";
 
-/// Shared Browser work may go to a registered browser host only while the
-/// hosted browser policy covers its space.
+/// Shared Browser work may go to a browser host only while the hosted browser
+/// policy covers its space. Any stored `browserHost` counts, whatever its
+/// generation, so a value left from an earlier lease cannot pass this gate.
 fn shared_browser_host_dispatch_is_allowed(
     state: &AppState,
     project_id: &Uuid,
     provider: &str,
     capabilities: &JsonValue,
-    active_lease_id: Option<Uuid>,
 ) -> bool {
-    !runtime::runtime_is_registered_browser_host(provider, capabilities, active_lease_id)
+    !runtime::runtime_holds_browser_host_capability(provider, capabilities)
         || state.config.hosted_browser_host.allows_project(project_id)
 }
 
@@ -4472,17 +4472,12 @@ async fn ensure_shared_browser_runtime_dispatchable(
             )),
         ));
     }
-    // A space's own machine keeps its browser-host consent until its next
-    // registration renewal. Turning the policy off stops new browser turns to
-    // it at once; legacy webdev sessions keep their consent.
-    let active_lease_id: Option<Uuid> = row.get("active_lease_id");
-    if !shared_browser_host_dispatch_is_allowed(
-        state,
-        project_id,
-        &provider,
-        &capabilities,
-        active_lease_id,
-    ) {
+    // Registration does not read the policy: a space's own machine keeps its
+    // stored browser-host consent until a reuse with the policy off drops the
+    // lease's attestation, or until its next lease. This check is what
+    // enforces the policy, so turning it off stops new browser turns to the
+    // machine at once. Legacy webdev sessions keep their consent.
+    if !shared_browser_host_dispatch_is_allowed(state, project_id, &provider, &capabilities) {
         return Err((
             StatusCode::CONFLICT,
             Json(ApiError::new(SHARED_BROWSER_HOST_POLICY_OFF_MESSAGE)),
@@ -4497,7 +4492,7 @@ async fn ensure_shared_browser_runtime_dispatchable(
         idle_ttl_seconds: row.get("idle_ttl_seconds"),
         capabilities,
         display_name: row.get("display_name"),
-        active_lease_id,
+        active_lease_id: row.get("active_lease_id"),
     })
 }
 

@@ -76,16 +76,20 @@ enum BrowserWebRtcProxyPolicy {
     Relay(String),
 }
 
+/// `browser_host` is true when the origin's runtime holds a controller-written
+/// `browserHost`. A host launches with WebRTC off and shares its machine with
+/// root model shells, so no relay credential is minted for it.
 fn browser_webrtc_proxy_policy(
     turn: Option<&crate::browser_turn::BrowserTurnRestConfig>,
     project_id: Uuid,
     runtime_id: Option<Uuid>,
+    browser_host: bool,
     now_unix: i64,
 ) -> std::result::Result<BrowserWebRtcProxyPolicy, &'static str> {
     let Some(turn) = turn else {
         return Ok(BrowserWebRtcProxyPolicy::Unmanaged);
     };
-    if !turn.allows_project(project_id) {
+    if browser_host || !turn.allows_project(project_id) {
         return Ok(BrowserWebRtcProxyPolicy::Disabled);
     }
     let runtime_id = runtime_id.ok_or("managed WebRTC requires a runtime-bound origin token")?;
@@ -2331,11 +2335,13 @@ async fn origin_is_accessible_to_subject(
     }
 }
 
+/// Returns the origin's live runtime binding, if any, once the token's runtime
+/// is confirmed to still be authorized for it.
 async fn authorize_origin_proxy_token_runtime(
     state: &AppState,
     origin: &WorkspaceOriginRecord,
     claims: &AccessTokenClaims,
-) -> Result<(), (StatusCode, Json<ApiError>)> {
+) -> Result<Option<OriginRuntimeBinding>, (StatusCode, Json<ApiError>)> {
     let subject_user_id = Uuid::parse_str(claims.sub.trim())
         .map_err(|_| unauthorized("origin token subject is invalid"))?;
     let token_runtime_id = claims
@@ -2361,7 +2367,7 @@ async fn authorize_origin_proxy_token_runtime(
         if token_runtime_id.is_some() {
             return Err(unauthorized("origin token runtime binding mismatch"));
         }
-        return Ok(());
+        return Ok(None);
     };
     if token_runtime_id != Some(binding.runtime_id) {
         return Err(unauthorized("origin token runtime binding mismatch"));
@@ -2403,7 +2409,7 @@ async fn authorize_origin_proxy_token_runtime(
         )?;
     }
 
-    Ok(())
+    Ok(Some(binding))
 }
 
 async fn load_workspace_runtime_binding(
@@ -4563,9 +4569,8 @@ async fn proxy_origin_request(
     if project_deleted {
         return Err(not_found("project not found"));
     }
+    let runtime_binding = authorize_origin_proxy_token_runtime(&state, &origin, &claims).await?;
     ensure_browser_host_route_allowed(&state.config, &canonical_path, &origin.project_id)?;
-
-    authorize_origin_proxy_token_runtime(&state, &origin, &claims).await?;
 
     if !origin_endpoint_is_proxyable(&origin.endpoint) {
         return Err(forbidden(
@@ -4622,10 +4627,17 @@ async fn proxy_origin_request(
             .runtime_id
             .as_deref()
             .and_then(|value| Uuid::parse_str(value).ok());
+        let browser_host = runtime_binding.as_ref().is_some_and(|binding| {
+            crate::runtime::runtime_holds_browser_host_capability(
+                &binding.provider,
+                &binding.capabilities,
+            )
+        });
         match browser_webrtc_proxy_policy(
             state.config.browser_turn_rest.as_ref(),
             origin.project_id,
             runtime_id,
+            browser_host,
             Utc::now().timestamp(),
         )
         .map_err(forbidden)?
@@ -6011,12 +6023,22 @@ MCowBQYDK2VwAyEAFQAEX0aYqix3VQUBg05FFISGxhx2Ry93VE51GzM5iXA=
             &project_id.to_string(),
         );
 
-        let first =
-            browser_webrtc_proxy_policy(Some(&config), project_id, Some(runtime_id), 1_700_000_000)
-                .expect("first policy");
-        let refreshed =
-            browser_webrtc_proxy_policy(Some(&config), project_id, Some(runtime_id), 1_700_000_601)
-                .expect("refreshed policy");
+        let first = browser_webrtc_proxy_policy(
+            Some(&config),
+            project_id,
+            Some(runtime_id),
+            false,
+            1_700_000_000,
+        )
+        .expect("first policy");
+        let refreshed = browser_webrtc_proxy_policy(
+            Some(&config),
+            project_id,
+            Some(runtime_id),
+            false,
+            1_700_000_601,
+        )
+        .expect("refreshed policy");
         assert_ne!(first, refreshed);
         assert!(matches!(first, BrowserWebRtcProxyPolicy::Relay(_)));
 
@@ -6024,12 +6046,45 @@ MCowBQYDK2VwAyEAFQAEX0aYqix3VQUBg05FFISGxhx2Ry93VE51GzM5iXA=
             Some(&config),
             Uuid::new_v4(),
             Some(runtime_id),
+            false,
             1_700_000_000,
         )
         .expect("denied policy");
         assert_eq!(denied, BrowserWebRtcProxyPolicy::Disabled);
         assert!(
-            browser_webrtc_proxy_policy(Some(&config), project_id, None, 1_700_000_000,).is_err()
+            browser_webrtc_proxy_policy(Some(&config), project_id, None, false, 1_700_000_000)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn managed_webrtc_policy_mints_no_relay_credential_for_a_browser_host() {
+        let project_id = Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();
+        let runtime_id = Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap();
+        let config = crate::browser_turn::BrowserTurnRestConfig::for_test_projects(
+            "turns:turn.example.test:443",
+            "0123456789abcdef0123456789abcdef",
+            600,
+            &project_id.to_string(),
+        );
+
+        // Managed TURN covers the project, yet a host gets no credential.
+        assert_eq!(
+            browser_webrtc_proxy_policy(
+                Some(&config),
+                project_id,
+                Some(runtime_id),
+                true,
+                1_700_000_000,
+            )
+            .expect("host policy"),
+            BrowserWebRtcProxyPolicy::Disabled
+        );
+        // Without managed TURN nothing is minted either way.
+        assert_eq!(
+            browser_webrtc_proxy_policy(None, project_id, Some(runtime_id), true, 1_700_000_000)
+                .expect("unmanaged host policy"),
+            BrowserWebRtcProxyPolicy::Unmanaged
         );
     }
 

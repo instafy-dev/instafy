@@ -223,7 +223,7 @@ requires Builder-or-higher permission, stops managed runtimes that may hold the
 profile, and deletes the durable snapshot only after that shutdown is confirmed.
 When Instafy's browser runs on the space's own machine, that machine is one of
 them: it restarts, which ends its previews, terminals and running work, and
-Studio starts the same machine again afterwards. It does not clear Personal
+Studio's browser-host attach starts the same machine again afterwards. It does not clear Personal
 Browser. A failed shutdown leaves the saved profile in place so the clear can be
 retried safely.
 

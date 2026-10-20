@@ -719,7 +719,10 @@ to the webdev one:
   negotiation's fresh TURN relay credentials to a loopback WebRTC sender, so a
   root shell could capture them. WebRTC returns for hosts once the browser runs
   in a container of its own (Phase 2). CDP screencast is the viewer, with RFB as
-  the fallback. A provider's static ICE list is removed.
+  the fallback. A provider's static ICE list is removed, and the origin proxy
+  mints no relay credential for an origin whose runtime holds a stored
+  `browserHost`: its `browser/capabilities` and `browser/webrtc/offer` requests
+  carry the `disabled` WebRTC policy instead.
 - **Registration.** The runtime reports `browserHost`
   `{"version": 1, "modes": ["lazy"]}`. The controller always removes the
   reported `browserHost` (and `browser_host`) and, only when the active lease
@@ -745,8 +748,10 @@ to the webdev one:
   the origin's space.
 - **Dispatch.** Shared dispatch to a registered host answers 409 when the
   policy does not cover its space, and the request is not sent to another
-  runtime. The stored consent lasts until the next registration renewal, so
-  this check is what stops new browser turns at once.
+  runtime. Registration does not read the policy: the stored consent lasts
+  until a reuse with the policy off drops the lease's attestation, or until the
+  machine's next lease. This check is what enforces the policy, so turning it
+  off stops new browser turns at once.
 - **Sign-ins are kept.** A space the policy covers also has durable profile
   persistence, through the same encrypted store, `agent.browser_profile` token
   scope and launch settings that `BROWSER_PROFILE_PERSIST_PROJECT_IDS` enables
@@ -757,7 +762,8 @@ to the webdev one:
   policy on. **Clear shared browser data** still stops every managed machine
   of the space that may hold the profile, which includes a browser host: the
   space's own machine restarts, which ends its previews, terminals and running
-  work, and Studio starts the same machine again afterwards.
+  work, and Studio's browser-host attach starts the same machine again
+  afterwards.
 
 The attestation is inert on its own: a runtime that does not implement the lazy
 host ignores it and reports no `browserHost`, so it gets neither consent nor

@@ -326,6 +326,27 @@ pub(crate) fn browser_host_capability(lease_id: Uuid) -> JsonValue {
     })
 }
 
+/// Whether an exact managed runtime row holds a controller-written
+/// `browserHost` capability of any generation. Policy gates use this wider
+/// test so a value left from an earlier lease can never slip past them; only
+/// registration writes the key, so a runtime cannot set it.
+pub(crate) fn runtime_holds_browser_host_capability(
+    provider: &str,
+    capabilities: &JsonValue,
+) -> bool {
+    if !exact_managed_provider(provider) {
+        return false;
+    }
+    capabilities
+        .get(BROWSER_HOST_CAPABILITY)
+        .and_then(JsonValue::as_object)
+        .is_some_and(|host| {
+            host.get("version").and_then(JsonValue::as_u64) == Some(BROWSER_HOST_CAPABILITY_VERSION)
+                && host.get("mode").and_then(JsonValue::as_str)
+                    == Some(MANAGED_BROWSER_HOST_LAZY_MODE)
+        })
+}
+
 /// Whether a runtime row is a registered browser host for its active lease:
 /// the exact managed provider, the controller's Shared Browser consent, and a
 /// stored `browserHost` capability for exactly `active_lease_id`. A value
@@ -1079,6 +1100,44 @@ mod tests {
             assert!(
                 !runtime_is_registered_browser_host("instafy-cloud", &capabilities, Some(lease_id)),
                 "{host}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stored_browser_host_of_any_generation_counts_for_policy_gates() {
+        let lease_id = Uuid::new_v4();
+        let stored = json!({ (BROWSER_HOST_CAPABILITY): browser_host_capability(lease_id) });
+        assert!(runtime_holds_browser_host_capability(
+            "instafy-cloud",
+            &stored
+        ));
+        // An earlier generation still counts, and consent is not required.
+        let earlier = json!({
+            (BROWSER_HOST_CAPABILITY): browser_host_capability(Uuid::new_v4()),
+            (SHARED_BROWSER_AGENT_CONSENT_CAPABILITY): { "version": 1 },
+        });
+        assert!(runtime_holds_browser_host_capability(
+            "instafy-cloud",
+            &earlier
+        ));
+
+        for provider in ["instafy-cloud-custom", "self-hosted", "runtime"] {
+            assert!(
+                !runtime_holds_browser_host_capability(provider, &stored),
+                "{provider}"
+            );
+        }
+        for capabilities in [
+            json!({}),
+            json!({ (BROWSER_HOST_CAPABILITY): { "version": 1, "modes": ["lazy"] } }),
+            json!({ (BROWSER_HOST_CAPABILITY): { "version": 2, "mode": "lazy" } }),
+            json!({ (BROWSER_HOST_CAPABILITY): { "version": 1, "mode": "eager" } }),
+            json!({ (BROWSER_HOST_CAPABILITY): true }),
+        ] {
+            assert!(
+                !runtime_holds_browser_host_capability("instafy-cloud", &capabilities),
+                "{capabilities}"
             );
         }
     }
