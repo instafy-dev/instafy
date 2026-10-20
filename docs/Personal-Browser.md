@@ -213,12 +213,13 @@ does:
 Denials are final for that step: `activation_denied`, `typing_denied`,
 `form_submission_denied`, `navigation_denied` and `origin_not_approved`.
 
-On a Desktop host without policy version 2, routine keeps its older meaning. electron requires one native confirmation before enabling routine mode. It permits
+On a Desktop host without policy version 2, routine keeps its older meaning: Electron requires one native confirmation before enabling routine mode. It permits
 ordinary navigation, searches, clicks, non-sensitive field filling and form
 submissions, including Enter/Space activation, across sites in the
 current project/browser control session without repeated site/action prompts.
 Recognized consequential controls and URLs still ask; secret-entry blocks and
 fresh-target validation remain.
+
 Pause, Escape, closing, clearing data, or changing the user/project/renderer
 revokes this grant. A later Resume shows the start confirmation again; no
 permission is saved to the browser profile or shared with teammates.
