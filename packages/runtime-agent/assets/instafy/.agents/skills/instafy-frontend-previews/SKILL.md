@@ -26,6 +26,7 @@ Pick one of these modes and state it briefly in chat:
 When the user asks for a landing page / website / React UI:
 - Create or update the page.
 - Ensure a preview server is running (don’t just tell the user to run it).
+- Check it before you show it: `instafy preview check --port <port>` loads the page in a headless browser and lists console errors, failed requests and a blank page, and writes desktop and phone screenshots to open. Fix what it lists and check again. Exit 4 (no browser here) or 70 (the check itself failed) means nothing was checked; say so instead of calling the page checked.
 - Ask consent before exposing the preview port via an Instafy tunnel.
 - Post the preview URL as a normal clickable link.
 - If the user reports it’s down, run “preview doctor” and fix it.

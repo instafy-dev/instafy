@@ -33,6 +33,7 @@ import { listTunnelSessions, startTunnelDetached, stopTunnelSession, tailTunnelL
 import { configGet, configList, configPath, configSet, configUnset } from "./config-command.js";
 import { getInstafyProfileConfigPath, listInstafyProfileNames, readInstafyProfileConfig } from "./config.js";
 import { runInstafyGit, runInstafyGitSync } from "./git-wrapper.js";
+import { registerPreviewCheckCommand } from "./site-check.js";
 import { historyConversations, historyMessages, historyRuns } from "./history.js";
 import {
   grantHardwareBinding,
@@ -2210,6 +2211,13 @@ tunnelCommand
       process.exit(1);
     }
   });
+
+const previewCommand = program
+  .command("preview")
+  .description("Look at sites running in this space");
+
+failWithGroupHelp(previewCommand);
+registerPreviewCheckCommand(previewCommand);
 
 const orgCommand = program
   .command("team")
