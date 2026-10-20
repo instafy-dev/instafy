@@ -102,19 +102,30 @@ json_array() {
 
 echo "::group::Image size and cold pull"
 declare -A size pull_ms
+# Each pull starts with neither image present, so the second pull cannot
+# reuse layers the first one fetched. The before image is pulled again,
+# untimed, for the measurements below.
+if [[ "$skip_pull" != "1" ]]; then
+  docker image rm -f "$before_image" "$after_image" >/dev/null 2>&1 || true
+fi
 for side in before after; do
   image="$before_image"
   [[ "$side" == "after" ]] && image="$after_image"
   pull_ms[$side]=null
   if [[ "$skip_pull" != "1" ]]; then
-    docker image rm -f "$image" >/dev/null 2>&1 || true
     started="$(now_ms)"
     docker pull --quiet "$image" >/dev/null
     pull_ms[$side]="$(( $(now_ms) - started ))"
   fi
   size[$side]="$(docker image inspect -f '{{.Size}}' "$image")"
   echo "$side: ${size[$side]} bytes, pull ${pull_ms[$side]} ms"
+  if [[ "$skip_pull" != "1" && "$side" == "before" ]]; then
+    docker image rm -f "$before_image" >/dev/null
+  fi
 done
+if [[ "$skip_pull" != "1" ]]; then
+  docker pull --quiet "$before_image" >/dev/null
+fi
 echo "::endgroup::"
 
 echo "::group::Boot time and idle memory"
