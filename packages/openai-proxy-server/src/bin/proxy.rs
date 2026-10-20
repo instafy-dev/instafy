@@ -15,8 +15,8 @@ async fn main() -> Result<()> {
     let credentials = match auth::load_credentials(None) {
         Ok(creds) => Some(creds),
         Err(error) => {
-            eprintln!(
-                "[proxy] unable to load local credentials: {error}; continuing without static upstream credentials"
+            openai_proxy_server::proxy_log!(
+                "unable to load local credentials: {error}; continuing without static upstream credentials"
             );
             None
         }

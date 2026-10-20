@@ -5,7 +5,7 @@ use std::future::{Future, IntoFuture};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
@@ -98,8 +98,8 @@ impl StaticCredentials {
                 .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
                 .is_ok()
         {
-            eprintln!(
-                "[proxy] static proxy credentials are serving a managed run but the managed model is not pinned: managed runs keep the model they ask for and every client tool, hosted ones such as web search included, and speech and transcription stay available, on these credentials. Set PROXY_PINNED_MODEL to MANAGED_AI_MODEL_ID to pin them."
+            crate::proxy_log!(
+                "static proxy credentials are serving a managed run but the managed model is not pinned: managed runs keep the model they ask for and every client tool, hosted ones such as web search included, and speech and transcription stay available, on these credentials. Set PROXY_PINNED_MODEL to MANAGED_AI_MODEL_ID to pin them."
             );
         }
         LeasedCredentials {
@@ -280,16 +280,6 @@ fn fallback_default_model_for_endpoint(endpoint: &str) -> Option<&'static str> {
         Some(KnownByocProvider::Gemini) => Some("gemini-2.5-pro"),
         None => None,
     }
-}
-
-fn format_endpoint_for_error(endpoint: &str) -> String {
-    Url::parse(endpoint)
-        .ok()
-        .and_then(|url| {
-            let host = url.host_str()?;
-            Some(format!("{}{}", host, url.path()))
-        })
-        .unwrap_or_else(|| endpoint.trim().to_string())
 }
 
 fn looks_like_openai_model_id(model: &str) -> bool {
@@ -501,7 +491,7 @@ fn dropped_tools_summary(dropped: &[DroppedTool]) -> Value {
 fn log_dropped_tools(dropped: &[DroppedTool], run_id: Option<&str>) {
     let mut summary = dropped_tools_summary(dropped);
     summary["runId"] = json!(run_id);
-    eprintln!("[proxy] credential lease drops client tools {summary}");
+    crate::proxy_log!("credential lease drops client tools {summary}");
 }
 
 /// Input item types that carry tool definitions. Codex sends its whole tool
@@ -792,8 +782,8 @@ struct LaneLease<'a> {
     /// asks for again and a usage report names; `None` for static
     /// credentials.
     controller_credential_id: Option<&'a str>,
-    /// `claim`, `managed` or `static`: the `credential_source` in error
-    /// context.
+    /// `claim`, `managed` or `static`: the `credentialSource` of the
+    /// request's `upstream request` line.
     source: &'static str,
 }
 
@@ -1059,8 +1049,8 @@ where
     // The proxy used to debit this many credits per request; that flat burn is
     // gone, so an environment that still sets it gets one startup warning.
     if std::env::var("PROXY_CREDIT_BURN_AMOUNT").is_ok_and(|value| !value.trim().is_empty()) {
-        eprintln!(
-            "[proxy] PROXY_CREDIT_BURN_AMOUNT is ignored: the proxy no longer debits credits per request"
+        crate::proxy_log!(
+            "PROXY_CREDIT_BURN_AMOUNT is ignored: the proxy no longer debits credits per request"
         );
     }
     let require_controller_auth = boolean_env("PROXY_REQUIRE_CONTROLLER_AUTH")?;
@@ -1117,7 +1107,7 @@ where
         .await
         .context("failed to bind proxy listener")?;
 
-    println!("codex proxy listening on http://{}", listener.local_addr()?);
+    crate::proxy_log!("codex proxy listening on http://{}", listener.local_addr()?);
 
     serve_until(listener, app, shutdown, SHUTDOWN_DRAIN_LIMIT)
         .await
@@ -1150,8 +1140,8 @@ where
     match tokio::time::timeout(drain_limit, server).await {
         Ok(result) => result,
         Err(_) => {
-            eprintln!(
-                "[proxy] requests were still open after {}s; exiting without them",
+            crate::proxy_log!(
+                "requests were still open after {}s; exiting without them",
                 drain_limit.as_secs_f32()
             );
             Ok(())
@@ -1386,7 +1376,7 @@ impl ProxyState {
         let overrides = self.service_tier_overrides.clone();
         Some(Box::new(move || {
             overrides.fetch_add(1, Ordering::Relaxed);
-            eprintln!("[proxy] platform lane overrides the requested service tier {record}");
+            crate::proxy_log!("platform lane overrides the requested service tier {record}");
         }))
     }
 
@@ -1526,8 +1516,8 @@ fn required_tool_call_fallback_hook(
     let run_id = run_id.map(str::to_string);
     Box::new(move |rejection: &ToolControlRejection| {
         fallbacks.fetch_add(1, Ordering::Relaxed);
-        eprintln!(
-            "[proxy] required tool call falls back to the request's own tool choice {}",
+        crate::proxy_log!(
+            "required tool call falls back to the request's own tool choice {}",
             json!({
                 "route": route,
                 "runId": run_id,
@@ -1549,25 +1539,9 @@ fn build_remote_completion_client<'i>(
     input_items: &'i [Value],
     log_lease_policy: bool,
     required_tool_call_attempt: RequiredToolCallAttempt,
-) -> Result<(CodexClient, String, String, Cow<'i, [Value]>)> {
-    let endpoint_for_error = format_endpoint_for_error(leased.credentials.endpoint());
+) -> Result<(CodexClient, String, Cow<'i, [Value]>)> {
     let upstream_model = resolve_model_for_lease(options.requested_model, &leased);
-    let requested_model = options.requested_model.trim();
     let pinned = leased.pinned_model().is_some();
-    if log_lease_policy
-        && pinned
-        && !requested_model.is_empty()
-        && requested_model != upstream_model
-    {
-        eprintln!(
-            "[proxy] credential lease pins the model {}",
-            json!({
-                "requestedModel": requested_model,
-                "upstreamModel": upstream_model,
-                "runId": run_id_from_claims(options.claims),
-            })
-        );
-    }
     // Only the pinned model may run on a pinned lease, so a client tool that
     // brings its own model or hosted work does not go upstream, whether the
     // request lists it in `tools` or in a tool-carrying input item. The
@@ -1652,8 +1626,8 @@ fn build_remote_completion_client<'i>(
     }
 
     if required_tool_call && required_tool_call_attempt == RequiredToolCallAttempt::First {
-        eprintln!(
-            "[proxy] required tool call sends tool_choice required {}",
+        crate::proxy_log!(
+            "required tool call sends tool_choice required {}",
             json!({ "route": options.route, "runId": run_id })
         );
     }
@@ -1696,7 +1670,85 @@ fn build_remote_completion_client<'i>(
         }
     }
 
-    Ok((client, upstream_model, endpoint_for_error, input_items))
+    Ok((client, upstream_model, input_items))
+}
+
+/// Sends one model request upstream on `lane` and, when it ends, logs one
+/// line for it ([`log_upstream_request`]). Returns the completion and the
+/// model it was sent as.
+async fn complete_with_optional_controller_refresh(
+    lane: LaneLease<'_>,
+    options: &RemoteCompletionOptions<'_>,
+    input_items: &[Value],
+    controller: Option<&ControllerIntegration>,
+    send_hook: Option<SendHook>,
+) -> Result<(CodexCompletion, String)> {
+    let started = Instant::now();
+    let model = resolve_model_for_lease(options.requested_model, &lane.leased);
+    let result = send_with_optional_controller_refresh(
+        lane.leased,
+        options,
+        input_items,
+        controller,
+        lane.controller_credential_id,
+        send_hook,
+    )
+    .await;
+    log_upstream_request(options, lane.source, &model, &result, started.elapsed());
+    result
+}
+
+/// The `upstream request` line of one model request, when it ends: the
+/// route; the run, job and lease attempt its token names; where its
+/// credentials came from (`claim`, `managed` or `static`); the model it asked
+/// for and the model it went upstream as; how long it took; and either the
+/// response's outcome, the model the response names, its id and the `usage`
+/// the provider reported, as reported, or the failure: the status and code
+/// the client gets and what the provider said
+/// ([`upstream_error::ProviderError`]). Beyond what a provider's message
+/// quotes, it logs nothing a request or an answer says, and no header or
+/// credential.
+fn log_upstream_request(
+    options: &RemoteCompletionOptions<'_>,
+    credential_source: &str,
+    model: &str,
+    result: &Result<(CodexCompletion, String)>,
+    elapsed: Duration,
+) {
+    let claims = options.claims;
+    let mut record = json!({
+        "route": options.route,
+        "runId": run_id_from_claims(claims),
+        "jobId": claims.and_then(|claims| claims.job_id.as_deref()),
+        "leaseAttempt": claims.and_then(|claims| claims.lease_attempt),
+        "credentialSource": credential_source,
+        "requestedModel": Some(options.requested_model.trim()).filter(|model| !model.is_empty()),
+        "model": model,
+        "latencyMs": u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+    });
+    match result {
+        Ok((completion, sent_as)) => {
+            let raw = &completion.raw;
+            record["model"] = json!(sent_as);
+            record["outcome"] = json!(
+                raw.get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("completed")
+            );
+            record["servedModel"] =
+                json!(Some(completion.model.as_str()).filter(|model| !model.is_empty()));
+            record["responseId"] = json!(completion.id);
+            record["usage"] = raw.get("usage").cloned().unwrap_or(Value::Null);
+        }
+        Err(error) => {
+            let classified = upstream_error::classify(error);
+            record["outcome"] = json!("failed");
+            record["status"] = json!(classified.status.as_u16());
+            record["code"] = json!(classified.code);
+            record["upstreamError"] = json!(upstream_error::provider_error(error));
+        }
+    }
+    crate::proxy_log!("upstream request {record}");
 }
 
 /// `send_hook` runs when the first attempt goes upstream; a lease renewal's
@@ -1704,7 +1756,7 @@ fn build_remote_completion_client<'i>(
 /// does the client's own retry after upstream refused the required tool call
 /// it set, which also keeps the lease; a lease renewal after that retry
 /// sends no required tool call either.
-async fn complete_with_optional_controller_refresh(
+async fn send_with_optional_controller_refresh(
     leased: LeasedCredentials,
     options: &RemoteCompletionOptions<'_>,
     input_items: &[Value],
@@ -1713,7 +1765,7 @@ async fn complete_with_optional_controller_refresh(
     send_hook: Option<SendHook>,
 ) -> Result<(CodexCompletion, String)> {
     let first_lease_pinned = leased.pinned_model().is_some();
-    let (client, upstream_model, endpoint_for_error, first_input) = build_remote_completion_client(
+    let (client, upstream_model, first_input) = build_remote_completion_client(
         leased,
         options,
         input_items,
@@ -1730,10 +1782,7 @@ async fn complete_with_optional_controller_refresh(
                 && error_indicates_chatgpt_token_refreshable(&first_error);
 
             if !can_refresh {
-                return Err(first_error.context(format!(
-                    "upstream request failed (endpoint={}, requested_model={}, resolved_model={})",
-                    endpoint_for_error, options.requested_model, upstream_model
-                )));
+                return Err(first_error);
             }
 
             let controller = controller.expect("controller checked above");
@@ -1745,31 +1794,25 @@ async fn complete_with_optional_controller_refresh(
                 .into_material()
                 .context(UpstreamFailure::CredentialRefresh)?;
             // The renewed lease carries the controller's pin again; the first
-            // attempt already logged it unless that lease had none.
+            // attempt already logged the tools it drops unless that lease had
+            // none.
             let required_tool_call_attempt = if client.required_tool_call_refused() {
                 RequiredToolCallAttempt::RenewalAfterFallback
             } else {
                 RequiredToolCallAttempt::Renewal
             };
-            let (mut retry_client, retry_model, retry_endpoint, retry_input) =
-                build_remote_completion_client(
-                    refreshed,
-                    options,
-                    input_items,
-                    !first_lease_pinned,
-                    required_tool_call_attempt,
-                )?;
+            let (mut retry_client, retry_model, retry_input) = build_remote_completion_client(
+                refreshed,
+                options,
+                input_items,
+                !first_lease_pinned,
+                required_tool_call_attempt,
+            )?;
 
             return retry_client
                 .complete_with_input(&retry_input)
                 .await
-                .map(|response| (response, retry_model.clone()))
-                .map_err(|retry_error| {
-                    retry_error.context(format!(
-                        "upstream request failed after controller credential lease renewal (endpoint={}, requested_model={}, resolved_model={}, initial_error={:#})",
-                        retry_endpoint, options.requested_model, retry_model, first_error
-                    ))
-                });
+                .map(|response| (response, retry_model));
         }
     }
 }
@@ -1817,7 +1860,7 @@ fn spawn_credential_usage_report(
             .await
         {
             if std::env::var("PROXY_DEBUG_USAGE").as_deref() == Ok("1") {
-                eprintln!("[proxy] credential usage report failed: {error:#}");
+                crate::proxy_log!("credential usage report failed: {error:#}");
             }
         }
     });
@@ -1855,8 +1898,8 @@ async fn create_response(
     let requested_tool_choice = payload.get("tool_choice").cloned();
     let requested_parallel_tool_calls = payload.get("parallel_tool_calls").and_then(Value::as_bool);
     let requested_text_controls = payload.get("text").cloned();
-    eprintln!(
-        "[proxy] response tool controls {}",
+    crate::proxy_log!(
+        "response tool controls {}",
         json!({
             "model": model,
             "plainTextCompletion": plain_text_completion,
@@ -1899,29 +1942,25 @@ async fn create_response(
         .and_then(Value::as_bool)
         .unwrap_or(true);
 
-    let LaneLease {
-        leased,
-        controller_credential_id,
-        source: credential_source,
-    } = state.lease_for_lane(lane).await?;
+    let lease = state.lease_for_lane(lane).await?;
+    let controller_credential_id = lease.controller_credential_id;
     context_controls
         .validate_upstream(
-            sends_tool_controls(&leased.credentials),
-            leased.credentials.is_chatgpt(),
+            sends_tool_controls(&lease.leased.credentials),
+            lease.leased.credentials.is_chatgpt(),
         )
         .map_err(AppError::bad_request)?;
     let send_hook = state.service_tier_override_hook(
         &service_tier,
-        &leased.credentials,
+        &lease.leased.credentials,
         "/v1/responses",
         claims.as_ref(),
     );
     let completion = match complete_with_optional_controller_refresh(
-        leased,
+        lease,
         &completion_options,
         &input_items,
         state.controller.as_ref(),
-        controller_credential_id,
         send_hook,
     )
     .await
@@ -1935,10 +1974,7 @@ async fn create_response(
             ProxyCompletion::Remote(response)
         }
         Err(error) => {
-            let error = AppError::upstream(error.context(format!(
-                "upstream request failed (credential_source={}, requested_model={})",
-                credential_source, model,
-            )));
+            let error = AppError::upstream(error);
             // Codex does not retry an HTTP 429 by itself (its `retry_429` is off for every
             // provider), but it retries a stream that fails with `rate_limit_exceeded` after
             // the wait the message names, within its stream retry budget. A transient rate limit
@@ -1952,8 +1988,8 @@ async fn create_response(
                     )
                 })
             {
-                eprintln!(
-                    "[proxy] upstream rate limit streamed as response.failed {}",
+                crate::proxy_log!(
+                    "upstream rate limit streamed as response.failed {}",
                     json!({
                         "runId": run_id_from_claims(claims.as_ref()),
                         "message": rate_limit["message"],
@@ -2031,41 +2067,31 @@ async fn create_chat_completion(
         affinity_codec: &state.affinity_codec,
     };
 
-    let LaneLease {
-        leased,
-        controller_credential_id,
-        source: credential_source,
-    } = state.lease_for_lane(lane).await?;
+    let lease = state.lease_for_lane(lane).await?;
+    let controller_credential_id = lease.controller_credential_id;
     context_controls
         .validate_upstream(
-            sends_tool_controls(&leased.credentials),
-            leased.credentials.is_chatgpt(),
+            sends_tool_controls(&lease.leased.credentials),
+            lease.leased.credentials.is_chatgpt(),
         )
         .map_err(AppError::bad_request)?;
     let send_hook = state.service_tier_override_hook(
         &service_tier,
-        &leased.credentials,
+        &lease.leased.credentials,
         "/v1/chat/completions",
         claims.as_ref(),
     );
     let (completion, upstream_model) = match complete_with_optional_controller_refresh(
-        leased,
+        lease,
         &completion_options,
         &input_items,
         state.controller.as_ref(),
-        controller_credential_id,
         send_hook,
     )
     .await
     {
         Ok(result) => result,
-        Err(error) => {
-            let error = error.context(format!(
-                "upstream request failed (credential_source={}, requested_model={})",
-                credential_source, requested_model,
-            ));
-            return Err(AppError::upstream(error));
-        }
+        Err(error) => return Err(AppError::upstream(error)),
     };
 
     spawn_credential_usage_report(
@@ -2723,8 +2749,8 @@ fn sse_response(events: Vec<Value>) -> Result<Response, AppError> {
             .iter()
             .chain(std::iter::once(&json!({"type": "done"})))
         {
-            eprintln!(
-                "[proxy] stream event: {}",
+            crate::proxy_log!(
+                "stream event: {}",
                 serde_json::to_string(event).unwrap_or_else(|_| "<invalid>".into())
             );
         }
@@ -2814,13 +2840,20 @@ impl AppError {
         }
     }
 
+    /// The proxy's own words for the failure, followed by the provider's code and param when
+    /// it gave them ([`upstream_error::ProviderError::reason`]), never its message. The
+    /// words stay a sentence of their own, which clients match.
     fn upstream(err: impl Into<anyhow::Error>) -> Self {
         let err = err.into();
         let classified = upstream_error::classify(&err);
+        let message = match upstream_error::provider_error(&err).and_then(|error| error.reason()) {
+            Some(reason) => format!("{} Upstream error: {reason}.", classified.message),
+            None => classified.message.to_string(),
+        };
         Self {
             status: classified.status,
             error_type: classified.error_type,
-            message: classified.message.to_string(),
+            message,
             code: None,
             upstream: Some(classified),
         }
@@ -3344,7 +3377,7 @@ fn stop_signal() -> std::io::Result<impl Future<Output = ()> + Send + 'static> {
             _ = terminate.recv() => "SIGTERM",
             _ = interrupt.recv() => "SIGINT",
         };
-        eprintln!("[proxy] {name} received; finishing requests in progress");
+        crate::proxy_log!("{name} received; finishing requests in progress");
     })
 }
 
@@ -3353,7 +3386,7 @@ fn stop_signal() -> std::io::Result<impl Future<Output = ()> + Send + 'static> {
     let mut ctrl_c = tokio::signal::windows::ctrl_c()?;
     Ok(async move {
         ctrl_c.recv().await;
-        eprintln!("[proxy] Ctrl-C received; finishing requests in progress");
+        crate::proxy_log!("Ctrl-C received; finishing requests in progress");
     })
 }
 

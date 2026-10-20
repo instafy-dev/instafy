@@ -55,6 +55,32 @@ The proxy stops on SIGTERM (what `docker stop` sends) or Ctrl-C: it stops taking
 lets the requests in progress finish for up to eight seconds (a model stream still open then is
 cut), and exits with status 0.
 
+### Logs
+
+The proxy logs to stderr, one line per event, each starting with the time it was written (UTC,
+to the millisecond) and `[proxy]`:
+
+```text
+2026-10-20T15:04:14.123Z [proxy] codex proxy listening on http://127.0.0.1:8080
+```
+
+Each Responses and Chat Completions request that goes upstream logs one `upstream request` line
+when it ends, with the `route`; the `runId`, `jobId` and `leaseAttempt` its token names; where its
+credentials came from (`credentialSource`: `claim`, `managed` or `static`); the model it asked for
+(`requestedModel`) and the model it went upstream as (`model`); and `latencyMs`. A request that
+got an answer adds the answer's `outcome` (its `status`, else `completed`), the model the answer
+names (`servedModel`), its `responseId` and the `usage` the provider reported, as reported. A
+failed one adds `outcome` `failed`, the `status` and `code` the client gets, and `upstreamError`:
+the provider's error `code`, `type` and `param` when they read as identifiers, and its message (or
+a `detail` or `error` string) on one line, cut to 200 characters, with every run of 32 or more
+characters that could belong to a key or token replaced by `[masked]`. Beyond what a provider's
+message quotes, the line holds nothing a request or an answer says, and it holds no header or
+credential.
+
+The controller hears nothing of a request served on static credentials: `reportsUsage` is
+`false`, and the controller has no endpoint for a usage report yet. This line is where the model
+that served a managed run and the tokens it used are recorded.
+
 ### Testing the proxy with curl
 
 ```bash
@@ -131,8 +157,8 @@ provider's id uses its default, so a mismatched id does not fail upstream.
 In controller-integrated mode the controller can pin a credential lease to one model with
 `pinnedModel` on the lease response. It pins the managed Instafy AI lease, which the operator
 pays for, to `MANAGED_AI_MODEL_ID`. The proxy then sends every Responses and Chat Completions
-request on that lease as the pinned model, whatever model the request names, and logs
-`credential lease pins the model` with the requested and sent ids when they differ. Speech and
+request on that lease as the pinned model, whatever model the request names; its
+`upstream request` line ([Logs](#logs)) names both. Speech and
 transcription requests name an audio model the pinned model cannot replace, so both routes
 answer 400 on a pinned lease without contacting the provider. Client tools on a pinned lease are
 limited to codex's client tool types (`function`, `custom`, `namespace`, and `tool_search` with
@@ -331,7 +357,7 @@ and logs it.
 | `sessionTokensRefused` | `true` with controller integration: credential-less tokens without a `run_id` get 401 |
 | `serviceTier` | The `service_tier` platform-lane Responses and Chat Completions requests go upstream with (see [Service tier](#service-tier)), by the rule the requests follow: `default` when static credentials and their endpoint carry it, and `null` for a static ChatGPT login, Gemini Code Assist, an endpoint `PROXY_PLATFORM_SERVICE_TIER_ENDPOINTS` does not name (with the default `openai`, a host not under `openai.com`), when `servedBy` is `refused`, and in standalone mode. A controller lease names its endpoint only per lease, so for `controller_lease` the field says what the setting implies for the controller's OpenAI API key: `default` unless the setting is `none`. A lease whose endpoint is not an OpenAI host still gets no tier under `openai`, which each override's log line shows |
 | `serviceTierOverrides` | How many platform-lane Responses and Chat Completions requests since the proxy started went upstream without the string tier they asked for: replaced with `default`, or dropped where no tier is sent (a ChatGPT login, Gemini Code Assist, or an endpoint the setting does not name). A request counts when it goes upstream, once however many attempts it takes; one that never gets there (refused for bad input, no credits or a failed lease, or failing inside the proxy after its lease) does not. It only grows, and stays `0` without a platform lane |
-| `reportsUsage` | Whether the proxy reports platform-lane usage to the controller; `false` today |
+| `reportsUsage` | Whether the proxy reports platform-lane usage to the controller; `false` today. Each request's model and usage are in its log line instead ([Logs](#logs)) |
 | `controllerMeteringProtocol` | The controller's usage metering protocol as the proxy last read it; `null` today |
 | `outputCeilingSource` | Where the output token ceiling sent upstream comes from; `null` today, no ceiling is sent |
 
@@ -360,13 +386,17 @@ add a stable `error.code` and boolean `error.retryable`. The one exception is a 
 whose `error.type` is the provider's `usage_limit_reached` or `usage_not_included` so Codex
 reports it as a usage limit, with a positive integer `error.resets_at` (Unix seconds) when the
 provider gave one. Raw provider messages, response bodies, credentials, and endpoint URLs are
-not echoed. Valid `Retry-After` seconds or HTTP dates are forwarded for 429 and 503 with the
-provider's value and no bound of the proxy's own (Codex itself does not retry an HTTP 429, so
-the header matters to other clients and to the streamed wait below); other header values are
-discarded. Every retryable 429 carries a `Retry-After`. When the provider
-sends no usable one, the proxy derives it from the rate-limit bucket that refused the request,
-using OpenAI's `x-ratelimit-remaining-*` and `x-ratelimit-reset-*` headers (reset durations such
-as `6s` or `1m2.5s` are rounded up to whole seconds):
+not echoed. After the proxy's own sentence, `error.message` names the provider's error code (its
+type when it has none) and the param it blames, when the provider gave them as identifiers:
+`The upstream provider rejected the request. Upstream error: model_not_found, param model.` The
+provider's message is only in the proxy's log ([Logs](#logs)). Valid `Retry-After` seconds or
+HTTP dates are forwarded for 429 and 503 with the provider's value and no bound of the proxy's
+own (Codex itself does not retry an HTTP 429, so the header matters to other clients and to the
+streamed wait below); other header values are discarded. Every retryable 429 carries a
+`Retry-After`. When the provider sends no usable one, the proxy derives it from the rate-limit
+bucket that refused the request, using OpenAI's `x-ratelimit-remaining-*` and
+`x-ratelimit-reset-*` headers (reset durations such as `6s` or `1m2.5s` are rounded up to whole
+seconds):
 
 - A bucket whose `x-ratelimit-remaining-*` count is 0 refused the request, so the proxy waits
   for that bucket's reset, or for the later of both resets when both counts are 0.

@@ -70,8 +70,8 @@ pub(crate) fn delivered_response(mut response: Value) -> Value {
             )),
         }
     }
-    eprintln!(
-        "[proxy] upstream response incomplete {}",
+    crate::proxy_log!(
+        "upstream response incomplete {}",
         json!({
             "responseId": map.get("id"),
             "reason": reason,

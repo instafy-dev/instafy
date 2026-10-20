@@ -162,8 +162,8 @@ fn global_reasoning_effort() -> Option<&'static str> {
                 }
                 let effort = normalize_reasoning_effort(trimmed);
                 if effort.is_none() {
-                    eprintln!(
-                        "[proxy] Ignoring invalid CODEX_REASONING_EFFORT value `{}`; expected minimal|low|medium|high|xhigh|max.",
+                    crate::proxy_log!(
+                        "Ignoring invalid CODEX_REASONING_EFFORT value `{}`; expected minimal|low|medium|high|xhigh|max.",
                         trimmed
                     );
                 }
@@ -685,7 +685,7 @@ impl CodexClient {
 /// Prints a request about to go upstream when `CODEX_DEBUG_HTTP=1`.
 fn debug_http_request(endpoint: &str, headers: &HeaderMap, payload: &Value) {
     if std::env::var("CODEX_DEBUG_HTTP").as_deref() == Ok("1") {
-        eprintln!(
+        crate::proxy_log!(
             "--> POST {}\nHeaders: {:?}\nBody: {}",
             endpoint,
             headers,
@@ -1507,7 +1507,7 @@ async fn read_chatgpt_stream(mut response: reqwest::Response) -> Result<Value> {
     let text = String::from_utf8(bytes).context("streamed response was not valid UTF-8")?;
 
     if std::env::var("CODEX_DEBUG_HTTP").as_deref() == Ok("1") {
-        eprintln!("<-- stream\n{}", text);
+        crate::proxy_log!("<-- stream\n{}", text);
     }
 
     read_chatgpt_stream_text(&text)

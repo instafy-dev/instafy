@@ -5,6 +5,7 @@ use std::time::{Duration, SystemTime};
 
 use reqwest::StatusCode;
 use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -36,6 +37,14 @@ const TOOL_CONTROL_PARAMS: [&str; 2] = ["tool_choice", "tools"];
 /// Most characters of a provider error code that a [`ToolControlRejection`] keeps, so a log
 /// line that names it stays bounded.
 const MAX_TOOL_CONTROL_ERROR_CODE_CHARS: usize = 64;
+/// Most characters of a provider error code, type or param that a [`ProviderError`] keeps.
+const MAX_PROVIDER_IDENTIFIER_CHARS: usize = 64;
+/// Most characters of a provider error message that a [`ProviderError`] keeps for the log.
+const MAX_PROVIDER_MESSAGE_CHARS: usize = 200;
+/// A logged provider message masks every run of at least this many characters that could
+/// belong to a key or token. API keys, access tokens and JWTs are longer; words and model ids
+/// are shorter.
+const MIN_MASKED_RUN_CHARS: usize = 32;
 
 #[derive(Debug)]
 pub(crate) enum UpstreamFailure {
@@ -45,6 +54,8 @@ pub(crate) enum UpstreamFailure {
         refreshable_auth: bool,
         /// Set only for a 400 whose structured error blames the tool controls.
         tool_control_rejection: Option<ToolControlRejection>,
+        /// What the provider's error body said, when it said anything the proxy reads.
+        provider_error: Option<ProviderError>,
     },
     CredentialRefresh,
     InvalidResponse,
@@ -141,6 +152,116 @@ impl ToolControlRejection {
     }
 }
 
+/// Why a provider says it refused a request: the `code`, `type` and `param` of its error object
+/// (`error`, else `detail`, else the body itself) when they read as identifiers, and its message,
+/// or a `detail` or `error` string, on one line, cut to [`MAX_PROVIDER_MESSAGE_CHARS`] and with
+/// every run of key- or token-like characters masked. The message is for the proxy's own log
+/// only; a client gets [`ProviderError::reason`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub(crate) struct ProviderError {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) code: Option<String>,
+    /// The error's `type`.
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub(crate) kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) param: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) message: Option<String>,
+}
+
+impl ProviderError {
+    fn from_body(body: &str) -> Option<Self> {
+        let body = serde_json::from_str::<Value>(body).ok()?;
+        let object = ["error", "detail"]
+            .into_iter()
+            .find_map(|field| body.get(field).filter(|value| value.is_object()))
+            .unwrap_or(&body);
+        fn text<'v>(value: &'v Value, field: &str) -> Option<&'v str> {
+            value.get(field).and_then(Value::as_str)
+        }
+        let error = Self {
+            code: text(object, "code").and_then(provider_identifier),
+            kind: text(object, "type").and_then(provider_identifier),
+            param: text(object, "param").and_then(provider_identifier),
+            message: text(object, "message")
+                .or_else(|| text(&body, "detail"))
+                .or_else(|| text(&body, "error"))
+                .and_then(loggable_provider_message),
+        };
+        (error != Self::default()).then_some(error)
+    }
+
+    /// The reason a client may see: the provider's code, or its type when it has none, and the
+    /// param it names. Identifiers only, never the provider's message, which can name the
+    /// operator's account or echo the request.
+    pub(crate) fn reason(&self) -> Option<String> {
+        let what = self.code.as_deref().or(self.kind.as_deref());
+        match (what, self.param.as_deref()) {
+            (Some(what), Some(param)) => Some(format!("{what}, param {param}")),
+            (Some(what), None) => Some(what.to_string()),
+            (None, Some(param)) => Some(format!("param {param}")),
+            (None, None) => None,
+        }
+    }
+}
+
+/// `value`, trimmed, when it reads as a provider identifier: a code such as `model_not_found`
+/// or a param such as `input[3].content`, at most [`MAX_PROVIDER_IDENTIFIER_CHARS`] long.
+fn provider_identifier(value: &str) -> Option<String> {
+    let value = value.trim();
+    let allowed = |ch: char| ch.is_ascii_alphanumeric() || "_-.:[]".contains(ch);
+    (!value.is_empty()
+        && value.chars().count() <= MAX_PROVIDER_IDENTIFIER_CHARS
+        && value.chars().all(allowed))
+    .then(|| value.to_string())
+}
+
+/// `message` on one line, every run of at least [`MIN_MASKED_RUN_CHARS`] characters that could
+/// belong to a key or token replaced with `[masked]`, cut to [`MAX_PROVIDER_MESSAGE_CHARS`].
+fn loggable_provider_message(message: &str) -> Option<String> {
+    let token_char = |ch: char| ch.is_ascii_alphanumeric() || "-_.+/=*".contains(ch);
+    let mut line = String::new();
+    let mut run = String::new();
+    let end_run = |line: &mut String, run: &mut String| {
+        if run.chars().count() >= MIN_MASKED_RUN_CHARS {
+            line.push_str("[masked]");
+        } else {
+            line.push_str(run);
+        }
+        run.clear();
+    };
+    for ch in message.chars() {
+        if token_char(ch) {
+            run.push(ch);
+            continue;
+        }
+        end_run(&mut line, &mut run);
+        if ch.is_whitespace() || ch.is_control() {
+            if !line.is_empty() && !line.ends_with(' ') {
+                line.push(' ');
+            }
+        } else {
+            line.push(ch);
+        }
+    }
+    end_run(&mut line, &mut run);
+    let line = line.trim_end();
+    if line.is_empty() {
+        return None;
+    }
+    let mut chars = line.chars();
+    let kept = chars
+        .by_ref()
+        .take(MAX_PROVIDER_MESSAGE_CHARS)
+        .collect::<String>();
+    Some(if chars.next().is_some() {
+        format!("{kept}…")
+    } else {
+        kept
+    })
+}
+
 impl UpstreamFailure {
     pub(crate) fn http_body(status: StatusCode, headers: &HeaderMap, body: &str) -> Self {
         if status == StatusCode::TOO_MANY_REQUESTS
@@ -179,10 +300,12 @@ impl UpstreamFailure {
         );
         if let Self::Http {
             tool_control_rejection,
+            provider_error,
             ..
         } = &mut failure
         {
             *tool_control_rejection = ToolControlRejection::from_body(status, body);
+            *provider_error = ProviderError::from_body(body);
         }
         failure
     }
@@ -216,6 +339,7 @@ impl UpstreamFailure {
             retry_after,
             refreshable_auth,
             tool_control_rejection: None,
+            provider_error: None,
         }
     }
 }
@@ -254,6 +378,20 @@ pub(crate) fn refreshable_auth(error: &anyhow::Error) -> bool {
             ..
         })
     )
+}
+
+/// What the provider said about the failure `error` carries: the error body of an HTTP
+/// rejection ([`ProviderError::from_body`]), or the code and message of a failed stream.
+pub(crate) fn provider_error(error: &anyhow::Error) -> Option<ProviderError> {
+    match error.downcast_ref::<UpstreamFailure>()? {
+        UpstreamFailure::Http { provider_error, .. } => provider_error.clone(),
+        UpstreamFailure::Stream { code, message } => Some(ProviderError {
+            code: code.as_deref().and_then(provider_identifier),
+            message: loggable_provider_message(message),
+            ..ProviderError::default()
+        }),
+        _ => None,
+    }
 }
 
 /// The tool control rejection `error` carries, if it is a 400 whose structured error blames
@@ -1461,5 +1599,174 @@ mod tests {
         ));
         assert_eq!(classified.status, StatusCode::BAD_GATEWAY);
         assert!(classified.retryable);
+    }
+
+    fn provider_error_of(status: StatusCode, body: &str) -> Option<ProviderError> {
+        provider_error(
+            &anyhow::Error::new(UpstreamFailure::http_body(status, &HeaderMap::new(), body))
+                .context("request context"),
+        )
+    }
+
+    #[test]
+    fn a_provider_error_keeps_identifiers_and_a_short_masked_message() {
+        let error =
+            |code: Option<&str>, kind: Option<&str>, param: Option<&str>, message: Option<&str>| {
+                Some(ProviderError {
+                    code: code.map(str::to_string),
+                    kind: kind.map(str::to_string),
+                    param: param.map(str::to_string),
+                    message: message.map(str::to_string),
+                })
+            };
+        let token = format!("sk-proj-{}", "a1".repeat(40));
+        let jwt = format!(
+            "eyJ{}.eyJ{}.{}",
+            "h".repeat(20),
+            "p".repeat(40),
+            "s".repeat(30)
+        );
+        for (body, expected) in [
+            // OpenAI's shape, with a key and a token in a two-line message.
+            (
+                json!({ "error": {
+                    "message": format!("Incorrect API key provided: {token}.\nBearer {jwt} refused."),
+                    "type": "invalid_request_error",
+                    "param": null,
+                    "code": "invalid_api_key"
+                } })
+                .to_string(),
+                error(
+                    Some("invalid_api_key"),
+                    Some("invalid_request_error"),
+                    None,
+                    Some("Incorrect API key provided: [masked] Bearer [masked] refused."),
+                ),
+            ),
+            (
+                json!({ "error": {
+                    "message": "Invalid 'input[3].content': string too long.",
+                    "type": "invalid_request_error",
+                    "param": "input[3].content",
+                    "code": "string_above_max_length"
+                } })
+                .to_string(),
+                error(
+                    Some("string_above_max_length"),
+                    Some("invalid_request_error"),
+                    Some("input[3].content"),
+                    Some("Invalid 'input[3].content': string too long."),
+                ),
+            ),
+            // The ChatGPT Codex endpoint's `detail`, as a string or an object.
+            (
+                r#"{"detail":"The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account."}"#.to_string(),
+                error(None, None, None, Some("The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account.")),
+            ),
+            (
+                r#"{"detail":{"code":"unsupported_model","message":"Not supported."}}"#.to_string(),
+                error(Some("unsupported_model"), None, None, Some("Not supported.")),
+            ),
+            // A top-level error, and an error that is only a string.
+            (
+                r#"{"code":"bad_gateway","message":"Try again."}"#.to_string(),
+                error(Some("bad_gateway"), None, None, Some("Try again.")),
+            ),
+            (
+                r#"{"error":"model unavailable"}"#.to_string(),
+                error(None, None, None, Some("model unavailable")),
+            ),
+            // What does not read as an identifier is left out.
+            (
+                json!({ "error": {
+                    "code": "not an identifier",
+                    "type": "x".repeat(65),
+                    "param": 3,
+                    "message": "   "
+                } })
+                .to_string(),
+                None,
+            ),
+            // A body that says nothing the proxy reads.
+            ("{}".to_string(), None),
+            (r#"{"error":{}}"#.to_string(), None),
+            ("<html>Bad Request</html>".to_string(), None),
+            (String::new(), None),
+        ] {
+            assert_eq!(provider_error_of(StatusCode::BAD_REQUEST, &body), expected, "{body}");
+        }
+
+        // A long message is cut, after it is masked.
+        let long = json!({ "error": { "message": format!("{} {token}", "word ".repeat(60)) } })
+            .to_string();
+        let message = provider_error_of(StatusCode::BAD_REQUEST, &long)
+            .and_then(|error| error.message)
+            .unwrap();
+        assert_eq!(
+            message.chars().count(),
+            MAX_PROVIDER_MESSAGE_CHARS + 1,
+            "{message}"
+        );
+        assert!(
+            message.ends_with('…') && !message.contains("sk-proj"),
+            "{message}"
+        );
+
+        // A failed stream's code and message, as the stream gave them.
+        assert_eq!(
+            provider_error(&anyhow::Error::new(UpstreamFailure::Stream {
+                code: Some("context_length_exceeded".into()),
+                message: format!("Input too long for {token}"),
+            })),
+            error(
+                Some("context_length_exceeded"),
+                None,
+                None,
+                Some("Input too long for [masked]")
+            ),
+        );
+        // A failure the provider said nothing about.
+        assert_eq!(provider_error(&anyhow::anyhow!("model_not_found")), None);
+        assert_eq!(
+            provider_error(&anyhow::Error::new(UpstreamFailure::InvalidResponse)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_client_gets_only_the_provider_code_and_param() {
+        let reason = |code: Option<&str>, kind: Option<&str>, param: Option<&str>| {
+            ProviderError {
+                code: code.map(str::to_string),
+                kind: kind.map(str::to_string),
+                param: param.map(str::to_string),
+                message: Some("The model does not exist in organization org-private.".into()),
+            }
+            .reason()
+        };
+        assert_eq!(
+            reason(
+                Some("model_not_found"),
+                Some("invalid_request_error"),
+                Some("model")
+            )
+            .as_deref(),
+            Some("model_not_found, param model")
+        );
+        // The type stands in for a missing code.
+        assert_eq!(
+            reason(None, Some("invalid_request_error"), Some("tool_choice")).as_deref(),
+            Some("invalid_request_error, param tool_choice")
+        );
+        assert_eq!(
+            reason(None, None, Some("model")).as_deref(),
+            Some("param model")
+        );
+        assert_eq!(
+            reason(Some("server_error"), None, None).as_deref(),
+            Some("server_error")
+        );
+        // A message alone gives no reason: it never reaches a client.
+        assert_eq!(reason(None, None, None), None);
     }
 }
