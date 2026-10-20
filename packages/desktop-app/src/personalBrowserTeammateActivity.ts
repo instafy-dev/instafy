@@ -67,7 +67,15 @@ export function createMemoryTeammateActivityStore(): PersonalBrowserTeammateActi
   };
 }
 
-type StoredFile = { version: number; profiles: Record<string, PersonalBrowserTeammateActivity> };
+type StoredFile = {
+  version: number;
+  profiles: Record<string, PersonalBrowserTeammateActivity>;
+  /**
+   * Present once a damaged file was replaced: every profile not listed in
+   * `forgotten` still counts as marked.
+   */
+  damaged?: { forgotten: string[] };
+};
 
 function validActivity(value: unknown): value is PersonalBrowserTeammateActivity {
   if (!value || typeof value !== "object") return false;
@@ -80,14 +88,19 @@ function validActivity(value: unknown): value is PersonalBrowserTeammateActivity
 /**
  * A store in Desktop's userData folder, keyed by the profile's partition.
  * A file that exists but cannot be read marks every profile, so a damaged file
- * brings the per-site prompts back instead of dropping them.
+ * brings the per-site prompts back instead of dropping them. That state is
+ * written back with the next save and lasts until each profile is forgotten.
  */
 export function createFileTeammateActivityStore(
   filePath: string,
   logger: (message: string) => void = () => undefined,
 ): PersonalBrowserTeammateActivityStore {
   let cache: Map<string, PersonalBrowserTeammateActivity> | null = null;
-  let damaged = false;
+  // Null while the file is intact; otherwise the profiles forgotten since.
+  let damagedForgotten: Set<string> | null = null;
+  const markDamaged = () => {
+    damagedForgotten = new Set();
+  };
 
   const load = (): Map<string, PersonalBrowserTeammateActivity> => {
     if (cache) return cache;
@@ -97,7 +110,7 @@ export function createFileTeammateActivityStore(
       raw = fs.readFileSync(filePath, "utf8");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        damaged = true;
+        markDamaged();
         logger("Personal Browser teammate activity could not be read; every profile asks per site.");
       }
       return cache;
@@ -111,9 +124,16 @@ export function createFileTeammateActivityStore(
         if (!validActivity(activity)) throw new Error("invalid entry");
         cache.set(partition, { sites: activity.sites.slice(-MAX_TEAMMATE_SITES), markedAtMs: activity.markedAtMs });
       }
+      if (parsed.damaged !== undefined) {
+        const forgotten = parsed.damaged?.forgotten;
+        if (!Array.isArray(forgotten) || !forgotten.every((partition) => typeof partition === "string")) {
+          throw new Error("invalid damaged marker");
+        }
+        damagedForgotten = new Set(forgotten.slice(-MAX_PROFILES));
+      }
     } catch {
       cache.clear();
-      damaged = true;
+      markDamaged();
       logger("Personal Browser teammate activity is damaged; every profile asks per site.");
     }
     return cache;
@@ -123,12 +143,15 @@ export function createFileTeammateActivityStore(
     const entries = [...profiles.entries()]
       .sort((left, right) => left[1].markedAtMs - right[1].markedAtMs)
       .slice(-MAX_PROFILES);
-    const body: StoredFile = { version: FILE_VERSION, profiles: Object.fromEntries(entries) };
+    const body: StoredFile = {
+      version: FILE_VERSION,
+      profiles: Object.fromEntries(entries),
+      ...(damagedForgotten ? { damaged: { forgotten: [...damagedForgotten] } } : {}),
+    };
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     const temporary = `${filePath}.${process.pid}.tmp`;
     fs.writeFileSync(temporary, `${JSON.stringify(body)}\n`, { mode: 0o600 });
     fs.renameSync(temporary, filePath);
-    damaged = false;
   };
 
   return {
@@ -136,7 +159,7 @@ export function createFileTeammateActivityStore(
       const profiles = load();
       const activity = profiles.get(partition);
       if (activity) return activity;
-      return damaged ? { sites: [], markedAtMs: 0 } : null;
+      return damagedForgotten && !damagedForgotten.has(partition) ? { sites: [], markedAtMs: 0 } : null;
     },
     mark(partition, url) {
       const profiles = load();
@@ -152,9 +175,19 @@ export function createFileTeammateActivityStore(
     clear(partition) {
       const profiles = load();
       profiles.delete(partition);
+      if (damagedForgotten) {
+        // Forgetting one profile leaves every other profile of a damaged
+        // file marked.
+        damagedForgotten.delete(partition);
+        damagedForgotten.add(partition);
+        // Past the cap the oldest forgotten profile counts as marked again.
+        while (damagedForgotten.size > MAX_PROFILES) {
+          const oldest = damagedForgotten.values().next().value;
+          if (oldest === undefined) break;
+          damagedForgotten.delete(oldest);
+        }
+      }
       try {
-        // Forgetting rewrites the file. A damaged file's unknown marks for
-        // other profiles on this device are dropped with it.
         save(profiles);
       } catch {
         logger("Personal Browser teammate activity could not be saved.");

@@ -48,6 +48,7 @@ async function fixture(highlight = async () => true, options = {}) {
     "./personalBrowserSecurity": security,
     "./personalBrowserRedaction": require(path.join(packageRoot, "dist/personalBrowserRedaction.js")),
     "./personalBrowserActionPolicy": require(path.join(packageRoot, "dist/personalBrowserActionPolicy.js")),
+    "./personalBrowserTeammateActivity": require(path.join(packageRoot, "dist/personalBrowserTeammateActivity.js")),
     "./personalBrowserPageBridge": {
       ...pageBridge,
       snapshotPersonalBrowserPage: async () => ({
@@ -265,10 +266,39 @@ test("a changed mode after a handoff shows the start dialog", async () => {
   assert.equal(routineStarts(fromRoutine.dialogs), 2, "switching modes used up the kept mode");
 });
 
+test("a resume that names a host the owner has not seen shows the start dialog", async () => {
+  const subset = await fixture(undefined, { mode: "routine", knownHosts: ["example.test", "docs.example.test"] });
+  await subset.host.handleControlOperation("request_human_input", { indices: [0] });
+  subset.host.enablePreparedAgentControl(await subset.host.prepareAgentControl("routine", ["example.test"]));
+  assert.equal(routineStarts(subset.dialogs), 1, "hosts the owner already saw keep the mode");
+  assert.equal(subset.host.runKnownHosts.join(","), "example.test,docs.example.test");
+
+  const { host, dialogs } = await fixture(undefined, { mode: "routine", knownHosts: ["example.test"] });
+  await host.handleControlOperation("request_human_input", { indices: [0] });
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine", ["example.test", "unseen-a.test", "unseen-b.test"]));
+  assert.equal(routineStarts(dialogs), 2);
+  const start = dialogs.filter((options) => options.buttons?.length === 3).at(-1);
+  assert.match(start.detail, /unseen-a\.test, unseen-b\.test/);
+  assert.equal(host.runKnownHosts.join(","), "example.test,unseen-a.test,unseen-b.test");
+});
+
+test("a Studio that names the handoff binds the kept mode to it", async () => {
+  const mismatch = await fixture(undefined, { mode: "routine" });
+  await mismatch.host.handleControlOperation("request_human_input", { indices: [0] });
+  mismatch.host.enablePreparedAgentControl(await mismatch.host.prepareAgentControl("routine", [], "another-handoff"));
+  assert.equal(routineStarts(mismatch.dialogs), 2);
+
+  const { host, dialogs } = await fixture(undefined, { mode: "routine" });
+  await host.handleControlOperation("request_human_input", { indices: [0] });
+  const handoffId = host.getStatus().humanInputRequest.handoffId;
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine", [], handoffId));
+  assert.equal(routineStarts(dialogs), 1);
+});
+
 for (const { name, cancel } of [
   { name: "expiry", cancel: (host) => { host.handoffResume.expiresAtMs = Date.now() - 1; } },
   { name: "Pause", cancel: (host) => host.pauseAgentControl() },
-  { name: "Escape", cancel: (host) => host.emergencyPauseAgentControl() },
+  { name: "the emergency pause", cancel: (host) => host.emergencyPauseAgentControl() },
   { name: "an owner change", cancel: (host) => { host.currentOwnerId = "another-owner"; } },
   { name: "Clear data", cancel: async (host) => {
     Object.assign(host.view.webContents, {

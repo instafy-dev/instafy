@@ -43,6 +43,7 @@ function fixture(choose = async () => ({ response: 1 }), pageOverrides = {}, hos
     "./personalBrowserSecurity": security,
     "./personalBrowserRedaction": require(path.join(packageRoot, "dist/personalBrowserRedaction.js")),
     "./personalBrowserActionPolicy": require(path.join(packageRoot, "dist/personalBrowserActionPolicy.js")),
+    "./personalBrowserTeammateActivity": require(path.join(packageRoot, "dist/personalBrowserTeammateActivity.js")),
     "./personalBrowserPageBridge": { ...pageBridge, clearPersonalBrowserHumanInput: async () => {}, ...pageOverrides },
     "./personalBrowserHumanInput": {},
     "./personalBrowserInputShield": { PersonalBrowserInputShield: InputShield },
@@ -670,11 +671,74 @@ test("routine: a POST search asks to fill in and submit, Enter in a chat box ask
   await host.handleControlOperation("type", { index: 0, text: "invoices", submit: true });
   assert.equal(dialogs.length, before + 1);
   assert.match(dialogs.at(-1).message, /fill in and submit/);
+  assert.match(dialogs.at(-1).detail, /The agent types: “invoices”\./, "the owner sees what the approval sends");
   await host.handleControlOperation("snapshot", {});
   await host.handleControlOperation("press", { index: 1, key: "Enter" });
   assert.equal(dialogs.length, before + 2);
   assert.equal(dialogs.at(-1).title, "Send a message");
   assert.deepEqual(calls.keys, [[0, "Enter"], [1, "Enter"]]);
+});
+
+test("a type-and-submit dialog shows the exact text, bounded, every time it asks", async () => {
+  const { host, dialogs } = pageFixture([
+    { tag: "textarea", ariaLabel: "Message", formOwnerIdentity: "doc-a:form-1", formSubmitLabels: "Send" },
+  ]);
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine"));
+  const before = dialogs.length;
+  await host.handleControlOperation("snapshot", {});
+  await host.handleControlOperation("type", { index: 0, text: "Hello\n  team", submit: true });
+  assert.equal(dialogs.length, before + 1);
+  assert.match(dialogs.at(-1).detail, /The agent types: “Hello team”\./);
+  // The form's typing approval does not cover a second send with new text.
+  const long = "x".repeat(400);
+  await host.handleControlOperation("snapshot", {});
+  await host.handleControlOperation("type", { index: 0, text: long, submit: true });
+  assert.equal(dialogs.length, before + 2);
+  assert.match(dialogs.at(-1).detail, /x{300}… \(400 characters\)/);
+});
+
+test("arrow keys in an editable combobox share the form's typing approval", async () => {
+  const { host, dialogs, calls } = pageFixture([
+    { tag: "input", type: "text", role: "combobox", ariaLabel: "Customer", formOwnerIdentity: "doc-a:form-1" },
+  ]);
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine"));
+  const before = dialogs.length;
+  await host.handleControlOperation("snapshot", {});
+  await host.handleControlOperation("type", { index: 0, text: "Acme" });
+  assert.equal(dialogs.length, before + 1);
+  for (const key of ["ArrowDown", "ArrowDown", "ArrowUp"]) {
+    await host.handleControlOperation("snapshot", {});
+    await host.handleControlOperation("press", { index: 0, key });
+  }
+  assert.equal(dialogs.length, before + 1, "picking an option asks no more");
+  assert.equal(calls.keys.length, 3);
+});
+
+test("a denied page-started navigation is reported to the agent's next operation once", async () => {
+  const { host, calls } = pageFixture([], async (options) => ({ response: options.buttons.length === 3 ? 1 : 0 }));
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine"));
+  const event = navigationEvent();
+  host.guardPageNavigation(event, "https://example.test/account/logout");
+  assert.equal(event.prevented, true);
+  await settle();
+  await assert.rejects(host.handleControlOperation("snapshot", {}), (error) => error.code === "navigation_denied");
+  await host.handleControlOperation("snapshot", {});
+  assert.deepEqual(calls.loads, []);
+});
+
+test("an approved link's navigation is matched with its query", async () => {
+  const { host } = pageFixture([
+    { tag: "a", text: "Report", href: "https://example.test/reports/2026.csv", linkSelf: true },
+  ]);
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine"));
+  await host.handleControlOperation("snapshot", {});
+  await host.handleControlOperation("click", { index: 0 });
+  const other = navigationEvent();
+  host.guardPageNavigation(other, "https://example.test/reports/2026.csv?scope=all");
+  assert.equal(other.prevented, true, "another query is not the approved address");
+  const own = navigationEvent();
+  host.guardPageNavigation(own, "https://example.test/reports/2026.csv");
+  assert.equal(own.prevented, false);
 });
 
 // --- Teammate activity in the owner's profile ---

@@ -394,8 +394,8 @@ export function classifyPersonalBrowserStep(
   });
 }
 
-// Free categories where label words never add a prompt: the classifier
-// already judged a link by its address and a field by its structure.
+// Free categories the classifier already judged in full: a link by its
+// address and its own label, a field by its structure.
 const ROUTINE_STRUCTURAL_CATEGORIES = new Set(["navigation", "focus", "search", "keyboard"]);
 
 export function personalBrowserActivationRequiresConfirmation(
@@ -437,19 +437,21 @@ export function personalBrowserKeyRequiresConfirmation(
   approvalMode: PersonalBrowserApprovalMode = "ask",
   context: { pageUrl?: string } = {},
 ): boolean {
+  // Keys other than Enter and Space follow the step rules in both modes:
+  // arrows on value controls change them, and Backspace or Delete off a field
+  // deletes the selection.
+  if (!isPersonalBrowserActivationKey(key)) {
+    return classifyPersonalBrowserStep("press", value, { ...context, key }).verdict !== "allow";
+  }
   // Owner tier: Enter submits only a same-site GET search without asking;
   // activation keys follow the click rules.
   if (approvalMode === "routine") {
-    if (!isPersonalBrowserActivationKey(key)) {
-      return classifyPersonalBrowserStep("press", value, { ...context, key }).verdict !== "allow";
-    }
     if (isPolicyEditable(value)) {
       return classifyPersonalBrowserStep("press", value, { ...context, key }).verdict !== "allow";
     }
     return personalBrowserActivationRequiresConfirmation(value, "routine", context);
   }
   return (
-    isPersonalBrowserActivationKey(key) &&
     (personalBrowserActivationRequiresConfirmation(value) ||
       (key === "Enter" && Boolean(value.formOwnerIdentity?.trim() || value.formActionText?.trim())) ||
       // A chat box can send on keydown without any form. Enter on a field

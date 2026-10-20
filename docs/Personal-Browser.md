@@ -106,7 +106,8 @@ When a participant takes tab control, or opens Explore, Desktop marks the profil
 and records the host names they visit (at most 20, never paths or page content)
 in `personal-browser-teammate-activity.json` in Desktop's userData folder, keyed
 by the profile's partition. A file that exists but cannot be read counts as a
-mark on every profile. While a profile is marked, a routine run asks per site
+mark on every profile; the file keeps that state when it is rewritten, until
+each profile is forgotten or cleared. While a profile is marked, a routine run asks per site
 again on every site except the card's hosts the owner allowed in the start
 dialog, because a teammate may have signed in to accounts in it and single
 sign-on can carry that to other sites. The routine start dialog names the
@@ -138,7 +139,7 @@ Personal Browser is gated at several layers.
 
 In Ask mode, the first agent navigation to, or interaction with, an HTTP(S) origin shows a native Electron confirmation. The positive choice is **Allow for this session**. Approval is held in memory for the current project/browser session and is cleared when the browser closes, its identity changes, or browser data is cleared.
 
-The user can navigate manually without granting agent access. Cross-origin agent navigation and link activation require approval for the destination origin, unless routine browsing was explicitly granted as described below. A routine run shows no site prompt at all.
+The user can navigate manually without granting agent access. Cross-origin agent navigation and link activation require approval for the destination origin, unless routine browsing was explicitly granted as described below. A routine run shows no site prompt, unless its profile is marked by teammate activity.
 
 ### Routine browsing and stricter approval
 
@@ -166,27 +167,36 @@ the run in Ask mode, and **Allow** starts routine. When Studio passes the card's
 hosts as `knownHosts` (at most three valid host names; others are dropped), the
 dialog lists them.
 
-Routine never shows a per-site prompt, including for an address the agent types
-itself. What it does:
+Routine shows no per-site prompt, including for an address the agent types
+itself, unless the profile is marked by teammate activity (see above). What it
+does:
 
 - **Free, never prompted:** reading (snapshot and status, always redacted),
   scrolling, following a plain link (the clicked element is the link itself,
   an `http(s)` address that is not a same-page anchor, a download or a risky
-  address, and not an entry in a credential row or dialog), tabs, `<summary>`,
+  address, not a link that declares a request or script such as `data-method`,
+  `data-turbo-method`, `hx-post` or `onclick`, not an entry in a credential row
+  or dialog, and not labelled with a purchase, transfer, delete, cancel,
+  sign-out, sharing, key, download or message word), tabs, `<summary>`,
   menu and popup openers, neutral menu, tree, tab and navigation items, page
-  numbers, privacy-preserving cookie dismissals, clicking into a field, typing
+  numbers, privacy-preserving cookie dismissals (Reject all, Necessary only,
+  Close, Alle ablehnen, Nur notwendige, Schließen; a bare Decline or Ablehnen
+  asks), clicking into a field, typing
   into a search field, submitting a search that uses GET to the same site or no
   form, and Tab, Escape, PageUp, PageDown, Home, End and arrow keys outside
   value controls.
 - **Asks ("Allow once"), titled by category:** every other click (buttons,
   icon-only and script-driven controls, checkboxes, selects, rows), every other
   submit including every POST form, Enter on a field that is not proven to be
-  search, arrow keys on sliders and option lists, and risky addresses.
+  search, arrow keys on sliders and option lists, Backspace and Delete outside
+  a field, and risky addresses.
   Typing outside search asks once per form on the page, or once per field
-  outside forms; Space, Backspace and Delete in a field share that approval.
-  `type` with `submit` asks once to fill in and submit; the submission asks
-  again only when typing changed what kind of step it is.
-- **Risky addresses** are judged by the address only: sign-out and unsubscribe,
+  outside forms; Space, Backspace and Delete in a field, and arrow keys in an
+  editable combobox, share that approval. `type` with `submit` asks once to
+  fill in and submit, and that dialog shows the exact text (up to 300
+  characters) the agent will type; the submission asks again only when typing
+  changed what kind of step it is.
+- **Risky addresses** are judged by the address: sign-out and unsubscribe,
   an action word next to an id or token (delete, remove, cancel, confirm,
   approve, accept, join, forward, verify, activate, reset, revoke, unlink,
   löschen, stornieren, kündigen), invite, magic and reset links with a long
@@ -194,8 +204,10 @@ itself. What it does:
   xlsx, json, pdf, zip, ofx, qif, mt940, camt and DATEV. Search terms never
   count. The check runs on the agent's `navigate`, on links, and on navigations
   the page starts and redirects, in both modes. The address an approved step
-  opens is not asked about again; a redirect to another risky address is held
-  until the person allows it.
+  opens, with the same query, is not asked about again before the next page
+  loads; a redirect to another risky address is held until the person allows
+  it. When the person denies a navigation the page started, the agent's next
+  operation fails once with `navigation_denied`.
 - **Refused in every mode:** see the step categories below.
 
 Denials are final for that step: `activation_denied`, `typing_denied`,
@@ -432,9 +444,13 @@ turn observes the page again instead of replaying old indices.
 A handoff keeps the run's approval mode: **Let AI continue** within the
 request's 10-minute window, for the same project, browser profile and owner,
 and in the same mode, does not show the routine start confirmation again, and
-the card's hosts carry over. It is used once. Pause, Escape, Clear data, closing
-the browser, or a change of owner or project cancels it, and a different mode
-shows the confirmation as usual. Changing the
+the card's hosts carry over. A start that names a host the owner has not seen
+in a start dialog shows the confirmation again, and when Studio passes the
+request's `handoffId`, the kept mode applies only to that handoff. It is used
+once. Turning agent control off, Clear data, closing or releasing the browser,
+or a change of owner or project cancels it (Escape does not apply while the
+handoff has already paused control), and a different mode shows the
+confirmation as usual. Changing the
 account/project/page binding or an expired request cannot silently continue work.
 Passwords, codes and payment values stay in the page and must not be entered in
 chat. The continuation message contains none of those values, but a later page

@@ -2227,6 +2227,7 @@ app.whenReady().then(() => {
         const preparedEpoch = await personalBrowserHost!.prepareAgentControl(
           payload?.approvalMode,
           payload?.knownHosts,
+          payload?.handoffId,
         );
         try {
           await resumePersonalBrowserRuntime(projectId);

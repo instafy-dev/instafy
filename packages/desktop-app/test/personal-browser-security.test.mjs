@@ -8,6 +8,7 @@ const packageRoot = path.resolve(__dirname, "..");
 const modulePath = path.join(packageRoot, "dist", "personalBrowserSecurity.js");
 const {
   PERSONAL_BROWSER_PARTITION_PREFIX,
+  classifyPersonalBrowserStep,
   constantTimePersonalBrowserTokenMatch,
   derivePersonalBrowserPartition,
   isAllowedPersonalBrowserControlHost,
@@ -78,13 +79,14 @@ test("routine frees reading-style steps: plain links, menus, tabs, dismissals an
   const page = { pageUrl: "https://example.test/list" };
   for (const descriptor of [
     { tag: "a", text: "Documentation", href: "https://docs.example.test/", linkSelf: true },
-    { tag: "a", text: "Send money", href: "https://example.test/help/send-money", linkSelf: true },
+    { tag: "a", text: "Getting paid", href: "https://example.test/help/payouts", linkSelf: true },
     { tag: "div", role: "menuitem", text: "Mein Profil", areas: "menu" },
     { tag: "span", text: "Verbundene Apps", areas: "nav" },
     { tag: "button", role: "tab", text: "Overview" },
     { tag: "summary", text: "More" },
     { tag: "button", text: "Konto", menuOpener: true },
     { tag: "button", text: "Alle ablehnen" },
+    { tag: "button", text: "Decline all", areas: "dialog" },
     { tag: "a", text: "2", areas: "pagination" },
     { tag: "input", type: "text", ariaLabel: "Name" },
   ]) {
@@ -134,6 +136,82 @@ test("routine asks for every other click, submit, risky address and Enter outsid
   // Ask mode is unchanged and never freer than routine for these.
   assert.equal(personalBrowserActivationRequiresConfirmation({ tag: "button", type: "submit", formOwnerIdentity: "f" }, "ask"), true);
   assert.equal(personalBrowserKeyRequiresConfirmation("Enter", { tag: "input", type: "text", formOwnerIdentity: "form-owner", formActionText: "" }), true);
+});
+
+test("a plain link whose own label names a risky step asks in routine with that category", () => {
+  const page = { pageUrl: "https://example.test/list" };
+  for (const [text, href, category] of [
+    ["Delete", "https://example.test/items/5", "destructive"],
+    ["Sign out", "https://example.test/session", "destructive"],
+    ["Abmelden", "https://example.test/auth/end-session", "destructive"],
+    ["Konto löschen", "https://example.test/settings/close-account", "destructive"],
+    ["Unsubscribe", "https://example.test/u/abcd", "destructive"],
+    ["Archive", "https://example.test/items/55/archive", "destructive"],
+    ["Cancel subscription", "https://example.test/billing?do=cancel", "destructive"],
+    ["Pay now", "https://example.test/orders/5?action=pay", "purchase"],
+    ["Send money", "https://example.test/help/send-money", "transfer"],
+    ["Invite teammates", "https://example.test/team", "permission"],
+  ]) {
+    const descriptor = { tag: "a", text, href, linkSelf: true };
+    assert.equal(personalBrowserActivationRequiresConfirmation(descriptor, "routine", page), true, text);
+    assert.equal(personalBrowserActivationRequiresConfirmation(descriptor, "ask", page), true, text);
+    const step = classifyPersonalBrowserStep("click", descriptor, page);
+    assert.equal(step.verdict, "ask", text);
+    assert.equal(step.category, category, text);
+  }
+  // A link to a page about keys stays a plain link; reveal controls are refused on their own.
+  assert.equal(
+    personalBrowserActivationRequiresConfirmation({ tag: "a", text: "API keys", href: "https://example.test/settings/keys", linkSelf: true }, "routine", page),
+    false,
+  );
+});
+
+test("bare Decline and Ablehnen are not cookie dismissals", () => {
+  const page = { pageUrl: "https://example.test/list" };
+  for (const descriptor of [
+    { tag: "button", text: "Decline", areas: "dialog" },
+    { tag: "button", text: "Ablehnen", areas: "dialog" },
+    { tag: "button", text: "Decline" },
+    { tag: "button", text: "Ablehnen" },
+  ]) {
+    assert.equal(personalBrowserActivationRequiresConfirmation(descriptor, "routine", page), true, JSON.stringify(descriptor));
+  }
+});
+
+test("Backspace and Delete off a field ask as destructive in both modes", () => {
+  const page = { pageUrl: "https://mail.example.test/inbox" };
+  const row = { tag: "div", role: "row", text: "Quarterly report" };
+  for (const key of ["Backspace", "Delete"]) {
+    assert.equal(classifyPersonalBrowserStep("press", row, { ...page, key }).category, "destructive");
+    assert.equal(personalBrowserKeyRequiresConfirmation(key, row, "routine", page), true, key);
+    assert.equal(personalBrowserKeyRequiresConfirmation(key, row, "ask", page), true, key);
+  }
+  // Arrows on a value control ask in Ask mode too; arrows elsewhere stay free.
+  assert.equal(personalBrowserKeyRequiresConfirmation("ArrowUp", { tag: "input", type: "range" }, "ask", page), true);
+  assert.equal(personalBrowserKeyRequiresConfirmation("ArrowDown", { tag: "div", text: "List" }, "ask", page), false);
+});
+
+test("menu items with risky words ask in routine", () => {
+  const page = { pageUrl: "https://example.test/list" };
+  for (const [text, category] of [
+    ["Trash", "destructive"],
+    ["Move to trash", "destructive"],
+    ["In den Papierkorb", "destructive"],
+    ["Block user", "destructive"],
+    ["Report spam", "destructive"],
+    ["Make admin", "permission"],
+    ["Zum Admin machen", "permission"],
+    ["Duplicate", "change"],
+    ["Duplizieren", "change"],
+  ]) {
+    const descriptor = { tag: "div", role: "menuitem", text, areas: "menu" };
+    assert.equal(personalBrowserActivationRequiresConfirmation(descriptor, "routine", page), true, text);
+    assert.equal(classifyPersonalBrowserStep("click", descriptor, page).category, category, text);
+  }
+  for (const text of ["Mein Profil", "Reports", "Belege", "Einstellungen"]) {
+    const descriptor = { tag: "div", role: "menuitem", text, areas: "menu" };
+    assert.equal(personalBrowserActivationRequiresConfirmation(descriptor, "routine", page), false, text);
+  }
 });
 
 test("Personal Browser is enabled by default with an explicit emergency kill switch", () => {

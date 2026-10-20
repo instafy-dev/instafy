@@ -543,3 +543,22 @@ test("descriptors carry form, link and page-area structure for the step classifi
   assert.equal(security.classifyPersonalBrowserStep("click", revealDescriptor).code, "step_refused_secret");
   assert.equal(security.classifyPersonalBrowserStep("click", report).category, "download");
 });
+
+test("a link that sends a request or runs a declared script is not a plain link", async () => {
+  const harness = createPageHarness();
+  const plain = new harness.HTMLAnchorElement({ href: "https://example.test/items/5", text: "Item 5" });
+  const railsDelete = new harness.HTMLAnchorElement({ href: "https://example.test/items/5", text: "Remove item", "data-method": "delete" });
+  const turbo = new harness.HTMLAnchorElement({ href: "https://example.test/items/5", text: "Item", "data-turbo-method": "post" });
+  const scripted = new harness.HTMLAnchorElement({ href: "https://example.test/items/5", text: "Item", onclick: "go()" });
+  harness.document.elements = [plain, railsDelete, turbo, scripted];
+  const snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
+  const [plainDescriptor, railsDescriptor, turboDescriptor, scriptedDescriptor] =
+    snapshot.interactive.map((entry) => entry.descriptor);
+  assert.equal(plainDescriptor.linkSelf, true);
+  assert.equal(security.classifyPersonalBrowserStep("click", plainDescriptor).verdict, "allow");
+  for (const descriptor of [railsDescriptor, turboDescriptor, scriptedDescriptor]) {
+    assert.equal(descriptor.linkSelf, false);
+    assert.equal(security.classifyPersonalBrowserStep("click", descriptor).verdict, "ask");
+  }
+  assert.equal(security.classifyPersonalBrowserStep("click", railsDescriptor).category, "destructive");
+});

@@ -70,6 +70,20 @@ test("a damaged file marks every profile until it is forgotten", () => {
     store.clear("profile-a");
     assert.equal(store.read("profile-a"), null);
     assert.equal(createFileTeammateActivityStore(file).read("profile-a"), null);
+    // Writing for one profile keeps every other profile marked, also after
+    // a restart, until each is forgotten.
+    store.mark("profile-c", "https://c.test/");
+    assert.notEqual(store.read("profile-b"), null);
+    const reopened = createFileTeammateActivityStore(file);
+    assert.notEqual(reopened.read("profile-b"), null);
+    assert.deepEqual(reopened.read("profile-c").sites, ["c.test"]);
+    assert.equal(reopened.read("profile-a"), null);
+    reopened.clear("profile-b");
+    reopened.clear("profile-c");
+    const again = createFileTeammateActivityStore(file);
+    assert.equal(again.read("profile-b"), null);
+    assert.equal(again.read("profile-c"), null);
+    assert.notEqual(again.read("profile-d"), null);
   } finally {
     cleanup();
   }
