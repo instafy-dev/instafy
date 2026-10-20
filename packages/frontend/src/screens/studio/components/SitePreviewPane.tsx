@@ -7,6 +7,7 @@ import {
   createSitePreviewViewer,
   getSitePreview,
   heartbeatSitePreviewViewer,
+  isSitePreviewRateLimited,
   revokeSitePreviewViewer,
   sitePreviewProblem,
   sitePreviewRecordState,
@@ -29,7 +30,8 @@ export const SITE_PREVIEW_FRAME_ALLOW = "fullscreen; clipboard-write";
  */
 export const SITE_PREVIEW_MESSAGE_TYPE = "instafy-preview";
 
-type SessionState = "opening" | "ready" | "ended" | SitePreviewProblem;
+/** `busy`: the controller refused a new session because too many were opened in the last minute. */
+type SessionState = "opening" | "ready" | "ended" | "busy" | SitePreviewProblem;
 type HealthState = "checking" | Exclude<SitePreviewRecordState, "pending" | "unverified"> | Exclude<SitePreviewProblem, "unavailable">;
 
 /**
@@ -40,10 +42,11 @@ type HealthState = "checking" | Exclude<SitePreviewRecordState, "pending" | "unv
 function paneHealth(state: SitePreviewRecordState): HealthState {
   return state === "pending" || state === "unverified" ? "checking" : state;
 }
-export type SitePreviewPaneState = "opening" | "ended" | HealthState | SitePreviewProblem;
+export type SitePreviewPaneState = "opening" | "ended" | "busy" | HealthState | SitePreviewProblem;
 
 const UNAVAILABLE_TEXT = "Previews are not available here";
 const POPUP_BLOCKED_TEXT = "Your browser blocked the new tab. Allow pop-ups for this site and try again.";
+const BUSY_TEXT = "Too many previews were opened just now. Wait a minute and try again.";
 
 /** The panes kept mounted in one conversation's view scope. */
 export type MountedSitePreviews = { scope: string | null; ids: readonly string[] };
@@ -70,6 +73,7 @@ const PROBLEM_TEXT: Record<Exclude<SitePreviewPaneState, "opening" | "checking" 
   missing: { title: "This preview no longer exists", body: "It was closed. Ask Octo to open the site again.", reload: false },
   no_access: { title: "You can't open this preview", body: "You may no longer have access to it.", reload: false },
   ended: { title: "This preview session ended", body: "Reload to open a new session.", reload: true },
+  busy: { title: "Too many previews opened", body: "Too many previews were opened just now. Wait a minute, then reload.", reload: true },
   unavailable: { title: UNAVAILABLE_TEXT, body: "This server does not offer site previews.", reload: false },
 };
 
@@ -88,6 +92,7 @@ function statusDetail(state: SitePreviewPaneState, port: number | null): string 
     case "missing": return "Closed";
     case "no_access": return "No access";
     case "ended": return "Session ended";
+    case "busy": return "Try again shortly";
     default: return UNAVAILABLE_TEXT;
   }
 }
@@ -98,7 +103,14 @@ function statusDetail(state: SitePreviewPaneState, port: number | null): string 
  * The viewer address is a member-only capability. It is minted when the pane
  * mounts, lives only in this component's memory (never stored, logged or shown;
  * the bar shows the title) and is revoked when the pane unmounts, which is what
- * the tab's × does.
+ * the tab's × does, and when Studio itself is closed or reloaded (`pagehide`,
+ * which does not unmount anything).
+ *
+ * Open in new tab is different: it mints a separate session for a top-level
+ * tab, so that address is a bearer link. It shows in that tab's address bar
+ * and history, anyone it is copied to can open the site with it, it is kept
+ * alive by the tab's own traffic up to the controller's maximum session age
+ * (12 hours), and closing the pane does not end it.
  *
  * The frame can tell the pane one thing: `{type: "instafy-preview", status}`,
  * read only from this frame's window and this capability's origin. The
@@ -148,6 +160,7 @@ export function SitePreviewPane({ projectId, previewId, title, visible }: {
       if (!mounted.current || attempt !== mintAttempt.current) return;
       const problem = sitePreviewProblem(cause);
       if (problem) { setSession(problem); return; }
+      if (isSitePreviewRateLimited(cause)) { setSession("busy"); return; }
       setSession("ended");
       setFeedback(cause instanceof Error ? cause.message : "Could not open the preview.");
     }
@@ -185,6 +198,33 @@ export function SitePreviewPane({ projectId, previewId, title, visible }: {
       live.current = null;
     };
   }, [mint, revoke]);
+
+  // Closing or reloading Studio does not unmount the pane, so its session is revoked as the page goes
+  // (keepalive lets that request finish after it); otherwise each reload would leave one live until it
+  // idles out, and the controller's per-person cap would start ending the person's other sessions.
+  // A page restored from the back-forward cache opens a new session.
+  useEffect(() => {
+    let revokedOnHide = false;
+    const onPageHide = () => {
+      revokedOnHide = true;
+      mintAttempt.current += 1; // A mint still in flight is revoked when it lands.
+      const url = live.current;
+      live.current = null;
+      if (url) void revokeSitePreviewViewer(projectId, previewId, url, { keepalive: true }).catch(() => undefined);
+    };
+    const onPageShow = (event: PageTransitionEvent) => {
+      if (!event.persisted || !revokedOnHide) return;
+      revokedOnHide = false;
+      reminted.current = false;
+      replaceSession();
+    };
+    window.addEventListener("pagehide", onPageHide);
+    window.addEventListener("pageshow", onPageShow);
+    return () => {
+      window.removeEventListener("pagehide", onPageHide);
+      window.removeEventListener("pageshow", onPageShow);
+    };
+  }, [previewId, projectId, replaceSession]);
 
   const checkHealth = useCallback(async (signal?: AbortSignal, fresh = false) => {
     try {
@@ -286,7 +326,11 @@ export function SitePreviewPane({ projectId, previewId, title, visible }: {
         if (mounted.current) setFeedback(POPUP_BLOCKED_TEXT);
       } catch (cause) {
         tab.cancel();
-        if (mounted.current) setFeedback(sitePreviewProblem(cause) === "unavailable" ? UNAVAILABLE_TEXT : cause instanceof Error ? cause.message : "Could not open the preview.");
+        if (mounted.current) {
+          setFeedback(sitePreviewProblem(cause) === "unavailable" ? UNAVAILABLE_TEXT
+            : isSitePreviewRateLimited(cause) ? BUSY_TEXT
+              : cause instanceof Error ? cause.message : "Could not open the preview.");
+        }
       } finally {
         if (mounted.current) setOpeningTab(false);
       }

@@ -48,7 +48,8 @@ export const SITE_PREVIEW_ROUTES_MISSING_CODE = "preview_routes_missing";
 
 /**
  * Why the controller would not open or describe a preview, from its answer:
- * - `unavailable`: this server does not offer previews (503 `previews_unavailable`, or no preview routes);
+ * - `unavailable`: this server does not offer previews (503 `previews_unavailable`, no preview routes,
+ *   or no controller configured in this Studio at all);
  * - `missing`: this preview does not exist (any other 404);
  * - `no_access`: this person may not open it (403);
  * - `stopped`: it exists but is no longer running (409, 410).
@@ -63,6 +64,11 @@ export function sitePreviewProblem(cause: unknown): SitePreviewProblem | null {
   if (cause.status === 403) return "no_access";
   if (cause.status === 409 || cause.status === 410) return "stopped";
   return null;
+}
+
+/** The controller's 429: this person opened too many sessions in the last minute. Asking again later helps. */
+export function isSitePreviewRateLimited(cause: unknown): boolean {
+  return cause instanceof ControllerApiError && cause.status === 429;
 }
 
 export function isSitePreviewsUnavailable(cause: unknown): boolean {
@@ -80,8 +86,13 @@ function previewPath(projectId: string, previewId: string, suffix = "") {
   return `/projects/${encodeURIComponent(projectId)}/previews/${encodeURIComponent(previewId)}${suffix}`;
 }
 
-async function previewRequest(path: string, method: "GET" | "POST", fallback: string, body?: unknown, signal?: AbortSignal): Promise<unknown> {
-  if (!runtimeControllerEnabled) throw new Error("Runtime controller is not configured.");
+type PreviewRequestOptions = { body?: unknown; signal?: AbortSignal; keepalive?: boolean };
+
+async function previewRequest(path: string, method: "GET" | "POST", fallback: string, { body, signal, keepalive }: PreviewRequestOptions = {}): Promise<unknown> {
+  if (!runtimeControllerEnabled) {
+    // A Studio with no controller offers no previews: the same answer as a controller with previews switched off.
+    throw new ControllerApiError({ status: 503, message: "Runtime controller is not configured.", code: SITE_PREVIEWS_UNAVAILABLE_CODE, details: null });
+  }
   const context = await resolveControllerRequestContext(null);
   if (!context.baseUrl || !context.accessToken) {
     throw new ControllerApiError({ status: 401, message: "Missing controller session token.", code: null, details: null });
@@ -90,6 +101,7 @@ async function previewRequest(path: string, method: "GET" | "POST", fallback: st
   if (body !== undefined) headers["content-type"] = "application/json";
   const response = await fetch(`${context.baseUrl}${path}`, {
     method, headers, signal, body: body === undefined ? undefined : JSON.stringify(body),
+    ...(keepalive ? { keepalive: true } : {}),
   });
   if (!response.ok) {
     const routeMissing = response.status === 404 && !(await response.clone().text().catch(() => "")).trim();
@@ -142,7 +154,7 @@ export function sitePreviewRecordState(preview: Pick<ControllerSitePreview, "sta
 /** `fresh` asks for a new probe (a person's Reload) instead of the controller's short cache. */
 export async function getSitePreview(projectId: string, previewId: string, signal?: AbortSignal, options?: { fresh?: boolean }): Promise<ControllerSitePreview> {
   const path = previewPath(projectId, previewId) + (options?.fresh ? "?fresh=1" : "");
-  const preview = mapControllerSitePreview(await previewRequest(path, "GET", "Could not check the preview.", undefined, signal));
+  const preview = mapControllerSitePreview(await previewRequest(path, "GET", "Could not check the preview.", { signal }));
   if (!preview) throw new Error("The controller returned an unreadable preview.");
   return preview;
 }
@@ -179,7 +191,7 @@ export function isSitePreviewViewerUrl(url: URL, previewId: string): boolean {
  * instead, and it still ends at the session's maximum age.
  */
 export async function createSitePreviewViewer(projectId: string, previewId: string, options: { tab?: boolean } = {}): Promise<SitePreviewViewer> {
-  const value = await previewRequest(previewPath(projectId, previewId, options.tab ? "/view?tab=true" : "/view"), "POST", "Could not open the preview.", {});
+  const value = await previewRequest(previewPath(projectId, previewId, options.tab ? "/view?tab=true" : "/view"), "POST", "Could not open the preview.", { body: {} });
   const viewerUrl = isRecord(value) ? readString(value.viewerUrl) : null;
   let parsed: URL | null = null;
   try { parsed = viewerUrl ? new URL(viewerUrl) : null; } catch { parsed = null; }
@@ -193,8 +205,12 @@ export async function createSitePreviewViewer(projectId: string, previewId: stri
   };
 }
 
-export async function revokeSitePreviewViewer(projectId: string, previewId: string, viewerUrl: string): Promise<void> {
-  await previewRequest(previewPath(projectId, previewId, "/view/revoke"), "POST", "Could not close the preview session.", { viewerUrl });
+/**
+ * `keepalive` lets the request outlive the page, for a revoke sent while
+ * Studio is being closed or reloaded.
+ */
+export async function revokeSitePreviewViewer(projectId: string, previewId: string, viewerUrl: string, options: { keepalive?: boolean } = {}): Promise<void> {
+  await previewRequest(previewPath(projectId, previewId, "/view/revoke"), "POST", "Could not close the preview session.", { body: { viewerUrl }, keepalive: options.keepalive });
 }
 
 /**
@@ -204,7 +220,7 @@ export async function revokeSitePreviewViewer(projectId: string, previewId: stri
  */
 export async function heartbeatSitePreviewViewer(projectId: string, previewId: string, viewerUrl: string, signal?: AbortSignal): Promise<"live" | "gone"> {
   try {
-    await previewRequest(previewPath(projectId, previewId, "/view/heartbeat"), "POST", "Could not keep the preview session.", { viewerUrl }, signal);
+    await previewRequest(previewPath(projectId, previewId, "/view/heartbeat"), "POST", "Could not keep the preview session.", { body: { viewerUrl }, signal });
     return "live";
   } catch (cause) {
     if (cause instanceof ControllerApiError && cause.status === 410) return "gone";
