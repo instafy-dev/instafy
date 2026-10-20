@@ -1,0 +1,196 @@
+{
+  "schema": "instafy.octo-turn-cases@1",
+  "about": "Cases for the agent-run Octo turn eval (docs/Octo-Turn-Eval.md): one of each kind of thing people ask for, plus asks that must stay in chat. Nothing here needs a particular skill pack: each case is graded on what the person gets (the page's shape, sources, the reply's wording and language) and what it cost. Each case runs in a fresh space. Budgets are generous ceilings, not targets. Grader: scripts/octo-turn-grade.mjs.",
+  "cases": [
+    {
+      "id": "map-day-walk",
+      "tier": "standard",
+      "kind": "map",
+      "prompt": "Make me a map for a first day in Rome: the main sights in walking order, with how long to spend at each.",
+      "expect": {
+        "route": "direct",
+        "siteRequired": true,
+        "map": true,
+        "minSources": 2
+      },
+      "budget": {
+        "seconds": 600,
+        "cardSeconds": 300,
+        "inputTokens": 3000000,
+        "outputTokens": 60000
+      },
+      "notes": "A place answer belongs on a map: the page renders one (any map library) and links where its facts come from."
+    },
+    {
+      "id": "compare-table",
+      "tier": "standard",
+      "kind": "table",
+      "prompt": "Make a table comparing the eight planets: size, distance from the Sun, number of moons and length of a day. I want to sort it by any column.",
+      "expect": {
+        "route": "direct",
+        "siteRequired": true,
+        "siteShape": {
+          "tableRows": 8
+        },
+        "minSources": 1
+      },
+      "budget": {
+        "seconds": 600,
+        "cardSeconds": 300,
+        "inputTokens": 2500000,
+        "outputTokens": 50000
+      },
+      "notes": "A comparison is a table with one row per thing compared. No live research: one direct build."
+    },
+    {
+      "id": "ranked-list",
+      "tier": "standard",
+      "kind": "list",
+      "prompt": "Make a page ranking the ten tallest buildings in the world, with height, city and year finished, and a source link for each.",
+      "expect": {
+        "route": "direct",
+        "siteRequired": true,
+        "siteShape": {
+          "rankedItems": 10
+        },
+        "minSources": 3
+      },
+      "budget": {
+        "seconds": 600,
+        "cardSeconds": 300,
+        "inputTokens": 2500000,
+        "outputTokens": 50000
+      },
+      "notes": "A ranking reads 1 to 10, however it is laid out (ordered list, table, cards)."
+    },
+    {
+      "id": "plan-timeline",
+      "tier": "standard",
+      "kind": "plan",
+      "prompt": "Help me plan moving to a new apartment in six weeks? A timeline page would be great.",
+      "expect": {
+        "route": "direct",
+        "siteRequired": true,
+        "siteShape": {
+          "datedItems": 6
+        },
+        "replyAssumed": true
+      },
+      "budget": {
+        "seconds": 600,
+        "cardSeconds": 300,
+        "inputTokens": 2500000,
+        "outputTokens": 50000
+      },
+      "notes": "Vague on purpose (how big a home, how many people, which date): Octo builds on defaults and says them in one Assumed: line instead of asking first. The page steps through time (weeks, dates)."
+    },
+    {
+      "id": "checklist",
+      "tier": "standard",
+      "kind": "checklist",
+      "prompt": "Make a packing checklist for a week of camping that I can tick off on my phone.",
+      "expect": {
+        "route": "direct",
+        "siteRequired": true,
+        "siteShape": {
+          "checkboxes": 10
+        },
+        "replyAssumed": true
+      },
+      "budget": {
+        "seconds": 600,
+        "cardSeconds": 300,
+        "inputTokens": 2500000,
+        "outputTokens": 50000
+      },
+      "notes": "Something to tick off has real checkboxes. Season and group size are not given: one Assumed: line."
+    },
+    {
+      "id": "meal-plan-es",
+      "tier": "standard",
+      "kind": "table",
+      "prompt": "Hazme una página con un plan de comidas vegetarianas para una semana y la lista de la compra.",
+      "expect": {
+        "route": "direct",
+        "siteRequired": true,
+        "siteShape": {
+          "items": 7
+        },
+        "language": "es"
+      },
+      "budget": {
+        "seconds": 600,
+        "cardSeconds": 300,
+        "inputTokens": 2500000,
+        "outputTokens": 50000
+      },
+      "notes": "Non-English ask: the reply (must) and the page (should) are in Spanish. Seven days or more list items."
+    },
+    {
+      "id": "plain-answer",
+      "tier": "cheap",
+      "kind": "answer",
+      "prompt": "How does a heat pump heat a house when it's freezing outside? Keep it short.",
+      "expect": {
+        "route": "direct",
+        "siteRequired": false,
+        "replyAnswers": true,
+        "replyNotQuestionOnly": true
+      },
+      "budget": {
+        "seconds": 180,
+        "inputTokens": 600000,
+        "outputTokens": 10000
+      },
+      "notes": "A question gets an answer in chat: at least one plain statement, no page, no file changed, no questions back. However short: the prompt asks for short."
+    },
+    {
+      "id": "negative-email",
+      "tier": "cheap",
+      "kind": "negative",
+      "prompt": "write a polite email declining the meeting on Thursday",
+      "expect": {
+        "route": "direct",
+        "siteRequired": false
+      },
+      "budget": {
+        "seconds": 180,
+        "inputTokens": 600000,
+        "outputTokens": 10000
+      },
+      "notes": "A chat answer: no page and no file changed."
+    },
+    {
+      "id": "negative-translate",
+      "tier": "cheap",
+      "kind": "negative",
+      "prompt": "How do I say 'where is the train station?' in Mandarin and in Japanese?",
+      "expect": {
+        "route": "direct",
+        "siteRequired": false
+      },
+      "budget": {
+        "seconds": 180,
+        "inputTokens": 600000,
+        "outputTokens": 10000
+      },
+      "notes": "Travel words but no place to show: no page and no file changed."
+    },
+    {
+      "id": "negative-rewrite",
+      "tier": "cheap",
+      "kind": "negative",
+      "prompt": "Rewrite this to sound friendlier: 'Send me the comparison table and the map by Friday.'",
+      "expect": {
+        "route": "direct",
+        "siteRequired": false
+      },
+      "budget": {
+        "seconds": 180,
+        "inputTokens": 600000,
+        "outputTokens": 10000
+      },
+      "notes": "Names a table and a map, asks for neither: a rewritten sentence in chat, no page and no file changed."
+    }
+  ]
+}
