@@ -27,6 +27,7 @@ test("system SDK cleanup is restricted to GitHub-hosted runners in every workflo
     "image-scan.yml": 1,
     "publish-runtime-agent-multiarch.yml": 1,
     "publish-runtime-agent.yml": 1,
+    "runtime-browser-cost.yml": 1,
   });
 });
 

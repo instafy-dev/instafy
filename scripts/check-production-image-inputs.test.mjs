@@ -4,8 +4,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-// The on-demand browser host runs from the same entrypoint and image inputs.
+// The on-demand browser host and its cost check use the same entrypoint and
+// image inputs.
 import "./runtime-browser-host.test.mjs";
+import "./runtime-browser-cost.test.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 const productionDockerfiles = [
