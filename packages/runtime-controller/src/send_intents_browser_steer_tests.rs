@@ -24,45 +24,12 @@ struct Fixture {
 }
 
 impl Fixture {
+    /// Ids, tokens and state only. The rows are written by [`Fixture::run`],
+    /// inside the guarded body, so a failed insert cannot leak them.
     async fn new() -> anyhow::Result<Self> {
         let pool = require_origin_test_pool("browser turn steer").await?;
         let owner = Uuid::new_v4();
         let teammate = Uuid::new_v4();
-        ensure_test_user(&pool, &owner).await?;
-        ensure_test_user(&pool, &teammate).await?;
-        let project = Uuid::new_v4();
-        let conversation = Uuid::new_v4();
-        let runtime = Uuid::new_v4();
-        {
-            let db = pool.get().await?;
-            db.execute(
-                "insert into projects(id,owner_user_id,name,project_type,status)
-                 values($1,$2,'Browser steer fixture','customer','active')",
-                &[&project, &owner],
-            )
-            .await?;
-            db.execute(
-                "insert into project_memberships(project_id,user_id,role) values($1,$2,'builder')",
-                &[&project, &teammate],
-            )
-            .await?;
-            db.execute(
-                "insert into conversations(id,project_id,created_by,visibility,metadata,root_conversation_id)
-                 values($1,$2,$3,'public','{}'::jsonb,$1)",
-                &[&conversation, &project, &owner],
-            )
-            .await?;
-            db.execute(
-                "insert into runtimes(id,project_id,provider,status,capabilities)
-                 values($1,$2,'default','ready',$3)",
-                &[
-                    &runtime,
-                    &project,
-                    &PgJson(json!({ "activeTurnInput": true })),
-                ],
-            )
-            .await?;
-        }
         let config = build_app_config(
             test_origin_private_key(),
             test_origin_public_key(),
@@ -80,14 +47,88 @@ impl Fixture {
         Ok(Self {
             state,
             app,
-            project,
-            conversation,
-            runtime,
+            project: Uuid::new_v4(),
+            conversation: Uuid::new_v4(),
+            runtime: Uuid::new_v4(),
             owner,
             owner_token,
             teammate,
             teammate_token,
         })
+    }
+
+    /// Seed the space, run `body`, then delete the space and both test users
+    /// however `body` ends.
+    async fn run(
+        &self,
+        body: impl std::future::Future<Output = anyhow::Result<()>>,
+    ) -> anyhow::Result<()> {
+        use futures_util::FutureExt;
+
+        let outcome = std::panic::AssertUnwindSafe(with_shared_db_fixture(
+            SharedDbFixture {
+                projects: vec![self.project],
+                ..SharedDbFixture::default()
+            },
+            async {
+                self.seed().await?;
+                body.await
+            },
+        ))
+        .catch_unwind()
+        .await;
+        let users = self.delete_users().await;
+        match outcome {
+            Ok(result) => result.and(users),
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    async fn seed(&self) -> anyhow::Result<()> {
+        ensure_test_user(&self.state.pool, &self.owner).await?;
+        ensure_test_user(&self.state.pool, &self.teammate).await?;
+        let db = self.state.pool.get().await?;
+        db.execute(
+            "insert into projects(id,owner_user_id,name,project_type,status)
+             values($1,$2,'Browser steer fixture','customer','active')",
+            &[&self.project, &self.owner],
+        )
+        .await?;
+        db.execute(
+            "insert into project_memberships(project_id,user_id,role) values($1,$2,'builder')",
+            &[&self.project, &self.teammate],
+        )
+        .await?;
+        db.execute(
+            "insert into conversations(id,project_id,created_by,visibility,metadata,root_conversation_id)
+             values($1,$2,$3,'public','{}'::jsonb,$1)",
+            &[&self.conversation, &self.project, &self.owner],
+        )
+        .await?;
+        db.execute(
+            "insert into runtimes(id,project_id,provider,status,capabilities)
+             values($1,$2,'default','ready',$3)",
+            &[
+                &self.runtime,
+                &self.project,
+                &PgJson(json!({ "activeTurnInput": true })),
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn delete_users(&self) -> anyhow::Result<()> {
+        self.state
+            .pool
+            .get()
+            .await?
+            .execute(
+                "delete from auth.users where id = any($1)",
+                &[&vec![self.owner, self.teammate]],
+            )
+            .await?;
+        Ok(())
     }
 
     /// One active, input-ready job whose prompt was written by `author`.
@@ -195,88 +236,94 @@ impl Fixture {
             .await?
             .get(0))
     }
+
+    /// Transcript messages and participant rows `user` has in the conversation.
+    async fn transcript_rows_by(&self, user: Uuid) -> anyhow::Result<(i64, i64)> {
+        let row = self
+            .state
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select
+                     (select count(*) from conversation_messages
+                      where conversation_id = $1 and created_by = $2),
+                     (select count(*) from conversation_participants
+                      where conversation_id = $1 and user_id = $2)",
+                &[&self.conversation, &user],
+            )
+            .await?;
+        Ok((row.get(0), row.get(1)))
+    }
 }
 
 #[tokio::test]
 async fn only_the_prompt_author_can_steer_an_active_browser_turn() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
-    let project = f.project;
-    with_shared_db_fixture(
-        SharedDbFixture {
-            projects: vec![project],
-            ..SharedDbFixture::default()
-        },
-        async {
-            for transport in ["desktop-personal", "shared"] {
-                let job = f
-                    .active_job(
-                        Some(f.owner),
-                        json!({ "browserTransport": transport, "userId": f.teammate }),
-                    )
-                    .await?;
+    f.run(async {
+        for transport in ["desktop-personal", "shared"] {
+            let job = f
+                .active_job(
+                    Some(f.owner),
+                    json!({ "browserTransport": transport, "userId": f.teammate }),
+                )
+                .await?;
 
-                let (status, body) = f.steer(&f.teammate_token, job).await?;
-                assert_eq!(status, StatusCode::FORBIDDEN, "{transport}: {body}");
-                assert_eq!(body["code"], json!("browser_turn_steer_forbidden"));
-                assert_eq!(f.job_input_count(job).await?, 0, "{transport}");
+            let (status, body) = f.steer(&f.teammate_token, job).await?;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{transport}: {body}");
+            assert_eq!(body["code"], json!("browser_turn_steer_forbidden"));
+            assert_eq!(f.job_input_count(job).await?, 0, "{transport}");
+            assert_eq!(
+                f.transcript_rows_by(f.teammate).await?,
+                (0, 0),
+                "{transport}: a refused steer stores no message or participant"
+            );
 
-                let (status, body) = f.steer(&f.owner_token, job).await?;
-                assert_eq!(status, StatusCode::OK, "{transport}: {body}");
-                assert_eq!(body["appliedMode"], json!("steer"));
-                assert_eq!(f.job_input_count(job).await?, 1, "{transport}");
+            let (status, body) = f.steer(&f.owner_token, job).await?;
+            assert_eq!(status, StatusCode::OK, "{transport}: {body}");
+            assert_eq!(body["appliedMode"], json!("steer"));
+            assert_eq!(f.job_input_count(job).await?, 1, "{transport}");
 
-                f.finish_job(job).await?;
-            }
-            Ok(())
-        },
-    )
+            f.finish_job(job).await?;
+        }
+        Ok(())
+    })
     .await
 }
 
 #[tokio::test]
 async fn a_browser_turn_without_a_recorded_author_cannot_be_steered() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
-    let project = f.project;
-    with_shared_db_fixture(
-        SharedDbFixture {
-            projects: vec![project],
-            ..SharedDbFixture::default()
-        },
-        async {
-            let job = f
-                .active_job(
-                    None,
-                    json!({ "browserTransport": "desktop-personal", "userId": f.owner }),
-                )
-                .await?;
-            for token in [&f.owner_token, &f.teammate_token] {
-                let (status, body) = f.steer(token, job).await?;
-                assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-                assert_eq!(body["code"], json!("browser_turn_steer_forbidden"));
-            }
-            assert_eq!(f.job_input_count(job).await?, 0);
-            Ok(())
-        },
-    )
+    f.run(async {
+        let job = f
+            .active_job(
+                None,
+                json!({ "browserTransport": "desktop-personal", "userId": f.owner }),
+            )
+            .await?;
+        for token in [&f.owner_token, &f.teammate_token] {
+            let (status, body) = f.steer(token, job).await?;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+            assert_eq!(body["code"], json!("browser_turn_steer_forbidden"));
+        }
+        assert_eq!(f.job_input_count(job).await?, 0);
+        assert_eq!(f.transcript_rows_by(f.teammate).await?.0, 0);
+        assert_eq!(f.transcript_rows_by(f.owner).await?.0, 0);
+        Ok(())
+    })
     .await
 }
 
 #[tokio::test]
 async fn teammates_can_still_steer_an_ordinary_turn() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
-    let project = f.project;
-    with_shared_db_fixture(
-        SharedDbFixture {
-            projects: vec![project],
-            ..SharedDbFixture::default()
-        },
-        async {
-            let job = f.active_job(Some(f.owner), json!({})).await?;
-            let (status, body) = f.steer(&f.teammate_token, job).await?;
-            assert_eq!(status, StatusCode::OK, "{body}");
-            assert_eq!(f.job_input_count(job).await?, 1);
-            Ok(())
-        },
-    )
+    f.run(async {
+        let job = f.active_job(Some(f.owner), json!({})).await?;
+        let (status, body) = f.steer(&f.teammate_token, job).await?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(f.job_input_count(job).await?, 1);
+        assert_eq!(f.transcript_rows_by(f.teammate).await?, (1, 1));
+        Ok(())
+    })
     .await
 }

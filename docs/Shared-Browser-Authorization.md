@@ -52,7 +52,11 @@ the turn.
   job input is created. Queue remains available to every member with write
   access, and a queued message starts a new turn after the current one ends.
 - Ordinary agent turns keep the existing rule: anyone with write and
-  conversation access may steer them.
+  conversation access may steer them. The limit follows the turn's
+  `browserTransport`, not the machine that runs it, so an ordinary turn on the
+  machine that hosts a Shared Browser is not covered. Separating that machine's
+  ordinary turns from its browser is tracked as later Shared Browser work. A
+  Desktop Personal Browser runtime only leases `desktop-personal` turns.
 
 Studio shows the refusal as "Only the person who started this browser task can
 steer it. Queue your message instead." Older Studio builds show the
