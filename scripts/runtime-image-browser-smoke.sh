@@ -13,7 +13,9 @@
 # sets a persistent cookie and one with no expiry, closes Chromium over CDP
 # with the agent's own close helper, and requires both cookies, the
 # session-restore and download-block preferences and the rest of the profile
-# after the next start on the same profile.
+# after the next start on the same profile. It then keeps only the files the
+# agent packs (as a later machine restores them) and requires both cookies
+# after a third start on that profile.
 #
 #   scripts/runtime-image-browser-smoke.sh [--lazy] <image> [<entrypoint to mount>]
 #
@@ -142,6 +144,9 @@ class Cdp {
   console.log(mode === "set" ? "Set a persistent cookie and one with no expiry." : "Both cookies survived a clean close and the next start.");
 })().then(() => process.exit(0), (error) => { console.error(error.message); process.exit(1); });
 '
+  # What runtime-agent packs and a later machine restores (browser_profile.rs
+  # PROFILE_FILE_ALLOWLIST and PROFILE_DIRECTORY_ALLOWLIST).
+  packed_paths=("Local State" "Default/Cookies" "Default/Network/Cookies" "Default/Local Storage" "Default/IndexedDB" "Default/Session Storage")
   # The profile keeps blocking downloads and continues the last session.
   preferences_probe='
 const preferences = JSON.parse(require("fs").readFileSync(`${process.argv[1]}/Default/Preferences`, "utf8"));
@@ -316,11 +321,36 @@ if (!preferences.session || preferences.session.restore_on_startup !== 1) throw 
   prove_running_host second
   docker exec "$name" env -i "$host_node" -e "$cookie_probe" get "$host_cdp_port" \
     || lazy_fail "The second browser host lost a sign-in cookie across a clean close."
+  close_host second
+
+  # A later machine gets only the packed files, with no Preferences or
+  # Sessions: the host writes its preferences again, and Chromium must still
+  # load both cookies. The smoke's marker is kept for the checks above.
+  docker exec "$name" bash -c '
+    set -e
+    profile="$1"
+    shift
+    packed="${profile}.packed"
+    rm -rf "$packed"
+    mkdir -m 0700 "$packed"
+    for path in "$@" instafy-smoke-marker; do
+      if [ -e "$profile/$path" ]; then
+        mkdir -p "$packed/$(dirname "$path")"
+        cp -a "$profile/$path" "$packed/$path"
+      fi
+    done
+    rm -rf "$profile"
+    mv "$packed" "$profile"' bash "$profile_dir" "${packed_paths[@]}" \
+    || lazy_fail "Could not reduce the profile to the files the agent packs."
+  start_host
+  prove_running_host third
+  docker exec "$name" env -i "$host_node" -e "$cookie_probe" get "$host_cdp_port" \
+    || lazy_fail "The third browser host lost a sign-in cookie restored from the packed files."
   # A SIGTERM-only stop is not relied on to keep sign-ins: it does not flush
   # Chromium's cookie store, so the agent never saves a profile after one.
-  stop_host second
+  stop_host third
 
-  echo "Browser host started on demand twice on one persisted profile, kept both sign-in cookies across a clean close and left no process behind."
+  echo "Browser host started on demand three times, kept both sign-in cookies across a clean close on the same profile and from the packed files alone, and left no process behind."
   exit 0
 fi
 

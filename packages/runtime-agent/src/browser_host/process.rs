@@ -39,6 +39,8 @@ pub(crate) const START_TIMEOUT: &str = "start_timeout";
 pub(crate) const SPAWN_FAILED: &str = "spawn_failed";
 pub(crate) const UNCONFIRMED_SHUTDOWN: &str = "unconfirmed_shutdown";
 pub(crate) const HOST_ERROR: &str = "host_error";
+/// The host's exit status after an `exited <child>` line.
+pub(crate) const EXITED_STATUS: i32 = 71;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum HostLine {
@@ -750,7 +752,9 @@ mod tests {
                 "the entrypoint no longer names the {child} child"
             );
         }
-        assert!(entrypoint.contains("browser_host_status \"exited ${exited_name}\""));
+        assert!(entrypoint.contains(&format!(
+            "browser_host_status \"exited ${{exited_name}}\"\n  exit {EXITED_STATUS}\n"
+        )));
         assert!(entrypoint.contains("browser_host_status \"stopped\""));
         assert!(entrypoint.contains(
             "browser_host_status \"ready display=${display} cdp=${cdp_port} vnc=${vnc_port} egress=${egress_status} webrtc=${webrtc_status}"

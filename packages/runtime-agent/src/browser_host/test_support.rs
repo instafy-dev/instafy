@@ -60,9 +60,15 @@ while true; do
     exit 71
   fi
   if [ -f "$dir/close" ] && [ "$mode" != "ignoreclose" ]; then
-    # Chromium closed over CDP: the host stops its group and reports it.
     rm -f "$dir/close"
     kill -KILL "$child"
+    case "$mode" in
+      # Another child stopped first; the host stopped Chromium itself.
+      closeother) echo "instafy-browser-host: exited display"; exit 71 ;;
+      # The host is killed outright and prints nothing.
+      closekilled) kill -KILL $$ ;;
+    esac
+    # Chromium closed over CDP: the host stops its group and reports it.
     echo "instafy-browser-host: exited chromium"
     exit 71
   fi

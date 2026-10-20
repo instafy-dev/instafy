@@ -1045,26 +1045,40 @@ the boot-time browser off, and the boot-time persistence needs it on.
   empty profile (removed without following symlinks).
 - **Saves while Ready.** Every `INSTAFY_BROWSER_PROFILE_SNAPSHOT_SECS` (the
   controller sets 30 for covered spaces) the profile is packed and uploaded
-  when it changed. What each upload sends is recorded before it is sent.
+  when it changed. What each upload sends is recorded before it is sent. A
+  save that first has to settle an unknown result gives up its read as soon
+  as the host stops being Ready, so it never delays the stop's own save.
 - **Saves at every stop.** An idle or explicit stop first ends the periodic
   saves and waits for an upload in flight (it is never aborted). It then
   closes Chromium over CDP (`Browser.close`, with the private Node and
   Playwright and only `PATH` in the environment), waits up to 5 seconds for
   the host to report that Chromium exited, and only then packs and uploads.
-  A close that cannot be confirmed falls back to SIGTERM and never packs a
+  Only an `exited chromium` status line that comes before any other final
+  line confirms the close (with exit status 71 when the host's exit arrives
+  first); another child's exit, a killed host or a missing line does not. A
+  close that cannot be confirmed falls back to SIGTERM and never packs a
   live profile. A host stop does not end saving: later starts in the same
   process save again.
 - **The runtime's shutdown** does the same within its 10-second budget,
   before the runtime stops itself. If a periodic upload is still running when
   the budget ends, there is no final save. The final upload is bounded by the
-  remaining budget, and nothing saves after it.
+  remaining budget, and nothing saves after it. With no host running, a
+  profile whose last stop confirmed the close is saved once more, so a stop
+  save that failed or stayed unknown is retried (nothing is sent when it is
+  unchanged).
 - **Results.** A 409 means another writer won: saving stops until the next
   start installs the stored copy. A refusal (400, 401, 403, 404, 413 or 428)
-  stored nothing, so the writer is kept and that same copy is not sent again.
-  An unknown result (network error, timeout, 5xx or an unexpected
+  stored nothing, so the writer is kept. That same copy is not sent again,
+  except after a 401, which concerns the agent's token or lease rather than
+  the copy. An unknown result (network error, timeout, 5xx or an unexpected
   acknowledgement) stays recorded and is settled by the next save's read or
   the next start, by comparing hashes. Unlike the boot-time persistence, one
   uncertain save does not stop saving for the process.
+- **Its own late writes.** The process remembers the last few copies it sent
+  since the local profile last came from the store. If the stored copy is one
+  of them (an upload settled as not landed that committed later, so the
+  resend got a 409), it is recognised as the process's own: the newer local
+  profile is kept, and the next save sends it on top.
 - **No save** after a poisoned host or for a deleted space: the last
   successful save stands.
 - **Cookies without an expiry.** Chromium keeps a cookie that has no expiry
@@ -1072,9 +1086,11 @@ the boot-time browser off, and the boot-time persistence needs it on.
   therefore writes `session.restore_on_startup = 1` into the profile's
   `Default/Preferences` on every start, next to the download block. Neither
   preference is packed, so tabs open at a stop reopen at the next start only
-  within the same container. Publication's image smoke proves a persistent
-  cookie and one without an expiry both survive a clean close and the next
-  start.
+  within the same container. Sign-ins a site meant to end with the browser
+  ("don't remember me") are therefore kept, on later machines too, until
+  Clear data. The `--lazy` image smoke requires a persistent cookie and one
+  without an expiry to survive a clean close and the next start, both on the
+  same profile directory and on a fresh one holding only the packed files.
 - **Loss window.** A controller- or provider-initiated machine stop fences
   the lease before the runtime's shutdown, so its final upload is refused.
   A sign-in made less than about one save interval (plus Chromium's own
@@ -1230,7 +1246,8 @@ its own; or `stopped` after SIGTERM. Publication and the image scan require
 boot with no browser process (the base image also with the browser session on),
 and the host must start on the agent's own root and ports with WebRTC off,
 keep a persistent cookie and one without an expiry across a close with the
-agent's CDP close helper, and start again on that profile.
+agent's CDP close helper, and start again on that profile and on one holding
+only the files the agent packs.
 
 On an attested lease, runtime-agent supervises the host with one actor that
 owns the child and makes every state change:

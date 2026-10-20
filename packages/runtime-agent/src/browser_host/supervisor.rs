@@ -493,6 +493,9 @@ async fn run_actor(
     mut commands: mpsc::UnboundedReceiver<Command>,
 ) {
     let mut running: Option<Running> = None;
+    // The last host stopped with a confirmed close, and none has started
+    // since: the local profile is closed and safe to pack.
+    let mut profile_closed = false;
     let mut idle = tokio::time::interval_at(
         tokio::time::Instant::now() + config.idle_tick,
         config.idle_tick,
@@ -565,13 +568,15 @@ async fn run_actor(
                     }
                 };
                 if current {
+                    profile_closed = false;
                     running = start(&shared, &config, generation).await;
                 }
             }
             Event::Command(Some(Command::Stop { reason, reply })) => {
                 if let Some(host) = running.take() {
                     tracing::info!(reason, "stopping the browser host");
-                    stop_running(&shared, &config, host, None, SaveKind::HostStop).await;
+                    profile_closed =
+                        stop_running(&shared, &config, host, None, SaveKind::HostStop).await;
                 }
                 let _ = reply.send(());
             }
@@ -579,6 +584,13 @@ async fn run_actor(
                 if let Some(host) = running.take() {
                     tracing::info!("stopping the browser host for the runtime's shutdown");
                     stop_running(&shared, &config, host, Some(deadline), SaveKind::Final).await;
+                } else if profile_closed && let Some(persistence) = &config.persistence {
+                    // The last stop's save may have failed or stayed
+                    // uncertain; the closed profile is saved once more
+                    // (nothing is sent when it is unchanged).
+                    persistence
+                        .save(&config.dirs.profile, SaveKind::Final, Some(deadline), None)
+                        .await;
                 }
                 // Nothing saves after the runtime's shutdown, whether or not
                 // a host ran.
@@ -621,7 +633,8 @@ async fn run_actor(
                 });
                 if stop && let Some(host) = running.take() {
                     tracing::info!("stopping the idle browser host");
-                    stop_running(&shared, &config, host, None, SaveKind::HostStop).await;
+                    profile_closed =
+                        stop_running(&shared, &config, host, None, SaveKind::HostStop).await;
                 }
             }
         }
@@ -789,14 +802,16 @@ async fn start(shared: &Shared, config: &HostConfig, generation: Uuid) -> Option
 /// closed over CDP so it flushes its cookies, and only once its exit is
 /// confirmed is the profile packed and saved. A close that cannot be
 /// confirmed falls back to SIGTERM and never packs a live profile.
-/// `deadline` bounds the whole stop for the runtime's shutdown.
+/// `deadline` bounds the whole stop for the runtime's shutdown. True when
+/// Chromium's close was confirmed and the host's group is gone, so the local
+/// profile is closed.
 async fn stop_running(
     shared: &Shared,
     config: &HostConfig,
     mut host: Running,
     deadline: Option<tokio::time::Instant>,
     kind: SaveKind,
-) {
+) -> bool {
     {
         let mut inner = shared.inner();
         if inner.generation == Some(host.generation)
@@ -833,18 +848,22 @@ async fn stop_running(
         group::kill(host.pid);
     }
     let confirmed = finish(shared, config, host).await;
-    if let Some(persistence) = &config.persistence
-        && closed
-        && confirmed
-    {
-        persistence
-            .save(&config.dirs.profile, kind, deadline, None)
-            .await;
-    }
+    let Some(persistence) = config.persistence.as_ref().filter(|_| closed && confirmed) else {
+        return false;
+    };
+    persistence
+        .save(&config.dirs.profile, kind, deadline, None)
+        .await;
+    true
 }
 
-/// Asks Chromium to close over CDP and waits for it to exit: an `exited
-/// chromium` line, or the host's own exit with no other child reported.
+/// Asks Chromium to close over CDP and waits for the host to report that
+/// Chromium exited. Confirmed only by an `exited chromium` line that comes
+/// before any other final status line; when the host's exit wins the race
+/// with that line, its queued lines are read first and it must also have
+/// exited with the status the entrypoint uses after that line. A host that
+/// reports another child, is killed or prints nothing is never confirmed, so
+/// a profile Chromium did not flush is never packed.
 async fn close_browser(
     config: &HostConfig,
     host: &mut Running,
@@ -859,39 +878,81 @@ async fn close_browser(
     }
     enum Seen {
         Line(Option<HostLine>),
-        Exited,
+        Exited(Option<i32>),
         Deadline,
     }
     let until = tokio::time::Instant::now() + remaining(CLOSE_CONFIRM_BUDGET, deadline);
-    let mut other_exit = false;
     loop {
         let seen = {
             let lines = host.lines_open.then_some(&mut host.lines);
             tokio::select! {
+                // Lines first: a status line already queued precedes the exit.
+                biased;
                 line = async {
                     match lines {
                         Some(lines) => lines.recv().await,
                         None => std::future::pending().await,
                     }
                 } => Seen::Line(line),
-                _ = host.child.wait() => Seen::Exited,
+                status = host.child.wait() => {
+                    Seen::Exited(status.ok().and_then(|status| status.code()))
+                }
                 _ = tokio::time::sleep_until(until) => Seen::Deadline,
             }
         };
-        match seen {
-            Seen::Line(Some(HostLine::Exited(token))) if token == EXITED_CHROMIUM => return true,
-            Seen::Line(Some(HostLine::Exited(token) | HostLine::Failed(token))) => {
-                host.failure.get_or_insert(token);
-                other_exit = true;
+        let line = match seen {
+            Seen::Line(Some(line)) => line,
+            Seen::Line(None) => {
+                host.lines_open = false;
+                continue;
             }
-            Seen::Line(Some(_)) => {}
-            Seen::Line(None) => host.lines_open = false,
-            Seen::Exited => return !other_exit,
+            Seen::Exited(code) => {
+                // The reader task may not have forwarded the host's last line.
+                let chromium = loop {
+                    if !host.lines_open {
+                        break false;
+                    }
+                    match tokio::time::timeout(EXIT_LINE_DRAIN, host.lines.recv()).await {
+                        Ok(Some(line)) => {
+                            if let Some(confirmed) = closed_by(host, line) {
+                                break confirmed;
+                            }
+                        }
+                        Ok(None) | Err(_) => host.lines_open = false,
+                    }
+                };
+                let confirmed = chromium && code == Some(process::EXITED_STATUS);
+                if !confirmed {
+                    tracing::warn!("the browser host exited without confirming the close; no save");
+                }
+                return confirmed;
+            }
             Seen::Deadline => {
                 tracing::warn!("the browser did not exit after the close; no save");
                 return false;
             }
+        };
+        if let Some(confirmed) = closed_by(host, line) {
+            if !confirmed {
+                tracing::warn!("another browser host process stopped first; no save");
+            }
+            return confirmed;
         }
+    }
+}
+
+/// What a status line says about the close: `Some(true)` for `exited
+/// chromium`, `Some(false)` for any other final line (recorded as the host's
+/// failure), `None` for a line that is not final.
+fn closed_by(host: &mut Running, line: HostLine) -> Option<bool> {
+    match line {
+        HostLine::Exited(token) if token == EXITED_CHROMIUM => Some(true),
+        HostLine::Exited(token) | HostLine::Failed(token) => {
+            host.failure.get_or_insert(token);
+            Some(false)
+        }
+        HostLine::Stopped => Some(false),
+        HostLine::Ready => None,
     }
 }
 

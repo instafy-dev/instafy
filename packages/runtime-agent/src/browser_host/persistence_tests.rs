@@ -292,6 +292,107 @@ async fn a_rejected_copy_keeps_the_writer_and_is_not_sent_again() {
 }
 
 #[tokio::test]
+async fn a_401_keeps_the_writer_and_sends_the_same_copy_again() {
+    // A lapsed token or lease, not a refused copy: a renewal fixes it.
+    let setup = setup();
+    setup.restore().await;
+    write(&setup.profile, COOKIES, b"signed in");
+    setup
+        .store
+        .set_mode(UploadMode::Reject(StatusCode::UNAUTHORIZED));
+    assert_eq!(setup.save(SaveKind::Periodic).await, SaveOutcome::Rejected);
+    setup.store.set_mode(UploadMode::Normal);
+    assert_eq!(setup.save(SaveKind::HostStop).await, SaveOutcome::Saved(1));
+    assert_eq!(setup.store.uploads_started(), 2);
+}
+
+#[tokio::test]
+async fn an_upload_that_commits_after_it_was_settled_as_not_landed_stays_ours() {
+    // The first upload times out while the controller is still running it.
+    let setup = setup();
+    setup.restore().await;
+    write(&setup.profile, COOKIES, b"one");
+    setup.store.set_mode(UploadMode::UncertainCommitsLate);
+    assert_eq!(setup.save(SaveKind::Periodic).await, SaveOutcome::Uncertain);
+    // The next save reads the old copy (not landed) and sends again; the
+    // first upload commits meanwhile, so the resend conflicts with it.
+    setup.store.set_mode(UploadMode::Normal);
+    write(&setup.profile, COOKIES, b"two");
+    assert_eq!(setup.save(SaveKind::HostStop).await, SaveOutcome::Conflict);
+    assert_eq!(setup.store.stored().0, 1);
+
+    // The stored copy is this process's own: the next start keeps the newer
+    // local profile instead of installing the older copy.
+    write(&setup.profile, "Default/Preferences", b"{}");
+    assert_eq!(setup.restore().await, RestoreOutcome::KeptLocal);
+    assert!(read(&setup.profile, "Default/Preferences").is_some());
+    assert_eq!(setup.save(SaveKind::Periodic).await, SaveOutcome::Saved(2));
+    assert_eq!(read(&setup.profile, COOKIES).as_deref(), Some(&b"two"[..]));
+
+    // While running, the next tick recognises it too.
+    let setup = self::setup();
+    setup.restore().await;
+    write(&setup.profile, COOKIES, b"one");
+    setup.store.set_mode(UploadMode::UncertainCommitsLate);
+    setup.save(SaveKind::Periodic).await;
+    setup.store.set_mode(UploadMode::Normal);
+    write(&setup.profile, COOKIES, b"two");
+    assert_eq!(setup.save(SaveKind::Periodic).await, SaveOutcome::Conflict);
+    assert_eq!(setup.save(SaveKind::Periodic).await, SaveOutcome::Saved(2));
+
+    // Someone else's copy is never adopted.
+    let setup = self::setup();
+    setup.restore().await;
+    write(&setup.profile, COOKIES, b"one");
+    assert_eq!(setup.save(SaveKind::Periodic).await, SaveOutcome::Saved(1));
+    setup
+        .store
+        .set_stored(2, Some(archive_with_cookies(b"theirs")));
+    write(&setup.profile, COOKIES, b"two");
+    assert_eq!(setup.save(SaveKind::Periodic).await, SaveOutcome::Conflict);
+    assert_eq!(setup.save(SaveKind::Periodic).await, SaveOutcome::Skipped);
+    assert_eq!(setup.restore().await, RestoreOutcome::Installed);
+    assert_eq!(
+        read(&setup.profile, COOKIES).as_deref(),
+        Some(&b"theirs"[..])
+    );
+}
+
+#[tokio::test]
+async fn a_periodic_settle_read_gives_up_once_the_host_is_not_ready() {
+    let setup = setup();
+    setup.restore().await;
+    write(&setup.profile, COOKIES, b"signed in");
+    setup.store.set_mode(UploadMode::UncertainBeforeCommit);
+    assert_eq!(setup.save(SaveKind::Periodic).await, SaveOutcome::Uncertain);
+    setup.store.set_mode(UploadMode::Normal);
+    setup.store.set_fetch_delay(Duration::from_secs(4));
+
+    let ready = Arc::new(AtomicBool::new(true));
+    let save = {
+        let persistence = setup.persistence.clone();
+        let profile = setup.profile.clone();
+        let ready = ready.clone();
+        tokio::spawn(async move {
+            let ready = move || ready.load(Ordering::SeqCst);
+            persistence
+                .save(&profile, SaveKind::Periodic, None, Some(&ready))
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let stopped = std::time::Instant::now();
+    ready.store(false, Ordering::SeqCst);
+    assert_eq!(save.await.unwrap(), SaveOutcome::Skipped);
+    assert!(stopped.elapsed() < Duration::from_secs(1));
+    assert_eq!(setup.store.uploads_started(), 1, "nothing packed or sent");
+
+    // The stop's own save settles it.
+    setup.store.set_fetch_delay(Duration::ZERO);
+    assert_eq!(setup.save(SaveKind::HostStop).await, SaveOutcome::Saved(1));
+}
+
+#[tokio::test]
 async fn a_host_stop_save_does_not_latch_but_the_final_save_does() {
     let setup = setup();
     setup.restore().await;
@@ -400,4 +501,11 @@ fn the_entrypoint_keeps_the_browser_session_on_every_host_start() {
 fn the_image_smoke_closes_the_browser_with_the_agents_helper() {
     let smoke = include_str!("../../../../scripts/runtime-image-browser-smoke.sh");
     assert!(smoke.contains(&format!("\n{CLOSE_SCRIPT}\n")));
+    // The packed-files restart keeps exactly what the agent packs.
+    let packed: Vec<String> = crate::browser_profile::PROFILE_FILE_ALLOWLIST
+        .iter()
+        .chain(crate::browser_profile::PROFILE_DIRECTORY_ALLOWLIST)
+        .map(|path| format!("\"{path}\""))
+        .collect();
+    assert!(smoke.contains(&format!("\n  packed_paths=({})\n", packed.join(" "))));
 }

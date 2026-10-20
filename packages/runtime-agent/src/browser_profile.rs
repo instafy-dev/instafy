@@ -101,10 +101,10 @@ const CHROMIUM_CLOSE_POLL: Duration = Duration::from_millis(100);
 ///
 /// `Local State` is mandatory: it holds os_crypt's wrapped key, and without it
 /// the restored cookies cannot be decrypted on the next runtime.
-const PROFILE_FILE_ALLOWLIST: &[&str] =
+pub(crate) const PROFILE_FILE_ALLOWLIST: &[&str] =
     &["Local State", "Default/Cookies", "Default/Network/Cookies"];
 
-const PROFILE_DIRECTORY_ALLOWLIST: &[&str] = &[
+pub(crate) const PROFILE_DIRECTORY_ALLOWLIST: &[&str] = &[
     "Default/Local Storage",
     "Default/IndexedDB",
     "Default/Session Storage",

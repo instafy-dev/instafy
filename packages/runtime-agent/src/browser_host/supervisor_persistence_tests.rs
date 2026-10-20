@@ -3,7 +3,7 @@
 //! in-memory profile store, on real time.
 
 use super::*;
-use crate::browser_host::persistence::testing::FakeStore;
+use crate::browser_host::persistence::testing::{FakeStore, UploadMode};
 use crate::browser_host::test_support::{Fake, eventually, wait_for_state};
 
 const COOKIES: &str = "Default/Network/Cookies";
@@ -209,6 +209,23 @@ async fn a_close_that_cannot_be_confirmed_never_packs() {
 }
 
 #[tokio::test]
+async fn a_host_exit_without_an_exited_chromium_line_never_packs() {
+    // A different child is reported first, or the host is killed with no
+    // line at all: Chromium may not have flushed its cookies.
+    for mode in ["closeother", "closekilled"] {
+        let fake = Fake::new(mode);
+        let store = FakeStore::new();
+        let host = fake.spawn_persisting(store.clone(), NO_PERIODIC);
+        start_ready(&host).await;
+        write_cookies(&fake, b"not flushed");
+        host.stop("test").await;
+        assert_eq!(fake.closes(), 1, "{mode}");
+        assert_eq!(host.snapshot().state, BrowserHostState::Idle, "{mode}");
+        assert_eq!(store.uploads_started(), 0, "{mode}");
+    }
+}
+
+#[tokio::test]
 async fn poison_and_kill_never_save() {
     let fake = Fake::new("ready");
     let store = FakeStore::new();
@@ -266,4 +283,36 @@ async fn the_runtime_shutdown_respects_its_budget() {
     );
     assert_eq!(store.uploads_started(), 1, "the final save was attempted");
     assert_eq!(store.stored().0, 0);
+}
+
+#[tokio::test]
+async fn the_runtime_shutdown_saves_a_closed_profile_whose_stop_save_failed() {
+    let fake = Fake::new("ready");
+    let store = FakeStore::new();
+    let host = fake.spawn_persisting(store.clone(), NO_PERIODIC);
+    start_ready(&host).await;
+    write_cookies(&fake, b"signed in");
+    store.set_mode(UploadMode::UncertainBeforeCommit);
+    host.stop("idle").await;
+    assert_eq!(store.uploads_started(), 1);
+    assert_eq!(store.stored().0, 0);
+
+    store.set_mode(UploadMode::Normal);
+    host.shutdown(Duration::from_secs(10)).await;
+    assert_eq!(store.stored().0, 1);
+    assert_eq!(stored_cookies(&store).as_deref(), Some(&b"signed in"[..]));
+    assert_eq!(fake.starts(), 1, "saved without starting the browser");
+}
+
+#[tokio::test]
+async fn the_runtime_shutdown_never_saves_a_profile_whose_close_was_not_confirmed() {
+    let fake = Fake::new("ready");
+    let store = FakeStore::new();
+    let host = fake.spawn_persisting(store.clone(), NO_PERIODIC);
+    start_ready(&host).await;
+    write_cookies(&fake, b"signed in");
+    fake.touch("close-fails");
+    host.stop("idle").await;
+    host.shutdown(Duration::from_secs(10)).await;
+    assert_eq!(store.uploads_started(), 0);
 }

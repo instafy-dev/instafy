@@ -37,6 +37,10 @@ use crate::controller::{BrowserProfileSnapshot, ControllerClient, UploadFailure}
 /// How long a restore (or the read that resolves an uncertain save) may
 /// wait for the stored copy.
 pub(crate) const RESTORE_BUDGET: Duration = Duration::from_secs(30);
+/// How often a periodic save's read checks that the host is still Ready.
+const READY_POLL: Duration = Duration::from_millis(50);
+/// How many of this process's own uploads are remembered.
+const OWN_COPIES: usize = 8;
 /// How long the CDP close helper may run.
 pub(crate) const CLOSE_HELPER_BUDGET: Duration = Duration::from_secs(2);
 /// How long Chromium may take to exit after the close.
@@ -116,10 +120,25 @@ struct Pending {
     prev_packed_hash: u64,
 }
 
+/// A copy this process sent from the local profile: the stored version and
+/// bytes if that upload committed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct OwnCopy {
+    version: i64,
+    sha256: Sha256Digest,
+    packed_hash: u64,
+}
+
 #[derive(Debug, Default)]
 struct HostProfileSession {
     writer: Option<Writer>,
     pending: Option<Pending>,
+    /// Uploads sent from the local profile since it last came from the
+    /// store, newest last. The local profile is at least as new as any of
+    /// them, so a stored copy that equals one is this process's own write,
+    /// even after its result was misread (an upload settled as not landed
+    /// that then committed, so the resend got a conflict).
+    own: Vec<OwnCopy>,
     /// A packed hash the controller refused; not sent again.
     rejected_hash: Option<u64>,
     /// This process installed a stored baseline at least once.
@@ -152,6 +171,43 @@ impl HostProfileSession {
         });
         self.pending = None;
         true
+    }
+
+    /// Settles what this process does not know about the stored copy: a
+    /// pending upload, or a stored copy that may be its own write. False
+    /// when the stored copy is someone else's.
+    fn settle(&mut self, version: i64, stored: &Sha256Digest) -> bool {
+        if self.resolve_pending(version, stored) {
+            return true;
+        }
+        if let Some(own) = self
+            .own
+            .iter()
+            .rev()
+            .find(|own| own.version == version && own.sha256 == *stored)
+        {
+            self.writer = Some(Writer {
+                version,
+                archive_sha256: *stored,
+                packed_hash: own.packed_hash,
+            });
+            self.pending = None;
+            return true;
+        }
+        false
+    }
+
+    /// The local profile now comes from the store (or may no longer be the
+    /// one this process wrote from).
+    fn forget_own(&mut self) {
+        self.own.clear();
+    }
+
+    fn remember_own(&mut self, copy: OwnCopy) {
+        if self.own.len() == OWN_COPIES {
+            self.own.remove(0);
+        }
+        self.own.push(copy);
     }
 }
 
@@ -269,7 +325,7 @@ impl HostPersistence {
         {
             return Ok(RestoreOutcome::KeptLocal);
         }
-        if session.resolve_pending(version, &stored) {
+        if session.settle(version, &stored) {
             return Ok(RestoreOutcome::KeptLocal);
         }
 
@@ -286,6 +342,7 @@ impl HostPersistence {
                 session.pending = None;
                 session.rejected_hash = None;
                 session.baseline_installed = true;
+                session.forget_own();
                 info!(version, "restored the browser profile");
                 Ok(RestoreOutcome::Installed)
             }
@@ -339,26 +396,47 @@ impl HostPersistence {
         if session.shutdown || self.is_disabled() || ready.is_some_and(|ready| !ready()) {
             return SaveOutcome::Skipped;
         }
-        if session.pending.is_some() {
-            // A read only: it never touches the local profile.
+        // An unknown upload, or a conflict that may have been this
+        // process's own earlier upload committing late.
+        if session.pending.is_some() || (session.writer.is_none() && !session.own.is_empty()) {
+            // A read only: it never touches the local profile. A periodic
+            // save gives it up as soon as the host stops being Ready, so a
+            // slow read never holds up the stop's own close and save.
             let budget = remaining(self.restore_budget, deadline);
-            match tokio::time::timeout(budget, self.store.fetch()).await {
-                Ok(Ok(snapshot)) => {
+            let read = tokio::time::timeout(budget, self.store.fetch());
+            let read = match ready {
+                Some(ready) => tokio::select! {
+                    read = read => Some(read),
+                    _ = until_not_ready(ready) => None,
+                },
+                None => Some(read.await),
+            };
+            match read {
+                Some(Ok(Ok(snapshot))) => {
                     let stored = sha256(snapshot.archive.as_deref().unwrap_or_default());
-                    if !session.resolve_pending(snapshot.version, &stored) {
+                    if !session.settle(snapshot.version, &stored) {
+                        let had_writer = session.writer.is_some() || session.pending.is_some();
                         session.writer = None;
                         session.pending = None;
-                        return SaveOutcome::Conflict;
+                        session.forget_own();
+                        return if had_writer {
+                            SaveOutcome::Conflict
+                        } else {
+                            SaveOutcome::Skipped
+                        };
                     }
                 }
-                Ok(Err(error)) => {
+                Some(Ok(Err(error))) => {
                     warn!(
                         ?error,
                         "could not read the stored browser profile to settle a save"
                     );
                     return SaveOutcome::Skipped;
                 }
-                Err(_) => return SaveOutcome::Skipped,
+                Some(Err(_)) | None => return SaveOutcome::Skipped,
+            }
+            if ready.is_some_and(|ready| !ready()) {
+                return SaveOutcome::Skipped;
             }
         }
         let Some(writer) = session.writer else {
@@ -399,6 +477,13 @@ impl HostPersistence {
             packed_hash,
             prev_packed_hash: writer.packed_hash,
         });
+        if let Some(version) = writer.version.checked_add(1) {
+            session.remember_own(OwnCopy {
+                version,
+                sha256: sent,
+                packed_hash,
+            });
+        }
         let upload = self.store.upload(packed, writer.version);
         let result = match deadline {
             Some(deadline) => tokio::time::timeout_at(deadline, upload)
@@ -430,7 +515,11 @@ impl HostPersistence {
                 warn!(%status, "browser profile upload refused");
                 session.writer = Some(writer);
                 session.pending = None;
-                session.rejected_hash = Some(packed_hash);
+                // A 401 is about the agent's token or lease, which a renewal
+                // can fix, not about this copy: the next save sends it again.
+                if status != reqwest::StatusCode::UNAUTHORIZED {
+                    session.rejected_hash = Some(packed_hash);
+                }
                 SaveOutcome::Rejected
             }
             Err(UploadFailure::Uncertain(error)) => {
@@ -481,8 +570,10 @@ fn keep_or_empty(
 ) -> Result<RestoreOutcome> {
     let had_writer = session.writer.is_some();
     if drop_writer {
+        // A failed install may have changed the local profile.
         session.writer = None;
         session.pending = None;
+        session.forget_own();
     }
     if had_writer && !drop_writer {
         return Ok(RestoreOutcome::KeptLocal);
@@ -504,6 +595,13 @@ fn remove_profile(profile: &Path) -> std::io::Result<()> {
         Ok(_) => std::fs::remove_file(profile),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
+    }
+}
+
+/// Resolves once `ready` no longer holds.
+async fn until_not_ready(ready: &(dyn Fn() -> bool + Send + Sync)) {
+    while ready() {
+        tokio::time::sleep(READY_POLL).await;
     }
 }
 
@@ -608,12 +706,19 @@ pub(crate) mod testing {
         UncertainAfterCommit,
         /// Stores nothing and reports an unknown result.
         UncertainBeforeCommit,
+        /// Reports an unknown result while the request is still running on
+        /// the controller: it commits when the next upload arrives.
+        UncertainCommitsLate,
     }
 
     struct State {
         version: i64,
         archive: Option<Vec<u8>>,
         fetch_fails: bool,
+        fetch_delay: Duration,
+        /// An upload still running on the controller: expected version and
+        /// body.
+        late: Option<(i64, Vec<u8>)>,
         mode: UploadMode,
         fetches: usize,
         uploads_started: usize,
@@ -643,6 +748,8 @@ pub(crate) mod testing {
                     version: 0,
                     archive: None,
                     fetch_fails: false,
+                    fetch_delay: Duration::ZERO,
+                    late: None,
                     mode: UploadMode::Normal,
                     fetches: 0,
                     uploads_started: 0,
@@ -673,6 +780,11 @@ pub(crate) mod testing {
             self.state().fetch_fails = fails;
         }
 
+        /// Reads take this long.
+        pub(crate) fn set_fetch_delay(&self, delay: Duration) {
+            self.state().fetch_delay = delay;
+        }
+
         pub(crate) fn set_mode(&self, mode: UploadMode) {
             self.state().mode = mode;
         }
@@ -698,8 +810,13 @@ pub(crate) mod testing {
     impl ProfileStore for FakeStore {
         fn fetch(&self) -> BoxFuture<'_, Result<BrowserProfileSnapshot>> {
             Box::pin(async move {
-                let mut state = self.state();
-                state.fetches += 1;
+                let delay = {
+                    let mut state = self.state();
+                    state.fetches += 1;
+                    state.fetch_delay
+                };
+                tokio::time::sleep(delay).await;
+                let state = self.state();
                 anyhow::ensure!(!state.fetch_fails, "the store is unreachable");
                 Ok(BrowserProfileSnapshot {
                     version: state.version,
@@ -722,10 +839,20 @@ pub(crate) mod testing {
                 let _ = open.wait_for(|open| *open).await;
                 let mut state = self.state();
                 state.uploads_finished += 1;
+                if let Some((expected, late)) = state.late.take()
+                    && state.version == expected
+                {
+                    state.version += 1;
+                    state.archive = Some(late);
+                }
                 match state.mode {
                     UploadMode::Reject(status) => return Err(UploadFailure::Rejected(status)),
                     UploadMode::UncertainBeforeCommit => {
                         return Err(UploadFailure::Uncertain(anyhow!("connection reset")));
+                    }
+                    UploadMode::UncertainCommitsLate => {
+                        state.late = Some((expected_version, body));
+                        return Err(UploadFailure::Uncertain(anyhow!("request timed out")));
                     }
                     UploadMode::Normal | UploadMode::UncertainAfterCommit => {}
                 }
