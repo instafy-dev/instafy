@@ -3,17 +3,17 @@ import { OpenNewWindow, Refresh } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { Spinner } from "../../../components/Spinner";
 import { Text } from "../../../components/Text";
-import { ControllerApiError } from "../../../services/runtimeController/core";
 import {
   createSitePreviewViewer,
   getSitePreview,
   heartbeatSitePreviewViewer,
-  isSitePreviewsUnavailable,
   revokeSitePreviewViewer,
+  sitePreviewProblem,
   sitePreviewRecordState,
+  type SitePreviewProblem,
   type SitePreviewRecordState,
 } from "../../../services/runtimeController/previews";
-import { openExternalUrl } from "../../../utils/openExternalUrl";
+import { reserveExternalWindow } from "../../../utils/openExternalUrl";
 import { BrowserChromeShell, BrowserStatusPill, type BrowserChromeState } from "./BrowserChromeShell";
 
 export const SITE_PREVIEW_HEALTH_POLL_MS = 15_000;
@@ -22,24 +22,47 @@ export const SITE_PREVIEW_HEARTBEAT_MS = 60_000;
 export const SITE_PREVIEW_FRAME_SANDBOX = "allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads";
 export const SITE_PREVIEW_FRAME_ALLOW = "fullscreen; clipboard-write";
 
-/** The only message the pane reads from its frame: the broker's own error pages report their status with it. */
+/**
+ * The only message the pane reads from its frame. The broker's error pages
+ * report their status with it, but any page on this preview's origin can send
+ * it, the site itself included.
+ */
 export const SITE_PREVIEW_MESSAGE_TYPE = "instafy-preview";
 
-type SessionState = "opening" | "ready" | "stopped" | "ended" | "unavailable";
-export type SitePreviewPaneState = "opening" | "checking" | SitePreviewRecordState | "ended" | "unavailable";
+type SessionState = "opening" | "ready" | "ended" | SitePreviewProblem;
+type HealthState = "checking" | SitePreviewRecordState | Exclude<SitePreviewProblem, "unavailable">;
+export type SitePreviewPaneState = "opening" | "ended" | HealthState | SitePreviewProblem;
 
 const UNAVAILABLE_TEXT = "Previews are not available here";
+const POPUP_BLOCKED_TEXT = "Your browser blocked the new tab. Allow pop-ups for this site and try again.";
+
+/** The panes kept mounted in one conversation's view scope. */
+export type MountedSitePreviews = { scope: string | null; ids: readonly string[] };
+export const NO_MOUNTED_SITE_PREVIEWS: MountedSitePreviews = { scope: null, ids: [] };
 
 /**
  * Which panes stay mounted: each one from the first time it is on screen until
- * its tab closes. Returns `current` itself when nothing changed.
+ * its tab closes, and none carried over from another conversation's scope.
+ * Returns `current` itself when nothing changed.
  */
-export function nextMountedSitePreviews(current: readonly string[], openPreviewIds: readonly string[], shownPreviewId: string | null): readonly string[] {
-  const kept = current.filter(id => openPreviewIds.includes(id));
+export function nextMountedSitePreviews(current: MountedSitePreviews, scope: string | null, openPreviewIds: readonly string[], shownPreviewId: string | null): MountedSitePreviews {
+  const sameScope = current.scope === scope;
+  const previous = sameScope ? current.ids : [];
+  const kept = previous.filter(id => openPreviewIds.includes(id));
   const add = shownPreviewId && openPreviewIds.includes(shownPreviewId) && !kept.includes(shownPreviewId);
-  if (!add && kept.length === current.length) return current;
-  return add ? [...kept, shownPreviewId] : kept;
+  if (sameScope && !add && kept.length === previous.length) return current;
+  return { scope, ids: add ? [...kept, shownPreviewId] : kept };
 }
+
+/** What the pane says in place of the site. Reload is offered only where asking again can help. */
+const PROBLEM_TEXT: Record<Exclude<SitePreviewPaneState, "opening" | "checking" | "live">, { title: string | null; body: string; reload: boolean }> = {
+  not_responding: { title: null, body: "The site stopped answering. Reload once it is back, or ask Octo to start it again.", reload: true },
+  stopped: { title: null, body: "The machine or the site stopped. Ask Octo to start it again.", reload: true },
+  missing: { title: "This preview no longer exists", body: "It was closed. Ask Octo to open the site again.", reload: false },
+  no_access: { title: "You can't open this preview", body: "You may no longer have access to it.", reload: false },
+  ended: { title: "This preview session ended", body: "Reload to open a new session.", reload: true },
+  unavailable: { title: UNAVAILABLE_TEXT, body: "This server does not offer site previews.", reload: false },
+};
 
 function chromeState(state: SitePreviewPaneState): BrowserChromeState {
   if (state === "live") return "ready";
@@ -53,6 +76,8 @@ function statusDetail(state: SitePreviewPaneState, port: number | null): string 
     case "live": return "Live";
     case "not_responding": return port ? `Not responding on port ${port}` : "Not responding";
     case "stopped": return "Stopped";
+    case "missing": return "Closed";
+    case "no_access": return "No access";
     case "ended": return "Session ended";
     default: return UNAVAILABLE_TEXT;
   }
@@ -66,11 +91,13 @@ function statusDetail(state: SitePreviewPaneState, port: number | null): string 
  * the bar shows the title) and is revoked when the pane unmounts, which is what
  * the tab's × does.
  *
- * The frame may only tell the pane one thing: the broker's error pages post
- * `{type: "instafy-preview", status}`, read only from this frame's window and
- * this capability's origin. A 401 (the session idled out or was revoked) and a
- * 410 from the heartbeat each mint one new session; a second loss in a row ends
- * it, so a removed member never loops.
+ * The frame can tell the pane one thing: `{type: "instafy-preview", status}`,
+ * read only from this frame's window and this capability's origin. The
+ * broker's error pages send it, but so can any page on that origin, the site
+ * itself included, so the worst a message can do is end or relabel this one
+ * pane. A 401 (the session idled out or was revoked) and a 410 from the
+ * heartbeat each mint one new session; a second loss in a row ends it, so a
+ * removed member never loops. Showing the pane again allows one more.
  */
 export function SitePreviewPane({ projectId, previewId, title, visible }: {
   projectId: string;
@@ -82,7 +109,7 @@ export function SitePreviewPane({ projectId, previewId, title, visible }: {
   const frame = useRef<HTMLIFrameElement>(null);
   const [viewerUrl, setViewerUrl] = useState<string | null>(null);
   const [session, setSession] = useState<SessionState>("opening");
-  const [health, setHealth] = useState<"checking" | SitePreviewRecordState>("checking");
+  const [health, setHealth] = useState<HealthState>("checking");
   const [port, setPort] = useState<number | null>(null);
   const [frameKey, setFrameKey] = useState(0);
   const [feedback, setFeedback] = useState<string | null>(null);
@@ -91,6 +118,8 @@ export function SitePreviewPane({ projectId, previewId, title, visible }: {
   const reminted = useRef(false);
   const mounted = useRef(true);
   const mintAttempt = useRef(0);
+  const wasVisible = useRef(visible);
+  const beatWhenShown = useRef(false);
 
   const revoke = useCallback((url: string | null) => {
     if (url) void revokeSitePreviewViewer(projectId, previewId, url).catch(() => undefined);
@@ -108,8 +137,8 @@ export function SitePreviewPane({ projectId, previewId, title, visible }: {
       setSession("ready");
     } catch (cause) {
       if (!mounted.current || attempt !== mintAttempt.current) return;
-      if (isSitePreviewsUnavailable(cause)) { setSession("unavailable"); return; }
-      if (cause instanceof ControllerApiError && [403, 409, 410].includes(cause.status)) { setSession("stopped"); return; }
+      const problem = sitePreviewProblem(cause);
+      if (problem) { setSession(problem); return; }
       setSession("ended");
       setFeedback(cause instanceof Error ? cause.message : "Could not open the preview.");
     }
@@ -156,20 +185,32 @@ export function SitePreviewPane({ projectId, previewId, title, visible }: {
       setHealth(sitePreviewRecordState(preview));
     } catch (cause) {
       if (signal?.aborted || !mounted.current) return;
-      if (cause instanceof ControllerApiError && [403, 404, 410].includes(cause.status)) setHealth("stopped");
+      const problem = sitePreviewProblem(cause);
+      if (problem && problem !== "unavailable") setHealth(problem);
     }
   }, [previewId, projectId]);
 
+  // A preview that is gone or forbidden stays so: nothing more is asked until Reload.
+  const healthSettled = health === "missing" || health === "no_access";
   useEffect(() => {
-    if (!visible || session !== "ready") return;
+    if (!visible || session !== "ready" || healthSettled) return;
     const controller = new AbortController();
     const tick = () => { if (document.visibilityState !== "hidden") void checkHealth(controller.signal); };
     tick();
     const timer = window.setInterval(tick, SITE_PREVIEW_HEALTH_POLL_MS);
     return () => { controller.abort(); window.clearInterval(timer); };
-  }, [checkHealth, session, visible]);
+  }, [checkHealth, healthSettled, session, visible]);
 
-  const frameOnScreen = visible && session === "ready" && Boolean(viewerUrl);
+  // Shown again after being hidden: the session may have idled out meanwhile,
+  // so check it at once, and allow one more re-mint.
+  useEffect(() => {
+    if (visible && !wasVisible.current) { reminted.current = false; beatWhenShown.current = true; }
+    wasVisible.current = visible;
+  }, [visible]);
+
+  const shown: SitePreviewPaneState = session === "ready" ? health : session;
+  const frameShown = Boolean(viewerUrl) && session === "ready" && (shown === "checking" || shown === "live" || shown === "not_responding");
+  const frameOnScreen = visible && frameShown;
   useEffect(() => {
     if (!frameOnScreen || !viewerUrl) return;
     const controller = new AbortController();
@@ -185,6 +226,7 @@ export function SitePreviewPane({ projectId, previewId, title, visible }: {
       if (result === "live") { reminted.current = false; return; }
       sessionLost();
     };
+    if (beatWhenShown.current) { beatWhenShown.current = false; void beat(); }
     const timer = window.setInterval(() => { void beat(); }, SITE_PREVIEW_HEARTBEAT_MS);
     return () => { controller.abort(); window.clearInterval(timer); };
   }, [frameOnScreen, previewId, projectId, sessionLost, viewerUrl]);
@@ -218,23 +260,30 @@ export function SitePreviewPane({ projectId, previewId, title, visible }: {
     replaceSession();
   }, [checkHealth, replaceSession, session, viewerUrl]);
 
-  const openInNewTab = useCallback(async () => {
+  /** Synchronous up to the reservation: the tab opens while the browser still counts the press. */
+  const openInNewTab = useCallback(() => {
     if (openingTab) return;
-    setOpeningTab(true);
     setFeedback(null);
-    try {
-      // Its own capability, so closing this pane leaves the tab working.
-      const viewer = await createSitePreviewViewer(projectId, previewId, { tab: true });
-      await openExternalUrl(viewer.viewerUrl);
-    } catch (cause) {
-      if (mounted.current) setFeedback(isSitePreviewsUnavailable(cause) ? UNAVAILABLE_TEXT : cause instanceof Error ? cause.message : "Could not open the preview.");
-    } finally {
-      if (mounted.current) setOpeningTab(false);
-    }
-  }, [openingTab, previewId, projectId]);
+    const tab = reserveExternalWindow();
+    // Nothing is minted for a tab the browser refused, so no session is left unused.
+    if (tab.blocked) { setFeedback(POPUP_BLOCKED_TEXT); return; }
+    setOpeningTab(true);
+    void (async () => {
+      try {
+        // Its own capability, so closing this pane leaves the tab working.
+        const viewer = await createSitePreviewViewer(projectId, previewId, { tab: true });
+        if (await tab.open(viewer.viewerUrl)) return;
+        revoke(viewer.viewerUrl);
+        if (mounted.current) setFeedback(POPUP_BLOCKED_TEXT);
+      } catch (cause) {
+        tab.cancel();
+        if (mounted.current) setFeedback(sitePreviewProblem(cause) === "unavailable" ? UNAVAILABLE_TEXT : cause instanceof Error ? cause.message : "Could not open the preview.");
+      } finally {
+        if (mounted.current) setOpeningTab(false);
+      }
+    })();
+  }, [openingTab, previewId, projectId, revoke]);
 
-  const shown: SitePreviewPaneState = session === "ready" ? health : session;
-  const frameShown = Boolean(viewerUrl) && session === "ready" && shown !== "stopped";
   const detail = statusDetail(shown, port);
 
   return (
@@ -257,7 +306,7 @@ export function SitePreviewPane({ projectId, previewId, title, visible }: {
         status={<BrowserStatusPill state={chromeState(shown)} detail={detail} testId="site-preview-status" />}
         actions={
           <IconButton aria-label="Open in new tab" title="Open in new tab" className="max-[540px]:h-10 max-[540px]:w-10" data-testid="site-preview-open-tab"
-            isDisabled={session !== "ready" || openingTab} onPress={() => void openInNewTab()} radius="full" size="sm" variant="ghost">
+            isDisabled={session !== "ready" || openingTab} onPress={openInNewTab} radius="full" size="sm" variant="ghost">
             <OpenNewWindow className="h-4 w-4" aria-hidden="true" />
           </IconButton>
         }
@@ -284,21 +333,14 @@ export function SitePreviewPane({ projectId, previewId, title, visible }: {
             <Spinner aria-hidden="true" tone="slate" size="sm" /> Opening {title}…
           </div>
         ) : null}
-        {shown === "not_responding" || shown === "stopped" || shown === "ended" || shown === "unavailable" ? (
+        {shown !== "opening" && shown !== "checking" && shown !== "live" ? (
           <div className="absolute inset-0 flex items-center justify-center bg-white/95 p-6 dark:bg-[var(--color-studio-dark-canvas)]/95" data-testid="site-preview-problem">
             <div className="max-w-sm space-y-3 text-center">
-              <Text as="div" variant="bodyStrong" tone="primary">
-                {shown === "unavailable" ? UNAVAILABLE_TEXT : shown === "ended" ? "This preview session ended" : detail}
-              </Text>
-              <Text as="div" variant="caption" tone="muted">
-                {shown === "unavailable" ? "This server does not offer site previews."
-                  : shown === "not_responding" ? "The site stopped answering. Reload once it is back, or ask Octo to start it again."
-                    : shown === "stopped" ? "The machine or the site stopped. Ask Octo to start it again."
-                      : "Reload to open a new session."}
-              </Text>
-              {shown === "unavailable" ? null : (
+              <Text as="div" variant="bodyStrong" tone="primary">{PROBLEM_TEXT[shown].title ?? detail}</Text>
+              <Text as="div" variant="caption" tone="muted">{PROBLEM_TEXT[shown].body}</Text>
+              {PROBLEM_TEXT[shown].reload ? (
                 <Button variant="outline" size="sm" radius="full" onPress={reload}>Reload</Button>
-              )}
+              ) : null}
             </div>
           </div>
         ) : null}

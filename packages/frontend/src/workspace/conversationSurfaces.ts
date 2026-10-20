@@ -113,7 +113,7 @@ export function closeConversationFile(state: ConversationSurfaces, id: string, h
   const index = state.files.findIndex(file => file.id === id);
   if (index < 0) return state;
   const files = state.files.filter(file => file.id !== id);
-  const nextId = files[Math.min(index, files.length - 1)]?.id ?? state.previews[0]?.id ?? (hasBrowser ? "browser" : "chat");
+  const nextId = files[Math.min(index, files.length - 1)]?.id ?? state.previews.at(-1)?.id ?? (hasBrowser ? "browser" : "chat");
   return {
     ...state, files,
     activeId: state.activeId === id ? nextId : state.activeId,
@@ -134,7 +134,7 @@ export function openConversationPreview(state: ConversationSurfaces, preview: { 
   };
 }
 
-/** Mirrors closeConversationFile: the next preview, then the previous, then a file, Browser or Chat. */
+/** Mirrors closeConversationFile: the next preview, then the previous, then the last file, Browser or Chat. */
 export function closeConversationPreview(state: ConversationSurfaces, id: string, hasBrowser: boolean): ConversationSurfaces {
   const index = state.previews.findIndex(preview => preview.id === id);
   if (index < 0) return state;
@@ -145,6 +145,24 @@ export function closeConversationPreview(state: ConversationSurfaces, id: string
     activeId: state.activeId === id ? nextId : state.activeId,
     resourceId: state.resourceId === id ? nextId : state.resourceId,
   };
+}
+
+/**
+ * The view shown beside Chat. A stored Browser choice with no browser open
+ * falls back to the first file, then the first preview.
+ */
+export function conversationResourceId(state: ConversationSurfaces, hasBrowser: boolean): string {
+  return state.resourceId === "browser" && !hasBrowser
+    ? state.files[0]?.id ?? state.previews[0]?.id ?? "browser" : state.resourceId;
+}
+
+/**
+ * The preview whose pane is on screen: the view beside Chat when it is a
+ * preview, while the pane is split or that view is the active one.
+ */
+export function visibleSitePreviewId(state: ConversationSurfaces, view: { resourceId: string; activeId: string; split: boolean }): string | null {
+  const preview = state.previews.find(item => item.id === view.resourceId);
+  return preview && (view.split || view.activeId === preview.id) ? preview.previewId : null;
 }
 
 export function conversationFileLabel(file: ConversationFileView, files: ConversationFileView[]): string {

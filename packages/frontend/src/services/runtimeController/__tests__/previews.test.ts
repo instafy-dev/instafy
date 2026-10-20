@@ -6,9 +6,10 @@ vi.mock("../core", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../core")>();
   return {
     ControllerApiError: actual.ControllerApiError,
-    readControllerApiError: async (response: Response, fallback: string) => ({
-      status: response.status, message: `${fallback} (${response.status})`, code: null, details: null,
-    }),
+    readControllerApiError: async (response: Response, fallback: string) => {
+      const body = await response.text().then(text => JSON.parse(text) as { code?: string }).catch(() => ({} as { code?: string }));
+      return { status: response.status, message: `${fallback} (${response.status})`, code: body.code ?? null, details: null };
+    },
     resolveControllerRequestContext: resolveControllerRequestContextMock,
     runtimeControllerEnabled: true,
   };
@@ -21,6 +22,7 @@ import {
   heartbeatSitePreviewViewer,
   isSitePreviewsUnavailable,
   revokeSitePreviewViewer,
+  sitePreviewProblem,
   sitePreviewRecordState,
 } from "../previews";
 
@@ -59,15 +61,26 @@ describe("site preview controller client", () => {
     expect(sitePreviewRecordState({ status: "revoked", health: { listening: true, status: 200 } })).toBe("stopped");
   });
 
-  it("keeps the HTTP status on failures and reads 404 and 503 as previews being unavailable", async () => {
-    for (const status of [404, 503]) {
-      fetchMock.mockResolvedValueOnce(new Response("{}", { status }));
-      const error = await createSitePreviewViewer(PROJECT_ID, PREVIEW_ID).catch((cause: unknown) => cause);
-      expect(error).toBeInstanceOf(ControllerApiError);
-      expect(isSitePreviewsUnavailable(error)).toBe(true);
-    }
-    fetchMock.mockResolvedValueOnce(new Response("{}", { status: 403 }));
-    expect(isSitePreviewsUnavailable(await createSitePreviewViewer(PROJECT_ID, PREVIEW_ID).catch((cause: unknown) => cause))).toBe(false);
+  it.each([
+    ["503 previews_unavailable", 503, JSON.stringify({ message: "Previews are not available on this server", code: "previews_unavailable" }), "unavailable"],
+    // An older controller has no preview routes: its 404 has no body.
+    ["a bodiless 404", 404, "", "unavailable"],
+    ["the controller's 404 for a preview that does not exist", 404, JSON.stringify({ message: "preview not found" }), "missing"],
+    ["403", 403, JSON.stringify({ message: "forbidden" }), "no_access"],
+    ["409", 409, JSON.stringify({ message: "this preview has stopped" }), "stopped"],
+    ["a passing 503", 503, "", null],
+    ["a 500", 500, JSON.stringify({ message: "boom" }), null],
+  ])("keeps the HTTP status on failures and reads %s as %s", async (_name, status, body, problem) => {
+    fetchMock.mockResolvedValueOnce(new Response(body || null, { status: status as number }));
+    const error = await createSitePreviewViewer(PROJECT_ID, PREVIEW_ID).catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(ControllerApiError);
+    expect((error as ControllerApiError).status).toBe(status);
+    expect(sitePreviewProblem(error)).toBe(problem);
+    expect(isSitePreviewsUnavailable(error)).toBe(problem === "unavailable");
+  });
+
+  it("reads a network failure as passing", () => {
+    expect(sitePreviewProblem(new TypeError("Failed to fetch"))).toBeNull();
   });
 
   it("mints a viewer for the pane, and a separate one for a new tab", async () => {
@@ -87,9 +100,19 @@ describe("site preview controller client", () => {
     ["a plain host", "https://attacker.example/"],
     ["a bare capability host", "https://p-aaaaaaaaaaaaaaaaaaaaaaaaaa--11111111111141118111111111111111/"],
     ["a short label", "https://p-aaaa--11111111111141118111111111111111.preview.localhost/"],
+    // Plain http only on a local stack.
+    ["plain http off a local stack", "http://p-aaaaaaaaaaaaaaaaaaaaaaaaaa--11111111111141118111111111111111.preview.example.com/"],
   ])("refuses a viewer address with %s", async (_name, viewerUrl) => {
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ viewerUrl })));
     await expect(createSitePreviewViewer(PROJECT_ID, PREVIEW_ID)).rejects.toThrow("unusable");
+  });
+
+  it.each([
+    "http://p-aaaaaaaaaaaaaaaaaaaaaaaaaa--11111111111141118111111111111111.preview.localhost:8083/",
+    "https://p-aaaaaaaaaaaaaaaaaaaaaaaaaa--11111111111141118111111111111111.preview.example.com/",
+  ])("accepts %s", async (viewerUrl) => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ viewerUrl })));
+    await expect(createSitePreviewViewer(PROJECT_ID, PREVIEW_ID)).resolves.toMatchObject({ viewerUrl });
   });
 
   it("sends the heartbeat with the capability and reads 410 as a dead session", async () => {

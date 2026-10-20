@@ -34,11 +34,36 @@ export type SitePreviewRecordState = "live" | "not_responding" | "stopped";
 
 const ENDED_PREVIEW_STATUSES: ReadonlySet<string> = new Set(["revoked", "expired", "closed", "failed"]);
 
-/** Status codes that mean this server does not offer previews (an older controller, or previews not configured). */
-export const SITE_PREVIEWS_UNAVAILABLE_STATUSES: ReadonlySet<number> = new Set([404, 503]);
+/** The controller's code when previews are not configured on this server. */
+export const SITE_PREVIEWS_UNAVAILABLE_CODE = "previews_unavailable";
+/**
+ * Set by this client on a 404 with no body: the controller has no preview
+ * routes at all (an older controller), as opposed to its JSON 404 for a
+ * preview that does not exist.
+ */
+export const SITE_PREVIEW_ROUTES_MISSING_CODE = "preview_routes_missing";
+
+/**
+ * Why the controller would not open or describe a preview, from its answer:
+ * - `unavailable`: this server does not offer previews (503 `previews_unavailable`, or no preview routes);
+ * - `missing`: this preview does not exist (any other 404);
+ * - `no_access`: this person may not open it (403);
+ * - `stopped`: it exists but is no longer running (409, 410).
+ * Anything else (a 5xx, a network error) is passing, and `null`.
+ */
+export type SitePreviewProblem = "unavailable" | "missing" | "no_access" | "stopped";
+
+export function sitePreviewProblem(cause: unknown): SitePreviewProblem | null {
+  if (!(cause instanceof ControllerApiError)) return null;
+  if (cause.code === SITE_PREVIEWS_UNAVAILABLE_CODE || cause.code === SITE_PREVIEW_ROUTES_MISSING_CODE) return "unavailable";
+  if (cause.status === 404) return "missing";
+  if (cause.status === 403) return "no_access";
+  if (cause.status === 409 || cause.status === 410) return "stopped";
+  return null;
+}
 
 export function isSitePreviewsUnavailable(cause: unknown): boolean {
-  return cause instanceof ControllerApiError && SITE_PREVIEWS_UNAVAILABLE_STATUSES.has(cause.status);
+  return sitePreviewProblem(cause) === "unavailable";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -63,7 +88,11 @@ async function previewRequest(path: string, method: "GET" | "POST", fallback: st
   const response = await fetch(`${context.baseUrl}${path}`, {
     method, headers, signal, body: body === undefined ? undefined : JSON.stringify(body),
   });
-  if (!response.ok) throw new ControllerApiError(await readControllerApiError(response, fallback, context));
+  if (!response.ok) {
+    const routeMissing = response.status === 404 && !(await response.clone().text().catch(() => "")).trim();
+    const payload = await readControllerApiError(response, fallback, context);
+    throw new ControllerApiError(routeMissing ? { ...payload, code: payload.code ?? SITE_PREVIEW_ROUTES_MISSING_CODE } : payload);
+  }
   const text = response.status === 204 ? "" : await response.text();
   return text.trim() ? JSON.parse(text) as unknown : null;
 }
@@ -114,13 +143,23 @@ export async function getSitePreview(projectId: string, previewId: string, signa
 
 const VIEWER_LABEL = /^p-[a-z2-7]{26}--([0-9a-f]{32})$/;
 
+/** Plain http is only for a local stack: loopback or a `.localhost` name. */
+function isLocalHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/\.$/, "");
+  return host === "localhost" || host.endsWith(".localhost") || host === "127.0.0.1" || host === "[::1]";
+}
+
 /**
- * Only a capability host for this preview may load in Studio's pane:
- * `p-<label>--<preview id as hex>.<preview domain>`, with no user info. Anything
- * else is refused, whatever the controller sent.
+ * A shape check on the address the controller returned, before it loads in
+ * Studio's pane: the first label must be `p-<label>--<preview id as hex>` (the
+ * controller names a preview's host after its tunnel, and a preview's id is
+ * its tunnel's id), there must be a parent domain and no user info, and the
+ * scheme must be https, or http only on a local stack. It does not pin the
+ * preview domain: the controller that minted the address stays the authority
+ * on where previews live.
  */
 export function isSitePreviewViewerUrl(url: URL, previewId: string): boolean {
-  if (url.protocol !== "https:" && url.protocol !== "http:") return false;
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && isLocalHost(url.hostname))) return false;
   if (url.username || url.password || !url.pathname.startsWith("/")) return false;
   const [first, ...rest] = url.hostname.split(".");
   const previewHex = VIEWER_LABEL.exec(first ?? "")?.[1];
@@ -129,8 +168,9 @@ export function isSitePreviewViewerUrl(url: URL, previewId: string): boolean {
 
 /**
  * Mints a fresh capability for this person. The pane keeps its own alive with
- * a heartbeat; `tab` mints one for a separate browser tab, which has no
- * heartbeat, so its own requests keep it alive.
+ * a heartbeat. `tab` mints one for a separate browser tab, which has no
+ * heartbeat: the controller marks it to be extended by its own traffic
+ * instead, and it still ends at the session's maximum age.
  */
 export async function createSitePreviewViewer(projectId: string, previewId: string, options: { tab?: boolean } = {}): Promise<SitePreviewViewer> {
   const value = await previewRequest(previewPath(projectId, previewId, options.tab ? "/view?tab=true" : "/view"), "POST", "Could not open the preview.", {});

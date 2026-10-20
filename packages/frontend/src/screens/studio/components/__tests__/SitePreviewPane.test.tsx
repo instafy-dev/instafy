@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ControllerApiError } from "../../../../services/runtimeController/core";
-import { SITE_PREVIEW_HEALTH_POLL_MS, SITE_PREVIEW_HEARTBEAT_MS, SitePreviewPane, nextMountedSitePreviews } from "../SitePreviewPane";
+import { NO_MOUNTED_SITE_PREVIEWS, SITE_PREVIEW_HEALTH_POLL_MS, SITE_PREVIEW_HEARTBEAT_MS, SitePreviewPane, nextMountedSitePreviews } from "../SitePreviewPane";
 
 const PREVIEW_ID = "11111111-1111-4111-8111-111111111111";
 const FIRST = "https://p-aaaaaaaaaaaaaaaaaaaaaaaaaa--11111111111141118111111111111111.preview.localhost/";
@@ -16,7 +16,9 @@ const mocks = vi.hoisted(() => ({
   getSitePreview: vi.fn(),
   heartbeatSitePreviewViewer: vi.fn(),
   revokeSitePreviewViewer: vi.fn(),
-  openExternalUrl: vi.fn(),
+  reserveExternalWindow: vi.fn(),
+  openReserved: vi.fn(),
+  cancelReserved: vi.fn(),
 }));
 vi.mock("../../../../services/runtimeController/previews", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../../services/runtimeController/previews")>();
@@ -28,19 +30,20 @@ vi.mock("../../../../services/runtimeController/previews", async (importOriginal
     revokeSitePreviewViewer: mocks.revokeSitePreviewViewer,
   };
 });
-vi.mock("../../../../utils/openExternalUrl", () => ({ openExternalUrl: mocks.openExternalUrl }));
+vi.mock("../../../../utils/openExternalUrl", () => ({ reserveExternalWindow: mocks.reserveExternalWindow }));
 
 function record(overrides: Record<string, unknown> = {}) {
   return { previewId: PREVIEW_ID, title: "Docs site", port: 4173, path: "/", runtimeId: "runtime-1",
     status: "active", health: { listening: true, status: 200 }, messageId: null, createdAt: null, ...overrides };
 }
 
-const apiError = (status: number) => new ControllerApiError({ status, message: `failed (${status})`, code: null, details: null });
+const apiError = (status: number, code: string | null = null) => new ControllerApiError({ status, message: `failed (${status})`, code, details: null });
 
 describe("SitePreviewPane", () => {
   let root: Root;
   let container: HTMLDivElement;
 
+  const problemText = () => container.querySelector("[data-testid=site-preview-problem]")?.textContent ?? "";
   async function render(visible = true) {
     await act(async () => root.render(<SitePreviewPane projectId="project-1" previewId={PREVIEW_ID} title="Docs site" visible={visible} />));
     await flush();
@@ -72,7 +75,8 @@ describe("SitePreviewPane", () => {
     mocks.getSitePreview.mockResolvedValue(record());
     mocks.heartbeatSitePreviewViewer.mockResolvedValue("live");
     mocks.revokeSitePreviewViewer.mockResolvedValue(undefined);
-    mocks.openExternalUrl.mockResolvedValue(true);
+    mocks.openReserved.mockResolvedValue(true);
+    mocks.reserveExternalWindow.mockImplementation(() => ({ blocked: false, open: mocks.openReserved, cancel: mocks.cancelReserved }));
     sessionStorage.clear(); localStorage.clear();
   });
   afterEach(async () => {
@@ -199,39 +203,135 @@ describe("SitePreviewPane", () => {
     expect(mocks.revokeSitePreviewViewer).toHaveBeenCalledWith("project-1", PREVIEW_ID, FIRST);
   });
 
-  it.each([404, 503])("says previews are not available, with no frame, when /view answers %i", async (status) => {
-    mocks.createSitePreviewViewer.mockRejectedValueOnce(apiError(status));
+  it.each([
+    ["503 previews_unavailable", apiError(503, "previews_unavailable")],
+    ["a controller without preview routes", apiError(404, "preview_routes_missing")],
+  ])("says previews are not available, with no frame, on %s", async (_name, error) => {
+    mocks.createSitePreviewViewer.mockRejectedValueOnce(error);
     await render();
     expect(pane().dataset.state).toBe("unavailable");
     expect(frame()).toBeNull();
-    expect(container.querySelector("[data-testid=site-preview-problem]")?.textContent).toContain("Previews are not available here");
+    expect(problemText()).toContain("Previews are not available here");
     // Nothing else is asked of a server without previews.
     await advance(SITE_PREVIEW_HEARTBEAT_MS * 2);
     expect(mocks.getSitePreview).not.toHaveBeenCalled();
     expect(mocks.heartbeatSitePreviewViewer).not.toHaveBeenCalled();
   });
 
-  it("opens a separate tab session in a new tab", async () => {
+  it("says a preview that no longer exists is closed, not that the server has no previews", async () => {
+    mocks.createSitePreviewViewer.mockRejectedValueOnce(apiError(404));
     await render();
+    expect(pane().dataset.state).toBe("missing");
+    expect(problemText()).toContain("This preview no longer exists");
+    expect(problemText()).not.toContain("not available");
+    expect(container.querySelector("[data-testid=site-preview-problem] button")).toBeNull();
+  });
+
+  it("tells a person who lost access so, with no Reload and no frame", async () => {
+    mocks.createSitePreviewViewer.mockRejectedValueOnce(apiError(403));
+    await render();
+    expect(pane().dataset.state).toBe("no_access");
+    expect(problemText()).toContain("You can't open this preview");
+    expect(problemText()).not.toContain("Ask Octo to start it");
+    expect(container.querySelector("[data-testid=site-preview-problem] button")).toBeNull();
+    expect(frame()).toBeNull();
+  });
+
+  it("stops the heartbeat and polls once health says the preview is gone or forbidden", async () => {
+    await render();
+    mocks.getSitePreview.mockRejectedValue(apiError(403));
+    await advance(SITE_PREVIEW_HEALTH_POLL_MS);
+    expect(pane().dataset.state).toBe("no_access");
+    expect(frame()).toBeNull();
+    const polls = mocks.getSitePreview.mock.calls.length;
+    await advance(SITE_PREVIEW_HEARTBEAT_MS * 3);
+    expect(mocks.heartbeatSitePreviewViewer).not.toHaveBeenCalled();
+    expect(mocks.getSitePreview).toHaveBeenCalledTimes(polls);
+  });
+
+  it("keeps no heartbeat for a stopped site whose frame is hidden", async () => {
+    mocks.getSitePreview.mockResolvedValue(record({ status: "revoked" }));
+    await render();
+    expect(pane().dataset.state).toBe("stopped");
+    await advance(SITE_PREVIEW_HEARTBEAT_MS * 2);
+    expect(mocks.heartbeatSitePreviewViewer).not.toHaveBeenCalled();
+  });
+
+  it("checks the session as soon as it is shown again, and may re-mint once more", async () => {
+    await render();
+    // Re-mint, then hide before a live beat clears the once-guard.
+    await post({ type: "instafy-preview", status: 401 }, new URL(FIRST).origin, frame()!.contentWindow);
+    expect(mocks.createSitePreviewViewer).toHaveBeenCalledTimes(2);
+    await render(false);
+    await advance(31 * 60_000);
+    expect(mocks.heartbeatSitePreviewViewer).not.toHaveBeenCalled();
+    mocks.heartbeatSitePreviewViewer.mockResolvedValueOnce("gone");
+    await render(true);
+    // At once, not a minute later: the idled-out session is noticed on show.
+    expect(mocks.heartbeatSitePreviewViewer).toHaveBeenCalledExactlyOnceWith("project-1", PREVIEW_ID, SECOND, expect.any(AbortSignal));
+    expect(mocks.createSitePreviewViewer).toHaveBeenCalledTimes(3);
+    expect(pane().dataset.state).toBe("live");
+    expect(frame()!.getAttribute("src")).toBe(THIRD);
+  });
+
+  it("opens the new tab during the press, then fills it with a separate tab session", async () => {
+    const order: string[] = [];
+    mocks.reserveExternalWindow.mockImplementation(() => { order.push("reserve"); return { blocked: false, open: mocks.openReserved, cancel: mocks.cancelReserved }; });
+    await render();
+    const mint = mocks.createSitePreviewViewer.getMockImplementation()!;
+    mocks.createSitePreviewViewer.mockImplementation(async (...args: unknown[]) => { order.push("mint"); return mint(...(args as [string, string])); });
     await click("[data-testid=site-preview-open-tab]");
+    expect(order).toEqual(["reserve", "mint"]);
     expect(mocks.createSitePreviewViewer).toHaveBeenLastCalledWith("project-1", PREVIEW_ID, { tab: true });
-    expect(mocks.openExternalUrl).toHaveBeenCalledExactlyOnceWith(TAB);
+    expect(mocks.openReserved).toHaveBeenCalledExactlyOnceWith(TAB);
     // The pane keeps its own session.
     expect(frame()!.getAttribute("src")).toBe(FIRST);
     expect(mocks.revokeSitePreviewViewer).not.toHaveBeenCalled();
+  });
+
+  it("mints nothing when the browser blocks the new tab, and says so", async () => {
+    mocks.reserveExternalWindow.mockReturnValue({ blocked: true, open: mocks.openReserved, cancel: mocks.cancelReserved });
+    await render();
+    await click("[data-testid=site-preview-open-tab]");
+    expect(mocks.createSitePreviewViewer).toHaveBeenCalledTimes(1);
+    expect(container.querySelector("[data-testid=site-preview-feedback]")?.textContent).toContain("blocked the new tab");
+  });
+
+  it("revokes the tab session when the reserved tab cannot show it", async () => {
+    mocks.openReserved.mockResolvedValue(false);
+    await render();
+    await click("[data-testid=site-preview-open-tab]");
+    expect(mocks.revokeSitePreviewViewer).toHaveBeenCalledExactlyOnceWith("project-1", PREVIEW_ID, TAB);
+    expect(container.querySelector("[data-testid=site-preview-feedback]")?.textContent).toContain("blocked the new tab");
+  });
+
+  it("closes the reserved tab when the mint fails", async () => {
+    await render();
+    mocks.createSitePreviewViewer.mockRejectedValueOnce(apiError(409));
+    await click("[data-testid=site-preview-open-tab]");
+    expect(mocks.cancelReserved).toHaveBeenCalledOnce();
+    expect(mocks.openReserved).not.toHaveBeenCalled();
   });
 });
 
 describe("nextMountedSitePreviews", () => {
   it("mounts a preview once shown, keeps it while its tab is open, and keeps identity when unchanged", () => {
-    const none: readonly string[] = [];
-    expect(nextMountedSitePreviews(none, ["a", "b"], null)).toBe(none);
-    const one = nextMountedSitePreviews(none, ["a", "b"], "a");
-    expect(one).toEqual(["a"]);
-    expect(nextMountedSitePreviews(one, ["a", "b"], null)).toBe(one);
-    const two = nextMountedSitePreviews(one, ["a", "b"], "b");
-    expect(two).toEqual(["a", "b"]);
-    expect(nextMountedSitePreviews(two, ["b"], "b")).toEqual(["b"]);
-    expect(nextMountedSitePreviews(two, ["a", "b"], "gone")).toBe(two);
+    const none = nextMountedSitePreviews(NO_MOUNTED_SITE_PREVIEWS, "scope-1", ["a", "b"], null);
+    expect(none).toEqual({ scope: "scope-1", ids: [] });
+    expect(nextMountedSitePreviews(none, "scope-1", ["a", "b"], null)).toBe(none);
+    const one = nextMountedSitePreviews(none, "scope-1", ["a", "b"], "a");
+    expect(one.ids).toEqual(["a"]);
+    expect(nextMountedSitePreviews(one, "scope-1", ["a", "b"], null)).toBe(one);
+    const two = nextMountedSitePreviews(one, "scope-1", ["a", "b"], "b");
+    expect(two.ids).toEqual(["a", "b"]);
+    expect(nextMountedSitePreviews(two, "scope-1", ["b"], "b").ids).toEqual(["b"]);
+    expect(nextMountedSitePreviews(two, "scope-1", ["a", "b"], "gone")).toBe(two);
+  });
+
+  it("carries no pane over into another conversation's scope", () => {
+    const mounted = nextMountedSitePreviews(NO_MOUNTED_SITE_PREVIEWS, "scope-1", ["a", "b"], "a");
+    const other = nextMountedSitePreviews(mounted, "scope-2", ["a", "b"], null);
+    expect(other).toEqual({ scope: "scope-2", ids: [] });
+    expect(nextMountedSitePreviews(other, "scope-2", ["a", "b"], "b")).toEqual({ scope: "scope-2", ids: ["b"] });
   });
 });

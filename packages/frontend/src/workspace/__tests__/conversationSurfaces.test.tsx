@@ -2,7 +2,7 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { DEFAULT_CONVERSATION_SURFACES, closeConversationFile, closeConversationPreview, conversationFileLabel, openConversationFile, openConversationPreview, readConversationSurfaces, selectConversationView, useConversationSurfacesOwner } from "../conversationSurfaces";
+import { DEFAULT_CONVERSATION_SURFACES, closeConversationFile, closeConversationPreview, conversationFileLabel, conversationResourceId, openConversationFile, openConversationPreview, readConversationSurfaces, selectConversationView, useConversationSurfacesOwner, visibleSitePreviewId } from "../conversationSurfaces";
 
 describe("conversation surface ownership", () => {
   beforeEach(() => { sessionStorage.clear(); });
@@ -67,6 +67,36 @@ describe("conversation surface ownership", () => {
     const only = openConversationPreview(DEFAULT_CONVERSATION_SURFACES, { previewId: pid(1), title: "One" });
     expect(closeConversationPreview(only, `preview:${pid(1)}`, true).activeId).toBe("browser");
     expect(closeConversationPreview(only, `preview:${pid(1)}`, false).activeId).toBe("chat");
+  });
+
+  it("falls back to the last view of the other kind when the last file or preview closes", () => {
+    const pid = (n: number) => `${String(n).padStart(8, "0")}-1111-4111-8111-111111111111`;
+    let state = openConversationFile(openConversationFile(DEFAULT_CONVERSATION_SURFACES, { id: "file:a.md", path: "a.md" }), { id: "file:b.md", path: "b.md" });
+    state = openConversationPreview(openConversationPreview(state, { previewId: pid(1), title: "One" }), { previewId: pid(2), title: "Two" });
+    const filesOnly = closeConversationPreview(closeConversationPreview(state, `preview:${pid(2)}`, false), `preview:${pid(1)}`, false);
+    expect(filesOnly.activeId).toBe("file:b.md");
+    const onFile = selectConversationView(state, "file:a.md");
+    const previewsOnly = closeConversationFile(closeConversationFile(selectConversationView(onFile, "file:b.md"), "file:b.md", false), "file:a.md", false);
+    expect(previewsOnly.activeId).toBe(`preview:${pid(2)}`);
+  });
+
+  it("resolves the view beside Chat and which preview is on screen", () => {
+    const previewId = "11111111-1111-4111-8111-111111111111";
+    const withPreview = selectConversationView(openConversationPreview(DEFAULT_CONVERSATION_SURFACES, { previewId, title: "Docs" }), "chat");
+    // A stored Browser choice with no browser open falls to a file first, then a preview.
+    const onBrowser = { ...withPreview, resourceId: "browser" };
+    expect(conversationResourceId(onBrowser, false)).toBe(`preview:${previewId}`);
+    expect(conversationResourceId(onBrowser, true)).toBe("browser");
+    const withFile = openConversationFile(onBrowser, { id: "file:a.md", path: "a.md" });
+    expect(conversationResourceId({ ...withFile, resourceId: "browser" }, false)).toBe("file:a.md");
+    expect(conversationResourceId(DEFAULT_CONVERSATION_SURFACES, false)).toBe("browser");
+
+    const resourceId = `preview:${previewId}`;
+    // Beside Chat in a split, or the active view on its own; hidden behind Chat otherwise.
+    expect(visibleSitePreviewId(withPreview, { resourceId, activeId: "chat", split: true })).toBe(previewId);
+    expect(visibleSitePreviewId(withPreview, { resourceId, activeId: "chat", split: false })).toBeNull();
+    expect(visibleSitePreviewId(withPreview, { resourceId, activeId: resourceId, split: false })).toBe(previewId);
+    expect(visibleSitePreviewId(withFile, { resourceId: "file:a.md", activeId: "file:a.md", split: true })).toBeNull();
   });
 
   it("round-trips site preview references and drops bad ids, addresses and extra fields", async () => {

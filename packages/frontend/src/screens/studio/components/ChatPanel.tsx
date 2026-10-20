@@ -362,8 +362,8 @@ import { ConversationSurfaceLayout, ConversationSurfaceTabs, type ConversationSu
 import { ConversationWorkspaceViews } from "../../../workspace/ConversationWorkspaceViews";
 import { ConversationFileContext } from "../../../workspace/ConversationFileContext";
 import { ConversationPreviewContext, type ConversationPreviewOpener } from "../../../workspace/ConversationPreviewContext";
-import { conversationSurfaceScope, closeConversationFile, closeConversationPreview, conversationFileLabel, openConversationFile, openConversationPreview, selectConversationView } from "../../../workspace/conversationSurfaces";
-import { SitePreviewPane, nextMountedSitePreviews } from "./SitePreviewPane";
+import { conversationSurfaceScope, closeConversationFile, closeConversationPreview, conversationFileLabel, conversationResourceId, openConversationFile, openConversationPreview, selectConversationView, visibleSitePreviewId } from "../../../workspace/conversationSurfaces";
+import { NO_MOUNTED_SITE_PREVIEWS, SitePreviewPane, nextMountedSitePreviews, type MountedSitePreviews } from "./SitePreviewPane";
 import type { OpenWorkspaceFileEventDetail } from "./useFilesPanelViewerState";
 import { FilesPanel } from "../StudioLazyPanels";
 import {
@@ -752,8 +752,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const [surfaceWidth, setSurfaceWidth] = useState(0);
   const hasBrowserView = browserSessionOpen || hasHiddenBrowserSession;
   const hasResources = hasBrowserView || surfaces.files.length > 0 || surfaces.previews.length > 0;
-  const resourceId = surfaces.resourceId === "browser" && !hasBrowserView
-    ? surfaces.files[0]?.id ?? surfaces.previews[0]?.id ?? "browser" : surfaces.resourceId;
+  const resourceId = conversationResourceId(surfaces, hasBrowserView);
   const activeSurfaceId = conversationWorkspace && jobThread ? "chat" : surfaces.activeId === "browser" && !hasBrowserView ? "chat" : surfaces.activeId;
   const wideSurfaces = surfaceWidth >= 1024;
   const splitSurfaces = !(conversationWorkspace && jobThread) && wideSurfaces && surfaces.split && hasResources;
@@ -774,7 +773,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   }, [activeProjectId, activeConversationId, conversationWorkspace, jobThread, openSurfaceConversation, surfaceScope, updateSurfaces]);
   const selectedFile = surfaces.files.find(file => file.id === resourceId);
   const selectedPreview = surfaces.previews.find(preview => preview.id === resourceId);
-  const visiblePreviewId = selectedPreview && (splitSurfaces || activeSurfaceId === selectedPreview.id) ? selectedPreview.previewId : null;
+  const visiblePreviewId = visibleSitePreviewId(surfaces, { resourceId, activeId: activeSurfaceId, split: splitSurfaces });
   const openSurfacePreview = useCallback((preview: { previewId: string; title: string }) => {
     updateSurfaces(surfaceScope, state => openConversationPreview(state, preview));
     // As with files: a run thread shares the task's views, so opening one leaves the transcript.
@@ -784,12 +783,12 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   // A pane mounts the first time its preview is on screen and stays mounted while its tab is open, so moving
   // between views does not reload the site. Closing the tab unmounts it, which revokes its viewer session.
   const sitePreviewIds = useMemo(() => surfaces.previews.map(preview => preview.previewId), [surfaces.previews]);
-  const [mountedSitePreviews, setMountedSitePreviews] = useState<{ scope: string | null; ids: readonly string[] }>({ scope: null, ids: [] });
-  const mountedPreviewIds = nextMountedSitePreviews(
-    mountedSitePreviews.scope === surfaceScope ? mountedSitePreviews.ids : [], sitePreviewIds, visiblePreviewId);
+  const [mountedSitePreviews, setMountedSitePreviews] = useState<MountedSitePreviews>(NO_MOUNTED_SITE_PREVIEWS);
+  const nextMountedPreviews = nextMountedSitePreviews(mountedSitePreviews, surfaceScope, sitePreviewIds, visiblePreviewId);
+  const mountedPreviewIds = nextMountedPreviews.ids;
   useEffect(() => {
-    setMountedSitePreviews(current => current.scope === surfaceScope && current.ids === mountedPreviewIds ? current : { scope: surfaceScope, ids: mountedPreviewIds });
-  }, [mountedPreviewIds, surfaceScope]);
+    if (nextMountedPreviews !== mountedSitePreviews) setMountedSitePreviews(nextMountedPreviews);
+  }, [mountedSitePreviews, nextMountedPreviews]);
   const fileRequest = useMemo(() => selectedFile ? (
     fileOpenRequest?.path === selectedFile.path ? fileOpenRequest : {
       path: selectedFile.path, projectId: activeProjectId, line: selectedFile.line, markdownView: selectedFile.markdownView,

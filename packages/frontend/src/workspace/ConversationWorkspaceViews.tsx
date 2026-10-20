@@ -7,7 +7,7 @@ import { useChatParticipantsSnapshot, EMPTY_CHAT_PARTICIPANTS_SNAPSHOT } from ".
 import { useCode } from "../code/useCode";
 import { useWorkspaceTabs } from "./WorkspaceTabsProvider";
 import { ConversationSurfaceTabs, type ConversationSurface } from "./ConversationSurfaceLayout";
-import { closeConversationFile, closeConversationPreview, conversationFileLabel, selectConversationView } from "./conversationSurfaces";
+import { closeConversationFile, closeConversationPreview, conversationFileLabel, conversationResourceId, selectConversationView } from "./conversationSurfaces";
 
 /** One view bar for the selected task, including routes rendered outside ChatPanel. */
 export function ConversationWorkspaceViews({ placement = "header" }: { placement?: "header" | "composer" }) {
@@ -60,7 +60,7 @@ export function ConversationWorkspaceViews({ placement = "header" }: { placement
   ];
   const baseView = activeTab.kind === "conversation";
   const activeId = baseView ? (surfaces.activeId === "browser" && !hasBrowser ? "chat" : surfaces.activeId) : activeTab.id;
-  const resourceId = surfaces.resourceId === "browser" && !hasBrowser ? surfaces.files[0]?.id ?? surfaces.previews[0]?.id ?? "browser" : surfaces.resourceId;
+  const resourceId = conversationResourceId(surfaces, hasBrowser);
   const canSplit = baseView && width >= 1024 && (hasBrowser || surfaces.files.length > 0 || surfaces.previews.length > 0);
   return <div ref={root} className="min-w-0 shrink-0 empty:hidden" data-testid="conversation-workspace-views" data-placement={placement}>
     <ConversationSurfaceTabs chatPanelId="conversation-workspace-chat" chatActions={chatActions} resources={resources}
