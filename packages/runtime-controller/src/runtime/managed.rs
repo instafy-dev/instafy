@@ -10,6 +10,30 @@ pub(crate) const SHARED_BROWSER_AGENT_CONSENT_CAPABILITY: &str =
 const MANAGED_RUNTIME_LAUNCH_ATTESTATION_VERSION: u64 = 1;
 pub(crate) const SHARED_BROWSER_AGENT_CONSENT_VERSION: u64 = 1;
 
+/// Controller-owned proof that a lease generation of a space's own managed
+/// machine was launched ready to host Instafy's browser on demand. It is a
+/// separate key from [`MANAGED_RUNTIME_LAUNCH_ATTESTATION`]: the provider
+/// refuses that key without the webdev flavor, and the reuse flavor rule
+/// answers 409 when the two disagree.
+pub(crate) const MANAGED_BROWSER_HOST_ATTESTATION: &str = "_instafyManagedBrowserHost";
+const MANAGED_BROWSER_HOST_ATTESTATION_VERSION: u64 = 1;
+/// The browser starts inside the space's own runtime container on first use.
+pub(crate) const MANAGED_BROWSER_HOST_LAZY_MODE: &str = "lazy";
+/// The `source` a multi-agent spread writes on each worker slot it ensures.
+pub(crate) const MULTI_AGENT_WORKER_LEASE_SOURCE: &str = "skill_multi_agent_plan";
+
+/// What the controller decided about hosting the browser for one new lease,
+/// before the request itself is looked at (see
+/// [`attest_new_managed_runtime_launch`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BrowserHostLaunch {
+    /// The policy does not cover this launch.
+    Off,
+    /// The policy covers this space's machine. `profile_persist` records
+    /// whether the space keeps its browser sign-ins.
+    Host { profile_persist: bool },
+}
+
 pub(crate) fn runtime_supports_shared_browser_agent_consent(capabilities: &JsonValue) -> bool {
     capabilities
         .get(SHARED_BROWSER_AGENT_CONSENT_CAPABILITY)
@@ -218,11 +242,82 @@ pub(crate) fn managed_webdev_launch_is_attested(
     exact_managed_provider(provider) && attested_webdev_generation(metadata) == Some(lease_id)
 }
 
-/// Bind a newly selected managed flavor to the newly created lease generation.
+fn browser_host_attestation(lease_id: Uuid, profile_persist: bool) -> JsonValue {
+    json!({
+        "version": MANAGED_BROWSER_HOST_ATTESTATION_VERSION,
+        "mode": MANAGED_BROWSER_HOST_LAZY_MODE,
+        "generation": lease_id.to_string(),
+        "profilePersist": profile_persist,
+    })
+}
+
+/// The `profilePersist` of a browser-host attestation bound to exactly
+/// `lease_id`, or `None` when the metadata holds no such attestation.
+fn attested_browser_host_profile_persist(
+    metadata: Option<&JsonValue>,
+    lease_id: Uuid,
+) -> Option<bool> {
+    let attestation = metadata?
+        .as_object()?
+        .get(MANAGED_BROWSER_HOST_ATTESTATION)?
+        .as_object()?;
+    if attestation.get("version").and_then(JsonValue::as_u64)
+        != Some(MANAGED_BROWSER_HOST_ATTESTATION_VERSION)
+        || attestation.get("mode").and_then(JsonValue::as_str)
+            != Some(MANAGED_BROWSER_HOST_LAZY_MODE)
+        || attestation
+            .get("generation")
+            .and_then(JsonValue::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok())
+            != Some(lease_id)
+    {
+        return None;
+    }
+    attestation
+        .get("profilePersist")
+        .and_then(JsonValue::as_bool)
+}
+
+/// Whether `lease_id` of an exact managed runtime was launched as a browser
+/// host. The attestation names its own generation, so a copy carried from an
+/// earlier lease never counts.
+pub(crate) fn managed_browser_host_is_attested(
+    provider: &str,
+    metadata: Option<&JsonValue>,
+    lease_id: Uuid,
+) -> bool {
+    exact_managed_provider(provider)
+        && attested_browser_host_profile_persist(metadata, lease_id).is_some()
+}
+
+/// Whether a sanitized launch request describes a space's own machine that
+/// may host the browser lazily: not the webdev image (that is a browser
+/// session of its own), not one asking for the eager boot-time browser, and
+/// not a multi-agent worker slot.
+fn browser_host_request_is_eligible(root: &JsonMap<String, JsonValue>) -> bool {
+    if root.contains_key(MANAGED_RUNTIME_FLAVOR_KEY) {
+        return false;
+    }
+    if root.get("source").and_then(JsonValue::as_str) == Some(MULTI_AGENT_WORKER_LEASE_SOURCE)
+        || root.contains_key("groupId")
+    {
+        return false;
+    }
+    root.get("env")
+        .and_then(JsonValue::as_object)
+        .and_then(|env| env.get("INSTAFY_ENABLE_BROWSER_SESSION"))
+        .and_then(JsonValue::as_str)
+        != Some("1")
+}
+
+/// Bind a newly selected managed flavor, and the controller's browser-host
+/// decision, to the newly created lease generation. Neither attestation can
+/// come from the request: both keys are removed before either is written.
 pub(crate) fn attest_new_managed_runtime_launch(
     provider: &str,
     metadata: Option<JsonValue>,
     lease_id: Uuid,
+    browser_host: BrowserHostLaunch,
 ) -> Option<JsonValue> {
     if !exact_managed_provider(provider) {
         return metadata;
@@ -230,11 +325,19 @@ pub(crate) fn attest_new_managed_runtime_launch(
 
     let mut root = metadata_object(metadata);
     root.remove(MANAGED_RUNTIME_LAUNCH_ATTESTATION);
+    root.remove(MANAGED_BROWSER_HOST_ATTESTATION);
     if normalized_requested_flavor(&root).ok().flatten() == Some(MANAGED_RUNTIME_WEBDEV_FLAVOR) {
         root.insert(
             MANAGED_RUNTIME_LAUNCH_ATTESTATION.to_string(),
             launch_attestation(lease_id),
         );
+    } else if let BrowserHostLaunch::Host { profile_persist } = browser_host {
+        if browser_host_request_is_eligible(&root) {
+            root.insert(
+                MANAGED_BROWSER_HOST_ATTESTATION.to_string(),
+                browser_host_attestation(lease_id, profile_persist),
+            );
+        }
     }
     Some(JsonValue::Object(root))
 }
@@ -243,11 +346,18 @@ pub(crate) fn attest_new_managed_runtime_launch(
 /// launched for its active lease. In particular, a later browser request may
 /// not relabel a base image as webdev and gain controller consent without a
 /// provider relaunch.
+///
+/// Reuse overwrites the lease's stored metadata with the request, so the
+/// browser-host attestation of the live generation is written again here,
+/// while `browser_host_allowed` says the policy still covers the space. A
+/// request never adds one, and with the policy turned off the reused lease
+/// loses it, which is the rollback.
 pub(crate) fn reconcile_reused_managed_runtime_metadata(
     provider: &str,
     requested: Option<JsonValue>,
     existing: Option<&JsonValue>,
     lease_id: Uuid,
+    browser_host_allowed: bool,
 ) -> Result<Option<JsonValue>, &'static str> {
     if !exact_managed_provider(provider) {
         return Ok(requested);
@@ -264,11 +374,19 @@ pub(crate) fn reconcile_reused_managed_runtime_metadata(
     }
 
     requested_root.remove(MANAGED_RUNTIME_LAUNCH_ATTESTATION);
+    requested_root.remove(MANAGED_BROWSER_HOST_ATTESTATION);
     if existing_webdev {
         requested_root.insert(
             MANAGED_RUNTIME_LAUNCH_ATTESTATION.to_string(),
             launch_attestation(lease_id),
         );
+    } else if browser_host_allowed {
+        if let Some(profile_persist) = attested_browser_host_profile_persist(existing, lease_id) {
+            requested_root.insert(
+                MANAGED_BROWSER_HOST_ATTESTATION.to_string(),
+                browser_host_attestation(lease_id, profile_persist),
+            );
+        }
     }
     Ok(Some(JsonValue::Object(requested_root)))
 }
@@ -533,6 +651,7 @@ mod tests {
             "instafy-cloud",
             Some(json!({ "runtimeFlavor": "webdev" })),
             lease_id,
+            BrowserHostLaunch::Off,
         );
 
         assert!(managed_webdev_launch_is_attested(
@@ -560,6 +679,7 @@ mod tests {
             Some(json!({ "runtimeFlavor": "webdev" })),
             Some(&json!({ "runtimeFlavor": "default" })),
             lease_id,
+            true,
         )
         .is_err());
     }
@@ -571,6 +691,7 @@ mod tests {
             "instafy-cloud",
             Some(json!({ "runtimeFlavor": "webdev" })),
             lease_id,
+            BrowserHostLaunch::Off,
         )
         .expect("attested metadata");
 
@@ -579,6 +700,7 @@ mod tests {
             Some(json!({})),
             Some(&existing),
             lease_id,
+            false,
         )
         .is_err());
 
@@ -586,6 +708,7 @@ mod tests {
             "instafy-cloud",
             Some(json!({ "runtimeFlavor": "webdev" })),
             Uuid::new_v4(),
+            BrowserHostLaunch::Off,
         )
         .expect("wrong-generation metadata");
         assert!(reconcile_reused_managed_runtime_metadata(
@@ -593,6 +716,264 @@ mod tests {
             Some(json!({ "runtimeFlavor": "webdev" })),
             Some(&wrong_generation),
             lease_id,
+            false,
+        )
+        .is_err());
+    }
+
+    const HOST: BrowserHostLaunch = BrowserHostLaunch::Host {
+        profile_persist: true,
+    };
+
+    #[test]
+    fn browser_host_attestation_follows_the_policy_decision() {
+        let lease_id = Uuid::new_v4();
+        let request = json!({ "source": "studio", "sizeId": "standard" });
+
+        let off = attest_new_managed_runtime_launch(
+            "instafy-cloud",
+            Some(request.clone()),
+            lease_id,
+            BrowserHostLaunch::Off,
+        );
+        assert!(!managed_browser_host_is_attested(
+            "instafy-cloud",
+            off.as_ref(),
+            lease_id
+        ));
+        assert!(off
+            .as_ref()
+            .and_then(|metadata| metadata.get(MANAGED_BROWSER_HOST_ATTESTATION))
+            .is_none());
+
+        let on = attest_new_managed_runtime_launch(
+            "instafy-cloud",
+            Some(request.clone()),
+            lease_id,
+            HOST,
+        )
+        .expect("host metadata");
+        assert_eq!(
+            on[MANAGED_BROWSER_HOST_ATTESTATION],
+            json!({
+                "version": 1,
+                "mode": "lazy",
+                "generation": lease_id.to_string(),
+                "profilePersist": true,
+            })
+        );
+        assert!(managed_browser_host_is_attested(
+            "instafy-cloud",
+            Some(&on),
+            lease_id
+        ));
+        // The attestation names one generation, and only the exact managed
+        // provider honours it.
+        assert!(!managed_browser_host_is_attested(
+            "instafy-cloud",
+            Some(&on),
+            Uuid::new_v4()
+        ));
+        assert!(!managed_browser_host_is_attested(
+            "instafy-cloud-custom",
+            Some(&on),
+            lease_id
+        ));
+        // Never the webdev key: the provider refuses it without the flavor.
+        assert!(on.get(MANAGED_RUNTIME_LAUNCH_ATTESTATION).is_none());
+        assert!(!managed_webdev_launch_is_attested(
+            "instafy-cloud",
+            Some(&on),
+            lease_id
+        ));
+
+        let without_persistence = attest_new_managed_runtime_launch(
+            "instafy-cloud",
+            Some(request.clone()),
+            lease_id,
+            BrowserHostLaunch::Host {
+                profile_persist: false,
+            },
+        )
+        .expect("host metadata");
+        assert_eq!(
+            without_persistence[MANAGED_BROWSER_HOST_ATTESTATION]["profilePersist"],
+            false
+        );
+
+        for provider in ["acme-provider", "self-hosted", "instafy-cloud-custom"] {
+            assert_eq!(
+                attest_new_managed_runtime_launch(provider, Some(request.clone()), lease_id, HOST),
+                Some(request.clone()),
+                "{provider}"
+            );
+        }
+    }
+
+    #[test]
+    fn browser_host_is_never_attested_for_webdev_eager_browser_or_worker_launches() {
+        let lease_id = Uuid::new_v4();
+        for request in [
+            json!({ "runtimeFlavor": "webdev", "source": "browser-session" }),
+            json!({ "env": { "INSTAFY_ENABLE_BROWSER_SESSION": "1" } }),
+            json!({ "source": MULTI_AGENT_WORKER_LEASE_SOURCE }),
+            json!({ "source": "dispatch_runtime_alert", "groupId": Uuid::new_v4() }),
+        ] {
+            let metadata = attest_new_managed_runtime_launch(
+                "instafy-cloud",
+                Some(request.clone()),
+                lease_id,
+                HOST,
+            );
+            assert!(
+                !managed_browser_host_is_attested("instafy-cloud", metadata.as_ref(), lease_id),
+                "{request}"
+            );
+        }
+
+        // The webdev launch keeps its own attestation.
+        let webdev = attest_new_managed_runtime_launch(
+            "instafy-cloud",
+            Some(json!({ "runtimeFlavor": "webdev" })),
+            lease_id,
+            HOST,
+        );
+        assert!(managed_webdev_launch_is_attested(
+            "instafy-cloud",
+            webdev.as_ref(),
+            lease_id
+        ));
+    }
+
+    #[test]
+    fn a_request_cannot_inject_the_browser_host_key_or_its_launch_env() {
+        let lease_id = Uuid::new_v4();
+        let forged = json!({
+            "source": "studio",
+            (MANAGED_BROWSER_HOST_ATTESTATION): {
+                "version": 1,
+                "mode": "lazy",
+                "generation": lease_id.to_string(),
+                "profilePersist": true,
+            },
+            "env": {
+                "INSTAFY_BROWSER_WEBRTC_REQUIRE_TURN": "0",
+                "INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON": "[{\"urls\":\"stun:attacker.test\"}]",
+                "INSTAFY_BROWSER_PROFILE_PERSIST": "1",
+                "INSTAFY_BROWSER_PROFILE_SNAPSHOT_SECS": "5",
+            }
+        });
+        let sanitized = sanitize_managed_runtime_request_metadata("instafy-cloud", Some(forged))
+            .expect("sanitize")
+            .expect("metadata");
+        assert!(sanitized.get(MANAGED_BROWSER_HOST_ATTESTATION).is_none());
+        assert!(
+            sanitized
+                .get("env")
+                .and_then(JsonValue::as_object)
+                .is_none_or(JsonMap::is_empty),
+            "{sanitized}"
+        );
+
+        // Even past the request boundary, a policy that is off writes none,
+        // and reuse never adopts one the live lease did not launch with.
+        let mut carried = sanitized.clone();
+        carried[MANAGED_BROWSER_HOST_ATTESTATION] = json!({
+            "version": 1,
+            "mode": "lazy",
+            "generation": lease_id.to_string(),
+            "profilePersist": true,
+        });
+        let launched = attest_new_managed_runtime_launch(
+            "instafy-cloud",
+            Some(carried.clone()),
+            lease_id,
+            BrowserHostLaunch::Off,
+        );
+        assert!(!managed_browser_host_is_attested(
+            "instafy-cloud",
+            launched.as_ref(),
+            lease_id
+        ));
+        let reused = reconcile_reused_managed_runtime_metadata(
+            "instafy-cloud",
+            Some(carried),
+            Some(&json!({ "source": "studio" })),
+            lease_id,
+            true,
+        )
+        .expect("bare reuse")
+        .expect("reused metadata");
+        assert!(reused.get(MANAGED_BROWSER_HOST_ATTESTATION).is_none());
+    }
+
+    #[test]
+    fn reuse_keeps_the_live_host_attestation_and_never_answers_409() {
+        let lease_id = Uuid::new_v4();
+        let existing = attest_new_managed_runtime_launch(
+            "instafy-cloud",
+            Some(json!({ "source": "studio" })),
+            lease_id,
+            HOST,
+        )
+        .expect("host metadata");
+
+        // A bare reuse, as Studio's next ensure of the space machine sends.
+        for requested in [None, Some(json!({})), Some(json!({ "source": "studio" }))] {
+            let reused = reconcile_reused_managed_runtime_metadata(
+                "instafy-cloud",
+                requested.clone(),
+                Some(&existing),
+                lease_id,
+                true,
+            )
+            .expect("a bare reuse of a host lease is accepted")
+            .expect("reused metadata");
+            assert_eq!(
+                reused[MANAGED_BROWSER_HOST_ATTESTATION],
+                existing[MANAGED_BROWSER_HOST_ATTESTATION],
+                "{requested:?}"
+            );
+        }
+
+        // An attestation for another generation is not carried.
+        let other_generation = attest_new_managed_runtime_launch(
+            "instafy-cloud",
+            Some(json!({ "source": "studio" })),
+            Uuid::new_v4(),
+            HOST,
+        )
+        .expect("host metadata");
+        let reused = reconcile_reused_managed_runtime_metadata(
+            "instafy-cloud",
+            Some(json!({})),
+            Some(&other_generation),
+            lease_id,
+            true,
+        )
+        .expect("bare reuse")
+        .expect("reused metadata");
+        assert!(reused.get(MANAGED_BROWSER_HOST_ATTESTATION).is_none());
+
+        // Policy turned off: the reused lease drops it (rollback).
+        let reused = reconcile_reused_managed_runtime_metadata(
+            "instafy-cloud",
+            Some(json!({})),
+            Some(&existing),
+            lease_id,
+            false,
+        )
+        .expect("bare reuse")
+        .expect("reused metadata");
+        assert!(reused.get(MANAGED_BROWSER_HOST_ATTESTATION).is_none());
+
+        // A webdev request against a host lease is still the flavor mismatch.
+        assert!(reconcile_reused_managed_runtime_metadata(
+            "instafy-cloud",
+            Some(json!({ "runtimeFlavor": "webdev" })),
+            Some(&existing),
+            lease_id,
+            true,
         )
         .is_err());
     }

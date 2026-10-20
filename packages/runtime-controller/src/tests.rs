@@ -231,6 +231,7 @@ pub(crate) fn build_app_config(private_key: &str, public_key: &str, key_id: &str
         credential_keys: None,
         browser_profile_persist_project_ids: vec![],
         browser_profile_snapshot_secs: 30,
+        hosted_browser_host: Default::default(),
         progress_callback_secret: None,
         git_remote_base_url: None,
         git_remote_public_base_url: None,
@@ -31127,6 +31128,283 @@ async fn dispatch_reconnect_relaunches_an_idle_stopped_webdev_runtime_as_webdev(
         ] {
             assert_eq!(launch["metadata"]["env"][key], json!("1"), "{key}");
         }
+        Ok(())
+    })
+    .await
+}
+
+/// The browser-host attestation an earlier generation of `lease_id` carried,
+/// as the launch path stores it on a covered space's machine.
+fn browser_host_lease_metadata(lease_id: Uuid) -> serde_json::Value {
+    json!({
+        "source": "studio",
+        "sizeId": "standard",
+        "env": { "RUNTIME_CPU_LIMIT": "2", "RUNTIME_MEMORY_LIMIT": "4g" },
+        "_instafyManagedBrowserHost": {
+            "version": 1,
+            "mode": "lazy",
+            "generation": lease_id.to_string(),
+            "profilePersist": true,
+        },
+    })
+}
+
+async fn lease_metadata(pool: &PgPool, lease_id: Uuid) -> anyhow::Result<serde_json::Value> {
+    Ok(pool
+        .get()
+        .await?
+        .query_one(
+            "select metadata from runtime_leases where id = $1",
+            &[&lease_id],
+        )
+        .await?
+        .get::<_, PgJson<serde_json::Value>>("metadata")
+        .0)
+}
+
+/// A space the browser-host policy covers relaunches its own machine as a
+/// browser host attested for the new generation, never by carrying the old
+/// generation's key, with the host launch settings: boot-time browser off,
+/// CDP on, WebRTC relay-only without launch-time ICE, and sign-ins kept. A
+/// space outside the policy launches exactly as before. Reusing the live
+/// lease keeps the attestation and never answers 409; with the policy off
+/// the reuse drops it.
+#[tokio::test]
+async fn browser_host_policy_attests_only_covered_space_machines() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("browser host attestation test").await?;
+    // One organization each, so the hosted runtime limit admits both.
+    let covered_org = Uuid::new_v4();
+    let outside_org = Uuid::new_v4();
+    let covered = Uuid::new_v4();
+    let outside = Uuid::new_v4();
+    let fixture = SharedDbFixture {
+        organizations: vec![covered_org, outside_org],
+        projects: vec![covered, outside],
+    };
+
+    with_shared_db_fixture(fixture, async {
+        let label = "browser-host-attestation";
+        seed_dispatch_reconnect_projects(&pool, covered_org, &[covered], label).await?;
+        seed_dispatch_reconnect_projects(&pool, outside_org, &[outside], label).await?;
+        let provider = spawn_recording_hosted_provider().await?;
+        let mut config = dispatch_reconnect_test_config(label);
+        config.runtime_providers[0].endpoint = Some(provider.endpoint.clone());
+        config.hosted_browser_host =
+            crate::config::HostedBrowserHostPolicy::Projects(vec![covered]);
+        config.browser_turn_rest = Some(
+            crate::browser_turn::BrowserTurnRestConfig::for_test_projects(
+                "turns:turn.example.test:443",
+                "0123456789abcdef0123456789abcdef",
+                600,
+                &format!("{covered},{outside}"),
+            ),
+        );
+        let state = build_test_state(pool.clone(), config.clone());
+
+        let mut successors = HashMap::new();
+        for project_id in [covered, outside] {
+            let runtime_id = Uuid::new_v4();
+            let ended_lease_id = Uuid::new_v4();
+            seed_idle_stopped_hosted_runtime(
+                &pool,
+                project_id,
+                runtime_id,
+                "Hosted Runtime",
+                &[EndedRuntimeLease {
+                    id: ended_lease_id,
+                    requested_seconds_ago: 3600,
+                    metadata: browser_host_lease_metadata(ended_lease_id),
+                }],
+            )
+            .await?;
+            let dispatched =
+                dispatch_prompt_to_seeded_runtime(&pool, &state, project_id, runtime_id, None)
+                    .await?;
+            let (successor_id, metadata) = reconnect_successor_lease(&pool, &dispatched).await?;
+            assert!(successor_id != ended_lease_id);
+            assert!(
+                metadata.get("_instafyManagedRuntimeLaunch").is_none(),
+                "{metadata}"
+            );
+            successors.insert(project_id, (runtime_id, successor_id, metadata));
+        }
+
+        let calls = provider.calls.lock().await.clone();
+        let launch_for = |lease_id: Uuid| {
+            calls
+                .iter()
+                .find(|(kind, body)| {
+                    *kind == "launch" && body["lease_id"] == json!(lease_id.to_string())
+                })
+                .map(|(_, body)| body.clone())
+                .expect("the provider launched the successor")
+        };
+
+        let (covered_runtime, covered_lease, metadata) = successors[&covered].clone();
+        assert_eq!(
+            metadata["_instafyManagedBrowserHost"],
+            json!({
+                "version": 1,
+                "mode": "lazy",
+                "generation": covered_lease.to_string(),
+                "profilePersist": true,
+            }),
+            "{metadata}"
+        );
+        let launch = launch_for(covered_lease);
+        assert_eq!(
+            launch["metadata"]["_instafyManagedBrowserHost"]["generation"],
+            json!(covered_lease.to_string())
+        );
+        let env = &launch["metadata"]["env"];
+        assert_eq!(env["INSTAFY_ENABLE_BROWSER_SESSION"], json!("0"), "{env}");
+        assert_eq!(env["INSTAFY_BROWSER_VIEWPORT_ONLY"], json!("1"), "{env}");
+        assert_eq!(env["INSTAFY_BROWSER_CDP_SCREENCAST"], json!("1"), "{env}");
+        assert_eq!(env["INSTAFY_BROWSER_WEBRTC_ENABLED"], json!("1"), "{env}");
+        assert_eq!(
+            env["INSTAFY_BROWSER_WEBRTC_REQUIRE_TURN"],
+            json!("1"),
+            "{env}"
+        );
+        assert!(
+            env.get("INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON").is_none(),
+            "{env}"
+        );
+        assert_eq!(env["INSTAFY_BROWSER_PROFILE_PERSIST"], json!("1"), "{env}");
+
+        let (_, outside_lease, metadata) = successors[&outside].clone();
+        assert!(
+            metadata.get("_instafyManagedBrowserHost").is_none(),
+            "{metadata}"
+        );
+        let launch = launch_for(outside_lease);
+        assert!(launch["metadata"]
+            .get("_instafyManagedBrowserHost")
+            .is_none());
+        let env = &launch["metadata"]["env"];
+        assert!(env.get("INSTAFY_BROWSER_VIEWPORT_ONLY").is_none(), "{env}");
+        assert_eq!(env["INSTAFY_BROWSER_PROFILE_PERSIST"], json!("0"), "{env}");
+
+        // Studio's next ensure of the space machine reuses the live lease.
+        let reused = crate::runtime::ensure_runtime_for_automation(
+            &state,
+            covered,
+            Some("instafy-cloud".to_string()),
+            Some(covered_runtime),
+            None,
+            None,
+            Some(json!({ "source": "studio" })),
+        )
+        .await
+        .map_err(|error| controller_error("reuse the covered space machine", error))?;
+        assert_eq!(reused.lease_id, covered_lease.to_string());
+        let metadata = lease_metadata(&pool, covered_lease).await?;
+        assert_eq!(
+            metadata["_instafyManagedBrowserHost"]["generation"],
+            json!(covered_lease.to_string()),
+            "{metadata}"
+        );
+
+        // Rollback: with the policy off, the next reuse drops it.
+        let mut off = config;
+        off.hosted_browser_host = crate::config::HostedBrowserHostPolicy::Off;
+        let off_state = build_test_state(pool.clone(), off);
+        let reused = crate::runtime::ensure_runtime_for_automation(
+            &off_state,
+            covered,
+            Some("instafy-cloud".to_string()),
+            Some(covered_runtime),
+            None,
+            None,
+            Some(json!({ "source": "studio" })),
+        )
+        .await
+        .map_err(|error| controller_error("reuse with the policy off", error))?;
+        assert_eq!(reused.lease_id, covered_lease.to_string());
+        let metadata = lease_metadata(&pool, covered_lease).await?;
+        assert!(
+            metadata.get("_instafyManagedBrowserHost").is_none(),
+            "{metadata}"
+        );
+
+        let launches = provider
+            .calls
+            .lock()
+            .await
+            .iter()
+            .filter(|(kind, _)| *kind == "launch")
+            .count();
+        assert_eq!(launches, 2, "reuse launches nothing");
+        Ok(())
+    })
+    .await
+}
+
+/// A multi-agent worker slot is not a space's own machine. Its reconnect
+/// rewrites the lease's `source`, so the controller also recognises it by
+/// the earlier lease a spread launched.
+#[tokio::test]
+async fn browser_host_policy_skips_a_worker_slot_after_its_reconnect() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("browser host worker exclusion test").await?;
+    let org_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let fixture = SharedDbFixture {
+        organizations: vec![org_id],
+        projects: vec![project_id],
+    };
+
+    with_shared_db_fixture(fixture, async {
+        let label = "browser-host-worker";
+        seed_dispatch_reconnect_projects(&pool, org_id, &[project_id], label).await?;
+        let provider = spawn_recording_hosted_provider().await?;
+        let mut config = dispatch_reconnect_test_config(label);
+        config.runtime_providers[0].endpoint = Some(provider.endpoint.clone());
+        config.hosted_browser_host = crate::config::HostedBrowserHostPolicy::All;
+        let state = build_test_state(pool.clone(), config);
+
+        let runtime_id = Uuid::new_v4();
+        let worker_lease_id = Uuid::new_v4();
+        seed_idle_stopped_hosted_runtime(
+            &pool,
+            project_id,
+            runtime_id,
+            "Team worker 2",
+            &[EndedRuntimeLease {
+                id: worker_lease_id,
+                requested_seconds_ago: 3600,
+                metadata: json!({
+                    "source": "skill_multi_agent_plan",
+                    "sizeId": "standard",
+                }),
+            }],
+        )
+        .await?;
+        let dispatched =
+            dispatch_prompt_to_seeded_runtime(&pool, &state, project_id, runtime_id, None).await?;
+        let (successor_id, metadata) = reconnect_successor_lease(&pool, &dispatched).await?;
+        assert_eq!(metadata["source"], json!("dispatch_runtime_alert"));
+        assert!(
+            metadata.get("_instafyManagedBrowserHost").is_none(),
+            "{metadata}"
+        );
+
+        let calls = provider.calls.lock().await.clone();
+        let launch = calls
+            .iter()
+            .find(|(kind, body)| {
+                *kind == "launch" && body["lease_id"] == json!(successor_id.to_string())
+            })
+            .map(|(_, body)| body.clone())
+            .expect("the provider launched the successor");
+        assert!(launch["metadata"]
+            .get("_instafyManagedBrowserHost")
+            .is_none());
+        assert!(
+            launch["metadata"]["env"]
+                .get("INSTAFY_BROWSER_VIEWPORT_ONLY")
+                .is_none(),
+            "{launch}"
+        );
         Ok(())
     })
     .await

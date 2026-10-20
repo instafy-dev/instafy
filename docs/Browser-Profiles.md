@@ -164,6 +164,8 @@ Address recall does not restore open tabs or unsaved page contents.
   WebRTC, CDP screencast, and RFB do not select new profiles.
 - **Shared, replacement runtime:** recovery requires enabled durable persistence
   and a usable saved snapshot. Persistence is default-off and controller-owned.
+  A space whose own machine hosts the browser (`HOSTED_BROWSER_HOST`) has it on,
+  so its sign-ins are kept.
 - **Shared, separate active runtimes:** there is no live cookie synchronization.
   A stored snapshot is not a continuously shared browser session. Conditional
   saves reject stale writers rather than overwriting a newer profile. After a

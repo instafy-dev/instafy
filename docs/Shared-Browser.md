@@ -486,6 +486,7 @@ VITE_INSTAFY_SHARED_BROWSER_CDP_SCREENCAST=1
 VITE_INSTAFY_SHARED_BROWSER_WEBRTC=0
 TURN_ENABLED=false
 BROWSER_PROFILE_PERSIST_PROJECT_IDS=
+HOSTED_BROWSER_HOST=off
 ```
 
 WebRTC must only change to `1` after TURN is deployed and a project is explicitly allowlisted.
@@ -576,6 +577,59 @@ real client types.
 4. Expand WebRTC and durable-profile allowlists only after their separate connectivity and privacy
    decisions are complete. To stop WebRTC, first clear the allowlist or turn off the frontend flag;
    only then tear down TURN.
+
+## Browser on the space's own machine (controller policy)
+
+The controller can launch a space's own managed machine ready to host the
+browser on first use, so opening it neither starts a second machine nor
+restarts the space's machine. The policy is off by default:
+
+```bash
+HOSTED_BROWSER_HOST=off            # off | projects | all
+HOSTED_BROWSER_HOST_PROJECT_IDS=   # required with projects; comma-separated UUIDs
+```
+
+Controller startup rejects any other mode, `projects` without a UUID, and a
+malformed UUID. When the policy covers a space, each new lease of that space's
+machine on the exact managed provider gets a controller-owned attestation next
+to the webdev one:
+
+```json
+{"_instafyManagedBrowserHost": {"version": 1, "mode": "lazy", "generation": "<leaseId>", "profilePersist": true}}
+```
+
+- **Which launches.** Not a webdev launch (a browser session of its own), not a
+  request for the boot-time browser (`INSTAFY_ENABLE_BROWSER_SESSION=1`), not a
+  tenant lease, and not a multi-agent worker slot. A worker is recognised by its
+  lease `source` and by any earlier lease of the same runtime that a spread
+  launched, because a reconnect or requeue rewrites `source`.
+- **Request boundary.** The key and its launch settings are not on the request
+  allowlist, so a client cannot set them. Reconnect metadata drops the old
+  generation's key, and the successor lease gets one only when the controller
+  decides so again.
+- **Reuse.** Reuse rewrites the lease's metadata, so the controller writes the
+  live generation's attestation again while the policy still covers the space.
+  A bare reuse never answers 409. With the policy turned off, the reused lease
+  loses it.
+- **Launch settings.** After the runtime and provider metadata are merged, an
+  attested lease launches with the boot-time browser off, viewport-only
+  rendering and CDP screencast on. WebRTC is on only when managed TURN serves
+  the project, and then with `INSTAFY_BROWSER_WEBRTC_REQUIRE_TURN=1` and no ICE
+  servers at launch; the origin injects fresh relay credentials into each
+  capabilities and offer request. A provider's static ICE list is removed.
+- **Sign-ins are kept.** A space the policy covers also has durable profile
+  persistence, through the same encrypted store, `agent.browser_profile` token
+  scope and launch settings that `BROWSER_PROFILE_PERSIST_PROJECT_IDS` enables
+  (see [Shared profile persistence and clearing](#shared-profile-persistence-and-clearing)).
+  The persistence rollout barrier below therefore applies before turning the
+  policy on. **Clear shared browser data** still stops every managed machine
+  of the space that may hold the profile, which includes a browser host.
+
+The attestation is inert on its own: a runtime that does not implement the lazy
+host ignores it. The browser then shares the runtime container with ordinary
+workspace processes, the same boundary described under
+[Human approval policy](#human-approval-policy). Rollback is `HOSTED_BROWSER_HOST=off`; machines
+already launched keep their launch settings until their next lease.
 
 ## CDP screencast
 

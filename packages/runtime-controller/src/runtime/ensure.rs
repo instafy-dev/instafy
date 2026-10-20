@@ -39,10 +39,11 @@ use super::limit_waits::{
     RUNTIME_LIMIT_REACHED_CODE,
 };
 use super::provider::{
-    apply_browser_profile_persistence_policy, apply_controller_turn_credentials,
-    apply_git_remote_env, authorize_provider_config_for_project, authorize_provider_for_project,
-    call_provider_endpoint, lock_and_load_authoritative_provider_config, merge_provider_metadata,
-    ProviderEnsureRequest, ProviderReleaseRequest,
+    apply_browser_host_launch_policy, apply_browser_profile_persistence_policy,
+    apply_controller_turn_credentials, apply_git_remote_env, authorize_provider_config_for_project,
+    authorize_provider_for_project, call_provider_endpoint,
+    lock_and_load_authoritative_provider_config, merge_provider_metadata, ProviderEnsureRequest,
+    ProviderReleaseRequest,
 };
 use super::stop::{
     stop_runtime_for_project, stop_runtime_safely, RuntimeIdentityExpectation, StopOptions,
@@ -1723,6 +1724,7 @@ fn build_dispatch_reconnect_metadata(
             // An attestation binds one lease generation, and the launch path
             // writes its own for the lease it reuses or creates.
             metadata.remove(super::managed::MANAGED_RUNTIME_LAUNCH_ATTESTATION);
+            metadata.remove(super::managed::MANAGED_BROWSER_HOST_ATTESTATION);
             metadata.remove(super::managed::MANAGED_RUNTIME_FLAVOR_KEY);
             if super::managed::managed_webdev_launch_is_attested(provider, lease_metadata, lease_id)
             {
@@ -2445,6 +2447,60 @@ async fn replace_stalled_launch_before_ensure(
     Ok(())
 }
 
+/// Whether the policy covers a new lease of this runtime as a browser host,
+/// before the request is looked at (see
+/// `managed::attest_new_managed_runtime_launch`, which also refuses webdev,
+/// eager-browser and worker requests).
+///
+/// A dispatch reconnect or a requeue rewrites the lease's `source`, so a
+/// multi-agent worker slot is also recognised by any earlier lease of the
+/// same runtime that a spread launched. The query runs only while the policy
+/// covers the space.
+async fn browser_host_launch_for_new_lease(
+    state: &AppState,
+    transaction: &tokio_postgres::Transaction<'_>,
+    project_id: &Uuid,
+    runtime_id: &Uuid,
+    scope: RuntimeLeaseScope,
+) -> Result<super::managed::BrowserHostLaunch, (StatusCode, Json<ApiError>)> {
+    use super::managed::BrowserHostLaunch;
+
+    if scope == RuntimeLeaseScope::Tenant
+        || !state.config.hosted_browser_host.allows_project(project_id)
+    {
+        return Ok(BrowserHostLaunch::Off);
+    }
+    let launched_as_worker: bool = transaction
+        .query_one(
+            "select exists(
+                select 1 from runtime_leases
+                where runtime_id = $1
+                  and project_id = $2
+                  and metadata ->> 'source' = $3
+             )",
+            &[
+                runtime_id,
+                project_id,
+                &super::managed::MULTI_AGENT_WORKER_LEASE_SOURCE,
+            ],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to check the runtime's earlier leases for a worker slot: {error}"
+            ))
+        })?
+        .get(0);
+    if launched_as_worker {
+        return Ok(BrowserHostLaunch::Off);
+    }
+    Ok(BrowserHostLaunch::Host {
+        profile_persist: state
+            .config
+            .browser_profile_persistence_enabled_for_project(project_id),
+    })
+}
+
 async fn ensure_runtime_launch_inner(
     state: &AppState,
     project_id: Uuid,
@@ -2613,6 +2669,7 @@ async fn ensure_runtime_launch_inner(
                     metadata.clone(),
                     existing.metadata.as_ref(),
                     existing.id,
+                    state.config.hosted_browser_host.allows_project(&project_id),
                 )
                 .map_err(|message| (StatusCode::CONFLICT, Json(ApiError::new(message))))?;
                 if let Some(meta) = reusable_metadata.as_ref() {
@@ -2932,6 +2989,10 @@ async fn ensure_runtime_launch_inner(
             }
         }
 
+        let browser_host =
+            browser_host_launch_for_new_lease(state, &transaction, &project_id, &runtime.id, scope)
+                .await?;
+
         let lease = create_runtime_lease(
             &transaction,
             &project_id,
@@ -2947,6 +3008,7 @@ async fn ensure_runtime_launch_inner(
             &provider,
             metadata.clone(),
             lease.id,
+            browser_host,
         );
         transaction
             .execute(
@@ -3137,13 +3199,27 @@ async fn launch_committed_runtime_lease(
         &provider,
         merge_provider_metadata(&launch_metadata, &provider_cfg.metadata),
     );
-    let managed_transport_metadata = apply_controller_turn_credentials(
-        state.config.browser_turn_rest.as_ref(),
-        project_id,
-        runtime.id,
-        Utc::now().timestamp(),
-        merged_metadata,
-    );
+    let managed_transport_metadata = if super::managed::managed_browser_host_is_attested(
+        &provider,
+        launch_metadata.as_ref(),
+        lease.id,
+    ) {
+        // A browser host takes its relay credentials per request from the
+        // origin, never at launch.
+        apply_browser_host_launch_policy(
+            state.config.browser_turn_rest.as_ref(),
+            project_id,
+            merged_metadata,
+        )
+    } else {
+        apply_controller_turn_credentials(
+            state.config.browser_turn_rest.as_ref(),
+            project_id,
+            runtime.id,
+            Utc::now().timestamp(),
+            merged_metadata,
+        )
+    };
     let allocator_metadata = apply_browser_profile_persistence_policy(
         &state.config,
         project_id,
@@ -3845,6 +3921,7 @@ mod tests {
             sanitized,
             Some(lease_metadata),
             lease_id,
+            true,
         )
     }
 
@@ -3962,8 +4039,107 @@ mod tests {
             "instafy-cloud",
             sanitized,
             lease_id,
+            super::super::managed::BrowserHostLaunch::Off,
         )
         .expect("managed launch metadata")
+    }
+
+    #[test]
+    fn dispatch_reconnect_carries_no_stale_browser_host_key() {
+        use super::super::managed::{
+            attest_new_managed_runtime_launch, managed_browser_host_is_attested,
+            sanitize_managed_runtime_request_metadata, BrowserHostLaunch,
+            MANAGED_BROWSER_HOST_ATTESTATION,
+        };
+        const HOST: BrowserHostLaunch = BrowserHostLaunch::Host {
+            profile_persist: true,
+        };
+
+        let runtime_id = Uuid::new_v4();
+        let lease_id = Uuid::new_v4();
+        let lease_metadata = attest_new_managed_runtime_launch(
+            "instafy-cloud",
+            Some(json!({ "source": "studio", "sizeId": "standard" })),
+            lease_id,
+            HOST,
+        )
+        .expect("host lease metadata");
+
+        for (live, ended) in [
+            (Some((lease_id, Some(&lease_metadata))), None),
+            (None, Some((lease_id, Some(&lease_metadata)))),
+        ] {
+            let requested = build_dispatch_reconnect_metadata(
+                "instafy-cloud",
+                live,
+                ended,
+                runtime_id,
+                "dispatch_runtime_alert",
+                live.is_none(),
+            );
+            assert!(
+                requested.get(MANAGED_BROWSER_HOST_ATTESTATION).is_none(),
+                "{requested}"
+            );
+            // The request boundary would drop one anyway.
+            let mut forged = requested.clone();
+            forged[MANAGED_BROWSER_HOST_ATTESTATION] =
+                lease_metadata[MANAGED_BROWSER_HOST_ATTESTATION].clone();
+            let sanitized =
+                sanitize_managed_runtime_request_metadata("instafy-cloud", Some(forged))
+                    .expect("sanitize")
+                    .expect("metadata");
+            assert!(sanitized.get(MANAGED_BROWSER_HOST_ATTESTATION).is_none());
+
+            // A successor lease gets an attestation of its own generation only
+            // when the controller decides so again.
+            let successor = Uuid::new_v4();
+            let relaunched = attest_new_managed_runtime_launch(
+                "instafy-cloud",
+                Some(sanitized.clone()),
+                successor,
+                BrowserHostLaunch::Off,
+            );
+            assert!(!managed_browser_host_is_attested(
+                "instafy-cloud",
+                relaunched.as_ref(),
+                successor
+            ));
+            let relaunched = attest_new_managed_runtime_launch(
+                "instafy-cloud",
+                Some(sanitized),
+                successor,
+                HOST,
+            );
+            assert!(managed_browser_host_is_attested(
+                "instafy-cloud",
+                relaunched.as_ref(),
+                successor
+            ));
+            assert!(!managed_browser_host_is_attested(
+                "instafy-cloud",
+                relaunched.as_ref(),
+                lease_id
+            ));
+        }
+
+        // Reusing the live host lease keeps its attestation, with no 409.
+        let requested = build_dispatch_reconnect_metadata(
+            "instafy-cloud",
+            Some((lease_id, Some(&lease_metadata))),
+            None,
+            runtime_id,
+            "dispatch_runtime_alert",
+            false,
+        );
+        let reused = reuse_decision(requested, &lease_metadata, lease_id)
+            .expect("a reconnect reuses the live host lease")
+            .expect("reused metadata");
+        assert!(managed_browser_host_is_attested(
+            "instafy-cloud",
+            Some(&reused),
+            lease_id
+        ));
     }
 
     #[test]
