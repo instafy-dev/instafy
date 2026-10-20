@@ -30,6 +30,70 @@ export function normalizePersonalBrowserUrl(rawUrl: string): string | null {
   return normalizeBrowserAddress(rawUrl);
 }
 
+export type PersonalBrowserApprovalMode = "ask" | "routine";
+
+/**
+ * The Desktop's "routine" is the owner's tier (policy version 2): reading and
+ * plain links are free, while forms, purchases, messages and credentials still
+ * ask. Older hosts mean the earlier routine, which submits ordinary forms.
+ */
+export const PERSONAL_BROWSER_OWNER_TIER_POLICY_VERSION = 2;
+
+type PersonalBrowserApprovalStatus = Pick<InstafyDesktopPersonalBrowserStatus, "approvalModes" | "approvalPolicyVersion">;
+
+export function personalBrowserRoutineAvailable(status: PersonalBrowserApprovalStatus | null | undefined): boolean {
+  return status?.approvalModes?.includes("routine") === true;
+}
+
+export function personalBrowserOwnerTier(status: PersonalBrowserApprovalStatus | null | undefined): boolean {
+  return personalBrowserRoutineAvailable(status) &&
+    typeof status?.approvalPolicyVersion === "number" &&
+    status.approvalPolicyVersion >= PERSONAL_BROWSER_OWNER_TIER_POLICY_VERSION;
+}
+
+/**
+ * The approval mode a start asks the Desktop for.
+ * - Nothing chosen yet: routine on an owner-tier Desktop, ask on an older one.
+ * - Studio starting the browser by itself asks for routine only from an
+ *   owner-tier Desktop and only when the person has not chosen Ask, so it
+ *   never requests an older host's routine.
+ * - Otherwise (a press, Resume, Retry, Let AI continue) the person's choice.
+ */
+export function resolvePersonalBrowserApprovalMode(input: {
+  status: PersonalBrowserApprovalStatus | null | undefined;
+  choice: PersonalBrowserApprovalMode | null;
+  automatic?: boolean;
+}): PersonalBrowserApprovalMode {
+  if (!personalBrowserRoutineAvailable(input.status)) return "ask";
+  const ownerTier = personalBrowserOwnerTier(input.status);
+  const preferred = input.choice ?? (ownerTier ? "routine" : "ask");
+  if (input.automatic) return ownerTier && preferred === "routine" ? "routine" : "ask";
+  return preferred;
+}
+
+/**
+ * Hosts an owner-tier Desktop may treat as this run's sites, so it does not ask
+ * per site for them: valid lowercase host names, at most three, sent only with
+ * routine. An older host never receives them.
+ */
+export function personalBrowserKnownHosts(
+  status: PersonalBrowserApprovalStatus | null | undefined,
+  approvalMode: PersonalBrowserApprovalMode | undefined,
+  hosts: readonly string[] | null | undefined,
+): string[] {
+  if (approvalMode !== "routine" || !personalBrowserOwnerTier(status) || !hosts) return [];
+  const known: string[] = [];
+  for (const host of hosts) {
+    if (typeof host !== "string") continue;
+    const normalized = host.trim().toLowerCase().replace(/\.$/, "");
+    if (!/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(normalized) ||
+        normalized.length > 253 || known.includes(normalized)) continue;
+    known.push(normalized);
+    if (known.length === 3) break;
+  }
+  return known;
+}
+
 export function resolvePersonalBrowserRuntimeOverride(input: {
   agentControlEnabled: boolean;
   agentPhase: PersonalBrowserAgentPhase;
@@ -119,7 +183,8 @@ export function usePersonalBrowserBridge({
 }) {
   const [checked, setChecked] = useState(false);
   const [status, setStatus] = useState<InstafyDesktopPersonalBrowserStatus | null>(null);
-  const [preferredApprovalMode, setPreferredApprovalMode] = useState<"ask" | "routine">("routine");
+  // Unset until the person chooses; the default follows the Desktop's policy.
+  const [approvalModeChoice, setPreferredApprovalMode] = useState<PersonalBrowserApprovalMode | null>(null);
   const [runtimeStartState, setRuntimeStartState] = useState<
     "idle" | "starting" | "succeeded" | "failed"
   >("idle");
@@ -646,7 +711,7 @@ export function usePersonalBrowserBridge({
     [invoke],
   );
   const setAgentControlEnabled = useCallback(
-    async (enabled: boolean, approvalMode?: "ask" | "routine") => {
+    async (enabled: boolean, approvalMode?: PersonalBrowserApprovalMode, knownHosts?: readonly string[]) => {
       const bridge = browserBridge();
       const ownerId = personalBrowserOwnerIdRef.current;
       if (
@@ -661,6 +726,7 @@ export function usePersonalBrowserBridge({
           enabled,
           ownerId,
           ...(approvalMode ? { approvalMode } : {}),
+          ...(enabled && knownHosts && knownHosts.length > 0 ? { knownHosts: [...knownHosts] } : {}),
         });
         if (
           !mountedRef.current ||
@@ -718,9 +784,10 @@ export function usePersonalBrowserBridge({
     if (!paused) {
       return null;
     }
-    return setAgentControlEnabled(true,
-      paused.approvalModes?.includes("routine") ? preferredApprovalMode : undefined);
-  }, [preferredApprovalMode, setAgentControlEnabled]);
+    return setAgentControlEnabled(true, personalBrowserRoutineAvailable(paused)
+      ? resolvePersonalBrowserApprovalMode({ status: paused, choice: approvalModeChoice })
+      : undefined);
+  }, [approvalModeChoice, setAgentControlEnabled]);
   const clearData = useCallback(
     async () => {
       const bridge = browserBridge();
@@ -793,7 +860,10 @@ export function usePersonalBrowserBridge({
     });
   }, [agentPhase, identityScope, runtimeId, status?.agentControlEnabled, status?.ownerId, status?.state]);
 
+  const preferredApprovalMode = resolvePersonalBrowserApprovalMode({ status, choice: approvalModeChoice });
+
   return {
+    /** The mode a press, Resume, Retry or Let AI continue asks for. */
     preferredApprovalMode,
     setPreferredApprovalMode,
     agentError,

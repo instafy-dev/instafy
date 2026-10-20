@@ -76,9 +76,14 @@ run that took the lane first, counts as sent: the notice stays and the card read
 **Opened**. A press, or an opened card, reads **Opened** from then on, also after a reload,
 so displaying an old message never runs it again. **Try again** on a failed browser run
 sends the card's task again through the browser, with the card it continues, never the
-notice text. A browser Studio opened by itself grants nothing a press does not: it uses
-the person's own approval settings, so the browser's site and action prompts ask exactly
-as for a press.
+notice text. A browser Studio opened by itself grants nothing a press does not. It asks
+for routine browsing only from a Desktop whose routine is the owner tier (approval policy
+version 2: reading and plain links free, forms, purchases, messages and credentials still
+ask), and only when the person has not chosen Ask; on an older Desktop it uses Ask, so it
+never requests the earlier routine that submits ordinary forms. A start, pressed or
+automatic, also gives an owner-tier Desktop in routine the hosts the card shows (at most
+three) as the run's own sites; they are not recorded with the prompt, and an older Desktop
+never receives them.
 The card shows the host its task opens. The card says nothing about which browsers exist,
 because the Workspace browser starts on demand as a runtime of its own; Studio disables the
 button, with the reason, only when the Workspace browser is known not to open and there is no
@@ -98,8 +103,10 @@ credential value: it stops on the screen that lists it, names the control that o
 asks the person to open that page in a tab of their own browser to see and copy the value.
 That is turn guidance for the model, not a block the browser enforces.
 Paused native control uses the existing Resume flow with the Browser settings
-approval choice (routine browsing by default on supported Desktop hosts); already active
-control keeps its settings. A pending manual step must be finished with **Let AI continue** before another task can start.
+approval choice. Until the person chooses, it defaults to routine on a Desktop reporting
+approval policy version 2 and to Ask on an older one; an explicit choice, either way, is
+kept for presses, Resume, Retry and **Let AI continue**. Already active control keeps its
+settings. A pending manual step must be finished with **Let AI continue** before another task can start.
 
 Studio first reuses the browser location saved for this conversation on this
 device. For a new conversation, it uses the user's explicit location preference,

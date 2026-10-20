@@ -72,6 +72,8 @@ describe("Chat browser request handoff", () => {
       // The chat records it as a notice naming the card, not as the person's words.
       display: "Octo opened Instafy's browser",
       metadata: { browserRequestOf: "message:request-1" },
+      // The card names no host, so it gives the browser none.
+      knownHosts: [],
     });
     expect(lastState?.cardStates.get("message:request-1")).toEqual({ kind: "opened" });
   });
@@ -187,6 +189,7 @@ describe("Chat browser request handoff", () => {
     expect(value.continueTask).toHaveBeenCalledExactlyOnceWith("personal", expect.stringContaining("Continue comparing our earlier choices."), {
       display: "Octo opened Instafy's browser",
       metadata: { retryOfMessageId: "failure-1", browserRequestOf: "message:request-1" },
+      knownHosts: [],
     });
     expect(value.activate).toHaveBeenCalledExactlyOnceWith("personal", null);
   });
@@ -205,6 +208,7 @@ describe("Chat browser request handoff", () => {
     expect(value.continueTask).toHaveBeenCalledExactlyOnceWith("shared", expect.stringMatching(/\n\nOpen https:\/\/app\.example\.test\/settings and stop on API keys\.$/), {
       display: "Octo opened Instafy's browser at app.example.test",
       metadata: { retryOfMessageId: "failure-1", browserRequestOf: "job:old" },
+      knownHosts: ["app.example.test"],
     });
   });
 
@@ -302,10 +306,12 @@ describe("Studio starting a request_browser card by itself", () => {
     expect(value.activate).toHaveBeenCalledExactlyOnceWith("personal", PERSONAL);
     expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "opening", note: null });
     await becomeReady();
-    // It grants nothing: no routine browsing, the person's own approval settings.
+    // It is marked as Studio's own start, so the browser chooses its approval
+    // mode by the Desktop's policy, and carries the hosts the card shows.
     expect(value.continueTask).toHaveBeenCalledExactlyOnceWith("personal", expect.stringContaining(TASK), {
       display: "Octo opened Instafy's browser at app.example.test",
       metadata: { browserRequestOf: "job:job-1", browserAutoStarted: true },
+      knownHosts: ["app.example.test"],
     });
     expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "opened" });
   });

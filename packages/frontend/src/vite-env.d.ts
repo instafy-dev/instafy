@@ -337,6 +337,11 @@ type InstafyDesktopPersonalBrowserStatus = {
   agentControlEnabled: boolean;
   approvalMode?: "ask" | "routine";
   approvalModes?: Array<"ask" | "routine">;
+  /**
+   * 2 when "routine" is the owner's tier: reading and links are free, while
+   * forms, purchases, messages and credentials still ask. Absent on older hosts.
+   */
+  approvalPolicyVersion?: number;
   humanInputRequest?: import("./screens/studio/components/useBrowserHumanInput").BrowserHumanInputRequest;
   humanControlReady?: boolean;
   takeoverRequestId?: string;
@@ -468,6 +473,8 @@ interface Window {
       enabled: boolean;
       ownerId: string;
       approvalMode?: "ask" | "routine";
+      /** The card's hosts (at most 3); read only by policy version 2 hosts in routine. */
+      knownHosts?: string[];
     }) => Promise<InstafyDesktopPersonalBrowserStatus>;
     personalBrowserClearData?: (options: {
       ownerId: string;

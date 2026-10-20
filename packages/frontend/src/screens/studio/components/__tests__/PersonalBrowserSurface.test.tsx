@@ -336,6 +336,21 @@ describe("PersonalBrowserSurface", () => {
     expect(document.querySelector('[data-testid="personal-browser-routine-approval"]')).toBeNull();
   });
 
+  it.each([
+    { policy: 2, label: "Let Octo browse and read without asking for each site", hint: "Forms, buttons and messages still ask" },
+    { policy: undefined, label: "Allow routine browsing without asking each time", hint: "High-impact actions still ask" },
+  ])("names what routine allows on Desktop policy $policy", async ({ policy, label, hint }) => {
+    const model = createModel();
+    model.status = { ...model.status!, agentControlEnabled: false, approvalMode: "ask", approvalModes: ["ask", "routine"],
+      ...(policy ? { approvalPolicyVersion: policy } : {}) };
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
+    const checkbox = document.querySelector<HTMLInputElement>('[data-testid="personal-browser-routine-approval"]');
+    const row = checkbox?.closest('[data-browser-session-safe-zone="true"]');
+    expect(row?.textContent).toContain(label);
+    expect(row?.textContent).toContain(hint);
+  });
+
   it("keeps location and profile ownership accessible in the compact menu", async () => {
     await act(async () => {
       root.render(

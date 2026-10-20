@@ -121,17 +121,24 @@ describe("Personal handoff with the real React browser bridge", () => {
   }
 
   it.each([
-    { preferred: "routine", legacy: false, expected: "routine" },
-    { preferred: "ask", legacy: false, expected: "ask" },
-    { preferred: "routine", legacy: true, expected: "ask" },
-  ] as const)("uses $expected approval for preference $preferred (legacy: $legacy) and waits for the exact runtime", async ({ preferred, legacy, expected }) => {
+    // An owner-tier Desktop defaults to routine; an older one to ask.
+    { policy: 2, preferred: null, legacy: false, expected: "routine" },
+    { policy: undefined, preferred: null, legacy: false, expected: "ask" },
+    // An explicit choice is kept on either host.
+    { policy: 2, preferred: "ask", legacy: false, expected: "ask" },
+    { policy: undefined, preferred: "routine", legacy: false, expected: "routine" },
+    // A host without routine always uses ask.
+    { policy: undefined, preferred: "routine", legacy: true, expected: "ask" },
+  ] as const)("uses $expected approval for preference $preferred (policy $policy, legacy: $legacy) and waits for the exact runtime", async ({ policy, preferred, legacy, expected }) => {
     if (legacy) nativeStatus = { ...nativeStatus, approvalModes: undefined };
+    if (policy) nativeStatus = { ...nativeStatus, approvalPolicyVersion: policy };
     await render();
-    expect(resultRef.current!.personal.preferredApprovalMode).toBe("routine");
-    await act(async () => resultRef.current!.personal.setPreferredApprovalMode(preferred));
+    expect(resultRef.current!.personal.preferredApprovalMode).toBe(policy === 2 ? "routine" : "ask");
+    if (preferred) await act(async () => resultRef.current!.personal.setPreferredApprovalMode(preferred));
     let pending!: Promise<boolean>;
     await act(async () => { pending = resultRef.current!.handoff.startPersonal("Continue comparing the saved items"); });
     expect(setEnabled).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ enabled: true, approvalMode: expected }));
+    expect(setEnabled.mock.calls[0]![0]).not.toHaveProperty("knownHosts");
     expect(value.onSubmit).not.toHaveBeenCalled();
     await act(async () => startup.resolve({ pid: 42, runtimeId: "personal-fresh" }));
     await act(async () => { await vi.advanceTimersByTimeAsync(100); });
@@ -146,8 +153,33 @@ describe("Personal handoff with the real React browser bridge", () => {
     await act(async () => { await resultRef.current!.personal.retryAgentControl(); });
     expect(setEnabled).toHaveBeenLastCalledWith({
       enabled: true, ownerId: nativeStatus.ownerId,
-      ...(legacy ? {} : { approvalMode: preferred }),
+      ...(legacy ? {} : { approvalMode: expected }),
     });
+  });
+
+  it.each([
+    // Only an owner-tier Desktop gets routine, and the card's hosts, by itself.
+    { policy: 2, preferred: null, expected: "routine", hosts: ["app.example.test", "docs.example.test"] },
+    { policy: 2, preferred: "ask", expected: "ask", hosts: null },
+    // An older Desktop's routine submits forms: an automatic start never asks for it.
+    { policy: undefined, preferred: "routine", expected: "ask", hosts: null },
+    { policy: undefined, preferred: null, expected: "ask", hosts: null },
+  ] as const)("an automatic start asks for $expected (policy $policy, preference $preferred)", async ({ policy, preferred, expected, hosts }) => {
+    if (policy) nativeStatus = { ...nativeStatus, approvalPolicyVersion: policy };
+    await render();
+    if (preferred) await act(async () => resultRef.current!.personal.setPreferredApprovalMode(preferred));
+    await act(async () => {
+      void resultRef.current!.handoff.startPersonal("Continue this browser task.\n\nOpen https://app.example.test and https://docs.example.test", {
+        display: "Octo opened Instafy's browser at app.example.test",
+        metadata: { browserRequestOf: "job:job-1", browserAutoStarted: true },
+        knownHosts: ["app.example.test", "docs.example.test"],
+      }).catch(() => null);
+    });
+    expect(setEnabled).toHaveBeenCalledTimes(1);
+    const call = setEnabled.mock.calls[0]![0];
+    expect(call).toMatchObject({ enabled: true, approvalMode: expected });
+    if (hosts) expect(call.knownHosts).toEqual(hosts);
+    else expect(call).not.toHaveProperty("knownHosts");
   });
 
   it("retries Done after a native failure without reading the pre-Resume unavailable phase as a new failure", async () => {

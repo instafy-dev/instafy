@@ -128,15 +128,23 @@ The user can navigate manually without granting agent access. Cross-origin agent
 
 ### Routine browsing and stricter approval
 
-Studio selects **Allow routine browsing without asking each time** by default for
-Personal Browser control. The setting is available in Browser settings before
-Resume and also applies to Chat's **Open browser and continue** handoff, whether
-the person pressed it or Studio opened this browser by itself for Octo's card: an
-automatic start uses the same setting and grants nothing more. Only a person on
-their own AI connection gets that automatic start: with Instafy AI, a card resolves
-to Instafy's browser instead, because dispatch refuses a turn on this device's
-runtime, and that card waits for a press. Existing active control keeps its approval mode. Older Desktop hosts
+The setting is available in Browser settings before Resume and also applies to Chat's
+**Open browser and continue** handoff. Until the person chooses, Studio defaults to
+routine only on a Desktop that reports `approvalPolicyVersion: 2`, where routine is the
+owner tier and the checkbox reads **Let Octo browse and read without asking for each
+site**; on an older Desktop it defaults to Ask, and the checkbox keeps the label
+**Allow routine browsing without asking each time**. An explicit choice is kept on either.
+When Studio opens this browser by itself for Octo's card, it asks for routine only from a
+policy version 2 Desktop and only when the person has not chosen Ask; otherwise it uses
+Ask, so an automatic start never requests the earlier routine below. A card start passes
+the card's hosts (at most three) as `knownHosts` to a policy version 2 Desktop in routine;
+an older Desktop ignores the field and never receives it. Only a person on their own AI
+connection gets that automatic start: with Instafy AI, a card resolves to Instafy's
+browser instead, because dispatch refuses a turn on this device's runtime, and that card
+waits for a press. Existing active control keeps its approval mode. Older Desktop hosts
 without routine-mode support use Ask mode.
+
+The rest of this section describes routine on Desktop hosts without policy version 2.
 
 Electron requires one native confirmation before enabling routine mode. It permits
 ordinary navigation, searches, clicks, non-sensitive field filling and form

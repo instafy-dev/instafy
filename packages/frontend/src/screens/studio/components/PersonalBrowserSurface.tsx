@@ -34,9 +34,11 @@ import {
   BrowserStatusPill,
   type BrowserChromeState,
 } from "./BrowserChromeShell";
-import type {
-  BrowserTransport,
-  usePersonalBrowserBridge,
+import {
+  personalBrowserOwnerTier,
+  personalBrowserRoutineAvailable,
+  type BrowserTransport,
+  type usePersonalBrowserBridge,
 } from "./usePersonalBrowserBridge";
 
 type PersonalBrowserModel = ReturnType<typeof usePersonalBrowserBridge>;
@@ -186,7 +188,9 @@ export function PersonalBrowserSurface({
   const humanInputLocked = model.status?.agentControlEnabled === true || model.status?.humanControlReady === false || model.status?.tabControlActive === true;
   const visible = active && model.available && ready;
   const ownerId = model.ownerId;
-  const routineApprovalAvailable = model.status?.approvalModes?.includes("routine") === true;
+  const routineApprovalAvailable = personalBrowserRoutineAvailable(model.status);
+  // On an owner-tier Desktop, "routine" frees reading and links only.
+  const ownerTierApproval = personalBrowserOwnerTier(model.status);
 
   useEffect(() => {
     if (!active) setFullscreen(false);
@@ -508,7 +512,9 @@ export function PersonalBrowserSurface({
             {routineApprovalAvailable ? (
               <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-slate-200 px-3 py-2 text-xs dark:border-slate-800" data-browser-session-safe-zone="true">
                 <Checkbox
-                  label="Allow routine browsing without asking each time"
+                  label={ownerTierApproval
+                    ? "Let Octo browse and read without asking for each site"
+                    : "Allow routine browsing without asking each time"}
                   isSelected={humanInputLocked ? model.status?.approvalMode === "routine" : selectedApprovalMode === "routine"}
                   data-testid="personal-browser-routine-approval"
                   isDisabled={humanInputLocked}
@@ -521,6 +527,8 @@ export function PersonalBrowserSurface({
                     ? "When ready, choose Let AI continue in the browser toolbar."
                     : humanInputLocked
                     ? "Take over to change approvals."
+                    : ownerTierApproval
+                    ? "Choose before Resume. Forms, buttons and messages still ask; secrets stay manual."
                     : "Choose before Resume. High-impact actions still ask; secrets stay manual."}
                 </span>
               </div>

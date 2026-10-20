@@ -165,6 +165,44 @@ describe("useChatBrowserHandoff", () => {
     expect(value.personal.setAgentControlEnabled).toHaveBeenCalledExactlyOnceWith(true, "ask");
   });
 
+  it.each([
+    // An owner-tier Desktop: routine, with the card's hosts.
+    { policy: 2, preferred: "routine", automatic: true, expected: "routine", hosts: ["app.example.test"] },
+    // An explicit Ask stays Ask, for Studio's own start as for a press.
+    { policy: 2, preferred: "ask", automatic: true, expected: "ask", hosts: null },
+    // An older Desktop's routine submits forms: Studio never asks for it by itself.
+    { policy: undefined, preferred: "routine", automatic: true, expected: "ask", hosts: null },
+    // A press keeps the person's choice on either host; hosts only go to the owner tier.
+    { policy: undefined, preferred: "routine", automatic: false, expected: "routine", hosts: null },
+    { policy: 2, preferred: "routine", automatic: false, expected: "routine", hosts: ["app.example.test"] },
+  ] as const)("asks the Desktop for $expected (policy $policy, preference $preferred, automatic $automatic)", async ({ policy, preferred, automatic, expected, hosts }) => {
+    const value = options({ transport: "personal", personal: personal({
+      status: { ...personal().status!, approvalModes: ["ask", "routine"], ...(policy ? { approvalPolicyVersion: policy } : {}) },
+      preferredApprovalMode: preferred,
+    } as Partial<Options["personal"]>) });
+    await render(value);
+    void resultRef.current!.startPersonal("Open https://app.example.test", {
+      display: "Octo opened Instafy's browser at app.example.test",
+      metadata: { browserRequestOf: "job:job-1", ...(automatic ? { browserAutoStarted: true } : {}) },
+      knownHosts: ["app.example.test"],
+    }).catch(() => null);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(value.personal.setAgentControlEnabled).toHaveBeenCalledExactlyOnceWith(true, expected, ...(hosts ? [hosts] : []));
+  });
+
+  it("never records the card's hosts with the prompt", async () => {
+    const override = { runtimeId: "personal-live", runtimeDisplayName: "Personal Browser", preferRuntime: false };
+    const value = options({ transport: "personal", personal: personal({ runtimeOverride: override }) });
+    await render(value);
+    await expect(resultRef.current!.startPersonal("Open https://app.example.test", {
+      metadata: { browserRequestOf: "job:job-1" }, knownHosts: ["app.example.test"],
+    })).resolves.toBe(true);
+    const sent = vi.mocked(value.onSubmit).mock.calls[0]![2]!;
+    expect(JSON.stringify(sent.metadata)).not.toContain("knownHosts");
+    // Control already running keeps its settings.
+    expect(value.personal.setAgentControlEnabled).not.toHaveBeenCalled();
+  });
+
   it.each([{ transport: "personal" as const }, { runtimeId: null }, { page: null }])("does not fall back when Shared routing is unavailable: %j", async (change) => {
     const value = options(change);
     await render(value);

@@ -20,6 +20,7 @@ import {
   BROWSER_REQUEST_OF_METADATA_KEY,
   browserRequestContinuation,
   browserRequestContinuedKeys,
+  browserRequestDestinations,
   browserRequestFromContinuationPrompt,
   browserRequestFromMessage,
   browserRequestJobId,
@@ -41,6 +42,11 @@ export type BrowserTaskExtras = {
   display: string;
   /** Prompt metadata naming the card, and whether Studio sent it by itself. */
   metadata: Record<string, unknown>;
+  /**
+   * The hosts the card shows (at most three). The browser on this device may
+   * treat them as the run's own sites; they are not recorded with the prompt.
+   */
+  knownHosts: string[];
 };
 
 /** What Studio needs to start a card by itself. Absent, every card waits for a press. */
@@ -237,6 +243,7 @@ export function useChatBrowserRequest(options: Options) {
               [BROWSER_REQUEST_OF_METADATA_KEY]: key,
               ...(autoStarted ? { [BROWSER_AUTO_STARTED_METADATA_KEY]: true } : {}),
             },
+            knownHosts: browserRequestDestinations(request.task),
           });
           if (!sent) throw new Error("The browser task was not sent. You can retry from its message.");
           return;
