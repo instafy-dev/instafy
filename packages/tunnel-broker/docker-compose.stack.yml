@@ -1,4 +1,10 @@
 services:
+  # The broker calls the controller's hooks on the host (scripts/lib/localTunnelBroker.mjs).
+  # Docker Desktop resolves host.docker.internal by itself; Linux Docker needs this.
+  broker:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
   # Override bind-mount configs with named volumes so running the stack doesn't dirty the repo.
   rathole:
     volumes:

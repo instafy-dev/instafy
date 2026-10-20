@@ -45,7 +45,7 @@ Every part fails closed. A missing setting turns previews off; it never makes th
 | Broker | `PREVIEW_DOMAIN` (viewer hosts are `p-<label>--<tunnel>.<PREVIEW_DOMAIN>`) | no private routers; private tunnels refused with 400 |
 | Broker | `PREVIEW_AUTH_ADDRESS` (where Traefik's forwardAuth reaches the broker) | the same |
 | Broker | `PREVIEW_AUTH_HOOK_URL` (the controller's `/tunnel-broker/hooks/preview-auth`) | the same |
-| Broker | `ACL_HOOK_TOKEN` = controller `TUNNEL_BROKER_HOOK_SECRET` | every viewer request denied |
+| Broker | `ACL_HOOK_TOKEN` = controller `TUNNEL_BROKER_HOOK_SECRET` (the bearer for every controller hook) | every viewer request denied |
 | Broker | `PREVIEW_MAX_TTL_SECONDS` (default 43200) | 12 h |
 | Ingress sidecar | `PREVIEW_DOMAIN`, `PREVIEW_AUTH_ADDRESS` (same values as the broker) | no private routers |
 | Controller | `PREVIEW_DOMAIN`, or `PREVIEW_BASE_URL` such as `http://preview.localhost:8083` | every preview route answers 503 `previews_unavailable`; no tunnel, grant or card is made |
@@ -67,28 +67,45 @@ Where a part is older or unconfigured:
 
 ### Local stack
 
-`scripts/run-e2e-dev.mjs` (`pnpm stack:up`) sets these for the tunnel broker it starts itself, and for the controller
-beside it:
+`scripts/run-e2e-dev.mjs` (`pnpm stack:up`) configures the tunnel broker it starts itself, and the controller beside
+it. The rules are in `scripts/lib/localTunnelBroker.mjs`. There are two parts.
+
+**Controller hooks**, as in `packages/tunnel-broker/docs/integration.md`. The broker asks the controller before it
+creates any tunnel, public or private, and reports tunnel events to it:
+
+| Setting | Value |
+|---|---|
+| `ACL_HOOK_URL` | `http://host.docker.internal:<CONTROLLER_PORT>/tunnel-broker/hooks/acl` |
+| `EVENT_HOOK_URL` | `http://host.docker.internal:<CONTROLLER_PORT>/tunnel-broker/hooks/events` |
+| `ACL_HOOK_TOKEN`, `EVENT_HOOK_TOKEN`, controller `TUNNEL_BROKER_HOOK_SECRET` | one random secret per checkout, kept owner-only in `tmp/tunnel-broker-hook-secret` |
+
+**Private previews**, which need the hooks:
 
 | Setting | Value |
 |---|---|
 | `PREVIEW_DOMAIN` | `preview.localhost` (browsers resolve `*.localhost` to loopback) |
-| `PREVIEW_BASE_URL` | `http://preview.localhost:8083` (the local Traefik's plain-HTTP port, `PUBLIC_INGRESS_PORT`) |
+| `PREVIEW_BASE_URL` (controller) | `http://preview.localhost:8083` (where `docker-compose.yml` publishes the local Traefik's plain-HTTP entrypoint) |
 | `PREVIEW_AUTH_ADDRESS` | `http://broker:8080` (the broker on its compose network) |
 | `PREVIEW_AUTH_HOOK_URL` | `http://host.docker.internal:<CONTROLLER_PORT>/tunnel-broker/hooks/preview-auth` |
-| `ACL_HOOK_URL` | `http://host.docker.internal:<CONTROLLER_PORT>/tunnel-broker/hooks/acl` |
-| `ACL_HOOK_TOKEN`, `TUNNEL_BROKER_HOOK_SECRET` | one random secret per checkout, kept owner-only in `tmp/tunnel-broker-hook-secret` |
 
-- Values already in the environment win.
-- `PREVIEW_DOMAIN=` (empty) turns previews off for the stack.
+- Values already in the environment win. The hook secret is the exception that must agree: if
+  `TUNNEL_BROKER_HOOK_SECRET`, `ACL_HOOK_TOKEN` and `EVENT_HOOK_TOKEN` are set to different values, the script refuses
+  to start. Set only `TUNNEL_BROKER_HOOK_SECRET`.
+- `PREVIEW_DOMAIN=` (empty) turns previews off. The hooks stay on.
 - With `TUNNEL_BROKER_BASE_URL` set, or `RUNTIME_SKIP_TUNNEL_BROKER=1`, the script starts no broker and sets nothing.
+- With `RUNTIME_SKIP_CONTROLLER=1` the script cannot give the controller a secret. Unless `TUNNEL_BROKER_HOOK_SECRET`
+  is set for both, the broker gets no hooks and no previews, and the script says so.
+- A controller that is already running is reused only if it accepts the secret (an ACL hook call with an empty
+  project answers 400). Otherwise it is restarted with it, so a controller from an older checkout cannot make every
+  tunnel create fail.
+- The settings go only to the broker's compose and the controller. Other services the script starts never see the
+  secret.
 - The hook secret is random because the dev controller listens on every interface; a value written in the source
   would open its hooks to the local network.
-- `ACL_HOOK_URL` is set as well because the controller stops burning tunnel credits itself once the hook secret is
-  set; the broker's ACL hook burns them instead, as in a hosted deployment.
+- `docker-compose.stack.yml` maps `host.docker.internal` to the host for the broker, which Linux Docker needs.
 
 The browser test `packages/frontend/tests/playwright/projects/project-preview-ready.spec.ts` runs on this stack. It
-skips itself when the broker does not report private previews.
+skips itself when the broker does not report private previews, so it skips in CI.
 
 ## Security model
 
@@ -110,7 +127,9 @@ skips itself when the broker does not report private previews.
   The viewer URL lives in memory only; tabs store the preview id, never a URL.
 - **Reach.** The rathole client dials only `127.0.0.1:<port>` in the space's own machine. Viewer URLs come only from
   that space's grant rows, never from client input.
-- **Billing.** A private preview burns no tunnel credits: it is part of the machine the space already pays for.
+- **Billing.** Tunnel credits for broker tunnels are charged by the controller's ACL hook, `TUNNEL_CREDIT_BURN_AMOUNT`
+  per create (0 by default, so the local stack charges nothing). Whether a private preview is charged is open; see
+  below.
 - **Retention.** Session rows are pruned a little after they expire, and revoked ones an hour after revocation.
 
 ### Known limits
@@ -126,14 +145,15 @@ skips itself when the broker does not report private previews.
 
 None of these block a local or self-hosted merge, because everything is off by default.
 
-- **Preview domain (Q1/O1).** Hosted previews need a separate registrable domain, listed on the Public Suffix List with
+- **Preview domain.** Hosted previews need a separate registrable domain, listed on the Public Suffix List with
   `*.<domain>`, plus wildcard DNS and TLS. Until it is listed, previews on that domain can set cookies for each other.
   The controller's startup check keeps the domain off the Studio, API and tunnel hosts.
-- **Label binding (Q4/O1).** Bind each label to the first browser that opens it with a partitioned `__Host-` cookie, so
-  a leaked label stops working elsewhere. That needs Traefik 3.1 or later (`addAuthCookiesToResponse`); the stack runs
+- **Label binding.** Bind each label to the first browser that opens it with a partitioned `__Host-` cookie, so a
+  leaked label stops working elsewhere. That needs Traefik 3.1 or later (`addAuthCookiesToResponse`); the stack runs
   3.0. Keep the short idle window as the fallback where partitioned cookies are not supported.
-- **Long-lived connections (O4).** A site's own WebSockets and SSE streams opened before a revocation stay open until
-  they end. Put preview routers on their own Traefik entrypoint with bounded idle and write timeouts, or give the broker
-  a way to cut upgraded connections.
-- **Defaults to confirm.** Q2: private previews burn no tunnel credits. Q3: every space member who can read the space,
-  read-only viewers included, can open a preview.
+- **Long-lived connections.** A site's own WebSockets and SSE streams opened before a revocation stay open until they
+  end. Put preview routers on their own Traefik entrypoint with bounded idle and write timeouts, or give the broker a
+  way to cut upgraded connections.
+- **Defaults to confirm.** Whether a private preview burns tunnel credits (the proposal is that it does not, because it
+  is part of the machine the space already pays for). Whether every space member who can read the space, read-only
+  viewers included, can open a preview.

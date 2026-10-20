@@ -41,7 +41,7 @@ import { resolveRustBinaryLaunch } from "./lib/prebuiltRustBinary.mjs";
 import { ensureLocalAuthorPseudonymKeys } from "./lib/localAuthorPseudonymKeys.mjs";
 import { ensureLocalUserTokenSecret } from "./lib/localUserTokenSecret.mjs";
 import { ensureLocalSecret } from "./lib/localSecret.mjs";
-import { localPreviewEnv } from "./lib/localPreviewEnv.mjs";
+import { controllerHoldsHookSecret, tunnelBrokerStartPlan } from "./lib/localTunnelBroker.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -141,8 +141,6 @@ const tunnelBrokerComposeOverride = path.join(tunnelBrokerDir, "docker-compose.s
 const tunnelBrokerFlag = path.join(repoRoot, "tmp", ".tunnel-broker-stack-started");
 const tunnelBrokerPort = Number(process.env.TUNNEL_BROKER_PORT || 8082);
 const tunnelBrokerBaseUrlDefault = `http://127.0.0.1:${tunnelBrokerPort}`;
-// The local Traefik's plain-HTTP port, where preview viewer hosts are served.
-const tunnelBrokerIngressPort = Number(process.env.PUBLIC_INGRESS_PORT || 8083);
 // The broker calls the controller's hooks with this bearer. It is random per
 // checkout and kept here so restarts agree: the dev controller listens on every
 // interface, so a well-known value would open its hooks to the network.
@@ -1895,19 +1893,16 @@ async function stopGitCompose(options = {}) {
 }
 
 /**
- * Private preview settings for the broker this script starts and for the
- * controller beside it (docs/Previews.md); `{}` when `PREVIEW_DOMAIN` is set
- * empty. A hook secret already in `env` wins; otherwise one is kept per
- * checkout.
+ * The tunnel broker plan for this launch (scripts/lib/localTunnelBroker.mjs):
+ * the hook secret is the one in `env`, or else one kept per checkout.
  */
-export function tunnelBrokerPreviewEnv(env = process.env) {
-  return localPreviewEnv({
+function localTunnelBrokerPlan(env = process.env) {
+  return tunnelBrokerStartPlan({
     env,
     controllerPort,
-    ingressPort: tunnelBrokerIngressPort,
     resolveHookSecret: () =>
       ensureLocalSecret({
-        explicit: env.TUNNEL_BROKER_HOOK_SECRET || env.ACL_HOOK_TOKEN,
+        explicit: "",
         filePath: tunnelBrokerHookSecretPath,
         label: "tunnel broker hook secret",
       }),
@@ -1915,22 +1910,23 @@ export function tunnelBrokerPreviewEnv(env = process.env) {
 }
 
 async function startTunnelBrokerIngressIfNeeded() {
-  if ((process.env.RUNTIME_SKIP_TUNNEL_BROKER || "").trim() === "1") {
-    return { running: false, started: false, skipped: true };
+  const plan = localTunnelBrokerPlan(process.env);
+  if (plan.action === "skip") {
+    return { running: false, started: false, skipped: true, controllerEnv: {} };
   }
 
-  const existingBaseUrl = (process.env.TUNNEL_BROKER_BASE_URL || "").trim();
-  if (existingBaseUrl.length > 0) {
+  if (plan.action === "external") {
     if (!process.env.TUNNEL_BROKER_TOKEN || process.env.TUNNEL_BROKER_TOKEN.trim() === "") {
       process.env.TUNNEL_BROKER_TOKEN = "dev-token";
     }
-    return { running: false, started: false, configured: true };
+    return { running: false, started: false, configured: true, controllerEnv: {} };
   }
 
-  // Private previews only for the broker this script starts. The broker, its
-  // ingress sidecar (compose) and the controller (spawned with process.env)
-  // read the same values.
-  Object.assign(process.env, tunnelBrokerPreviewEnv(process.env));
+  for (const warning of plan.warnings) {
+    console.warn(`[runtime-dev] ${warning}`);
+  }
+  // Only compose and the controller get these; other children never see the hook secret.
+  const brokerComposeEnv = { ...process.env, ...plan.broker };
 
   console.log("[runtime-dev] Launching tunnel-broker ingress fixture...");
   run(
@@ -1950,7 +1946,7 @@ async function startTunnelBrokerIngressIfNeeded() {
       "rathole",
       "traefik",
     ],
-    { cwd: tunnelBrokerDir }
+    { cwd: tunnelBrokerDir, env: brokerComposeEnv }
   );
   run(
     "docker",
@@ -1966,7 +1962,7 @@ async function startTunnelBrokerIngressIfNeeded() {
       "-d",
       "rathole-sidecar",
     ],
-    { cwd: tunnelBrokerDir }
+    { cwd: tunnelBrokerDir, env: brokerComposeEnv }
   );
 
   const ok = await waitForPort(tunnelBrokerPort, {
@@ -1993,7 +1989,7 @@ async function startTunnelBrokerIngressIfNeeded() {
   console.log(
     `[runtime-dev] Tunnel-broker is listening (TUNNEL_BROKER_BASE_URL=${tunnelBrokerBaseUrlDefault}).`
   );
-  return { running: true, started: true };
+  return { running: true, started: true, controllerEnv: plan.controller };
 }
 
 async function stopTunnelBrokerIngressIfWeStarted() {
@@ -3046,7 +3042,8 @@ async function startControllerIfNeeded(
   supabaseEnv,
   proxyConfig = getProxyConfig(),
   runtimeRepoHost,
-  runtimeCodexRoot
+  runtimeCodexRoot,
+  brokerControllerEnv = {}
 ) {
   if (process.env.RUNTIME_SKIP_CONTROLLER === "1") {
     console.log("[runtime-dev] Skipping controller start (RUNTIME_SKIP_CONTROLLER=1).");
@@ -3085,8 +3082,17 @@ async function startControllerIfNeeded(
     } catch {
       jwksReady = false;
     }
-    if (!jwksReady) {
-      console.log("[runtime-dev] Controller running without origin signing key; restarting...");
+    // The broker this script started calls the controller's hooks with this
+    // checkout's secret; a controller started without it would refuse them,
+    // and with them every tunnel create.
+    const hookSecret = brokerControllerEnv.TUNNEL_BROKER_HOOK_SECRET;
+    const restartReason = !jwksReady
+      ? "without origin signing key"
+      : hookSecret && !(await controllerHoldsHookSecret({ baseUrl: controllerBaseUrl, secret: hookSecret }))
+        ? "without this checkout's tunnel broker hook secret"
+        : "";
+    if (restartReason) {
+      console.log(`[runtime-dev] Controller running ${restartReason}; restarting...`);
       const stopped = await stopControllerInternal().catch((error) => {
         console.warn(`[runtime-dev] Failed to stop existing controller: ${error?.message || error}`);
         return false;
@@ -3251,6 +3257,9 @@ async function startControllerIfNeeded(
   env.RUNTIME_SIGNING_PUBLIC_KEY = originKeys.publicKey;
   env.RUNTIME_SIGNING_KEY_ID = originKeys.keyId;
   env.CREDENTIAL_ENCRYPTION_KEY = ensureCredentialEncryptionKey();
+  // The tunnel broker's hook secret and private preview settings, when this
+  // script started the broker (scripts/lib/localTunnelBroker.mjs).
+  Object.assign(env, brokerControllerEnv);
   // Never sign local sessions with the development fallback published in the
   // source: the controller listens on every interface, not only loopback.
   env.USER_TOKEN_SECRET = ensureLocalUserTokenSecret({
@@ -3640,12 +3649,13 @@ async function buildRuntimeContext(options = {}) {
 
 async function ensureControllerStack(ctx) {
   await startRedisComposeIfNeeded();
-  await startTunnelBrokerIngressIfNeeded();
+  const broker = await startTunnelBrokerIngressIfNeeded();
   await startControllerIfNeeded(
     ctx.supabaseEnv,
     ctx.proxyConfig,
     ctx.runtimeRepoHost,
-    ctx.runtimeCodexHome
+    ctx.runtimeCodexHome,
+    broker.controllerEnv
   );
   ensureProxyImage();
   await startProxyIfNeeded(ctx.runtimeRepoHost, ctx.proxyConfig);

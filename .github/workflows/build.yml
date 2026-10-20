@@ -347,8 +347,7 @@ jobs:
             scripts/lib/codexMachineAuthExpiry.test.mjs \
             scripts/lib/localSecret.test.mjs \
             scripts/lib/localUserTokenSecret.test.mjs \
-            scripts/lib/localPreviewEnv.test.mjs \
-            scripts/run-e2e-dev-previews.test.mjs \
+            scripts/lib/localTunnelBroker.test.mjs \
             scripts/lib/localAuthorPseudonymKeys.test.mjs \
             scripts/lib/supabaseImageMirror.test.mjs \
             scripts/mirror-supabase-images.test.mjs \

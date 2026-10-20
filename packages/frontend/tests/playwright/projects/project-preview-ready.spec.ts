@@ -13,8 +13,9 @@ const PREVIEW_PORT = 4173;
 const PREVIEW_TITLE = "Site preview";
 const BROKER_BASE_URL = (process.env.TUNNEL_BROKER_BASE_URL || "http://127.0.0.1:8082").replace(/\/+$/, "");
 const BROKER_TOKEN = process.env.TUNNEL_BROKER_TOKEN || "dev-token";
-const INGRESS_PORT = Number(process.env.PUBLIC_INGRESS_PORT || 8083);
 const TUNNEL_DOMAIN = process.env.TUNNEL_DOMAIN || "rt.test";
+// The local Traefik's API (docker-compose.yml publishes it on 8084), to see which routers it serves.
+const TRAEFIK_API_URL = (process.env.TUNNEL_BROKER_TRAEFIK_API_URL || "http://127.0.0.1:8084").replace(/\/+$/, "");
 
 type BrokerCapabilities = { privatePreviews?: boolean; previewDomain?: string };
 
@@ -86,10 +87,10 @@ function openPreview(container: string, conversationId: string): Record<string, 
 }
 
 /** A plain request to the local Traefik with an explicit Host, so no DNS is involved. */
-function ingressStatus(host: string): Promise<number> {
+function ingressStatus(host: string, port: number): Promise<number> {
   return new Promise((resolve, reject) => {
     const request = http.request(
-      { host: "127.0.0.1", port: INGRESS_PORT, path: "/", method: "GET", headers: { host: `${host}:${INGRESS_PORT}` }, timeout: 10_000 },
+      { host: "127.0.0.1", port, path: "/", method: "GET", headers: { host: `${host}:${port}` }, timeout: 10_000 },
       (response) => {
         response.resume();
         resolve(response.statusCode ?? 0);
@@ -99,6 +100,15 @@ function ingressStatus(host: string): Promise<number> {
     request.on("error", reject);
     request.end();
   });
+}
+
+type TraefikRouter = { name: string; rule?: string; middlewares?: string[] };
+
+/** The HTTP routers the local Traefik serves now. */
+async function traefikRouters(): Promise<TraefikRouter[]> {
+  const response = await fetch(`${TRAEFIK_API_URL}/api/http/routers`, { signal: AbortSignal.timeout(5_000) });
+  if (!response.ok) throw new Error(`Traefik API answered ${response.status}`);
+  return (await response.json()) as TraefikRouter[];
 }
 
 function randomCapabilityLabel(): string {
@@ -180,30 +190,51 @@ test.describe("Site preview card and pane", () => {
       await expect(page.getByTestId(`conversation-subtab-preview:${previewId}`)).toBeVisible();
       await expect(page.getByTestId("site-preview-title")).toHaveText(PREVIEW_TITLE);
 
+      // The frame is sandboxed, sends no referrer and may use only fullscreen and the clipboard.
+      const frame = page.getByTestId("site-preview-frame");
+      const sandbox = (await frame.getAttribute("sandbox")) ?? "";
+      expect(sandbox).toContain("allow-scripts");
+      expect(sandbox).not.toContain("allow-top-navigation");
+      await expect(frame).toHaveAttribute("referrerpolicy", "no-referrer");
+      await expect(frame).toHaveAttribute("allow", "fullscreen; clipboard-write");
+
       // The frame is on a capability host for this preview, and nothing else gets in.
-      const src = await page.getByTestId("site-preview-frame").getAttribute("src");
-      const viewer = new URL(src ?? "");
-      expect(viewer.hostname).toMatch(new RegExp(`^p-[a-z2-7]{26}--${tunnelHex}\\.${previewDomain.replace(/\./g, "\\.")}$`));
-      expect(await ingressStatus(viewer.hostname)).toBe(200);
+      const viewer = new URL((await frame.getAttribute("src")) ?? "");
+      expect(viewer.hostname.endsWith(`.${previewDomain}`)).toBe(true);
+      const capabilityLabel = viewer.hostname.slice(0, -(previewDomain.length + 1));
+      expect(capabilityLabel).toMatch(/^p-[a-z2-7]{26}--[0-9a-f]{32}$/);
+      expect(capabilityLabel.endsWith(`--${tunnelHex}`)).toBe(true);
+      const ingressPort = Number(viewer.port || 80);
+      expect(await ingressStatus(viewer.hostname, ingressPort)).toBe(200);
 
       const outsider = await browser.newContext();
       try {
-        // A signed-out browser with a made-up label gets the 401 page.
-        const forged = `http://p-${randomCapabilityLabel()}--${tunnelHex}.${previewDomain}:${INGRESS_PORT}/`;
+        // A signed-out browser with a made-up label for the same tunnel gets the 401 page.
+        const forged = `http://p-${randomCapabilityLabel()}--${tunnelHex}.${previewDomain}:${ingressPort}/`;
         const response = await (await outsider.newPage()).goto(forged);
         expect(response?.status()).toBe(401);
       } finally {
         await outsider.close();
       }
-      // A private tunnel has no router on its bare tunnel host.
-      expect(await ingressStatus(`${previewId}.${TUNNEL_DOMAIN}`)).toBe(404);
-      expect(await ingressStatus(`${tunnelHex}.${TUNNEL_DOMAIN}`)).toBe(404);
+
+      // Traefik serves this tunnel only on the capability hosts, behind the auth middleware, and never on its
+      // bare tunnel host. The routers come first so the 404s below cannot pass for a wrong host format.
+      const routers = await traefikRouters();
+      const tunnelRouters = routers.filter((router) => (router.rule ?? "").includes(tunnelHex) || (router.rule ?? "").includes(previewId));
+      expect(tunnelRouters.length).toBeGreaterThan(0);
+      for (const router of tunnelRouters) {
+        expect(router.rule ?? "").toContain(`--${tunnelHex}`);
+        expect(router.rule ?? "").toMatch(/^HostRegexp\(/);
+        expect((router.middlewares ?? []).some((name) => name.includes("preview-auth"))).toBe(true);
+      }
+      expect(await ingressStatus(`${previewId}.${TUNNEL_DOMAIN}`, ingressPort)).toBe(404);
+      expect(await ingressStatus(`${tunnelHex}.${TUNNEL_DOMAIN}`, ingressPort)).toBe(404);
 
       // The tab's × closes the pane and revokes its session within the broker's 30 s cache.
       await page.getByRole("button", { name: `Close ${PREVIEW_TITLE} view` }).click();
       await expect(page.getByTestId("site-preview-frame")).toHaveCount(0);
       await expect(card.getByRole("button", { name: "Open" })).toBeVisible();
-      await expect.poll(() => ingressStatus(viewer.hostname), { timeout: 35_000, intervals: [1_000] }).toBe(401);
+      await expect.poll(() => ingressStatus(viewer.hostname, ingressPort), { timeout: 35_000, intervals: [1_000] }).toBe(401);
 
       // The server dies: the pane and the card both say so.
       await openFromCard(page);
