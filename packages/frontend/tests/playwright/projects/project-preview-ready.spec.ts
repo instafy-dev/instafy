@@ -7,7 +7,9 @@ import { prepareStudio, resetRuntimeUserState } from "../utils/harness.js";
 // Site previews end to end (docs/Previews.md): a site running in the space's
 // machine is opened from its "Ready to preview" card into a side-pane tab on a
 // member-only capability host. Needs the local stack (`pnpm stack:up`), whose
-// tunnel broker serves private previews; on any other stack the test skips.
+// tunnel broker serves private previews; on any other stack the test skips,
+// unless INSTAFY_E2E_REQUIRE_PREVIEWS=1, which makes it fail instead so a stack
+// that lost its preview settings cannot pass by skipping.
 
 const PREVIEW_PORT = 4173;
 const PREVIEW_TITLE = "Site preview";
@@ -156,7 +158,12 @@ test.describe("Site preview card and pane", () => {
 
   test("opens a private preview from its card and keeps it private", async ({ page, browser }) => {
     const capabilities = await brokerCapabilities();
-    test.skip(!capabilities?.privatePreviews || !capabilities.previewDomain, "This stack's tunnel broker serves no private previews (see docs/Previews.md).");
+    const servesPreviews = Boolean(capabilities?.privatePreviews && capabilities.previewDomain);
+    const noPreviews = "This stack's tunnel broker serves no private previews (see docs/Previews.md).";
+    if (process.env.INSTAFY_E2E_REQUIRE_PREVIEWS === "1") {
+      expect(servesPreviews, noPreviews).toBe(true);
+    }
+    test.skip(!servesPreviews, noPreviews);
     const previewDomain = capabilities!.previewDomain!;
 
     await page.setViewportSize({ width: 1400, height: 900 });

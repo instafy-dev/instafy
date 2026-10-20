@@ -63,8 +63,29 @@ export function localPreviewsEnabled(env = process.env) {
 }
 
 /**
+ * Whether `host` is a loopback host by the controller's rule
+ * (`is_loopback_host` in runtime-controller previews/sessions.rs): `localhost`,
+ * a name under `.localhost`, or a loopback IP. Only such a host may have a plain
+ * `http` PREVIEW_BASE_URL; the controller refuses to start with any other.
+ */
+export function isLoopbackPreviewHost(host) {
+  const value = String(host ?? "").trim().toLowerCase().replace(/\.$/, "");
+  if (value === "localhost" || value.endsWith(".localhost")) {
+    return true;
+  }
+  const bare = value.replace(/^\[|\]$/g, "");
+  return bare === "::1" || /^127(\.\d{1,3}){3}$/.test(bare);
+}
+
+/**
  * Private preview settings for the broker, its ingress sidecar and the
  * controller, or `{}` when previews are off. Values already in `env` win.
+ *
+ * PREVIEW_BASE_URL is derived (`http://<domain>:<ingressPort>`, the local
+ * Traefik) only for a loopback domain. For any other domain it is left unset,
+ * so the controller uses `https://<domain>` and the operator supplies that
+ * ingress. A given plain-http PREVIEW_BASE_URL on a non-loopback host is
+ * refused here, because the controller would refuse to start with it.
  */
 export function localPreviewEnv({ env = process.env, controllerPort, ingressPort = LOCAL_INGRESS_HTTP_PORT }) {
   if (!localPreviewsEnabled(env)) {
@@ -72,9 +93,23 @@ export function localPreviewEnv({ env = process.env, controllerPort, ingressPort
   }
   const pick = (key, fallback) => configured(env, key) || fallback;
   const domain = pick("PREVIEW_DOMAIN", LOCAL_PREVIEW_DOMAIN);
+  const givenBaseUrl = configured(env, "PREVIEW_BASE_URL");
+  if (givenBaseUrl) {
+    let parsed = null;
+    try {
+      parsed = new URL(givenBaseUrl);
+    } catch {}
+    if (parsed?.protocol === "http:" && !isLoopbackPreviewHost(parsed.hostname)) {
+      throw new Error(
+        "PREVIEW_BASE_URL uses plain http on a host that is not loopback, which the controller refuses at startup. " +
+          "Use https, a localhost name, or leave PREVIEW_BASE_URL unset."
+      );
+    }
+  }
+  const baseUrl = givenBaseUrl || (isLoopbackPreviewHost(domain) ? `http://${domain}:${ingressPort}` : "");
   return {
     PREVIEW_DOMAIN: domain,
-    PREVIEW_BASE_URL: pick("PREVIEW_BASE_URL", `http://${domain}:${ingressPort}`),
+    ...(baseUrl ? { PREVIEW_BASE_URL: baseUrl } : {}),
     PREVIEW_AUTH_ADDRESS: pick("PREVIEW_AUTH_ADDRESS", LOCAL_PREVIEW_AUTH_ADDRESS),
     PREVIEW_AUTH_HOOK_URL: pick(
       "PREVIEW_AUTH_HOOK_URL",
@@ -132,11 +167,76 @@ export function tunnelBrokerStartPlan({ env = process.env, controllerPort, ingre
 }
 
 /**
+ * The two `docker compose` calls that start the broker's stack: the broker
+ * with its postgres, rathole and Traefik, then the ingress sidecar. Both get
+ * `env` plus `plan.broker`, as a new object: `env` itself is never changed, so
+ * other children of the launcher never see the hook secret.
+ */
+export function tunnelBrokerComposeCalls({ plan, env = process.env, composeFiles, cwd }) {
+  const composeEnv = { ...env, ...plan.broker };
+  const files = composeFiles.flatMap((file) => ["-f", file]);
+  const up = (...services) => ({
+    command: "docker",
+    args: ["compose", ...files, "--profile", "ingress", "up", "-d", ...services],
+    options: { cwd, env: composeEnv },
+  });
+  return [up("postgres", "broker", "rathole", "traefik"), up("rathole-sidecar")];
+}
+
+/**
+ * Whether this checkout started the controller listening on its port: the pid
+ * it recorded is a runtime controller, and a listener on the port is that
+ * process or in its process group (the launcher starts the controller
+ * detached, so `cargo run` and the binary it runs share the recorded pid as
+ * their group). `listeners` is `[{ pid, pgid }]` for the port.
+ */
+export function ownsControllerListener({ recordedPid, recordedIsController, listeners }) {
+  if (!Number.isInteger(recordedPid) || recordedPid <= 0 || !recordedIsController) {
+    return false;
+  }
+  return (listeners ?? []).some(({ pid, pgid }) => pid === recordedPid || pgid === recordedPid);
+}
+
+/**
+ * What the launcher does with a controller already on its port:
+ * - `reuse` when it has an origin signing key and, if this launch has a hook
+ *   secret, holds that secret;
+ * - otherwise `restart` when this checkout started it (`ownsListener`), and
+ *   `refuse` when it did not. A controller this checkout did not start (another
+ *   worktree's, another project's, one started by hand) is never stopped.
+ */
+export function controllerReuseDecision({ jwksReady, hookSecret, holdsSecret, ownsListener, controllerPort }) {
+  const missing = !jwksReady
+    ? "an origin signing key"
+    : hookSecret && !holdsSecret
+      ? "this checkout's tunnel broker hook secret"
+      : "";
+  if (!missing) {
+    return { action: "reuse" };
+  }
+  const reason = `without ${missing}`;
+  if (ownsListener) {
+    return { action: "restart", reason };
+  }
+  return {
+    action: "refuse",
+    reason,
+    message:
+      `A controller on port ${controllerPort} is running ${reason}, and this checkout did not start it, ` +
+      "so it is left running. Stop it yourself, set CONTROLLER_PORT to a free port, or run it with " +
+      "RUNTIME_SKIP_CONTROLLER=1 and TUNNEL_BROKER_HOOK_SECRET set to the secret it holds.",
+  };
+}
+
+/**
  * Whether the controller at `baseUrl`, already running, holds the hook
- * `secret`. It is asked through its ACL hook with that bearer and no project,
- * which writes nothing: 400 (the project is checked only after the bearer)
- * means it does; 401 (a different secret), 503 (none), any other answer or no
- * answer means it does not, and the launcher restarts it with the secret.
+ * `secret`. It is asked through its ACL hook with that bearer and an empty
+ * project, which writes nothing. This relies on the hook's order in
+ * `post_tunnel_broker_acl_hook` (runtime-controller tunnels/mod.rs): the bearer
+ * is checked before the project id, so 400 means it does; 401 (a different
+ * secret), 503 (none), any other answer or no answer means it does not. The
+ * controller test `acl_hook_checks_the_bearer_before_the_project` pins that
+ * order.
  */
 export async function controllerHoldsHookSecret({ baseUrl, secret, fetchImpl = fetch }) {
   try {

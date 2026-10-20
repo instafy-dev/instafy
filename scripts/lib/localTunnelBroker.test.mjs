@@ -1,11 +1,17 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import test from "node:test";
 
 import {
   controllerHoldsHookSecret,
+  controllerReuseDecision,
+  isLoopbackPreviewHost,
   localBrokerHookEnv,
   localPreviewEnv,
   localPreviewsEnabled,
+  ownsControllerListener,
+  tunnelBrokerComposeCalls,
   tunnelBrokerStartPlan,
 } from "./localTunnelBroker.mjs";
 
@@ -59,9 +65,46 @@ test("previews are served on preview.localhost through the local Traefik", () =>
     PREVIEW_AUTH_ADDRESS: "http://broker:8080",
     PREVIEW_AUTH_HOOK_URL: "http://host.docker.internal:8788/tunnel-broker/hooks/preview-auth",
   });
+  const sub = localPreviewEnv({ env: { PREVIEW_DOMAIN: "pv.dev.localhost" }, controllerPort, ingressPort: 9083 });
+  assert.equal(sub.PREVIEW_BASE_URL, "http://pv.dev.localhost:9083");
+});
+
+// The controller accepts a plain-http PREVIEW_BASE_URL only on a loopback host
+// (PreviewOrigin::parse in runtime-controller previews/sessions.rs) and refuses
+// to start otherwise, so the launcher never derives one for any other domain.
+test("a domain that is not loopback gets no derived http base URL, so the controller uses https", () => {
   const custom = localPreviewEnv({ env: { PREVIEW_DOMAIN: " previews.test " }, controllerPort });
   assert.equal(custom.PREVIEW_DOMAIN, "previews.test");
-  assert.equal(custom.PREVIEW_BASE_URL, "http://previews.test:8083");
+  assert.equal(Object.hasOwn(custom, "PREVIEW_BASE_URL"), false);
+
+  const plan = tunnelBrokerStartPlan({ env: { PREVIEW_DOMAIN: "previews.test" }, controllerPort, resolveHookSecret: secret });
+  assert.deepEqual(plan.controller, { TUNNEL_BROKER_HOOK_SECRET: "s3cret", PREVIEW_DOMAIN: "previews.test" });
+
+  const https = localPreviewEnv({
+    env: { PREVIEW_DOMAIN: "previews.test", PREVIEW_BASE_URL: "https://previews.test" },
+    controllerPort,
+  });
+  assert.equal(https.PREVIEW_BASE_URL, "https://previews.test");
+});
+
+test("a given plain-http base URL on a host that is not loopback refuses to start", () => {
+  assert.throws(
+    () => localPreviewEnv({ env: { PREVIEW_BASE_URL: "http://previews.test:8083" }, controllerPort }),
+    /plain http.*not loopback/
+  );
+  assert.equal(
+    localPreviewEnv({ env: { PREVIEW_BASE_URL: "http://127.0.0.1:8083" }, controllerPort }).PREVIEW_BASE_URL,
+    "http://127.0.0.1:8083"
+  );
+});
+
+test("loopback hosts follow the controller's rule", () => {
+  for (const host of ["localhost", "preview.localhost", "a.b.localhost", "127.0.0.1", "127.1.2.3", "[::1]", "::1"]) {
+    assert.equal(isLoopbackPreviewHost(host), true, host);
+  }
+  for (const host of ["previews.test", "localhost.example.com", "notlocalhost", "128.0.0.1", "10.0.0.1", ""]) {
+    assert.equal(isLoopbackPreviewHost(host), false, host);
+  }
 });
 
 test("an empty PREVIEW_DOMAIN turns previews off and leaves the hooks on", () => {
@@ -159,4 +202,109 @@ test("a running controller is reused only when it accepts the hook secret", asyn
     throw new Error("connection refused");
   };
   assert.equal(await controllerHoldsHookSecret({ baseUrl: "http://c.test", secret: "s3cret", fetchImpl: unreachable }), false);
+});
+
+test("only the broker's two compose calls get the plan, and the launcher's env is not changed", () => {
+  const plan = tunnelBrokerStartPlan({ env: {}, controllerPort, resolveHookSecret: secret });
+  const env = { PATH: "/usr/bin", HOME: "/home/dev" };
+  const before = { ...env };
+  const calls = tunnelBrokerComposeCalls({ plan, env, composeFiles: ["base.yml", "stack.yml"], cwd: "/broker" });
+
+  assert.deepEqual(env, before);
+  assert.deepEqual(
+    calls.map((call) => call.args.slice(7)),
+    [
+      ["up", "-d", "postgres", "broker", "rathole", "traefik"],
+      ["up", "-d", "rathole-sidecar"],
+    ]
+  );
+  for (const call of calls) {
+    assert.equal(call.command, "docker");
+    assert.deepEqual(call.args.slice(0, 7), ["compose", "-f", "base.yml", "-f", "stack.yml", "--profile", "ingress"]);
+    assert.equal(call.options.cwd, "/broker");
+    assert.equal(call.options.env.PATH, "/usr/bin");
+    assert.equal(call.options.env.ACL_HOOK_TOKEN, "s3cret");
+    assert.equal(call.options.env.PREVIEW_DOMAIN, "preview.localhost");
+    // Controller-only settings stay out of the broker's environment.
+    assert.equal(Object.hasOwn(call.options.env, "TUNNEL_BROKER_HOOK_SECRET"), false);
+    assert.equal(Object.hasOwn(call.options.env, "PREVIEW_BASE_URL"), false);
+  }
+});
+
+test("a controller counts as this checkout's only when its recorded pid is on the port", () => {
+  const listeners = [{ pid: 4321, pgid: 4300 }];
+  assert.equal(ownsControllerListener({ recordedPid: 4321, recordedIsController: true, listeners }), true);
+  // `cargo run` is the recorded pid; the binary it runs listens in its process group.
+  assert.equal(ownsControllerListener({ recordedPid: 4300, recordedIsController: true, listeners }), true);
+  // No pid file, a stale pid, or a pid that is not a controller: someone else's.
+  assert.equal(ownsControllerListener({ recordedPid: 0, recordedIsController: false, listeners }), false);
+  assert.equal(ownsControllerListener({ recordedPid: 999, recordedIsController: true, listeners }), false);
+  assert.equal(ownsControllerListener({ recordedPid: 4321, recordedIsController: false, listeners }), false);
+  assert.equal(ownsControllerListener({ recordedPid: 4321, recordedIsController: true, listeners: [] }), false);
+});
+
+test("a controller this checkout did not start is never restarted", () => {
+  // No pid file and a 401 to this checkout's secret: refuse, never kill.
+  const foreign = controllerReuseDecision({
+    jwksReady: true,
+    hookSecret: "s3cret",
+    holdsSecret: false,
+    ownsListener: false,
+    controllerPort: 8788,
+  });
+  assert.equal(foreign.action, "refuse");
+  assert.match(foreign.message, /port 8788.*did not start it.*left running/);
+  assert.equal(foreign.message.includes("s3cret"), false);
+
+  // The same holds for a missing origin signing key.
+  assert.equal(
+    controllerReuseDecision({ jwksReady: false, hookSecret: "", holdsSecret: false, ownsListener: false, controllerPort }).action,
+    "refuse"
+  );
+});
+
+test("this checkout's own controller is restarted when it lacks the key or the secret, else reused", () => {
+  const own = { ownsListener: true, controllerPort };
+  assert.deepEqual(controllerReuseDecision({ ...own, jwksReady: true, hookSecret: "s3cret", holdsSecret: true }), {
+    action: "reuse",
+  });
+  // No broker hooks this launch (skipped or external broker): the secret is not asked about.
+  assert.deepEqual(controllerReuseDecision({ ...own, jwksReady: true, hookSecret: undefined, holdsSecret: false }), {
+    action: "reuse",
+  });
+  assert.deepEqual(controllerReuseDecision({ ...own, jwksReady: true, hookSecret: "s3cret", holdsSecret: false }), {
+    action: "restart",
+    reason: "without this checkout's tunnel broker hook secret",
+  });
+  assert.deepEqual(controllerReuseDecision({ ...own, jwksReady: false, hookSecret: "s3cret", holdsSecret: true }), {
+    action: "restart",
+    reason: "without an origin signing key",
+  });
+  // Reuse never depends on owning it.
+  assert.equal(
+    controllerReuseDecision({ jwksReady: true, hookSecret: "s3cret", holdsSecret: true, ownsListener: false, controllerPort }).action,
+    "reuse"
+  );
+});
+
+// The launcher applies these rules; its reuse step must not fall back to a
+// machine-wide kill, and the broker's settings must go through the compose calls.
+test("the dev launcher uses these rules and never force-kills from its reuse step", () => {
+  const source = fs.readFileSync(path.join(import.meta.dirname, "..", "run-e2e-dev.mjs"), "utf8");
+  const body = (name) => {
+    const start = source.indexOf(`async function ${name}(`);
+    assert.notEqual(start, -1, name);
+    const next = source.indexOf("\nasync function ", start + 1);
+    return source.slice(start, next === -1 ? undefined : next);
+  };
+  const controller = body("startControllerIfNeeded");
+  assert.match(controller, /controllerReuseDecision\(/);
+  assert.match(controller, /ownsListener: thisCheckoutStartedController\(\)/);
+  assert.doesNotMatch(controller, /forceKillControllerProcess|pkill/);
+  assert.match(controller, /Object\.assign\(env, brokerControllerEnv\)/);
+
+  const broker = body("startTunnelBrokerIngressIfNeeded");
+  assert.match(broker, /tunnelBrokerComposeCalls\(/);
+  assert.match(broker, /controllerEnv: plan\.controller/);
+  assert.doesNotMatch(broker, /process\.env\[|Object\.assign\(process\.env/);
 });

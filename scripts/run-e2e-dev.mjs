@@ -41,7 +41,13 @@ import { resolveRustBinaryLaunch } from "./lib/prebuiltRustBinary.mjs";
 import { ensureLocalAuthorPseudonymKeys } from "./lib/localAuthorPseudonymKeys.mjs";
 import { ensureLocalUserTokenSecret } from "./lib/localUserTokenSecret.mjs";
 import { ensureLocalSecret } from "./lib/localSecret.mjs";
-import { controllerHoldsHookSecret, tunnelBrokerStartPlan } from "./lib/localTunnelBroker.mjs";
+import {
+  controllerHoldsHookSecret,
+  controllerReuseDecision,
+  ownsControllerListener,
+  tunnelBrokerComposeCalls,
+  tunnelBrokerStartPlan,
+} from "./lib/localTunnelBroker.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1926,44 +1932,15 @@ async function startTunnelBrokerIngressIfNeeded() {
     console.warn(`[runtime-dev] ${warning}`);
   }
   // Only compose and the controller get these; other children never see the hook secret.
-  const brokerComposeEnv = { ...process.env, ...plan.broker };
-
   console.log("[runtime-dev] Launching tunnel-broker ingress fixture...");
-  run(
-    "docker",
-    [
-      "compose",
-      "-f",
-      tunnelBrokerComposeFile,
-      "-f",
-      tunnelBrokerComposeOverride,
-      "--profile",
-      "ingress",
-      "up",
-      "-d",
-      "postgres",
-      "broker",
-      "rathole",
-      "traefik",
-    ],
-    { cwd: tunnelBrokerDir, env: brokerComposeEnv }
-  );
-  run(
-    "docker",
-    [
-      "compose",
-      "-f",
-      tunnelBrokerComposeFile,
-      "-f",
-      tunnelBrokerComposeOverride,
-      "--profile",
-      "ingress",
-      "up",
-      "-d",
-      "rathole-sidecar",
-    ],
-    { cwd: tunnelBrokerDir, env: brokerComposeEnv }
-  );
+  for (const call of tunnelBrokerComposeCalls({
+    plan,
+    env: process.env,
+    composeFiles: [tunnelBrokerComposeFile, tunnelBrokerComposeOverride],
+    cwd: tunnelBrokerDir,
+  })) {
+    run(call.command, call.args, call.options);
+  }
 
   const ok = await waitForPort(tunnelBrokerPort, {
     attempts: 240,
@@ -2932,6 +2909,21 @@ function isControllerProcess(pid) {
   }
   return command.includes("runtime-controller");
 }
+/** The process group of `pid`, or 0 when it cannot be read. */
+function processGroupOf(pid) {
+  const result = tryCapture("ps", ["-p", String(pid), "-o", "pgid="]);
+  const pgid = Number.parseInt((result.stdout ?? "").trim(), 10);
+  return result.code === 0 && Number.isFinite(pgid) ? pgid : 0;
+}
+/** Whether the controller listening on controllerPort is the one this checkout started. */
+function thisCheckoutStartedController() {
+  const recordedPid = readPid();
+  return ownsControllerListener({
+    recordedPid,
+    recordedIsController: isControllerProcess(recordedPid),
+    listeners: listListeningPidsByPort(controllerPort).map((pid) => ({ pid, pgid: processGroupOf(pid) })),
+  });
+}
 function listControllerPids() {
   const pids = new Set();
 
@@ -3084,26 +3076,33 @@ async function startControllerIfNeeded(
     }
     // The broker this script started calls the controller's hooks with this
     // checkout's secret; a controller started without it would refuse them,
-    // and with them every tunnel create.
+    // and with them every tunnel create. Only a controller this checkout
+    // started is ever restarted (scripts/lib/localTunnelBroker.mjs).
     const hookSecret = brokerControllerEnv.TUNNEL_BROKER_HOOK_SECRET;
-    const restartReason = !jwksReady
-      ? "without origin signing key"
-      : hookSecret && !(await controllerHoldsHookSecret({ baseUrl: controllerBaseUrl, secret: hookSecret }))
-        ? "without this checkout's tunnel broker hook secret"
-        : "";
-    if (restartReason) {
-      console.log(`[runtime-dev] Controller running ${restartReason}; restarting...`);
+    const holdsSecret =
+      jwksReady && hookSecret
+        ? await controllerHoldsHookSecret({ baseUrl: controllerBaseUrl, secret: hookSecret })
+        : false;
+    const decision = controllerReuseDecision({
+      jwksReady,
+      hookSecret,
+      holdsSecret,
+      ownsListener: thisCheckoutStartedController(),
+      controllerPort,
+    });
+    if (decision.action === "refuse") {
+      throw new Error(decision.message);
+    }
+    if (decision.action === "restart") {
+      console.log(`[runtime-dev] Controller running ${decision.reason}; restarting...`);
       const stopped = await stopControllerInternal().catch((error) => {
         console.warn(`[runtime-dev] Failed to stop existing controller: ${error?.message || error}`);
         return false;
       });
       if (!stopped) {
-        const killed = forceKillControllerProcess();
-        if (killed) {
-          await waitForPortClose(controllerPort);
-        }
-      } else {
-        await waitForPortClose(controllerPort);
+        throw new Error(
+          `The controller this checkout started is still on port ${controllerPort} after it was stopped. Stop it and retry.`
+        );
       }
     } else {
       console.log(`[runtime-dev] Detected controller on ${controllerBaseUrl}; reusing existing instance.`);
