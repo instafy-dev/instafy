@@ -913,6 +913,9 @@ pub struct PreviewSettings {
     /// `PREVIEW_DENY_PORTS`: more ports no preview may expose, on top of the
     /// built-in list. It never removes one.
     pub deny_ports: Vec<u16>,
+    /// `PREVIEW_DENY_PORTS` entries that are not ports. Startup refuses any,
+    /// so a typo never leaves a moved service exposed.
+    pub invalid_deny_ports: Vec<String>,
     /// `TUNNEL_DOMAIN`, when set here too: public tunnel hosts, which the
     /// preview domain must not overlap.
     pub tunnel_domain: Option<String>,
@@ -931,14 +934,24 @@ impl PreviewSettings {
                 .filter(|value| !value.is_empty())
                 .map(str::to_string)
         };
+        let mut ports = Vec::new();
+        let mut invalid = Vec::new();
+        for entry in deny_ports
+            .unwrap_or_default()
+            .split(|ch: char| ch == ',' || ch.is_whitespace())
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+        {
+            match entry.parse::<u16>() {
+                Ok(port) => ports.push(port),
+                Err(_) => invalid.push(entry.to_string()),
+            }
+        }
         Self {
             base_url: present(base_url),
             domain: present(domain),
-            deny_ports: deny_ports
-                .unwrap_or_default()
-                .split(|ch: char| ch == ',' || ch.is_whitespace())
-                .filter_map(|value| value.trim().parse::<u16>().ok())
-                .collect(),
+            deny_ports: ports,
+            invalid_deny_ports: invalid,
             tunnel_domain: present(tunnel_domain),
         }
     }

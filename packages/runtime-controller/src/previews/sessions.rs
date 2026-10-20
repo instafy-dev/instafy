@@ -145,6 +145,13 @@ impl PreviewOrigin {
 /// the local stack's own layout.
 pub(crate) fn check_preview_domain(config: &crate::config::AppConfig) -> anyhow::Result<()> {
     let settings = &config.previews;
+    if !settings.invalid_deny_ports.is_empty() {
+        anyhow::bail!(
+            "PREVIEW_DENY_PORTS has entries that are not ports ({}); list ports \
+             separated by commas",
+            settings.invalid_deny_ports.join(", ")
+        );
+    }
     let configured = settings
         .base_url
         .as_deref()
@@ -176,7 +183,11 @@ pub(crate) fn check_preview_domain(config: &crate::config::AppConfig) -> anyhow:
         others.push(("CONTROLLER_EXTERNAL_URL", host));
     }
     if let Some(domain) = settings.tunnel_domain.as_deref() {
-        others.push(("TUNNEL_DOMAIN", domain.to_string()));
+        // An unreadable tunnel domain cannot be compared, so it is refused
+        // rather than skipped.
+        let domain = normalize_preview_domain(domain)
+            .ok_or_else(|| anyhow::anyhow!("TUNNEL_DOMAIN is set but is not a valid domain"))?;
+        others.push(("TUNNEL_DOMAIN", domain));
     }
     for (name, host) in others {
         let Some(host) = normalize_preview_domain(&host) else {
@@ -190,7 +201,32 @@ pub(crate) fn check_preview_domain(config: &crate::config::AppConfig) -> anyhow:
             );
         }
     }
+    if let Some(warning) = preview_cookie_scope_warning(origin.domain()) {
+        tracing::warn!("{warning}");
+    }
     Ok(())
+}
+
+/// A warning when previews of different spaces share one cookie scope: the
+/// preview domain is not itself a public suffix, so a site previewed in one
+/// space can set `Domain=<preview domain>` cookies that every other space's
+/// preview receives, and they count as same-site to each other. Listing the
+/// domain on the Public Suffix List separates them. Loopback hosts and IP
+/// addresses are exempt: they are local stacks, and an IP address takes no
+/// `Domain=` cookie.
+pub(super) fn preview_cookie_scope_warning(domain: &str) -> Option<String> {
+    if is_loopback_host(domain) || domain.parse::<std::net::IpAddr>().is_ok() {
+        return None;
+    }
+    if psl::suffix_str(domain).is_some_and(|suffix| suffix.eq_ignore_ascii_case(domain)) {
+        return None;
+    }
+    Some(format!(
+        "the preview domain {domain} is not on the Public Suffix List, so every \
+         space's previews share one cookie scope: a site previewed in one space \
+         can set cookies the others receive. List the domain on the Public \
+         Suffix List before serving previews of untrusted sites."
+    ))
 }
 
 fn is_loopback_host(host: &str) -> bool {
@@ -425,7 +461,7 @@ fn uuid_of(grant: &PreviewGrant) -> ApiResult<Uuid> {
 /// Store a new session and keep at most [`SESSIONS_PER_VIEWER`] live for this
 /// user and preview, revoking the oldest. The advisory lock makes two
 /// concurrent Opens count each other.
-async fn insert_preview_session(
+pub(super) async fn insert_preview_session(
     pool: &PgPool,
     hash: &str,
     tunnel_id: &str,
@@ -446,6 +482,26 @@ async fn insert_preview_session(
         .execute("select pg_advisory_xact_lock(hashtext($1))", &[&lock_key])
         .await
         .map_err(|error| internal_error(format!("failed to lock preview sessions: {error}")))?;
+    // Check the grant again under a share lock: a revoke that lands after the
+    // caller's own check either commits first and is seen here, or waits for
+    // this insert and then ends the new session with the others.
+    let live = transaction
+        .query_opt(
+            "select 1 from runtime_tunnel_grants
+             where tunnel_id = $1
+               and lower(btrim(status)) not in ('revoked', 'expired', 'failed')
+               and expires_at > now()
+             for share",
+            &[&tunnel_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to check preview: {error}")))?;
+    if live.is_none() {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ApiError::new("this preview has stopped")),
+        ));
+    }
     transaction
         .execute(
             "update runtime_preview_sessions
