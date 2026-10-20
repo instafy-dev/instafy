@@ -14,6 +14,7 @@ use serde::Deserialize;
 use tokio::time::timeout;
 
 use crate::auth::{validated_claim_expiry, OriginClaims};
+use crate::browser_host::BrowserHostReady;
 use crate::error::OriginError;
 use crate::routes::AppState;
 use transport::ResolvedTarget;
@@ -220,6 +221,7 @@ async fn requested_target(
 }
 
 pub(crate) async fn handle_browser_screencast_ws(
+    _ready: BrowserHostReady,
     State(state): State<AppState>,
     Extension(claims): Extension<OriginClaims>,
     Query(query): Query<BrowserScreencastQuery>,
@@ -247,6 +249,7 @@ pub(crate) async fn handle_browser_screencast_ws(
 }
 
 pub(crate) async fn handle_browser_input_ws(
+    _ready: BrowserHostReady,
     State(state): State<AppState>,
     Extension(claims): Extension<OriginClaims>,
     Query(query): Query<BrowserScreencastQuery>,
