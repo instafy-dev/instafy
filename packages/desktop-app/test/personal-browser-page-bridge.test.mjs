@@ -172,9 +172,11 @@ function createPageHarness() {
     title: "Atomic target fixture",
     body: { innerText: "fixture" },
     elements: [],
-    querySelectorAll() {
+    // Non-interactive elements are only visible to whole-page scans.
+    passive: [],
+    querySelectorAll(selector) {
       for (const element of this.elements) element.ownerDocument = this;
-      return this.elements;
+      return selector === "*" ? [...this.elements, ...this.passive] : this.elements;
     },
     getElementById(id) {
       return this.elements.find((element) => element.id === id) ?? null;
@@ -221,6 +223,7 @@ function createPageHarness() {
     HTMLButtonElement,
     HTMLInputElement,
     HTMLTextAreaElement,
+    HTMLAnchorElement,
     HTMLFormElement,
   };
 }
@@ -436,4 +439,105 @@ test("isolated type and press recheck identity after hostile focus-time DOM repl
   assert.equal(pressed.pressed, false);
   assert.equal(safeButton.clickCount, 0);
   assert.equal(deleteButton.clickCount, 0);
+});
+
+const CANARY = ["sk", "test", ["INSTAFY", "CANARY", "7Qm2Xr9Lp4Vb8Nc1"].join("")].join("_");
+
+test("page secret signals answer yes or no and never return the value", async () => {
+  const harness = createPageHarness();
+  const field = new harness.HTMLInputElement({ type: "text", readonly: "", "aria-label": "Client Secret" });
+  field.value = CANARY;
+  harness.document.elements = [field];
+  let snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
+  assert.deepEqual({ ...snapshot.signals }, {
+    credentialContext: false,
+    secretField: true,
+    secretCode: false,
+    maskedNearReveal: false,
+  });
+  assert.ok(!JSON.stringify(snapshot).includes(CANARY));
+
+  field.value = "Ada Lovelace";
+  snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
+  assert.equal(snapshot.signals.secretField, false, "an ordinary read-only value is not a secret");
+});
+
+test("page secret signals find code blocks, credential headings and masked values next to reveal controls", async () => {
+  const harness = createPageHarness();
+  const heading = new harness.Element("h2", { text: "API-Schlüssel" });
+  const code = new harness.Element("code", { text: CANARY });
+  const row = new harness.Element("div", { text: "Instafy Bot •••••••• Anzeigen" });
+  const reveal = new harness.HTMLButtonElement({ type: "button", text: "Anzeigen" });
+  reveal.parentElement = row;
+  harness.document.passive = [heading, code, row];
+  harness.document.elements = [reveal];
+  const snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
+  assert.deepEqual({ ...snapshot.signals }, {
+    credentialContext: true,
+    secretField: false,
+    secretCode: true,
+    maskedNearReveal: true,
+  });
+  assert.ok(!JSON.stringify(snapshot).includes(CANARY));
+});
+
+test("page secret signals look inside open shadow roots", async () => {
+  const harness = createPageHarness();
+  const host = new harness.Element("app-key-view", {});
+  const hidden = new harness.HTMLInputElement({ type: "text", readonly: "" });
+  hidden.value = CANARY;
+  host.shadowRoot = { querySelectorAll: () => [hidden] };
+  harness.document.passive = [host];
+  const snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
+  assert.equal(snapshot.signals.secretField, true);
+  assert.ok(!JSON.stringify(snapshot).includes(CANARY));
+});
+
+test("opening a menu keeps the target fingerprint; only the opener's presence is bound", async () => {
+  const harness = createPageHarness();
+  const opener = new harness.HTMLButtonElement({ type: "button", text: "More actions", "aria-haspopup": "menu", "aria-expanded": "false" });
+  harness.document.elements = [opener];
+  const snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
+  const before = snapshot.interactive[0].descriptor;
+  assert.equal(before.menuOpener, true);
+  opener.attributes.set("aria-expanded", "true");
+  const after = await bridge.inspectPersonalBrowserTarget(harness.webContents, { index: 0 });
+  assert.equal(after.menuOpener, true);
+  assert.equal(
+    security.personalBrowserTargetSecurityFingerprint(after),
+    security.personalBrowserTargetSecurityFingerprint(before),
+  );
+});
+
+test("descriptors carry form, link and page-area structure for the step classifier", async () => {
+  const harness = createPageHarness();
+  const form = new harness.HTMLFormElement({ method: "POST" });
+  const email = new harness.HTMLInputElement({ type: "email", autocomplete: "username" });
+  const password = new harness.HTMLInputElement({ type: "password" });
+  const submit = new harness.HTMLButtonElement({ type: "submit", text: "Sign in" });
+  const other = new harness.HTMLButtonElement({ type: "submit", text: "Create account" });
+  form.elements = [email, password, submit, other];
+  for (const control of form.elements) control.form = form;
+  const link = new harness.HTMLAnchorElement({ href: "https://example.test/report.csv", text: "Report", download: "" });
+  const nav = new harness.Element("nav", {});
+  const row = new harness.Element("tr", { text: "API-Schlüssel •••••••• Anzeigen" });
+  const reveal = new harness.HTMLButtonElement({ type: "button", text: "Anzeigen" });
+  reveal.parentElement = row;
+  row.parentElement = nav;
+  harness.document.elements = [submit, link, reveal];
+  const snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
+  const [signIn, report, revealDescriptor] = snapshot.interactive.map((entry) => entry.descriptor);
+  assert.equal(signIn.formMethod, "post");
+  assert.equal(signIn.formHasPassword, true);
+  assert.equal(signIn.formFieldCount, 2);
+  assert.equal(signIn.formSubmitLabels, "Sign in | Create account");
+  assert.equal(report.linkSelf, true);
+  assert.equal(report.download, true);
+  assert.equal(revealDescriptor.row, true);
+  assert.equal(revealDescriptor.areas, "nav");
+  assert.equal(revealDescriptor.credentialContext, true);
+  assert.equal(revealDescriptor.nearMaskedText, true);
+  assert.equal(security.classifyPersonalBrowserStep("click", signIn).code, "step_refused_sign_in");
+  assert.equal(security.classifyPersonalBrowserStep("click", revealDescriptor).code, "step_refused_secret");
+  assert.equal(security.classifyPersonalBrowserStep("click", report).category, "download");
 });

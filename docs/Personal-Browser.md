@@ -162,6 +162,73 @@ an ordinary click. Keep Ask mode when every activation needs human review.
 
 The text-based high-impact classifier remains defense in depth for custom controls and activation keys, not a proof that every consequential control is detected. Keep adversarial coverage against real applications and conservative classifier updates in the release loop.
 
+### Step categories and refusals
+
+Electron main classifies every agent click, typing step, submission and key
+press before it runs (`personalBrowserActionPolicy.js`). The classifier works on
+the element's structure: tag, role, whether the target is the link itself,
+the link's address and `download` attribute, the owning form's method, action,
+password field, editable-field count and submit labels, and the enclosing page
+area (dialog, search, navigation, menu, tree, tab list or pagination). An
+element is in a credential context when the nearest heading before it, its
+dialog title, its table column header or its row names a credential. Label
+words in English and German only add risk; verbs match whole words and
+credential nouns also match inside compounds such as Zugangsschlüssel.
+Bookkeeping compounds such as Buchungsschlüssel or Steuerschlüssel are not
+credential words.
+
+**Refused in every mode, with no dialog.** The agent receives a 403 and must stop
+and tell the person:
+
+- `step_refused_secret`: a reveal, show, view or copy control (including
+  Anzeigen, Einblenden, Kopieren and eye or copy icons) in a credential context,
+  next to masked text in its row or a small container, or labelled with a
+  credential word. A link to another page counts only when its own label names
+  a credential, so "View invoice" beside a masked card number stays a link.
+  Masked card or account numbers that end in visible digits (`•••• 4242`) are
+  not masked secrets;
+- `step_refused_sign_in`: a sign-in form's submit, a "Log in" or "Anmelden"
+  button inside a form with a password field, a "Continue with …", "Sign in
+  with …" or "Mit … anmelden" control naming an identity provider (Google,
+  Apple, Microsoft, SSO, passkey, ID Austria and similar), and typing the
+  account identifier: an email field, a field marked as the username, or the
+  text field right before the password in a form with a password field, and a
+  username field of an email-first sign-in. Other fields of a sign-up form,
+  header sign-in buttons and plain links to a sign-in page stay allowed, so the
+  agent can reach the sign-in page and hand it over;
+- `step_refused_upload`: file inputs.
+
+Password, code and payment fields stay blocked as before.
+
+**Category titles.** When a step asks, the native dialog title names its
+category: purchase or payment, money transfer, send a message, sharing or access
+change, key or password change, download or export, delete/cancel/sign out,
+"May show a secret" (a row or entry in a credential context), or "Change
+something" by default. When a control's accessible name and visible text differ,
+the dialog shows both. After a key or password step, or a step that may show a
+secret, the page stays withheld from the agent until a new page loads, and so
+does the page that step opens. Withholding starts before the step runs, so a
+pause or rotation after the click cannot leave the page readable. It is kept
+per document: a single-page app stays withheld across its own route changes
+until a real page load or an agent `navigate`.
+
+**Ask mode** also asks for selects, checkboxes, switches, menu items, focusable
+and script-driven controls unless they are structurally free (tabs, `<summary>`, menu openers,
+neutral menu or navigation items, page numbers and privacy-preserving cookie
+dismissals), and asks for Enter on any editable field that is not a search
+field, because a chat box can send on keydown without a form. Routine mode
+keeps its existing rules apart from the refusals and the category titles.
+
+Snapshots include `<summary>`, menu, tree, tab, switch, checkbox, radio and
+option roles, `aria-expanded`/`aria-haspopup` openers and elements with an
+`onclick` handler, so script-driven menus are addressable. The security
+fingerprint gains only structural fields; whether a menu is open and heading
+text stay out of it, so opening a menu does not cancel a pending approval.
+
+The case table in `packages/desktop-app/test/fixtures/risky-steps/cases.json`
+and the English and German fixture pages beside it hold synthetic values only;
+the canary key is assembled by script at run time.
+
 ### Sensitive input is hard-blocked
 
 Agent typing into the following classes of fields is rejected, even after origin approval:
@@ -171,6 +238,56 @@ Agent typing into the following classes of fields is rejected, even after origin
 - card numbers, CVV/CVC, expiration values, cardholder fields, and payment-like fields.
 
 Detection checks input type, autocomplete tokens, accessible labels, names, placeholders, IDs, and related descriptors before and after focus. The user may Pause (or press Escape) and complete these steps manually in the visible browser; the agent cannot type them through the RPC.
+
+### Secrets are masked before the agent sees a page
+
+Every page observation the agent receives is redacted in Electron main before it
+leaves Desktop, in Ask and routine mode and on every site. This covers the
+snapshot's address, title, visible text and control names, the `status` address,
+title and load error, and Desktop's own log messages.
+
+- **Known key formats** are masked in place as `[redacted secret]`: provider API
+  keys and tokens (OpenAI- and Anthropic-style `sk-` keys, payment `sk_`/`rk_`
+  keys, webhook secrets, GitHub, GitLab, Slack, AWS, Google, npm, Hugging Face,
+  Shopify, Notion and SendGrid tokens), JWTs, PEM private keys and `Bearer`
+  values.
+- **Unknown formats:** a value of 20 or more characters that mixes letters and
+  digits and looks random is masked anywhere on a credential page, and elsewhere
+  within about 120 characters of a word such as key, token, secret, Schlüssel,
+  Zugangsdaten or Client Secret. UUIDs and 32/40/64-character hex values are
+  masked on a credential page or within about 32 characters of such a word,
+  unless they are labelled as an id or commit ("Token id …").
+- **Codes:** six to eight digits, or two groups of three or four, right after a
+  code word such as code, PIN, TAN, OTP or Bestätigungscode are masked. Words
+  that only contain "code", such as Postcode or Steuercode, do not count.
+- **Addresses** stay navigable. Fragments and ordinary paths are kept; a query
+  value on a key such as `token`, `code`, `key` or `state` is masked only when it
+  is long and random, and a path segment only after an action word such as
+  reset, invite, magic or verify.
+
+**Secret screens.** The page computes four yes/no answers inside its isolated
+world and never returns the values it tested: whether a heading, dialog title,
+label or table header names a credential; whether a read-only field holds a
+key-like value; whether a code block holds one; and whether masked text such as
+`••••` sits next to a reveal or copy control. Open shadow roots are searched too.
+A page is a secret screen when a read-only field holds a key, masked text sits
+next to a reveal or copy control, or a credential context shows a key-like value
+in text or a code block. The snapshot then carries `secretScreen: true`, an
+empty `text` and a fixed message, while the masked control names stay so the
+agent can tell the person which control shows the value. Pages that only show
+example keys, such as documentation, are masked in place instead. On a withheld
+page every random-looking value, UUID or hex run in a control name is masked as
+well, because a control such as a click-to-copy chip can be named by the value
+itself.
+
+A secret screen stays withheld until a new page loads, even after the value is
+hidden again. This also covers a dialog that shows a value without changing the
+address. If redaction fails or the page's answers are missing, the page is
+withheld and its control names are dropped.
+
+Redaction is a heuristic. It can miss a value in an unknown format with no
+credential word nearby, a value split across elements, or text in an image.
+Native dialogs, which only the person sees, keep the unmasked labels.
 
 ### Renderer restrictions
 
@@ -211,7 +328,7 @@ instafy_personal_browser.request_human_input
 | MCP tool | Purpose |
 | --- | --- |
 | `status` | Read readiness and whether control is resumed; URL/title stay redacted until control is enabled and the current origin is approved |
-| `snapshot` | Read URL, title, bounded visible text, and indexed interactive descriptors |
+| `snapshot` | Read the redacted URL, title, bounded visible text, and indexed interactive descriptors; `secretScreen: true` means the text is withheld |
 | `navigate` | Navigate the visible page to an absolute credential-free HTTP(S) URL |
 | `click` | Click one target by its fresh snapshot index |
 | `type` | Type bounded text into a non-sensitive editable target, optionally submitting with Enter |

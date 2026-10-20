@@ -140,7 +140,9 @@ The controller is authoritative for explicit composer delivery intent:
   the entry stranded.
 - A **steer** intent is bound to one expected active job. The controller persists an ordered job
   input and the owning runtime acknowledges it only after submitting the input to that same active
-  model turn. Steering never aliases to conversation-wide cancellation.
+  model turn. Steering never aliases to conversation-wide cancellation. Only the person whose
+  prompt started a Shared or Personal Browser turn may steer it; see
+  [Shared-Browser-Authorization.md](Shared-Browser-Authorization.md#steering-an-active-browser-turn).
 - A **stash** is owner-private draft state. It is not conversation history and cannot enter the
   job or send-queue state machines. Per-owner/conversation row and serialized-byte quotas bound
   both storage and list responses.

@@ -33,3 +33,31 @@ Builder-or-higher Shared Browser surfaces request both scopes; Viewer surfaces
 request `browser.view` only. Narrow metadata and command helpers request only
 the scope needed for that operation. The controller proxy and runtime origin
 enforce the same route-to-scope mapping so neither path can weaken the other.
+
+## Steering an active browser turn
+
+Steer adds text to an agent turn that is already running, and the runtime
+delivers it to the model without an author. For a turn that drives a Shared
+Browser or a Desktop Personal Browser (`browserTransport` of `shared` or
+`desktop-personal`), that text would act inside one person's signed-in browser
+session, so the controller limits steering to the person whose prompt started
+the turn.
+
+- The author is the `prompts.user_id` that dispatch recorded from the signed-in
+  caller. Client metadata such as `metadata.userId` is never consulted.
+- Any other caller, including a trusted service token without a user, receives
+  `403` with code `browser_turn_steer_forbidden`. A browser turn with no
+  recorded author cannot be steered by anyone.
+- The refusal happens before anything is stored: no transcript message and no
+  job input is created. Queue remains available to every member with write
+  access, and a queued message starts a new turn after the current one ends.
+- Ordinary agent turns keep the existing rule: anyone with write and
+  conversation access may steer them. The limit follows the turn's
+  `browserTransport`, not the machine that runs it, so an ordinary turn on the
+  machine that hosts a Shared Browser is not covered. Separating that machine's
+  ordinary turns from its browser is tracked as later Shared Browser work. A
+  Desktop Personal Browser runtime only leases `desktop-personal` turns.
+
+Studio shows the refusal as "Only the person who started this browser task can
+steer it. Queue your message instead." Older Studio builds show the
+controller's message for the same refusal.

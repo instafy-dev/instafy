@@ -11,7 +11,7 @@ import {
   useId,
   type JSX,
 } from "react";
-import { Globe, Page } from "iconoir-react";
+import { Globe, Page, WebWindow } from "iconoir-react";
 import { useWorkspaceStore } from "../../../store";
 import { useLocation } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
@@ -344,6 +344,7 @@ import {
 } from "../../../services/runtimeController/sendIntents";
 import { ControllerApiError } from "../../../services/runtimeController/core";
 import { normalizeChatMessageStashEnvelope } from "./chatMessageStashEnvelope";
+import { describeSendIntentError } from "./sendIntentErrorMessage";
 import {
   requireExpectedJobForSteer,
   resolveComposerPrimaryActionMode,
@@ -361,7 +362,9 @@ import { LocalBrowserSharing, LocalBrowserTabPublisher } from "./LocalBrowserSha
 import { ConversationSurfaceLayout, ConversationSurfaceTabs, type ConversationSurface } from "../../../workspace/ConversationSurfaceLayout";
 import { ConversationWorkspaceViews } from "../../../workspace/ConversationWorkspaceViews";
 import { ConversationFileContext } from "../../../workspace/ConversationFileContext";
-import { conversationSurfaceScope, closeConversationFile, conversationFileLabel, openConversationFile, selectConversationView } from "../../../workspace/conversationSurfaces";
+import { ConversationPreviewContext, type ConversationPreviewOpener } from "../../../workspace/ConversationPreviewContext";
+import { conversationSurfaceScope, closeConversationFile, closeConversationPreview, conversationFileLabel, conversationResourceId, openConversationFile, openConversationPreview, selectConversationView, visibleSitePreviewId } from "../../../workspace/conversationSurfaces";
+import { NO_MOUNTED_SITE_PREVIEWS, SitePreviewPane, nextMountedSitePreviews, type MountedSitePreviews } from "./SitePreviewPane";
 import type { OpenWorkspaceFileEventDetail } from "./useFilesPanelViewerState";
 import { FilesPanel } from "../StudioLazyPanels";
 import {
@@ -749,9 +752,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const browserSubtab = surfaces.activeId;
   const [surfaceWidth, setSurfaceWidth] = useState(0);
   const hasBrowserView = browserSessionOpen || hasHiddenBrowserSession;
-  const hasResources = hasBrowserView || surfaces.files.length > 0;
-  const resourceId = surfaces.resourceId === "browser" && !hasBrowserView
-    ? surfaces.files[0]?.id ?? "browser" : surfaces.resourceId;
+  const hasResources = hasBrowserView || surfaces.files.length > 0 || surfaces.previews.length > 0;
+  const resourceId = conversationResourceId(surfaces, hasBrowserView);
   const activeSurfaceId = conversationWorkspace && jobThread ? "chat" : surfaces.activeId === "browser" && !hasBrowserView ? "chat" : surfaces.activeId;
   const wideSurfaces = surfaceWidth >= 1024;
   const splitSurfaces = !(conversationWorkspace && jobThread) && wideSurfaces && surfaces.split && hasResources;
@@ -771,6 +773,23 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     if (conversationWorkspace && jobThread && activeConversationId) openSurfaceConversation(activeConversationId);
   }, [activeProjectId, activeConversationId, conversationWorkspace, jobThread, openSurfaceConversation, surfaceScope, updateSurfaces]);
   const selectedFile = surfaces.files.find(file => file.id === resourceId);
+  const selectedPreview = surfaces.previews.find(preview => preview.id === resourceId);
+  const visiblePreviewId = visibleSitePreviewId(surfaces, { resourceId, activeId: activeSurfaceId, split: splitSurfaces });
+  const openSurfacePreview = useCallback((preview: { previewId: string; title: string }) => {
+    updateSurfaces(surfaceScope, state => openConversationPreview(state, preview));
+    // As with files: a run thread shares the task's views, so opening one leaves the transcript.
+    if (conversationWorkspace && jobThread && activeConversationId) openSurfaceConversation(activeConversationId);
+  }, [activeConversationId, conversationWorkspace, jobThread, openSurfaceConversation, surfaceScope, updateSurfaces]);
+  const previewOpener = useMemo<ConversationPreviewOpener>(() => ({ openPreview: openSurfacePreview, visiblePreviewId }), [openSurfacePreview, visiblePreviewId]);
+  // A pane mounts the first time its preview is on screen and stays mounted while its tab is open, so moving
+  // between views does not reload the site. Closing the tab unmounts it, which revokes its viewer session.
+  const sitePreviewIds = useMemo(() => surfaces.previews.map(preview => preview.previewId), [surfaces.previews]);
+  const [mountedSitePreviews, setMountedSitePreviews] = useState<MountedSitePreviews>(NO_MOUNTED_SITE_PREVIEWS);
+  const nextMountedPreviews = nextMountedSitePreviews(mountedSitePreviews, surfaceScope, sitePreviewIds, visiblePreviewId);
+  const mountedPreviewIds = nextMountedPreviews.ids;
+  useEffect(() => {
+    if (nextMountedPreviews !== mountedSitePreviews) setMountedSitePreviews(nextMountedPreviews);
+  }, [mountedSitePreviews, nextMountedPreviews]);
   const fileRequest = useMemo(() => selectedFile ? (
     fileOpenRequest?.path === selectedFile.path ? fileOpenRequest : {
       path: selectedFile.path, projectId: activeProjectId, line: selectedFile.line, markdownView: selectedFile.markdownView,
@@ -4291,23 +4310,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           if (sendIntentAttemptRef.current?.key === attemptKey) {
             sendIntentAttemptRef.current = null;
           }
-          const message = (() => {
-            switch (error.code) {
-              case "no_active_job":
-                return "That reply finished before the steer arrived. Your message is still in the composer.";
-              case "ambiguous_active_job":
-                return "More than one matching reply is active. Mention one agent, then try Steer again.";
-              case "active_job_conflict":
-                return "The active reply changed before the steer arrived. Review the current reply and try again.";
-              case "active_turn_input_unavailable":
-                return "This agent cannot accept Steer during its current turn. Queue the message instead.";
-              case "send_intent_idempotency_conflict":
-                return "This message conflicts with an earlier send attempt. Edit it slightly and try again.";
-              default:
-                return error.message;
-            }
-          })();
-          showStatus(message, "warning", 5500);
+          showStatus(describeSendIntentError(error.code, error.message), "warning", 5500);
           return false;
         }
         const message = error instanceof Error ? error.message : "Unable to apply this message action.";
@@ -5768,6 +5771,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       panelId: conversationWorkspace ? "conversation-workspace-file" : `${chatPanelId}-file`, icon: <Page className="h-3.5 w-3.5" />, dirty: dirtyFiles.has(file.path),
       onClose: () => updateSurfaces(surfaceScope, state => closeConversationFile(state, file.id, hasBrowserView)),
     })),
+    ...surfaces.previews.map(preview => ({
+      id: preview.id, label: preview.title, title: preview.title,
+      panelId: conversationWorkspace ? "conversation-workspace-preview" : `${chatPanelId}-preview`, icon: <WebWindow className="h-3.5 w-3.5" />,
+      onClose: () => updateSurfaces(surfaceScope, state => closeConversationPreview(state, preview.id, hasBrowserView)),
+    })),
   ];
   const chatSurface = (
       <div
@@ -6147,6 +6155,18 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         <FilesPanel previewOwnerId={`conversation:${surfaceScope}`} showExplorer={false} mobileView="viewer" embeddedOpenRequest={fileRequest} />
       </div>
     ) : null}
+    {surfaces.previews.length > 0 && activeProjectId ? (
+      <div id={conversationWorkspace ? "conversation-workspace-preview" : `${chatPanelId}-preview`} role="tabpanel" aria-label={selectedPreview?.title ?? "Preview"}
+        hidden={!visiblePreviewId} className={visiblePreviewId ? "h-full min-h-0" : "hidden"} style={!splitSurfaces ? { paddingBottom: composerOverlayHeight } : undefined}
+        data-testid="site-preview-panel">
+        {surfaces.previews.filter(preview => mountedPreviewIds.includes(preview.previewId)).map(preview => {
+          const shown = preview.previewId === visiblePreviewId;
+          return <div key={`${surfaceScope}:${preview.previewId}`} className={shown ? "h-full min-h-0" : "hidden"} hidden={!shown}>
+            <SitePreviewPane projectId={activeProjectId} previewId={preview.previewId} title={preview.title} visible={shown} />
+          </div>;
+        })}
+      </div>
+    ) : null}
   </>;
 
   return (
@@ -6154,6 +6174,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     <ChatRunStopNoticeProvider value={runStopNoticeContext}>
     <RunFailureRetryProvider value={runFailureRetryContextValue}>
     <ConversationFileContext.Provider value={openSurfaceFile}>
+    <ConversationPreviewContext.Provider value={previewOpener}>
     <ChatRuntimeActivityContext.Provider value={chatRuntimeActivityValue}>
     <BrowserRequestHostContext.Provider value={browserRequestHost}>
     <div
@@ -6487,6 +6508,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         </div>
     </BrowserRequestHostContext.Provider>
     </ChatRuntimeActivityContext.Provider>
+    </ConversationPreviewContext.Provider>
     </ConversationFileContext.Provider>
     </RunFailureRetryProvider>
     </ChatRunStopNoticeProvider>

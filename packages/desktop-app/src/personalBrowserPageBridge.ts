@@ -6,6 +6,12 @@ import {
   type PersonalBrowserActionDescriptor,
   type PersonalBrowserEditableDescriptor,
 } from "./personalBrowserSecurity";
+import {
+  CREDENTIAL_CONTEXT_SOURCE,
+  KNOWN_SECRET_PATTERN_SOURCES,
+  MASKED_TEXT_SOURCE,
+  PLACEHOLDER_SOURCE,
+} from "./personalBrowserRedaction";
 
 const PERSONAL_BROWSER_ISOLATED_WORLD_ID = 987;
 
@@ -20,12 +26,25 @@ export type PersonalBrowserInteractiveElement = {
   descriptor: PersonalBrowserTargetDescriptor;
 };
 
+/**
+ * Yes/no answers computed inside the page. Values are tested where they live
+ * and never returned, so a key shown in a read-only field never reaches the
+ * main process.
+ */
+export type PersonalBrowserPageSecretSignals = {
+  credentialContext: boolean;
+  secretField: boolean;
+  secretCode: boolean;
+  maskedNearReveal: boolean;
+};
+
 export type PersonalBrowserPageSnapshot = {
   url: string;
   title: string;
   text: string;
   interactive: PersonalBrowserInteractiveElement[];
   documentToken: string;
+  signals?: PersonalBrowserPageSecretSignals;
   capturedAt: string;
 };
 
@@ -58,6 +77,126 @@ function serializeForScript(value: unknown): string {
     .replace(/\u2029/g, "\\u2029");
 }
 
+// Runs inside the page. Every check returns a boolean; no field value, code
+// block text or masked text is ever part of the result. Open shadow roots are
+// searched too, because querySelectorAll does not enter them.
+const PAGE_SECRET_SIGNAL_SCRIPT = `
+    const secretPatternSources = ${serializeForScript(KNOWN_SECRET_PATTERN_SOURCES)};
+    const credentialContextPattern = new RegExp(${serializeForScript(CREDENTIAL_CONTEXT_SOURCE)}, "iu");
+    const placeholderPattern = new RegExp(${serializeForScript(PLACEHOLDER_SOURCE)}, "i");
+    const maskedTextPattern = new RegExp(${serializeForScript(MASKED_TEXT_SOURCE)}, "u");
+    const revealLabelPattern = /(?<![\\p{L}\\p{N}])(?:reveal|show|view|copy|unhide|display|anzeigen|einblenden|kopieren|zeigen|ansehen)(?![\\p{L}\\p{N}])|(?<![\\p{L}])eye(?:[-_]?(?:icon|open|off|slash|closed|fill|outline))?(?![\\p{L}])|(?<![\\p{L}])eye(?=icon|open|off|slash)|visibility|clipboard/iu;
+    const uuidValuePattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const hexValuePattern = /^(?:[0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{64})$/i;
+    const valueEntropy = (value) => {
+      const counts = new Map();
+      for (const character of value) counts.set(character, (counts.get(character) || 0) + 1);
+      let entropy = 0;
+      for (const count of counts.values()) {
+        const probability = count / value.length;
+        entropy -= probability * Math.log2(probability);
+      }
+      return entropy;
+    };
+    const looksLikeSecretValue = (raw, credentialContext) => {
+      if (typeof raw !== "string") return false;
+      const value = raw.trim();
+      if (value.length < 16 || value.length > 16_384 || placeholderPattern.test(value)) return false;
+      if (secretPatternSources.some((source) => new RegExp(source).test(value))) return true;
+      if (/\\s/.test(value) || value.length < 20 || value.length > 512) return false;
+      if (!credentialContext && (uuidValuePattern.test(value) || hexValuePattern.test(value))) return false;
+      return /[A-Za-z]/.test(value) && /[0-9]/.test(value) && valueEntropy(value) >= 3.5;
+    };
+    const scanElements = (visit) => {
+      const roots = [document];
+      let scanned = 0;
+      while (roots.length > 0 && scanned < 20_000) {
+        const root = roots.shift();
+        const elements = typeof root?.querySelectorAll === "function" ? Array.from(root.querySelectorAll("*")) : [];
+        for (const element of elements) {
+          scanned += 1;
+          if (visit(element) === true) return true;
+          if (element && element.shadowRoot && typeof element.shadowRoot.querySelectorAll === "function") {
+            roots.push(element.shadowRoot);
+          }
+          if (scanned >= 20_000) break;
+        }
+      }
+      return false;
+    };
+    const elementTag = (element) => typeof element?.tagName === "string" ? element.tagName.toUpperCase() : "";
+    const elementAttribute = (element, name) => typeof element?.getAttribute === "function" ? element.getAttribute(name) : null;
+    const elementText = (element) => clean(element?.textContent ?? element?.innerText ?? "", 2_000);
+    const isDialog = (element) => elementTag(element) === "DIALOG"
+      || ["dialog", "alertdialog"].includes(elementAttribute(element, "role"))
+      || elementAttribute(element, "aria-modal") === "true";
+    const pageSecretSignals = () => {
+      try {
+        const labelTags = new Set(["H1", "H2", "H3", "H4", "H5", "H6", "LEGEND", "TH", "LABEL", "DT", "CAPTION"]);
+        const credentialContext = credentialContextPattern.test(clean(document.title, 1_000)) || scanElements((element) => {
+          const label = labelTags.has(elementTag(element)) || elementAttribute(element, "role") === "heading"
+            ? elementText(element)
+            : isDialog(element)
+              ? clean(elementAttribute(element, "aria-label"))
+              : "";
+          return Boolean(label) && credentialContextPattern.test(label);
+        });
+        const codeTags = new Set(["CODE", "PRE", "KBD", "SAMP", "OUTPUT"]);
+        let secretField = false;
+        let secretCode = false;
+        let maskedNearReveal = false;
+        scanElements((element) => {
+          const tag = elementTag(element);
+          if (!secretField && (tag === "INPUT" || tag === "TEXTAREA")) {
+            const type = String(element.type || elementAttribute(element, "type") || "").toLowerCase();
+            const readOnly = element.readOnly === true || elementAttribute(element, "readonly") !== null
+              || element.disabled === true || elementAttribute(element, "disabled") !== null;
+            if (readOnly && type !== "password" && type !== "hidden" && looksLikeSecretValue(element.value, credentialContext)) {
+              secretField = true;
+            }
+          }
+          if (!secretCode && codeTags.has(tag) && looksLikeSecretValue(elementText(element), credentialContext)) {
+            secretCode = true;
+          }
+          if (!maskedNearReveal && (tag === "BUTTON" || tag === "A" || elementAttribute(element, "role") === "button"
+              || elementAttribute(element, "onclick") !== null)) {
+            const label = [
+              elementAttribute(element, "aria-label"), elementAttribute(element, "title"),
+              elementAttribute(element, "class"), elementAttribute(element, "data-icon"), elementText(element),
+            ].filter(Boolean).join(" ");
+            // A link to another page counts only when its own label names a
+            // credential; "View invoice" beside a masked card number does not.
+            let pageLink = false;
+            if (tag === "A") {
+              try {
+                pageLink = ["http:", "https:"].includes(new URL(String(element.href || "")).protocol)
+                  && !String(elementAttribute(element, "href") || "").startsWith("#");
+              } catch {
+                pageLink = false;
+              }
+            }
+            if (revealLabelPattern.test(label) && (!pageLink || credentialContextPattern.test(label))) {
+              let ancestor = element.parentElement;
+              for (let depth = 0; ancestor && depth < 3; depth += 1, ancestor = ancestor.parentElement) {
+                // Only a small container around the control, never a whole card or page.
+                const ancestorText = typeof ancestor.textContent === "string" ? ancestor.textContent : (ancestor.innerText ?? "");
+                if (ancestorText.length <= 400 && maskedTextPattern.test(elementText(ancestor))) {
+                  maskedNearReveal = true;
+                  break;
+                }
+              }
+            }
+          }
+          return secretField && secretCode && maskedNearReveal;
+        });
+        return { credentialContext, secretField, secretCode, maskedNearReveal };
+      } catch {
+        // The host withholds the page when the answers are missing.
+        return null;
+      }
+    };
+`;
+
 function buildPageScript(argumentsValue: unknown, body: string): string {
   return `(() => {
     "use strict";
@@ -66,7 +205,11 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
     const interactiveSelector = [
       "a[href]", "button", "input:not([type='hidden'])", "textarea", "select",
       "[contenteditable='true']", "[role='button']", "[role='link']", "[role='textbox']",
-      "[tabindex]:not([tabindex='-1'])"
+      "[tabindex]:not([tabindex='-1'])",
+      // Script-driven apps build menus, trees and rows from generic elements.
+      "summary", "[role='menuitem']", "[role='menuitemcheckbox']", "[role='menuitemradio']",
+      "[role='treeitem']", "[role='tab']", "[role='switch']", "[role='checkbox']", "[role='radio']",
+      "[role='option']", "[aria-expanded]", "[aria-haspopup]:not([aria-haspopup='false'])", "[onclick]"
     ].join(",");
     const clean = (value, limit = 500) => typeof value === "string"
       ? value.replace(/\\s+/g, " ").trim().slice(0, limit)
@@ -80,6 +223,7 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
         && style.visibility !== "hidden" && style.display !== "none"
         && style.pointerEvents !== "none";
     };
+    ${PAGE_SECRET_SIGNAL_SCRIPT}
     const forbiddenTarget = (element) => element.matches("iframe, frame, object, embed");
     const candidates = () => Array.from(document.querySelectorAll(interactiveSelector))
       .filter((element) => element.ownerDocument === document && !forbiddenTarget(element) && visible(element));
@@ -109,6 +253,172 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
       }
       return null;
     };
+    // Structure around the element. Ancestor facts and bounded text are
+    // computed once per node in each run, so a page with hundreds of rows
+    // stays fast. Text stays in the main process; it is never sent to the agent.
+    const structureAttribute = (node, name) => typeof node?.getAttribute === "function" ? node.getAttribute(name) : null;
+    const structureTag = (node) => typeof node?.tagName === "string" ? node.tagName.toUpperCase() : "";
+    const structureHeadingSelector = "h1, h2, h3, h4, h5, h6, [role='heading'], legend, caption";
+    const structureDialogSelector = "dialog, [role='dialog'], [role='alertdialog'], [aria-modal='true']";
+    const SMALL_CONTAINER_CHARACTERS = 400;
+    const areaOf = (node) => {
+      const role = clean(structureAttribute(node, "role")).toLowerCase();
+      const tag = structureTag(node);
+      if (tag === "DIALOG" || role === "dialog" || role === "alertdialog" || structureAttribute(node, "aria-modal") === "true") return "dialog";
+      if (tag === "SEARCH" || role === "search") return "search";
+      const pagination = /pagination|pager|paginat|seitennavigation/i.test(
+        [structureAttribute(node, "aria-label"), structureAttribute(node, "class"), structureAttribute(node, "data-testid")].filter(Boolean).join(" "),
+      );
+      if (pagination) return "pagination";
+      if (tag === "NAV" || role === "navigation") return "nav";
+      if (role === "menu" || role === "menubar") return role;
+      if (role === "tree" || role === "tablist") return role;
+      return "";
+    };
+    const rowOf = (node) => {
+      const role = clean(structureAttribute(node, "role")).toLowerCase();
+      return ["TR", "LI", "DT", "DD"].includes(structureTag(node)) || ["row", "listitem", "option", "gridcell", "treeitem", "article"].includes(role);
+    };
+    const dialogLabelOf = (node) => {
+      const labelledBy = clean(structureAttribute(node, "aria-labelledby")).split(/\\s+/)
+        .map((id) => id ? document.getElementById(id) : null).filter(Boolean)
+        .map((label) => clean(label.textContent)).join(" ");
+      const dialogHeading = typeof node.querySelector === "function" ? node.querySelector(structureHeadingSelector) : null;
+      return clean(structureAttribute(node, "aria-label") || labelledBy || dialogHeading?.textContent || "", 200);
+    };
+    const emptyFacts = { areas: [], dialogLabel: "", row: null };
+    const nodeFacts = new Map();
+    // Enclosing areas (nearest first), the nearest dialog's label and the
+    // nearest row, inherited from the parent's cached facts.
+    const factsOf = (start) => {
+      if (!start) return emptyFacts;
+      const chain = [];
+      let node = start;
+      while (node && !nodeFacts.has(node) && chain.length < 200) {
+        chain.push(node);
+        node = node.parentElement;
+      }
+      let inherited = node && nodeFacts.has(node) ? nodeFacts.get(node) : emptyFacts;
+      for (let index = chain.length - 1; index >= 0; index -= 1) {
+        const current = chain[index];
+        const area = areaOf(current);
+        const facts = {
+          areas: area && !inherited.areas.includes(area) ? [area, ...inherited.areas] : inherited.areas,
+          dialogLabel: area === "dialog" ? dialogLabelOf(current) : inherited.dialogLabel,
+          row: rowOf(current) ? current : inherited.row,
+        };
+        nodeFacts.set(current, facts);
+        inherited = facts;
+      }
+      return nodeFacts.get(start) ?? emptyFacts;
+    };
+    const textFacts = new Map();
+    const boundedText = (node) => {
+      let facts = textFacts.get(node);
+      if (!facts) {
+        const raw = typeof node?.textContent === "string" ? node.textContent : "";
+        facts = { text: clean(raw.slice(0, 4_000), 2_000), length: raw.length };
+        textFacts.set(node, facts);
+      }
+      return facts;
+    };
+    let headingList = null;
+    const headingsInOrder = () => {
+      if (headingList === null) {
+        try {
+          headingList = Array.from(document.querySelectorAll(structureHeadingSelector)).filter((node) =>
+            typeof node?.matches === "function" && node.matches(structureHeadingSelector) &&
+            typeof node.compareDocumentPosition === "function");
+        } catch {
+          headingList = [];
+        }
+      }
+      return headingList;
+    };
+    // The nearest heading before the element in document order, within six
+    // levels of it and not inside a dialog the element is outside of.
+    const nearestHeading = (element) => {
+      if (typeof element?.compareDocumentPosition !== "function") return "";
+      const list = headingsInOrder();
+      let low = 0;
+      let high = list.length - 1;
+      let found = -1;
+      while (low <= high) {
+        const middle = (low + high) >> 1;
+        const candidate = list[middle];
+        // 4 is DOCUMENT_POSITION_FOLLOWING: the element comes after the heading.
+        if (candidate === element || (candidate.compareDocumentPosition(element) & 4) !== 0) {
+          found = middle;
+          low = middle + 1;
+        } else {
+          high = middle - 1;
+        }
+      }
+      let scope = element;
+      for (let depth = 0; depth < 6 && scope.parentElement; depth += 1) scope = scope.parentElement;
+      for (let index = found, steps = 0; index >= 0 && steps < 25; index -= 1, steps += 1) {
+        const candidate = list[index];
+        if (candidate === element) continue;
+        if (typeof scope.contains !== "function" || !scope.contains(candidate)) return "";
+        const dialog = typeof candidate.closest === "function" ? candidate.closest(structureDialogSelector) : null;
+        if (dialog && !(typeof dialog.contains === "function" && dialog.contains(element))) continue;
+        return clean(candidate.textContent ?? "", 200);
+      }
+      return "";
+    };
+    // The column header of the element's table cell, or the whole header row
+    // for a row target.
+    const columnHeader = (element, row) => {
+      if (structureTag(row) !== "TR" || typeof row.closest !== "function") return "";
+      const table = row.closest("table");
+      if (!table) return "";
+      const headerRow = table.tHead?.rows?.[0]
+        ?? Array.from(table.rows ?? []).find((candidate) => typeof candidate.querySelector === "function" && candidate.querySelector("th"));
+      if (!headerRow || headerRow === row) return "";
+      if (element === row) {
+        return clean(Array.from(headerRow.cells ?? []).map((cell) => cell.textContent ?? "").join(" "), 200);
+      }
+      const cell = typeof element.closest === "function" ? element.closest("td, th") : null;
+      if (!cell || cell.parentElement !== row || !Number.isInteger(cell.cellIndex)) return "";
+      return clean(headerRow.cells?.[cell.cellIndex]?.textContent ?? "", 200);
+    };
+    const describeStructure = (element, link) => {
+      const parentFacts = factsOf(element.parentElement);
+      const row = rowOf(element) ? element : parentFacts.row;
+      const rowText = row ? clean(boundedText(row).text, 500) : "";
+      const heading = nearestHeading(element);
+      const header = row ? columnHeader(element, row) : "";
+      // Masked text counts only in the element's row or a small container
+      // around it, never a whole card or page.
+      let nearMaskedText = false;
+      const smallMasked = (node) => {
+        const facts = boundedText(node);
+        return facts.length <= SMALL_CONTAINER_CHARACTERS && maskedTextPattern.test(facts.text);
+      };
+      let node = element.parentElement;
+      for (let depth = 0; node && depth < 3 && !nearMaskedText; depth += 1, node = node.parentElement) {
+        nearMaskedText = smallMasked(node);
+      }
+      if (!nearMaskedText && row && row !== element) nearMaskedText = smallMasked(row);
+      const contextLabel = clean([parentFacts.dialogLabel, heading, header, rowText].filter(Boolean).join(" · "), 200);
+      const iconChild = typeof element.querySelector === "function" ? element.querySelector("svg, i, img, use") : null;
+      const iconHint = clean([
+        structureAttribute(element, "class"), structureAttribute(element, "data-icon"), structureAttribute(element, "data-testid"),
+        structureAttribute(iconChild, "class"), structureAttribute(iconChild, "aria-label"), structureAttribute(iconChild, "alt"),
+        structureAttribute(iconChild, "data-icon"), structureAttribute(iconChild, "href"),
+      ].filter(Boolean).join(" "), 160);
+      const expanded = structureAttribute(element, "aria-expanded") ?? structureAttribute(link, "aria-expanded");
+      const popup = structureAttribute(element, "aria-haspopup");
+      return {
+        areas: parentFacts.areas.join(" "),
+        menuOpener: expanded !== null || (popup !== null && popup !== "false"),
+        credentialContext: credentialContextPattern.test([parentFacts.dialogLabel, heading, header, rowText].join(" ")),
+        row: Boolean(row),
+        contextLabel,
+        nearMaskedText,
+        iconHint,
+      };
+    };
     const descriptor = (element) => {
       if (
         !(element instanceof Element) ||
@@ -131,12 +441,36 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
       // no owner despite being inside one. Use the browser's resolved owner.
       const formCandidate = "form" in element ? element.form : element.closest("form");
       const form = formCandidate instanceof HTMLFormElement ? formCandidate : null;
-      const submit = form ? Array.from(form.elements).find((control) =>
+      const formControls = form ? Array.from(form.elements || []) : [];
+      const isSubmitControl = (control) => control.form === form && (
+        (control instanceof HTMLButtonElement && control.type === "submit") ||
+        (control instanceof HTMLInputElement && ["submit", "image"].includes(control.type))
+      );
+      const submit = formControls.find(isSubmitControl) ?? null;
+      const submitLabel = (control) => clean(
+        control.getAttribute("aria-label") || control.textContent || control.getAttribute("value") || "",
+        80,
+      );
+      const formSubmitLabels = clean(formControls.filter(isSubmitControl).map(submitLabel).filter(Boolean).join(" | "), 200);
+      const editableTypes = ["", "text", "search", "email", "url", "tel", "number", "password", "date", "time", "datetime-local", "month", "week"];
+      const formFieldCount = formControls.filter((control) =>
         control.form === form && (
-          (control instanceof HTMLButtonElement && control.type === "submit") ||
-          (control instanceof HTMLInputElement && ["submit", "image"].includes(control.type))
-        ),
-      ) : null;
+          (control instanceof HTMLInputElement && editableTypes.includes(String(control.type || "").toLowerCase())) ||
+          control instanceof HTMLTextAreaElement ||
+          String(control.tagName || "").toUpperCase() === "SELECT"
+        )).length;
+      const isPasswordControl = (control) =>
+        control instanceof HTMLInputElement && String(control.type || "").toLowerCase() === "password";
+      const formPasswordCount = formControls.filter(isPasswordControl).length;
+      const formHasPassword = formPasswordCount > 0;
+      // The text field right before the form's first password field is the
+      // account identifier of a sign-in form.
+      const firstPassword = formControls.findIndex(isPasswordControl);
+      const identifierCandidate = firstPassword > 0
+        ? formControls.slice(0, firstPassword).reverse().find((control) =>
+          control instanceof HTMLInputElement && ["", "text", "email", "tel"].includes(String(control.type || "").toLowerCase()))
+        : null;
+      const signInIdentifier = Boolean(identifierCandidate) && identifierCandidate === element;
       const formLabelledBy = clean(form?.getAttribute("aria-labelledby"))
         .split(/\\s+/)
         .map((id) => document.getElementById(id))
@@ -168,6 +502,7 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
         ? Array.from(element.labels).map((label) => clean(label.textContent)).filter(Boolean).join(" ")
         : "";
       const accessibleLabel = read("aria-label") || labelledBy || associatedLabels;
+      const structure = describeStructure(element, link);
       return {
         found: true,
         identity: targetIdentity(element),
@@ -191,6 +526,17 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
         // Keep a non-empty description even for an unlabeled implicit form.
         formActionText,
         disabled: Boolean("disabled" in element && element.disabled) || read("aria-disabled") === "true",
+        linkSelf: link instanceof HTMLAnchorElement && link === element,
+        download: link instanceof HTMLAnchorElement && typeof link.getAttribute === "function" && link.getAttribute("download") !== null,
+        formMethod: form ? clean(form.getAttribute("method") || "get", 16).toLowerCase() : "",
+        formActionUrl: form ? clean(typeof form.action === "string" ? form.action : form.getAttribute("action"), 4096) : "",
+        formHasPassword,
+        formPasswordCount,
+        signInIdentifier,
+        formFieldCount,
+        formSubmitLabels,
+        contentEditable: element.isContentEditable === true,
+        ...structure,
         rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
       };
     };
@@ -261,6 +607,7 @@ export async function snapshotPersonalBrowserPage(
         text: clean(document.body?.innerText ?? "", 60_000),
         interactive,
         documentToken: registry.documentToken,
+        signals: pageSecretSignals(),
       };
     `),
   );

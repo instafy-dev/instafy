@@ -452,7 +452,10 @@ export class PersonalBrowserControlServer {
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name: "instafy-personal-browser", version: "1.0.0" },
           instructions:
-            "Use snapshot before indexed actions. The user must resume control and approve each origin; sensitive typing is blocked.",
+            "Use snapshot before indexed actions. The user must resume control and approve each origin; sensitive typing is blocked. " +
+            "Snapshots and status mask values that look like keys, tokens or codes. When a snapshot has secretScreen: true its text is withheld: " +
+            "do not try to reveal or read the value; stop and tell the user which control on the page shows it. " +
+            "step_refused_secret, step_refused_sign_in and step_refused_upload are final: those steps are the user's.",
         },
       };
     }

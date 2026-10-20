@@ -1,0 +1,115 @@
+<!doctype html>
+<!--
+  Risky-steps fixture for the Personal Browser step classifier and redaction.
+  Every value is synthetic. The canary key is assembled by script at run time,
+  so no key-shaped literal is stored in the repository.
+
+  Serve this folder on a free local port and point the Personal Browser at it:
+    python3 -m http.server 8765 --directory packages/desktop-app/test/fixtures/risky-steps
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Risky steps fixture</title>
+    <style>
+      body { font: 15px/1.5 system-ui, sans-serif; margin: 24px; max-width: 760px; }
+      section { border-top: 1px solid #ccc; padding: 12px 0; }
+      [role="menu"][hidden] { display: none; }
+      .composer { border: 1px solid #999; min-height: 2em; padding: 4px; }
+      .banner { background: #f4f4f4; padding: 8px; }
+    </style>
+  </head>
+  <body>
+    <div class="banner" role="dialog" aria-label="Cookie choices" id="cookies">
+      We use cookies.
+      <button type="button" onclick="cookies.remove()">Reject all</button>
+      <button type="button" onclick="cookies.remove()">Accept all</button>
+    </div>
+
+    <nav aria-label="Main">
+      <a href="./">Home</a>
+      <a href="./docs.html">Documentation</a>
+      <a href="./ff/">Bookkeeping fixture (German)</a>
+      <a href="./logout">Sign out</a>
+    </nav>
+
+    <section>
+      <h2>Links</h2>
+      <a href="./reports/2026-q3.csv">Quarterly report</a>
+      <a href="./export/invoices">Export invoices</a>
+      <a href="./invoice.html" download>Download invoice</a>
+      <a href="./items/1234/delete">Remove item 1234</a>
+      <a href="./orders/1234"><span onclick="event.preventDefault(); this.textContent = 'Archived'">Archive</span> Order 1234</a>
+    </section>
+
+    <section>
+      <h2>Disclosure</h2>
+      <div role="tablist"><button role="tab" aria-selected="true">Overview</button><button role="tab" aria-selected="false">Activity</button></div>
+      <details><summary>More details</summary><p>Hidden details.</p></details>
+      <button type="button" aria-haspopup="menu" aria-expanded="false" onclick="toggleMenu(this)">More actions</button>
+      <div role="menu" id="actions" hidden>
+        <div role="menuitem" tabindex="0">Rename</div>
+        <div role="menuitem" tabindex="0">Delete</div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Search and forms</h2>
+      <form method="get" action="./search">
+        <input type="search" name="q" aria-label="Search" />
+        <button type="submit">Search</button>
+      </form>
+      <form method="post" action="./profile">
+        <label>Display name <input name="display_name" /></label>
+        <button type="submit">Save</button>
+      </form>
+      <div class="composer" contenteditable="true" role="textbox" aria-label="Message" id="composer"></div>
+      <p id="sent"></p>
+      <label>Attachment <input type="file" /></label>
+    </section>
+
+    <section>
+      <h2>Team</h2>
+      <button type="button">Invite teammate</button>
+      <button type="button">Export CSV</button>
+      <button type="button">Generate API key</button>
+      <button type="button" aria-label="Delete workspace">🗑</button>
+    </section>
+
+    <section>
+      <h2>Sign in</h2>
+      <form method="post" action="./session">
+        <label>Email <input type="email" name="email" autocomplete="username" /></label>
+        <label>Password <input type="password" name="password" autocomplete="current-password" /></label>
+        <button type="submit">Sign in</button>
+      </form>
+      <button type="button">Continue with Google</button>
+    </section>
+
+    <section>
+      <h2>API keys</h2>
+      <p>Your secret key: <code id="key-code"></code> <button type="button">Copy</button></p>
+    </section>
+
+    <nav aria-label="Pagination" class="pagination">
+      <a href="?page=1">1</a> <a href="?page=2">2</a> <button type="button">Next</button>
+    </nav>
+
+    <script>
+      const canary = ["sk", "test", "INSTAFY" + "CANARY" + "7Qm2Xr9Lp4Vb8Nc1"].join("_");
+      document.getElementById("key-code").textContent = canary;
+      function toggleMenu(button) {
+        const menu = document.getElementById("actions");
+        menu.hidden = !menu.hidden;
+        button.setAttribute("aria-expanded", String(!menu.hidden));
+      }
+      document.getElementById("composer").addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          document.getElementById("sent").textContent = "Sent: " + event.target.textContent;
+        }
+      });
+    </script>
+  </body>
+</html>

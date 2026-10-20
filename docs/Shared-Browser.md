@@ -376,7 +376,9 @@ success.
 Page content is untrusted. Browser-only turns therefore have no local execution
 environment, project MCP servers, web search, plugins, image generation, child
 agents, patch/file tools, or learned-memory tools. Browser capability variables
-are also stripped from shell children in ordinary turns. The hosted browser is
+are also stripped from shell children in ordinary turns. The runtime agent
+clears `RUNTIME_METADATA`, whose launch environment can carry TURN credentials,
+from its own environment at startup. The hosted browser is
 still in the same runtime OS boundary as ordinary workspace execution; moving
 Chromium/control into a separate sidecar user or container is the remaining
 defense-in-depth step against a deliberately hostile workspace process.

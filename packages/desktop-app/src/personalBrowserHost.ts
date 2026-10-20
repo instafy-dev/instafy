@@ -26,6 +26,19 @@ import {
   type PersonalBrowserTargetDescriptor,
 } from "./personalBrowserPageBridge";
 import { PersonalBrowserInputShield } from "./personalBrowserInputShield";
+import {
+  hasCredentialWord,
+  redactLogValue,
+  redactPageObservation,
+  redactText,
+  redactUrl,
+} from "./personalBrowserRedaction";
+import {
+  categoryTitle,
+  refusalFor,
+  stepLabels,
+  type PersonalBrowserStepClassification,
+} from "./personalBrowserActionPolicy";
 import { BrowserTabCapture } from "./browserTabCapture";
 import {
   PersonalBrowserControlError,
@@ -34,9 +47,11 @@ import {
   type PersonalBrowserControlOperation,
 } from "./personalBrowserControlServer";
 import {
+  classifyPersonalBrowserStep,
   derivePersonalBrowserPartition,
   getPersonalBrowserOrigin,
   isHighImpactPersonalBrowserAction,
+  isPersonalBrowserActivationKey,
   isSensitivePersonalBrowserEditable,
   normalizePersonalBrowserApprovalMode,
   normalizePersonalBrowserBounds,
@@ -181,6 +196,35 @@ function pageLabel(descriptor: PersonalBrowserTargetDescriptor): string {
   ).slice(0, 160);
 }
 
+// Shows both labels when the control's accessible name and visible text
+// differ, so a page cannot hide what a control does behind a friendly name.
+function activationLabel(descriptor: PersonalBrowserTargetDescriptor): string {
+  const labels = stepLabels(descriptor);
+  if (labels.differ) {
+    return `“${labels.accessible.slice(0, 160)}” (shown on the page as “${labels.visible.slice(0, 160)}”)`;
+  }
+  return `“${pageLabel(descriptor)}”`;
+}
+
+const STEP_DIALOG_DETAILS: Record<string, string> = {
+  purchase: "This may buy something or start a payment.",
+  transfer: "This may move money.",
+  message: "This may send a message or publish something as you.",
+  permission: "This may share something or change who has access.",
+  credential: "This may create, change or remove a key, token or password.",
+  download: "This may download or export data.",
+  destructive: "This may delete, cancel, remove or sign out of something.",
+  may_show_secret:
+    "This may open a key or other secret. If you allow it, the agent cannot read this page or the page it opens until a new page loads.",
+  change: "This may change something on the site.",
+};
+
+// Steps after which the page, and a page they open, stay withheld.
+const SECRET_REVEALING_CATEGORIES = new Set(["credential", "may_show_secret"]);
+// Withheld documents remembered at once, so going back to an earlier
+// withheld page keeps it withheld.
+const MAX_WITHHELD_DOCUMENTS = 32;
+
 function formSubmissionDescription(descriptor: PersonalBrowserTargetDescriptor): string {
   const formLabel = descriptor.formActionText?.trim();
   if (formLabel && formLabel !== "this form") {
@@ -232,6 +276,12 @@ export class PersonalBrowserHost {
   private pendingOriginApprovals = new Map<string, Promise<boolean>>();
   private controlEpoch = 0;
   private latestAgentSnapshot: PersonalBrowserSnapshotState | null = null;
+  // A document stays withheld from the agent until a new page loads once it
+  // was a secret screen or a credential step ran on it.
+  private withheldDocumentTokens = new Set<string>();
+  // Set by a credential step that may open another page: the next new
+  // document is withheld too.
+  private withholdNextDocumentAfter: string | null = null;
   private lastEmittedStatus = "";
   private releaseCloseTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly tabCapture = new BrowserTabCapture(() => {
@@ -288,7 +338,10 @@ export class PersonalBrowserHost {
     this.onReleaseExpiry = options.onReleaseExpiry;
     this.onEmergencyPause = options.onEmergencyPause ?? (() => undefined);
     this.onStatus = options.onStatus ?? (() => undefined);
-    this.logger = options.logger ?? (() => undefined);
+    const logger = options.logger ?? (() => undefined);
+    // Error messages can carry page addresses. Mask them before they reach
+    // Desktop's log files.
+    this.logger = (level, message, payload) => logger(level, message, payload ? redactLogValue(payload) : payload);
     this.controlServer = new PersonalBrowserControlServer({
       handle: (operation, payload) => this.handleControlOperation(operation, payload),
       logger: this.logger,
@@ -1178,22 +1231,26 @@ export class PersonalBrowserHost {
 
   private async confirmAgentActivation(
     descriptor: PersonalBrowserTargetDescriptor,
-    options: { formSubmission?: boolean } = {},
+    options: { formSubmission?: boolean; category?: string } = {},
   ): Promise<boolean> {
     const owner = this.ownerWindow;
     if (!owner || owner.isDestroyed() || !owner.isVisible()) {
       return false;
     }
     const epoch = this.controlEpoch;
+    const categoryName = options.category ? categoryTitle(options.category) : null;
+    const categoryDetail = options.category ? STEP_DIALOG_DETAILS[options.category] : undefined;
+    const genericDetail = options.formSubmission
+      ? "This sends the form to the site and may navigate or change site state. Review it before allowing once."
+      : "This activates the selected page control and may navigate or change site state. Review it before allowing once.";
     const result = await dialog.showMessageBox(owner, {
       type: "warning",
-      title: options.formSubmission ? "Confirm form submission" : "Confirm agent action",
+      // The title names what kind of step this is.
+      title: categoryName ?? (options.formSubmission ? "Confirm form submission" : "Confirm agent action"),
       message: options.formSubmission
         ? `Allow the agent to submit ${formSubmissionDescription(descriptor)}?`
-        : `Allow the agent to activate “${pageLabel(descriptor)}”?`,
-      detail: options.formSubmission
-        ? "This sends the form to the site and may navigate or change site state. Review it before allowing once."
-        : "This activates the selected page control and may navigate or change site state. Review it before allowing once.",
+        : `Allow the agent to activate ${activationLabel(descriptor)}?`,
+      detail: categoryDetail ? `${categoryDetail} ${genericDetail}` : genericDetail,
       buttons: ["Deny", "Allow once"],
       defaultId: 0,
       cancelId: 0,
@@ -1258,10 +1315,25 @@ export class PersonalBrowserHost {
         originApproved = false;
       }
     }
-    if (originApproved) {
-      return status;
+    if (!originApproved) {
+      return sanitizePersonalBrowserBrokerStatus(status, false);
     }
-    return sanitizePersonalBrowserBrokerStatus(status, false);
+    try {
+      // Status is read without a page observation. The title gets the same
+      // masking a snapshot title gets from its own words, and a load error,
+      // which can quote the full address, is masked like a log line.
+      const url = redactUrl(status.url).text;
+      const title = status.title === undefined
+        ? undefined
+        : redactText(status.title, { credentialContext: hasCredentialWord(status.title) }).text;
+      const redacted = { ...status, url };
+      if (title === undefined) delete redacted.title;
+      else redacted.title = title;
+      if (typeof redacted.error === "string") redacted.error = redactLogValue(redacted.error);
+      return redacted;
+    } catch {
+      return sanitizePersonalBrowserBrokerStatus(status, false);
+    }
   }
 
   private invalidateAgentSnapshot() {
@@ -1276,7 +1348,9 @@ export class PersonalBrowserHost {
 
   private rememberAgentSnapshot(
     snapshot: PersonalBrowserPageSnapshot,
-  ): Omit<PersonalBrowserPageSnapshot, "documentToken" | "interactive"> & {
+  ): Omit<PersonalBrowserPageSnapshot, "documentToken" | "interactive" | "signals"> & {
+    secretScreen?: true;
+    message?: string;
     interactive: Array<{
       index: number;
       tag: string;
@@ -1313,20 +1387,96 @@ export class PersonalBrowserHost {
       documentToken: snapshot.documentToken,
       targets,
     };
-    return {
-      url: snapshot.url,
-      title: snapshot.title,
-      text: snapshot.text,
-      capturedAt: snapshot.capturedAt,
-      interactive: snapshot.interactive.map(({ index, tag, role, name, type, disabled }) => ({
-        index,
-        tag,
-        ...(role ? { role } : {}),
-        ...(name ? { name } : {}),
-        ...(type ? { type } : {}),
-        disabled,
-      })),
-    };
+    return this.redactAgentSnapshot(snapshot);
+  }
+
+  private shouldWithholdDocument(documentToken: string): boolean {
+    if (this.withheldDocumentTokens.has(documentToken)) {
+      return true;
+    }
+    if (this.withholdNextDocumentAfter !== null && this.withholdNextDocumentAfter !== documentToken) {
+      this.withholdNextDocumentAfter = null;
+      return true;
+    }
+    return false;
+  }
+
+  private withholdDocument(documentToken: string) {
+    this.withheldDocumentTokens.delete(documentToken);
+    this.withheldDocumentTokens.add(documentToken);
+    while (this.withheldDocumentTokens.size > MAX_WITHHELD_DOCUMENTS) {
+      const oldest = this.withheldDocumentTokens.values().next().value;
+      if (oldest === undefined) break;
+      this.withheldDocumentTokens.delete(oldest);
+    }
+  }
+
+  /**
+   * Withholds the page a credential step ran on until a new page loads. When
+   * the step may open another page, that page is withheld as well.
+   */
+  private withholdAfterCredentialStep(identity: string | null | undefined, opensPage: boolean) {
+    const documentToken = identity?.split(":", 1)[0];
+    if (!documentToken) {
+      return;
+    }
+    this.withholdDocument(documentToken);
+    if (opensPage) {
+      this.withholdNextDocumentAfter = documentToken;
+    }
+  }
+
+  // Every page observation passes through redaction before it leaves the main
+  // process, in every approval mode and on every site. A failure withholds it.
+  private redactAgentSnapshot(snapshot: PersonalBrowserPageSnapshot) {
+    const withhold = this.shouldWithholdDocument(snapshot.documentToken);
+    const rawNames = snapshot.interactive.map((entry) => entry.name);
+    const describe = (
+      { index, tag, role, type, disabled }: PersonalBrowserPageSnapshot["interactive"][number],
+      name: string | undefined,
+    ) => ({
+      index,
+      tag,
+      ...(role ? { role } : {}),
+      ...(name ? { name } : {}),
+      ...(type ? { type } : {}),
+      disabled,
+    });
+    try {
+      if (!snapshot.signals) {
+        throw new Error("Page secret signals are missing.");
+      }
+      const redacted = redactPageObservation({
+        url: snapshot.url,
+        title: snapshot.title,
+        text: snapshot.text,
+        names: rawNames,
+        signals: snapshot.signals,
+        withhold,
+      });
+      if (redacted.secretScreen) {
+        this.withholdDocument(snapshot.documentToken);
+      }
+      return {
+        url: redacted.url,
+        title: redacted.title,
+        text: redacted.text,
+        capturedAt: snapshot.capturedAt,
+        ...(redacted.secretScreen ? { secretScreen: true as const, message: redacted.message } : {}),
+        interactive: snapshot.interactive.map((entry, position) => describe(entry, redacted.names[position])),
+      };
+    } catch {
+      this.withholdDocument(snapshot.documentToken);
+      return {
+        url: "",
+        title: "",
+        text: "",
+        capturedAt: snapshot.capturedAt,
+        secretScreen: true as const,
+        message: "This page could not be checked for secrets, so it is withheld. Navigate to another page or ask the user to continue.",
+        interactive: snapshot.interactive.map((entry) => describe(entry, undefined)),
+      };
+    }
   }
 
   private consumeAgentSnapshotTarget(index: number): PersonalBrowserResolvedTarget {
@@ -1412,6 +1562,29 @@ export class PersonalBrowserHost {
     return current;
   }
 
+  /** Refusals apply in every approval mode and never show a dialog. */
+  private assertStepNotRefused(step: PersonalBrowserStepClassification) {
+    if (step.verdict !== "refuse") {
+      return;
+    }
+    const refusal = refusalFor(step.category);
+    throw new PersonalBrowserControlError(
+      403,
+      step.code ?? refusal?.code ?? "step_refused",
+      refusal?.message ?? "This browser step is the user's to take.",
+    );
+  }
+
+  private withholdIfSecretRevealing(
+    step: PersonalBrowserStepClassification,
+    descriptor: PersonalBrowserTargetDescriptor,
+    opensPage: boolean,
+  ) {
+    if (SECRET_REVEALING_CATEGORIES.has(step.category)) {
+      this.withholdAfterCredentialStep(descriptor.identity, opensPage);
+    }
+  }
+
   private assertNonSensitiveActivation(descriptor: PersonalBrowserTargetDescriptor) {
     if (isSensitivePersonalBrowserEditable(descriptor)) {
       throw new PersonalBrowserControlError(
@@ -1493,6 +1666,8 @@ export class PersonalBrowserHost {
       }
       this.assertControlEpoch(operationEpoch);
       this.invalidateAgentSnapshot();
+      // An address the agent opens itself is not the page a credential step opened.
+      this.withholdNextDocumentAfter = null;
       await contents.loadURL(url);
       return { status: this.getBrokerStatus() };
     }
@@ -1551,6 +1726,9 @@ export class PersonalBrowserHost {
     let resolvedTarget = await this.revalidateControlTarget(contents, target, snapshotTarget);
 
     if (operation === "click") {
+      const pageUrl = contents.getURL() || "about:blank";
+      let step = classifyPersonalBrowserStep("click", resolvedTarget.descriptor, { pageUrl });
+      this.assertStepNotRefused(step);
       if (resolvedTarget.descriptor.href) {
         let hrefOrigin: string | null;
         try {
@@ -1569,7 +1747,7 @@ export class PersonalBrowserHost {
         resolvedTarget = await this.revalidateControlTarget(contents, target, resolvedTarget);
       }
       if (personalBrowserActivationRequiresConfirmation(resolvedTarget.descriptor, this.approvalMode)) {
-        if (!(await this.confirmAgentActivation(resolvedTarget.descriptor))) {
+        if (!(await this.confirmAgentActivation(resolvedTarget.descriptor, { category: step.category }))) {
           throw new PersonalBrowserControlError(403, "activation_denied", "The user denied the browser activation.");
         }
         this.assertControlEpoch(operationEpoch);
@@ -1577,7 +1755,13 @@ export class PersonalBrowserHost {
       } else {
         resolvedTarget = await this.revalidateControlTarget(contents, target, resolvedTarget);
       }
+      // Context outside the fingerprint can change while a dialog is open.
+      step = classifyPersonalBrowserStep("click", resolvedTarget.descriptor, { pageUrl });
+      this.assertStepNotRefused(step);
       this.assertControlEpoch(operationEpoch);
+      // Withhold before the step runs: a pause or rotation after the in-page
+      // click must not leave the page it revealed readable.
+      this.withholdIfSecretRevealing(step, resolvedTarget.descriptor, true);
       const result = await clickPersonalBrowserTarget(
         contents,
         target,
@@ -1606,6 +1790,8 @@ export class PersonalBrowserHost {
           "Agent typing into password, verification-code, or payment fields is blocked.",
         );
       }
+      const pageUrl = contents.getURL() || "about:blank";
+      this.assertStepNotRefused(classifyPersonalBrowserStep("type", resolvedTarget.descriptor, { pageUrl }));
       const text = normalizePersonalBrowserText(payload.text);
       this.assertControlEpoch(operationEpoch);
       const result = await typeIntoPersonalBrowserTarget(
@@ -1636,16 +1822,25 @@ export class PersonalBrowserHost {
           compareSecurity: false,
         });
         this.assertNonSensitiveActivation(submitTarget.descriptor);
+        let submitStep = classifyPersonalBrowserStep("submit", submitTarget.descriptor, { pageUrl });
+        this.assertStepNotRefused(submitStep);
         const submissionNeedsConfirmation = this.approvalMode === "ask" ||
           personalBrowserKeyRequiresConfirmation("Enter", submitTarget.descriptor, this.approvalMode);
         if (submissionNeedsConfirmation &&
-          !(await this.confirmAgentActivation(submitTarget.descriptor, { formSubmission: true }))) {
+          !(await this.confirmAgentActivation(submitTarget.descriptor, {
+            formSubmission: true,
+            category: submitStep.category,
+          }))) {
           throw new PersonalBrowserControlError(403, "form_submission_denied", "The user denied form submission.");
         }
         this.assertControlEpoch(operationEpoch);
         submitTarget = await this.revalidateControlTarget(contents, target, submitTarget);
         this.assertNonSensitiveActivation(submitTarget.descriptor);
+        // Context outside the fingerprint can change while a dialog is open.
+        submitStep = classifyPersonalBrowserStep("submit", submitTarget.descriptor, { pageUrl });
+        this.assertStepNotRefused(submitStep);
         this.assertControlEpoch(operationEpoch);
+        this.withholdIfSecretRevealing(submitStep, submitTarget.descriptor, true);
         const submitResult = await pressPersonalBrowserTarget(
           contents,
           target,
@@ -1669,6 +1864,8 @@ export class PersonalBrowserHost {
     }
 
     const key = normalizePersonalBrowserPressKey(payload.key);
+    const pressPageUrl = contents.getURL() || "about:blank";
+    let pressStep = classifyPersonalBrowserStep("press", resolvedTarget.descriptor, { key, pageUrl: pressPageUrl });
     const isImplicitFormSubmission =
       key === "Enter" && Boolean(resolvedTarget.descriptor.formActionText?.trim());
     if (
@@ -1677,10 +1874,12 @@ export class PersonalBrowserHost {
     ) {
       this.assertNonSensitiveActivation(resolvedTarget.descriptor);
     }
+    this.assertStepNotRefused(pressStep);
     if (personalBrowserKeyRequiresConfirmation(key, resolvedTarget.descriptor, this.approvalMode)) {
       if (
         !(await this.confirmAgentActivation(resolvedTarget.descriptor, {
           formSubmission: isImplicitFormSubmission,
+          category: pressStep.category,
         }))
       ) {
         throw new PersonalBrowserControlError(403, "activation_denied", "The user denied browser activation.");
@@ -1694,7 +1893,13 @@ export class PersonalBrowserHost {
     ) {
       this.assertNonSensitiveActivation(resolvedTarget.descriptor);
     }
+    // Context outside the fingerprint can change while a dialog is open.
+    pressStep = classifyPersonalBrowserStep("press", resolvedTarget.descriptor, { key, pageUrl: pressPageUrl });
+    this.assertStepNotRefused(pressStep);
     this.assertControlEpoch(operationEpoch);
+    if (isPersonalBrowserActivationKey(key)) {
+      this.withholdIfSecretRevealing(pressStep, resolvedTarget.descriptor, true);
+    }
     const pressResult = await pressPersonalBrowserTarget(
       contents,
       target,

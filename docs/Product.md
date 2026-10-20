@@ -837,7 +837,8 @@ an existing draft. Clients without voice input retain the Send control.
 The composer exposes three one-shot actions instead of a persistent delivery mode:
 
 - **Steer** adds the message to the matching agent's active turn. While that turn is active,
-  `Enter` and the primary send control steer it.
+  `Enter` and the primary send control steer it. A turn that is using a browser can be steered
+  only by the person who started it; teammates queue their message instead.
 - **Queue** saves the message for the matching agent's next turn. Use `Cmd+Enter` on macOS or
   `Ctrl+Enter` elsewhere. If there is no matching active turn, the controller may dispatch it
   immediately rather than leave an idle queue entry behind.

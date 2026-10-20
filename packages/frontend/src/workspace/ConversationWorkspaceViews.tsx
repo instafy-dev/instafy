@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, useState } from "react";
-import { Globe, Page } from "iconoir-react";
+import { Globe, Page, WebWindow } from "iconoir-react";
 import { useConversations } from "../conversations/ConversationsProvider";
 import { useStudioNavigationPosture } from "../screens/studio/useStudioNavigationPosture";
 import { ConversationRoster } from "../screens/studio/components/ConversationRoster";
@@ -7,7 +7,7 @@ import { useChatParticipantsSnapshot, EMPTY_CHAT_PARTICIPANTS_SNAPSHOT } from ".
 import { useCode } from "../code/useCode";
 import { useWorkspaceTabs } from "./WorkspaceTabsProvider";
 import { ConversationSurfaceTabs, type ConversationSurface } from "./ConversationSurfaceLayout";
-import { closeConversationFile, conversationFileLabel, selectConversationView } from "./conversationSurfaces";
+import { closeConversationFile, closeConversationPreview, conversationFileLabel, conversationResourceId, selectConversationView } from "./conversationSurfaces";
 
 /** One view bar for the selected task, including routes rendered outside ChatPanel. */
 export function ConversationWorkspaceViews({ placement = "header" }: { placement?: "header" | "composer" }) {
@@ -50,14 +50,18 @@ export function ConversationWorkspaceViews({ placement = "header" }: { placement
       panelId: "conversation-workspace-file", icon: <Page className="h-3.5 w-3.5" />, dirty: dirty.has(file.path),
       onClose: () => conversationSurfaces.update(scope, state => closeConversationFile(state, file.id, hasBrowser)),
     })),
+    ...surfaces.previews.map(preview => ({ id: preview.id, label: preview.title, title: preview.title,
+      panelId: "conversation-workspace-preview", icon: <WebWindow className="h-3.5 w-3.5" />,
+      onClose: () => conversationSurfaces.update(scope, state => closeConversationPreview(state, preview.id, hasBrowser)),
+    })),
     ...ownedViews.map(tab => ({ id: tab.id, label: tab.title, panelId: "conversation-workspace-resource", icon: tab.icon,
       dirty: tab.dirty, onClose: () => closeTab(tab.id),
     })),
   ];
   const baseView = activeTab.kind === "conversation";
   const activeId = baseView ? (surfaces.activeId === "browser" && !hasBrowser ? "chat" : surfaces.activeId) : activeTab.id;
-  const resourceId = surfaces.resourceId === "browser" && !hasBrowser ? surfaces.files[0]?.id ?? "browser" : surfaces.resourceId;
-  const canSplit = baseView && width >= 1024 && (hasBrowser || surfaces.files.length > 0);
+  const resourceId = conversationResourceId(surfaces, hasBrowser);
+  const canSplit = baseView && width >= 1024 && (hasBrowser || surfaces.files.length > 0 || surfaces.previews.length > 0);
   return <div ref={root} className="min-w-0 shrink-0 empty:hidden" data-testid="conversation-workspace-views" data-placement={placement}>
     <ConversationSurfaceTabs chatPanelId="conversation-workspace-chat" chatActions={chatActions} resources={resources}
       presentation={besideComposer ? "composer" : "header"}

@@ -22,7 +22,7 @@ This broker + PDNS path is meant to stay isolated from the controller/frontend c
 - `DELETE /tunnels/:id` — revoke + expire DNS records.
 - Labels: `labels.kind = "preview"` lets `expires_in_seconds` run up to `PREVIEW_MAX_TTL_SECONDS` (default 43200) instead of the token TTL. `labels.visibility = "private"` (anything other than `public`) makes a private tunnel, described below; without the preview config the request fails with 400. An `idempotency_key` stays bound to the visibility it was first used with: reusing it with the other visibility returns 409 instead of the stored tunnel.
   - Optional hooks:
-  - `ACL_HOOK_URL` (POST) receives `{ intent, project_id, org_id?, runtime_id?, lease_id?, idempotency_key?, metadata? }` and returns `{ allowed: bool }`. When `allowed: false`, broker denies creation. When you burn credits here, require an `idempotency_key` so repeated calls don’t double-charge.
+  - `ACL_HOOK_URL` (POST) receives `{ intent, project_id, org_id?, runtime_id?, lease_id?, idempotency_key?, metadata? }` and returns `{ allowed: bool }`. When `allowed: false`, broker denies creation. Any other 2xx body, and any 4xx, denies too; a 5xx fails the create. When you burn credits here, require an `idempotency_key` so repeated calls don’t double-charge.
   - `EVENT_HOOK_URL` receives fire-and-forget events `{ kind: tunnel.created|tunnel.revoked|tunnel.expired, project_id, org_id?, runtime_id?, lease_id?, data }` (`tunnel.expired` is emitted by `ingress_sidecar` when it revokes expired tunnels).
   - In Instafy deployments, point these at the runtime-controller:
     - `ACL_HOOK_URL=https://<controller>/tunnel-broker/hooks/acl`

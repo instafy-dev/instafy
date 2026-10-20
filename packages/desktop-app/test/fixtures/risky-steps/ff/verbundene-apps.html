@@ -1,0 +1,53 @@
+<!doctype html>
+<!--
+  Connected-apps screen. The key appears in a dialog opened from the API row
+  without the address changing. The value is a synthetic canary assembled by
+  script at run time.
+-->
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Verbundene Apps – Buchhaltung</title>
+    <style>
+      body { font: 15px/1.5 system-ui, sans-serif; margin: 24px; }
+      table { border-collapse: collapse; }
+      td, th { border-bottom: 1px solid #ddd; padding: 6px 12px; text-align: left; }
+      tr[onclick] { cursor: pointer; }
+      dialog input { width: 28em; }
+    </style>
+  </head>
+  <body>
+    <a href="./index.html">Zurück zur Startseite</a>
+    <h1>Verbundene Apps</h1>
+    <h2>API-Schlüssel</h2>
+    <table>
+      <thead><tr><th>App</th><th>Technischer Benutzer</th><th>Zugangsschlüssel</th><th></th></tr></thead>
+      <tbody>
+        <tr onclick="document.getElementById('key-dialog').showModal()">
+          <td>Instafy</td>
+          <td>api-instafy</td>
+          <td>••••••••••••</td>
+          <td>
+            <button type="button" onclick="event.stopPropagation(); document.getElementById('key-dialog').showModal()">Anzeigen</button>
+            <button type="button" aria-label="Kopieren" class="icon-copy" onclick="event.stopPropagation()">⧉</button>
+            <button type="button" onclick="event.stopPropagation(); this.closest('tr').remove()">Löschen</button>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+    <button type="button" onclick="document.getElementById('key-dialog').showModal()">Token erstellen</button>
+
+    <dialog id="key-dialog" aria-label="Zugangsdaten">
+      <h3>Zugangsdaten</h3>
+      <label>Client Secret <input id="key-field" readonly /></label>
+      <button type="button" aria-label="Anzeigen" class="icon-eye">👁</button>
+      <form method="dialog"><button>Schließen</button></form>
+    </dialog>
+
+    <script>
+      document.getElementById("key-field").value =
+        ["sk", "test", "INSTAFY" + "CANARY" + "7Qm2Xr9Lp4Vb8Nc1"].join("_");
+    </script>
+  </body>
+</html>
