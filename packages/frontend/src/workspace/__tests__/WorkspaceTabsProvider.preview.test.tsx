@@ -9,6 +9,7 @@ import { createInitialConversation, type ConversationState } from "../../convers
 import type { StudioPanel } from "../../screens/studio/types";
 import { publishChatParticipants, EMPTY_CHAT_PARTICIPANTS_SNAPSHOT } from "../../screens/studio/components/chatParticipantsStore";
 import { ConversationWorkspaceViews } from "../ConversationWorkspaceViews";
+import { openConversationPreview } from "../conversationSurfaces";
 import { WorkspaceTabsProvider, useWorkspaceTabs } from "../WorkspaceTabsProvider";
 import { getTabIdForConversation, getTabIdForJobThread, getTabIdForPanel } from "../workspaceTabFactories";
 import { loadPersistedWorkspaceTabs, persistWorkspaceTabsState } from "../workspaceTabPersistence";
@@ -140,6 +141,28 @@ describe("conversation preview tabs", () => {
     expect(container.textContent).not.toContain("Implementation");
     expect(container.textContent).not.toContain("a.ts");
     expect(container.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("b.ts");
+  });
+
+  it("lists site previews as views of this chat, offers the split for them alone, and closes them with ×", async () => {
+    showViewBar = true;
+    const width = vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(1200);
+    const props = { conversationWorkspaceUserId: "user-a" };
+    await render(props);
+    const scope = api.conversationWorkspaceScope;
+    const header = () => container.querySelector('[data-testid="header-view-host"]')!;
+    expect(header().querySelector('[aria-label="Show side by side"]')).toBeNull();
+    const one = "11111111-1111-4111-8111-111111111111", two = "22222222-2222-4222-8222-222222222222";
+    await act(async () => api.conversationSurfaces.update(scope, state => openConversationPreview(openConversationPreview(state, { previewId: one, title: "Docs site" }), { previewId: two, title: "Shop" })));
+    await render(props);
+    expect([...header().querySelectorAll('[role="tab"]')].map(tab => tab.textContent)).toEqual(["Docs site", "Shop"]);
+    const selected = header().querySelector('[role="tab"][aria-selected="true"]')!;
+    expect(selected.getAttribute("data-testid")).toBe(`conversation-subtab-preview:${two}`);
+    expect(selected.getAttribute("aria-controls")).toBe("conversation-workspace-preview");
+    // A preview alone is enough to put chat beside it.
+    expect(header().querySelector('[aria-label="Show one view"], [aria-label="Show side by side"]')).not.toBeNull();
+    await act(async () => header().querySelector<HTMLButtonElement>('[aria-label="Close Shop view"]')?.click());
+    expect(api.conversationSurfaces.read(scope)).toMatchObject({ activeId: `preview:${one}`, previews: [{ previewId: one, title: "Docs site" }] });
+    width.mockRestore();
   });
 
   it("keeps exactly one Chat/Browser switcher at the composer on compact screens and moves it on resize", async () => {
