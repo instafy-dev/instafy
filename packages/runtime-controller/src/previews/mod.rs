@@ -45,7 +45,7 @@ use crate::tunnels::{
     authorize_active_job_tunnel, authorize_live_runtime_machine_tunnel,
     ensure_private_runtime_access, ensure_project_authorized, ensure_project_write_authorized,
     ensure_runtime_tunnel_generation_is_live, load_runtime_tunnel_grant_by_tunnel_id,
-    parse_required_uuid, request_runtime_tunnel_with_overrides,
+    mark_issuing_tunnel_active, parse_required_uuid, request_runtime_tunnel_with_overrides,
     resolve_canonical_tunnel_runtime_id, revoke_tunnel_record, runtime_tunnel_grant_from_row,
     tunnel_status_is_active, RuntimeTunnelGenerationState, RuntimeTunnelGrantRecord, TunnelProbe,
     TunnelRequestOverrides, ACTIVE_JOB_TUNNEL_METADATA_KEY, ACTIVE_JOB_TUNNEL_SOURCE,
@@ -934,7 +934,7 @@ async fn post_preview_ready(
     ensure_previews_available(&state).await?;
     let project_id = parse_required_uuid(&params.project_id, "projectId")?;
     let caller = identify_preview_caller(&state, &headers, &project_id).await?;
-    let grant = load_preview_grant(&state.pool, &project_id, &params.preview_id).await?;
+    let mut grant = load_preview_grant(&state.pool, &project_id, &params.preview_id).await?;
     if !grant.is_live() {
         return Err((
             StatusCode::CONFLICT,
@@ -962,6 +962,7 @@ async fn post_preview_ready(
     // Probe before taking the row lock: the broker may take seconds. The
     // client was just (re)started, so an older cached answer does not count.
     let health = probe_preview_until_listening(&state, &grant).await;
+    record_preview_serving(&state, &mut grant, health.as_ref()).await;
 
     let mut connection = state
         .pool
@@ -1236,6 +1237,35 @@ async fn probe_preview(
     health
 }
 
+/// Whether a probe saw the site answer through the tunnel, not the broker's
+/// 502 to 504 for a site that is down behind it (Studio reads those as not
+/// responding too).
+fn probe_saw_site(health: Option<&TunnelProbe>) -> bool {
+    health.is_some_and(|probe| probe.listening && !matches!(probe.status, Some(502..=504)))
+}
+
+/// A preview whose probe saw the site is serving: an issuing grant becomes
+/// active, so the record the card and pane read says so. Every path that
+/// probes a preview goes through here, whether or not `ready` was ever called.
+async fn record_preview_serving(
+    state: &AppState,
+    grant: &mut PreviewGrant,
+    health: Option<&TunnelProbe>,
+) {
+    if !grant.record.status.trim().eq_ignore_ascii_case("issuing") || !probe_saw_site(health) {
+        return;
+    }
+    match mark_issuing_tunnel_active(state, &grant.record).await {
+        Ok(Some(updated)) => grant.record = updated,
+        Ok(None) => {}
+        Err((_, Json(error))) => warn!(
+            tunnel_id = %grant.record.tunnel_id,
+            error = %error.message,
+            "could not record the preview as active"
+        ),
+    }
+}
+
 /// A fresh probe, repeated while the broker reaches the tunnel but nothing
 /// answers yet, so a just-started client is not reported as not responding.
 async fn probe_preview_until_listening(
@@ -1378,7 +1408,7 @@ async fn get_preview(
     ensure_previews_available(&state).await?;
     let project_id = parse_required_uuid(&params.project_id, "projectId")?;
     let reader = authorize_preview_reader(&state, &headers, &project_id).await?;
-    let grant = load_preview_grant(&state.pool, &project_id, &params.preview_id).await?;
+    let mut grant = load_preview_grant(&state.pool, &project_id, &params.preview_id).await?;
     if !preview_visible_to(&state, &project_id, &grant, &reader).await? {
         return Err(not_found("preview not found"));
     }
@@ -1395,6 +1425,7 @@ async fn get_preview(
     } else {
         None
     };
+    record_preview_serving(&state, &mut grant, health.as_ref()).await;
     Ok(Json(grant.response(Some(health))))
 }
 
