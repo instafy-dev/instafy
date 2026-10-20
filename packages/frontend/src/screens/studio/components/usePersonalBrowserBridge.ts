@@ -863,6 +863,8 @@ export function usePersonalBrowserBridge({
   const preferredApprovalMode = resolvePersonalBrowserApprovalMode({ status, choice: approvalModeChoice });
 
   return {
+    /** The person's own choice; null until they pick one. */
+    approvalModeChoice,
     /** The mode a press, Resume, Retry or Let AI continue asks for. */
     preferredApprovalMode,
     setPreferredApprovalMode,

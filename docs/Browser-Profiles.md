@@ -190,11 +190,15 @@ It fills the app viewport; it does not create a different browser, profile or
 OS window. Collapse returns to the docked browser with the same page.
 
 Shared offers **Always allow routine browsing** at the first site prompt for that
-turn. Personal Browser defaults to **Allow routine browsing without asking each
-time** in Browser settings and confirms that choice once when control starts.
-Uncheck it before Resume for stricter Ask mode. Routine browsing covers ordinary
-navigation, search, clicks and non-sensitive forms without repeated site/action
-prompts; it does not change cookie sharing.
+turn. Personal Browser keeps the routine choice in Browser settings. Until the
+person chooses, it is on for a Desktop reporting approval policy version 2 and
+off (Ask) for an older one; a choice either way is kept. On a version 2 Desktop
+the setting reads **Let Octo browse and read without asking for each site**:
+reading, tabs, menus and plain links go ahead, while forms, other buttons and
+messages still ask. On an older Desktop it reads **Allow routine browsing without
+asking each time**, confirms once when control starts, and also covers ordinary
+clicks and non-sensitive forms. Uncheck it before Resume for stricter Ask mode.
+Routine browsing does not change cookie sharing.
 Recognized high-impact actions still ask and secret entry remains manual; a
 website can attach unexpected side effects to an otherwise ordinary control.
 See each mode's policy for scope and revocation.

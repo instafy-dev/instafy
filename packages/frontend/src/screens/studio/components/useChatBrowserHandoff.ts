@@ -214,7 +214,7 @@ export function useChatBrowserHandoff(options: Options) {
       const automatic = extras?.metadata?.[BROWSER_AUTO_STARTED_METADATA_KEY] === true;
       return continuePersonal(message, resolvePersonalBrowserApprovalMode({
         status: captured.personal.status,
-        choice: captured.personal.preferredApprovalMode ?? null,
+        choice: captured.personal.approvalModeChoice ?? null,
         automatic,
       }), extras);
     }

@@ -19,6 +19,7 @@ function setInputValue(input: HTMLInputElement, value: string) {
 
 function createModel(): PersonalBrowserModel {
   return {
+    approvalModeChoice: "routine",
     preferredApprovalMode: "routine",
     setPreferredApprovalMode: vi.fn(),
     agentError: null,

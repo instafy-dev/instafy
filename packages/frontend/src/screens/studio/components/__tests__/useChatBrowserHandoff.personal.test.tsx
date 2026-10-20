@@ -134,7 +134,9 @@ describe("Personal handoff with the real React browser bridge", () => {
     if (policy) nativeStatus = { ...nativeStatus, approvalPolicyVersion: policy };
     await render();
     expect(resultRef.current!.personal.preferredApprovalMode).toBe(policy === 2 ? "routine" : "ask");
+    expect(resultRef.current!.personal.approvalModeChoice).toBeNull();
     if (preferred) await act(async () => resultRef.current!.personal.setPreferredApprovalMode(preferred));
+    expect(resultRef.current!.personal.approvalModeChoice).toBe(preferred);
     let pending!: Promise<boolean>;
     await act(async () => { pending = resultRef.current!.handoff.startPersonal("Continue comparing the saved items"); });
     expect(setEnabled).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ enabled: true, approvalMode: expected }));

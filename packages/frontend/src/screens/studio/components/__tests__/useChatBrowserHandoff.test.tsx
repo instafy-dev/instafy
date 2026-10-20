@@ -151,6 +151,7 @@ describe("useChatBrowserHandoff", () => {
     // applies, exactly as for a press.
     const value = options({ transport: "personal", personal: personal({
       status: { ...personal().status!, approvalModes: ["ask", "routine"] },
+      approvalModeChoice: "ask",
       preferredApprovalMode: "ask",
     } as Partial<Options["personal"]>) });
     await render(value);
@@ -175,10 +176,16 @@ describe("useChatBrowserHandoff", () => {
     // A press keeps the person's choice on either host; hosts only go to the owner tier.
     { policy: undefined, preferred: "routine", automatic: false, expected: "routine", hosts: null },
     { policy: 2, preferred: "routine", automatic: false, expected: "routine", hosts: ["app.example.test"] },
+    // Nothing chosen yet: routine only from an owner-tier Desktop.
+    { policy: 2, preferred: null, automatic: true, expected: "routine", hosts: ["app.example.test"] },
+    { policy: undefined, preferred: null, automatic: true, expected: "ask", hosts: null },
+    { policy: undefined, preferred: null, automatic: false, expected: "ask", hosts: null },
   ] as const)("asks the Desktop for $expected (policy $policy, preference $preferred, automatic $automatic)", async ({ policy, preferred, automatic, expected, hosts }) => {
     const value = options({ transport: "personal", personal: personal({
       status: { ...personal().status!, approvalModes: ["ask", "routine"], ...(policy ? { approvalPolicyVersion: policy } : {}) },
-      preferredApprovalMode: preferred,
+      approvalModeChoice: preferred,
+      // What the bridge resolves; the handoff reads the raw choice.
+      preferredApprovalMode: preferred ?? (policy ? "routine" : "ask"),
     } as Partial<Options["personal"]>) });
     await render(value);
     void resultRef.current!.startPersonal("Open https://app.example.test", {
