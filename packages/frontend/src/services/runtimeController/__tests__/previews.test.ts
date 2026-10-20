@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const resolveControllerRequestContextMock = vi.hoisted(() => vi.fn());
+const controller = vi.hoisted(() => ({ enabled: true }));
 
 vi.mock("../core", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../core")>();
@@ -11,7 +12,7 @@ vi.mock("../core", async (importOriginal) => {
       return { status: response.status, message: `${fallback} (${response.status})`, code: body.code ?? null, details: null };
     },
     resolveControllerRequestContext: resolveControllerRequestContextMock,
-    runtimeControllerEnabled: true,
+    get runtimeControllerEnabled() { return controller.enabled; },
   };
 });
 
@@ -38,7 +39,15 @@ describe("site preview controller client", () => {
     fetchMock.mockReset();
     vi.stubGlobal("fetch", fetchMock);
   });
-  afterEach(() => { vi.unstubAllGlobals(); });
+  afterEach(() => { vi.unstubAllGlobals(); controller.enabled = true; });
+
+  it("reads a Studio with no controller as one with no previews, and asks nothing", async () => {
+    controller.enabled = false;
+    const cause = await createSitePreviewViewer(PROJECT_ID, PREVIEW_ID).catch((error: unknown) => error);
+    expect(sitePreviewProblem(cause)).toBe("unavailable");
+    await expect(getSitePreview(PROJECT_ID, PREVIEW_ID).catch((error: unknown) => sitePreviewProblem(error))).resolves.toBe("unavailable");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 
   it("reads a preview with its health and no address", async () => {
     fetchMock.mockImplementation(async () => new Response(JSON.stringify({ previewId: PREVIEW_ID, title: "Docs site", port: 4173, path: "/",
@@ -132,5 +141,15 @@ describe("site preview controller client", () => {
     fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
     await revokeSitePreviewViewer(PROJECT_ID, PREVIEW_ID, VIEWER);
     expect(fetchMock).toHaveBeenLastCalledWith(`${BASE}/view/revoke`, expect.objectContaining({ method: "POST", body: JSON.stringify({ viewerUrl: VIEWER }) }));
+    expect(fetchMock.mock.lastCall?.[1]).not.toHaveProperty("keepalive");
+  });
+
+  it("sends a revoke that can outlive the page when asked to", async () => {
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
+    await revokeSitePreviewViewer(PROJECT_ID, PREVIEW_ID, VIEWER, { keepalive: true });
+    expect(fetchMock).toHaveBeenLastCalledWith(`${BASE}/view/revoke`, expect.objectContaining({
+      method: "POST", keepalive: true, body: JSON.stringify({ viewerUrl: VIEWER }),
+      headers: expect.objectContaining({ authorization: "Bearer token-123" }),
+    }));
   });
 });

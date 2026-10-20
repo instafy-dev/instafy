@@ -203,6 +203,43 @@ describe("SitePreviewPane", () => {
     expect(mocks.revokeSitePreviewViewer).toHaveBeenCalledExactlyOnceWith("project-1", PREVIEW_ID, FIRST);
   });
 
+  it("revokes its session, in a request that outlives the page, when Studio is closed or reloaded", async () => {
+    await render();
+    await act(async () => { window.dispatchEvent(new Event("pagehide")); });
+    await flush();
+    expect(mocks.revokeSitePreviewViewer).toHaveBeenCalledExactlyOnceWith("project-1", PREVIEW_ID, FIRST, { keepalive: true });
+    // The pane is still mounted; unmounting later does not revoke the same session twice.
+    await act(async () => root.render(<></>));
+    await flush();
+    expect(mocks.revokeSitePreviewViewer).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens a new session when the page comes back from the back-forward cache", async () => {
+    await render();
+    await act(async () => { window.dispatchEvent(new Event("pagehide")); });
+    // A page shown normally (not restored) asks for nothing.
+    await act(async () => { window.dispatchEvent(Object.assign(new Event("pageshow"), { persisted: false })); });
+    await flush();
+    expect(mocks.createSitePreviewViewer).toHaveBeenCalledTimes(1);
+    await act(async () => { window.dispatchEvent(Object.assign(new Event("pageshow"), { persisted: true })); });
+    await flush();
+    expect(mocks.createSitePreviewViewer).toHaveBeenCalledTimes(2);
+    expect(frame()?.getAttribute("src")).toBe(SECOND);
+    expect(mocks.revokeSitePreviewViewer).toHaveBeenCalledTimes(1);
+  });
+
+  it("says too many previews were opened on a 429, and Reload asks again", async () => {
+    mocks.createSitePreviewViewer.mockRejectedValueOnce(apiError(429));
+    await render();
+    expect(pane().dataset.state).toBe("busy");
+    expect(frame()).toBeNull();
+    expect(problemText()).toContain("Too many previews opened");
+    expect(problemText()).not.toContain("session ended");
+    await click("[data-testid=site-preview-problem] button");
+    expect(pane().dataset.state).toBe("live");
+    expect(frame()?.getAttribute("src")).toBe(FIRST);
+  });
+
   it("revokes a session that arrives after the pane unmounted", async () => {
     let resolve!: (value: unknown) => void;
     mocks.createSitePreviewViewer.mockImplementationOnce(() => new Promise(next => { resolve = next; }));

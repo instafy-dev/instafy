@@ -364,7 +364,7 @@ import { ConversationWorkspaceViews } from "../../../workspace/ConversationWorks
 import { ConversationFileContext } from "../../../workspace/ConversationFileContext";
 import { ConversationPreviewContext, type ConversationPreviewOpener } from "../../../workspace/ConversationPreviewContext";
 import { conversationSurfaceScope, closeConversationFile, closeConversationPreview, conversationFileLabel, conversationResourceId, openConversationFile, openConversationPreview, selectConversationView, visibleSitePreviewId } from "../../../workspace/conversationSurfaces";
-import { NO_MOUNTED_SITE_PREVIEWS, SitePreviewPane, nextMountedSitePreviews, type MountedSitePreviews } from "./SitePreviewPane";
+import { SitePreviewPanel } from "./SitePreviewPanel";
 import type { OpenWorkspaceFileEventDetail } from "./useFilesPanelViewerState";
 import { FilesPanel } from "../StudioLazyPanels";
 import {
@@ -781,15 +781,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     if (conversationWorkspace && jobThread && activeConversationId) openSurfaceConversation(activeConversationId);
   }, [activeConversationId, conversationWorkspace, jobThread, openSurfaceConversation, surfaceScope, updateSurfaces]);
   const previewOpener = useMemo<ConversationPreviewOpener>(() => ({ openPreview: openSurfacePreview, visiblePreviewId }), [openSurfacePreview, visiblePreviewId]);
-  // A pane mounts the first time its preview is on screen and stays mounted while its tab is open, so moving
-  // between views does not reload the site. Closing the tab unmounts it, which revokes its viewer session.
-  const sitePreviewIds = useMemo(() => surfaces.previews.map(preview => preview.previewId), [surfaces.previews]);
-  const [mountedSitePreviews, setMountedSitePreviews] = useState<MountedSitePreviews>(NO_MOUNTED_SITE_PREVIEWS);
-  const nextMountedPreviews = nextMountedSitePreviews(mountedSitePreviews, surfaceScope, sitePreviewIds, visiblePreviewId);
-  const mountedPreviewIds = nextMountedPreviews.ids;
-  useEffect(() => {
-    if (nextMountedPreviews !== mountedSitePreviews) setMountedSitePreviews(nextMountedPreviews);
-  }, [mountedSitePreviews, nextMountedPreviews]);
   const fileRequest = useMemo(() => selectedFile ? (
     fileOpenRequest?.path === selectedFile.path ? fileOpenRequest : {
       path: selectedFile.path, projectId: activeProjectId, line: selectedFile.line, markdownView: selectedFile.markdownView,
@@ -5763,6 +5754,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     />
   );
 
+  const sitePreviewPanelId = conversationWorkspace ? "conversation-workspace-preview" : `${chatPanelId}-preview`;
   const resourceTabs: ConversationSurface[] = [
     ...(hasBrowserView ? [{
       id: "browser", label: "Browser", panelId: browserPanelId, icon: <Globe className="h-3.5 w-3.5" />,
@@ -5775,7 +5767,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     })),
     ...surfaces.previews.map(preview => ({
       id: preview.id, label: preview.title, title: preview.title,
-      panelId: conversationWorkspace ? "conversation-workspace-preview" : `${chatPanelId}-preview`, icon: <WebWindow className="h-3.5 w-3.5" />,
+      panelId: sitePreviewPanelId, icon: <WebWindow className="h-3.5 w-3.5" />,
       onClose: () => updateSurfaces(surfaceScope, state => closeConversationPreview(state, preview.id, hasBrowserView)),
     })),
   ];
@@ -6158,16 +6150,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       </div>
     ) : null}
     {surfaces.previews.length > 0 && activeProjectId ? (
-      <div id={conversationWorkspace ? "conversation-workspace-preview" : `${chatPanelId}-preview`} role="tabpanel" aria-label={selectedPreview?.title ?? "Preview"}
-        hidden={!visiblePreviewId} className={visiblePreviewId ? "h-full min-h-0" : "hidden"} style={!splitSurfaces ? { paddingBottom: composerOverlayHeight } : undefined}
-        data-testid="site-preview-panel">
-        {surfaces.previews.filter(preview => mountedPreviewIds.includes(preview.previewId)).map(preview => {
-          const shown = preview.previewId === visiblePreviewId;
-          return <div key={`${surfaceScope}:${preview.previewId}`} className={shown ? "h-full min-h-0" : "hidden"} hidden={!shown}>
-            <SitePreviewPane projectId={activeProjectId} previewId={preview.previewId} title={preview.title} visible={shown} />
-          </div>;
-        })}
-      </div>
+      <SitePreviewPanel id={sitePreviewPanelId} label={selectedPreview?.title ?? "Preview"} projectId={activeProjectId} scope={surfaceScope}
+        previews={surfaces.previews} visiblePreviewId={visiblePreviewId} style={!splitSurfaces ? { paddingBottom: composerOverlayHeight } : undefined} />
     ) : null}
   </>;
 
