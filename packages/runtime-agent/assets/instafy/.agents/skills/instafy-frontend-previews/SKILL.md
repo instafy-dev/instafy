@@ -11,18 +11,19 @@ Goal: when a user asks to build or iterate on a frontend, keep a live preview ru
 
 Use this whenever a site runs in the space and the person should see it, on any port and for any kind of site.
 
-1. Start the site (see below) and check it before you show it: `instafy preview check --port <port>` (see “Default behavior”).
+1. Start the site (see below) on 127.0.0.1 or 0.0.0.0 and check it before you show it: `instafy preview check --port <port>` (see “Default behavior”).
 2. Run `instafy preview open --port <port> --title "<short name>" --json` (add `--path /<page>` to open a sub-page).
    - It posts a "Ready to preview" card in this conversation. Only space members can open it, and nothing becomes public.
    - It prints no URL. Tell the person to open it from the card. Do not paste a preview, tunnel or localhost URL for it.
    - Running it again for the same port reuses the preview and its card. `instafy preview list` shows the previews; `instafy preview close <previewId>` closes one.
-3. Read `status` in the JSON: `live` means the card works. `not_responding` means the preview could not reach the site: check the server is up on that port, then run `instafy preview open` again. `unknown` means the server did not say; tell the person to open the card.
-4. If it fails:
-   - Exit `2`: nothing answers on the port, or the site answers with a server error. Start or fix the server, then run it again.
+3. Allow the preview host before the person opens the card. Dev servers that check the `Host` header (Vite dev and `vite preview`, webpack-dev-server, Angular) show "Blocked request" to everyone who opens the card, and you cannot see that page yourself. So the first time you open a preview for such a server, add the `viewerHostSuffix` from the JSON, with a leading dot and without any `:port`, to its allowed hosts (for Vite, `server.allowedHosts` and `preview.allowedHosts`; webpack-dev-server and Angular have an `allowedHosts` option too). Restart the server on the same port and run the same `instafy preview open` again before you tell the person to open the card. Static servers such as `python -m http.server` need nothing.
+4. Read `status` in the JSON: `live` means the card works. `not_responding` means the preview could not reach the site: check the server is up on that port, then run `instafy preview open` again. `unknown` means the server did not say; tell the person to open the card.
+5. If it fails:
+   - Exit `2`: nothing answers on 127.0.0.1 at that port, or the site answers with a server error. Start or fix the server, then run it again. If the message says the site answers only on [::1], it is running: do not start a second one; bind it to 127.0.0.1 or 0.0.0.0 (for Vite, `--host 127.0.0.1`), restart it, then run it again.
    - Exit `3`: the port is not allowed. Serve the site on another port from 1024 to 65535.
    - Exit `5` ("Previews are not available on this server"), or `instafy preview` is not a command here: previews are off. Use the flow below instead: post the local URL, and create a public tunnel only when the person asks for a shareable link, after the consent gate.
    - Exit `1` (any other error): run it once more. If it fails again, tell the person the error in one line and post the local URL instead. Do not create a public tunnel unless they ask for one.
-5. If the card's page says "Blocked request" or "host is not allowed", the dev server rejects the preview host. Add the `viewerHostSuffix` from the JSON output, with a leading dot, to the server's allowed hosts (for Vite, `server.allowedHosts`), restart the server, and run `instafy preview open` again.
+6. If the person still reports "Blocked request" or "host is not allowed" on the card's page, do step 3 for that server.
 
 ## Consent gates (required)
 

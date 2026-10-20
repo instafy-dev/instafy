@@ -237,4 +237,72 @@ describe("tunnel (detached + manage commands)", () => {
       fs.rmSync(homeDir, { recursive: true, force: true });
     }
   }, 30000);
+
+  it("stop never signals a process that only mentions the tunnel's config path", async () => {
+    if (process.platform === "win32") return;
+    const projectId = randomUUID();
+    const { server, revokeCalled } = startMockController(projectId);
+    await once(server, "listening");
+    const address = server.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+    const controllerUrl = `http://127.0.0.1:${port}`;
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-cli-home-"));
+    const viewerDir = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-viewer-"));
+    const viewer = path.join(viewerDir, "viewer");
+    fs.writeFileSync(viewer, "#!/usr/bin/env bash\nsleep 60\n", { mode: 0o755 });
+    const children: ReturnType<typeof spawn>[] = [];
+    const clientPids: number[] = [];
+    try {
+      for (const kind of ["argument", "dash-c"] as const) {
+        const start = await execCli(
+          ["tunnel", "start", "--space", projectId, "--server-url", controllerUrl, "--access-token", "test-token", "--rathole-bin", makeStubRathole(), "--json"],
+          undefined,
+          homeDir,
+        );
+        expect(start.code, start.stderr).toBe(0);
+        const started = JSON.parse(start.stdout) as { pid: number; workdir: string };
+        clientPids.push(started.pid);
+        const configPath = path.join(started.workdir, "rathole.toml");
+        // `node -e … <config>` names the path; `viewer -c <config>` has the client's arguments but is not rathole.
+        const stranger =
+          kind === "argument"
+            ? spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)", configPath], { stdio: "ignore", detached: true })
+            : spawn(viewer, ["-c", configPath], { stdio: "ignore", detached: true });
+        children.push(stranger);
+        await new Promise((resolve) => setTimeout(resolve, 500));
+
+        const stateFile = path.join(homeDir, ".instafy", "cli-tunnel-state.json");
+        const state = JSON.parse(fs.readFileSync(stateFile, "utf8")) as { tunnels: Array<{ pid: number }> };
+        state.tunnels[0]!.pid = stranger.pid!;
+        fs.writeFileSync(stateFile, JSON.stringify(state));
+
+        const stopped = await execCli(
+          ["tunnel", "stop", "tunnel-1", "--server-url", controllerUrl, "--access-token", "test-token"],
+          undefined,
+          homeDir,
+        );
+        expect(stopped.code, stopped.stderr).toBe(0);
+        expect(revokeCalled()).toBe(true);
+        expect(() => process.kill(stranger.pid!, 0), kind).not.toThrow();
+      }
+    } finally {
+      for (const child of children) {
+        try {
+          process.kill(-child.pid!, "SIGKILL");
+        } catch {
+          // already gone
+        }
+      }
+      for (const pid of clientPids) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // already gone
+        }
+      }
+      server.close();
+      fs.rmSync(homeDir, { recursive: true, force: true });
+      fs.rmSync(viewerDir, { recursive: true, force: true });
+    }
+  }, 30000);
 });
