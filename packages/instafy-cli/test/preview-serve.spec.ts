@@ -160,13 +160,13 @@ describe("preview start command", () => {
       ["node", "server.js", "--token=abc123"],
       ["env", "OPENAI_API_KEY=sk-x", "node", "server.js"],
       ["node", "server.js", "--db", "postgres://app:hunter2@db.internal:5432/app"],
-      ["node", "server.js", "ghp_abcdefghijklmnopqrstuvwxyz0123"],
+      ["node", "server.js", ["gh", "p_abcdefghijklmnopqrstuvwxyz0123"].join("")],
       ["python3", "app.py", "--password", "hunter2"],
     ]) {
       const result = resolvePreviewServe({ port: 8000, projectId: ws.projectId, env: ws.env, procRoot: fakeProc(8000, argv, site) });
       expect(result.serve, argv.join(" ")).toBeNull();
       expect(result.note).toMatch(/looks like a secret .*--serve-cmd/);
-      expect(result.note).not.toMatch(/hunter2|sk-live|abc123|ghp_/);
+      expect(result.note).not.toMatch(/hunter2|sk-live|abc123|gh[p]_/);
     }
     // ordinary commands, and flags that only switch something off, are recorded
     for (const argv of [

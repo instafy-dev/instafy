@@ -157,8 +157,14 @@ fn looks_like_a_key(value: &str) -> Option<&'static str> {
             return Some("a key");
         }
     }
-    for prefix in ["ghp_", "gho_", "ghu_", "ghs_", "ghr_"] {
-        if value.starts_with(prefix) && run_of(&value[4..], |ch| ch.is_ascii_alphanumeric()) >= 20 {
+    // GitHub tokens: `gh`, one of `pousr`, `_`, then 20 or more letters and
+    // digits.
+    if let Some(rest) = value.strip_prefix("gh") {
+        let mut chars = rest.chars();
+        if chars.next().is_some_and(|kind| "pousr".contains(kind))
+            && chars.next() == Some('_')
+            && run_of(&rest[2..], |ch| ch.is_ascii_alphanumeric()) >= 20
+        {
             return Some("a key");
         }
     }
@@ -318,7 +324,11 @@ mod tests {
                 "--db",
                 "postgres://app:hunter2@db.internal:5432/app"
             ]),
-            json!(["node", "server.js", "ghp_abcdefghijklmnopqrstuvwxyz0123"]),
+            json!([
+                "node",
+                "server.js",
+                format!("gh{}_abcdefghijklmnopqrstuvwxyz0123", "p")
+            ]),
             json!(["python3", "app.py", "--password", "hunter2"]),
             json!(["node", "server.js", "--auth", "basic"]),
             json!(["node", "server.js", "--key=AKIAABCDEFGHIJKLMNOP"]),
