@@ -23379,11 +23379,25 @@ async fn conversation_message_dispatch_uses_one_pool_connection() -> anyhow::Res
     })??;
 
     let status = response.status();
+    let server_timing = response
+        .headers()
+        .get("server-timing")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
     let body = to_bytes(response.into_body(), usize::MAX).await?;
     if status != StatusCode::OK {
         anyhow::bail!(
             "conversation message dispatch failed with status {status}: {}",
             String::from_utf8_lossy(&body)
+        );
+    }
+    // The send reports where its time went. `tx` is the dispatch transaction,
+    // the part of a job's queue wait that no runtime poll can shorten.
+    for phase in ["auth", "checkout", "lookup", "pre", "tx", "post", "total"] {
+        anyhow::ensure!(
+            server_timing.contains(&format!("{phase};dur=")),
+            "Server-Timing is missing {phase}: {server_timing:?}"
         );
     }
     let response: serde_json::Value = serde_json::from_slice(&body)?;
@@ -23399,6 +23413,20 @@ async fn conversation_message_dispatch_uses_one_pool_connection() -> anyhow::Res
             .ok_or_else(|| anyhow::anyhow!("Personal Browser response omitted jobId"))?,
     )?;
     let connection = pool.get().await?;
+    // A send still leaves an org that had none with exactly one default
+    // subscription. Only the project ensure before the dispatch transaction
+    // creates it now; this fails if that goes too, or if a second one appears.
+    let subscriptions: i64 = connection
+        .query_one(
+            "SELECT count(*) FROM org_subscriptions WHERE org_id = $1",
+            &[&org_id],
+        )
+        .await?
+        .get(0);
+    assert_eq!(
+        subscriptions, 1,
+        "the org keeps exactly one default subscription"
+    );
     let job = connection
         .query_one(
             "SELECT target_runtime_id, payload->'metadata' AS metadata
