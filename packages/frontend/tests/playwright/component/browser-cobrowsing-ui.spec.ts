@@ -67,58 +67,71 @@ async function mountPersonalControls(page: Page) {
   await expect(page.getByTestId("personal-browser-chrome")).toBeVisible();
 }
 
-for (const width of [360, 900]) {
-  test(`expands and waits for confirmed takeover before continuing at ${width}px`, async ({ page }, testInfo) => {
-    await page.setViewportSize({ width, height: 800 });
-    const errors: string[] = [];
-    page.on("pageerror", (error) => errors.push(error.message));
-    await mountPersonalControls(page);
-    const resume = page.getByRole("button", { name: "Resume agent control", exact: true });
-    await expect(resume).toHaveCount(1);
-    await expect(resume).toHaveAttribute("data-testid", "personal-browser-agent-status");
-    await expect(resume).toHaveText("Resume");
-    await resume.focus();
-    expect((await resume.boundingBox())!.height).toBeGreaterThanOrEqual(width <= 540 ? 40 : 32);
-    await page.getByRole("button", { name: "Browser settings", exact: true }).click();
-    await expect(page.getByTestId("personal-browser-routine-approval")).toBeChecked();
-    await page.keyboard.press("Escape");
-    await resume.focus();
-    await resume.press("Enter");
-    await expect.poll(() => page.evaluate(() => (window as { __lastApprovalMode?: string }).__lastApprovalMode)).toBe("routine");
-    await page.getByTestId("browser-human-input-request").click();
-    await expect(page.getByRole("dialog", { name: "Take over browser", exact: true })).toBeVisible();
-    await page.getByTestId("browser-human-input-takeover").click();
-    await expect(page.getByTestId("browser-human-input-controls")).toContainText("Waiting for agent control to stop");
-    await expect(page.getByTestId("browser-human-input-continue")).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Resume agent control", exact: true })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Retry agent control", exact: true })).toHaveCount(0);
+for (const hasTouch of [false, true]) {
+  test.describe(hasTouch ? "coarse pointer" : "fine pointer", () => {
+    test.use({ hasTouch });
+    for (const width of [360, 900]) {
+      test(`expands and waits for confirmed takeover before continuing at ${width}px`, async ({ page }, testInfo) => {
+        await page.setViewportSize({ width, height: 800 });
+        const errors: string[] = [];
+        page.on("pageerror", (error) => errors.push(error.message));
+        await mountPersonalControls(page);
+        expect(await page.evaluate(() => ({
+          fine: matchMedia("(pointer: fine)").matches,
+          coarse: matchMedia("(pointer: coarse)").matches,
+        }))).toEqual({ fine: !hasTouch, coarse: hasTouch });
+        const resume = page.getByRole("button", { name: "Resume agent control", exact: true });
+        await expect(resume).toHaveCount(1);
+        await expect(resume).toHaveAttribute("data-testid", "personal-browser-agent-status");
+        await expect(resume).toHaveText("Resume");
+        await resume.focus();
+        // Control density follows the pointer, including a narrow mouse window
+        // and a wide touch screen; viewport width does not choose the target size.
+        const resumeBounds = (await resume.boundingBox())!;
+        expect(resumeBounds.height).toBe(hasTouch ? 44 : 32);
+        if (hasTouch) expect(resumeBounds.width).toBeGreaterThanOrEqual(44);
+        await page.getByRole("button", { name: "Browser settings", exact: true }).click();
+        await expect(page.getByTestId("personal-browser-routine-approval")).toBeChecked();
+        await page.keyboard.press("Escape");
+        await resume.focus();
+        await resume.press("Enter");
+        await expect.poll(() => page.evaluate(() => (window as { __lastApprovalMode?: string }).__lastApprovalMode)).toBe("routine");
+        await page.getByTestId("browser-human-input-request").click();
+        await expect(page.getByRole("dialog", { name: "Take over browser", exact: true })).toBeVisible();
+        await page.getByTestId("browser-human-input-takeover").click();
+        await expect(page.getByTestId("browser-human-input-controls")).toContainText("Waiting for agent control to stop");
+        await expect(page.getByTestId("browser-human-input-continue")).toHaveCount(0);
+        await expect(page.getByRole("button", { name: "Resume agent control", exact: true })).toHaveCount(0);
+        await expect(page.getByRole("button", { name: "Retry agent control", exact: true })).toHaveCount(0);
 
-    await page.getByTestId("personal-browser-fullscreen-toggle").click();
-    await expect(page.getByRole("dialog", { name: "Personal Browser", exact: true })).toBeVisible();
-    await expect(page.getByTestId("browser-human-input-controls")).toContainText("Waiting for agent control to stop");
-    await page.evaluate(() => (window as unknown as { __confirmNativeDrain: () => void }).__confirmNativeDrain());
-    await expect(page.getByTestId("browser-human-input-continue")).toBeEnabled();
-    await expect(page.getByRole("button", { name: "Resume agent control", exact: true })).toHaveCount(0);
-    await expect(page.getByTestId("browser-human-input-continue")).toHaveText("Let AI continue");
-    const screenshotPath = testInfo.outputPath(`personal-takeover-expanded-${width}px.png`);
-    await page.screenshot({ animations: "disabled", path: screenshotPath });
-    await testInfo.attach(`Expanded Personal takeover at ${width}px`, { contentType: "image/png", path: screenshotPath });
-    await page.getByTestId("personal-browser-fullscreen-toggle").click();
-    await expect(page.getByRole("dialog", { name: "Personal Browser", exact: true })).toHaveCount(0);
-    await expect(page.getByTestId("browser-human-input-continue")).toBeVisible();
-    await page.evaluate(() => { (window as { __failNextContinuation?: boolean }).__failNextContinuation = true; });
-    await page.getByTestId("browser-human-input-continue").click();
-    await expect(page.getByTestId("browser-human-input-controls")).toContainText("browser task was not sent");
-    await expect(page.getByRole("button", { name: "Resume agent control", exact: true })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Retry agent control", exact: true })).toHaveCount(0);
-    expect(await page.evaluate(() => (window as { __controlCalls?: boolean[] }).__controlCalls)).toEqual([true, false]);
-    expect(await page.evaluate(() => (window as { __retryCalls?: number }).__retryCalls ?? 0)).toBe(0);
-    await expect(page.getByTestId("browser-human-input-continue")).toBeEnabled();
-    await page.getByTestId("browser-human-input-continue").click();
-    await expect.poll(() => page.evaluate(() => (window as { __continuation?: string }).__continuation)).toContain("Take a fresh snapshot");
-    expect(await page.evaluate(() => (window as { __continuationAttempts?: number }).__continuationAttempts)).toBe(2);
-    await expect(page.getByTestId("browser-human-input-request")).toBeVisible();
-    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
-    expect(errors).toEqual([]);
+        await page.getByTestId("personal-browser-fullscreen-toggle").click();
+        await expect(page.getByRole("dialog", { name: "Personal Browser", exact: true })).toBeVisible();
+        await expect(page.getByTestId("browser-human-input-controls")).toContainText("Waiting for agent control to stop");
+        await page.evaluate(() => (window as unknown as { __confirmNativeDrain: () => void }).__confirmNativeDrain());
+        await expect(page.getByTestId("browser-human-input-continue")).toBeEnabled();
+        await expect(page.getByRole("button", { name: "Resume agent control", exact: true })).toHaveCount(0);
+        await expect(page.getByTestId("browser-human-input-continue")).toHaveText("Let AI continue");
+        const screenshotPath = testInfo.outputPath(`personal-takeover-expanded-${width}px.png`);
+        await page.screenshot({ animations: "disabled", path: screenshotPath });
+        await testInfo.attach(`Expanded Personal takeover at ${width}px`, { contentType: "image/png", path: screenshotPath });
+        await page.getByTestId("personal-browser-fullscreen-toggle").click();
+        await expect(page.getByRole("dialog", { name: "Personal Browser", exact: true })).toHaveCount(0);
+        await expect(page.getByTestId("browser-human-input-continue")).toBeVisible();
+        await page.evaluate(() => { (window as { __failNextContinuation?: boolean }).__failNextContinuation = true; });
+        await page.getByTestId("browser-human-input-continue").click();
+        await expect(page.getByTestId("browser-human-input-controls")).toContainText("browser task was not sent");
+        await expect(page.getByRole("button", { name: "Resume agent control", exact: true })).toHaveCount(0);
+        await expect(page.getByRole("button", { name: "Retry agent control", exact: true })).toHaveCount(0);
+        expect(await page.evaluate(() => (window as { __controlCalls?: boolean[] }).__controlCalls)).toEqual([true, false]);
+        expect(await page.evaluate(() => (window as { __retryCalls?: number }).__retryCalls ?? 0)).toBe(0);
+        await expect(page.getByTestId("browser-human-input-continue")).toBeEnabled();
+        await page.getByTestId("browser-human-input-continue").click();
+        await expect.poll(() => page.evaluate(() => (window as { __continuation?: string }).__continuation)).toContain("Take a fresh snapshot");
+        expect(await page.evaluate(() => (window as { __continuationAttempts?: number }).__continuationAttempts)).toBe(2);
+        await expect(page.getByTestId("browser-human-input-request")).toBeVisible();
+        expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+        expect(errors).toEqual([]);
+      });
+    }
   });
 }

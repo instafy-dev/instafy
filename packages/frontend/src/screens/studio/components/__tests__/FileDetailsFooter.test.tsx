@@ -46,11 +46,13 @@ describe("FileDetailsFooter", () => {
     expect(container.textContent).not.toContain("October 21");
     await open();
     expect(dialog()?.textContent).toContain("October 21, 2026");
+    await vi.waitFor(() => expect(dialog()?.contains(document.activeElement)).toBe(true));
     await act(async () => nativeBack?.());
-    await act(async () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
     expect(dialog()).toBeNull();
     expect(leavePage).not.toHaveBeenCalled();
-    expect(document.activeElement).toBe(trigger());
+    // React Aria restores the trigger in a frame scheduled during focus-scope
+    // teardown. Wait for that behavior rather than racing it with our own frame.
+    await vi.waitFor(() => expect(document.activeElement).toBe(trigger()));
     expect(container.querySelector('[role="status"]')?.textContent).toBe("Unsaved changes");
     await act(async () => nativeBack?.());
     expect(leavePage).toHaveBeenCalledOnce();
