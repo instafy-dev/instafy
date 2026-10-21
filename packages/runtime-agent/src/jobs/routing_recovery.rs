@@ -320,14 +320,14 @@ mod tests {
                 "call_1",
                 "curl -s http://127.0.0.1:8080/health | head -c 2000",
             ),
-            ("call_2", "ls -la /workspace 2>/dev/null | head -40"),
+            ("call_2", "ls -la /workspace | head -40"),
             ("call_3", grep_rollouts),
             ("call_4", grep_rollouts),
         ]);
         // Job 66179ac6: one long-running read, polled until it completed.
         let one_read = live_attempt(&[(
             "call_1",
-            "grep -rh 'missing_command_observation' ~/.codex/sessions/2026/10/21 2>/dev/null | tail -n 2",
+            "grep -rh 'missing_command_observation' ~/.codex/sessions/2026/10/21 | tail -n 2",
         )]);
         for events in [three_reads, one_read] {
             let (observed, receipts) =
@@ -340,6 +340,21 @@ mod tests {
             assert!(!observed.context_retrieval);
             assert!(plan(required, observed, Gate::default()).is_none());
         }
+        // The run records keep no command text. A read that hid its errors
+        // before a pipe is still retried, but it did run a program, so the
+        // first attempt's answer can stand if the retry brings none.
+        let hidden_errors = extract_codex_messages(&live_attempt(&[(
+            "call_1",
+            "grep -rh 'missing_command_observation' ~/.codex/sessions 2>/dev/null | tail -n 2",
+        )]));
+        let (observed, _) = routing_evidence_with_receipts(None, &hidden_errors);
+        assert_eq!(
+            plan(required, observed, Gate::default()).map(Plan::reason),
+            Some("missing_command_observation")
+        );
+        assert!(
+            super::super::routing_evidence::ran_program_beyond_literal_output(&hidden_errors, true)
+        );
         // A turn that ran nothing, or only printed text, is still retried.
         for events in [
             Vec::new(),

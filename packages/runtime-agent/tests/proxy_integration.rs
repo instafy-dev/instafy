@@ -35,6 +35,9 @@ use uuid::Uuid;
 static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "proxy_integration/evidence_retry.rs"]
+mod evidence_retry;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "proxy_integration/isolated_tool_workers.rs"]
 mod isolated_tool_workers;
 #[path = "proxy_integration/native_compaction.rs"]

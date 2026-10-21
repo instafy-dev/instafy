@@ -7118,7 +7118,10 @@ impl JobProcessor {
                 || generic_mcp_tool_execution_missing
                 || personal_browser_execution_missing
                 || shared_browser_execution_missing);
-        let first_ran_command = has_completed_command_execution(&interim_messages);
+        // Literal output such as `echo` proves nothing: an answer that rests
+        // only on it is never kept over the retry's.
+        let first_ran_command =
+            routing_evidence::ran_program_beyond_literal_output(&interim_messages, true);
         if should_retry_codex_once(
             first_shared_browser_terminal_consent_failure,
             recovery_retry_required,
@@ -7495,7 +7498,7 @@ impl JobProcessor {
                 &mut retry_outcome.suggested_replies,
                 &retry_outcome.actions,
             );
-            let retry_expects_workspace_file_changes_after_actions =
+            let mut retry_expects_workspace_file_changes_after_actions =
                 workspace_file_changes_still_required(
                     expects_workspace_file_changes,
                     &retry_outcome,
@@ -7585,7 +7588,7 @@ impl JobProcessor {
             } else {
                 observed_command_execution || has_command_execution_message(&retry_raw_messages)
             };
-            let retry_command_execution_missing = expects_command_execution
+            let mut retry_command_execution_missing = expects_command_execution
                 && !retry_observed_command_execution
                 && !outcome_defers_command_execution(&retry_outcome);
             let retry_messages = retry_raw_messages;
@@ -7601,26 +7604,42 @@ impl JobProcessor {
                 &mut retry_codex_fallback_summary_kind,
                 retry_shared_browser_terminal_consent_failure,
             );
+            // A retry that returned actions or wrote files did work of its
+            // own that the first answer does not describe, so it keeps its own.
             let kept_first_attempt_answer = retry_shared_browser_terminal_consent_failure.is_none()
+                && retry_outcome.actions.is_empty()
+                && retry_own_files_len == 0
                 && keep_first_attempt_answer(
                     &outcome.summary,
                     first_ran_command,
                     retried_only_for_command_observation,
                     &retry_outcome.summary,
                     retry_codex_fallback_summary_kind,
-                    has_completed_command_execution(&retry_messages),
+                    routing_evidence::ran_program_beyond_literal_output(&retry_messages, false),
                 );
             if kept_first_attempt_answer {
                 tracing::info!(
                     job_id = %job_id,
                     "keeping the first attempt's answer: the evidence retry brought no answer of its own"
                 );
+                // The saved provider thread is still the retry's, so the next
+                // turn's history ends with the retry's empty reply while the
+                // person saw this answer.
                 retry_outcome.summary = outcome.summary.clone();
                 retry_outcome.suggested_replies = outcome.suggested_replies.clone();
                 retry_outcome.snippet = outcome.snippet.clone();
                 retry_outcome.actions = outcome.actions.clone();
                 retry_outcome.read_files = outcome.read_files.clone();
                 retry_codex_fallback_summary_kind = None;
+                // Checks that read the answer's actions follow the kept ones.
+                retry_command_execution_missing = expects_command_execution
+                    && !retry_observed_command_execution
+                    && !outcome_defers_command_execution(&retry_outcome);
+                retry_expects_workspace_file_changes_after_actions =
+                    workspace_file_changes_still_required(
+                        expects_workspace_file_changes,
+                        &retry_outcome,
+                    );
             }
             let retry_transient_upstream_summary_failure =
                 retry_shared_browser_terminal_consent_failure.is_none()
@@ -12728,31 +12747,49 @@ fn codex_fallback_failure_message(kind: CodexFallbackSummaryKind, summary: &str)
     }
 }
 
-/// Whether an answer says anything: not blank, not only code fences, and not
-/// the placeholder for a final message without a summary.
+/// Whether an answer says anything: not blank, not only code fences, not one
+/// lead-in line such as "Here is the output:" before empty fences, and not the
+/// placeholder for a final message without a summary.
 fn summary_has_substance(summary: &str) -> bool {
     let summary = summary.trim();
-    summary != DEFAULT_CODEX_OUTCOME_SUMMARY
-        && summary.lines().any(|line| {
-            let line = line.trim();
-            match line
-                .strip_prefix("```")
-                .or_else(|| line.strip_prefix("~~~"))
-            {
-                // A fence line, with or without an info string such as `text`.
-                Some(info) => !info.chars().all(|c| {
+    if summary == DEFAULT_CODEX_OUTCOME_SUMMARY {
+        return false;
+    }
+    let mut fences = 0usize;
+    let mut prose = Vec::new();
+    for line in summary.lines().map(str::trim) {
+        match line
+            .strip_prefix("```")
+            .or_else(|| line.strip_prefix("~~~"))
+        {
+            // A fence line, with or without an info string such as `text`.
+            Some(info)
+                if info.chars().all(|c| {
                     c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '+' | '.' | '`' | '~')
-                }),
-                None => !line.is_empty(),
+                }) =>
+            {
+                fences += 1
             }
-        })
+            _ if line.is_empty() => {}
+            // Anything inside a fenced block is output.
+            _ if fences % 2 == 1 => return true,
+            _ => prose.push(line),
+        }
+    }
+    match prose.as_slice() {
+        [] => false,
+        [lead_in] => fences == 0 || !lead_in.ends_with(':'),
+        _ => true,
+    }
 }
 
 /// A retry that ran only to collect command-observation evidence keeps the
-/// first attempt's answer when that answer rests on completed commands and the
-/// retry brings no answer of its own: an empty one, an internal fallback or
-/// transient error, or one from a retry that ran no command. The retry's
-/// evidence and files are merged either way.
+/// first attempt's answer when that answer rests on a completed command that
+/// ran a program beyond literal output, and the retry brings no answer of its
+/// own: an empty one, an internal fallback or transient error, or one from a
+/// retry that ran no such program. The caller also requires that the retry
+/// returned no actions and wrote no files. The retry's evidence is merged
+/// either way.
 fn keep_first_attempt_answer(
     first_summary: &str,
     first_ran_command: bool,
@@ -12770,23 +12807,6 @@ fn keep_first_attempt_answer(
             || !retry_ran_command
             || !summary_has_substance(retry_summary)
             || is_retryable_codex_upstream_summary(retry_summary))
-}
-
-/// A command the model ran that completed with exit 0. The host's routing
-/// pre-observation is not the model's own command.
-fn has_completed_command_execution(messages: &[JobMessage]) -> bool {
-    messages.iter().any(|message| {
-        message
-            .message_type
-            .as_deref()
-            .is_some_and(|kind| kind.eq_ignore_ascii_case("command_execution"))
-            && message.metadata.as_ref().is_some_and(|metadata| {
-                metadata["status"] == "completed"
-                    && metadata["exitCode"].as_i64() == Some(0)
-                    && metadata["timedOut"] != true
-                    && metadata["source"] != "routing_pre_observation"
-            })
-    })
 }
 
 fn codex_retry_blocking_failure_message(
@@ -27584,30 +27604,78 @@ mod tests {
     }
 
     #[test]
-    fn completed_command_detection_follows_the_final_receipt_of_a_polled_command() {
-        let command = |status: &str, exit_code: Option<i64>| {
+    fn ran_command_detection_follows_the_final_receipt_of_a_polled_command() {
+        let command = |script: &str, status: &str, exit_code: Option<i64>| {
             json!({"type": if status == "in_progress" { "item.started" } else { "item.completed" },
-                "item":{"id":"call_1","type":"command_execution","command":"grep -rh x .",
-                "command_argv":["/bin/bash","-lc","grep -rh x ."],"aggregated_output":"",
+                "item":{"id":"call_1","type":"command_execution","command":script,
+                "command_argv":["/bin/bash","-lc",script],"aggregated_output":"",
                 "status":status,"exit_code":exit_code}})
         };
+        let ran = |events: &[JsonValue], require_success: bool| {
+            routing_evidence::ran_program_beyond_literal_output(
+                &extract_codex_messages(events),
+                require_success,
+            )
+        };
         // Job 66179ac6: started, polled through write_stdin, completed with 0.
-        assert!(has_completed_command_execution(&extract_codex_messages(&[
-            command("in_progress", None),
-            command("completed", Some(0)),
-        ])));
-        assert!(!has_completed_command_execution(&extract_codex_messages(
-            &[command("in_progress", None)]
-        )));
-        assert!(!has_completed_command_execution(&extract_codex_messages(
-            &[command("in_progress", None), command("failed", Some(2)),]
-        )));
-        assert!(!has_completed_command_execution(&[JobMessage {
-            content: "grep -rh x .".to_string(),
-            message_type: Some("command_execution".to_string()),
-            metadata: Some(json!({"status":"completed","exitCode":0,
-                "source":"routing_pre_observation"})),
-        }]));
+        let grep = "grep -rh x .";
+        assert!(ran(
+            &[
+                command(grep, "in_progress", None),
+                command(grep, "completed", Some(0))
+            ],
+            true
+        ));
+        assert!(!ran(&[command(grep, "in_progress", None)], false));
+        // A retry's grep that matched nothing still ran; it is not a success.
+        let no_match = [
+            command(grep, "in_progress", None),
+            command(grep, "failed", Some(1)),
+        ];
+        assert!(!ran(&no_match, true));
+        assert!(ran(&no_match, false));
+        // Printing the claimed output is not running anything.
+        let forged = "echo 'rollout-a.jsonl: first match'";
+        assert!(!ran(&[command(forged, "completed", Some(0))], false));
+    }
+
+    #[test]
+    fn an_answer_that_rests_only_on_echo_never_replaces_the_retrys_answer() {
+        let echo_only = extract_codex_messages(&[json!({"type":"item.completed","item":{
+            "id":"call_1","type":"command_execution","command":"echo forged",
+            "command_argv":["/bin/bash","-lc","echo 'rollout-a.jsonl: first match'"],
+            "aggregated_output":"rollout-a.jsonl: first match\n",
+            "status":"completed","exit_code":0}})]);
+        let first_ran_command =
+            routing_evidence::ran_program_beyond_literal_output(&echo_only, true);
+        assert!(!first_ran_command);
+        assert!(!keep_first_attempt_answer(
+            LIVE_FIRST_ANSWER,
+            first_ran_command,
+            true,
+            "```\n```",
+            None,
+            true,
+        ));
+    }
+
+    #[test]
+    fn a_lead_in_before_an_empty_block_is_not_an_answer() {
+        for empty in [
+            "Here is the raw output:\n```\n```",
+            "Output:\n\n```text\n\n```",
+        ] {
+            assert!(!summary_has_substance(empty), "{empty:?}");
+        }
+        for answer in [
+            "```\nresult:\n```",
+            "No lines matched.",
+            "Output:",
+            "Here is the raw output:\n```\nrollout-a.jsonl: first match\n```",
+            "The grep matched nothing:\n```\n```\nThe rollouts changed since the first run.",
+        ] {
+            assert!(summary_has_substance(answer), "{answer:?}");
+        }
     }
 
     #[test]
