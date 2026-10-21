@@ -8,5 +8,6 @@ pub mod credential_lease;
 mod incomplete_response;
 pub mod proxy;
 pub mod proxy_auth;
+mod stream_passthrough;
 mod upstream_error;
 mod usage;

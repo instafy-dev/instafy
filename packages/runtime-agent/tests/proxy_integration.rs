@@ -44,6 +44,8 @@ mod native_images;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "proxy_integration/native_subagents.rs"]
 mod native_subagents;
+#[path = "proxy_integration/proxy_stream.rs"]
+mod proxy_stream;
 
 async fn env_guard() -> tokio::sync::MutexGuard<'static, ()> {
     ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().await

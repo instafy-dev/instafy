@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -78,6 +79,8 @@ pub struct CodexClient {
     send_hook: Option<SendHook>,
     user_agent: String,
     context_controls: Option<ScopedResponseContext>,
+    /// Whether the request in flight asks the upstream for a stream it passes on as it arrives.
+    stream_upstream: bool,
 }
 
 pub(crate) fn conversation_id_enabled() -> bool {
@@ -203,6 +206,7 @@ impl CodexClient {
             send_hook: None,
             user_agent: format!("openai-proxy-server/{}", env!("CARGO_PKG_VERSION")),
             context_controls: None,
+            stream_upstream: false,
         })
     }
 
@@ -339,6 +343,23 @@ impl CodexClient {
     }
 
     pub async fn complete_with_input(&mut self, input_items: &[Value]) -> Result<CodexCompletion> {
+        match self.respond_with_input(input_items, false).await? {
+            CodexReply::Complete(completion) => Ok(completion),
+            CodexReply::Stream(_) => {
+                unreachable!("a request that does not pass through never streams")
+            }
+        }
+    }
+
+    /// [`Self::complete_with_input`], except that with `pass_through` an upstream that streams
+    /// ([`Self::upstream_streams`]) answers with its events as they arrive. The events are read
+    /// up to the first one with output before this returns, so a failure the upstream reports
+    /// before any output is an error here, exactly as for a whole completion.
+    pub(crate) async fn respond_with_input(
+        &mut self,
+        input_items: &[Value],
+        pass_through: bool,
+    ) -> Result<CodexReply> {
         if input_items.is_empty() {
             bail!("request must include at least one input item");
         }
@@ -362,6 +383,9 @@ impl CodexClient {
             None
         };
         let upstream_wire_api = wire_api_for(&self.credentials);
+        self.stream_upstream = pass_through
+            && upstream_wire_api == UpstreamWireApi::Responses
+            && self.upstream_streams();
         headers.insert(USER_AGENT, HeaderValue::from_str(&self.user_agent)?);
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         if self.credentials.is_chatgpt() {
@@ -493,13 +517,26 @@ impl CodexClient {
             None
         };
 
+        if self.stream_upstream
+            && (self.credentials.is_chatgpt() || is_event_stream(response.headers()))
+        {
+            let mut events = UpstreamEventStream::new(
+                response,
+                self.credentials.is_chatgpt(),
+                rate_limits,
+                turn_state,
+            );
+            events.read_until_output().await?;
+            return Ok(CodexReply::Stream(events));
+        }
+
         if self.credentials.is_chatgpt() {
             let body = read_chatgpt_stream(response).await?;
             let mut completion =
                 parse_completion(body).context(UpstreamFailure::InvalidResponse)?;
             completion.rate_limits = rate_limits;
             completion.turn_state = turn_state;
-            return Ok(completion);
+            return Ok(CodexReply::Complete(completion));
         }
 
         let body: Value = response
@@ -523,7 +560,23 @@ impl CodexClient {
         };
         completion.rate_limits = rate_limits;
         completion.turn_state = turn_state;
-        Ok(completion)
+        Ok(CodexReply::Complete(completion))
+    }
+
+    /// Whether this client's upstream sends a streaming response's events as they happen: a
+    /// ChatGPT login's Codex endpoint, and the OpenAI API (an API key without an endpoint of its
+    /// own goes there, or to the `CODEX_OPENAI_ENDPOINT` set in its place). Other endpoints keep
+    /// answering with one JSON body.
+    fn upstream_streams(&self) -> bool {
+        match &self.credentials {
+            Credentials::ChatGpt { .. } => true,
+            Credentials::ApiKey { endpoint: None, .. } => true,
+            Credentials::ApiKey {
+                endpoint: Some(endpoint),
+                ..
+            } => endpoint.to_ascii_lowercase().contains("api.openai.com"),
+            Credentials::GeminiCodeAssist { .. } => false,
+        }
     }
 
     /// The body one request goes upstream with on `upstream_wire_api`, after
@@ -609,6 +662,9 @@ impl CodexClient {
             self.service_tier.as_ref(),
             self.service_tier_endpoints,
         );
+        if self.stream_upstream && !self.credentials.is_chatgpt() {
+            payload["stream"] = Value::Bool(true);
+        }
         Ok((payload, request_id_header))
     }
 
@@ -1516,8 +1572,7 @@ async fn read_chatgpt_stream(mut response: reqwest::Response) -> Result<Value> {
 fn read_chatgpt_stream_text(text: &str) -> Result<Value> {
     let mut completed: Option<Value> = None;
     let mut incomplete: Option<Value> = None;
-    let mut assistant_text_delta = String::new();
-    let mut completed_output_items = Vec::new();
+    let mut output = StreamedOutput::default();
     let mut event_kind: Option<String> = None;
     let mut data_lines: Vec<String> = Vec::new();
 
@@ -1529,8 +1584,7 @@ fn read_chatgpt_stream_text(text: &str) -> Result<Value> {
                 &data_lines,
                 &mut completed,
                 &mut incomplete,
-                &mut completed_output_items,
-                &mut assistant_text_delta,
+                &mut output,
             )? {
                 break;
             }
@@ -1555,40 +1609,21 @@ fn read_chatgpt_stream_text(text: &str) -> Result<Value> {
             &data_lines,
             &mut completed,
             &mut incomplete,
-            &mut completed_output_items,
-            &mut assistant_text_delta,
+            &mut output,
         )?;
     }
 
-    if let Some(mut completed) = completed {
-        backfill_chatgpt_completed_output(
-            &mut completed,
-            completed_output_items,
-            assistant_text_delta.trim_end_matches('\n'),
-        );
-        return Ok(completed);
+    if let Some(completed) = completed {
+        return Ok(output.completed_response(completed));
     }
 
-    // The upstream stopped the response early and has billed it. It is returned with
-    // `status: "incomplete"`, like the API's own response, for the proxy to decide what the
-    // client gets (see `incomplete_response`). Its output gets only the items the stream
-    // finished: an item that was only added, and text that only streamed as deltas, were cut
-    // off, so neither is backfilled.
-    let mut incomplete =
+    let incomplete =
         incomplete.ok_or_else(|| anyhow!("stream ended without a response.completed event"))?;
-    let finished_output_items = completed_output_items
-        .into_iter()
-        .filter(|streamed| streamed.done)
-        .collect();
-    backfill_chatgpt_completed_output(&mut incomplete, finished_output_items, "");
-    if let Value::Object(map) = &mut incomplete {
-        map.insert("status".to_string(), json!("incomplete"));
-    }
-    Ok(incomplete)
+    Ok(output.incomplete_response(incomplete))
 }
 
 #[derive(Debug)]
-struct StreamedOutputItem {
+pub(crate) struct StreamedOutputItem {
     output_index: Option<usize>,
     item: Value,
     /// Whether the item came from `response.output_item.done`, so the upstream finished it.
@@ -1608,120 +1643,375 @@ impl StreamedOutputItem {
     }
 }
 
+/// What a Responses stream produced before its terminal event: the output items it announced
+/// or finished and the assistant text it streamed. A ChatGPT login's `response.completed`
+/// carries no output of its own, so the response is rebuilt from these.
+#[derive(Debug, Default)]
+pub(crate) struct StreamedOutput {
+    items: Vec<StreamedOutputItem>,
+    assistant_text_delta: String,
+}
+
+impl StreamedOutput {
+    /// Notes one non-terminal `event` of type `kind`.
+    pub(crate) fn observe(&mut self, kind: &str, event: &Value) {
+        match kind {
+            "response.output_text.delta" => {
+                if let Some(delta) = event.get("delta").and_then(Value::as_str) {
+                    self.assistant_text_delta.push_str(delta);
+                }
+            }
+            "response.output_text.done" => {
+                if let Some(text) = event.get("text").and_then(Value::as_str)
+                    && !text.trim().is_empty()
+                    && self.assistant_text_delta.trim().is_empty()
+                {
+                    self.assistant_text_delta.push_str(text);
+                }
+            }
+            "response.output_item.added" => {
+                if let Some(item) = event.get("item")
+                    && response_item_has_assistant_output_text(item)
+                {
+                    self.items
+                        .push(StreamedOutputItem::from_event(event, item.clone(), false));
+                }
+            }
+            "response.output_item.done" => {
+                if let Some(item) = event.get("item")
+                    && response_item_should_be_preserved(item)
+                {
+                    self.items
+                        .push(StreamedOutputItem::from_event(event, item.clone(), true));
+                }
+            }
+            "message" => {
+                if let Some(item) = chatgpt_message_event_to_response_item(event) {
+                    self.items
+                        .push(StreamedOutputItem::from_event(event, item, false));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `completed`, the response of `response.completed`, with the output the stream produced.
+    pub(crate) fn completed_response(self, mut completed: Value) -> Value {
+        backfill_chatgpt_completed_output(
+            &mut completed,
+            self.items,
+            self.assistant_text_delta.trim_end_matches('\n'),
+        );
+        completed
+    }
+
+    /// `incomplete`, the response of `response.incomplete`, with `status: "incomplete"`, like the
+    /// API's own response, for the proxy to decide what the client gets (see
+    /// `incomplete_response`). The upstream stopped the response early and has billed it. Its
+    /// output gets only the items the stream finished: an item that was only added, and text that
+    /// only streamed as deltas, were cut off, so neither is backfilled.
+    pub(crate) fn incomplete_response(self, mut incomplete: Value) -> Value {
+        let finished_output_items = self
+            .items
+            .into_iter()
+            .filter(|streamed| streamed.done)
+            .collect();
+        backfill_chatgpt_completed_output(&mut incomplete, finished_output_items, "");
+        if let Value::Object(map) = &mut incomplete {
+            map.insert("status".to_string(), json!("incomplete"));
+        }
+        incomplete
+    }
+}
+
+/// One server-sent event of a Responses stream.
+enum StreamBlock {
+    /// A comment, or a block without data.
+    Empty,
+    /// `data: [DONE]`.
+    Done,
+    /// The event, which always names its `type`: the `event:` line's when the data has none.
+    Event(Value),
+}
+
+fn parse_stream_block(event_kind: Option<&str>, data_lines: &[String]) -> Result<StreamBlock> {
+    if data_lines.is_empty() {
+        return Ok(StreamBlock::Empty);
+    }
+    let payload = data_lines.join("\n");
+    if payload.trim() == "[DONE]" {
+        return Ok(StreamBlock::Done);
+    }
+    let mut event: Value = serde_json::from_str(&payload)
+        .with_context(|| format!("failed to parse stream event JSON: {}", payload))?;
+    if event.get("type").and_then(Value::as_str).is_none()
+        && let (Some(kind), Value::Object(map)) = (event_kind, &mut event)
+    {
+        map.insert("type".to_string(), Value::String(kind.to_string()));
+    }
+    Ok(StreamBlock::Event(event))
+}
+
+pub(crate) fn stream_event_type(event: &Value) -> &str {
+    event.get("type").and_then(Value::as_str).unwrap_or("")
+}
+
+/// The failure a `response.failed` (or older `response.error`) event reports.
+///
+/// The backend reports a terminal stream failure as `response.failed` carrying
+/// `response.error`, and answers HTTP 200 while doing it: a quota exhaustion arrives here, not
+/// as a 429. `response.error` is kept because older captures use it, but it is not what the
+/// backend sends today, so handling only that name dropped the payload and let the stream end
+/// without `response.completed` -- surfacing as "stream ended without a response.completed
+/// event", which is indistinguishable from a truncated stream or a parser regression. The
+/// machine-readable `code` (e.g. `insufficient_quota`) is what makes the difference between a
+/// quota wall and a bug legible at a glance.
+fn stream_failure(event: &Value) -> anyhow::Error {
+    let error = event
+        .get("error")
+        .or_else(|| event.get("response").and_then(|r| r.get("error")));
+    let message = error
+        .and_then(|err| err.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown error");
+    let code = error
+        .and_then(|err| err.get("code"))
+        .and_then(Value::as_str);
+    UpstreamFailure::Stream {
+        code: code.map(str::to_string),
+        message: message.to_string(),
+    }
+    .into()
+}
+
+/// The response a terminal `response.completed` or `response.incomplete` event carries.
+pub(crate) fn terminal_response(event: &Value) -> Option<Value> {
+    if let Some(response) = event.get("response") {
+        return Some(response.clone());
+    }
+    (event.get("id").is_some() && event.get("status").is_some()).then(|| event.clone())
+}
+
 fn process_chatgpt_stream_event(
     event_kind: Option<&str>,
     data_lines: &[String],
     completed: &mut Option<Value>,
     incomplete: &mut Option<Value>,
-    completed_output_items: &mut Vec<StreamedOutputItem>,
-    assistant_text_delta: &mut String,
+    output: &mut StreamedOutput,
 ) -> Result<bool> {
-    if data_lines.is_empty() {
-        return Ok(false);
-    }
-
-    let payload = data_lines.join("\n");
-    if payload.trim() == "[DONE]" {
-        return Ok(true);
-    }
-
-    let event: Value = serde_json::from_str(&payload)
-        .with_context(|| format!("failed to parse stream event JSON: {}", payload))?;
-    let kind = event
-        .get("type")
-        .and_then(Value::as_str)
-        .or(event_kind)
-        .unwrap_or("");
+    let event = match parse_stream_block(event_kind, data_lines)? {
+        StreamBlock::Empty => return Ok(false),
+        StreamBlock::Done => return Ok(true),
+        StreamBlock::Event(event) => event,
+    };
+    let kind = stream_event_type(&event);
 
     match kind {
-        // The backend reports a terminal stream failure as `response.failed`
-        // carrying `response.error`, and answers HTTP 200 while doing it: a
-        // quota exhaustion arrives here, not as a 429. `response.error` is
-        // kept because older captures use it, but it is not what the backend
-        // sends today, so handling only that name dropped the payload and let
-        // the stream end without `response.completed` -- surfacing as "stream
-        // ended without a response.completed event", which is indistinguishable
-        // from a truncated stream or a parser regression. The machine-readable
-        // `code` (e.g. `insufficient_quota`) is what makes the difference
-        // between a quota wall and a bug legible at a glance.
-        "response.failed" | "response.error" => {
-            let error = event
-                .get("error")
-                .or_else(|| event.get("response").and_then(|r| r.get("error")));
-            let message = error
-                .and_then(|err| err.get("message"))
-                .and_then(Value::as_str)
-                .unwrap_or("unknown error");
-            let code = error
-                .and_then(|err| err.get("code"))
-                .and_then(Value::as_str);
-            return Err(UpstreamFailure::Stream {
-                code: code.map(str::to_string),
-                message: message.to_string(),
-            }
-            .into());
-        }
-        "response.output_text.delta" => {
-            if let Some(delta) = event.get("delta").and_then(Value::as_str) {
-                assistant_text_delta.push_str(delta);
-            }
-        }
-        "response.output_text.done" => {
-            if let Some(text) = event.get("text").and_then(Value::as_str)
-                && !text.trim().is_empty()
-                && assistant_text_delta.trim().is_empty()
-            {
-                assistant_text_delta.push_str(text);
-            }
-        }
-        "response.output_item.added" => {
-            if let Some(item) = event.get("item")
-                && response_item_has_assistant_output_text(item)
-            {
-                completed_output_items.push(StreamedOutputItem::from_event(
-                    &event,
-                    item.clone(),
-                    false,
-                ));
-            }
-        }
-        "response.output_item.done" => {
-            if let Some(item) = event.get("item")
-                && response_item_should_be_preserved(item)
-            {
-                completed_output_items.push(StreamedOutputItem::from_event(
-                    &event,
-                    item.clone(),
-                    true,
-                ));
-            }
-        }
-        "message" => {
-            if let Some(item) = chatgpt_message_event_to_response_item(&event) {
-                completed_output_items.push(StreamedOutputItem::from_event(&event, item, false));
-            }
-        }
+        "response.failed" | "response.error" => return Err(stream_failure(&event)),
         "response.completed" => {
-            if let Some(response) = event.get("response") {
-                *completed = Some(response.clone());
-            } else if event.get("id").is_some() && event.get("status").is_some() {
-                *completed = Some(event);
+            if let Some(response) = terminal_response(&event) {
+                *completed = Some(response);
             }
         }
         // The upstream stopped the response early, at `max_output_tokens` or by a content
         // filter for example. It is still a response, with the usage it was billed for, not a
         // stream failure.
         "response.incomplete" => {
-            if let Some(response) = event.get("response") {
-                *incomplete = Some(response.clone());
-            } else if event.get("id").is_some() && event.get("status").is_some() {
-                *incomplete = Some(event);
+            if let Some(response) = terminal_response(&event) {
+                *incomplete = Some(response);
             }
         }
-        _ => {}
+        _ => output.observe(kind, &event),
     }
 
     Ok(false)
+}
+
+/// What one upstream request answered with: the whole completion, or the upstream's events
+/// as they arrive.
+pub(crate) enum CodexReply {
+    Complete(CodexCompletion),
+    Stream(UpstreamEventStream),
+}
+
+impl CodexReply {
+    /// The BYOC subscription-usage snapshot of the upstream's response headers.
+    pub(crate) fn rate_limits(&self) -> Option<&Value> {
+        match self {
+            Self::Complete(completion) => completion.rate_limits.as_ref(),
+            Self::Stream(stream) => stream.rate_limits.as_ref(),
+        }
+    }
+
+    pub(crate) fn turn_state(&self) -> Option<&str> {
+        match self {
+            Self::Complete(completion) => completion.turn_state.as_deref(),
+            Self::Stream(stream) => stream.turn_state.as_deref(),
+        }
+    }
+}
+
+/// The longest server-sent event an upstream stream may send.
+const MAX_STREAM_EVENT_BYTES: usize = 16 * 1024 * 1024;
+
+/// A streaming upstream response, read one event at a time.
+pub(crate) struct UpstreamEventStream {
+    response: reqwest::Response,
+    /// A ChatGPT login's stream, whose client gets only the items [`chatgpt_relays_item`] keeps.
+    pub(crate) chatgpt: bool,
+    buffer: Vec<u8>,
+    /// Events read before the first one with output, in order.
+    read_ahead: VecDeque<Value>,
+    /// The body ended, or sent `[DONE]`.
+    ended: bool,
+    rate_limits: Option<Value>,
+    turn_state: Option<String>,
+}
+
+impl UpstreamEventStream {
+    fn new(
+        response: reqwest::Response,
+        chatgpt: bool,
+        rate_limits: Option<Value>,
+        turn_state: Option<String>,
+    ) -> Self {
+        Self {
+            response,
+            chatgpt,
+            buffer: Vec::new(),
+            read_ahead: VecDeque::new(),
+            ended: false,
+            rate_limits,
+            turn_state,
+        }
+    }
+
+    /// The next event, or `None` once the upstream sent all of them.
+    pub(crate) async fn next_event(&mut self) -> Result<Option<Value>> {
+        if let Some(event) = self.read_ahead.pop_front() {
+            return Ok(Some(event));
+        }
+        self.read_event().await
+    }
+
+    /// Reads ahead to the first event with output, or to the response's end. Until then the
+    /// upstream may still fail the request as a whole, which is an error here, as for a buffered
+    /// request; so is a stream that ends with nothing.
+    async fn read_until_output(&mut self) -> Result<()> {
+        loop {
+            let Some(event) = self.read_event().await? else {
+                bail!("stream ended without a response.completed event");
+            };
+            let kind = stream_event_type(&event);
+            if matches!(kind, "response.failed" | "response.error") {
+                return Err(stream_failure(&event));
+            }
+            let before_output = matches!(
+                kind,
+                "response.created" | "response.in_progress" | "response.queued"
+            ) || !(kind.starts_with("response.") || kind == "message");
+            self.read_ahead.push_back(event);
+            if !before_output {
+                return Ok(());
+            }
+        }
+    }
+
+    async fn read_event(&mut self) -> Result<Option<Value>> {
+        loop {
+            if let Some(block) = self.take_block() {
+                match parse_sse_block(&block)? {
+                    StreamBlock::Empty => continue,
+                    StreamBlock::Done => {
+                        self.ended = true;
+                        self.buffer.clear();
+                        return Ok(None);
+                    }
+                    StreamBlock::Event(event) => return Ok(Some(event)),
+                }
+            }
+            if self.ended {
+                return Ok(None);
+            }
+            match self
+                .response
+                .chunk()
+                .await
+                .context("failed to read streaming chunk from backend")?
+            {
+                Some(chunk) => {
+                    self.buffer.extend_from_slice(&chunk);
+                    if self.buffer.len() > MAX_STREAM_EVENT_BYTES {
+                        bail!("upstream stream event exceeded {MAX_STREAM_EVENT_BYTES} bytes");
+                    }
+                }
+                None => {
+                    self.ended = true;
+                    // The last event may end without its blank line.
+                    if !self.buffer.iter().all(u8::is_ascii_whitespace) {
+                        self.buffer.extend_from_slice(b"\n\n");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The next complete block of the buffer, without its terminating blank line.
+    fn take_block(&mut self) -> Option<Vec<u8>> {
+        let (end, separator) = find_block_end(&self.buffer)?;
+        let block = self.buffer[..end].to_vec();
+        self.buffer.drain(..end + separator);
+        Some(block)
+    }
+}
+
+/// Where the first blank line of `buffer` begins, and how long it is.
+fn find_block_end(buffer: &[u8]) -> Option<(usize, usize)> {
+    let mut index = 0;
+    while index < buffer.len() {
+        if buffer[index] == b'\n' {
+            let rest = &buffer[index + 1..];
+            if rest.starts_with(b"\n") {
+                return Some((index, 2));
+            }
+            if rest.starts_with(b"\r\n") {
+                return Some((index, 3));
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+fn parse_sse_block(block: &[u8]) -> Result<StreamBlock> {
+    let text = std::str::from_utf8(block).context("streamed response was not valid UTF-8")?;
+    if std::env::var("CODEX_DEBUG_HTTP").as_deref() == Ok("1") {
+        eprintln!("<-- stream event\n{}", text);
+    }
+    let mut event_kind: Option<&str> = None;
+    let mut data_lines = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(event) = trimmed.strip_prefix("event:") {
+            event_kind = Some(event.trim());
+        } else if let Some(data) = trimmed.strip_prefix("data:") {
+            data_lines.push(data.trim().to_string());
+        }
+    }
+    parse_stream_block(event_kind, &data_lines)
+}
+
+/// Whether `headers` say the body is a stream of server-sent events.
+fn is_event_stream(headers: &HeaderMap) -> bool {
+    headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .trim()
+                .to_ascii_lowercase()
+                .starts_with("text/event-stream")
+        })
 }
 
 fn backfill_chatgpt_completed_output(
@@ -1785,7 +2075,7 @@ fn backfill_chatgpt_completed_output(
     }
 }
 
-fn response_items_match(left: &Value, right: &Value) -> bool {
+pub(crate) fn response_items_match(left: &Value, right: &Value) -> bool {
     if left.get("type") != right.get("type") {
         return false;
     }
@@ -1834,7 +2124,22 @@ fn response_item_has_assistant_output_text(item: &Value) -> bool {
             })
 }
 
-fn chatgpt_message_event_to_response_item(event: &Value) -> Option<Value> {
+/// Whether a ChatGPT login's passed-through stream sends on an item of this kind: the kinds a
+/// buffered response keeps (see `response_item_should_be_preserved`), judged by kind alone,
+/// since an answer starts out without text. Reasoning and the backend's own tool items never
+/// reached a client of that lane, and they still do not.
+pub(crate) fn chatgpt_relays_item(item: &Value) -> bool {
+    match item.get("type").and_then(Value::as_str) {
+        Some(
+            "function_call" | "custom_tool_call" | "local_shell_call" | "tool_search_call"
+            | "compaction",
+        ) => true,
+        Some("message") => item.get("role").and_then(Value::as_str) == Some("assistant"),
+        _ => false,
+    }
+}
+
+pub(crate) fn chatgpt_message_event_to_response_item(event: &Value) -> Option<Value> {
     if response_item_has_assistant_output_text(event) {
         return Some(event.clone());
     }
@@ -1856,7 +2161,7 @@ fn chatgpt_message_event_to_response_item(event: &Value) -> Option<Value> {
     Some(assistant_text_response_item(text))
 }
 
-fn assistant_text_response_item(text: &str) -> Value {
+pub(crate) fn assistant_text_response_item(text: &str) -> Value {
     json!({
         "id": format!("msg_{}", Uuid::new_v4()),
         "type": "message",
@@ -2066,18 +2371,79 @@ fn parse_codex_rate_limit_headers(headers: &reqwest::header::HeaderMap) -> Optio
 mod tests {
     use super::*;
 
+    #[test]
+    fn stream_blocks_end_at_a_blank_line_in_either_line_ending() {
+        assert_eq!(find_block_end(b"data: {}\n\ndata: x"), Some((8, 2)));
+        assert_eq!(find_block_end(b"data: {}\r\n\r\nrest"), Some((9, 3)));
+        assert_eq!(find_block_end(b"data: {}\n"), None);
+    }
+
+    #[test]
+    fn a_stream_block_names_its_type_from_the_event_line_when_its_data_does_not() {
+        let StreamBlock::Event(event) =
+            parse_sse_block(b"event: response.created\r\ndata: {\"id\":\"r\"}").unwrap()
+        else {
+            panic!("an event");
+        };
+        assert_eq!(event, json!({"id": "r", "type": "response.created"}));
+        let StreamBlock::Event(event) =
+            parse_sse_block(b"event: other\ndata: {\"type\":\"response.completed\"}").unwrap()
+        else {
+            panic!("an event");
+        };
+        assert_eq!(stream_event_type(&event), "response.completed");
+        assert!(matches!(
+            parse_sse_block(b"data: [DONE]").unwrap(),
+            StreamBlock::Done
+        ));
+        assert!(matches!(
+            parse_sse_block(b": keep-alive").unwrap(),
+            StreamBlock::Empty
+        ));
+    }
+
+    #[test]
+    fn only_the_chatgpt_codex_endpoint_and_the_openai_api_stream_upstream() {
+        let streams =
+            |credentials: Credentials| CodexClient::new(credentials).unwrap().upstream_streams();
+        assert!(streams(Credentials::ChatGpt {
+            access_token: "inert".into(),
+            refresh_token: None,
+            account_id: None,
+            default_model: None,
+            auth_path: None,
+        }));
+        let api_key = |endpoint: Option<&str>| Credentials::ApiKey {
+            key: "inert".into(),
+            endpoint: endpoint.map(str::to_string),
+            default_model: None,
+        };
+        assert!(streams(api_key(None)));
+        assert!(streams(api_key(Some(
+            "https://api.openai.com/v1/responses"
+        ))));
+        assert!(!streams(api_key(Some(
+            "https://openrouter.ai/api/v1/responses"
+        ))));
+        assert!(!streams(api_key(Some("http://127.0.0.1:9/v1/responses"))));
+        assert!(!streams(Credentials::GeminiCodeAssist {
+            access_token: "inert".into(),
+            project_id: "project".into(),
+            endpoint: None,
+            default_model: None,
+        }));
+    }
+
     fn drive_event(payload: &str) -> anyhow::Result<bool> {
         let mut completed = None;
         let mut incomplete = None;
-        let mut items = Vec::new();
-        let mut delta = String::new();
+        let mut output = StreamedOutput::default();
         process_chatgpt_stream_event(
             None,
             &[payload.to_string()],
             &mut completed,
             &mut incomplete,
-            &mut items,
-            &mut delta,
+            &mut output,
         )
     }
 
