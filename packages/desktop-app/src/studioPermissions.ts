@@ -5,8 +5,10 @@
 // could read precise location with no prompt at all. Studio is the only thing
 // that may call geolocation: it brokers location to sites itself and shows
 // which site received it. So geolocation is allowed only for Studio's own top
-// frame, after one native question that is remembered; every subframe and
-// every other origin is denied.
+// frame, after one question that is remembered; every subframe and every
+// other origin is denied. Where the operating system asks the person itself
+// (macOS Location Services, with Instafy's usage string), that is the one
+// question and the app does not ask a second time.
 //
 // Frames inside a Studio window (agent-built previews, provider surfaces) get
 // only what a page needs to work in a frame: fullscreen, writing to the
@@ -34,7 +36,8 @@ export type StoredStudioLocationConsent = {
   decidedAt: string;
 };
 
-export type StudioLocationPermissionState = StudioLocationDecision | "ask";
+/** "system": the operating system asks the person and keeps the answer (macOS); the app has none of its own. */
+export type StudioLocationPermissionState = StudioLocationDecision | "ask" | "system";
 
 export type StudioPermissionFrame = {
   /**
@@ -113,7 +116,11 @@ export function parseStoredStudioLocationConsent(value: unknown): StoredStudioLo
 export function studioLocationPermissionState(
   consent: StoredStudioLocationConsent | null,
   studioOrigin: string,
+  systemAsks = false,
 ): StudioLocationPermissionState {
+  if (systemAsks) {
+    return "system";
+  }
   if (!consent || consent.origin !== studioOrigin) {
     return "ask";
   }
@@ -126,14 +133,13 @@ export function decideStudioPermissionCheck(
   frame: StudioPermissionFrame,
   studioOrigin: string,
   consent: StoredStudioLocationConsent | null,
+  systemAsks = false,
 ): boolean {
   if (permission === GEOLOCATION) {
     // An undecided state must read as "not granted" so the request path, and
     // with it the one-time question, still runs.
-    return (
-      isStudioTopFrame(frame, studioOrigin) &&
-      studioLocationPermissionState(consent, studioOrigin) === "granted"
-    );
+    const state = studioLocationPermissionState(consent, studioOrigin, systemAsks);
+    return isStudioTopFrame(frame, studioOrigin) && (state === "granted" || state === "system");
   }
   if (isStudioSubframe(frame, studioOrigin)) {
     return STUDIO_SUBFRAME_PERMISSIONS.has(permission);
@@ -148,13 +154,15 @@ export function decideStudioPermissionRequest(
   frame: StudioPermissionFrame,
   studioOrigin: string,
   consent: StoredStudioLocationConsent | null,
+  systemAsks = false,
 ): StudioPermissionRequestDecision {
   if (permission === GEOLOCATION) {
     if (!isStudioTopFrame(frame, studioOrigin)) {
       return "deny";
     }
-    const state = studioLocationPermissionState(consent, studioOrigin);
-    return state === "granted" ? "grant" : state === "denied" ? "deny" : "ask";
+    const state = studioLocationPermissionState(consent, studioOrigin, systemAsks);
+    // "system": the operating system's own prompt is the one question.
+    return state === "granted" || state === "system" ? "grant" : state === "denied" ? "deny" : "ask";
   }
   if (isStudioSubframe(frame, studioOrigin)) {
     return STUDIO_SUBFRAME_PERMISSIONS.has(permission) ? "grant" : "deny";
@@ -174,6 +182,11 @@ export type StudioPermissionHandlerDeps<Contents> = {
   writeConsent(consent: StoredStudioLocationConsent | null): void;
   /** Shows the native question; resolves true for Allow. */
   askUser(contents: Contents): Promise<boolean>;
+  /**
+   * The operating system asks the person itself before the app gets a position
+   * (macOS Location Services). Then the app asks nothing of its own.
+   */
+  systemAsks?: boolean;
   now?(): Date;
   log?(event: string, payload: Record<string, unknown>): void;
 };
@@ -229,7 +242,7 @@ export function createStudioPermissionHandlers<Contents>(deps: StudioPermissionH
   ) => {
     const studioOrigin = deps.getStudioOrigin();
     const frame = frameOf(contents, details);
-    const decision = decideStudioPermissionRequest(permission, frame, studioOrigin, deps.readConsent());
+    const decision = decideStudioPermissionRequest(permission, frame, studioOrigin, deps.readConsent(), deps.systemAsks);
     if (permission !== GEOLOCATION && decision === "deny" && isStudioSubframe(frame, studioOrigin)) {
       deps.log?.("studio subframe permission denied", { permission });
     }
@@ -258,16 +271,20 @@ export function createStudioPermissionHandlers<Contents>(deps: StudioPermissionH
       frameOf(contents, details, requestingOrigin),
       deps.getStudioOrigin(),
       deps.readConsent(),
+      deps.systemAsks,
     );
 
   return {
     requestHandler,
     checkHandler,
     locationPermissionState(): StudioLocationPermissionState {
-      return studioLocationPermissionState(deps.readConsent(), deps.getStudioOrigin());
+      return studioLocationPermissionState(deps.readConsent(), deps.getStudioOrigin(), deps.systemAsks);
     },
-    /** Forget the answer; the next request from Studio asks again. */
+    /** Forget the answer; the next request from Studio asks again. Where the system asks, it keeps its own answer. */
     resetLocationPermission(): StudioLocationPermissionState {
+      if (deps.systemAsks) {
+        return "system";
+      }
       deps.writeConsent(null);
       return "ask";
     },

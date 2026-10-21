@@ -127,7 +127,10 @@ export type LocationBroker = {
   handleMessage: (event: Pick<MessageEvent, "data" | "origin" | "source">) => boolean;
   /** Pauses watches while hidden, resumes them when shown. */
   setVisible: (visible: boolean) => void;
-  /** Ends every watch; with a code the site is told why, else it gets `location-stop`. */
+  /**
+   * Ends every watch and drops answers still pending; with a code the site is
+   * told why, else it gets `location-stop`.
+   */
   stopAll: (code?: LocationErrorCode) => void;
   /**
    * The open preview's record changed (the agent renamed it or changed its path):
@@ -172,6 +175,8 @@ export function createLocationBroker(deps: LocationBrokerDeps): LocationBroker {
   let disposed = false;
   let recordedAt: number | null = null;
   let recent: Array<{ latitude: number; longitude: number; at: number }> = [];
+  /** Bumped by stopAll: answers still pending for an earlier page are dropped. */
+  let generation = 0;
 
   const post = (message: HostLocationMessage) => {
     const target = deps.target();
@@ -260,12 +265,15 @@ export function createLocationBroker(deps: LocationBrokerDeps): LocationBroker {
   };
 
   const handleRequest = async (request: LocationRequest, sourceWindow: Window) => {
+    const asked = generation;
+    // A page that asked is gone when the frame is the same window but stopAll ran since (it navigated).
+    const gone = () => disposed || generation !== asked || deps.target()?.window !== sourceWindow;
     const fail = (code: LocationErrorCode) => post(buildLocationError(request.id, code));
     if (!withinRate()) return fail("unavailable");
     if (!visible) return fail("hidden");
     const resolved = await deps.site().catch(() => null);
     // The frame may have changed while Studio looked the site up.
-    if (disposed || deps.target()?.window !== sourceWindow) return;
+    if (gone()) return;
     if (!resolved) return fail("unavailable");
     adoptLocationSite(resolved);
     if (site && site.key !== resolved.key) recordedAt = null;
@@ -284,13 +292,13 @@ export function createLocationBroker(deps: LocationBrokerDeps): LocationBroker {
     }
     geolocation.getCurrentPosition(
       position => {
-        if (disposed || deps.target()?.window !== sourceWindow) return;
+        if (gone()) return;
         if (!visible) return fail("hidden");
         if (stopped()) return fail("stopped");
         deliver([request.id], position);
       },
       error => {
-        if (disposed || deps.target()?.window !== sourceWindow) return;
+        if (gone()) return;
         const code = locationErrorCode(error);
         if (code === "denied") deps.onDenied?.();
         fail(code);
@@ -324,6 +332,7 @@ export function createLocationBroker(deps: LocationBrokerDeps): LocationBroker {
       syncNativeWatch();
     },
     stopAll(code) {
+      generation += 1;
       endWatches(code ?? null);
     },
     siteChanged(next) {

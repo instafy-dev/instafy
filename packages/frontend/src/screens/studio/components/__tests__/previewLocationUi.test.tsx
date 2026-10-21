@@ -2,7 +2,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { LocationBlockedNotice, LocationMarker, LocationSitesList, LocationToast, LOCATION_BLOCKED_MS, LOCATION_TOAST_MS } from "../previewHost/PreviewLocation";
+import { LocationBlockedNotice, LocationMarker, locationBlockedText, LocationSitesList, LocationToast, LOCATION_BLOCKED_MS, LOCATION_TOAST_MS } from "../previewHost/PreviewLocation";
 import { PersonalLocationSettings } from "../PersonalLocationSettings";
 import {
   listLocationSites,
@@ -83,6 +83,7 @@ describe("location in previews: marker, toast and list", () => {
     window.instafyDesktop = { notify: async () => true, locationPermissionStatus: async () => ({ state: "denied" as const }) };
     try {
       await render(<LocationBlockedNotice onDismiss={onDismiss} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
       expect(text()).toContain("Settings → Profile → Location");
       expect(text()).toContain("Location Permission… menu item");
     } finally {
@@ -90,6 +91,25 @@ describe("location in previews: marker, toast and list", () => {
     }
     await act(async () => { await vi.advanceTimersByTimeAsync(LOCATION_BLOCKED_MS); });
     expect(onDismiss).toHaveBeenCalled();
+  });
+
+  it("on desktop, points to the operating system when the app itself allows location (or macOS decides)", async () => {
+    for (const state of ["granted", "system"] as const) {
+      window.instafyDesktop = { notify: async () => true, locationPermissionStatus: async () => ({ state }) };
+      try {
+        await render(<LocationBlockedNotice onDismiss={() => undefined} />);
+        await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+        const text = container.querySelector("[data-testid=preview-location-blocked]")?.textContent ?? "";
+        expect(text).not.toContain("Settings → Profile → Location");
+        expect(text).toMatch(/blocks location for Instafy/);
+      } finally {
+        delete window.instafyDesktop;
+      }
+      await render(null);
+    }
+    expect(locationBlockedText("system", "MacIntel")).toContain("System Settings → Privacy & Security → Location Services");
+    expect(locationBlockedText("system", "Win32")).toContain("Settings → Privacy & security → Location");
+    expect(locationBlockedText("system", "Linux x86_64")).toContain("Your computer blocks location");
   });
 
   it("lists the sites that received location (title, space, last time) with Stop and Share again", async () => {
@@ -143,6 +163,23 @@ describe("location in previews: marker, toast and list", () => {
       expect(reset).toHaveBeenCalledTimes(1);
       expect(state()).toContain("Not asked yet");
       // Nothing to reset before an answer, and no way to grant from Studio.
+      expect(container.querySelector("[data-testid=desktop-location-reset]")).toBeNull();
+    } finally {
+      delete window.instafyDesktop;
+    }
+  });
+
+  it("on macOS, where the system asks, says where to change it and offers no Reset", async () => {
+    window.instafyDesktop = {
+      notify: async () => true,
+      locationPermissionStatus: async () => ({ state: "system" as const }),
+      resetLocationPermission: vi.fn(async () => ({ state: "system" as const })),
+    };
+    try {
+      await render(<PersonalLocationSettings />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(container.querySelector("[data-testid=desktop-location-state]")?.textContent)
+        .toContain("System Settings → Privacy & Security → Location Services");
       expect(container.querySelector("[data-testid=desktop-location-reset]")).toBeNull();
     } finally {
       delete window.instafyDesktop;

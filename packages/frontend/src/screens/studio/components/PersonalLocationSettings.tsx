@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { SettingsFormLayout } from "../../../components/SettingsFormLayout";
 import { Button } from "../../../components/Button";
 import { Text } from "../../../components/Text";
-import { LOCATION_SITES_DESCRIPTION, LocationSitesList } from "./previewHost/PreviewLocation";
+import { LOCATION_SITES_DESCRIPTION, LocationSitesList, MACOS_LOCATION_SETTINGS } from "./previewHost/PreviewLocation";
 import { SettingsSection } from "./SettingsSection";
 
 type DesktopLocationState = InstafyDesktopLocationPermissionState;
@@ -11,11 +11,13 @@ const DESKTOP_STATE_TEXT: Record<DesktopLocationState, string> = {
   granted: "Allowed. Sites in previews still ask Instafy, and you see 📍 when one gets it.",
   denied: "Not allowed. Sites in previews can't get your location. Reset to be asked again, here or with the Location Permission… menu item.",
   ask: "Not asked yet. The first time a site asks, Instafy asks you once.",
+  system: `macOS asks you the first time a site wants it. Change it in ${MACOS_LOCATION_SETTINGS}.`,
 };
 
 /**
  * The desktop app's own answer to "Allow Instafy to use your location?". Only Reset is offered:
- * the native question is the only way to allow it.
+ * the native question is the only way to allow it. On macOS the system asks instead, so this
+ * only says where to change it.
  */
 function DesktopLocationPermission() {
   const desktop = typeof window === "undefined" ? undefined : window.instafyDesktop;
@@ -46,7 +48,7 @@ function DesktopLocationPermission() {
         <Text variant="caption" tone="muted" className="min-w-0 flex-1" data-testid="desktop-location-state">
           {failed ? "Couldn't read this app's location permission." : state ? DESKTOP_STATE_TEXT[state] : "Checking…"}
         </Text>
-        {reset && state && state !== "ask" ? (
+        {reset && (state === "granted" || state === "denied") ? (
           <Button variant="outline" size="sm" radius="lg" data-testid="desktop-location-reset" onPress={onReset}>Reset</Button>
         ) : null}
       </div>

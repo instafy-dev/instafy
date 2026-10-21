@@ -16,7 +16,7 @@ This package wraps the Instafy Studio web app in an Electron shell.
 ## Location permission
 
 Studio's window session has its own permission handler (`src/studioPermissions.ts`). Geolocation is allowed only
-for Studio's own top frame on the app origin: the first request shows one native question ("Allow Instafy to use
+for Studio's own top frame on the app origin: on Windows and Linux the first request shows one native question ("Allow Instafy to use
 your location?"), and the answer (Allow or Don't Allow) is remembered in `desktop-config.json` under
 `studioLocationConsent`, tied to the Studio origin. Later requests follow it without asking. Geolocation from any
 subframe (every site preview) or any other origin is always denied; sites get location only through Studio's
@@ -24,10 +24,14 @@ broker, which shows which site received it. Any other permission asked for by a 
 only fullscreen, clipboard writes and pointer lock (no notifications, storage access, camera or sensors). Studio's
 own top frame and windows that are not Studio's keep Electron's default.
 
-To reset the answer: **Instafy ▸ Location Permission…** on macOS, **File ▸ Location Permission…** on Windows, or
-from Studio via `window.instafyDesktop.resetLocationPermission()` (`locationPermissionStatus()` reads it). There is
-no way to grant it except the native question. On Linux the default menu is kept, so use Studio's settings or
-delete `studioLocationConsent` from `desktop-config.json` in the app's user-data folder.
+On macOS the app does not ask its own question: macOS Location Services asks the person once, with the app's
+location usage string, and keeps the answer (`locationPermissionStatus()` returns `"system"`). The menu item and
+Studio's settings point to System Settings ▸ Privacy & Security ▸ Location Services there. Subframes are still denied.
+
+To reset the answer on Windows: **File ▸ Location Permission…**, or from Studio via
+`window.instafyDesktop.resetLocationPermission()` (`locationPermissionStatus()` reads it). There is no way to grant
+it except the native question. On Linux the default menu is kept, so use Studio's settings or delete
+`studioLocationConsent` from `desktop-config.json` in the app's user-data folder.
 
 `pnpm --filter @instafy/desktop-app smoke:studio:permissions` proves the policy in real Electron.
 

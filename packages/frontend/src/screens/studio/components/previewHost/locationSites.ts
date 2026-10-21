@@ -48,6 +48,7 @@ export const LOCATION_SITES_STORAGE_KEY = "instafy.previewLocationSites.v1";
 export function locationSitesStorageKey(account: string): string {
   return `${LOCATION_SITES_STORAGE_KEY}:${account}`;
 }
+/** Sites that were not stopped kept on the list; a stopped site is never dropped, so its stop holds. */
 export const LOCATION_SITES_LIMIT = 50;
 
 export function locationSiteKey(site: LocationSiteIdentity): string {
@@ -99,8 +100,6 @@ export function setLocationSitesAccount(next: string | null): void {
   receivedThisSession.clear();
   previewKeys.clear();
   statusCache.clear();
-  // The first version kept one list for everyone on the device.
-  try { if (typeof window !== "undefined") window.localStorage.removeItem(LOCATION_SITES_STORAGE_KEY); } catch { /* storage off */ }
   notify();
 }
 
@@ -113,11 +112,14 @@ function load(): readonly LocationSiteRecord[] {
 }
 
 function save(next: readonly LocationSiteRecord[]) {
-  // Most recent first; the oldest that were never stopped go once the list is full.
+  // Most recent first; once more than the limit were never stopped, the oldest of those go.
+  // A stopped site always stays: dropping it would give it the location again.
   const sorted = [...next].sort((a, b) => (b.lastAt ?? 0) - (a.lastAt ?? 0));
-  while (sorted.length > LOCATION_SITES_LIMIT) {
-    const index = sorted.map(record => record.stopped).lastIndexOf(false);
-    sorted.splice(index >= 0 ? index : sorted.length - 1, 1);
+  let allowed = sorted.filter(record => !record.stopped).length;
+  for (let index = sorted.length - 1; index >= 0 && allowed > LOCATION_SITES_LIMIT; index -= 1) {
+    if (sorted[index].stopped) continue;
+    sorted.splice(index, 1);
+    allowed -= 1;
   }
   records = sorted;
   try { if (account) storage()?.setItem(locationSitesStorageKey(account), JSON.stringify(sorted)); } catch { memoryOnly = true; }

@@ -110,17 +110,44 @@ export const LOCATION_SITES_DESCRIPTION = "Sites in previews ask Instafy for you
 
 export const LOCATION_BLOCKED_MS = 12_000;
 
-/** Where to turn location back on for Instafy itself: the desktop app's own answer, or the browser's. */
-export function locationBlockedText(desktop: boolean): string {
-  return desktop
-    ? "Location is off for the Instafy app. Turn it on in Settings → Profile → Location, or with the Location Permission… menu item."
-    : "Your browser blocks location for Instafy. Allow it in the browser's site settings for this page, then try again.";
+export const MACOS_LOCATION_SETTINGS = "System Settings → Privacy & Security → Location Services";
+
+/** What refused location to Instafy itself: the browser, the desktop app's own answer, or the operating system. */
+export type LocationBlockedBy = "browser" | "app" | "system";
+
+/** Where to turn location back on for Instafy itself. */
+export function locationBlockedText(by: LocationBlockedBy, platform = typeof navigator === "undefined" ? "" : navigator.platform): string {
+  if (by === "browser") return "Your browser blocks location for Instafy. Allow it in the browser's site settings for this page, then try again.";
+  if (by === "app") return "Location is off for the Instafy app. Turn it on in Settings → Profile → Location, or with the Location Permission… menu item.";
+  if (/^Mac/i.test(platform)) return `macOS blocks location for Instafy. Turn it on in ${MACOS_LOCATION_SETTINGS}, then try again.`;
+  if (/^Win/i.test(platform)) return "Windows blocks location for Instafy. Turn it on in Settings → Privacy & security → Location, then try again.";
+  return "Your computer blocks location for Instafy. Turn it on in its privacy or location settings, then try again.";
 }
 
-const isDesktopApp = () => typeof window !== "undefined" && typeof window.instafyDesktop?.locationPermissionStatus === "function";
+const desktopLocationStatus = () => typeof window === "undefined" ? undefined : window.instafyDesktop?.locationPermissionStatus;
+
+/**
+ * On desktop the app's own answer says which: when it is "denied" the app refused, otherwise
+ * (allowed, or macOS decides) the operating system did. Null while that is being read.
+ */
+function useLocationBlockedBy(): LocationBlockedBy | null {
+  const readStatus = desktopLocationStatus();
+  const [by, setBy] = useState<LocationBlockedBy | null>(readStatus ? null : "browser");
+  useEffect(() => {
+    if (!readStatus) return;
+    let cancelled = false;
+    readStatus().then(
+      result => { if (!cancelled) setBy(result.state === "denied" ? "app" : "system"); },
+      () => { if (!cancelled) setBy("app"); },
+    );
+    return () => { cancelled = true; };
+  }, [readStatus]);
+  return by;
+}
 
 /** A site asked and Instafy itself is not allowed location: say where to change that (sites can't tell). */
 export function LocationBlockedNotice({ onDismiss }: { onDismiss: () => void }) {
+  const blockedBy = useLocationBlockedBy();
   useEffect(() => {
     const timer = window.setTimeout(onDismiss, LOCATION_BLOCKED_MS);
     return () => window.clearTimeout(timer);
@@ -129,7 +156,7 @@ export function LocationBlockedNotice({ onDismiss }: { onDismiss: () => void }) 
     className={`pointer-events-none absolute inset-x-0 z-20 flex ${TOAST_PLACEMENT}`}>
     <div className="pointer-events-auto flex max-w-md items-start gap-2 rounded-2xl bg-slate-900/90 py-2 pl-3 pr-1 text-xs font-medium text-white shadow-lg backdrop-blur">
       <span aria-hidden="true">📍</span>
-      <span className="min-w-0 flex-1">{locationBlockedText(isDesktopApp())}</span>
+      <span className="min-w-0 flex-1">{blockedBy ? locationBlockedText(blockedBy) : "Location is off for Instafy."}</span>
       <IconButton variant="ghost" radius="full" size="xs" aria-label="Dismiss" onPress={onDismiss}
         className="text-white/80 hover:bg-white/10 pointer-coarse:h-11 pointer-coarse:w-11">
         <Xmark className="h-3.5 w-3.5" aria-hidden="true" />

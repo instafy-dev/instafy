@@ -516,6 +516,9 @@ const studioPermissionHandlers = createStudioPermissionHandlers<Electron.WebCont
       : await dialog.showMessageBox(options);
     return result.response === 0;
   },
+  // macOS asks the person itself (Location Services, with Instafy's usage
+  // string), so the app's own question would be a second prompt for the same thing.
+  systemAsks: process.platform === "darwin",
   log: (event, payload) => desktopLog("info", `[instafy-desktop] ${event}`, payload),
 });
 
@@ -528,8 +531,11 @@ function installStudioPermissionHandlers(window: BrowserWindow) {
 function describeStudioLocationPermission(state: StudioLocationPermissionState): string {
   if (state === "granted") return "Instafy can use your location.";
   if (state === "denied") return "Instafy is not allowed to use your location.";
+  if (state === "system") return "macOS decides whether Instafy can use your location.";
   return "Instafy will ask the first time a site wants your location.";
 }
+
+const MACOS_LOCATION_SETTINGS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices";
 
 async function showStudioLocationPermissionDialog() {
   const state = studioPermissionHandlers.locationPermissionState();
@@ -544,6 +550,19 @@ async function showStudioLocationPermissionDialog() {
         message: describeStudioLocationPermission(state),
         detail: "Reset to be asked again the next time a site wants your location.",
       };
+  if (state === "system") {
+    const systemOptions: Electron.MessageBoxOptions = {
+      type: "info",
+      buttons: ["Open Location Services", "OK"],
+      defaultId: 1,
+      cancelId: 1,
+      message: describeStudioLocationPermission(state),
+      detail: "macOS asks the first time a site wants it. Change it in System Settings → Privacy & Security → Location Services.",
+    };
+    const answer = window ? await dialog.showMessageBox(window, systemOptions) : await dialog.showMessageBox(systemOptions);
+    if (answer.response === 0) void shell.openExternal(MACOS_LOCATION_SETTINGS_URL);
+    return;
+  }
   const result = window ? await dialog.showMessageBox(window, options) : await dialog.showMessageBox(options);
   if (state !== "ask" && result.response === 0) {
     studioPermissionHandlers.resetLocationPermission();

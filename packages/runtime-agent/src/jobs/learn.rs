@@ -1783,6 +1783,7 @@ mod tests {
             "answers only on [::1]",
             "type: \"location-request\"",
             "instafy_host=studio",
+            "type: \"layout\"}` message arrives from `parent`",
         ] {
             assert!(FRONTEND_PREVIEWS_TEMPLATE.contains(needle), "{needle}");
         }

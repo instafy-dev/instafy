@@ -9,7 +9,7 @@ import {
   type LocationBroker,
 } from "../previewHost/locationBroker";
 import {
-  LOCATION_SITES_STORAGE_KEY,
+  LOCATION_SITES_LIMIT,
   adoptLocationSite,
   listLocationSites,
   locationPreviewStatus,
@@ -80,7 +80,7 @@ const request = (id: string, payload: Record<string, unknown> = {}, source = "in
   ({ source, v: 1, type: "location-request", payload: { id, ...payload } });
 
 describe("location messages", () => {
-  it("accepts map, generic and bind sites, v1, with a short opaque id", () => {
+  it("accepts any site kit name, v1, with a short opaque id", () => {
     for (const source of ["example-map", "my-site", "site-kit"]) {
       expect(parseLocationMessage(request("r-1", { watch: true, highAccuracy: true }, source)))
         .toEqual({ type: "location-request", request: { id: "r-1", watch: true, highAccuracy: true } });
@@ -374,10 +374,24 @@ describe("sites that received location", () => {
     expect(listLocationSites()).toEqual([]);
     setLocationSitesAccount("user-1");
     expect(listLocationSites()).toEqual([expect.objectContaining({ key: SITE.key, stopped: true })]);
-    // Nothing is left under the old device-wide key.
-    localStorage.setItem(LOCATION_SITES_STORAGE_KEY, "[]");
-    setLocationSitesAccount("user-3");
-    expect(localStorage.getItem(LOCATION_SITES_STORAGE_KEY)).toBeNull();
+  });
+
+  it("never drops a stopped site to make room, so its stop holds", () => {
+    const site = (index: number) => ({ key: `stopped-${index}`, projectId: "p1", title: `Site ${index}`, space: null });
+    // Stopped before it ever got a position, so it sorts last.
+    setLocationStopped(site(0), true);
+    for (let index = 1; index <= LOCATION_SITES_LIMIT; index += 1) {
+      recordLocationDelivery(site(index), index);
+      setLocationStopped(site(index), true);
+    }
+    expect(listLocationSites()).toHaveLength(LOCATION_SITES_LIMIT + 1);
+    resetLocationSitesForTests();
+    expect(locationSiteStatus("stopped-0").stopped).toBe(true);
+    // Sites that were never stopped are what the limit trims, oldest first.
+    for (let index = 0; index <= LOCATION_SITES_LIMIT; index += 1) recordLocationDelivery({ ...site(index), key: `open-${index}` }, 100 + index);
+    expect(listLocationSites().filter(entry => !entry.stopped)).toHaveLength(LOCATION_SITES_LIMIT);
+    expect(listLocationSites().some(entry => entry.key === "open-0")).toBe(false);
+    expect(listLocationSites().filter(entry => entry.stopped)).toHaveLength(LOCATION_SITES_LIMIT + 1);
   });
 
   it("tells a preview's tab whether its site has the person's location", () => {

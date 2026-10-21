@@ -183,7 +183,8 @@ type InstafyDesktopLocalHardwareIoActionRunResult = {
   error?: string | null;
 };
 
-type InstafyDesktopLocationPermissionState = "granted" | "denied" | "ask";
+/** "system": the operating system asks and decides (macOS); the app keeps no answer of its own. */
+type InstafyDesktopLocationPermissionState = "granted" | "denied" | "ask" | "system";
 
 type InstafyDesktopUpdaterStatus = {
   isEnabled: boolean;

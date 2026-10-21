@@ -49,12 +49,20 @@ export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, 
     observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class", "data-theme"] });
     return () => observer.disconnect();
   }, []);
-  const sendLayout = useCallback(() => { postToFrame(buildHostLayoutMessage({ theme, location: true })); }, [postToFrame, theme]);
+  const sendLayout = useCallback(() => { postToFrame(buildHostLayoutMessage(theme)); }, [postToFrame, theme]);
   useEffect(() => { sendLayout(); }, [sendLayout]);
 
   const heardFromSite = useRef(false);
+  /** Loads of the frame since it was loaded fresh (frameKey or capability changed). */
+  const loadsSinceFresh = useRef(0);
   const onFrameLoad = useCallback(() => {
     heardFromSite.current = false;
+    loadsSinceFresh.current += 1;
+    // The site moved to another page inside the frame: that page did not ask, so this
+    // frame's watches and pending answers end. The first load is left alone, since the
+    // site's scripts may have asked before it fired. Positions are kept: the new page
+    // may still hold them (in its URL), so a shared view must still keep them out.
+    if (loadsSinceFresh.current > 1) broker.current?.stopAll();
     sendLayout();
   }, [sendLayout]);
 
@@ -118,7 +126,10 @@ export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, 
     broker.current?.siteChanged(locationSite);
   }, [locationSite]);
   // A new document in the frame (Reload, a new capability) did not ask: its watches end, and what it held is gone.
-  useEffect(() => () => { broker.current?.stopAll(); broker.current?.forgetPositions(); }, [frameKey, viewerUrl]);
+  useEffect(() => {
+    loadsSinceFresh.current = 0;
+    return () => { broker.current?.stopAll(); broker.current?.forgetPositions(); };
+  }, [frameKey, viewerUrl]);
   const locationStatus = useLocationSiteStatus(siteKey);
 
   /** One message from this pane's frame at the viewer's origin (the pane checked both). True when it was read. */

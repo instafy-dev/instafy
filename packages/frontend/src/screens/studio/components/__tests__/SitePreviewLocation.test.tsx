@@ -103,7 +103,7 @@ describe("SitePreviewPane location", () => {
   it("tells the site to ask Studio, never lets the frame use geolocation itself", async () => {
     await renderFramed();
     await act(async () => frame().dispatchEvent(new Event("load")));
-    expect(toSite().find(message => message.type === "layout")).toMatchObject({ caps: { geolocation: true, location: "host" } });
+    expect(toSite().find(message => message.type === "layout")).toMatchObject({ caps: { location: "host" } });
     expect(frame().getAttribute("allow")).toBe(SITE_PREVIEW_FRAME_ALLOW);
     expect(frame().getAttribute("allow")).not.toContain("geolocation");
     expect(frame().getAttribute("src")).toContain("instafy_host=studio");
@@ -158,6 +158,33 @@ describe("SitePreviewPane location", () => {
     await act(async () => root.unmount());
     root = createRoot(container);
     expect(geo.watchers.size).toBe(0);
+  });
+
+  it("ends the watch and drops pending answers when the site moves to another page in the frame", async () => {
+    await renderFramed();
+    // The first load is the page that asked; it keeps its watch.
+    await post(request("w1", { watch: true }));
+    await act(async () => frame().dispatchEvent(new Event("load")));
+    expect(geo.watchers.size).toBe(1);
+    await act(async () => { [...geo.watchers.values()][0](POSITION); });
+    expect(marker()?.dataset.watching).toBe("true");
+    let pending: ((position: unknown) => void) | null = null;
+    geo.getCurrentPosition.mockImplementation((success: (position: unknown) => void) => { pending = success; });
+    await post(request("a1"));
+    expect(pending).not.toBeNull();
+    // A link or full-page navigation inside the same frame: same window, new document.
+    await act(async () => frame().dispatchEvent(new Event("load")));
+    await flush();
+    expect(geo.clearWatch).toHaveBeenCalledTimes(1);
+    expect(geo.watchers.size).toBe(0);
+    expect(marker()?.dataset.watching).not.toBe("true");
+    const before = answers().length;
+    await act(async () => { pending!(POSITION); });
+    expect(answers().slice(before).filter(message => message.type === "location")).toEqual([]);
+    // The new page can still ask for itself.
+    geo.getCurrentPosition.mockImplementation((success: (position: unknown) => void) => success(POSITION));
+    await post(request("b1"));
+    expect(answers().at(-1)).toMatchObject({ type: "location", payload: { id: "b1" } });
   });
 
   it("Stop sharing location sticks for the site until Share location again", async () => {

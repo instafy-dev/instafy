@@ -117,7 +117,7 @@ function prepareAppBundleCopy(sourceAppBundlePath, destinationRootDir) {
   return destinationAppBundlePath;
 }
 
-export function ensureMacosBluetoothUsageDescription(appBinaryPath) {
+export function ensureMacosUsageDescriptions(appBinaryPath) {
   if (process.platform !== "darwin") {
     return appBinaryPath;
   }
@@ -138,7 +138,7 @@ export function ensureMacosBluetoothUsageDescription(appBinaryPath) {
   return resolveBinaryPathFromAppBundle(appBundlePath);
 }
 
-export function prepareMacosBluetoothElectronBinary(appBinaryPath, options = {}) {
+export function prepareMacosElectronBinary(appBinaryPath, options = {}) {
   if (process.platform !== "darwin") {
     return appBinaryPath;
   }
@@ -153,5 +153,5 @@ export function prepareMacosBluetoothElectronBinary(appBinaryPath, options = {})
     path.join(os.tmpdir(), "instafy-bluetooth-electron");
   const copiedAppBundlePath = prepareAppBundleCopy(sourceAppBundlePath, destinationRootDir);
   const copiedBinaryPath = resolveBinaryPathFromAppBundle(copiedAppBundlePath);
-  return ensureMacosBluetoothUsageDescription(copiedBinaryPath);
+  return ensureMacosUsageDescriptions(copiedBinaryPath);
 }

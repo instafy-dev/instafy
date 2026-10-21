@@ -4,10 +4,10 @@
  * here knows what the site is, and a site that never answers keeps working as
  * a plain page.
  *
- * Studio → site: `{source:"instafy-host", v:1, type:"layout", …}` says what
- * Studio offers the frame: its theme, that its bar already names the site, and
- * that the site may ask Studio for the person's location (`caps.location:
- * "host"`), since the frame itself may not use the browser's geolocation.
+ * Studio → site: `{source:"instafy-host", v:1, type:"layout", caps, theme}`
+ * says what Studio offers the frame: its theme, and that the site may ask
+ * Studio for the person's location (`caps.location: "host"`), since the frame
+ * itself may not use the browser's geolocation.
  * Site → Studio: `{source:<the site's kit>, v:1, type, payload}`. Location has
  * its own pair in `locationBroker.ts`. Messages are data, never commands, and
  * the pane reads them only from its own frame at the viewer's origin.
@@ -32,37 +32,22 @@ export function isSiteMessageSource(value: unknown): value is string {
   return typeof value === "string" && value !== HOST_MESSAGE_SOURCE && /^[a-z][a-z0-9-]{0,39}$/.test(value);
 }
 
-export type HostInsets = { top: number; right: number; bottom: number; left: number };
-/** Studio pads the frame itself (the pane sits above the composer), so it covers none of it. */
-export const ZERO_INSETS: HostInsets = { top: 0, right: 0, bottom: 0, left: 0 };
-
 export type HostLayoutMessage = {
   source: typeof HOST_MESSAGE_SOURCE;
   v: typeof HOST_MESSAGE_VERSION;
   type: "layout";
-  insets: HostInsets;
-  chrome: "host";
-  /** "shown": Studio's bar names the site, so the site may hide its own title. */
-  title: "shown";
   /**
-   * `geolocation`: the site may ask for the person's location. `location: "host"`: ask Studio
-   * (`location-request`), not `navigator.geolocation`, which the frame is not allowed to use.
+   * `location: "host"`: the person's location is available through Studio
+   * (`location-request`), never through `navigator.geolocation`, which the
+   * frame is not allowed to use.
    */
-  caps: { geolocation: boolean; location?: "host" };
+  caps: { location: "host" };
+  /** Studio's theme, so a site can match it. */
   theme: "light" | "dark";
 };
 
-export function buildHostLayoutMessage(input: { theme: "light" | "dark"; location: boolean }): HostLayoutMessage {
-  return {
-    source: HOST_MESSAGE_SOURCE,
-    v: HOST_MESSAGE_VERSION,
-    type: "layout",
-    insets: ZERO_INSETS,
-    chrome: "host",
-    title: "shown",
-    caps: input.location ? { geolocation: true, location: "host" } : { geolocation: false },
-    theme: input.theme,
-  };
+export function buildHostLayoutMessage(theme: "light" | "dark"): HostLayoutMessage {
+  return { source: HOST_MESSAGE_SOURCE, v: HOST_MESSAGE_VERSION, type: "layout", caps: { location: "host" }, theme };
 }
 
 /**

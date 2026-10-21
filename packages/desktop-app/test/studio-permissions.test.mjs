@@ -97,7 +97,7 @@ test("stored consent is validated before it is trusted", () => {
   assert.equal(parseStoredStudioLocationConsent(undefined), null);
 });
 
-function harness({ answer = true, consent = null, studioContents = ["studio"] } = {}) {
+function harness({ answer = true, consent = null, studioContents = ["studio"], systemAsks = false } = {}) {
   const state = { consent, asked: 0, writes: [] };
   let release;
   const gate = new Promise((resolve) => {
@@ -118,6 +118,7 @@ function harness({ answer = true, consent = null, studioContents = ["studio"] } 
       return answer;
     },
     now: () => new Date("2026-10-13T12:00:00.000Z"),
+    systemAsks,
   });
   const request = (contents, details) =>
     new Promise((resolve) => handlers.requestHandler(contents, "geolocation", resolve, details));
@@ -178,6 +179,23 @@ test("reset forgets the answer so the next request asks again", async () => {
   assert.equal(h.state.asked, 1);
 });
 
+test("where the system asks (macOS), the app asks nothing of its own, and frames stay denied", async () => {
+  const h = harness({ answer: true, systemAsks: true });
+  assert.equal(await h.request("studio", topDetails), true);
+  assert.equal(h.state.asked, 0);
+  assert.equal(h.state.writes.length, 0);
+  assert.equal(h.handlers.checkHandler("studio", "geolocation", STUDIO, topDetails), true);
+  assert.equal(h.handlers.locationPermissionState(), "system");
+  assert.equal(h.handlers.resetLocationPermission(), "system");
+  assert.equal(h.state.writes.length, 0);
+  assert.equal(await h.request("studio", { isMainFrame: false, requestingUrl: "https://p-label.instafy.site/" }), false);
+  assert.equal(await h.request("other-window", topDetails), false);
+  assert.equal(h.handlers.checkHandler("studio", "geolocation", STUDIO, { isMainFrame: false, requestingUrl: "https://p-label.instafy.site/" }), false);
+  for (const frame of [previewFrame, sameOriginSubframe, foreignTop, notStudio]) {
+    assert.equal(decideStudioPermissionRequest("geolocation", frame, STUDIO, null, true), "deny");
+  }
+});
+
 test("the question uses the spec's wording", () => {
   assert.equal(STUDIO_LOCATION_PROMPT.message, "Allow Instafy to use your location?");
   assert.equal(STUDIO_LOCATION_PROMPT.detail, "Sites you open can ask for it, and you'll see \u{1F4CD} when one does.");
@@ -214,7 +232,7 @@ test("macOS builds can use Location Services", async () => {
     assert.match(entitlements, new RegExp(`<key>com\\.apple\\.security\\.cs\\.${key}</key>\\s*<true/>`));
   }
   const { MACOS_USAGE_DESCRIPTIONS } = await import(
-    path.join(packageRoot, "scripts", "ensure-macos-bluetooth-usage.mjs")
+    path.join(packageRoot, "scripts", "ensure-macos-usage-descriptions.mjs")
   );
   // The dev launcher's bundle carries the same strings as the packaged app.
   assert.equal(MACOS_USAGE_DESCRIPTIONS.NSLocationUsageDescription, info.NSLocationUsageDescription);

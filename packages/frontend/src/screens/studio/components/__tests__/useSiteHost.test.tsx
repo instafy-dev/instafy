@@ -65,7 +65,7 @@ describe("useSiteHost", () => {
     await render();
     const posted = vi.spyOn(frame!.contentWindow!, "postMessage").mockImplementation(() => undefined);
     act(() => host.onFrameLoad());
-    expect(posted).toHaveBeenLastCalledWith(expect.objectContaining({ type: "layout", caps: { geolocation: true, location: "host" } }), ORIGIN);
+    expect(posted).toHaveBeenLastCalledWith(expect.objectContaining({ type: "layout", caps: { location: "host" } }), ORIGIN);
     posted.mockClear();
     expect(host.handleSiteMessage(fromFrame({ source: "my-site", v: 1, type: "hello" }))).toBe(true);
     expect(posted).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ type: "layout" }), ORIGIN);
