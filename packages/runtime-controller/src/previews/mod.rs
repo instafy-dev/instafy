@@ -59,11 +59,14 @@ use crate::{
 mod follow;
 #[cfg(test)]
 mod follow_tests;
+mod serve;
 mod sessions;
 #[cfg(test)]
 mod tests;
+mod wake;
 
 pub(crate) use follow::{FollowBusMessage, FollowEnvelope, FollowHub};
+use serve::PreviewServe;
 use sessions::PreviewOrigin;
 pub(crate) use sessions::{
     check_preview_domain, prune_preview_sessions, revoke_preview_sessions_for_tunnel,
@@ -157,6 +160,18 @@ pub(crate) fn router() -> Router<AppState> {
             get(follow::get_preview_follow_stream),
         )
         .route(
+            "/projects/:project_id/previews/:preview_id/wake",
+            post(wake::post_preview_wake),
+        )
+        .route(
+            "/agent/preview-restarts/claim",
+            post(wake::post_agent_preview_restarts_claim),
+        )
+        .route(
+            "/agent/preview-restarts/:wake_id/result",
+            post(wake::post_agent_preview_restart_result),
+        )
+        .route(
             "/tunnel-broker/hooks/preview-auth",
             post(sessions::post_preview_auth_hook),
         )
@@ -233,6 +248,11 @@ struct CreatePreviewBody {
     title: String,
     #[serde(default)]
     metadata: Option<JsonValue>,
+    /// How the site was started (`instafy preview open` reads it from the
+    /// process on the port or takes `--serve-cmd`). With it the preview can
+    /// be woken after the runtime sleeps; without it, it cannot.
+    #[serde(default)]
+    serve: Option<JsonValue>,
 }
 
 #[derive(Debug, Serialize)]
@@ -241,6 +261,8 @@ struct CreatePreviewResponse {
     preview_id: String,
     status: String,
     credentials: Option<JsonValue>,
+    /// Whether a wake can start the site again (a `serve` was recorded).
+    restartable: bool,
     /// The Host suffix viewers reach this preview under (see
     /// `PreviewOrigin::host_suffix`), so a dev server that checks the Host
     /// header can allow it. Not a capability: it names the shared preview
@@ -273,6 +295,11 @@ struct PreviewResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     visibility: Option<String>,
     created_at: String,
+    /// A wake can start the site again: a `serve` command is recorded and
+    /// nobody closed the preview on purpose.
+    restartable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wake: Option<wake::WakeView>,
 }
 
 /// Who is calling a preview route. Job and machine tokens are bound on the
@@ -404,6 +431,33 @@ impl PreviewGrant {
         self.preview_str("path").unwrap_or("/").to_string()
     }
 
+    /// The recorded start command, when it is still a valid one.
+    fn serve(&self) -> Option<PreviewServe> {
+        self.preview_metadata()
+            .and_then(|metadata| metadata.get("serve"))
+            .and_then(|serve| PreviewServe::from_json(serve).ok())
+    }
+
+    /// Closed on purpose (`instafy preview close`, the close route): it never
+    /// wakes. A runtime stop revokes the grant too, but does not close it.
+    fn is_closed(&self) -> bool {
+        self.preview_metadata()
+            .is_some_and(|metadata| metadata.contains_key("closedAt"))
+    }
+
+    fn restartable(&self) -> bool {
+        self.is_private_preview()
+            && !self.is_closed()
+            && self.serve().is_some()
+            && self.tunnel_key().is_some()
+    }
+
+    /// The broker idempotency key this preview's tunnel was requested with,
+    /// so a wake reconnects the same tunnel id (the preview id in cards).
+    fn tunnel_key(&self) -> Option<&str> {
+        self.preview_str("tunnelKey")
+    }
+
     fn is_private_preview(&self) -> bool {
         grant_metadata_is_preview(self.record.metadata.as_ref())
             && self.preview_str("visibility") == Some(PREVIEW_VISIBILITY)
@@ -454,6 +508,8 @@ impl PreviewGrant {
             message_id: self.message_id(),
             visibility: self.preview_str("visibility").map(str::to_string),
             created_at: self.created_at.to_rfc3339(),
+            restartable: self.restartable(),
+            wake: None,
         }
     }
 }
@@ -734,6 +790,13 @@ async fn post_preview(
     let port = validate_preview_port(body.port, &state.config.previews.deny_ports)?;
     let title = validate_preview_title(&body.title)?;
     let path = validate_preview_path(body.path.as_deref())?;
+    let serve = body
+        .serve
+        .as_ref()
+        .filter(|serve| !serve.is_null())
+        .map(PreviewServe::from_json)
+        .transpose()
+        .map_err(bad_request)?;
     let requested_runtime_id = optional_uuid(body.runtime_id.as_ref(), "runtimeId")?;
     let requested_lease_id = optional_uuid(body.runtime_lease_id.as_ref(), "runtimeLeaseId")?;
     let conversation_id = optional_uuid(body.conversation_id.as_ref(), "conversationId")?;
@@ -829,6 +892,12 @@ async fn post_preview(
         preview.insert("conversationId".to_string(), json!(conversation_id));
     }
     preview.insert("tunnelKey".to_string(), json!(tunnel_key));
+    // How the site was started, for a wake. Controller-owned like the rest,
+    // so no tunnel route can swap in another command.
+    let restartable = serve.is_some();
+    if let Some(serve) = serve {
+        preview.insert("serve".to_string(), serve.to_json());
+    }
     let mut metadata = JsonMap::new();
     metadata.insert("localPort".to_string(), json!(port));
     metadata.insert(
@@ -860,6 +929,7 @@ async fn post_preview(
             preview_id: grant.tunnel_id,
             status: grant.status,
             credentials: grant.credentials,
+            restartable,
             viewer_host_suffix: origin.host_suffix(),
         }),
     ))
@@ -1447,7 +1517,10 @@ async fn get_preview(
         None
     };
     record_preview_serving(&state, &mut grant, health.as_ref()).await;
-    Ok(Json(grant.response(Some(health))))
+    let listening = health.as_ref().map(|probe| probe.listening);
+    let mut response = grant.response(Some(health));
+    response.wake = Some(wake::load_wake_view(&state, &project_id, &grant, listening).await?);
+    Ok(Json(response))
 }
 
 #[instrument(skip(state, headers))]
@@ -1487,8 +1560,9 @@ async fn post_preview_close(
     }
     if !tunnel_status_is_active(&grant.record.status) {
         // Already stopped (a runtime stop, say); make sure no viewer outlived
-        // it, and nobody still presents it.
+        // it, that it no longer wakes, and that nobody still presents it.
         revoke_preview_sessions_for_tunnel(&state.pool, &grant.record.tunnel_id).await;
+        mark_preview_closed(&state.pool, &grant.record.id).await?;
         state
             .follow
             .end_preview(&grant.record.tunnel_id, follow::EndReason::Closed);
@@ -1499,11 +1573,39 @@ async fn post_preview_close(
             .await?
             .ok_or_else(|| not_found("preview not found"))?;
     revoke_tunnel_record(&state, record, None).await?;
+    mark_preview_closed(&state.pool, &grant.record.id).await?;
     // A closed preview has nothing left to present.
     state
         .follow
         .end_preview(&grant.record.tunnel_id, follow::EndReason::Closed);
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// A closed preview stays closed: `closedAt` (in the controller-owned preview
+/// object, so only this module sets it) keeps a wake from starting it again.
+/// A later `instafy preview open` of the same port writes fresh metadata
+/// without it.
+async fn mark_preview_closed(pool: &PgPool, grant_row_id: &Uuid) -> ApiResult<()> {
+    let connection = pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to acquire connection: {error}")))?;
+    connection
+        .execute(
+            "update runtime_tunnel_grants
+             set metadata = jsonb_set(
+                   metadata,
+                   '{_instafyPreview,closedAt}',
+                   to_jsonb(now())
+                 ),
+                 updated_at = now()
+             where id = $1
+               and jsonb_typeof(metadata->'_instafyPreview') = 'object'",
+            &[grant_row_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to close preview: {error}")))?;
+    Ok(())
 }
 
 /// The broker hook's identity check of a viewer: still a member who may see

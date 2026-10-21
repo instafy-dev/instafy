@@ -2144,6 +2144,29 @@ pub(crate) fn tunnel_status_is_active(status: &str) -> bool {
     !matches!(normalized.as_str(), "revoked" | "expired" | "failed")
 }
 
+/// Preview metadata only the controller and the runtime read: the start
+/// command a wake runs (its argv may carry a secret the site was started
+/// with) and the wake id. They live in the controller-owned preview object;
+/// the generic tunnel routes, which any member may list, never return them.
+const INTERNAL_PREVIEW_METADATA_KEYS: [&str; 2] = ["serve", "wakeId"];
+
+fn public_tunnel_metadata(metadata: Option<&JsonValue>) -> Option<JsonValue> {
+    let metadata = metadata?;
+    let Some(map) = metadata.as_object() else {
+        return Some(metadata.clone());
+    };
+    let mut kept = map.clone();
+    if let Some(preview) = kept
+        .get_mut(PREVIEW_TUNNEL_METADATA_KEY)
+        .and_then(JsonValue::as_object_mut)
+    {
+        for key in INTERNAL_PREVIEW_METADATA_KEYS {
+            preview.remove(key);
+        }
+    }
+    Some(JsonValue::Object(kept))
+}
+
 fn tunnel_response_from_record(
     record: &RuntimeTunnelGrantRecord,
     credentials: Option<JsonValue>,
@@ -2159,7 +2182,7 @@ fn tunnel_response_from_record(
         url: record.url.clone(),
         status: record.status.clone(),
         expires_at: record.expires_at.to_rfc3339(),
-        metadata: record.metadata.clone(),
+        metadata: public_tunnel_metadata(record.metadata.as_ref()),
         credentials,
     }
 }

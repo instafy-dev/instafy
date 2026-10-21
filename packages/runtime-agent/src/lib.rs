@@ -23,6 +23,7 @@ pub mod mcp_process_groups;
 mod model_environment;
 pub mod origin;
 pub mod personal_browser;
+pub mod preview_restarts;
 pub mod process_hardening;
 mod required_execution;
 pub mod resources;

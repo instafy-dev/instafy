@@ -22,9 +22,11 @@ import {
   getSitePreview,
   heartbeatSitePreviewViewer,
   isSitePreviewsUnavailable,
+  mapControllerSitePreview,
   revokeSitePreviewViewer,
   sitePreviewProblem,
   sitePreviewRecordState,
+  wakeSitePreview,
 } from "../previews";
 
 const PROJECT_ID = "22222222-2222-4222-8222-222222222222";
@@ -56,7 +58,7 @@ describe("site preview controller client", () => {
     const preview = await getSitePreview(PROJECT_ID, PREVIEW_ID);
     expect(preview).toEqual({ previewId: PREVIEW_ID, title: "Docs site", port: 4173, path: "/",
       runtimeId: "runtime-1", status: "active", health: { listening: false, status: null }, messageId: "m-1", createdAt: "2026-10-12T00:00:00Z",
-      visibility: "private" });
+      visibility: "private", restartable: false, wake: { state: "idle", startedAt: null, error: null } });
     expect(JSON.stringify(preview)).not.toContain("p-aaaa");
     expect(fetchMock).toHaveBeenCalledWith(BASE, expect.objectContaining({ method: "GET", headers: expect.objectContaining({ authorization: "Bearer token-123" }) }));
     await getSitePreview(PROJECT_ID, PREVIEW_ID, undefined, { fresh: true });
@@ -152,5 +154,32 @@ describe("site preview controller client", () => {
       method: "POST", keepalive: true, body: JSON.stringify({ viewerUrl: VIEWER }),
       headers: expect.objectContaining({ authorization: "Bearer token-123" }),
     }));
+  });
+
+  it("reads whether a preview can be woken without Octo, and its wake", () => {
+    const base = { previewId: PREVIEW_ID, port: 4173, status: "revoked" };
+    expect(mapControllerSitePreview({ ...base, restartable: true, wake: { state: "WAKING", startedAt: "2026-10-14T10:00:00Z" } }))
+      .toMatchObject({ restartable: true, wake: { state: "waking", startedAt: "2026-10-14T10:00:00Z", error: null } });
+    // Shown as one plain line on the card: whitespace folded, length capped.
+    const failed = mapControllerSitePreview({ ...base, restartable: true, wake: { state: "failed", error: `port\n4173 ${"x".repeat(400)}` } })!;
+    expect(failed.wake?.state).toBe("failed");
+    expect(failed.wake!.error!.startsWith("port 4173 x")).toBe(true);
+    expect(failed.wake!.error!.length).toBe(160);
+    // Anything else (an older controller, a made-up state) is idle and not restartable.
+    expect(mapControllerSitePreview({ ...base, restartable: "yes", wake: { state: "exploding" } }))
+      .toMatchObject({ restartable: false, wake: { state: "idle", startedAt: null, error: null } });
+    expect(mapControllerSitePreview(base)).toMatchObject({ restartable: false, wake: { state: "idle" } });
+  });
+
+  it("wakes a preview with an empty POST and reads live or waking", async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ state: "live" })));
+    await expect(wakeSitePreview(PROJECT_ID, PREVIEW_ID)).resolves.toEqual({ state: "live" });
+    expect(fetchMock).toHaveBeenLastCalledWith(`${BASE}/wake`,
+      expect.objectContaining({ method: "POST", body: "{}", headers: expect.objectContaining({ authorization: "Bearer token-123" }) }));
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ state: "waking" }), { status: 202 }));
+    await expect(wakeSitePreview(PROJECT_ID, PREVIEW_ID)).resolves.toEqual({ state: "waking" });
+    fetchMock.mockResolvedValueOnce(new Response("{}", { status: 429 }));
+    const error = await wakeSitePreview(PROJECT_ID, PREVIEW_ID).catch((cause: unknown) => cause);
+    expect((error as ControllerApiError).status).toBe(429);
   });
 });
