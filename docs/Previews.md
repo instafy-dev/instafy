@@ -23,8 +23,9 @@ public, and no consent question is asked. A public link is still `instafy tunnel
 5. The tab's × closes the pane and revokes its session. If the server stops answering, the card and the pane say
    "Not responding on port N". If the preview is closed or the machine stops, they say "Stopped".
 6. While the pane shows the site, its heartbeat (about once a minute) counts as activity in the space, so the idle
-   sweep does not stop a machine someone is looking at. Each person's viewing does this for at most 4 hours a day per
-   space.
+   sweep does not stop a machine someone is looking at. This counts only for members who may change the space, the
+   same rule as Studio's own activity ping and as starting a stopped machine: the space pays for the machine, so a
+   view-only member's viewing keeps nothing up. Each person's viewing does this for at most 4 hours a day per space.
 7. A site `instafy preview open` knew how to start can be started again from the card or the pane after the machine
    slept (see [Waking a stopped site](#waking-a-stopped-site)).
 
@@ -47,7 +48,9 @@ A member can **Present** a site whose page says it can share its view, and the o
 ## Waking a stopped site
 
 `instafy preview open` records how the site was started: the argv and working directory of the process listening on
-the port (read from `/proc` on a Linux space), or `--serve-cmd "<command>"`. The controller keeps it in the preview's
+the port (read from `/proc` on a Linux space), or `--serve-cmd "<command>"`. A command line that looks like it carries a
+secret is never recorded: the CLI leaves it out (from `/proc`) or refuses it (`--serve-cmd`), and the controller refuses
+it too (`400`), whichever client sends it. The controller keeps it in the preview's
 controller-owned metadata, where no tunnel route can change it and no listing shows it. The preview record says
 `restartable: true` only when such a command is recorded and nobody closed the preview on purpose.
 
@@ -58,21 +61,30 @@ stopped answering), Studio calls `POST /projects/:id/previews/:pid/wake`:
 - Otherwise the controller records one wake (one open wake per preview; asking again joins it) and answers
   `202 {state: "waking"}`. If the machine is stopped, it starts it the way a chat message would. Only members who may
   change the space may start a stopped machine (`403 start_needs_builder`); anyone who may view the preview may restart
-  its site while the machine is up, or join a wake under way. A machine someone else owns that is offline fails with
-  `409 runtime_offline`.
+  its site while the machine is up, or join a wake under way. A person's `GET` of the preview says `canStart: false`
+  when their wake could not go ahead (they may not change the space and the machine is not up), so Studio disables
+  **Open** with that reason before anyone presses it. A self-hosted machine that is offline fails with
+  `409 runtime_offline` ("The computer this space runs on is offline.").
 - The runtime agent polls `POST /agent/preview-restarts/claim` with its agent token. A claim reconnects the same
   preview tunnel on the machine's current lease and hands the agent the recorded command and the tunnel client
   credentials. The agent starts the command as argv in its directory under the workspace (symlinks resolved, never
   outside), with the same stripped environment as other helper processes, waits up to 60 s for the port, starts the
   tunnel client and records it in the CLI's state file under the CLI's lock, then reports
   `POST /agent/preview-restarts/:wake_id/result`. The controller probes the site through the tunnel before it calls the
-  wake done.
+  wake done; when the broker cannot be asked, the wake ends on the agent's word but the `preview.wake` event says
+  `unverified`, not `live`, and Studio's own `GET` decides what it shows.
 - `GET` on the preview shows the wake as `wake: {state: "idle" | "waking" | "failed", startedAt?, error?}`. Studio
-  follows it until the site answers, then opens it. A failed wake shows its reason (one line, at most 300 characters).
+  follows it until the site answers, then opens it. A failed wake shows its reason: a fixed plain line ("the start
+  command exited (exit status: 1) before the site answered on port 4173", "the space could not start; try again in a
+  few minutes"), never a local path, user name or command line, since every member who may view the preview reads
+  it. The details stay in the agent's and the controller's logs.
 
 No agent job, run, chat message or model call is involved. Limits: 6 new wakes per preview per 10 minutes and 30 per
 person per space per hour (`429`); a wake not claimed within 10 minutes fails, and a claim without a result is retried
-after 90 s, at most 3 times. A preview closed with `instafy preview close` or the close route never wakes. Without
+after 180 s (well past the agent's longest restart: 60 s for the port, 30 s for the CLI's lock), at most 3 times. An
+agent that sees a re-claim of a preview it is still restarting reports that restart's outcome for it. Each runtime
+agent asks for claims every 3 s: one indexed update of `runtime_preview_wakes` plus the agent token's runtime check
+(`ensure_runtime_can_heartbeat`), whether or not it has previews. A preview closed with `instafy preview close` or the close route never wakes. Without
 previews configured, the wake route answers 503 like the others and the claim route 404, which the agent reads as "not
 offered here" and then asks only every 5 minutes. `runtime_preview_wakes` keeps who asked and how each wake ended.
 
@@ -184,12 +196,19 @@ skips itself when the broker does not report private previews, so it skips in CI
   charged nothing: the hook sees its private label and burns 0.
 - **Retention.** Session rows are pruned a little after they expire, and revoked ones an hour after revocation.
   Viewing windows (`runtime_preview_viewing_windows`) are pruned after 48 hours.
-- **Keep-awake.** Viewing keeps a machine up for at most 4 hours per person, space and day, counted from that person's
-  first viewing there, whatever the number of sessions. A removed member's heartbeat gets `410` and keeps nothing up.
+- **Keep-awake.** Only members who may change the space keep it awake by viewing, for at most 4 hours per person, space
+  and day, counted from that person's first viewing there, whatever the number of sessions. A view-only member's
+  viewing, and a removed member's heartbeat (`410`), keep nothing up.
 - **Wake.** The recorded start command runs as argv, never through a shell, only in its directory under the space's
-  workspace, with a stripped environment. A command line that looks like it carries a secret is not recorded, and the
-  generic tunnel routes never return the command. A stopped machine is started only for members who may change the
-  space, so a read-only member cannot spend its credits by opening a card.
+  workspace, with a stripped environment. A command line that looks like it carries a secret is not recorded (the CLI
+  and the controller both check), and the generic tunnel routes never return the command. A stopped machine is started
+  only for members who may change the space, so a read-only member cannot spend its credits by opening a card.
+- **Who may record a start command.** The runtime agent later runs the command with its own authority, outside any
+  sandbox, so only callers that already have that authority may record one: the runtime itself (its machine token),
+  Octo's turns on it (their job token; they run with full access on the runtime), and members who may change the
+  space (who can ask Octo to run any command anyway). Sandboxed code never holds a controller token: the runtime
+  refuses to hand one to an isolated tool worker, so a command that could not run inside the sandbox cannot be
+  recorded to run outside it later.
 
 ### Known limits
 

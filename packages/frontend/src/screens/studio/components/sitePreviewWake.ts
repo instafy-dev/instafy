@@ -24,12 +24,17 @@ const GONE_STATUSES = new Set([403, 404, 410]);
 
 /** The controller refuses a read-only member who would start a stopped runtime (it costs the space credits). */
 export const START_NEEDS_BUILDER = "start_needs_builder";
+/** What a member who may not start the machine reads, before pressing anything and after a refusal alike. */
+export const START_NEEDS_BUILDER_TEXT = "Only people who can edit this space can start it. Ask one of them to open it.";
+/** The space runs on someone's own computer, which is offline: nothing in Studio can start it. */
+export const RUNTIME_OFFLINE = "runtime_offline";
 
 /** One short line for the card: what went wrong, never a stack or a URL. */
 export function wakeErrorText(cause: unknown): string {
   if (cause instanceof PreviewWakeError) return cause.message;
   if (cause instanceof ControllerApiError) {
-    if (cause.code === START_NEEDS_BUILDER) return "Only people who can edit this space can start it. Ask one of them to open it.";
+    if (cause.code === START_NEEDS_BUILDER) return START_NEEDS_BUILDER_TEXT;
+    if (cause.code === RUNTIME_OFFLINE) return "The computer this space runs on is offline.";
     if (GONE_STATUSES.has(cause.status)) return "This preview is gone.";
     if (cause.status === 429) return "Asked too often. Try again in a minute.";
     if (cause.status === 409) return "This preview can't be started from here.";

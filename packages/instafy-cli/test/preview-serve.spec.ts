@@ -10,6 +10,7 @@ import {
   parseServeCommand,
   previewOpen,
   resolvePreviewServe,
+  parseExplicitServeCommand,
   secretInServeCommand,
   resolveWorkspaceRoot,
   workspaceRelativeDir,
@@ -199,6 +200,27 @@ describe("preview start command", () => {
     expect(() => resolvePreviewServe({ port: 8000, projectId: ws.projectId, env: {}, serveCmd: "serve" })).toThrow(
       /WORKSPACE_DIR/,
     );
+  });
+
+  it("refuses a --serve-cmd that carries a secret, as it refuses one read from the process", () => {
+    const ws = workspace();
+    for (const serveCmd of [
+      "node server.js --api-key sk-live-abcdefghijklmnop",
+      "node server.js --token x",
+      "env API_KEY=hunter2 node server.js",
+      "node server.js --db postgres://app:hunter2@db.internal:5432/app",
+    ]) {
+      let message = "";
+      try {
+        resolvePreviewServe({ port: 8000, projectId: ws.projectId, env: ws.env, serveCmd, cwd: ws.root, platform: "darwin" });
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message, serveCmd).toMatch(/looks like a secret .*env file/);
+      expect(message).not.toMatch(/hunter2|sk-live/);
+      expect(() => parseExplicitServeCommand(serveCmd)).toThrow(/looks like a secret/);
+    }
+    expect(parseExplicitServeCommand("node server.js --no-token")).toEqual(["node", "server.js", "--no-token"]);
   });
 });
 

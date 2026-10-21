@@ -36,6 +36,11 @@ export type ControllerSitePreview = {
    */
   restartable?: boolean;
   wake?: SitePreviewWake;
+  /**
+   * Whether Open may start this preview for the person asking: they may change the space, or its machine is already
+   * up (restarting only the site costs nothing). Null when the controller did not say.
+   */
+  canStart?: boolean | null;
 };
 
 /** A member-only capability address. Keep it in memory only: never store, log or show it. */
@@ -162,6 +167,7 @@ export function mapControllerSitePreview(value: unknown): ControllerSitePreview 
     visibility: readString(value.visibility),
     restartable: value.restartable === true,
     wake: mapSitePreviewWake(value.wake),
+    canStart: typeof value.canStart === "boolean" ? value.canStart : null,
   };
 }
 

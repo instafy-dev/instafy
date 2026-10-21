@@ -15,7 +15,7 @@ import { ChatActionCard, type ChatActionCardAction } from "./ChatActionCard";
 import type { SitePreviewRequest } from "./sitePreviewRequest";
 import { requestFollow, setFollowPresence, useFollowAccount, useFollowEntry } from "./previewHost/followStore";
 import { getFollowState } from "../../../services/runtimeController/previewFollow";
-import { PreviewWakeError, wakeUntilLive } from "./sitePreviewWake";
+import { PreviewWakeError, START_NEEDS_BUILDER_TEXT, wakeUntilLive } from "./sitePreviewWake";
 
 export type SitePreviewState = "checking" | "live" | "not_responding" | "unavailable" | "stopped";
 
@@ -334,6 +334,8 @@ export function SitePreviewCard({
   const showing = state !== "stopped" && opener?.visiblePreviewId === preview.previewId;
   // Only a record that says how to start the site can be woken; a preview that is gone cannot.
   const wakeable = server?.restartable === true && !gone;
+  // Starting its stopped machine takes someone who may change the space: others see why before they press Open.
+  const startBlocked = wakeable && state === "stopped" && server?.canStart === false;
   // Someone else (another member, another tab) is waking it: follow along.
   const wakingElsewhere = !waking && server?.wake?.state === "waking";
   const starting = waking || wakingElsewhere;
@@ -401,12 +403,14 @@ export function SitePreviewCard({
   }, [opener, preview.previewId, preview.title]);
   const open = () => {
     // A stopped site that can be started: start it, then open it.
-    if (state === "stopped" && wakeable) { void wake(openNow); return; }
+    if (state === "stopped" && wakeable) { if (!startBlocked) void wake(openNow); return; }
     renew();
     openNow();
   };
 
-  const label = sitePreviewStateLabel(state, server?.port ?? preview.port);
+  const label = starting
+    ? "Starting…"
+    : wakeError ?? (startBlocked ? START_NEEDS_BUILDER_TEXT : sitePreviewStateLabel(state, server?.port ?? preview.port));
   const actions: ChatActionCardAction[] = [];
   if (opener && followable && followPresence) {
     // The pane follows as soon as it is open and knows the presentation.
@@ -415,15 +419,13 @@ export function SitePreviewCard({
       onPress: () => { requestFollow(preview.previewId); open(); },
     });
   }
-  const label = starting ? "Starting…" : wakeError ?? sitePreviewStateLabel(state, server?.port ?? preview.port);
-  const actions: ChatActionCardAction[] = [];
   if (opener) {
     actions.push({
       id: "open-preview",
       label: showing ? "Showing" : "Open",
       variant: showing || followable || (state === "not_responding" && !wakeable) || state === "unavailable" ? "outline" : "primary",
       onPress: open,
-      isDisabled: showing || starting || (state === "stopped" && !wakeable),
+      isDisabled: showing || starting || (state === "stopped" && (!wakeable || startBlocked)),
       isLoading: starting,
       loadingLabel: "Starting…",
       testId: "preview-ready-open",

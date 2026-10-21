@@ -58,7 +58,7 @@ describe("site preview controller client", () => {
     const preview = await getSitePreview(PROJECT_ID, PREVIEW_ID);
     expect(preview).toEqual({ previewId: PREVIEW_ID, title: "Docs site", port: 4173, path: "/",
       runtimeId: "runtime-1", status: "active", health: { listening: false, status: null }, messageId: "m-1", createdAt: "2026-10-12T00:00:00Z",
-      visibility: "private", restartable: false, wake: { state: "idle", startedAt: null, error: null } });
+      visibility: "private", restartable: false, wake: { state: "idle", startedAt: null, error: null }, canStart: null });
     expect(JSON.stringify(preview)).not.toContain("p-aaaa");
     expect(fetchMock).toHaveBeenCalledWith(BASE, expect.objectContaining({ method: "GET", headers: expect.objectContaining({ authorization: "Bearer token-123" }) }));
     await getSitePreview(PROJECT_ID, PREVIEW_ID, undefined, { fresh: true });
@@ -169,6 +169,10 @@ describe("site preview controller client", () => {
     expect(mapControllerSitePreview({ ...base, restartable: "yes", wake: { state: "exploding" } }))
       .toMatchObject({ restartable: false, wake: { state: "idle", startedAt: null, error: null } });
     expect(mapControllerSitePreview(base)).toMatchObject({ restartable: false, wake: { state: "idle" } });
+    // Whether Open may start it for this person: only a boolean the controller sent counts.
+    expect(mapControllerSitePreview({ ...base, canStart: false })?.canStart).toBe(false);
+    expect(mapControllerSitePreview({ ...base, canStart: true })?.canStart).toBe(true);
+    expect(mapControllerSitePreview({ ...base, canStart: "no" })?.canStart).toBeNull();
   });
 
   it("wakes a preview with an empty POST and reads live or waking", async () => {

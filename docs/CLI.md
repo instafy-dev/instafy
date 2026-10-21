@@ -550,7 +550,7 @@ Nothing is recorded when the directory is outside the space's workspace, the com
 folder (`/tmp`, `/var/tmp`, `/dev/shm`, `/run`), or the command line carries what looks like a secret
 (`--token …`, `API_KEY=…`, a URL with a password, a known key format); read secrets from an env file. The
 JSON then has `"restartable": false` and a `restartNote` saying why, and the card works as before until
-the space sleeps. `restartable` is `true` only when the server recorded the command too.
+the space sleeps. A `--serve-cmd` that carries what looks like a secret is refused before anything is opened. `restartable` is `true` only when the server recorded the command too.
 
 Exit codes:
 

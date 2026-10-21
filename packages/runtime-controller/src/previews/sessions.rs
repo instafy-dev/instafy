@@ -670,14 +670,57 @@ pub(super) async fn post_preview_view_heartbeat(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Whether `user_id` may change the space: the same rule as Studio's own
+/// activity ping and as starting a stopped machine. Compute is paid by the
+/// space, so only these members' viewing keeps it running.
+async fn may_keep_space_awake(
+    pool: &PgPool,
+    project_id: &Uuid,
+    user_id: &Uuid,
+) -> Result<bool, String> {
+    let mut connection = pool.get().await.map_err(|error| error.to_string())?;
+    let transaction = connection
+        .transaction()
+        .await
+        .map_err(|error| error.to_string())?;
+    let context = crate::auth::RequestContext {
+        user_id: Some(*user_id),
+        is_service_role: false,
+        scoped_claims: None,
+    };
+    let allowed = match crate::projects::load_project_record(&transaction, project_id).await {
+        Ok(project) => {
+            crate::projects::ensure_project_write_access(&transaction, &project, &context, None)
+                .await
+                .is_ok()
+        }
+        Err(_) => false,
+    };
+    transaction
+        .commit()
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(allowed)
+}
+
 /// Viewing is activity in the space, as a Studio ping is: the idle sweep,
 /// the stop's idle check and slot reclaim all read `project_user_activity`.
-/// Each person's viewing keeps a space up for at most
+/// Only members who may change the space count (see
+/// [`may_keep_space_awake`]): a view-only member's viewing neither starts nor
+/// keeps up a machine. Each such person's viewing keeps a space up for at most
 /// [`VIEWING_ACTIVITY_CAP_SECONDS`] a day, counted from the start of their
 /// viewing window there (`runtime_preview_viewing_windows`, one row per
 /// person and space): a new session does not start a new window, so viewing
 /// alone cannot keep a runtime up forever.
 pub(super) async fn record_viewing_activity(pool: &PgPool, project_id: &Uuid, user_id: &Uuid) {
+    match may_keep_space_awake(pool, project_id, user_id).await {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => {
+            warn!(%project_id, %error, "failed to check who may keep the space awake");
+            return;
+        }
+    }
     let result = match pool.get().await {
         Ok(connection) => connection
             .execute(

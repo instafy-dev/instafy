@@ -110,6 +110,16 @@ enum ParentFrame {
 
 impl IsolatedToolWorkerRequest {
     fn validate(&self) -> Result<()> {
+        // Sandboxed code never holds controller authority. A controller token
+        // could, for one, record a preview start command (`instafy preview
+        // open --serve-cmd`), which the runtime agent later runs outside the
+        // sandbox when a member opens the stopped preview. Fail closed.
+        ensure!(
+            self.controller_token.is_none()
+                && self.controller_token_scopes.is_empty()
+                && self.controller_token_expires_at.is_none(),
+            "an isolated worker never gets a controller token"
+        );
         ensure_supported_platform(std::env::consts::OS)?;
         ensure!(
             !self.prompt.trim().is_empty(),
@@ -167,14 +177,6 @@ impl IsolatedToolWorkerRequest {
             !workspace.starts_with(&state) && !state.starts_with(&workspace),
             "worker workspace and private state must be separate"
         );
-        if let Some(expires) = self.controller_token_expires_at.as_deref() {
-            let expires = chrono::DateTime::parse_from_rfc3339(expires)
-                .context("invalid controller token expiry")?;
-            ensure!(
-                expires > chrono::Utc::now(),
-                "isolated worker controller token expired"
-            );
-        }
         validate_job_environment(&self.job_environment)
     }
 }
@@ -635,16 +637,6 @@ pub fn prepare_cli() -> Result<IsolatedToolWorkerRequest> {
             RUN_TIMEOUT.as_secs().to_string(),
         ),
     ]));
-    if let Some(token) = &request.controller_token {
-        environment.insert("CONTROLLER_ACCESS_TOKEN".into(), token.clone());
-        environment.insert(
-            "CONTROLLER_ACCESS_SCOPES".into(),
-            request.controller_token_scopes.join(" "),
-        );
-    }
-    if let Some(expires) = &request.controller_token_expires_at {
-        environment.insert("CONTROLLER_ACCESS_EXPIRES_AT".into(), expires.clone());
-    }
     if let Some(model) = &request.model {
         environment.insert("CODEX_MODEL".into(), model.clone());
     }
@@ -788,6 +780,50 @@ mod tests {
         assert!(ensure_supported_platform("macos").is_ok());
         for platform in ["windows", "freebsd", "unknown"] {
             assert!(ensure_supported_platform(platform).is_err());
+        }
+    }
+
+    #[test]
+    fn a_sandboxed_worker_request_never_carries_a_controller_token() {
+        let scratch = tempfile::tempdir().unwrap();
+        let workspace_dir = scratch.path().join("workspace");
+        let state_dir = scratch.path().join("state");
+        std::fs::create_dir_all(&workspace_dir).unwrap();
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let request = IsolatedToolWorkerRequest {
+            workspace_dir,
+            state_dir,
+            prompt: "inert".into(),
+            project_id: Uuid::new_v4(),
+            job_id: Uuid::new_v4(),
+            conversation_id: None,
+            proxy_base_url: "http://127.0.0.1:9".into(),
+            proxy_token: "inert-proxy".into(),
+            controller_base_url: "http://127.0.0.1:9".into(),
+            controller_token: None,
+            controller_token_scopes: Vec::new(),
+            controller_token_expires_at: None,
+            job_environment: HashMap::new(),
+            model: None,
+            reasoning_effort: None,
+        };
+        assert!(request.validate().is_ok());
+        for with_authority in [
+            IsolatedToolWorkerRequest {
+                controller_token: Some("job-token".into()),
+                ..request.clone()
+            },
+            IsolatedToolWorkerRequest {
+                controller_token_scopes: vec!["prompt.execute".into()],
+                ..request.clone()
+            },
+            IsolatedToolWorkerRequest {
+                controller_token_expires_at: Some("2999-01-01T00:00:00Z".into()),
+                ..request.clone()
+            },
+        ] {
+            let error = with_authority.validate().unwrap_err().to_string();
+            assert!(error.contains("never gets a controller token"), "{error}");
         }
     }
 

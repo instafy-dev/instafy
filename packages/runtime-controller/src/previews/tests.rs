@@ -421,6 +421,8 @@ struct PreviewStubBroker {
     assignment_status: StdMutex<Option<String>>,
     /// What a probe that reaches the tunnel answers; `None` is a site's 200.
     probe_status: StdMutex<Option<u16>>,
+    /// The broker cannot be asked: every probe errors.
+    probe_fails: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait]
@@ -485,6 +487,9 @@ impl TunnelBroker for PreviewStubBroker {
     async fn probe_tunnel(&self, _tunnel_id: &str, _path: &str) -> anyhow::Result<TunnelProbe> {
         use std::sync::atomic::Ordering;
         self.probes.fetch_add(1, Ordering::SeqCst);
+        if self.probe_fails.load(Ordering::SeqCst) {
+            anyhow::bail!("the broker is unreachable");
+        }
         let silent = self
             .silent_probes
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {

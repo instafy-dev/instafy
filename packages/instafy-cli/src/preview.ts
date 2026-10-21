@@ -695,7 +695,7 @@ export function detectListeningProcess(port: number, procRoot = "/proc"): Listen
 }
 
 const SECRET_FLAG = /^-{1,2}(?!-|no-)[\w.-]*(token|secret|passw(or)?d|passwd|api[-_]?key|access[-_]?key|private[-_]?key|credentials?|auth(?![a-z]))[\w.-]*$/i;
-const SECRET_ENV = /^[A-Za-z_][\w]*(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|CREDENTIALS?)[\w]*=./i;
+const SECRET_ENV = /^(?=[A-Za-z_])\w*(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|CREDENTIALS?)[\w]*=./i;
 const SECRET_VALUE = /^(sk|pk|rk)[-_][A-Za-z0-9_-]{12,}|^gh[pousr]_[A-Za-z0-9]{20,}|^xox[abposr]-|^AKIA[0-9A-Z]{12,}|^eyJ[A-Za-z0-9_-]{20,}\./;
 const URL_USERINFO = /^[a-z][a-z0-9+.-]*:\/\/[^/\s@]*:[^/\s@]*@/i;
 
@@ -722,6 +722,21 @@ export function secretInServeCommand(argv: string[]): string | null {
 }
 
 /**
+ * `--serve-cmd` as argv, refused when it is shell syntax or carries what looks like a secret: the controller keeps
+ * the recorded command, so a secret belongs in an env file the site reads.
+ */
+export function parseExplicitServeCommand(raw: string): string[] {
+  const argv = parseServeCommand(raw);
+  const secret = secretInServeCommand(argv);
+  if (secret) {
+    throw new Error(
+      `--serve-cmd carries what looks like a secret (${secret}), which is not recorded. Have the site read it from an env file and pass the command without it.`,
+    );
+  }
+  return argv;
+}
+
+/**
  * How to start the site again after the space sleeps: `--serve-cmd` from the current directory, else the argv and
  * directory of the process listening on the port. `note` says why there is none.
  */
@@ -738,7 +753,7 @@ export function resolvePreviewServe(params: {
   const root = resolveWorkspaceRoot(env, params.projectId);
   const explicit = params.serveCmd?.trim();
   if (explicit) {
-    const argv = parseServeCommand(explicit);
+    const argv = parseExplicitServeCommand(explicit);
     if (!root) {
       throw new Error("--serve-cmd needs the space's workspace (WORKSPACE_DIR); run it inside the space.");
     }
@@ -910,8 +925,8 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
   const port = parsePreviewPort(opts.port);
   const title = parsePreviewTitle(opts.title);
   const sitePath = parsePreviewPath(opts.path);
-  // A malformed --serve-cmd is refused before anything is probed or asked for.
-  if (opts.serveCmd?.trim()) parseServeCommand(opts.serveCmd);
+  // A malformed --serve-cmd, or one carrying a secret, is refused before anything is probed or asked for.
+  if (opts.serveCmd?.trim()) parseExplicitServeCommand(opts.serveCmd);
   const projectId = resolveProject({ project: opts.project });
   const retryCommand = `instafy preview open --port ${port} --title ${shellQuote(title)}`;
   const { auth, controllerUrl } = resolveAuth(opts, retryCommand);

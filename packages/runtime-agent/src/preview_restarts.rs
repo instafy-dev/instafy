@@ -19,7 +19,6 @@
 //! 4. Report the outcome; the controller probes the site through the tunnel
 //!    before it calls the wake done.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -79,6 +78,76 @@ fn default_path() -> String {
 pub(crate) struct PreviewRestartClaim {
     #[serde(default)]
     pub(crate) restarts: Vec<PreviewRestart>,
+}
+
+/// Why a restart failed, as the controller shows it to every member who may
+/// view the preview: a fixed plain reason, never a local path, user name or
+/// command line. The full error stays in this agent's log.
+#[derive(Debug)]
+pub struct RestartFailed(pub String);
+
+impl std::fmt::Display for RestartFailed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for RestartFailed {}
+
+/// Gives a failure its plain reason unless a deeper step already gave one.
+fn plainly<T>(result: Result<T>, reason: &str) -> Result<T> {
+    result.map_err(|error| {
+        if error.downcast_ref::<RestartFailed>().is_some() {
+            error
+        } else {
+            error.context(RestartFailed(reason.to_string()))
+        }
+    })
+}
+
+fn failed(reason: impl Into<String>) -> anyhow::Error {
+    RestartFailed(reason.into()).into()
+}
+
+/// What a failed restart reports: its plain reason, or a generic line.
+pub fn reported_reason(error: &anyhow::Error) -> String {
+    error
+        .downcast_ref::<RestartFailed>()
+        .map(|reason| reason.0.clone())
+        .unwrap_or_else(|| "the site could not be restarted on its computer".to_string())
+}
+
+/// The previews this agent is restarting now, and the wakes waiting on each.
+/// A preview is restarted once at a time; a wake claimed for it meanwhile
+/// (the controller re-offers a claim it has no result for) gets the same
+/// outcome instead of being dropped.
+#[derive(Default)]
+pub struct RestartsInFlight(Mutex<std::collections::HashMap<String, Vec<Uuid>>>);
+
+impl RestartsInFlight {
+    /// True when this starts a restart of the preview; false when one is
+    /// under way, and the wake now waits on it.
+    pub fn begin(&self, preview_id: &str, wake_id: Uuid) -> bool {
+        let mut map = self.0.lock();
+        match map.get_mut(preview_id) {
+            Some(waiting) => {
+                if !waiting.contains(&wake_id) {
+                    waiting.push(wake_id);
+                }
+                false
+            }
+            None => {
+                map.insert(preview_id.to_string(), vec![wake_id]);
+                true
+            }
+        }
+    }
+
+    /// Ends the preview's restart: every wake that waited on it, the first
+    /// one first.
+    pub fn finish(&self, preview_id: &str) -> Vec<Uuid> {
+        self.0.lock().remove(preview_id).unwrap_or_default()
+    }
 }
 
 /// Where a restart runs and what it may use.
@@ -152,7 +221,7 @@ pub fn spawn_preview_restart_task(
 ) -> Option<tokio::task::JoinHandle<()>> {
     let interval = poll_interval()?;
     let environment = RestartEnvironment::from_config(&config);
-    let in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+    let in_flight = Arc::new(RestartsInFlight::default());
     Some(tokio::spawn(async move {
         let mut wait = interval;
         loop {
@@ -173,7 +242,8 @@ pub fn spawn_preview_restart_task(
                 }
             };
             for restart in restarts {
-                if !in_flight.lock().insert(restart.preview_id.clone()) {
+                if !in_flight.begin(&restart.preview_id, restart.wake_id) {
+                    // Already restarting it: this wake gets that outcome.
                     continue;
                 }
                 let client = client.clone();
@@ -184,20 +254,24 @@ pub fn spawn_preview_restart_task(
                     let preview_id = restart.preview_id.clone();
                     let wake_id = restart.wake_id;
                     let outcome = run_preview_restart(&environment, &restart).await;
-                    let error = outcome.as_ref().err().map(|error| format!("{error:#}"));
-                    match &error {
-                        None => info!(%preview_id, %wake_id, "preview restarted"),
-                        Some(error) => {
-                            warn!(%preview_id, %wake_id, %error, "preview restart failed")
+                    let reason = match &outcome {
+                        Ok(()) => {
+                            info!(%preview_id, %wake_id, "preview restarted");
+                            None
+                        }
+                        Err(error) => {
+                            warn!(%preview_id, %wake_id, error = %format!("{error:#}"), "preview restart failed");
+                            Some(reported_reason(error))
+                        }
+                    };
+                    for wake_id in in_flight.finish(&preview_id) {
+                        if let Err(report_error) = client
+                            .report_preview_restart(&registration, wake_id, reason.as_deref())
+                            .await
+                        {
+                            warn!(%preview_id, %wake_id, ?report_error, "preview restart report failed");
                         }
                     }
-                    if let Err(report_error) = client
-                        .report_preview_restart(&registration, wake_id, error.as_deref())
-                        .await
-                    {
-                        warn!(%preview_id, %wake_id, ?report_error, "preview restart report failed");
-                    }
-                    in_flight.lock().remove(&preview_id);
                 });
             }
         }
@@ -210,21 +284,42 @@ pub async fn run_preview_restart(
     restart: &PreviewRestart,
 ) -> Result<()> {
     if restart.serve.argv.is_empty() || restart.serve.argv[0].trim().is_empty() {
-        bail!("the recorded start command is empty");
+        return Err(failed("the recorded start command is empty"));
     }
     let credentials = restart
         .credentials
         .as_ref()
-        .ok_or_else(|| anyhow!("the claim carried no tunnel credentials"))?;
+        .ok_or_else(|| failed("the claim carried no tunnel credentials"))?;
     // Build the tunnel config first: bad credentials should not leave a
     // started site behind.
-    let config_body = rathole_config(credentials, restart.port, environment.in_container)?;
+    let config_body = plainly(
+        rathole_config(credentials, restart.port, environment.in_container),
+        "the tunnel credentials were not usable",
+    )?;
 
     if !site_answers(restart.port, &restart.path).await {
-        let cwd = resolve_serve_cwd(&environment.workspace_dir, &restart.serve.cwd)?;
-        start_site(environment, restart, &cwd).await?;
+        let cwd = plainly(
+            resolve_serve_cwd(&environment.workspace_dir, &restart.serve.cwd),
+            "the start command's directory is missing or outside the workspace",
+        )?;
+        plainly(
+            start_site(environment, restart, &cwd).await,
+            "the start command could not be run",
+        )?;
     }
-    start_tunnel_client(environment, restart, &config_body)
+    // Waiting for the CLI's state lock and the client's first moments block:
+    // off the async workers, so heartbeats and jobs keep running meanwhile.
+    let environment = environment.clone();
+    let restart = restart.clone();
+    let started = tokio::task::spawn_blocking(move || {
+        start_tunnel_client(&environment, &restart, &config_body)
+    })
+    .await
+    .map_err(|error| anyhow!("the tunnel client task failed: {error}"));
+    plainly(
+        started.and_then(|result| result),
+        "the preview tunnel client could not be started",
+    )
 }
 
 /// `serve.cwd` under the workspace, after resolving symlinks. Refuses
@@ -344,20 +439,20 @@ async fn start_site(
     let deadline = Instant::now() + environment.port_wait;
     loop {
         if let Some(status) = child.try_wait()? {
-            bail!(
+            return Err(failed(format!(
                 "the start command exited ({status}) before the site answered on port {}",
                 restart.port
-            );
+            )));
         }
         if site_answers(restart.port, &restart.path).await {
             break;
         }
         if Instant::now() >= deadline {
-            bail!(
+            return Err(failed(format!(
                 "the site did not answer on port {} within {} s",
                 restart.port,
                 environment.port_wait.as_secs()
-            );
+            )));
         }
         sleep(Duration::from_millis(300)).await;
     }
@@ -374,7 +469,9 @@ async fn start_site(
     _restart: &PreviewRestart,
     _cwd: &Path,
 ) -> Result<()> {
-    bail!("restarting a preview's site is not supported on this platform")
+    Err(failed(
+        "restarting a preview's site is not supported on this platform",
+    ))
 }
 
 const LOOPBACK_HOSTS: [&str; 4] = ["127.0.0.1", "localhost", "::1", "[::1]"];
@@ -569,7 +666,9 @@ impl StateLock {
                         continue;
                     }
                     if Instant::now() >= deadline {
-                        bail!("another instafy preview command on this space is still running");
+                        return Err(failed(
+                            "another instafy preview command on this space is still running",
+                        ));
                     }
                     std::thread::sleep(Duration::from_millis(100));
                 }
@@ -731,7 +830,9 @@ fn start_tunnel_client(
             .with_context(|| format!("could not start {binary}"))?;
         std::thread::sleep(CLIENT_SETTLE);
         if let Some(status) = child.try_wait()? {
-            bail!("the preview tunnel client exited at once ({status})");
+            return Err(failed(format!(
+                "the preview tunnel client exited at once ({status})"
+            )));
         }
         let child_pid = i64::from(child.id());
         // Reap it whenever it exits; it outlives this restart.
@@ -777,7 +878,9 @@ fn start_tunnel_client(
     _restart: &PreviewRestart,
     _config_body: &str,
 ) -> Result<()> {
-    bail!("restarting a preview's tunnel is not supported on this platform")
+    Err(failed(
+        "restarting a preview's tunnel is not supported on this platform",
+    ))
 }
 
 #[cfg(all(test, unix))]
@@ -1051,6 +1154,12 @@ mod tests {
             message.contains("exited") && message.contains('7'),
             "{message}"
         );
+        assert_eq!(
+            reported_reason(&error),
+            format!(
+                "the start command exited (exit status: 7) before the site answered on port {port}"
+            )
+        );
         assert!(
             !sandbox
                 .home
@@ -1070,6 +1179,69 @@ mod tests {
             .await
             .expect_err("must fail");
         assert!(format!("{error:#}").contains("definitely-not-a-program-xyz"));
+        // Members see a plain reason: no command line, path or user name.
+        assert_eq!(
+            reported_reason(&error),
+            "the start command could not be run"
+        );
+
+        let outside = PreviewRestart {
+            serve: PreviewServe {
+                argv: vec!["true".to_string()],
+                cwd: "not-there".to_string(),
+            },
+            ..missing
+        };
+        let error = run_preview_restart(&sandbox.environment(), &outside)
+            .await
+            .expect_err("must fail");
+        let home = sandbox.home.display().to_string();
+        assert!(format!("{error:#}").contains("not-there"), "{error:#}");
+        let reason = reported_reason(&error);
+        assert_eq!(
+            reason,
+            "the start command's directory is missing or outside the workspace"
+        );
+        assert!(!reason.contains(&home));
+        let mut broken = sandbox.environment();
+        broken.workspace_dir = sandbox.home.join("no-workspace");
+        let error = run_preview_restart(&broken, &outside)
+            .await
+            .expect_err("must fail");
+        assert!(format!("{error:#}").contains("no-workspace"), "{error:#}");
+        assert!(!reported_reason(&error).contains("no-workspace"));
+        assert_eq!(
+            reported_reason(&anyhow!("failed to open /home/someone/.instafy/x.log")),
+            "the site could not be restarted on its computer"
+        );
+    }
+
+    #[test]
+    fn a_wake_claimed_again_mid_restart_waits_for_that_restart_and_gets_its_outcome() {
+        let in_flight = RestartsInFlight::default();
+        let (first, again, newer) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        assert!(in_flight.begin("p", first), "the first claim restarts it");
+        assert!(
+            !in_flight.begin("p", first),
+            "a re-claim of the same wake joins"
+        );
+        assert!(!in_flight.begin("p", again), "another wake of it joins");
+        assert!(!in_flight.begin("p", again));
+        assert!(
+            in_flight.begin("q", newer),
+            "another preview restarts on its own"
+        );
+        assert_eq!(
+            in_flight.finish("p"),
+            vec![first, again],
+            "each reported once"
+        );
+        assert!(
+            in_flight.begin("p", newer),
+            "a later wake restarts it again"
+        );
+        assert_eq!(in_flight.finish("q"), vec![newer]);
+        assert_eq!(in_flight.finish("missing"), Vec::<Uuid>::new());
     }
 
     #[test]

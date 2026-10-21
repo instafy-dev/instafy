@@ -51,8 +51,12 @@ use crate::{bad_request, forbidden, internal_error, not_found, unauthorized, Api
 /// did not come up (or its agent cannot restart previews).
 pub(super) const WAKE_PENDING_TIMEOUT_SECONDS: i64 = 10 * 60;
 /// A claimed wake without a result may be claimed again after this long (the
-/// agent died mid-restart), at most [`WAKE_MAX_CLAIMS`] times in all.
-pub(super) const WAKE_CLAIM_RETRY_SECONDS: i64 = 90;
+/// agent died mid-restart), at most [`WAKE_MAX_CLAIMS`] times in all. Well
+/// past the agent's longest restart (`preview_restarts.rs`: 60 s for the port,
+/// 30 s for the CLI's state lock, a few seconds of probes), so a slow restart
+/// is not claimed again while it runs; an agent that does see a re-claim of a
+/// preview it is restarting reports that restart's outcome for it.
+pub(super) const WAKE_CLAIM_RETRY_SECONDS: i64 = 180;
 pub(super) const WAKE_MAX_CLAIMS: i32 = 3;
 /// How long `GET` keeps showing a failed wake.
 pub(super) const WAKE_FAILED_VISIBLE_SECONDS: i64 = 15 * 60;
@@ -285,6 +289,29 @@ async fn load_wake_runtime(
         live,
         private_self_hosted,
     })
+}
+
+/// Whether a wake by `context` can go ahead for this preview: they may change
+/// the space, or its machine is already up (restarting only the site costs
+/// nothing). `GET` reports it so Studio can disable Open with the reason.
+pub(super) async fn caller_may_start(
+    state: &AppState,
+    project_id: &Uuid,
+    grant: &PreviewGrant,
+    context: &crate::auth::RequestContext,
+) -> bool {
+    if ensure_project_write_authorized(state, project_id, context)
+        .await
+        .is_ok()
+    {
+        return true;
+    }
+    match grant.record.runtime_id {
+        Some(runtime_id) => load_wake_runtime(state, project_id, &runtime_id)
+            .await
+            .is_ok_and(|runtime| runtime.live),
+        None => false,
+    }
 }
 
 /// `preview.wake` carries the preview's conversation (as the event's
@@ -575,10 +602,12 @@ pub(super) async fn post_preview_wake(
                     error = %error.message,
                     "preview wake could not start the runtime"
                 );
+                // Members see a plain line; the provider's own words (hosts,
+                // paths) stay in this log.
                 fail_wake(
                     &background,
                     &wake_id,
-                    &format!("the space could not start: {}", error.message),
+                    "the space could not start; try again in a few minutes",
                 )
                 .await;
             }
@@ -859,6 +888,7 @@ pub(super) async fn post_agent_preview_restart_result(
     }
 
     let grant = load_preview_grant(&state.pool, &project_id, &tunnel_id).await?;
+    let mut verified = true;
     let failure = if !body.ok {
         Some(
             body.error
@@ -867,12 +897,18 @@ pub(super) async fn post_agent_preview_restart_result(
                 .unwrap_or_else(|| sanitize_wake_error("")),
         )
     } else {
-        // Trust, but check: the site must answer through the tunnel.
+        // Trust, but check: the site must answer through the tunnel. When the
+        // broker cannot be asked, the agent's word ends the wake but the site
+        // is not announced live: Studio's own GET decides what it shows.
         match probe_preview_until_listening(&state, &grant).await {
             Some(probe) if !probe.listening => {
                 Some("the site started but does not answer through the preview tunnel".to_string())
             }
-            _ => None,
+            Some(_) => None,
+            None => {
+                verified = false;
+                None
+            }
         }
     };
     let connection = state
@@ -899,14 +935,23 @@ pub(super) async fn post_agent_preview_restart_result(
         state = next_state,
         "preview restart reported"
     );
-    publish_wake_event(
-        &state,
-        &project_id,
-        &tunnel_id,
-        if failure.is_some() { "failed" } else { "live" },
-    )
-    .await;
+    let published = match (&failure, verified) {
+        (Some(_), _) => "failed",
+        (None, true) => "live",
+        (None, false) => "unverified",
+    };
+    publish_wake_event(&state, &project_id, &tunnel_id, published).await;
     Ok(Json(
-        load_wake_view(&state, &project_id, &grant, Some(failure.is_none())).await?,
+        load_wake_view(
+            &state,
+            &project_id,
+            &grant,
+            if verified {
+                Some(failure.is_none())
+            } else {
+                None
+            },
+        )
+        .await?,
     ))
 }

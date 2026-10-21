@@ -117,6 +117,26 @@ describe("the card wakes a stopped site on Open", () => {
     expect(open().disabled).toBe(false); // Open is the retry
   });
 
+  it("tells a member who may not start the machine why, before they press Open", async () => {
+    mocks.getSitePreview.mockResolvedValue(stopped({ canStart: false }));
+    await render();
+    expect(text("[data-testid=preview-ready-status]")).toBe("Only people who can edit this space can start it. Ask one of them to open it.");
+    expect(open().disabled).toBe(true);
+    await act(async () => open().click());
+    await flush();
+    expect(mocks.wakeSitePreview).not.toHaveBeenCalled();
+    expect(opener.openPreview).not.toHaveBeenCalled();
+  });
+
+  it("says plainly when the space's own computer is offline", async () => {
+    mocks.getSitePreview.mockResolvedValue(stopped({ canStart: true }));
+    mocks.wakeSitePreview.mockRejectedValue(apiError(409, "runtime_offline"));
+    await render();
+    await press("[data-testid=preview-ready-open]");
+    expect(text("[data-testid=preview-ready-status]")).toBe("The computer this space runs on is offline.");
+    expect(opener.openPreview).not.toHaveBeenCalled();
+  });
+
   it("follows a wake someone else started, and offers Start again for a site that stopped answering", async () => {
     mocks.getSitePreview.mockResolvedValueOnce(stopped({ wake: { state: "waking", startedAt: null, error: null } }))
       .mockResolvedValueOnce(record({ health: { listening: false, status: null } }))
@@ -152,6 +172,29 @@ describe("the pane starts a stopped site again", () => {
     expect(mocks.wakeSitePreview).toHaveBeenCalledOnce();
     expect(mocks.createSitePreviewViewer).toHaveBeenCalledTimes(2);
     expect(frame()?.getAttribute("src")).toContain("p-aaaa");
+  });
+
+  it("stops following its wake when it closes", async () => {
+    mocks.createSitePreviewViewer.mockRejectedValue(apiError(409));
+    mocks.getSitePreview.mockResolvedValueOnce(stopped()).mockResolvedValue(stopped({ wake: { state: "waking", startedAt: null, error: null } }));
+    mocks.wakeSitePreview.mockResolvedValue({ state: "waking" });
+    await render();
+    await press("[data-testid=site-preview-wake]");
+    await advance(2_000);
+    const polls = mocks.getSitePreview.mock.calls.length;
+    expect(polls).toBeGreaterThan(1);
+    await act(async () => root.render(<div />));
+    await advance(20_000);
+    expect(mocks.getSitePreview.mock.calls.length).toBe(polls);
+  });
+
+  it("keeps Start again off, with the reason, for a member who may not start the machine", async () => {
+    mocks.createSitePreviewViewer.mockRejectedValue(apiError(409));
+    mocks.getSitePreview.mockResolvedValue(stopped({ canStart: false }));
+    await render();
+    expect(text("[data-testid=site-preview-problem]")).toContain("Only people who can edit this space can start it.");
+    expect(container.querySelector<HTMLButtonElement>("[data-testid=site-preview-wake]")?.disabled).toBe(true);
+    expect(mocks.wakeSitePreview).not.toHaveBeenCalled();
   });
 
   it("asks Octo, not the pane, for a site nobody recorded how to start", async () => {

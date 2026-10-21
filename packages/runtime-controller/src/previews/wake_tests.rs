@@ -381,7 +381,14 @@ async fn a_preview_stopped_by_the_idle_sweep_wakes_on_the_next_lease_without_a_m
             assert_eq!(stopped["restartable"], json!(true));
 
             // A read-only member can't start the stopped runtime (it costs
-            // the space credits); nothing is recorded or launched.
+            // the space credits); nothing is recorded or launched. GET says
+            // so before anyone presses Open.
+            assert_eq!(f.get_preview(&preview_id).await?["canStart"], json!(false));
+            let (status, builder_view) = f
+                .request(&f.tokens[1], "GET", &f.path(&format!("/{preview_id}")), Value::Null)
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{builder_view}");
+            assert_eq!(builder_view["canStart"], json!(true));
             let (provider, launches, _provider) = stub_provider().await?;
             let app = f.app_with_provider(&provider);
             let wake_path = f.path(&format!("/{preview_id}/wake"));
@@ -585,11 +592,10 @@ async fn a_wake_whose_runtime_cannot_start_fails_with_the_reason() -> anyhow::Re
             }
             // Members see why at once instead of waiting ten minutes.
             let (_, error) = wake.context("the wake did not fail")?;
-            assert!(
-                error
-                    .as_deref()
-                    .is_some_and(|error| error.starts_with("the space could not start:")),
-                "{error:?}"
+            // A plain line: the provider's own words stay in the log.
+            assert_eq!(
+                error.as_deref(),
+                Some("the space could not start; try again in a few minutes")
             );
             let preview = f.get_preview(&preview_id).await?;
             assert_eq!(preview["wake"]["state"], "failed", "{preview}");
@@ -839,7 +845,7 @@ async fn wake_outcomes_reach_get_failed_runs_time_out_and_foreign_reports_are_re
             assert_eq!(status, StatusCode::ACCEPTED);
             db.execute(
                 "update runtime_preview_wakes
-                 set state = 'claimed', claim_count = 3, claimed_at = now() - interval '2 minutes'
+                 set state = 'claimed', claim_count = 3, claimed_at = now() - interval '4 minutes'
                  where tunnel_id = $1 and state = 'pending'",
                 &[&preview_id],
             )
@@ -852,14 +858,44 @@ async fn wake_outcomes_reach_get_failed_runs_time_out_and_foreign_reports_are_re
 }
 
 #[tokio::test]
-async fn viewing_a_preview_is_activity_in_the_space_for_four_hours() -> anyhow::Result<()> {
+async fn viewing_by_members_who_may_change_the_space_is_activity_for_four_hours(
+) -> anyhow::Result<()> {
     run(|f| {
         Box::pin(async move {
             let job = f.job(None).await?;
             let preview_id = f.open_restartable(&job).await?;
+            // A view-only member's viewing keeps nothing awake: they may not
+            // start the machine either, and the space pays for it.
+            f.clear_activity().await?;
+            let (readonly_url, readonly_label) = f.view(2, &preview_id).await?;
+            assert_eq!(f.activity_at().await?, None, "a view-only member's Open");
+            // Past the once-a-minute debounce, so the heartbeat would count.
+            f.state
+                .pool
+                .get()
+                .await?
+                .execute(
+                    "update runtime_preview_sessions set last_used_at = now() - interval '2 minutes'
+                     where capability_hash = $1",
+                    &[&capability_hash(&readonly_label)],
+                )
+                .await?;
+            let (status, _) = f
+                .request(
+                    &f.tokens[2],
+                    "POST",
+                    &f.path(&format!("/{preview_id}/view/heartbeat")),
+                    json!({ "viewerUrl": readonly_url }),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::NO_CONTENT);
+            assert_eq!(f.activity_at().await?, None, "a view-only member's heartbeat");
+            crate::previews::sessions::record_viewing_activity(&f.state.pool, &f.project, &f.users[2]).await;
+            assert_eq!(f.activity_at().await?, None, "any viewing by a view-only member");
+
             // Opening it is activity.
             f.clear_activity().await?;
-            let (viewer_url, label) = f.view(2, &preview_id).await?;
+            let (viewer_url, label) = f.view(1, &preview_id).await?;
             assert!(f.activity_at().await?.is_some(), "the Open counts");
             let hash = capability_hash(&label);
             let db = f.state.pool.get().await?;
@@ -898,7 +934,7 @@ async fn viewing_a_preview_is_activity_in_the_space_for_four_hours() -> anyhow::
             };
             let age_window = |hours: i32| {
                 let pool = f.state.pool.clone();
-                let (project, user) = (f.project, f.users[2]);
+                let (project, user) = (f.project, f.users[1]);
                 async move {
                     pool.get()
                         .await?
@@ -919,7 +955,7 @@ async fn viewing_a_preview_is_activity_in_the_space_for_four_hours() -> anyhow::
             // traffic is not proof that the member is still looking.
             f.clear_activity().await?;
             age_session(hash.clone(), 2, 0).await?;
-            forget_viewer_access(&f.users[2], &f.project);
+            forget_viewer_access(&f.users[1], &f.project);
             assert!(f.allowed(&preview_id, &label).await?);
             assert!(idle_minutes(hash.clone()).await? >= 1.9, "the hook only checks");
             assert_eq!(f.activity_at().await?, None, "the hook is not activity");
@@ -933,7 +969,7 @@ async fn viewing_a_preview_is_activity_in_the_space_for_four_hours() -> anyhow::
             // A session opened for a separate tab has no heartbeat, so its
             // own traffic keeps it alive (and counts).
             let (status, tab) = f
-                .request(&f.tokens[2], "POST", &f.path(&format!("/{preview_id}/view?tab=true")), json!({}))
+                .request(&f.tokens[1], "POST", &f.path(&format!("/{preview_id}/view?tab=true")), json!({}))
                 .await?;
             assert_eq!(status, StatusCode::OK, "{tab}");
             let tab_host = url::Url::parse(tab["viewerUrl"].as_str().context("viewerUrl")?)?
@@ -955,7 +991,7 @@ async fn viewing_a_preview_is_activity_in_the_space_for_four_hours() -> anyhow::
                 let f = f.clone();
                 async move {
                     let (status, _) = f
-                        .request(&f.tokens[2], "POST", &heartbeat, json!({ "viewerUrl": url }))
+                        .request(&f.tokens[1], "POST", &heartbeat, json!({ "viewerUrl": url }))
                         .await?;
                     anyhow::Ok(status)
                 }
@@ -979,11 +1015,11 @@ async fn viewing_a_preview_is_activity_in_the_space_for_four_hours() -> anyhow::
             age_session(hash.clone(), 2, 0).await?;
             assert_eq!(beat(viewer_url.clone()).await?, StatusCode::NO_CONTENT);
             assert_eq!(f.activity_at().await?, None, "its heartbeat after 5 h");
-            let (fresh_url, _) = f.view(2, &preview_id).await?;
+            let (fresh_url, _) = f.view(1, &preview_id).await?;
             assert_eq!(f.activity_at().await?, None, "a new Open after 5 h");
             assert_eq!(beat(fresh_url).await?, StatusCode::NO_CONTENT);
             assert_eq!(f.activity_at().await?, None, "the new session's heartbeat");
-            crate::previews::sessions::record_viewing_activity(&f.state.pool, &f.project, &f.users[2]).await;
+            crate::previews::sessions::record_viewing_activity(&f.state.pool, &f.project, &f.users[1]).await;
             assert_eq!(
                 f.activity_at().await?,
                 None,
@@ -994,7 +1030,7 @@ async fn viewing_a_preview_is_activity_in_the_space_for_four_hours() -> anyhow::
             assert!(f.activity_at().await?.is_some(), "another member");
             f.clear_activity().await?;
             age_window(25).await?;
-            f.view(2, &preview_id).await?;
+            f.view(1, &preview_id).await?;
             assert!(f.activity_at().await?.is_some(), "the next day");
 
             // Someone else's session, or a revoked one, is gone (410).
@@ -1009,7 +1045,7 @@ async fn viewing_a_preview_is_activity_in_the_space_for_four_hours() -> anyhow::
             assert_eq!(status, StatusCode::GONE);
             let (status, _) = f
                 .request(
-                    &f.tokens[2],
+                    &f.tokens[1],
                     "POST",
                     &f.path(&format!("/{preview_id}/view/revoke")),
                     json!({ "viewerUrl": viewer_url }),
@@ -1020,14 +1056,14 @@ async fn viewing_a_preview_is_activity_in_the_space_for_four_hours() -> anyhow::
 
             // A member removed from the space loses the heartbeat too, and
             // with it the session.
-            let (member_url, member_label) = f.view(2, &preview_id).await?;
+            let (member_url, member_label) = f.view(1, &preview_id).await?;
             age_session(capability_hash(&member_label), 2, 0).await?;
             db.execute(
                 "delete from project_memberships where project_id = $1 and user_id = $2",
-                &[&f.project, &f.users[2]],
+                &[&f.project, &f.users[1]],
             )
             .await?;
-            forget_viewer_access(&f.users[2], &f.project);
+            forget_viewer_access(&f.users[1], &f.project);
             f.clear_activity().await?;
             assert_eq!(beat(member_url).await?, StatusCode::GONE, "removed member");
             assert_eq!(f.activity_at().await?, None, "keeps nothing awake");
@@ -1090,14 +1126,17 @@ async fn members_never_see_the_start_command_and_a_revoke_cannot_move_the_port_a
         Box::pin(async move {
             let job = f.job(None).await?;
             let mut body = f.open_body(&job, 4173);
-            body["serve"] = json!({ "argv": ["node", "server.js", "--api-key", "sk-test-secret"], "cwd": "site" });
+            // A command line is private to the space (paths, names): only the
+            // runtime gets it. (One that looks like it carries a secret is not
+            // recorded at all: see serve.rs.)
+            body["serve"] = json!({ "argv": ["node", "server.js", "--data-dir", "private-marker-7f3a"], "cwd": "site" });
             let (status, created) = f.request(&job.token, "POST", &f.path(""), body).await?;
             assert_eq!(status, StatusCode::CREATED, "{created}");
             let preview_id = created["previewId"].as_str().context("previewId")?.to_string();
             // Stored for the wake…
             assert_eq!(
                 f.grant_metadata(&preview_id).await?[PREVIEW_TUNNEL_METADATA_KEY]["serve"]["argv"][3],
-                "sk-test-secret"
+                "private-marker-7f3a"
             );
             // …but no member's tunnel list carries it (nor the broker key).
             let (status, list) = f
@@ -1109,7 +1148,7 @@ async fn members_never_see_the_start_command_and_a_revoke_cannot_move_the_port_a
                 )
                 .await?;
             assert_eq!(status, StatusCode::OK, "{list}");
-            assert!(!list.to_string().contains("sk-test-secret"), "{list}");
+            assert!(!list.to_string().contains("private-marker-7f3a"), "{list}");
             let grant = list["grants"]
                 .as_array()
                 .context("grants")?
@@ -1217,6 +1256,123 @@ async fn the_restart_channel_is_not_offered_where_previews_are_off() -> anyhow::
                 )
                 .await?;
             assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_private_computer_that_is_offline_fails_its_wake_at_once_without_a_launch(
+) -> anyhow::Result<()> {
+    run(|f| {
+        Box::pin(async move {
+            let job = f.job(None).await?;
+            let preview_id = f.open_restartable(&job).await?;
+            f.stop_runtime_like_the_idle_sweep(&job).await?;
+            // The space runs on its owner's own computer.
+            f.state
+                .pool
+                .get()
+                .await?
+                .execute(
+                    "update runtimes set capabilities = $2 where id = $1",
+                    &[
+                        &job.runtime_id,
+                        &json!({ "_instafySelfHostedAccess": { "mode": "private", "ownerUserId": f.users[0] } }),
+                    ],
+                )
+                .await?;
+            let (provider, launches, _provider) = stub_provider().await?;
+            let app = f.app_with_provider(&provider);
+            let wake_path = f.path(&format!("/{preview_id}/wake"));
+            let (status, refused) = f
+                .request_on(&app, &f.tokens[0], "POST", &wake_path, json!({}))
+                .await?;
+            assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+            assert_eq!(refused["code"], "runtime_offline", "{refused}");
+            let row = f
+                .state
+                .pool
+                .get()
+                .await?
+                .query_one(
+                    "select state, error from runtime_preview_wakes where tunnel_id = $1",
+                    &[&preview_id],
+                )
+                .await?;
+            assert_eq!(row.get::<_, String>("state"), "failed");
+            assert!(row
+                .get::<_, Option<String>>("error")
+                .is_some_and(|error| error.contains("offline")));
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            assert_eq!(
+                launches.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "nothing here can start someone's computer"
+            );
+            let (status, preview) = f
+                .request_on(&app, &f.tokens[0], "GET", &f.path(&format!("/{preview_id}")), Value::Null)
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{preview}");
+            assert_eq!(preview["wake"]["state"], "failed", "{preview}");
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_view_only_member_restarts_a_site_on_a_running_machine_and_an_unchecked_restart_is_not_announced_live(
+) -> anyhow::Result<()> {
+    use std::sync::atomic::Ordering;
+    run(|f| {
+        Box::pin(async move {
+            let job = f.job(None).await?;
+            let preview_id = f.open_restartable(&job).await?;
+            // With the machine up, anyone who may view may restart the site.
+            assert_eq!(f.get_preview(&preview_id).await?["canStart"], json!(true));
+
+            // The machine is up but the site stopped answering: restarting it
+            // costs nothing, so a view-only member may.
+            f.broker.silent_probes.store(1_000, Ordering::SeqCst);
+            let (status, body) = f.wake(2, &preview_id).await?;
+            assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+            assert_eq!(body["state"], "waking");
+            let agent = f.agent_token(job.runtime_id, job.lease_id)?;
+            let (status, claimed) = f.claim(&agent).await?;
+            assert_eq!(status, StatusCode::OK, "{claimed}");
+            let restarts = claimed["restarts"].as_array().context("restarts")?;
+            assert_eq!(restarts.len(), 1, "{claimed}");
+            let wake_id = restarts[0]["wakeId"]
+                .as_str()
+                .context("wakeId")?
+                .to_string();
+
+            // The agent says it worked, but the broker cannot be asked: the
+            // wake ends without telling anyone the site is live.
+            f.broker.silent_probes.store(0, Ordering::SeqCst);
+            f.broker.probe_fails.store(true, Ordering::SeqCst);
+            let mut events = f.state.events.subscribe();
+            let (status, result) = f.report(&agent, &wake_id, json!({ "ok": true })).await?;
+            assert_eq!(status, StatusCode::OK, "{result}");
+            let event = std::iter::from_fn(|| events.try_recv().ok())
+                .find(|event| event.kind == "preview.wake")
+                .context("preview.wake event")?;
+            assert_eq!(event.data["state"], "unverified", "{:?}", event.data);
+            let state: String = f
+                .state
+                .pool
+                .get()
+                .await?
+                .query_one(
+                    "select state from runtime_preview_wakes where id = $1",
+                    &[&Uuid::parse_str(&wake_id)?],
+                )
+                .await?
+                .get(0);
+            assert_eq!(state, "done");
+            f.broker.probe_fails.store(false, Ordering::SeqCst);
             Ok(())
         })
     })

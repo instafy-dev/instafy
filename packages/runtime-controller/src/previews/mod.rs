@@ -300,6 +300,12 @@ struct PreviewResponse {
     restartable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     wake: Option<wake::WakeView>,
+    /// Whether a wake by the caller can go ahead: they may change the space
+    /// (as starting a stopped machine requires), or its machine is up. Only
+    /// on a person's `GET` of one preview, so Studio can disable Open with
+    /// the reason before anyone presses it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    can_start: Option<bool>,
 }
 
 /// Who is calling a preview route. Job and machine tokens are bound on the
@@ -510,6 +516,7 @@ impl PreviewGrant {
             created_at: self.created_at.to_rfc3339(),
             restartable: self.restartable(),
             wake: None,
+            can_start: None,
         }
     }
 }
@@ -1520,6 +1527,10 @@ async fn get_preview(
     let listening = health.as_ref().map(|probe| probe.listening);
     let mut response = grant.response(Some(health));
     response.wake = Some(wake::load_wake_view(&state, &project_id, &grant, listening).await?);
+    if let PreviewReader::Context(context) = &reader {
+        response.can_start =
+            Some(wake::caller_may_start(&state, &project_id, &grant, context).await);
+    }
     Ok(Json(response))
 }
 
