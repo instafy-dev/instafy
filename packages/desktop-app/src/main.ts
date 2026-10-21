@@ -535,8 +535,6 @@ function describeStudioLocationPermission(state: StudioLocationPermissionState):
   return "Instafy will ask the first time a site wants your location.";
 }
 
-const MACOS_LOCATION_SETTINGS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices";
-
 async function showStudioLocationPermissionDialog() {
   const state = studioPermissionHandlers.locationPermissionState();
   const window = getStudioWindow();
@@ -553,14 +551,12 @@ async function showStudioLocationPermissionDialog() {
   if (state === "system") {
     const systemOptions: Electron.MessageBoxOptions = {
       type: "info",
-      buttons: ["Open Location Services", "OK"],
-      defaultId: 1,
-      cancelId: 1,
+      buttons: ["OK"],
       message: describeStudioLocationPermission(state),
       detail: "macOS asks the first time a site wants it. Change it in System Settings → Privacy & Security → Location Services.",
     };
-    const answer = window ? await dialog.showMessageBox(window, systemOptions) : await dialog.showMessageBox(systemOptions);
-    if (answer.response === 0) void shell.openExternal(MACOS_LOCATION_SETTINGS_URL);
+    if (window) await dialog.showMessageBox(window, systemOptions);
+    else await dialog.showMessageBox(systemOptions);
     return;
   }
   const result = window ? await dialog.showMessageBox(window, options) : await dialog.showMessageBox(options);
