@@ -147,7 +147,31 @@ export function followEntry(previewId: string): FollowEntry {
   return entries.get(previewId) ?? EMPTY;
 }
 
+/**
+ * Who is signed in, set by AuthProvider (as for location's sites), so the
+ * pane and card know a presentation is the person's own without importing the
+ * auth provider's graph.
+ */
+let account: string | null = null;
+const accountListeners = new Set<() => void>();
+
+export function setFollowAccount(userId: string | null) {
+  if (account === userId) return;
+  account = userId;
+  for (const listener of accountListeners) listener();
+}
+
+/** The signed-in person's id, or null (signed out, or a component rendered on its own). */
+export function useFollowAccount(): string | null {
+  return useSyncExternalStore(
+    listener => { accountListeners.add(listener); return () => { accountListeners.delete(listener); }; },
+    () => account,
+    () => null,
+  );
+}
+
 export function resetFollowStoreForTests() {
+  setFollowAccount(null);
   entries.clear();
   ownPresentations.clear();
   endedPresentations.length = 0;

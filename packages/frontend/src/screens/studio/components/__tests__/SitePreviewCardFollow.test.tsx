@@ -6,11 +6,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ControllerSitePreview } from "../../../../services/runtimeController/previews";
 import { ConversationPreviewContext, type ConversationPreviewOpener } from "../../../../workspace/ConversationPreviewContext";
 import { SitePreviewCard } from "../SitePreviewCard";
-import { applyFollowPresenceEvent, followEntry, publishFollowRole, resetFollowStoreForTests } from "../previewHost/followStore";
+import { applyFollowPresenceEvent, followEntry, publishFollowRole, resetFollowStoreForTests, setFollowAccount } from "../previewHost/followStore";
 
 const PREVIEW_ID = "11111111-1111-4111-8111-111111111111";
 const kim = { id: "u-kim", name: "Kim", avatarUrl: null };
-const mocks = vi.hoisted(() => ({ getSitePreview: vi.fn(), getFollowState: vi.fn(), selfId: null as string | null }));
+const mocks = vi.hoisted(() => ({ getSitePreview: vi.fn(), getFollowState: vi.fn() }));
 vi.mock("../../../../services/runtimeController/previews", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../../services/runtimeController/previews")>()),
   getSitePreview: mocks.getSitePreview,
@@ -18,10 +18,6 @@ vi.mock("../../../../services/runtimeController/previews", async (importOriginal
 vi.mock("../../../../services/runtimeController/previewFollow", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../../services/runtimeController/previewFollow")>()),
   getFollowState: mocks.getFollowState,
-}));
-vi.mock("../../../../providers/AuthProvider", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../../../providers/AuthProvider")>()),
-  useOptionalUserId: () => mocks.selfId,
 }));
 vi.mock("../../../../runtime/RuntimeStateProvider", () => ({ useOptionalRuntimeState: () => ({ tunnelGrants: {}, runtimeStatuses: [] }) }));
 
@@ -52,11 +48,11 @@ describe("SitePreviewCard follow mode", () => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container);
     Object.values(mocks).forEach(mock => { if (typeof mock === "function") mock.mockReset(); });
-    mocks.selfId = "u-lena";
     mocks.getSitePreview.mockResolvedValue(record());
     mocks.getFollowState.mockResolvedValue({ presence: null, followers: [] });
     opener = { openPreview: vi.fn(), visiblePreviewId: null };
     resetFollowStoreForTests();
+    setFollowAccount("u-lena");
   });
   afterEach(async () => {
     await act(async () => root.unmount()); container.remove(); vi.useRealTimers();

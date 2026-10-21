@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
-import { useOptionalUserId } from "../../../../providers/AuthProvider";
 import { getSitePreview } from "../../../../services/runtimeController/previews";
 import { buildHostLayoutMessage, currentStudioTheme, isSiteEnvelope, parseSiteMessage } from "./hostMessages";
 import { createLocationBroker, type LocationBroker } from "./locationBroker";
 import { adoptLocationSite, locationSiteKey, useLocationSiteStatus, type LocationSiteMeta } from "./locationSites";
 import { usePreviewFollow } from "./usePreviewFollow";
+import { useFollowAccount } from "./followStore";
 
 const NO_ERROR = () => {};
 
@@ -147,7 +147,7 @@ export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, 
   }, [frameKey, viewerUrl]);
   const locationStatus = useLocationSiteStatus(siteKey);
 
-  const selfId = useOptionalUserId();
+  const selfId = useFollowAccount();
   const follow = usePreviewFollow({
     projectId,
     previewId,

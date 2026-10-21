@@ -12,9 +12,8 @@ import {
 import { useConversationPreviewOpener } from "../../../workspace/ConversationPreviewContext";
 import { ChatActionCard, type ChatActionCardAction } from "./ChatActionCard";
 import type { SitePreviewRequest } from "./sitePreviewRequest";
-import { requestFollow, setFollowPresence, useFollowEntry } from "./previewHost/followStore";
+import { requestFollow, setFollowPresence, useFollowAccount, useFollowEntry } from "./previewHost/followStore";
 import { getFollowState } from "../../../services/runtimeController/previewFollow";
-import { useOptionalUserId } from "../../../providers/AuthProvider";
 
 export type SitePreviewState = "checking" | "live" | "not_responding" | "unavailable" | "stopped";
 
@@ -323,7 +322,7 @@ export function SitePreviewCard({
 
   // Follow mode: who presents this site now (events keep it current; one look when the card first reads Live).
   const followEntry = useFollowEntry(preview.previewId);
-  const selfId = useOptionalUserId();
+  const selfId = useFollowAccount();
   const askedFollow = useRef(false);
   useEffect(() => {
     if (!projectId || state !== "live" || askedFollow.current) return;

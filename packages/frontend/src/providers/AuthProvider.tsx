@@ -26,6 +26,7 @@ import {
 import { useWorkspaceStore } from "../store";
 import { clearProjectState } from "../workspace/projectClear";
 import { setLocationSitesAccount } from "../screens/studio/components/previewHost/locationSites";
+import { setFollowAccount } from "../screens/studio/components/previewHost/followStore";
 import { changeNotificationSession, releaseNotificationSession } from "../notifications/notificationLifecycle";
 import { installNotificationActionListeners } from "../notifications/notificationActions";
 import { postAuthTelemetryEvent } from "../services/runtimeController/authTelemetry";
@@ -592,6 +593,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     useWorkspaceStore.getState().setWorkspaceScope(scope);
     // Which sites got this person's location is theirs: never shown to the next account on this device.
     setLocationSitesAccount(user?.id ?? null);
+    // And whose presentations are their own.
+    setFollowAccount(user?.id ?? null);
   }, [loading, user?.id]);
 
   useEffect(() => {
@@ -895,11 +898,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
-}
-
-/** The signed-in person's id, or null outside an AuthProvider (a component rendered on its own). */
-export function useOptionalUserId(): string | null {
-  return useContext(AuthContext)?.user?.id ?? null;
 }
 
 export function useAuth() {

@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SitePreviewPane } from "../SitePreviewPane";
 import { useSiteHost } from "../previewHost/useSiteHost";
 import { resetLocationSitesForTests, setLocationSitesAccount } from "../previewHost/locationSites";
-import { applyFollowPresenceEvent, endOwnPresentation, followEntry, requestFollow, resetFollowStoreForTests } from "../previewHost/followStore";
+import { applyFollowPresenceEvent, endOwnPresentation, followEntry, requestFollow, resetFollowStoreForTests, setFollowAccount } from "../previewHost/followStore";
 import type { FollowStreamEvent } from "../../../../services/runtimeController/previewFollow";
 
 // docs/Follow-Mode.md (Studio): follow mode in the site preview pane.
@@ -27,11 +27,6 @@ const mocks = vi.hoisted(() => ({
   sendFollowTap: vi.fn(),
   stopPresenting: vi.fn(),
   openFollowStream: vi.fn(),
-  selfId: null as string | null,
-}));
-vi.mock("../../../../providers/AuthProvider", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../../../providers/AuthProvider")>()),
-  useOptionalUserId: () => mocks.selfId,
 }));
 vi.mock("../../../../services/runtimeController/previews", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../../services/runtimeController/previews")>()),
@@ -99,7 +94,6 @@ describe("SitePreviewPane follow mode", () => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container);
     Object.values(mocks).forEach(mock => { if (typeof mock === "function" && "mockReset" in mock) mock.mockReset(); });
-    mocks.selfId = null;
     mocks.createSitePreviewViewer.mockResolvedValue({ viewerUrl: FIRST, idleTimeoutSeconds: 1800, expiresAt: null });
     mocks.getSitePreview.mockResolvedValue(record());
     mocks.heartbeatSitePreviewViewer.mockResolvedValue("live");
@@ -295,7 +289,7 @@ describe("SitePreviewPane follow mode", () => {
     });
 
     it("offers the person's own presentation from another screen as Stop, never as someone to follow", async () => {
-      mocks.selfId = "u-lena";
+      setFollowAccount("u-lena");
       server.presence = { presentationId: "pres-other", presenter: lena, state: "live", followers: 1 };
       applyFollowPresenceEvent(PREVIEW_ID, "pres-other", { presentationId: "pres-other", presenter: lena, state: "live", followers: 1 });
       await renderAcked();
