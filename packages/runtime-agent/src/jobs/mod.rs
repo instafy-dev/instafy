@@ -7107,6 +7107,18 @@ impl JobProcessor {
                 || generic_mcp_tool_execution_missing
                 || personal_browser_execution_missing
                 || shared_browser_execution_missing);
+        // Only a retry for command-observation evidence alone may leave the
+        // first answer standing; every other reason means that answer failed.
+        let retried_only_for_command_observation = command_execution_missing
+            && !routing_recovery::blocking_missing(evidence_requirements, observed_evidence)
+            && !(reported_file_changes_missing
+                || workspace_file_changes_missing
+                || codex_fallback_summary_kind.is_some()
+                || transient_upstream_summary_failure
+                || generic_mcp_tool_execution_missing
+                || personal_browser_execution_missing
+                || shared_browser_execution_missing);
+        let first_ran_command = has_completed_command_execution(&interim_messages);
         if should_retry_codex_once(
             first_shared_browser_terminal_consent_failure,
             recovery_retry_required,
@@ -7589,6 +7601,27 @@ impl JobProcessor {
                 &mut retry_codex_fallback_summary_kind,
                 retry_shared_browser_terminal_consent_failure,
             );
+            let kept_first_attempt_answer = retry_shared_browser_terminal_consent_failure.is_none()
+                && keep_first_attempt_answer(
+                    &outcome.summary,
+                    first_ran_command,
+                    retried_only_for_command_observation,
+                    &retry_outcome.summary,
+                    retry_codex_fallback_summary_kind,
+                    has_completed_command_execution(&retry_messages),
+                );
+            if kept_first_attempt_answer {
+                tracing::info!(
+                    job_id = %job_id,
+                    "keeping the first attempt's answer: the evidence retry brought no answer of its own"
+                );
+                retry_outcome.summary = outcome.summary.clone();
+                retry_outcome.suggested_replies = outcome.suggested_replies.clone();
+                retry_outcome.snippet = outcome.snippet.clone();
+                retry_outcome.actions = outcome.actions.clone();
+                retry_outcome.read_files = outcome.read_files.clone();
+                retry_codex_fallback_summary_kind = None;
+            }
             let retry_transient_upstream_summary_failure =
                 retry_shared_browser_terminal_consent_failure.is_none()
                     && retry_own_files_len == 0
@@ -7612,6 +7645,15 @@ impl JobProcessor {
                 retry_artifacts.push(refresh.artifact());
             }
             retry_artifacts.extend(build_codex_artifacts(&retry_output, &retry_outcome));
+            if kept_first_attempt_answer {
+                retry_artifacts.push(json!({
+                    "kind": "codex/final-message-kept-from-attempt",
+                    "metadata": {
+                        "attempt": 1,
+                        "reason": "evidence_retry_without_answer",
+                    }
+                }));
+            }
             if evidence_requirements.requires_any() {
                 retry_artifacts.push(json!({
                     "kind": "codex/routing-evidence-recovery",
@@ -9683,12 +9725,14 @@ fn parse_line_range(value: &JsonValue) -> Option<LineRange> {
     None
 }
 
+const DEFAULT_CODEX_OUTCOME_SUMMARY: &str = "Codex automation completed the request.";
+
 fn extract_codex_outcome(value: &JsonValue) -> Result<CodexOutcome> {
     let summary = value
         .get("summary")
         .and_then(JsonValue::as_str)
         .map(normalize_codex_outcome_summary_text)
-        .unwrap_or_else(|| "Codex automation completed the request.".to_string());
+        .unwrap_or_else(|| DEFAULT_CODEX_OUTCOME_SUMMARY.to_string());
 
     let snippet = value
         .get("code")
@@ -12682,6 +12726,67 @@ fn codex_fallback_failure_message(kind: CodexFallbackSummaryKind, summary: &str)
             )
         }
     }
+}
+
+/// Whether an answer says anything: not blank, not only code fences, and not
+/// the placeholder for a final message without a summary.
+fn summary_has_substance(summary: &str) -> bool {
+    let summary = summary.trim();
+    summary != DEFAULT_CODEX_OUTCOME_SUMMARY
+        && summary.lines().any(|line| {
+            let line = line.trim();
+            match line
+                .strip_prefix("```")
+                .or_else(|| line.strip_prefix("~~~"))
+            {
+                // A fence line, with or without an info string such as `text`.
+                Some(info) => !info.chars().all(|c| {
+                    c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '+' | '.' | '`' | '~')
+                }),
+                None => !line.is_empty(),
+            }
+        })
+}
+
+/// A retry that ran only to collect command-observation evidence keeps the
+/// first attempt's answer when that answer rests on completed commands and the
+/// retry brings no answer of its own: an empty one, an internal fallback or
+/// transient error, or one from a retry that ran no command. The retry's
+/// evidence and files are merged either way.
+fn keep_first_attempt_answer(
+    first_summary: &str,
+    first_ran_command: bool,
+    retried_only_for_command_observation: bool,
+    retry_summary: &str,
+    retry_fallback: Option<CodexFallbackSummaryKind>,
+    retry_ran_command: bool,
+) -> bool {
+    retried_only_for_command_observation
+        && first_ran_command
+        && summary_has_substance(first_summary)
+        && classify_internal_codex_fallback_summary(first_summary).is_none()
+        && !is_retryable_codex_upstream_summary(first_summary)
+        && (retry_fallback.is_some()
+            || !retry_ran_command
+            || !summary_has_substance(retry_summary)
+            || is_retryable_codex_upstream_summary(retry_summary))
+}
+
+/// A command the model ran that completed with exit 0. The host's routing
+/// pre-observation is not the model's own command.
+fn has_completed_command_execution(messages: &[JobMessage]) -> bool {
+    messages.iter().any(|message| {
+        message
+            .message_type
+            .as_deref()
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("command_execution"))
+            && message.metadata.as_ref().is_some_and(|metadata| {
+                metadata["status"] == "completed"
+                    && metadata["exitCode"].as_i64() == Some(0)
+                    && metadata["timedOut"] != true
+                    && metadata["source"] != "routing_pre_observation"
+            })
+    })
 }
 
 fn codex_retry_blocking_failure_message(
@@ -27428,6 +27533,122 @@ mod tests {
             "did not provide the accepted execution evidence required by runtime routing"
         ));
         assert!(!message.contains("final assistant message"));
+    }
+
+    /// Job 66179ac6 (Oct 21): the first attempt ran one read and answered with
+    /// its two matching lines (their text is not in the run records); the
+    /// evidence retry ran it again, matched nothing, and its empty code block
+    /// replaced the answer.
+    const LIVE_FIRST_ANSWER: &str =
+        "```\nrollout-a.jsonl: first match\nrollout-b.jsonl: second match\n```";
+
+    #[test]
+    fn evidence_retry_with_an_empty_answer_keeps_the_first_attempts_answer() {
+        for retry_summary in [
+            "```\n```",
+            "```text\n\n```",
+            "  \n",
+            "Codex automation completed the request.",
+        ] {
+            assert!(
+                keep_first_attempt_answer(LIVE_FIRST_ANSWER, true, true, retry_summary, None, true,),
+                "{retry_summary:?}"
+            );
+        }
+        // A retry that ended without a usable final message, hit an upstream
+        // error, or answered without running any command adds nothing.
+        assert!(keep_first_attempt_answer(
+            LIVE_FIRST_ANSWER,
+            true,
+            true,
+            "Codex automation completed, but no final assistant message was returned.",
+            Some(CodexFallbackSummaryKind::MissingFinalAssistantMessage),
+            true,
+        ));
+        assert!(keep_first_attempt_answer(
+            LIVE_FIRST_ANSWER,
+            true,
+            true,
+            "unexpected status 502 Bad Gateway: upstream request failed (endpoint=chatgpt.com/backend-api/codex/responses)",
+            None,
+            true,
+        ));
+        assert!(keep_first_attempt_answer(
+            LIVE_FIRST_ANSWER,
+            true,
+            true,
+            "The output is shown above.",
+            None,
+            false,
+        ));
+    }
+
+    #[test]
+    fn completed_command_detection_follows_the_final_receipt_of_a_polled_command() {
+        let command = |status: &str, exit_code: Option<i64>| {
+            json!({"type": if status == "in_progress" { "item.started" } else { "item.completed" },
+                "item":{"id":"call_1","type":"command_execution","command":"grep -rh x .",
+                "command_argv":["/bin/bash","-lc","grep -rh x ."],"aggregated_output":"",
+                "status":status,"exit_code":exit_code}})
+        };
+        // Job 66179ac6: started, polled through write_stdin, completed with 0.
+        assert!(has_completed_command_execution(&extract_codex_messages(&[
+            command("in_progress", None),
+            command("completed", Some(0)),
+        ])));
+        assert!(!has_completed_command_execution(&extract_codex_messages(
+            &[command("in_progress", None)]
+        )));
+        assert!(!has_completed_command_execution(&extract_codex_messages(
+            &[command("in_progress", None), command("failed", Some(2)),]
+        )));
+        assert!(!has_completed_command_execution(&[JobMessage {
+            content: "grep -rh x .".to_string(),
+            message_type: Some("command_execution".to_string()),
+            metadata: Some(json!({"status":"completed","exitCode":0,
+                "source":"routing_pre_observation"})),
+        }]));
+    }
+
+    #[test]
+    fn evidence_retry_answer_wins_when_it_has_content_or_the_first_answer_is_not_settled() {
+        // A retry that ran its command and answered still wins.
+        assert!(!keep_first_attempt_answer(
+            LIVE_FIRST_ANSWER,
+            true,
+            true,
+            "```\nno matches\n```",
+            None,
+            true,
+        ));
+        // A first attempt that ran nothing, retried for anything beyond
+        // command evidence, or produced no answer of its own is not kept.
+        assert!(!keep_first_attempt_answer(
+            LIVE_FIRST_ANSWER,
+            false,
+            true,
+            "```\n```",
+            None,
+            true,
+        ));
+        assert!(!keep_first_attempt_answer(
+            LIVE_FIRST_ANSWER,
+            true,
+            false,
+            "```\n```",
+            None,
+            true,
+        ));
+        for first in [
+            "```\n```",
+            "Codex automation completed, but no final assistant message was returned.",
+            "unexpected status 502 Bad Gateway: upstream request failed (endpoint=chatgpt.com/backend-api/codex/responses)",
+        ] {
+            assert!(
+                !keep_first_attempt_answer(first, true, true, "```\n```", None, true),
+                "{first:?}"
+            );
+        }
     }
 
     #[test]

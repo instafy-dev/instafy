@@ -285,6 +285,75 @@ mod tests {
         }
     }
 
+    /// Two production turns (Oct 21) whose shell reads all completed with exit
+    /// 0 and output were still retried as `missing_command_observation`. The
+    /// run records keep no command text, so these scripts are the shapes such
+    /// reads take: a pipeline into head/tail, stderr sent to /dev/null and
+    /// `grep -h` across several rollout files.
+    fn live_attempt(reads: &[(&str, &str)]) -> Vec<serde_json::Value> {
+        reads
+            .iter()
+            .flat_map(|(id, script)| {
+                let argv = json!(["/bin/bash", "-lc", script]);
+                [
+                    json!({"type":"item.started","item":{"id":id,"type":"command_execution",
+                        "command":script,"command_argv":argv,"status":"in_progress","exit_code":null}}),
+                    json!({"type":"item.completed","item":{"id":id,"type":"command_execution",
+                        "command":script,"command_argv":argv,"aggregated_output":"output",
+                        "status":"completed","exit_code":0}}),
+                ]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn completed_shell_reads_from_live_jobs_do_not_plan_an_observation_retry() {
+        let required = RoutingEvidenceRequirements {
+            context_retrieval: false,
+            command_observation: true,
+        };
+        let grep_rollouts = "grep -h '\"type\":\"exec_command_end\"' \
+            ~/.codex/sessions/2026/10/21/*.jsonl | tail -n 5";
+        // Job f05c260a: three reads, then the third once more.
+        let three_reads = live_attempt(&[
+            (
+                "call_1",
+                "curl -s http://127.0.0.1:8080/health | head -c 2000",
+            ),
+            ("call_2", "ls -la /workspace 2>/dev/null | head -40"),
+            ("call_3", grep_rollouts),
+            ("call_4", grep_rollouts),
+        ]);
+        // Job 66179ac6: one long-running read, polled until it completed.
+        let one_read = live_attempt(&[(
+            "call_1",
+            "grep -rh 'missing_command_observation' ~/.codex/sessions/2026/10/21 2>/dev/null | tail -n 2",
+        )]);
+        for events in [three_reads, one_read] {
+            let (observed, receipts) =
+                routing_evidence_with_receipts(None, &extract_codex_messages(&events));
+            assert!(
+                observed.command_observation,
+                "{}",
+                serde_json::to_string(&receipts).unwrap()
+            );
+            assert!(!observed.context_retrieval);
+            assert!(plan(required, observed, Gate::default()).is_none());
+        }
+        // A turn that ran nothing, or only printed text, is still retried.
+        for events in [
+            Vec::new(),
+            live_attempt(&[("call_1", "echo 'grep found two lines' | cat")]),
+        ] {
+            let (observed, _) =
+                routing_evidence_with_receipts(None, &extract_codex_messages(&events));
+            assert_eq!(
+                plan(required, observed, Gate::default()).map(Plan::reason),
+                Some("missing_command_observation")
+            );
+        }
+    }
+
     #[test]
     fn final_enforcement_blocks_only_missing_context_retrieval() {
         let observation = RoutingEvidenceRequirements {

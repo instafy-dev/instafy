@@ -271,6 +271,12 @@ Evidence comes from successful terminal command receipts, with exact argv retain
 from display text. Failed, incomplete or malformed receipts do not count. The recognizer accepts
 bounded literal read sequences conservatively: a successful `&&` segment proves its reads,
 while earlier commands before a semicolon or newline are not proven by the final exit status.
+A `|` pipeline counts as one observation of its first command when every later stage only
+formats output (such as `head`, `tail`, `grep`, `wc`, `sort` or `jq`); it never proves a
+conversation lookup, because the pipe hides the lookup's exit status. Stderr may be sent to
+`/dev/null` or to stdout; any other redirect is rejected. Commands that only print literal
+text (`echo`, `printf`, `yes`) never count, piped or not. Short read flags such as `grep -h`
+and `ls -h` are reads, while `--help` and `--version` are not.
 Unsupported shell shapes may remain unrecognized even if a read actually occurred. Legacy
 single-command interpreter receipts remain generic execution evidence, not proof of correct
 program semantics or answers. This classification does not grant execution permission.
@@ -281,7 +287,12 @@ without replaying raw scripts. Successful evidence is accumulated across attempt
 when a provider reuses event IDs. Failed pre-observations do not satisfy a requirement, and
 cancellation interrupts recovery backoff. Missing context retrieval remains blocking after the
 retry; an ordinary observation-only job retains the existing warning path when its retry
-produces a usable result. The `codex/routing-evidence-recovery` artifact records cumulative
+produces a usable result. When the retry ran only for missing command observation, the first
+attempt's answer rests on completed commands, and the retry brings no answer of its own (an
+empty or fence-only reply, an internal fallback, a transient upstream error, or a reply from a
+retry that ran no command), the job keeps the first attempt's answer and records a
+`codex/final-message-kept-from-attempt` artifact; the retry's evidence and files are still
+merged. The `codex/routing-evidence-recovery` artifact records cumulative
 requirements, evidence and receipt counts, not command contents.
 
 ## Context Recovery Contract
