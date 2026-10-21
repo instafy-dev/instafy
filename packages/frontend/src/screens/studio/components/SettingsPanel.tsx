@@ -40,6 +40,7 @@ import { ProfileEditor } from "../../../profile/ProfileEditor";
 import { NotificationPreferencesSettings } from "../../../notifications/NotificationPreferencesSettings";
 import { PersonalAppearanceSettings } from "./PersonalAppearanceSettings";
 import { PersonalAdvancedSettings } from "./PersonalAdvancedSettings";
+import { PersonalLocationSettings } from "./PersonalLocationSettings";
 import { SettingsSection } from "./SettingsSection";
 import { describeProjectMemoryBootstrapResult } from "./projectMemoryBootstrapStatus";
 import { TeamProfileSettings } from "./TeamProfileSettings";
@@ -924,7 +925,9 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
                 ? "Notifications"
                 : profileCategory === "appearance"
                   ? "Appearance"
-                  : "Advanced";
+                  : profileCategory === "location"
+                    ? "Location"
+                    : "Advanced";
 
   const settingsScope =
     activeTab === "profile" ? null : activeTab === "org" ? (
@@ -1242,6 +1245,7 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
       { id: "account", label: "Profile", testId: "settings-category-profile-account" },
       { id: "appearance", label: "Appearance", testId: "settings-category-profile-appearance" },
       { id: "notifications", label: "Notifications", testId: "settings-category-profile-notifications" },
+      { id: "location", label: "Location", testId: "settings-category-profile-location" },
       { id: "advanced", label: "Advanced", testId: "settings-category-profile-advanced" },
     ];
   }, [activeTab, projectAiItems]);
@@ -1555,6 +1559,8 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
             <NotificationPreferencesSettings userId={user?.id ?? null} accessToken={session?.access_token ?? null} />
           ) : profileCategory === "appearance" ? (
             <PersonalAppearanceSettings />
+          ) : profileCategory === "location" ? (
+            <PersonalLocationSettings />
           ) : (
             <PersonalAdvancedSettings />
           )}

@@ -17,7 +17,9 @@ import {
 import { reserveExternalWindow } from "../../../utils/openExternalUrl";
 import { BrowserChromeShell, BrowserStatusPill, type BrowserChromeState } from "./BrowserChromeShell";
 import { withHostQuery } from "./previewHost/hostMessages";
-import { useSiteHost, type SiteMessageEvent } from "./previewHost/useSiteHost";
+import { useSiteHost, type SiteMessageEvent, type SiteRecord } from "./previewHost/useSiteHost";
+import { setLocationStopped } from "./previewHost/locationSites";
+import { LocationBarControl, LocationBlockedNotice, LocationToast } from "./previewHost/PreviewLocation";
 import { followLabels } from "./previewHost/followMode";
 import { FollowRing, FollowRipples, FollowToast, SitePreviewFollowControls } from "./previewHost/FollowControls";
 
@@ -31,8 +33,8 @@ export const SITE_PREVIEW_FRAME_ALLOW = "fullscreen; clipboard-write";
  * The status message the pane reads from its frame. The broker's error pages
  * report their status with it, but any page on this preview's origin can send
  * it, the site itself included. Everything else from the frame goes to the
- * site host channel (previewHost/useSiteHost): data for follow mode, never
- * commands.
+ * site host channel (previewHost/useSiteHost): the layout handshake, location
+ * requests and follow mode, read as data, never as commands.
  */
 export const SITE_PREVIEW_MESSAGE_TYPE = "instafy-preview";
 
@@ -123,18 +125,22 @@ function statusDetail(state: SitePreviewPaneState, port: number | null): string 
  * heartbeat each mint one new session; a second loss in a row ends it, so a
  * removed member never loops. Showing the pane again allows one more.
  */
-export function SitePreviewPane({ projectId, previewId, title, visible }: {
+export function SitePreviewPane({ projectId, previewId, title, visible, spaceName = null }: {
   projectId: string;
   previewId: string;
   title: string;
   /** On screen now: health polls and heartbeats run only while it is. */
   visible: boolean;
+  /** The space's name, for the list of sites that received the person's location. */
+  spaceName?: string | null;
 }) {
   const frame = useRef<HTMLIFrameElement>(null);
   const [viewerUrl, setViewerUrl] = useState<string | null>(null);
   const [session, setSession] = useState<SessionState>("opening");
   const [health, setHealth] = useState<HealthState>("checking");
   const [port, setPort] = useState<number | null>(null);
+  /** The record's title, port and path: what keys this site for location. */
+  const [record, setRecord] = useState<SiteRecord | null>(null);
   const [frameKey, setFrameKey] = useState(0);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [openingTab, setOpeningTab] = useState(false);
@@ -236,6 +242,8 @@ export function SitePreviewPane({ projectId, previewId, title, visible }: {
       const preview = await getSitePreview(projectId, previewId, signal, fresh ? { fresh } : undefined);
       if (signal?.aborted || !mounted.current) return;
       setPort(preview.port);
+      setRecord(current => current && current.title === preview.title && current.port === preview.port && current.path === preview.path
+        ? current : { title: preview.title, port: preview.port, path: preview.path });
       setHealth(sitePreviewShownState(preview));
     } catch (cause) {
       if (signal?.aborted || !mounted.current) return;
@@ -266,7 +274,7 @@ export function SitePreviewPane({ projectId, previewId, title, visible }: {
   const frameShown = Boolean(viewerUrl) && session === "ready" && (shown === "checking" || shown === "live" || shown === "not_responding");
   const frameOnScreen = visible && frameShown;
   const host = useSiteHost({
-    frame, viewerUrl: frameShown ? viewerUrl : null, frameKey, projectId, previewId, frameOnScreen,
+    frame, viewerUrl: frameShown ? viewerUrl : null, frameKey, projectId, previewId, frameOnScreen, record, spaceName,
     onError: message => { if (mounted.current) setFeedback(message); },
   });
   siteMessage.current = host.handleSiteMessage;
@@ -370,6 +378,7 @@ export function SitePreviewPane({ projectId, previewId, title, visible }: {
           </div>
         }
         status={<>
+          <LocationBarControl site={host.location.site} status={host.location.status} />
           <SitePreviewFollowControls follow={follow} supportsView={host.supportsView && frameOnScreen} />
           <BrowserStatusPill state={chromeState(shown)} detail={detail} testId="site-preview-status" />
         </>}
@@ -400,7 +409,11 @@ export function SitePreviewPane({ projectId, previewId, title, visible }: {
         ) : null}
         {frameShown && follow.state.role === "following" ? <FollowRing /> : null}
         {frameShown ? <FollowRipples ripples={follow.ripples} /> : null}
-        {followNote ? <FollowToast text={followNote} />
+        {host.location.blocked ? <LocationBlockedNotice onDismiss={host.location.dismissBlocked} /> : null}
+        {host.location.toast && host.location.site ? (
+          <LocationToast title={host.location.site.title} onDismiss={host.location.dismissToast}
+            onStop={() => { if (host.location.site) setLocationStopped(host.location.site, true); host.location.dismissToast(); }} />
+        ) : followNote ? <FollowToast text={followNote} />
           : follow.locationLeftOut && follow.state.role === "presenting" ? <FollowToast text="📍 Your location is left out" testId="follow-location-toast" /> : null}
         {shown === "opening" ? (
           <div className="absolute inset-0 flex items-center justify-center gap-2 text-sm text-slate-500 dark:text-slate-400">

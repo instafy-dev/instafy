@@ -1044,7 +1044,9 @@ export function ChatComposerSurface({
       <div
         ref={composerOverlayRef}
         className={`pointer-events-none absolute inset-x-0 bottom-0 z-20 transition-transform duration-200 ease-out ${
-          composerHidden ? "translate-y-full" : "translate-y-0"
+          // One mechanism at a time: Tailwind's translate-y-full sets the CSS `translate` property, which adds to an
+          // inline `transform`, so the compact peek (inline) must not also get the class or it slides fully off.
+          composerHidden && !compactBrowserViewport ? "translate-y-full" : "translate-y-0"
         } ${draftExpanded ? "top-0 pt-2" : ""}`}
         data-testid="chat-composer-overlay"
         data-expanded={draftExpanded || undefined}

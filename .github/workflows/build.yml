@@ -1439,6 +1439,7 @@ jobs:
       - rust-test-proxy
       - rust-test-origin
       - rust-test-git
+      - rust-test-broker
     if: ${{ always() && !(github.repository == 'instafy-dev/instafy' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true && cancelled()) }}
     runs-on: >-
       ${{ vars.CI_RUST_SELF_HOSTED == 'true'
@@ -1494,7 +1495,7 @@ jobs:
         run: |
           node <<'NODE'
           const assert = require('node:assert/strict');
-          const expected = ['rust-test-contracts','rust-test-agent','rust-test-proxy','rust-test-origin','rust-test-git'];
+          const expected = ['rust-test-contracts','rust-test-agent','rust-test-proxy','rust-test-origin','rust-test-git','rust-test-broker'];
           const results = JSON.parse(process.env.RUST_RESULTS);
           assert.deepEqual(Object.keys(results).sort(), expected.sort());
           for (const name of expected) {
@@ -2207,3 +2208,116 @@ jobs:
       - name: Run database-free Rust test suite
         run: |
           cargo test --manifest-path packages/git-service/Cargo.toml
+
+  rust-test-broker:
+    name: Rust test tunnel broker
+    runs-on: >-
+      ${{ vars.CI_RUST_SELF_HOSTED == 'true'
+          && github.repository == 'instafy-dev/instafy'
+          && github.event.repository.private == true
+          && ((github.event_name == 'pull_request'
+               && github.event.pull_request.base.ref == 'main'
+               && github.event.pull_request.base.repo.full_name == github.repository
+               && github.event.pull_request.head.repo.full_name == github.repository
+               && github.event.pull_request.head.repo.fork == false)
+              || (github.event_name == 'push'
+                  && github.ref == 'refs/heads/main'
+                  && github.ref_protected == true))
+          && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-public-rust-test-broker","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
+          || (vars.CI_RUST_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main'
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-rust-test-broker","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
+          || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
+
+    steps:
+      - name: Qualify isolated Rust CI runner
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: |
+          node <<'NODE'
+          const assert = require('node:assert/strict');
+          const { execFileSync } = require('node:child_process');
+          assert.equal(process.platform, 'linux');
+          assert.equal(process.arch, 'arm64');
+          assert.ok(Number.isSafeInteger(process.getuid()) && process.getuid() > 0);
+          assert.equal(process.versions.node.split('.')[0], '22');
+          assert.equal(process.env.RUNNER_OS, 'Linux');
+          assert.equal(process.env.RUNNER_ARCH, 'ARM64');
+          assert.equal(process.env.INSTAFY_CI_JOB_ISOLATION, 'ephemeral');
+          assert.ok(!process.env.INSTAFY_ENV_DIR);
+          for (const tool of ['bash', 'git', 'curl', 'tar', 'sha256sum', 'unzip', 'rustup', 'cargo', 'cc', 'pkg-config', 'make']) {
+            execFileSync('/bin/bash', ['-c', 'command -v "$1" >/dev/null', 'rust-ci-preflight', tool], { timeout: 1000, stdio: 'ignore' });
+          }
+          NODE
+
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Verify Rust CI coverage and routing
+        run: node --test scripts/check-rust-ci.test.mjs
+
+      - name: Install scoped Rust native prerequisites
+        if: runner.environment == 'self-hosted'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == ARM64 ]]
+          [[ "${INSTAFY_CI_JOB_ISOLATION:-}" == ephemeral ]]
+          sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
+          for package in clang lld cmake libcap-dev protobuf-compiler; do
+            [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
+          done
+          pkg-config --exists libcap
+          clang --version
+          ld.lld --version
+          cmake --version
+          protoc --version
+
+      - name: Set up stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Restore cargo cache without saving
+        if: runner.environment == 'self-hosted' || github.ref != 'refs/heads/main'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            .cargo-target
+          key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-test-broker-${{ hashFiles('packages/*/Cargo.lock') }}
+
+      - name: Restore cargo cache
+        if: runner.environment == 'github-hosted' && github.ref == 'refs/heads/main'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            .cargo-target
+          key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-test-broker-${{ hashFiles('packages/*/Cargo.lock') }}
+
+      - name: Run database-free Rust test suite
+        run: |
+          cargo test --locked --manifest-path packages/tunnel-broker/Cargo.toml

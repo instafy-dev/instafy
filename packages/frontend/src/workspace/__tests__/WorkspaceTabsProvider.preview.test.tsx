@@ -855,6 +855,44 @@ describe("conversation preview tabs", () => {
     expect(api.activeTab?.kind === "conversation" && api.activeTab.conversationId).toBe("fresh");
   });
 
+  it("opens a tab for a chat created live, but never for a tool's work thread (metadata.source)", async () => {
+    save(["a"]);
+    await render();
+    expect(ids()).toEqual(["a"]);
+    const now = Date.now() + 1_000;
+    // a tool's own root work thread, created while the person is in their chat
+    fixture.conversations = [...fixture.conversations,
+      conversation("tool-thread", { createdAt: now, title: "Site work: orders", toolSource: "example-tool", visibility: "private" })];
+    await render();
+    expect(ids()).toEqual(["a"]);
+    // A chat a person started elsewhere still opens as before.
+    fixture.conversations = [...fixture.conversations, conversation("teammate", { createdAt: now })];
+    await render();
+    expect(ids()).toEqual(["a", "teammate"]);
+    expect(fixture.activeConversationId).toBe("a");
+  });
+
+  it("never falls back to a tool's work thread when no chat tab is open", async () => {
+    fixture.activeConversationId = null;
+    fixture.conversations = [
+      conversation("tool-thread", { createdAt: 5, title: "Site work: orders", toolSource: "example-tool" }),
+      conversation("a"),
+    ];
+    await render();
+    expect(ids()).toEqual(["a"]);
+  });
+
+  it("falls back from stale saved tabs to a person's chat, not a tool's work thread", async () => {
+    save(["gone"]);
+    fixture.activeConversationId = null;
+    fixture.conversations = [
+      conversation("tool-thread", { title: "Site work: orders", toolSource: "example-tool" }),
+      conversation("a"),
+    ];
+    await render();
+    expect(ids()).toEqual(["a"]);
+  });
+
   it("does not overwrite saved destination tabs when closing a partial hydration tab", async () => {
     fixture.projectId = projectB;
     fixture.projectKey = projectB;

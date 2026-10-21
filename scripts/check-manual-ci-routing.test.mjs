@@ -102,8 +102,8 @@ for (const job of MANUAL_CI_JOBS.filter(item => item.file === 'npm-release.yml')
     e=>{e.GITHUB_REF='refs/heads/topic';},e=>{e.GITHUB_REF_PROTECTED='false';},e=>{e.GITHUB_REPOSITORY_ID='1';}])
     assert.throws(()=>execute('workflow_dispatch',mutate));
 });
-test('manual scope stays exactly 31 definitions; npm policy/publish and image routes are untouched', () => {
-  assert.equal(MANUAL_CI_JOBS.length,31);
+test('manual scope stays exactly 32 definitions; npm policy/publish and image routes are untouched', () => {
+  assert.equal(MANUAL_CI_JOBS.length,32);
   const source=read('npm-release.yml');
   for(const key of ['pull-request-policy','publish']) assert.equal(section(source,key),
     section(withoutManualCiRouting('npm-release.yml',source),key));

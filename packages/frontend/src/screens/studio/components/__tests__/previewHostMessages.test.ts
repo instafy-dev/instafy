@@ -3,12 +3,9 @@ import { buildHostLayoutMessage, isSiteMessageSource, parseSiteMessage, withHost
 import { SITE_PREVIEW_FRAME_ALLOW } from "../SitePreviewPane";
 
 describe("host → site layout message", () => {
-  it("has the v1 shape: Studio's bar names the site, it covers none of the frame, and the frame gets no location", () => {
-    expect(buildHostLayoutMessage({ theme: "dark" })).toEqual({
-      source: "instafy-host", v: 1, type: "layout", insets: { top: 0, right: 0, bottom: 0, left: 0 },
-      chrome: "host", title: "shown", caps: { geolocation: false }, theme: "dark",
-    });
-    expect(buildHostLayoutMessage({ theme: "light" })).toEqual(expect.objectContaining({ theme: "light" }));
+  it("has the v1 shape: the theme, and location only through Studio", () => {
+    expect(buildHostLayoutMessage("dark")).toEqual({ source: "instafy-host", v: 1, type: "layout", caps: { location: "host" }, theme: "dark" });
+    expect(buildHostLayoutMessage("light")).toEqual(expect.objectContaining({ theme: "light" }));
   });
 
   it("adds ?instafy_host=studio to the frame address, keeping the path and any query", () => {

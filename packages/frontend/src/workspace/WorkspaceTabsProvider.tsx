@@ -23,6 +23,7 @@ import {
 } from "../conversations/ConversationsProvider";
 import { useProject } from "../projects/useProject";
 import { isEmptyConversationPlaceholder } from "../conversations/conversationState";
+import { isToolRootThread } from "../conversations/conversationMetadata";
 import { isUUID } from "../utils/uuid";
 import type { WorkspaceGitReviewSource } from "./gitReviewTypes";
 import { useWorkspaceTabController } from "./useWorkspaceTabController";
@@ -111,6 +112,17 @@ declare global {
       ) => void;
     };
   }
+}
+
+/**
+ * The chat to fall back to when no tab says which: the first one that is not a
+ * tool's own top-level work thread, else the first at all. A tool's thread is
+ * never picked over a person's chat.
+ */
+function firstPersonConversation<T extends { toolSource?: string | null; parentConversationId?: string | null }>(
+  conversations: readonly T[],
+): T | null {
+  return conversations.find((conversation) => !isToolRootThread(conversation)) ?? conversations[0] ?? null;
 }
 
 export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanelDestination, conversationWorkspaceUserId = null }: {
@@ -219,7 +231,7 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
     if (activeConversationId) {
       return getTabIdForConversation(activeConversationId);
     }
-    const initialConversation = conversations[0] ?? null;
+    const initialConversation = firstPersonConversation(conversations);
     return initialConversation ? getTabIdForConversation(initialConversation.localId) : null;
   });
   const suppressPanelSyncRef = useRef<StudioPanel | null>(null);
@@ -453,7 +465,7 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
 
     const persistedConversationCount = projectState.conversations.length;
     if (persistedConversationCount > 0 && nextConversationTabs.length === 0) {
-      const fallback = conversations[0] ?? null;
+      const fallback = firstPersonConversation(conversations);
       if (fallback) {
         nextConversationTabs.push(createTabForConversation(fallback));
       }
@@ -509,11 +521,11 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
     const nonConversationTabs = tabsRef.current.filter((tab) => tab.kind !== "conversation" && (tab.kind !== "jobThread" || Boolean(tab.workspaceOwner)));
 
     if (!projectState) {
-      const targetConversationId = activeConversationId ?? conversations[0]?.localId ?? null;
+      const targetConversationId = activeConversationId ?? firstPersonConversation(conversations)?.localId ?? null;
       const conversation =
         (targetConversationId
           ? conversations.find((entry) => entry.localId === targetConversationId)
-          : null) ?? conversations[0] ?? null;
+          : null) ?? firstPersonConversation(conversations);
       if (!conversation) {
         return;
       }
@@ -664,6 +676,11 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
       if (conversation.parentConversationId || conversation.threadKind) {
         return;
       }
+      // A tool's work thread (metadata.source) is not something the person
+      // started: it stays out of the tab strip until they open it from Chats.
+      if (isToolRootThread(conversation)) {
+        return;
+      }
       if (now - conversation.createdAt > autoOpenWindowMs) {
         return;
       }
@@ -685,7 +702,7 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
       !conversationHistoryPending &&
       (hadConversationTabs || persistedOrder === null);
     if (shouldEnsureFallback) {
-      const fallback = conversations[0] ?? null;
+      const fallback = firstPersonConversation(conversations);
       if (fallback) {
         nextConversationTabs.push(createTabForConversation(fallback));
         changed = true;

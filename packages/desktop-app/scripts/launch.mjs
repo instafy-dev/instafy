@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { prepareMacosBluetoothElectronBinary } from "./ensure-macos-bluetooth-usage.mjs";
+import { prepareMacosElectronBinary } from "./ensure-macos-usage-descriptions.mjs";
 
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
@@ -21,7 +21,7 @@ function resolveAppBundlePath(executablePath) {
 
 try {
   const electronBinary = require("electron");
-  const preparedElectronBinary = prepareMacosBluetoothElectronBinary(electronBinary);
+  const preparedElectronBinary = prepareMacosElectronBinary(electronBinary);
   if (preparedElectronBinary && preparedElectronBinary !== electronBinary) {
     const preparedAppBundle = resolveAppBundlePath(preparedElectronBinary);
     if (process.platform === "darwin") {
@@ -45,7 +45,7 @@ try {
   }
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
-  console.warn(`[desktop-launch] unable to patch macOS Bluetooth usage description: ${message}`);
+  console.warn(`[desktop-launch] unable to patch macOS usage descriptions (Bluetooth, location): ${message}`);
 }
 
 const child = spawn(command, args, { stdio: "inherit", env });

@@ -97,8 +97,8 @@ mechanism in `redis_bus.rs`, each with its own connection and queue.
   and whole micro- or 1e-7 degrees. A map centred that close to the person is held back too, since it shows where
   they are. Rounding to 2 places or an encoding of its own gets through, so the skill's "never put the person's own
   position in it" is the main control. The guard has no time limit, because the page may still hold the position in
-  its URL or state. Studio gives a frame no position today (the frame may not use geolocation), so the guard has
-  nothing to match until something does.
+  its URL or state. The positions are the ones Studio's location broker gave the frame
+  ([Previews.md](Previews.md), "Location"), until the frame is loaded fresh.
 - `usePreviewFollow.ts`: Present and Stop, a heartbeat every 5 s while the page is visible, followers fetched every
   15 s and whenever the count changes, taps capped at 5/s, a screen wake lock (the person's own screen, never the
   space's machine) while presenting or following and the page is visible. Following
@@ -127,7 +127,7 @@ The frame's address carries `?instafy_host=studio`, so a site knows a host frame
 comes from its own frame at the viewer's origin, and reads them as data, never as commands.
 
 ```
-Studio → site  {source:"instafy-host", v:1, type:"layout", insets, chrome:"host", title:"shown", caps:{geolocation:false}, theme}
+Studio → site  {source:"instafy-host", v:1, type:"layout", caps:{location:"host"}, theme}   // see Previews.md
 site → Studio  {source:<the site's own short name>, v:1, type:"layout-ack", payload:{supports:["view", "tap"?]}}
 site → Studio  {…, type:"view", seq, payload}                 // ≤ 2 KB, opaque; only sent on while Studio says it presents
 site → Studio  {…, type:"tap", seq, payload:{x, y, at?}}       // x,y in 0..1 of the frame

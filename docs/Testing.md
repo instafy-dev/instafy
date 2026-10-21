@@ -545,7 +545,7 @@ coverage and aggregate regressions; these are not live workload qualification.
 
 `Rust packages` and `Rust tests` retain their existing check names as strict
 five-minute aggregates. The first requires all five compile-check children;
-the second requires all five test children. Each child is independent, uses
+the second requires all six test children. Each child is independent, uses
 the same exact event commit and recursive submodules, and has a 30-minute
 limit. Missing, skipped, cancelled or failed children fail the corresponding
 aggregate. Aggregates have no repository permissions or checkout and are
@@ -565,6 +565,7 @@ pull requests and manual runs retain always-run, fail-closed aggregation.
 | Rust test OpenAI proxy | Complete openai-proxy-server suite | `public-rust-test-proxy` |
 | Rust test origin server | Complete origin-http-server suite | `public-rust-test-origin` |
 | Rust test git service | Complete git-service suite | `public-rust-test-git` |
+| Rust test tunnel broker | Complete tunnel-broker workspace suite, `--locked` | `public-rust-test-broker` |
 
 The `native_compaction::` selector runs only the two isolated, localhost lifecycle
 tests for ChatGPT streaming and API-key JSON responses through the real proxy.
@@ -581,6 +582,9 @@ turn does not send it again.
 All eleven original Cargo commands retain their arguments and repository-root
 working directory. Test children also retain the full frozen Node20/pnpm
 installation, including the pinned Playwright fixture required by agent tests.
+The later tunnel broker test child runs one `cargo test --locked` over the
+broker workspace and, like the check children, needs no pnpm install or hosted
+disk cleanup.
 Stable native Rust and debug-info settings are unchanged. Each child has its
 own target directory; Cargo caches are partitioned by job, operating system,
 CPU architecture and the exact workspace Cargo lockfiles, with no cross-arch
@@ -615,7 +619,7 @@ compile path, which does not use the Shared fixture's JavaScript compiler helper
 Signal9 alone does not prove an out-of-memory cause. Cold completion and memory
 use still require the real job; source regressions are not that qualification.
 
-All twelve jobs default to `ubuntu-latest`. Only the independent
+All thirteen jobs default to `ubuntu-latest`. Only the independent
 `CI_RUST_SELF_HOSTED=true` switch may select isolated Linux ARM64 workers, for
 private same-repository PRs to `main` and protected-main pushes. It uses the
 same trust-specific organization groups and per-run, per-attempt, per-job
@@ -626,7 +630,7 @@ controlled by `CI_EXPANDED_SELF_HOSTED`. Exact-main manual dispatches use the
 route above; forks, public visibility and unsupported contexts keep hosted runners.
 
 Do not enable this switch before independently enrolling the reviewed workflow
-and all twelve exact job identities in the runner manager. Its existing
+and all thirteen exact job identities in the runner manager. Its existing
 35-minute worker lifecycle remains sufficient only if the actual cold setup
 and each full child workload fit their allotted window. Before checkout,
 self-hosted children require non-root Linux ARM64, Node22, the ephemeral marker,

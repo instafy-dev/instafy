@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SitePreviewPane } from "../SitePreviewPane";
 import { useSiteHost } from "../previewHost/useSiteHost";
+import { resetLocationSitesForTests, setLocationSitesAccount } from "../previewHost/locationSites";
 import { applyFollowPresenceEvent, endOwnPresentation, followEntry, requestFollow, resetFollowStoreForTests } from "../previewHost/followStore";
 import type { FollowStreamEvent } from "../../../../services/runtimeController/previewFollow";
 
@@ -476,21 +477,39 @@ describe("SitePreviewPane follow mode", () => {
 
   describe("the location guard", () => {
     type Host = ReturnType<typeof useSiteHost>;
-    function Harness({ positions, onHost }: { positions: { latitude: number; longitude: number }[]; onHost: (host: Host) => void }) {
+    const POSITION = { coords: { latitude: 25.05, longitude: 121.53, accuracy: 20, altitude: null, heading: null, speed: null }, timestamp: 1 };
+    function Harness({ onHost }: { onHost: (host: Host, frame: HTMLIFrameElement | null) => void }) {
       const ref = useRef<HTMLIFrameElement>(null);
-      onHost(useSiteHost({ frame: ref, viewerUrl: FIRST, frameKey: 0, projectId: "project-1", previewId: PREVIEW_ID,
-        frameOnScreen: true, guardPositions: () => positions, onError: () => undefined }));
+      const host = useSiteHost({ frame: ref, viewerUrl: FIRST, frameKey: 0, projectId: "project-1", previewId: PREVIEW_ID,
+        frameOnScreen: true, record: { title: "Site preview", port: 4173, path: "/" }, onError: () => undefined });
+      onHost(host, ref.current);
       return <iframe ref={ref} title="site" />;
     }
+    beforeEach(() => {
+      Object.defineProperty(navigator, "geolocation", {
+        configurable: true,
+        value: { getCurrentPosition: vi.fn((success: (position: unknown) => void) => success(POSITION)), watchPosition: vi.fn(() => 1), clearWatch: vi.fn() },
+      });
+      localStorage.clear();
+      setLocationSitesAccount("user-1");
+      resetLocationSitesForTests();
+    });
+    afterEach(() => { Reflect.deleteProperty(navigator, "geolocation"); });
 
-    it("never sends a view or tap holding a position the frame was given, and says it was left out", async () => {
+    it("never sends a view or tap holding a position Studio gave the frame, and says it was left out", async () => {
       let host: Host | null = null;
-      await act(async () => root.render(<Harness positions={[{ latitude: 25.05, longitude: 121.53 }]} onHost={next => { host = next; }} />));
-      await flush();
+      let element: HTMLIFrameElement | null = null;
+      const onHost = (next: Host, frameElement: HTMLIFrameElement | null) => { host = next; element = frameElement; };
+      await act(async () => root.render(<Harness onHost={onHost} />));
+      await act(async () => root.render(<Harness onHost={onHost} />));
+      vi.spyOn(element!.contentWindow!, "postMessage").mockImplementation(() => undefined);
       const fromFrame = async (type: string, extra: Record<string, unknown>) => {
-        await act(async () => { host!.handleSiteMessage({ data: { source: "site-kit", v: 1, type, ...extra }, origin: ORIGIN, source: null }); });
+        await act(async () => { host!.handleSiteMessage({ data: { source: "site-kit", v: 1, type, ...extra }, origin: ORIGIN, source: element!.contentWindow }); });
         await flush();
       };
+      // The site asks Studio for the location, and gets it: the frame now holds the position.
+      await fromFrame("location-request", { payload: { id: "a" } });
+      expect(host!.location.hasPositions()).toBe(true);
       await fromFrame("layout-ack", { payload: { supports: ["view", "tap"] } });
       await act(async () => { await host!.follow.present(); });
       await flush();
@@ -501,8 +520,8 @@ describe("SitePreviewPane follow mode", () => {
       expect(mocks.sendFollowView).not.toHaveBeenCalled();
       expect(mocks.sendFollowTap).not.toHaveBeenCalled();
       expect(host!.follow.locationLeftOut).toBe(true);
-      // 0.001° away is someone else's place: it goes.
-      await fromFrame("view", { payload: { cam: "25.0510,121.5310,15" } });
+      // 0.002° away is someone else's place: it goes.
+      await fromFrame("view", { payload: { cam: "25.0520,121.5320,15" } });
       await wait(200);
       expect(mocks.sendFollowView).toHaveBeenCalledTimes(1);
     });

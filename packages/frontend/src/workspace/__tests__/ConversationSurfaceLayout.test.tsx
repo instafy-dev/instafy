@@ -100,4 +100,19 @@ describe("ConversationSurfaceTabs", () => {
       "Approve",
     );
   });
+
+  it("names what a tab's marker means when it is not an approval", async () => {
+    await act(async () => {
+      root.render(
+        <ConversationSurfaceTabs
+          activeId="chat"
+          resourceId="preview-1" split={false} wide={false} ratio={.55} onSplitChange={() => {}}
+          resources={[{ id: "preview-1", label: "Cafés", panelId: "preview-panel", attention: <span>📍</span>, attentionLabel: "can see your location" }]}
+          chatPanelId="chat-panel"
+          onSelect={vi.fn()}
+        />,
+      );
+    });
+    expect(container.querySelector('[data-testid="conversation-subtab-preview-1"]')?.getAttribute("aria-label")).toBe("Cafés, can see your location");
+  });
 });

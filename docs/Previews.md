@@ -135,8 +135,10 @@ skips itself when the broker does not report private previews, so it skips in CI
 - **Paths.** A private tunnel has no router on its bare `<uuid>.<TUNNEL_DOMAIN>` host (404). An unknown, expired or
   revoked label gets 401. Every private router has the auth middleware, and a render test fails if one does not.
   Service-worker scripts get 403.
-- **Frame.** The iframe is sandboxed, sends no referrer and is allowed only fullscreen and clipboard-write. Studio
-  accepts one message from it, `{type: "instafy-preview", status}`, and only from that frame's own window and origin.
+- **Frame.** The iframe is sandboxed, sends no referrer and is allowed only fullscreen and clipboard-write, so it can
+  never use the browser's geolocation itself. Studio reads messages from it only from that frame's own window and
+  origin: `{type: "instafy-preview", status}`, and the site envelope described in [Location](#location). They are
+  data, never commands. Studio adds `?instafy_host=studio` to the frame's address so a site knows where it runs.
   The viewer URL lives in memory only; tabs store the preview id, never a URL.
 - **Reach.** The rathole client dials only `127.0.0.1:<port>` in the space's own machine. Viewer URLs come only from
   that space's grant rows, never from client input.
@@ -153,6 +155,114 @@ skips itself when the broker does not report private previews, so it skips in CI
   `viewerHostSuffix` is added to its allowed hosts. The skill tells Octo to do that on a "Blocked request" error.
 - While a session is live, its label works for whoever holds it. It is a bearer. Browsers also send it in the `Origin`
   header of the site's own cross-origin requests.
+
+## Location
+
+A site in a preview can use the person's location, with one browser prompt for Instafy and a visible 📍 for every
+site that got it. Studio is the only part that calls the browser's geolocation. Sites ask Studio for it.
+
+### What the person sees
+
+- **One prompt.** The first time any site asks, Studio calls `navigator.geolocation`, so the browser asks once, for
+  Instafy. If Instafy already has location, there is no prompt. There are no per-site prompts.
+- **📍 in the bar.** A site that received the location this session shows 📍 in the preview's bar and on its tab
+  in both tab strips. It pulses while the site follows the person (a watch). Pressing it offers **Stop sharing
+  location** (or **Share location again**) and **Sites with your location…**.
+- **A one-time note.** The first time a site gets the location on this device, a short note says "📍 <title> can see
+  your location · Stop". It goes away by itself.
+- **The list.** Settings → Profile → Location lists every site that received it on this device, with its space and
+  when it last got a position, and Stop or Share again. The list belongs to the signed-in account. Another account on
+  the same device never sees it, and it is not sent anywhere.
+- **Blocked.** If the browser (or the desktop app) refuses location to Instafy itself, the pane says where to allow
+  it. A site cannot tell the difference between that and "no position".
+
+### The rules
+
+- **Only the site on screen.** Studio answers only the mounted, visible preview frame whose window and viewer origin
+  match the request, and posts answers to that origin only, never `"*"`. A hidden pane gets `hidden`. A watch pauses
+  while the pane is hidden. It ends, with any answer still pending, when the frame reloads or the site moves to
+  another page inside the frame (the new page did not ask), and when the tab closes or the person leaves the
+  conversation.
+- **Stop sticks.** After Stop, that site's requests get `stopped` until the person presses Share location again in
+  Studio. Nothing a site sends can undo a stop. A stop is kept per space, preview title, port and path on this
+  device, so a reopened or renamed preview stays stopped.
+- **Limits per frame.** At most 5 requests in 10 seconds and 3 watches at once; more get `unavailable`. A one-off
+  answer may reuse a position up to 30 seconds old.
+- **What Studio keeps.** Studio does not store positions. It keeps, on this device only, which sites received the
+  location and when. It also remembers, in memory, that a frame has received positions until that frame is loaded
+  fresh, because the page may still hold them in its URL or state. Anything that shares what a pane shows with other
+  people must check this first and keep those positions out.
+- **Open in new tab** is the site's own page. There the browser asks for the site's own origin, as on any website,
+  and Studio is not involved.
+
+### Desktop app
+
+The Studio window's Electron session has a permission handler (`packages/desktop-app/src/studioPermissions.ts`).
+Without one Electron grants every request, so a preview frame used to get location with no prompt at all.
+
+- Geolocation is allowed only for Studio's own top frame on the Studio origin. A preview frame, any other subframe
+  and any other origin are always denied.
+- One question. On macOS, Location Services asks the person once, with Instafy's usage string, and keeps the answer;
+  the app asks nothing of its own. On Windows and Linux the app asks once ("Allow Instafy to use your location?")
+  and remembers the answer, either way, in `desktop-config.json` for that origin.
+- Frames inside a Studio window get only fullscreen, clipboard writes and pointer lock. Everything else
+  (notifications that would look like Instafy's, storage access, camera, sensors) is denied to them.
+- **Location Permission…** in the app menu and Settings → Profile → Location show the answer and can reset the app's
+  own one. Nothing can grant it except the native question. On macOS they point to System Settings → Privacy &
+  Security → Location Services. When a site asks and the app itself allows location but the operating system
+  refuses, the pane's note points to the operating system's settings, not the app's.
+- The mac build carries the location usage strings and the location entitlement that the hardened runtime needs.
+
+### Messages
+
+All messages use one envelope, version 1. A site names itself in `source` with a short lowercase name of its own
+choosing (`[a-z][a-z0-9-]{0,39}`). The name is not trusted for anything. `instafy-host` is Studio's own.
+
+Studio → site, on every frame load and when Studio's theme changes:
+
+```
+{ "source": "instafy-host", "v": 1, "type": "layout", "caps": { "location": "host" }, "theme": "light" }
+```
+
+`caps.location: "host"` means the person's location is available through Studio: ask Studio, not
+`navigator.geolocation`, which the frame may not use. `theme` is Studio's, so a site can match it. A site that speaks
+before it got the layout is sent it again.
+
+Site → Studio:
+
+```
+{ "source": "my-site", "v": 1, "type": "location-request", "payload": { "id": "r1", "watch": false, "highAccuracy": false } }
+{ "source": "my-site", "v": 1, "type": "location-stop", "payload": { "id": "r1" } }
+```
+
+`id` is the site's own short id (`[A-Za-z0-9:._-]{1,64}`). It only comes back to that site.
+
+Studio → site:
+
+```
+{ "source": "instafy-host", "v": 1, "type": "location", "payload": { "id": "r1",
+  "coords": { "latitude": 59.33, "longitude": 18.06, "accuracy": 20 }, "timestamp": 1700000000000 } }
+{ "source": "instafy-host", "v": 1, "type": "location-error", "payload": { "id": "r1", "code": "denied" } }
+{ "source": "instafy-host", "v": 1, "type": "location-stop", "payload": { "id": "r1" } }
+```
+
+`coords` may also carry `altitude`, `heading` and `speed`. A watch gets repeated `location` messages with the same
+id. `code` is `denied`, `unavailable`, `timeout`, `stopped` or `hidden`, and ends that request. A watch that already
+got a position outlives a passing `unavailable` or `timeout` from the browser.
+
+A site that wants to work both inside Studio and on its own checks for `?instafy_host=studio` or the layout
+message and uses this path there, and `navigator.geolocation` elsewhere. Studio adds the query only to the frame's
+first address, so after the site moves to another page only the layout message (sent on every load) says it; a site
+can keep the flag in `sessionStorage`. The `instafy-frontend-previews` skill tells
+Octo this.
+
+### Limits of this version
+
+- A site is keyed by its space, preview title, port and path. Two different sites with the same title in the same
+  space share a stop.
+- The list and stops are per device. Stopping a site on a laptop does not stop it on a phone.
+- The desktop app's handling was tested in a real Electron window (`smoke:studio:permissions`), not in a signed,
+  notarized mac build.
 
 ## Before a hosted launch
 

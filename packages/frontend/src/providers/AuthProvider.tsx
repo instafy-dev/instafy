@@ -25,6 +25,7 @@ import {
 } from "../auth/nativeAuthBridge";
 import { useWorkspaceStore } from "../store";
 import { clearProjectState } from "../workspace/projectClear";
+import { setLocationSitesAccount } from "../screens/studio/components/previewHost/locationSites";
 import { changeNotificationSession, releaseNotificationSession } from "../notifications/notificationLifecycle";
 import { installNotificationActionListeners } from "../notifications/notificationActions";
 import { postAuthTelemetryEvent } from "../services/runtimeController/authTelemetry";
@@ -589,6 +590,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
     const scope = user?.id?.trim() || "anonymous";
     useWorkspaceStore.getState().setWorkspaceScope(scope);
+    // Which sites got this person's location is theirs: never shown to the next account on this device.
+    setLocationSitesAccount(user?.id ?? null);
   }, [loading, user?.id]);
 
   useEffect(() => {

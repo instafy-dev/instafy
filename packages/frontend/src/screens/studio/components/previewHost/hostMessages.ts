@@ -1,24 +1,26 @@
 /**
  * The small, versioned contract between Studio and a site shown in a preview
- * pane. It is the same for every site (a map, shopping results, a dashboard):
- * nothing here knows what the site is, and a site that never answers keeps
- * working as a plain page.
+ * pane. It is the same for every site (a map, a shop, a dashboard): nothing
+ * here knows what the site is, and a site that never answers keeps working as
+ * a plain page.
  *
- * Studio → site: `{source:"instafy-host", v:1, type:"layout", …}` says what
- * Studio offers the frame: its theme, and that its bar already names the site.
- * The frame may not use the browser's geolocation (`caps.geolocation: false`).
- * Site → Studio: `{source:<the site's kit>, v:1, type, payload}`. Studio reads
- * only what follow mode needs (`layout-ack` with what the site supports, and
- * `view`, `tap`, `interact`). They are data, never commands, and the pane
- * reads them only from its own frame at the viewer's origin.
+ * Studio → site: `{source:"instafy-host", v:1, type:"layout", caps, theme}`
+ * says what Studio offers the frame: its theme, and that the site may ask
+ * Studio for the person's location (`caps.location: "host"`), since the frame
+ * itself may not use the browser's geolocation.
+ * Site → Studio: `{source:<the site's kit>, v:1, type, payload}`. Location has
+ * its own pair in `locationBroker.ts`; follow mode reads `layout-ack` (what the
+ * site supports), `view`, `tap` and `interact`. Messages are data, never
+ * commands, and the pane reads them only from its own frame at the viewer's
+ * origin.
  */
 
 export const HOST_MESSAGE_SOURCE = "instafy-host";
 export const HOST_MESSAGE_VERSION = 1;
 
 /**
- * Read by sites at boot, so they know a host frames them and can wait for its
- * layout message. Host-neutral on purpose: Studio frames any site.
+ * Read by sites at boot so they can wait for the host's layout before asking
+ * for location. Host-neutral on purpose: Studio frames any site.
  */
 export const HOST_QUERY_PARAM = "instafy_host";
 export const HOST_QUERY_VALUE = "studio";
@@ -32,40 +34,28 @@ export function isSiteMessageSource(value: unknown): value is string {
   return typeof value === "string" && value !== HOST_MESSAGE_SOURCE && /^[a-z][a-z0-9-]{0,39}$/.test(value);
 }
 
-export type HostInsets = { top: number; right: number; bottom: number; left: number };
-/** Studio pads the frame itself (the pane sits above the composer), so it covers none of it. */
-export const ZERO_INSETS: HostInsets = { top: 0, right: 0, bottom: 0, left: 0 };
-
 export type HostLayoutMessage = {
   source: typeof HOST_MESSAGE_SOURCE;
   v: typeof HOST_MESSAGE_VERSION;
   type: "layout";
-  insets: HostInsets;
-  chrome: "host";
-  /** "shown": Studio's bar names the site, so the site may hide its own title. */
-  title: "shown";
-  /** `geolocation: false`: the frame may not use the person's location (it is not delegated to it). */
-  caps: { geolocation: boolean };
+  /**
+   * `location: "host"`: the person's location is available through Studio
+   * (`location-request`), never through `navigator.geolocation`, which the
+   * frame is not allowed to use.
+   */
+  caps: { location: "host" };
+  /** Studio's theme, so a site can match it. */
   theme: "light" | "dark";
 };
 
-export function buildHostLayoutMessage(input: { theme: "light" | "dark" }): HostLayoutMessage {
-  return {
-    source: HOST_MESSAGE_SOURCE,
-    v: HOST_MESSAGE_VERSION,
-    type: "layout",
-    insets: ZERO_INSETS,
-    chrome: "host",
-    title: "shown",
-    caps: { geolocation: false },
-    theme: input.theme,
-  };
+export function buildHostLayoutMessage(theme: "light" | "dark"): HostLayoutMessage {
+  return { source: HOST_MESSAGE_SOURCE, v: HOST_MESSAGE_VERSION, type: "layout", caps: { location: "host" }, theme };
 }
 
 /**
  * The iframe's address: the minted capability URL plus `?instafy_host=studio`.
- * The controller mints the URL without a query and only reads the host when it
- * revokes, so the query is added here, on the frame's `src` only.
+ * The controller mints the URL and only reads the host when it revokes, so the
+ * query is added here, on the frame's `src` only.
  */
 export function withHostQuery(viewerUrl: string): string {
   try {
@@ -136,4 +126,14 @@ export function parseSiteMessage(data: unknown): SiteEvent | null {
     default:
       return null;
   }
+}
+
+/**
+ * A message in the site envelope (`{source:<kit>, v:1, type}`), whatever its
+ * type. The caller has already checked that it came from this pane's frame at
+ * the viewer's origin; this only checks the shape. Studio reads nothing else
+ * from it: a site that speaks before it got the layout is sent the layout again.
+ */
+export function isSiteEnvelope(data: unknown): boolean {
+  return isRecord(data) && isSiteMessageSource(data.source) && data.v === HOST_MESSAGE_VERSION && typeof data.type === "string";
 }
