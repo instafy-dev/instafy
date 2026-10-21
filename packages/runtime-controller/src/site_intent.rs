@@ -310,7 +310,10 @@ mod tests {
             title: "Running shoes".to_string(),
             port: 4180,
         });
-        assert_eq!(kept["site"], json!({ "title": "Running shoes", "port": 4180 }));
+        assert_eq!(
+            kept["site"],
+            json!({ "title": "Running shoes", "port": 4180 })
+        );
         assert_eq!(kept["verified"], json!(true));
         assert_eq!(kept["params"], claim()["params"]);
 
@@ -324,7 +327,10 @@ mod tests {
             ("params", json!({ "bad key": 1 })),
             ("params", json!({ "blob": "x".repeat(501) })),
             ("params", json!({ "a": { "b": { "c": { "d": 1 } } } })),
-            ("params", json!({ "a": "x".repeat(400), "b": "x".repeat(400), "c": "x".repeat(400), "d": "x".repeat(400), "e": "x".repeat(400), "f": "x".repeat(400) })),
+            (
+                "params",
+                json!({ "a": "x".repeat(400), "b": "x".repeat(400), "c": "x".repeat(400), "d": "x".repeat(400), "e": "x".repeat(400), "f": "x".repeat(400) }),
+            ),
             ("withheld", json!("note")),
             ("coarsened", json!(["bad key"])),
         ];

@@ -41,16 +41,28 @@ async fn a_site_intent_is_kept_only_for_an_open_preview_the_sender_can_see_and_c
             let preview_id = f.open(&job).await?;
             let owner = person(f.users[0]);
 
-            let kept = verified_site_intent(&f.state, &f.project, &owner, &claim(&preview_id, "int_a_0001"), true)
-                .await
-                .map_err(|(_, e)| anyhow::anyhow!(e.0.message))?
-                .context("the owner's ask from an open preview is kept")?;
+            let kept = verified_site_intent(
+                &f.state,
+                &f.project,
+                &owner,
+                &claim(&preview_id, "int_a_0001"),
+                true,
+            )
+            .await
+            .map_err(|(_, e)| anyhow::anyhow!(e.0.message))?
+            .context("the owner's ask from an open preview is kept")?;
             assert_eq!(kept["previewId"], json!(preview_id));
             assert_eq!(kept["askId"], json!("int_a_0001"));
             assert_eq!(kept["intent"], json!("check_size"));
-            assert_eq!(kept["params"], json!({ "ref": "shoes:karhu-ikoni-3", "size": "10" }));
+            assert_eq!(
+                kept["params"],
+                json!({ "ref": "shoes:karhu-ikoni-3", "size": "10" })
+            );
             // The site is named by the grant, never by the page.
-            assert_eq!(kept["site"], json!({ "title": "Site preview", "port": 4173 }));
+            assert_eq!(
+                kept["site"],
+                json!({ "title": "Site preview", "port": 4173 })
+            );
             assert_eq!(kept["verified"], json!(true));
 
             let check = |context: RequestContext, project: Uuid, value: Value| {
@@ -61,47 +73,129 @@ async fn a_site_intent_is_kept_only_for_an_open_preview_the_sender_can_see_and_c
                         .map_err(|(_, e)| anyhow::anyhow!(e.0.message))
                 }
             };
-            assert_eq!(check(person(f.users[3]), f.project, claim(&preview_id, "int_a_0002")).await?, None, "an outsider");
-            assert_eq!(check(person(f.users[0]), f.project, claim(&Uuid::new_v4().to_string(), "int_a_0003")).await?, None, "no such preview");
-            assert_eq!(check(person(f.users[0]), Uuid::new_v4(), claim(&preview_id, "int_a_0004")).await?, None, "another space");
-            let anonymous = RequestContext { user_id: None, is_service_role: true, scoped_claims: None };
-            assert_eq!(check(anonymous, f.project, claim(&preview_id, "int_a_0005")).await?, None, "nobody to have clicked");
+            assert_eq!(
+                check(
+                    person(f.users[3]),
+                    f.project,
+                    claim(&preview_id, "int_a_0002")
+                )
+                .await?,
+                None,
+                "an outsider"
+            );
+            assert_eq!(
+                check(
+                    person(f.users[0]),
+                    f.project,
+                    claim(&Uuid::new_v4().to_string(), "int_a_0003")
+                )
+                .await?,
+                None,
+                "no such preview"
+            );
+            assert_eq!(
+                check(
+                    person(f.users[0]),
+                    Uuid::new_v4(),
+                    claim(&preview_id, "int_a_0004")
+                )
+                .await?,
+                None,
+                "another space"
+            );
+            let anonymous = RequestContext {
+                user_id: None,
+                is_service_role: true,
+                scoped_claims: None,
+            };
+            assert_eq!(
+                check(anonymous, f.project, claim(&preview_id, "int_a_0005")).await?,
+                None,
+                "nobody to have clicked"
+            );
             let mut malformed = claim(&preview_id, "int_a_0006");
             malformed["params"] = json!("size=10");
-            assert_eq!(check(person(f.users[0]), f.project, malformed).await?, None, "malformed");
+            assert_eq!(
+                check(person(f.users[0]), f.project, malformed).await?,
+                None,
+                "malformed"
+            );
 
             // Six asks per person and preview in ten minutes (one already counted above).
             for index in 1..SITE_ASKS_PER_WINDOW {
-                verified_site_intent(&f.state, &f.project, &owner, &claim(&preview_id, &format!("int_b_{index:04}")), true)
-                    .await
-                    .map_err(|(_, e)| anyhow::anyhow!(e.0.message))?
-                    .context("within the cap")?;
-            }
-            let refused = verified_site_intent(&f.state, &f.project, &owner, &claim(&preview_id, "int_c_0001"), true)
-                .await
-                .err()
-                .context("the seventh ask in ten minutes is refused")?;
-            assert_eq!(refused.0, StatusCode::TOO_MANY_REQUESTS);
-            assert!(refused.1 .0.message.starts_with("You asked from this site 6 times in 10 minutes."), "{}", refused.1 .0.message);
-            // Another person is not held up by it.
-            verified_site_intent(&f.state, &f.project, &person(f.users[1]), &claim(&preview_id, "int_c_0002"), true)
+                verified_site_intent(
+                    &f.state,
+                    &f.project,
+                    &owner,
+                    &claim(&preview_id, &format!("int_b_{index:04}")),
+                    true,
+                )
                 .await
                 .map_err(|(_, e)| anyhow::anyhow!(e.0.message))?
-                .context("the builder's own cap")?;
+                .context("within the cap")?;
+            }
+            let refused = verified_site_intent(
+                &f.state,
+                &f.project,
+                &owner,
+                &claim(&preview_id, "int_c_0001"),
+                true,
+            )
+            .await
+            .err()
+            .context("the seventh ask in ten minutes is refused")?;
+            assert_eq!(refused.0, StatusCode::TOO_MANY_REQUESTS);
+            assert!(
+                refused
+                    .1
+                     .0
+                    .message
+                    .starts_with("You asked from this site 6 times in 10 minutes."),
+                "{}",
+                refused.1 .0.message
+            );
+            // Another person is not held up by it.
+            verified_site_intent(
+                &f.state,
+                &f.project,
+                &person(f.users[1]),
+                &claim(&preview_id, "int_c_0002"),
+                true,
+            )
+            .await
+            .map_err(|(_, e)| anyhow::anyhow!(e.0.message))?
+            .context("the builder's own cap")?;
 
             // A closed preview takes no more asks.
             let (status, body) = f
-                .request(&f.tokens[0], "POST", &f.path(&format!("/{preview_id}/close")), json!({}))
+                .request(
+                    &f.tokens[0],
+                    "POST",
+                    &f.path(&format!("/{preview_id}/close")),
+                    json!({}),
+                )
                 .await?;
             assert!(status.is_success(), "{status} {body}");
-            assert_eq!(check(person(f.users[0]), f.project, claim(&preview_id, "int_d_0001")).await?, None, "closed");
+            assert_eq!(
+                check(
+                    person(f.users[0]),
+                    f.project,
+                    claim(&preview_id, "int_d_0001")
+                )
+                .await?,
+                None,
+                "closed"
+            );
             Ok(())
         })
     })
     .await
 }
 
-fn ask_request(f: &Fixture, metadata: Value) -> anyhow::Result<crate::dispatch::DispatchPromptNormalized> {
+fn ask_request(
+    f: &Fixture,
+    metadata: Value,
+) -> anyhow::Result<crate::dispatch::DispatchPromptNormalized> {
     normalize_dispatch_request(DispatchPromptRequest {
         project_id: Some(f.project.to_string()),
         session_id: None,
@@ -233,7 +327,11 @@ async fn a_recorded_message_cannot_say_it_came_from_a_site() -> anyhow::Result<(
                 .await?;
             let status = response.status();
             let bytes = to_bytes(response.into_body(), 1024 * 1024).await?;
-            assert!(status.is_success(), "{status} {}", String::from_utf8_lossy(&bytes));
+            assert!(
+                status.is_success(),
+                "{status} {}",
+                String::from_utf8_lossy(&bytes)
+            );
             let stored: Value = f
                 .state
                 .pool
@@ -248,7 +346,10 @@ async fn a_recorded_message_cannot_say_it_came_from_a_site() -> anyhow::Result<(
                 .get::<_, PgJson<Value>>(0)
                 .0;
             assert!(stored.get("siteIntent").is_none(), "{stored}");
-            assert!(stored["prompt_metadata"].get("site_intent").is_none(), "{stored}");
+            assert!(
+                stored["prompt_metadata"].get("site_intent").is_none(),
+                "{stored}"
+            );
             Ok(())
         })
     })

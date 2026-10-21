@@ -25663,7 +25663,10 @@ mod tests {
 
         // A copy the controller did not mark as checked never reaches the prompt.
         let mut unchecked = site_intent;
-        unchecked.as_object_mut().expect("object").remove("verified");
+        unchecked
+            .as_object_mut()
+            .expect("object")
+            .remove("verified");
         let prompt = prompt_for(build(unchecked)).await;
         assert!(!prompt.contains("Sent from a site"), "{prompt}");
     }
