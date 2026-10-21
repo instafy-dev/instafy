@@ -146,8 +146,7 @@ export function ComposerInviteModal({
                 <Button
                   type="button"
                   variant="ghost"
-                  size="sm"
-                  radius="full"
+                  preset="inline"
                   onPress={() => {
                     onOpenChange(false);
                     onOpenProjectSettings();

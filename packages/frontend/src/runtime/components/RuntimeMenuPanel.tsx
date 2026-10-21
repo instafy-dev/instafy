@@ -43,8 +43,7 @@ function OpenBlockerSpaceButton({ projectId }: { projectId: string }) {
       onPress={() => navigateToDestination(blockerSpaceMachinesDestination(projectId))}
       variant="text"
       tone="accent"
-      size="sm"
-      radius="full"
+      preset="inline"
       className="mt-1"
       data-testid="runtime-open-blocker-space"
     >
@@ -278,7 +277,6 @@ export function RuntimeMenuPanel({
             <IconButton
               variant="ghost"
               size="sm"
-              radius="full"
               onPress={onClose}
               aria-label="Close runtimes menu"
               tone="neutral"
@@ -314,8 +312,7 @@ export function RuntimeMenuPanel({
                 onPress={() => setShowErrorDetails((current) => !current)}
                 variant="text"
                 tone="neutral"
-                size="sm"
-                radius="full"
+                preset="inline"
               >
                 {showErrorDetails ? "Hide details" : "View details"}
               </Button>
@@ -324,8 +321,7 @@ export function RuntimeMenuPanel({
                   onPress={handleTakeOverHostedRuntimeLimit}
                   variant="text"
                   tone="danger"
-                  size="sm"
-                  radius="full"
+                  preset="inline"
                   isDisabled={hostedRuntimeTakeoverInProgress}
                 >
                   {hostedRuntimeTakeoverInProgress
@@ -348,9 +344,8 @@ export function RuntimeMenuPanel({
               <Button
                 onPress={handleRetryHosted}
                 variant="primary"
-                size="sm"
+                preset="inline"
                 isDisabled={hostedRuntimeTakeoverInProgress || retryHostedPending}
-                radius="xl"
                 fullWidth
                 className="mt-3"
                 data-testid="runtime-reconnect-cloud"
@@ -431,8 +426,7 @@ export function RuntimeMenuPanel({
             onPress={() => onSelectOption(null)}
             variant="text"
             tone="neutral"
-            size="sm"
-            radius="full"
+            preset="inline"
             className="shrink-0"
           >
             Use best available
@@ -443,8 +437,7 @@ export function RuntimeMenuPanel({
         <Button
           onPress={() => onStartRuntime(primaryRestartOption.id)}
           variant="primary"
-          size="sm"
-          radius="xl"
+          preset="inline"
           fullWidth
           className="mt-3"
           data-testid="runtime-start-existing"
@@ -482,9 +475,8 @@ export function RuntimeMenuPanel({
             <Button
               onPress={handleRetryHosted}
               variant="primary"
-              size="sm"
+              preset="inline"
               isDisabled={hostedRuntimeTakeoverInProgress || retryHostedPending}
-              radius="xl"
               fullWidth
               className="mt-3"
               data-testid="runtime-start-cloud"

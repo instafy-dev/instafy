@@ -161,7 +161,6 @@ describe("ConversationRoster", () => {
     ));
     const trigger = container.querySelector<HTMLButtonElement>('[data-testid="conversation-roster"]')!;
     expect(trigger.title).toBe("Participants");
-    expect(trigger.className).toContain("!min-h-11");
     expect(container.querySelector('[data-testid="conversation-roster-overflow"]')?.textContent).toBe("+1");
     expect(container.querySelector('[data-testid="conversation-roster-warning"]')).not.toBeNull();
   });
@@ -216,13 +215,4 @@ describe("ConversationRoster", () => {
     ).toBe("true");
   });
 
-  it("keeps the trigger ambient: no panel background, border, shadow or blur", async () => {
-    await renderRoster([human("user-self", "Taylor", true)], [agent("octo", "Octo", "octo")]);
-    const triggerClass =
-      container.querySelector('[data-testid="conversation-roster"]')?.getAttribute("class") ?? "";
-    expect(triggerClass).toContain("bg-transparent");
-    expect(triggerClass).toContain("border-0");
-    expect(triggerClass).toContain("shadow-none");
-    expect(triggerClass).not.toContain("backdrop-blur");
-  });
 });

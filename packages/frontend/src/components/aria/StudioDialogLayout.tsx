@@ -75,7 +75,6 @@ export function StudioDialogHeader({
                 variant="ghost"
                 tone="muted"
                 size="sm"
-                radius="full"
                 onPress={onClose}
                 aria-label={closeLabel}
                 isDisabled={closeButtonDisabled}

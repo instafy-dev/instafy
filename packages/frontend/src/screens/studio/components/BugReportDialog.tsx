@@ -477,7 +477,6 @@ export function BugReportDialog({
                         onPress={() => handleRemoveScreenshot(screenshot.id)}
                         variant="ghost"
                         size="sm"
-                        radius="full"
                         aria-label={`Remove ${screenshot.fileName}`}
                       >
                         <Xmark className="h-4 w-4" aria-hidden="true" />

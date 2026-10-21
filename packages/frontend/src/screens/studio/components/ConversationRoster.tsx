@@ -21,9 +21,8 @@ const MAX_STACK_AVATARS = 5;
  * budget). An amber dot rides the stack when an agent's credential needs
  * attention, so that state is visible without opening anything.
  *
- * Styling is deliberately ambient: a bare, transparent avatar stack (no panel,
- * border, shadow or blur) so it reads as passive information with a control
- * affordance. Each avatar carries a thin ring painted in the chat surface's
+ * A quiet toolbar trigger supplies the hover/focus surface around the round
+ * avatars, without a permanent panel, border or shadow. Each avatar carries a thin ring painted in the chat surface's
  * own background to separate overlapping faces. The ring sits on the face
  * itself, above the face's own avatar coin shadow (light mode), so the
  * separator stays clean white and the soft shadow falls outside it.
@@ -44,7 +43,6 @@ export function ConversationRoster({
   const drawerOpen = useParticipantsDrawerOpen();
   const totalCount = humans.length + agents.length;
   const headerPlacement = placement === "header";
-  const spacingClass = headerPlacement ? "!min-h-11 !min-w-11 shrink-0 px-2 py-1" : "px-1 py-0.5";
   // Persistent entry point: even before anyone has joined (a brand-new chat),
   // keep a plain icon so the participants/config panel is always reachable —
   // otherwise there is no way to open it until a member appears.
@@ -53,14 +51,14 @@ export function ConversationRoster({
       <Button
         type="button"
         variant="ghost"
-        size="xs"
-        radius="full"
+        preset="toolbar"
+        tone="muted"
         aria-label="Open participants"
         aria-expanded={drawerOpen}
         data-testid="conversation-roster"
         title="Participants"
         onPress={() => toggleParticipantsDrawer()}
-        className={`border-0 bg-transparent text-slate-400 shadow-none hover:text-slate-600 data-[hovered]:text-slate-600 dark:text-slate-500 dark:hover:text-slate-300 dark:data-[hovered]:text-slate-300 ${spacingClass}`}
+        className="shrink-0"
       >
         <Group className={headerPlacement ? "h-5 w-5" : "h-4 w-4"} aria-hidden="true" />
       </Button>
@@ -92,14 +90,13 @@ export function ConversationRoster({
     <Button
       type="button"
       variant="ghost"
-      size="xs"
-      radius="full"
+      preset="toolbar"
       aria-label={`Conversation members (${totalCount})`}
       aria-expanded={drawerOpen}
       data-testid="conversation-roster"
       title="Participants"
       onPress={() => toggleParticipantsDrawer()}
-      className={`relative gap-1 border-0 bg-transparent shadow-none ${spacingClass}`}
+      className="relative shrink-0"
     >
       <span className="flex items-center -space-x-1.5">
         {visibleStackEntries.map((entry) => (
@@ -123,7 +120,7 @@ export function ConversationRoster({
         <span
           aria-hidden="true"
           data-testid="conversation-roster-warning"
-          className={`absolute h-2.5 w-2.5 rounded-full border-2 border-white bg-secondary-500 dark:border-[var(--color-studio-dark-panel)] ${headerPlacement ? "right-1 top-1" : "-right-0.5 -top-0.5"}`}
+          className="absolute right-1 top-1 h-2.5 w-2.5 rounded-full border-2 border-white bg-secondary-500 dark:border-[var(--color-studio-dark-panel)]"
         />
       ) : null}
     </Button>

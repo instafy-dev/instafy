@@ -68,7 +68,7 @@ export function MobileFocusDialog({
     dialogClassName="flex h-full min-h-0 flex-col"
   >
     <div className={`flex shrink-0 items-center gap-2 border-b border-slate-200 px-3 dark:border-[color:var(--color-studio-dark-panel-border)] ${shortViewport ? "h-11 border-b-0" : "py-2"}`}>
-      <IconButton slot={null} aria-label={dismissLabel} title={dismissLabel} variant="ghost" radius="full"
+      <IconButton slot={null} aria-label={dismissLabel} title={dismissLabel} variant="ghost"
         className="h-11 w-11 shrink-0" isDisabled={closeDisabled} onPress={close}>
         <NavArrowLeft aria-hidden="true" className="h-5 w-5" />
       </IconButton>

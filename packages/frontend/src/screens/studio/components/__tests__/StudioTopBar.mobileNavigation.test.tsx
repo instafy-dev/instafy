@@ -76,7 +76,6 @@ describe("StudioTopBar mobile navigation integration", () => {
     expect(query("conversation-roster")?.getAttribute("aria-label")).toBe("Conversation members (3)");
     expect(query("conversation-roster")?.querySelectorAll('[data-testid="chat-avatar-human"]').length).toBe(2);
     expect(query("conversation-roster-overflow")?.textContent).toBe("+1");
-    expect(query("conversation-roster")?.className).toContain("!min-h-11");
     await click("conversation-roster");
     expect(query("conversation-roster")?.getAttribute("aria-expanded")).toBe("true");
 

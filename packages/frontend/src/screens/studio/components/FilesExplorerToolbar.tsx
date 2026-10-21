@@ -42,7 +42,7 @@ export function FilesExplorerToolbar({
   const actionsWithSearch = <>
     <IconButton
       ref={toggleRef} variant={showSearch ? "secondary" : "ghost"}
-      size="sm" radius="full" aria-label={searchLabel} title={searchLabel}
+      size="sm" aria-label={searchLabel} title={searchLabel}
       aria-expanded={showSearch} aria-controls={showSearch ? "code-search" : undefined}
       data-testid="files-explorer-search-toggle"
       onPress={() => showSearch ? closeSearch() : setSearchOpen(true)}
@@ -58,7 +58,7 @@ export function FilesExplorerToolbar({
       actions={actionsWithSearch} />}
     {segments.length > 0 ? <nav aria-label="File location"
       className="mt-2 flex min-h-8 min-w-0 items-center gap-1 overflow-hidden px-4 text-xs font-medium text-slate-500 dark:text-slate-400">
-      <Button variant="ghost" size="xs" radius="full" onPress={() => onFocusDirectory("")}
+      <Button variant="ghost" size="xs" onPress={() => onFocusDirectory("")}
         aria-label="Focus root folder" className="shrink-0 px-1">Root</Button>
       {segments.map((segment, index) => {
         const path = segments.slice(0, index + 1).join("/");
@@ -66,7 +66,7 @@ export function FilesExplorerToolbar({
           <span aria-hidden="true">/</span>
           {index === segments.length - 1
             ? <span aria-current="location" title={path} className="truncate text-slate-700 dark:text-slate-200">{segment}</span>
-            : <Button variant="ghost" size="xs" radius="full" onPress={() => onFocusDirectory(path)}
+            : <Button variant="ghost" size="xs" onPress={() => onFocusDirectory(path)}
                 className="max-w-32 truncate px-1" title={path}>{segment}</Button>}
         </span>;
       })}

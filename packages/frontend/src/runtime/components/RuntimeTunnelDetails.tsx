@@ -73,13 +73,13 @@ export function RuntimeTunnelDetails({
         <IconButton
           type="button"
           variant="ghost"
-          size="xs"
-          radius="full"
+          size="sm"
+          tone="muted"
           onPress={() => onCopy("url")}
           isDisabled={copyDisabled}
           aria-label="Copy tunnel URL"
           data-testid={copyTestId}
-          className="shrink-0 text-slate-500 hover:text-slate-700 data-[hovered]:text-slate-700 dark:text-slate-300 dark:hover:text-slate-50 dark:data-[hovered]:text-slate-50"
+          className="shrink-0"
         >
           <Copy className="h-3.5 w-3.5" aria-hidden="true" />
         </IconButton>

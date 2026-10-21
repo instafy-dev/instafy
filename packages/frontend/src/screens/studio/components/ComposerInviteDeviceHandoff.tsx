@@ -51,9 +51,8 @@ export function ComposerInviteDeviceHandoff({
         <div className="flex shrink-0 items-center gap-2">
           <IconButton
             type="button"
-            variant="outline"
+            variant="ghost"
             size="sm"
-            radius="full"
             onPress={onShowQr}
             isDisabled={!appUrl}
             data-testid="composer-device-handoff-show-qr"
@@ -67,7 +66,6 @@ export function ComposerInviteDeviceHandoff({
               type="button"
               variant="ghost"
               size="sm"
-              radius="full"
               onPress={onShare}
               isDisabled={!browserUrl || sharePending}
               data-testid="composer-device-handoff-share"

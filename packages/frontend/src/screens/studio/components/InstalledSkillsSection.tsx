@@ -82,8 +82,8 @@ export function InstalledSkillsSection({
         <Text as="h2" variant="bodyStrong" tone="primary" className="min-w-0" tabIndex={-1}>
           Installed skills
         </Text>
-        <div className="flex shrink-0 items-center gap-1">
-          <Button variant="primary" size="sm" radius="xl" onPress={onConnectTool}
+        <div className="flex shrink-0 items-center gap-2">
+          <Button variant="primary" preset="inline" onPress={onConnectTool}
             isDisabled={!hasProject}
             aria-label="Connect a tool" data-testid="skills-connect-tool">
             <Plus className="h-4 w-4" aria-hidden="true" />
@@ -91,9 +91,9 @@ export function InstalledSkillsSection({
             <span className="hidden @min-[36rem]/settings-content:inline">Connect a tool</span>
           </Button>
           <MenuTrigger>
-            <IconButton variant="ghost" size="sm" radius="lg" isDisabled={!hasProject}
+            <IconButton variant="ghost" size="sm" isDisabled={!hasProject}
               aria-label="More skill actions" data-testid="skills-actions">
-              <MoreHoriz className="h-5 w-5" aria-hidden="true" />
+              <MoreHoriz className="h-4 w-4" aria-hidden="true" />
             </IconButton>
             <StudioPopover placement="bottom end" layout="menu">
               <StudioMenu aria-label="Skill actions">
@@ -127,7 +127,7 @@ export function InstalledSkillsSection({
           <Text as="p" variant="caption" tone="muted" className="min-w-0" role="status">
             {error}
           </Text>
-          <Button variant="text" tone="muted" size="sm" radius="lg" onPress={onReload} isPending={loading}
+          <Button variant="text" tone="muted" preset="inline" onPress={onReload} isPending={loading}
             onFocus={() => { retryFocused.current = true; }}
             onBlur={(event) => { if (event.currentTarget.isConnected) retryFocused.current = false; }}
             className="shrink-0" data-testid="skills-retry">
@@ -201,7 +201,7 @@ export function InstalledSkillsSection({
                       </Text>
                     </div>
                   </div>
-                  <div className="ml-2 flex shrink-0 items-center gap-1.5 pt-0.5">
+                  <div className="ml-2 flex shrink-0 items-center gap-2 pt-0.5">
                     <Toggle
                       size="sm"
                       aria-label={`Set ${skill.title} active`}
@@ -218,7 +218,6 @@ export function InstalledSkillsSection({
                       <IconButton
                         variant="ghost"
                         size="sm"
-                        radius="full"
                         onPress={() => onUninstallSkill(skill)}
                         aria-label={`Uninstall ${skill.title}`}
                         title="Uninstall skill"
@@ -237,7 +236,6 @@ export function InstalledSkillsSection({
                       <IconButton
                         variant="ghost"
                         size="sm"
-                        radius="full"
                         onPress={() => onOpenSkillFile(skill)}
                         aria-label={`Open ${skill.title}`}
                         title="Open skill file"
@@ -251,7 +249,6 @@ export function InstalledSkillsSection({
                         <IconButton
                           variant="ghost"
                           size="sm"
-                          radius="full"
                           aria-label={`Actions for ${skill.title}`}
                           title="Skill actions"
                           isDisabled={togglePendingSkillId !== null || uninstallPendingSkillId !== null}

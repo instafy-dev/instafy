@@ -21,7 +21,7 @@ function PanelFallback({ children, title, onClose, tabs, headerPortalTarget, act
       {tabs}
       {renderMobileHeader ? renderMobileHeader({ title, actions: null }) : actionsPortalTarget ? null : onClose ? (
         <DrawerHeader portalTarget={headerPortalTarget} actionsPortalTarget={actionsPortalTarget} title={title} pageTitle={title === "Files" || title === "Changes" || title === "History"} frame="rail" actions={
-          <IconButton variant="ghost" size="sm" radius="full" aria-label={`Close ${title.toLowerCase()}`} onPress={onClose}>
+          <IconButton variant="ghost" size="sm" aria-label={`Close ${title.toLowerCase()}`} onPress={onClose}>
             <Xmark className="h-4 w-4" />
           </IconButton>
         } />

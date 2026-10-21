@@ -962,33 +962,26 @@ export function LegacyChangesDrawer({
 
   const diffPreviewActions = previewPath ? (
     <>
-      <Button
-        variant="ghost"
-        size="xs"
-        radius="xl"
-        onPress={handlePreviewPrevious}
-        isDisabled={!previewCanPrevious}
-        data-testid="source-control-diff-prev"
-      >
-        <NavArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
-        Prev
-      </Button>
-      <Button
-        variant="ghost"
-        size="xs"
-        radius="xl"
-        onPress={handlePreviewNext}
-        isDisabled={!previewCanNext}
-        data-testid="source-control-diff-next"
-      >
-        Next
-        <NavArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
-      </Button>
+      {[
+        { id: "prev", label: "Prev", name: "Previous changed file", icon: NavArrowLeft, onPress: handlePreviewPrevious, disabled: !previewCanPrevious },
+        { id: "next", label: "Next", name: "Next changed file", icon: NavArrowRight, onPress: handlePreviewNext, disabled: !previewCanNext },
+      ].map(({ id, label, name, icon: Icon, onPress, disabled }) => isLargeScreen ? (
+        <Button key={id} variant="ghost" size="sm" elevation="none" onPress={onPress} isDisabled={disabled}
+          aria-label={name} title={name} data-testid={`source-control-diff-${id}`}>
+          {id === "prev" ? <Icon className="h-4 w-4" aria-hidden="true" /> : null}
+          {label}
+          {id === "next" ? <Icon className="h-4 w-4" aria-hidden="true" /> : null}
+        </Button>
+      ) : (
+        <IconButton key={id} variant="ghost" size="sm" onPress={onPress} isDisabled={disabled}
+          aria-label={name} title={name} data-testid={`source-control-diff-${id}`}>
+          <Icon className="h-4 w-4" aria-hidden="true" />
+        </IconButton>
+      ))}
       {!isLargeScreen ? (
         <IconButton
           variant="ghost"
           size="sm"
-          radius="lg"
           aria-label="Close diff preview"
           onPress={() => setPreviewPath(null)}
           data-testid="source-control-diff-close"
@@ -1010,7 +1003,6 @@ export function LegacyChangesDrawer({
                 <Button
                   variant="ghost"
                   size="xs"
-                  radius="xl"
                   onPress={() => handleEnterScope(null)}
                   data-testid="source-control-scope-root"
                 >
@@ -1022,7 +1014,6 @@ export function LegacyChangesDrawer({
                     <Button
                       variant="ghost"
                       size="xs"
-                      radius="xl"
                       onPress={() => handleEnterScope(segment.prefix)}
                       isDisabled={index === scopeSegments.length - 1}
                       data-testid={`source-control-scope-segment-${sanitizeScopeTestId(segment.prefix)}`}
@@ -1035,7 +1026,6 @@ export function LegacyChangesDrawer({
               <Button
                 variant="ghost"
                 size="xs"
-                radius="xl"
                 onPress={handleNavigateUp}
                 data-testid="source-control-scope-parent"
               >
@@ -1096,7 +1086,6 @@ export function LegacyChangesDrawer({
               <Button
                 variant="ghost"
                 size="xs"
-                radius="xl"
                 onPress={handlePreviousPage}
                 isDisabled={currentPageOffset === 0}
                 data-testid="source-control-page-prev"
@@ -1110,7 +1099,6 @@ export function LegacyChangesDrawer({
               <Button
                 variant="ghost"
                 size="xs"
-                radius="xl"
                 onPress={handleNextPage}
                 isDisabled={!hasMoreFiles}
                 data-testid="source-control-page-next"
@@ -1219,9 +1207,8 @@ export function LegacyChangesDrawer({
                     onClick={(event) => event.stopPropagation()}
                   >
                     <IconButton
-                      size="xs"
+                      size="sm"
                       variant="ghost"
-                      radius="full"
                       aria-label={`Discard changes for ${entry.path}`}
                       title="Discard changes"
                       onPress={() => void handleDiscardPath(entry.path)}
@@ -1264,7 +1251,6 @@ export function LegacyChangesDrawer({
             <IconButton
               variant="ghost"
               size="sm"
-              radius="full"
               aria-label="Refresh changes"
               title="Refresh"
               data-testid="source-control-refresh"
@@ -1278,7 +1264,6 @@ export function LegacyChangesDrawer({
               <IconButton
                 variant="ghost"
                 size="sm"
-                radius="full"
                 aria-label="Close changes"
                 title="Close"
                 data-testid="source-control-close"
@@ -1334,8 +1319,7 @@ export function LegacyChangesDrawer({
                 data-testid="source-control-conflict"
                 actions={<Button
                   variant="outline"
-                  size="sm"
-                  radius="xl"
+                  preset="inline"
                   onPress={handleResolveConflicts}
                   isDisabled={syncing}
                   data-testid="source-control-resolve-conflicts"
@@ -1370,11 +1354,11 @@ export function LegacyChangesDrawer({
                     data-testid="source-control-commit-message"
                   />
                 </div>
-                <div className="flex items-center gap-1 pb-0.5">
+                <div className="flex items-center gap-2 pb-0.5">
                   <IconButton
                     variant="primary"
+                    elevation="none"
                     size="md"
-                    radius="full"
                     onPress={handleSync}
                     isDisabled={!projectWriteEnabled || !supported || syncing || discarding || busyBlocksMutations}
                     data-testid="source-control-sync"
@@ -1390,7 +1374,6 @@ export function LegacyChangesDrawer({
                   <IconButton
                     variant="ghost"
                     size="md"
-                    radius="full"
                     onPress={handleDiscardStaged}
                     isDisabled={
                       !supported ||
@@ -1426,14 +1409,13 @@ export function LegacyChangesDrawer({
                       </span>
                     ) : null}
                   </div>
-                  <div className="flex items-center gap-1">
+                  <div className="flex items-center gap-2">
                     {dirtyCount > 0 ? (
                       <SegmentedControl
                         aria-label="Changes view"
                         value={reviewMode}
                         onChange={setReviewMode}
                         width="fit"
-                        className="mr-1"
                         options={[
                           { value: "focused", label: "Files", testId: "source-control-review-mode-focused" },
                           { value: "all", label: "All changes", ariaLabel: "Preview all changes", testId: "source-control-review-mode-all" },
@@ -1442,8 +1424,7 @@ export function LegacyChangesDrawer({
                     ) : null}
                     <IconButton
                       variant="ghost"
-                      size="xs"
-                      radius="full"
+                      size="sm"
                       onPress={handleSelectAll}
                       isDisabled={!supported || syncing || discarding || busyBlocksReviewControls || dirtyPaths.length === 0}
                       data-testid="source-control-select-all"
@@ -1455,8 +1436,7 @@ export function LegacyChangesDrawer({
                     </IconButton>
                     <IconButton
                       variant="ghost"
-                      size="xs"
-                      radius="full"
+                      size="sm"
                       onPress={handleSelectNone}
                       isDisabled={!supported || syncing || discarding || busyBlocksReviewControls || selectedPaths.size === 0}
                       data-testid="source-control-select-none"
@@ -1620,8 +1600,7 @@ export function LegacyChangesDrawer({
                                   </button>
                                   <IconButton
                                     variant="ghost"
-                                    size="xs"
-                                    radius="full"
+                                    size="sm"
                                     onPress={() => toggleHistoryEntry(entry.commit)}
                                     data-testid="source-control-history-toggle"
                                     aria-label={expanded ? "Collapse saved version details" : "Expand saved version details"}
@@ -1647,8 +1626,7 @@ export function LegacyChangesDrawer({
                                       <span>{formatRelativeCommitTime(entry.committedAt)}</span>
                                       <Button
                                         variant="ghost"
-                                        size="sm"
-                                        radius="xl"
+                                        preset="inline"
                                         onPress={() => {
                                           openSavedVersionInReviewTab(entry);
                                         }}
@@ -1658,8 +1636,7 @@ export function LegacyChangesDrawer({
                                       </Button>
                                       <Button
                                         variant="ghost"
-                                        size="sm"
-                                        radius="xl"
+                                        preset="inline"
                                         isDisabled={!projectWriteEnabled || revertingCommit !== null}
                                         onPress={() => {
                                           void handleRevertHistoryCommit(entry);
@@ -1703,8 +1680,7 @@ export function LegacyChangesDrawer({
               <div className="h-1.5 w-12 rounded-full bg-slate-300 dark:bg-slate-700" />
               <IconButton
                 variant="ghost"
-                size="xs"
-                radius="full"
+                size="sm"
                 aria-label="Close all changes review"
                 onPress={() => setReviewMode("focused")}
                 data-testid="source-control-rolling-diff-close"

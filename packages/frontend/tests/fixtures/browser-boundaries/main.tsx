@@ -6,6 +6,7 @@ import { Text } from "../../../src/components/Text";
 import { ConversationSurfaceTabs } from "../../../src/workspace/ConversationSurfaceLayout";
 import { BrowserSessionModal } from "../../../src/screens/studio/components/BrowserSessionModal";
 import { BrowserChromeShell, BrowserStatusPill } from "../../../src/screens/studio/components/BrowserChromeShell";
+import { SharedBrowserChrome } from "../../../src/screens/studio/components/SharedBrowserChrome";
 import { BrowserTransportSelector } from "../../../src/screens/studio/components/PersonalBrowserSurface";
 import "./review.css";
 
@@ -20,6 +21,8 @@ function Review() {
   const [composerView, setComposerView] = useState("chat");
   const [dark, setDark] = useState(params.get("theme") === "dark");
   const [address, setAddress] = useState("https://fixture.example.test");
+  const [browserMessage, setBrowserMessage] = useState<string | null>("Example connection message. Dismiss to continue the local review.");
+  const [paused, setPaused] = useState(true);
   return (
     <main className="review-page">
       <header className="review-heading">
@@ -51,6 +54,17 @@ function Review() {
               }} />
           </div>
         </div>
+      </section>
+      <section aria-label="Shared browser toolbar controls" className="review-section">
+        <Text as="h2" variant="bodyStrong" tone="primary">Shared browser navigation and feedback</Text>
+        <Text variant="caption" tone="muted">Production controls. Actions update this local example only.</Text>
+        <SharedBrowserChrome resolved pages={[{ id: "toolbar-page", url: address, host: "fixture.example.test", label: "Review", title: "Review page", isActive: true }]}
+          pendingAction={null} error={browserMessage}
+          onNavigate={(_pageId, nextAddress) => setAddress(nextAddress)} onBack={noop} onForward={noop} onReload={noop}
+          onFocusPage={noop} onClearError={() => setBrowserMessage(null)}
+          toolbarStatus={<BrowserStatusPill state={paused ? "paused" : "ready"} resume={{ onPress: () => setPaused(false) }} />}
+          toolbarActions={<IconButton size="sm" variant="ghost" aria-label="Show example message" onPress={() => setBrowserMessage("Example connection message. Dismiss to continue the local review.")}><MoreHoriz className="h-4 w-4" aria-hidden="true" /></IconButton>} />
+        <p className="review-content">Sample page content; no browser navigation or remote session is started.</p>
       </section>
       <section aria-label="Wrapping browser toolbar" className="review-section">
         <Text as="h2" variant="bodyStrong" tone="primary">One toolbar, even when controls wrap</Text>

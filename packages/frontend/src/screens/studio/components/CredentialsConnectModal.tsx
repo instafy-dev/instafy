@@ -798,7 +798,6 @@ export function CredentialsConnectModal({
             <IconButton
               variant="ghost"
               size="sm"
-              radius="full"
               aria-label="Back"
               onPress={onBack}
               isDisabled={modalBusy}

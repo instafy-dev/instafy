@@ -72,6 +72,13 @@ function assertCanSave() {
   if (getFilesReviewScenario() === "write-error") throw new Error("Review scenario: the file could not be saved. Your edits are kept.");
 }
 
+async function waitForReviewSave() {
+  // Explicit local fixture mode for inspecting pending UI; normal saves stay immediate.
+  // This does not model controller latency or native/background save behavior.
+  if (new URLSearchParams(window.location.search).get("filesSave") !== "manual") return;
+  await new Promise<void>(resolve => window.addEventListener("review:finish-save", () => resolve(), { once: true }));
+}
+
 /** Data boundary only. FilesPanel, its tree, filtering, and preview are production code. */
 export const filesApi = {
   list: async ({ path }: { path?: string }) => list(path),
@@ -84,6 +91,7 @@ export const filesApi = {
   getRawUrl: async () => null,
   write: async ({ path, content }: { path: string; content: string }) => {
     assertCanSave();
+    await waitForReviewSave();
     const normalized = normalize(path);
     contents[normalized] = content;
     return { ok: true, path: normalized, size: new TextEncoder().encode(content).length };

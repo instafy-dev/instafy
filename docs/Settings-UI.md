@@ -29,6 +29,32 @@ determines the winner. Arbitrary layout classes remain supported.
   individual props for specialized controls such as icons and chips; the presets
   do not change unconverted buttons. `SettingsFormActions` uses the form preset;
   invitation conflict and member actions share the inline preset with chat invites.
+- Toolbar and dialog utility icons (Back, Close, Copy, Refresh, Expand and More) use
+  the shared `IconButton` 8px corner default, usually with `variant="ghost"`.
+  Keep the compact shared size and its 44px coarse-pointer target rather than
+  fixing dimensions at a viewport breakpoint. Quiet actions have no permanent
+  fill or border; hover/pressed surfaces and keyboard focus remain visible.
+  Separate adjacent utility controls by 8px so their focus rings have clearance.
+  Shape follows the control's context; primary or destructive importance comes
+  from its variant/tone, not a circular shape or a locally reconstructed palette.
+  Labelled contextual/form actions keep the inline/form presets above. Composer
+  Send/Stop/Voice, standalone image-overlay dismissal, avatar badges, identity
+  chips and compound tab controls retain their purpose-specific shapes.
+  Browser address fields use the shared input's 12px radius, including the mobile
+  address trigger. Their embedded Go/Clear utilities use the shared 8px corners.
+- Content-sized toolbar controls, such as participant stacks and a browser-location
+  icon plus chevron, use `Button preset="toolbar"`. It owns flat elevation, 8px
+  corners, 4px padding and a 32px minimum mouse target;
+  the shared 44px minimum still applies to coarse pointers. Width grows with the
+  contents instead of forcing a stack into a square. Use the quiet variant for
+  these triggers. Avatars and ownership rings inside remain circular, and status
+  badges remain informational. Take/Request/Give/Release control use the inline
+  action preset; browser approval Allow/Deny use the form preset.
+  Browser participant popovers use `Text bodyCompact` with primary contrast for
+  names and `caption` with muted contrast for supporting status. Show Controls
+  and Requested beside the corresponding person. The compact Give control action
+  sits in the first requester's row; its accessible label retains the complete
+  recipient name. Keep other controls in the footer and preserve request order.
 - `Input` and both native/styled `Select` share medium defaults and control size tokens.
   `Field label` plus matching `htmlFor`/control `id` also labels app-rendered selects;
   explicit ARIA labels remain authoritative. `Checkbox` owns its interaction target
@@ -194,7 +220,7 @@ in its details. Start/Stop stay visible in the header, while More actions opens 
 Remove confirmation. Inspecting a machine never changes the space's preferred machine.
 Expanded machine details use alignment and spacing, without a divider or enclosing card.
 Routine actions use the shared ghost button treatment; empty states remain plain content.
-Machine icon actions use `size="sm"` and `radius="full"`: 32px on fine pointers and
+Machine icon actions use `size="sm"` and the shared 8px corner default: 32px on fine pointers and
 44px on coarse pointers, including Close, Copy, Start/Stop, More and picker disclosure.
 **Use this machine** uses the flat secondary treatment (`elevation="none"`) to stay
 recognizable as an action. Once selected, it becomes plain **Selected machine** status
@@ -398,7 +424,7 @@ existing thin outline, 12px default radius
 and visible keyboard focus treatment. Profile's Save action follows the same 44px mobile
 target and uses a compact 36px height on wider fine-pointer screens.
 
-Use a small, consistent radius scale: 6px for compact search scope chips, 8px for menu rows
+Use a small, consistent radius scale: 6px for compact search scope chips, 8px for utility icon controls, menu rows
 and segmented options, 12px for navigation rows, form controls and profile actions, and 16px for cards, dialogs and
 popovers. Human avatars remain circular; team identities use rounded squares. Do not turn
 every action into a pill.
@@ -618,6 +644,39 @@ Save draft writes to the workspace without creating a version; Save version also
 and syncs that file. Versioned origins keep their single Save action. The footer reports
 unsaved changes, saving and saved state; read-only viewers offer no save actions.
 Viewer toolbar actions use the shared button tones and flat elevation.
+The viewer footer keeps save status and size on one compact row. A quiet inline
+**Details** action opens the full size, modified timestamp and MIME type in a shared
+popover; unknown values are omitted. Status stays visible and can wrap when needed.
+Use shared caption text and pointer-aware buttons, with the same 16px horizontal
+inset as the header. The footer owns one top divider, without a separate surface
+or shadow; only the floating details popover has elevation.
+
+File viewers, diff-file headers and the All changes summary use `ContentHeader`.
+These are content headings below the page navigation: 14px medium primary text,
+12px regular muted supporting text, and a 16px muted decorative icon. They share
+16px horizontal insets and 8px between the title, controls and individual actions.
+This leaves 4px of clearance beyond the shared focus ring, which extends 4px outside
+the focused button. Composed controls such as Undo/Redo participate directly in the
+header's action layout instead of adding a tighter internal gap.
+File toolbar controls use the shared Button/IconButton 8px corner radius. Back,
+Edit/Preview and More are quiet actions, with no permanent fill or border. Save is
+quiet when clean and primary blue for unsaved edits or known changes awaiting a
+version, retaining its primary treatment while saving. Unknown legacy version
+status stays quiet but actionable. A clean Save remains focusable and aria-disabled
+so completing a keyboard save does not drop focus. Keep these states in the shared
+button variants rather than local color, shape or padding overrides.
+Default headers use 8px vertical padding; repeated diff-file headers use the compact
+6px preset without changing their typography. Both retain the shared pointer-aware
+button targets. Compact diff headers can use the subtle surface preset to distinguish
+each file from its code; the header owns one bottom divider and no enclosing shadow.
+Long filenames truncate while controls remain visible. Crowded controls wrap onto a
+second row instead of squeezing the filename and supporting text; this follows the
+available panel width, independently of the viewport or pointer. These content headings
+use a plain container, not a page-banner landmark. File code remains monospace
+with semantic diff colors. Keep titles, icon colors and padding out of consumer overrides.
+In the mobile selected-diff sheet, Previous/Next use shared icon buttons with explicit
+accessible names so navigation, Close, Open file and Refresh fit in one action row even
+at 320px. Desktop keeps the labelled inline actions.
 
 The path row and header use the shared spacing described above. Desktop layout follows Studio's 900px breakpoint; touch targets
 grow independently for coarse pointers. Navigation selection uses a flat fill with a

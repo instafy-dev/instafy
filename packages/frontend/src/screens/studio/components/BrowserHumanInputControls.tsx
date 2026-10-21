@@ -31,7 +31,7 @@ export function BrowserHumanInputStatus(props: BrowserHumanInputOptions & Browse
   const controls = (
     <div className="flex min-w-0 max-w-full shrink-0 items-center gap-2 text-xs" data-testid="browser-human-input-controls" data-browser-session-safe-zone="true">
       {state.active && props.humanControlConfirmed ? (
-        <Button type="button" size="sm" variant="primary" radius="full" className="min-h-9 shrink-0"
+        <Button type="button" size="sm" variant="primary" className="shrink-0"
           isDisabled={state.busy !== null || props.canContinue === false} title={state.error ?? manualGuidance}
           onPress={() => void state.continueTask()} data-testid="browser-human-input-continue">
           <Play className="h-3.5 w-3.5" aria-hidden="true" />
@@ -40,7 +40,7 @@ export function BrowserHumanInputStatus(props: BrowserHumanInputOptions & Browse
       ) : state.active && !state.error ? (
         <span role="status" className="text-slate-500 dark:text-slate-400">{state.busy === "continue" ? "Continuing…" : "Stopping AI…"}</span>
       ) : props.canTakeOver ? (
-        <IconButton type="button" size="md" variant="ghost" radius="full"
+        <IconButton type="button" size="sm" variant="ghost"
           aria-label="Take over browser" title="Take over browser" onPress={state.requestTakeOver} data-testid="browser-human-input-request">
           <CursorPointer className="h-4 w-4" aria-hidden="true" />
         </IconButton>

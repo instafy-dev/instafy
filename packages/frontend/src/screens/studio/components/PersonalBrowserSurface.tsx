@@ -61,7 +61,7 @@ export function BrowserTransportSelector({
   const location = mode === "personal" ? "This device" : "Workspace";
   return <div data-browser-session-safe-zone="true" data-testid="browser-transport-selector" data-compact={compact ? "true" : "false"}>
     <BrowserToolsPopover placement="bottom start" label="Browser location" isOpen={open} onOpenChange={setOpen} trigger={
-      <Button variant="ghost" size={compact ? "icon" : "sm"} className={compact ? "h-10 w-11 shrink-0 pointer-coarse:h-11" : "max-[540px]:h-10 pointer-coarse:min-h-11"} aria-label={`Browser location: ${location}`} data-testid="browser-location-menu" title={`Runs on ${location.toLowerCase()}`}>
+      <Button variant="ghost" preset="toolbar" className="shrink-0" aria-label={`Browser location: ${location}`} data-testid="browser-location-menu" title={`Runs on ${location.toLowerCase()}`}>
         {mode === "personal" ? <Computer className="h-3.5 w-3.5" aria-hidden="true" /> : <Globe className="h-3.5 w-3.5" aria-hidden="true" />}
         <NavArrowDown className="h-3 w-3" aria-hidden="true" />
       </Button>
@@ -364,14 +364,12 @@ export function PersonalBrowserSurface({
         label="Personal browser controls"
         leading={transportSelector}
         navigation={
-          <div className="flex items-center gap-0.5">
+          <div className="flex items-center gap-2">
           {!compactChrome ? (<>
             <IconButton
               aria-label="Back"
-              className="max-[540px]:h-10 max-[540px]:w-10"
               isDisabled={!ready || humanInputLocked || !model.status?.canGoBack}
               onPress={() => void model.goBack()}
-              radius="full"
               size="sm"
               variant="ghost"
             >
@@ -379,10 +377,8 @@ export function PersonalBrowserSurface({
             </IconButton>
             <IconButton
               aria-label="Forward"
-              className="max-[540px]:h-10 max-[540px]:w-10"
               isDisabled={!ready || humanInputLocked || !model.status?.canGoForward}
               onPress={() => void model.goForward()}
-              radius="full"
               size="sm"
               variant="ghost"
             >
@@ -391,10 +387,8 @@ export function PersonalBrowserSurface({
           </>) : null}
           <IconButton
             aria-label="Reload"
-            className="max-[540px]:h-10 max-[540px]:w-10"
             isDisabled={!ready || humanInputLocked}
             onPress={() => void model.reload()}
-            radius="full"
             size="sm"
             variant="ghost"
           >
@@ -454,9 +448,7 @@ export function PersonalBrowserSurface({
           {ready && !model.status?.agentControlEnabled && model.agentPhase === "unavailable" && !humanInputState.active ? (
             <IconButton
               aria-label="Retry agent control"
-              className="max-[540px]:h-10 max-[540px]:w-10"
               onPress={() => void model.retryAgentControl()}
-              radius="full"
               size="sm"
               title="Retry agent control"
               variant="ghost"
@@ -467,7 +459,6 @@ export function PersonalBrowserSurface({
             <IconButton
               aria-label={model.status?.agentControlEnabled ? "Pause agent control" : "Resume agent control"}
               isDisabled={!model.status?.agentControlEnabled && (model.status?.humanControlReady === false || model.status?.tabControlActive)}
-              className="max-[540px]:h-10 max-[540px]:w-10"
               onPress={() => {
                 if (model.status?.agentControlEnabled) onPauseAgentControl?.();
                 void model.setAgentControlEnabled(
@@ -475,7 +466,6 @@ export function PersonalBrowserSurface({
                   routineApprovalAvailable ? selectedApprovalMode : undefined,
                 );
               }}
-              radius="full"
               size="sm"
               title={model.status?.agentControlEnabled ? "Pause agent control" : "Resume agent control"}
               variant="ghost"
@@ -487,7 +477,7 @@ export function PersonalBrowserSurface({
               )}
             </IconButton>
           ) : null}
-          <BrowserToolsPopover label="Browser settings" isOpen={settingsOpen} onOpenChange={setSettingsOpen} trigger={<IconButton aria-label="Browser settings" variant="ghost" radius="full" size="sm"><MoreHoriz className="h-4 w-4" aria-hidden="true" /></IconButton>}>
+          <BrowserToolsPopover label="Browser settings" isOpen={settingsOpen} onOpenChange={setSettingsOpen} trigger={<IconButton aria-label="Browser settings" variant="ghost" size="sm"><MoreHoriz className="h-4 w-4" aria-hidden="true" /></IconButton>}>
             {compactChrome ? (
               <div className="flex items-center gap-1" role="group" aria-label="Page history">
                 <Button
@@ -541,7 +531,6 @@ export function PersonalBrowserSurface({
             isDisabled={!ready || model.clearDataState === "clearing"}
             className="w-full justify-start"
             onPress={handleClearData}
-            radius="full"
             size="sm"
             title="Clear personal browser data"
             variant="ghost"

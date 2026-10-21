@@ -110,8 +110,7 @@ export function ComposerInviteQrModal({
               <Button
                 type="button"
                 variant="outline"
-                size="sm"
-                radius="full"
+                preset="inline"
                 onPress={onCopy}
                 className="border-white/15 text-slate-100 hover:bg-white/10 data-[hovered]:bg-white/10"
                 data-testid="composer-invite-nearby-copy-from-qr"
@@ -122,8 +121,7 @@ export function ComposerInviteQrModal({
                 <Button
                   type="button"
                   variant="ghost"
-                  size="sm"
-                  radius="full"
+                  preset="inline"
                   onPress={onShare}
                   isDisabled={sharePending}
                   className="text-slate-100 hover:bg-white/10 data-[hovered]:bg-white/10"

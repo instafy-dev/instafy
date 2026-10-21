@@ -194,8 +194,7 @@ export function SharedBrowserApprovalPrompt({
             fullWidth
             isDisabled={submitting}
             onPress={() => onDecision("deny")}
-            radius="full"
-            size="sm"
+            preset="form"
             variant="secondary"
             className="min-[420px]:w-auto"
           >
@@ -207,8 +206,7 @@ export function SharedBrowserApprovalPrompt({
             fullWidth
             isDisabled={submitting}
             onPress={() => onDecision(allowRoutine ? "allow_routine" : sharedBrowserApprovalAllowDecision(request.kind))}
-            radius="full"
-            size="sm"
+            preset="form"
             variant="primary"
             className="min-[420px]:w-auto"
           >

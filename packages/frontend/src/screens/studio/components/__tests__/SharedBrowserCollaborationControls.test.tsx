@@ -37,6 +37,8 @@ describe("SharedBrowserCollaborationControls", () => {
   const status = () => find("shared-browser-collaboration-control-state");
   const controller = () => find("shared-browser-controller-indicator");
   const participantsList = () => document.querySelector<HTMLElement>('[aria-label="Browser participants"]')!;
+  const participantRow = (id: string) => Array.from(participantsList().querySelectorAll<HTMLLIElement>("li[data-participant-id]"))
+    .find(row => row.dataset.participantId === id)!;
   const trigger = () => find<HTMLButtonElement>("shared-browser-collaboration-toggle")!;
   const click = async (element: HTMLElement) => act(async () => { element.focus(); element.click(); });
   const finishFocusRestoration = async () => act(async () => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
@@ -97,12 +99,15 @@ describe("SharedBrowserCollaborationControls", () => {
     expect(status()?.classList.contains("sr-only")).toBe(true);
     expect(controller()?.getAttribute("role")).toBe("img");
     expect(controller()?.getAttribute("aria-label")).toBe("You control");
+    expect(controller()?.textContent).toBe("Controls");
     expect(controller()?.closest("li")?.dataset.participantId).toBe("self");
     expect(document.querySelectorAll('[data-testid="shared-browser-controller-indicator"]')).toHaveLength(1);
     expect(participantsList().compareDocumentPosition(action()!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     const continueControl = Array.from(document.querySelectorAll("button")).find(button => button.textContent === "Let AI continue")!;
     expect(participantsList().compareDocumentPosition(continueControl) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(document.querySelector('[aria-label="Browser participants"]')?.textContent).toContain("Taylor (you)AnnaGrace");
+    expect(participantRow("self").textContent).toContain("Taylor (you)");
+    expect(participantRow("peer").textContent).toBe("Anna");
+    expect(participantRow("third").textContent).toBe("Grace");
     expect(document.body.textContent).toContain("Let AI continue");
     expect(action()?.textContent).toBe("Release control");
     await click(action()!);
@@ -148,7 +153,8 @@ describe("SharedBrowserCollaborationControls", () => {
     });
     await openControls();
     expect(status()?.textContent).toBe("Runtime Octo controls");
-    expect(controller()?.closest("li")?.textContent).toBe("Runtime Octo");
+    expect(controller()?.closest("li")?.textContent).toContain("Runtime Octo");
+    expect(controller()?.textContent).toBe("Controls");
     expect(controller()?.closest("li")?.dataset.controllerKind).toBe("agent");
     expect(participantsList().textContent).not.toContain("Queued agent");
     expect(action()).toBeNull();
@@ -162,6 +168,7 @@ describe("SharedBrowserCollaborationControls", () => {
     if (compact) {
       expect(controller()?.closest("li")?.dataset.participantId).toBe("peer");
       expect(controller()?.getAttribute("aria-label")).toBe("Anna controls");
+      expect(controller()?.textContent).toBe("Controls");
     }
     expect(action()?.textContent).toBe("Request control");
     expect(action()?.getAttribute("aria-label")).toBe("Request control");
@@ -173,6 +180,10 @@ describe("SharedBrowserCollaborationControls", () => {
     await render({ client: { ...peerOwns, state: { ...peerOwns.state!, requests: ["self"] } } });
     expect(action()?.disabled).toBe(true);
     expect(action()?.textContent).toBe("Control requested");
+    if (compact) {
+      expect(participantRow("self").textContent).toContain("Requested");
+      expect(participantRow("peer").textContent).not.toContain("Requested");
+    }
     await click(action()!);
     expect(props.onRequestControl).toHaveBeenCalledOnce();
     if (compact) {
@@ -194,13 +205,77 @@ describe("SharedBrowserCollaborationControls", () => {
     expect(find("shared-browser-control-requests")?.textContent).toBe("1");
     expect(trigger().getAttribute("aria-label")).toContain("1 pending control request");
     await openControls();
-    expect(action()?.textContent).toBe("Give control to Anna");
+    expect(action()?.textContent).toBe("Give control");
+    expect(action()?.getAttribute("aria-label")).toBe("Give control to Anna");
+    expect(action()?.closest("li")).toBe(participantRow("peer"));
+    expect(participantRow("peer").textContent).toContain("Requested");
+    expect(participantRow("self").textContent).not.toContain("Requested");
     await click(action()!);
     expect(props.onGrantControl).toHaveBeenCalledExactlyOnceWith("peer");
 
     await render({ localControlOwner: { kind: "agent", displayName: "Octo" } });
     expect(status()?.textContent).toBe("Octo controls");
     expect(action()).toBeNull();
+    expect(participantRow("peer").textContent).toContain("Requested");
+  });
+
+  it.each([true, false])("preserves the full recipient in the grant action's accessible name (compact=%s)", async compact => {
+    const longName = "Alexandra Morrison with a long display name";
+    await render({ compact, client: client({ state: {
+      ...client().state!,
+      participants: [participant("self", "Taylor"), participant("peer", longName)],
+      requests: ["peer"],
+    } }) });
+    if (compact) await openControls();
+    expect(action()?.getAttribute("aria-label")).toBe(`Give control to ${longName}`);
+    expect(action()?.textContent).toBe(compact ? "Give control" : `Give control to ${longName}`);
+    if (compact) {
+      expect(participantRow("peer").textContent).toContain(longName);
+      expect(action()?.closest("li")).toBe(participantRow("peer"));
+    }
+    await click(action()!);
+    expect(props.onGrantControl).toHaveBeenCalledExactlyOnceWith("peer");
+  });
+
+  it("labels every requester and offers control to the first queued request beside that participant", async () => {
+    const requested = client({ state: {
+      ...client().state!,
+      participants: [participant("self", "Taylor"), participant("peer", "Anna"), participant("third", "Grace")],
+      requests: ["third", "peer"],
+    } });
+    await render({ client: requested });
+    expect(find("shared-browser-control-requests")?.textContent).toBe("2");
+    await openControls();
+    expect(participantRow("third").textContent).toContain("Requested");
+    expect(participantRow("peer").textContent).toContain("Requested");
+    expect(participantRow("self").textContent).not.toContain("Requested");
+    expect(document.querySelectorAll('[data-testid="shared-browser-collaboration-control-action"]')).toHaveLength(1);
+    expect(action()?.closest("li")).toBe(participantRow("third"));
+    expect(action()?.getAttribute("aria-label")).toBe("Give control to Grace");
+    await click(action()!);
+    expect(props.onGrantControl).toHaveBeenCalledExactlyOnceWith("third");
+
+    await render({ client: { ...requested, state: { ...requested.state!, requests: ["peer"] } } });
+    expect(participantRow("third").textContent).not.toContain("Requested");
+    expect(action()?.closest("li")).toBe(participantRow("peer"));
+    expect(action()?.getAttribute("aria-label")).toBe("Give control to Anna");
+  });
+
+  it("keeps focus in the popup when granting control removes the action from its participant row", async () => {
+    const requested = client({ state: { ...client().state!, requests: ["peer"] } });
+    await render({ client: requested });
+    await openControls();
+    const dialog = document.querySelector('[role="dialog"][aria-label="Browser participants and control"]');
+    await click(action()!);
+    expect(document.activeElement).toBe(dialog);
+
+    await render({ client: { ...requested, state: {
+      ...requested.state!, requests: [], controlOwner: { kind: "human", participantId: "peer" },
+    } } });
+    expect(controller()?.closest("li")).toBe(participantRow("peer"));
+    expect(participantRow("peer").querySelector("button")).toBeNull();
+    expect(action()?.dataset.action).toBe("request");
+    expect(document.activeElement).toBe(dialog);
   });
 
   it("hands control to the requested device even when both devices have the same account name", async () => {
@@ -231,14 +306,15 @@ describe("SharedBrowserCollaborationControls", () => {
 
   it.each([
     { compact: false, ownerId: "peer" }, { compact: true, ownerId: "peer" },
+    { compact: false, ownerId: "self" }, { compact: true, ownerId: "self" },
     { compact: false, ownerId: null }, { compact: true, ownerId: null },
   ])("keeps a read-only participant view-only (compact=$compact, owner=$ownerId)", async ({ compact, ownerId }) => {
     await render({ compact, client: client({ state: {
       revision: 1, participants: [participant("self", "Anna", false), participant("peer", "Taylor")],
-      controlOwner: ownerId ? { kind: "human", participantId: ownerId } : null, requests: [],
+      controlOwner: ownerId ? { kind: "human", participantId: ownerId } : null, requests: ["peer"],
     } }) });
     if (compact) await openControls();
-    expect(status()?.textContent).toBe(ownerId ? "Taylor controls" : "Control available");
+    expect(status()?.textContent).toBe(ownerId === "self" ? "You control" : ownerId ? "Taylor controls" : "Control available");
     expect(action()).toBeNull();
   });
 
