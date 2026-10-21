@@ -67,15 +67,25 @@ to the millisecond) and `[proxy]`:
 Each Responses and Chat Completions request that goes upstream logs one `upstream request` line
 when it ends, with the `route`; the `runId`, `jobId` and `leaseAttempt` its token names; where its
 credentials came from (`credentialSource`: `claim`, `managed` or `static`); the model it asked for
-(`requestedModel`) and the model it went upstream as (`model`); and `latencyMs`. A request that
-got an answer adds the answer's `outcome` (its `status`, else `completed`), the model the answer
-names (`servedModel`), its `responseId` and the `usage` the provider reported, as reported. A
-failed one adds `outcome` `failed`, the `status` and `code` the client gets, and `upstreamError`:
-the provider's error `code`, `type` and `param` when they read as identifiers, and its message (or
-a `detail` or `error` string) on one line, cut to 200 characters, with every run of 32 or more
-characters that could belong to a key or token replaced by `[masked]`. Beyond what a provider's
-message quotes, the line holds nothing a request or an answer says, and it holds no header or
-credential.
+(`requestedModel`) and the model it last went upstream as (`model`, the renewed lease's after a
+lease renewal); and `latencyMs`. A request that got an answer adds the answer's `outcome` (its
+`status`, else `completed`), the model the answer names (`servedModel`), its `responseId` and the
+`usage` the provider reported, as reported. A failed one adds `outcome` `failed`, the `status` and
+`code` the proxy classified the failure as, and `upstreamError`: what the provider said. A
+streaming Responses request gets a transient rate limit as a `response.failed` event instead of
+that status ([Upstream failures and retries](#upstream-failures-and-retries)). A request dropped
+before it ends, because its client went away (Codex drops its request when a turn is stopped or a
+run is cancelled or loses its lease) or because the proxy stopped with it still open, adds
+`outcome` `cancelled`: the provider may already have its input, and bill for it, but no usage is
+known.
+
+`upstreamError` is read from the error object of the provider's error body (its `error`, else its
+`detail`, when that is an object, else the body itself), or from a failed stream's error: its
+`code`, `type` and `param` when they read as identifiers, and its message (or a `detail` or `error`
+string) on one line, cut to 200 characters, with every run of 32 or more characters that could
+belong to a key or token replaced by `[masked]`. Beyond what a provider's message quotes, the line
+holds nothing a request or an answer says, and it holds no header or credential. Speech and
+transcription requests log no such line.
 
 The controller hears nothing of a request served on static credentials: `reportsUsage` is
 `false`, and the controller has no endpoint for a usage report yet. This line is where the model
@@ -255,19 +265,19 @@ and the upstream, the OpenAI API or the ChatGPT Codex endpoint, answers 400 with
 blames the tool controls, the proxy sends the same request once more, on the same lease and
 credential, exactly as it would have gone without the key: with `tool_choice: "auto"` when it
 lists `tools`, and, for a Responses Lite request, with no `tool_choice` to the OpenAI API and
-`auto` to a ChatGPT login. The error blames the tool controls when the body is an
-OpenAI error object whose `param` is `tool_choice` or `tools`, or, when it names no `param`, whose
-code (`error.code`, or `error.type` without one) is set and whose `message` names the tool choice
-(`tool_choice` or `tool choice`). Nothing else falls back: not a 400 whose `param` names another
-parameter, whatever its message says, nor one without an `error` object (such as a
-`{"detail": ...}` body), nor any other status, nor an error a stream reports after it has
-started, nor any request whose `required` the proxy did not set, one that chose `required` itself
-included. Those go back to the client after one attempt, as before. If the retry fails too, its
-failure goes back as any failure does.
+`auto` to a ChatGPT login. The error blames the tool controls when its error object (the one
+`upstreamError` is read from, see [Logs](#logs)) has the `param` `tool_choice` or `tools`, or, when
+it names no `param`, has a code (its `code`, or its `type` without one) and a message, as the
+provider wrote it, that names the tool choice (`tool_choice` or `tool choice`). Nothing else falls
+back: not a 400 whose `param` names another parameter, whatever its message says, nor one with
+neither a param nor a code (such as a `{"detail": "..."}` string), nor any other status, nor an
+error a stream reports after it has started, nor any request whose `required` the proxy did not
+set, one that chose `required` itself included. Those go back to the client after one attempt, as
+before. If the retry fails too, its failure goes back as any failure does.
 
 Each fallback logs one `required tool call falls back to the request's own tool choice` line with
-the route, the run id, the upstream error's code (at most 64 characters) and its `param`, never
-its message or the request body, and adds one to `requiredToolCallFallbacks` in the
+the route, the run id and `upstreamError` as the `upstream request` line names it but without its
+message, never the request body, and adds one to `requiredToolCallFallbacks` in the
 [health report](#platform-lane-health-report). The retry belongs to the same request: it counts
 no second service tier override, logs no second `required tool call sends tool_choice required`
 line, and a lease renewal that follows it sends no `required` either.
@@ -388,15 +398,17 @@ reports it as a usage limit, with a positive integer `error.resets_at` (Unix sec
 provider gave one. Raw provider messages, response bodies, credentials, and endpoint URLs are
 not echoed. After the proxy's own sentence, `error.message` names the provider's error code (its
 type when it has none) and the param it blames, when the provider gave them as identifiers:
-`The upstream provider rejected the request. Upstream error: model_not_found, param model.` The
-provider's message is only in the proxy's log ([Logs](#logs)). Valid `Retry-After` seconds or
-HTTP dates are forwarded for 429 and 503 with the provider's value and no bound of the proxy's
-own (Codex itself does not retry an HTTP 429, so the header matters to other clients and to the
-streamed wait below); other header values are discarded. Every retryable 429 carries a
-`Retry-After`. When the provider sends no usable one, the proxy derives it from the rate-limit
-bucket that refused the request, using OpenAI's `x-ratelimit-remaining-*` and
-`x-ratelimit-reset-*` headers (reset durations such as `6s` or `1m2.5s` are rounded up to whole
-seconds):
+`The upstream provider rejected the request. Upstream error: model_not_found, param model.` A
+429 does too: `The upstream provider has no available quota. Upstream error: insufficient_quota.`
+The provider's message for a Responses or Chat Completions request is only in its
+`upstream request` line ([Logs](#logs)); for a speech or transcription request it is in no log.
+Valid `Retry-After` seconds or HTTP dates are forwarded for 429 and 503 with the provider's value
+and no bound of the proxy's own (Codex itself does not retry an HTTP 429, so the header matters
+to other clients and to the streamed wait below); other header values are discarded. Every
+retryable 429 carries a `Retry-After`. When the provider sends no usable one, the proxy derives
+it from the rate-limit bucket that refused the request, using OpenAI's `x-ratelimit-remaining-*`
+and `x-ratelimit-reset-*` headers (reset durations such as `6s` or `1m2.5s` are rounded up to
+whole seconds):
 
 - A bucket whose `x-ratelimit-remaining-*` count is 0 refused the request, so the proxy waits
   for that bucket's reset, or for the later of both resets when both counts are 0.

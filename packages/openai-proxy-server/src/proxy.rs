@@ -33,7 +33,7 @@ use crate::controller_integration::ControllerIntegration;
 use crate::credential_lease::LeasedCredentials;
 use crate::incomplete_response;
 use crate::proxy_auth::ProxyClaims;
-use crate::upstream_error::{self, ToolControlRejection, UpstreamFailure};
+use crate::upstream_error::{self, ProviderError, UpstreamFailure};
 use crate::usage::responses_to_chat_usage;
 
 const MAX_PROXY_REQUEST_BYTES: usize = 25 * 1024 * 1024;
@@ -1505,8 +1505,9 @@ enum RequiredToolCallAttempt {
 /// What the client of a request that goes upstream with the
 /// `tool_choice: "required"` the proxy set runs if upstream refuses that
 /// choice and it falls back: one `requiredToolCallFallbacks` and one log line
-/// with the route, the run id, and the upstream error's code and `param`,
-/// never its message or the request body.
+/// with the route, the run id, and the provider's error as the request's
+/// `upstream request` line names it, without its message, and never the
+/// request body.
 fn required_tool_call_fallback_hook(
     route: &str,
     run_id: Option<&str>,
@@ -1514,15 +1515,14 @@ fn required_tool_call_fallback_hook(
 ) -> RequiredToolCallFallbackHook {
     let route = route.to_string();
     let run_id = run_id.map(str::to_string);
-    Box::new(move |rejection: &ToolControlRejection| {
+    Box::new(move |rejection: &ProviderError| {
         fallbacks.fetch_add(1, Ordering::Relaxed);
         crate::proxy_log!(
             "required tool call falls back to the request's own tool choice {}",
             json!({
                 "route": route,
                 "runId": run_id,
-                "upstreamErrorCode": rejection.code,
-                "upstreamErrorParam": rejection.param,
+                "upstreamError": rejection.without_message(),
             })
         );
     })
@@ -1673,9 +1673,9 @@ fn build_remote_completion_client<'i>(
     Ok((client, upstream_model, input_items))
 }
 
-/// Sends one model request upstream on `lane` and, when it ends, logs one
-/// line for it ([`log_upstream_request`]). Returns the completion and the
-/// model it was sent as.
+/// Sends one model request upstream on `lane` and logs its `upstream request`
+/// line ([`UpstreamRequestLine`]). Returns the completion and the model it was
+/// sent as.
 async fn complete_with_optional_controller_refresh(
     lane: LaneLease<'_>,
     options: &RemoteCompletionOptions<'_>,
@@ -1683,9 +1683,9 @@ async fn complete_with_optional_controller_refresh(
     controller: Option<&ControllerIntegration>,
     send_hook: Option<SendHook>,
 ) -> Result<(CodexCompletion, String)> {
-    let started = Instant::now();
-    let model = resolve_model_for_lease(options.requested_model, &lane.leased);
+    let mut line = UpstreamRequestLine::start(options, lane.source);
     let result = send_with_optional_controller_refresh(
+        &mut line,
         lane.leased,
         options,
         input_items,
@@ -1694,76 +1694,119 @@ async fn complete_with_optional_controller_refresh(
         send_hook,
     )
     .await;
-    log_upstream_request(options, lane.source, &model, &result, started.elapsed());
-    result
+    line.end(result)
 }
 
-/// The `upstream request` line of one model request, when it ends: the
-/// route; the run, job and lease attempt its token names; where its
-/// credentials came from (`claim`, `managed` or `static`); the model it asked
-/// for and the model it went upstream as; how long it took; and either the
-/// response's outcome, the model the response names, its id and the `usage`
-/// the provider reported, as reported, or the failure: the status and code
-/// the client gets and what the provider said
-/// ([`upstream_error::ProviderError`]). Beyond what a provider's message
-/// quotes, it logs nothing a request or an answer says, and no header or
-/// credential.
-fn log_upstream_request(
-    options: &RemoteCompletionOptions<'_>,
-    credential_source: &str,
-    model: &str,
-    result: &Result<(CodexCompletion, String)>,
-    elapsed: Duration,
-) {
-    let claims = options.claims;
-    let mut record = json!({
-        "route": options.route,
-        "runId": run_id_from_claims(claims),
-        "jobId": claims.and_then(|claims| claims.job_id.as_deref()),
-        "leaseAttempt": claims.and_then(|claims| claims.lease_attempt),
-        "credentialSource": credential_source,
-        "requestedModel": Some(options.requested_model.trim()).filter(|model| !model.is_empty()),
-        "model": model,
-        "latencyMs": u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
-    });
-    match result {
-        Ok((completion, sent_as)) => {
-            let raw = &completion.raw;
-            record["model"] = json!(sent_as);
-            record["outcome"] = json!(
-                raw.get("status")
-                    .and_then(Value::as_str)
-                    .unwrap_or("completed")
-            );
-            record["servedModel"] =
-                json!(Some(completion.model.as_str()).filter(|model| !model.is_empty()));
-            record["responseId"] = json!(completion.id);
-            record["usage"] = raw.get("usage").cloned().unwrap_or(Value::Null);
-        }
-        Err(error) => {
-            let classified = upstream_error::classify(error);
-            record["outcome"] = json!("failed");
-            record["status"] = json!(classified.status.as_u16());
-            record["code"] = json!(classified.code);
-            record["upstreamError"] = json!(upstream_error::provider_error(error));
+/// The `upstream request` line of one model request, written once, when the
+/// request ends: the route; the run, job and lease attempt its token names;
+/// where its credentials came from (`claim`, `managed` or `static`); the
+/// model it asked for and the model it last went upstream as; how long it
+/// took; and its outcome. That is the response's outcome, the model the
+/// response names, its id and the `usage` the provider reported, as
+/// reported; or the failure: the status and code the proxy classified it as
+/// and what the provider said ([`upstream_error::ProviderError`]); or, for a
+/// request dropped before it ended (its client went away, or the proxy
+/// stopped with it open), `cancelled`, written as the request is dropped.
+/// Beyond what a provider's message quotes, it logs nothing a request or an
+/// answer says, and no header or credential.
+struct UpstreamRequestLine {
+    record: Value,
+    started: Instant,
+    /// The model the request last went upstream as; `None` until it does.
+    model: Option<String>,
+    written: bool,
+}
+
+impl UpstreamRequestLine {
+    fn start(options: &RemoteCompletionOptions<'_>, credential_source: &str) -> Self {
+        let claims = options.claims;
+        Self {
+            record: json!({
+                "route": options.route,
+                "runId": run_id_from_claims(claims),
+                "jobId": claims.and_then(|claims| claims.job_id.as_deref()),
+                "leaseAttempt": claims.and_then(|claims| claims.lease_attempt),
+                "credentialSource": credential_source,
+                "requestedModel": Some(options.requested_model.trim()).filter(|model| !model.is_empty()),
+            }),
+            started: Instant::now(),
+            model: None,
+            written: false,
         }
     }
-    crate::proxy_log!("upstream request {record}");
+
+    /// The request goes upstream as `model`, on its first lease or a renewed
+    /// one.
+    fn sends_as(&mut self, model: String) {
+        self.model = Some(model);
+    }
+
+    /// Writes the line for what upstream answered, and passes the answer on
+    /// with the model it was sent as.
+    fn end(mut self, result: Result<CodexCompletion>) -> Result<(CodexCompletion, String)> {
+        match &result {
+            Ok(completion) => {
+                let raw = &completion.raw;
+                self.record["outcome"] = json!(
+                    raw.get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("completed")
+                );
+                self.record["servedModel"] =
+                    json!(Some(completion.model.as_str()).filter(|model| !model.is_empty()));
+                self.record["responseId"] = json!(completion.id);
+                self.record["usage"] = raw.get("usage").cloned().unwrap_or(Value::Null);
+            }
+            Err(error) => {
+                let classified = upstream_error::classify(error);
+                self.record["outcome"] = json!("failed");
+                self.record["status"] = json!(classified.status.as_u16());
+                self.record["code"] = json!(classified.code);
+                self.record["upstreamError"] = json!(upstream_error::provider_error(error));
+            }
+        }
+        self.write();
+        let model = self.model.take().unwrap_or_default();
+        result.map(|completion| (completion, model))
+    }
+
+    fn write(&mut self) {
+        self.record["model"] = json!(self.model);
+        self.record["latencyMs"] =
+            json!(u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX));
+        self.written = true;
+        crate::proxy_log!("upstream request {}", self.record);
+    }
+}
+
+impl Drop for UpstreamRequestLine {
+    /// A request dropped before it ended: codex drops its request when a turn
+    /// is stopped or a run is cancelled or loses its lease, and the proxy
+    /// drops the requests still open when it stops. Upstream may already
+    /// have the input, and bill for it.
+    fn drop(&mut self) {
+        if !self.written {
+            self.record["outcome"] = json!("cancelled");
+            self.write();
+        }
+    }
 }
 
 /// `send_hook` runs when the first attempt goes upstream; a lease renewal's
 /// retry follows an upstream rejection, so it does not run it again. Nor
 /// does the client's own retry after upstream refused the required tool call
 /// it set, which also keeps the lease; a lease renewal after that retry
-/// sends no required tool call either.
+/// sends no required tool call either. Each attempt tells `line` the model
+/// it goes upstream as.
 async fn send_with_optional_controller_refresh(
+    line: &mut UpstreamRequestLine,
     leased: LeasedCredentials,
     options: &RemoteCompletionOptions<'_>,
     input_items: &[Value],
     controller: Option<&ControllerIntegration>,
     credential_id: Option<&str>,
     send_hook: Option<SendHook>,
-) -> Result<(CodexCompletion, String)> {
+) -> Result<CodexCompletion> {
     let first_lease_pinned = leased.pinned_model().is_some();
     let (client, upstream_model, first_input) = build_remote_completion_client(
         leased,
@@ -1772,10 +1815,11 @@ async fn send_with_optional_controller_refresh(
         true,
         RequiredToolCallAttempt::First,
     )?;
+    line.sends_as(upstream_model);
     let mut client = client.with_send_hook(send_hook);
 
     match client.complete_with_input(&first_input).await {
-        Ok(response) => return Ok((response, upstream_model)),
+        Ok(response) => Ok(response),
         Err(first_error) => {
             let can_refresh = controller.is_some()
                 && credential_id.is_some()
@@ -1808,11 +1852,9 @@ async fn send_with_optional_controller_refresh(
                 !first_lease_pinned,
                 required_tool_call_attempt,
             )?;
+            line.sends_as(retry_model);
 
-            return retry_client
-                .complete_with_input(&retry_input)
-                .await
-                .map(|response| (response, retry_model));
+            retry_client.complete_with_input(&retry_input).await
         }
     }
 }
