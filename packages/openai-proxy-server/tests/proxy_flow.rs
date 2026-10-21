@@ -1,12 +1,12 @@
 use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
 use axum::Router;
-use axum::extract::{Json as AxumJson, Path, State};
+use axum::extract::{Json as AxumJson, Path, RawQuery, State};
 use axum::http::{HeaderMap, header};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -19,7 +19,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use serial_test::serial;
 use tokio::net::TcpListener;
-use tokio::sync::oneshot;
+use tokio::sync::{Notify, oneshot};
 
 const CHAT_PROMPT: &str = "Say hello to the integration test in one short sentence.";
 const RESPONSES_FIXTURE: &str = include_str!("fixtures/responses_success.sse");
@@ -47,6 +47,8 @@ const SIGNING_SECRET: &str = "proxy-signing-test";
 /// The run a dispatch job token belongs to. Session envelopes (agent login,
 /// runtime register) carry no run_id.
 const RUN_ID: &str = "44444444-4444-4444-8444-444444444444";
+/// The job a job lease's token names.
+const JOB_ID: &str = "77777777-7777-4777-8777-777777777777";
 
 // A live call on the developer's own login (OPENAI_API_KEY, or the Codex
 // auth.json), so it runs only when asked: `cargo test -- --ignored`. Serial,
@@ -204,6 +206,10 @@ struct ControllerStub {
     /// `pinnedModel` on the managed lease; `None` models a controller that
     /// predates the field.
     pinned_model: Option<String>,
+    /// When set, the `pinnedModel` of a managed lease renewed after a
+    /// rejection (`forceRefresh`), as when the controller pins the managed
+    /// model while a lease is out.
+    renewal_pinned_model: Arc<Mutex<Option<String>>>,
     upstream_base: String,
 }
 
@@ -234,11 +240,38 @@ struct UpstreamStub {
     audio: Arc<Mutex<Vec<String>>>,
     /// The body of each audio request that reached the provider, as sent.
     audio_bodies: Arc<Mutex<Vec<Vec<u8>>>>,
+    /// Model requests the endpoint holds unanswered.
+    held: Arc<HeldRequests>,
+}
+
+/// Model requests the model stub holds unanswered, until the proxy drops them.
+#[derive(Default)]
+struct HeldRequests {
+    /// Whether the model endpoint holds the requests it gets.
+    on: AtomicBool,
+    /// Notified when a held request reaches the model endpoint.
+    arrived: Notify,
+    /// Notified when the proxy drops a held request.
+    abandoned: Notify,
+}
+
+/// Holds one model request unanswered until the proxy drops it.
+async fn hold_until_abandoned<T>(held: &HeldRequests) -> T {
+    struct Abandoned<'a>(&'a Notify);
+    impl Drop for Abandoned<'_> {
+        fn drop(&mut self) {
+            self.0.notify_one();
+        }
+    }
+    let _abandoned = Abandoned(&held.abandoned);
+    held.arrived.notify_one();
+    std::future::pending().await
 }
 
 async fn controller_lease_stub(
     State(stub): State<ControllerStub>,
     Path(credential_id): Path<String>,
+    RawQuery(query): RawQuery,
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let authorization = headers
@@ -270,7 +303,15 @@ async fn controller_lease_stub(
                     "leaseExpiresInSeconds": 60,
                     "renewalAuthority": "controller",
                 });
-                if let Some(pinned_model) = stub.pinned_model.as_deref() {
+                let renewal_pinned_model = (query.as_deref() == Some("forceRefresh=true"))
+                    .then(|| {
+                        stub.renewal_pinned_model
+                            .lock()
+                            .expect("renewal pin")
+                            .clone()
+                    })
+                    .flatten();
+                if let Some(pinned_model) = renewal_pinned_model.or(stub.pinned_model.clone()) {
                     lease["defaultModel"] = json!(pinned_model);
                     lease["pinnedModel"] = json!(pinned_model);
                 }
@@ -417,6 +458,9 @@ async fn upstream_responses_stub(
             StatusCode::UNAUTHORIZED,
             AxumJson(json!({ "error": { "message": "bad upstream key" } })),
         );
+    }
+    if stub.held.on.load(Ordering::SeqCst) {
+        return hold_until_abandoned(&stub.held).await;
     }
     if let Some((status, body)) = next_canned_response(&stub) {
         return (status, AxumJson(body));
@@ -604,6 +648,7 @@ async fn spawn_stack_with_service_tier_endpoints(
         leases: Arc::new(Mutex::new(Vec::new())),
         managed_key: managed_key.map(str::to_string),
         pinned_model: pinned_model.map(str::to_string),
+        renewal_pinned_model: Arc::default(),
         upstream_base: format!("http://{upstream_addr}"),
     };
     let (controller_addr, controller_guard) = spawn_router(
@@ -694,6 +739,11 @@ struct TestProxyClaims {
     run_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     credential_id: Option<String>,
+    /// The job and lease attempt a job lease's token names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lease_attempt: Option<i64>,
     iat: i64,
     exp: i64,
 }
@@ -715,7 +765,7 @@ fn proxy_token_in_project(
     project_id: &str,
 ) -> String {
     let now = chrono::Utc::now().timestamp();
-    let claims = TestProxyClaims {
+    sign_proxy_claims(TestProxyClaims {
         aud: "proxy",
         iss: "runtime-controller",
         sub: "proxy:project:runtime".to_string(),
@@ -723,9 +773,33 @@ fn proxy_token_in_project(
         runtime_id: "22222222-2222-4222-8222-222222222222".to_string(),
         run_id: run_id.map(str::to_string),
         credential_id: credential_id.map(str::to_string),
+        job_id: None,
+        lease_attempt: None,
         iat: now,
         exp: now + 300,
-    };
+    })
+}
+
+/// The job token a job lease mints for a managed run: a run, a job and its
+/// lease attempt, and no credential.
+fn proxy_job_token() -> String {
+    let now = chrono::Utc::now().timestamp();
+    sign_proxy_claims(TestProxyClaims {
+        aud: "proxy",
+        iss: "runtime-controller",
+        sub: "proxy:project:runtime".to_string(),
+        project_id: "11111111-1111-4111-8111-111111111111".to_string(),
+        runtime_id: "22222222-2222-4222-8222-222222222222".to_string(),
+        run_id: Some(RUN_ID.to_string()),
+        credential_id: None,
+        job_id: Some(JOB_ID.to_string()),
+        lease_attempt: Some(2),
+        iat: now,
+        exp: now + 300,
+    })
+}
+
+fn sign_proxy_claims(claims: TestProxyClaims) -> String {
     encode(
         &Header::new(Algorithm::HS256),
         &claims,
@@ -2227,7 +2301,10 @@ async fn openai_api_lanes_forward_a_responses_lite_request_its_parallel_tool_cal
     Ok(())
 }
 
-/// Every refusal body below holds this; no log line may show it.
+/// Every refusal body below holds this. No answer may show it, and no log
+/// line of a request that falls back from it: only the `upstream request`
+/// line of a request the provider finally refuses names the provider's
+/// message.
 const REFUSAL_MARKER: &str = "refusal-body-marker";
 
 /// 400 bodies with which OpenAI might refuse `tool_choice: "required"` for a
@@ -2795,26 +2872,16 @@ fn required_tool_call_is_logged_only_where_it_goes_upstream() -> Result<()> {
     // proxy must not claim it sent one. Each wire API runs in a fresh child
     // process, so its stderr holds only that proxy's log.
     for (upstream_path, logged) in [("/v1/responses", 2), ("/v1/chat/completions", 0)] {
-        let output = std::process::Command::new(std::env::current_exe()?)
-            .env_clear()
-            .env(REQUIRED_TOOL_CALL_LOG_CHILD, upstream_path)
-            .args([
-                "--exact",
-                "required_tool_call_is_logged_only_where_it_goes_upstream",
-                "--nocapture",
-            ])
-            .output()?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // A child that ran no test would log nothing and pass the count below.
-        assert!(
-            output.status.success() && stdout.contains("test result: ok. 1 passed"),
-            "{upstream_path}: {stdout}\n{stderr}"
-        );
+        let log = proxy_log_of_child(
+            "required_tool_call_is_logged_only_where_it_goes_upstream",
+            REQUIRED_TOOL_CALL_LOG_CHILD,
+            upstream_path,
+        )?;
+        // A standalone proxy reads no token, so it names no run.
         assert_eq!(
-            stderr.matches(REQUIRED_TOOL_CALL_LOG).count(),
-            logged,
-            "{upstream_path}: {stdout}\n{stderr}"
+            log_records(&log, REQUIRED_TOOL_CALL_LOG)?,
+            vec![json!({ "route": "/v1/responses", "runId": null }); logged],
+            "{upstream_path}: {log}"
         );
     }
     Ok(())
@@ -2883,44 +2950,25 @@ fn required_tool_call_fallback_logs_one_line_without_the_upstream_body() -> Resu
             .build()?
             .block_on(send_a_refused_required_tool_call());
     }
-    // The child's stderr holds only its own proxy's log.
-    let output = std::process::Command::new(std::env::current_exe()?)
-        .env_clear()
-        .env(REQUIRED_TOOL_CALL_FALLBACK_LOG_CHILD, "1")
-        .args([
-            "--exact",
-            "required_tool_call_fallback_logs_one_line_without_the_upstream_body",
-            "--nocapture",
-        ])
-        .output()?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success() && stdout.contains("test result: ok. 1 passed"),
-        "{stdout}\n{stderr}"
-    );
-    let lines = stderr
-        .lines()
-        .filter_map(|line| line.split_once(REQUIRED_TOOL_CALL_FALLBACK_LOG))
-        .map(|(_, record)| serde_json::from_str::<Value>(record.trim()))
-        .collect::<Result<Vec<_>, _>>()?;
+    let log = proxy_log_of_child(
+        "required_tool_call_fallback_logs_one_line_without_the_upstream_body",
+        REQUIRED_TOOL_CALL_FALLBACK_LOG_CHILD,
+        "1",
+    )?;
+    // The provider's error as the `upstream request` line names it, without
+    // its message.
     assert_eq!(
-        lines,
+        log_records(&log, REQUIRED_TOOL_CALL_FALLBACK_LOG)?,
         vec![json!({
             "route": "/v1/responses",
             "runId": RUN_ID,
-            "upstreamErrorCode": "invalid_request_error",
-            "upstreamErrorParam": "tool_choice",
+            "upstreamError": { "type": "invalid_request_error", "param": "tool_choice" },
         })],
-        "{stderr}"
+        "{log}"
     );
-    assert!(!stderr.contains(REFUSAL_MARKER), "{stderr}");
+    assert!(!log.contains(REFUSAL_MARKER), "{log}");
     // `required` went upstream once, on the first attempt.
-    assert_eq!(
-        stderr.matches(REQUIRED_TOOL_CALL_LOG).count(),
-        1,
-        "{stderr}"
-    );
+    assert_eq!(log_records(&log, REQUIRED_TOOL_CALL_LOG)?.len(), 1, "{log}");
     Ok(())
 }
 
@@ -2939,6 +2987,535 @@ async fn send_a_refused_required_tool_call() -> Result<()> {
     .await?;
     assert_eq!(status, StatusCode::OK, "{text}");
     assert_eq!(upstream_bodies_since(&upstream, 0).len(), 2);
+    Ok(())
+}
+
+/// Runs `test` again in a child process whose environment holds only
+/// `child_env`, set to `value`, and returns its stderr: the log of the
+/// proxies that child alone started.
+fn proxy_log_of_child(test: &str, child_env: &str, value: &str) -> Result<String> {
+    let output = std::process::Command::new(std::env::current_exe()?)
+        .env_clear()
+        .env(child_env, value)
+        .args(["--exact", test, "--nocapture"])
+        .output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    // A child that ran no test would log nothing.
+    anyhow::ensure!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed"),
+        "{test}: {stdout}\n{stderr}"
+    );
+    Ok(stderr)
+}
+
+/// The record of each line of `log` that holds `marker`.
+fn log_records(log: &str, marker: &str) -> Result<Vec<Value>> {
+    log.lines()
+        .filter_map(|line| line.split_once(marker))
+        .map(|(_, record)| Ok(serde_json::from_str::<Value>(record.trim())?))
+        .collect()
+}
+
+/// The line the proxy logs for each model request it sends upstream.
+const UPSTREAM_REQUEST_LOG: &str = "[proxy] upstream request ";
+/// Set in the child process of the test below.
+const UPSTREAM_REQUEST_LOG_CHILD: &str = "PROXY_FLOW_UPSTREAM_REQUEST_LOG_CHILD";
+/// The model the model stub's canned answer says it served, a dated
+/// snapshot of the pinned model.
+const SERVED_MODEL: &str = "gpt-6-luna-2026-10-01";
+
+fn served_usage() -> Value {
+    json!({
+        "input_tokens": 1200,
+        "input_tokens_details": { "cached_tokens": 1024 },
+        "output_tokens": 30,
+        "output_tokens_details": { "reasoning_tokens": 12 },
+        "total_tokens": 1230
+    })
+}
+
+/// A Responses API answer that names the model that served it.
+fn served_response() -> Value {
+    json!({
+        "id": "resp-served",
+        "object": "response",
+        "status": "completed",
+        "model": SERVED_MODEL,
+        "output": [{
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{ "type": "output_text", "text": "ok" }]
+        }],
+        "usage": served_usage()
+    })
+}
+
+#[test]
+#[serial]
+fn each_model_request_logs_its_job_the_model_served_and_its_usage() -> Result<()> {
+    if std::env::var(UPSTREAM_REQUEST_LOG_CHILD).is_ok() {
+        return tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(send_model_requests_on_static_credentials());
+    }
+    // Static credentials serve managed runs with no controller lease, so the
+    // controller hears nothing of them: this line is the only record of the
+    // model that served a job and the tokens it used.
+    let log = proxy_log_of_child(
+        "each_model_request_logs_its_job_the_model_served_and_its_usage",
+        UPSTREAM_REQUEST_LOG_CHILD,
+        "1",
+    )?;
+    let mut records = log_records(&log, UPSTREAM_REQUEST_LOG)?;
+    for record in &mut records {
+        // How long each took varies; that it is there does not.
+        assert!(record["latencyMs"].is_u64(), "{record}");
+        record
+            .as_object_mut()
+            .expect("a record is an object")
+            .remove("latencyMs");
+    }
+    let fixture_usage = json!({
+        "input_tokens": 42,
+        "input_tokens_details": { "cached_tokens": 0 },
+        "output_tokens": 84,
+        "output_tokens_details": { "reasoning_tokens": 0 },
+        "total_tokens": 126
+    });
+    let record = |route: &str, served_model: &str, response_id: &str, usage: &Value| {
+        json!({
+            "route": route,
+            "runId": RUN_ID,
+            "jobId": JOB_ID,
+            "leaseAttempt": 2,
+            "credentialSource": "static",
+            "requestedModel": "gpt-5.5",
+            "model": PINNED_MODEL,
+            "outcome": "completed",
+            "servedModel": served_model,
+            "responseId": response_id,
+            "usage": usage,
+        })
+    };
+    assert_eq!(
+        records,
+        vec![
+            // An API key, on both model routes.
+            record(
+                "/v1/responses",
+                SERVED_MODEL,
+                "resp-served",
+                &served_usage()
+            ),
+            record(
+                "/v1/chat/completions",
+                SERVED_MODEL,
+                "resp-served",
+                &served_usage()
+            ),
+            // A ChatGPT login, whose stream (the stub's fixture) names
+            // gpt-5.5 whatever it was sent: the line says what the provider
+            // says it served, not what the proxy asked for.
+            record("/v1/responses", "gpt-5.5", "resp-proxy", &fixture_usage),
+        ],
+        "{log}"
+    );
+    Ok(())
+}
+
+/// The child side of the test above: a managed run's requests, asking for
+/// gpt-5.5, on static credentials pinned to the managed model, an API key and
+/// then a ChatGPT login.
+async fn send_model_requests_on_static_credentials() -> Result<()> {
+    let token = proxy_job_token();
+    {
+        let (proxy_addr, _controller, upstream, _env, _guards) =
+            spawn_static_stack(Some(PINNED_MODEL)).await?;
+        answer_next(
+            &upstream,
+            [
+                (StatusCode::OK, served_response()),
+                (StatusCode::OK, served_response()),
+            ],
+        );
+        let (status, text) = responses_through_proxy(proxy_addr, &token, "gpt-5.5").await?;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        let (status, text) = chat_through_proxy_as(proxy_addr, &token, "gpt-5.5").await?;
+        assert_eq!(status, StatusCode::OK, "{text}");
+    }
+    let (proxy_addr, _controller, _upstream, _env, _guards) = spawn_stack(
+        None,
+        None,
+        false,
+        StackProxy::StaticChatGpt {
+            pinned_model: Some(PINNED_MODEL),
+        },
+    )
+    .await?;
+    let (status, text) = responses_through_proxy(proxy_addr, &token, "gpt-5.5").await?;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    Ok(())
+}
+
+/// Set in the child process of the test below.
+const UPSTREAM_REJECTION_LOG_CHILD: &str = "PROXY_FLOW_UPSTREAM_REJECTION_LOG_CHILD";
+/// A key a provider's error message echoes. No log line and no answer may
+/// show it.
+const ECHOED_KEY: &str = "sk-proj-0123456789abcdefghijklmnopqrstuvwxyzABCDEF";
+
+#[test]
+#[serial]
+fn a_rejected_request_logs_what_the_provider_said_and_answers_only_its_code() -> Result<()> {
+    if std::env::var(UPSTREAM_REJECTION_LOG_CHILD).is_ok() {
+        return tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(send_requests_the_upstream_rejects());
+    }
+    let log = proxy_log_of_child(
+        "a_rejected_request_logs_what_the_provider_said_and_answers_only_its_code",
+        UPSTREAM_REJECTION_LOG_CHILD,
+        "1",
+    )?;
+    let failures = log_records(&log, UPSTREAM_REQUEST_LOG)?
+        .into_iter()
+        .map(|record| {
+            json!({
+                "outcome": record["outcome"],
+                "status": record["status"],
+                "code": record["code"],
+                "upstreamError": record["upstreamError"],
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        failures,
+        vec![
+            json!({
+                "outcome": "failed",
+                "status": 400,
+                "code": "upstream_http_error",
+                "upstreamError": {
+                    "code": "model_not_found",
+                    "type": "invalid_request_error",
+                    "param": "model",
+                    "message": "The model `gpt-6-luna` does not exist or you do not have access to it. Key [masked] was used.",
+                },
+            }),
+            // A 429 the proxy classifies by its code keeps the provider's
+            // own message.
+            json!({
+                "outcome": "failed",
+                "status": 402,
+                "code": "upstream_insufficient_quota",
+                "upstreamError": {
+                    "code": "insufficient_quota",
+                    "type": "insufficient_quota",
+                    "message": "You exceeded your current quota, please check your plan and billing details.",
+                },
+            }),
+            // The ChatGPT Codex endpoint says why in `detail` alone.
+            json!({
+                "outcome": "failed",
+                "status": 400,
+                "code": "upstream_http_error",
+                "upstreamError": {
+                    "message": "The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account.",
+                },
+            }),
+        ],
+        "{log}"
+    );
+    assert!(!log.contains(ECHOED_KEY), "{log}");
+    assert!(!log.contains(MANAGED_STUB_KEY), "{log}");
+    Ok(())
+}
+
+/// The child side of the test above: a managed run's request that the
+/// provider refuses, on an API key and on a ChatGPT login. The client gets
+/// the proxy's own words and the provider's code and param, never its
+/// message.
+async fn send_requests_the_upstream_rejects() -> Result<()> {
+    let token = proxy_job_token();
+    let rejected = |text: &str| -> Result<Value> {
+        let body: Value = serde_json::from_str(text)?;
+        assert!(!text.contains(ECHOED_KEY), "{text}");
+        assert!(!text.contains("does not exist"), "{text}");
+        assert!(!text.contains("not supported"), "{text}");
+        Ok(body["error"].clone())
+    };
+    {
+        let (proxy_addr, _controller, upstream, _env, _guards) =
+            spawn_static_stack(Some(PINNED_MODEL)).await?;
+        answer_next(
+            &upstream,
+            [
+                (
+                    StatusCode::BAD_REQUEST,
+                    json!({ "error": {
+                        "message": format!("The model `gpt-6-luna` does not exist or you do not have access to it.\nKey {ECHOED_KEY} was used."),
+                        "type": "invalid_request_error",
+                        "param": "model",
+                        "code": "model_not_found"
+                    } }),
+                ),
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    json!({ "error": {
+                        "message": "You exceeded your current quota, please check your plan and billing details.",
+                        "type": "insufficient_quota",
+                        "param": null,
+                        "code": "insufficient_quota"
+                    } }),
+                ),
+            ],
+        );
+        let (status, text) = responses_through_proxy(proxy_addr, &token, "gpt-5.5").await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+        assert_eq!(
+            rejected(&text)?,
+            json!({
+                "message": "The upstream provider rejected the request. Upstream error: model_not_found, param model.",
+                "type": "upstream_error",
+                "code": "upstream_http_error",
+                "retryable": false,
+            })
+        );
+        let (status, text) = responses_through_proxy(proxy_addr, &token, "gpt-5.5").await?;
+        assert_eq!(status, StatusCode::PAYMENT_REQUIRED, "{text}");
+        assert!(!text.contains("exceeded your current quota"), "{text}");
+        assert_eq!(
+            rejected(&text)?["message"],
+            json!(
+                "The upstream provider has no available quota. Upstream error: insufficient_quota."
+            )
+        );
+    }
+    let (proxy_addr, _controller, upstream, _env, _guards) = spawn_stack(
+        None,
+        None,
+        false,
+        StackProxy::StaticChatGpt {
+            pinned_model: Some(PINNED_MODEL),
+        },
+    )
+    .await?;
+    answer_next(
+        &upstream,
+        [(
+            StatusCode::BAD_REQUEST,
+            json!({ "detail": "The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account." }),
+        )],
+    );
+    let (status, text) = responses_through_proxy(proxy_addr, &token, "gpt-5.5").await?;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+    // No code or param to pass on: the proxy's own words alone.
+    assert_eq!(
+        rejected(&text)?["message"],
+        json!("The upstream provider rejected the request.")
+    );
+    Ok(())
+}
+
+/// Set in the child process of the test below.
+const CANCELLED_REQUEST_LOG_CHILD: &str = "PROXY_FLOW_CANCELLED_REQUEST_LOG_CHILD";
+
+#[test]
+#[serial]
+fn a_request_dropped_before_it_ends_is_logged_as_cancelled() -> Result<()> {
+    if std::env::var(CANCELLED_REQUEST_LOG_CHILD).is_ok() {
+        return tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(drop_a_request_upstream_holds());
+    }
+    // Codex drops its request when a turn is stopped or a run is cancelled,
+    // and the provider may already have billed for its input, so the request
+    // still gets its line.
+    let log = proxy_log_of_child(
+        "a_request_dropped_before_it_ends_is_logged_as_cancelled",
+        CANCELLED_REQUEST_LOG_CHILD,
+        "1",
+    )?;
+    let mut records = log_records(&log, UPSTREAM_REQUEST_LOG)?;
+    for record in &mut records {
+        assert!(record["latencyMs"].is_u64(), "{record}");
+        record
+            .as_object_mut()
+            .expect("a record is an object")
+            .remove("latencyMs");
+    }
+    assert_eq!(
+        records,
+        vec![json!({
+            "route": "/v1/responses",
+            "runId": RUN_ID,
+            "jobId": JOB_ID,
+            "leaseAttempt": 2,
+            "credentialSource": "static",
+            "requestedModel": "gpt-5.5",
+            "model": PINNED_MODEL,
+            "outcome": "cancelled",
+        })],
+        "{log}"
+    );
+    Ok(())
+}
+
+/// The child side of the test above: a managed run's request whose client
+/// goes away while the provider has it.
+async fn drop_a_request_upstream_holds() -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let wait = |notified| tokio::time::timeout(Duration::from_secs(10), notified);
+    let (proxy_addr, _controller, upstream, _env, _guards) =
+        spawn_static_stack(Some(PINNED_MODEL)).await?;
+    upstream.held.on.store(true, Ordering::SeqCst);
+    let body = json!({
+        "model": "gpt-5.5",
+        "stream": false,
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{ "type": "input_text", "text": CHAT_PROMPT }]
+        }]
+    })
+    .to_string();
+    let mut client = tokio::net::TcpStream::connect(proxy_addr).await?;
+    client
+        .write_all(
+            format!(
+                "POST /v1/responses HTTP/1.1\r\nhost: proxy\r\nauthorization: Bearer {}\r\n\
+                 content-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+                proxy_job_token(),
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .await?;
+    wait(upstream.held.arrived.notified()).await?;
+    drop(client);
+    // The proxy drops its own request once it sees its client gone.
+    wait(upstream.held.abandoned.notified()).await?;
+    Ok(())
+}
+
+/// Set in the child process of the test below.
+const RENEWED_REQUEST_LOG_CHILD: &str = "PROXY_FLOW_RENEWED_REQUEST_LOG_CHILD";
+
+#[test]
+#[serial]
+fn a_renewed_request_logs_the_model_its_retry_went_upstream_as() -> Result<()> {
+    if std::env::var(RENEWED_REQUEST_LOG_CHILD).is_ok() {
+        return tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(renew_an_unpinned_lease_into_a_pinned_one());
+    }
+    let log = proxy_log_of_child(
+        "a_renewed_request_logs_the_model_its_retry_went_upstream_as",
+        RENEWED_REQUEST_LOG_CHILD,
+        "1",
+    )?;
+    let failures = log_records(&log, UPSTREAM_REQUEST_LOG)?
+        .into_iter()
+        .map(|record| {
+            json!({
+                "credentialSource": record["credentialSource"],
+                "requestedModel": record["requestedModel"],
+                "model": record["model"],
+                "outcome": record["outcome"],
+                "status": record["status"],
+                "upstreamError": record["upstreamError"],
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        failures,
+        vec![json!({
+            "credentialSource": "managed",
+            "requestedModel": "gpt-5.5",
+            "model": PINNED_MODEL,
+            "outcome": "failed",
+            "status": 401,
+            "upstreamError": {
+                "code": "token_expired",
+                "message": "Your authentication token has expired.",
+            },
+        })],
+        "{log}"
+    );
+    Ok(())
+}
+
+/// The child side of the test above: a managed lease without a pin that the
+/// provider rejects, renewed into a pinned one that it rejects too.
+async fn renew_an_unpinned_lease_into_a_pinned_one() -> Result<()> {
+    let (proxy_addr, controller, upstream, _env, _guards) =
+        spawn_managed_stack(Some(MANAGED_STUB_KEY), None, false).await?;
+    *controller.renewal_pinned_model.lock().expect("renewal pin") = Some(PINNED_MODEL.to_string());
+    upstream.expire_next.store(2, Ordering::SeqCst);
+    let (status, text) = responses_through_proxy(proxy_addr, &proxy_job_token(), "gpt-5.5").await?;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{text}");
+    assert_eq!(
+        upstream.models.lock().expect("model log").clone(),
+        vec!["gpt-5.5", PINNED_MODEL],
+        "the first attempt goes out as asked, the retry as the renewed pin"
+    );
+    Ok(())
+}
+
+/// Set in the child process of the test below.
+const LOG_TIME_CHILD: &str = "PROXY_FLOW_LOG_TIME_CHILD";
+
+#[test]
+#[serial]
+fn every_proxy_log_line_starts_with_the_time_it_was_written() -> Result<()> {
+    if std::env::var(LOG_TIME_CHILD).is_ok() {
+        return tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(async {
+                let (proxy_addr, _controller, _upstream, _env, _guards) =
+                    spawn_static_stack(Some(PINNED_MODEL)).await?;
+                let (status, text) =
+                    responses_through_proxy(proxy_addr, &proxy_job_token(), "gpt-5.5").await?;
+                assert_eq!(status, StatusCode::OK, "{text}");
+                Ok(())
+            });
+    }
+    let started = chrono::Utc::now() - chrono::Duration::seconds(1);
+    let log = proxy_log_of_child(
+        "every_proxy_log_line_starts_with_the_time_it_was_written",
+        LOG_TIME_CHILD,
+        "1",
+    )?;
+    let finished = chrono::Utc::now() + chrono::Duration::seconds(1);
+    let lines = log
+        .lines()
+        .filter(|line| line.contains("[proxy] "))
+        .collect::<Vec<_>>();
+    for logged in [
+        "[proxy] codex proxy listening on http://",
+        "[proxy] response tool controls ",
+        UPSTREAM_REQUEST_LOG,
+    ] {
+        assert!(
+            lines.iter().any(|line| line.contains(logged)),
+            "{logged}: {log}"
+        );
+    }
+    for line in lines {
+        let (time, rest) = line.split_once(' ').unwrap_or_default();
+        assert!(rest.starts_with("[proxy] "), "{line}");
+        // UTC to the millisecond: 2026-10-20T15:04:14.123Z.
+        assert!(time.len() == 24 && time.ends_with('Z'), "{line}");
+        let time = chrono::DateTime::parse_from_rfc3339(time)?;
+        assert!(started <= time && time <= finished, "{line}");
+    }
     Ok(())
 }
 

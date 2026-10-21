@@ -5,6 +5,7 @@ use std::time::{Duration, SystemTime};
 
 use reqwest::StatusCode;
 use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -33,24 +34,34 @@ const STREAM_RATE_LIMIT_MAX_JITTER_PERCENT: u32 = 20;
 const LONG_RATE_LIMIT_WINDOW_SECS: u64 = 5 * 60;
 /// The OpenAI error `param` values that name a request's tool controls.
 const TOOL_CONTROL_PARAMS: [&str; 2] = ["tool_choice", "tools"];
-/// Most characters of a provider error code that a [`ToolControlRejection`] keeps, so a log
-/// line that names it stays bounded.
-const MAX_TOOL_CONTROL_ERROR_CODE_CHARS: usize = 64;
+/// Most characters of a provider error code, type or param that a [`ProviderError`] keeps.
+const MAX_PROVIDER_IDENTIFIER_CHARS: usize = 64;
+/// Most characters of a provider error message that a [`ProviderError`] keeps for the log.
+const MAX_PROVIDER_MESSAGE_CHARS: usize = 200;
+/// A logged provider message masks every run of at least this many characters that could
+/// belong to a key or token. API keys, access tokens and JWTs are longer; words and model ids
+/// are shorter.
+const MIN_MASKED_RUN_CHARS: usize = 32;
 
+/// How an upstream request failed, as far as the answer the client gets goes. A failure the
+/// provider described also carries what it said, as a [`ProviderError`] context
+/// ([`provider_error`]).
 #[derive(Debug)]
 pub(crate) enum UpstreamFailure {
     Http {
         status: StatusCode,
         retry_after: Option<HeaderValue>,
         refreshable_auth: bool,
-        /// Set only for a 400 whose structured error blames the tool controls.
-        tool_control_rejection: Option<ToolControlRejection>,
+        /// Set only for a 400 whose provider error blames the tool controls
+        /// ([`body_blames_tool_controls`]).
+        blames_tool_controls: bool,
     },
     CredentialRefresh,
     InvalidResponse,
+    /// A failure the provider named by its code: a failed stream, or a 429 whose code or type
+    /// is `insufficient_quota`.
     Stream {
         code: Option<String>,
-        message: String,
     },
     PlanLimit {
         limit: PlanLimit,
@@ -72,12 +83,11 @@ pub(crate) enum PlanLimit {
 }
 
 impl PlanLimit {
-    fn from_provider_code(code: &str) -> Option<Self> {
-        match code {
-            "usage_limit_reached" => Some(Self::UsageLimitReached),
-            "usage_not_included" => Some(Self::UsageNotIncluded),
-            _ => None,
-        }
+    /// The plan limit a provider error names by its code or its type.
+    fn named_by(error: &ProviderError) -> Option<Self> {
+        [Self::UsageLimitReached, Self::UsageNotIncluded]
+            .into_iter()
+            .find(|limit| error.names(limit.provider_code()))
     }
 
     /// The provider's own error type, which the proxy passes on as `error.type`. Codex checks
@@ -91,100 +101,261 @@ impl PlanLimit {
     }
 }
 
-/// A 400 whose OpenAI error object blames the request's tool controls. It keeps only the
-/// structured fields that identify the error, never its message or any other body text.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ToolControlRejection {
-    /// `error.param` when it names `tool_choice` or `tools`; `None` when the error names no
-    /// param and its code and message name the tool choice instead.
-    pub(crate) param: Option<&'static str>,
-    /// `error.code`, or `error.type` when there is no code, cut to
-    /// [`MAX_TOOL_CONTROL_ERROR_CODE_CHARS`] characters.
+/// Why a provider says it refused a request, read from the error object of its error body
+/// ([`error_object`]): the object's `code`, `type` and `param` when they read as identifiers,
+/// and its message ([`provider_message`]) on one line, cut to [`MAX_PROVIDER_MESSAGE_CHARS`]
+/// and with every run of key- or token-like characters masked. A failed stream gives its code
+/// and message the same way. The message is for the proxy's own log only; a client gets
+/// [`ProviderError::reason`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub(crate) struct ProviderError {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) code: Option<String>,
+    /// The error's `type`.
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub(crate) kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) param: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) message: Option<String>,
 }
 
-impl ToolControlRejection {
-    /// Reads a 400 body. It matches only the OpenAI error shape, `{"error": {...}}`, and only
-    /// when the error's `param` is exactly `tool_choice` or `tools`, or, with no `param` at
-    /// all, when it carries a code (`error.code` or `error.type`) and its `message` names the
-    /// tool choice. An error whose `param` names any other parameter never matches, whatever
-    /// its message says, and neither does a body without an error object.
-    fn from_body(status: StatusCode, body: &str) -> Option<Self> {
-        if status != StatusCode::BAD_REQUEST {
-            return None;
+impl ProviderError {
+    /// What `body`, a provider's error body, says, when it says anything the proxy reads.
+    fn from_body(body: &Value) -> Option<Self> {
+        let object = error_object(body);
+        let identifier = |field: &str| {
+            object
+                .get(field)
+                .and_then(Value::as_str)
+                .and_then(provider_identifier)
+        };
+        Self {
+            code: identifier("code"),
+            kind: identifier("type"),
+            param: identifier("param"),
+            message: provider_message(body).and_then(loggable_provider_message),
         }
-        let body = serde_json::from_str::<serde_json::Value>(body).ok()?;
-        let error = body.get("error").filter(|error| error.is_object())?;
-        let text = |field: &str| error.get(field).and_then(serde_json::Value::as_str);
-        let code = text("code").or_else(|| text("type")).map(|code| {
-            code.chars()
-                .take(MAX_TOOL_CONTROL_ERROR_CODE_CHARS)
-                .collect::<String>()
-        });
-        match error.get("param") {
-            None | Some(serde_json::Value::Null) => {}
-            Some(param) => {
-                let param = TOOL_CONTROL_PARAMS
-                    .into_iter()
-                    .find(|name| param.as_str() == Some(*name))?;
-                return Some(Self {
-                    param: Some(param),
-                    code,
-                });
-            }
+        .said_anything()
+    }
+
+    /// What a failed stream's error says: its code and message.
+    fn from_stream(code: Option<&str>, message: Option<&str>) -> Option<Self> {
+        Self {
+            code: code.and_then(provider_identifier),
+            message: message.and_then(loggable_provider_message),
+            ..Self::default()
         }
-        let names_tool_choice = text("message").is_some_and(|message| {
-            let message = message.to_ascii_lowercase();
-            message.contains("tool_choice") || message.contains("tool choice")
-        });
-        (code.is_some() && names_tool_choice).then_some(Self { param: None, code })
+        .said_anything()
+    }
+
+    fn said_anything(self) -> Option<Self> {
+        (self != Self::default()).then_some(self)
+    }
+
+    /// The error's code, or its type when it has none.
+    fn code_or_type(&self) -> Option<&str> {
+        self.code.as_deref().or(self.kind.as_deref())
+    }
+
+    /// Whether the error's code or its type is `name`.
+    fn names(&self, name: &str) -> bool {
+        [self.code.as_deref(), self.kind.as_deref()].contains(&Some(name))
+    }
+
+    /// The reason a client may see: the provider's code, or its type when it has none, and the
+    /// param it names. Identifiers only, never the provider's message, which can name the
+    /// operator's account or echo the request.
+    pub(crate) fn reason(&self) -> Option<String> {
+        match (self.code_or_type(), self.param.as_deref()) {
+            (Some(what), Some(param)) => Some(format!("{what}, param {param}")),
+            (Some(what), None) => Some(what.to_string()),
+            (None, Some(param)) => Some(format!("param {param}")),
+            (None, None) => None,
+        }
+    }
+
+    /// The error without its message, for a log line that does not quote the provider.
+    pub(crate) fn without_message(&self) -> Self {
+        Self {
+            message: None,
+            ..self.clone()
+        }
     }
 }
 
+/// The identifiers and the message as the log keeps it, for an error chain that is printed,
+/// as the `openai-proxy-server` command prints its own failure. A client never gets it.
+impl fmt::Display for ProviderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("the provider said")?;
+        if let Some(reason) = self.reason() {
+            write!(f, " {reason}")?;
+        }
+        if let Some(message) = &self.message {
+            write!(f, ": {message}")?;
+        }
+        Ok(())
+    }
+}
+
+/// The error object of a provider's error body: its `error`, else its `detail`, when that is
+/// an object, else the body itself.
+fn error_object(body: &Value) -> &Value {
+    ["error", "detail"]
+        .into_iter()
+        .find_map(|field| body.get(field).filter(|value| value.is_object()))
+        .unwrap_or(body)
+}
+
+/// The message of a provider's error body, as the provider wrote it: its error object's
+/// `message`, else a `detail` or `error` string.
+fn provider_message(body: &Value) -> Option<&str> {
+    fn text<'v>(value: &'v Value, field: &str) -> Option<&'v str> {
+        value.get(field).and_then(Value::as_str)
+    }
+    text(error_object(body), "message")
+        .or_else(|| text(body, "detail"))
+        .or_else(|| text(body, "error"))
+}
+
+/// Whether a 400 with `body`, whose provider error is `error`, blames the request's tool
+/// controls: its error object's `param` is exactly `tool_choice` or `tools`, or, with no
+/// `param` at all, the error has a code (or type) and its message, as the provider wrote it,
+/// names the tool choice. A `param` that names anything else, or is not an identifier, never
+/// does, whatever the message says.
+fn body_blames_tool_controls(body: &Value, error: &ProviderError) -> bool {
+    match error_object(body).get("param") {
+        None | Some(Value::Null) => {
+            error.code_or_type().is_some()
+                && provider_message(body).is_some_and(|message| {
+                    let message = message.to_ascii_lowercase();
+                    message.contains("tool_choice") || message.contains("tool choice")
+                })
+        }
+        Some(_) => error
+            .param
+            .as_deref()
+            .is_some_and(|param| TOOL_CONTROL_PARAMS.contains(&param)),
+    }
+}
+
+/// `value`, trimmed, when it reads as a provider identifier: a code such as `model_not_found`
+/// or a param such as `input[3].content`, at most [`MAX_PROVIDER_IDENTIFIER_CHARS`] long.
+fn provider_identifier(value: &str) -> Option<String> {
+    let value = value.trim();
+    let allowed = |ch: char| ch.is_ascii_alphanumeric() || "_-.:[]".contains(ch);
+    (!value.is_empty()
+        && value.chars().count() <= MAX_PROVIDER_IDENTIFIER_CHARS
+        && value.chars().all(allowed))
+    .then(|| value.to_string())
+}
+
+/// `message` on one line, every run of at least [`MIN_MASKED_RUN_CHARS`] characters that could
+/// belong to a key or token replaced with `[masked]`, cut to [`MAX_PROVIDER_MESSAGE_CHARS`].
+fn loggable_provider_message(message: &str) -> Option<String> {
+    let token_char = |ch: char| ch.is_ascii_alphanumeric() || "-_.+/=*".contains(ch);
+    let mut line = String::new();
+    let mut run = String::new();
+    let end_run = |line: &mut String, run: &mut String| {
+        if run.chars().count() >= MIN_MASKED_RUN_CHARS {
+            line.push_str("[masked]");
+        } else {
+            line.push_str(run);
+        }
+        run.clear();
+    };
+    for ch in message.chars() {
+        if token_char(ch) {
+            run.push(ch);
+            continue;
+        }
+        end_run(&mut line, &mut run);
+        if ch.is_whitespace() || ch.is_control() {
+            if !line.is_empty() && !line.ends_with(' ') {
+                line.push(' ');
+            }
+        } else {
+            line.push(ch);
+        }
+    }
+    end_run(&mut line, &mut run);
+    let line = line.trim_end();
+    if line.is_empty() {
+        return None;
+    }
+    let mut chars = line.chars();
+    let kept = chars
+        .by_ref()
+        .take(MAX_PROVIDER_MESSAGE_CHARS)
+        .collect::<String>();
+    Some(if chars.next().is_some() {
+        format!("{kept}…")
+    } else {
+        kept
+    })
+}
+
 impl UpstreamFailure {
-    pub(crate) fn http_body(status: StatusCode, headers: &HeaderMap, body: &str) -> Self {
-        if status == StatusCode::TOO_MANY_REQUESTS
-            && let Ok(body) = serde_json::from_str::<serde_json::Value>(body)
-        {
-            // Only a structured provider code qualifies; arbitrary body text never does.
-            let codes = ["/error/code", "/error/type"]
-                .map(|field| body.pointer(field).and_then(serde_json::Value::as_str));
+    /// The failure an HTTP error answer stands for, carrying what its body says
+    /// ([`ProviderError`]). The body is read once, and only its error object's identifiers
+    /// decide anything, never its text: a 429 whose code or type is `insufficient_quota` is
+    /// quota exhaustion and one whose code or type names a plan limit is that limit, and a 400
+    /// may blame the tool controls ([`body_blames_tool_controls`]).
+    pub(crate) fn http_body(status: StatusCode, headers: &HeaderMap, body: &str) -> anyhow::Error {
+        let refreshable_auth = crate::auth::response_indicates_chatgpt_token_expired(status, body);
+        let body = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
+        let said = ProviderError::from_body(&body);
+        let said_in_429 = said
+            .as_ref()
+            .filter(|_| status == StatusCode::TOO_MANY_REQUESTS);
+        let failure = if said_in_429.is_some_and(|said| said.names("insufficient_quota")) {
             // Quota exhaustion is not a rate limit that can recover within the same job.
-            if codes.contains(&Some("insufficient_quota")) {
-                return Self::Stream {
-                    code: Some("insufficient_quota".into()),
-                    message: "Upstream quota exhausted.".into(),
-                };
+            Self::Stream {
+                code: Some("insufficient_quota".into()),
             }
-            if let Some(limit) = codes
-                .into_iter()
-                .flatten()
-                .find_map(PlanLimit::from_provider_code)
+        } else if let Some(limit) = said_in_429.and_then(PlanLimit::named_by) {
+            Self::PlanLimit {
+                limit,
+                // A validated reset time lets the client say when to try again.
+                resets_at: error_object(&body)
+                    .get("resets_at")
+                    .and_then(Value::as_i64)
+                    .filter(|seconds| *seconds > 0),
+            }
+        } else {
+            let mut failure = Self::http(status, headers, refreshable_auth);
+            if let Self::Http {
+                blames_tool_controls,
+                ..
+            } = &mut failure
             {
-                return Self::PlanLimit {
-                    limit,
-                    // A validated reset time lets the client say when to try again. Nothing
-                    // else from the provider body is passed on.
-                    resets_at: body
-                        .pointer("/error/resets_at")
-                        .and_then(serde_json::Value::as_i64)
-                        .filter(|seconds| *seconds > 0),
-                };
+                *blames_tool_controls = status == StatusCode::BAD_REQUEST
+                    && said
+                        .as_ref()
+                        .is_some_and(|said| body_blames_tool_controls(&body, said));
             }
+            failure
+        };
+        failure.carrying(said)
+    }
+
+    /// The failure a `response.failed` event reports, carrying its code and message, when it
+    /// gave them.
+    pub(crate) fn stream(code: Option<&str>, message: Option<&str>) -> anyhow::Error {
+        Self::Stream {
+            code: code.map(str::to_string),
         }
-        let mut failure = Self::http(
-            status,
-            headers,
-            crate::auth::response_indicates_chatgpt_token_expired(status, body),
-        );
-        if let Self::Http {
-            tool_control_rejection,
-            ..
-        } = &mut failure
-        {
-            *tool_control_rejection = ToolControlRejection::from_body(status, body);
+        .carrying(ProviderError::from_stream(code, message))
+    }
+
+    /// This failure as an error, with what the provider said, if anything, as its context.
+    fn carrying(self, said: Option<ProviderError>) -> anyhow::Error {
+        let error = anyhow::Error::new(self);
+        match said {
+            Some(said) => error.context(said),
+            None => error,
         }
-        failure
     }
 
     pub(crate) fn http(status: StatusCode, headers: &HeaderMap, refreshable_auth: bool) -> Self {
@@ -215,7 +386,7 @@ impl UpstreamFailure {
             status,
             retry_after,
             refreshable_auth,
-            tool_control_rejection: None,
+            blames_tool_controls: false,
         }
     }
 }
@@ -226,8 +397,8 @@ impl fmt::Display for UpstreamFailure {
             Self::Http { status, .. } => write!(f, "upstream returned {status}"),
             Self::CredentialRefresh => f.write_str("upstream credential refresh failed"),
             Self::InvalidResponse => f.write_str("invalid upstream response"),
-            Self::Stream { code, message } => {
-                write!(f, "backend stream reported error: {message}")?;
+            Self::Stream { code } => {
+                f.write_str("upstream reported a failure")?;
                 if let Some(code) = code {
                     write!(f, " (code={code})")?;
                 }
@@ -256,14 +427,21 @@ pub(crate) fn refreshable_auth(error: &anyhow::Error) -> bool {
     )
 }
 
-/// The tool control rejection `error` carries, if it is a 400 whose structured error blames
-/// the tool controls; see [`ToolControlRejection::from_body`].
-pub(crate) fn tool_control_rejection(error: &anyhow::Error) -> Option<&ToolControlRejection> {
-    match error.downcast_ref::<UpstreamFailure>() {
-        Some(UpstreamFailure::Http {
-            tool_control_rejection,
+/// What the provider said about the failure `error` carries, when it said anything the proxy
+/// reads: an HTTP rejection's error body ([`UpstreamFailure::http_body`]) or a failed stream's
+/// code and message ([`UpstreamFailure::stream`]).
+pub(crate) fn provider_error(error: &anyhow::Error) -> Option<&ProviderError> {
+    error.downcast_ref::<ProviderError>()
+}
+
+/// What the provider said, when `error` is a 400 whose provider error blames the tool
+/// controls ([`body_blames_tool_controls`]).
+pub(crate) fn tool_control_rejection(error: &anyhow::Error) -> Option<&ProviderError> {
+    match error.downcast_ref::<UpstreamFailure>()? {
+        UpstreamFailure::Http {
+            blames_tool_controls: true,
             ..
-        }) => tool_control_rejection.as_ref(),
+        } => provider_error(error),
         _ => None,
     }
 }
@@ -439,7 +617,7 @@ pub(crate) fn classify(error: &anyhow::Error) -> ErrorResponse {
                 response.retry_after = None;
                 response
             }
-            UpstreamFailure::Stream { code, .. } => match code.as_deref() {
+            UpstreamFailure::Stream { code } => match code.as_deref() {
                 Some("insufficient_quota") => ErrorResponse::new(
                     StatusCode::PAYMENT_REQUIRED,
                     "upstream_insufficient_quota",
@@ -729,7 +907,7 @@ mod tests {
         for &(name, value) in pairs {
             headers.insert(name, HeaderValue::from_static(value));
         }
-        classify(&UpstreamFailure::http_body(status, &headers, "{}").into())
+        classify(&UpstreamFailure::http_body(status, &headers, "{}"))
     }
 
     #[test]
@@ -959,15 +1137,8 @@ mod tests {
 
     #[test]
     fn stream_rate_limit_gets_the_default_delay_but_quota_exhaustion_does_not() {
-        let stream = |code: &str| {
-            classify(
-                &UpstreamFailure::Stream {
-                    code: Some(code.into()),
-                    message: "private-token".into(),
-                }
-                .into(),
-            )
-        };
+        let stream =
+            |code: &str| classify(&UpstreamFailure::stream(Some(code), Some("private-token")));
         let limited = stream("rate_limit_exceeded");
         assert_eq!(limited.status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(limited.retry_after.unwrap(), "5");
@@ -1016,9 +1187,11 @@ mod tests {
         for retry_after in ["169", date.as_str()] {
             let mut headers = HeaderMap::new();
             headers.insert(RETRY_AFTER, HeaderValue::from_str(retry_after).unwrap());
-            let classified = classify(
-                &UpstreamFailure::http_body(StatusCode::TOO_MANY_REQUESTS, &headers, "{}").into(),
-            );
+            let classified = classify(&UpstreamFailure::http_body(
+                StatusCode::TOO_MANY_REQUESTS,
+                &headers,
+                "{}",
+            ));
             for jitter in [0.0, 0.5, 1.0] {
                 let error = classified.stream_rate_limit_error(now, jitter).unwrap();
                 assert_eq!(stated_delay(&error), "169", "{retry_after}, {jitter}");
@@ -1038,9 +1211,11 @@ mod tests {
             for &(name, value) in pairs {
                 headers.insert(name, HeaderValue::from_str(value).unwrap());
             }
-            let classified = classify(
-                &UpstreamFailure::http_body(StatusCode::TOO_MANY_REQUESTS, &headers, "{}").into(),
-            );
+            let classified = classify(&UpstreamFailure::http_body(
+                StatusCode::TOO_MANY_REQUESTS,
+                &headers,
+                "{}",
+            ));
             stated_delay(&classified.stream_rate_limit_error(now, jitter).unwrap())
         };
         for (pairs, jitter, expected) in [
@@ -1082,13 +1257,10 @@ mod tests {
             assert_eq!(delay(pairs, jitter), expected, "{pairs:?} {jitter}");
         }
         // A rate limit reported inside the upstream stream carries no headers.
-        let stream = classify(
-            &UpstreamFailure::Stream {
-                code: Some("rate_limit_exceeded".into()),
-                message: "private-token".into(),
-            }
-            .into(),
-        );
+        let stream = classify(&UpstreamFailure::stream(
+            Some("rate_limit_exceeded"),
+            Some("private-token"),
+        ));
         let error = stream.stream_rate_limit_error(now, 0.0).unwrap();
         assert_eq!(stated_delay(&error), "5");
         assert!(!error.to_string().contains("private-token"), "{error}");
@@ -1130,9 +1302,11 @@ mod tests {
         let retry_after = u64::MAX.to_string();
         let mut headers = HeaderMap::new();
         headers.insert(RETRY_AFTER, HeaderValue::from_str(&retry_after).unwrap());
-        let classified = classify(
-            &UpstreamFailure::http_body(StatusCode::TOO_MANY_REQUESTS, &headers, "{}").into(),
-        );
+        let classified = classify(&UpstreamFailure::http_body(
+            StatusCode::TOO_MANY_REQUESTS,
+            &headers,
+            "{}",
+        ));
         assert!(
             classified
                 .stream_rate_limit_error(SystemTime::UNIX_EPOCH, 1.0)
@@ -1166,24 +1340,22 @@ mod tests {
                 &plan_headers,
                 r#"{"error":{"type":"usage_not_included"}}"#,
             ),
-            UpstreamFailure::Stream {
-                code: Some("usage_limit_reached".into()),
-                message: "private-token".into(),
-            },
+            UpstreamFailure::stream(Some("usage_limit_reached"), Some("private-token")),
             // So does a window too long to wait out, and quota exhaustion.
             UpstreamFailure::RateLimitWindow {
                 resets_in_secs: 3_600,
-            },
+            }
+            .into(),
             UpstreamFailure::http_body(
                 StatusCode::TOO_MANY_REQUESTS,
                 &HeaderMap::new(),
                 r#"{"error":{"code":"insufficient_quota"}}"#,
             ),
-            UpstreamFailure::http(StatusCode::SERVICE_UNAVAILABLE, &plan_headers, false),
-            UpstreamFailure::http(StatusCode::UNAUTHORIZED, &HeaderMap::new(), false),
-            UpstreamFailure::InvalidResponse,
+            UpstreamFailure::http(StatusCode::SERVICE_UNAVAILABLE, &plan_headers, false).into(),
+            UpstreamFailure::http(StatusCode::UNAUTHORIZED, &HeaderMap::new(), false).into(),
+            UpstreamFailure::InvalidResponse.into(),
         ] {
-            let classified = classify(&anyhow::Error::new(failure));
+            let classified = classify(&failure);
             assert!(
                 classified.stream_rate_limit_error(now, 0.5).is_none(),
                 "{:?}",
@@ -1217,9 +1389,11 @@ mod tests {
                 None,
             ),
         ] {
-            let classified = classify(
-                &UpstreamFailure::http_body(StatusCode::TOO_MANY_REQUESTS, &headers, body).into(),
-            );
+            let classified = classify(&UpstreamFailure::http_body(
+                StatusCode::TOO_MANY_REQUESTS,
+                &headers,
+                body,
+            ));
             assert_eq!(classified.status, StatusCode::TOO_MANY_REQUESTS, "{body}");
             assert_eq!(classified.error_type, error_type, "{body}");
             assert_eq!(classified.code, code, "{body}");
@@ -1228,49 +1402,34 @@ mod tests {
             assert_eq!(classified.resets_at, resets_at, "{body}");
         }
         // Quota exhaustion keeps its 402 even when a plan code is also present.
-        let quota = classify(
-            &UpstreamFailure::http_body(
-                StatusCode::TOO_MANY_REQUESTS,
-                &headers,
-                r#"{"error":{"type":"usage_limit_reached","code":"insufficient_quota"}}"#,
-            )
-            .into(),
-        );
+        let quota = classify(&UpstreamFailure::http_body(
+            StatusCode::TOO_MANY_REQUESTS,
+            &headers,
+            r#"{"error":{"type":"usage_limit_reached","code":"insufficient_quota"}}"#,
+        ));
         assert_eq!(quota.status, StatusCode::PAYMENT_REQUIRED);
         assert_eq!(quota.error_type, "upstream_error");
         // A plan code in free text, or on another status, is not a plan limit.
-        let text = classify(
-            &UpstreamFailure::http_body(
-                StatusCode::TOO_MANY_REQUESTS,
-                &HeaderMap::new(),
-                r#"{"error":{"message":"usage_limit_reached"}}"#,
-            )
-            .into(),
-        );
+        let text = classify(&UpstreamFailure::http_body(
+            StatusCode::TOO_MANY_REQUESTS,
+            &HeaderMap::new(),
+            r#"{"error":{"message":"usage_limit_reached"}}"#,
+        ));
         assert!(text.retryable);
         assert_eq!(text.error_type, "upstream_error");
         assert_eq!(text.code, "upstream_rate_limit");
-        let forbidden = classify(
-            &UpstreamFailure::http_body(
-                StatusCode::FORBIDDEN,
-                &HeaderMap::new(),
-                r#"{"error":{"type":"usage_not_included"}}"#,
-            )
-            .into(),
-        );
+        let forbidden = classify(&UpstreamFailure::http_body(
+            StatusCode::FORBIDDEN,
+            &HeaderMap::new(),
+            r#"{"error":{"type":"usage_not_included"}}"#,
+        ));
         assert_eq!(forbidden.error_type, "upstream_error");
         assert_eq!(forbidden.code, "upstream_access_denied");
         for (code, error_type) in [
             ("usage_limit_reached", "upstream_usage_limit_reached"),
             ("usage_not_included", "upstream_usage_not_included"),
         ] {
-            let stream = classify(
-                &UpstreamFailure::Stream {
-                    code: Some(code.into()),
-                    message: "private-token".into(),
-                }
-                .into(),
-            );
+            let stream = classify(&UpstreamFailure::stream(Some(code), Some("private-token")));
             assert_eq!(stream.status, StatusCode::TOO_MANY_REQUESTS);
             assert_eq!(stream.error_type, code);
             assert_eq!(stream.code, error_type);
@@ -1283,47 +1442,74 @@ mod tests {
     #[test]
     fn only_a_400_that_blames_the_tool_controls_is_a_tool_control_rejection() {
         let rejection = |status: StatusCode, body: &str| {
-            let error =
-                anyhow::Error::new(UpstreamFailure::http_body(status, &HeaderMap::new(), body))
-                    .context("request context");
-            tool_control_rejection(&error).cloned()
+            let error = UpstreamFailure::http_body(status, &HeaderMap::new(), body)
+                .context("request context");
+            tool_control_rejection(&error).map(ProviderError::without_message)
         };
         let bad_request = |body: &str| rejection(StatusCode::BAD_REQUEST, body);
+        // What the fallback line logs: the provider error, without its message.
+        let said = |code: Option<&str>, kind: Option<&str>, param: Option<&str>| {
+            Some(ProviderError {
+                code: code.map(str::to_string),
+                kind: kind.map(str::to_string),
+                param: param.map(str::to_string),
+                message: None,
+            })
+        };
         let long_code = "c".repeat(80);
-        for (body, param, code) in [
+        for (body, expected) in [
             (
                 r#"{"error":{"message":"private-token","type":"invalid_request_error","param":"tool_choice","code":null}}"#.to_string(),
-                Some("tool_choice"),
-                Some("invalid_request_error".to_string()),
+                said(None, Some("invalid_request_error"), Some("tool_choice")),
             ),
             (
                 r#"{"error":{"message":"private-token","type":"invalid_request_error","param":"tools","code":"missing_required_parameter"}}"#.to_string(),
-                Some("tools"),
-                Some("missing_required_parameter".to_string()),
+                said(Some("missing_required_parameter"), Some("invalid_request_error"), Some("tools")),
             ),
             // With no param, a code and a message that names the tool choice.
             (
                 r#"{"error":{"message":"Invalid value for 'tool_choice': private-token","param":null,"code":"invalid_value"}}"#.to_string(),
-                None,
-                Some("invalid_value".to_string()),
+                said(Some("invalid_value"), None, None),
             ),
             (
                 r#"{"error":{"message":"Tool choice 'required' needs tools. private-token","type":"invalid_request_error"}}"#.to_string(),
-                None,
-                Some("invalid_request_error".to_string()),
+                said(None, Some("invalid_request_error"), None),
             ),
-            // The code is cut, so a log line that names it stays bounded.
+            // The message is read as the provider wrote it, before the log masks or cuts it.
+            (
+                json!({ "error": {
+                    "message": "Invalid 'function.tool_choice_override_for_this_request'.",
+                    "code": "invalid_value"
+                } })
+                .to_string(),
+                said(Some("invalid_value"), None, None),
+            ),
+            (
+                json!({ "error": {
+                    "message": format!("{} tool choice", "word ".repeat(60)),
+                    "code": "invalid_value"
+                } })
+                .to_string(),
+                said(Some("invalid_value"), None, None),
+            ),
+            // A code too long to read as an identifier is left out; the param still blames
+            // the tool choice.
             (
                 format!(r#"{{"error":{{"param":"tool_choice","code":"{long_code}"}}}}"#),
-                Some("tool_choice"),
-                Some("c".repeat(64)),
+                said(None, None, Some("tool_choice")),
+            ),
+            // The error object is the one every provider error is read from: a `detail`
+            // object, or the body itself.
+            (
+                r#"{"detail":{"param":"tool_choice","code":"invalid_value"}}"#.to_string(),
+                said(Some("invalid_value"), None, Some("tool_choice")),
+            ),
+            (
+                r#"{"message":"tool_choice","param":"tool_choice"}"#.to_string(),
+                said(None, None, Some("tool_choice")),
             ),
         ] {
-            assert_eq!(
-                bad_request(&body),
-                Some(ToolControlRejection { param, code }),
-                "{body}"
-            );
+            assert_eq!(bad_request(&body), expected, "{body}");
         }
 
         for body in [
@@ -1332,14 +1518,14 @@ mod tests {
             r#"{"error":{"message":"Invalid tools","type":"invalid_request_error","param":"tools[0].name"}}"#,
             r#"{"error":{"message":"tool_choice","type":"invalid_request_error","param":"TOOL_CHOICE"}}"#,
             r#"{"error":{"message":"tool_choice","type":"invalid_request_error","param":1}}"#,
+            r#"{"error":{"message":"tool_choice","type":"invalid_request_error","param":"tool choice"}}"#,
             // No param, and either no code or a message that names no tool choice.
             r#"{"error":{"message":"Invalid value for 'tool_choice'.","param":null,"code":null}}"#,
             r#"{"error":{"message":"Invalid value for 'tools'.","type":"invalid_request_error"}}"#,
             r#"{"error":{"message":"The model does not exist.","code":"model_not_found"}}"#,
-            // Not the OpenAI error shape.
+            // A string `detail` or `error`, which has no code, and a body that is no JSON.
             r#"{"detail":"Unsupported parameter: tool_choice"}"#,
             r#"{"error":"tool_choice"}"#,
-            r#"{"message":"tool_choice","param":"tool_choice"}"#,
             "tool_choice",
             "",
         ] {
@@ -1364,14 +1550,11 @@ mod tests {
         );
 
         // The 400 still reaches the client as the terminal rejection it was.
-        let classified = classify(
-            &UpstreamFailure::http_body(
-                StatusCode::BAD_REQUEST,
-                &HeaderMap::new(),
-                blames_tool_choice,
-            )
-            .into(),
-        );
+        let classified = classify(&UpstreamFailure::http_body(
+            StatusCode::BAD_REQUEST,
+            &HeaderMap::new(),
+            blames_tool_choice,
+        ));
         assert_eq!(classified.status, StatusCode::BAD_REQUEST);
         assert_eq!(classified.code, "upstream_http_error");
         assert!(!classified.retryable);
@@ -1453,7 +1636,7 @@ mod tests {
             &HeaderMap::new(),
             r#"{"error":{"message":"insufficient_quota controller credential lease renewal failed"}}"#,
         );
-        let classified = classify(&error.into());
+        let classified = classify(&error);
         assert_eq!(classified.status, StatusCode::TOO_MANY_REQUESTS);
         assert!(classified.retryable);
         let classified = classify(&anyhow::anyhow!(
@@ -1461,5 +1644,287 @@ mod tests {
         ));
         assert_eq!(classified.status, StatusCode::BAD_GATEWAY);
         assert!(classified.retryable);
+    }
+
+    fn provider_error_of(status: StatusCode, body: &str) -> Option<ProviderError> {
+        provider_error_with(status, &HeaderMap::new(), body)
+    }
+
+    fn provider_error_with(
+        status: StatusCode,
+        headers: &HeaderMap,
+        body: &str,
+    ) -> Option<ProviderError> {
+        provider_error(
+            &UpstreamFailure::http_body(status, headers, body).context("request context"),
+        )
+        .cloned()
+    }
+
+    #[test]
+    fn a_provider_error_keeps_identifiers_and_a_short_masked_message() {
+        let error =
+            |code: Option<&str>, kind: Option<&str>, param: Option<&str>, message: Option<&str>| {
+                Some(ProviderError {
+                    code: code.map(str::to_string),
+                    kind: kind.map(str::to_string),
+                    param: param.map(str::to_string),
+                    message: message.map(str::to_string),
+                })
+            };
+        let token = format!("sk-proj-{}", "a1".repeat(40));
+        let jwt = format!(
+            "eyJ{}.eyJ{}.{}",
+            "h".repeat(20),
+            "p".repeat(40),
+            "s".repeat(30)
+        );
+        for (body, expected) in [
+            // OpenAI's shape, with a key and a token in a two-line message.
+            (
+                json!({ "error": {
+                    "message": format!("Incorrect API key provided: {token}.\nBearer {jwt} refused."),
+                    "type": "invalid_request_error",
+                    "param": null,
+                    "code": "invalid_api_key"
+                } })
+                .to_string(),
+                error(
+                    Some("invalid_api_key"),
+                    Some("invalid_request_error"),
+                    None,
+                    Some("Incorrect API key provided: [masked] Bearer [masked] refused."),
+                ),
+            ),
+            (
+                json!({ "error": {
+                    "message": "Invalid 'input[3].content': string too long.",
+                    "type": "invalid_request_error",
+                    "param": "input[3].content",
+                    "code": "string_above_max_length"
+                } })
+                .to_string(),
+                error(
+                    Some("string_above_max_length"),
+                    Some("invalid_request_error"),
+                    Some("input[3].content"),
+                    Some("Invalid 'input[3].content': string too long."),
+                ),
+            ),
+            // The ChatGPT Codex endpoint's `detail`, as a string or an object.
+            (
+                r#"{"detail":"The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account."}"#.to_string(),
+                error(None, None, None, Some("The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account.")),
+            ),
+            (
+                r#"{"detail":{"code":"unsupported_model","message":"Not supported."}}"#.to_string(),
+                error(Some("unsupported_model"), None, None, Some("Not supported.")),
+            ),
+            // A top-level error, and an error that is only a string.
+            (
+                r#"{"code":"bad_gateway","message":"Try again."}"#.to_string(),
+                error(Some("bad_gateway"), None, None, Some("Try again.")),
+            ),
+            (
+                r#"{"error":"model unavailable"}"#.to_string(),
+                error(None, None, None, Some("model unavailable")),
+            ),
+            // What does not read as an identifier is left out.
+            (
+                json!({ "error": {
+                    "code": "not an identifier",
+                    "type": "x".repeat(65),
+                    "param": 3,
+                    "message": "   "
+                } })
+                .to_string(),
+                None,
+            ),
+            // A body that says nothing the proxy reads.
+            ("{}".to_string(), None),
+            (r#"{"error":{}}"#.to_string(), None),
+            ("<html>Bad Request</html>".to_string(), None),
+            (String::new(), None),
+        ] {
+            assert_eq!(provider_error_of(StatusCode::BAD_REQUEST, &body), expected, "{body}");
+        }
+
+        // A long message is cut, after it is masked.
+        let long = json!({ "error": { "message": format!("{} {token}", "word ".repeat(60)) } })
+            .to_string();
+        let message = provider_error_of(StatusCode::BAD_REQUEST, &long)
+            .and_then(|error| error.message)
+            .unwrap();
+        assert_eq!(
+            message.chars().count(),
+            MAX_PROVIDER_MESSAGE_CHARS + 1,
+            "{message}"
+        );
+        assert!(
+            message.ends_with('…') && !message.contains("sk-proj"),
+            "{message}"
+        );
+
+        // A failed stream's code and message, as the stream gave them, and nothing in place
+        // of a message it did not give.
+        let stream = |code: Option<&str>, message: Option<&str>| {
+            provider_error(&UpstreamFailure::stream(code, message)).cloned()
+        };
+        assert_eq!(
+            stream(
+                Some("context_length_exceeded"),
+                Some(&format!("Input too long for {token}"))
+            ),
+            error(
+                Some("context_length_exceeded"),
+                None,
+                None,
+                Some("Input too long for [masked]")
+            ),
+        );
+        assert_eq!(
+            stream(Some("server_error"), None),
+            error(Some("server_error"), None, None, None)
+        );
+        assert_eq!(stream(None, None), None);
+        // A failure the provider said nothing about.
+        assert_eq!(provider_error(&anyhow::anyhow!("model_not_found")), None);
+        assert_eq!(
+            provider_error(&anyhow::Error::new(UpstreamFailure::InvalidResponse)),
+            None
+        );
+    }
+
+    #[test]
+    fn every_refusal_built_from_a_body_keeps_what_the_provider_said() {
+        let said = |code: Option<&str>, kind: Option<&str>, message: &str| {
+            Some(ProviderError {
+                code: code.map(str::to_string),
+                kind: kind.map(str::to_string),
+                param: None,
+                message: Some(message.to_string()),
+            })
+        };
+        let classified_as = |status: StatusCode, headers: &HeaderMap, body: &str| {
+            let error = UpstreamFailure::http_body(status, headers, body);
+            let classified = classify(&error);
+            (classified.code, provider_error(&error).cloned())
+        };
+        // Quota exhaustion: the provider's own message, not words of the proxy's.
+        let quota = json!({ "error": {
+            "message": "You exceeded your current quota.",
+            "type": "insufficient_quota",
+            "code": "insufficient_quota"
+        } });
+        assert_eq!(
+            classified_as(
+                StatusCode::TOO_MANY_REQUESTS,
+                &HeaderMap::new(),
+                &quota.to_string()
+            ),
+            (
+                "upstream_insufficient_quota",
+                said(
+                    Some("insufficient_quota"),
+                    Some("insufficient_quota"),
+                    "You exceeded your current quota."
+                )
+            )
+        );
+        // A plan limit, read from a `detail` object as from an `error` one.
+        for body in [
+            json!({ "error": { "type": "usage_limit_reached", "message": "The usage limit has been reached.", "resets_at": 1_900_000_000 } }),
+            json!({ "detail": { "type": "usage_limit_reached", "message": "The usage limit has been reached.", "resets_at": 1_900_000_000 } }),
+        ] {
+            let error = UpstreamFailure::http_body(
+                StatusCode::TOO_MANY_REQUESTS,
+                &HeaderMap::new(),
+                &body.to_string(),
+            );
+            let classified = classify(&error);
+            assert_eq!(classified.code, "upstream_usage_limit_reached", "{body}");
+            assert_eq!(classified.resets_at, Some(1_900_000_000), "{body}");
+            assert_eq!(
+                provider_error(&error).cloned(),
+                said(
+                    None,
+                    Some("usage_limit_reached"),
+                    "The usage limit has been reached."
+                ),
+                "{body}"
+            );
+        }
+        // A bucket that needs hours to refill, such as a daily requests limit.
+        let mut daily = HeaderMap::new();
+        for (name, value) in [
+            ("x-ratelimit-remaining-requests", "0"),
+            ("x-ratelimit-reset-requests", "6h0m0s"),
+        ] {
+            daily.insert(name, HeaderValue::from_static(value));
+        }
+        let per_day = json!({ "error": {
+            "message": "Rate limit reached for requests per day (RPD).",
+            "type": "requests",
+            "code": "rate_limit_exceeded"
+        } });
+        let error =
+            UpstreamFailure::http_body(StatusCode::TOO_MANY_REQUESTS, &daily, &per_day.to_string());
+        assert!(matches!(
+            error.downcast_ref::<UpstreamFailure>(),
+            Some(UpstreamFailure::RateLimitWindow {
+                resets_in_secs: 21_600
+            })
+        ));
+        assert_eq!(
+            provider_error(&error)
+                .and_then(ProviderError::reason)
+                .as_deref(),
+            Some("rate_limit_exceeded")
+        );
+        assert_eq!(
+            provider_error_with(StatusCode::TOO_MANY_REQUESTS, &daily, &per_day.to_string()),
+            said(
+                Some("rate_limit_exceeded"),
+                Some("requests"),
+                "Rate limit reached for requests per day (RPD)."
+            )
+        );
+    }
+
+    #[test]
+    fn a_client_gets_only_the_provider_code_and_param() {
+        let reason = |code: Option<&str>, kind: Option<&str>, param: Option<&str>| {
+            ProviderError {
+                code: code.map(str::to_string),
+                kind: kind.map(str::to_string),
+                param: param.map(str::to_string),
+                message: Some("The model does not exist in organization org-private.".into()),
+            }
+            .reason()
+        };
+        assert_eq!(
+            reason(
+                Some("model_not_found"),
+                Some("invalid_request_error"),
+                Some("model")
+            )
+            .as_deref(),
+            Some("model_not_found, param model")
+        );
+        // The type stands in for a missing code.
+        assert_eq!(
+            reason(None, Some("invalid_request_error"), Some("tool_choice")).as_deref(),
+            Some("invalid_request_error, param tool_choice")
+        );
+        assert_eq!(
+            reason(None, None, Some("model")).as_deref(),
+            Some("param model")
+        );
+        assert_eq!(
+            reason(Some("server_error"), None, None).as_deref(),
+            Some("server_error")
+        );
+        // A message alone gives no reason: it never reaches a client.
+        assert_eq!(reason(None, None, None), None);
     }
 }

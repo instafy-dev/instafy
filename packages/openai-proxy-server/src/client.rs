@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::auth::{Credentials, response_indicates_chatgpt_token_expired};
 use crate::context_controls::ScopedResponseContext;
-use crate::upstream_error::{self, ToolControlRejection, UpstreamFailure};
+use crate::upstream_error::{self, ProviderError, UpstreamFailure};
 use crate::usage::apply_chat_to_responses_usage;
 
 const APPLY_PATCH_GRAMMAR: &str = include_str!(concat!(
@@ -54,7 +54,7 @@ pub(crate) type SendHook = Box<dyn FnOnce() + Send + Sync>;
 
 /// Runs once, when a client sends a request again without the
 /// `tool_choice: "required"` it set, after upstream refused that choice.
-pub(crate) type RequiredToolCallFallbackHook = Box<dyn FnOnce(&ToolControlRejection) + Send + Sync>;
+pub(crate) type RequiredToolCallFallbackHook = Box<dyn FnOnce(&ProviderError) + Send + Sync>;
 
 pub struct CodexClient {
     http: reqwest::Client,
@@ -162,8 +162,8 @@ fn global_reasoning_effort() -> Option<&'static str> {
                 }
                 let effort = normalize_reasoning_effort(trimmed);
                 if effort.is_none() {
-                    eprintln!(
-                        "[proxy] Ignoring invalid CODEX_REASONING_EFFORT value `{}`; expected minimal|low|medium|high|xhigh|max.",
+                    crate::proxy_log!(
+                        "Ignoring invalid CODEX_REASONING_EFFORT value `{}`; expected minimal|low|medium|high|xhigh|max.",
                         trimmed
                     );
                 }
@@ -643,8 +643,7 @@ impl CodexClient {
                     StatusCode::UNAUTHORIZED,
                     &response_headers,
                     &body,
-                )
-                .into());
+                ));
             }
         }
 
@@ -655,7 +654,7 @@ impl CodexClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "<empty>".to_string());
-            return Err(UpstreamFailure::http_body(status, &response_headers, &text).into());
+            return Err(UpstreamFailure::http_body(status, &response_headers, &text));
         }
 
         Ok(response)
@@ -685,7 +684,7 @@ impl CodexClient {
 /// Prints a request about to go upstream when `CODEX_DEBUG_HTTP=1`.
 fn debug_http_request(endpoint: &str, headers: &HeaderMap, payload: &Value) {
     if std::env::var("CODEX_DEBUG_HTTP").as_deref() == Ok("1") {
-        eprintln!(
+        crate::proxy_log!(
             "--> POST {}\nHeaders: {:?}\nBody: {}",
             endpoint,
             headers,
@@ -1507,7 +1506,7 @@ async fn read_chatgpt_stream(mut response: reqwest::Response) -> Result<Value> {
     let text = String::from_utf8(bytes).context("streamed response was not valid UTF-8")?;
 
     if std::env::var("CODEX_DEBUG_HTTP").as_deref() == Ok("1") {
-        eprintln!("<-- stream\n{}", text);
+        crate::proxy_log!("<-- stream\n{}", text);
     }
 
     read_chatgpt_stream_text(&text)
@@ -1648,18 +1647,8 @@ fn process_chatgpt_stream_event(
             let error = event
                 .get("error")
                 .or_else(|| event.get("response").and_then(|r| r.get("error")));
-            let message = error
-                .and_then(|err| err.get("message"))
-                .and_then(Value::as_str)
-                .unwrap_or("unknown error");
-            let code = error
-                .and_then(|err| err.get("code"))
-                .and_then(Value::as_str);
-            return Err(UpstreamFailure::Stream {
-                code: code.map(str::to_string),
-                message: message.to_string(),
-            }
-            .into());
+            let text = |field: &str| error.and_then(|err| err.get(field)).and_then(Value::as_str);
+            return Err(UpstreamFailure::stream(text("code"), text("message")));
         }
         "response.output_text.delta" => {
             if let Some(delta) = event.get("delta").and_then(Value::as_str) {
@@ -2740,7 +2729,7 @@ mod tests {
                 .with_response_controls(Some(tools.clone()), tool_choice, None, None)
                 .with_required_tool_call(required_tool_call)
                 .with_required_tool_call_fallback(Some(Box::new(
-                    move |rejection: &ToolControlRejection| {
+                    move |rejection: &ProviderError| {
                         fallbacks.lock().unwrap().push(rejection.clone());
                     },
                 )))
@@ -2762,9 +2751,11 @@ mod tests {
         assert!(set_by_client.required_tool_call_refused());
         assert_eq!(
             fallbacks.lock().unwrap().clone(),
-            vec![ToolControlRejection {
-                param: Some("tool_choice"),
-                code: Some("invalid_request_error".to_string()),
+            vec![ProviderError {
+                kind: Some("invalid_request_error".to_string()),
+                param: Some("tool_choice".to_string()),
+                message: Some("private-token".to_string()),
+                ..ProviderError::default()
             }]
         );
 

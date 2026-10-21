@@ -51,7 +51,7 @@ impl ProxyTokenValidator {
         let secret = match secret {
             Some(value) => value,
             None if require => {
-                eprintln!("[proxy] PROXY_SIGNING_SECRET missing; proxy tokens cannot be validated");
+                crate::proxy_log!("PROXY_SIGNING_SECRET missing; proxy tokens cannot be validated");
                 return None;
             }
             None => return None,
