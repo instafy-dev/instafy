@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Button } from "../../../components/Button";
+import { ContentHeader } from "../../../components/ContentHeader";
 import { Text } from "../../../components/Text";
 import { WorkspaceGitDiffPanel } from "./WorkspaceGitDiffPanel";
 import { DARK_DIVIDER_BORDER_CLASS, DARK_DIVIDER_DIVIDE_CLASS, DARK_PANEL_BG_CLASS } from "../../../theme/darkSurfaces";
@@ -113,19 +114,15 @@ export function WorkspaceGitRollingDiffPanel({
   return (
     <div className="flex h-full min-h-0 flex-col" data-testid={dataTestId}>
       {showHeader ? (
-        <div className={`flex items-center justify-between gap-3 border-b border-slate-200/70 px-4 py-3 ${DARK_DIVIDER_BORDER_CLASS}`}>
-          <div className="min-w-0">
-            <Text as="div" variant="bodyStrong" tone="inherit" className="text-sm text-slate-800 dark:text-slate-100">
-              All changes
-            </Text>
-            <Text tone="secondary" className="text-xs">
-              Scroll through changed files without switching views.
-            </Text>
-          </div>
-          <Text tone="secondary" className="shrink-0 text-xs">
+        <ContentHeader
+          title="All changes"
+          titleAs="h3"
+          subtitle="Scroll through changed files without switching views."
+          data-testid={`${testIdPrefix}-toolbar`}
+          actions={<Text variant="caption" tone="muted">
             {paths.length} {paths.length === 1 ? "file" : "files"}
-          </Text>
-        </div>
+          </Text>}
+        />
       ) : null}
 
       <div className={layoutStyle === "flat" ? "flex-1 overflow-y-auto" : "flex-1 overflow-y-auto p-3"}>

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState, type ComponentProps, type Re
 import { GitBranch, NavArrowDown, Refresh } from "iconoir-react";
 import { Badge } from "../../../components/Badge";
 import { Button, IconButton } from "../../../components/Button";
-import { Heading } from "../../../components/Heading";
+import { ContentHeader } from "../../../components/ContentHeader";
 import { InlineNotice } from "../../../components/InlineNotice";
 import { Spinner } from "../../../components/Spinner";
 import { Text } from "../../../components/Text";
@@ -359,92 +359,60 @@ export function WorkspaceGitDiffPanel({
         .join(" ")}
       data-testid={dataTestId}
     >
-      <div
-        className={[
-          `flex items-center justify-between gap-3 border-b border-slate-200/70 ${DARK_DIVIDER_BORDER_CLASS}`,
-          integratedCompactPanel
-            ? `bg-slate-50/80 px-3 py-1.5 ${DARK_PANEL_SOFT_BG_CLASS}`
-            : compactHeader
-              ? "px-3 py-2"
-              : "px-4 py-3",
-        ].join(" ")}
-      >
-        <div className="flex min-w-0 items-center gap-2">
-          {integratedCompactPanel ? (
-            <GitBranch className="h-4 w-4 shrink-0 text-slate-400 dark:text-slate-500" aria-hidden="true" />
-          ) : (
-            <span
-              className={[
-                `inline-flex items-center justify-center rounded-lg border border-transparent bg-slate-50 text-slate-500 ${DARK_PANEL_SOFT_BG_CLASS} dark:text-slate-300`,
-                compactHeader ? "h-7 w-7" : "h-8 w-8",
-              ].join(" ")}
-            >
-              <GitBranch className={compactHeader ? "text-[14px]" : "text-[16px]"} aria-hidden="true" />
-            </span>
-          )}
-          <div className="min-w-0">
-            <Heading
-              level={4}
-              className={[
-                "truncate leading-tight",
-                integratedCompactPanel ? "text-[13px] font-semibold" : compactHeader ? "text-sm" : "",
-              ].join(" ")}
-            >
-              {normalizedPath || "Diff preview"}
-            </Heading>
-            {showModeLabel ? (
-              <Text variant="label" tone="secondary" className="leading-tight">
-                {/* The panel only ever shows diffs: the label carries the mode, not the word "diff". */}
-                {modeLabelText ?? (base ? "Agent run" : commit ? "Saved version" : "Working tree")}
-              </Text>
-            ) : null}
-          </div>
-        </div>
-
-        <div className="flex items-center gap-1">
+      <ContentHeader
+        title={normalizedPath || "Diff preview"}
+        titleText={normalizedPath || undefined}
+        titleAs="h4"
+        subtitle={showModeLabel ? (modeLabelText ?? (base ? "Agent run" : commit ? "Saved version" : "Working tree")) : undefined}
+        icon={<GitBranch />}
+        density={compactHeader ? "compact" : "default"}
+        tone={integratedCompactPanel ? "subtle" : "default"}
+        data-testid={`${testIdPrefix}-toolbar`}
+        actions={<>
           {actions}
           {onToggleCollapsed ? (
             <IconButton
               size="sm"
               variant="ghost"
-              radius="lg"
               aria-label={collapsed ? "Expand diff" : "Collapse diff"}
+              aria-expanded={!collapsed}
               onPress={onToggleCollapsed}
               data-testid={`${testIdPrefix}-toggle`}
             >
               <NavArrowDown
-                className={["text-[16px] transition-transform", collapsed ? "-rotate-90" : ""].join(" ")}
+                className={["h-4 w-4 transition-transform", collapsed ? "-rotate-90" : ""].join(" ")}
                 aria-hidden="true"
               />
             </IconButton>
           ) : null}
           {onOpenFile && showOpenFileButton ? (
             <Button
-              variant="ghost"
               size="sm"
-              radius="xl"
+              elevation="none"
+              variant="ghost"
+              aria-label="Open file"
+              title="Open file"
               onPress={() => normalizedPath && onOpenFile(normalizedPath)}
               isDisabled={!normalizedPath}
               data-testid={`${testIdPrefix}-open-file`}
             >
-              Open file
+              Open
             </Button>
           ) : null}
           {showRefreshButton ? (
             <IconButton
               size="sm"
               variant="ghost"
-              radius="lg"
               aria-label="Refresh diff"
               onPress={() => void refresh({ silent: false })}
               isDisabled={diffLoading || !normalizedPath}
               data-testid={`${testIdPrefix}-refresh`}
             >
-              <Refresh className="text-[16px]" aria-hidden="true" />
+              <Refresh className="h-4 w-4" aria-hidden="true" />
             </IconButton>
           ) : null}
-        </div>
-      </div>
+        </>}
+      />
 
       {!collapsed ? (
         <div className={["flex-1 overflow-auto p-4", bodyClassName].filter(Boolean).join(" ")}>
@@ -532,8 +500,7 @@ export function WorkspaceGitDiffPanel({
                   {diffHeader.indexLine || diffHeader.modeLine || diffHeader.binaryLine ? (
                     <Button
                       variant="ghost"
-                      size="xs"
-                      radius="full"
+                      preset="inline"
                       onPress={() => setDiffHeaderDetailsOpen((prev) => !prev)}
                       data-testid={`${testIdPrefix}-header-details`}
                     >

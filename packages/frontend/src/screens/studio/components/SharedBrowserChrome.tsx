@@ -75,11 +75,10 @@ function ChromeButton({
   return (
     <IconButton
       aria-label={label}
-      className="shrink-0 max-[540px]:h-10 max-[540px]:w-10"
+      className="shrink-0"
       data-testid={testId}
       isDisabled={disabled}
       onPress={onClick}
-      radius="full"
       size="sm"
       title={label}
       type="button"
@@ -171,7 +170,7 @@ export function SharedBrowserChrome({
 
   const hasNavigationMenu = typeof toolbarActions === "function";
   const historyControls = (
-    <span className={compact && !hasNavigationMenu ? "hidden" : "inline-flex items-center gap-0.5"}>
+    <span className={compact && !hasNavigationMenu ? "hidden" : "inline-flex items-center gap-2"}>
       <ChromeButton
         disabled={controlsDisabled || !controls.history || historyPage?.canGoBack === false}
         label="Back"
@@ -262,7 +261,7 @@ export function SharedBrowserChrome({
         compact={compact}
         leading={toolbarLeading}
         navigation={!compact || !hasNavigationMenu ? (
-          <div className="flex items-center gap-0.5">
+          <div className="flex items-center gap-2">
             {historyControls}
             {reloadControl}
           </div>

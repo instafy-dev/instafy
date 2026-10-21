@@ -25,6 +25,8 @@ async function mountButtons(page: Page) {
           ...['xs','sm','md','lg'].flatMap(size=>[
             h(Button,{key:'button-'+size,size,'data-testid':'button-'+size},'Go'),
             h(IconButton,{key:'icon-'+size,size,'aria-label':'Icon '+size,'data-testid':'icon-'+size},'×')]),
+          ...['ghost','outline'].map(variant=>h(Button,{key:'toolbar-'+variant,preset:'toolbar',variant,'data-testid':'toolbar-'+variant},
+            h('span',{style:{width:24,height:24,borderRadius:'50%',background:'gray'},'aria-hidden':true}), 'Participants')),
           h(Button,{variant:'text',tone:'muted',size:'xs','data-testid':'text'},'Edit'),
           h(Button,{variant:'ghost',tone:'danger','data-testid':'danger',onPress:()=>setPresses(n=>n+1)},'Delete'),
           h(Button,{variant:'outline',tone:'danger','data-testid':'danger-outline'},'Remove'),
@@ -41,7 +43,7 @@ const color = (page: Page, id: string) => page.getByTestId(id).evaluate(el => ge
 const background = (page: Page, id: string) => page.getByTestId(id).evaluate(el => getComputedStyle(el).backgroundColor);
 
 async function expectTouchTargets(page: Page) {
-  for (const id of ["button-xs", "button-sm", "button-md", "button-lg", "icon-xs", "icon-sm", "icon-md", "icon-lg", "text"]) {
+  for (const id of ["button-xs", "button-sm", "button-md", "button-lg", "icon-xs", "icon-sm", "icon-md", "icon-lg", "text", "toolbar-ghost", "toolbar-outline"]) {
     const box = await page.getByTestId(id).boundingBox();
     expect(box!.height, id).toBeGreaterThanOrEqual(44);
     expect(box!.width, id).toBeGreaterThanOrEqual(44);
@@ -55,11 +57,15 @@ test.describe("fine pointer", () => {
       await page.setViewportSize({ width, height: 844 });
       await mountButtons(page);
       expect(await page.evaluate(() => matchMedia("(pointer: fine)").matches)).toBe(true);
-      for (const [id, height] of [["button-xs", 24], ["button-sm", 32], ["button-md", 36], ["button-lg", 44], ["icon-xs", 24], ["icon-sm", 32], ["icon-md", 36], ["icon-lg", 40], ["text", 16]] as const) {
+      for (const [id, height] of [["button-xs", 24], ["button-sm", 32], ["button-md", 36], ["button-lg", 44], ["icon-xs", 24], ["icon-sm", 32], ["icon-md", 36], ["icon-lg", 40], ["text", 16], ["toolbar-ghost", 32], ["toolbar-outline", 32]] as const) {
         expect((await page.getByTestId(id).boundingBox())!.height, id).toBe(height);
       }
       expect((await page.getByTestId("icon-xs").boundingBox())!.width).toBe(24);
       expect((await page.getByTestId("text").boundingBox())!.width).toBeLessThan(44);
+      for (const id of ["toolbar-ghost", "toolbar-outline"]) {
+        await expect(page.getByTestId(id)).toHaveCSS("border-radius", "8px");
+        expect((await page.getByTestId(id).boundingBox())!.width).toBeGreaterThan(44);
+      }
     });
   }
 

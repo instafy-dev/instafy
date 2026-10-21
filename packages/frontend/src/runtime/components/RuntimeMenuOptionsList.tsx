@@ -136,7 +136,6 @@ function RuntimeValueRow({
             type="button"
             variant="ghost"
             size="sm"
-            radius="full"
             onPress={() => onCopy()}
             aria-label={copyLabel}
             title={copyLabel}
@@ -471,7 +470,7 @@ export function RuntimeMenuOptionsList({
             {/* The pressable selection surface and the disclosure toggle are
                 siblings: interactive elements must not nest inside the
                 header's role="button". */}
-            <div className={`flex w-full items-center gap-1 rounded-xl pr-1 transition hover:bg-slate-100 active:bg-slate-200/80 dark:hover:bg-[var(--color-studio-dark-control-hover)] dark:active:bg-[var(--color-studio-dark-active)] ${isSelected ? selectedOptionClassName : ""}`}>
+            <div className={`flex w-full items-center gap-2 rounded-xl pr-1 transition hover:bg-slate-100 active:bg-slate-200/80 dark:hover:bg-[var(--color-studio-dark-control-hover)] dark:active:bg-[var(--color-studio-dark-active)] ${isSelected ? selectedOptionClassName : ""}`}>
               <div
                 ref={(node) => {
                   if (node) optionRefs.current.set(optionKey, node);
@@ -534,7 +533,6 @@ export function RuntimeMenuOptionsList({
                 <IconButton
                   variant="ghost"
                   size="sm"
-                  radius="full"
                   aria-label={`Start ${option.label}`}
                   title="Start"
                   onPress={() => onStartRuntime?.(option.id ?? null)}
@@ -548,7 +546,6 @@ export function RuntimeMenuOptionsList({
                 <IconButton
                   variant="ghost"
                   size="sm"
-                  radius="full"
                   aria-label={`Stop ${option.label}`}
                   title="Stop"
                   onPress={() => onTerminateRuntime?.(option.id ?? null)}
@@ -567,7 +564,6 @@ export function RuntimeMenuOptionsList({
                     }}
                     variant="ghost"
                     size="sm"
-                    radius="full"
                     aria-label={`More actions for ${option.label}`}
                     title="More actions"
                     tone="neutral"
@@ -592,7 +588,6 @@ export function RuntimeMenuOptionsList({
                 <IconButton
                   variant="ghost"
                   size="sm"
-                  radius="full"
                   tone="neutral"
                   className="shrink-0"
                   aria-label={isExpanded ? "Hide runtime details" : "Show runtime details"}
@@ -622,9 +617,7 @@ export function RuntimeMenuOptionsList({
                     ) : (
                       <Button
                         variant="secondary"
-                        elevation="none"
-                        size="sm"
-                        radius="full"
+                        preset="inline"
                         onPress={() => {
                           onSelectOption(option.id);
                           // The action becomes status text; keep keyboard focus
@@ -718,10 +711,8 @@ export function RuntimeMenuOptionsList({
                       <Button
                         onPress={() => onShowSelfHostHelp?.()}
                         variant="ghost"
-                        size="sm"
-                        radius="full"
+                        preset="inline"
                         tone="neutral"
-                        className="gap-1.5"
                       >
                         <Play className="h-3.5 w-3.5" aria-hidden="true" />
                         How to start it
@@ -735,10 +726,8 @@ export function RuntimeMenuOptionsList({
                       <Button
                         onPress={() => onStartRuntime?.(option.id ?? null)}
                         variant="ghost"
-                        size="sm"
-                        radius="full"
+                        preset="inline"
                         tone="neutral"
-                        className="gap-1.5"
                       >
                         <Play className="h-3.5 w-3.5" aria-hidden="true" />
                         Start
@@ -748,10 +737,8 @@ export function RuntimeMenuOptionsList({
                       <Button
                         onPress={() => onTerminateRuntime?.(option.id ?? null)}
                         variant="ghost"
-                        size="sm"
-                        radius="full"
+                        preset="inline"
                         tone="neutral"
-                        className="gap-1.5"
                       >
                         <Square className="h-3.5 w-3.5" aria-hidden="true" />
                         Stop
@@ -765,10 +752,9 @@ export function RuntimeMenuOptionsList({
                         }}
                         onPress={() => setRemoveConfirmOptionId(optionKey)}
                         variant="ghost"
-                        size="sm"
-                        radius="full"
+                        preset="inline"
                         tone="danger"
-                        className="ml-auto gap-1.5"
+                        className="ml-auto"
                       >
                         <Trash className="h-3.5 w-3.5" aria-hidden="true" />
                         Remove
@@ -781,7 +767,7 @@ export function RuntimeMenuOptionsList({
                     <Text as="span" variant="bodyCompact" tone="danger">
                       Remove “{option.label}”?
                     </Text>
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex items-center gap-2">
                       {/* Focus enters the strip on the safe action, never on
                           the destructive one. */}
                       <Button
@@ -790,8 +776,7 @@ export function RuntimeMenuOptionsList({
                           setRemoveConfirmOptionId(null);
                         }}
                         variant="ghost"
-                        size="sm"
-                        radius="full"
+                        preset="inline"
                         autoFocus
                       >
                         Cancel
@@ -803,8 +788,7 @@ export function RuntimeMenuOptionsList({
                         }}
                         variant="ghost"
                         tone="danger"
-                        size="sm"
-                        radius="full"
+                        preset="inline"
                       >
                         Remove
                       </Button>

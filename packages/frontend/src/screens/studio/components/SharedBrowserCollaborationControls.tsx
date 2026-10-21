@@ -3,6 +3,7 @@ import { CursorPointer, Group } from "iconoir-react";
 import { Dialog, DialogTrigger } from "react-aria-components";
 import { StudioPopover } from "../../../components/aria/StudioPopover";
 import { Button } from "../../../components/Button";
+import { Text } from "../../../components/Text";
 import type { SharedBrowserControlOwner } from "./sharedBrowserControlOwner";
 import {
   collaborationSelfOwnsControl,
@@ -161,15 +162,28 @@ export function SharedBrowserCollaborationControls({
   ) : null;
   const hasListedController = Boolean(agentDisplayName || humanOwner);
   const controlIndicator = (
-    <span role="img" aria-label={statusLabel} title={statusLabel}
-      className="mt-0.5 shrink-0 text-slate-500 dark:text-slate-300"
+    <Text as="span" variant="caption" tone="muted" role="img" aria-label={statusLabel} title={statusLabel}
+      className="inline-flex shrink-0 items-center gap-1"
       data-testid="shared-browser-controller-indicator">
       <CursorPointer aria-hidden="true" className="h-3.5 w-3.5" />
-    </span>
+      Controls
+    </Text>
   );
-  const ownershipStatus = (
+  const ownershipStatus = compact ? (
+    <Text
+      as="span"
+      variant="caption"
+      tone="muted"
+      className={hasListedController ? "sr-only" : "block"}
+      data-testid="shared-browser-collaboration-control-state"
+      role="status"
+      title={statusLabel}
+    >
+      {statusLabel}
+    </Text>
+  ) : (
     <span
-      className={compact ? hasListedController ? "sr-only" : "mt-3 block text-xs text-slate-500 dark:text-slate-400" : `inline-flex h-7 min-w-0 items-center rounded-full border px-2 text-xxs font-medium ${
+      className={`inline-flex h-7 min-w-0 items-center rounded-full border px-2 text-xxs font-medium ${
         selfOwnsControl
           ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
           : agentDisplayName
@@ -180,36 +194,39 @@ export function SharedBrowserCollaborationControls({
       role="status"
       title={statusLabel}
     >
-      <span className={compact ? undefined : "max-w-28 truncate"}>{statusLabel}</span>
+      <span className="max-w-28 truncate">{statusLabel}</span>
     </span>
   );
   const controlAction = action ? (
     <Button
       aria-label={action.label}
-      size="xs"
+      preset="inline"
       variant="secondary"
-      radius="full"
-      className={compact ? "min-h-10 max-w-full whitespace-normal text-left" : "max-w-36 min-h-7 shrink-0"}
+      className={compact ? "max-w-full whitespace-normal text-left" : "max-w-36 shrink-0"}
       data-action={action.kind}
       data-testid="shared-browser-collaboration-control-action"
       isDisabled={action.disabled}
       onPress={() => {
-        // A pending request disables this button. Keep keyboard focus inside
-        // the popup before the native disabled state removes button focus.
-        if (compact && action.kind === "request") dialogRef.current?.focus();
+        // Requesting disables the action; granting moves it out of this row.
+        // Keep focus inside the popup before either change removes button focus.
+        if (compact && (action.kind === "request" || action.kind === "grant")) dialogRef.current?.focus();
         action.run();
       }}
       title={action.label}
       type="button"
     >
-      <span className={compact ? "break-words" : "truncate"}>{action.label}</span>
+      <span className={compact ? "break-words" : "truncate"}>{compact && action.kind === "grant" ? "Give control" : action.label}</span>
     </Button>
   ) : null;
+  // In the popup, associate the short grant action with its complete recipient
+  // name. Other controls remain in the footer; the wide toolbar keeps its label.
+  const grantInParticipantRow = compact && action?.kind === "grant";
+  const footerAction = grantInParticipantRow ? null : controlAction;
 
   return (
     <div
       aria-label="Shared browser collaboration"
-      className="flex min-w-0 shrink-0 items-center gap-1"
+      className="flex min-w-0 shrink-0 items-center gap-2"
       data-browser-session-safe-zone="true"
       data-testid="shared-browser-collaboration"
       role="group"
@@ -218,10 +235,9 @@ export function SharedBrowserCollaborationControls({
         <DialogTrigger>
           <Button
             aria-label={`Browser participants and control: ${statusLabel}. ${participantNames || "No participants connected"}${requestLabel ? `. ${requestLabel}` : ""}`}
-            className="relative min-h-10 min-w-10 shrink-0 px-1.5"
+            className="relative shrink-0"
             data-testid="shared-browser-collaboration-toggle"
-            radius="full"
-            size="xs"
+            preset="toolbar"
             title={`Browser participants and control — ${statusLabel}`}
             variant="ghost"
           >
@@ -243,32 +259,45 @@ export function SharedBrowserCollaborationControls({
             data-browser-session-safe-zone="true"
           >
             <Dialog ref={dialogRef} aria-label="Browser participants and control" className="outline-none">
+              {pendingRequestCount ? (
+                <Text variant="caption" tone="muted" className="mb-3">{requestLabel}</Text>
+              ) : null}
               {participants.length || agentDisplayName ? (
-                <ul aria-label="Browser participants" className="space-y-2 text-xs">
+                <ul aria-label="Browser participants" className="space-y-3">
                   {participants.map((participant) => (
                     <li className="flex min-w-0 items-start gap-2" key={participant.id} data-participant-id={participant.id}>
-                      <span aria-hidden="true" className="mt-1 h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: participant.color }} />
-                      <span className="min-w-0 flex-1 break-words">
-                        {participant.displayName}{participant.id === client.participantId ? " (you)" : ""}
-                      </span>
-                      {!agentDisplayName && humanOwner?.id === participant.id ? controlIndicator : null}
+                      <span aria-hidden="true" className="mt-1.5 h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: participant.color }} />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex min-w-0 items-baseline gap-2">
+                          <Text as="span" variant="bodyCompact" tone="primary" className="min-w-0 flex-1 break-words" data-participant-name="">
+                            {participant.displayName}
+                            {participant.id === client.participantId ? <Text as="span" variant="caption" tone="muted"> (you)</Text> : null}
+                          </Text>
+                          {!agentDisplayName && humanOwner?.id === participant.id ? controlIndicator : null}
+                        </div>
+                        {state?.requests.includes(participant.id) ? (
+                          <div className="mt-1 flex flex-wrap items-center justify-between gap-2">
+                            <Text as="span" variant="caption" tone="muted">Requested</Text>
+                            {grantInParticipantRow && firstRequester?.id === participant.id ? controlAction : null}
+                          </div>
+                        ) : null}
+                      </div>
                     </li>
                   ))}
                   {agentDisplayName ? (
-                    <li className="flex min-w-0 items-start gap-2" data-controller-kind="agent">
-                      <span aria-hidden="true" className="mt-1 h-2 w-2 shrink-0 rounded-full bg-violet-500" />
-                      <span className="min-w-0 flex-1 break-words">{agentDisplayName}</span>
+                    <li className="flex min-w-0 items-baseline gap-2" data-controller-kind="agent">
+                      <span aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full bg-violet-500" />
+                      <Text as="span" variant="bodyCompact" tone="primary" className="min-w-0 flex-1 break-words" data-participant-name="">{agentDisplayName}</Text>
                       {controlIndicator}
                     </li>
                   ) : null}
                 </ul>
               ) : null}
-              {ownershipStatus}
-              {pendingRequestCount || controlAction || children ? (
+              <div className={hasListedController || !participants.length ? undefined : "mt-3"}>{ownershipStatus}</div>
+              {footerAction || children ? (
                 <div className={`space-y-2 ${participants.length || agentDisplayName ? "mt-3 border-t border-slate-200 pt-3 dark:border-slate-700" : "mt-2"}`}>
-                  {pendingRequestCount ? <p className="text-xs text-slate-500 dark:text-slate-400">{requestLabel}</p> : null}
                   <div className="flex flex-wrap justify-end gap-2">
-                    {controlAction}
+                    {footerAction}
                     {children}
                   </div>
                 </div>

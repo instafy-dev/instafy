@@ -55,7 +55,7 @@ export function DrawerHeader({
     <Text {...titleProps} as={titleAs} className="sr-only">{title}</Text>
   ) : null;
   if (actionsPortalTarget) {
-    return <>{hiddenTitle}{actions ? createPortal(<div className="flex shrink-0 items-center gap-1">{actions}</div>, actionsPortalTarget) : null}</>;
+    return <>{hiddenTitle}{actions ? createPortal(<div className="flex shrink-0 items-center gap-2">{actions}</div>, actionsPortalTarget) : null}</>;
   }
   if (hideTitle && !subtitle && !actions) return hiddenTitle;
   const header = (
@@ -95,8 +95,7 @@ export function DrawerHeader({
       {actions ? (
         <div
           className={[
-            "flex shrink-0 items-center",
-            touchDensity ? "gap-2" : "gap-1",
+            "flex shrink-0 items-center gap-2",
             actionsClassName,
           ]
             .filter(Boolean)

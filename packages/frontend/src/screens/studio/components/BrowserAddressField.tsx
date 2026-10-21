@@ -109,7 +109,7 @@ export const BrowserAddressField = forwardRef<HTMLInputElement, BrowserAddressFi
   );
   if (desktop) return editor;
   return <>
-    <Button slot={null} variant="outline" size="xs" radius="full"
+    <Button slot={null} variant="outline" size="xs" radius="xl"
       className="h-8 max-[540px]:h-10 pointer-coarse:h-11 w-full min-w-0 !justify-start px-3 text-left !text-base font-normal"
       aria-label="Address" aria-haspopup="dialog" aria-expanded={editing}
       data-testid={`${props.testIdPrefix}-address-trigger`} isDisabled={disabled}
@@ -199,7 +199,6 @@ const AddressControls = forwardRef<HTMLInputElement, Pick<BrowserAddressFieldPro
         autoFocus={mobile}
         onFocus={mobile ? event => event.currentTarget.select() : undefined}
         size="xs"
-        radius="full"
         className={`h-8 min-w-0 pl-3 pr-9 aria-invalid:border-rose-400 aria-invalid:focus-visible:ring-rose-500/20 max-[540px]:h-10 max-[540px]:pr-11 pointer-coarse:h-11 pointer-coarse:pr-12 ${mobile ? "!h-11 !pr-24" : ""}`}
         data-testid={`${testIdPrefix}-address`}
         onKeyDownCapture={event => {
@@ -215,7 +214,7 @@ const AddressControls = forwardRef<HTMLInputElement, Pick<BrowserAddressFieldPro
         }}
       />
       <span className="absolute inset-y-0 right-0 flex items-center">
-        {mobile && state.inputValue && <IconButton slot={null} aria-label="Clear address" variant="ghost" radius="full"
+        {mobile && state.inputValue && <IconButton slot={null} aria-label="Clear address" variant="ghost"
           className="h-11 w-11" preventFocusOnPress onPress={() => { onClear(); focusInput(); state.open(); }}>
           <Xmark aria-hidden="true" className="h-4 w-4" />
         </IconButton>}
@@ -226,7 +225,6 @@ const AddressControls = forwardRef<HTMLInputElement, Pick<BrowserAddressFieldPro
           data-testid={`${testIdPrefix}-go`}
           type="submit"
           size="xs"
-          radius="full"
           variant="ghost"
           className={mobile ? "!h-11 !w-11" : "max-[540px]:h-10 max-[540px]:w-10"}
           isDisabled={inputProps.disabled}

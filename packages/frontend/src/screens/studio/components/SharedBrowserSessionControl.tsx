@@ -49,8 +49,8 @@ export function SharedBrowserSessionControl({ runtimeId, resumeUrl, open, busy, 
     return addFloatingSurfaceViewportChangeListener(update);
   }, [open]);
   return <DialogTrigger isOpen={open} onOpenChange={onOpenChange}>
-    <IconButton ref={triggerRef} size="sm" variant="ghost" radius="full" aria-label="Browser options" title="Browser options"
-      className="shrink-0 max-[540px]:h-10 max-[540px]:w-10" data-browser-session-safe-zone="true"
+    <IconButton ref={triggerRef} size="sm" variant="ghost" aria-label="Browser options" title="Browser options"
+      className="shrink-0" data-browser-session-safe-zone="true"
       data-testid="shared-browser-sessions-toggle">
       <MoreHoriz className="h-4 w-4" aria-hidden="true" />
     </IconButton>

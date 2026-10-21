@@ -198,6 +198,8 @@ describe("FilesPanel one Save", () => {
     useWorkspaceStore.setState({ activeProjectId: "space-a" });
     // A response queued with mockResolvedValueOnce never leaks into the next test.
     mocks.saveChanges.mockReset();
+    mocks.fetchStatus.mockReset().mockResolvedValue(null);
+    mocks.syncToRemote.mockReset();
     mocks.listAt.mockReset();
     mocks.readAt.mockReset();
     mocks.editorCommands.length = 0;
@@ -229,6 +231,7 @@ describe("FilesPanel one Save", () => {
     mocks.versioningInputs.length = 0;
     mocks.runtime.desktopOrigin = { originId: "origin-1", endpoint: "https://origin.test", mode: "hosted" };
     mocks.runtime.desktopOriginProjectId = null;
+    mocks.runtime.runtimeReady = false;
     mocks.listAt.mockImplementation(async ({ path }: { path?: string }) => ({
       ok: true,
       entries: path === "docs"
@@ -279,18 +282,42 @@ describe("FilesPanel one Save", () => {
     expect(saveUnavailable()).toBe(false);
   });
 
-  it("renders one Save and no draft button, enabled only with unsaved edits", async () => {
+  it("keeps one focusable Save through clean, edited, saving and saved states", async () => {
+    const request = deferred<ReturnType<typeof saved>>();
+    mocks.saveChanges.mockReturnValueOnce(request.promise);
     await render([buffer({ modified: "saved" })]);
-    const save = query("code-save-button");
+    const save = query("code-save-button")!;
     expect(query("code-save-draft-button")).toBeNull();
-    expect(save?.getAttribute("aria-label")).toBe("Save");
-    expect(save?.getAttribute("title")).toMatch(/^Save \((⌘S|Ctrl\+S)\)$/);
+    expect(save.getAttribute("aria-label")).toBe("Save");
+    expect(save.getAttribute("title")).toMatch(/^Save \((⌘S|Ctrl\+S)\)$/);
     expect(saveUnavailable()).toBe(true);
     // Clean, it stays in the tab order rather than being natively disabled.
-    expect(save?.disabled).toBe(false);
-    expect(save?.getAttribute("aria-disabled")).toBe("true");
+    expect(save.disabled).toBe(false);
+    expect(save.getAttribute("aria-disabled")).toBe("true");
+    save.focus();
+    await act(async () => save.click());
+    expect(document.activeElement).toBe(save);
+    expect(mocks.saveChanges).not.toHaveBeenCalled();
+
     await edit("edited");
     expect(saveUnavailable()).toBe(false);
+    await act(async () => save.click());
+    await settle();
+    expect(mocks.saveChanges).toHaveBeenCalledTimes(1);
+    expect(save.getAttribute("aria-label")).toBe("Saving");
+    expect(save.getAttribute("aria-busy")).toBe("true");
+    expect(save.disabled).toBe(false);
+    expect(document.activeElement).toBe(save);
+
+    await act(async () => request.resolve(saved(REV_2)));
+    await settle();
+    expect(query("code-save-button")).toBe(save);
+    expect(file()).toMatchObject({ generated: "edited", modified: "edited" });
+    expect(save.getAttribute("aria-label")).toBe("Save");
+    expect(save.hasAttribute("aria-busy")).toBe(false);
+    expect(save.getAttribute("aria-disabled")).toBe("true");
+    expect(save.disabled).toBe(false);
+    expect(document.activeElement).toBe(save);
   });
 
   it("dims a clean Save from the first frame it is shown in", async () => {
@@ -372,6 +399,119 @@ describe("FilesPanel one Save", () => {
       mocks.runtime.runtimeReady = false;
       mocks.fetchStatus.mockResolvedValue(null);
     }
+  });
+
+  it("keeps a known-clean legacy version action focusable without saving again", async () => {
+    mocks.versioning.mode = "legacy";
+    mocks.runtime.runtimeReady = true;
+    mocks.fetchStatus.mockResolvedValue({ supported: true, dirtyPaths: [] });
+    await render([buffer({ modified: "saved", baseRev: undefined, blobOid: undefined, originId: undefined })]);
+    await settle();
+    const save = query("code-save-button")!;
+    expect(save.disabled).toBe(false);
+    expect(save.getAttribute("aria-disabled")).toBe("true");
+    save.focus();
+    await act(async () => save.click());
+    expect(document.activeElement).toBe(save);
+    expect(mocks.syncToRemote).not.toHaveBeenCalled();
+    expect(mocks.write).not.toHaveBeenCalled();
+  });
+
+  it.each(["unavailable", "unsupported", "failed"] as const)(
+    "still allows saving a legacy version when Git status is %s",
+    async (status) => {
+      mocks.versioning.mode = "legacy";
+      mocks.runtime.runtimeReady = true;
+      if (status === "unsupported") mocks.fetchStatus.mockResolvedValue({ supported: false, dirtyPaths: [] });
+      if (status === "failed") mocks.fetchStatus.mockRejectedValue(new Error("Status unavailable"));
+      mocks.syncToRemote.mockResolvedValue({ ok: true });
+      await render([buffer({ modified: "saved", baseRev: undefined, blobOid: undefined, originId: undefined })]);
+      await settle();
+      const save = query("code-save-button")!;
+      expect(saveUnavailable()).toBe(false);
+      save.focus();
+      await act(async () => save.click());
+      await settle();
+      expect(mocks.syncToRemote).toHaveBeenCalledExactlyOnceWith({
+        projectId: "space-a", runtimeId: "runtime-1", message: "Save version: README.md", paths: ["README.md"],
+      });
+      expect(mocks.write).not.toHaveBeenCalled();
+      expect(save.getAttribute("aria-disabled")).toBe("true");
+      expect(save.disabled).toBe(false);
+      expect(document.activeElement).toBe(save);
+    },
+  );
+
+  it("saves known workspace changes as a version even when the editor buffer is clean", async () => {
+    const request = deferred<{ ok: boolean }>();
+    mocks.versioning.mode = "legacy";
+    mocks.runtime.runtimeReady = true;
+    mocks.fetchStatus.mockResolvedValue({ supported: true, dirtyPaths: [{ path: "README.md" }] });
+    mocks.syncToRemote.mockReturnValueOnce(request.promise);
+    await render([buffer({ modified: "saved", baseRev: undefined, blobOid: undefined, originId: undefined })]);
+    await settle();
+    const save = query("code-save-button")!;
+    expect(saveUnavailable()).toBe(false);
+    expect(container.querySelector('[data-testid="files-save-status"]')?.textContent).toBe("Draft saved · version pending");
+    save.focus();
+    await act(async () => save.click());
+    await settle();
+    expect(mocks.syncToRemote).toHaveBeenCalledTimes(1);
+    expect(mocks.write).not.toHaveBeenCalled();
+    expect(save.getAttribute("aria-label")).toBe("Saving version");
+    expect(save.getAttribute("aria-busy")).toBe("true");
+    expect(save.getAttribute("aria-disabled")).toBe("true");
+    expect(save.disabled).toBe(false);
+    expect(document.activeElement).toBe(save);
+    await act(async () => save.click());
+    expect(mocks.syncToRemote).toHaveBeenCalledTimes(1);
+
+    await act(async () => request.resolve({ ok: true }));
+    await settle();
+    expect(save.getAttribute("aria-label")).toBe("Save version");
+    expect(save.hasAttribute("aria-busy")).toBe(false);
+    expect(save.getAttribute("aria-disabled")).toBe("true");
+    expect(save.disabled).toBe(false);
+    expect(document.activeElement).toBe(save);
+    expect(container.querySelector('[data-testid="files-save-status"]')?.textContent).toBe("Saved");
+  });
+
+  it("keeps a written draft version-pending and retryable after publication fails", async () => {
+    const request = deferred<{ ok: boolean; error: string }>();
+    mocks.versioning.mode = "legacy";
+    mocks.runtime.runtimeReady = true;
+    mocks.fetchStatus.mockResolvedValue({ supported: true, dirtyPaths: [] });
+    mocks.write.mockResolvedValue({ ok: true, path: "README.md", size: 6, rev: null });
+    mocks.syncToRemote.mockReturnValueOnce(request.promise).mockResolvedValueOnce({ ok: true });
+    await render([buffer({ baseRev: undefined, blobOid: undefined, originId: undefined })]);
+    await settle();
+    const save = query("code-save-button")!;
+    save.focus();
+    await act(async () => save.click());
+    await settle();
+    // The write makes the buffer clean before publication finishes. Save must
+    // keep its pending state and focus until the whole operation completes.
+    expect(file()).toMatchObject({ generated: "edited", modified: "edited" });
+    expect(save.getAttribute("aria-busy")).toBe("true");
+    expect(save.disabled).toBe(false);
+    expect(document.activeElement).toBe(save);
+    expect(container.querySelector('[data-testid="files-save-status"]')?.textContent).toBe("Saving…");
+
+    await act(async () => request.resolve({ ok: false, error: "Remote unavailable" }));
+    await settle();
+    expect(save.hasAttribute("aria-busy")).toBe(false);
+    expect(saveUnavailable()).toBe(false);
+    expect(document.activeElement).toBe(save);
+    expect(container.querySelector('[data-testid="files-save-status"]')?.textContent).toBe("Draft saved · version pending");
+    expect(mocks.showStatus).toHaveBeenCalledWith("Unable to save version. Remote unavailable", "error", 6500);
+
+    await act(async () => save.click());
+    await settle();
+    expect(mocks.syncToRemote).toHaveBeenCalledTimes(2);
+    expect(mocks.write).toHaveBeenCalledTimes(1);
+    expect(save.getAttribute("aria-disabled")).toBe("true");
+    expect(document.activeElement).toBe(save);
+    expect(container.querySelector('[data-testid="files-save-status"]')?.textContent).toBe("Saved");
   });
 
   it("saves once on Cmd/Ctrl+S with the buffer's baseRev and blob, then marks it saved", async () => {
@@ -1404,13 +1544,19 @@ describe("FilesPanel one Save", () => {
     mocks.versioning.mode = mode;
     await render([buffer({ modifiedAt: null, size: 12 })]);
     const footer = () => container.querySelector("footer")?.textContent ?? "";
-    expect(footer()).toContain("Size");
+    expect(footer()).toContain("12 B");
     expect(footer()).not.toContain("Modified");
     expect(footer()).not.toContain("\u2014");
+    await act(async () => query("files-viewer-details")?.click());
+    const details = () => document.querySelector('[role="dialog"][aria-label="File details"]')?.textContent ?? "";
+    expect(details()).toContain("Size12 B");
+    expect(details()).not.toContain("Modified");
     await act(async () => root.unmount());
     root = createRoot(container);
     await render([buffer({ modifiedAt: "2026-10-04T10:00:00.000Z" })]);
-    expect(footer()).toContain("Modified");
+    expect(footer()).not.toContain("Modified");
+    await act(async () => query("files-viewer-details")?.click());
+    expect(details()).toContain("Modified");
   });
 
   it("omits save actions for a read-only member", async () => {

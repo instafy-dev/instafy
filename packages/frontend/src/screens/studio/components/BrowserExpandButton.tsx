@@ -19,10 +19,9 @@ export function BrowserExpandButton({
     <Component
       aria-expanded={expanded}
       aria-label={label}
-      className={showLabel ? "w-full min-h-10 justify-start" : "shrink-0 max-[540px]:h-10 max-[540px]:w-10"}
+      className={showLabel ? "w-full justify-start" : "shrink-0"}
       data-testid={testId}
       onPress={onPress}
-      radius="full"
       size="sm"
       title={label}
       variant="ghost"

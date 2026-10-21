@@ -173,19 +173,19 @@ describe("SharedBrowserChrome", () => {
   it("uses the common icon button styling for navigation and expansion", async () => {
     await act(async () => root.render(
       <>
-        <IconButton aria-label="Reference" data-testid="reference-icon-button" radius="full" size="sm" variant="ghost" />
+        <IconButton aria-label="Reference" data-testid="reference-icon-button" size="sm" variant="ghost" />
         <SharedBrowserChrome {...props()} toolbarActions={<BrowserExpandButton expanded={false} onPress={vi.fn()} />} />
       </>,
     ));
     const reference = container.querySelector<HTMLButtonElement>('[data-testid="reference-icon-button"]')!;
-    const allowedClasses = new Set([...reference.classList, "shrink-0", "max-[540px]:h-10", "max-[540px]:w-10"]);
+    const allowedClasses = new Set([...reference.classList, "shrink-0"]);
     for (const testId of ["shared-browser-back", "shared-browser-forward", "shared-browser-reload", "browser-session-fullscreen-toggle"]) {
       const button = container.querySelector<HTMLButtonElement>(`[data-testid="${testId}"]`)!;
       for (const token of reference.classList) expect(button.classList.contains(token)).toBe(true);
       expect([...button.classList].filter((token) => !allowedClasses.has(token))).toEqual([]);
       expect(button.classList.contains("pointer-coarse:min-h-11")).toBe(true);
       expect(button.classList.contains("pointer-coarse:min-w-11")).toBe(true);
-      expect(button.classList.contains("max-[540px]:h-10")).toBe(true);
+      expect(button.classList.contains("max-[540px]:h-10")).toBe(false);
       expect(button.title).toBe(button.getAttribute("aria-label"));
       expect(button.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
     }
@@ -423,7 +423,7 @@ describe("SharedBrowserChrome", () => {
 
     expect(
       container.querySelector('[data-testid="shared-browser-reload"]')?.className,
-    ).toContain("max-[540px]:h-10");
+    ).toContain("pointer-coarse:min-h-11");
     expect(
       container.querySelector('[data-testid="shared-browser-address"]')?.className,
     ).toContain("max-[540px]:h-10");

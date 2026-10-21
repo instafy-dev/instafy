@@ -14,7 +14,7 @@ import { InlineNotice } from "../../../components/InlineNotice";
 import { LIST_ROW_SURFACE_BASE, LIST_ROW_FOCUS_RING, listRowSurfaceToneClassName } from "../../../components/listRowStyles";
 import type { MobilePageHeader } from "./MobileStudioNavigationHeader";
 import { FilesExplorerToolbar } from "./FilesExplorerToolbar";
-import { Heading } from "../../../components/Heading";
+import { ContentHeader } from "../../../components/ContentHeader";
 import { MarkdownPreview } from "../../../components/MarkdownPreview";
 import { type MarkdownOutlineItem } from "../../../components/markdownOutline";
 import { LoadingStatus } from "../../../components/LoadingStatus";
@@ -64,6 +64,7 @@ import {
 } from "./useFilesPanelViewerState";
 import { resolveViewerStateWithoutActiveFile } from "./filesPanelViewerSync";
 import { describeFileViewerFacts } from "./filesViewerFooter";
+import { FileDetailsFooter } from "./FileDetailsFooter";
 import { FilesExplorerTree } from "./FilesExplorerTree";
 import {
   type DirectoryEntries,
@@ -2103,20 +2104,33 @@ export function FilesPanel({
       const ModeIcon = previewingMarkdown ? (projectWriteDisabled ? Code : EditPencil) : Eye;
       const ToolbarAction = isLargeScreen ? Button : IconButton;
       const draftDisabled = projectWriteDisabled || workspaceWritesBlocked || !activeFile || activeFile.modified === activeFile.generated;
+      // Unknown version status still permits saving, but only known changes
+      // earn primary emphasis. Keep that emphasis stable through the save.
+      const hasSaveChanges = Boolean(activeFile && (
+        isFileBufferDirty(activeFile) || (!versioned && activeFileHasVersionChanges === true)
+      ));
+      const saveVariant = hasSaveChanges || (versioned ? versionedSaving : saveMode === "version")
+        ? "primary"
+        : "ghost";
+      const showBackToAssistant = embeddedOpenRequest === undefined && isLargeScreen && activePath && fileViewerReturnTarget === "assistant";
 
       return (
-        <header className={`flex items-center justify-between gap-2 border-b border-slate-200/70 px-4 py-2.5 ${DARK_DIVIDER_BORDER_CLASS}`}>
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
+        <ContentHeader
+          title={title}
+          titleAs="h3"
+          titleText={rawPath || title}
+          titleHidden={embeddedOpenRequest !== undefined}
+          subtitle={subtitle}
+          truncateSubtitle
+          data-testid="files-viewer-header"
+          leading={mobileViewerBackTarget || showBackToAssistant ? <>
               {mobileViewerBackTarget ? (
                 <IconButton
                   onPress={handleMobileViewerBack}
                   variant="ghost"
                   size="sm"
-                  radius="full"
                   aria-label={mobileViewerBackLabel}
                   title={mobileViewerBackLabel}
-                  className="-ml-1 shrink-0"
                   data-testid={
                     mobileViewerBackTarget === "assistant"
                       ? "files-back-to-assistant-button"
@@ -2126,25 +2140,21 @@ export function FilesPanel({
                   <NavArrowLeft className="h-4 w-4" aria-hidden="true" />
                 </IconButton>
               ) : null}
-              {embeddedOpenRequest === undefined && isLargeScreen && activePath && fileViewerReturnTarget === "assistant" ? (
+              {showBackToAssistant ? (
                 <Button
                   onPress={handleOpenChat}
                   variant="ghost"
-                  size="xs"
-                  radius="full"
+                  size="sm"
                   aria-label="Back to Assistant"
                   title="Back to Assistant"
                   tone="muted"
-                  className="-ml-1 shrink-0"
                 >
                   <NavArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
                   Assistant
                 </Button>
               ) : null}
-              <Heading level={3} variant="subtitle" title={title} className={embeddedOpenRequest === undefined ? "truncate" : "sr-only"}>
-                {title}
-              </Heading>
-              {projectWriteDisabled ? (
+          </> : undefined}
+          titleAccessory={projectWriteDisabled ? (
                 <Badge
                   tone="warning"
                   size="xs"
@@ -2154,23 +2164,14 @@ export function FilesPanel({
                   Read-only
                 </Badge>
               ) : null}
-            </div>
-            {subtitle && embeddedOpenRequest === undefined ? (
-              <Text variant="caption" tone="muted" className="truncate">
-                {subtitle}
-              </Text>
-            ) : null}
-          </div>
-          {viewerState.mode === "text" && activeFile ? (
-            <div className="flex shrink-0 items-center justify-end gap-1.5 sm:gap-2">
+          actions={viewerState.mode === "text" && activeFile ? (
+            <>
               {!projectWriteDisabled && !previewingMarkdown && isLargeScreen ? <HistoryControls /> : null}
               {isMarkdownWorkspacePath(activeFile.path) ? (
                 <ToolbarAction
                   onPress={() => setMarkdownView((current) => (current === "preview" ? "edit" : "preview"))}
-                  variant="secondary"
-                  elevation="none"
+                  variant="ghost"
                   size="sm"
-                  radius="full"
                   aria-label={modeLabel}
                   title={modeLabel}
                   data-testid="files-viewer-mode"
@@ -2190,7 +2191,6 @@ export function FilesPanel({
                   variant="ghost"
                   tone="muted"
                   size="sm"
-                  radius="full"
                   data-testid="code-save-draft-button"
                   aria-label={saveMode === "draft" ? "Saving draft" : "Save draft"}
                   title="Save to the workspace without creating a version"
@@ -2203,10 +2203,9 @@ export function FilesPanel({
                   ref={saveButtonRef}
                   onPress={() => { if (isFileBufferDirty(activeFile)) void handleSave(); }}
                   isDisabled={workspaceWritesBlocked || !originAvailable}
-                  variant="primary"
+                  variant={saveVariant}
                   elevation="none"
                   size="sm"
-                  radius="full"
                   className="aria-disabled:pointer-events-none aria-disabled:opacity-60"
                   data-testid="code-save-button"
                   aria-label={versionedSaving ? "Saving" : "Save"}
@@ -2222,10 +2221,9 @@ export function FilesPanel({
                   isDisabled={workspaceWritesBlocked || saveMode === "draft"}
                   className="aria-disabled:pointer-events-none aria-disabled:opacity-60"
                   isPending={saveMode === "version"}
-                  variant="primary"
+                  variant={saveVariant}
                   elevation="none"
                   size="sm"
-                  radius="full"
                   data-testid="code-save-button"
                   aria-label={saveMode === "version" ? "Saving version" : "Save version"}
                   title="Save to the workspace and create a version"
@@ -2236,7 +2234,7 @@ export function FilesPanel({
               )) : null}
               {!projectWriteDisabled && ((!isLargeScreen && !previewingMarkdown) || (!versioned && (!isLargeScreen || previewingMarkdown))) ? (
                 <MenuTrigger>
-                  <IconButton variant="ghost" tone="muted" size="sm" radius="full" isPending={saveMode === "draft"} aria-label={saveMode === "draft" ? "Saving draft" : "File editing actions"} title={saveMode === "draft" ? "Saving draft" : "File editing actions"} data-testid="files-viewer-more">
+                  <IconButton variant="ghost" size="sm" isPending={saveMode === "draft"} aria-label={saveMode === "draft" ? "Saving draft" : "File editing actions"} title={saveMode === "draft" ? "Saving draft" : "File editing actions"} data-testid="files-viewer-more">
                     <MoreHoriz className="h-4 w-4" aria-hidden="true" />
                   </IconButton>
                   <StudioPopover layout="menu" placement="bottom end">
@@ -2257,9 +2255,9 @@ export function FilesPanel({
                   </StudioPopover>
                 </MenuTrigger>
               ) : null}
-            </div>
+            </>
           ) : null}
-        </header>
+        />
       );
     },
     [
@@ -2459,26 +2457,18 @@ export function FilesPanel({
         {viewerHeader}
         <div className={`flex-1 min-h-0 overflow-hidden bg-white ${DARK_PANEL_BG_CLASS}`}>{viewerBody}</div>
         {viewerState.entry && viewerState.entry.kind === "file" ? (
-          <footer className={`border-t border-slate-200/70 px-4 py-2.5 text-xs text-slate-500 ${DARK_DIVIDER_BORDER_CLASS} dark:text-slate-400`}>
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-              {viewerState.mode === "text" && activeFile && !projectWriteDisabled ? (
-                <Text as="span" variant="caption" tone="secondary" role="status" data-testid="files-save-status">
-                  {versionedSaving || saveMode ? "Saving…" : isFileBufferDirty(activeFile) ? "Unsaved changes" :
-                    !versioned && activeFileHasVersionChanges ? "Draft saved · version pending" : "Saved"}
-                </Text>
-              ) : null}
-              {/* Unknown facts are left out: listings without a time (the stateless gateway) have no Modified row. */}
-              {describeFileViewerFacts({
-                size: viewerState.entry.size ?? activeFile?.size ?? null,
-                modified: viewerModifiedAt,
-                mimeType: viewerState.entry.mimeType,
-              }).map((fact) => (
-                <span key={fact.label}>
-                  {fact.label} · {fact.value}
-                </span>
-              ))}
-            </div>
-          </footer>
+          <FileDetailsFooter
+            key={viewerState.entry.path}
+            status={viewerState.mode === "text" && activeFile && !projectWriteDisabled
+              ? versionedSaving || saveMode ? "Saving…" : isFileBufferDirty(activeFile) ? "Unsaved changes" :
+                !versioned && activeFileHasVersionChanges ? "Draft saved · version pending" : "Saved"
+              : null}
+            facts={describeFileViewerFacts({
+              size: viewerState.entry.size ?? activeFile?.size ?? null,
+              modified: viewerModifiedAt,
+              mimeType: viewerState.entry.mimeType,
+            })}
+          />
         ) : null}
       </div>
     ),

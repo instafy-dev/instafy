@@ -2562,10 +2562,6 @@ export function BrowserSessionModal({
     [fallBackFromViewer],
   );
 
-  const compactGhostButtonClass =
-    "text-slate-500 hover:bg-slate-100 hover:text-slate-700 data-[hovered]:bg-slate-100 data-[hovered]:text-slate-700 dark:text-slate-400 dark:hover:bg-slate-900 dark:hover:text-slate-200 dark:data-[hovered]:bg-slate-900 dark:data-[hovered]:text-slate-200";
-  const compactPrimaryButtonClass =
-    "bg-primary-600 text-white hover:bg-primary-700 data-[hovered]:bg-primary-700";
   const viewportSurfaceClass =
     displayStatus === "connected" && !error
       ? "bg-black"
@@ -2668,11 +2664,10 @@ export function BrowserSessionModal({
               <IconButton
                 variant="primary"
                 size="sm"
-                radius="full"
                 onPress={() => setFullscreen(true)}
                 aria-label="Open browser fullscreen"
                 title="Open browser fullscreen"
-                className={compactPrimaryButtonClass}
+                elevation="none"
                 onClick={(event) => event.stopPropagation()}
               >
                 <Expand className="h-4 w-4" aria-hidden="true" />
@@ -2716,11 +2711,10 @@ export function BrowserSessionModal({
                 <IconButton
                   variant="ghost"
                   size="sm"
-                  radius="full"
                   onPress={closeBrowserSession}
                   aria-label="Hide browser session"
                   title="Hide browser session"
-                  className={compactGhostButtonClass}
+                  tone="muted"
                   onClick={(event) => event.stopPropagation()}
                 >
                   <Xmark className="h-4 w-4" aria-hidden="true" />
@@ -2728,11 +2722,10 @@ export function BrowserSessionModal({
                 <IconButton
                   variant="primary"
                   size="sm"
-                  radius="full"
                   onPress={() => setFullscreen(true)}
                   aria-label="Open browser fullscreen"
                   title="Open browser fullscreen"
-                  className={compactPrimaryButtonClass}
+                  elevation="none"
                   onClick={(event) => event.stopPropagation()}
                 >
                   <Expand className="h-4 w-4" aria-hidden="true" />
@@ -2843,7 +2836,7 @@ export function BrowserSessionModal({
               <BrowserIdentityBadge className={fillContainer ? "inline-flex" : "hidden sm:inline-flex"} />
             )}
           </div>
-          <div className="flex flex-none items-center gap-1">
+          <div className="flex flex-none items-center gap-2">
             {humanInputControls}
             {renderSessionControls()}
             {!forceViewportFullscreenDocked ? (
@@ -2855,11 +2848,10 @@ export function BrowserSessionModal({
             <IconButton
               variant="ghost"
               size="xs"
-              radius="full"
               onPress={returnToChat}
               aria-label={returnToChatLabel}
               title={returnToChatLabel}
-              className="text-slate-400 hover:text-slate-700 data-[hovered]:text-slate-700 dark:text-slate-500 dark:hover:text-slate-200 dark:data-[hovered]:text-slate-200"
+              tone="muted"
             >
               <Xmark className="h-4 w-4" aria-hidden="true" />
             </IconButton>

@@ -220,13 +220,13 @@ export function ComposerInviteProjectAccessSection({
         <div className="flex items-center gap-2">
           <IconButton
             type="button"
-            variant="outline"
+            variant="ghost"
             size="sm"
-            radius="full"
             onPress={onShowNearbyQr}
+            isPending={nearbyQrPendingRole === accessRole}
             isDisabled={
               !sharingTargetReady ||
-              nearbyQrPendingRole !== null ||
+              (nearbyQrPendingRole !== null && nearbyQrPendingRole !== accessRole) ||
               nearbySharePendingRole !== null ||
               inviteLinkRevokePendingId !== null
             }
@@ -235,18 +235,13 @@ export function ComposerInviteProjectAccessSection({
             aria-label={activeNearbyInviteUrl ? "Refresh QR code" : "Show QR code"}
             title={activeNearbyInviteUrl ? "Refresh QR" : "Show QR"}
           >
-            {nearbyQrPendingRole === accessRole ? (
-              <Spinner aria-hidden="true" tone="primary" size="xs" />
-            ) : (
-              <QrCode className="h-4 w-4" aria-hidden="true" />
-            )}
+            <QrCode className="h-4 w-4" aria-hidden="true" />
           </IconButton>
           {nearbyShareAvailable ? (
             <IconButton
               type="button"
               variant="ghost"
               size="sm"
-              radius="full"
               onPress={onNearbyShare}
               isDisabled={
                 !sharingTargetReady ||

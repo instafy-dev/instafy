@@ -658,7 +658,6 @@ export function ParticipantsDrawer({
           <IconButton
             variant="ghost"
             size="sm"
-            radius="full"
             onPress={onClose}
             aria-label="Close participants"
             tone="muted"

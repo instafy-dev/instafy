@@ -31,13 +31,15 @@ describe("Button", () => {
   it("makes preset geometry exclusive while keeping custom controls compatible", () => {
     expectTypeOf<{ preset: "inline"; variant: "primary" }>().toExtend<ButtonProps>();
     expectTypeOf<{ preset: "form"; variant: "ghost" }>().toExtend<ButtonProps>();
+    expectTypeOf<{ preset: "toolbar"; variant: "ghost" }>().toExtend<ButtonProps>();
     expectTypeOf<{ preset: "inline"; size: "xs" }>().not.toExtend<ButtonProps>();
     expectTypeOf<{ preset: "inline"; radius: "full" }>().not.toExtend<ButtonProps>();
     expectTypeOf<{ preset: "form"; elevation: "raised" }>().not.toExtend<ButtonProps>();
+    expectTypeOf<{ preset: "toolbar"; radius: "full" }>().not.toExtend<ButtonProps>();
     expectTypeOf<{ size: "xs"; radius: "full"; elevation: "raised" }>().toExtend<ButtonProps>();
   });
 
-  it.each(["inline", "form"] as const)("preserves the %s action's ref, name and pending behavior", async (preset) => {
+  it.each(["inline", "form", "toolbar"] as const)("preserves the %s action's ref, name and pending behavior", async (preset) => {
     const ref = { current: null as HTMLButtonElement | null };
     const onPress = vi.fn();
     const button = await render(<Button ref={ref} preset={preset} variant="primary" onPress={onPress}>Apply</Button>);

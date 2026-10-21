@@ -530,6 +530,45 @@ describe("ComposerInviteModal", () => {
     expect(document.querySelector('[data-testid="chat-invite-modal"]')).toBeNull();
   });
 
+  it.each([true, false])("keeps the access QR trigger focusable while preparing and blocks duplicate requests (desktop: %s)", async (isDesktop) => {
+    mockDesktopWidth(isDesktop);
+    mocks.nearbyShareAvailable = true;
+    const link = { acceptPath: "/invite?token=deferred", id: "link-deferred", role: "builder" };
+    let resolveLink!: (result: { success: true; link: typeof link }) => void;
+    mocks.createLink.mockImplementation(() => new Promise((resolve) => { resolveLink = resolve; }));
+    await act(async () => root.render(<ComposerInviteModal {...createProps()} />));
+    await act(async () => { await new Promise(requestAnimationFrame); });
+    const qrTrigger = document.querySelector<HTMLButtonElement>('[data-testid="composer-invite-nearby-show-qr"]')!;
+    const shareTrigger = document.querySelector<HTMLButtonElement>('[data-testid="composer-invite-nearby-share"]')!;
+
+    await act(async () => { qrTrigger.focus(); qrTrigger.click(); });
+    expect(mocks.createLink).toHaveBeenCalledTimes(1);
+    expect(qrTrigger.disabled).toBe(false);
+    expect(qrTrigger.getAttribute("aria-disabled")).toBe("true");
+    expect(document.activeElement).toBe(qrTrigger);
+    expect(shareTrigger.disabled).toBe(true);
+    await act(async () => { qrTrigger.click(); shareTrigger.click(); });
+    expect(mocks.createLink).toHaveBeenCalledTimes(1);
+    expect(mocks.shareNearbyInvite).not.toHaveBeenCalled();
+
+    await act(async () => {
+      mocks.inviteLinks = [link];
+      resolveLink({ success: true, link });
+    });
+    await act(async () => { await new Promise(requestAnimationFrame); });
+    const closeQr = document.querySelector<HTMLButtonElement>('[aria-label="Close QR code"]')!;
+    expect(closeQr).not.toBeNull();
+    await act(async () => { closeQr.focus(); closeQr.click(); });
+    await act(async () => { await new Promise(requestAnimationFrame); });
+    expect(document.querySelector('[data-testid="composer-invite-nearby-qr-modal"]')).toBeNull();
+    // Nested focus-scope teardown restores focus asynchronously; observing the
+    // result is reliable even when it runs after this test's animation frame.
+    await vi.waitFor(() => expect(document.activeElement).toBe(qrTrigger));
+    expect(qrTrigger.disabled).toBe(false);
+    expect(qrTrigger.hasAttribute("aria-disabled")).toBe(false);
+    expect(shareTrigger.disabled).toBe(false);
+  });
+
   it("shares a prepared device link without creating an invitation", async () => {
     mocks.nearbyShareAvailable = true;
     await act(async () => root.render(<ComposerInviteModal {...createProps()} />));

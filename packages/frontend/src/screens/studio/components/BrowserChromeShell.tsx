@@ -55,9 +55,8 @@ export function BrowserStatusPill({
         type="button"
         aria-label="Resume agent control"
         variant="secondary"
-        radius="full"
-        size="xs"
-        className="h-8 shrink-0 max-[540px]:min-h-10"
+        size="sm"
+        className="shrink-0"
         data-testid={testId}
         isDisabled={resume.disabled}
         onPress={resume.onPress}
@@ -147,7 +146,7 @@ export function BrowserChromeShell({
         ref={toolbarRef}
         aria-busy={busy || undefined}
         aria-label={label}
-        className={`flex w-full min-w-0 flex-nowrap items-center gap-1 overflow-hidden border-b border-slate-200 bg-slate-50 px-2 max-[400px]:px-1 dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-panel-soft)] ${compact ? "h-12 pointer-coarse:h-13" : "h-11 max-[540px]:h-auto max-[540px]:flex-wrap max-[400px]:gap-0.5"}`}
+        className={`flex w-full min-w-0 flex-nowrap items-center gap-1 overflow-hidden border-b border-slate-200 bg-slate-50 px-2 max-[400px]:px-1 dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-panel-soft)] ${compact ? "min-h-12 py-1" : "h-11 max-[540px]:h-auto max-[540px]:flex-wrap max-[540px]:py-1 max-[400px]:gap-0.5"}`}
         data-testid={testId}
         data-browser-session-safe-zone="true"
         role="toolbar"
@@ -157,7 +156,7 @@ export function BrowserChromeShell({
         <div className={`min-w-0 flex-1 ${compact ? "" : "max-[540px]:basis-24"}`}>{address}</div>
         {status || actions ? (
           <div
-            className={`flex shrink-0 items-center gap-1 ${compact ? "" : "max-[540px]:order-last max-[540px]:min-h-10 max-[540px]:w-full max-[540px]:basis-full max-[540px]:justify-between"}`}
+            className={`flex shrink-0 items-center gap-2 ${compact ? "" : "max-[540px]:order-last max-[540px]:min-h-10 max-[540px]:w-full max-[540px]:basis-full max-[540px]:justify-between"}`}
             data-testid="browser-chrome-context-row"
           >
             {status ? (
@@ -169,7 +168,7 @@ export function BrowserChromeShell({
               </div>
             ) : null}
             {actions ? (
-              <div className={`flex min-w-0 shrink-0 items-center max-[540px]:flex-1 max-[540px]:justify-end max-[540px]:overflow-hidden ${compact ? "gap-1" : "gap-0.5"}`}>
+              <div className="flex min-w-0 shrink-0 items-center gap-2 max-[540px]:flex-1 max-[540px]:justify-end">
                 {actions}
               </div>
             ) : null}
@@ -192,9 +191,8 @@ export function BrowserChromeShell({
             <IconButton
               aria-label="Dismiss browser message"
               size="xs"
-              radius="full"
               variant="ghost"
-              className="shrink-0 max-[540px]:h-10 max-[540px]:w-10"
+              className="shrink-0"
               onPress={onDismissFeedback}
               title="Dismiss"
               type="button"

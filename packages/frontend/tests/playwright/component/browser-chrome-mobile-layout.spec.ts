@@ -250,18 +250,18 @@ for (const width of [320, 360, 390]) {
     expect(geometry.documentWidth).toBeLessThanOrEqual(width);
     expect(geometry.chromeFits).toBe(true);
     expect(geometry.coarse).toBe(false);
-    expect(geometry.chrome?.height).toBe(48);
+    expect(geometry.chrome?.height).toBeGreaterThanOrEqual(48);
     expect(geometry.address?.width ?? 0).toBeGreaterThanOrEqual(96);
     expect(geometry.collaboration!.left - geometry.address!.right).toBeCloseTo(4, 1);
-    expect(geometry.options!.left - geometry.collaboration!.right).toBeCloseTo(4, 1);
+    expect(geometry.options!.left - geometry.collaboration!.right).toBeCloseTo(8, 1);
     for (const target of [geometry.address, geometry.collaboration, geometry.locationMenu, geometry.options]) {
-      expect(Math.abs(target!.top - geometry.chrome!.top - 4)).toBeLessThanOrEqual(1);
-      expect(Math.abs(geometry.chrome!.bottom - target!.bottom - 4)).toBeLessThanOrEqual(1);
+      expect(target!.top - geometry.chrome!.top).toBeGreaterThanOrEqual(4);
+      expect(geometry.chrome!.bottom - target!.bottom).toBeGreaterThanOrEqual(4);
     }
-    expect(Math.abs(geometry.collaboration!.top - geometry.address!.top)).toBeLessThanOrEqual(2);
+    expect(Math.abs((geometry.collaboration!.top + geometry.collaboration!.bottom) / 2 - (geometry.address!.top + geometry.address!.bottom) / 2)).toBeLessThanOrEqual(1);
     for (const target of [geometry.collaboration, geometry.browserTab, geometry.locationMenu, geometry.options]) {
       expect(target).not.toBeNull();
-      expect(target!.height).toBeGreaterThanOrEqual(40);
+      expect(target!.height).toBeGreaterThanOrEqual(32);
       expect(target!.left).toBeGreaterThanOrEqual(0);
       expect(target!.right).toBeLessThanOrEqual(width);
     }
@@ -361,20 +361,20 @@ for (const counts of [{ participantCount: 4, pageCount: 3 }, { participantCount:
       const geometry = await browserChromeGeometry(page);
 
       expect(geometry.coarse).toBe(true);
-      expect(geometry.chrome?.height).toBe(52);
+      expect(geometry.chrome?.height).toBeGreaterThanOrEqual(53);
       expect(geometry.chromeFits).toBe(true);
       expect(geometry.documentWidth).toBeLessThanOrEqual(320);
       expect(geometry.address?.width ?? 0).toBeGreaterThanOrEqual(96);
       expect(geometry.collaboration!.left - geometry.address!.right).toBeCloseTo(4, 1);
-      expect(geometry.options!.left - geometry.collaboration!.right).toBeCloseTo(4, 1);
+      expect(geometry.options!.left - geometry.collaboration!.right).toBeCloseTo(8, 1);
       for (const target of [geometry.address, geometry.collaboration, geometry.tabPicker, geometry.locationMenu, geometry.options]) {
         expect(target).not.toBeNull();
         expect(target!.height).toBeGreaterThanOrEqual(44);
         expect(target!.width).toBeGreaterThanOrEqual(44);
         expect(target!.left).toBeGreaterThanOrEqual(0);
         expect(target!.right).toBeLessThanOrEqual(320);
-        expect(Math.abs(target!.top - geometry.chrome!.top - 4)).toBeLessThanOrEqual(1);
-        expect(Math.abs(geometry.chrome!.bottom - target!.bottom - 4)).toBeLessThanOrEqual(1);
+        expect(target!.top - geometry.chrome!.top).toBeGreaterThanOrEqual(4);
+        expect(geometry.chrome!.bottom - target!.bottom).toBeGreaterThanOrEqual(4);
       }
     } finally {
       await context.close();

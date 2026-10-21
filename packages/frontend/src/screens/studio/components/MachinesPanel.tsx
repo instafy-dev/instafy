@@ -70,9 +70,8 @@ function AssignAgentMenu({
         ref={triggerRef}
         type="button"
         variant="ghost"
-        size="sm"
+        preset="inline"
         tone="neutral"
-        radius="full"
         isDisabled={disabledReason != null}
         aria-label={`Pin an agent to ${machine.label}`}
         aria-haspopup="menu"
