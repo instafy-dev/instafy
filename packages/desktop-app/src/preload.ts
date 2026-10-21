@@ -337,6 +337,14 @@ contextBridge.exposeInMainWorld("instafyDesktop", {
   localHardwareSerialProbe: async (options: { path: string }): Promise<SerialPortProbeResult> => {
     return (await ipcRenderer.invoke("instafy:localHardwareSerialProbe", options)) as SerialPortProbeResult;
   },
+  /** Whether Instafy itself may use location: "granted", "denied" or "ask" (not answered yet). */
+  locationPermissionStatus: async (): Promise<{ state: "granted" | "denied" | "ask" }> => {
+    return (await ipcRenderer.invoke("instafy:locationPermissionStatus")) as { state: "granted" | "denied" | "ask" };
+  },
+  /** Forget the answer so the next location request asks again. Cannot grant. */
+  resetLocationPermission: async (): Promise<{ state: "granted" | "denied" | "ask" }> => {
+    return (await ipcRenderer.invoke("instafy:locationPermissionReset")) as { state: "granted" | "denied" | "ask" };
+  },
   desktopUpdaterStatus: async (): Promise<DesktopUpdaterStatus> => {
     return (await ipcRenderer.invoke("instafy:desktopUpdaterStatus")) as DesktopUpdaterStatus;
   },

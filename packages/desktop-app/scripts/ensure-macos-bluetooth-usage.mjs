@@ -5,6 +5,17 @@ import path from "node:path";
 
 export const BLUETOOTH_USAGE_DESCRIPTION =
   "Instafy Studio uses Bluetooth to connect to hardware selected by you.";
+// Without a location usage string macOS never offers the location prompt, so
+// Studio's geolocation (and the one in-app question in front of it) would
+// always fail in the dev bundle. Same text as package.json's extendInfo.
+export const LOCATION_USAGE_DESCRIPTION =
+  "Instafy uses your location when a site you open asks for it. You'll see a location marker when one does.";
+export const MACOS_USAGE_DESCRIPTIONS = {
+  NSBluetoothAlwaysUsageDescription: BLUETOOTH_USAGE_DESCRIPTION,
+  NSBluetoothPeripheralUsageDescription: BLUETOOTH_USAGE_DESCRIPTION,
+  NSLocationUsageDescription: LOCATION_USAGE_DESCRIPTION,
+  NSLocationWhenInUseUsageDescription: LOCATION_USAGE_DESCRIPTION,
+};
 const DEV_BUNDLE_IDENTIFIER = "dev.instafy.studio.dev";
 const DEV_BUNDLE_NAME = "Instafy Studio";
 
@@ -117,12 +128,9 @@ export function ensureMacosBluetoothUsageDescription(appBinaryPath) {
     return appBinaryPath;
   }
 
-  upsertPlistString(infoPlistPath, "NSBluetoothAlwaysUsageDescription", BLUETOOTH_USAGE_DESCRIPTION);
-  upsertPlistString(
-    infoPlistPath,
-    "NSBluetoothPeripheralUsageDescription",
-    BLUETOOTH_USAGE_DESCRIPTION,
-  );
+  for (const [key, value] of Object.entries(MACOS_USAGE_DESCRIPTIONS)) {
+    upsertPlistString(infoPlistPath, key, value);
+  }
   upsertPlistString(infoPlistPath, "CFBundleIdentifier", DEV_BUNDLE_IDENTIFIER);
   upsertPlistString(infoPlistPath, "CFBundleName", DEV_BUNDLE_NAME);
   upsertPlistString(infoPlistPath, "CFBundleDisplayName", DEV_BUNDLE_NAME);

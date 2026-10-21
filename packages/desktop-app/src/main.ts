@@ -1,5 +1,12 @@
 import { resolveDesktopNotificationClickTargetUrl, resolveDesktopNotificationBody } from "./deepLinks";
 import { registerStudioWindow, getStudioWindow, getStudioWindows } from "./desktopWindows";
+import {
+  STUDIO_LOCATION_PROMPT,
+  createStudioPermissionHandlers,
+  parseStoredStudioLocationConsent,
+  type StoredStudioLocationConsent,
+  type StudioLocationPermissionState,
+} from "./studioPermissions";
 import { BrowserWindow, Menu, Notification, app, dialog, ipcMain, net, shell } from "electron";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -221,6 +228,8 @@ type DesktopAppConfig = {
   projectWorkspaceDirs?: Record<string, string>;
   desktopVoiceHostEnabled?: boolean;
   desktopHardwareHostId?: string;
+  /** The one-time answer to "Allow Instafy to use your location?". */
+  studioLocationConsent?: StoredStudioLocationConsent;
 };
 
 type DesktopLocalHardwareHostStatus = {
@@ -474,6 +483,73 @@ function writeConfig(next: DesktopAppConfig) {
   fs.writeFileSync(filePath, JSON.stringify(next, null, 2), "utf8");
 }
 
+// Studio's session has no permission handler by default, and Electron then
+// grants everything -- including geolocation to any page framed inside Studio.
+// One handler set, shared by every Studio window, so a question already open
+// is never asked twice. See studioPermissions.ts for the policy.
+const studioPermissionHandlers = createStudioPermissionHandlers<Electron.WebContents>({
+  getStudioOrigin: () => getAllowedOrigin(),
+  isStudioContents: (contents) =>
+    Boolean(contents) && getStudioWindows().some((window) => window.webContents === contents),
+  readConsent: () => parseStoredStudioLocationConsent(readConfig().studioLocationConsent),
+  writeConsent: (consent) => {
+    const next = { ...readConfig() };
+    if (consent) {
+      next.studioLocationConsent = consent;
+    } else {
+      delete next.studioLocationConsent;
+    }
+    writeConfig(next);
+  },
+  askUser: async (contents) => {
+    const window = BrowserWindow.fromWebContents(contents);
+    const options: Electron.MessageBoxOptions = {
+      type: "question",
+      buttons: [STUDIO_LOCATION_PROMPT.allowLabel, STUDIO_LOCATION_PROMPT.denyLabel],
+      defaultId: 0,
+      cancelId: 1,
+      message: STUDIO_LOCATION_PROMPT.message,
+      detail: STUDIO_LOCATION_PROMPT.detail,
+    };
+    const result = window && !window.isDestroyed()
+      ? await dialog.showMessageBox(window, options)
+      : await dialog.showMessageBox(options);
+    return result.response === 0;
+  },
+  log: (event, payload) => desktopLog("info", `[instafy-desktop] ${event}`, payload),
+});
+
+function installStudioPermissionHandlers(window: BrowserWindow) {
+  const studioSession = window.webContents.session;
+  studioSession.setPermissionRequestHandler(studioPermissionHandlers.requestHandler);
+  studioSession.setPermissionCheckHandler(studioPermissionHandlers.checkHandler);
+}
+
+function describeStudioLocationPermission(state: StudioLocationPermissionState): string {
+  if (state === "granted") return "Instafy can use your location.";
+  if (state === "denied") return "Instafy is not allowed to use your location.";
+  return "Instafy will ask the first time a site wants your location.";
+}
+
+async function showStudioLocationPermissionDialog() {
+  const state = studioPermissionHandlers.locationPermissionState();
+  const window = getStudioWindow();
+  const options: Electron.MessageBoxOptions = state === "ask"
+    ? { type: "info", buttons: ["OK"], message: describeStudioLocationPermission(state) }
+    : {
+        type: "info",
+        buttons: ["Reset", "Cancel"],
+        defaultId: 1,
+        cancelId: 1,
+        message: describeStudioLocationPermission(state),
+        detail: "Reset to be asked again the next time a site wants your location.",
+      };
+  const result = window ? await dialog.showMessageBox(window, options) : await dialog.showMessageBox(options);
+  if (state !== "ask" && result.response === 0) {
+    studioPermissionHandlers.resetLocationPermission();
+  }
+}
+
 function getShortHostname(): string {
   return os.hostname().split(".")[0]?.trim() || os.hostname();
 }
@@ -637,6 +713,7 @@ function createMainWindow(initialUrl?: string) {
     }
   });
   registerStudioWindow(mainWindow);
+  installStudioPermissionHandlers(mainWindow);
   const mainWebContentsId = mainWindow.webContents.id;
   studioRendererGenerations.set(mainWebContentsId, { generation: 0, acceptsIpc: false });
   personalBrowserHost?.attachWindow(mainWindow);
@@ -2528,6 +2605,18 @@ app.whenReady().then(() => {
     },
   );
 
+  // Studio's settings can show and reset the remembered location answer. There
+  // is deliberately no IPC to grant it: only the native question can.
+  ipcMain.handle("instafy:locationPermissionStatus", async (event) => {
+    assertAllowedCaller(event);
+    return { state: studioPermissionHandlers.locationPermissionState() };
+  });
+
+  ipcMain.handle("instafy:locationPermissionReset", async (event) => {
+    assertAllowedCaller(event);
+    return { state: studioPermissionHandlers.resetLocationPermission() };
+  });
+
   ipcMain.handle("instafy:desktopUpdaterStatus", async (event) => {
     assertAllowedCaller(event);
     return desktopUpdaterStatus;
@@ -3115,6 +3204,12 @@ function installDesktopApplicationMenu() {
                 void checkForDesktopUpdatesInteractively();
               },
             },
+            {
+              label: "Location Permission…",
+              click: () => {
+                void showStudioLocationPermissionDialog();
+              },
+            },
             { type: "separator" },
             { role: "quit" },
           ],
@@ -3139,6 +3234,12 @@ function installDesktopApplicationMenu() {
             label: "Check for Updates\u2026",
             click: () => {
               void checkForDesktopUpdatesInteractively();
+            },
+          },
+          {
+            label: "Location Permission\u2026",
+            click: () => {
+              void showStudioLocationPermissionDialog();
             },
           },
           { type: "separator" },

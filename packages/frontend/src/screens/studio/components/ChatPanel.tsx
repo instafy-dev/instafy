@@ -365,6 +365,8 @@ import { ConversationFileContext } from "../../../workspace/ConversationFileCont
 import { ConversationPreviewContext, type ConversationPreviewOpener } from "../../../workspace/ConversationPreviewContext";
 import { conversationSurfaceScope, closeConversationFile, closeConversationPreview, conversationFileLabel, conversationResourceId, openConversationFile, openConversationPreview, selectConversationView, visibleSitePreviewId } from "../../../workspace/conversationSurfaces";
 import { SitePreviewPanel } from "./SitePreviewPanel";
+import { previewTabLocation } from "./previewHost/PreviewLocation";
+import { useLocationSitesVersion } from "./previewHost/locationSites";
 import type { OpenWorkspaceFileEventDetail } from "./useFilesPanelViewerState";
 import { FilesPanel } from "../StudioLazyPanels";
 import {
@@ -757,6 +759,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const browserSubtab = surfaces.activeId;
   const [surfaceWidth, setSurfaceWidth] = useState(0);
   const hasBrowserView = browserSessionOpen || hasHiddenBrowserSession;
+  // Each preview tab shows its site's 📍 while that site has the person's location.
+  useLocationSitesVersion();
   const hasResources = hasBrowserView || surfaces.files.length > 0 || surfaces.previews.length > 0;
   const resourceId = conversationResourceId(surfaces, hasBrowserView);
   const activeSurfaceId = conversationWorkspace && jobThread ? "chat" : surfaces.activeId === "browser" && !hasBrowserView ? "chat" : surfaces.activeId;
@@ -5857,6 +5861,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     ...surfaces.previews.map(preview => ({
       id: preview.id, label: preview.title, title: preview.title,
       panelId: sitePreviewPanelId, icon: <WebWindow className="h-3.5 w-3.5" />,
+      ...previewTabLocation(preview.previewId, preview.title),
       onClose: () => updateSurfaces(surfaceScope, state => closeConversationPreview(state, preview.id, hasBrowserView)),
     })),
   ];
@@ -6245,6 +6250,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     ) : null}
     {surfaces.previews.length > 0 && activeProjectId ? (
       <SitePreviewPanel id={sitePreviewPanelId} label={selectedPreview?.title ?? "Preview"} projectId={activeProjectId} scope={surfaceScope}
+        spaceName={projectList.find(entry => entry.id === activeProjectId)?.name ?? null}
         previews={surfaces.previews} visiblePreviewId={visiblePreviewId} style={!splitSurfaces ? { paddingBottom: composerOverlayHeight } : undefined} />
     ) : null}
   </>;

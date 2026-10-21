@@ -16,6 +16,10 @@ import {
 } from "../../../services/runtimeController/previews";
 import { reserveExternalWindow } from "../../../utils/openExternalUrl";
 import { BrowserChromeShell, BrowserStatusPill, type BrowserChromeState } from "./BrowserChromeShell";
+import { withHostQuery } from "./previewHost/hostMessages";
+import { useSiteHost, type SiteMessageEvent, type SiteRecord } from "./previewHost/useSiteHost";
+import { setLocationStopped } from "./previewHost/locationSites";
+import { LocationBarControl, LocationBlockedNotice, LocationToast } from "./previewHost/PreviewLocation";
 
 export const SITE_PREVIEW_HEALTH_POLL_MS = 15_000;
 /** While the frame is on screen: keeps a quiet site's session alive. */
@@ -24,9 +28,11 @@ export const SITE_PREVIEW_FRAME_SANDBOX = "allow-scripts allow-same-origin allow
 export const SITE_PREVIEW_FRAME_ALLOW = "fullscreen; clipboard-write";
 
 /**
- * The only message the pane reads from its frame. The broker's error pages
+ * The status message the pane reads from its frame. The broker's error pages
  * report their status with it, but any page on this preview's origin can send
- * it, the site itself included.
+ * it, the site itself included. Everything else from the frame goes to the
+ * site host channel (previewHost/useSiteHost): the layout handshake and
+ * location requests, read as data, never as commands.
  */
 export const SITE_PREVIEW_MESSAGE_TYPE = "instafy-preview";
 
@@ -117,18 +123,22 @@ function statusDetail(state: SitePreviewPaneState, port: number | null): string 
  * heartbeat each mint one new session; a second loss in a row ends it, so a
  * removed member never loops. Showing the pane again allows one more.
  */
-export function SitePreviewPane({ projectId, previewId, title, visible }: {
+export function SitePreviewPane({ projectId, previewId, title, visible, spaceName = null }: {
   projectId: string;
   previewId: string;
   title: string;
   /** On screen now: health polls and heartbeats run only while it is. */
   visible: boolean;
+  /** The space's name, for the list of sites that received the person's location. */
+  spaceName?: string | null;
 }) {
   const frame = useRef<HTMLIFrameElement>(null);
   const [viewerUrl, setViewerUrl] = useState<string | null>(null);
   const [session, setSession] = useState<SessionState>("opening");
   const [health, setHealth] = useState<HealthState>("checking");
   const [port, setPort] = useState<number | null>(null);
+  /** The record's title, port and path: what keys this site for location. */
+  const [record, setRecord] = useState<SiteRecord | null>(null);
   const [frameKey, setFrameKey] = useState(0);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [openingTab, setOpeningTab] = useState(false);
@@ -138,6 +148,8 @@ export function SitePreviewPane({ projectId, previewId, title, visible }: {
   const mintAttempt = useRef(0);
   const wasVisible = useRef(visible);
   const beatWhenShown = useRef(false);
+  /** The site host channel's reader, set once the hook below has run. */
+  const siteMessage = useRef<(event: SiteMessageEvent) => boolean>(() => false);
 
   const revoke = useCallback((url: string | null) => {
     if (url) void revokeSitePreviewViewer(projectId, previewId, url).catch(() => undefined);
@@ -228,6 +240,8 @@ export function SitePreviewPane({ projectId, previewId, title, visible }: {
       const preview = await getSitePreview(projectId, previewId, signal, fresh ? { fresh } : undefined);
       if (signal?.aborted || !mounted.current) return;
       setPort(preview.port);
+      setRecord(current => current && current.title === preview.title && current.port === preview.port && current.path === preview.path
+        ? current : { title: preview.title, port: preview.port, path: preview.path });
       setHealth(sitePreviewShownState(preview));
     } catch (cause) {
       if (signal?.aborted || !mounted.current) return;
@@ -257,6 +271,8 @@ export function SitePreviewPane({ projectId, previewId, title, visible }: {
   const shown: SitePreviewPaneState = session === "ready" ? health : session;
   const frameShown = Boolean(viewerUrl) && session === "ready" && (shown === "checking" || shown === "live" || shown === "not_responding");
   const frameOnScreen = visible && frameShown;
+  const host = useSiteHost({ frame, viewerUrl: frameShown ? viewerUrl : null, frameKey, projectId, previewId, frameOnScreen, record, spaceName });
+  siteMessage.current = host.handleSiteMessage;
   useEffect(() => {
     if (!frameOnScreen || !viewerUrl) return;
     const controller = new AbortController();
@@ -284,7 +300,8 @@ export function SitePreviewPane({ projectId, previewId, title, visible }: {
     const onMessage = (event: MessageEvent) => {
       if (!frame.current || event.source !== frame.current.contentWindow || event.origin !== origin) return;
       const data = event.data as { type?: unknown; status?: unknown } | null;
-      if (!data || typeof data !== "object" || data.type !== SITE_PREVIEW_MESSAGE_TYPE || typeof data.status !== "number") return;
+      if (!data || typeof data !== "object") return;
+      if (data.type !== SITE_PREVIEW_MESSAGE_TYPE || typeof data.status !== "number") { siteMessage.current(event); return; }
       if (data.status === 401) { sessionLost(); return; }
       if (data.status >= 502 && data.status <= 504) setHealth("not_responding");
     };
@@ -353,7 +370,10 @@ export function SitePreviewPane({ projectId, previewId, title, visible }: {
             <span className="min-w-0 truncate font-medium" data-testid="site-preview-title" title={title}>{title}</span>
           </div>
         }
-        status={<BrowserStatusPill state={chromeState(shown)} detail={detail} testId="site-preview-status" />}
+        status={<>
+          <LocationBarControl site={host.location.site} status={host.location.status} />
+          <BrowserStatusPill state={chromeState(shown)} detail={detail} testId="site-preview-status" />
+        </>}
         actions={
           <IconButton aria-label="Open in new tab" title="Open in new tab" className="max-[540px]:h-10 max-[540px]:w-10" data-testid="site-preview-open-tab"
             isDisabled={session !== "ready" || openingTab} onPress={openInNewTab} radius="full" size="sm" variant="ghost">
@@ -369,14 +389,20 @@ export function SitePreviewPane({ projectId, previewId, title, visible }: {
           <iframe
             key={frameKey}
             ref={frame}
-            src={viewerUrl}
+            src={withHostQuery(viewerUrl)}
             title={title}
             sandbox={SITE_PREVIEW_FRAME_SANDBOX}
             allow={SITE_PREVIEW_FRAME_ALLOW}
             referrerPolicy="no-referrer"
             className="h-full w-full border-0"
             data-testid="site-preview-frame"
+            onLoad={host.onFrameLoad}
           />
+        ) : null}
+        {host.location.blocked ? <LocationBlockedNotice onDismiss={host.location.dismissBlocked} /> : null}
+        {host.location.toast && host.location.site ? (
+          <LocationToast title={host.location.site.title} onDismiss={host.location.dismissToast}
+            onStop={() => { if (host.location.site) setLocationStopped(host.location.site, true); host.location.dismissToast(); }} />
         ) : null}
         {shown === "opening" ? (
           <div className="absolute inset-0 flex items-center justify-center gap-2 text-sm text-slate-500 dark:text-slate-400">

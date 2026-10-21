@@ -183,6 +183,8 @@ type InstafyDesktopLocalHardwareIoActionRunResult = {
   error?: string | null;
 };
 
+type InstafyDesktopLocationPermissionState = "granted" | "denied" | "ask";
+
 type InstafyDesktopUpdaterStatus = {
   isEnabled: boolean;
   channel: string;
@@ -399,6 +401,10 @@ interface Window {
     localHardwareSerialProbe?: (options: {
       path: string;
     }) => Promise<InstafyDesktopSerialPortProbeResult>;
+    /** Whether Instafy itself may use location (the desktop app's one native question). */
+    locationPermissionStatus?: () => Promise<{ state: InstafyDesktopLocationPermissionState }>;
+    /** Forgets that answer so the next request asks again. There is no way to grant from here. */
+    resetLocationPermission?: () => Promise<{ state: InstafyDesktopLocationPermissionState }>;
     desktopUpdaterStatus?: () => Promise<InstafyDesktopUpdaterStatus>;
     desktopUpdaterCheck?: () => Promise<InstafyDesktopUpdaterStatus>;
     desktopUpdaterDownload?: () => Promise<InstafyDesktopUpdaterStatus>;

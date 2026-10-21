@@ -14,6 +14,8 @@ export type ConversationSurface = {
   icon?: ReactNode;
   dirty?: boolean;
   attention?: ReactNode;
+  /** What `attention` means to a screen reader; defaults to "approval needed". */
+  attentionLabel?: string;
   onClose?: () => void;
 };
 
@@ -72,7 +74,7 @@ export function ConversationSurfaceTabs({
                 ref={node => { if (node) tabs.current.set(view.id, node); else tabs.current.delete(view.id); }}
                 type="button" role="tab" aria-controls={view.panelId}
                 aria-selected={selected === view.id} tabIndex={selected === view.id ? 0 : -1}
-                aria-label={[view.label, view.dirty ? "unsaved changes" : null, view.attention ? "approval needed" : null].filter(Boolean).join(", ")}
+                aria-label={[view.label, view.dirty ? "unsaved changes" : null, view.attention ? view.attentionLabel ?? "approval needed" : null].filter(Boolean).join(", ")}
                 title={view.title ?? view.label}
                 data-testid={`conversation-subtab-${view.id}`}
                 className={`relative flex min-h-11 max-w-52 items-center gap-1.5 px-3 ${besideComposer ? "flex-1 justify-center rounded-xl text-sm aria-selected:font-medium aria-selected:text-primary-700 dark:aria-selected:text-primary-300 forced-colors:aria-selected:outline forced-colors:aria-selected:outline-solid forced-colors:aria-selected:outline-[Highlight]" : "text-xs hover:bg-slate-100/80 after:pointer-events-none after:absolute after:inset-x-3 after:bottom-0 after:h-[1.5px] after:rounded-full aria-selected:after:bg-primary-600 dark:aria-selected:after:bg-primary-400 forced-colors:aria-selected:after:bg-[Highlight]"} ${DARK_RAIL_HOVER_CLASS} ${TAB_FOCUS_CLASS} ${besideComposer ? "" : "pointer-coarse:max-w-40"}`}

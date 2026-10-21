@@ -25,6 +25,10 @@ Use this whenever a site runs in the space and the person should see it, on any 
    - Exit `1` (any other error): run it once more. If it fails again, tell the person the error in one line and post the local URL instead. Do not create a public tunnel unless they ask for one.
 6. If the person still reports "Blocked request" or "host is not allowed" on the card's page, do step 3 for that server.
 
+### A site that uses the person's location
+
+Inside a Studio preview the page cannot call `navigator.geolocation`; the browser refuses it. When the page's URL has `instafy_host=studio`, ask Studio instead: `parent.postMessage({source: "<your site's short name>", v: 1, type: "location-request", payload: {id: "<short id>", watch: false}}, "*")`, and read `{source: "instafy-host", type: "location", payload: {id, coords}}` or `type: "location-error"` (`payload.code`: `denied`, `unavailable`, `timeout`, `stopped` or `hidden`) from `message` events whose `event.source` is `parent`. Use `watch: true` to follow the person, and send `type: "location-stop"` with the same id to end it. Elsewhere, use `navigator.geolocation` as usual. Studio asks the person once and shows them which sites got their location, so do not add a consent dialog of your own. Show a short note for each error code; `stopped` means the person turned location off for this site in Studio's 📍 menu, and only they can turn it back on there. Do not put the person's position in a URL, a public page or a file you commit.
+
 ## Consent gates (required)
 
 - Open Instafy's browser on your own to check the preview or a provider's screens.
