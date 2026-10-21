@@ -576,9 +576,10 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
     async function ensureOriginApproved(rawUrl, label = "") {
       const origin = normalizedOrigin(rawUrl);
       if (!origin) {
-        fail(
-          "origin_not_approvable",
-          "Shared Browser cannot expose or act on this page origin. It has no http(s) address to approve; navigate to the address the task names first",
+        // Not a consent decision, so not final: navigating to an http(s)
+        // address goes through that site's own approval.
+        throw new Error(
+          "Shared Browser cannot expose or act on this page origin. It has no http(s) address to approve; navigate to the address the task names first [origin_not_approvable]",
         );
       }
       const authority = readAuthority(initialAuthority);

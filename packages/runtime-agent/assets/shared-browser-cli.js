@@ -1079,28 +1079,30 @@ async function snapshot(page, { withhold = false } = {}) {
   };
 }
 
-// A browser that has just started shows exactly about:blank. It has no
-// origin to approve, so it is reported as blank, which leaves the agent free
-// to navigate to the task's site under that site's own approval. The reply is
-// constant and nothing is read from the page: an about:blank document can
+// A browser that has just started shows about:blank, and a new tab opened in
+// the viewer shows the new-tab page. Neither has an origin to approve, so they
+// are reported as blank, which leaves the agent free to navigate to the task's
+// site under that site's own approval. The reply is constant apart from the
+// fixed address and nothing is read from the page: an about:blank document can
 // inherit its opener's origin and hold script-written content. Every other
-// origin-less page (data:, about:srcdoc, about:blank#..., browser pages) still
-// fails closed, and no action can target a blank page.
-const BLANK_PAGE_URL = "about:blank";
+// origin-less page (data:, about:srcdoc, about:blank#..., other browser pages)
+// still fails closed, and no action can target a blank page.
+const BLANK_PAGE_URLS = new Set(["", "about:blank", "chrome://newtab/", "chrome://new-tab-page/"]);
 
 function isBlankPage(page) {
-  return page.url() === BLANK_PAGE_URL;
+  return BLANK_PAGE_URLS.has(page.url());
 }
 
-function blankPageResult(extra = {}) {
+function blankPageResult(page, extra = {}) {
+  const url = BLANK_PAGE_URLS.has(page.url()) ? page.url() : "about:blank";
   return {
     ...extra,
-    snapshotId: snapshotFingerprint(BLANK_PAGE_URL, []),
+    snapshotId: snapshotFingerprint(url, []),
     browserPageId: EXPECTED_BROWSER_PAGE_ID,
     blank: true,
     originApproved: false,
     redacted: false,
-    url: BLANK_PAGE_URL,
+    url,
     title: "",
     visibleText: "",
     secretScreen: false,
@@ -1112,7 +1114,7 @@ function blankPageResult(extra = {}) {
 
 async function snapshotForResult(page, options = {}) {
   if (isBlankPage(page)) {
-    return blankPageResult();
+    return blankPageResult(page);
   }
   if (!approvalProtocol.isOriginApproved(page.url())) {
     return approvalProtocol.redactedPageResult();
@@ -1442,7 +1444,7 @@ async function execute(browser, method, requestPath, body) {
       pageCount: browser.contexts().flatMap((context) => context.pages()).length,
     };
     if (isBlankPage(page)) {
-      return blankPageResult(shared);
+      return blankPageResult(page, shared);
     }
     if (!approvalProtocol.isOriginApproved(page.url())) {
       return approvalProtocol.redactedPageResult(shared);
@@ -1458,9 +1460,10 @@ async function execute(browser, method, requestPath, body) {
   }
 
   if (method === "GET" && requestPath === "/v1/snapshot") {
+    // A blank observation is not action evidence: like status, it only shows
+    // that the browser is reachable, so a turn that stops here is retried.
     if (isBlankPage(page)) {
-      emitAction({ type: "nav_result", label: "Blank page", url: null });
-      return blankPageResult();
+      return blankPageResult(page);
     }
     const approvedOrigin = await approvalProtocol.ensureOriginApproved(
       page.url(),

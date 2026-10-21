@@ -23774,6 +23774,37 @@ mod tests {
     }
 
     #[test]
+    fn blank_page_snapshot_alone_still_counts_as_missing_shared_browser_execution() {
+        // A snapshot of a blank page completes but adds nothing to the action
+        // log, so a turn that stops there gets the retry that says to navigate.
+        let snapshot = JobMessage {
+            content: "Tool call completed: instafy_shared_browser/snapshot".to_string(),
+            message_type: Some("mcp_tool_call".to_string()),
+            metadata: Some(json!({
+                "server": "instafy_shared_browser",
+                "tool": "snapshot",
+                "status": "completed",
+            })),
+        };
+        let messages = [snapshot];
+        assert!(has_successful_shared_browser_mcp_message(&messages));
+        assert!(shared_browser_execution_missing_after_attempt(
+            true,
+            &messages,
+            None,
+            Some(3),
+            3,
+        ));
+        assert!(!shared_browser_execution_missing_after_attempt(
+            true,
+            &messages,
+            None,
+            Some(3),
+            5,
+        ));
+    }
+
+    #[test]
     fn shared_browser_retry_prompt_navigates_away_from_a_blank_page() {
         let retry = shared_browser_execution_retry_prompt("Open https://app.example.test");
         assert!(retry.starts_with("Open https://app.example.test\n\n"));

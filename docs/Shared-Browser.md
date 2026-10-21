@@ -463,14 +463,19 @@ runtime-agent binary directory, never from project `node_modules`. Actions
 return concrete observed page state, including the final URL and title.
 
 A browser that has just started, such as the on-demand browser on a space's own
-machine, shows exactly `about:blank`. `status` and `snapshot` report that page as
-`blank: true` with a constant, empty observation: nothing is read from the page,
-no origin is approved, and no action can target it. The agent then calls
-`navigate` with the task's address, which asks for that site's approval as usual.
-Every other page without an http(s) origin (`data:`, `about:srcdoc`, a blank page
-with a fragment, browser-internal pages) still fails closed with
-`origin_not_approvable`. Neither Studio nor the runtime opens a card's site on its
-own; the card's hosts are only shown to the person.
+machine, shows exactly `about:blank`, and a tab opened in the viewer shows the
+new-tab page (`chrome://newtab/` or `chrome://new-tab-page/`). `status` and
+`snapshot` report these pages as `blank: true` with a constant, empty
+observation: nothing is read from the page, no origin is approved, no action can
+target it, and the observation is not written to the action log, so it is not
+evidence of browser work. A turn that stops on a blank page is retried once with
+the instruction to call `navigate` with the task's address, which asks for that
+site's approval as usual. Every other page without an http(s) origin (`data:`,
+`about:srcdoc`, a blank page with a fragment, other browser-internal pages)
+still fails closed with `[origin_not_approvable]`. That error is not a consent
+decision and does not end the run; it tells the agent to navigate first. Neither
+Studio nor the runtime opens a card's site on its own; the card's hosts are only
+shown to the person.
 
 Every high-level snapshot/action appends the cursor/action-ticker telemetry
 owned by the Shared Browser shell. The runtime records the action-log position

@@ -140,7 +140,9 @@ const bodyTextFor = (currentUrl, targetId) => {
   if (targetId === "decoy-target" && !decoyLooksIdentical) return "Decoy page";
   // An about:blank document can hold script-written content; none of it may
   // reach an observation.
-  if (currentUrl === "about:blank") return `Script-written blank ${CANARY}`;
+  if (currentUrl === "about:blank" || currentUrl.startsWith("chrome://")) {
+    return `Script-written blank ${CANARY}`;
+  }
   if (mode === "canary-text") return `Order note ${CANARY} for the fixture`;
   if (mode === "secret-screen") return `Production key ${CANARY}`;
   return "Fixture page";
@@ -155,9 +157,13 @@ const makePage = (targetId) => {
         ? "about:srcdoc"
         : mode === "data-page"
           ? "data:text/html,fixture"
-          : targetId === "decoy-target" && !decoyLooksIdentical
-            ? "https://decoy.example.test/"
-            : "https://example.test/";
+          : mode === "new-tab-page"
+            ? "chrome://newtab/"
+            : mode === "browser-internal"
+              ? "chrome://settings/"
+              : targetId === "decoy-target" && !decoyLooksIdentical
+                ? "https://decoy.example.test/"
+                : "https://example.test/";
   const handle = {
     isVisible: async () => true,
     boundingBox: async () => ({ x: 10, y: 20, width: 120, height: 32 }),
@@ -192,7 +198,8 @@ const makePage = (targetId) => {
     url: () => currentUrl,
     title: async () => currentUrl.includes("unapproved-secret")
       ? "Secret destination title"
-      : currentUrl === "about:blank" ? "Script-written blank title"
+      : currentUrl === "about:blank" || currentUrl.startsWith("chrome://")
+        ? "Script-written blank title"
       : targetId === "decoy-target" && !decoyLooksIdentical ? "Decoy" : "Fixture",
     bringToFront: async () => {},
     setDefaultTimeout: () => {},
@@ -1968,14 +1975,13 @@ fn blank_page_is_observed_as_blank_without_any_approval_or_page_content() {
     .expect("approval state JSON");
     assert_eq!(state["approvedOrigins"], json!([]));
     assert_ne!(state["routineBrowsingAllowed"], true);
-    // The observation counts as action evidence without naming a page.
-    let log = fixture.action_log();
-    let event: JsonValue =
-        serde_json::from_str(log.lines().last().expect("blank snapshot action event"))
-            .expect("blank snapshot action JSON");
-    assert_eq!(event["type"], "nav_result");
-    assert_eq!(event["url"], JsonValue::Null);
-    assert!(!log.contains("Script-written"));
+    // A blank observation is not action evidence, so a turn that stops on it
+    // is retried with the instruction to navigate.
+    assert_eq!(
+        fixture.action_log(),
+        "",
+        "a blank snapshot was logged as action"
+    );
 
     let status = fixture
         .command_for("blank-page", "page-target", "GET", "/v1/status", None)
@@ -2001,9 +2007,12 @@ fn blank_page_is_observed_as_blank_without_any_approval_or_page_content() {
     );
     assert!(!clicked.status.success());
     assert!(click_requests.is_empty());
+    let click_error = String::from_utf8_lossy(&clicked.stderr);
     assert!(
-        String::from_utf8_lossy(&clicked.stderr).contains("origin_not_approvable_non_retryable")
+        click_error.contains("[origin_not_approvable]"),
+        "{click_error}"
     );
+    assert!(!click_error.contains("_non_retryable"), "{click_error}");
 
     // Navigating away still asks for the destination site and the step.
     let (navigated, navigate_requests) = fixture.run_with_decisions(
@@ -2024,9 +2033,41 @@ fn blank_page_is_observed_as_blank_without_any_approval_or_page_content() {
 }
 
 #[test]
-fn only_exact_about_blank_is_observed_without_an_origin() {
-    // Other origin-less pages still fail closed.
-    for mode in ["blank-fragment", "srcdoc-page", "data-page"] {
+fn new_tab_page_is_observed_as_blank_without_any_page_content() {
+    // A tab opened in the viewer shows the new-tab page, which is just as
+    // empty as about:blank.
+    let fixture = EmbeddedControllerFixture::new();
+    let (output, requests) = fixture.run_with_decisions(
+        "new-tab-page",
+        "page-target",
+        "GET",
+        "/v1/snapshot",
+        None,
+        &[],
+        &[],
+    );
+    let payload = payload_of(&output);
+    assert!(requests.is_empty(), "a new-tab page asked for approval");
+    assert_eq!(payload["blank"], true);
+    assert_eq!(payload["url"], "chrome://newtab/");
+    assert_eq!(payload["visibleText"], "");
+    assert_eq!(payload["interactiveElements"], json!([]));
+    let raw = String::from_utf8_lossy(&output.stdout);
+    assert!(!raw.contains("Script-written"));
+    assert_no_canary("new-tab snapshot", &raw);
+    assert_eq!(fixture.action_log(), "");
+}
+
+#[test]
+fn only_empty_tabs_are_observed_without_an_origin() {
+    // Other origin-less pages still fail closed. The error is not a consent
+    // decision, so it points at navigating instead of ending the run.
+    for mode in [
+        "blank-fragment",
+        "srcdoc-page",
+        "data-page",
+        "browser-internal",
+    ] {
         let fixture = EmbeddedControllerFixture::new();
         let (output, requests) =
             fixture.run_with_decisions(mode, "page-target", "GET", "/v1/snapshot", None, &[], &[]);
@@ -2034,10 +2075,17 @@ fn only_exact_about_blank_is_observed_without_an_origin() {
         assert!(requests.is_empty(), "{mode}");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("origin_not_approvable_non_retryable"),
+            stderr.contains("[origin_not_approvable]"),
             "{mode}: {stderr}"
         );
+        assert!(
+            stderr.contains("navigate to the address"),
+            "{mode}: {stderr}"
+        );
+        assert!(!stderr.contains("_non_retryable"), "{mode}: {stderr}");
+        assert!(!stderr.contains("Script-written"), "{mode}: {stderr}");
         assert!(String::from_utf8_lossy(&output.stdout).is_empty(), "{mode}");
+        assert_eq!(fixture.action_log(), "", "{mode}");
     }
 }
 
@@ -2251,6 +2299,7 @@ fn only_explicit_terminal_approval_codes_are_latched() {
         "Shared Browser snapshot is stale; take a fresh snapshot before acting",
         "selected page is temporarily unavailable",
         "site origin cannot be approved [origin_not_approvable_non_retryable]",
+        "site origin cannot be approved; navigate to the address the task names first [origin_not_approvable]",
         "unrelated browser failure",
     ] {
         assert_eq!(
