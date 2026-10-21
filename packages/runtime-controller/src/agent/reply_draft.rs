@@ -158,7 +158,7 @@ pub(crate) async fn agent_reply_draft(
     }
     publish_controller_event_with_conversation(
         &state.events,
-        "run.reply_draft",
+        crate::state::REPLY_DRAFT_EVENT,
         Some(claims.project_id),
         route.session_id,
         Some(route.conversation_id),
