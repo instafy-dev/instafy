@@ -42,6 +42,13 @@ export interface ConversationState {
   activeGoal: ConversationGoal | null;
   originMessageId: string | null;
   delegatedByAgentId: string | null;
+  /**
+   * The tool that wrote this row (`metadata.source`, e.g. a site's or a
+   * script's own work thread), or absent for a chat a person started. A tool's
+   * row never opens a tab by itself and is listed under the Chats "Tool
+   * threads" filter instead of among the person's chats.
+   */
+  toolSource?: string | null;
   messages: ChatMessage[];
   draft: string;
   draftEditorState: string | null;
@@ -117,6 +124,7 @@ export type ConversationsAction =
   | { type: "SET_TITLE"; id: string; title: string }
   | { type: "SET_GOAL"; id: string; goal: ConversationGoal | null }
   | { type: "SET_VISIBILITY"; id: string; visibility: ConversationVisibility }
+  | { type: "SET_TOOL_SOURCE"; id: string; toolSource: string | null }
   | {
       type: "SET_THREAD_META";
       id: string;
@@ -712,6 +720,16 @@ export function conversationsReducer(
         conversations: state.conversations.map((conversation) =>
           conversation.localId === action.id
             ? { ...conversation, visibility: action.visibility }
+            : conversation,
+        ),
+      };
+    }
+    case "SET_TOOL_SOURCE": {
+      return {
+        ...state,
+        conversations: state.conversations.map((conversation) =>
+          conversation.localId === action.id
+            ? { ...conversation, toolSource: action.toolSource }
             : conversation,
         ),
       };

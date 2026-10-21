@@ -29,9 +29,11 @@ import {
   extractConversationOwnerAgentFromMetadata,
   extractConversationTitleFromMetadata,
   hasRecommendationOrigin,
+  isPlainObject,
   parseTimestamp,
   resolveConversationVisibility,
   resolveConversationVisibilityCandidate,
+  toolSourceOf,
 } from "./conversationMetadata";
 import {
   extractLastUserMessageContent,
@@ -337,6 +339,9 @@ export function usePendingConversationEffects({
         activeGoal: activeGoalFromMetadata,
         originMessageId: originMessageIdFromMetadata,
         delegatedByAgentId: delegatedByAgentIdFromMetadata,
+        // A tool's own work thread is kept out of the tab strip and the
+        // person's chat list; see WorkspaceTabsProvider.
+        toolSource: toolSourceOf(creation.metadata),
         messages: [],
         draft: "",
         draftEditorState: null,
@@ -447,6 +452,13 @@ export function usePendingConversationEffects({
           id: localId,
           goal: nextActiveGoal,
         });
+      }
+      // Only an update that carries metadata can say who wrote the row; one without it keeps the current value.
+      if (isPlainObject(update.metadata)) {
+        const nextToolSource = toolSourceOf(update.metadata);
+        if ((conversation.toolSource ?? null) !== nextToolSource) {
+          dispatch({ type: "SET_TOOL_SOURCE", id: localId, toolSource: nextToolSource });
+        }
       }
 
       const resolvedParentConversationId =

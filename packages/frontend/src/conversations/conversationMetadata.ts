@@ -43,6 +43,35 @@ export function hasRecommendationOrigin(metadata: Record<string, unknown> | null
   return typeof metadata?.recommendationId === "string" && metadata.recommendationId.trim().length > 0;
 }
 
+/**
+ * The tool that wrote a conversation (`metadata.source`, trimmed, at most 64
+ * chars), or null for a chat a person started. On a conversation (not on a
+ * message, where `source` means something else) this key is reserved for the
+ * name of the tool that wrote the thread. `threadKind` cannot carry it: the
+ * controller only accepts `threadKind` on a nested thread, and a tool's own
+ * thread is usually a root.
+ */
+export function toolSourceOf(metadata: Record<string, unknown> | null | undefined): string | null {
+  const source = metadata?.source;
+  if (typeof source !== "string") return null;
+  const trimmed = source.trim();
+  return trimmed.length > 0 ? trimmed.slice(0, 64) : null;
+}
+
+/**
+ * A tool's own top-level work thread: written by a tool and not nested under a
+ * chat. Such a thread never opens a tab by itself, is never the fallback chat,
+ * and while active is listed in Chats under "From tools" instead of among the
+ * person's chats. A tool thread nested under a chat (even one whose parent is
+ * not loaded) stays with that chat.
+ */
+export function isToolRootThread(conversation: {
+  toolSource?: string | null;
+  parentConversationId?: string | null;
+}): boolean {
+  return Boolean(conversation.toolSource) && !conversation.parentConversationId;
+}
+
 export function extractConversationTitleFromMetadata(
   metadata: Record<string, unknown> | null | undefined,
 ): string | null {

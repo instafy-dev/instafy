@@ -489,7 +489,18 @@ describe("ChatComposerSurface", () => {
     expect(container.querySelector('[data-testid="chat-input"]')).toBe(input);
     await act(async () => root.render(<ChatComposerSurface {...props} />));
     expect(container.querySelector('[role="tablist"]')).toBeNull();
+    // Compact: only the inline peek transform. The translate-y-full class would add a second
+    // 100% (CSS `translate` stacks on `transform`) and push even the peek off the screen.
+    expect(overlay.className).not.toContain("translate-y-full");
+    expect(overlay.style.transform).toContain("translateY(calc(100% - max(");
+  });
+
+  it("hides a wide composer with the class alone, without an inline transform", async () => {
+    const props = createProps({ composerAutoHidden: true, compactBrowserViewport: false });
+    await act(async () => root.render(<ChatComposerSurface {...props} />));
+    const overlay = container.querySelector<HTMLElement>('[data-testid="chat-composer-overlay"]')!;
     expect(overlay.className).toContain("translate-y-full");
+    expect(overlay.style.transform).toBe("");
   });
 
   it("expands in place and collapses with Escape without remounting the editor or attachments", async () => {

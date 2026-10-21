@@ -104,6 +104,16 @@ describe("MobileNavigationSheet", () => {
     expect(mocks.navigate).toHaveBeenCalledWith({ kind: "conversation", projectId: "space-a", conversationId: "b", conversationControllerId: "controller-b" });
   });
 
+  it("leaves a tool's own root work thread out of loaded chats, but keeps one nested under a chat", async () => {
+    mocks.conversations.mockReturnValue({ ...historyState(), conversations: [chat("a", "Alpha chat"),
+      { ...chat("tool-root", "Site work: orders"), toolSource: "example-tool" },
+      { ...chat("tool-child", "Site work: notes"), toolSource: "example-tool", parentConversationId: "controller-a" }] });
+    await render();
+    expect(document.body.textContent).toContain("Alpha chat");
+    expect(document.body.textContent).not.toContain("Site work: orders");
+    expect(document.body.textContent).toContain("Site work: notes");
+  });
+
   it("does not claim exhaustive search and exposes the All chats fallback", async () => {
     await render(); await search("missing");
     expect(document.body.textContent).toContain("No matching loaded chats.");
