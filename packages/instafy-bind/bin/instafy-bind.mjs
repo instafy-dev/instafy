@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import readline from "node:readline";
-import { createBinder, discoverSites } from "../src/server.mjs";
+import { createBinder, discoverSites, trimEnd } from "../src/server.mjs";
 import { initSite, STARTER_NAMES } from "../src/init.mjs";
 import { checkBound, resolveIntent, executorOf } from "../src/bound.mjs";
 import { formatErrors } from "../src/schema-lite.mjs";
@@ -248,7 +248,7 @@ async function serve(dir, flags) {
     intents: [...site.runnable],
     unavailable: site.unavailable,
     ...(binder.preview ? { preview_command: previewCommand(listenPort, site) } : {}),
-    ...(flags["public-url"]?.length ? { public_urls: flags["public-url"].map((origin) => binder.shareUrl(site, origin.replace(/\/+$/, ""))) } : {}),
+    ...(flags["public-url"]?.length ? { public_urls: flags["public-url"].map((origin) => binder.shareUrl(site, trimEnd(origin, "/"))) } : {}),
   }));
   if (json) {
     out({ event: "listening", url: binder.url, preview: binder.preview, agent: binder.agentState, agent_reason: binder.agentReason, sites });

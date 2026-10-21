@@ -48,7 +48,18 @@ const VIEWER_ONLY_RE = /^(bound\.json|data\/version\.json|data\/records\/.*)$/;
  * `/Bound.json`, `/DATA/records/x.json` or `/handlers./x.mjs` are the files they name, not other files.
  */
 export function guardKey(rel) {
-  return String(rel).split(/[\\/]+/).map((seg) => seg.toLowerCase().replace(/:.*$/s, "").replace(/[. ]+$/, "")).filter(Boolean).join("/");
+  return String(rel).split(/[\\/]/).map((seg) => {
+    const name = seg.toLowerCase();
+    const colon = name.indexOf(":");
+    return trimEnd(colon >= 0 ? name.slice(0, colon) : name, ". ");
+  }).filter(Boolean).join("/");
+}
+
+/** `text` without any of `chars` at its end (a plain loop: no regex backtracking on long runs). */
+export function trimEnd(text, chars) {
+  let end = text.length;
+  while (end > 0 && chars.includes(text[end - 1])) end -= 1;
+  return text.slice(0, end);
 }
 
 /**
@@ -821,7 +832,7 @@ export function createBinder(options) {
       return address ? `http://${host.includes(":") ? `[${host}]` : host}:${address.port}` : null;
     },
     shareUrl(site, base = binder.url, style = site.linkStyle) {
-      const publicBase = publicOrigins.some((origin) => origin.replace(/\/+$/, "") === String(base).replace(/\/+$/, ""));
+      const publicBase = publicOrigins.some((origin) => trimEnd(origin, "/") === trimEnd(String(base), "/"));
       if (!site.token || (preview && !publicBase)) return `${base}${site.prefix}/`;
       return style === "query" ? `${base}${site.prefix}/?k=${site.token}` : `${base}${site.prefix}/#k=${site.token}`;
     },
