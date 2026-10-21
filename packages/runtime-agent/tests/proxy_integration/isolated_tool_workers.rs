@@ -134,7 +134,8 @@ async fn provider_request(
              if cat {host_auth} >/dev/null 2>&1; then exit 52; fi\n\
              if printf forbidden > {outside} 2>/dev/null; then exit 53; fi\n\
              test \"$FIXTURE_JOB_SENTINEL\" = 'job-secret-{lane}'\n\
-             test \"$CONTROLLER_ACCESS_TOKEN\" = 'inert-controller-lane-{lane}'\n\
+             test -z \"${{CONTROLLER_ACCESS_TOKEN:-}}\"\n\
+             test -z \"${{CONTROLLER_ACCESS_SCOPES:-}}\"\n\
              test -z \"${{RUNTIME_ACCESS_TOKEN:-}}\"\n\
              test -z \"${{OPENAI_API_KEY:-}}\"\n\
              test -z \"${{CODEX_API_KEY:-}}\"\n\
@@ -230,6 +231,11 @@ async fn exercise(case: Case) -> Result<()> {
         "RUNTIME_ACCESS_TOKEN",
         "inert-parent-runtime-must-not-reach-tools",
     );
+    // Sandboxed code never holds controller authority, the parent's or its own.
+    let _parent_controller_token = EnvGuard::set(
+        "CONTROLLER_ACCESS_TOKEN",
+        "inert-parent-controller-must-not-reach-tools",
+    );
     let mut proxies = Vec::new();
     let mut handles = Vec::new();
     let workspaces: [PathBuf; 2] =
@@ -267,8 +273,8 @@ async fn exercise(case: Case) -> Result<()> {
             proxy_base_url: format!("http://{address}"),
             proxy_token: format!("inert-proxy-lane-{lane}"),
             controller_base_url: "http://127.0.0.1:9".into(),
-            controller_token: Some(format!("inert-controller-lane-{lane}")),
-            controller_token_scopes: vec!["agent.message".into()],
+            controller_token: None,
+            controller_token_scopes: Vec::new(),
             controller_token_expires_at: None,
             job_environment: HashMap::from([(
                 "FIXTURE_JOB_SENTINEL".into(),
