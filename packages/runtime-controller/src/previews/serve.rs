@@ -332,16 +332,23 @@ mod tests {
             json!(["python3", "app.py", "--password", "hunter2"]),
             json!(["node", "server.js", "--auth", "basic"]),
             json!(["node", "server.js", "--key=AKIAAAAAAAAAAAAAAAAA"]),
-        ] {
-            let error = PreviewServe::from_json(&json!({ "argv": argv, "cwd": "." }))
-                .expect_err(&argv.to_string());
-            assert!(error.contains("looks like it carries a secret"), "{error}");
-            assert!(
-                !error.contains("hunter2")
-                    && !error.contains("sk-live")
-                    && !error.contains("abc123"),
-                "{error}"
-            );
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            // The assertions never print the refusal: it names what looked
+            // like a secret, and test output is a log too.
+            let refused = PreviewServe::from_json(&json!({ "argv": argv, "cwd": "." }));
+            let names_the_rule = refused
+                .as_ref()
+                .is_err_and(|error| error.contains("looks like it carries a secret"));
+            assert!(names_the_rule, "case {index} is refused with the rule");
+            let repeats_a_value = refused.as_ref().is_err_and(|error| {
+                ["hunter2", "sk-live", "abc123"]
+                    .iter()
+                    .any(|value| error.contains(value))
+            });
+            assert!(!repeats_a_value, "case {index} never repeats the value");
         }
         for argv in [
             json!(["node", "server.mjs", "--no-token", "site/"]),
