@@ -1048,6 +1048,26 @@ impl ControllerClient {
             .await
     }
 
+    /// Sends the latest draft of the job's reply. The controller shows it to the conversation's
+    /// viewers and stores nothing; the completion's message replaces it.
+    pub async fn post_reply_draft(
+        &self,
+        registration: &Registration,
+        job_id: Uuid,
+        seq: u64,
+        draft: &crate::jobs::ReplyDraft,
+    ) -> Result<()> {
+        let url = self.base_url.join("/agent/reply-draft")?;
+        let payload = json!({
+            "job_id": job_id,
+            "segment": draft.segment,
+            "seq": seq,
+            "text": draft.text,
+        });
+        self.post_agent(url, &self.bearer_for_agent(registration), payload)
+            .await
+    }
+
     pub async fn fetch_job_secrets(
         &self,
         registration: &Registration,

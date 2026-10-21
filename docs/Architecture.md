@@ -119,6 +119,17 @@ This does **not** require a dedicated public file server. Private storage stays 
   so one user's eight streams on one space can ask for eight database connections for one event.
   That is more than the default pool of 4 (`DATABASE_POOL_SIZE`): the extra checks wait for a
   connection, and other requests on the node wait behind them.
+- A chat turn's reply streams as `run.reply_draft` while the model writes it. The runtime reads
+  the `summary` of the answer's JSON as it arrives and sends the latest text to
+  `POST /agent/reply-draft` at most every 200 ms, on its own task beside the job's message queue.
+  The controller checks that call like `/agent/message` (the `agent.message` scope, the runtime's
+  lease and a job it holds in a conversation that is not internal), at most once per job every
+  5 s, and publishes the text to the conversation's viewers without storing it. Studio shows it in
+  the place the reply takes and drops it in the render that adds the persisted reply. Only a
+  structured reply drafts; plans, routing and team lanes do not, and text that could still become
+  the `NO_RESPONSE` decline is held back. An older controller or client ignores drafts, and the
+  reply still arrives whole. The model proxy currently hands a response on only once it has all of
+  it, so a draft appears when the model call ends rather than token by token.
 - Supabase is a fallback when the controller is disabled.
 
 ## Conversation delivery intents

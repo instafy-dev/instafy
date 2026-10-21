@@ -3,6 +3,7 @@
 import { act, useLayoutEffect, useReducer } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { conversationReplyDrafts, resetReplyDraftsForTests } from "../../../conversations/replyDrafts";
 import type { RunRecord, RuntimeState } from "../../../types";
 import type { ControllerOriginSummary, LocalWorkspacePresence } from "../../../sdk/instafy";
 import {
@@ -774,6 +775,43 @@ describe("useRuntimeControllerSync controller access results", () => {
       expect((followEvent.mock.calls[0][0] as CustomEvent).detail).toEqual(data);
     } finally {
       window.removeEventListener(PREVIEW_FOLLOW_EVENT, followEvent);
+    }
+  });
+
+  it("keeps a reply draft (run.reply_draft) for its conversation's transcript", async () => {
+    const dependencies = createHookDependencies();
+    let subscription: SubscribeControllerRunsParams | null = null;
+    controllerMocks.fetchRuns.mockResolvedValue(fetchResult());
+    controllerMocks.subscribeToRuns.mockImplementation(
+      (params: SubscribeControllerRunsParams) => {
+        subscription = params;
+        return vi.fn();
+      },
+    );
+    try {
+      await act(async () => {
+        root.render(<Harness projectId="project-current" dependencies={dependencies} />);
+      });
+      await vi.waitFor(() => expect(subscription).not.toBeNull());
+      await act(async () => {
+        subscription?.onEvent?.({
+          kind: "run.reply_draft",
+          project_id: "project-current",
+          conversation_id: "conversation-1",
+          run_id: "run-1",
+          job_id: "job-1",
+          data: { jobId: "job-1", runId: "run-1", conversationId: "conversation-1", segment: 1, seq: 1, text: "Hel" },
+        });
+      });
+      expect(conversationReplyDrafts("conversation-1")).toMatchObject([
+        { jobId: "job-1", runId: "run-1", seq: 1, text: "Hel" },
+      ]);
+      // A draft is never a conversation message.
+      expect(dependencies.dispatch).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: "pushConversationMessage" }),
+      );
+    } finally {
+      resetReplyDraftsForTests();
     }
   });
 

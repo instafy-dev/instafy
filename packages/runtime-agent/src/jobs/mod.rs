@@ -64,6 +64,7 @@ mod project_preferences_auth_tests;
 mod project_preferences_tests;
 #[cfg(test)]
 mod read_reference_tests;
+mod reply_draft;
 pub(crate) mod rolling_saves;
 mod site_intent;
 mod skill_declaration;
@@ -266,10 +267,85 @@ fn with_runtime_metadata_vec(messages: Vec<JobMessage>, runtime_id: &Uuid) -> Ve
 
 pub type JobMessageSender = UnboundedSender<JobMessage>;
 
+pub use reply_draft::{ReplyDraft, ReplyDraftSender};
+
 #[derive(Clone)]
 pub struct JobProgress {
     pub sender: JobMessageSender,
     pub status: Arc<AtomicBool>,
+    /// Where the job's reply goes while the model writes it. `None` drafts nothing.
+    pub reply_draft: Option<ReplyDraftSender>,
+}
+
+/// Streams one Codex run's interim messages to the job's progress queue as its events arrive,
+/// and its reply draft when the run answers the conversation.
+struct CodexRunStream {
+    sender: JobMessageSender,
+    status: Arc<AtomicBool>,
+    job_id: Uuid,
+    runtime_id: Uuid,
+    /// A later attempt within the job, which its token usage rows name.
+    attempt: Option<u64>,
+    extractor: CodexMessageExtractor,
+    /// How many of the run's messages went to the queue.
+    streamed_count: usize,
+    active: bool,
+    reply_draft: Option<reply_draft::ReplyDraftStream>,
+}
+
+impl CodexRunStream {
+    fn new(
+        progress: &JobProgress,
+        job_id: Uuid,
+        runtime_id: Uuid,
+        attempt: Option<u64>,
+        drafts_reply: bool,
+    ) -> Self {
+        Self {
+            sender: progress.sender.clone(),
+            status: progress.status.clone(),
+            job_id,
+            runtime_id,
+            attempt,
+            extractor: CodexMessageExtractor::default(),
+            streamed_count: 0,
+            active: true,
+            reply_draft: progress
+                .reply_draft
+                .clone()
+                .filter(|_| drafts_reply)
+                .map(reply_draft::ReplyDraftStream::start),
+        }
+    }
+
+    fn observe(&mut self, event: &JsonValue) {
+        if let Some(draft) = self.reply_draft.as_mut() {
+            draft.observe(event);
+        }
+        if !self.active {
+            return;
+        }
+        let mut messages = self.extractor.observe(event);
+        if let Some(attempt) = self.attempt {
+            mark_attempt_token_usage(&mut messages, attempt);
+        }
+        for message in messages {
+            if self
+                .sender
+                .send(with_runtime_metadata(message, &self.runtime_id))
+                .is_err()
+            {
+                warn!(
+                    job_id = %self.job_id,
+                    "job progress receiver dropped; disabling streaming for remaining events"
+                );
+                self.active = false;
+                self.status.store(false, Ordering::SeqCst);
+                break;
+            }
+        }
+        self.streamed_count = self.extractor.pushed.get();
+    }
 }
 
 static CODEX_EXECUTION_LOCK: Lazy<AsyncMutex<()>> = Lazy::new(|| AsyncMutex::new(()));
@@ -6729,24 +6805,22 @@ impl JobProcessor {
         let shared_browser_action_log_before =
             explicit_shared_browser_execution.then(crate::shared_browser::action_log_len);
 
-        struct StreamingContext {
-            sender: JobMessageSender,
-            status: Arc<AtomicBool>,
-            events: Vec<JsonValue>,
-            streamed_count: usize,
-            active: bool,
-        }
-
-        let mut streaming_context = progress_sender.as_ref().map(|progress| StreamingContext {
-            sender: progress.sender.clone(),
-            status: progress.status.clone(),
-            events: Vec::new(),
-            streamed_count: 0,
-            active: true,
+        // Only a turn whose final answer is the conversation reply drafts it: a structured
+        // answer under the reply schema, outside a team's worker lanes.
+        let drafts_reply = final_output_mode == RuntimeFinalOutputMode::StrictStructured
+            && final_output_schema == CodexFinalOutputSchema::Default
+            && !is_multi_agent_worker_job(job);
+        let mut streaming_context = progress_sender.as_ref().map(|progress| {
+            CodexRunStream::new(
+                progress,
+                job.id,
+                registration.runtime_id,
+                None,
+                drafts_reply,
+            )
         });
 
         let job_id = job.id;
-        let runtime_id_for_messages = registration.runtime_id;
         let _client_timezone_guard =
             ClientTimezoneGuard::from_metadata(job.payload.get("metadata"));
         let _turn_clock_guard = TurnClockGuard::start();
@@ -6755,25 +6829,7 @@ impl JobProcessor {
         let output_result = if streaming_context.is_some() {
             let mut event_handler = |event: &JsonValue| -> Result<()> {
                 if let Some(ctx) = streaming_context.as_mut() {
-                    ctx.events.push(event.clone());
-                    if ctx.active {
-                        let messages = with_runtime_metadata_vec(
-                            extract_codex_messages(&ctx.events),
-                            &runtime_id_for_messages,
-                        );
-                        for message in messages.iter().skip(ctx.streamed_count) {
-                            if ctx.sender.send(message.clone()).is_err() {
-                                warn!(
-                                    job_id = %job_id,
-                                    "job progress receiver dropped; disabling streaming for remaining events"
-                                );
-                                ctx.active = false;
-                                ctx.status.store(false, Ordering::SeqCst);
-                                break;
-                            }
-                        }
-                        ctx.streamed_count = messages.len();
-                    }
+                    ctx.observe(event);
                 }
                 Ok(())
             };
@@ -7424,31 +7480,19 @@ impl JobProcessor {
             let native_retry_prompt =
                 without_project_preferences(&retry_prompt, &project_id, &retry_preferences)?;
             let retry_output = if let Some(progress) = progress_sender.as_ref() {
-                let retry_sender = progress.sender.clone();
-                let retry_status = progress.status.clone();
-                let mut retry_stream_events: Vec<JsonValue> = Vec::new();
-                let mut retry_streamed_count = 0usize;
-                let mut retry_stream_active = true;
+                // The retry's answer replaces the first attempt's, and so does its draft. A
+                // team-planning retry answers with a plan, which is never drafted.
+                let mut retry_stream = CodexRunStream::new(
+                    progress,
+                    job_id,
+                    registration.runtime_id,
+                    Some(2),
+                    drafts_reply
+                        && retry_codex_run_options.final_output_schema
+                            == CodexFinalOutputSchema::Default,
+                );
                 let mut retry_event_handler = |event: &JsonValue| -> Result<()> {
-                    retry_stream_events.push(event.clone());
-                    if retry_stream_active {
-                        let messages = with_runtime_metadata_vec(
-                            extract_codex_attempt_messages(&retry_stream_events, 2),
-                            &registration.runtime_id,
-                        );
-                        for message in messages.iter().skip(retry_streamed_count) {
-                            if retry_sender.send(message.clone()).is_err() {
-                                warn!(
-                                    job_id = %job_id,
-                                    "job progress receiver dropped; disabling streaming for remaining retry events"
-                                );
-                                retry_stream_active = false;
-                                retry_status.store(false, Ordering::SeqCst);
-                                break;
-                            }
-                        }
-                        retry_streamed_count = messages.len();
-                    }
+                    retry_stream.observe(event);
                     Ok(())
                 };
                 codex
@@ -17435,37 +17479,57 @@ fn sanitize_codex_final_json(value: &JsonValue) -> JsonValue {
 }
 
 fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
+    let mut extractor = CodexMessageExtractor::default();
     let mut results = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    // Counts every message pushed so far. A Cell lets the stream.retry arm read it while the
-    // closure below holds the mutable borrows of `results` and `seen`.
-    let pushed = std::cell::Cell::new(0usize);
-    let mut retry_episode = 0usize;
-    let mut pushed_at_last_retry: Option<usize> = None;
-
-    let mut push_message =
-        |key: String, content: String, message_type: Option<&str>, metadata: JsonValue| {
-            let trimmed = content.trim();
-            if trimmed.is_empty() {
-                return;
-            }
-            if seen.insert(key) {
-                pushed.set(pushed.get() + 1);
-                results.push(JobMessage {
-                    content: trimmed.to_string(),
-                    message_type: message_type.map(|value| value.to_string()),
-                    metadata: if metadata.is_null() {
-                        None
-                    } else {
-                        Some(metadata)
-                    },
-                });
-            }
-        };
-
     for event in events {
+        extractor.observe_into(event, &mut results);
+    }
+    results
+}
+
+/// Turns a Codex run's events into job messages one event at a time, so a run streams its
+/// progress without reading every earlier event again.
+#[derive(Default)]
+struct CodexMessageExtractor {
+    seen: HashSet<String>,
+    // Counts every message pushed so far. A Cell lets the stream.retry arm read it while the
+    // closure in `observe_into` holds the mutable borrows of `results` and `seen`.
+    pushed: std::cell::Cell<usize>,
+    retry_episode: usize,
+    pushed_at_last_retry: Option<usize>,
+}
+
+impl CodexMessageExtractor {
+    /// The messages this event adds to those of the events before it.
+    fn observe(&mut self, event: &JsonValue) -> Vec<JobMessage> {
+        let mut results = Vec::new();
+        self.observe_into(event, &mut results);
+        results
+    }
+
+    fn observe_into(&mut self, event: &JsonValue, results: &mut Vec<JobMessage>) {
+        let mut push_message =
+            |key: String, content: String, message_type: Option<&str>, metadata: JsonValue| {
+                let trimmed = content.trim();
+                if trimmed.is_empty() {
+                    return;
+                }
+                if self.seen.insert(key) {
+                    self.pushed.set(self.pushed.get() + 1);
+                    results.push(JobMessage {
+                        content: trimmed.to_string(),
+                        message_type: message_type.map(|value| value.to_string()),
+                        metadata: if metadata.is_null() {
+                            None
+                        } else {
+                            Some(metadata)
+                        },
+                    });
+                }
+            };
+
         let Some(map) = event.as_object() else {
-            continue;
+            return;
         };
         let event_type = map
             .get("type")
@@ -17475,7 +17539,7 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
         match event_type {
             "item.completed" | "item.started" | "item.updated" => {
                 let Some(item) = map.get("item").and_then(JsonValue::as_object) else {
-                    continue;
+                    return;
                 };
                 let item_type = item
                     .get("type")
@@ -17492,7 +17556,7 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                             item.get("text").and_then(JsonValue::as_str).map(str::trim)
                         {
                             if text.is_empty() || !should_surface_agent_text(text) {
-                                continue;
+                                return;
                             }
                             let key = format!("agent_message::{text}");
                             push_message(
@@ -17549,7 +17613,7 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                     }
                     "command_execution" => {
                         if event_type == "item.updated" {
-                            continue;
+                            return;
                         }
                         let command = item
                             .get("command")
@@ -17557,7 +17621,7 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                             .unwrap_or_default()
                             .trim();
                         if command.is_empty() {
-                            continue;
+                            return;
                         }
                         let status = item
                             .get("status")
@@ -17593,7 +17657,7 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                     // legacy `changes`-array items fall through to the arm below.
                     "file_change" if item.get("paths").is_some() => {
                         if event_type == "item.updated" {
-                            continue;
+                            return;
                         }
                         let paths: Vec<String> = item
                             .get("paths")
@@ -17607,7 +17671,7 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                             })
                             .unwrap_or_default();
                         if paths.is_empty() {
-                            continue;
+                            return;
                         }
                         let status = item
                             .get("status")
@@ -17645,7 +17709,7 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                             .unwrap_or_default()
                             .trim();
                         if server.is_empty() && tool.is_empty() {
-                            continue;
+                            return;
                         }
                         let status = item
                             .get("status")
@@ -17739,7 +17803,7 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                             item.get("query").and_then(JsonValue::as_str).map(str::trim)
                         {
                             if query.is_empty() {
-                                continue;
+                                return;
                             }
                             let key = format!("web_search::{item_id}::{query}");
                             push_message(
@@ -17801,7 +17865,7 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                                 paths = ?paths,
                                 "codex file_change item failed"
                             );
-                            continue;
+                            return;
                         }
                         let changes_value = item
                             .get("changes")
@@ -17854,7 +17918,7 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                             .map(str::trim)
                         {
                             if message.is_empty() {
-                                continue;
+                                return;
                             }
                             let key = format!("item_error::{item_id}::{event_type}::{message}");
                             push_message(
@@ -17920,11 +17984,14 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                     // attempts collapse into one line while it is still the latest message,
                     // but once anything else has been shown, a later throttle in the same
                     // turn needs a line of its own or the headline keeps the stale step.
-                    if pushed_at_last_retry.is_some_and(|count| count != pushed.get()) {
-                        retry_episode += 1;
+                    if self
+                        .pushed_at_last_retry
+                        .is_some_and(|count| count != self.pushed.get())
+                    {
+                        self.retry_episode += 1;
                     }
                     push_message(
-                        format!("stream_retry::{retry_episode}::{reason}"),
+                        format!("stream_retry::{}::{reason}", self.retry_episode),
                         format!("Retrying: {reason}"),
                         Some("status"),
                         json!({
@@ -17932,7 +17999,7 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                             "event": event.clone(),
                         }),
                     );
-                    pushed_at_last_retry = Some(pushed.get());
+                    self.pushed_at_last_retry = Some(self.pushed.get());
                 }
             }
             "error" => {
@@ -17942,10 +18009,10 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                     .map(str::trim)
                 {
                     if message.is_empty() {
-                        continue;
+                        return;
                     }
                     if message.starts_with("Reconnecting...") {
-                        continue;
+                        return;
                     }
                     let key = format!("stream_error::{message}");
                     push_message(
@@ -17968,7 +18035,7 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                     .map(str::trim)
                 {
                     if message.is_empty() {
-                        continue;
+                        return;
                     }
                     let key = format!("turn_failed::{message}");
                     push_message(
@@ -17985,15 +18052,18 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
             _ => {}
         }
     }
-
-    results
 }
 
 /// Messages of a later attempt within one job. Its `token_usage` rows carry `attempt`, since the
 /// controller's completion row and the ledger repeat only the first attempt's usage.
 fn extract_codex_attempt_messages(events: &[JsonValue], attempt: u64) -> Vec<JobMessage> {
     let mut messages = extract_codex_messages(events);
-    for message in &mut messages {
+    mark_attempt_token_usage(&mut messages, attempt);
+    messages
+}
+
+fn mark_attempt_token_usage(messages: &mut [JobMessage], attempt: u64) {
+    for message in messages {
         if message.message_type.as_deref() != Some("token_usage") {
             continue;
         }
@@ -18001,7 +18071,6 @@ fn extract_codex_attempt_messages(events: &[JsonValue], attempt: u64) -> Vec<Job
             details.insert("attempt".to_string(), JsonValue::from(attempt));
         }
     }
-    messages
 }
 
 fn should_surface_agent_text(text: &str) -> bool {
@@ -28774,6 +28843,7 @@ mod tests {
             JobProgress {
                 sender,
                 status: Arc::new(AtomicBool::new(true)),
+                reply_draft: None,
             },
             receiver,
         )
@@ -30447,6 +30517,75 @@ mod tests {
 
         let normalized = normalize_codex_files(&project_dir, files).unwrap();
         assert!(normalized.is_empty());
+    }
+
+    /// A run's events as they stream: a retry, reasoning, a command, the
+    /// answer written in pieces, its completion and the turn's usage.
+    fn streamed_run_events() -> Vec<JsonValue> {
+        let answer = "{\"summary\":\"Hello \\\"there\\\"\",\"files\":[]}";
+        let mut events = vec![
+            json!({"type": "stream.retry", "message": "upstream timeout"}),
+            json!({"type": "item.updated", "item": {"id": "r1", "type": "reasoning", "text": "Looking", "status": "in_progress"}}),
+            json!({"type": "stream.retry", "message": "upstream timeout"}),
+            json!({"type": "item.started", "item": {"id": "c1", "type": "command_execution", "command": "ls", "status": "in_progress"}}),
+            json!({"type": "item.completed", "item": {"id": "c1", "type": "command_execution", "command": "ls", "status": "completed", "exit_code": 0}}),
+        ];
+        for end in [3, 14, 20, answer.len()] {
+            events.push(json!({"type": "item.updated", "item": {"id": "a1", "type": "agent_message", "text": &answer[..end], "status": "in_progress"}}));
+        }
+        events.push(json!({"type": "item.completed", "item": {"id": "a1", "type": "agent_message", "text": answer}}));
+        events.push(json!({"type": "turn.completed", "usage": {"input_tokens": 10, "cached_input_tokens": 0, "output_tokens": 5}}));
+        events
+    }
+
+    fn sent(
+        receiver: &mut tokio::sync::mpsc::UnboundedReceiver<JobMessage>,
+    ) -> Vec<(String, Option<String>, Option<JsonValue>)> {
+        std::iter::from_fn(|| receiver.try_recv().ok())
+            .map(|message| (message.content, message.message_type, message.metadata))
+            .collect()
+    }
+
+    #[test]
+    fn a_streamed_run_sends_what_its_whole_event_list_extracts_and_drafts_its_reply() {
+        let events = streamed_run_events();
+        let runtime_id = Uuid::new_v4();
+        for attempt in [None, Some(2)] {
+            let (mut progress, mut receiver) = test_progress();
+            let (draft_sender, draft) = tokio::sync::watch::channel(ReplyDraft::default());
+            progress.reply_draft = Some(draft_sender);
+            let mut stream =
+                CodexRunStream::new(&progress, Uuid::new_v4(), runtime_id, attempt, true);
+            for event in &events {
+                stream.observe(event);
+            }
+            let whole = match attempt {
+                Some(attempt) => extract_codex_attempt_messages(&events, attempt),
+                None => extract_codex_messages(&events),
+            };
+            let expected: Vec<_> = with_runtime_metadata_vec(whole, &runtime_id)
+                .into_iter()
+                .map(|message| (message.content, message.message_type, message.metadata))
+                .collect();
+            assert_eq!(sent(&mut receiver), expected);
+            assert_eq!(stream.streamed_count, expected.len());
+            assert_eq!(draft.borrow().text, "Hello \"there\"");
+        }
+    }
+
+    #[test]
+    fn a_run_that_does_not_answer_the_conversation_drafts_nothing() {
+        let (mut progress, mut receiver) = test_progress();
+        let (draft_sender, draft) = tokio::sync::watch::channel(ReplyDraft::default());
+        progress.reply_draft = Some(draft_sender);
+        let mut stream =
+            CodexRunStream::new(&progress, Uuid::new_v4(), Uuid::new_v4(), None, false);
+        for event in streamed_run_events() {
+            stream.observe(&event);
+        }
+        assert!(!sent(&mut receiver).is_empty());
+        assert_eq!(*draft.borrow(), ReplyDraft::default());
+        assert!(!draft.has_changed().unwrap_or(true));
     }
 
     #[test]

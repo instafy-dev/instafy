@@ -19,8 +19,10 @@ import {
   AssistantMessageEntry,
   BrowserRequestNoticeRow,
   extractChatAttachments,
+  NotchedMessageShell,
   UserMessageBubble,
 } from "./ChatMessageEntries";
+import { isReplyDraftMessage } from "../../../conversations/replyDrafts";
 import { isUnsentBrowserRequestNotice, readBrowserRequestOf } from "./browserRequest";
 import {
   AssistantSpeakerIdentityLabel,
@@ -385,8 +387,10 @@ export function ConversationMessageRows({
         }
 
         const normalizedMessageType = (getMessageType(message) ?? "").trim().toLowerCase();
-        const messageAssistantAvatarMotion: AssistantAvatarMotion =
-          activeAssistantAvatarMotion?.messageId === message.id
+        const isReplyDraft = isReplyDraftMessage(message);
+        const messageAssistantAvatarMotion: AssistantAvatarMotion = isReplyDraft
+          ? "thinking"
+          : activeAssistantAvatarMotion?.messageId === message.id
             ? activeAssistantAvatarMotion.motion
             : "idle";
         const isAgentJobThreadMessage = normalizedMessageType === "agent_job_thread";
@@ -450,6 +454,25 @@ export function ConversationMessageRows({
               onOpenImage={onOpenImage}
               mentionableAgentHandles={mentionableAgentHandles}
             />
+          ) : isReplyDraft ? (
+            // The reply while it is written: the shell and body of the message
+            // that replaces it, without the actions of a stored message.
+            <NotchedMessageShell
+              align="left"
+              messageId={message.id}
+              testId="chat-reply-draft"
+              showNotch={showNotch}
+              className="pr-2"
+            >
+              <div className="min-w-0" aria-busy="true">
+                <MessageContent
+                  content={message.content}
+                  metadata={null}
+                  projectId={projectId}
+                  mentionableAgentHandles={mentionableAgentHandles}
+                />
+              </div>
+            </NotchedMessageShell>
           ) : message.id === targetedMessageId ? (
             <div className="min-w-0 py-2" data-testid="chat-matched-message-content">
               <MessageContent content={message.content} metadata={message.metadata} projectId={projectId} mentionableAgentHandles={mentionableAgentHandles} />
@@ -572,7 +595,9 @@ export function ConversationMessageRows({
             narrowSpeakerIdentity={narrowSpeakerIdentity}
             speakerMarker={speakerMarker}
             onContextMenu={
-              message.role === "assistant" ? (event) => onMessageContextMenu(event, message.id) : undefined
+              message.role === "assistant" && !isReplyDraft
+                ? (event) => onMessageContextMenu(event, message.id)
+                : undefined
             }
             workflowSpineActive={Boolean(workflowSpineKey)}
             workflowSpineContinuesBefore={spineBridgeBefore}

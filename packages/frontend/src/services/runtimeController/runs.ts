@@ -67,6 +67,8 @@ const PROJECT_MEMBERS_EVENT_KINDS = ["project.members_changed"] as const;
 const CREDITS_EVENT_KINDS = ["credits.updated"] as const;
 // Follow mode presence only (started, away, ended); views never travel on /events.
 const PREVIEW_FOLLOW_EVENT_KINDS = ["preview.follow"] as const;
+// A reply's text while the model writes it; never stored, the persisted reply replaces it.
+const REPLY_DRAFT_EVENT_KINDS = ["run.reply_draft"] as const;
 // The stream dropped events (it fell behind, or could not check access for
 // them); the payload is just a reason, and the listener re-reads everything.
 const STREAM_EVENT_KINDS = ["events.resync"] as const;
@@ -84,6 +86,7 @@ const FORWARD_EVENT_KINDS = [
   ...PROJECT_MEMBERS_EVENT_KINDS,
   ...CREDITS_EVENT_KINDS,
   ...PREVIEW_FOLLOW_EVENT_KINDS,
+  ...REPLY_DRAFT_EVENT_KINDS,
   ...STREAM_EVENT_KINDS,
 ] as const;
 
