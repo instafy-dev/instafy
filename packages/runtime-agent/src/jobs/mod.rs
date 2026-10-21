@@ -7196,15 +7196,7 @@ impl JobProcessor {
                     Retry the latest user request now."
                 )
             } else if shared_browser_execution_missing {
-                format!(
-                    "{prompt}\n\nIMPORTANT SHARED BROWSER RETRY REQUIREMENT:\n\
-                    - Your previous response did not produce any instrumented Shared Browser action evidence.\n\
-                    - Use `instafy_shared_browser.snapshot` now.\n\
-                    - Complete the requested interaction with the same dedicated MCP server and fresh snapshot indices.\n\
-                    - Do not use shell, Playwright, direct CDP, or merely narrate the action.\n\
-                    - Finish only after the controller response provides the final observed page title and URL.\n\n\
-                    Retry the latest user request now."
-                )
+                shared_browser_execution_retry_prompt(&prompt)
             } else if command_execution_missing {
                 evidence_recovery_plan.map_or_else(
                     || prompt.to_string(),
@@ -12249,6 +12241,20 @@ fn codex_missing_final_inert_write_task_retry_prompt(prompt: &str) -> String {
         - This request expects real workspace work. Complete the latest user request now — run the required commands and/or edit the required files with the available tools first.\n\
         - If the correct outcome is to stop and ask the user a question (for example a merge conflict that needs the user's decision), do the safe preparatory work and return that question as the final assistant message.\n\
         - Do not end the turn after reasoning alone, and do not send a progress/status update as the final assistant message.\n\n\
+        Retry the latest user request now."
+    )
+}
+
+fn shared_browser_execution_retry_prompt(prompt: &str) -> String {
+    // A browser that has just started is on a blank page: the snapshot says so
+    // and the agent has to navigate before there is anything to act on.
+    format!(
+        "{prompt}\n\nIMPORTANT SHARED BROWSER RETRY REQUIREMENT:\n\
+        - Your previous response did not produce any instrumented Shared Browser action evidence.\n\
+        - Use `instafy_shared_browser.snapshot` now. If it reports a blank page, call `instafy_shared_browser.navigate` with the http(s) address the task names before anything else.\n\
+        - Complete the requested interaction with the same dedicated MCP server and fresh snapshot indices.\n\
+        - Do not use shell, Playwright, direct CDP, or merely narrate the action.\n\
+        - Finish only after the controller response provides the final observed page title and URL.\n\n\
         Retry the latest user request now."
     )
 }
@@ -23765,6 +23771,48 @@ mod tests {
             ..completed
         };
         assert!(!has_successful_shared_browser_mcp_message(&[failed]));
+    }
+
+    #[test]
+    fn blank_page_snapshot_alone_still_counts_as_missing_shared_browser_execution() {
+        // A snapshot of a blank page completes but adds nothing to the action
+        // log, so a turn that stops there gets the retry that says to navigate.
+        let snapshot = JobMessage {
+            content: "Tool call completed: instafy_shared_browser/snapshot".to_string(),
+            message_type: Some("mcp_tool_call".to_string()),
+            metadata: Some(json!({
+                "server": "instafy_shared_browser",
+                "tool": "snapshot",
+                "status": "completed",
+            })),
+        };
+        let messages = [snapshot];
+        assert!(has_successful_shared_browser_mcp_message(&messages));
+        assert!(shared_browser_execution_missing_after_attempt(
+            true,
+            &messages,
+            None,
+            Some(3),
+            3,
+        ));
+        assert!(!shared_browser_execution_missing_after_attempt(
+            true,
+            &messages,
+            None,
+            Some(3),
+            5,
+        ));
+    }
+
+    #[test]
+    fn shared_browser_retry_prompt_navigates_away_from_a_blank_page() {
+        let retry = shared_browser_execution_retry_prompt("Open https://app.example.test");
+        assert!(retry.starts_with("Open https://app.example.test\n\n"));
+        assert!(retry.contains("Use `instafy_shared_browser.snapshot` now."));
+        assert!(retry.contains(
+            "If it reports a blank page, call `instafy_shared_browser.navigate` with the http(s) address the task names"
+        ));
+        assert!(retry.ends_with("Retry the latest user request now."));
     }
 
     #[test]
