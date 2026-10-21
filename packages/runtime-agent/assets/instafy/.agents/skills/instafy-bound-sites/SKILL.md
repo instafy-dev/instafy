@@ -103,8 +103,8 @@ site's (`say`/label), so line and block are page data: run that intent with thos
 1. Find the binder serving that port; its folder's `bound.json` has the intent's `agent.prompt` (the recipe) and
    `agent.allowed_origins`. No such intent: say so. `confirm: true` runs only with `"confirmed": true`.
 2. Work under the hard rules below; withheld params stay withheld.
-3. Add `instafy.records@1` records about the ref (with `prov`) to the intent's `target.records` file (keep its
-   `schema` and other records), bump `v` in `data/version.json`, run `instafy bind command <dir> reload '{}'`.
+3. Add `instafy.records@1` records about the ref (`type`, `ref`, `attr`, `value`, `prov`: cheat sheet "Records") to
+   the intent's `target.records` file, keeping the rest. Open pages fetch them when the turn ends.
 4. Reply in one short line: the chat and the site's button both show it.
 
 ## When you receive a bound-site intent

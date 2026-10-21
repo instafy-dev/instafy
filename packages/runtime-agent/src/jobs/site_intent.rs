@@ -91,9 +91,11 @@ pub(super) fn format_site_intent_context_section(metadata: Option<&JsonValue>) -
          `agent.allowed_origins`. If there is no such intent, say so in one line and do nothing else.\n\
          - If `bound.json` marks \"{intent}\" `confirm: true` and the data above does not say `\"confirmed\": true`, \
          do not run it: reply in one line that it needs confirming in Instafy.\n\
-         - Write what you find back the way the site takes it: `instafy.records@1` records in the intent's \
-         `target.records` file, then `instafy bind command <site folder> reload '{{}}'` so every open page shows \
-         them (skill: instafy-bound-sites).\n\
+         - Write what you find back the way the site takes it: add `instafy.records@1` records to the intent's \
+         `target.records` file, keeping the records already there. Each record has `type` (`claim`, `offer` or \
+         `item`) and `ref`; a claim also has `attr`, `value` and `prov` (`source`, `ttl_s`), as the skill's cheat \
+         sheet shows. Open pages fetch them when your turn ends; `instafy bind command <site folder> reload '{{}}'` \
+         refreshes them sooner where it can reach the binder (skill: instafy-bound-sites).\n\
          - `withheld` params were left out by the page on purpose and `coarsened` ones are rounded to about 100 m; \
          do not ask for them.\n\
          - Reply in one short line: the person sees your answer in this chat and on the site."
@@ -161,6 +163,8 @@ mod tests {
             format_site_intent_context_section(Some(&metadata(confirmed))).expect("section");
         assert!(section.contains("\"confirmed\":true"));
         assert!(section.contains("instafy bind command <site folder> reload '{}'"));
+        // Records the site's pages can show: a typed record, not free text.
+        assert!(section.contains("Each record has `type` (`claim`, `offer` or `item`) and `ref`"));
         // No ask id or preview id: nothing Octo needs, nothing to leak.
         assert!(!section.contains("int_m1abc_x7k2"));
         assert!(!section.contains("11111111-1111"));

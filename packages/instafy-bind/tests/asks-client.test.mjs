@@ -16,6 +16,7 @@ function load({ embedded = true, search = "?instafy_host=studio", asks = [ASK], 
   const listeners = {};
   const sent = [];
   const posted = [];
+  const fetched = [];
   const parent = { postMessage(msg, origin) { sent.push({ msg: JSON.parse(JSON.stringify(msg)), origin }); } };
   const location = { href: `${SITE}/${search}`, origin: SITE, search, hash: "", pathname: "/" };
   const window = { addEventListener(type, fn) { (listeners[type] ||= []).push(fn); }, location, navigator: {} };
@@ -35,6 +36,7 @@ function load({ embedded = true, search = "?instafy_host=studio", asks = [ASK], 
     console,
     fetch: (url, init) => {
       const u = String(url);
+      fetched.push(u);
       if (u.endsWith("/health")) return Promise.resolve({ ok: true, json: async () => health });
       if (u.endsWith("/intent")) {
         posted.push(JSON.parse(init.body));
@@ -49,6 +51,7 @@ function load({ embedded = true, search = "?instafy_host=studio", asks = [ASK], 
     bind: window.instafyBind,
     sent,
     posted,
+    fetched,
     deliver(data, { origin = STUDIO, source = parent } = {}) {
       for (const fn of listeners.message || []) fn({ data, origin, source });
     },
@@ -225,4 +228,18 @@ test("an ask without say or confirm sends neither", async () => {
   const [sent] = page.asksSent();
   assert.equal("say" in sent.msg.payload, false);
   assert.equal("confirm" in sent.msg.payload, false);
+});
+
+test("when the host says an ask's run is done, the page fetches the site's records again (Octo answers through them)", async () => {
+  const page = load();
+  await tick(5);
+  page.layout({ ask: true });
+  await page.bind.ready;
+  const id = page.bind.intent("ask_octo", { ref: "shoes:a" }, { ref: "shoes:a" });
+  await tick(5);
+  page.status({ id, state: "sent" });
+  const before = page.fetched.filter((u) => u.endsWith("/records")).length;
+  page.status({ id, state: "done" });
+  await tick(5);
+  assert.equal(page.fetched.filter((u) => u.endsWith("/records")).length, before + 1);
 });

@@ -395,7 +395,8 @@
     if (p.state === "sent") handleHost(Object.assign({ type: "ack", status: "sent" }, base2), "host");
     // the host shows its own confirm first (the intent says confirm: true): the click waits for the person there
     else if (p.state === "confirm") handleHost(Object.assign({ type: "ack", status: "needs_confirm" }, base2), "host");
-    else if (p.state === "done") { askIds.delete(id); handleHost(Object.assign({ type: "done", summary: reason }, base2), "host"); }
+    // the ask's run ended: Octo answers through the site's records files, so fetch them fresh for this page
+    else if (p.state === "done") { askIds.delete(id); handleHost(Object.assign({ type: "done", summary: reason }, base2), "host"); if (hostReady) loadRecords(); }
     else if (p.state === "declined") { askIds.delete(id); localAck(id, "rejected", reason || "Not sent."); }
     else if (p.state === "failed") { askIds.delete(id); handleHost(Object.assign({ type: "error", error: { code: "ask_failed", message: reason || "Octo could not answer." } }, base2), "host"); }
   }

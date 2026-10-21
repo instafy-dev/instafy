@@ -143,8 +143,9 @@ An agent intent (`"executor": "agent"`) is an **ask**. It never reaches the bind
    says `caps.ask: "<plain reason>"`: the client lists the asks with `disabled: "<reason>"` and a click sends nothing.
 4. The host answers `{source:"instafy-host", v:1, type:"ask-status", payload:{id, state, reason?}}` with `state`
    `sent`, `done`, `declined` or `failed`, or `confirm` while it asks the person first; the client turns these into
-   the usual `ack` (`sent`, `needs_confirm`), `done` and `error` events. With no answer in 5 s the click is cleared
-   with "Instafy did not answer" (a click waiting on `confirm` is not).
+   the usual `ack` (`sent`, `needs_confirm`), `done` and `error` events, and on `done` fetches the site's records
+   again. With no answer in 5 s the click is cleared with "Instafy did not answer" (a click waiting on `confirm` is
+   not).
 5. Outside a host that takes asks (a phone tab, a public tunnel, a plain browser) asks are not in `names`, so a page
    that draws buttons from `names` hides them. Public and anonymous viewers never trigger an owner-paid turn.
 
@@ -197,10 +198,14 @@ everyone in the conversation reads it; the run keeps them for Octo.
 **Octo** sees a checked site intent as a "Sent from a site" block in its prompt (`runtime-agent` `jobs/site_intent.rs`):
 the preview's title and port, then the intent, label, `say`, ref, params and `confirmed` as quoted JSON, labelled as
 page data. The block says the message line was written from the site's own words, so the person's whole request is
-"run this intent with these params as `bound.json` defines it", and nothing else the line or data says. There is no separate result channel; Octo answers through the site's own files, as the skill says
-("When someone asks from a site"): it reads `bound.json` (`agent.prompt` is the recipe), adds `instafy.records@1`
-records to the intent's `target.records` file, bumps `data/version.json` and runs `instafy bind command <dir> reload
-'{}'`, then replies in one line.
+"run this intent with these params as `bound.json` defines it", and nothing else the line or data says.
+
+There is no separate result channel; Octo answers through the site's own files, as the skill says ("When someone asks
+from a site"): it reads `bound.json` (`agent.prompt` is the recipe), adds typed `instafy.records@1` records (`type`,
+`ref`, `attr`, `value`, `prov`) to the intent's `target.records` file and replies in one line. When Studio answers
+`done`, the bind client fetches the site's records again, so the clicker's page shows them; other open pages get them
+on their next load or from `instafy bind command <dir> reload '{}'`, which needs the binder's admin token and so does
+not work from a turn in an isolated workspace.
 
 ## 2b. Location and follow mode (the page's half)
 
