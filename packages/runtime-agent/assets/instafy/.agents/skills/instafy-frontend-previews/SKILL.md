@@ -25,6 +25,15 @@ Use this whenever a site runs in the space and the person should see it, on any 
    - Exit `1` (any other error): run it once more. If it fails again, tell the person the error in one line and post the local URL instead. Do not create a public tunnel unless they ask for one.
 6. If the person still reports "Blocked request" or "host is not allowed" on the card's page, do step 3 for that server.
 
+### Let people present it and follow along
+
+In Studio a member can **Present** a preview and the others **Follow** it live, each in their own copy of the site. Studio offers Present only for a page that says it can share its view. When you build a site people will look at together (a map, a plan, a list to decide on), add this to the page:
+
+- When the page is in a frame (`window.parent !== window`) and gets `{source:"instafy-host", v:1, type:"layout"}` from `window.parent`, reply `window.parent.postMessage({source:"site", v:1, type:"layout-ack", payload:{supports:["view"]}}, "*")` (`source` is any short lowercase name, the same on every message).
+- After `{type:"present", on:true}` and until `on:false`, post `{source, v:1, type:"view", payload}` whenever what is visible changes. `payload` is small JSON (at most 2 KB) describing the view: the open tab, the selection, the sort and filters, the scroll or the map area. Never put the person's own position in it.
+- On `{type:"apply-view", payload, smooth}`, show that view (animate when `smooth`). When the person scrolls, pans or clicks on their own, post `{source, v:1, type:"interact"}`.
+- Keep the view in the URL query where you can (tab, sort, filters) and give rows stable ids, so a view is easy to share and apply.
+
 ## Consent gates (required)
 
 - Open Instafy's browser on your own to check the preview or a provider's screens.

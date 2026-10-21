@@ -894,6 +894,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
+/** The signed-in person's id, or null outside an AuthProvider (a component rendered on its own). */
+export function useOptionalUserId(): string | null {
+  return useContext(AuthContext)?.user?.id ?? null;
+}
+
 export function useAuth() {
   const context = useContext(AuthContext);
   if (!context) {

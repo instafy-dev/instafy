@@ -265,6 +265,26 @@ async fn main() -> anyhow::Result<()> {
         }
         None => (EventHub::new(), None),
     };
+    // Follow mode's views cross nodes on their own channel and queue, so a
+    // 10 Hz presentation never competes with chat events for the event bus.
+    let (follow, follow_bus) = match config.redis_url.clone() {
+        Some(redis_url) => {
+            let namespace = config
+                .redis_namespace
+                .clone()
+                .unwrap_or_else(|| "instafy".to_string());
+            let (outbound_tx, outbound_rx) = previews::FollowHub::bus_channel();
+            (
+                previews::FollowHub::new(events.clone(), Some(outbound_tx)),
+                Some((
+                    redis_url,
+                    format!("{namespace}:controller:follow"),
+                    outbound_rx,
+                )),
+            )
+        }
+        None => (previews::FollowHub::new(events.clone(), None), None),
+    };
     let runtime_activity = RuntimeActivityTracker::new(config.runtime_idle_release_seconds);
     let provider_registry = providers::build_provider_registry(&config, &pool).await?;
     let tunnel_broker = tunnels::build_tunnel_broker(&config, http_client.clone())?;
@@ -274,6 +294,7 @@ async fn main() -> anyhow::Result<()> {
         rate_limiter: rate_limit::RateLimiter::new(),
         connection_limiter: connection_limit::ConnectionLimiter::new(),
         events,
+        follow,
         http_client,
         origin_proxy_client,
         runtime_activity: runtime_activity.clone(),
@@ -336,6 +357,9 @@ async fn main() -> anyhow::Result<()> {
 
     if let Some((redis_url, channel, outbound_rx)) = redis_event_bus {
         redis_bus::spawn(redis_url, channel, state.events.clone(), outbound_rx);
+    }
+    if let Some((redis_url, channel, outbound_rx)) = follow_bus {
+        redis_bus::spawn_follow(redis_url, channel, state.follow.clone(), outbound_rx);
     }
 
     if let Err(error) = origins::register_runtime_signing_key(&state).await {

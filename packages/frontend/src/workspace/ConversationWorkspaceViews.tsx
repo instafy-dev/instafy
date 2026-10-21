@@ -5,6 +5,7 @@ import { useStudioNavigationPosture } from "../screens/studio/useStudioNavigatio
 import { ConversationRoster } from "../screens/studio/components/ConversationRoster";
 import { useChatParticipantsSnapshot, EMPTY_CHAT_PARTICIPANTS_SNAPSHOT } from "../screens/studio/components/chatParticipantsStore";
 import { useCode } from "../code/useCode";
+import { endOwnPresentation } from "../screens/studio/components/previewHost/followStore";
 import { useWorkspaceTabs } from "./WorkspaceTabsProvider";
 import { ConversationSurfaceTabs, type ConversationSurface } from "./ConversationSurfaceLayout";
 import { closeConversationFile, closeConversationPreview, conversationFileLabel, conversationResourceId, selectConversationView } from "./conversationSurfaces";
@@ -52,7 +53,8 @@ export function ConversationWorkspaceViews({ placement = "header" }: { placement
     })),
     ...surfaces.previews.map(preview => ({ id: preview.id, label: preview.title, title: preview.title,
       panelId: "conversation-workspace-preview", icon: <WebWindow className="h-3.5 w-3.5" />,
-      onClose: () => conversationSurfaces.update(scope, state => closeConversationPreview(state, preview.id, hasBrowser)),
+      // Closing the tab ends a presentation this page runs for the site (switching views does not).
+      onClose: () => { endOwnPresentation(preview.previewId); conversationSurfaces.update(scope, state => closeConversationPreview(state, preview.id, hasBrowser)); },
     })),
     ...ownedViews.map(tab => ({ id: tab.id, label: tab.title, panelId: "conversation-workspace-resource", icon: tab.icon,
       dirty: tab.dirty, onClose: () => closeTab(tab.id),

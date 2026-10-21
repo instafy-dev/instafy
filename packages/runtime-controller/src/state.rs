@@ -20,6 +20,9 @@ pub(crate) struct AppState {
     pub(crate) rate_limiter: RateLimiter,
     pub(crate) connection_limiter: ConnectionLimiter,
     pub(crate) events: EventHub,
+    /// Follow mode's relay: presented views fan out here, never through
+    /// `events`.
+    pub(crate) follow: crate::previews::FollowHub,
     pub(crate) http_client: reqwest::Client,
     pub(crate) origin_proxy_client: reqwest::Client,
     pub(crate) runtime_activity: RuntimeActivityTracker,

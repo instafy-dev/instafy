@@ -1111,6 +1111,8 @@ describe("runtime controller run event streaming", () => {
     const kinds = new URL(request.url).searchParams.getAll("kinds[]");
     expect(kinds).toContain("project.members_changed");
     expect(kinds).toContain("credits.updated");
+    // Follow mode's presence (who presents a site) rides the main stream; views never do.
+    expect(kinds).toContain("preview.follow");
 
     const membersChanged = {
       kind: "project.members_changed",

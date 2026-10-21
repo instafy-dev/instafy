@@ -69,6 +69,7 @@ import {
   PROJECT_ACCESS_REFRESH_EVENT,
 } from "../../../projects/projectAccessEvents";
 import { CREDITS_UPDATED_EVENT } from "../../../credits/creditsEvents";
+import { PREVIEW_FOLLOW_EVENT } from "../../../services/runtimeController/previewFollow";
 import { getStudioWorkspaceOwnerKey } from "../../../screens/studio/useStudioKnownFiles";
 
 function deferred<T>() {
@@ -746,6 +747,34 @@ describe("useRuntimeControllerSync controller access results", () => {
     });
     expect(unsubscribe).toHaveBeenCalledOnce();
     expect(dependencies.markControllerUnavailable).not.toHaveBeenCalled();
+  });
+
+  it("forwards follow-mode presence (preview.follow) as a window event for the follow store", async () => {
+    const dependencies = createHookDependencies();
+    let subscription: SubscribeControllerRunsParams | null = null;
+    controllerMocks.fetchRuns.mockResolvedValue(fetchResult());
+    controllerMocks.subscribeToRuns.mockImplementation(
+      (params: SubscribeControllerRunsParams) => {
+        subscription = params;
+        return vi.fn();
+      },
+    );
+    const followEvent = vi.fn<(event: Event) => void>();
+    window.addEventListener(PREVIEW_FOLLOW_EVENT, followEvent);
+    try {
+      await act(async () => {
+        root.render(<Harness projectId="project-current" dependencies={dependencies} />);
+      });
+      await vi.waitFor(() => expect(subscription).not.toBeNull());
+      const data = { previewId: "preview-1", presentationId: "pres-1", state: "live", presenter: { id: "u-kim", name: "Kim" }, followers: 2 };
+      await act(async () => {
+        subscription?.onEvent?.({ kind: "preview.follow", project_id: "project-current", data });
+      });
+      expect(followEvent).toHaveBeenCalledOnce();
+      expect((followEvent.mock.calls[0][0] as CustomEvent).detail).toEqual(data);
+    } finally {
+      window.removeEventListener(PREVIEW_FOLLOW_EVENT, followEvent);
+    }
   });
 
   it("forwards roster and credit signals as window events", async () => {

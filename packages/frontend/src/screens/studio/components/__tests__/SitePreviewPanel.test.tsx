@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConversationSitePreviewView } from "../../../../workspace/conversationSurfaces";
 import { SITE_PREVIEW_HEARTBEAT_MS } from "../SitePreviewPane";
 import { SitePreviewPanel } from "../SitePreviewPanel";
+import { withHostQuery } from "../previewHost/hostMessages";
 
 const DOCS_ID = "11111111-1111-4111-8111-111111111111";
 const SHOP_ID = "22222222-2222-4222-8222-222222222222";
@@ -110,6 +111,6 @@ describe("SitePreviewPanel", () => {
     // The other conversation's pane is its own, with its own session.
     expect(mocks.createSitePreviewViewer).toHaveBeenCalledTimes(2);
     expect(slots()).toHaveLength(1);
-    expect(container.querySelector("[data-testid=site-preview-frame]")?.getAttribute("src")).toBe(viewer("b", DOCS_ID));
+    expect(container.querySelector("[data-testid=site-preview-frame]")?.getAttribute("src")).toBe(withHostQuery(viewer("b", DOCS_ID)));
   });
 });
