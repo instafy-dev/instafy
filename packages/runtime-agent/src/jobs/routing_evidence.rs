@@ -194,23 +194,7 @@ pub(super) fn routing_evidence_with_receipts(
                 receipts.failed_or_incomplete_commands.saturating_add(1);
             continue;
         }
-        // Malformed present argv never falls back to a plausible display string.
-        let argv = match metadata.get("commandArgv") {
-            Some(value) => value
-                .as_array()
-                .filter(|values| values.len() <= 128)
-                .and_then(|values| {
-                    values
-                        .iter()
-                        .map(serde_json::Value::as_str)
-                        .collect::<Option<Vec<_>>>()
-                })
-                .map(|args| args.into_iter().map(str::to_owned).collect::<Vec<_>>()),
-            None => metadata["command"]
-                .as_str()
-                .and_then(split_routing_pre_observation_command),
-        };
-        let Some(argv) = argv else {
+        let Some(argv) = receipt_argv(metadata) else {
             receipts.invalid_receipts = receipts.invalid_receipts.saturating_add(1);
             continue;
         };
@@ -241,6 +225,136 @@ pub(super) fn routing_evidence_with_receipts(
         progress = progress.merge(observed);
     }
     (progress, receipts)
+}
+
+/// A receipt's exact argv. Malformed present argv never falls back to a
+/// plausible display string.
+fn receipt_argv(metadata: &serde_json::Value) -> Option<Vec<String>> {
+    match metadata.get("commandArgv") {
+        Some(value) => value
+            .as_array()
+            .filter(|values| values.len() <= 128)
+            .and_then(|values| {
+                values
+                    .iter()
+                    .map(serde_json::Value::as_str)
+                    .collect::<Option<Vec<_>>>()
+            })
+            .map(|args| args.into_iter().map(str::to_owned).collect::<Vec<_>>()),
+        None => metadata["command"]
+            .as_str()
+            .and_then(split_routing_pre_observation_command),
+    }
+}
+
+/// Whether the model's own commands ran a program beyond literal output, such
+/// as `echo`, `printf`, `yes`, `true` or `cd`, and fed by no here-document.
+/// Unlike evidence, an unsupported shape still counts: this says a program
+/// really ran, not that a read was proven. A program whose name is not literal
+/// text does not count. With `require_success` only completed exit-0 receipts
+/// count; otherwise any receipt with an exit code does, so a `grep` that
+/// matched nothing (exit 1) still ran. The host's routing pre-observation is
+/// never the model's own command.
+pub(super) fn ran_program_beyond_literal_output(
+    messages: &[JobMessage],
+    require_success: bool,
+) -> bool {
+    messages.iter().any(|message| {
+        message
+            .message_type
+            .as_deref()
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("command_execution"))
+            && message.metadata.as_ref().is_some_and(|metadata| {
+                metadata["source"] != "routing_pre_observation"
+                    && metadata["exitCode"].as_i64().is_some_and(|exit_code| {
+                        !require_success
+                            || (exit_code == 0
+                                && metadata["status"] == "completed"
+                                && metadata["timedOut"] != true)
+                    })
+                    && receipt_argv(metadata).is_some_and(|argv| {
+                        executes_program_beyond_literal_output(
+                            &argv.iter().map(String::as_str).collect::<Vec<_>>(),
+                        )
+                    })
+            })
+    })
+}
+
+fn executes_program_beyond_literal_output(argv: &[&str]) -> bool {
+    if !bounded_command_argv(argv) {
+        return false;
+    }
+    if !shell_program(argv[0]) {
+        return program_name(argv[0]).is_some_and(|program| !literal_output_program(program));
+    }
+    let [shell, flag, script] = argv else {
+        return false;
+    };
+    if !matches!(program_name(shell), Some("sh" | "bash" | "zsh")) || !matches!(*flag, "-c" | "-lc")
+    {
+        return false;
+    }
+    let Some(tree) = codex_shell_command::bash::try_parse_shell(script) else {
+        return false;
+    };
+    if tree.root_node().has_error() {
+        return false;
+    }
+    let mut ran = false;
+    // Only a pipeline's first stage counts: later stages may only reshape
+    // what it printed, as `head` does to `printf` output.
+    let mut stack = vec![(tree.root_node(), true)];
+    while let Some((node, counts)) = stack.pop() {
+        match node.kind() {
+            // `cat <<EOF` prints whatever the script supplies.
+            "heredoc_redirect" | "herestring_redirect" => return false,
+            "command" if counts => {
+                ran |= node
+                    .child_by_field_name("name")
+                    .and_then(|name| script.get(name.byte_range()))
+                    .filter(|name| {
+                        !name.contains(['$', '`', '\\', '"', '\'', '*', '?', '[', '{', '~', '='])
+                    })
+                    .filter(|name| !shell_program(name))
+                    .and_then(program_name)
+                    .is_some_and(|program| !literal_output_program(program));
+            }
+            _ => {}
+        }
+        let pipeline = node.kind() == "pipeline";
+        let mut cursor = node.walk();
+        let mut first_stage = true;
+        for child in node.children(&mut cursor) {
+            let later_stage = pipeline && child.is_named() && !std::mem::take(&mut first_stage);
+            stack.push((child, counts && !later_stage));
+        }
+    }
+    ran
+}
+
+/// Builtins and utilities whose output is only their own literal arguments, or
+/// nothing at all.
+fn literal_output_program(program: &str) -> bool {
+    matches!(
+        program,
+        "echo"
+            | "printf"
+            | "yes"
+            | "true"
+            | "false"
+            | ":"
+            | "cd"
+            | "sleep"
+            | "seq"
+            | "expr"
+            | "test"
+            | "exit"
+            | "set"
+            | "unset"
+            | "export"
+            | "read"
+    )
 }
 
 /// Recognize executed lookup shapes, never stdout or a model's claim about an
@@ -372,6 +486,9 @@ enum CommandProof {
 struct LiteralCommands {
     commands: Vec<Vec<String>>,
     final_segment_start: usize,
+    /// `piped[i]`: leaf `i` is a later pipeline stage that reads the previous
+    /// leaf's output. Without pipefail, exit zero proves only the last stage.
+    piped: Vec<bool>,
 }
 
 /// Exit zero proves every leaf in the final flat AND segment succeeded. A
@@ -386,6 +503,7 @@ fn literal_commands(argv: &[&str]) -> Result<LiteralCommands, RejectedCommand> {
         return Ok(LiteralCommands {
             commands: vec![argv.iter().map(|s| (*s).to_owned()).collect()],
             final_segment_start: 0,
+            piped: vec![false],
         });
     }
     if argv.len() != 3
@@ -401,6 +519,7 @@ fn literal_commands(argv: &[&str]) -> Result<LiteralCommands, RejectedCommand> {
         return Ok(LiteralCommands {
             commands: vec![command],
             final_segment_start: 0,
+            piped: vec![false],
         });
     }
     let tree =
@@ -411,7 +530,11 @@ fn literal_commands(argv: &[&str]) -> Result<LiteralCommands, RejectedCommand> {
     let mut stack = vec![tree.root_node()];
     let mut commands = 0usize;
     let mut command_sources = Vec::new();
-    let mut comments = Vec::new();
+    // Comments and accepted stderr redirects: spans between leaves that are
+    // neither operators nor part of any leaf.
+    let mut ignored = Vec::new();
+    // Accepted `2>/dev/null` spans, a subset of `ignored`.
+    let mut discarded_stderr = Vec::<std::ops::Range<usize>>::new();
     while let Some(node) = stack.pop() {
         if node.is_named()
             && !matches!(
@@ -419,6 +542,8 @@ fn literal_commands(argv: &[&str]) -> Result<LiteralCommands, RejectedCommand> {
                 "program"
                     | "comment"
                     | "list"
+                    | "pipeline"
+                    | "redirected_statement"
                     | "command"
                     | "command_name"
                     | "word"
@@ -432,13 +557,63 @@ fn literal_commands(argv: &[&str]) -> Result<LiteralCommands, RejectedCommand> {
             return Err(rejected_shell_node(node.kind()));
         }
         if !node.is_named()
-            && !matches!(node.kind(), "&&" | ";" | "\"" | "'")
+            && !matches!(node.kind(), "&&" | ";" | "|" | "\"" | "'")
             && !node.kind().trim().is_empty()
         {
             return Err(rejected_shell_node(node.kind()));
         }
+        if node.kind() == "redirected_statement" {
+            // Literal commands whose only redirects send stderr to /dev/null
+            // or to stdout. Their stdout, the observed output, stays where it
+            // was; every other redirect could write or replace it. The parser
+            // attaches a trailing redirect to a whole list or pipeline, and
+            // the body is checked like any other node once it is popped.
+            let mut body = None;
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                let stderr_only = || {
+                    let mut operators = child.walk();
+                    let operators = child
+                        .children(&mut operators)
+                        .filter(|operator| !operator.is_named())
+                        .map(|operator| operator.kind())
+                        .collect::<Vec<_>>();
+                    let descriptor = child
+                        .child_by_field_name("descriptor")
+                        .and_then(|descriptor| script.get(descriptor.byte_range()));
+                    let destination =
+                        child
+                            .child_by_field_name("destination")
+                            .and_then(|destination| {
+                                Some((destination.kind(), script.get(destination.byte_range())?))
+                            });
+                    // Some(true): stderr is discarded; Some(false): it joins stdout.
+                    if child.named_child_count() != 2 || descriptor != Some("2") {
+                        return None;
+                    }
+                    match (operators.as_slice(), destination) {
+                        ([">"], Some(("word", "/dev/null"))) => Some(true),
+                        ([">&"], Some(("number", "1"))) => Some(false),
+                        _ => None,
+                    }
+                };
+                match child.kind() {
+                    "command" | "pipeline" | "list" if body.is_none() => body = Some(child),
+                    "file_redirect" => {
+                        let discards = stderr_only().ok_or(RejectedCommand::Redirection)?;
+                        ignored.push(child.byte_range());
+                        if discards {
+                            discarded_stderr.push(child.byte_range());
+                        }
+                    }
+                    _ => return Err(RejectedCommand::Redirection),
+                }
+            }
+            stack.push(body.ok_or(RejectedCommand::Redirection)?);
+            continue;
+        }
         match node.kind() {
-            "comment" => comments.push(node.byte_range()),
+            "comment" => ignored.push(node.byte_range()),
             "command" => {
                 commands += 1;
                 command_sources.push((
@@ -449,7 +624,7 @@ fn literal_commands(argv: &[&str]) -> Result<LiteralCommands, RejectedCommand> {
                         .ok_or(RejectedCommand::LiteralArguments)?,
                 ));
             }
-            "||" | "|" | "&" => return Err(RejectedCommand::ControlFlow),
+            "||" | "&" => return Err(RejectedCommand::ControlFlow),
             _ => {}
         }
         let mut cursor = node.walk();
@@ -459,25 +634,27 @@ fn literal_commands(argv: &[&str]) -> Result<LiteralCommands, RejectedCommand> {
         return Err(RejectedCommand::CommandBound);
     }
     command_sources.sort_by_key(|(position, _, _)| *position);
-    comments.sort_by_key(|range| range.start);
+    ignored.sort_by_key(|range| range.start);
     let mut final_segment_start = 0;
+    let mut piped = vec![false; command_sources.len()];
     for (index, pair) in command_sources.windows(2).enumerate() {
-        // Only AST comment spans are ignored. A '#' within a quoted argument
-        // stays part of its literal leaf; the newline ending a comment remains
-        // available to distinguish sequential commands from an AND segment.
+        // Only AST comment and accepted redirect spans are ignored. A '#'
+        // within a quoted argument stays part of its literal leaf; the newline
+        // ending a comment remains available to distinguish sequential
+        // commands from an AND segment.
         let mut between = String::new();
         let mut cursor = pair[0].1;
-        for comment in comments
+        for span in ignored
             .iter()
             .filter(|range| range.start >= pair[0].1 && range.end <= pair[1].0)
         {
             between.push_str(
                 script
-                    .get(cursor..comment.start)
+                    .get(cursor..span.start)
                     .ok_or(RejectedCommand::LiteralArguments)?,
             );
             between.push(' ');
-            cursor = comment.end;
+            cursor = span.end;
         }
         between.push_str(
             script
@@ -486,6 +663,18 @@ fn literal_commands(argv: &[&str]) -> Result<LiteralCommands, RejectedCommand> {
         );
         match between.trim() {
             "&&" => {}
+            "|" => {
+                // Without pipefail exit zero proves only the last stage. An
+                // earlier stage's failure then shows only in its error text,
+                // so that stage must not discard it.
+                if discarded_stderr
+                    .iter()
+                    .any(|range| range.start >= pair[0].1 && range.end <= pair[1].0)
+                {
+                    return Err(RejectedCommand::Redirection);
+                }
+                piped[index + 1] = true;
+            }
             ";" => final_segment_start = index + 1,
             "" if between.contains('\n') => final_segment_start = index + 1,
             _ => return Err(RejectedCommand::ControlFlow),
@@ -512,6 +701,7 @@ fn literal_commands(argv: &[&str]) -> Result<LiteralCommands, RejectedCommand> {
     Ok(LiteralCommands {
         commands: parsed,
         final_segment_start,
+        piped,
     })
 }
 
@@ -609,7 +799,10 @@ fn classify_command(
     let LiteralCommands {
         commands,
         final_segment_start,
+        piped,
     } = literal_commands(argv)?;
+    // A pipeline is one read: its first leaf observes, later leaves format.
+    let compound = piped.iter().filter(|piped| !**piped).count() > 1;
     let mut progress = RoutingEvidenceProgress::default();
     for (index, command) in commands.iter().enumerate() {
         let args = command.iter().map(String::as_str).collect::<Vec<_>>();
@@ -619,16 +812,25 @@ fn classify_command(
         if !bounded_command_argv(&args) || shell_program(args[0]) {
             return Err(RejectedCommand::LeafArguments);
         }
+        if piped[index] {
+            // A later stage sees only the earlier stage's output. It never
+            // discharges a requirement, and must neither execute nor write.
+            if !pipe_filter(program, &args) {
+                return Err(RejectedCommand::CompoundRead);
+            }
+            continue;
+        }
         if neutral_leaf(&args) {
             continue;
         }
-        if args
-            .iter()
-            .any(|arg| matches!(*arg, "--help" | "-h" | "--version" | "-V"))
-        {
+        if help_or_version_request(program, &args) {
             return Err(RejectedCommand::LeafArguments);
         }
         if lookup_leaf(&args) {
+            // A pipe would hide the lookup's own exit status.
+            if piped.get(index + 1) == Some(&true) {
+                return Err(RejectedCommand::CompoundRead);
+            }
             if index >= final_segment_start {
                 progress.context_retrieval = true;
             }
@@ -640,7 +842,7 @@ fn classify_command(
             if rejected_observation(program, &args) {
                 return Err(RejectedCommand::LeafArguments);
             }
-            if commands.len() > 1 && !readonly_observation(&args) {
+            if compound && !readonly_observation(&args) {
                 return Err(RejectedCommand::CompoundRead);
             }
             if index >= final_segment_start {
@@ -659,6 +861,71 @@ fn classify_command(
         CommandProof::Single
     };
     Ok((progress, proof))
+}
+
+/// `--help` and `--version` print usage, never state. Short `-h` and `-V` mean
+/// the same for most programs, but they are ordinary read flags for these.
+fn help_or_version_request(program: &str, argv: &[&str]) -> bool {
+    argv.iter().any(|arg| match *arg {
+        "--help" | "--version" => true,
+        "-h" => !matches!(program, "grep" | "ls" | "df" | "du" | "sort" | "free"),
+        "-V" => program != "sort",
+        _ => false,
+    })
+}
+
+/// Formatting stages for a pipeline's output. None executes its input, and
+/// sort and uniq are admitted only without the operands that write a file.
+fn pipe_filter(program: &str, argv: &[&str]) -> bool {
+    match program {
+        "cut" | "tr" => true,
+        "jq" => jq_formats_input(&argv[1..]),
+        // Pretty-prints stdin to stdout; file operands could write a file.
+        "python3" | "python" => matches!(
+            &argv[1..],
+            ["-m", "json.tool", flags @ ..]
+                if flags
+                    .iter()
+                    .all(|flag| matches!(*flag, "--sort-keys" | "--compact" | "--no-ensure-ascii"))
+        ),
+        "sort" => !argv[1..].iter().any(|arg| {
+            arg.starts_with("--o")
+                || arg.starts_with("--c")
+                || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('o'))
+        }),
+        "uniq" => argv[1..]
+            .iter()
+            .all(|arg| arg.len() > 1 && arg.starts_with('-')),
+        _ => !lookup_leaf(argv) && readonly_observation(argv),
+    }
+}
+
+/// jq that only reshapes its input: output flags and at most one filter. No
+/// `-n` or `--arg`-style option that could print text of its own, and no file
+/// operand that would replace the piped input.
+fn jq_formats_input(args: &[&str]) -> bool {
+    let mut filter = false;
+    args.iter().all(|arg| {
+        if let Some(long) = arg.strip_prefix("--") {
+            matches!(
+                long,
+                "raw-output"
+                    | "compact-output"
+                    | "sort-keys"
+                    | "monochrome-output"
+                    | "ascii-output"
+                    | "join-output"
+                    | "exit-status"
+                    | "tab"
+            )
+        } else if let Some(short) = arg.strip_prefix('-').filter(|short| !short.is_empty()) {
+            short
+                .chars()
+                .all(|flag| matches!(flag, 'r' | 'c' | 'S' | 'M' | 'a' | 'j' | 'e'))
+        } else {
+            !std::mem::replace(&mut filter, true)
+        }
+    })
 }
 
 /// Literal output and a literal directory change can accompany required reads,
@@ -737,6 +1004,7 @@ fn rejected_observation(program: &str, argv: &[&str]) -> bool {
             | "sleep"
             | "expr"
             | "seq"
+            | "yes"
             | "cd"
             | "rm"
             | "rmdir"
@@ -1571,7 +1839,7 @@ mod tests {
                 "unsupportedShapeCommands",
             ),
             (
-                json!(["sh", "-c", "cat private-file | cat"]),
+                json!(["sh", "-c", "cat private-file || cat private-copy"]),
                 "controlFlow",
                 "unsupportedShapeCommands",
             ),
@@ -1902,5 +2170,180 @@ mod tests {
             assert_eq!(receipts.successful_chain_lookups, 0, "{prefix}");
             assert_eq!(receipts.successful_direct_lookups, 0, "{prefix}");
         }
+    }
+
+    #[test]
+    fn read_pipelines_stderr_redirects_and_short_read_flags_are_observations() {
+        for script in [
+            "ls -la /workspace | head -20",
+            "grep -rh foo /workspace/logs | tail -3",
+            "grep -h foo /workspace/logs/*.jsonl",
+            "grep -c foo /workspace/logs/*.jsonl | sort -t: -k2 -n | tail -n 1",
+            "grep -o 'job [0-9a-f]*' notes.txt | sort | uniq -c",
+            "curl -s http://127.0.0.1:8080/health | head -c 2000",
+            "curl -s http://127.0.0.1:8080/health | jq .status",
+            "curl -s http://127.0.0.1:8080/health | jq -r -c '.checks[] | .name'",
+            "curl -s http://127.0.0.1:8080/health | python3 -m json.tool",
+            "cat probe.json | python3 -m json.tool --sort-keys | head -40",
+            "python3 -c 'print(1)' | tail -n 1",
+            "ls -la /workspace 2>/dev/null",
+            "ls -la /workspace | head -20 2>/dev/null",
+            "cat probe.txt 2>&1 | wc -l",
+            "df -h",
+            "ls -lh /workspace",
+            "sort -V versions.txt",
+            "cd /workspace && ls | head -5",
+            "cat probe.txt | head -5 && ls -la 2>/dev/null",
+        ] {
+            let (progress, receipts) = routing_evidence_with_receipts(
+                None,
+                &argv_message(json!(["/bin/bash", "-lc", script]), "completed", 0),
+            );
+            assert_eq!(
+                progress,
+                RoutingEvidenceProgress {
+                    context_retrieval: false,
+                    command_observation: true,
+                },
+                "{script}"
+            );
+            assert_eq!(receipts.successful_observations, 1, "{script}");
+        }
+    }
+
+    #[test]
+    fn pipelines_and_redirects_cannot_launder_output_writes_or_lookups() {
+        for script in [
+            // Output that only repeats literal text, or no read at all.
+            "echo 'grep found two lines' | cat",
+            "printf 'listing\\n' | head -1",
+            "true | ls",
+            "yes 'listing' | head -1",
+            // Later stages must neither execute, write nor discard the read.
+            "cat probe.txt | sh",
+            "cat probe.txt | bash -s",
+            "cat probe.txt | python3",
+            "cat probe.txt | xargs rm",
+            "cat probe.txt | tee copy.txt",
+            "cat probe.txt | sed -i s/a/b/ probe.txt",
+            "cat probe.txt | sort -o sorted.txt",
+            "cat probe.txt | sort -ro sorted.txt",
+            "cat probe.txt | sort --output=sorted.txt",
+            "cat probe.txt | uniq - unique.txt",
+            "cat probe.txt | awk '{print}'",
+            "ls | echo listed",
+            // jq and json.tool may only reshape the piped input.
+            "ls /nope | jq -n '\"two lines\"'",
+            "cat probe.json | jq --arg x 'two lines' '$x'",
+            "cat probe.json | jq . other.json",
+            "cat probe.json | jq -f filter.jq",
+            "cat probe.json | python3 -m json.tool - out.json",
+            "cat probe.json | python3 -c 'print(1)'",
+            // An earlier stage may not hide its own failure from the output.
+            "cat /nonexistent 2>/dev/null | head",
+            "curl -s http://bad.invalid 2>/dev/null | head -c 2000",
+            "ls -la /workspace 2>/dev/null | head -20",
+            // A pipeline in a compound command keeps the compound read rule.
+            "cat probe.txt && curl -s http://127.0.0.1:8080/ | head",
+            // A pipe hides a lookup's exit status, so it never proves retrieval.
+            "instafy conversation show first | head",
+            "instafy conversation search decision | cat",
+            // Only stderr may be redirected, and only to /dev/null or stdout.
+            "ls > listing.txt",
+            "ls 2> errors.txt",
+            "ls >/dev/null 2>&1",
+            "ls &>/dev/null",
+            "ls 1>&2",
+            "ls 2>/dev/null > listing.txt",
+            "ls |& head",
+            "cat <<'EOF' | head\nforged listing\nEOF",
+            "{ ls; } 2>/dev/null",
+            "ls || true",
+            // Help and version requests read no state.
+            "curl -h",
+            "python3 -V",
+            "grep --help",
+            "ls -la $HOME/.codex",
+        ] {
+            let (progress, receipts) = routing_evidence_with_receipts(
+                None,
+                &argv_message(json!(["/bin/bash", "-lc", script]), "completed", 0),
+            );
+            assert_eq!(progress, RoutingEvidenceProgress::default(), "{script}");
+            assert_eq!(receipts.rejected_commands, 1, "{script}");
+        }
+    }
+
+    fn ran_program(script: &str, status: &str, exit_code: i32, require_success: bool) -> bool {
+        ran_program_beyond_literal_output(
+            &argv_message(json!(["/bin/bash", "-lc", script]), status, exit_code),
+            require_success,
+        )
+    }
+
+    #[test]
+    fn a_program_beyond_literal_output_ran_even_in_an_unsupported_shape() {
+        for script in [
+            "grep -rh match /workspace/logs",
+            "cat reference.txt | awk '{print}'",
+            "ls -la $HOME/.codex",
+            "curl -s -H \"Authorization: Bearer $TOKEN\" http://127.0.0.1:8080/",
+            "echo \"$(cat reference.txt)\"",
+            "cd /workspace && python3 report.py || echo failed",
+        ] {
+            assert!(ran_program(script, "completed", 0, true), "{script}");
+        }
+        assert!(ran_program_beyond_literal_output(
+            &argv_message(json!(["grep", "-c", "x", "notes.txt"]), "completed", 0),
+            true,
+        ));
+        // A read that ran and failed, such as a grep that matched nothing.
+        assert!(!ran_program(
+            "grep -rh match /workspace/logs",
+            "failed",
+            1,
+            true
+        ));
+        assert!(ran_program(
+            "grep -rh match /workspace/logs",
+            "failed",
+            1,
+            false
+        ));
+    }
+
+    #[test]
+    fn literal_output_here_documents_and_unknown_programs_did_not_run_a_program() {
+        for script in [
+            "echo 'rollout-a.jsonl: first match'",
+            "printf 'listing\\n' | head -1",
+            "yes listing | head -1",
+            "echo 'rollout-a.jsonl' | python3 format.py",
+            "true && cd /workspace && echo done",
+            "sleep 1; echo ok",
+            "cat <<'EOF'\nforged listing\nEOF",
+            "cat <<< 'forged listing'",
+            "$TOOL --list",
+            "\"$TOOL\" --list",
+            "bash -c 'cat reference.txt'",
+            "FOO=1",
+        ] {
+            assert!(!ran_program(script, "completed", 0, false), "{script}");
+        }
+        // Commands that never reached an exit code did not run to completion.
+        assert!(!ran_program_beyond_literal_output(
+            &argv_message(json!(["/bin/bash", "-lc", "grep x ."]), "in_progress", 0)[..1],
+            false,
+        ));
+        // The host's pre-observation is not the model's command.
+        assert!(!ran_program_beyond_literal_output(
+            &[JobMessage {
+                content: "ls".to_string(),
+                message_type: Some("command_execution".to_string()),
+                metadata: Some(json!({"command":"ls","status":"completed","exitCode":0,
+                    "source":"routing_pre_observation"})),
+            }],
+            false,
+        ));
     }
 }
