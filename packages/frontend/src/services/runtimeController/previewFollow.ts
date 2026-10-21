@@ -95,7 +95,15 @@ export class FollowRateLimitedError extends Error {
   }
 }
 
-type RequestOptions = { body?: unknown; signal?: AbortSignal; keepalive?: boolean };
+type RequestOptions = { body?: unknown; signal?: AbortSignal; keepalive?: boolean; attempt?: number };
+
+/**
+ * A controller node that has not heard of a presentation yet answers 409
+ * `state:"unknown"` (with several nodes, the Present may still be on its way).
+ * The same request is tried again after each of these waits; only then is it
+ * treated as ended.
+ */
+export const FOLLOW_UNKNOWN_RETRY_MS = [250, 1_000] as const;
 
 async function followRequest(path: string, method: "GET" | "POST", options: RequestOptions = {}): Promise<unknown> {
   if (!runtimeControllerEnabled) throw new Error("Runtime controller is not configured.");
@@ -114,8 +122,14 @@ async function followRequest(path: string, method: "GET" | "POST", options: Requ
   try { data = text.trim() ? JSON.parse(text) as unknown : null; } catch { data = null; }
   if (response.ok) return data;
   if (response.status === 409) {
+    const attempt = options.attempt ?? 0;
+    if (isRecord(data) && data.state === "unknown" && method === "POST" && attempt < FOLLOW_UNKNOWN_RETRY_MS.length && !options.signal?.aborted) {
+      await new Promise(resolve => setTimeout(resolve, FOLLOW_UNKNOWN_RETRY_MS[attempt]));
+      return followRequest(path, method, { ...options, attempt: attempt + 1 });
+    }
     // `state: "ended"`: the presentation is over (timed out or stopped elsewhere), nobody replaced it.
-    if (isRecord(data) && data.state === "ended") {
+    // Still unknown after the retries: as good as ended.
+    if (isRecord(data) && (data.state === "ended" || data.state === "unknown")) {
       throw new ControllerApiError({ status: 410, message: "This presentation has ended.", code: "presentation_ended", details: null, url: response.url });
     }
     throw new FollowReplacedError(isRecord(data) ? mapFollowPerson(data.presenter) : null);

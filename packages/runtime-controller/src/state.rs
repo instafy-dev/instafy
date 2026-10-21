@@ -729,7 +729,9 @@ pub(crate) struct ControllerEvent {
     pub(crate) run_id: Option<Uuid>,
     pub(crate) job_id: Option<Uuid>,
     pub(crate) channel: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    // Left out when empty, so it must default when read back (another node
+    // reads it from the Redis event bus).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) channels: Vec<String>,
     /// Optional human-user audience for non-sensitive control events. This is
     /// serialized across the Redis event bus so rolling/multi-node

@@ -29,12 +29,14 @@ Names and avatars come from `profiles` or the account metadata, never from the c
 ```
 POST /projects/:projectId/previews/:previewId/follow
   {op:"present"}                              → 200 {presentationId, presenter:{id,name,avatarUrl?}, startedAt, replaced?:{id,name}}
-                                                 the last one wins; 429 {code:"too_many_presentations"} past 3 per user
+                                                 the last one wins; 429 {code:"too_many_presentations"} past 3 per user;
+                                                 429 + Retry-After past 3 presents within 3 s per person and preview
   {op:"view", presentationId, seq?, payload?} → 202; payload is opaque JSON ≤ 2,048 bytes (413 above); no payload = heartbeat.
                                                  a seq at or below the last one is accepted and ignored
   {op:"tap",  presentationId, seq, payload}   → 202; payload {x,y} in 0..1 of the frame plus an optional site-defined `at`; else 400
   {op:"stop", presentationId}                 → 200 {stopped: bool}; safe to repeat
-  errors: 409 {state:"replaced", presenter} · 409 {state:"ended", presenter:null} (ended, unknown, or the preview stopped)
+  errors: 409 {state:"replaced", presenter} · 409 {state:"ended", presenter:null} (it ended, or the preview stopped)
+          409 {state:"unknown", presenter:null}: this node never heard of it (its Present may still be on the way)
           403 a view or tap from someone other than the presenter · 429 + Retry-After (views 20/s, burst 40; taps 5/s)
 
 GET  /projects/:projectId/previews/:previewId/follow
@@ -61,13 +63,26 @@ GET  /projects/:projectId/previews/:previewId/follow/stream   (SSE; opening it m
 `event_access_recheck_after` (5 s); a member who loses access gets `end{access}` and the stream closes. A preview that
 is closed, stopped with its machine or expired ends its presentation (`end{closed}`: at once on close, otherwise at a
 follower's next access check or the presenter's next view) and cannot be presented. Presenting and following are not
-activity in the space: they never keep a machine up by themselves. Rate buckets and the stream limit count per node;
-the 3-presentation cap counts every node.
+activity in the space: they never keep the space's machine running. (Studio does keep the presenter's and followers'
+own screens from dimming while the page is visible; see `usePreviewFollow.ts`.) Rate buckets and the stream limit
+count per node; the 3-presentation cap counts every node.
+
+**Who may present.** Anyone who may see the preview may present it, viewers included, and may take over someone
+else's presentation: the last one wins. Presenting only shares what a site shows; it changes nothing in the space and
+costs nothing. A takeover is never silent: the button reads **Present instead** (with "Kim's followers will follow
+you"), followers read "Lena took over from Kim", and Kim's own chip says Lena presents now.
 
 **Between nodes.** With `REDIS_URL` set, presentations, views, taps and stops travel on `<ns>:controller:follow` with
 their own queue; a burst of views is thinned to the latest before publishing. Every node keeps every presentation and
 works out presence itself, so each node announces `preview.follow` to its own streams only. With two presents at once,
 the later start time wins everywhere. Without Redis the hub is in-process.
+
+A view or tap load-balanced to a node that has not heard the Present yet gets 409 `unknown`, not `ended`: Studio sends
+it again after 250 ms and 1 s, and only then treats the presentation as ended. Each heartbeat announces the
+presentation again, so a node that missed the Present (Redis was unreachable, which drops messages) learns it within
+one heartbeat. A node remembers presentations that ended on it for 10 minutes, so a late view reads `ended` and a late
+repeat of the Present never brings an ended presentation back. Both buses (events and follow) use one channel
+mechanism in `redis_bus.rs`, each with its own connection and queue.
 
 ## Studio (`packages/frontend/src/screens/studio/components/previewHost/`)
 
@@ -76,12 +91,17 @@ the later start time wins everywhere. Without Redis the hub is in-process.
   `fetch(…, {keepalive:true})`.
 - `followMode.ts`: the pane's state and every label; the pacing (≤ 10 views/s, latest wins, a trailing send, waits out
   a 429); payload checks (plain JSON ≤ 2 KB; taps inside the frame); the **location guard**: a view or tap holding the
-  latitude **and** longitude of a position the frame was given since it last loaded fresh (within 1e-4 degrees, about
-  11 m, however the site rounded it) is not sent, and the presenter sees "📍 Your location is left out". The guard has
-  no time limit, because the page may still hold the position in its URL or state. Studio gives a frame no position
-  today (the frame may not use geolocation), so the guard has nothing to match until something does.
+  latitude **and** longitude of a position the frame was given since it last loaded fresh is not sent, and the
+  presenter sees "📍 Your location is left out". It is best effort against a site leaking the position by accident:
+  it catches decimals within 1e-3 degrees (about 110 m, so copies rounded to 3 or more places, in numbers or in text)
+  and whole micro- or 1e-7 degrees. A map centred that close to the person is held back too, since it shows where
+  they are. Rounding to 2 places or an encoding of its own gets through, so the skill's "never put the person's own
+  position in it" is the main control. The guard has no time limit, because the page may still hold the position in
+  its URL or state. Studio gives a frame no position today (the frame may not use geolocation), so the guard has
+  nothing to match until something does.
 - `usePreviewFollow.ts`: Present and Stop, a heartbeat every 5 s while the page is visible, followers fetched every
-  15 s and whenever the count changes, taps capped at 5/s, a screen wake lock while presenting or following. Following
+  15 s and whenever the count changes, taps capped at 5/s, a screen wake lock (the person's own screen, never the
+  space's machine) while presenting or following and the page is visible. Following
   stops on the site's `interact` (ignored for 300 ms after an applied view) or when focus moves into the frame;
   Studio's own controls never stop it.
 - `followStore.ts`: who presents each preview, from `preview.follow` and GET follow; late events are ignored. A
@@ -120,6 +140,13 @@ Studio → site  {source:"instafy-host", v:1, type:"apply-tap", payload, from:{i
 - Studio sends `present` and `apply-view` only to a frame whose ack listed `"view"`, and offers **Present** only for
   one. Within one page load the supported list only grows; a new page load starts empty.
 - `smooth:false` is for the first view after (re)connecting, a late join and **Follow again**.
+- **The relay does not check a payload's shape, so sites must.** A view comes from another member, and a member can
+  send any JSON of the right size straight to the relay, without the site. Studio hands it to followers' frames as it
+  came. A site reads only the keys it expects, of the types it expects; applying a view only changes what is shown
+  (never a write, a purchase, a message, a URL fetched or opened from it, or a value put into HTML or code); it shows
+  `from.name` as text; it reads host messages only from `window.parent` and answers to that message's origin, never
+  `"*"`; and it puts only shared, non-secret state in a view (no tokens, nothing only that person may see). The
+  frontend-previews skill tells Octo all of this.
 - A site that supports `"tap"` draws the presenter's tap itself; otherwise Studio draws it at `x,y` with the
   presenter's name for 1.2 s.
 
@@ -127,7 +154,8 @@ Studio → site  {source:"instafy-host", v:1, type:"apply-tap", payload, from:{i
 
 - Controller: `pnpm test:controller previews::follow_tests` (the 404 gate, fan-out, 413, 429, takeover, away, timeout
   and the 4 h cap on a paused clock, two hubs on an in-memory bus, access revoked, close, a stopped preview, no rows
-  written). `FOLLOW_TEST_REDIS_URL=redis://127.0.0.1:6379` adds the cross-node Redis test.
+  written, a viewer taking over, presents rate-limited, a view reaching a node before its Present). With
+  `FOLLOW_TEST_REDIS_URL=redis://127.0.0.1:6379`, two follow hubs and two event buses also meet through a real Redis.
 - Frontend: `followMode.test.ts`, `SitePreviewFollow.test.tsx`, `SitePreviewCardFollow.test.tsx`,
   `previewFollow.test.ts`, `previewHostMessages.test.ts`; e2e `project-preview-ready.spec.ts` "follow mode" (a desktop
   presenter and a 390 px phone follower on a real preview, through the real relay).

@@ -1766,8 +1766,8 @@ mod tests {
     /// `instafy preview open` and keeps the local URL and consent-gated tunnel
     /// as the fallback when previews are not available. It allows the preview
     /// host on a dev server that checks `Host` before anyone opens the card, and
-    /// tells a site how to be presented and followed (without the person's own
-    /// position). An unedited v3, v4 or v5 copy is upgraded to it; an edited one
+    /// tells a site how to be presented and followed: without the person's own
+    /// position or secrets, and treating another person's view as untrusted. An unedited v3, v4 or v5 copy is upgraded to it; an edited one
     /// is kept.
     #[test]
     fn scaffold_upgrades_frontend_previews_to_studio_preview_cards() {
@@ -1784,6 +1784,14 @@ mod tests {
             "answers only on [::1]",
             "type:\"layout-ack\", payload:{supports:[\"view\"]}",
             "Never put the person's own position in it.",
+            "Read host messages only when `event.source === window.parent`",
+            "never `\"*\"`",
+            "A view is shared, non-secret state only",
+            "comes from another person, so treat it as untrusted input.",
+            "Read only the keys you expect, of the types you expect",
+            "Applying a view only changes what is shown.",
+            "never fetches or opens a URL taken from it",
+            "Show `from.name` as text only.",
         ] {
             assert!(FRONTEND_PREVIEWS_TEMPLATE.contains(needle), "{needle}");
         }

@@ -84,6 +84,13 @@ const STREAM_QUEUE: usize = 32;
 /// superseded by the next one anyway).
 pub(crate) const FOLLOW_BUS_QUEUE: usize = 4096;
 const PERSON_NAME_MAX_CHARS: usize = 80;
+/// How long a node remembers a presentation that ended here, so a late view
+/// for it reads "ended" rather than "unknown".
+const ENDED_REMEMBERED: Duration = Duration::from_secs(10 * 60);
+const ENDED_REMEMBERED_MAX: usize = 10_000;
+/// `op:"present"` per user and preview: 3 within 3 s.
+const PRESENTS_PER_WINDOW: usize = 3;
+const PRESENT_WINDOW: Duration = Duration::from_secs(3);
 const FALLBACK_NAME: &str = "Someone";
 
 /// Timeouts and rates. Tests shorten them; production uses the defaults.
@@ -263,8 +270,12 @@ pub(crate) struct FollowEnvelope {
 pub(crate) enum FollowReject {
     /// Someone else presents now (last one wins).
     Replaced(FollowPerson),
-    /// The presentation is over (stopped, timed out, closed) or unknown.
+    /// The presentation is over (stopped, timed out, closed).
     Ended,
+    /// This node has never heard of the presentation: with several nodes,
+    /// its `Present` may still be on the way. The client tries again
+    /// shortly, and only then gives up.
+    Unknown,
     /// The caller is not the presenter of this presentation.
     NotPresenter,
     RateLimited(Duration),
@@ -411,6 +422,8 @@ struct HubInner {
     events: EventHub,
     outbound: Option<mpsc::Sender<FollowEnvelope>>,
     rooms: StdMutex<HashMap<String, Room>>,
+    /// Presentations that ended on this node, and how. Locked after `rooms`.
+    ended: StdMutex<HashMap<Uuid, (Instant, EndReason)>>,
     next_stream: AtomicU64,
     wake: Arc<Notify>,
     sweeper_started: AtomicBool,
@@ -455,6 +468,7 @@ impl FollowHub {
                 events,
                 outbound,
                 rooms: StdMutex::new(HashMap::new()),
+                ended: StdMutex::new(HashMap::new()),
                 next_stream: AtomicU64::new(1),
                 wake: Arc::new(Notify::new()),
                 sweeper_started: AtomicBool::new(false),
@@ -482,6 +496,30 @@ impl FollowHub {
             .rooms
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn ended(&self) -> MutexGuard<'_, HashMap<Uuid, (Instant, EndReason)>> {
+        self.inner
+            .ended
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn remember_end(&self, presentation_id: Uuid, reason: EndReason, now: Instant) {
+        let mut ended = self.ended();
+        if ended.len() >= 1024 {
+            ended.retain(|_, (at, _)| now.saturating_duration_since(*at) < ENDED_REMEMBERED);
+        }
+        if ended.len() >= ENDED_REMEMBERED_MAX {
+            if let Some(oldest) = ended
+                .iter()
+                .min_by_key(|(_, (at, _))| *at)
+                .map(|(id, _)| *id)
+            {
+                ended.remove(&oldest);
+            }
+        }
+        ended.insert(presentation_id, (now, reason));
     }
 
     fn send_bus(&self, message: FollowBusMessage) {
@@ -590,6 +628,7 @@ impl FollowHub {
 
     fn install(&self, preview_id: &str, room: &mut Room, info: PresentationInfo, now: Instant) {
         if let Some(previous) = room.presentation.take() {
+            self.remember_end(previous.info.presentation_id, EndReason::Replaced, now);
             room.last_end = Some(EndNotice {
                 presentation_id: previous.info.presentation_id,
                 presenter_id: previous.info.presenter.id,
@@ -620,6 +659,7 @@ impl FollowHub {
         let Some(ended) = room.presentation.take() else {
             return false;
         };
+        self.remember_end(presentation_id, reason, Instant::now());
         room.last_end = Some(EndNotice {
             presentation_id,
             presenter_id: ended.info.presenter.id,
@@ -693,22 +733,39 @@ impl FollowHub {
         Ok(info)
     }
 
-    /// Check the caller presents `presentation_id` now and take a token.
+    /// Check the caller presents `presentation_id` now. A presentation this
+    /// node never heard of is [`FollowReject::Unknown`], not ended: with
+    /// several nodes its `Present` may not have arrived yet.
     fn presenter_room<'a>(
+        &self,
         rooms: &'a mut HashMap<String, Room>,
         preview_id: &str,
         presentation_id: Uuid,
         user_id: Uuid,
     ) -> Result<&'a mut Room, FollowReject> {
-        let room = rooms.get_mut(preview_id).ok_or(FollowReject::Ended)?;
-        let presentation = room.presentation.as_ref().ok_or(FollowReject::Ended)?;
-        if presentation.info.presentation_id != presentation_id {
-            return Err(FollowReject::Replaced(presentation.info.presenter.clone()));
+        let current = rooms
+            .get(preview_id)
+            .and_then(|room| room.presentation.as_ref())
+            .map(|presentation| presentation.info.clone());
+        match current {
+            Some(info) if info.presentation_id == presentation_id => {
+                if info.presenter.id != user_id {
+                    return Err(FollowReject::NotPresenter);
+                }
+                rooms.get_mut(preview_id).ok_or(FollowReject::Unknown)
+            }
+            current => match self
+                .ended()
+                .get(&presentation_id)
+                .map(|(_, reason)| *reason)
+            {
+                Some(EndReason::Replaced) => Err(current
+                    .map(|info| FollowReject::Replaced(info.presenter))
+                    .unwrap_or(FollowReject::Ended)),
+                Some(_) => Err(FollowReject::Ended),
+                None => Err(FollowReject::Unknown),
+            },
         }
-        if presentation.info.presenter.id != user_id {
-            return Err(FollowReject::NotPresenter);
-        }
-        Ok(room)
     }
 
     /// The presenter's view, or without `payload` a heartbeat.
@@ -722,9 +779,10 @@ impl FollowHub {
     ) -> Result<(), FollowReject> {
         let now = Instant::now();
         let at = Utc::now();
+        let mut republish = None;
         {
             let mut rooms = self.rooms();
-            let room = Self::presenter_room(&mut rooms, preview_id, presentation_id, user_id)?;
+            let room = self.presenter_room(&mut rooms, preview_id, presentation_id, user_id)?;
             let Some(presentation) = room.presentation.as_mut() else {
                 return Err(FollowReject::Ended);
             };
@@ -732,6 +790,12 @@ impl FollowHub {
                 .views
                 .take(now)
                 .map_err(FollowReject::RateLimited)?;
+            // A heartbeat announces the presentation again, so a node that
+            // missed its `Present` (Redis was down, say) learns it within one
+            // heartbeat. A node that has it already ignores the repeat.
+            if payload.is_none() {
+                republish = Some(presentation.info.clone());
+            }
             self.apply_view(
                 preview_id,
                 room,
@@ -741,6 +805,12 @@ impl FollowHub {
                 at,
                 now,
             );
+        }
+        if let Some(info) = republish {
+            self.send_bus(FollowBusMessage::Present {
+                preview_id: preview_id.to_string(),
+                info,
+            });
         }
         self.send_bus(FollowBusMessage::View {
             preview_id: preview_id.to_string(),
@@ -806,7 +876,7 @@ impl FollowHub {
         let at = Utc::now();
         {
             let mut rooms = self.rooms();
-            let room = Self::presenter_room(&mut rooms, preview_id, presentation_id, user_id)?;
+            let room = self.presenter_room(&mut rooms, preview_id, presentation_id, user_id)?;
             let Some(presentation) = room.presentation.as_mut() else {
                 return Err(FollowReject::Ended);
             };
@@ -872,7 +942,7 @@ impl FollowHub {
     pub(crate) fn stop(&self, preview_id: &str, presentation_id: Uuid, user_id: Uuid) -> bool {
         let stopped = {
             let mut rooms = self.rooms();
-            match Self::presenter_room(&mut rooms, preview_id, presentation_id, user_id) {
+            match self.presenter_room(&mut rooms, preview_id, presentation_id, user_id) {
                 Ok(room) => self.finish(preview_id, room, presentation_id, EndReason::Stopped),
                 Err(_) => false,
             }
@@ -1028,10 +1098,14 @@ impl FollowHub {
                     let room = rooms
                         .entry(preview_id.clone())
                         .or_insert_with(|| Room::new(info.project_id));
-                    let newer = room.presentation.as_ref().is_none_or(|current| {
-                        (info.started_at, info.presentation_id)
-                            > (current.info.started_at, current.info.presentation_id)
-                    });
+                    // A repeat of an ended presentation (a heartbeat's
+                    // re-announcement that crossed its end) never revives it.
+                    let ended = self.ended().contains_key(&info.presentation_id);
+                    let newer = !ended
+                        && room.presentation.as_ref().is_none_or(|current| {
+                            (info.started_at, info.presentation_id)
+                                > (current.info.started_at, current.info.presentation_id)
+                        });
                     if newer {
                         self.install(&preview_id, room, info, now);
                     }
@@ -1371,6 +1445,16 @@ fn rejection(reject: FollowReject) -> Response {
             })),
         )
             .into_response(),
+        FollowReject::Unknown => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "message": "this presentation is not known here yet",
+                "code": "presentation_unknown",
+                "state": "unknown",
+                "presenter": null,
+            })),
+        )
+            .into_response(),
         FollowReject::NotPresenter => {
             forbidden("only the presenter sends views and taps").into_response()
         }
@@ -1379,7 +1463,7 @@ fn rejection(reject: FollowReject) -> Response {
             let mut response = (
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(ApiError::with_details(
-                    "too many views or taps; slow down",
+                    "sending too fast; slow down",
                     "follow_rate_limited",
                     json!({ "retryAfterSeconds": seconds }),
                 )),
@@ -1473,6 +1557,19 @@ async fn handle_follow_post(
     }
     match body.op.as_str() {
         "present" => {
+            // Each present loads the presenter and announces presence to
+            // every `/events` stream of the space, so it has its own bucket.
+            if let Err(limit) = state
+                .rate_limiter
+                .enforce(
+                    format!("follow:present:{}:{preview_id}", caller.user_id),
+                    PRESENTS_PER_WINDOW,
+                    PRESENT_WINDOW,
+                )
+                .await
+            {
+                return Ok(rejection(FollowReject::RateLimited(limit.retry_after)));
+            }
             let presenter = load_person(&state.pool, &caller.user_id).await;
             let runtime_id = resolve_canonical_tunnel_runtime_id(
                 state,

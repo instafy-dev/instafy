@@ -75,6 +75,26 @@ describe("follow relay client", () => {
     expect(limited.retryAt).toBeGreaterThanOrEqual(before + 2_000);
   });
 
+  it("tries a view again when this controller node has not heard of the presentation yet, then gives up as ended", async () => {
+    vi.useFakeTimers();
+    fetchMock.mockResolvedValueOnce(json(409, { state: "unknown", presenter: null, code: "presentation_unknown" }));
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 202 }));
+    const healed = sendFollowView("project-1", "preview-1", { presentationId: "p", seq: 1, payloadJson: '{"a":1}' });
+    await vi.advanceTimersByTimeAsync(250);
+    await expect(healed).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ op: "view", presentationId: "p", seq: 1, payload: { a: 1 } });
+
+    fetchMock.mockReset();
+    fetchMock.mockImplementation(async () => json(409, { state: "unknown", presenter: null }));
+    const gone = sendFollowView("project-1", "preview-1", { presentationId: "p", seq: 2 }).catch(error => error);
+    await vi.advanceTimersByTimeAsync(1_250);
+    const error = await gone;
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(error).not.toBeInstanceOf(FollowReplacedError);
+    expect(error.status).toBe(410);
+  });
+
   it("reads GET follow and the presence event", async () => {
     fetchMock.mockResolvedValueOnce(json(200, {
       presentation: { presentationId: "pres-1", presenter: { id: "u-kim", name: "Kim" }, startedAt: "x", state: "away", seq: 4, payload: { a: 1 } },

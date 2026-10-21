@@ -123,7 +123,8 @@ export function SitePreviewFollowControls({ follow, supportsView }: {
       <Button variant="ghost" size="sm" radius="full" data-testid="follow-present" aria-label={present.text} title={present.detail ?? present.text}
         className="max-[540px]:h-10" onPress={() => void follow.present()}>
         <Presentation className="h-4 w-4" aria-hidden="true" />
-        <span className="max-[400px]:sr-only">Present</span>
+        {/* A takeover keeps its words on a phone too: "Present instead" is not the same tap as "Present". */}
+        <span className={present.short === "Present" ? "max-[400px]:sr-only" : undefined} data-testid="follow-present-label">{present.short}</span>
       </Button>
     ) : null}
   </>;

@@ -144,6 +144,7 @@ describe("SitePreviewPane follow mode", () => {
       // A second ack without the list (another script on the page) keeps "view".
       await ack([]);
       expect(q("[data-testid=follow-present]")!.getAttribute("aria-label")).toBe("Present to the space");
+      expect(q("[data-testid=follow-present-label]")!.textContent).toBe("Present");
       await present();
       expect(mocks.startPresenting).toHaveBeenCalledExactlyOnceWith("project-1", PREVIEW_ID);
       expect(toSite("present")).toEqual([{ source: "instafy-host", v: 1, type: "present", on: true, share: { location: false } }]);
@@ -319,6 +320,11 @@ describe("SitePreviewPane follow mode", () => {
       expect(q("[data-testid=follow-note]")!.textContent).toBe("Kim is presenting now");
       expect(q("[data-testid=follow-status]")!.textContent).toBe("Kim is presenting");
       expect(q("[data-testid=follow-action]")!.textContent).toBe("Follow");
+      // Presenting now takes over from Kim, and the button says so in words a phone shows too.
+      const label = q("[data-testid=follow-present-label]")!;
+      expect(label.textContent).toBe("Present instead");
+      expect(label.className).not.toContain("sr-only");
+      expect(q("[data-testid=follow-present]")!.getAttribute("aria-label")).toBe("Present instead of Kim");
     });
   });
 

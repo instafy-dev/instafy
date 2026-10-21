@@ -130,7 +130,7 @@ describe("follow state", () => {
   it("knows the person's own presentation from another screen: Stop it from here, never Follow or 'instead of' themselves", () => {
     const mine = run([{ type: "self", id: "u-kim" }, { type: "presence", presence: presence(), at: 1 }]);
     expect(followLabels(mine)).toMatchObject({ status: "You're presenting on another screen", action: "stop-elsewhere", actionText: "Stop" });
-    expect(presentMenuLabel({ supportsView: true, state: mine })).toEqual({ text: "Present from here", disabled: false, detail: "You're presenting on another screen" });
+    expect(presentMenuLabel({ supportsView: true, state: mine })).toEqual({ text: "Present from here", short: "Present here", disabled: false, detail: "You're presenting on another screen" });
     // It ending (stopped from here, or timed out) is no news to its own presenter.
     expect(run([{ type: "presence", presence: null, reason: "stopped", at: 2 }], mine).note).toBeNull();
     // Someone else's is unchanged.
@@ -139,10 +139,11 @@ describe("follow state", () => {
   });
 
   it("offers Present for sites that share views, Present instead of Kim with a presenter, and greys it out otherwise", () => {
-    expect(presentMenuLabel({ supportsView: false, state: INITIAL_FOLLOW_STATE })).toEqual({ text: "Present: this site can't share its view yet", disabled: true, detail: null });
-    expect(presentMenuLabel({ supportsView: true, state: INITIAL_FOLLOW_STATE })).toMatchObject({ text: "Present to the space", disabled: false });
+    expect(presentMenuLabel({ supportsView: false, state: INITIAL_FOLLOW_STATE })).toEqual({ text: "Present: this site can't share its view yet", short: "Present", disabled: true, detail: null });
+    expect(presentMenuLabel({ supportsView: true, state: INITIAL_FOLLOW_STATE })).toMatchObject({ text: "Present to the space", short: "Present", disabled: false });
+    // A takeover says so in the button's visible words, not only in its tooltip.
     expect(presentMenuLabel({ supportsView: true, state: run([{ type: "presence", presence: presence(), at: 1 }]) }))
-      .toMatchObject({ text: "Present instead of Kim", disabled: false });
+      .toMatchObject({ text: "Present instead of Kim", short: "Present instead", disabled: false, detail: "Kim's followers will follow you" });
   });
 });
 
@@ -238,15 +239,25 @@ describe("the location guard", () => {
     expect(payloadHasPosition([[121.56501, 25.03299]], [here])).toBe(true);
   });
 
-  it("catches a position the site truncated rather than rounded (both within about 11 m)", () => {
+  it("catches a position the site truncated rather than rounded", () => {
     const fix = { latitude: 25.03349, longitude: 121.56549 };
     expect(payloadHasPosition({ q: "near=25.0335,121.5655" }, [fix])).toBe(true);
     expect(payloadHasPosition({ q: "near=25.0334,121.5654" }, [fix])).toBe(true);
-    expect(payloadHasPosition({ q: "near=25.0337,121.5654" }, [fix])).toBe(false);
+    expect(payloadHasPosition({ q: "near=25.0347,121.5654" }, [fix])).toBe(false);
   });
 
-  it("passes coordinates 0.001° away, a latitude alone, and anything when no position was given", () => {
-    expect(payloadHasPosition({ cam: { lat: 25.0340, lng: 121.5660 } }, [here])).toBe(false);
+  it("catches a copy rounded to 3 decimals (about 110 m) and whole micro- or 1e-7 degrees", () => {
+    const fix = { latitude: 25.03349, longitude: 121.56497 };
+    expect(payloadHasPosition({ cam: [25.033, 121.565] }, [fix])).toBe(true);
+    expect(payloadHasPosition({ q: "at=25.033,121.565" }, [fix])).toBe(true);
+    expect(payloadHasPosition({ latE6: 25033490, lngE6: 121564970 }, [fix])).toBe(true);
+    expect(payloadHasPosition({ latE7: 250334900, lngE7: 1215649700 }, [fix])).toBe(true);
+    expect(payloadHasPosition({ q: "e7=250334900,1215649700" }, [fix])).toBe(true);
+  });
+
+  it("passes coordinates 0.002° away, a latitude alone, and anything when no position was given", () => {
+    expect(payloadHasPosition({ cam: { lat: 25.0350, lng: 121.5670 } }, [here])).toBe(false);
+    expect(payloadHasPosition({ cam: { lat: 25.03, lng: 121.56 } }, [here])).toBe(false);
     expect(payloadHasPosition({ cam: { lat: 25.0330, lng: 121.6 } }, [here])).toBe(false);
     expect(payloadHasPosition({ cam: { lat: 25.0330, lng: 121.5650 } }, [])).toBe(false);
   });

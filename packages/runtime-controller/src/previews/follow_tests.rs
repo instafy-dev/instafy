@@ -623,6 +623,72 @@ async fn a_second_presenter_takes_over_and_the_first_gets_409() -> anyhow::Resul
     .await
 }
 
+/// Presenting needs only what following needs: a member who may see the
+/// preview. A viewer may present, and may take over someone else's
+/// presentation (the last one wins, and everyone is told who took over).
+#[tokio::test]
+async fn a_viewer_may_present_and_take_over_a_presentation() -> anyhow::Result<()> {
+    run(|f| {
+        Box::pin(async move {
+            let preview_id = preview(&f).await?;
+            // users[2] is the space's viewer.
+            let first = present(&f, 1, &preview_id).await?;
+            let taken = present(&f, 2, &preview_id).await?;
+            assert_eq!(taken["presenter"]["id"], json!(f.users[2]));
+            assert_eq!(taken["replaced"]["id"], json!(f.users[1]));
+            let (status, _, body) = post_op(
+                &f,
+                1,
+                &preview_id,
+                json!({ "op": "view", "presentationId": first["presentationId"], "seq": 1 }),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::CONFLICT, "{body}");
+            assert_eq!(body["state"], "replaced");
+            assert_eq!(body["presenter"]["id"], json!(f.users[2]));
+            let (status, _, body) = post_op(
+                &f,
+                2,
+                &preview_id,
+                json!({ "op": "view", "presentationId": taken["presentationId"], "seq": 1, "payload": { "tab": "plan" } }),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+            f.state.follow.end_preview(&preview_id, EndReason::Stopped);
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// Each present loads the presenter and tells every `/events` stream, so a
+/// retry loop is held to 3 within 3 s per person and preview.
+#[tokio::test]
+async fn presenting_again_and_again_gets_429_with_retry_after() -> anyhow::Result<()> {
+    run(|f| {
+        Box::pin(async move {
+            let preview_id = preview(&f).await?;
+            let other = preview(&f).await?;
+            for _ in 0..3 {
+                present(&f, 1, &preview_id).await?;
+            }
+            let (status, headers, body) =
+                post_op(&f, 1, &preview_id, json!({ "op": "present" })).await?;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+            assert_eq!(body["code"], "follow_rate_limited");
+            let retry_after: u64 = headers["retry-after"].to_str()?.parse()?;
+            assert!((1..=3).contains(&retry_after), "{retry_after}");
+            // Another person, or another preview, has a bucket of its own.
+            present(&f, 0, &preview_id).await?;
+            present(&f, 1, &other).await?;
+            f.state.follow.end_preview(&preview_id, EndReason::Stopped);
+            f.state.follow.end_preview(&other, EndReason::Stopped);
+            Ok(())
+        })
+    })
+    .await
+}
+
 #[tokio::test]
 async fn stop_and_close_end_the_presentation_for_followers() -> anyhow::Result<()> {
     run(|f| {
@@ -1140,13 +1206,102 @@ async fn views_never_go_backwards_and_heartbeats_keep_the_view() {
     hub.view("p1", id, kim.id, 6, None).unwrap();
     let frame = hub.signal("p1").1.expect("view");
     assert_eq!((frame.seq, frame.payload), (5, json!({ "v": 5 })));
-    // A view of another presentation is refused.
-    assert!(matches!(
+    // A view of a presentation this node never heard of is unknown, not
+    // ended: with several nodes its `Present` may still be on the way.
+    assert_eq!(
         hub.view("p1", Uuid::new_v4(), kim.id, 7, Some(json!({}))),
-        Err(FollowReject::Replaced(_))
-    ));
+        Err(FollowReject::Unknown)
+    );
     assert_eq!(
         hub.view("nope", id, kim.id, 7, Some(json!({}))),
+        Err(FollowReject::Unknown)
+    );
+}
+
+/// Hand every message waiting in `from` to `to`, through JSON as on the wire;
+/// `keep` decides which ones arrive.
+fn deliver(
+    from: &mut tokio::sync::mpsc::Receiver<FollowEnvelope>,
+    to: &FollowHub,
+    keep: impl Fn(&FollowBusMessage) -> bool,
+) -> usize {
+    let mut delivered = 0;
+    while let Ok(envelope) = from.try_recv() {
+        if keep(&envelope.message) {
+            let wire = serde_json::to_string(&envelope).unwrap();
+            to.receive(serde_json::from_str(&wire).unwrap());
+            delivered += 1;
+        }
+    }
+    delivered
+}
+
+/// A view load-balanced to a node that has not heard the `Present` yet is
+/// "unknown" (Studio tries again), never "ended"; a heartbeat announces the
+/// presentation again for a node that missed it; and a late repeat of an
+/// ended presentation does not bring it back.
+#[tokio::test]
+async fn a_view_that_reaches_a_node_before_its_present_is_unknown_and_a_heartbeat_heals_it() {
+    let (a_tx, mut a_rx) = FollowHub::bus_channel();
+    let (b_tx, _b_rx) = FollowHub::bus_channel();
+    let a = FollowHub::new(EventHub::new(), Some(a_tx));
+    let b = FollowHub::new(EventHub::new(), Some(b_tx));
+    let project = Uuid::new_v4();
+    let kim = person("Kim");
+
+    let info = a.present("p1", project, None, None, kim.clone()).unwrap();
+    let id = info.presentation_id;
+    // The view reaches B before the Present does.
+    assert_eq!(
+        b.view("p1", id, kim.id, 1, Some(json!({ "v": 1 }))),
+        Err(FollowReject::Unknown)
+    );
+    assert_eq!(deliver(&mut a_rx, &b, |_| true), 1);
+    b.view("p1", id, kim.id, 1, Some(json!({ "v": 1 })))
+        .unwrap();
+
+    // Kim presents again and B never hears it (Redis was down).
+    let second = a.present("p1", project, None, None, kim.clone()).unwrap();
+    assert_eq!(deliver(&mut a_rx, &b, |_| false), 0);
+    assert_eq!(
+        b.view("p1", second.presentation_id, kim.id, 2, None),
+        Err(FollowReject::Unknown)
+    );
+    // A view with a payload does not repeat the Present; a heartbeat does.
+    a.view(
+        "p1",
+        second.presentation_id,
+        kim.id,
+        2,
+        Some(json!({ "v": 2 })),
+    )
+    .unwrap();
+    assert!(!matches!(
+        a_rx.try_recv().unwrap().message,
+        FollowBusMessage::Present { .. }
+    ));
+    a.view("p1", second.presentation_id, kim.id, 3, None)
+        .unwrap();
+    assert_eq!(deliver(&mut a_rx, &b, |_| true), 2);
+    b.view("p1", second.presentation_id, kim.id, 4, None)
+        .unwrap();
+    // The first presentation was replaced on both nodes.
+    assert!(matches!(
+        b.view("p1", id, kim.id, 5, None),
+        Err(FollowReject::Replaced(person)) if person.id == kim.id
+    ));
+
+    // A heartbeat's repeat that crosses the stop never revives it.
+    a.view("p1", second.presentation_id, kim.id, 5, None)
+        .unwrap();
+    let late: Vec<FollowEnvelope> = std::iter::from_fn(|| a_rx.try_recv().ok()).collect();
+    assert!(b.stop("p1", second.presentation_id, kim.id));
+    for envelope in late {
+        b.receive(envelope);
+    }
+    assert!(b.signal("p1").0.presentation.is_none());
+    assert_eq!(
+        b.view("p1", second.presentation_id, kim.id, 6, None),
         Err(FollowReject::Ended)
     );
 }

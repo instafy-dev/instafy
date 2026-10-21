@@ -103,18 +103,27 @@ export function readFollowTap(value: unknown): FollowTap | null {
 }
 
 // ---------------------------------------------------------------------------
-// The location guard: a payload that holds the person's own position,
-// latitude and longitude both to 4 decimals (about 11 m), is not sent.
+// The location guard: best effort against a site leaking the person's own
+// position by accident. A payload holding latitude and longitude both within
+// 1e-3 degrees (about 110 m) of it, as decimals (3 or more places, in numbers
+// or text) or as whole micro- or 1e-7 degrees, is not sent. Coarser rounding
+// gets through: the skill's "never put the position in it" is the main control.
 
 export type GuardPosition = { latitude: number; longitude: number };
 
-const NUMBER_IN_TEXT = /-?\d{1,3}\.\d{3,}/g;
+const NUMBER_IN_TEXT = /-?\d{1,3}\.\d{3,}|-?\d{6,10}/g;
+
+/** A number as degrees, and a whole number also as micro- (E6) and 1e-7 (E7) degrees. */
+function pushDegrees(value: number, into: number[]) {
+  into.push(value);
+  if (Number.isInteger(value) && Math.abs(value) >= 100_000) into.push(value / 1e6, value / 1e7);
+}
 
 function collectNumbers(value: unknown, into: number[], depth = 0) {
   if (depth > 32) return;
-  if (typeof value === "number" && Number.isFinite(value)) { into.push(value); return; }
+  if (typeof value === "number" && Number.isFinite(value)) { pushDegrees(value, into); return; }
   if (typeof value === "string") {
-    for (const match of value.matchAll(NUMBER_IN_TEXT)) into.push(Number(match[0]));
+    for (const match of value.matchAll(NUMBER_IN_TEXT)) pushDegrees(Number(match[0]), into);
     return;
   }
   if (Array.isArray(value)) { for (const item of value) collectNumbers(item, into, depth + 1); return; }
@@ -126,8 +135,12 @@ function collectNumbers(value: unknown, into: number[], depth = 0) {
   }
 }
 
-/** Within 1e-4 degrees (about 11 m), however the site rounded or truncated it. */
-const GUARD_TOLERANCE = 1e-4;
+/**
+ * Within 1e-3 degrees (about 110 m): a copy rounded or truncated to 3 or more
+ * decimals. A map centred that close to the person also shows where they are,
+ * so it is held back too.
+ */
+const GUARD_TOLERANCE = 1e-3;
 
 export function payloadHasPosition(payload: unknown, positions: readonly GuardPosition[]): boolean {
   if (!positions.length) return false;
@@ -405,11 +418,17 @@ export function followLabels(state: FollowState): FollowLabels {
   return { status: away ? `${name} is away` : `${name} is presenting`, action: "follow", actionText: "Follow", note };
 }
 
-/** "Present to the space", "Present instead of Kim", or why it is greyed out. */
-export function presentMenuLabel(input: { supportsView: boolean; state: FollowState }): { text: string; disabled: boolean; detail: string | null } {
-  if (!input.supportsView) return { text: "Present: this site can't share its view yet", disabled: true, detail: null };
+/**
+ * "Present to the space", "Present instead of Kim", or why it is greyed out.
+ * `short` is the button's visible word, which says a takeover too, since
+ * touch screens show no tooltip.
+ */
+export function presentMenuLabel(input: { supportsView: boolean; state: FollowState }): { text: string; short: string; disabled: boolean; detail: string | null } {
+  if (!input.supportsView) return { text: "Present: this site can't share its view yet", short: "Present", disabled: true, detail: null };
   const presence = input.state.presence;
-  if (presentsElsewhere(input.state)) return { text: "Present from here", disabled: false, detail: "You're presenting on another screen" };
-  if (presence && input.state.role !== "presenting") return { text: `Present instead of ${presence.presenter.name}`, disabled: false, detail: null };
-  return { text: "Present to the space", disabled: false, detail: "Others in the space can follow your view" };
+  if (presentsElsewhere(input.state)) return { text: "Present from here", short: "Present here", disabled: false, detail: "You're presenting on another screen" };
+  if (presence && input.state.role !== "presenting") {
+    return { text: `Present instead of ${presence.presenter.name}`, short: "Present instead", disabled: false, detail: `${presence.presenter.name}'s followers will follow you` };
+  }
+  return { text: "Present to the space", short: "Present", disabled: false, detail: "Others in the space can follow your view" };
 }
