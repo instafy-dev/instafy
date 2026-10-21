@@ -451,6 +451,24 @@ test("jobsQuery only accepts a uuid and an ISO UTC timestamp", () => {
   assert.throws(() => jobsQuery(PROJECT, "2026-10-14' or 1=1 --"));
 });
 
+test("a lane the controller started again after a short rate limit does not fail the case; its retry's outcome counts", () => {
+  const lead = job({ id: "lead" });
+  const limited = { ...job({ id: "lane-1", role: "worker", parent: "lead", route: null, status: "failed", outcome: "failed" }),
+    errorMessage: "rate limit exceeded (upstream_rate_limit, 429). Please try again in 6s." };
+  const retry = { ...job({ id: "lane-1-retry", role: "worker", parent: "lead", route: null }),
+    planRateLimitRetry: { of: "lane-1", waitMs: 6000, holdMs: 9000, reason: "upstream_rate_limit" } };
+  const report = job({ id: "lead-2", role: "lead_continuation", parent: "lead", route: null });
+  const metrics = (jobs) => caseMetrics({ ...built(), jobs });
+  const m = metrics([lead, limited, retry, report]);
+  assert.equal(m.failedJobs, 0, "the rate-limited run was started again and succeeded");
+  assert.equal(m.retriedJobs, 1);
+  assert.ok(m.jobStatuses.includes("worker:failed/failed (retried)"));
+  // a retry that fails too, or a failed lane nobody retried, still fails the case
+  assert.equal(metrics([lead, limited, { ...retry, status: "failed", outcome: "failed" }, report]).failedJobs, 1);
+  assert.equal(metrics([lead, limited, report]).failedJobs, 1);
+  assert.match(jobsQuery(PROJECT, SENT), /rateLimitRetry\}' as "planRateLimitRetry"/);
+});
+
 test("jobsSettled waits for terminal jobs and a quiet period", () => {
   const done = [{ status: "completed" }, { status: "failed" }];
   assert.equal(jobsSettled([], { lastChangeAt: 0, now: 100_000 }), false);
