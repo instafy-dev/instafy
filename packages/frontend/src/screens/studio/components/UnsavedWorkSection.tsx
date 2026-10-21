@@ -136,14 +136,15 @@ export function UnsavedWorkSection({
   const locked = disabled || busyKey !== null;
   const { refresh } = unsavedWork;
   const sectionRef = useRef<HTMLElement | null>(null);
-  const focusRequestRef = useRef<FocusRequest | null>(null);
+  // The request, and the element that had focus when it was made.
+  const focusRequestRef = useRef<{ request: FocusRequest; from: Element | null } | null>(null);
   // Bumped with a request made after the render it needs already happened.
   const [, setFocusRequests] = useState(0);
   const entriesRef = useRef(unsavedWork.visibleEntries);
   entriesRef.current = unsavedWork.visibleEntries;
 
   const requestFocus = useCallback((request: FocusRequest) => {
-    focusRequestRef.current = request;
+    focusRequestRef.current = { request, from: typeof document === "undefined" ? null : document.activeElement };
     setFocusRequests((value) => value + 1);
   }, []);
 
@@ -159,11 +160,20 @@ export function UnsavedWorkSection({
   // Pressed controls unmount (a resolved file's buttons, a removed row): put
   // keyboard focus on the next thing to do once the section is idle again.
   useEffect(() => {
-    const request = focusRequestRef.current;
-    if (!request || locked) {
+    const pending = focusRequestRef.current;
+    if (!pending || locked) {
+      return;
+    }
+    // React can run this ahead of the render that removes the pressed control
+    // (an earlier render's effects run before the next render starts). While
+    // that control still has focus, wait for its removal instead of dropping
+    // the request; focus anywhere else is the person's choice and ends it.
+    const { from } = pending;
+    if (from && from !== document.body && from.isConnected && document.activeElement === from) {
       return;
     }
     focusRequestRef.current = null;
+    const { request } = pending;
     const rows = Array.from(
       sectionRef.current?.querySelectorAll<HTMLElement>('[data-testid="unsaved-work-entry"]') ?? [],
     );
