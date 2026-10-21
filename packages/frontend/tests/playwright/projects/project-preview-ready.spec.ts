@@ -149,6 +149,23 @@ async function openFromCard(page: Page): Promise<Locator> {
   return card;
 }
 
+const siteBody = (page: Page) => page.frameLocator("[data-testid=site-preview-frame]").locator("body");
+
+/** Inside the framed site: ask Studio for the location, as any site does (docs/Previews.md, "Location"), and return its answer. */
+function askStudioForLocation(page: Page, id: string) {
+  return siteBody(page).evaluate((_body, id) => new Promise<unknown>((resolve) => {
+    const onMessage = (event: MessageEvent) => {
+      const data = event.data as { source?: string; type?: string; payload?: { id?: string } } | null;
+      if (event.source !== window.parent || data?.source !== "instafy-host" || data.payload?.id !== id) return;
+      if (data.type !== "location" && data.type !== "location-error") return;
+      window.removeEventListener("message", onMessage);
+      resolve(data);
+    };
+    window.addEventListener("message", onMessage);
+    window.parent.postMessage({ source: "e2e-site", v: 1, type: "location-request", payload: { id } }, "*");
+  }), id);
+}
+
 test.describe("Site preview card and pane", () => {
   test.setTimeout(300_000);
 
@@ -204,6 +221,32 @@ test.describe("Site preview card and pane", () => {
       expect(sandbox).not.toContain("allow-top-navigation");
       await expect(frame).toHaveAttribute("referrerpolicy", "no-referrer");
       await expect(frame).toHaveAttribute("allow", "fullscreen; clipboard-write");
+
+      // Location: Studio is the only thing that calls geolocation, granted to Studio's origin only. The site's own
+      // call is refused; asking Studio works, and the bar and the tab then show who can see it.
+      const studioOrigin = new URL(page.url()).origin;
+      await page.context().grantPermissions(["geolocation"], { origin: studioOrigin });
+      await page.context().setGeolocation({ latitude: 48.2082, longitude: 16.3738, accuracy: 10 });
+      const direct = await siteBody(page).evaluate(() => new Promise<string>((resolve) => {
+        navigator.geolocation.getCurrentPosition(() => resolve("granted"), (error) => resolve(`refused:${error.code}`), { timeout: 5_000 });
+      }));
+      expect(direct).toBe("refused:1");
+      expect(await askStudioForLocation(page, "e2e-1")).toMatchObject({
+        source: "instafy-host", type: "location", payload: { id: "e2e-1", coords: { latitude: 48.2082, longitude: 16.3738 } },
+      });
+      const bar = page.getByTestId("site-preview-chrome");
+      await expect(bar.getByTestId("preview-location-marker")).toHaveAttribute("aria-label", `${PREVIEW_TITLE} can see your location`);
+      await expect(page.getByTestId(`conversation-subtab-preview:${previewId}`)).toHaveAttribute("aria-label", `${PREVIEW_TITLE}, can see your location`);
+      await expect(page.getByTestId("preview-location-toast")).toContainText(`${PREVIEW_TITLE} can see your location`);
+      // Stop sticks: the site's next request is refused until Studio's own "Share location again".
+      await bar.getByTestId("site-preview-location").click();
+      await page.getByTestId("site-preview-location-stop").click();
+      await expect(bar.getByTestId("preview-location-marker")).toHaveCount(0);
+      expect(await askStudioForLocation(page, "e2e-2")).toMatchObject({ type: "location-error", payload: { id: "e2e-2", code: "stopped" } });
+      await bar.getByTestId("site-preview-location").click();
+      await page.getByTestId("site-preview-location-allow").click();
+      expect(await askStudioForLocation(page, "e2e-3")).toMatchObject({ type: "location", payload: { id: "e2e-3" } });
+      await expect(bar.getByTestId("preview-location-marker")).toBeVisible();
 
       // The frame is on a capability host for this preview, and nothing else gets in.
       const viewer = new URL((await frame.getAttribute("src")) ?? "");

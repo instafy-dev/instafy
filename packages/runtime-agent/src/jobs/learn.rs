@@ -113,8 +113,9 @@ const FRONTEND_PREVIEWS_TEMPLATE: &str = include_str!(concat!(
 // The bundled browser guidance used to ask before opening a browser. Since Oct 19
 // Octo opens it on its own (v1). v2 is the copy from before `instafy preview
 // check`, v3 the one from before `instafy preview open` showed a running site
-// in Studio ahead of any public tunnel, and v4 the one that allowed the preview
-// host only after someone reported a blocked page. A workspace still holding an
+// in Studio ahead of any public tunnel, v4 the one that allowed the preview
+// host only after someone reported a blocked page, and v5 the one from before
+// sites in a preview asked Studio for the person's location. A workspace still holding an
 // unedited earlier bundled copy of this skill, browser automation or skill
 // import compat is upgraded; an edited one is kept.
 const LEGACY_FRONTEND_PREVIEWS_TEMPLATES: &[&str] = &[
@@ -122,6 +123,7 @@ const LEGACY_FRONTEND_PREVIEWS_TEMPLATES: &[&str] = &[
     include_str!("legacy/frontend-previews-v2.md"),
     include_str!("legacy/frontend-previews-v3.md"),
     include_str!("legacy/frontend-previews-v4.md"),
+    include_str!("legacy/frontend-previews-v5.md"),
 ];
 const INTEGRATION_ONBOARDING_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -1763,8 +1765,9 @@ mod tests {
     /// The bundled frontend-previews skill shows a running site with
     /// `instafy preview open` and keeps the local URL and consent-gated tunnel
     /// as the fallback when previews are not available. It allows the preview
-    /// host on a dev server that checks `Host` before anyone opens the card. An
-    /// unedited v3 or v4 copy is upgraded to it; an edited one is kept.
+    /// host on a dev server that checks `Host` before anyone opens the card, and
+    /// tells a site in a preview to ask Studio for the person's location. An
+    /// unedited v3, v4 or v5 copy is upgraded to it; an edited one is kept.
     #[test]
     fn scaffold_upgrades_frontend_previews_to_studio_preview_cards() {
         for needle in [
@@ -1778,20 +1781,26 @@ mod tests {
             "Allow the preview host before the person opens the card.",
             "before you tell the person to open the card",
             "answers only on [::1]",
+            "type: \"location-request\"",
+            "instafy_host=studio",
+            "type: \"layout\"}` message arrives from `parent`",
         ] {
             assert!(FRONTEND_PREVIEWS_TEMPLATE.contains(needle), "{needle}");
         }
         let v3 = include_str!("legacy/frontend-previews-v3.md");
-        let previous = include_str!("legacy/frontend-previews-v4.md");
+        let v4 = include_str!("legacy/frontend-previews-v4.md");
+        let previous = include_str!("legacy/frontend-previews-v5.md");
         assert!(!v3.contains("instafy preview open"));
-        assert!(previous.contains("instafy preview open"));
-        assert!(!previous.contains("Allow the preview host before the person opens the card."));
+        assert!(v4.contains("instafy preview open"));
+        assert!(!v4.contains("Allow the preview host before the person opens the card."));
+        assert!(previous.contains("Allow the preview host before the person opens the card."));
+        assert!(!previous.contains("location-request"));
         assert!(FRONTEND_PREVIEWS_TEMPLATE.contains("instafy preview check --port <port>"));
 
         let workspace = tempdir().expect("workspace tempdir");
         ensure_project_memory_scaffold(workspace.path());
         let skill = workspace.path().join(FRONTEND_PREVIEWS_RELATIVE_PATH);
-        for old in [v3, previous] {
+        for old in [v3, v4, previous] {
             fs::write(&skill, old).unwrap();
             ensure_project_memory_scaffold(workspace.path());
             assert_eq!(

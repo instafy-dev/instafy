@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ControllerApiError } from "../../../../services/runtimeController/core";
 import { NO_MOUNTED_SITE_PREVIEWS, SITE_PREVIEW_HEALTH_POLL_MS, SITE_PREVIEW_HEARTBEAT_MS, SitePreviewPane, nextMountedSitePreviews } from "../SitePreviewPane";
+import { withHostQuery } from "../previewHost/hostMessages";
 
 const PREVIEW_ID = "11111111-1111-4111-8111-111111111111";
 const FIRST = "https://p-aaaaaaaaaaaaaaaaaaaaaaaaaa--11111111111141118111111111111111.preview.localhost/";
@@ -88,7 +89,7 @@ describe("SitePreviewPane", () => {
     await render();
     expect(mocks.createSitePreviewViewer).toHaveBeenCalledExactlyOnceWith("project-1", PREVIEW_ID);
     const iframe = frame()!;
-    expect(iframe.getAttribute("src")).toBe(FIRST);
+    expect(iframe.getAttribute("src")).toBe(withHostQuery(FIRST));
     expect(iframe.getAttribute("sandbox")).toBe("allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads");
     expect(iframe.getAttribute("allow")).toBe("fullscreen; clipboard-write");
     expect(iframe.getAttribute("referrerpolicy")).toBe("no-referrer");
@@ -127,7 +128,7 @@ describe("SitePreviewPane", () => {
     await post({ type: "instafy-preview", status: 401 }, new URL(FIRST).origin, frame()!.contentWindow);
     expect(mocks.revokeSitePreviewViewer).toHaveBeenCalledWith("project-1", PREVIEW_ID, FIRST);
     expect(mocks.createSitePreviewViewer).toHaveBeenCalledTimes(2);
-    expect(frame()!.getAttribute("src")).toBe(SECOND);
+    expect(frame()!.getAttribute("src")).toBe(withHostQuery(SECOND));
     await post({ type: "instafy-preview", status: 401 }, new URL(SECOND).origin, frame()!.contentWindow);
     expect(mocks.createSitePreviewViewer).toHaveBeenCalledTimes(2);
     expect(mocks.revokeSitePreviewViewer).toHaveBeenCalledWith("project-1", PREVIEW_ID, SECOND);
@@ -136,7 +137,7 @@ describe("SitePreviewPane", () => {
     // Reload is the person's own request for a new session.
     await click("[data-testid=site-preview-reload]");
     expect(mocks.createSitePreviewViewer).toHaveBeenCalledTimes(3);
-    expect(frame()!.getAttribute("src")).toBe(THIRD);
+    expect(frame()!.getAttribute("src")).toBe(withHostQuery(THIRD));
   });
 
   it("sends the heartbeat about once a minute while on screen, and re-mints on 410", async () => {
@@ -147,7 +148,7 @@ describe("SitePreviewPane", () => {
     mocks.heartbeatSitePreviewViewer.mockResolvedValueOnce("gone");
     await advance(SITE_PREVIEW_HEARTBEAT_MS);
     expect(mocks.createSitePreviewViewer).toHaveBeenCalledTimes(2);
-    expect(frame()!.getAttribute("src")).toBe(SECOND);
+    expect(frame()!.getAttribute("src")).toBe(withHostQuery(SECOND));
     // A live beat after the new session clears the once-guard: a later 410 re-mints again.
     await advance(SITE_PREVIEW_HEARTBEAT_MS);
     mocks.heartbeatSitePreviewViewer.mockResolvedValueOnce("gone");
@@ -224,7 +225,7 @@ describe("SitePreviewPane", () => {
     await act(async () => { window.dispatchEvent(Object.assign(new Event("pageshow"), { persisted: true })); });
     await flush();
     expect(mocks.createSitePreviewViewer).toHaveBeenCalledTimes(2);
-    expect(frame()?.getAttribute("src")).toBe(SECOND);
+    expect(frame()?.getAttribute("src")).toBe(withHostQuery(SECOND));
     expect(mocks.revokeSitePreviewViewer).toHaveBeenCalledTimes(1);
   });
 
@@ -237,7 +238,7 @@ describe("SitePreviewPane", () => {
     expect(problemText()).not.toContain("session ended");
     await click("[data-testid=site-preview-problem] button");
     expect(pane().dataset.state).toBe("live");
-    expect(frame()?.getAttribute("src")).toBe(FIRST);
+    expect(frame()?.getAttribute("src")).toBe(withHostQuery(FIRST));
   });
 
   it("revokes a session that arrives after the pane unmounted", async () => {
@@ -318,7 +319,7 @@ describe("SitePreviewPane", () => {
     expect(mocks.heartbeatSitePreviewViewer).toHaveBeenCalledExactlyOnceWith("project-1", PREVIEW_ID, SECOND, expect.any(AbortSignal));
     expect(mocks.createSitePreviewViewer).toHaveBeenCalledTimes(3);
     expect(pane().dataset.state).toBe("live");
-    expect(frame()!.getAttribute("src")).toBe(THIRD);
+    expect(frame()!.getAttribute("src")).toBe(withHostQuery(THIRD));
   });
 
   it("opens the new tab during the press, then fills it with a separate tab session", async () => {
@@ -332,7 +333,7 @@ describe("SitePreviewPane", () => {
     expect(mocks.createSitePreviewViewer).toHaveBeenLastCalledWith("project-1", PREVIEW_ID, { tab: true });
     expect(mocks.openReserved).toHaveBeenCalledExactlyOnceWith(TAB);
     // The pane keeps its own session.
-    expect(frame()!.getAttribute("src")).toBe(FIRST);
+    expect(frame()!.getAttribute("src")).toBe(withHostQuery(FIRST));
     expect(mocks.revokeSitePreviewViewer).not.toHaveBeenCalled();
   });
 

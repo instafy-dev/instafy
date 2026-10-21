@@ -5,6 +5,8 @@ import { useStudioNavigationPosture } from "../screens/studio/useStudioNavigatio
 import { ConversationRoster } from "../screens/studio/components/ConversationRoster";
 import { useChatParticipantsSnapshot, EMPTY_CHAT_PARTICIPANTS_SNAPSHOT } from "../screens/studio/components/chatParticipantsStore";
 import { useCode } from "../code/useCode";
+import { useLocationSitesVersion } from "../screens/studio/components/previewHost/locationSites";
+import { previewTabLocation } from "../screens/studio/components/previewHost/PreviewLocation";
 import { useWorkspaceTabs } from "./WorkspaceTabsProvider";
 import { ConversationSurfaceTabs, type ConversationSurface } from "./ConversationSurfaceLayout";
 import { closeConversationFile, closeConversationPreview, conversationFileLabel, conversationResourceId, selectConversationView } from "./conversationSurfaces";
@@ -20,6 +22,8 @@ export function ConversationWorkspaceViews({ placement = "header" }: { placement
   const besideComposer = !isLargeScreen && (activeTab?.kind === "conversation" || activeTab?.kind === "jobThread");
   const visible = placement === (besideComposer ? "composer" : "header");
   const snapshot = useChatParticipantsSnapshot();
+  // Each preview tab shows its site's 📍 while that site has the person's location.
+  useLocationSitesVersion();
   const root = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
   useLayoutEffect(() => {
@@ -52,6 +56,7 @@ export function ConversationWorkspaceViews({ placement = "header" }: { placement
     })),
     ...surfaces.previews.map(preview => ({ id: preview.id, label: preview.title, title: preview.title,
       panelId: "conversation-workspace-preview", icon: <WebWindow className="h-3.5 w-3.5" />,
+      ...previewTabLocation(preview.previewId, preview.title),
       onClose: () => conversationSurfaces.update(scope, state => closeConversationPreview(state, preview.id, hasBrowser)),
     })),
     ...ownedViews.map(tab => ({ id: tab.id, label: tab.title, panelId: "conversation-workspace-resource", icon: tab.icon,
