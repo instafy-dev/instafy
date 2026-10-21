@@ -9,8 +9,10 @@
  * Studio for the person's location (`caps.location: "host"`), since the frame
  * itself may not use the browser's geolocation.
  * Site → Studio: `{source:<the site's kit>, v:1, type, payload}`. Location has
- * its own pair in `locationBroker.ts`. Messages are data, never commands, and
- * the pane reads them only from its own frame at the viewer's origin.
+ * its own pair in `locationBroker.ts`; follow mode reads `layout-ack` (what the
+ * site supports), `view`, `tap` and `interact`. Messages are data, never
+ * commands, and the pane reads them only from its own frame at the viewer's
+ * origin.
  */
 
 export const HOST_MESSAGE_SOURCE = "instafy-host";
@@ -75,8 +77,56 @@ export function currentStudioTheme(): "light" | "dark" {
 // ---------------------------------------------------------------------------
 // Site → Studio
 
+export type SiteEvent =
+  /** What the site supports, e.g. "view" and "tap" for follow mode. */
+  | { type: "layout-ack"; supports: string[] }
+  /**
+   * Follow mode (docs/Follow-Mode.md). `view` is opaque JSON describing what is
+   * visible, sent only while Studio told the site it presents; `tap` is where
+   * the presenter tapped; `interact` is the person's own gesture on the site.
+   * Studio checks size and shape in followMode.ts and never runs them.
+   */
+  | { type: "view"; seq: number | null; payload: unknown }
+  | { type: "tap"; seq: number | null; payload: unknown }
+  | { type: "interact" };
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
+
+const MAX_SUPPORTS = 16;
+
+/** What a site says it can do (`layout-ack` `supports`): short lowercase names, at most 16. */
+function readSupports(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const names = value.filter((item): item is string => typeof item === "string" && /^[a-z][a-z0-9-]{0,23}$/.test(item));
+  return [...new Set(names)].slice(0, MAX_SUPPORTS);
+}
+
+/**
+ * Reads one site message. The caller has already checked that it came from
+ * this pane's frame at the viewer's origin; this only checks its shape.
+ * Unknown types and anything malformed return null.
+ */
+export function parseSiteMessage(data: unknown): SiteEvent | null {
+  if (!isRecord(data) || !isSiteMessageSource(data.source)) return null;
+  if (data.v !== HOST_MESSAGE_VERSION || typeof data.type !== "string") return null;
+  const payload = isRecord(data.payload) ? data.payload : {};
+  switch (data.type) {
+    case "layout-ack":
+      return { type: "layout-ack", supports: readSupports(payload.supports) };
+    case "view":
+    case "tap": {
+      // The payload stays as the site sent it (opaque); followMode.ts drops anything that is not small plain JSON.
+      if (!("payload" in data) || data.payload === undefined) return null;
+      const seq = typeof data.seq === "number" && Number.isFinite(data.seq) ? data.seq : null;
+      return { type: data.type, seq, payload: data.payload };
+    }
+    case "interact":
+      return { type: "interact" };
+    default:
+      return null;
+  }
+}
 
 /**
  * A message in the site envelope (`{source:<kit>, v:1, type}`), whatever its

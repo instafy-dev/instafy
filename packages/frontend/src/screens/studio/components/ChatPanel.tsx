@@ -365,6 +365,7 @@ import { ConversationFileContext } from "../../../workspace/ConversationFileCont
 import { ConversationPreviewContext, type ConversationPreviewOpener } from "../../../workspace/ConversationPreviewContext";
 import { conversationSurfaceScope, closeConversationFile, closeConversationPreview, conversationFileLabel, conversationResourceId, openConversationFile, openConversationPreview, selectConversationView, visibleSitePreviewId } from "../../../workspace/conversationSurfaces";
 import { SitePreviewPanel } from "./SitePreviewPanel";
+import { endOwnPresentation } from "./previewHost/followStore";
 import { previewTabLocation } from "./previewHost/PreviewLocation";
 import { useLocationSitesVersion } from "./previewHost/locationSites";
 import type { OpenWorkspaceFileEventDetail } from "./useFilesPanelViewerState";
@@ -5862,7 +5863,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       id: preview.id, label: preview.title, title: preview.title,
       panelId: sitePreviewPanelId, icon: <WebWindow className="h-3.5 w-3.5" />,
       ...previewTabLocation(preview.previewId, preview.title),
-      onClose: () => updateSurfaces(surfaceScope, state => closeConversationPreview(state, preview.id, hasBrowserView)),
+      // Closing the tab ends a presentation this page runs for the site (switching views does not).
+      onClose: () => { endOwnPresentation(preview.previewId); updateSurfaces(surfaceScope, state => closeConversationPreview(state, preview.id, hasBrowserView)); },
     })),
   ];
   const chatSurface = (

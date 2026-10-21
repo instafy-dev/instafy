@@ -10,6 +10,7 @@ import type { StudioPanel } from "../../screens/studio/types";
 import { publishChatParticipants, EMPTY_CHAT_PARTICIPANTS_SNAPSHOT } from "../../screens/studio/components/chatParticipantsStore";
 import { ConversationWorkspaceViews } from "../ConversationWorkspaceViews";
 import { openConversationPreview } from "../conversationSurfaces";
+import { ownPresentation, rememberOwnPresentation, resetFollowStoreForTests } from "../../screens/studio/components/previewHost/followStore";
 import { WorkspaceTabsProvider, useWorkspaceTabs } from "../WorkspaceTabsProvider";
 import { getTabIdForConversation, getTabIdForJobThread, getTabIdForPanel } from "../workspaceTabFactories";
 import { loadPersistedWorkspaceTabs, persistWorkspaceTabsState } from "../workspaceTabPersistence";
@@ -160,8 +161,14 @@ describe("conversation preview tabs", () => {
     expect(selected.getAttribute("aria-controls")).toBe("conversation-workspace-preview");
     // A preview alone is enough to put chat beside it.
     expect(header().querySelector('[aria-label="Show one view"], [aria-label="Show side by side"]')).not.toBeNull();
+    // This page presents the shop: closing its tab ends that presentation for everyone, the other site's stays.
+    rememberOwnPresentation(two, { projectId: projectA, presentationId: "pres-shop", presenter: { id: "user-a", name: "Kim" } });
+    rememberOwnPresentation(one, { projectId: projectA, presentationId: "pres-docs", presenter: { id: "user-a", name: "Kim" } });
     await act(async () => header().querySelector<HTMLButtonElement>('[aria-label="Close Shop view"]')?.click());
     expect(api.conversationSurfaces.read(scope)).toMatchObject({ activeId: `preview:${one}`, previews: [{ previewId: one, title: "Docs site" }] });
+    expect(ownPresentation(two)).toBeNull();
+    expect(ownPresentation(one)?.presentationId).toBe("pres-docs");
+    resetFollowStoreForTests();
     width.mockRestore();
   });
 

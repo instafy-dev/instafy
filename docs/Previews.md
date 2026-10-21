@@ -36,6 +36,9 @@ Traefik   HostRegexp router → forwardAuth → broker GET /preview-auth
             → rathole → 127.0.0.1:N in the space's machine
 ```
 
+A member can **Present** a site whose page says it can share its view, and the others **Follow** it live; see
+[Follow-Mode.md](Follow-Mode.md).
+
 ## Configuration
 
 Every part fails closed. A missing setting turns previews off; it never makes them public.

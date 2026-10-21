@@ -2287,7 +2287,7 @@ fn is_profile_metadata_whitespace(character: char) -> bool {
         | '\u{205f}' | '\u{3000}' | '\u{feff}')
 }
 
-fn human_profile_metadata_defaults(
+pub(crate) fn human_profile_metadata_defaults(
     metadata: &serde_json::Value,
 ) -> (Option<String>, Option<String>) {
     let values = metadata.as_object();

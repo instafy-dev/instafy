@@ -12,6 +12,8 @@ import {
 import { useConversationPreviewOpener } from "../../../workspace/ConversationPreviewContext";
 import { ChatActionCard, type ChatActionCardAction } from "./ChatActionCard";
 import type { SitePreviewRequest } from "./sitePreviewRequest";
+import { requestFollow, setFollowPresence, useFollowAccount, useFollowEntry } from "./previewHost/followStore";
+import { getFollowState } from "../../../services/runtimeController/previewFollow";
 
 export type SitePreviewState = "checking" | "live" | "not_responding" | "unavailable" | "stopped";
 
@@ -318,6 +320,30 @@ export function SitePreviewCard({
     return () => window.clearInterval(timer);
   }, [following, preview.previewId, refresh, showing]);
 
+  // Follow mode: who presents this site now (events keep it current; one look when the card first reads Live).
+  const followEntry = useFollowEntry(preview.previewId);
+  const selfId = useFollowAccount();
+  const askedFollow = useRef(false);
+  useEffect(() => {
+    if (!projectId || state !== "live" || askedFollow.current) return;
+    askedFollow.current = true;
+    const controller = new AbortController();
+    void getFollowState(projectId, preview.previewId, controller.signal)
+      .then((snapshot) => { if (!controller.signal.aborted) setFollowPresence(preview.previewId, snapshot.presence); })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [preview.previewId, projectId, state]);
+  // A stopped site has nothing to follow.
+  const followPresence = state === "stopped" ? null : followEntry.presence;
+  // My own presentation from another screen: never "Follow" myself.
+  const mine = Boolean(selfId && followPresence?.presenter.id === selfId);
+  const followable = Boolean(followPresence) && !mine && followEntry.role !== "presenting" && followEntry.role !== "following";
+  const watching = followPresence?.followers ? ` · ${followPresence.followers} watching` : "";
+  const followLine = !followPresence ? null
+    : followEntry.role === "presenting" ? `You're presenting${watching}`
+      : mine ? `You're presenting on another screen${watching}`
+        : `${followPresence.presenter.name} ${followPresence.state === "away" ? "is away" : "is presenting"}${watching}`;
+
   // The preview comes from the stored card, parsed once: nothing a press
   // carries is trusted. Opening only selects the conversation's view; the
   // pane mints its own viewer session.
@@ -327,16 +353,24 @@ export function SitePreviewCard({
   };
 
   const label = sitePreviewStateLabel(state, server?.port ?? preview.port);
-  const actions: ChatActionCardAction[] = opener
-    ? [{
-        id: "open-preview",
-        label: showing ? "Showing" : "Open",
-        variant: showing || state === "not_responding" || state === "unavailable" ? "outline" : "primary",
-        onPress: open,
-        isDisabled: showing || state === "stopped",
-        testId: "preview-ready-open",
-      }]
-    : [];
+  const actions: ChatActionCardAction[] = [];
+  if (opener && followable && followPresence) {
+    // The pane follows as soon as it is open and knows the presentation.
+    actions.push({
+      id: "follow-preview", label: `Follow ${followPresence.presenter.name}`, variant: "primary", testId: "preview-ready-follow",
+      onPress: () => { requestFollow(preview.previewId); open(); },
+    });
+  }
+  if (opener) {
+    actions.push({
+      id: "open-preview",
+      label: showing ? "Showing" : "Open",
+      variant: showing || followable || state === "not_responding" || state === "unavailable" ? "outline" : "primary",
+      onPress: open,
+      isDisabled: showing || state === "stopped",
+      testId: "preview-ready-open",
+    });
+  }
 
   return (
     <ChatActionCard
@@ -358,6 +392,9 @@ export function SitePreviewCard({
           <span className={`h-2 w-2 shrink-0 rounded-full ${STATE_DOT[state]}`} aria-hidden="true" />
           {label}
         </span>
+        {followLine ? (
+          <span className="font-medium text-violet-700 dark:text-violet-300" data-testid="preview-ready-follow-line">{followLine}</span>
+        ) : null}
         {/* Said only when the controller's record says so. */}
         {server?.visibility === "private" ? (
           <span className="inline-flex items-center gap-1" data-testid="preview-ready-visibility">

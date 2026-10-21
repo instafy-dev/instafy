@@ -2248,6 +2248,24 @@ async fn every_preview_route_fails_closed_when_previews_are_off_or_the_broker_ca
                 ),
                 (job.token.clone(), "POST", format!("{one}/close"), json!({})),
                 (
+                    f.tokens[0].clone(),
+                    "POST",
+                    format!("{one}/follow"),
+                    json!({ "op": "present" }),
+                ),
+                (
+                    f.tokens[0].clone(),
+                    "GET",
+                    format!("{one}/follow"),
+                    Value::Null,
+                ),
+                (
+                    f.tokens[0].clone(),
+                    "GET",
+                    format!("{one}/follow/stream"),
+                    Value::Null,
+                ),
+                (
                     HOOK_SECRET.to_string(),
                     "POST",
                     "/tunnel-broker/hooks/preview-auth".to_string(),

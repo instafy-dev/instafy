@@ -56,10 +56,14 @@ use crate::{
     unauthorized, ApiError, AppState,
 };
 
+mod follow;
+#[cfg(test)]
+mod follow_tests;
 mod sessions;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use follow::{FollowBusMessage, FollowEnvelope, FollowHub};
 use sessions::PreviewOrigin;
 pub(crate) use sessions::{
     check_preview_domain, prune_preview_sessions, revoke_preview_sessions_for_tunnel,
@@ -143,6 +147,14 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/projects/:project_id/previews/:preview_id/close",
             post(post_preview_close),
+        )
+        .route(
+            "/projects/:project_id/previews/:preview_id/follow",
+            post(follow::post_preview_follow).get(follow::get_preview_follow),
+        )
+        .route(
+            "/projects/:project_id/previews/:preview_id/follow/stream",
+            get(follow::get_preview_follow_stream),
         )
         .route(
             "/tunnel-broker/hooks/preview-auth",
@@ -1474,8 +1486,12 @@ async fn post_preview_close(
         }
     }
     if !tunnel_status_is_active(&grant.record.status) {
-        // Already stopped (a runtime stop, say); make sure no viewer outlived it.
+        // Already stopped (a runtime stop, say); make sure no viewer outlived
+        // it, and nobody still presents it.
         revoke_preview_sessions_for_tunnel(&state.pool, &grant.record.tunnel_id).await;
+        state
+            .follow
+            .end_preview(&grant.record.tunnel_id, follow::EndReason::Closed);
         return Ok(StatusCode::NO_CONTENT);
     }
     let record =
@@ -1483,6 +1499,10 @@ async fn post_preview_close(
             .await?
             .ok_or_else(|| not_found("preview not found"))?;
     revoke_tunnel_record(&state, record, None).await?;
+    // A closed preview has nothing left to present.
+    state
+        .follow
+        .end_preview(&grant.record.tunnel_id, follow::EndReason::Closed);
     Ok(StatusCode::NO_CONTENT)
 }
 

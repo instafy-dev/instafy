@@ -32,6 +32,7 @@ import {
   type MembersChangedEventDetail,
   type ProjectAccessRefreshEventDetail,
 } from "../../projects/projectAccessEvents";
+import { PREVIEW_FOLLOW_EVENT } from "../../services/runtimeController/previewFollow";
 import {
   CREDITS_UPDATED_EVENT,
   type CreditsUpdatedEventDetail,
@@ -705,6 +706,10 @@ export function useRuntimeControllerSync({
                 } satisfies ConversationSendQueueEventDetail,
               }),
             );
+          }
+          if (event.kind === "preview.follow" && typeof window !== "undefined") {
+            // Presence only (who presents a site, away, ended); the follow store reads it.
+            window.dispatchEvent(new CustomEvent(PREVIEW_FOLLOW_EVENT, { detail: event.data ?? null }));
           }
           if (event.kind?.startsWith("tunnel.")) {
             const grant = mapTunnelGrantFromPayload(

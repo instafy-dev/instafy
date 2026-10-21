@@ -20,6 +20,8 @@ import { withHostQuery } from "./previewHost/hostMessages";
 import { useSiteHost, type SiteMessageEvent, type SiteRecord } from "./previewHost/useSiteHost";
 import { setLocationStopped } from "./previewHost/locationSites";
 import { LocationBarControl, LocationBlockedNotice, LocationToast } from "./previewHost/PreviewLocation";
+import { followLabels } from "./previewHost/followMode";
+import { FollowRing, FollowRipples, FollowToast, SitePreviewFollowControls } from "./previewHost/FollowControls";
 
 export const SITE_PREVIEW_HEALTH_POLL_MS = 15_000;
 /** While the frame is on screen: keeps a quiet site's session alive. */
@@ -31,8 +33,8 @@ export const SITE_PREVIEW_FRAME_ALLOW = "fullscreen; clipboard-write";
  * The status message the pane reads from its frame. The broker's error pages
  * report their status with it, but any page on this preview's origin can send
  * it, the site itself included. Everything else from the frame goes to the
- * site host channel (previewHost/useSiteHost): the layout handshake and
- * location requests, read as data, never as commands.
+ * site host channel (previewHost/useSiteHost): the layout handshake, location
+ * requests and follow mode, read as data, never as commands.
  */
 export const SITE_PREVIEW_MESSAGE_TYPE = "instafy-preview";
 
@@ -271,8 +273,13 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
   const shown: SitePreviewPaneState = session === "ready" ? health : session;
   const frameShown = Boolean(viewerUrl) && session === "ready" && (shown === "checking" || shown === "live" || shown === "not_responding");
   const frameOnScreen = visible && frameShown;
-  const host = useSiteHost({ frame, viewerUrl: frameShown ? viewerUrl : null, frameKey, projectId, previewId, frameOnScreen, record, spaceName });
+  const host = useSiteHost({
+    frame, viewerUrl: frameShown ? viewerUrl : null, frameKey, projectId, previewId, frameOnScreen, record, spaceName,
+    onError: message => { if (mounted.current) setFeedback(message); },
+  });
   siteMessage.current = host.handleSiteMessage;
+  const follow = host.follow;
+  const followNote = followLabels(follow.state).note;
   useEffect(() => {
     if (!frameOnScreen || !viewerUrl) return;
     const controller = new AbortController();
@@ -372,6 +379,7 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
         }
         status={<>
           <LocationBarControl site={host.location.site} status={host.location.status} />
+          <SitePreviewFollowControls follow={follow} supportsView={host.supportsView && frameOnScreen} />
           <BrowserStatusPill state={chromeState(shown)} detail={detail} testId="site-preview-status" />
         </>}
         actions={
@@ -399,11 +407,14 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
             onLoad={host.onFrameLoad}
           />
         ) : null}
+        {frameShown && follow.state.role === "following" ? <FollowRing /> : null}
+        {frameShown ? <FollowRipples ripples={follow.ripples} /> : null}
         {host.location.blocked ? <LocationBlockedNotice onDismiss={host.location.dismissBlocked} /> : null}
         {host.location.toast && host.location.site ? (
           <LocationToast title={host.location.site.title} onDismiss={host.location.dismissToast}
             onStop={() => { if (host.location.site) setLocationStopped(host.location.site, true); host.location.dismissToast(); }} />
-        ) : null}
+        ) : followNote ? <FollowToast text={followNote} />
+          : follow.locationLeftOut && follow.state.role === "presenting" ? <FollowToast text="📍 Your location is left out" testId="follow-location-toast" /> : null}
         {shown === "opening" ? (
           <div className="absolute inset-0 flex items-center justify-center gap-2 text-sm text-slate-500 dark:text-slate-400">
             <Spinner aria-hidden="true" tone="slate" size="sm" /> Opening {title}…

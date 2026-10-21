@@ -1,8 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { getSitePreview } from "../../../../services/runtimeController/previews";
-import { buildHostLayoutMessage, currentStudioTheme, isSiteEnvelope } from "./hostMessages";
+import { buildHostLayoutMessage, currentStudioTheme, isSiteEnvelope, parseSiteMessage } from "./hostMessages";
 import { createLocationBroker, type LocationBroker } from "./locationBroker";
 import { adoptLocationSite, locationSiteKey, useLocationSiteStatus, type LocationSiteMeta } from "./locationSites";
+import { usePreviewFollow } from "./usePreviewFollow";
+import { useFollowAccount } from "./followStore";
+
+const NO_ERROR = () => {};
 
 /** The preview record's title, port and path: what keys a site for location. */
 export type SiteRecord = { title: string; port: number; path: string };
@@ -11,7 +15,8 @@ export type SiteMessageEvent = Pick<MessageEvent, "data" | "origin" | "source">;
 /**
  * The host side of one preview pane's frame, for any site: the layout message
  * (sent on each load, when Studio's theme changes, and again when a site that
- * missed it first speaks) and location. SitePreviewPane owns the frame, the
+ * missed it first speaks), location, what the site says it supports, and
+ * follow mode (docs/Follow-Mode.md). SitePreviewPane owns the frame, the
  * capability and the checks on where a message came from; it hands every
  * other message from its own frame here. A site that never answers is just a
  * page in a frame.
@@ -19,9 +24,11 @@ export type SiteMessageEvent = Pick<MessageEvent, "data" | "origin" | "source">;
  * Location (docs/Previews.md, "Location"): the frame may not use the browser's
  * geolocation. A site asks with `location-request`; this pane's broker
  * answers only its own frame while it is on screen, records which site got
- * it, and the bar shows 📍 for a site that received it.
+ * it, and the bar shows 📍 for a site that received it. Follow mode never
+ * shares a view or tap holding a position this frame received since it was
+ * loaded fresh.
  */
-export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, frameOnScreen, record, spaceName = null }: {
+export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, frameOnScreen, record, spaceName = null, onError = NO_ERROR }: {
   frame: RefObject<HTMLIFrameElement | null>;
   /** The live capability address: messages go to its origin only. */
   viewerUrl: string | null;
@@ -35,6 +42,8 @@ export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, 
   record: SiteRecord | null;
   /** The space's name, for the list of sites that received the person's location. */
   spaceName?: string | null;
+  /** A follow-mode failure the pane shows. */
+  onError?: (message: string) => void;
 }) {
   const postToFrame = useCallback((message: unknown) => {
     const target = frame.current?.contentWindow;
@@ -55,9 +64,15 @@ export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, 
   const heardFromSite = useRef(false);
   /** Loads of the frame since it was loaded fresh (frameKey or capability changed). */
   const loadsSinceFresh = useRef(0);
+  /** What the site's `layout-ack` listed ("view", "tap"); cleared with each new document. */
+  const [supports, setSupports] = useState<readonly string[]>([]);
+  /** Counts the frame's documents: a site that navigates must be told again that it presents. */
+  const [frameLoads, setFrameLoads] = useState(0);
   const onFrameLoad = useCallback(() => {
     heardFromSite.current = false;
     loadsSinceFresh.current += 1;
+    setSupports([]);
+    setFrameLoads(count => count + 1);
     // The site moved to another page inside the frame: that page did not ask, so this
     // frame's watches and pending answers end. The first load is left alone, since the
     // site's scripts may have asked before it fired. Positions are kept: the new page
@@ -128,9 +143,27 @@ export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, 
   // A new document in the frame (Reload, a new capability) did not ask: its watches end, and what it held is gone.
   useEffect(() => {
     loadsSinceFresh.current = 0;
-    return () => { broker.current?.stopAll(); broker.current?.forgetPositions(); };
+    return () => { broker.current?.stopAll(); broker.current?.forgetPositions(); setSupports([]); };
   }, [frameKey, viewerUrl]);
   const locationStatus = useLocationSiteStatus(siteKey);
+
+  const selfId = useFollowAccount();
+  const follow = usePreviewFollow({
+    projectId,
+    previewId,
+    frameOnScreen,
+    postToFrame,
+    supportsView: supports.includes("view"),
+    supportsTap: supports.includes("tap"),
+    documentKey: `${viewerUrl ?? ""}:${frameKey}:${frameLoads}`,
+    // The location guard: positions this frame received since it was loaded fresh.
+    recentPositions: () => broker.current?.recentPositions() ?? [],
+    frameElement: () => frame.current,
+    selfId,
+    onError,
+  });
+  const followSiteEvent = useRef(follow.handleSiteEvent);
+  followSiteEvent.current = follow.handleSiteEvent;
 
   /** One message from this pane's frame at the viewer's origin (the pane checked both). True when it was read. */
   const handleSiteMessage = useCallback((event: SiteMessageEvent): boolean => {
@@ -138,12 +171,22 @@ export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, 
     if (!isSiteEnvelope(event.data)) return false;
     // A site whose bridge starts after the frame's load event missed the first layout message.
     if (!heardFromSite.current) { heardFromSite.current = true; sendLayout(); }
+    const parsed = parseSiteMessage(event.data);
+    if (parsed) {
+      // Within one document what a site supports only grows.
+      if (parsed.type === "layout-ack") {
+        setSupports(current => parsed.supports.every(name => current.includes(name)) ? current : [...new Set([...current, ...parsed.supports])]);
+      }
+      followSiteEvent.current(parsed);
+    }
     return true;
   }, [sendLayout]);
 
   return {
     onFrameLoad,
     handleSiteMessage,
+    follow,
+    supportsView: supports.includes("view"),
     location: {
       site: locationSite,
       status: locationStatus,

@@ -1,8 +1,11 @@
 import { test, expect, type Locator, type Page } from "@playwright/test";
 import { spawnSync } from "node:child_process";
 import http from "node:http";
-import { activeConversationId, returnToConversation } from "../utils/conversationNavigation.js";
-import { prepareStudio, resetRuntimeUserState } from "../utils/harness.js";
+import { createPublicChatFromTopBar } from "../utils/chatUi.js";
+import { activeConversationId, returnToConversation, selectConversation } from "../utils/conversationNavigation.js";
+import { deleteDisposableTestUser, loginAsGuest, prepareStudio, resetRuntimeUserState } from "../utils/harness.js";
+import { chooseOption } from "../utils/select.js";
+import { openTeamDirectory } from "../utils/sidebar.js";
 
 // Site previews end to end (docs/Previews.md): a site running in the space's
 // machine is opened from its "Ready to preview" card into a side-pane tab on a
@@ -10,6 +13,9 @@ import { prepareStudio, resetRuntimeUserState } from "../utils/harness.js";
 // tunnel broker serves private previews; on any other stack the test skips,
 // unless INSTAFY_E2E_REQUIRE_PREVIEWS=1, which makes it fail instead so a stack
 // that lost its preview settings cannot pass by skipping.
+//
+// Follow mode (docs/Follow-Mode.md): a desktop presenter and a phone follower on
+// a real preview, through the controller's relay.
 
 const PREVIEW_PORT = 4173;
 const PREVIEW_TITLE = "Site preview";
@@ -79,9 +85,9 @@ async function waitForFixture(container: string, port = PREVIEW_PORT) {
     .toBe(0);
 }
 
-function openPreview(container: string, conversationId: string): Record<string, unknown> {
+function openPreview(container: string, conversationId: string, port = PREVIEW_PORT, title = PREVIEW_TITLE): Record<string, unknown> {
   const opened = docker(
-    ["exec", container, "instafy", "preview", "open", "--port", String(PREVIEW_PORT), "--title", PREVIEW_TITLE, "--conversation", conversationId, "--json"],
+    ["exec", container, "instafy", "preview", "open", "--port", String(port), "--title", title, "--conversation", conversationId, "--json"],
     90_000,
   );
   // Progress goes to stderr, so stdout is the JSON document alone.
@@ -136,12 +142,12 @@ async function createBlankControllerConversationId(page: Page, projectId: string
   return normalized;
 }
 
-function previewCard(page: Page): Locator {
-  return page.getByTestId("preview-ready-card").filter({ hasText: PREVIEW_TITLE }).last();
+function previewCard(page: Page, title = PREVIEW_TITLE): Locator {
+  return page.getByTestId("preview-ready-card").filter({ hasText: title }).last();
 }
 
-async function openFromCard(page: Page): Promise<Locator> {
-  const card = previewCard(page);
+async function openFromCard(page: Page, title = PREVIEW_TITLE): Promise<Locator> {
+  const card = previewCard(page, title);
   await expect(card).toContainText("Live", { timeout: 30_000 });
   await card.getByRole("button", { name: "Open" }).click();
   await expect(page.frameLocator("[data-testid=site-preview-frame]").locator("#pv")).toHaveText("ok", { timeout: 30_000 });
@@ -150,6 +156,74 @@ async function openFromCard(page: Page): Promise<Locator> {
 }
 
 const siteBody = (page: Page) => page.frameLocator("[data-testid=site-preview-frame]").locator("body");
+
+/**
+ * Inside a framed site: answers the layout message listing follow mode's
+ * "view" (docs/Follow-Mode.md), records what Studio sends it, and exposes the
+ * site side of the protocol (view, tap, the person's own gesture) to the test.
+ */
+async function actAsFollowSite(page: Page) {
+  await siteBody(page).evaluate((body) => {
+    type Applied = { seq: number; payload: Record<string, unknown>; smooth: boolean; from: { name: string }; receivedAt: number };
+    const site = window as unknown as {
+      __host: Array<Record<string, unknown>>; __applied: Applied[];
+      __view: (payload: Record<string, unknown>) => void; __tap: (x: number, y: number) => void; __interact: () => void;
+    };
+    if (site.__applied) return;
+    site.__host = [];
+    site.__applied = [];
+    window.addEventListener("message", (event) => {
+      if (event.source !== window.parent) return;
+      const data = event.data as Record<string, unknown>;
+      site.__host.push(data);
+      if (data?.type === "present") body.dataset.presenting = String(data.on);
+      if (data?.type === "apply-view") {
+        site.__applied.push({ ...(data as unknown as Applied), receivedAt: Date.now() });
+        body.dataset.view = JSON.stringify(data.payload);
+      }
+    });
+    const post = (message: Record<string, unknown>) => window.parent.postMessage({ source: "instafy-site", v: 1, ...message }, "*");
+    site.__view = (payload) => post({ type: "view", payload });
+    site.__tap = (x, y) => post({ type: "tap", payload: { x, y } });
+    site.__interact = () => post({ type: "interact" });
+    post({ type: "layout-ack", payload: { v: 1, supports: ["view"] } });
+  });
+}
+
+type FollowSiteWindow = {
+  __host: Array<Record<string, unknown>>;
+  __applied: Array<{ seq: number; payload: Record<string, unknown>; smooth: boolean; from: { name: string }; receivedAt: number }>;
+  __view: (payload: Record<string, unknown>) => void; __tap: (x: number, y: number) => void; __interact: () => void;
+};
+const appliedViews = (page: Page) => siteBody(page).evaluate(() => (window as unknown as FollowSiteWindow).__applied);
+const sendView = (page: Page, payload: Record<string, unknown>) =>
+  siteBody(page).evaluate((_body, payload) => (window as unknown as FollowSiteWindow).__view({ ...payload, sentAt: Date.now() }), payload);
+
+/** A builder invite link for the space, opening this conversation (the org invite flow members use). */
+async function createInviteLink(page: Page, conversationControllerId: string): Promise<string> {
+  await openTeamDirectory(page);
+  await page.getByTestId("sidebar-project-settings").click();
+  await expect(page.getByTestId("settings-panel")).toBeVisible();
+  await page.getByTestId("settings-category-project-access").click();
+  await expect(page.getByTestId("project-access-section")).toBeVisible();
+  await chooseOption(page.getByTestId("org-invite-link-role"), "builder");
+  await page.getByTestId("org-invite-link-create").click();
+  const input = page.getByTestId("org-invite-link-url");
+  await expect(input).toBeVisible();
+  const link = new URL(await input.inputValue());
+  link.searchParams.set("conversationControllerId", conversationControllerId);
+  link.searchParams.set("panel", "chat");
+  return link.toString();
+}
+
+/** Back in the chat after leaving it: the preview's pane (its tab, if the chat shows) presents again by itself. */
+async function backToPresentedPane(page: Page, previewId: string) {
+  if (await page.getByTestId("site-preview-frame").count() === 0) await page.getByTestId(`conversation-subtab-preview:${previewId}`).click();
+  await expect(page.frameLocator("[data-testid=site-preview-frame]").locator("#pv")).toHaveText("ok", { timeout: 30_000 });
+  await expect(page.getByTestId("follow-bar-chip")).toHaveAttribute("data-role", "presenting", { timeout: 15_000 });
+  await actAsFollowSite(page);
+  await expect(siteBody(page)).toHaveAttribute("data-presenting", "true");
+}
 
 /** Inside the framed site: ask Studio for the location, as any site does (docs/Previews.md, "Location"), and return its answer. */
 function askStudioForLocation(page: Page, id: string) {
@@ -300,6 +374,118 @@ test.describe("Site preview card and pane", () => {
       await expect(previewCard(page)).toContainText("Stopped", { timeout: 35_000 });
     } finally {
       stopFixtureServer(container);
+    }
+  });
+
+  test("follow mode: a phone follows a desktop presenter, and presenting survives leaving the chat", async ({ page, browser }) => {
+    test.setTimeout(420_000);
+    const capabilities = await brokerCapabilities();
+    const servesPreviews = Boolean(capabilities?.privatePreviews && capabilities.previewDomain);
+    const noPreviews = "This stack's tunnel broker serves no private previews (see docs/Previews.md).";
+    if (process.env.INSTAFY_E2E_REQUIRE_PREVIEWS === "1") expect(servesPreviews, noPreviews).toBe(true);
+    test.skip(!servesPreviews, noPreviews);
+    const FOLLOW_PORT = PREVIEW_PORT + 7;
+    const FOLLOW_TITLE = "Follow site";
+    await page.setViewportSize({ width: 1400, height: 900 });
+    const projectId = await prepareStudio(page);
+    if (!projectId) throw new Error("Project id missing for follow test.");
+    await returnToConversation(page);
+    const localConversationId = await activeConversationId(page);
+    const conversationId = await createBlankControllerConversationId(page, projectId, localConversationId);
+    const container = await runtimeContainerFor(projectId);
+    startFixtureServer(container, FOLLOW_PORT);
+    const member = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+    let memberUserId: string | null = null;
+    try {
+      await waitForFixture(container, FOLLOW_PORT);
+      const opened = openPreview(container, conversationId, FOLLOW_PORT, FOLLOW_TITLE);
+      const previewId = String(opened.previewId);
+
+      // A opens the site. Present is offered only once the site says it can share its view.
+      await openFromCard(page, FOLLOW_TITLE);
+      await expect(page.getByTestId("follow-present")).toHaveCount(0);
+      await actAsFollowSite(page);
+      await expect(page.getByTestId("follow-present")).toHaveAttribute("aria-label", "Present to the space");
+      await page.getByTestId("follow-present").click();
+      const presenterChip = page.getByTestId("follow-bar-chip");
+      await expect(presenterChip).toHaveAttribute("data-role", "presenting");
+      await expect(presenterChip.getByTestId("follow-status")).toHaveText("Presenting");
+      // The site hears it presents; the person's location is never part of it.
+      await expect(siteBody(page)).toHaveAttribute("data-presenting", "true");
+      expect(await siteBody(page).evaluate(() => (window as unknown as FollowSiteWindow).__host.find(message => message.type === "present")))
+        .toMatchObject({ source: "instafy-host", v: 1, type: "present", on: true, share: { location: false } });
+      await sendView(page, { tab: "plan", day: 3, n: 0 });
+
+      // B: a second member on a phone, invited with a link, in the same conversation.
+      // A's settings replace the chat for a moment, so the pane comes back with a fresh frame, still presenting.
+      const inviteUrl = await createInviteLink(page, conversationId);
+      await returnToConversation(page);
+      await backToPresentedPane(page, previewId);
+      await sendView(page, { tab: "plan", day: 3, n: 0 });
+      const mobile = await member.newPage();
+      mobile.setDefaultTimeout(60_000);
+      memberUserId = (await loginAsGuest(mobile)).disposableUserId;
+      await mobile.goto(inviteUrl, { waitUntil: "domcontentloaded" });
+      await mobile.getByTestId("invite-accept-join").click();
+      await mobile.waitForURL((url) => url.pathname.includes("/studio"), { timeout: 60_000 });
+      await mobile.goto(`/studio?projectId=${encodeURIComponent(projectId)}&panel=chat&conversationControllerId=${encodeURIComponent(conversationId)}`,
+        { waitUntil: "domcontentloaded" });
+      // The card says who presents and offers Follow.
+      const mobileCard = previewCard(mobile, FOLLOW_TITLE);
+      await expect(mobileCard.getByTestId("preview-ready-follow-line")).toContainText("is presenting", { timeout: 60_000 });
+      await mobileCard.scrollIntoViewIfNeeded();
+      await mobileCard.getByTestId("preview-ready-follow").click();
+      await expect(mobile.frameLocator("[data-testid=site-preview-frame]").locator("#pv")).toHaveText("ok", { timeout: 30_000 });
+      await expect(mobile.getByTestId("follow-bar-chip")).toHaveAttribute("data-role", "following", { timeout: 10_000 });
+      await expect(mobile.getByTestId("follow-ring")).toBeVisible();
+      // The site acks "view": it catches up at once, jumping to the presenter's view.
+      await actAsFollowSite(mobile);
+      await expect.poll(async () => (await appliedViews(mobile)).at(-1)?.payload?.n, { timeout: 5_000 }).toBe(0);
+      expect((await appliedViews(mobile))[0]).toMatchObject({ smooth: false, payload: { tab: "plan", day: 3 } });
+
+      // A moves: B follows within a second, smoothly, the latest view winning.
+      for (let n = 1; n <= 20; n += 1) {
+        await sendView(page, { tab: "plan", day: 3, n });
+        await page.waitForTimeout(20);
+      }
+      await expect.poll(async () => (await appliedViews(mobile)).at(-1)?.payload?.n, { timeout: 3_000 }).toBe(20);
+      const applied = await appliedViews(mobile);
+      const last = applied.at(-1)!;
+      expect(last.smooth).toBe(true);
+      expect(applied.filter(view => (view.payload.n as number) >= 1).length).toBeLessThan(20);
+      const latencies = applied.filter(view => typeof view.payload.sentAt === "number").map(view => view.receivedAt - (view.payload.sentAt as number));
+      console.log(`[follow-e2e] presenter → follower latency ms: ${latencies.join(",")}`);
+      expect(last.receivedAt - (last.payload.sentAt as number)).toBeLessThan(1_500);
+
+      // A leaves this chat for another one (as when opening a run tab): the pane goes, the presentation stays and
+      // B sees A away once A's heartbeats stop (15 s), still on the last view.
+      await createPublicChatFromTopBar(page);
+      await expect(page.getByTestId("site-preview-frame")).toHaveCount(0);
+      await expect(mobile.getByTestId("follow-status")).toHaveText(/is away$/, { timeout: 40_000 });
+      await expect(mobile.getByTestId("follow-note")).toHaveCount(0);
+      // A comes back: presenting again at once, with no second Present, and B follows again.
+      await selectConversation(page, localConversationId);
+      await backToPresentedPane(page, previewId);
+      await expect(mobile.getByTestId("follow-status")).toHaveText(/^Following /, { timeout: 15_000 });
+      await sendView(page, { tab: "places", n: 30 });
+      await expect.poll(async () => (await appliedViews(mobile)).at(-1)?.payload?.n, { timeout: 5_000 }).toBe(30);
+
+      // B pans the site: following stops and the chip offers Follow again.
+      await mobile.waitForTimeout(400);
+      await siteBody(mobile).evaluate(() => (window as unknown as FollowSiteWindow).__interact());
+      await expect(mobile.getByTestId("follow-action")).toHaveText("Follow again");
+      await expect(mobile.getByTestId("follow-ring")).toHaveCount(0);
+      await mobile.getByTestId("follow-action").click();
+      await expect(mobile.getByTestId("follow-bar-chip")).toHaveAttribute("data-role", "following");
+
+      // Closing the preview's tab ends it for everyone.
+      await page.getByRole("button", { name: `Close ${FOLLOW_TITLE} view` }).click();
+      await expect(mobile.getByTestId("follow-note")).toContainText("stopped presenting", { timeout: 15_000 });
+      docker(["exec", container, "instafy", "preview", "close", previewId]);
+    } finally {
+      await member.close();
+      stopFixtureServer(container, FOLLOW_PORT);
+      if (memberUserId) await deleteDisposableTestUser(memberUserId).catch(() => {});
     }
   });
 });

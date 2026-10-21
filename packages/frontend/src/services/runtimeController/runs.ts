@@ -65,6 +65,8 @@ const PROJECT_ACCESS_EVENT_KINDS = ["project.access_changed"] as const;
 // refetch the roster or /credits/status through their own authorization.
 const PROJECT_MEMBERS_EVENT_KINDS = ["project.members_changed"] as const;
 const CREDITS_EVENT_KINDS = ["credits.updated"] as const;
+// Follow mode presence only (started, away, ended); views never travel on /events.
+const PREVIEW_FOLLOW_EVENT_KINDS = ["preview.follow"] as const;
 // The stream dropped events (it fell behind, or could not check access for
 // them); the payload is just a reason, and the listener re-reads everything.
 const STREAM_EVENT_KINDS = ["events.resync"] as const;
@@ -81,6 +83,7 @@ const FORWARD_EVENT_KINDS = [
   ...PROJECT_ACCESS_EVENT_KINDS,
   ...PROJECT_MEMBERS_EVENT_KINDS,
   ...CREDITS_EVENT_KINDS,
+  ...PREVIEW_FOLLOW_EVENT_KINDS,
   ...STREAM_EVENT_KINDS,
 ] as const;
 
@@ -309,7 +312,7 @@ export interface ControllerStreamAccessDenied {
   message: string;
 }
 
-interface ParsedServerSentEvent {
+export interface ParsedServerSentEvent {
   data: string;
   event: string;
   lastEventId: string;
@@ -391,7 +394,8 @@ function assertServerSentEventContentType(response: Response) {
   );
 }
 
-class ServerSentEventParser {
+/** Also reads the follow-mode stream (`previewFollow.ts`). */
+export class ServerSentEventParser {
   private readonly lineBuffer = new Uint8Array(
     MAX_SERVER_SENT_EVENT_LINE_BYTES,
   );
