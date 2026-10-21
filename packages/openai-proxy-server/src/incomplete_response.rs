@@ -2,9 +2,10 @@
 //! `max_output_tokens` or by a content filter. The upstream has produced and billed it by then.
 //! Codex answers the upstream's `response.incomplete` by sending the same request again, which the
 //! upstream bills again and most likely stops the same way, and it runs whatever tool call the
-//! stopped response carried, truncated arguments included. The proxy buffers the whole upstream
-//! response before it answers, so it decides what a cut-short response becomes instead, and
-//! always delivers it as completed:
+//! stopped response carried, truncated arguments included. The proxy holds back the end of every
+//! response until it knows how the response ended (see `stream_passthrough` for a stream it passes
+//! on), so it decides what a cut-short response becomes instead, and always delivers it as
+//! completed:
 //!
 //! - An output item is finished when its status is `completed`. An item without a status is
 //!   finished too unless it is the last one: the stop cuts off the last item, so that one is
@@ -85,6 +86,16 @@ pub(crate) fn delivered_response(mut response: Value) -> Value {
     map.insert("status".into(), json!("completed"));
     map.insert("output".into(), Value::Array(output));
     response
+}
+
+/// The notice for `response`, as the upstream returned it, as an assistant message of its own.
+/// A passed-through stream needs it when the answer the notice would join already went to the
+/// client.
+pub(crate) fn separate_notice(response: &Value) -> Value {
+    cut_short_notice(
+        response.get("id").and_then(Value::as_str),
+        &incomplete_reason(response),
+    )
 }
 
 /// The text of the notice the proxy adds to a cut-short response that does not continue, which

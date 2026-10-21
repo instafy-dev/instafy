@@ -110,6 +110,7 @@ returns a surfaced upstream error instead of silently pretending the backend is 
 | `PROXY_PINNED_MODEL` | The only model static credentials serve managed runs as (set it to the controller's `MANAGED_AI_MODEL_ID`); see [Model selection](#model-selection) | `None` |
 | `PROXY_PLATFORM_SERVICE_TIER_ENDPOINTS` | Which upstream endpoints get the platform lane's `service_tier: "default"`: `openai` (only hosts under `openai.com`), `all` (any endpoint that takes a tier) or `none`; any other value stops the proxy at startup. See [Service tier](#service-tier) | `openai` |
 | `CODEX_PROXY_CHATGPT_ENDPOINT` | Upstream ChatGPT Codex Responses endpoint | `https://chatgpt.com/backend-api/codex/responses` |
+| `PROXY_STREAM_PASSTHROUGH` | `0`, `false`, `no` or `off` makes a streaming `/v1/responses` request wait for the whole upstream response again; see [Streaming](#streaming) | On |
 
 `CODEX_OPENAI_ENDPOINT` can also point at an OpenAI-compatible Chat Completions endpoint (e.g. `.../chat/completions`). When it does, the proxy will call that upstream endpoint and adapt the result into an OpenAI Responses-shaped payload for downstream callers.
 
@@ -425,10 +426,11 @@ filter for example. An API key's Responses upstream answers with `status: "incom
 instead of `response.completed`. The upstream has produced and billed that response by then.
 Codex treats an upstream `response.incomplete` as a retryable stream error: it sends the same
 request again, billed again to whoever owns the key and most likely stopped the same way, and
-it runs any tool call the response carried, truncated arguments included. The proxy buffers the
-whole upstream response before it answers, so on every lane, and on both routes that stream
-(`/v1/responses`, and `/v1/chat/completions`, which streams the same Responses events), a
-streaming client gets `response.completed` instead, never `response.failed`:
+it runs any tool call the response carried, truncated arguments included. The proxy holds back
+the end of every response until it knows how the response ended (see [Streaming](#streaming)),
+so on every lane, and on both routes that stream (`/v1/responses`, and `/v1/chat/completions`,
+which streams the same Responses events), a streaming client gets `response.completed` instead,
+never `response.failed`:
 
 - An output item is finished when its status is `completed`, or when it has no status and is
   not the last item: the stop cuts off the last item, so that one is finished only when it says
@@ -454,6 +456,9 @@ streaming client gets `response.completed` instead, never `response.failed`:
   not issue. Either way Codex records the output and ends the turn normally instead of sending
   the request again.
 - A cut-off reasoning item or tool call never reaches the client.
+- On a stream the proxy passes on as it arrives, an answer that the client already finished
+  before the stop can no longer take the notice, so the notice follows it as a message of its
+  own. The final `response.completed` lists the items the client finished, in that order.
 
 The response keeps the upstream's `usage` either way, so Codex reports the turn's tokens as for
 any completed turn and the controller reconciles the charge on them. A ChatGPT login's
@@ -474,6 +479,40 @@ and one resend after an eligible ChatGPT 401. Controller mode performs that rene
 the controller lease interface; standalone mode uses its local refresh authority. Calling
 runtimes own bounded transient retries. Invalid successful responses are retryable 502 failures;
 they do not change credential state.
+
+### Streaming
+
+A streaming `/v1/responses` request gets the upstream's events as they arrive when the upstream
+streams. That is a ChatGPT login's Codex endpoint, and the OpenAI API, which the proxy then asks
+for a stream: an API key without an endpoint of its own, one whose endpoint is under
+`api.openai.com`, or one pointed elsewhere with `CODEX_OPENAI_ENDPOINT`. A client sees the
+model's text while it is written instead of all of it when the model is done. An upstream that
+answers a stream request with one JSON body is read whole, as before. Other upstreams, requests
+that do not stream, and `/v1/chat/completions` keep reading the whole response first.
+`PROXY_STREAM_PASSTHROUGH=0` turns streaming off.
+
+A passed-on stream keeps what the client finally gets as before:
+
+- **Failures before any output.** Every retry (a ChatGPT credential renewal, a lease renewal,
+  the fallback after a refused `tool_choice: "required"`) happens before the proxy reads any of
+  the upstream's output. The proxy reads ahead to the first event with output before it
+  answers, so a failure the upstream reports before then is the request's error, with the
+  statuses described in [Upstream failures and retries](#upstream-failures-and-retries).
+- **Failures after output.** Once output went on, a `response.failed` goes on as the upstream
+  sent it, followed by `[DONE]`. A stream that breaks off ends without `[DONE]` and without a
+  terminal event, so the client sees it was cut off. Neither is sent again: the client already
+  has output from it.
+- **The end of each item.** Each `response.output_item.done` waits for the next event, which
+  costs no time to speak of. Only the last item can be one a stop cut off, so a response that
+  ends with `response.incomplete` gets what [Responses the upstream cuts
+  short](#responses-the-upstream-cuts-short) describes.
+- **ChatGPT logins.** A ChatGPT login's client gets the same items as before: assistant
+  messages, the tool calls Codex runs and compaction. Reasoning items, the backend's own tool
+  items and their events are left out. Text that streams with no message announced around it
+  goes on inside a message the proxy announces and finishes.
+
+Usage is unchanged: the upstream's terminal event carries it, and a ChatGPT login's
+subscription-usage report comes from the response headers, which arrive first.
 
 ## Tests & formatting
 

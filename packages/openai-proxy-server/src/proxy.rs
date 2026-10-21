@@ -24,7 +24,7 @@ use uuid::Uuid;
 
 use crate::auth::{Credentials, response_indicates_chatgpt_token_expired};
 use crate::client::{
-    CodexClient, CodexCompletion, DEFAULT_INSTRUCTIONS, DEFAULT_MODEL,
+    CodexClient, CodexCompletion, CodexReply, DEFAULT_INSTRUCTIONS, DEFAULT_MODEL,
     RequiredToolCallFallbackHook, SendHook, ServiceTierEndpoints, conversation_id_enabled,
     is_additional_tools_item, normalize_reasoning_effort, sends_service_tier, sends_tool_controls,
 };
@@ -33,6 +33,7 @@ use crate::controller_integration::ControllerIntegration;
 use crate::credential_lease::LeasedCredentials;
 use crate::incomplete_response;
 use crate::proxy_auth::ProxyClaims;
+use crate::stream_passthrough;
 use crate::upstream_error::{self, ToolControlRejection, UpstreamFailure};
 use crate::usage::responses_to_chat_usage;
 
@@ -1712,6 +1713,35 @@ async fn complete_with_optional_controller_refresh(
     credential_id: Option<&str>,
     send_hook: Option<SendHook>,
 ) -> Result<(CodexCompletion, String)> {
+    let (reply, upstream_model) = respond_with_optional_controller_refresh(
+        leased,
+        options,
+        input_items,
+        controller,
+        credential_id,
+        send_hook,
+        false,
+    )
+    .await?;
+    match reply {
+        CodexReply::Complete(completion) => Ok((completion, upstream_model)),
+        CodexReply::Stream(_) => unreachable!("a request that does not pass through never streams"),
+    }
+}
+
+/// [`complete_with_optional_controller_refresh`], except that with `pass_through` an upstream
+/// that streams answers with its events (see [`CodexClient::respond_with_input`]). Every retry
+/// here follows a failure before any of the upstream's output was read, so none can repeat
+/// output a client already got.
+async fn respond_with_optional_controller_refresh(
+    leased: LeasedCredentials,
+    options: &RemoteCompletionOptions<'_>,
+    input_items: &[Value],
+    controller: Option<&ControllerIntegration>,
+    credential_id: Option<&str>,
+    send_hook: Option<SendHook>,
+    pass_through: bool,
+) -> Result<(CodexReply, String)> {
     let first_lease_pinned = leased.pinned_model().is_some();
     let (client, upstream_model, endpoint_for_error, first_input) = build_remote_completion_client(
         leased,
@@ -1722,7 +1752,7 @@ async fn complete_with_optional_controller_refresh(
     )?;
     let mut client = client.with_send_hook(send_hook);
 
-    match client.complete_with_input(&first_input).await {
+    match client.respond_with_input(&first_input, pass_through).await {
         Ok(response) => return Ok((response, upstream_model)),
         Err(first_error) => {
             let can_refresh = controller.is_some()
@@ -1761,7 +1791,7 @@ async fn complete_with_optional_controller_refresh(
                 )?;
 
             return retry_client
-                .complete_with_input(&retry_input)
+                .respond_with_input(&retry_input, pass_through)
                 .await
                 .map(|response| (response, retry_model.clone()))
                 .map_err(|retry_error| {
@@ -1794,12 +1824,12 @@ fn usage_report_slots() -> &'static Arc<tokio::sync::Semaphore> {
 fn spawn_credential_usage_report(
     controller: Option<&ControllerIntegration>,
     credential_id: Option<&str>,
-    completion: &CodexCompletion,
+    rate_limits: Option<&Value>,
 ) {
     let (Some(controller), Some(credential_id)) = (controller, credential_id) else {
         return;
     };
-    let Some(snapshot) = completion.rate_limits.clone() else {
+    let Some(snapshot) = rate_limits.cloned() else {
         return;
     };
     // Drop this report if the in-flight budget is exhausted (controller likely
@@ -1916,23 +1946,24 @@ async fn create_response(
         "/v1/responses",
         claims.as_ref(),
     );
-    let completion = match complete_with_optional_controller_refresh(
+    let reply = match respond_with_optional_controller_refresh(
         leased,
         &completion_options,
         &input_items,
         state.controller.as_ref(),
         controller_credential_id,
         send_hook,
+        stream_requested && stream_pass_through_enabled(),
     )
     .await
     {
-        Ok((response, _upstream_model)) => {
+        Ok((reply, _upstream_model)) => {
             spawn_credential_usage_report(
                 state.controller.as_ref(),
                 controller_credential_id,
-                &response,
+                reply.rate_limits(),
             );
-            ProxyCompletion::Remote(response)
+            reply
         }
         Err(error) => {
             let error = AppError::upstream(error.context(format!(
@@ -1965,15 +1996,34 @@ async fn create_response(
         }
     };
 
-    let ProxyCompletion::Remote(ref remote) = completion;
-    let turn_state = remote.turn_state.clone();
-    let response = if stream_requested {
-        let ProxyCompletion::Remote(remote) = completion;
-        stream_responses_from_value(remote.raw)?
-    } else {
-        Json(completion.into_response_body()).into_response()
+    let turn_state = reply.turn_state().map(str::to_string);
+    let response = match reply {
+        CodexReply::Stream(events) => stream_passthrough::pass_through(
+            events,
+            run_id_from_claims(claims.as_ref()).map(str::to_string),
+        ),
+        CodexReply::Complete(remote) if stream_requested => {
+            stream_responses_from_value(remote.raw)?
+        }
+        CodexReply::Complete(remote) => {
+            Json(ProxyCompletion::Remote(remote).into_response_body()).into_response()
+        }
     };
     Ok(with_turn_state(response, turn_state))
+}
+
+/// Whether a streaming `/v1/responses` request gets the upstream's events as they arrive
+/// ([`stream_passthrough`]). `PROXY_STREAM_PASSTHROUGH=0` (or `false`, `no`, `off`) makes the
+/// proxy read each whole response first again, as it did before.
+fn stream_pass_through_enabled() -> bool {
+    !matches!(
+        std::env::var("PROXY_STREAM_PASSTHROUGH")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "0" | "false" | "no" | "off"
+    )
 }
 
 async fn create_chat_completion(
@@ -2071,7 +2121,7 @@ async fn create_chat_completion(
     spawn_credential_usage_report(
         state.controller.as_ref(),
         controller_credential_id,
-        &completion,
+        completion.rate_limits.as_ref(),
     );
     build_remote_chat_response(&payload, completion, upstream_model).await
 }

@@ -332,17 +332,60 @@ fn completed_events(id: &str, items: Vec<Value>) -> Vec<Value> {
 
 /// A streaming request on each route that streams Responses events: `/v1/responses`, and
 /// `/v1/chat/completions`, which streams the same events.
-async fn streaming_routes(addr: SocketAddr) -> Result<Vec<reqwest::Response>> {
+async fn streaming_routes(addr: SocketAddr) -> Result<Vec<(Route, reqwest::Response)>> {
     Ok(vec![
-        stream_request(addr).await?,
-        send(
-            addr,
-            "/v1/chat/completions",
-            json!({"model": "gpt-6-luna", "stream": true,
-                "messages": [{"role": "user", "content": "local test"}]}),
-        )
-        .await?,
+        (Route::Responses, stream_request(addr).await?),
+        (
+            Route::ChatCompletions,
+            send(
+                addr,
+                "/v1/chat/completions",
+                json!({"model": "gpt-6-luna", "stream": true,
+                    "messages": [{"role": "user", "content": "local test"}]}),
+            )
+            .await?,
+        ),
     ])
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Route {
+    /// Passes a ChatGPT login's events on as they arrive.
+    Responses,
+    /// Reads the whole response first.
+    ChatCompletions,
+}
+
+/// What a client ends up with from `events`: the items it finished, in order, and the response
+/// of the final `response.completed`.
+fn delivered(events: &[Value]) -> (Vec<Value>, Value) {
+    let finished = events
+        .iter()
+        .filter(|event| event["type"] == "response.output_item.done")
+        .map(|event| event["item"].clone())
+        .collect();
+    let last = events.last().expect("a stream with events");
+    assert_eq!(last["type"], "response.completed", "{events:?}");
+    (finished, last["response"].clone())
+}
+
+/// Asserts that `events` deliver `items` as the cut-short response `completed_events` describes:
+/// exactly those events from a route that reads the whole response first, and those finished
+/// items and that completed response from one that passes events on as they arrive.
+fn assert_delivers(route: Route, events: &[Value], id: &str, items: Vec<Value>) {
+    let expected = completed_events(id, items.clone());
+    match route {
+        Route::ChatCompletions => assert_eq!(events, expected.as_slice()),
+        Route::Responses => {
+            let (finished, completed) = delivered(events);
+            assert_eq!(finished, items, "{events:?}");
+            assert_eq!(
+                &completed,
+                &expected.last().unwrap()["response"],
+                "{events:?}"
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -362,15 +405,16 @@ async fn chatgpt_cut_short_answer_completes_with_the_text_that_arrived_and_a_not
             vec![Reply::ok(upstream.clone()), Reply::ok(upstream)],
         )
         .await?;
-        for response in streaming_routes(addr).await? {
+        for (route, response) in streaming_routes(addr).await? {
             let events = stream_events(response).await?;
             // Never a failure, which would end the turn without the usage codex reports for a
             // completed response. The notice joins the answer, which codex takes whole as the
             // turn's answer.
-            assert_eq!(
-                events,
-                completed_events("resp-cut", vec![with_notice(cut_off_answer(), expected)]),
-                "{reason:?}"
+            assert_delivers(
+                route,
+                &events,
+                "resp-cut",
+                vec![with_notice(cut_off_answer(), expected)],
             );
         }
         // One upstream request per client request: nothing is sent again.
@@ -391,11 +435,13 @@ async fn chatgpt_cut_short_after_a_finished_call_streams_only_that_call_as_compl
         vec![Reply::ok(upstream.clone()), Reply::ok(upstream)],
     )
     .await?;
-    for response in streaming_routes(addr).await? {
+    for (route, response) in streaming_routes(addr).await? {
         let events = stream_events(response).await?;
-        // No notice: codex runs the call and continues.
-        assert_eq!(events, completed_events("resp-cut", vec![finished_call()]));
-        assert!(!json!(events).to_string().contains("call-cut-off"));
+        // No notice: codex runs the call and continues. The cut-off call may have been
+        // announced as it began, but it never finishes, so codex never runs it.
+        assert_delivers(route, &events, "resp-cut", vec![finished_call()]);
+        let (finished, _) = delivered(&events);
+        assert!(!json!(finished).to_string().contains("call-cut-off"));
     }
     assert_eq!(mock.calls.load(Ordering::SeqCst), 2);
     Ok(())
@@ -472,7 +518,9 @@ async fn api_key_cut_short_responses_get_the_same_treatment() -> Result<()> {
             vec![Reply::ok(upstream.clone()), Reply::ok(upstream)],
         )
         .await?;
-        for response in streaming_routes(addr).await? {
+        // An API key with an endpoint of its own answers with one JSON body, which every route
+        // reads whole.
+        for (_, response) in streaming_routes(addr).await? {
             assert_eq!(stream_events(response).await?, expected);
         }
         assert_eq!(mock.calls.load(Ordering::SeqCst), 2);
