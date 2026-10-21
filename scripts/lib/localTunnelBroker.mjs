@@ -167,6 +167,21 @@ export function tunnelBrokerStartPlan({ env = process.env, controllerPort, ingre
 }
 
 /**
+ * The controller hooks a running broker lacks, from its container's environment (`KEY=value`
+ * lines, as `docker inspect` prints them): an empty or missing ACL_HOOK_URL, EVENT_HOOK_URL or
+ * their tokens. A broker without them creates tunnels nobody approved and never reports them,
+ * which happens when its containers are recreated by hand. Only names are returned, never values.
+ */
+export function missingBrokerHooks(containerEnv) {
+  const values = new Map();
+  for (const line of String(containerEnv ?? "").split("\n")) {
+    const at = line.indexOf("=");
+    if (at > 0) values.set(line.slice(0, at), line.slice(at + 1).trim());
+  }
+  return ["ACL_HOOK_URL", "ACL_HOOK_TOKEN", "EVENT_HOOK_URL", "EVENT_HOOK_TOKEN"].filter((key) => !values.get(key));
+}
+
+/**
  * The two `docker compose` calls that start the broker's stack: the broker
  * with its postgres, rathole and Traefik, then the ingress sidecar. Both get
  * `env` plus `plan.broker`, as a new object: `env` itself is never changed, so
