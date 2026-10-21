@@ -6,7 +6,7 @@ import { once } from "node:events";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { parsePreviewPath, parsePreviewTitle, parseViewerHostSuffix } from "../src/preview.js";
+import { parsePreviewPath, parsePreviewTitle, parseStudioOrigin, parseViewerHostSuffix } from "../src/preview.js";
 import { commandLineIsRatholeClient } from "../src/tunnel.js";
 
 type RequestCapture = {
@@ -157,6 +157,7 @@ async function startMockController(options: {
   readyStatus?: number;
   readyBody?: unknown;
   viewerHostSuffix?: string;
+  studioOrigin?: string;
   // Replaces the credentials in the create response (null leaves them out).
   credentials?: Record<string, unknown> | null;
 }) {
@@ -195,6 +196,7 @@ async function startMockController(options: {
           status: "active",
           ...(credentials ? { credentials } : {}),
           ...(options.viewerHostSuffix !== undefined ? { viewerHostSuffix: options.viewerHostSuffix } : {}),
+          ...(options.studioOrigin !== undefined ? { studioOrigin: options.studioOrigin } : {}),
         });
         return;
       }
@@ -290,7 +292,7 @@ function writeState(home: string, previews: unknown[]) {
 }
 
 function readState(home: string): {
-  previews: Array<{ previewId: string; pid: number; localPort: number; workdir: string }>;
+  previews: Array<{ previewId: string; pid: number; localPort: number; workdir: string; hostSuffix?: string; studioOrigin?: string }>;
 } {
   return JSON.parse(fs.readFileSync(path.join(home, ".instafy", "cli-preview-state.json"), "utf8"));
 }
@@ -311,6 +313,14 @@ describe("instafy preview", () => {
     expect(parseViewerHostSuffix(" Preview.Localhost:8083 ")).toBe("preview.localhost:8083");
     for (const bad of [undefined, 42, "", "evil.example/path", "a..b", "*.preview.dev", "x:abc", "a b"]) {
       expect(parseViewerHostSuffix(bad), String(bad)).toBeUndefined();
+    }
+  });
+
+  it("keeps only a bare http(s) origin as the Studio origin", () => {
+    expect(parseStudioOrigin("https://instafy.dev")).toBe("https://instafy.dev");
+    expect(parseStudioOrigin("http://localhost:5174/")).toBe("http://localhost:5174");
+    for (const bad of [undefined, 42, "", "instafy.dev", "https://instafy.dev/studio", "https://a@instafy.dev", "javascript:alert(1)", "https://instafy.dev/?x=1"]) {
+      expect(parseStudioOrigin(bad), String(bad)).toBeUndefined();
     }
   });
 
@@ -636,12 +646,18 @@ describe("instafy preview", () => {
       projectId,
       livePids: liveRecordedClients(home),
       viewerHostSuffix: "Preview.Localhost:8083",
+      studioOrigin: "http://localhost:5174",
     });
     const sitePort = await startSite();
 
     const result = await execCli(openArgs({ projectId, controllerUrl: controller.url, port: sitePort, rathole: rathole.file }), home);
 
     expect(result.code, result.stderr).toBe(0);
+    // A tokenless local site (`instafy bind serve --preview`) accepts the capability host only on this exact domain,
+    // which it reads from the state file: the preview id alone is not a secret.
+    expect(readState(home).previews[0]!.hostSuffix).toBe("preview.localhost:8083");
+    // ...and takes frame messages only from the Studio that frames it.
+    expect(readState(home).previews[0]!.studioOrigin).toBe("http://localhost:5174");
     const output = JSON.parse(result.stdout) as Record<string, unknown>;
     expect(output).toEqual({
       previewId: "preview-1",

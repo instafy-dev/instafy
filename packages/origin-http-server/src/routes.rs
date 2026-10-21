@@ -4777,6 +4777,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn binder_state_next_to_a_bound_site_is_never_served_or_listed() {
+        let workspace = TempDir::new().expect("workspace");
+        let root = workspace.path();
+        std::fs::create_dir_all(root.join("sites/shoes/.bind")).unwrap();
+        std::fs::write(root.join("sites/shoes/index.html"), b"<p>shoes</p>\n").unwrap();
+        std::fs::write(
+            root.join("sites/shoes/.bind/admin-token"),
+            b"secret-admin\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("sites/shoes/.bind/binder.log"), b"{}\n").unwrap();
+        let state = test_app_state(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &workspace,
+            "http://127.0.0.1:1".parse().expect("controller url"),
+            true,
+        );
+        let app = super::router(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind origin");
+        let address = listener.local_addr().expect("origin address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve origin");
+        });
+        let client = reqwest::Client::new();
+        for path in [
+            "/files/sites/shoes/.bind/admin-token",
+            "/raw/sites/shoes/.bind/admin-token",
+            "/raw/sites/shoes/.BIND/binder.log",
+            "/entries?path=sites/shoes/.bind",
+        ] {
+            let response = client
+                .get(format!("http://{address}{path}"))
+                .send()
+                .await
+                .expect("origin request");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+            let body = response.text().await.unwrap_or_default();
+            assert!(!body.contains("secret-admin"), "{path}: {body}");
+        }
+        let listing: serde_json::Value = client
+            .get(format!("http://{address}/entries?path=sites/shoes"))
+            .send()
+            .await
+            .expect("origin request")
+            .json()
+            .await
+            .expect("json listing");
+        let text = listing.to_string();
+        assert!(text.contains("index.html"), "{text}");
+        assert!(!text.contains(".bind"), "binder state is listed: {text}");
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn write_lease_authorization_fails_closed_and_requires_exact_claim_bindings() {
         let project_id = Uuid::new_v4();
         let origin_id = Uuid::new_v4();

@@ -1,0 +1,2 @@
+# Binder state: tokens, server.json and the message log. Never commit.
+.bind/

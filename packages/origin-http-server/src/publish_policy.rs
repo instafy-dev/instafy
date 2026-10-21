@@ -166,6 +166,8 @@ mod tests {
             ".instafy/space.json",
             ".instafy/origin-staging/x",
             "vendor/.git/config",
+            ".bind/admin-token",
+            "sites/shoes/.bind/binder.log",
         ] {
             assert_eq!(
                 unpublishable_reason(path),

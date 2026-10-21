@@ -1,0 +1,47 @@
+{
+  "question": "Which running shoe should I get?",
+  "note": "Shortlist checked 2026-10-11. Every URL is a brand's own store page that publishes schema.org Product/Offer JSON-LD.",
+  "size_hint": "Altra, On and norda list US men's sizes; KARHU's EU store lists EU sizes.",
+  "items": [
+    {
+      "ref": "shoes:altra-vanish-pulse",
+      "letter": "A",
+      "brand": "Altra",
+      "model": "Vanish Pulse (men's)",
+      "use": "Road · tempo",
+      "url": "https://www.altrarunning.com/en-us/products/mens-vanish-pulse-al0a85sj",
+      "site": "altrarunning.com",
+      "jsonld": "ProductGroup → hasVariant (by colour) → Offer"
+    },
+    {
+      "ref": "shoes:on-cloudmonster-2",
+      "letter": "B",
+      "brand": "On",
+      "model": "Cloudmonster 2 (men's)",
+      "use": "Road · max cushion",
+      "url": "https://www.on.com/en-us/products/cloudmonster-2-m-3me1012/mens",
+      "site": "on.com",
+      "jsonld": "@graph ProductGroup → hasVariant (by colour) → Offer + ListPrice"
+    },
+    {
+      "ref": "shoes:norda-005",
+      "letter": "C",
+      "brand": "norda",
+      "model": "005 Zephyr (men's)",
+      "use": "Trail · race",
+      "url": "https://nordarun.com/products/005-m-zephyr",
+      "site": "nordarun.com",
+      "jsonld": "@graph Product → offers[] (one per size, CAD)"
+    },
+    {
+      "ref": "shoes:karhu-fusion-5",
+      "letter": "D",
+      "brand": "KARHU",
+      "model": "Fusion 5.0 (men's)",
+      "use": "Road · daily",
+      "url": "https://karhu.com/products/karhu-mens-fusion-5-0-black-bamboo",
+      "site": "karhu.com",
+      "jsonld": "@graph ProductGroup → hasVariant (by size, EUR) → Offer"
+    }
+  ]
+}

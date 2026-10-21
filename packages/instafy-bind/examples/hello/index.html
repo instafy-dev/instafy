@@ -1,0 +1,360 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Hello, binder</title>
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:,">
+<style>
+  /* Theme: Instafy preset (light + dark). Every colour and radius is a token here;
+     override any of them in your own CSS (or edit this block) to re-skin the page.
+     --accent: focus rings, progress, highlights; --accent-text: accent-coloured text;
+     --accent-fill / --accent-ink: filled primary buttons (white text, AA in both modes). */
+  :root {
+    --bg: #fbfaf7; --panel: #ffffff; --chip: #f6f3ef; --line: #ebe7e2; --edge: #d4d0ca;
+    --ink: #0f172a; --muted: #5f5b54; --faint: #75716a;
+    --accent: #007acc; --accent-text: #006bb4; --glow: rgb(0 122 204 / .18);
+    --accent-fill: #0066ac; --accent-fill-hover: #00588f; --accent-ink: #ffffff;
+    --ok: #047857; --warn: #8c6a2c; --err: #be123c;
+    --toast-bg: #262626; --toast-ink: #fafafa;
+    --font: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --radius: 24px; --radius-sm: 16px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141414; --panel: #1d1d1d; --chip: #262626; --line: #2e2e2e; --edge: #3d3d3d;
+      --ink: #fbfaf7; --muted: #b5b0a9; --faint: #979189;
+      --accent: #3794ff; --accent-text: #4c9fff; --glow: rgb(55 148 255 / .25);
+      --accent-fill: #1f74d8; --accent-fill-hover: #1a6acb; --accent-ink: #ffffff;
+      --ok: #34d399; --warn: #e0c49a; --err: #fb7185;
+      --toast-bg: #2e2e2e;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font: 16px/1.45 var(--font);
+    padding: max(16px, env(safe-area-inset-top)) 16px 48px;
+  }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  main { max-width: 560px; margin: 0 auto; display: grid; gap: 14px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 2px 6px; }
+  h1 { font-size: 24px; font-weight: 650; margin: 0; letter-spacing: -.02em; }
+  .sub { color: var(--muted); font-size: 14px; margin: 2px 0 0; }
+  .pill { font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+  .pill[data-state="live"] { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); }
+  .pill[data-state="off"] { color: var(--err); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; }
+  .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; font-weight: 600; }
+  form { display: grid; grid-template-columns: 1fr; gap: 10px; }
+  label { font-size: 13px; font-weight: 500; color: var(--muted); }
+  input {
+    width: 100%; min-height: 44px; font: inherit; color: var(--ink); background: var(--panel); margin-top: 4px;
+    border: 1px solid var(--edge); border-radius: var(--radius-sm); padding: 0 14px;
+  }
+  input::placeholder { color: var(--faint); }
+  input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--glow); }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  button {
+    min-height: 44px; font: inherit; font-size: 15px; font-weight: 600; border-radius: 999px; padding: 0 18px; cursor: pointer;
+    border: 1px solid var(--edge); background: var(--panel); color: var(--ink);
+  }
+  button:not(.primary):hover:not(:disabled) { border-color: var(--faint); }
+  button.primary { background: var(--accent-fill); color: var(--accent-ink); border-color: transparent; flex: 1; }
+  button.primary:hover:not(:disabled) { background: var(--accent-fill-hover); }
+  button:disabled { opacity: .55; cursor: default; }
+  .status { min-height: 22px; font-size: 14px; color: var(--muted); }
+  .bar { height: 4px; border-radius: 4px; background: var(--chip); overflow: hidden; }
+  .bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s ease; }
+  ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+  .rec { padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius-sm); transition: box-shadow .3s, border-color .3s; }
+  .rec .v { font-weight: 600; }
+  .rec .m { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .rec.flash, .rec.hl { border-color: var(--accent); box-shadow: 0 0 0 4px var(--glow); }
+  .rec.expired { opacity: .5; }
+  .skeleton { height: 48px; border-radius: var(--radius-sm); background: linear-gradient(90deg, var(--chip), var(--line), var(--chip)); background-size: 200% 100%; animation: shimmer 1.2s linear infinite; }
+  @keyframes shimmer { to { background-position: -200% 0; } }
+  @media (prefers-reduced-motion: reduce) { .skeleton { animation: none; } .bar > i, .toast { transition: none; } }
+  .empty { color: var(--muted); font-size: 14px; }
+  .log { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; max-height: 240px; overflow: auto; display: grid; gap: 2px; }
+  .log div { white-space: pre-wrap; word-break: break-word; }
+  .log .t { color: var(--muted); }
+  .log .k-error { color: var(--err); } .log .k-done, .log .k-results { color: var(--ok); } .log .k-command { color: var(--warn); }
+  .toast {
+    position: fixed; left: 50%; bottom: max(20px, env(safe-area-inset-bottom)); transform: translateX(-50%) translateY(20px);
+    background: var(--toast-bg); color: var(--toast-ink); border: 1px solid rgb(255 255 255 / .08);
+    padding: 10px 18px; border-radius: var(--radius-sm); font-size: 14px; font-weight: 500; opacity: 0;
+    box-shadow: 0 12px 32px -12px rgb(0 0 0 / .45);
+    width: max-content; transition: opacity .2s, transform .2s; max-width: calc(100vw - 32px); pointer-events: none;
+  }
+  .toast.on { opacity: 1; transform: translateX(-50%) translateY(0); }
+  footer { color: var(--muted); font-size: 12px; text-align: center; }
+  code { font: 12px ui-monospace, Menlo, monospace; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>Hello, binder</h1>
+      <p class="sub">Click → intent → handler → records → every viewer.</p>
+    </div>
+    <span class="pill" id="conn" data-state="wait">connecting…</span>
+  </header>
+
+  <section class="card">
+    <form id="ask">
+      <div>
+        <label for="name">Your name</label>
+        <input id="name" name="name" maxlength="40" autocomplete="nickname" placeholder="Kim" required>
+      </div>
+      <div class="row">
+        <button class="primary" id="go" type="submit">👋 Ask the binder</button>
+        <button id="octo" type="button" title="Runs an Octo turn (needs an Instafy login, or --dry-run)">🐙 Ask Octo</button>
+        <button id="cancel" type="button" title="Cancel the running request" hidden>✕ Cancel</button>
+      </div>
+      <div class="bar" aria-hidden="true"><i id="bar"></i></div>
+      <div class="status" id="status" role="status" aria-live="polite"></div>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>Records</h2>
+    <ul id="records"><li class="empty">No records yet. Ask the binder.</li></ul>
+  </section>
+
+  <section class="card">
+    <h2>Live events</h2>
+    <div class="log" id="log" aria-live="off"></div>
+  </section>
+
+  <footer>Records are shared: open this page twice and click in one.</footer>
+</main>
+<div class="toast" id="toast" role="status" aria-live="assertive"></div>
+
+<script>window.instafyBindConfig = { builtins: false }; // this page shows its own toasts</script>
+<script src="__bind/client.js"></script>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const bind = window.instafyBind;
+  const conn = $("conn"), statusEl = $("status"), bar = $("bar"), logEl = $("log"), list = $("records");
+  const nameInput = $("name");
+  const mine = new Map();          // intent id -> { name, ref } for clicks made in this tab
+  const pendingRefs = new Map();   // ref -> count of running intents (any viewer, when the event names the ref)
+
+  try { nameInput.value = localStorage.getItem("hello.name") || ""; } catch {}
+
+  function slug(v) {
+    return String(v).toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "world";
+  }
+  function age(iso) {
+    const s = (Date.now() - Date.parse(iso)) / 1000;
+    if (!isFinite(s)) return "";
+    if (s < 60) return "now";
+    if (s < 3600) return `${Math.floor(s / 60)} min`;
+    if (s < 86400) return `${Math.floor(s / 3600)} h`;
+    return new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+  }
+  function log(kind, text) {
+    const row = document.createElement("div");
+    row.className = `k-${kind}`;
+    const t = document.createElement("span");
+    t.className = "t";
+    t.textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) + "  ";
+    row.append(t, `${kind.padEnd(8)} ${text}`);
+    logEl.prepend(row);
+    while (logEl.childElementCount > 80) logEl.lastChild.remove();
+  }
+  let toastTimer;
+  function toast(text) {
+    const el = $("toast");
+    el.textContent = String(text).slice(0, 140);
+    el.classList.add("on");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove("on"), 2600);
+  }
+  function setBusy(on) { $("go").disabled = on; $("cancel").hidden = !on; }
+
+  function render(flashRefs = []) {
+    const recs = bind ? bind.records() : [];
+    const claims = recs.filter((r) => r.type === "claim").sort((a, b) => Date.parse(b.prov?.observed_at) - Date.parse(a.prov?.observed_at));
+    list.replaceChildren();
+    for (const ref of pendingRefs.keys()) {
+      if (claims.some((c) => c.ref === ref) ) continue;
+      const li = document.createElement("li");
+      li.className = "skeleton";
+      li.setAttribute("aria-label", "Waiting for the binder");
+      list.append(li);
+    }
+    if (!claims.length && !pendingRefs.size) {
+      const li = document.createElement("li");
+      li.className = "empty";
+      li.textContent = "No records yet. Ask the binder.";
+      list.append(li);
+      return;
+    }
+    for (const c of claims) {
+      const li = document.createElement("li");
+      li.className = "rec";
+      li.dataset.ref = c.ref;
+      if (pendingRefs.has(c.ref)) { li.className = "skeleton"; list.append(li); continue; }
+      const expired = Date.now() > Date.parse(c.prov?.observed_at) + (c.prov?.ttl_s ?? Infinity) * 1000;
+      if (expired) li.classList.add("expired");
+      if (flashRefs.includes(c.ref)) { li.classList.add("flash"); setTimeout(() => li.classList.remove("flash"), 1500); }
+      const v = document.createElement("div");
+      v.className = "v";
+      v.textContent = c.value == null ? "—" : String(c.value);
+      const m = document.createElement("div");
+      m.className = "m";
+      m.textContent = [c.ref, c.prov?.source_label || c.prov?.source, age(c.prov?.observed_at) + (expired ? " · expired" : "")].filter(Boolean).join(" · ");
+      li.append(v, m);
+      list.append(li);
+    }
+  }
+  setInterval(() => render(), 30000);
+
+  function pend(ref, delta) {
+    if (!ref) return;
+    const n = (pendingRefs.get(ref) || 0) + delta;
+    if (n > 0) pendingRefs.set(ref, n); else pendingRefs.delete(ref);
+  }
+  function settle(id) {
+    const m = mine.get(id);
+    if (m) { pend(m.ref, -1); mine.delete(id); }
+    if (![...mine.values()].some((x) => !x.remote)) setBusy(false);
+  }
+
+  if (!bind) {
+    conn.textContent = "no binder";
+    conn.dataset.state = "off";
+    statusEl.textContent = "No binder is serving this page. Run: node packages/instafy-bind/bin/instafy-bind.mjs serve examples/hello";
+    $("go").disabled = $("octo").disabled = true;
+    return;
+  }
+
+  function send(intentName) {
+    const name = nameInput.value.trim();
+    if (!name) { nameInput.focus(); return; }
+    try { localStorage.setItem("hello.name", name); } catch {}
+    const ref = `hello:${slug(name)}`;
+    let id;
+    try {
+      id = bind.intent(intentName, { name, ref }, { ref, ui: "button" });
+    } catch (error) {
+      toast(error.message || String(error));
+      return;
+    }
+    mine.set(id, { name: intentName, ref });
+    pend(ref, 1);
+    setBusy(true);
+    bar.style.width = "8%";
+    statusEl.textContent = intentName === "ask_octo" ? "Sent to Octo…" : "Sent…";
+    log("intent", `${intentName} ${JSON.stringify({ name })}  ${id}`);
+    render();
+  }
+
+  $("ask").addEventListener("submit", (e) => { e.preventDefault(); send("hello"); });
+  $("octo").addEventListener("click", () => send("ask_octo"));
+  $("cancel").addEventListener("click", () => {
+    for (const [id, m] of mine) if (!m.remote) bind.cancel(id);
+    statusEl.textContent = "Cancelling…";
+  });
+
+  bind.ready.then((hello) => {
+    if (!hello?.connected) {
+      conn.textContent = "no binder";
+      conn.dataset.state = "off";
+      statusEl.textContent = "No binder is connected. Showing the last saved records.";
+      $("go").disabled = $("octo").disabled = true;
+      render();
+      return;
+    }
+    conn.textContent = "live";
+    conn.dataset.state = "live";
+    const names = hello.names || (hello.intents || []).map((i) => i.name);
+    if (!names.includes("ask_octo")) $("octo").hidden = true;
+    log("hello", `binder ready · intents: ${names.join(", ")}`);
+    render();
+  });
+
+  // Another viewer's click: learn its ref from the binder's job list so this page can show the skeleton too.
+  async function adoptRemote(id) {
+    if (!id || mine.has(id)) return;
+    mine.set(id, { remote: true });
+    try {
+      const job = (await bind.jobs()).find((j) => (j.ids || []).includes(id)) || null;
+      const m = mine.get(id);
+      if (!m || !job?.ref || ["done", "error"].includes(job.state)) { mine.delete(id); return; }
+      m.ref = job.ref;
+      pend(job.ref, 1);
+      log("remote", `${job.name} ${job.ref} (another viewer)`);
+      render();
+    } catch {
+      mine.delete(id);
+    }
+  }
+
+  bind.on("ack", (msg) => {
+    if (msg.status !== "rejected") adoptRemote(msg.id);
+    log("ack", `${msg.status || ""} ${msg.id || ""}${msg.reason ? " · " + msg.reason : ""}`);
+    if (msg.status === "rejected") {
+      if (mine.has(msg.id) && !mine.get(msg.id).remote) toast(msg.reason === "cooldown" ? "Just asked. Try again in a moment." : `Not sent: ${msg.reason || "rejected"}`);
+      settle(msg.id);
+      render();
+    }
+    if (msg.status === "needs_confirm") statusEl.textContent = "Waiting for confirmation…";
+  });
+  bind.on("progress", (msg) => {
+    const p = msg.progress || {};
+    adoptRemote(msg.id);
+    log("progress", `${p.step ?? "?"}/${p.of ?? "?"} ${p.message || ""}`);
+    if (p.of) bar.style.width = `${Math.round((p.step / p.of) * 90)}%`;
+    statusEl.textContent = [p.message, p.source, p.of ? `${p.step}/${p.of}` : ""].filter(Boolean).join(" · ");
+  });
+  bind.on("results", (msg) => {
+    const recs = msg.records || [];
+    log("results", `${recs.length} record(s) ${recs.map((r) => r.ref).join(", ")}`);
+  });
+  bind.on("records", (msg) => render((msg?.changed || []).map((r) => r.ref)));
+  bind.on("done", (msg) => {
+    log("done", `${msg.id || ""}${msg.summary ? " · " + msg.summary : ""}`);
+    bar.style.width = "100%";
+    statusEl.textContent = msg.summary || "Done";
+    setTimeout(() => { bar.style.width = "0"; }, 900);
+    settle(msg.id);
+    render();
+  });
+  bind.on("error", (msg) => {
+    const e = msg.error || {};
+    log("error", `${e.code || "error"} ${e.message || ""}`);
+    statusEl.textContent = e.code === "cancelled" ? "Cancelled" : `${e.code || "error"}: ${e.message || ""}`;
+    bar.style.width = "0";
+    settle(msg.id);
+    render();
+  });
+  bind.on("command", (msg) => {
+    const c = msg.command || {};
+    const args = c.args || {};
+    log("command", `${c.name} ${JSON.stringify(args)}`);
+    if (c.name === "toast") toast(args.text || args.message || "");
+    if (c.name === "reload") setTimeout(() => location.reload(), 50);
+    if (c.name === "highlight" || c.name === "select") {
+      const refs = args.refs || (args.ref ? [args.ref] : []);
+      const ms = Math.min(Number(args.ms) || 2500, 15000);
+      for (const ref of refs) {
+        const el = list.querySelector(`[data-ref="${CSS.escape(String(ref))}"]`);
+        if (!el) continue;
+        el.classList.add("hl");
+        if (c.name === "select") el.scrollIntoView({ behavior: "smooth", block: "center" });
+        setTimeout(() => el.classList.remove("hl"), ms);
+      }
+    }
+  });
+})();
+</script>
+</body>
+</html>

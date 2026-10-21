@@ -1,0 +1,41 @@
+{
+  "title": "A three-day plan",
+  "lede": "Set up on day one, run the sessions on day two, wrap up on day three.",
+  "days": [
+    {
+      "n": 1,
+      "date": "2026-10-24",
+      "place": "Main hall",
+      "stops": [
+        { "ref": "stop:setup", "name": "Set up the room", "note": "Chairs for 40, one screen" },
+        { "ref": "stop:sound-check", "name": "Sound check", "time": { "v": "14:00", "src": "Venue booking", "url": "https://example.com/booking", "date": "2026-10-17" } },
+        { "ref": "stop:walkthrough", "name": "Walk-through with the team" }
+      ],
+      "legs": []
+    },
+    {
+      "n": 2,
+      "date": "2026-10-25",
+      "place": "Main hall and Room B",
+      "stops": [
+        { "ref": "stop:doors", "name": "Doors open", "time": { "v": "09:00", "src": "Venue booking", "url": "https://example.com/booking", "date": "2026-10-17" } },
+        { "ref": "stop:sessions", "name": "Morning sessions", "note": "Three talks, 30 minutes each" },
+        { "ref": "stop:workshop", "name": "Workshop in Room B", "facts": [{ "note": "step-free access to Room B" }] }
+      ],
+      "legs": [
+        { "from": "stop:sessions", "to": "stop:workshop", "mode": "walk", "duration": { "v": "5 min", "est": true } }
+      ]
+    },
+    {
+      "n": 3,
+      "date": "2026-10-26",
+      "place": "Online",
+      "stops": [
+        { "ref": "stop:review", "name": "Review call", "time": { "v": "10:00", "src": "Team calendar", "url": "https://example.com/calendar", "date": "2026-10-17" } },
+        { "ref": "stop:send-notes", "name": "Send the notes to everyone" }
+      ],
+      "legs": []
+    }
+  ],
+  "unchecked": ["Ask the venue whether Room B is step-free", "Confirm day 2 lunch with the caterer"]
+}

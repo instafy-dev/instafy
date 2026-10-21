@@ -1,0 +1,72 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!-- Follow mode for a plain table: sort and filter live in the URL query, every row has an id.
+     That is all a page needs: framed by Studio, the bind client shares the query and the row at the top of the
+     window while someone presents, and applies them on the followers' copies. The rows are made-up sample data. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Sample shoes table</title>
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:,">
+<style>
+  :root { --ink: #171717; --muted: #6b7280; --line: #e5e7eb; --bg: #fff; --accent: #2563eb; }
+  @media (prefers-color-scheme: dark) { :root { --ink: #f5f5f5; --muted: #a3a3a3; --line: #2a2a2a; --bg: #111; --accent: #60a5fa; } }
+  body { margin: 0; font: 15px/1.4 system-ui, sans-serif; color: var(--ink); background: var(--bg); }
+  header { position: sticky; top: 0; background: var(--bg); padding: 12px 16px; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  h1 { font-size: 17px; margin: 0 auto 0 0; }
+  button, select { min-height: 44px; padding: 0 12px; border-radius: 10px; border: 1px solid var(--line); background: transparent; color: inherit; font: inherit; }
+  button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+  table { width: 100%; border-collapse: collapse; }
+  td, th { padding: 12px 16px; border-bottom: 1px solid var(--line); text-align: left; }
+  td.n { text-align: right; font-variant-numeric: tabular-nums; }
+  .note { color: var(--muted); padding: 8px 16px; margin: 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Sample shoes</h1>
+  <button id="sort-name" type="button" data-sort="name">Name</button>
+  <button id="sort-price" type="button" data-sort="price">Price</button>
+  <label>Size <select id="size"><option value="">Any</option><option>41</option><option>42</option><option>43</option><option>44</option></select></label>
+</header>
+<p class="note" id="count"></p>
+<table><thead><tr><th>Shoe</th><th class="n">Price</th><th>Sizes</th></tr></thead><tbody id="rows"></tbody></table>
+<script src="__bind/client.js"></script>
+<script>
+  // made-up sample rows (not real products or prices)
+  const SHOES = Array.from({ length: 48 }, (_, i) => ({ ref: `shoes:sample-${i + 1}`, name: `Sample runner ${i + 1}`,
+    price: 80 + ((i * 37) % 120), sizes: i % 3 ? [41, 42, 43] : [42, 44] }));
+  const tbody = document.getElementById("rows");
+  // the view lives in the URL query: links, reloads and follow mode carry it for free
+  const state = () => { const q = new URLSearchParams(location.search); return { sort: q.get("sort") || "name", size: q.get("size") || "" }; };
+  function setState(next) {
+    const q = new URLSearchParams(location.search);
+    for (const [k, v] of Object.entries(next)) { if (v) q.set(k, v); else q.delete(k); }
+    const s = q.toString();
+    history.replaceState(history.state, "", location.pathname + (s ? "?" + s : "") + location.hash);
+    render();
+  }
+  function render() {
+    const { sort, size } = state();
+    let list = SHOES.filter((s) => !size || s.sizes.includes(Number(size)));
+    list = list.sort(sort === "price" ? (a, b) => a.price - b.price || a.name.localeCompare(b.name) : (a, b) => a.name.localeCompare(b.name, "en", { numeric: true }));
+    tbody.replaceChildren(...list.map((s) => {
+      const tr = document.createElement("tr");
+      tr.id = "row-" + s.ref.split(":")[1]; // a stable id per row: followers scroll to the same row
+      for (const [text, cls] of [[s.name, ""], ["USD " + s.price, "n"], [s.sizes.join(", "), ""]]) { const td = document.createElement("td"); td.textContent = text; if (cls) td.className = cls; tr.append(td); }
+      return tr;
+    }));
+    document.getElementById("count").textContent = `${list.length} shoes${size ? " in size " + size : ""}, by ${sort}`;
+    for (const b of document.querySelectorAll("[data-sort]")) b.setAttribute("aria-pressed", String(b.dataset.sort === sort));
+    document.getElementById("size").value = size;
+  }
+  for (const b of document.querySelectorAll("[data-sort]")) b.addEventListener("click", () => setState({ sort: b.dataset.sort }));
+  document.getElementById("size").addEventListener("change", (e) => setState({ size: e.target.value }));
+  // a presenter's view arrives as a new query: render it
+  addEventListener("popstate", render);
+  render();
+</script>
+</body>
+</html>

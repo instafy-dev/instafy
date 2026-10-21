@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "title": "Compare three options",
+  "intents": {
+    "read_offer": {
+      "label": "Check price",
+      "describe": "Read one option's price from its store page (schema.org data). The URL comes from data.json, never from the click.",
+      "executor": "script",
+      "handler": "handlers/read_offer.mjs",
+      "params": {
+        "type": "object",
+        "required": ["ref"],
+        "additionalProperties": false,
+        "properties": {
+          "ref": { "type": "string", "maxLength": 80, "pattern": "^[a-z][a-z0-9-]{0,23}:[a-z0-9-]{1,50}$" }
+        }
+      },
+      "target": { "records": "data/records/read_offer.json" },
+      "lanes": ["local"],
+      "pending": "item",
+      "cooldown_s": 10,
+      "timeout_s": 45
+    }
+  },
+  "results": { "files": ["data/records/read_offer.json"], "poll_s": 3, "sse": true }
+}

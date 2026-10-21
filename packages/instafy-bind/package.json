@@ -1,0 +1,35 @@
+{
+  "name": "@instafy/bind",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "description": "Bound sites: a website plus a generic backend that turns clicks into typed intents, runs them through scripts or an Octo turn, and streams typed records back to every viewer.",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "instafy-bind": "bin/instafy-bind.mjs"
+  },
+  "exports": {
+    ".": "./src/server.mjs",
+    "./package.json": "./package.json",
+    "./handler-kit": "./src/handler-kit.mjs",
+    "./records": "./src/records.mjs",
+    "./schema-lite": "./src/schema-lite.mjs"
+  },
+  "files": [
+    "bin",
+    "src",
+    "client",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test tests/*.test.mjs examples/*/test/*.test.mjs",
+    "start": "node bin/instafy-bind.mjs serve",
+    "test:browser": "node tests/browser.e2e.mjs",
+    "test:starters": "node tests/starters.browser.mjs",
+    "test:examples": "node --test examples/*/test/*.test.mjs"
+  }
+}

@@ -15,6 +15,7 @@
   "files": [
     "bin",
     "dist/cli.js",
+    "dist/bind",
     "LICENSE",
     "README.md"
   ],
@@ -26,7 +27,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && tsup --config tsup.config.ts",
+    "build": "tsc -p tsconfig.json && tsup --config tsup.config.ts && node scripts/copy-bind.mjs",
     "prepack": "npm run build",
     "dev": "ts-node src/index.ts",
     "test": "pnpm test:unit",

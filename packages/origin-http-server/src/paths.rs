@@ -13,12 +13,22 @@ pub fn is_reserved_path(normalized: &str) -> bool {
     {
         return true;
     }
+    // `.bind` (any depth) is instafy-bind's state next to a bound site: the
+    // admin token that approves confirm-gated jobs and pushes commands to
+    // every viewer, the viewer token, the site's thread id and the binder log.
+    // It stays on the runtime: never served, listed, written, saved or copied
+    // into an isolated worker's snapshot (which reuses this through the
+    // publish policy).
     normalized.split('/').any(|segment| {
         let segment = windows_alias_key(segment);
         segment.eq_ignore_ascii_case(".git")
+            || segment.eq_ignore_ascii_case(BIND_STATE_DIR)
             || ascii_case_insensitive_starts_with(segment, ".git.instafy-hidden-")
     })
 }
+
+/// instafy-bind's per-site and per-root state folder (packages/instafy-bind/src/tokens.mjs BIND_DIR).
+pub const BIND_STATE_DIR: &str = ".bind";
 
 pub fn is_reserved_import_delete_path(normalized: &str) -> bool {
     // Deleting the metadata root would also delete every fixed reserved child,
@@ -40,6 +50,18 @@ fn ascii_case_insensitive_starts_with(value: &str, prefix: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{is_reserved_import_delete_path, is_reserved_path, ORIGIN_APPLY_RECEIPTS_DIR};
+
+    #[test]
+    fn binder_state_is_reserved_at_any_depth() {
+        assert!(is_reserved_path(".bind/admin-token"));
+        assert!(is_reserved_path("sites/shoes/.bind/viewer-token"));
+        assert!(is_reserved_path("sites/shoes/.BIND/binder.log"));
+        assert!(is_reserved_path("sites/shoes/.bind"));
+        assert!(is_reserved_path("sites/shoes/.bind./admin-token"));
+        assert!(!is_reserved_path("sites/shoes/bind/admin-token"));
+        assert!(!is_reserved_path("src/.binder/x"));
+        assert!(!is_reserved_path("src/x.bind"));
+    }
 
     #[test]
     fn reserved_paths_are_case_insensitive_for_macos_aliases() {

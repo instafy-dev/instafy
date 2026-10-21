@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "intents": {
+    "hello": {
+      "label": "Ask the binder",
+      "emoji": "👋",
+      "describe": "A script handler streams three progress steps and returns one greeting claim",
+      "executor": "script",
+      "handler": "handlers/hello.mjs",
+      "env": ["HELLO_STEP_MS"],
+      "params": {
+        "type": "object",
+        "required": ["name"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "title": "Your name", "minLength": 1, "maxLength": 40 },
+          "ref": { "type": "string", "maxLength": 60, "pattern": "^hello:[a-z0-9-]{1,40}$" }
+        }
+      },
+      "target": { "records": "data/records/hello.json" },
+      "sources": ["hello"],
+      "lanes": ["local"],
+      "pending": "item",
+      "cooldown_s": 2,
+      "timeout_s": 20
+    },
+    "ask_octo": {
+      "label": "Ask Octo",
+      "emoji": "🐙",
+      "describe": "The same question, answered by an Octo turn instead of a script",
+      "executor": "agent",
+      "agent": {
+        "prompt": "Write a one-line, friendly greeting for {{name}} (at most 12 words). Return it as one claim with ref {{ref}}, attr \"greeting\", basis \"editorial\", prov.source \"octo\", ttl_s 3600. Do not browse.",
+        "lane": "assist",
+        "timeout_s": 120
+      },
+      "params": {
+        "type": "object",
+        "required": ["name", "ref"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "title": "Your name", "minLength": 1, "maxLength": 40, "pattern": "^[A-Za-z0-9À-ÿ .'-]{1,40}$" },
+          "ref": { "type": "string", "maxLength": 60, "pattern": "^hello:[a-z0-9-]{1,40}$" }
+        }
+      },
+      "target": { "records": "data/records/hello.json" },
+      "pending": "item",
+      "cooldown_s": 10
+    }
+  },
+  "results": { "files": ["data/records/hello.json"], "poll_s": 3, "sse": true }
+}

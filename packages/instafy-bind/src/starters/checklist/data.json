@@ -1,0 +1,26 @@
+{
+  "title": "Before the launch",
+  "lede": "Tick things off as you go. Everyone sees the same list.",
+  "groups": [
+    {
+      "id": "prepare",
+      "title": "Prepare",
+      "items": [
+        { "ref": "item:book-room", "text": "Book the room", "fact": { "v": "Holds 40 people", "src": "Venue page", "url": "https://example.com/venue", "date": "2026-10-17" } },
+        { "ref": "item:invitations", "text": "Send the invitations" },
+        { "ref": "item:name-tags", "text": "Print name tags" },
+        { "ref": "item:parking", "text": "Tell guests where to park", "fact": { "note": "parking near the venue" } }
+      ]
+    },
+    {
+      "id": "on-the-day",
+      "title": "On the day",
+      "items": [
+        { "ref": "item:projector", "text": "Test the projector" },
+        { "ref": "item:chairs", "text": "Set out the chairs" },
+        { "ref": "item:photos", "text": "Take a group photo" }
+      ]
+    }
+  ],
+  "unchecked": []
+}

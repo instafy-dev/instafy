@@ -8,6 +8,13 @@ const PACKAGES = new Map([
   ["@instafy/cli", "packages/instafy-cli"],
   ["@instafy/provider-contract", "packages/provider-contract"],
 ]);
+// Folders another package ships inside a published one: the CLI bundles the binder's bin, src and client as dist/bind
+// (packages/instafy-cli/scripts/copy-bind.mjs), so a change there changes @instafy/cli's bytes.
+const BUNDLED = new Map([
+  ["packages/instafy-bind/bin", "@instafy/cli"],
+  ["packages/instafy-bind/src", "@instafy/cli"],
+  ["packages/instafy-bind/client", "@instafy/cli"],
+]);
 const BUMP_RANK = new Map([
   ["patch", 1],
   ["minor", 2],
@@ -50,6 +57,9 @@ export function isReleaseRelevantPath(filePath) {
     if (filePath === directory || filePath.startsWith(`${directory}/`)) {
       return !filePath.startsWith(`${directory}/test/`);
     }
+  }
+  for (const directory of BUNDLED.keys()) {
+    if (filePath.startsWith(`${directory}/`)) return true;
   }
   return false;
 }

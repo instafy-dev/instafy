@@ -1,0 +1,51 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Find running shoes</title>
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <header class="top">
+    <div>
+      <h1>Find running shoes</h1>
+      <p class="sub" id="question">Four shortlisted pairs, read live from each brand's own store.</p>
+    </div>
+    <span class="pill" id="conn" data-state="wait">connecting…</span>
+  </header>
+
+  <section class="controls" aria-label="Your size and checks">
+    <div class="size">
+      <label for="size">Your size</label>
+      <input id="size" inputmode="decimal" maxlength="12" placeholder="e.g. 10 or EU 44" autocomplete="off">
+      <small>Only on your screen. Others viewing see their own.</small>
+    </div>
+    <button class="primary" id="checkAll" type="button">🏷️ Check all prices</button>
+    <div class="status" id="status" role="status" aria-live="polite"></div>
+  </section>
+
+  <section class="gridWrap" aria-label="Compare">
+    <div class="grid" id="grid" role="table" aria-label="Shoe comparison"></div>
+  </section>
+
+  <p class="foot" id="foot">Each cell shows value · source · age. ↻ checks again. 🐙 asks Octo to open the page and check your size.
+    Source, seller and commission are never factors in the order.</p>
+
+  <details class="activity">
+    <summary>Activity</summary>
+    <div class="log" id="log"></div>
+  </details>
+</main>
+<div class="toast" id="toast" role="status" aria-live="assertive"></div>
+<div class="sr" id="announce" aria-live="polite"></div>
+
+<script>window.instafyBindConfig = { builtins: false }; // app.js shows its own toasts</script>
+<script src="__bind/client.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

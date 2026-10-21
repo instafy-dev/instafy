@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "title": "Checklist",
+  "intents": {
+    "set_check": {
+      "label": "Tick",
+      "describe": "Store one tick so every viewer sees the same list. Refs and people must be in data.json.",
+      "executor": "script",
+      "handler": "handlers/set_check.mjs",
+      "params": {
+        "type": "object",
+        "required": ["ref", "done"],
+        "additionalProperties": false,
+        "properties": {
+          "ref": { "type": "string", "maxLength": 80, "pattern": "^item:[a-z0-9-]{1,60}$" },
+          "done": { "type": "boolean" },
+          "who": { "type": "string", "maxLength": 24, "pattern": "^[A-Za-z0-9À-ÿ' -]{1,24}$" },
+          "at": { "type": "string", "format": "date-time", "maxLength": 40 }
+        }
+      },
+      "target": { "records": "data/records/set_check.json" },
+      "lanes": ["local"],
+      "pending": "item",
+      "cooldown_s": 0,
+      "timeout_s": 15
+    }
+  },
+  "results": { "files": ["data/records/set_check.json"], "poll_s": 5, "sse": true }
+}

@@ -560,6 +560,11 @@ jobs:
       - name: Test CLI preview check
         run: pnpm --filter @instafy/cli exec vitest run test/local-site.spec.ts test/site-check.spec.ts
 
+      - name: Test bound-sites binder
+        run: |
+          pnpm --filter @instafy/bind test
+          pnpm --filter @instafy/cli exec vitest run test/bind.e2e.spec.ts
+
   javascript-desktop:
     name: JavaScript Desktop and runtime
     runs-on: >-

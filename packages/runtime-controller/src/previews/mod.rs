@@ -246,6 +246,11 @@ struct CreatePreviewResponse {
     /// header can allow it. Not a capability: it names the shared preview
     /// domain, never a label.
     viewer_host_suffix: String,
+    /// The origin Studio frames previews from (`PUBLIC_APP_URL`), so a
+    /// preview site that talks to its frame (a bound site's Ask Octo,
+    /// location and follow mode) accepts messages from that origin only and
+    /// can name it in `frame-ancestors`. Public: it is Studio's own address.
+    studio_origin: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -861,6 +866,7 @@ async fn post_preview(
             status: grant.status,
             credentials: grant.credentials,
             viewer_host_suffix: origin.host_suffix(),
+            studio_origin: state.config.public_app_url.clone(),
         }),
     ))
 }

@@ -41,6 +41,7 @@ import {
 import { configGet, configList, configPath, configSet, configUnset } from "./config-command.js";
 import { getInstafyProfileConfigPath, listInstafyProfileNames, readInstafyProfileConfig } from "./config.js";
 import { runInstafyGit, runInstafyGitSync } from "./git-wrapper.js";
+import { runBind } from "./bind.js";
 import { registerPreviewCheckCommand } from "./site-check.js";
 import { historyConversations, historyMessages, historyRuns } from "./history.js";
 import {
@@ -2070,6 +2071,11 @@ program
   .description("Run git against the Instafy canonical checkout (.instafy/.git)")
   .allowUnknownOption(true);
 
+program
+  .command("bind")
+  .description("Bound sites: serve a website whose clicks run scripts and stream records back to every viewer (instafy-bind)")
+  .allowUnknownOption(true);
+
 const tunnelCommand = program
   .command("tunnel")
   .description("Create and manage shareable tunnels");
@@ -2825,6 +2831,11 @@ export async function runCli(argv: string[] = process.argv) {
     return;
   }
   const args = argv.slice(2);
+  if (args[0] === "bind") {
+    // Every argument after "bind" goes to the binder unchanged (its own --help, --json, --dry-run, ...).
+    process.exitCode = await runBind(args.slice(1));
+    return;
+  }
   if (args[0] === "git") {
     if (args[1] === "credential") {
       try {
