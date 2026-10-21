@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConversationState } from "../../../../conversations/conversationState";
 import type { ChatMessage } from "../../types";
 import { ConversationMessageRows } from "../ConversationMessageRows";
+import { replyDraftChatMessage } from "../../../../conversations/replyDrafts";
 import { RunFailureRetryProvider } from "../RunFailureNotice";
 import { ControllerNoticeActionsProvider } from "../ControllerNoticeActions";
 import {
@@ -2175,5 +2176,44 @@ describe("ConversationMessageRows", () => {
     );
     expect(container.querySelector('[data-testid="run-failure-retry"]')).toBeNull();
     expect(container.querySelector('[data-testid="run-failure-details-toggle"]')).not.toBeNull();
+  });
+
+  it("writes a reply draft in the row its reply takes, without a stored message's actions", async () => {
+    const ask = createMessage({ id: "ask", role: "user", authorId: "user-1", content: "Say hello", timestamp: 1_000 });
+    const draft = replyDraftChatMessage({
+      conversationId: "conversation-controller",
+      jobId: "job-1",
+      runId: "run-1",
+      segment: 1,
+      seq: 3,
+      text: "Hello **there**",
+      startedAt: 2_000,
+      updatedAt: 2_400,
+    });
+    const reply = createMessage({
+      id: "reply",
+      content: "Hello **there**",
+      timestamp: 2_000,
+      metadata: { source: "agent", jobId: "job-1", runId: "run-1" },
+    });
+    const rowShape = () => ({
+      avatars: container.querySelectorAll('[data-testid="assistant-avatar"]').length,
+      speakerMarkers: container.querySelectorAll(CHAT_SPEAKER_MARKER_SELECTOR).length,
+      times: container.querySelectorAll("time").length,
+      strong: container.querySelector("strong")?.textContent ?? null,
+    });
+
+    await renderSpeakerBoundaryMessages([ask, draft]);
+    const draftBubble = container.querySelector('[data-testid="chat-reply-draft"]');
+    expect(draftBubble?.textContent).toContain("Hello there");
+    expect(draftBubble?.querySelector('[aria-busy="true"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="chat-message-actions"]')).toBeNull();
+    const draftShape = rowShape();
+    expect(draftShape).toMatchObject({ avatars: 1, speakerMarkers: 2, times: 1, strong: "there" });
+
+    await renderSpeakerBoundaryMessages([ask, reply]);
+    expect(container.querySelector('[data-testid="chat-reply-draft"]')).toBeNull();
+    expect(container.querySelector('[data-testid="chat-bubble-assistant"]')?.textContent).toContain("Hello there");
+    expect(rowShape()).toEqual(draftShape);
   });
 });

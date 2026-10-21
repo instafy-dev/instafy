@@ -46,6 +46,8 @@ use crate::workspace;
 
 #[path = "agent/planning_receipts.rs"]
 mod planning_receipts;
+#[path = "agent/reply_draft.rs"]
+mod reply_draft;
 
 const AGENT_CONVERSATION_HISTORY_LIMIT: i64 = 80;
 /// How many of a conversation's latest skill setup openers a job carries. A
@@ -212,6 +214,7 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/agent/lease", post(agent_lease))
         .route("/agent/heartbeat", post(agent_heartbeat))
         .route("/agent/message", post(agent_message))
+        .route("/agent/reply-draft", post(reply_draft::agent_reply_draft))
         .route("/agent/complete", post(agent_complete))
         .route(
             "/agent/plan-groups/:group_id/status",
@@ -6076,6 +6079,10 @@ fn extract_multi_agent_plan_details(value: &JsonValue) -> Option<&JsonValue> {
 #[cfg(test)]
 #[path = "agent/deleted_space_fence_tests.rs"]
 mod deleted_space_fence_tests;
+
+#[cfg(test)]
+#[path = "agent/reply_draft_tests.rs"]
+mod reply_draft_tests;
 
 #[cfg(test)]
 mod tests {

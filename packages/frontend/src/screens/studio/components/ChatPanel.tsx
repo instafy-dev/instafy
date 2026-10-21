@@ -58,6 +58,7 @@ import {
 import { parseInviteCommandRequest } from "../../../conversations/inviteCommand";
 import { resolveGroupParticipationReplyTargets } from "../../../conversations/groupParticipation";
 import { getChatClientSessionId } from "../../../conversations/chatClientIdentity";
+import { useReplyDraftMessages } from "../../../conversations/replyDrafts";
 import { generateUUID } from "../../../utils/uuid";
 import { useSharedBrowserResume, useSharedBrowserResumeSearchReplacement } from "./useSharedBrowserResume";
 import { useConversations } from "../../../conversations/ConversationsProvider";
@@ -2896,6 +2897,20 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     return candidates;
   }, [activeConversationEntry?.controllerId, activeConversationEntry?.pendingRunIds, messages, runs]);
   const activeConversationRun = activeConversationRuns[0] ?? null;
+  const activeReplyRunIds = useMemo(
+    () => new Set(activeConversationRuns.map((run) => run.id)),
+    [activeConversationRuns],
+  );
+  // Octo's reply while the model writes it, in the place its message takes.
+  const replyDrafts = useReplyDraftMessages(
+    activeConversationEntry?.controllerId ?? null,
+    displayedMessages,
+    activeReplyRunIds,
+  );
+  const transcriptMessages = useMemo(
+    () => (replyDrafts.messages.length > 0 ? [...displayedMessages, ...replyDrafts.messages] : displayedMessages),
+    [displayedMessages, replyDrafts.messages],
+  );
   const showOutOfCreditsNotice = outOfCredits && activeConversationRuns.length === 0;
   // Keep the complete active-handle set for existing busy/queue overlap
   // behavior. Steer discovery applies the narrower silent-evaluation guard
@@ -6034,7 +6049,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                   targetedMessageId={messageTargetActive ? requestedMessageId : null}
                   highlightedMessageId={highlightedMessageId}
                   key="conversation-message-rows"
-                  messages={displayedMessages}
+                  messages={transcriptMessages}
                   allConversationMessages={collapsedConversationMessages}
                   timedSyntheticRows={timedSyntheticRows}
                   currentUserId={currentUserId}
@@ -6116,7 +6131,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
               typingStatusLabel={typingStatusLabel}
               typingStatusAriaLabel={typingStatusAriaLabel}
               suppressAssistantStatus={
-                showOutOfCreditsNotice || workspaceStartStall.showNotice || stoppedTurnNotice !== null
+                showOutOfCreditsNotice || workspaceStartStall.showNotice || stoppedTurnNotice !== null ||
+                replyDrafts.draftingRunActive
               }
               isThinkingLabelExpanded={isThinkingLabelExpanded}
               onToggleThinkingLabel={() => setIsThinkingLabelExpanded((current) => !current)}

@@ -5,15 +5,18 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::active_turn_input::ActiveTurnInputReceiver;
 use crate::config::Config;
 use crate::controller::{ControllerClient, LeaseJob, Registration};
 use crate::job_cancel::JobCancelSignal;
 use crate::jobs::rolling_saves;
-use crate::jobs::{JobExecution, JobMessage, JobProcessor, JobProgress};
+use crate::jobs::{
+    JobExecution, JobMessage, JobProcessor, JobProgress, ReplyDraft, ReplyDraftSender,
+};
 use crate::origin::LocalOriginSync;
 
 /// How long a turn that lost its lease (a cancel, or a stop that requeued
@@ -21,6 +24,10 @@ use crate::origin::LocalOriginSync;
 /// since. The controller's pre-stop flush uses the same window for a job
 /// cancelled before a stop.
 const INTERRUPTED_TURN_WINDOW: Duration = Duration::from_secs(60);
+
+/// The shortest gap between two sends of a job's reply draft. Each send carries the latest
+/// text, so a slow controller gets fewer, longer drafts rather than a backlog.
+const REPLY_DRAFT_INTERVAL: Duration = Duration::from_millis(200);
 
 /// The turns this process runs, as a stop sees them: a turn still running is
 /// unfinished, and so is one that lost its lease, within
@@ -205,11 +212,14 @@ impl AgentExecutor {
         lease_lost_signal: Option<JobCancelSignal>,
         active_turn_input: Option<ActiveTurnInputReceiver>,
     ) -> Result<JobExecution> {
+        let (reply_draft_tx, reply_draft_task) =
+            spawn_reply_draft_dispatch(client.clone(), registration, job.id);
         let (progress_tx, progress_status, progress_task) =
             spawn_progress_dispatch(client, registration, job.id, lease_lost_signal.clone());
         let progress_handle = JobProgress {
             sender: progress_tx.clone(),
             status: progress_status,
+            reply_draft: Some(reply_draft_tx),
         };
 
         // The folder's unfinished work reaches canonical every two minutes
@@ -229,6 +239,8 @@ impl AgentExecutor {
                 active_turn_input,
             )
             .await;
+        // The reply is about to be posted whole, and no draft may arrive after it.
+        reply_draft_task.abort();
         if let Some(saves) = saves.as_ref() {
             rolling_saves::finish_job(saves, ticker, &mut result).await;
         }
@@ -250,9 +262,11 @@ impl AgentExecutor {
         let worker_config = crate::agent::resolved_worker_job_config(&secrets)?;
         let (progress_tx, progress_status, progress_task) =
             spawn_progress_dispatch(client, registration, job.id, lease_lost_signal.clone());
+        // A scoped worker reports to its lead, not to the conversation, so it drafts nothing.
         let progress_handle = JobProgress {
             sender: progress_tx.clone(),
             status: progress_status,
+            reply_draft: None,
         };
         // Private copies are published only after scope/conflict validation.
         // A rolling whole-checkout save must not collect a sibling's edits.
@@ -320,6 +334,45 @@ fn spawn_progress_dispatch(
     });
 
     (progress_tx, progress_status, progress_task)
+}
+
+/// Sends the job's reply draft to the controller while the model writes it: the latest text
+/// at most every [`REPLY_DRAFT_INTERVAL`], on its own task so it never waits behind the
+/// progress queue. The first failure ends drafting for the job; a controller without the
+/// draft route still receives the reply whole.
+fn spawn_reply_draft_dispatch(
+    client: Arc<ControllerClient>,
+    registration: &Registration,
+    job_id: uuid::Uuid,
+) -> (ReplyDraftSender, JoinHandle<()>) {
+    let (draft_tx, mut draft_rx) = watch::channel(ReplyDraft::default());
+    let registration = registration.clone();
+    let task = tokio::spawn(async move {
+        let mut sent = ReplyDraft::default();
+        let mut seq = 0u64;
+        while draft_rx.changed().await.is_ok() {
+            let draft = draft_rx.borrow_and_update().clone();
+            // An empty draft matters only when it clears text a viewer has.
+            if draft == sent || (draft.text.is_empty() && sent.text.is_empty()) {
+                continue;
+            }
+            seq += 1;
+            if let Err(error) = client
+                .post_reply_draft(&registration, job_id, seq, &draft)
+                .await
+            {
+                info!(
+                    %error,
+                    job_id = %job_id,
+                    "controller did not take a reply draft; the reply arrives whole"
+                );
+                break;
+            }
+            sent = draft;
+            tokio::time::sleep(REPLY_DRAFT_INTERVAL).await;
+        }
+    });
+    (draft_tx, task)
 }
 
 async fn finish_progress_dispatch(

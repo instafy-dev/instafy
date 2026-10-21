@@ -33,6 +33,7 @@ import {
   type ProjectAccessRefreshEventDetail,
 } from "../../projects/projectAccessEvents";
 import { PREVIEW_FOLLOW_EVENT } from "../../services/runtimeController/previewFollow";
+import { applyReplyDraftEvent, REPLY_DRAFT_EVENT_KIND } from "../../conversations/replyDrafts";
 import {
   CREDITS_UPDATED_EVENT,
   type CreditsUpdatedEventDetail,
@@ -706,6 +707,10 @@ export function useRuntimeControllerSync({
                 } satisfies ConversationSendQueueEventDetail,
               }),
             );
+          }
+          if (event.kind === REPLY_DRAFT_EVENT_KIND) {
+            applyReplyDraftEvent(event);
+            return;
           }
           if (event.kind === "preview.follow" && typeof window !== "undefined") {
             // Presence only (who presents a site, away, ended); the follow store reads it.

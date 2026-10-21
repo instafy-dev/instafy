@@ -44,6 +44,8 @@ mod native_images;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "proxy_integration/native_subagents.rs"]
 mod native_subagents;
+#[path = "proxy_integration/reply_draft_stream.rs"]
+mod reply_draft_stream;
 
 async fn env_guard() -> tokio::sync::MutexGuard<'static, ()> {
     ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().await
@@ -1106,6 +1108,7 @@ async fn read_reference_proxy_case(case: ReadReferenceCase) -> Result<()> {
             Some(JobProgress {
                 sender,
                 status: Arc::new(AtomicBool::new(true)),
+                reply_draft: None,
             }),
             None,
             None,
