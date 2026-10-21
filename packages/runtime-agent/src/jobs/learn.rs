@@ -218,9 +218,9 @@ const BOUND_SITES_CHEATSHEET_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-bound-sites/references/cheatsheet.md"
 ));
-/// Earlier bundled copies of the bound-sites skill and cheat sheet that a scaffold may replace
-/// (none yet: this is the first shipped version). A copy someone edited is kept.
-const LEGACY_BOUND_SITES_TEMPLATES: &[&str] = &[];
+/// Earlier bundled copies of the bound-sites skill and cheat sheet that a scaffold may replace.
+/// A copy someone edited is kept.
+const LEGACY_BOUND_SITES_TEMPLATES: &[&str] = &[include_str!("legacy/bound-sites-v1.md")];
 const LEGACY_BOUND_SITES_CHEATSHEET_TEMPLATES: &[&str] = &[];
 const SKILL_ROUTER_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -1620,6 +1620,13 @@ mod tests {
         fs::write(&skill, customized).unwrap();
         ensure_project_memory_scaffold(workspace.path());
         assert_eq!(fs::read_to_string(&skill).unwrap(), customized);
+        // An unedited earlier copy is brought up to date (it did not say how to answer a site's ask).
+        let previous = include_str!("legacy/bound-sites-v1.md");
+        assert!(!previous.contains("## When someone asks from a site"));
+        fs::write(&skill, previous).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&skill).unwrap(), BOUND_SITES_TEMPLATE);
+        assert!(BOUND_SITES_TEMPLATE.contains("## When someone asks from a site"));
     }
 
     #[test]

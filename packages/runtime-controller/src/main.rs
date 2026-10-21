@@ -82,6 +82,7 @@ mod runtime;
 mod secrets;
 mod send_intents;
 mod send_queue;
+mod site_intent;
 mod skills_discovery;
 mod speech_proxy;
 mod state;

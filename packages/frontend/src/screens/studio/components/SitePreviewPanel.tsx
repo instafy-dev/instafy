@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import type { ConversationSitePreviewView } from "../../../workspace/conversationSurfaces";
+import type { SiteAskHost } from "./previewHost/useSiteAsks";
 import { NO_MOUNTED_SITE_PREVIEWS, SitePreviewPane, nextMountedSitePreviews, type MountedSitePreviews } from "./SitePreviewPane";
 
 /**
@@ -11,7 +12,7 @@ import { NO_MOUNTED_SITE_PREVIEWS, SitePreviewPane, nextMountedSitePreviews, typ
  * polls. Closing the tab, or moving to another conversation (`scope`), unmounts
  * the pane, which revokes its viewer session.
  */
-export function SitePreviewPanel({ id, label, projectId, scope, previews, visiblePreviewId, style, spaceName = null }: {
+export function SitePreviewPanel({ id, label, projectId, scope, previews, visiblePreviewId, style, spaceName = null, asks = null }: {
   /** The id the preview tabs name in `aria-controls`. */
   id: string;
   label: string;
@@ -22,6 +23,8 @@ export function SitePreviewPanel({ id, label, projectId, scope, previews, visibl
   style?: CSSProperties;
   /** The space's name, for the list of sites that received the person's location. */
   spaceName?: string | null;
+  /** Ask Octo from these sites, as the person's own message in this conversation (useSiteAsks). */
+  asks?: SiteAskHost | null;
 }) {
   const previewIds = useMemo(() => previews.map(preview => preview.previewId), [previews]);
   const [mounted, setMounted] = useState<MountedSitePreviews>(NO_MOUNTED_SITE_PREVIEWS);
@@ -37,7 +40,7 @@ export function SitePreviewPanel({ id, label, projectId, scope, previews, visibl
         const shown = preview.previewId === visiblePreviewId;
         return (
           <div key={`${scope}:${preview.previewId}`} className={shown ? "h-full min-h-0" : "hidden"} hidden={!shown} data-testid="site-preview-slot">
-            <SitePreviewPane projectId={projectId} previewId={preview.previewId} title={preview.title} visible={shown} spaceName={spaceName} />
+            <SitePreviewPane projectId={projectId} previewId={preview.previewId} title={preview.title} visible={shown} spaceName={spaceName} asks={asks} />
           </div>
         );
       })}

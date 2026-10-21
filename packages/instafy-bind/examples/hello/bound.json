@@ -28,6 +28,7 @@
       "label": "Ask Octo",
       "emoji": "🐙",
       "describe": "The same question, answered by an Octo turn instead of a script",
+      "say": "Say hello to {name}",
       "executor": "agent",
       "agent": {
         "prompt": "Write a one-line, friendly greeting for {{name}} (at most 12 words). Return it as one claim with ref {{ref}}, attr \"greeting\", basis \"editorial\", prov.source \"octo\", ttl_s 3600. Do not browse.",

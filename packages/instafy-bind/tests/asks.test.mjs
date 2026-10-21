@@ -113,3 +113,28 @@ test("--agent-executor runs the owner's own clicks on this machine; a click thro
     cleanup(dir);
   }
 });
+
+test("say is an agent intent's chat line: its placeholders must be declared params, and health lists it with the ask", async () => {
+  const { checkBound } = await import("../src/bound.mjs");
+  const bound = (intents) => ({ version: 1, intents });
+  assert.deepEqual(checkBound(bound({ ask_octo: { ...askDef, say: "Is {ref} still sold?" } })), []);
+  assert.match(checkBound(bound({ ask_octo: { ...askDef, say: "Is {size} still sold?" } })).map((p) => p.message).join(";"), /\{size\} is not a declared param/);
+  assert.match(checkBound(bound({ check: { ...scriptDef, say: "Check" } })).map((p) => p.message).join(";"), /say is for agent intents/);
+
+  const dir = makeSite({
+    "index.html": "<!doctype html><title>x</title>",
+    "bound.json": { version: 1, title: "Things", intents: { ask_octo: { ...askDef, say: "Is {ref} still sold?", confirm: true }, check: scriptDef } },
+    "handlers/check.mjs": "process.stdout.write(JSON.stringify({type:'done'})+'\\n');",
+  });
+  const binder = await startBinder(dir);
+  try {
+    const h = await health(binder, { "x-bind-token": binder.sites[0].token });
+    const ask = h.asks.find((d) => d.name === "ask_octo");
+    assert.equal(ask.say, "Is {ref} still sold?");
+    assert.equal(ask.confirm, true);
+    assert.equal("say" in h.catalog.find((d) => d.name === "check"), false);
+  } finally {
+    await binder.close();
+    cleanup(dir);
+  }
+});

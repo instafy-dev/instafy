@@ -240,6 +240,31 @@ function askStudioForLocation(page: Page, id: string) {
   }), id);
 }
 
+type AskSiteWindow = { __host: Array<Record<string, unknown>>; __ask: (payload: Record<string, unknown>) => void };
+
+/**
+ * Inside a framed site: records what Studio sends it and exposes the site side of Ask Octo
+ * (docs/Bound-Sites.md §2a): `ask` to the parent, `ask-status` back. Any site speaks it; the bind client is one.
+ */
+async function actAsAskSite(page: Page) {
+  await siteBody(page).evaluate(() => {
+    const site = window as unknown as AskSiteWindow;
+    if (site.__host) return;
+    site.__host = [];
+    window.addEventListener("message", (event) => {
+      if (event.source === window.parent) site.__host.push(event.data as Record<string, unknown>);
+    });
+    const post = (message: Record<string, unknown>) => window.parent.postMessage({ source: "e2e-site", v: 1, ...message }, "*");
+    site.__ask = (payload) => post({ type: "ask", payload });
+    // A site that speaks first is sent the layout again.
+    post({ type: "hello" });
+  });
+}
+const hostMessages = (page: Page) => siteBody(page).evaluate(() => (window as unknown as AskSiteWindow).__host);
+const askStates = async (page: Page, id: string) => (await hostMessages(page))
+  .filter((message) => message.type === "ask-status" && (message.payload as { id?: string } | undefined)?.id === id)
+  .map((message) => (message.payload as { state: string }).state);
+
 test.describe("Site preview card and pane", () => {
   test.setTimeout(300_000);
 
@@ -374,6 +399,60 @@ test.describe("Site preview card and pane", () => {
       await expect(previewCard(page)).toContainText("Stopped", { timeout: 35_000 });
     } finally {
       stopFixtureServer(container);
+    }
+  });
+
+  test("Ask Octo: a site's click is the person's own message in the chat, and the site hears what became of it", async ({ page }) => {
+    const capabilities = await brokerCapabilities();
+    const servesPreviews = Boolean(capabilities?.privatePreviews && capabilities.previewDomain);
+    const noPreviews = "This stack's tunnel broker serves no private previews (see docs/Previews.md).";
+    if (process.env.INSTAFY_E2E_REQUIRE_PREVIEWS === "1") expect(servesPreviews, noPreviews).toBe(true);
+    test.skip(!servesPreviews, noPreviews);
+    const ASK_PORT = PREVIEW_PORT + 9;
+    const ASK_TITLE = "Running shoes";
+    await page.setViewportSize({ width: 1400, height: 900 });
+    const projectId = await prepareStudio(page);
+    if (!projectId) throw new Error("Project id missing for the ask test.");
+    await returnToConversation(page);
+    const localConversationId = await activeConversationId(page);
+    const conversationId = await createBlankControllerConversationId(page, projectId, localConversationId);
+    const container = await runtimeContainerFor(projectId);
+    startFixtureServer(container, ASK_PORT);
+    try {
+      await waitForFixture(container, ASK_PORT);
+      openPreview(container, conversationId, ASK_PORT, ASK_TITLE);
+      await openFromCard(page, ASK_TITLE).catch(async (error) => {
+        await page.reload();
+        await returnToConversation(page);
+        return await openFromCard(page, ASK_TITLE).catch(() => { throw error; });
+      });
+
+      // The person may send messages here, so Studio's layout says the site may hand it asks.
+      await actAsAskSite(page);
+      await expect.poll(async () => (await hostMessages(page)).filter((m) => m.type === "layout").at(-1)?.caps, { timeout: 10_000 })
+        .toEqual({ location: "host", ask: true });
+
+      // A click: Studio writes the message itself, from the intent's say line and the preview's own title.
+      const ask = {
+        id: "int_e2e_0001", intent: "check_size", label: "Ask Octo", say: "Is size {size} in stock for {ref}?",
+        params: { size: "10", ref: "shoes:karhu-ikoni-3" }, ref: "shoes:karhu-ikoni-3",
+      };
+      await siteBody(page).evaluate((_body, payload) => (window as unknown as AskSiteWindow).__ask(payload), ask);
+      await expect.poll(() => askStates(page, ask.id), { timeout: 5_000 }).toContain("sent");
+      const line = `Is size 10 in stock for Karhu ikoni 3? · via ${ASK_TITLE}`;
+      await expect(page.getByText(line, { exact: true }).first()).toBeVisible({ timeout: 15_000 });
+
+      // The same id again asks nothing; a second ask while the first one's run is going is declined with a reason.
+      await siteBody(page).evaluate((_body, payload) => (window as unknown as AskSiteWindow).__ask(payload), ask);
+      await siteBody(page).evaluate((_body, payload) => (window as unknown as AskSiteWindow).__ask(payload), { ...ask, id: "int_e2e_0002" });
+      await expect.poll(() => askStates(page, "int_e2e_0002"), { timeout: 5_000 }).toEqual(["declined"]);
+      await expect(page.getByText(line, { exact: true })).toHaveCount(1);
+
+      // The message's run ends (an answer, or a failure on a stack without a model): the site hears which.
+      await expect.poll(async () => (await askStates(page, ask.id)).at(-1), { timeout: 240_000, intervals: [2_000] })
+        .toMatch(/^(done|failed)$/);
+    } finally {
+      stopFixtureServer(container, ASK_PORT);
     }
   });
 

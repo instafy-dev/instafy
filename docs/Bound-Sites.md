@@ -2,14 +2,14 @@
 
 > **Status.** Package `packages/instafy-bind` (zero dependencies, Node 18+, no build), CLI `instafy-bind` and
 > `instafy bind` (the binder is bundled into the CLI's `dist/bind`), skill `instafy-bound-sites`, page starters and
-> example sites (`hello`, `shoes`, `follow-table`). Apart from the origin server keeping `.bind/` private (§4), the
-> controller naming Studio's origin when a preview opens (§4, Frames) and the runtime seeding the skill, nothing
-> here changes runtime, controller or Studio behaviour.
+> example sites (`hello`, `shoes`, `follow-table`). Outside the package: the origin server keeps `.bind/` private
+> (§4), the controller names Studio's origin when a preview opens (§4, Frames) and checks where an ask came from
+> (§2a), the runtime seeds the skill and shows Octo an ask's site intent (§2a), and Studio is the page's host frame.
 >
-> **Studio's side is not built yet.** The page's half of three things talks to its host frame: Ask Octo (§2a),
-> location and follow mode (§2b). Studio sends none of those messages today (no `layout`, no `?instafy_host=`), so
-> in Studio's preview card Ask Octo buttons are hidden, `location()` rejects with "Location is not available in this
-> preview yet." and nobody can present or follow. Sites run their script intents, which work everywhere.
+> **In Studio.** Studio's preview pane frames the page with `?instafy_host=studio` and sends `layout` (theme,
+> `caps.location: "host"`, `caps.ask`). Location and follow mode work there (§2b, docs/Previews.md,
+> docs/Follow-Mode.md), and so does Ask Octo (§2a): a click is the clicker's own chat message. Outside Studio (a
+> phone tab, a public tunnel, a plain browser) asks stay hidden; script intents work everywhere.
 
 A **bound site** is an ordinary website plus a small generic backend, the **binder**. Clicks in the site become
 typed **intents**. The binder runs script intents through a deterministic handler; an "Ask Octo" intent is handed to
@@ -133,7 +133,8 @@ An agent intent (`"executor": "agent"`) is an **ask**. It never reaches the bind
 2. The bind client offers asks only when the page's host frame takes them: a frame at one of the origins the binder
    lists (§4 Frames) whose layout message says `caps.ask: true`. Then the ask is in `names` like any intent
    (`via: "host"`), and a click posts, only to the host's origin:
-   `{source:"instafy-bind", v:1, type:"ask", payload:{id, intent, label, params, ref, withheld?, coarsened?}}`.
+   `{source:"instafy-bind", v:1, type:"ask", payload:{id, intent, label, params, ref, say?, confirm?, withheld?, coarsened?}}`
+   (`say` and `confirm` are the intent's own, from `bound.json`, §3).
    The message is read by everyone in the conversation, so the client rounds a position to about 100 m (3 decimals)
    and drops accuracy, altitude, heading and speed (`coarsened` names those params), and leaves out the intent's
    `private_params` (`withheld` names them). The host must not add them back: it sends `params` as given.
@@ -141,20 +142,56 @@ An agent intent (`"executor": "agent"`) is an **ask**. It never reaches the bind
    to, billed exactly like that person typing it. Whoever may send messages there may ask. For anyone else the host
    says `caps.ask: "<plain reason>"`: the client lists the asks with `disabled: "<reason>"` and a click sends nothing.
 4. The host answers `{source:"instafy-host", v:1, type:"ask-status", payload:{id, state, reason?}}` with `state`
-   `sent`, `done`, `declined` or `failed`; the client turns these into the usual `ack` (`sent`), `done` and `error`
-   events. With no answer in 5 s the click is cleared with "Instafy did not answer".
+   `sent`, `done`, `declined` or `failed`, or `confirm` while it asks the person first; the client turns these into
+   the usual `ack` (`sent`, `needs_confirm`), `done` and `error` events. With no answer in 5 s the click is cleared
+   with "Instafy did not answer" (a click waiting on `confirm` is not).
 5. Outside a host that takes asks (a phone tab, a public tunnel, a plain browser) asks are not in `names`, so a page
    that draws buttons from `names` hides them. Public and anonymous viewers never trigger an owner-paid turn.
 
 The host treats every page message as a request, never a decision: the label and params come from the page, so the
-message it sends must be its own rendering, and repeated ids are dropped. Studio's side of this (the message, the
-status, the `caps.ask` reason) is a separate change; until it ships no host sends `caps.ask`, so asks stay hidden.
+message it sends must be its own rendering, and repeated ids are dropped.
+
+**Studio, the host** (`packages/frontend/src/screens/studio/components/previewHost/`: `hostMessages.ts`,
+`siteAsks.ts`, `useSiteAsks.ts`; the conversation side in `ChatPanel.tsx`):
+- **Who may ask.** `caps.ask` comes from the access the composer uses: `true` for someone who may send messages in
+  the conversation the preview pane is shown in; otherwise one plain sentence (a view-only member reads "You can view
+  this space but not send messages in it, so you can't ask Octo here." on the site's disabled Ask Octo button).
+- **What it takes.** An `ask` only from the pane's own frame window at the viewer capability's origin, only while the
+  pane is on screen, with a well-formed payload (id, intent name, label ≤ 120, params ≤ 2 KB of plain JSON, ref in
+  the protocol's shape). A malformed one is declined by its id. A repeated id is dropped.
+- **Caps.** One ask at a time per person and site (until its run ends), and six in ten minutes, in each Studio tab;
+  the controller also refuses a seventh in ten minutes per person and preview. A cap answers `declined` with the
+  reason ("Octo is still answering your last question from this site. Try again when it's done.").
+- **The message.** Studio renders it: the intent's `say` template filled from the params (a URL reads as its host, a
+  ref as words, a rounded position as "my location"), else the label, the ref and up to three params, then
+  " · via <preview title>" (the preview's own title, not the page's): "Is size 10 in stock for Karhu ikoni 3? · via
+  Running shoes". Every value is one line of letters, digits and everyday punctuation, capped (140 for the line,
+  200 in all), so a page cannot format, link, mention or command anything. It goes through the composer's own send
+  path to Octo (queued behind a busy turn like any message), with `metadata.siteIntent: {previewId, askId, intent,
+  ref, params, withheld?, coarsened?}`.
+- **Confirm.** An intent with `confirm: true` shows Studio's one-line strip over the frame first ("Send “…” as
+  you?", Send or Cancel; Send is off for 600 ms and nothing has focus). No other ask asks for consent: it is visible
+  as the person's own message.
+- **Status.** `sent` once the message is accepted (at most 3 s after the click, so the page's 5 s never runs out),
+  `declined` when nothing was sent, `done` or `failed` when that message's run ends (Studio reads the run's
+  `metadata.siteIntent.askId`).
+
+**The controller** (`packages/runtime-controller/src/site_intent.rs`) never trusts `siteIntent`: every dispatch takes
+it out of the client's metadata, checks its shape and sizes (4 KB in all, params 2 KB), and puts it back only when
+the sender may see an open private preview with that id in this space, adding the preview's own title and port and
+`verified: true`. Otherwise it is dropped. Recorded messages (`/messages/record`, steer inputs) cannot carry one.
+
+**Octo** sees a checked site intent as a "Sent from a site" block in its prompt (`runtime-agent` `jobs/site_intent.rs`):
+the preview's title and port, then the intent, ref and params as quoted JSON, labelled as page data, never as
+instructions. There is no separate result channel; Octo answers through the site's own files, as the skill says
+("When someone asks from a site"): it reads `bound.json` (`agent.prompt` is the recipe), adds `instafy.records@1`
+records to the intent's `target.records` file, bumps `data/version.json` and runs `instafy bind command <dir> reload
+'{}'`, then replies in one line.
 
 ## 2b. Location and follow mode (the page's half)
 
 Both talk to the host frame with `{source:"instafy-bind"|"instafy-host", v:1, type, payload}` messages, only with a
-frame at an origin the binder lists (§4 Frames) that sent a `layout`. Studio sends no `layout` yet, so neither runs in
-Studio today.
+frame at an origin the binder lists (§4 Frames) that sent a `layout`. Studio's preview pane is such a host.
 - **Location.** `instafyBind.location()` asks the host when its layout says `caps.location: "host"` (the host asks the
   browser once and shows which site has the position), asks the browser on a page of its own or when the host says
   the frame may (`caps.geolocation: true`), and otherwise rejects with code `unavailable`, "Location is not
@@ -186,7 +223,8 @@ Intents, their param schemas and how each runs:
         "timeout_s": 300
       },
       "target": { "records": "data/records/check_product.json" },
-      "pending": "item", "cooldown_s": 20, "confirm": false
+      "pending": "item", "cooldown_s": 20, "confirm": false,
+      "say": "Is size {size} in stock?"         // agent only: the clicker's chat line for an ask (§2a)
     },
     "read_offer": {
       "label": "Read price (fast)", "executor": "script", "handler": "handlers/read_offer.mjs",
@@ -312,10 +350,9 @@ site (an `index.html` and no `bound.json`) gets the client added to its pages.
 
 ## 5. What is not here yet
 
-- Studio's side of Ask Octo (§2a): turning an `ask` into the clicker's chat message, `ask-status`, and `caps.ask`
-  with a plain reason for people who may not send messages. Until then asks are hidden.
-- Studio's side of location and follow mode (§2b), and the `layout` message (theme, title, caps) itself. Until then
-  `location()` in the preview card says location is not available there, and nobody can present or follow.
+- A structured result channel for asks: Octo writes records into the site's files and reloads open pages (§2a).
+- Ask caps across Studio tabs: one ask at a time holds per tab; the controller's six in ten minutes is kept in each
+  controller process's memory.
 - One Studio origin per controller: a Studio served from any origin other than the controller's `PUBLIC_APP_URL`
   (for example the desktop app's default start page, if it differs) frames previews whose pages take no host
   messages from it.

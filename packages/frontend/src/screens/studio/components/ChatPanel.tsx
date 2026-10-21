@@ -365,6 +365,8 @@ import { ConversationFileContext } from "../../../workspace/ConversationFileCont
 import { ConversationPreviewContext, type ConversationPreviewOpener } from "../../../workspace/ConversationPreviewContext";
 import { conversationSurfaceScope, closeConversationFile, closeConversationPreview, conversationFileLabel, conversationResourceId, openConversationFile, openConversationPreview, selectConversationView, visibleSitePreviewId } from "../../../workspace/conversationSurfaces";
 import { SitePreviewPanel } from "./SitePreviewPanel";
+import { askOutcomesFromRuns, composerAskSender, siteAskAccess } from "./previewHost/siteAsks";
+import type { SiteAskHost } from "./previewHost/useSiteAsks";
 import { endOwnPresentation } from "./previewHost/followStore";
 import { previewTabLocation } from "./previewHost/PreviewLocation";
 import { useLocationSitesVersion } from "./previewHost/locationSites";
@@ -2270,6 +2272,26 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     window.addEventListener(REQUEST_MESSAGE_UNDO_EVENT, handler);
     return () => window.removeEventListener(REQUEST_MESSAGE_UNDO_EVENT, handler);
   }, [invokeSubmitMessage]);
+
+  // Ask Octo from a site in a preview pane (docs/Bound-Sites.md §2a): the click is the person's own message in this
+  // conversation, through the same send path and access checks as typing it. Someone who may not send messages here
+  // sees the site's ask disabled with this reason.
+  const siteAskCaps = siteAskAccess({
+    userId: currentUserId,
+    capabilitiesResolved: projectCapabilitiesResolved,
+    writeDisabled: projectWriteDisabled,
+  });
+  const sendSiteAsk = useMemo(() => composerAskSender(invokeSubmitMessage), [invokeSubmitMessage]);
+  const siteAskOutcomes = useMemo(
+    () => askOutcomesFromRuns(Object.values(runs ?? {}), activeConversationEntry?.controllerId ?? null),
+    [activeConversationEntry?.controllerId, runs],
+  );
+  const siteAskHost = useMemo<SiteAskHost>(() => ({
+    canAsk: siteAskCaps,
+    userId: currentUserId,
+    send: sendSiteAsk,
+    outcomes: siteAskOutcomes,
+  }), [currentUserId, sendSiteAsk, siteAskCaps, siteAskOutcomes]);
 
   const invokeComposerPrimaryAction = useCallback<SubmitMessageFn>(
     async (override, options) => {
@@ -6253,7 +6275,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     {surfaces.previews.length > 0 && activeProjectId ? (
       <SitePreviewPanel id={sitePreviewPanelId} label={selectedPreview?.title ?? "Preview"} projectId={activeProjectId} scope={surfaceScope}
         spaceName={projectList.find(entry => entry.id === activeProjectId)?.name ?? null}
-        previews={surfaces.previews} visiblePreviewId={visiblePreviewId} style={!splitSurfaces ? { paddingBottom: composerOverlayHeight } : undefined} />
+        previews={surfaces.previews} visiblePreviewId={visiblePreviewId} style={!splitSurfaces ? { paddingBottom: composerOverlayHeight } : undefined}
+        asks={siteAskHost} />
     ) : null}
   </>;
 
