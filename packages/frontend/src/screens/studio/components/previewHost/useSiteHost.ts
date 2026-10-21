@@ -5,6 +5,8 @@ import { createLocationBroker, type LocationBroker } from "./locationBroker";
 import { adoptLocationSite, locationSiteKey, useLocationSiteStatus, type LocationSiteMeta } from "./locationSites";
 import { usePreviewFollow } from "./usePreviewFollow";
 import { useFollowAccount } from "./followStore";
+import { useSiteAsks, type SiteAskHost } from "./useSiteAsks";
+import { useFrameGesture } from "./frameGesture";
 
 const NO_ERROR = () => {};
 
@@ -27,8 +29,12 @@ export type SiteMessageEvent = Pick<MessageEvent, "data" | "origin" | "source">;
  * it, and the bar shows 📍 for a site that received it. Follow mode never
  * shares a view or tap holding a position this frame received since it was
  * loaded fresh.
+ *
+ * Ask Octo (docs/Bound-Sites.md §2a, useSiteAsks): the layout says whether
+ * this person may ask (`caps.ask`), and a site's `ask` becomes their own chat
+ * message through `asks.send`, answered with `ask-status`.
  */
-export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, frameOnScreen, record, spaceName = null, onError = NO_ERROR }: {
+export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, frameOnScreen, record, title = "", spaceName = null, asks = null, onError = NO_ERROR }: {
   frame: RefObject<HTMLIFrameElement | null>;
   /** The live capability address: messages go to its origin only. */
   viewerUrl: string | null;
@@ -40,8 +46,12 @@ export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, 
   frameOnScreen: boolean;
   /** From the pane's last health check; the broker fetches it itself when a site asks first. */
   record: SiteRecord | null;
+  /** The preview's title (what Octo named it): an ask's message says "via" this, never the page's own title. */
+  title?: string;
   /** The space's name, for the list of sites that received the person's location. */
   spaceName?: string | null;
+  /** Ask Octo from the site (docs/Bound-Sites.md §2a); null where Studio takes no asks. */
+  asks?: SiteAskHost | null;
   /** A follow-mode failure the pane shows. */
   onError?: (message: string) => void;
 }) {
@@ -58,7 +68,10 @@ export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, 
     observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class", "data-theme"] });
     return () => observer.disconnect();
   }, []);
-  const sendLayout = useCallback(() => { postToFrame(buildHostLayoutMessage(theme)); }, [postToFrame, theme]);
+  const userGesture = useFrameGesture(frame);
+  const siteAsks = useSiteAsks({ host: asks, projectId, previewId, siteTitle: record?.title ?? title, frameOnScreen, post: postToFrame, userGesture });
+  const askCaps = siteAsks.caps;
+  const sendLayout = useCallback(() => { postToFrame(buildHostLayoutMessage(theme, askCaps)); }, [askCaps, postToFrame, theme]);
   useEffect(() => { sendLayout(); }, [sendLayout]);
 
   const heardFromSite = useRef(false);
@@ -164,6 +177,8 @@ export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, 
   });
   const followSiteEvent = useRef(follow.handleSiteEvent);
   followSiteEvent.current = follow.handleSiteEvent;
+  const askEvent = useRef(siteAsks);
+  askEvent.current = siteAsks;
 
   /** One message from this pane's frame at the viewer's origin (the pane checked both). True when it was read. */
   const handleSiteMessage = useCallback((event: SiteMessageEvent): boolean => {
@@ -177,6 +192,8 @@ export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, 
       if (parsed.type === "layout-ack") {
         setSupports(current => parsed.supports.every(name => current.includes(name)) ? current : [...new Set([...current, ...parsed.supports])]);
       }
+      if (parsed.type === "ask") { askEvent.current.handleAsk(parsed.ask); return true; }
+      if (parsed.type === "ask-invalid") { askEvent.current.handleInvalid(parsed.id); return true; }
       followSiteEvent.current(parsed);
     }
     return true;
@@ -186,6 +203,8 @@ export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, 
     onFrameLoad,
     handleSiteMessage,
     follow,
+    /** An ask waiting for the person's confirm in Studio's own strip (the intent said `confirm: true`). */
+    askConfirm: siteAsks.confirm,
     supportsView: supports.includes("view"),
     location: {
       site: locationSite,

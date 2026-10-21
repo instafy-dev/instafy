@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -142,6 +142,33 @@ pub(crate) struct DispatchPromptResponse {
     pub(crate) status: String,
     #[serde(rename = "conversationId")]
     pub(crate) conversation_id: Option<Uuid>,
+}
+
+/// Where one dispatch spent its time, for the send route's `Server-Timing`
+/// header and the enqueue log line. Runtimes cannot see a queued job until the
+/// dispatch transaction commits, so `transaction` is also the part of a job's
+/// queue wait that no runtime poll can shorten.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct DispatchPhaseTimings {
+    /// From entry until the dispatch transaction has begun.
+    pub(crate) pre: Option<Duration>,
+    /// The managed AI proxy probe, run inside the dispatch transaction.
+    pub(crate) proxy: Option<Duration>,
+    /// From the dispatch transaction's BEGIN to its COMMIT.
+    pub(crate) transaction: Option<Duration>,
+    /// From COMMIT until the response is ready.
+    pub(crate) post: Option<Duration>,
+}
+
+/// Formats `Server-Timing` metrics (`name;dur=<ms>`) for the phases that ran.
+pub(crate) fn server_timing_value(phases: &[(&str, Option<Duration>)]) -> String {
+    phases
+        .iter()
+        .filter_map(|(name, duration)| {
+            duration.map(|duration| format!("{name};dur={:.1}", duration.as_secs_f64() * 1000.0))
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[derive(Debug, Clone)]
@@ -939,9 +966,28 @@ async fn dispatch_prompt(
 pub(crate) async fn process_dispatch_prompt(
     state: &AppState,
     context: &RequestContext,
-    mut request: DispatchPromptNormalized,
+    request: DispatchPromptNormalized,
 ) -> Result<DispatchPromptResponse, (StatusCode, Json<ApiError>)> {
+    process_dispatch_prompt_timed(
+        state,
+        context,
+        request,
+        &mut DispatchPhaseTimings::default(),
+    )
+    .await
+}
+
+pub(crate) async fn process_dispatch_prompt_timed(
+    state: &AppState,
+    context: &RequestContext,
+    mut request: DispatchPromptNormalized,
+    timings: &mut DispatchPhaseTimings,
+) -> Result<DispatchPromptResponse, (StatusCode, Json<ApiError>)> {
+    let started = Instant::now();
     crate::task_usage::strip_authoring_claims(&mut request.metadata);
+    // "Via a site" is the controller's to say: a client's claim is checked
+    // against the previews this sender can see below, and refused otherwise.
+    let site_intent_claim = crate::site_intent::take_site_intent_claim(&mut request.metadata);
     conversations::normalize_human_mention_metadata(&mut request.metadata)?;
     // Parity with the record path: untrusted callers must not persist a forged
     // controller participation marker through gate-bypassing dispatches (e.g.
@@ -990,6 +1036,22 @@ pub(crate) async fn process_dispatch_prompt(
         .await
         .map_err(|error| internal_error(format!("failed to finalize project ensure: {error}")))?;
 
+    if let Some(claim) = site_intent_claim.as_ref() {
+        // An ask that does not check out is refused, not sent without its
+        // site: the clicker hears it was not sent. A send-queue entry was
+        // checked and counted when it was queued; it is re-checked here (the
+        // preview may have closed since) but not counted again.
+        let verified =
+            crate::site_intent::require_site_intent(state, &project.id, context, claim).await?;
+        if request.dispatch_queue_entry_id.is_none() {
+            crate::site_intent::charge_site_ask(state, &verified).await?;
+        }
+        ensure_object(&mut request.metadata).insert(
+            crate::site_intent::SITE_INTENT_KEY.to_string(),
+            verified.json,
+        );
+    }
+
     let (selected_runtime_preference, runtime_preference_target_user) =
         if let Some(user_id) = context.user_id {
             if let Some(preference) = state
@@ -1029,8 +1091,12 @@ pub(crate) async fn process_dispatch_prompt(
         .transaction()
         .await
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
+    let transaction_started = Instant::now();
+    timings.pre = Some(transaction_started.duration_since(started));
 
-    let project = ensure_project_org(&transaction, &project).await?;
+    // The project ensure above already gave the project an org and its default
+    // subscription, and committed both; checking again here cost six round
+    // trips inside the transaction that keeps the job hidden from runtimes.
     crate::ensure_project_access(&transaction, &project, context, request.session_id).await?;
     ensure_project_prompt_access(&transaction, &project, context, request.session_id).await?;
     // This snapshot informs the planner; admission still checks current controller policy.
@@ -1865,14 +1931,17 @@ pub(crate) async fn process_dispatch_prompt(
             JsonValue::from(state.config.managed_ai_credit_burn_amount),
         );
     } else if uses_managed_ai {
+        let proxy_started = Instant::now();
         let proxy_requirements = if let Some(proxy_base_url) = state.config.proxy_base_url.as_ref()
         {
-            credentials::fetch_proxy_credential_requirements(
+            let requirements = credentials::fetch_proxy_credential_requirements(
                 &state.http_client,
                 proxy_base_url,
                 Duration::from_secs(2),
             )
-            .await
+            .await;
+            timings.proxy = Some(proxy_started.elapsed());
+            requirements
         } else {
             credentials::ProxyCredentialRequirements {
                 requires_user_credentials: true,
@@ -2274,6 +2343,8 @@ pub(crate) async fn process_dispatch_prompt(
         .commit()
         .await
         .map_err(|error| internal_error(format!("failed to commit dispatch prompt: {error}")))?;
+    let committed = Instant::now();
+    timings.transaction = Some(committed.duration_since(transaction_started));
 
     if let Some(user_message) = user_message.as_ref() {
         conversations::publish_conversation_message_event(&state.events, user_message);
@@ -2794,10 +2865,17 @@ pub(crate) async fn process_dispatch_prompt(
         }
     }
 
+    timings.post = Some(committed.elapsed());
     info!(
         run_id = %primary_run_id,
         project_id = %project.id,
         job_id = ?primary_job_id,
+        phases = %server_timing_value(&[
+            ("pre", timings.pre),
+            ("tx", timings.transaction),
+            ("proxy", timings.proxy),
+            ("post", timings.post),
+        ]),
         "dispatch prompt enqueued"
     );
 
@@ -5352,6 +5430,17 @@ mod security_tests;
 mod tests {
     use super::*;
     use serde_json::{json, Value as JsonValue};
+
+    #[test]
+    fn server_timing_lists_only_the_phases_that_ran() {
+        let value = server_timing_value(&[
+            ("checkout", Some(Duration::from_micros(41_260))),
+            ("proxy", None),
+            ("tx", Some(Duration::from_millis(4_200))),
+        ]);
+        assert_eq!(value, "checkout;dur=41.3, tx;dur=4200.0");
+        assert_eq!(server_timing_value(&[("pre", None)]), "");
+    }
 
     fn ambient_gate_for(prompt: &str, intent: &str, metadata: &JsonValue) -> bool {
         ambient_gate_for_with_verified_agent(prompt, intent, metadata, false)

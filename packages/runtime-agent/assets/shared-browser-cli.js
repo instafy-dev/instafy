@@ -1079,7 +1079,43 @@ async function snapshot(page, { withhold = false } = {}) {
   };
 }
 
+// A browser that has just started shows about:blank, and a new tab opened in
+// the viewer shows the new-tab page. Neither has an origin to approve, so they
+// are reported as blank, which leaves the agent free to navigate to the task's
+// site under that site's own approval. The reply is constant apart from the
+// fixed address and nothing is read from the page: an about:blank document can
+// inherit its opener's origin and hold script-written content. Every other
+// origin-less page (data:, about:srcdoc, about:blank#..., other browser pages)
+// still fails closed, and no action can target a blank page.
+const BLANK_PAGE_URLS = new Set(["", "about:blank", "chrome://newtab/", "chrome://new-tab-page/"]);
+
+function isBlankPage(page) {
+  return BLANK_PAGE_URLS.has(page.url());
+}
+
+function blankPageResult(page, extra = {}) {
+  const url = BLANK_PAGE_URLS.has(page.url()) ? page.url() : "about:blank";
+  return {
+    ...extra,
+    snapshotId: snapshotFingerprint(url, []),
+    browserPageId: EXPECTED_BROWSER_PAGE_ID,
+    blank: true,
+    originApproved: false,
+    redacted: false,
+    url,
+    title: "",
+    visibleText: "",
+    secretScreen: false,
+    interactiveElements: [],
+    message:
+      "The page is blank. Call navigate with the http(s) address the task names; that site's approval applies there.",
+  };
+}
+
 async function snapshotForResult(page, options = {}) {
+  if (isBlankPage(page)) {
+    return blankPageResult(page);
+  }
   if (!approvalProtocol.isOriginApproved(page.url())) {
     return approvalProtocol.redactedPageResult();
   }
@@ -1407,6 +1443,9 @@ async function execute(browser, method, requestPath, body) {
       browserPageId: EXPECTED_BROWSER_PAGE_ID,
       pageCount: browser.contexts().flatMap((context) => context.pages()).length,
     };
+    if (isBlankPage(page)) {
+      return blankPageResult(page, shared);
+    }
     if (!approvalProtocol.isOriginApproved(page.url())) {
       return approvalProtocol.redactedPageResult(shared);
     }
@@ -1421,6 +1460,11 @@ async function execute(browser, method, requestPath, body) {
   }
 
   if (method === "GET" && requestPath === "/v1/snapshot") {
+    // A blank observation is not action evidence: like status, it only shows
+    // that the browser is reachable, so a turn that stops here is retried.
+    if (isBlankPage(page)) {
+      return blankPageResult(page);
+    }
     const approvedOrigin = await approvalProtocol.ensureOriginApproved(
       page.url(),
       "Allow the assistant to read and interact with this site for this run",

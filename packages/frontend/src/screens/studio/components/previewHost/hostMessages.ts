@@ -5,15 +5,18 @@
  * a plain page.
  *
  * Studio → site: `{source:"instafy-host", v:1, type:"layout", caps, theme}`
- * says what Studio offers the frame: its theme, and that the site may ask
+ * says what Studio offers the frame: its theme, that the site may ask
  * Studio for the person's location (`caps.location: "host"`), since the frame
- * itself may not use the browser's geolocation.
+ * itself may not use the browser's geolocation, and whether this person may
+ * Ask Octo from it (`caps.ask`: true, or the plain reason they may not).
  * Site → Studio: `{source:<the site's kit>, v:1, type, payload}`. Location has
  * its own pair in `locationBroker.ts`; follow mode reads `layout-ack` (what the
- * site supports), `view`, `tap` and `interact`. Messages are data, never
+ * site supports), `view`, `tap` and `interact`; Ask Octo reads `ask`
+ * (siteAsks.ts) and answers `ask-status`. Messages are data, never
  * commands, and the pane reads them only from its own frame at the viewer's
  * origin.
  */
+import { parseSiteAsk, type SiteAsk } from "./siteAsks";
 
 export const HOST_MESSAGE_SOURCE = "instafy-host";
 export const HOST_MESSAGE_VERSION = 1;
@@ -43,13 +46,49 @@ export type HostLayoutMessage = {
    * (`location-request`), never through `navigator.geolocation`, which the
    * frame is not allowed to use.
    */
-  caps: { location: "host" };
+  caps: {
+    location: "host";
+    /**
+     * Ask Octo (docs/Bound-Sites.md §2a): true when this person may send
+     * messages in the conversation the preview belongs to, so a click is sent
+     * as their own message; otherwise the plain reason they may not, which the
+     * site shows on its disabled button. Left out where Studio takes no asks.
+     */
+    ask?: true | string;
+  };
   /** Studio's theme, so a site can match it. */
   theme: "light" | "dark";
 };
 
-export function buildHostLayoutMessage(theme: "light" | "dark"): HostLayoutMessage {
-  return { source: HOST_MESSAGE_SOURCE, v: HOST_MESSAGE_VERSION, type: "layout", caps: { location: "host" }, theme };
+/** The longest `caps.ask` reason a site is sent (the bind client keeps 140 characters). */
+export const ASK_REASON_MAX_CHARS = 140;
+
+export function buildHostLayoutMessage(theme: "light" | "dark", ask: true | string | null = null): HostLayoutMessage {
+  const caps: HostLayoutMessage["caps"] = { location: "host" };
+  if (ask === true) caps.ask = true;
+  else if (typeof ask === "string" && ask.trim()) caps.ask = ask.trim().slice(0, ASK_REASON_MAX_CHARS);
+  return { source: HOST_MESSAGE_SOURCE, v: HOST_MESSAGE_VERSION, type: "layout", caps, theme };
+}
+
+/**
+ * What became of one ask, for the site's button: `confirm` (Studio is asking
+ * the person first), `sent` (it is their message in the chat), `done` or
+ * `failed` (that message's run ended), `declined` (nothing was sent; `reason`
+ * says why in plain words).
+ */
+export type AskState = "confirm" | "sent" | "done" | "declined" | "failed";
+
+export type HostAskStatusMessage = {
+  source: typeof HOST_MESSAGE_SOURCE;
+  v: typeof HOST_MESSAGE_VERSION;
+  type: "ask-status";
+  payload: { id: string; state: AskState; reason?: string };
+};
+
+export function buildAskStatusMessage(id: string, state: AskState, reason?: string | null): HostAskStatusMessage {
+  const payload: HostAskStatusMessage["payload"] = { id, state };
+  if (reason && reason.trim()) payload.reason = reason.trim().slice(0, ASK_REASON_MAX_CHARS);
+  return { source: HOST_MESSAGE_SOURCE, v: HOST_MESSAGE_VERSION, type: "ask-status", payload };
 }
 
 /**
@@ -88,7 +127,11 @@ export type SiteEvent =
    */
   | { type: "view"; seq: number | null; payload: unknown }
   | { type: "tap"; seq: number | null; payload: unknown }
-  | { type: "interact" };
+  | { type: "interact" }
+  /** An Ask Octo click (siteAsks.ts checked its shape and sizes); a request, never a decision. */
+  | { type: "ask"; ask: SiteAsk }
+  /** An ask Studio could not read (malformed or too large): it is declined, never sent. */
+  | { type: "ask-invalid"; id: string };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -123,6 +166,11 @@ export function parseSiteMessage(data: unknown): SiteEvent | null {
     }
     case "interact":
       return { type: "interact" };
+    case "ask": {
+      const parsed = parseSiteAsk(data.payload);
+      if (parsed.ok) return { type: "ask", ask: parsed.ask };
+      return parsed.id ? { type: "ask-invalid", id: parsed.id } : null;
+    }
     default:
       return null;
   }

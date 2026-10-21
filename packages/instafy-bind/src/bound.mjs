@@ -59,6 +59,7 @@ export const BOUND_SCHEMA = Object.freeze({
         },
         pending: { type: "string", pattern: "^(item|none|cell:[a-z][a-z0-9_]{0,47})$" },
         confirm: { type: "boolean" },
+        say: { type: "string", minLength: 1, maxLength: 120 },
         cooldown_s: { type: "number", minimum: 0, maximum: 3600 },
         timeout_s: { type: "number", minimum: 1, maximum: 1800 },
         sources: { type: "array", maxItems: 20, items: { type: "string", maxLength: 80 } },
@@ -110,6 +111,15 @@ export function checkBound(bound) {
     for (const lane of def.lanes || []) {
       if (executor && !laneSet.includes(lane)) {
         problems.push({ path: `${p}.lanes`, message: `${executor} intents may only write lanes ${laneSet.join(", ")} (got "${lane}")` });
+      }
+    }
+    if (def.say !== undefined && executor !== "agent") {
+      problems.push({ path: `${p}.say`, message: "say is for agent intents: it is the chat line Instafy sends for an Ask Octo click" });
+    }
+    if (executor === "agent" && typeof def.say === "string") {
+      const declared = new Set(Object.keys(def.params?.properties || {}));
+      for (const [, key] of def.say.matchAll(/\{\s*([A-Za-z0-9_]+)\s*\}/g)) {
+        if (!declared.has(key)) problems.push({ path: `${p}.say`, message: `{${key}} is not a declared param` });
       }
     }
     if (executor === "agent" && def.agent?.prompt) {
@@ -187,5 +197,6 @@ export function intentCatalog(bound, runnable) {
       executor: executorOf(def),
       target: { ...def.target, records: targetOf(name, def) },
       ...(Array.isArray(def.private_params) && def.private_params.length ? { private_params: def.private_params } : {}),
+      ...(executorOf(def) === "agent" && typeof def.say === "string" ? { say: def.say } : {}),
     }));
 }

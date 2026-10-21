@@ -35,6 +35,9 @@ use uuid::Uuid;
 static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "proxy_integration/evidence_retry.rs"]
+mod evidence_retry;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "proxy_integration/isolated_tool_workers.rs"]
 mod isolated_tool_workers;
 #[path = "proxy_integration/native_compaction.rs"]
@@ -1009,6 +1012,7 @@ async fn read_reference_proxy_case(case: ReadReferenceCase) -> Result<()> {
         tenant_projects: Vec::new(),
         parent_lease_id: None,
         poll_interval: Duration::from_millis(10),
+        lease_wait: Duration::ZERO,
         lease_max_jobs: 1,
         lease_seconds: 30,
         heartbeat_seconds: 30,

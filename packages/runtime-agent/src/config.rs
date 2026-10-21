@@ -133,6 +133,9 @@ pub struct Config {
     pub tenant_projects: Vec<Uuid>,
     pub parent_lease_id: Option<Uuid>,
     pub poll_interval: Duration,
+    /// How long a lease poll may wait at the controller for work before it
+    /// answers empty. Zero polls without waiting, once per `poll_interval`.
+    pub lease_wait: Duration,
     pub lease_max_jobs: u32,
     pub lease_seconds: u32,
     pub heartbeat_seconds: u32,
@@ -352,6 +355,19 @@ impl Config {
             .and_then(|raw| raw.parse::<u64>().ok())
             .map(Duration::from_millis)
             .unwrap_or_else(|| Duration::from_millis(2000));
+        // A wait shorter than the poll interval saves nothing over polling and
+        // costs a held request, so it means not waiting.
+        let lease_wait = std::env::var("RUNTIME_LEASE_WAIT_MS")
+            .ok()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .map(Duration::from_millis)
+            .unwrap_or_else(|| Duration::from_secs(10))
+            .min(Duration::from_secs(15));
+        let lease_wait = if lease_wait < poll_interval {
+            Duration::ZERO
+        } else {
+            lease_wait
+        };
 
         let strict_mode = parse_env_bool("RUNTIME_STRICT_MODE").unwrap_or(false);
         let dev_isolation_mode = parse_env_bool("RUNTIME_DEV_ISOLATION").unwrap_or(false);
@@ -595,6 +611,7 @@ impl Config {
             tenant_projects,
             parent_lease_id,
             poll_interval,
+            lease_wait,
             lease_max_jobs,
             lease_seconds,
             heartbeat_seconds,

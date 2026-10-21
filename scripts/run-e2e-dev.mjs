@@ -45,6 +45,7 @@ import {
   controllerHoldsHookSecret,
   controllerReuseDecision,
   ownsControllerListener,
+  missingBrokerHooks,
   tunnelBrokerComposeCalls,
   tunnelBrokerStartPlan,
 } from "./lib/localTunnelBroker.mjs";
@@ -1967,6 +1968,26 @@ async function startTunnelBrokerIngressIfNeeded() {
     `[runtime-dev] Tunnel-broker is listening (TUNNEL_BROKER_BASE_URL=${tunnelBrokerBaseUrlDefault}).`
   );
   return { running: true, started: true, controllerEnv: plan.controller };
+}
+
+/**
+ * Warn when this checkout's running broker lacks its controller hooks (see missingBrokerHooks).
+ * Returns whether it has them; true when no broker container of this checkout runs.
+ */
+function reportTunnelBrokerHooks() {
+  const ids = tryCapture("docker", [
+    "compose", "-f", tunnelBrokerComposeFile, "-f", tunnelBrokerComposeOverride, "ps", "-q", "broker",
+  ], { cwd: tunnelBrokerDir });
+  const id = (ids.stdout ?? "").trim().split("\n")[0];
+  if (!id) return true;
+  const inspected = tryCapture("docker", ["inspect", id, "--format", "{{range .Config.Env}}{{println .}}{{end}}"]);
+  const missing = missingBrokerHooks(inspected.stdout ?? "");
+  if (missing.length === 0) return true;
+  console.warn(
+    `[runtime-dev] The tunnel broker runs without ${missing.join(", ")}: it creates tunnels the controller never ` +
+      "approved and never reports them. Recreate it with: node scripts/run-e2e-dev.mjs broker:start"
+  );
+  return false;
 }
 
 async function stopTunnelBrokerIngressIfWeStarted() {
@@ -4291,6 +4312,7 @@ async function status() {
   console.log("");
   await controllerStatus();
   await proxyStatus();
+  reportTunnelBrokerHooks();
   reportRuntimeBuildStatus();
 }
 
@@ -4308,6 +4330,9 @@ async function check() {
   const controllerReady = await waitForPort(controllerPort, { attempts: 1, delayMs: 1 });
   if (!controllerReady) {
     console.warn(`[runtime-dev] Controller not reachable on ${controllerBaseUrl}`);
+    ok = false;
+  }
+  if (!reportTunnelBrokerHooks()) {
     ok = false;
   }
 
@@ -4371,6 +4396,8 @@ function printUsage() {
   );
   console.log(`\nController helpers:`);
   console.log(`  controller:start|stop|status`);
+  console.log(`\nTunnel broker:`);
+  console.log(`  broker:start  (Re)create this checkout's broker with its controller hooks and preview settings`);
   console.log(`\nEnv toggles:`);
   console.log(`  RUNTIME_SKIP_CONTROLLER=1   Skip starting controller`);
   console.log(`  INSTAFY_RUNTIME_CONTROLLER_BIN=<path>       Use a verified prebuilt controller`);
@@ -4426,6 +4453,17 @@ async function main(argv = []) {
       }
       const ctx = await buildRuntimeContext();
       await ensureControllerStack(ctx);
+      break;
+    }
+    case "broker:start": {
+      // (Re)create only this checkout's broker services with the launcher's own settings, so
+      // its controller hooks and private preview settings are the ones `up` gives it.
+      const started = await startTunnelBrokerIngressIfNeeded();
+      if (!started.started) {
+        console.log("[runtime-dev] No broker started: RUNTIME_SKIP_TUNNEL_BROKER=1 or TUNNEL_BROKER_BASE_URL points elsewhere.");
+      } else if (!reportTunnelBrokerHooks()) {
+        process.exitCode = 1;
+      }
       break;
     }
     case "controller:stop":

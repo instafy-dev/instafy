@@ -1,11 +1,25 @@
 import { describe, expect, it } from "vitest";
-import { buildHostLayoutMessage, isSiteMessageSource, parseSiteMessage, withHostQuery } from "../previewHost/hostMessages";
+import { buildAskStatusMessage, buildHostLayoutMessage, isSiteMessageSource, parseSiteMessage, withHostQuery } from "../previewHost/hostMessages";
 import { SITE_PREVIEW_FRAME_ALLOW } from "../SitePreviewPane";
 
 describe("host → site layout message", () => {
   it("has the v1 shape: the theme, and location only through Studio", () => {
     expect(buildHostLayoutMessage("dark")).toEqual({ source: "instafy-host", v: 1, type: "layout", caps: { location: "host" }, theme: "dark" });
     expect(buildHostLayoutMessage("light")).toEqual(expect.objectContaining({ theme: "light" }));
+  });
+
+  it("says whether this person may Ask Octo: true, or the plain reason (capped), or nothing where asks are not taken", () => {
+    expect(buildHostLayoutMessage("light", true).caps).toEqual({ location: "host", ask: true });
+    expect(buildHostLayoutMessage("light", " You can view this space but not send messages in it. ").caps)
+      .toEqual({ location: "host", ask: "You can view this space but not send messages in it." });
+    expect((buildHostLayoutMessage("light", "x".repeat(300)).caps.ask as string).length).toBe(140);
+    expect(buildHostLayoutMessage("light", null).caps).toEqual({ location: "host" });
+    expect(buildHostLayoutMessage("light", "  ").caps).toEqual({ location: "host" });
+  });
+
+  it("answers an ask with ask-status", () => {
+    expect(buildAskStatusMessage("int_a_b1", "sent")).toEqual({ source: "instafy-host", v: 1, type: "ask-status", payload: { id: "int_a_b1", state: "sent" } });
+    expect(buildAskStatusMessage("int_a_b1", "declined", "Not sent.").payload).toEqual({ id: "int_a_b1", state: "declined", reason: "Not sent." });
   });
 
   it("adds ?instafy_host=studio to the frame address, keeping the path and any query", () => {
@@ -44,8 +58,19 @@ describe("site → host events", () => {
     expect(parseSiteMessage({ ...kit, type: "tap", seq: 2, payload: { x: 0.4, y: 0.6 } })).toEqual({ type: "tap", seq: 2, payload: { x: 0.4, y: 0.6 } });
   });
 
+  it("reads an ask, and names a malformed one by its id so it can be declined", () => {
+    const kit = { source: "instafy-bind", v: 1 };
+    const payload = { id: "int_a_b1", intent: "check_size", label: "Ask Octo", params: { size: "10" }, ref: "shoes:a" };
+    expect(parseSiteMessage({ ...kit, type: "ask", payload })).toEqual({
+      type: "ask", ask: { ...payload, say: null, confirm: false, withheld: [], coarsened: [] },
+    });
+    expect(parseSiteMessage({ ...kit, type: "ask", payload: { ...payload, params: "size=10" } })).toEqual({ type: "ask-invalid", id: "int_a_b1" });
+    expect(parseSiteMessage({ ...kit, type: "ask", payload: { id: "x", key: "escape" } })).toEqual({ type: "ask-invalid", id: "x" });
+    expect(parseSiteMessage({ ...kit, type: "ask", payload: { key: "escape" } })).toBeNull();
+  });
+
   it("reads nothing else: a site cannot select, navigate or drive Studio through this channel", () => {
-    for (const type of ["select", "lens", "ask", "hotkey", "page", "command", "navigate"]) {
+    for (const type of ["select", "lens", "hotkey", "page", "command", "navigate"]) {
       expect(parseSiteMessage({ source: "instafy-site", v: 1, type, payload: { id: "x", key: "escape", path: "/" } })).toBeNull();
     }
   });

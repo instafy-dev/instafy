@@ -10,6 +10,7 @@ import {
   localBrokerHookEnv,
   localPreviewEnv,
   localPreviewsEnabled,
+  missingBrokerHooks,
   ownsControllerListener,
   tunnelBrokerComposeCalls,
   tunnelBrokerStartPlan,
@@ -307,4 +308,14 @@ test("the dev launcher uses these rules and never force-kills from its reuse ste
   assert.match(broker, /tunnelBrokerComposeCalls\(/);
   assert.match(broker, /controllerEnv: plan\.controller/);
   assert.doesNotMatch(broker, /process\.env\[|Object\.assign\(process\.env/);
+});
+
+test("a running broker without its controller hooks is found from its environment, naming no value", () => {
+  const recreatedByHand = "ACL_HOOK_URL=\nACL_HOOK_TOKEN=s3cret\nEVENT_HOOK_URL=\nEVENT_HOOK_TOKEN=\nPREVIEW_DOMAIN=preview.localhost\n";
+  assert.deepEqual(missingBrokerHooks(recreatedByHand), ["ACL_HOOK_URL", "EVENT_HOOK_URL", "EVENT_HOOK_TOKEN"]);
+  const plan = tunnelBrokerStartPlan({ env: {}, controllerPort, resolveHookSecret: secret });
+  const started = Object.entries(plan.broker).map(([key, value]) => `${key}=${value}`).join("\n");
+  assert.deepEqual(missingBrokerHooks(started), [], "what `up` and `broker:start` give the broker has every hook");
+  assert.deepEqual(missingBrokerHooks(""), ["ACL_HOOK_URL", "ACL_HOOK_TOKEN", "EVENT_HOOK_URL", "EVENT_HOOK_TOKEN"]);
+  assert.ok(missingBrokerHooks(recreatedByHand).every((name) => !name.includes("s3cret")));
 });

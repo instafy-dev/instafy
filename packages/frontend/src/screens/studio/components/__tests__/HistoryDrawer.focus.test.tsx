@@ -344,6 +344,38 @@ describe("HistoryDrawer: keyboard focus under latency", () => {
       expect(status()).toBe("Restore cancelled. Nothing was changed.");
     });
 
+    it("Cancel pressed in the render that enables it still lands on the row's Restore", async () => {
+      // A slow runner can press Cancel after the render that enables it but
+      // before React runs that render's effects. React then runs them while
+      // Cancel still has focus, ahead of the render that removes Cancel.
+      mocks.restoreRecovery.mockImplementation(() => later(conflict(["src/a.ts", "src/b.ts"]), 20));
+      await openWithRows();
+      let observer: MutationObserver | null = null;
+      const pressed = new Promise<void>((resolve) => {
+        observer = new MutationObserver(() => {
+          const cancel = q<HTMLButtonElement>(row(FIRST), "unsaved-work-conflict-cancel");
+          if (!cancel || cancel.disabled) {
+            return;
+          }
+          observer?.disconnect();
+          cancel.focus();
+          cancel.click();
+          resolve();
+        });
+        observer.observe(container, { subtree: true, childList: true, attributes: true });
+      });
+      try {
+        await pressFocused(q(row(FIRST), "unsaved-work-restore"), "Restore");
+        await pressed;
+        await until(() => q(row(FIRST), "unsaved-work-conflict") === null, "the choices to close");
+        await settle();
+      } finally {
+        (observer as MutationObserver | null)?.disconnect();
+      }
+      expect(document.activeElement).toBe(q(row(FIRST), "unsaved-work-restore"));
+      expect(status()).toBe("Restore cancelled. Nothing was changed.");
+    });
+
     it("Use this version lands on the next file once the save answers", async () => {
       mocks.restoreRecovery.mockImplementation(() => later(conflict(["src/a.ts", "src/b.ts"]), 20));
       mocks.readAt.mockImplementation(() =>

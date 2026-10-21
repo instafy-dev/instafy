@@ -271,6 +271,15 @@ Evidence comes from successful terminal command receipts, with exact argv retain
 from display text. Failed, incomplete or malformed receipts do not count. The recognizer accepts
 bounded literal read sequences conservatively: a successful `&&` segment proves its reads,
 while earlier commands before a semicolon or newline are not proven by the final exit status.
+A `|` pipeline counts as one observation of its first command when every later stage only
+formats output (such as `head`, `tail`, `grep`, `wc`, `sort`, `jq` without `-n`, `--arg` or
+file operands, or `python3 -m json.tool`). Without pipefail a pipeline's exit status proves
+only its last stage, so a pipeline never proves a conversation lookup, and a failed first stage
+can still be credited as an observation; its error text stays in the output because an earlier
+stage may not discard stderr. Stderr may go to `/dev/null` only on an unpiped command or a
+pipeline's last stage; any other redirect is rejected. Commands that only print literal text
+(`echo`, `printf`, `yes`) never count, piped or not. Short read flags such as `grep -h` and
+`ls -h` are reads, while `--help` and `--version` are not.
 Unsupported shell shapes may remain unrecognized even if a read actually occurred. Legacy
 single-command interpreter receipts remain generic execution evidence, not proof of correct
 program semantics or answers. This classification does not grant execution permission.
@@ -281,7 +290,15 @@ without replaying raw scripts. Successful evidence is accumulated across attempt
 when a provider reuses event IDs. Failed pre-observations do not satisfy a requirement, and
 cancellation interrupts recovery backoff. Missing context retrieval remains blocking after the
 retry; an ordinary observation-only job retains the existing warning path when its retry
-produces a usable result. The `codex/routing-evidence-recovery` artifact records cumulative
+produces a usable result. The job keeps the first attempt's answer, records a
+`codex/final-message-kept-from-attempt` artifact and still merges the retry's evidence when all
+of these hold: the retry ran only for missing command observation; the first attempt completed a
+command that ran a program beyond literal output (`echo`, `printf`, `cd` and here-documents do
+not count, while an unsupported read shape does); the retry returned no actions and wrote no
+files; and the retry brings no answer of its own (an empty or fence-only reply, a lead-in line
+before empty fences, an internal fallback, a transient upstream error, or a reply from a retry
+that ran no such program, where a failed `grep` still counts as having run). The saved provider
+thread remains the retry's. The `codex/routing-evidence-recovery` artifact records cumulative
 requirements, evidence and receipt counts, not command contents.
 
 ## Context Recovery Contract

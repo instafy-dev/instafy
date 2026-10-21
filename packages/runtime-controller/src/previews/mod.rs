@@ -62,6 +62,8 @@ mod follow_tests;
 mod serve;
 mod sessions;
 #[cfg(test)]
+mod site_intent_tests;
+#[cfg(test)]
 mod tests;
 mod wake;
 
@@ -1623,6 +1625,33 @@ async fn mark_preview_closed(pool: &PgPool, grant_row_id: &Uuid) -> ApiResult<()
         .await
         .map_err(|error| internal_error(format!("failed to close preview: {error}")))?;
     Ok(())
+}
+
+/// The preview an Ask Octo message names (`metadata.siteIntent.previewId`,
+/// crate::site_intent): its title and port when it is an open private
+/// preview in this project that `user_id` may see, else None. Needs no
+/// broker: a preview that cannot be served has no grant left to find.
+pub(crate) async fn site_intent_preview(
+    state: &AppState,
+    project_id: &Uuid,
+    user_id: &Uuid,
+    preview_id: &Uuid,
+) -> ApiResult<Option<crate::site_intent::SitePreviewFacts>> {
+    let grant = match load_preview_grant(&state.pool, project_id, &preview_id.to_string()).await {
+        Ok(grant) => grant,
+        Err((StatusCode::NOT_FOUND, _)) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !grant.is_private_preview() || !grant.is_live() || grant.is_closed() {
+        return Ok(None);
+    }
+    if !viewer_may_see_preview(state, project_id, user_id, &grant).await? {
+        return Ok(None);
+    }
+    Ok(Some(crate::site_intent::SitePreviewFacts {
+        title: grant.title(),
+        port: grant.port(),
+    }))
 }
 
 /// The broker hook's identity check of a viewer: still a member who may see

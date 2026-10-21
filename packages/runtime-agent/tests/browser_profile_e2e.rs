@@ -46,6 +46,7 @@ fn client(fixture: &Fixture, index: usize) -> Result<(ControllerClient, Registra
         tenant_projects: vec![],
         parent_lease_id: None,
         poll_interval: Duration::from_secs(1),
+        lease_wait: Duration::ZERO,
         lease_max_jobs: 1,
         lease_seconds: 120,
         heartbeat_seconds: 60,

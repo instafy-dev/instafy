@@ -30,6 +30,7 @@
       "label": "Ask Octo",
       "emoji": "🐙",
       "describe": "An Octo turn opens the product page in its browser and checks one size",
+      "say": "Is size {size} in stock for {ref}?",
       "executor": "agent",
       "agent": {
         "prompt": "Open this product page in your browser: {{url}}\nThe shopper's size is {{size}}. Pick that size on the page the way a shopper would (US men's unless the page says otherwise). Report only what the page shows: is size {{size}} available to buy right now, and what is the price for it (amount and currency)?\nReturn these records for ref {{ref}}:\n1. a claim with attr {{attr}}, label = \"Size \" followed by the size, value \"In stock\", \"Sold out\" or \"Not listed\", status ok (or uncertain if the page is unclear, with a short note why), basis \"live\";\n2. an offer for that size (oid built from the ref and size, variant.label = \"Size \" followed by the size, seller = the store's name, availability, price.kind \"regular\" or \"sale\", handoff.url = the page URL), only if a price is shown.\nUse prov.source = the store's host name (no www), prov.url = the page URL, ttl_s 21600, class \"live\". Decline cookie banners. Do not add to cart, sign in or accept any terms.",
