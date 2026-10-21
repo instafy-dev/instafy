@@ -484,4 +484,26 @@ describe("useChatSubmitFlow sends made for the person", () => {
     expect(composer.draft).toBe(RETRY_PROMPT);
     expect(options.focusInput).not.toHaveBeenCalled();
   });
+
+  it("an Ask Octo send that would only be recorded (no Octo turn) is not sent at all", async () => {
+    const options = createOptions({
+      targetsOverlapActiveRuns: vi.fn(() => false),
+      resolveGroupParticipationBeforeSubmit: vi.fn(async ({ metadata }) => ({
+        mode: "record_only" as const,
+        metadata: metadata ?? null,
+      })),
+    });
+    const resultRef = await mount(options);
+    let sent: boolean | undefined;
+    await act(async () => {
+      sent = await resultRef.current?.submitMessage(
+        { message: "Is size 10 in stock? · via Running shoes", editorState: null, metadata: { siteIntent: { askId: "a" } }, targetAgentHandles: ["octo"] },
+        { automatic: true, requireAgentTurn: true, onQueued: vi.fn() },
+      );
+    });
+    expect(sent).toBe(false);
+    expect(options.performSubmit).not.toHaveBeenCalled();
+    expect(options.enqueueServerSendQueueItem).not.toHaveBeenCalled();
+    expect(options.onRecordMessage).not.toHaveBeenCalled();
+  });
 });

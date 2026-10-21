@@ -23,6 +23,8 @@ import { setLocationStopped } from "./previewHost/locationSites";
 import { LocationBarControl, LocationBlockedNotice, LocationToast } from "./previewHost/PreviewLocation";
 import { followLabels } from "./previewHost/followMode";
 import { FollowRing, FollowRipples, FollowToast, SitePreviewFollowControls } from "./previewHost/FollowControls";
+import { AskConfirmStrip } from "./previewHost/AskConfirmStrip";
+import type { SiteAskHost } from "./previewHost/useSiteAsks";
 import { PreviewWakeError, START_NEEDS_BUILDER_TEXT, wakeUntilLive } from "./sitePreviewWake";
 
 export const SITE_PREVIEW_HEALTH_POLL_MS = 15_000;
@@ -134,7 +136,7 @@ function statusDetail(state: SitePreviewPaneState, port: number | null): string 
  * heartbeat each mint one new session; a second loss in a row ends it, so a
  * removed member never loops. Showing the pane again allows one more.
  */
-export function SitePreviewPane({ projectId, previewId, title, visible, spaceName = null }: {
+export function SitePreviewPane({ projectId, previewId, title, visible, spaceName = null, asks = null }: {
   projectId: string;
   previewId: string;
   title: string;
@@ -142,6 +144,8 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
   visible: boolean;
   /** The space's name, for the list of sites that received the person's location. */
   spaceName?: string | null;
+  /** Ask Octo from the site, as the person's own message in this conversation; null where asks are not taken. */
+  asks?: SiteAskHost | null;
 }) {
   const frame = useRef<HTMLIFrameElement>(null);
   const [viewerUrl, setViewerUrl] = useState<string | null>(null);
@@ -343,7 +347,7 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
   const frameShown = Boolean(viewerUrl) && session === "ready" && (shown === "checking" || shown === "live" || shown === "not_responding");
   const frameOnScreen = visible && frameShown;
   const host = useSiteHost({
-    frame, viewerUrl: frameShown ? viewerUrl : null, frameKey, projectId, previewId, frameOnScreen, record, spaceName,
+    frame, viewerUrl: frameShown ? viewerUrl : null, frameKey, projectId, previewId, frameOnScreen, record, title, spaceName, asks,
     onError: message => { if (mounted.current) setFeedback(message); },
   });
   siteMessage.current = host.handleSiteMessage;
@@ -479,6 +483,7 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
         {frameShown && follow.state.role === "following" ? <FollowRing /> : null}
         {frameShown ? <FollowRipples ripples={follow.ripples} /> : null}
         {host.location.blocked ? <LocationBlockedNotice onDismiss={host.location.dismissBlocked} /> : null}
+        {host.askConfirm ? <AskConfirmStrip line={host.askConfirm.line} onSend={host.askConfirm.send} onCancel={host.askConfirm.cancel} /> : null}
         {host.location.toast && host.location.site ? (
           <LocationToast title={host.location.site.title} onDismiss={host.location.dismissToast}
             onStop={() => { if (host.location.site) setLocationStopped(host.location.site, true); host.location.dismissToast(); }} />

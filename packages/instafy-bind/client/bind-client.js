@@ -17,7 +17,9 @@
  * Ask Octo (agent intents): the binder never runs them for a viewer. Framed by a host that takes asks (Studio: layout
  * caps.ask === true), they are in `names` like any intent and intent() hands the click to the host, which sends it as
  * the clicker's own chat message: {source:"instafy-bind", v:1, type:"ask", payload:{id, intent, label, params, ref}}.
- * The host answers {type:"ask-status", payload:{id, state: "sent"|"done"|"declined"|"failed", reason?}}. When caps.ask
+ * The payload also carries the intent's `say` (bound.json's chat line) and `confirm: true` when it has them.
+ * The host answers {type:"ask-status", payload:{id, state: "confirm"|"sent"|"done"|"declined"|"failed", reason?}}
+ * ("confirm": it is asking the person first, so the click waits instead of timing out). When caps.ask
  * is a string, this person may not send messages there: the asks are listed with `disabled: <that reason>` and a click
  * says so. Anywhere else asks are not offered (the page hides them like any intent not in `names`).
  *
@@ -375,6 +377,9 @@
     if (typeof state === "string") return localAck(msg.id, "rejected", state);
     var shared = askParams(msg.params, def);
     var payload = { id: msg.id, intent: msg.name, label: String(def.label || msg.name).slice(0, 120), params: shared.params, ref: msg.ref };
+    // bound.json's own words for the chat line ("Check size {size}") and whether the host confirms first
+    if (typeof def.say === "string" && def.say) payload.say = def.say.slice(0, 120);
+    if (def.confirm === true) payload.confirm = true;
     if (shared.withheld.length) payload.withheld = shared.withheld;
     if (shared.coarsened.length) payload.coarsened = shared.coarsened;
     askIds.add(msg.id);
@@ -388,7 +393,10 @@
     var reason = typeof p.reason === "string" && p.reason ? p.reason.slice(0, 140) : null;
     var base2 = { source: "instafy-host", v: 2, id: id, name: (pending.get(id) || {}).name };
     if (p.state === "sent") handleHost(Object.assign({ type: "ack", status: "sent" }, base2), "host");
-    else if (p.state === "done") { askIds.delete(id); handleHost(Object.assign({ type: "done", summary: reason }, base2), "host"); }
+    // the host shows its own confirm first (the intent says confirm: true): the click waits for the person there
+    else if (p.state === "confirm") handleHost(Object.assign({ type: "ack", status: "needs_confirm" }, base2), "host");
+    // the ask's run ended: Octo answers through the site's records files, so fetch them fresh for this page
+    else if (p.state === "done") { askIds.delete(id); handleHost(Object.assign({ type: "done", summary: reason }, base2), "host"); if (hostReady) loadRecords(); }
     else if (p.state === "declined") { askIds.delete(id); localAck(id, "rejected", reason || "Not sent."); }
     else if (p.state === "failed") { askIds.delete(id); handleHost(Object.assign({ type: "error", error: { code: "ask_failed", message: reason || "Octo could not answer." } }, base2), "host"); }
   }

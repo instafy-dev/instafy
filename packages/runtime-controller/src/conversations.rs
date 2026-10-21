@@ -1225,6 +1225,8 @@ pub(crate) fn sanitize_client_recorded_message_metadata(
     if trusted_service_role {
         return metadata;
     }
+    // Only a dispatch can say a message came from a site (crate::site_intent checks it there).
+    crate::site_intent::take_site_intent_claim(&mut metadata);
     let reserved = strip_reserved_controller_notice_claims(&mut metadata);
     if reserved {
         let Some(map) = metadata.as_object_mut() else {
@@ -4022,7 +4024,21 @@ fn build_conversation_message_metadata(request: &DispatchPromptNormalized) -> Js
     if let Some(metadata) = request.conversation_metadata.as_ref() {
         map.insert("conversation_metadata".to_string(), metadata.clone());
     }
-    map.insert("prompt_metadata".to_string(), request.metadata.clone());
+    let mut prompt_metadata = request.metadata.clone();
+    // Checked by dispatch (crate::site_intent): clients read where an ask came
+    // from here. Everyone in the conversation reads the message, so its copy
+    // leaves out rounded params (a position); the run keeps them for Octo.
+    if let Some(site_intent) = request.metadata.get(crate::site_intent::SITE_INTENT_KEY) {
+        let copy = crate::site_intent::site_intent_for_message(site_intent);
+        if let Some(prompt) = prompt_metadata.as_object_mut() {
+            prompt.insert(
+                crate::site_intent::SITE_INTENT_KEY.to_string(),
+                copy.clone(),
+            );
+        }
+        map.insert(crate::site_intent::SITE_INTENT_KEY.to_string(), copy);
+    }
+    map.insert("prompt_metadata".to_string(), prompt_metadata);
     // Prompt metadata is otherwise nested for the runtime. Persist the validated
     // human identities at the same canonical message key as record-only sends.
     if let Some(mentions) = request.metadata.get("mentionedUserIds") {

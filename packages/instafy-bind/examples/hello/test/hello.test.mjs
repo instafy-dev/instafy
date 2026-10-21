@@ -38,3 +38,14 @@ test("hello derives a ref from the name when none is given", async () => {
   const lines = await run({ intent: { params: { name: "Åsa Ö" } } });
   assert.equal(lines[3].records[0].ref, "hello:asa-o");
 });
+
+test("the page greys out Ask Octo with the host's reason for someone who may not ask, and follows the host's layout", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const html = await readFile(path.join(siteDir, "index.html"), "utf8");
+  const sync = html.slice(html.indexOf("function syncOcto()"));
+  assert.match(sync, /bind\.hostLayout\?\.caps\?\.ask/);
+  assert.match(sync, /octo\.disabled = Boolean\(reason\)/);
+  assert.match(sync, /why\.textContent = reason/);
+  assert.match(html, /bind\.on\("layout", syncOcto\)/);
+  assert.match(html, /<p class="note" id="octo-why" hidden><\/p>/);
+});

@@ -57,6 +57,12 @@ export type SubmitMessageFn = (
      * `false`.
      */
     onQueued?: () => void;
+    /**
+     * The send must start an agent turn (an Ask Octo click from a site): when
+     * the conversation would only record it, nothing is sent and the submit
+     * resolves `false`.
+     */
+    requireAgentTurn?: boolean;
   },
 ) => Promise<boolean>;
 
@@ -415,6 +421,9 @@ export function useChatSubmitFlow({
       ? []
       : agentSelection.targetHandles;
     const resolvedBaseSubmitMetadata = participationPreflight.metadata;
+    if (options?.requireAgentTurn && (participationRecordOnly || effectiveTargetAgentHandles.length === 0)) {
+      return false;
+    }
 
     const queuedRuntimeOverride = override?.runtimeOverride?.runtimeId
       ? override.runtimeOverride

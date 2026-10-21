@@ -67,6 +67,7 @@
   button.primary:hover:not(:disabled) { background: var(--accent-fill-hover); }
   button:disabled { opacity: .55; cursor: default; }
   .status { min-height: 22px; font-size: 14px; color: var(--muted); }
+  .note { margin: 0; font-size: 13px; color: var(--muted); }
   .bar { height: 4px; border-radius: 4px; background: var(--chip); overflow: hidden; }
   .bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s ease; }
   ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
@@ -116,6 +117,7 @@
         <button id="octo" type="button" title="Runs an Octo turn (needs an Instafy login, or --dry-run)">🐙 Ask Octo</button>
         <button id="cancel" type="button" title="Cancel the running request" hidden>✕ Cancel</button>
       </div>
+      <p class="note" id="octo-why" hidden></p>
       <div class="bar" aria-hidden="true"><i id="bar"></i></div>
       <div class="status" id="status" role="status" aria-live="polite"></div>
     </form>
@@ -276,10 +278,27 @@
     conn.textContent = "live";
     conn.dataset.state = "live";
     const names = hello.names || (hello.intents || []).map((i) => i.name);
-    if (!names.includes("ask_octo")) $("octo").hidden = true;
+    syncOcto();
+    // The host can change its answer (Studio first checks the person's access), so follow its layout.
+    bind.on("layout", syncOcto);
     log("hello", `binder ready · intents: ${names.join(", ")}`);
     render();
   });
+
+  /**
+   * Ask Octo is offered where the host takes asks. Someone who may not send messages there (a view-only member)
+   * sees it greyed out with the host's reason, and a click sends nothing; anywhere else it is hidden.
+   */
+  function syncOcto() {
+    const octo = $("octo"), why = $("octo-why");
+    const ask = bind.hostLayout?.caps?.ask;
+    const reason = typeof ask === "string" ? ask : "";
+    octo.hidden = !bind.names.includes("ask_octo");
+    octo.disabled = Boolean(reason);
+    octo.title = reason || "Sends this to Octo as your own chat message";
+    why.textContent = reason;
+    why.hidden = octo.hidden || !reason;
+  }
 
   // Another viewer's click: learn its ref from the binder's job list so this page can show the skeleton too.
   async function adoptRemote(id) {

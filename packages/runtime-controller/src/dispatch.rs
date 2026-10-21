@@ -985,6 +985,9 @@ pub(crate) async fn process_dispatch_prompt_timed(
 ) -> Result<DispatchPromptResponse, (StatusCode, Json<ApiError>)> {
     let started = Instant::now();
     crate::task_usage::strip_authoring_claims(&mut request.metadata);
+    // "Via a site" is the controller's to say: a client's claim is checked
+    // against the previews this sender can see below, and refused otherwise.
+    let site_intent_claim = crate::site_intent::take_site_intent_claim(&mut request.metadata);
     conversations::normalize_human_mention_metadata(&mut request.metadata)?;
     // Parity with the record path: untrusted callers must not persist a forged
     // controller participation marker through gate-bypassing dispatches (e.g.
@@ -1032,6 +1035,22 @@ pub(crate) async fn process_dispatch_prompt_timed(
         .commit()
         .await
         .map_err(|error| internal_error(format!("failed to finalize project ensure: {error}")))?;
+
+    if let Some(claim) = site_intent_claim.as_ref() {
+        // An ask that does not check out is refused, not sent without its
+        // site: the clicker hears it was not sent. A send-queue entry was
+        // checked and counted when it was queued; it is re-checked here (the
+        // preview may have closed since) but not counted again.
+        let verified =
+            crate::site_intent::require_site_intent(state, &project.id, context, claim).await?;
+        if request.dispatch_queue_entry_id.is_none() {
+            crate::site_intent::charge_site_ask(state, &verified).await?;
+        }
+        ensure_object(&mut request.metadata).insert(
+            crate::site_intent::SITE_INTENT_KEY.to_string(),
+            verified.json,
+        );
+    }
 
     let (selected_runtime_preference, runtime_preference_target_user) =
         if let Some(user_id) = context.user_id {
