@@ -34,15 +34,6 @@ describe("instafy bind", () => {
     expect(result.stderr).toContain("usage: instafy-bind command");
   });
 
-  it("reads web pages through the binder's polite reader", () => {
-    const refused = run(["web", "cite", "https://www.booking.com/hotel/x.html"]);
-    expect(refused.status).toBe(2);
-    expect(refused.stdout).toContain("refused: link-only site: Booking.com");
-    const policy = run(["web", "policy", "--json"]);
-    expect(policy.status).toBe(0);
-    expect(JSON.parse(policy.stdout).link_only.join(" ")).toContain("Agoda");
-  });
-
   it("explains how to find the binder when it is missing", () => {
     const result = run(["bind", "doctor"], { INSTAFY_BIND_BIN: path.join(tmpdir(), "no-such-instafy-bind.mjs") });
     expect(result.status).toBe(1);

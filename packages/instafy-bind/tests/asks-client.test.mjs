@@ -12,7 +12,7 @@ const STUDIO = "https://studio.example";
 const ASK = { name: "ask_octo", label: "Is it in stock?", executor: "agent", via: "host", params: { type: "object" } };
 const CHECK = { name: "check", label: "Check price", executor: "script", params: { type: "object" } };
 
-function load({ embedded = true, search = "?instafy_host=studio", asks = [ASK], catalog = [CHECK], intentReply = { status: 202, body: { status: "queued" } } } = {}) {
+function load({ embedded = true, search = "?instafy_host=studio", asks = [ASK], catalog = [CHECK], intentReply = { status: 202, body: { status: "queued" } }, parentOrigins = [STUDIO] } = {}) {
   const listeners = {};
   const sent = [];
   const posted = [];
@@ -20,7 +20,7 @@ function load({ embedded = true, search = "?instafy_host=studio", asks = [ASK], 
   const location = { href: `${SITE}/${search}`, origin: SITE, search, hash: "", pathname: "/" };
   const window = { addEventListener(type, fn) { (listeners[type] ||= []).push(fn); }, location, navigator: {} };
   window.parent = embedded ? parent : window;
-  const health = { ok: true, host: "instafy-bind", intents: catalog.map((d) => d.name), catalog, asks, parentOrigins: [] };
+  const health = { ok: true, host: "instafy-bind", intents: catalog.map((d) => d.name), catalog, asks, parentOrigins };
   const context = {
     window,
     document: { currentScript: null, title: "Shoes", createElement: () => ({ setAttribute() {}, remove() {} }), body: { appendChild() {} } },
@@ -160,4 +160,36 @@ test("an ask the host never answers is cleared after 5 s with a plain message", 
   assert.equal(acks.at(-1).reason, "Instafy did not answer. Try again, or ask in the chat.");
   page.status({ id: acks.at(-1).id, state: "done" });
   assert.equal(page.bind.pendingInfo(acks.at(-1).id), null);
+});
+
+test("a frame the binder does not list cannot take asks: its caps.ask is ignored and no ask (or its params) reaches it", async () => {
+  const page = load({ parentOrigins: [] });
+  await tick(5);
+  page.layout({ ask: true });
+  await tick(2100); // the client waits up to 2 s for a host's first layout
+  const ready = plain(await page.bind.ready);
+  assert.deepEqual(ready.names, ["check"], "no host, so no Ask Octo");
+  assert.throws(() => page.bind.intent("ask_octo", { ref: "shoes:a" }), /not available/);
+  assert.deepEqual(page.asksSent(), []);
+});
+
+test("an ask carries the clicker's position rounded to about 100 m, without precision details or private params", async () => {
+  const ask = { ...ASK, private_params: ["note"] };
+  const page = load({ asks: [ask] });
+  await tick(5);
+  page.layout({ ask: true });
+  await page.bind.ready;
+  page.bind.intent("ask_octo", {
+    ref: "cafes:a", lat: 52.370216, lng: 4.895168, accuracy: 12, near: "52.370216, 4.895168",
+    position: { latitude: 52.370216, longitude: 4.895168, altitude: 3.5, heading: 90 }, note: "my flat is at 12 Elm St", topic: "quiet",
+  }, { ref: "cafes:a" });
+  await tick(5);
+  const [sent] = page.asksSent();
+  const text = JSON.stringify(sent.msg.payload);
+  assert.doesNotMatch(text, /52\.3702|4\.8951|Elm St/, "no precise position and no private param reaches the chat");
+  assert.deepEqual(plain(sent.msg.payload.params), {
+    ref: "cafes:a", lat: 52.37, lng: 4.895, near: "52.37, 4.895", position: { latitude: 52.37, longitude: 4.895 }, topic: "quiet",
+  });
+  assert.deepEqual(plain(sent.msg.payload.withheld), ["accuracy", "note"]);
+  assert.deepEqual(plain(sent.msg.payload.coarsened), ["lat", "lng", "near", "position"]);
 });

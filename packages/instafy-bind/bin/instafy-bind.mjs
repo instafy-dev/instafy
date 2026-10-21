@@ -10,13 +10,12 @@ import { createBinder, discoverSites } from "../src/server.mjs";
 import { initSite, STARTER_NAMES } from "../src/init.mjs";
 import { checkBound, resolveIntent, executorOf } from "../src/bound.mjs";
 import { formatErrors } from "../src/schema-lite.mjs";
-import { resolveControllerConfig, agentUnavailableReason, detachedBinderEnv } from "../src/config.mjs";
+import { resolveControllerConfig, agentExecutorRefusal, agentUnavailableReason, detachedBinderEnv } from "../src/config.mjs";
 import { findServerState, readAdminToken, writeServerState, removeServerState } from "../src/tokens.mjs";
 import { COMMAND_NAMES, safeText } from "../src/protocol.mjs";
 import { envNameRefusal } from "../src/executors/script.mjs";
 import { DEFAULT_AGENT_BUDGET_PER_HOUR } from "../src/budget.mjs";
 import { handlerHash, readTried, tryIntent } from "../src/try.mjs";
-import { runWebCommand } from "../src/web.mjs";
 
 const HELP = `instafy-bind: a website plus a generic backend that turns clicks into typed intents.
 
@@ -24,22 +23,20 @@ Usage:
   instafy-bind serve <dir|gallery> [--port 4180] [--host 127.0.0.1] [--preview | --no-token]
                      [--agent-executor [--space <id>] [--conversation <id>] [--agent-conversation <id>]
                      [--server-url <url>] [--agent-budget ${DEFAULT_AGENT_BUDGET_PER_HOUR}]] [--dry-run] [--confirm] [--allow-local]
-                     [--allow-env NAME] [--pack-dir|--handlers-dir <dir>] [--public-url <url>] [--trust-proxy]
+                     [--allow-env NAME] [--public-url <url>] [--trust-proxy]
                      [--json] [--verbose] [--detach [--log <file>]]
   instafy-bind init <dir> [--starter compare|ranked|timeline|checklist|blank] [--force]
   instafy-bind command <dir> <name> [json-args]    names: ${COMMAND_NAMES.join(", ")}
   instafy-bind confirm <dir> <job|all> [--no]
-  instafy-bind doctor [dir] [--pack-dir <dir>]
-  instafy-bind try <dir> <intent> [json-params] [--save] [--pack-dir <dir>] [--allow-local]
-  instafy-bind web cite <url> [--grep <regex>] [--probe] [--json] | web policy
+  instafy-bind doctor [dir]
+  instafy-bind try <dir> <intent> [json-params] [--save] [--allow-local]
 
 serve      Serve the site (or every subfolder with a bound.json) with the binder endpoints under
-           __bind/ and __uw/. Prints share URLs with the viewer token: #k=... for pages that load
-           __bind/client.js, ?k=... (sets a cookie, then redirects) for other pages such as map-pack maps.
+           __bind/. Prints share URLs with the viewer token: #k=... for pages that load __bind/client.js,
+           ?k=... (sets a cookie, then redirects) for other pages.
            --preview: for Studio's preview card. No viewer token; besides localhost the binder answers only
            the private preview that \`instafy preview open --port <port>\` opens for this port (space members
            only, checked by Instafy before a request reaches the binder). Any other Host gets 421.
-           handler "pack:<name>" in bound.json resolves to <pack-dir>/<name>.mjs.
            Agent intents are "Ask Octo" buttons: the page hands the click to Studio, which sends it as the
            clicker's own chat message (billed like typing it). The binder answers them 409 ask_via_host and
            holds no Instafy login.
@@ -55,7 +52,7 @@ init       Write a starter bound.json, index.html and handlers/hello.mjs. --star
            with theme.css and site.js (compare 2-8 options; ranked a top-N; timeline days or steps in time;
            checklist ticks; blank anything else). You design the content in data.json and app.js. Existing
            files are kept; --force overwrites them.
-command    Push a command (select, flyTo, highlight, toast, ...) to every open viewer. Uses the
+command    Push a command (select, highlight, toast, reload) to every open viewer. Uses the
            admin token in .bind/admin-token.
 confirm    Approve (or --no: decline) jobs waiting for confirmation.
 doctor     Check Node, bound.json, handlers and the Instafy controller settings (never prints tokens).
@@ -65,8 +62,6 @@ try        Run one script intent as a viewer's click would (same input, environm
            --save: also store the accepted records in the site, exactly as a click's would be (same checks,
            provenance and merge), so the page opens with the values, each with its source and age. Use it to fill
            a new page (one try per item); a served page shows them after \`command <dir> reload '{}'\`.
-web        Read one public page the polite way (also \`instafy web\`): refuses sites that ban AI agents,
-           paths robots.txt disallows, bot checks and login walls. \`web --help\` for details.
 `;
 
 function parseArgs(argv) {
@@ -149,12 +144,13 @@ async function serveDetached(dir, flags) {
   };
   if (!up) fail(`the background binder did not start (log ${logFile}):\n${tail()}`);
   process.stdout.write(`instafy-bind serving ${dir} on port ${port} in the background (pid ${child.pid}; log ${logFile}); it keeps running after this turn.\n`);
-  const shown = tail().split("\n").filter((line) => /show it in Studio|agent executor|intents:/.test(line));
+  const shown = tail().split("\n").filter((line) => /show it in Studio|public link|agent executor|intents:/.test(line));
   for (const line of shown) process.stdout.write(`${line}\n`);
 }
 
 async function serve(dir, flags) {
   if (!dir) fail("serve needs a folder");
+  if (flags["agent-executor"] && agentExecutorRefusal(process.env)) fail(agentExecutorRefusal(process.env));
   if (flags.detach) return serveDetached(dir, flags);
   const json = Boolean(flags.json);
   const verbose = Boolean(flags.verbose);
@@ -193,7 +189,6 @@ async function serve(dir, flags) {
       dryRun: Boolean(flags["dry-run"]),
       confirm: Boolean(flags.confirm),
       allowLocal: Boolean(flags["allow-local"]),
-      packDir: flags["pack-dir"] || flags["handlers-dir"] ? path.resolve(flags["pack-dir"] || flags["handlers-dir"]) : null,
       publicOrigins: flags["public-url"] || [],
       log,
       onDryRun,
@@ -253,6 +248,7 @@ async function serve(dir, flags) {
     intents: [...site.runnable],
     unavailable: site.unavailable,
     ...(binder.preview ? { preview_command: previewCommand(listenPort, site) } : {}),
+    ...(flags["public-url"]?.length ? { public_urls: flags["public-url"].map((origin) => binder.shareUrl(site, origin.replace(/\/+$/, ""))) } : {}),
   }));
   if (json) {
     out({ event: "listening", url: binder.url, preview: binder.preview, agent: binder.agentState, agent_reason: binder.agentReason, sites });
@@ -261,6 +257,7 @@ async function serve(dir, flags) {
     for (const site of sites) {
       process.stdout.write(`  ${site.name}: ${site.url}\n    intents: ${site.intents.join(", ") || "(none)"}\n`);
       if (site.preview_command) process.stdout.write(`    show it in Studio: ${site.preview_command}\n`);
+      for (const link of site.public_urls || []) process.stdout.write(`    public link (share this whole link; it carries the viewer token): ${link}\n`);
     }
     if (binder.agentState === "host") {
       process.stdout.write("  agent executor: host (Ask Octo clicks go through Studio as the clicker's own message; this binder holds no Instafy login)\n");
@@ -336,8 +333,6 @@ async function command(dir, name, rawArgs) {
 }
 
 async function doctor(dir, flags = {}) {
-  const packFlag = flags["pack-dir"] || flags["handlers-dir"];
-  const packDir = packFlag ? path.resolve(packFlag) : null;
   const lines = [];
   let bad = false;
   const ok = (text) => lines.push(`ok    ${text}`);
@@ -383,7 +378,7 @@ async function doctor(dir, flags = {}) {
       }
       ok(`${site.name}: bound.json (${Object.keys(bound.intents).length} intents)`);
       for (const [name, def] of Object.entries(bound.intents)) {
-        const r = resolveIntent(def, { siteDir: site.dir, packDir });
+        const r = resolveIntent(def, { siteDir: site.dir });
         if (r.ok && executorOf(def) === "script" && r.handler) {
           const last = readTried(site.dir)[name];
           if (!last || last.hash !== handlerHash(r.handler)) warn(`${site.name}: ${name} has not been tried since its handler changed: run \`instafy bind try ${dir} ${name} '<params>'\` for one real item`);
@@ -418,32 +413,6 @@ async function doctor(dir, flags = {}) {
   if (bad) process.exit(1);
 }
 
-/**
- * Sourcing lint for the page's own text (index.html and data/*.json, not the binder's records): review claims with
- * no review links, and prices typed into the page. A shopper reads "reviewers say" as sourced and a typed price as
- * current; both must come from a page Octo opened (linked) or a price-check record. A budget ("under $150") is fine.
- */
-function lintSourcing(dir, html) {
-  const texts = [html];
-  try {
-    for (const file of fs.readdirSync(path.join(dir, "data"))) {
-      if (file.endsWith(".json")) texts.push(fs.readFileSync(path.join(dir, "data", file), "utf8"));
-    }
-  } catch {
-    // no data folder
-  }
-  const text = texts.join("\n");
-  const out = [];
-  const hosts = new Set([...text.matchAll(/https:\/\/([a-z0-9.-]+)/gi)].map((m) => m[1].toLowerCase().replace(/^www\./, "")));
-  if (/\breviewers?\b|\breviews? (say|praise|note|call|agree)|\bcritics\b/i.test(text) && hosts.size < 2) {
-    out.push("the page reports what reviewers say but links no review: link each claim's source (a page fetched with uw cite) or mark it \"not checked\"");
-  }
-  const price = /(?<!(?:under|below|less than|up to|max|budget|within|over)\s*)(?:[$€£¥]\s?\d{2,}(?:[.,]\d{2})?|\b\d{2,}(?:[.,]\d{2})?\s?(?:USD|EUR|GBP|SEK|NOK|DKK|TWD|JPY|NT\$))/i;
-  const typed = text.match(price);
-  if (typed) out.push(`a price is typed into the page (${typed[0].trim()}): prices come only from a price-check record; show "not checked" until one arrives`);
-  return out;
-}
-
 /** Lint checks for mistakes a model writing a bound site tends to make. Returns warning lines. */
 function lintSite(site, bound, { agentReady }) {
   const warnings = [];
@@ -454,15 +423,13 @@ function lintSite(site, bound, { agentReady }) {
   } catch {
     w("index.html is missing");
   }
-  const isMap = fs.existsSync(path.join(site.dir, "map.config.json"));
-  if (html && !isMap && !/__(?:bind|uw)\/client\.js/.test(html)) w('index.html does not load "__bind/client.js"; viewers get no live updates');
+  if (html && !/__bind\/client\.js/.test(html)) w('index.html does not load "__bind/client.js"; viewers get no live updates');
   const files = bound.results?.files;
   // A site with only agent intents does nothing where the binder has no owner login: in an Octo turn, or for a
   // Studio viewer. Its buttons then just say the service is not connected.
   if (!Object.values(bound.intents).some((def) => executorOf(def) === "script")) {
     w('no script intent: agent intents are "Ask Octo" buttons that only work where Instafy can send them as the clicker\'s message, so anywhere else every button stays dead; add a script intent (when it cannot read a page it returns status "uncertain" records with a note) and keep agent intents as an extra "Ask Octo"');
   }
-  for (const line of lintSourcing(site.dir, html)) w(line);
   for (const [name, def] of Object.entries(bound.intents)) {
     const target = def.target?.records || `data/records/${name}.json`;
     if (Array.isArray(files) && !files.includes(target)) w(`${name}: ${target} is not in results.files, so static viewers never load it`);
@@ -497,10 +464,6 @@ function lintSite(site, bound, { agentReady }) {
 }
 
 async function main() {
-  if (process.argv[2] === "web") {
-    process.exitCode = await runWebCommand(process.argv.slice(3));
-    return;
-  }
   let parsed;
   try {
     parsed = parseArgs(process.argv.slice(2));
@@ -540,9 +503,7 @@ async function main() {
       return doctor(rest[0], flags);
     case "try": {
       if (!rest[0] || !rest[1]) fail("usage: instafy-bind try <dir> <intent> [json-params]", 64);
-      const packFlag = flags["pack-dir"] || flags["handlers-dir"];
       const result = await tryIntent(rest[0], rest[1], rest[2] ?? "{}", {
-        packDir: packFlag ? path.resolve(packFlag) : null,
         allowLocal: Boolean(flags["allow-local"]),
         allowEnv: flags["allow-env"] || [],
         save: Boolean(flags.save),

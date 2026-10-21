@@ -200,8 +200,8 @@ export async function safeFetch(raw, { allowLocal = false, method = "GET", heade
   for (let hop = 0; hop <= maxRedirects; hop += 1) {
     const check = await checkPublicUrl(current, { allowLocal });
     if (!check.ok) throw Object.assign(new Error(`blocked: ${check.reason}`), { code: "policy" });
-    // A caller's own rule for every URL it would read, the first one and each redirect target (kit.fetch: robots.txt
-    // and the link-only list). It throws to refuse.
+    // A caller's own rule for every URL it would read, the first one and each redirect target (kit.fetch: robots.txt).
+    // It throws to refuse.
     if (checkHop) await checkHop(current, hop);
     const url = new URL(current);
     firstOrigin ??= url.origin;

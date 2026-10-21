@@ -1057,6 +1057,11 @@ async fn preview_create_binds_the_job_and_refuses_other_runtimes_ports_and_reade
             assert!(created["credentials"]["token"].is_string());
             // The runtime pins tokenless preview sites to this domain.
             assert_eq!(created["viewerHostSuffix"], json!("preview.localhost:8083"));
+            // A bound site in the preview talks only to the Studio that frames it.
+            assert_eq!(
+                created["studioOrigin"],
+                json!(f.state.config.public_app_url)
+            );
 
             let metadata = f.grant_metadata(preview_id).await?;
             let preview = &metadata[PREVIEW_TUNNEL_METADATA_KEY];

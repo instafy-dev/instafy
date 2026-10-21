@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 // Read schema.org Product / ProductGroup / Offer / AggregateOffer JSON-LD out of a product page
-// and turn it into uw.records@1 records. Pure functions; no I/O. The page is untrusted data:
+// and turn it into instafy.records@1 records. Pure functions; no I/O. The page is untrusted data:
 // only typed fields are read, strings are length-capped, and nothing from the page is executed.
 
 const AVAIL_IN = /(InStock|LimitedAvailability|OnlineOnly|InStoreOnly|PreSale|BackOrder)$/i;
@@ -24,10 +24,19 @@ export function clip(value, max) {
 /** Every JSON-LD block in the HTML, parsed. Blocks that are not valid JSON are skipped. */
 export function extractJsonLd(html) {
   const out = [];
-  const re = /<script\b[^>]*type\s*=\s*["']?application\/ld\+json["']?[^>]*>([\s\S]*?)<\/script\s*>/gi;
-  let match;
-  while ((match = re.exec(html))) {
-    let body = match[1].trim().replace(/^<!--/, "").replace(/-->$/, "").replace(/^\/\/<!\[CDATA\[|\/\/\]\]>$/g, "").trim();
+  // a linear scan for <script type="application/ld+json"> bodies (no backtracking regex over the page)
+  const text = String(html ?? "");
+  const lower = text.toLowerCase();
+  for (let at = 0, count = 0; count < 50; count += 1) {
+    const open = lower.indexOf("<script", at);
+    if (open < 0) break;
+    const tagEnd = lower.indexOf(">", open + 7);
+    if (tagEnd < 0) break;
+    const close = lower.indexOf("</script", tagEnd + 1);
+    if (close < 0) break;
+    at = close + 8;
+    if (!/\btype\s*=\s*["']?application\/ld\+json/.test(lower.slice(open + 7, tagEnd))) continue;
+    let body = text.slice(tagEnd + 1, close).trim().replace(/^<!--/, "").replace(/--!?>$/, "").replace(/^\/\/<!\[CDATA\[|\/\/\]\]>$/g, "").trim();
     if (!body) continue;
     try {
       out.push(JSON.parse(body));
@@ -243,7 +252,7 @@ function sizeRange(sizes) {
 const money = (amount, currency) => `${currency || ""} ${Number.isInteger(amount) ? amount : amount.toFixed(2)}`.trim();
 
 /**
- * Build uw.records@1 records for one read. `trust` is "curated" when the URL is the seed URL for the ref.
+ * Build instafy.records@1 records for one read. `trust` is "curated" when the URL is the seed URL for the ref.
  * The binder stamps prov.intent and prov.job; handlers never write files.
  */
 export function buildRecords({ ref, pageUrl, host, siteName, summary, size, attr, trust = "unknown", now = new Date() }) {

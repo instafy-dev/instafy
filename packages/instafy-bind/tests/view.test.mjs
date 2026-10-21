@@ -19,7 +19,7 @@ const SHOES = Array.from({ length: 48 }, (_, i) => ({ id: `shoe-${i + 1}`, price
  * A page running the client in a frame: a header (200 px), then a table of rows (rowH px each) built from the URL query
  * (?sort=price, ?size=42), re-rendered on popstate as a single-page app would.
  */
-function page({ search = "?instafy_host=studio", innerHeight = 800, rowH = 40, config = {}, sticky = false, wide = false, htmlAttrs = null } = {}) {
+function page({ search = "?instafy_host=studio", innerHeight = 800, rowH = 40, config = {}, sticky = false, wide = false, htmlAttrs = null, parentOrigins = [STUDIO] } = {}) {
   const docListeners = {}, winListeners = {};
   const sent = [];
   const replaced = [];
@@ -101,7 +101,7 @@ function page({ search = "?instafy_host=studio", innerHeight = 800, rowH = 40, c
     // the view poll never keeps the test process alive
     setInterval: (fn, ms) => { const t = setInterval(fn, ms); t.unref(); return t; }, clearInterval: (t) => clearInterval(t),
     console,
-    fetch: (url) => Promise.resolve(String(url).endsWith("/health") ? { ok: true, json: async () => ({ ok: true, host: "instafy-bind", intents: [], parentOrigins: [] }) } : { ok: false, json: async () => null }),
+    fetch: (url) => Promise.resolve(String(url).endsWith("/health") ? { ok: true, json: async () => ({ ok: true, host: "instafy-bind", intents: [], parentOrigins }) } : { ok: false, json: async () => null }),
     EventSource: undefined,
   };
   render();
@@ -126,6 +126,21 @@ function page({ search = "?instafy_host=studio", innerHeight = 800, rowH = 40, c
   return P;
 }
 async function ready(p) { await p.bind.ready; await wait(5); }
+
+test("a page framed by an origin the binder does not list has no host: its layout, present and apply-view are ignored", async () => {
+  // the preview label leaks in Origin headers, so any page could frame the preview URL; it must not become the host
+  const p = page({ parentOrigins: [] });
+  await ready(p);
+  p.layout();
+  assert.equal(p.bind.hostLayout, null);
+  p.present(true, true);
+  assert.equal(p.bind.view.presenting, false, "an unlisted parent cannot start presenting");
+  assert.deepEqual(p.sent, [], "nothing is posted to it: no ack, no view");
+  const before = p.location.search;
+  p.apply({ k: "page", path: "/", q: "?sort=evil" }, { smooth: false });
+  assert.equal(p.location.search, before, "an unlisted parent cannot drive the page");
+  p.stop();
+});
 
 test("the layout gets an ack that offers view and tap (and no insets: Studio keeps padding the frame)", async () => {
   const p = page();
@@ -338,11 +353,25 @@ test("the viewer's own position stays out of views unless the presenter shares i
   a.present(false);
   a.present(true, true);
   assert.equal(a.views().at(-1).msg.payload.q, "?near=59.3293,18.0686&sort=distance", "Share my location too");
-  // 0.001° away is another place, not the viewer
+  // a rounded copy (or any other form) of the position stays home too: once the page has one, its address does
   a.present(false);
-  a.setQuery("?instafy_host=studio&near=59.3303,18.0696");
+  a.setQuery("?instafy_host=studio&near=59.33,18.07&sort=distance");
   a.present(true);
-  assert.equal(a.views().at(-1).msg.payload.q, "?near=59.3303,18.0696");
+  assert.equal(a.views().at(-1).msg.payload.q, undefined, "?near=59.33,18.07 is the viewer, rounded");
+  assert.deepEqual(a.views().at(-1).msg.payload.withheld, ["location"]);
+  // ...and so does the page's own state
+  a.present(false);
+  a.bind.follow({ get: () => ({ cell: "u181" }) });
+  a.present(true);
+  assert.equal("s" in a.views().at(-1).msg.payload, false, "custom state may hold a geohash");
+  // a page that says its view never holds the position shares its address again
+  a.present(false);
+  a.bind.follow({ get: () => ({ tab: "list" }), locationFree: true });
+  a.setQuery("?instafy_host=studio&sort=distance");
+  a.present(true);
+  assert.equal(a.views().at(-1).msg.payload.q, "?sort=distance");
+  assert.deepEqual(a.views().at(-1).msg.payload.s, { tab: "list" });
+  a.bind.follow({});
   // an hour later the page still carries the position in its URL: it still stays home
   a.present(false);
   a.setQuery("?instafy_host=studio&near=59.3293,18.0686&sort=distance");

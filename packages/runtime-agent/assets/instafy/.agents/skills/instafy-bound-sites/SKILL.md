@@ -3,13 +3,13 @@ name: instafy-bound-sites
 description: Build "bound sites" (live pages whose buttons run checks through a generic binder and stream typed records back to every viewer), and answer bound-site intents.
 context_kind: workflow
 context_parent: instafy-skill-router
-routing_keywords: bound site, bound.json, two-way, live page, check prices, price, cheapest, deal, buy, should i buy, should i get, shop, shopping, compare, comparison, versus, price drop, in stock, availability, köpa, pris, billig, billigast
+routing_keywords: bound site, bound.json, live page, check again, re-check, two-way
 ---
 
 # Bound sites
 
 A bound site is an ordinary static page plus `bound.json`, served by the generic binder (`instafy bind`). Clicks become typed **intents**. The binder runs each script intent with a
-handler, validates the **records** that come back (`uw.records@1`), writes them to `data/records/*.json` and streams
+handler, validates the **records** that come back (`instafy.records@1`), writes them to `data/records/*.json` and streams
 them to every open viewer. An "Ask Octo" intent is an ask that Instafy sends as the clicker's own chat message; the
 binder never runs it. You can also push **commands** into the page.
 You never write a backend: only the page, `bound.json` and, when needed, small handler scripts.
@@ -20,26 +20,17 @@ You never write a backend: only the page, `bound.json` and, when needed, small h
 - The data changes (prices, stock, opening hours, availability) or must be fetched per click.
 - Several people should see the same results live.
 
-Not for: a one-off answer in chat (advice in chat still does step 1's current-model check), or a static page with
-nothing to check (use `instafy-frontend-previews`).
+Not for: a one-off answer in chat, or a static page with nothing to check (use `instafy-frontend-previews`).
 
 ## Procedure
 
-1. **Design the page from the question.** Pick the rows/columns or layers a decision needs. Seed known items in
-   the starter's `data.json` with a `ref` each (`<kind>:<slug>`, e.g. `shoes:on-cloudmonster-2`). When research
-   lanes left handoff files, run `instafy web handoff handoff/<task>`: it reads each price's page again and prints the
-   checked and stale prices, what is unverified and any lane that researched an older generation. Seed one item per file (the
-   current model) with its fit, review summary, sources, unknowns and checked prices. On every turn:
-   - A claim about quality or fit ("stable", "plush", "reviewers like…") needs a page you opened this turn
-     (`instafy web cite <url> --grep "<words>"`), linked on that item. Unsourced reads "not checked",
-     never "reviewers say".
-   - No prices from memory: prices come from price-check records (step 9 fills them) or a page you opened, each
-     with its store or source, link and date ("$145 at Fleet Feet ↗ · seen 17 Oct"); a review's list price is
-     `"list": true`, its date in `asof` ("$900 · list price on BabyGearLab ↗ · seen 5 Aug").
-   - Check each product is the current model before you name it, in chat too: `instafy web cite <maker's line-up,
-     or a review from the last 12 months> --family "<family>"` lists the generations the page names, newest first.
-     Lead with the newest; call an older one "previous generation" (often discounted), never judge a budget from
-     an old list price.
+1. **Design the page from the question.** Pick the rows/columns a decision needs. Seed known items in the
+   starter's `data.json` with a `ref` each (`<kind>:<slug>`, e.g. `shoes:on-cloudmonster-2`). On every turn:
+   - A claim ("stable", "open late", "reviewers like…") needs a page you opened this turn, linked on that item.
+     Unsourced reads "not checked", never "reviewers say".
+   - No values that change from memory (prices, stock, hours): they come from check records (step 9 fills them) or
+     a page you opened, each with its source, link and date ("$145 at Fleet Feet ↗ · seen 17 Oct").
+   - Products and prices: the cheat sheet's "Products and prices" section (current model, list prices).
 2. **Scaffold:** `instafy bind init <dir> --starter compare` (options side by side) or `--starter ranked` ("top N",
    "best X"). Keep its `theme.css`, `site.js` and look; write the content in `data.json` and `app.js`.
 3. **Declare intents in `bound.json`:** a name, `label`, a strict `params` schema (`additionalProperties: false`,
@@ -53,8 +44,8 @@ nothing to check (use `instafy-frontend-previews`).
      Fast, free, repeatable. Lane `open`, `official` (an API) or `local` (a page read by a script). Use the
      handler kit: `const kit = await import(process.env.BIND_KIT)` for `readInput`,
      `progress`, `records`, `done`, `error`, `uncertain`, `readJson` (the site's own files, e.g. the seed data:
-     handlers run in the site folder), `fetch` (refuses private addresses, sites that ban agents and paths
-     robots.txt disallows) and `offers` (a page's schema.org prices). Never fetch with your own code. When a page blocks the read (403, a bot wall) or has no structured data, the handler still answers with
+     handlers run in the site folder), `fetch` (refuses private addresses and paths robots.txt disallows for bots)
+     and `offers` (a page's schema.org prices). Never fetch with your own code. When a page blocks the read (403, a bot wall) or has no structured data, the handler still answers with
      `kit.uncertain({ref, attr, url, note})` ("the store blocks automated reads; open the store link"), so the cell
      says why. Never switch that intent to `agent` instead.
    - `agent` (`agent.prompt`): an optional extra "Ask Octo" next to a script intent, for what needs a browser or
@@ -71,8 +62,10 @@ nothing to check (use `instafy-frontend-previews`).
    "Open <store> ↗" once a store blocks reads; the reason is said once, under the list). `site.trust` draws
    `value · source ↗ · age` ("seen 17 Oct", "checked 4 min ago", "Price not checked"). Keep them; render new
    values with them. No ↻ or emoji per cell. The client underneath (`__bind/client.js`): `references/cheatsheet.md`.
-   "Near me": `await instafyBind.location()` (cheat sheet), never `navigator.geolocation`. Render strings with `textContent`; only open `https:` links, and take store
-   links from your seed data unless the offer is `seller.trust: "curated"`.
+   "Near me": `await instafyBind.location()` (cheat sheet), never `navigator.geolocation`, and always a typed
+   place too (a city or postcode field): in Studio's preview card location is not available yet, and the page says
+   so. Render strings with `textContent`; only open `https:` links, and take store links from your seed data unless
+   the offer is `seller.trust: "curated"`.
 7. **Serve it detached in preview mode, then show it in Studio** (free port 4173-4199):
    `instafy bind serve <dir> --port <port> --preview --detach` (a server started in the
    foreground stops when your turn ends), then `instafy preview open --port <port> --title '<short title>' --json`
@@ -80,10 +73,11 @@ nothing to check (use `instafy-frontend-previews`).
    through the card, and the binder refuses every other host. Never post localhost, preview or tunnel URLs;
    say "Open it from the card above". The binder holds no Instafy login and never runs Ask Octo itself
    (`agent executor: host`); the page hides buttons not in `names`. Do not tell the user to run `instafy login`
-   or any other terminal command: they use Studio. A public link only when the user asks (their ask is the go-ahead): follow
-   `instafy-frontend-previews`, `instafy tunnel start --port <port> --json`, then restart serve
-   with `--preview --public-url <tunnel url>` and share the tunnel URL; anyone with it can click script intents,
-   and nobody there can ask Octo.
+   or any other terminal command: they use Studio. A public link only when the user asks (their ask is the
+   go-ahead): follow `instafy-frontend-previews`, `instafy tunnel start --port <port> --json`, then restart serve
+   with `--preview --public-url <tunnel url> --detach` and share the `public link` it prints, whole: it carries the
+   viewer token (`#k=`), so only people with that link can open the data or click its checks, and nobody there can
+   ask Octo. The card in Studio stays tokenless. Never share the bare tunnel URL.
    Intents with `confirm: true` wait for `instafy bind confirm <dir> <job>`: set it only on an intent that cannot be
    undone or spends money outside Instafy, never on a read or a re-check.
 8. **Drive the view from chat:** `instafy bind command <dir> select '{"ref":"shoes:on-cloudmonster-2"}'`
@@ -103,7 +97,7 @@ nothing to check (use `instafy-frontend-previews`).
 ## When you receive a bound-site intent
 
 A message that starts with `[instafy-bind]` and ends with the bound-site output contract is an intent from a page,
-in the site's own thread (sent by a binder the owner runs with `--agent-executor`). Do the task, then reply with **only** `{"schema":"uw.records@1","records":[...]}`. No
+in the site's own thread (sent by a binder the owner runs with `--agent-executor`). Do the task, then reply with **only** `{"schema":"instafy.records@1","records":[...]}`. No
 prose, no code fence. Every record uses the ref the message gives (others are dropped). Leave out
 `prov.observed_at`, `prov.lane` and ids if unsure; the binder fills them. If you could not check, return a claim
 with `status: "uncertain"` and a short `note`; do not guess values. Do not edit workspace files for it.

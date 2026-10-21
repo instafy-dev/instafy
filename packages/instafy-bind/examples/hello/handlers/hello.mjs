@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 // hello: the smallest script handler.
-// stdin:  one JSON object { intent, bound, site }   (map-pack v0.2 §10 handler contract)
+// stdin:  one JSON object { intent, bound, site }
 // stdout: NDJSON lines: progress x3, records, done.
 // It never writes site files; the binder validates and applies the records.
 

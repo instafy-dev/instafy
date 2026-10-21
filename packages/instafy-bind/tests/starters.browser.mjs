@@ -170,7 +170,7 @@ try {
     data.items.push({ ref: "option:option-e", name: "Option E", why: "Its store link is broken", facts: { price: { v: "$150", src: "Example Store", url: "https://example.com/e", date: "2026-10-17" } }, store: { name: "Shop E", url: "not a web address", readable: true } });
     const old = new Date(Date.now() - 3 * 86400_000).toISOString();
     fs.mkdirSync(path.join(dir, "data/records"), { recursive: true });
-    fs.writeFileSync(path.join(dir, "data/records/read_offer.json"), JSON.stringify({ schema: "uw.records@1", records: [
+    fs.writeFileSync(path.join(dir, "data/records/read_offer.json"), JSON.stringify({ schema: "instafy.records@1", records: [
       { type: "offer", oid: "off_b", ref: "option:option-b", seller: { name: "Example Store" }, price: { amount: 160, currency: "USD" }, basis: "live",
         prov: { source: "example.com", lane: "local", url: "https://example.com/option-b", observed_at: old, ttl_s: 3600 } },
       { type: "claim", cid: "clm_d", ref: "option:option-d", attr: "price", value: null, status: "uncertain", basis: "live", confidence: "low", note: "the store asks for a login",
@@ -265,7 +265,7 @@ try {
       data.items[1].store = { name: "Example Store", url: "https://example.com/option-b", readable: true };
       const now = new Date().toISOString();
       fs.mkdirSync(path.join(d, "data/records"), { recursive: true });
-      fs.writeFileSync(path.join(d, "data/records/read_offer.json"), JSON.stringify({ schema: "uw.records@1", records: ["option:option-a", "option:option-b"].map((ref, i) => (
+      fs.writeFileSync(path.join(d, "data/records/read_offer.json"), JSON.stringify({ schema: "instafy.records@1", records: ["option:option-a", "option:option-b"].map((ref, i) => (
         { type: "claim", cid: "clm_" + i, ref, attr: "price", value: null, status: "uncertain", basis: "live", confidence: "low", note: "example.com blocks automated price checks",
           prov: { source: "example.com", lane: "local", observed_at: now, ttl_s: 3600 } })) }));
       return data;
@@ -361,7 +361,7 @@ try {
       data.items.push({ ref: "option:option-e", name: "Option E", why: "Fresh", facts: { price: { v: "$170", src: "Shop", url: "https://example.com/e", date: "2026-10-17" } } });
       // option-b's $99 is an old live check: cheapest, but it may have changed
       fs.mkdirSync(path.join(d, "data/records"), { recursive: true });
-      fs.writeFileSync(path.join(d, "data/records/read_offer.json"), JSON.stringify({ schema: "uw.records@1", records: [
+      fs.writeFileSync(path.join(d, "data/records/read_offer.json"), JSON.stringify({ schema: "instafy.records@1", records: [
         { type: "offer", oid: "off_b", ref: "option:option-b", seller: { name: "Example Store" }, price: { amount: 99, currency: "USD" }, basis: "live",
           prov: { source: "example.com", lane: "local", url: "https://example.com/option-b", observed_at: new Date(Date.now() - 5 * 86400_000).toISOString(), ttl_s: 3600 } }] }));
       return data;

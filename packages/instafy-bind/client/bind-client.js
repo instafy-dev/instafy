@@ -1,5 +1,5 @@
 /*!
- * instafy-bind client (served by the binder at __bind/client.js; alias __uw/client.js).
+ * instafy-bind client (served by the binder at __bind/client.js).
  * SPDX-License-Identifier: AGPL-3.0-only
  *
  * Load it with a script tag whose src is "__bind/client.js" (relative to the page), then:
@@ -10,8 +10,8 @@
  *
  * Events for on(type, fn): hello, ack, progress, results, done, error, command, records (store changed),
  * intent (local), and "*" (fn(type, payload)). Each also fires as a window CustomEvent "bind:<type>".
- * Transports in: SSE from the binder, postMessage from window.parent (source "instafy-host", only from
- * bound.json parentOrigins), and polling data/version.json while SSE is down. All are deduped.
+ * Transports in: SSE from the binder, postMessage from window.parent (source "instafy-host", only from the origins
+ * the binder lists in health.parentOrigins), and polling data/version.json while SSE is down. All are deduped.
  * Record strings are data: render them with textContent.
  *
  * Ask Octo (agent intents): the binder never runs them for a viewer. Framed by a host that takes asks (Studio: layout
@@ -21,9 +21,10 @@
  * is a string, this person may not send messages there: the asks are listed with `disabled: <that reason>` and a click
  * says so. Anywhere else asks are not offered (the page hides them like any intent not in `names`).
  *
- * Location: `await instafyBind.location()` (or location({watch: true}, onPosition)). In a host that offers it (Studio:
- * layout caps.location === "host") the host asks the browser once and shows which site got the position; elsewhere
- * the page asks navigator.geolocation.
+ * Location: `await instafyBind.location()` (or location({watch: true}, onPosition)). In a host that offers it (layout
+ * caps.location === "host") the host asks the browser once and shows which site got the position; a page of its own
+ * asks navigator.geolocation; a framed page with no such host rejects with code "unavailable" ("Location is not
+ * available in this preview yet."). Studio's side is not built yet.
  *
  * Follow mode (Studio's Present / Follow): framed by Studio, the page shares its view while Studio
  * says "present": path, query, hash, the element with an id at the top of the window and the scroll position. A
@@ -47,7 +48,7 @@
   var cfg = window.instafyBindConfig || {};
   var script = document.currentScript;
   var base = script && script.src ? script.src.replace(/client\.js(?:[?#].*)?$/, "") : new URL("__bind/", location.href).href;
-  var siteRoot = base.replace(/__(?:bind|uw)\/$/, "");
+  var siteRoot = base.replace(/__bind\/$/, "");
   var listeners = {};
   var seen = new Set();
   var seenOrder = [];
@@ -60,8 +61,7 @@
   var hostReady = false;
   var sseOpen = false;
   var parentOrigin = null;
-  var parentOrigins = null; // allowed parent frames; null until known
-  var listedParents = false; // bound.json named its parent origins: only those may host the page
+  var parentOrigins = null; // the origins that may host this page in a frame (the binder's list + this origin); null until known
   var parentQueue = [];
   var lastVersion = 0;
   var hasToken = false;
@@ -104,7 +104,7 @@
     };
   }
 
-  // ---- records store (uw.records@1 merge rules, same as the binder)
+  // ---- records store (instafy.records@1 merge rules, same as the binder)
   function recordKey(r) {
     if (r.type === "claim") return "c:" + r.cid;
     if (r.type === "offer") return "o:" + r.oid;
@@ -250,9 +250,6 @@
       var why = (m.error && m.error.message) || m.message || "it failed";
       showToast(String(myIntent.name).replace(/_/g, " ") + " did not work: " + String(why).slice(0, 140));
     }
-    if (via !== "uw" && window.uw && typeof window.uw.ingest === "function") {
-      try { window.uw.ingest(raw); } catch (e) { console.warn("[instafy-bind] uw.ingest failed", e); }
-    }
     if (m.type === "command" && cfg.builtins !== false && m.command) {
       if (m.command.name === "toast") showToast(m.command.args && m.command.args.text);
       if (m.command.name === "reload") setTimeout(function () { location.reload(); }, 50);
@@ -273,12 +270,18 @@
   }
 
   // ---- intents out
+  /** n uniform base36 characters (bytes 252-255 are dropped, so no character is likelier than another) */
+  function rand36(n) {
+    var out = "";
+    while (out.length < n) {
+      var bytes = new Uint8Array(n * 2);
+      (window.crypto || {}).getRandomValues ? crypto.getRandomValues(bytes) : bytes.forEach(function (_, i) { bytes[i] = Math.random() * 256; });
+      bytes.forEach(function (b) { if (b < 252 && out.length < n) out += (b % 36).toString(36); });
+    }
+    return out;
+  }
   function newId() {
-    var rand = "";
-    var bytes = new Uint8Array(4);
-    (window.crypto || {}).getRandomValues ? crypto.getRandomValues(bytes) : bytes.forEach(function (_, i) { bytes[i] = Math.random() * 256; });
-    bytes.forEach(function (b) { rand += (b % 36).toString(36); });
-    return "int_" + Date.now().toString(36) + "_" + rand;
+    return "int_" + Date.now().toString(36) + "_" + rand36(4);
   }
   function post(msg) {
     return fetch(base + "intent", { method: "POST", headers: authHeaders({ "content-type": "application/json" }), body: JSON.stringify(msg), credentials: "same-origin" })
@@ -329,12 +332,51 @@
       catalog.push(Object.assign({}, d, { via: "host" }, typeof state === "string" ? { disabled: state } : {}));
     });
   }
+  // An ask becomes a chat message everyone in the conversation reads, so the viewer's position goes rounded to about
+  // 100 m (3 decimals) without accuracy, altitude, heading or speed, and params the intent lists in private_params
+  // stay out. The same rules as the binder's (src/apply.mjs shareableParams, src/executors/agent.mjs coarsen).
+  var LOCATION_PARAM_RE = /^(lat|lng|lon|long|latitude|longitude|coords?|coordinates|position|geo|geolocation|location|accuracy|altitude|heading|near|near_me|my_location|user_location)$/i;
+  var POSITION_DETAIL_RE = /^(accuracy|altitude|heading|speed)$/i;
+  var COORD_PAIR_RE = /^\s*-?\d{1,3}\.\d+\s*,\s*-?\d{1,3}\.\d+\s*$/;
+  function looksLikePosition(v) {
+    if (typeof v === "string") return COORD_PAIR_RE.test(v);
+    if (!v || typeof v !== "object") return false;
+    if (Array.isArray(v)) return v.length >= 2 && v.length <= 3 && v.every(function (n) { return typeof n === "number"; }) && Math.abs(v[0]) <= 180 && Math.abs(v[1]) <= 180 && v.some(function (n) { return !Number.isInteger(n); });
+    return Object.keys(v).some(function (k) { return LOCATION_PARAM_RE.test(k); });
+  }
+  function coarse(n) { return Math.round(n * 1000) / 1000; }
+  function coarsen(v) {
+    if (typeof v === "number") return Number.isInteger(v) ? v : coarse(v);
+    if (typeof v === "string") return v.replace(/-?\d{1,3}\.\d+/g, function (m) { return String(coarse(Number(m))); });
+    if (Array.isArray(v)) return v.map(coarsen);
+    if (v && typeof v === "object") {
+      var out = {};
+      Object.keys(v).forEach(function (k) { if (!POSITION_DETAIL_RE.test(k)) out[k] = coarsen(v[k]); });
+      return out;
+    }
+    return v;
+  }
+  /** {params, withheld, coarsened}: what an ask may carry into the chat. */
+  function askParams(params, def) {
+    var declared = Array.isArray(def.private_params) ? def.private_params : [];
+    var out = {}, withheld = [], coarsened = [];
+    Object.keys(params && typeof params === "object" ? params : {}).forEach(function (k) {
+      var v = params[k];
+      if (declared.indexOf(k) >= 0 || POSITION_DETAIL_RE.test(k)) { withheld.push(k); return; }
+      if (LOCATION_PARAM_RE.test(k) || looksLikePosition(v)) { out[k] = coarsen(v); coarsened.push(k); return; }
+      out[k] = v;
+    });
+    return { params: out, withheld: withheld, coarsened: coarsened };
+  }
   function askHost(msg) {
     var def = askDef(msg.name);
     var state = askState();
     if (!def || state === null) return localAck(msg.id, "rejected", ASK_ELSEWHERE);
     if (typeof state === "string") return localAck(msg.id, "rejected", state);
-    var payload = { id: msg.id, intent: msg.name, label: String(def.label || msg.name).slice(0, 120), params: msg.params, ref: msg.ref };
+    var shared = askParams(msg.params, def);
+    var payload = { id: msg.id, intent: msg.name, label: String(def.label || msg.name).slice(0, 120), params: shared.params, ref: msg.ref };
+    if (shared.withheld.length) payload.withheld = shared.withheld;
+    if (shared.coarsened.length) payload.coarsened = shared.coarsened;
     askIds.add(msg.id);
     if (!toHost("ask", payload)) { askIds.delete(msg.id); return localAck(msg.id, "rejected", ASK_ELSEWHERE); }
     var p = pending.get(msg.id);
@@ -456,7 +498,7 @@
       if (version && version.files) Object.keys(version.files).forEach(function (f) { files[f] = 1; });
       return Promise.all(Object.keys(files).filter(function (f) { return /^data\/records\/[A-Za-z0-9_.-]+\.json$/.test(f); }).map(function (f) {
         return getJson(siteRoot + f).then(function (body) {
-          if (body && body.schema === "uw.records@1") ingestRecords(body.records, "static");
+          if (body && body.schema === "instafy.records@1") ingestRecords(body.records, "static");
         }).catch(function () {});
       }));
     });
@@ -496,11 +538,11 @@
     }, delay);
   }
 
-  // ---- parent frame (a future Studio pane): only origins listed in bound.json parentOrigins, else same origin
+  // ---- parent frame: only the origins the binder lists (bound.json parentOrigins, and in a preview the Studio that
+  // opened it), else this page's own origin. Nobody else, however it frames the page, is its host.
   function setParentOrigins(list) {
     if (parentOrigins) return;
-    parentOrigins = (Array.isArray(list) ? list : []).filter(function (o) { return typeof o === "string"; });
-    listedParents = parentOrigins.length > 0;
+    parentOrigins = (Array.isArray(list) ? list : []).filter(function (o) { return typeof o === "string" && /^https?:\/\/[^\s\/]+$/.test(o); });
     if (parentOrigins.indexOf(location.origin) < 0) parentOrigins.push(location.origin);
     var queued = parentQueue;
     parentQueue = [];
@@ -530,11 +572,12 @@
     unavailable: "Your location is not available right now.",
     timeout: "Finding your location took too long. Try again.",
     stopped: "Location is off for this site · turn it on in Studio's menu for this preview.",
+    framed: "Location is not available in this preview yet.",
     hidden: "This page is not on screen, so it gets no location."
   };
   var LAYOUT_WAIT_MS = 2000; // framed with ?instafy_host=: how long location() waits for the host's first layout
   var HOST_ANSWER_MS = 90000; // a one-shot request the host never answers (the person may be reading a prompt)
-  var hostQuery = /[?&](?:instafy_host|uw_host)=[a-z]/.test(location.search || "");
+  var hostQuery = /[?&]instafy_host=[a-z]/.test(location.search || "");
   var hostLayout = null; // the last layout from the host frame (v1), {caps, insets, chrome, title, theme}
   var hostOrigin = null; // the origin that sent the first layout keeps the frame
   var layoutWaiters = [];
@@ -542,11 +585,10 @@
 
   function embedded() { try { return window.parent !== window; } catch (e) { return true; } }
   function hostV1OriginOk(origin) {
-    if (!origin || origin === "null") return false;
+    if (!origin || origin === "null" || !parentOrigins) return false;
     if (hostOrigin) return origin === hostOrigin;
-    if (listedParents) return parentOrigins.indexOf(origin) >= 0;
-    // Unlisted (Studio frames previews from its own origin, which the site cannot know): the direct parent, at the
-    // origin the browser names in ancestorOrigins where it has that list (a masked "null" entry proves nothing).
+    if (parentOrigins.indexOf(origin) < 0) return false;
+    // where the browser names the frame's parent (ancestorOrigins), it must be the sender too
     var anc = location.ancestorOrigins;
     return !(anc && anc.length && anc[0] && anc[0] !== "null" && anc[0] !== origin);
   }
@@ -554,7 +596,11 @@
   var HOST_DENIED_MESSAGE = "Location is blocked for Instafy. Studio shows how to turn it on.";
   function locationError(code, fromHost) {
     if (!LOCATION_MESSAGES[code]) code = "unavailable";
-    var err = new Error(fromHost && code === "denied" ? HOST_DENIED_MESSAGE : LOCATION_MESSAGES[code]);
+    var text = fromHost && code === "denied" ? HOST_DENIED_MESSAGE : LOCATION_MESSAGES[code];
+    // framed by a page that offers no location: the browser would refuse the frame, and its "allow it in your
+    // settings" would send the person to fix the wrong thing. Pages see code "unavailable".
+    if (code === "framed") code = "unavailable";
+    var err = new Error(text);
     err.name = "LocationError";
     err.code = code;
     return err;
@@ -629,9 +675,17 @@
     if (!hostOrigin || !embedded()) return false;
     try { window.parent.postMessage({ source: "instafy-bind", v: 1, type: type, payload: payload }, hostOrigin); return true; } catch (e) { return false; }
   }
-  /** "host" when the frame's host answers location requests, else "browser". Waits briefly for a host's first layout. */
+  /**
+   * "host" when the frame's host answers location requests; "browser" on a page of its own, or in a frame whose host
+   * says the frame may ask the browser (caps.geolocation); else "framed" (no host offers it here). Waits briefly for a
+   * host's first layout.
+   */
   function locationRoute() {
-    function decide() { return hostLayout && hostLayout.caps.location === "host" && embedded() ? "host" : "browser"; }
+    function decide() {
+      if (!embedded()) return "browser";
+      if (hostLayout && hostLayout.caps.location === "host") return "host";
+      return hostLayout && hostLayout.caps.geolocation ? "browser" : "framed";
+    }
     if (hostLayout || !embedded() || !hostQuery) return Promise.resolve(decide());
     return new Promise(function (resolve) {
       var done = function () { clearTimeout(timer); resolve(decide()); };
@@ -644,10 +698,7 @@
     });
   }
   function locationId() {
-    var bytes = new Uint8Array(6), out = "";
-    (window.crypto || {}).getRandomValues ? crypto.getRandomValues(bytes) : bytes.forEach(function (_, i) { bytes[i] = Math.random() * 256; });
-    bytes.forEach(function (b) { out += (b % 36).toString(36); });
-    return "loc_" + out;
+    return "loc_" + rand36(6);
   }
   function browserCode(err) { return err && err.code === 1 ? "denied" : err && err.code === 3 ? "timeout" : "unavailable"; }
   function browserPosition(p) {
@@ -665,6 +716,7 @@
   function locateOnce(opts) {
     return locationRoute().then(function (via) {
       return new Promise(function (resolve, reject) {
+        if (via === "framed") return reject(locationError("framed"));
         if (via === "browser") {
           var g = geo();
           if (!g) return reject(locationError("unavailable"));
@@ -742,6 +794,7 @@
     locationRoute().then(function (route) {
       if (stopped) return;
       via = route;
+      if (route === "framed") { fail("framed"); return; }
       if (route === "browser") {
         var g = geo();
         if (!g) { fail("unavailable"); return; }
@@ -786,11 +839,11 @@
   // trailing send), tap {seq, payload:{x, y, at}}, interact (the person's own wheel, touch or keys). Only between the
   // page and the host that sent the layout; a presenting page never applies views, so nothing echoes.
   var VIEW_MAX_BYTES = 2048, VIEW_GAP_MS = 100, VIEW_POLL_MS = 500, TAP_GAP_MS = 200, INTERACT_GAP_MS = 300, QUIET_MS = 400;
-  var HOST_PARAMS = ["instafy_host", "uw_host"];
+  var HOST_PARAMS = ["instafy_host"];
   var viewOn = cfg.view !== false;
   var presenting = false, shareLocation = false, viewSeq = 0, lastView = null, lastViewAt = -Infinity, viewTimer = null, viewPoll = null;
   var following = false, touchedAt = -Infinity, lastInteract = -Infinity, lastTap = -Infinity;
-  var custom = { get: null, apply: null, auto: true };
+  var custom = { get: null, apply: null, auto: true, locationFree: false };
   // the position location() handed this page: kept out of views unless the presenter shares it, for as long as this
   // page lives (it may still hold it in its URL or state), not for a fixed time
   var lastFix = null;
@@ -894,7 +947,13 @@
     if (custom.get) {
       try { var s = custom.get(); if (s !== undefined) p.s = JSON.parse(JSON.stringify(s)); } catch (e) { console.warn("[instafy-bind] follow get() failed", e); }
     }
-    // the viewer's own position stays home: the address and the page's own state go, the scroll position stays
+    // the viewer's own position stays home. Once this page was given one, the address and the page's own state may hold
+    // it in any form (rounded, a geohash, custom state), so they go unless the presenter shares location or the page
+    // said its view never holds it (follow({locationFree: true})); the scroll position stays
+    if (lastFix && !shareLocation && !custom.locationFree) {
+      if (p.q || p.h || "s" in p) p.withheld = ["location"];
+      delete p.q; delete p.h; delete p.s;
+    }
     if (hasFix(p)) { delete p.q; delete p.h; delete p.s; p.withheld = ["location"]; if (hasFix(p)) return null; }
     // ≤ 2 KB: the hash first, then the query, then the page's own state
     ["h", "q", "s"].forEach(function (k) { if (bytes(p) > VIEW_MAX_BYTES && k in p) { delete p[k]; p.trimmed = true; } });
@@ -1073,8 +1132,9 @@
     custom.get = typeof o.get === "function" ? o.get : null;
     custom.apply = typeof o.apply === "function" ? o.apply : null;
     custom.auto = o.auto !== false;
+    custom.locationFree = o.locationFree === true;
     viewChanged();
-    return { changed: viewChanged, stop: function () { custom.get = null; custom.apply = null; custom.auto = true; } };
+    return { changed: viewChanged, stop: function () { custom.get = null; custom.apply = null; custom.auto = true; custom.locationFree = false; } };
   }
 
   var api = {

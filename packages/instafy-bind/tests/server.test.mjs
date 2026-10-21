@@ -43,11 +43,11 @@ function site(extraIntents = {}) {
   });
 }
 
-test("health, client.js and the __uw alias", async () => {
+test("health and client.js under __bind/, and no other endpoint prefix", async () => {
   const dir = site();
   const binder = await startBinder(dir);
   try {
-    for (const prefix of ["__bind", "__uw"]) {
+    for (const prefix of ["__bind"]) {
       const health = await (await fetch(`${binder.url}/${prefix}/health`)).json();
       assert.equal(health.ok, true);
       assert.equal(health.host, "instafy-bind");
@@ -60,6 +60,8 @@ test("health, client.js and the __uw alias", async () => {
     }
     // a page in a subfolder resolves endpoints relative to itself
     assert.equal((await fetch(`${binder.url}/sub/__bind/health`)).status, 200);
+    // one protocol: the old __uw/ alias is just a (missing) file
+    assert.equal((await fetch(`${binder.url}/__uw/health`)).status, 404);
     assert.ok(binder.logs.some((l) => /missing is not available/.test(l.text)));
   } finally {
     await binder.close();
@@ -427,9 +429,9 @@ test("cancel on a shared job only detaches the caller's id", async () => {
   }
 });
 
-test("pages without the bind client: ?k= sets a site cookie that authorises intents and events; static responses carry x-uw-host", async () => {
+test("pages without the bind client: ?k= sets a site cookie that authorises intents and events; no alias header", async () => {
   const dir = site();
-  fs.writeFileSync(path.join(dir, "index.html"), "<!doctype html><title>map</title><script type=module src=engine/engine.js></script>");
+  fs.writeFileSync(path.join(dir, "index.html"), "<!doctype html><title>page</title><script type=module src=app/app.js></script>");
   const binder = await startBinder(dir);
   try {
     const s = binder.sites[0];
@@ -438,7 +440,7 @@ test("pages without the bind client: ?k= sets a site cookie that authorises inte
     assert.match(share, /\/\?k=[A-Za-z0-9_-]{16,}$/);
 
     const page = await fetch(`${binder.url}/index.html`);
-    assert.equal(page.headers.get("x-uw-host"), "instafy-bind");
+    assert.equal(page.headers.get("x-uw-host"), null);
 
     const wrong = await fetch(`${binder.url}/?k=${"x".repeat(32)}`, { redirect: "manual" });
     assert.equal(wrong.status, 200, "a wrong token is ignored, never a cookie");
@@ -460,7 +462,7 @@ test("pages without the bind client: ?k= sets a site cookie that authorises inte
     const otherCookie = await postIntent(binder, intentMessage("hello", { name: "x" }), { token: null, headers: { cookie: `${s.cookie}=${"y".repeat(32)}` } });
     assert.equal(otherCookie.status, 401);
 
-    const events = await fetch(`${binder.url}/__uw/events`, { headers: { cookie } });
+    const events = await fetch(`${binder.url}/__bind/events`, { headers: { cookie } });
     assert.equal(events.status, 200);
     await events.body.cancel();
   } finally {
@@ -499,4 +501,26 @@ test("a plain site (index.html, no bound.json) is served with the bind client ad
   const empty = makeSite({ "notes.txt": "x" });
   await assert.rejects(startBinder(empty, { noToken: true }), /no bound\.json .* and no index\.html/);
   cleanup(empty);
+});
+
+test("other spellings of a guarded path are guarded too: case, trailing dots and spaces, streams, the real name", async () => {
+  const dir = site();
+  fs.mkdirSync(path.join(dir, "data", "records"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "data", "records", "x.json"), JSON.stringify({ schema: "instafy.records@1", records: [] }));
+  const binder = await startBinder(dir);
+  try {
+    const get = async (p) => (await fetch(`${binder.url}${p}`)).status;
+    for (const p of ["/bound.json", "/Bound.json", "/BOUND.JSON", "/bound.json.", "/bound.json%20", "/bound.json::$DATA", "/data/records/x.json", "/DATA/records/x.json", "/data/Records/X.json", "/data./records/x.json", "/Data/version.json"]) {
+      assert.equal(await get(p), 401, `${p} needs the viewer token`);
+    }
+    for (const p of ["/handlers/quick.mjs", "/Handlers/quick.mjs", "/HANDLERS/quick.mjs", "/handlers./quick.mjs", "/handlers%20/quick.mjs", "/Tests/x", "/node_modules./x"]) {
+      assert.equal(await get(p), 404, `${p} is never served`);
+    }
+    // with the token, the guarded files are served (by any spelling the filesystem knows)
+    assert.equal((await fetch(`${binder.url}/bound.json`, { headers: { "x-bind-token": binder.sites[0].token } })).status, 200);
+    assert.equal(await get("/app.js"), 200, "other files are untouched");
+  } finally {
+    await binder.close();
+    cleanup(dir);
+  }
 });

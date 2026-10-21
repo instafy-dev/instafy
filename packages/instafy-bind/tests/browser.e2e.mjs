@@ -125,6 +125,25 @@ f.addEventListener("load", () => f.contentWindow.postMessage({ source: "instafy-
 </script>`);
   });
   await new Promise((resolve) => hostServer.listen(0, "127.0.0.1", resolve));
+  // only a host the site lists may talk to it: bound.json parentOrigins (a preview lists the Studio that opened it)
+  const listHosts = (siteDir, origins) => {
+    const file = path.join(siteDir, "bound.json");
+    const bound = JSON.parse(fs.readFileSync(file, "utf8"));
+    bound.parentOrigins = origins;
+    fs.writeFileSync(file, JSON.stringify(bound, null, 2));
+  };
+  // an unlisted host first: its layout is ignored, so the page has no host and does not ask anyone for location
+  const u = await context.newPage();
+  await u.goto(`http://localhost:${hostServer.address().port}/`);
+  const unlisted = u.frames().find((fr) => fr.url().startsWith(site));
+  await unlisted.waitForFunction(() => window.instafyBind && window.instafyBind.connected === false);
+  await u.waitForTimeout(300);
+  assert.equal(await unlisted.evaluate(() => window.instafyBind.hostLayout), null, "an unlisted parent is not the host");
+  const refused = await unlisted.evaluate(() => instafyBind.location().then(() => "located", (err) => err.message));
+  assert.equal(refused, "Location is not available in this preview yet.");
+  assert.deepEqual(await u.evaluate(() => window.got.map((m) => m.type)), [], "nothing was posted to it");
+  await u.close();
+  listHosts(dir, [`http://localhost:${hostServer.address().port}`]);
   const h = await context.newPage();
   h.on("pageerror", (e) => errors.push(e.message));
   await h.goto(`http://localhost:${hostServer.address().port}/`);
@@ -140,9 +159,7 @@ f.addEventListener("load", () => f.contentWindow.postMessage({ source: "instafy-
   // pages may frame, stands in for the preview card.)
   const askDir = fs.mkdtempSync(path.join(os.tmpdir(), "bind-e2e-ask-"));
   initSite(askDir);
-  askBinder = createBinder({ root: askDir, port: 0, preview: true, env: {}, log: () => {}, previewStateFile: path.join(askDir, "no-state.json") });
-  await askBinder.listen();
-  const askSite = askBinder.url;
+  let askSite = null;
   askServer = http.createServer((req, res) => {
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(`<!doctype html><iframe id="f" referrerpolicy="no-referrer" src="${askSite}/?instafy_host=studio"></iframe>
@@ -160,6 +177,10 @@ f.addEventListener("load", () => f.contentWindow.postMessage({ source: "instafy-
 </script>`);
   });
   await new Promise((resolve) => askServer.listen(0, "127.0.0.1", resolve));
+  listHosts(askDir, [`http://localhost:${askServer.address().port}`]);
+  askBinder = createBinder({ root: askDir, port: 0, preview: true, env: {}, log: () => {}, previewStateFile: path.join(askDir, "no-state.json") });
+  await askBinder.listen();
+  askSite = askBinder.url;
   const k = await context.newPage();
   k.on("pageerror", (e) => errors.push(e.message));
   await k.goto(`http://localhost:${askServer.address().port}/`);
@@ -205,6 +226,7 @@ window.present = (on) => to(A, { type: "present", on, share: { location: false }
 </script>`);
   });
   await new Promise((resolve) => followServer.listen(0, "127.0.0.1", resolve));
+  listHosts(dir, [`http://localhost:${followServer.address().port}`]);
   const fp = await context.newPage();
   fp.on("pageerror", (e) => errors.push(e.message));
   await fp.setViewportSize({ width: 1320, height: 720 });

@@ -1,13 +1,13 @@
-// Message shapes shared by the binder and the bind client (map-pack ENGINE-SPEC v0.2 §9.3-§9.4).
+// Message shapes shared by the binder and the bind client.
 import { randomBytes } from "node:crypto";
 
 export const PROTOCOL_VERSION = 2;
 export const HOST_SOURCE = "instafy-host";
-export const INTENT_SOURCES = ["instafy-map", "instafy-site"];
+export const INTENT_SOURCES = ["instafy-site"];
 export const HOST_TYPES = ["hello", "ack", "progress", "results", "done", "error", "command"];
 export const ACK_STATUSES = ["queued", "needs_confirm", "rejected", "running"];
 export const ERROR_CODES = ["not_found", "timeout", "policy", "upstream", "unavailable", "invalid", "cancelled", "dry_run", "internal"];
-export const COMMAND_NAMES = ["select", "flyTo", "setLens", "setTime", "highlight", "toast", "reload"];
+export const COMMAND_NAMES = ["select", "highlight", "toast", "reload"];
 export const RESERVED_INTENTS = ["cancel"];
 
 export const INTENT_ID_RE = /^int_[a-z0-9]{1,12}_[a-z0-9]{2,8}$/;
@@ -20,11 +20,21 @@ export const ENVELOPE_TOKEN_RE = /^[A-Za-z0-9_.:-]{1,60}$/;
 export const CANCEL_KEY_RE = /^[A-Za-z0-9_-]{16,64}$/;
 /** The whole POST body. */
 export const MAX_INTENT_BYTES = 8 * 1024;
-/** Serialised params (map-pack §9.2). */
+/** Serialised params. */
 export const MAX_PARAMS_BYTES = 4 * 1024;
 export const MAX_COMMAND_BYTES = 4 * 1024;
 
-const base36 = (bytes) => [...randomBytes(bytes)].map((b) => (b % 36).toString(36)).join("");
+const ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz";
+/** n uniform base36 characters (rejection sampling: bytes 252-255 are dropped, so no character is likelier). */
+const base36 = (n) => {
+  let out = "";
+  while (out.length < n) {
+    for (const b of randomBytes(n * 2)) {
+      if (b < 252 && out.length < n) out += ALPHABET[b % 36];
+    }
+  }
+  return out;
+};
 
 /** "int_" + base36(now) + "_" + 4 random base36 characters. */
 export function newIntentId(now = Date.now()) {
@@ -40,7 +50,7 @@ export function hostMessage(type, fields = {}) {
   return { source: HOST_SOURCE, v: PROTOCOL_VERSION, type, ...fields, at: new Date().toISOString() };
 }
 
-/** Clip text for progress/error messages (140 characters, like map-pack). */
+/** Clip text for progress/error messages (140 characters). */
 export function clip(text, max = 140) {
   const value = String(text ?? "").replace(/\s+/g, " ").trim();
   return value.length > max ? `${value.slice(0, max - 1)}…` : value;

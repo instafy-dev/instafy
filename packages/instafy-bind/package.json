@@ -26,7 +26,7 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node --import ./tests/isolate-lookup-health.mjs --test tests/*.test.mjs examples/*/test/*.test.mjs",
+    "test": "node --test tests/*.test.mjs examples/*/test/*.test.mjs",
     "start": "node bin/instafy-bind.mjs serve",
     "test:browser": "node tests/browser.e2e.mjs",
     "test:starters": "node tests/starters.browser.mjs",

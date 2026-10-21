@@ -65,14 +65,14 @@ export function error(code, message) {
 
 /**
  * The polite, SSRF-guarded fetch: refuses loopback, private and LAN addresses (re-checked on redirects and at connect
- * time), sites whose terms ban AI agents, and paths robots.txt disallows for bots (error code "policy"; record it with
- * kit.uncertain as the reason the value is missing). Never work around a refusal.
- * A site that does not answer (refused, timed out, 5xx, or found down moments ago by any process) throws error code
- * "unavailable": not a missing page; say it could not be checked right now (the viewer can tap again later).
+ * time) and paths robots.txt disallows for bots (error code "policy"; record it with kit.uncertain as the reason the
+ * value is missing). Never work around a refusal.
+ * A site that does not answer (refused, timed out, 5xx) throws error code "unavailable": not a missing page; say it
+ * could not be checked right now (the viewer can tap again later).
  */
 export async function fetch(url, options = {}) {
   // Checked for the URL and for every redirect hop: a shortener or affiliate link must not lead into a page the
-  // target refuses (the same rule as politeFetch / `instafy web cite`).
+  // target refuses.
   const checkHop = async (hopUrl, hop) => {
     const policy = await checkPolicy(hopUrl, { allowLocal });
     if (!policy.refused) return;
@@ -134,8 +134,7 @@ export function uncertain({ ref, attr, url, note, label, source }) {
 }
 
 /**
- * The prices a product page states in its schema.org offers (JSON-LD), the same reading `instafy web cite` prints as
- * "price on the page": [{ amount, high?, currency, availability?, name? }]. Pass the page's HTML, or the response from
+ * The prices a page states in its schema.org offers (JSON-LD): [{ amount, high?, currency, availability?, name? }]. Pass the page's HTML, or the response from
  * kit.fetch (then a blocked or failed page throws code "policy"/"upstream" with the reason, for kit.uncertain).
  *   const [offer] = await kit.offers(await kit.fetch(item.url));
  *   if (offer) kit.records([{ type: "offer", oid: kit.rid("off", ref, host), ref, price: { amount: offer.amount, currency: offer.currency }, prov: { source: host, url } }]);

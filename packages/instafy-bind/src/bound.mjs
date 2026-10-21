@@ -1,4 +1,4 @@
-// bound.json: the per-site manifest of intents (map-pack ENGINE-SPEC v0.2 §9.1 plus executor fields).
+// bound.json: the per-site manifest of intents and how each one runs.
 import fs from "node:fs";
 import path from "node:path";
 import { checkSchema, validate, formatErrors } from "./schema-lite.mjs";
@@ -34,7 +34,7 @@ export const BOUND_SCHEMA = Object.freeze({
       },
     },
     attribution: { type: "array", maxItems: 10, items: { type: "string", maxLength: 300 } },
-    parentOrigins: { type: "array", maxItems: 10, items: { type: "string", pattern: "^https?://[^/]+$" } },
+    parentOrigins: { type: "array", maxItems: 10, items: { type: "string", pattern: "^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?$" } },
   },
   $defs: {
     recordsPath: { type: "string", pattern: RECORDS_PATH_RE.source },
@@ -50,23 +50,20 @@ export const BOUND_SCHEMA = Object.freeze({
         params: { type: "object" },
         prefill: { type: "object", additionalProperties: { type: "string", maxLength: 200 } },
         ui: { type: "array", maxItems: 8, items: { type: "string", maxLength: 60 } },
-        layers: { type: "array", maxItems: 20, items: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$" } },
         target: {
           type: "object",
           additionalProperties: false,
           properties: {
             records: { $ref: "#/$defs/recordsPath" },
-            layer: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$" },
-            create: { type: "object" },
           },
         },
-        pending: { type: "string", pattern: "^(item|layer|none|cell:[a-z][a-z0-9_]{0,47})$" },
+        pending: { type: "string", pattern: "^(item|none|cell:[a-z][a-z0-9_]{0,47})$" },
         confirm: { type: "boolean" },
         cooldown_s: { type: "number", minimum: 0, maximum: 3600 },
         timeout_s: { type: "number", minimum: 1, maximum: 1800 },
         sources: { type: "array", maxItems: 20, items: { type: "string", maxLength: 80 } },
         executor: { enum: ["script", "agent"] },
-        handler: { type: "string", pattern: "^(pack:[a-z][a-z0-9_]{0,47}|[A-Za-z0-9_./-]{1,120}\\.mjs)$" },
+        handler: { type: "string", pattern: "^[A-Za-z0-9_./-]{1,120}\\.mjs$" },
         lanes: { type: "array", minItems: 1, maxItems: 7, items: { $ref: "#/$defs/lane" } },
         env: { type: "array", maxItems: 10, items: { type: "string", pattern: "^[A-Z][A-Z0-9_]{0,63}$" } },
         private_params: { type: "array", maxItems: 20, items: { type: "string", minLength: 1, maxLength: 64 } },
@@ -143,20 +140,14 @@ export function loadBound(siteDir) {
 
 /**
  * Resolve how an intent runs. Returns {executor, handler?, ok, reason?}.
- * Script handlers must stay inside the site (or the pack dir for "pack:<name>").
+ * Script handlers must stay inside the site.
  */
-export function resolveIntent(def, { siteDir, packDir = null } = {}) {
+export function resolveIntent(def, { siteDir } = {}) {
   const executor = executorOf(def);
   if (executor === "agent") return { executor, ok: true };
   if (executor !== "script") return { executor, ok: false, reason: "no executor" };
-  let base = siteDir;
-  let rel = def.handler;
-  if (rel.startsWith("pack:")) {
-    if (!packDir) return { executor, ok: false, reason: `${rel} needs --pack-dir (or --handlers-dir)` };
-    base = packDir;
-    rel = `${rel.slice(5)}.mjs`;
-  }
-  const abs = path.resolve(base, rel);
+  const base = siteDir;
+  const abs = path.resolve(base, def.handler);
   let real;
   try {
     real = fs.realpathSync(abs);
@@ -190,11 +181,11 @@ export function intentCatalog(bound, runnable) {
       params: def.params,
       prefill: def.prefill,
       ui: def.ui,
-      layers: def.layers,
       pending: def.pending || "item",
       confirm: Boolean(def.confirm),
       cooldown_s: def.cooldown_s ?? 0,
       executor: executorOf(def),
       target: { ...def.target, records: targetOf(name, def) },
+      ...(Array.isArray(def.private_params) && def.private_params.length ? { private_params: def.private_params } : {}),
     }));
 }

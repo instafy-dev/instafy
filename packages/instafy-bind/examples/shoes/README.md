@@ -93,6 +93,6 @@ Atreyu (works, but every size was sold out). Those are what `check_size` (an Oct
 | `bound.json` | `read_offer` (script) and `check_size` (agent) |
 | `data/items.json` | The shortlist: ref, letter, brand, model, URL |
 | `handlers/read_offer.mjs` | Script handler |
-| `handlers/lib/offers.mjs` | JSON-LD → `uw.records@1` (pure, tested) |
-| `handlers/lib/safe-fetch.mjs` | SSRF-guarded GET (self-contained so the handler also runs under map-pack's `uw host`) |
+| `handlers/lib/offers.mjs` | JSON-LD → `instafy.records@1` (pure, tested) |
+| `handlers/lib/safe-fetch.mjs` | SSRF-guarded GET (self-contained, so the example's handler has no imports outside its folder) |
 | `test/` | `node:test` tests with synthetic fixtures |

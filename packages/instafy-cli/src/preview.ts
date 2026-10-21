@@ -91,6 +91,9 @@ type PreviewStateEntry = {
   // The controller's viewerHostSuffix for this preview. A tokenless local site (`instafy bind serve --preview`)
   // accepts the capability host only on exactly this domain: the preview id alone is not a secret.
   hostSuffix?: string;
+  // The origin Studio frames this preview from (the controller's studioOrigin). A bound site in the preview accepts
+  // frame messages (Ask Octo, location, follow mode) from this origin only, and none when it is missing.
+  studioOrigin?: string;
 };
 
 type PreviewStateFile = {
@@ -135,6 +138,20 @@ export function parseViewerHostSuffix(raw: unknown): string | undefined {
   if (typeof raw !== "string") return undefined;
   const suffix = raw.trim().toLowerCase();
   return suffix.length <= 253 && HOST_SUFFIX_RE.test(suffix) ? suffix : undefined;
+}
+
+/** The controller's studioOrigin as a bare http(s) origin, or undefined when it is missing or anything else. */
+export function parseStudioOrigin(raw: unknown): string | undefined {
+  if (typeof raw !== "string" || raw.length > 300) return undefined;
+  let url: URL;
+  try {
+    url = new URL(raw.trim());
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") return undefined;
+  if (url.username || url.password || url.search || url.hash || (url.pathname !== "/" && url.pathname !== "")) return undefined;
+  return url.origin;
 }
 
 // C0 and C1 control characters, the ones the server refuses in a title (Rust's char::is_control).
@@ -551,6 +568,7 @@ async function createAndStartClient(params: {
   const logFile = path.join(instafyDir(), "cli-preview-logs", `preview-${safePathSegment(previewId)}.log`);
   const configPath = configPathFor(workdir);
   const hostSuffix = parseViewerHostSuffix(grant["viewerHostSuffix"]);
+  const studioOrigin = parseStudioOrigin(grant["studioOrigin"]);
   const state = readStateFile();
   const current = state.previews.find((preview) => preview.previewId === previewId) ?? null;
 
@@ -625,6 +643,7 @@ async function createAndStartClient(params: {
     startedAt: current?.pid === pid ? current.startedAt : new Date().toISOString(),
     ...(binary ? { binary } : {}),
     ...(hostSuffix ? { hostSuffix } : {}),
+    ...(studioOrigin ? { studioOrigin } : {}),
   };
   upsertPreviewState(entry);
   return { grant, previewId, entry, current };

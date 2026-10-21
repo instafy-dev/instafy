@@ -127,7 +127,7 @@ test("writeRecords merges atomically and bumps data/version.json", () => {
     const second = writeRecords(dir, "data/records/check.json", [claim({ cid: "clm_b", attr: "size" })]);
     assert.equal(second.total, 2);
     const file = JSON.parse(fs.readFileSync(path.join(dir, "data/records/check.json"), "utf8"));
-    assert.equal(file.schema, "uw.records@1");
+    assert.equal(file.schema, "instafy.records@1");
     assert.equal(file.records.length, 2);
     const version = readVersion(dir);
     assert.equal(version.v, 2);

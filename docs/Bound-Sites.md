@@ -2,18 +2,20 @@
 
 > **Status.** Package `packages/instafy-bind` (zero dependencies, Node 18+, no build), CLI `instafy-bind` and
 > `instafy bind` (the binder is bundled into the CLI's `dist/bind`), skill `instafy-bound-sites`, page starters and
-> example sites (`hello`, `shoes`, `follow-table`). Apart from the origin server keeping `.bind/` private (§4) and the
-> runtime seeding the skill, nothing here changes runtime, controller or Studio behaviour.
+> example sites (`hello`, `shoes`, `follow-table`). Apart from the origin server keeping `.bind/` private (§4), the
+> controller naming Studio's origin when a preview opens (§4, Frames) and the runtime seeding the skill, nothing
+> here changes runtime, controller or Studio behaviour.
 >
-> **Ask Octo is host-mediated** (§2a): an agent intent is an ask the page hands to Studio, which sends it as the
-> clicker's own chat message. The binder never holds an Instafy credential for it. Studio's side of that message is
-> not built yet, so until it is, Ask Octo buttons are not offered anywhere and sites run their script intents.
+> **Studio's side is not built yet.** The page's half of three things talks to its host frame: Ask Octo (§2a),
+> location and follow mode (§2b). Studio sends none of those messages today (no `layout`, no `?instafy_host=`), so
+> in Studio's preview card Ask Octo buttons are hidden, `location()` rejects with "Location is not available in this
+> preview yet." and nobody can present or follow. Sites run their script intents, which work everywhere.
 
 A **bound site** is an ordinary website plus a small generic backend, the **binder**. Clicks in the site become
 typed **intents**. The binder runs script intents through a deterministic handler; an "Ask Octo" intent is handed to
 Studio and sent as the clicker's own chat message. Results come back as typed **records** with provenance. The binder writes them into the
 site's data files and streams them to every open viewer. Octo can also push **commands** back into the site (select,
-fly to, highlight). That is the two-way bind:
+highlight, toast, reload). That is the two-way bind:
 
 ```
   Site (any website)           Binder (generic; `instafy-bind serve`)                Executors
@@ -67,7 +69,7 @@ the site's own data files and pushes it to every open page. So:
   the clicker's own chat message, billed like typing it (§2a). Octo talks back to open pages with
   `instafy bind command <site> <name> '<json>'`, using the admin token on disk. Neither the page nor the binder holds
   an Instafy credential.
-- **Data is the contract.** Records (`uw.records@1`: claims, offers, items, each with source, lane, observed time and
+- **Data is the contract.** Records (`instafy.records@1`: claims, offers, items, each with source, lane, observed time and
   TTL) are the only thing an executor can change. That is what makes a script and an Octo turn interchangeable, and
   what keeps an agent's answer from rewriting the page.
 - **How Octo generates one.** The `instafy-bound-sites` skill: write the page against `__bind/client.js`, write
@@ -76,50 +78,49 @@ the site's own data files and pushes it to every open page. So:
   (tunnel with consent). A failed click shows as a toast when the page does not handle `error` events itself. Octo never writes server code, so the security properties (tokens, SSRF checks, schema validation,
   cooldowns) come with every site.
 - **Later transports, same protocol.** The client already accepts `postMessage` from a parent frame (`instafy-host`,
-  only from origins in `bound.json` `parentOrigins`), so a Studio pane can replace the local binder's SSE without the
-  page changing.
+  only from the origins the binder lists: `bound.json` `parentOrigins`, and in a preview the Studio that opened it),
+  so a Studio pane can replace the local binder's SSE without the page changing.
 
 ## 1. Parts
 
 | Part | What | Where |
 |---|---|---|
-| Site | Any static site: HTML/JS, the map-pack engine, a shopping grid. Loads the bind client | the site folder |
+| Site | Any static site (HTML/JS, a compare grid, a tracker). Loads the bind client; the binder adds it to plain pages | the site folder |
 | `bound.json` | Manifest: intents, param schemas, executor per intent, prompt templates, output targets | site root |
 | Bind client | `__bind/client.js`, a tiny browser library: `bind.intent(name, params)`, `bind.on(type, fn)`, records store, transports | served by the binder |
 | Binder | Static server + intent endpoint + SSE + apply step + jobs + tokens | `packages/instafy-bind` |
 | Executors | `script` (handler process, NDJSON); `agent` only with the owner's `--agent-executor` (§3) | `packages/instafy-bind/src/executors/` |
 | Skill | Teaches Octo to generate bound sites | `packages/runtime-agent/assets/instafy/.agents/skills/instafy-bound-sites/` |
 
-## 2. Protocol (compatible with the map pack's v0.2 host protocol)
+## 2. Protocol
 
-The protocol is the map pack's v0.2 host protocol ("uw host", §9-§10 of its engine spec). The binder serves every
-endpoint under **both** prefixes, `__bind/` (canonical) and `__uw/` (alias), so map-pack sites work unchanged.
+Every endpoint is under `__bind/`, relative to the site (a gallery's site at `/<name>/` has `/<name>/__bind/`).
 
 - **Intent out** (site → binder): `{ source, v: 2, type: "intent", id: "int_<base36 time>_<4 rand>", name, params, ui?, ref?, site?, state?, at }`.
-  - `source` is one of `instafy-map`, `instafy-site`. `by` from the page is ignored; the binder stamps its own observer.
+  - `source` is `instafy-site`. `by` from the page is ignored; the binder stamps its own observer.
   - `ref` must look like `<collection>:<id>` (`^[A-Za-z0-9][A-Za-z0-9_-]{0,47}:[A-Za-z0-9_.:-]{1,120}$`), and `ui` and
     `attr` are short tokens. They reach logs, prompts and other viewers, so free text is refused (400).
 - **Host → site**: `{ source: "instafy-host", v: 2, type: hello|ack|progress|results|done|error|command, id?, job?, status?, progress?, records?, files?, error?, user?, capabilities?, command? }`.
 - **Endpoints**:
-  - `GET health` → `{ok, host: "instafy-bind", v: 2, intents: [...], catalog, asks: [...]}` (`asks`: the agent
-    intents a click on this request hands to Studio, each `via: "host"`);
+  - `GET health` → `{ok, host: "instafy-bind", v: 2, intents: [...], catalog, asks: [...], token, viewer,
+    parentOrigins}` (`asks`: the agent intents a click on this request hands to Studio, each `via: "host"`;
+    `parentOrigins`: who may host this page in a frame, see §4 Frames);
   - `POST intent` → `202 {status:"queued"|"needs_confirm", id, job, cancel_key}` | `400` | `401` | `403` | `404` |
     `409` (a coalesced job, or `ask_via_host` for an agent intent: §2a) | `429` (`cooldown`, `rate`, `busy`, `budget`). `cancel_key` goes only to the submitting viewer; the
     `cancel` intent needs it;
   - `GET events` → SSE, all viewers get all events (one event per intent id, also for coalesced jobs),
-    `Last-Event-ID` replay from a ring buffer;
+    `Last-Event-ID` replay from a ring buffer. It also takes the token as `?k=`, because EventSource cannot send a
+    header and a page framed by another site may not get its cookie;
   - `GET jobs`, `GET records` (viewer token);
   - `POST session` (trades the header token for the HttpOnly site cookie);
   - `POST command`, `POST confirm` (admin token);
   - `GET client.js`.
-- **Deliberate extensions to §9-§10** (a map engine ignores them): the intent body may be 8 KB (params stay ≤ 4 KB);
-  `health` says `host: "instafy-bind"` and adds `catalog`, `viewer`, `parentOrigins`; SSE also carries `hello` and
-  `command`, and every host message carries `name` (and `ref`); error codes add `cancelled`, `dry_run`, `internal`;
-  intent source `instafy-site`; records files say `uw.cmd: "instafy-bind"`; endpoints `records`, `session`,
-  `command`, `confirm`, `client.js`; `bound.json` adds `title`, `executor`, `agent`, `lanes`, `env`. map-pack's
-  `bound.schema.json` does not allow those fields yet, so `uw validate` reports them.
-- **Records**: `uw.records@1` (map-pack v0.2 §9.6): `claim`, `offer` and `item`, each with a `prov` that includes
-  `source`, `lane`, `observed_at` and `ttl_s`. Merge rules as there.
+- **Limits and extras**: the intent body may be 8 KB (params stay ≤ 4 KB); SSE also carries `hello` and `command`,
+  and every host message carries `name` (and `ref`); error codes are `not_found`, `timeout`, `policy`, `upstream`,
+  `unavailable`, `invalid`, `cancelled`, `dry_run`, `internal`; records files say `writer.cmd: "instafy-bind"`.
+- **Records**: `instafy.records@1` (`src/records-schema.mjs`): `claim`, `offer` and `item`, each with a `prov` that
+  includes `source`, `lane`, `observed_at` and `ttl_s`. A newer observation replaces an older one of the same id;
+  assist and capture records never replace another lane's.
 - **Files**: `data/records/<intent>.json` (or `target.records`), and `data/version.json` (`{v, updated_at, files, jobs}`)
   so polling-only viewers also update.
 
@@ -129,9 +130,13 @@ An agent intent (`"executor": "agent"`) is an **ask**. It never reaches the bind
 
 1. The binder lists it in `health.asks` and the SSE `hello` (`capabilities.asks`), never in `intents`, and answers a
    `POST intent` for it with `409 {status:"rejected", reason:"ask_via_host"}`. It reads no Instafy login for it.
-2. The bind client offers asks only when the page's host frame takes them: Studio's layout message says
-   `caps.ask: true`. Then the ask is in `names` like any intent (`via: "host"`), and a click posts, only to the host's
-   origin: `{source:"instafy-bind", v:1, type:"ask", payload:{id, intent, label, params, ref}}`.
+2. The bind client offers asks only when the page's host frame takes them: a frame at one of the origins the binder
+   lists (§4 Frames) whose layout message says `caps.ask: true`. Then the ask is in `names` like any intent
+   (`via: "host"`), and a click posts, only to the host's origin:
+   `{source:"instafy-bind", v:1, type:"ask", payload:{id, intent, label, params, ref, withheld?, coarsened?}}`.
+   The message is read by everyone in the conversation, so the client rounds a position to about 100 m (3 decimals)
+   and drops accuracy, altitude, heading and speed (`coarsened` names those params), and leaves out the intent's
+   `private_params` (`withheld` names them). The host must not add them back: it sends `params` as given.
 3. The host sends it as a normal chat message from the person who clicked, in the conversation the preview belongs
    to, billed exactly like that person typing it. Whoever may send messages there may ask. For anyone else the host
    says `caps.ask: "<plain reason>"`: the client lists the asks with `disabled: "<reason>"` and a click sends nothing.
@@ -145,9 +150,23 @@ The host treats every page message as a request, never a decision: the label and
 message it sends must be its own rendering, and repeated ids are dropped. Studio's side of this (the message, the
 status, the `caps.ask` reason) is a separate change; until it ships no host sends `caps.ask`, so asks stay hidden.
 
+## 2b. Location and follow mode (the page's half)
+
+Both talk to the host frame with `{source:"instafy-bind"|"instafy-host", v:1, type, payload}` messages, only with a
+frame at an origin the binder lists (§4 Frames) that sent a `layout`. Studio sends no `layout` yet, so neither runs in
+Studio today.
+- **Location.** `instafyBind.location()` asks the host when its layout says `caps.location: "host"` (the host asks the
+  browser once and shows which site has the position), asks the browser on a page of its own or when the host says
+  the frame may (`caps.geolocation: true`), and otherwise rejects with code `unavailable`, "Location is not
+  available in this preview yet.", never a message about browser settings.
+- **Follow mode.** While the host says `present`, the page shares its view (path, query, hash, the element with an id
+  at the top, scroll); a follower's copy applies the presenter's. Once a page was given a position, views leave out
+  its query, hash and own state unless the presenter shares location (`present.share.location`) or the page says its
+  view never holds a position (`follow({locationFree: true})`). A follower never sends its own position.
+
 ## 3. `bound.json`
 
-Same shape as map-pack v0.2 §9.1, plus executor fields:
+Intents, their param schemas and how each runs:
 
 ```jsonc
 {
@@ -181,12 +200,14 @@ Same shape as map-pack v0.2 §9.1, plus executor fields:
 **Owner executor (`--agent-executor`) contract.** Off by default. With it, the binder runs agent intents as Octo
 turns on the owner's own login, and only for clicks made on this machine: a loopback socket, a loopback `Host` and no
 `X-Forwarded-*` header (the same test as admin calls). A click through the preview capability host, a `--public-url`
-tunnel or a proxy is still an ask (§2a), and a tokenless public link never runs one. `--dry-run` prints those prompts
+tunnel or a proxy is still an ask (§2a), and a preview binder with a public link never runs one. That test only
+means "the owner" on a machine only the owner uses, so `--agent-executor` is refused in an Instafy runtime
+(`RUNTIME_ID` or `CONTROLLER_BASE_URL` set: other members' turns run there). `--dry-run` prints those prompts
 instead of dispatching.
 1. The binder renders `agent.prompt` with the validated params. Template values are JSON-escaped; params are data,
    never instructions. URL params must be inside `agent.allowed_origins` (400 `policy` otherwise).
 2. It appends the safety rules and a fixed output contract: reply with only
-   `{"schema":"uw.records@1","records":[...]}`, every record about the clicked `ref` (JSON-quoted in the prompt).
+   `{"schema":"instafy.records@1","records":[...]}`, every record about the clicked `ref` (JSON-quoted in the prompt).
 3. It dispatches into the site's own thread: `POST /projects/:space/conversations/blank` once
    (`threadKind: "bind"`, private to the owner, a child of `--conversation` when given; the id is kept in
    `.bind/agent-thread.json`), then
@@ -211,14 +232,9 @@ instead of dispatching.
 10. Without `--agent-executor` none of this runs: no login is resolved, `serve --detach` drops `INSTAFY_ACCESS_TOKEN`
     and `SUPABASE_ACCESS_TOKEN` from the background binder's environment, and `doctor` does not ask for a login.
 
-**map-pack compatibility** (verified with a copy of `taipei-stay`, the v0.2 starter engine and a hand-written
-`bound.json`, served with `--handlers-dir <map-pack>/skills/interactive-map/scripts/handlers`):
-- static responses carry `x-uw-host: instafy-bind`, which is what the engine checks before asking `__uw/health`;
-- the engine has no bind client, so it cannot send `x-bind-token`. For such sites `serve` prints `?k=<token>`; opening
-  it sets an `HttpOnly; SameSite=Lax` cookie scoped to the site path and redirects to the clean URL;
-- handlers get `site.config` (the parsed `map.config.json`), `UW_SITE` and `UW_CACHE`, as under `uw host`;
-- map-pack's own rules still apply: the engine reads `bound.json` only with `"bind": true` in `map.config.json`, and
-  draws card intent buttons only for v2 configs.
+**Pages without the bind client.** They cannot send `x-bind-token`, so for them `serve` prints `?k=<token>`;
+opening it sets an `HttpOnly; SameSite=Lax` cookie scoped to the site path and redirects to the clean URL. A plain
+site (an `index.html` and no `bound.json`) gets the client added to its pages.
 
 ## 4. Security
 
@@ -227,8 +243,11 @@ instead of dispatching.
   address bar and never exposes it to page scripts; EventSource, polling and the page's own fetches ride on the
   cookie. Pages without the client use the `?k=` cookie handoff above.
 - **What the token guards.** Intents, events, jobs, `__bind/records`, `bound.json`, `data/version.json` and
-  `data/records/*`. `handlers/`, `test/`, `tests/` and `node_modules/` are never served. The page, its assets, seed
-  data and `client.js` stay public. In gallery mode only discovered site folders are served.
+  `data/records/*`. `handlers/`, `test/`, `tests/` and `node_modules/` are never served. Both rules compare the path
+  the way a case-insensitive filesystem (macOS, Windows) reads it, lower case with trailing dots, spaces and
+  `:stream` suffixes cut, and also the real path of the file it names, so `/Bound.json` or `/Handlers./x.mjs` are
+  guarded like their canonical names. The page, its assets, seed data and `client.js` stay public. In gallery mode
+  only discovered site folders are served.
 - **Admin token.** Commands and confirmations need the admin token from `.bind/admin-token` (mode 0600). The site
   never sees it, and they are accepted only on the binder's loopback address (never through a preview capability
   host, a `--public-url` tunnel or a proxy). The origin server reserves `.bind/` at any depth, so the file API, saves
@@ -243,14 +262,18 @@ instead of dispatching.
   for the owner's own clicks on this machine.
 - **Positions in agent prompts.** An agent intent's prompt (owner executor) carries a viewer's position rounded to
   about 100 m (accuracy, altitude and heading left out); `private_params` reach Octo, which is that intent's handler.
-  The site's thread is created private to the owner who serves it. Agent intents never run on a tokenless public
-  link (`--preview --public-url`).
+  The site's thread is created private to the owner who serves it. Agent intents never run on a preview binder with
+  a public link (`--preview --public-url`). An ask (§2a) carries the position rounded the same way, without
+  `private_params`.
+- **Public links need the token.** `--preview` is tokenless only on the binder's loopback names and the preview
+  capability host; a `--public-url` name needs the viewer token, and `serve` prints that public link with `#k=`.
+  `--no-token` cannot be combined with `--public-url`.
 - **`serve --detach`** starts the background binder without the runtime job token or other `CONTROLLER_*` secrets
   (it keeps `CONTROLLER_BASE_URL`), `SUPABASE_*` values or credential-like names other than `--allow-env` names (and
   the owner's login only with `--agent-executor`), because every handler can read the binder's `/proc/<pid>/environ`.
 - **Origins and hosts.** A request authenticated only by the cookie must come from the site's own origin (or a
-  `--public-url`); `x-forwarded-host` counts only with `--trust-proxy`. With `--no-token` (localhost only) the `Host`
-  header must be a name the binder was started for, which stops DNS rebinding.
+  `--public-url`); `x-forwarded-host` counts only with `--trust-proxy`. With `--no-token` or `--preview` (localhost
+  only) the `Host` header must be a name the binder was started for, which stops DNS rebinding.
 - **Limits.** Params ≤ 4 KB, body ≤ 8 KB; cooldown per (name, `params.ref`); 30 intents per name per minute; 20 jobs
   waiting per site; 2 concurrent jobs per site; identical intents within 60 s are coalesced (up to 10 viewers per
   job); 50 SSE viewers per site (8 per source); the replay buffer is capped at 200 events and 2 MB; records files stay under 200 KB.
@@ -266,9 +289,10 @@ instead of dispatching.
   They are not sandboxed: they can read what the owner can. URL params (nested ones too) and `kit.fetch` reach only
   public `http(s)` addresses (private, loopback, LAN, 6to4/Teredo to those are refused, also after redirects and at
   connect time) unless `--allow-local`; credential headers are dropped when a redirect changes origin. `kit.fetch`
-  also refuses sites whose terms ban AI agents and paths robots.txt disallows for bots (error code `policy`), for
-  the URL and every redirect hop, the same policy as `instafy web cite` (`src/web.mjs`), which agents use to source
-  facts. robots.txt paths are compared normalised (RFC 9309: unreserved escapes decoded, doubled slashes folded).
+  also refuses paths robots.txt disallows for `*` or the major AI user agents (error code `policy`), for the URL and
+  every redirect hop (`src/web.mjs`), and a site that does not answer or answers 5xx is error code `unavailable`,
+  never a missing page. robots.txt paths are compared normalised (RFC 9309: unreserved escapes decoded, doubled
+  slashes folded). The binder keeps no list of named sites: a site's own robots.txt is its policy.
 - **Agent prompts** (owner executor) state that page content and parameters are untrusted data, and that the agent
   must not buy, book, sign in or enter credentials, and must stop at CAPTCHAs. That text is a request, not an
   enforcement: the real limits are the dedicated thread, `writeIntent: false`, the per-site budget, origin checks on
@@ -276,13 +300,25 @@ instead of dispatching.
   `source: "instafy-bind"`, which is why the executor is off by default and owner-local only.
 - **Asks** go only to the host frame's origin (never `*`); the client counts `ask-status` answers only from that
   origin, for ids it sent.
-- **Frames.** HTML responses carry `Content-Security-Policy: frame-ancestors 'self' <parentOrigins>`. The client
-  accepts host messages only from those origins and posts intents only to a parent that said hello from one of them.
+- **Frames.** Who may host a page: `bound.json` `parentOrigins`, plus, on a preview capability host, the Studio origin
+  `instafy preview open` recorded for that preview (the controller's `studioOrigin`, its `PUBLIC_APP_URL`, kept in
+  `~/.instafy/cli-preview-state.json`). HTML responses carry `Content-Security-Policy: frame-ancestors 'self'
+  <those origins>`, and `health` and `hello` give the client the same list. The client takes host messages (layout,
+  asks, location, follow) only from a direct parent at one of them, and where the browser names the parent
+  (`ancestorOrigins`) it must be the sender. The preview label is a bearer that also leaks in Origin headers, so
+  without this any page that framed the preview URL would become the page's host. A preview with no recorded Studio
+  origin (an older CLI or controller) sends no `frame-ancestors`, so Studio can still show it, but its page takes no
+  host messages at all: no asks, no host location, no follow.
 
 ## 5. What is not here yet
 
 - Studio's side of Ask Octo (§2a): turning an `ask` into the clicker's chat message, `ask-status`, and `caps.ask`
   with a plain reason for people who may not send messages. Until then asks are hidden.
+- Studio's side of location and follow mode (§2b), and the `layout` message (theme, title, caps) itself. Until then
+  `location()` in the preview card says location is not available there, and nobody can present or follow.
+- One Studio origin per controller: a Studio served from any origin other than the controller's `PUBLIC_APP_URL`
+  (for example the desktop app's default start page, if it differs) frames previews whose pages take no host
+  messages from it.
 - The owner executor has run against a mock that mirrors `runtime-controller` (blank thread creation, `recorded`
   dispatches, run statuses, newest-first messages, job cancel), not against a live turn. It has no controller-enforced
   tool profile and no structured result channel; it reads Octo's answer out of chat text.

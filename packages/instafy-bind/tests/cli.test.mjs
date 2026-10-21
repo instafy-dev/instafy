@@ -83,27 +83,6 @@ test("doctor warns about a site whose every intent is agent-only (its buttons on
   }
 });
 
-test("doctor flags review claims without review links and prices typed into the page; a budget is fine", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bind-cli-sourcing-"));
-  try {
-    execFileSync(process.execPath, [BIN, "init", dir], { env: cleanEnv });
-    const clean = execFileSync(process.execPath, [BIN, "doctor", dir], { env: cleanEnv, encoding: "utf8" });
-    assert.doesNotMatch(clean, /reviewers say|price is typed/);
-    fs.mkdirSync(path.join(dir, "data"), { recursive: true });
-    fs.writeFileSync(path.join(dir, "data", "items.json"), JSON.stringify({ title: "Stability shoes under $150", items: [
-      { name: "Adrenaline GTS 24", note: "Reviewers generally praise its GuideRails support", list: "$140 original US list price", store: "https://www.brooksrunning.com/x" }] }));
-    const flagged = execFileSync(process.execPath, [BIN, "doctor", dir], { env: cleanEnv, encoding: "utf8" });
-    assert.match(flagged, /warn.*reports what reviewers say but links no review/);
-    assert.match(flagged, /warn.*a price is typed into the page \(\$140\)/);
-    fs.writeFileSync(path.join(dir, "data", "items.json"), JSON.stringify({ title: "Stability shoes under $150", items: [
-      { name: "Adrenaline GTS 24", note: "Reviewers praise its support", sources: ["https://www.outdoorgearlab.com/x", "https://believeintherun.com/y"] }] }));
-    const sourced = execFileSync(process.execPath, [BIN, "doctor", dir], { env: cleanEnv, encoding: "utf8" });
-    assert.doesNotMatch(sourced, /reviewers say|price is typed/, "linked reviews and a budget pass");
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
 test("serve --detach keeps serving after the command (and the turn that ran it) ends", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bind-cli-detach-"));
   const log = path.join(dir, "bind.log");

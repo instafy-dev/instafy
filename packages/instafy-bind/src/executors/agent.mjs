@@ -1,6 +1,6 @@
 // Agent executor: run an intent as an Octo turn through the controller API (the same calls as
 // `instafy chat --wait --json`), in the site's own thread, never in the owner's working conversation.
-// The reply must be one uw.records@1 JSON object; the binder stamps lane, time and provenance.
+// The reply must be one instafy.records@1 JSON object; the binder stamps lane, time and provenance.
 import { DEFAULT_AGENT_LANE } from "../bound.mjs";
 import { agentOrigins, intentRef, shareableParams } from "../apply.mjs";
 import { clip } from "../protocol.mjs";
@@ -24,7 +24,7 @@ export function renderTemplate(template, params) {
 
 export const OUTPUT_CONTRACT = [
   "Output contract. Reply with ONLY one JSON object and nothing else (no prose before or after):",
-  '{"schema":"uw.records@1","records":[ ... ],"note":"optional one-line summary, at most 140 characters"}',
+  '{"schema":"instafy.records@1","records":[ ... ],"note":"optional one-line summary, at most 140 characters"}',
   "Each record is one of:",
   '- claim, one checked fact: {"type":"claim","cid":"clm_<id>","ref":"<ref>","attr":"<snake_case>","value":<string|number|boolean|null>,"unit":"EUR","label":"Short label","status":"ok|not_found|uncertain|error","basis":"live|brand|editorial|estimated|inferred","confidence":"high|medium|low","note":"<=140 chars","prov":{...}}',
   '- offer, a price you saw: {"type":"offer","oid":"off_<id>","ref":"<ref>","price":{"amount":129.95,"currency":"EUR","kind":"regular|sale|from|total"},"availability":"in_stock|out|unknown","seller":{"name":"Shop name","trust":"unknown"},"handoff":{"url":"https://...","label":"Open shop"},"label":"Variant, e.g. EU 42","basis":"live","prov":{...}}',
@@ -113,7 +113,7 @@ export function buildRepairPrompt({ name, intent, problems }) {
     `[instafy-bind] Your reply for intent ${name} (id ${intent.id}) did not match the output contract:`,
     ...problems.slice(0, 10).map((problem) => `- ${problem}`),
     "",
-    'Reply again with ONLY the corrected JSON object {"schema":"uw.records@1","records":[...]}. Do not browse again unless you must; fix the shape.',
+    'Reply again with ONLY the corrected JSON object {"schema":"instafy.records@1","records":[...]}. Do not browse again unless you must; fix the shape.',
     "",
     OUTPUT_CONTRACT,
   ].join("\n");
@@ -144,7 +144,7 @@ export function parseAgentReply(text) {
   const extracted = extractJsonObject(text);
   if (extracted.error) return { error: extracted.error };
   const value = extracted.value;
-  if (value.schema !== undefined && value.schema !== "uw.records@1") return { error: 'schema must be "uw.records@1"' };
+  if (value.schema !== undefined && value.schema !== "instafy.records@1") return { error: 'schema must be "instafy.records@1"' };
   if (!Array.isArray(value.records)) return { error: "records must be an array" };
   if (value.records.length > 200) return { error: "at most 200 records per reply" };
   return { records: value.records, note: typeof value.note === "string" ? clip(value.note) : null };

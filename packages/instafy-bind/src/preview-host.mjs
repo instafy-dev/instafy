@@ -19,7 +19,12 @@
 //   attacker cannot serve a page from the real preview domain, so pinning the domain is what stops rebinding. A state
 //   entry without a hostSuffix (an older CLI) is never accepted. A public tunnel (`instafy tunnel`, Host
 //   `<uuid>.<tunnel domain>`) or any other name gets 421;
-// - intents still need Origin == Host (same origin) and a JSON body (CORS preflight), as with a token.
+// - intents still need Origin == Host (same origin) and a JSON body (CORS preflight), as with a token;
+// - frame messages (Ask Octo, location, follow mode) are taken only from the Studio origin `instafy preview open`
+//   recorded for that preview (`studioOrigin`, from the controller): the capability host sends
+//   `frame-ancestors 'self' <studio origin>` and the bind client trusts no other parent. The label is a bearer that
+//   also leaks in Origin headers, so without this any page that framed the preview URL could act as its host. A
+//   preview without a recorded Studio origin is still shown, but its page takes no host messages at all.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -53,9 +58,21 @@ const normalizeTunnelId = (raw) => {
   return /^[0-9a-f]{32}$/.test(hex) ? hex : null;
 };
 
+const normalizeOrigin = (raw) => {
+  if (typeof raw !== "string") return null;
+  try {
+    const url = new URL(raw.trim());
+    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+    if (url.username || url.password || url.search || url.hash || (url.pathname !== "/" && url.pathname !== "")) return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
+};
+
 /**
- * The previews opened for a local port, read from the CLI's state file: a Map of tunnel id → the host suffixes it is
- * viewed under. Entries without a hostSuffix are left out. The file is small and is written by `instafy preview open`
+ * The previews opened for a local port, read from the CLI's state file: a Map of tunnel id → Map of the host suffixes
+ * it is viewed under → the Studio origins that frame it (empty when unknown). Entries without a hostSuffix are left out. The file is small and is written by `instafy preview open`
  * after the binder starts, so it is read on use (cached until it changes).
  */
 export function previewTunnelReader(file = defaultPreviewStateFile()) {
@@ -86,8 +103,11 @@ export function previewTunnelReader(file = defaultPreviewStateFile()) {
       const id = normalizeTunnelId(entry.previewId);
       const suffix = normalizeSuffix(entry.hostSuffix);
       if (!id || !suffix) continue;
-      if (!previews.has(id)) previews.set(id, new Set());
-      previews.get(id).add(suffix);
+      if (!previews.has(id)) previews.set(id, new Map());
+      const suffixes = previews.get(id);
+      if (!suffixes.has(suffix)) suffixes.set(suffix, new Set());
+      const studio = normalizeOrigin(entry.studioOrigin);
+      if (studio) suffixes.get(suffix).add(studio);
     }
     return previews;
   };

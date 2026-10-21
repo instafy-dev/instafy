@@ -1,4 +1,4 @@
-// The apply step (map-pack ENGINE-SPEC v0.2 §10, "apply, no model"): executors never write site files.
+// The apply step ("apply, no model"): executors never write site files.
 // The binder validates records, enforces the lane and source policy per intent, stamps provenance,
 // merges into the target file atomically and bumps data/version.json.
 import fs from "node:fs";
@@ -237,7 +237,7 @@ export function writeRecords(siteDir, rel, records, { jobs = null, attribution =
   const stored = new Set(trim.records);
   const out = {
     schema: RECORDS_SCHEMA_ID,
-    uw: { cmd: "instafy-bind", updated_at: new Date().toISOString() },
+    writer: { cmd: "instafy-bind", updated_at: new Date().toISOString() },
     attribution: [...new Set([...(current.attribution || []), ...attribution.filter(Boolean)])].slice(0, 10),
     records: trim.records,
   };

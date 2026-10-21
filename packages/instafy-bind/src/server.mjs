@@ -1,5 +1,5 @@
 // The binder: static server + intent endpoint + SSE + apply step + jobs + tokens, for one site or a gallery.
-// Every endpoint is served under both __bind/ (canonical) and __uw/ (map-pack alias).
+// Every endpoint is served under __bind/.
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
@@ -15,7 +15,7 @@ import {
   COMMAND_NAMES, MAX_COMMAND_BYTES, MAX_INTENT_BYTES, MAX_PARAMS_BYTES, PROTOCOL_VERSION, checkIntentEnvelope, hostMessage, safeText,
 } from "./protocol.mjs";
 import { adminToken, bindDir, tokensEqual, viewerToken } from "./tokens.mjs";
-import { agentUnavailableReason, agentUsesOwnerConversation, resolveControllerConfig } from "./config.mjs";
+import { agentExecutorRefusal, agentUnavailableReason, agentUsesOwnerConversation, resolveControllerConfig } from "./config.mjs";
 import { ControllerClient } from "./controller.mjs";
 import { checkUriParams } from "./net.mjs";
 import { runScript } from "./executors/script.mjs";
@@ -36,11 +36,40 @@ const LOOPBACK_ANCESTORS = ["http://localhost:*", "http://127.0.0.1:*"];
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const CLIENT_FILE = path.join(HERE, "..", "client", "bind-client.js");
-const ENDPOINT_RE = /^(.*?)\/__(bind|uw)\/([A-Za-z.-]+)$/;
+const ENDPOINT_RE = /^(.*?)\/__bind\/([A-Za-z.-]+)$/;
 /** Site folders never served: handler code, tests and packages. */
 const PRIVATE_DIRS = new Set(["handlers", "test", "tests", "node_modules"]);
 /** Site files that need the viewer token: the manifest and everything the binder writes. */
 const VIEWER_ONLY_RE = /^(bound\.json|data\/version\.json|data\/records\/.*)$/;
+
+/**
+ * A site path the way a case-insensitive filesystem (macOS, Windows) reads it: lower case, with the Windows aliases
+ * of a name cut (trailing dots and spaces, an ":stream" suffix). The guards below compare this form, so
+ * `/Bound.json`, `/DATA/records/x.json` or `/handlers./x.mjs` are the files they name, not other files.
+ */
+export function guardKey(rel) {
+  return String(rel).split(/[\\/]+/).map((seg) => seg.toLowerCase().replace(/:.*$/s, "").replace(/[. ]+$/, "")).filter(Boolean).join("/");
+}
+
+/**
+ * Is a request path (relative to the site, decoded) one of the never-served folders, or a file that needs the viewer
+ * token? Checks the path as asked and, when it names a file, the real path of that file inside the site (an 8.3 short
+ * name or any other spelling the filesystem resolves), so no spelling reaches what the canonical name guards.
+ */
+export function guardedPath(siteRealDir, rel) {
+  const keys = [guardKey(rel)];
+  try {
+    const real = fs.realpathSync.native(path.join(siteRealDir, ...String(rel).split("/").filter(Boolean)));
+    const inside = path.relative(siteRealDir, real);
+    if (inside && !inside.startsWith("..") && !path.isAbsolute(inside)) keys.push(guardKey(inside.split(path.sep).join("/")));
+  } catch {
+    // no such file: the asked spelling is all there is
+  }
+  return {
+    hidden: keys.some((key) => PRIVATE_DIRS.has(key.split("/")[0])),
+    viewerOnly: keys.some((key) => VIEWER_ONLY_RE.test(key)),
+  };
+}
 
 function json(res, status, body, headers = {}) {
   const text = JSON.stringify(body);
@@ -81,7 +110,7 @@ function refuseBody(req, res, error, body) {
   return json(res, error.status || 400, body, error.status === 413 ? { connection: "close" } : {});
 }
 
-/** Cookie that carries the viewer token for pages that don't run the bind client (e.g. map-pack's engine). */
+/** Cookie that carries the viewer token for pages that don't run the bind client. */
 export function tokenCookieName(siteDir) {
   return `bind_k_${createHash("sha256").update(siteDir).digest("hex").slice(0, 12)}`;
 }
@@ -98,9 +127,17 @@ function readCookie(req, name) {
 function linkStyleOf(siteDir) {
   try {
     const html = fs.readFileSync(path.join(siteDir, "index.html"), "utf8");
-    return /__(?:bind|uw)\/client\.js/.test(html) ? "hash" : "query";
+    return CLIENT_TAG_RE.test(html) ? "hash" : "query";
   } catch {
     return "hash";
+  }
+}
+
+function nativeRealpath(dir) {
+  try {
+    return fs.realpathSync.native(dir);
+  } catch {
+    return dir;
   }
 }
 
@@ -133,10 +170,10 @@ export function discoverSites(root, { plain = false } = {}) {
   return sites;
 }
 
-const CLIENT_TAG_RE = /__(?:bind|uw)\/client\.js/;
+const CLIENT_TAG_RE = /__bind\/client\.js/;
 /**
  * A plain site's pages get the bind client when they don't load it themselves, so every site Studio shows can be
- * presented and followed (and ask for location) without the page knowing about it. Map sites have their own engine.
+ * presented and followed (and ask for location) without the page knowing about it.
  */
 export function withBindClient(html, prefix = "") {
   if (CLIENT_TAG_RE.test(html)) return html;
@@ -175,7 +212,7 @@ export function withBindClient(html, prefix = "") {
 export function createBinder(options) {
   const root = path.resolve(options.root);
   const {
-    port = 4180, host = "127.0.0.1", noToken = false, dryRun = false, confirm = false, allowLocal = false, packDir = null,
+    port = 4180, host = "127.0.0.1", noToken = false, dryRun = false, confirm = false, allowLocal = false,
     log: externalLog = () => {}, onDryRun = () => {}, pollMs, killGraceMs, publicOrigins = [], lookup, env = process.env,
     trustProxy = false, agentBudget = DEFAULT_AGENT_BUDGET_PER_HOUR, allowEnv = [], preview = false,
     previewStateFile = defaultPreviewStateFile(), agentExecutor = false,
@@ -183,10 +220,14 @@ export function createBinder(options) {
   // Preview mode is tokenless too: the broker's forwardAuth on the capability host is the auth.
   const tokenless = noToken || preview;
 
+  // A public URL without a viewer token would let anyone with the link run the site's checks: refuse it. (With
+  // --preview a --public-url name needs the viewer token: only the loopback names and the preview card are tokenless.)
+  if (noToken && publicOrigins.length) throw new Error("--no-token cannot be combined with --public-url: a public link needs the viewer token (serve without --no-token and share the #k= link)");
   if (tokenless && !["127.0.0.1", "localhost", "::1"].includes(host)) {
     throw new Error(`${preview ? "--preview" : "--no-token"} is only allowed when serving on localhost (--host 127.0.0.1)`);
   }
   const previewTunnels = preview ? previewTunnelReader(previewStateFile) : null;
+  if (agentExecutor && agentExecutorRefusal(env)) throw new Error(agentExecutorRefusal(env));
 
   const siteEntries = discoverSites(root, { plain: true });
   if (siteEntries.length === 0) throw new Error(`${root} has no ${BOUND_FILE} (and no subfolder with one) and no index.html. Run \`instafy-bind init ${options.root}\`.`);
@@ -231,11 +272,11 @@ export function createBinder(options) {
   if (client && agentUsesOwnerConversation(controllerConfig)) {
     log("warn", "agent intents post into your own conversation (--agent-conversation equals --conversation): every viewer click becomes a turn there");
   }
-  // A tokenless binder with a public URL answers anyone who has the link. Agent intents run Octo turns on the owner's
-  // login and credits, so they are not offered there (script intents are); owner-paid asks from strangers need an
-  // explicit opt-in that does not exist yet (SITE-BACKEND-CONTRACT public_octo).
+  // A preview binder with a public URL answers whoever has the public link. Agent intents run Octo turns on the
+  // owner's login and credits, so they are not offered there (script intents are); owner-paid asks from strangers
+  // need an explicit opt-in that does not exist yet (SITE-BACKEND-CONTRACT public_octo).
   const publicAgentReason = tokenless && publicOrigins.length && !dryRun
-    ? "not offered on a public link without a viewer token (anyone with the link could spend the owner's Octo turns)"
+    ? "not offered on a public link (anyone with the link could spend the owner's Octo turns)"
     : null;
   // dry_run and ready apply to clicks made on this machine; every other click of an agent intent is an ask via Studio.
   const agentState = dryRun ? "dry_run" : !agentExecutor ? "host" : agentReason || publicAgentReason ? "unavailable" : "ready";
@@ -252,7 +293,7 @@ export function createBinder(options) {
     const unavailable = {};
     const resolved = {};
     for (const [name, def] of Object.entries(bound.intents)) {
-      const r = resolveIntent(def, { siteDir: entry.dir, packDir });
+      const r = resolveIntent(def, { siteDir: entry.dir });
       if (!r.ok) unavailable[name] = r.reason;
       else if (r.executor === "agent") {
         asks.add(name);
@@ -266,6 +307,7 @@ export function createBinder(options) {
     }
     const site = {
       ...entry,
+      realDir: nativeRealpath(entry.dir),
       bound,
       title: bound.title || entry.name,
       runnable,
@@ -273,7 +315,8 @@ export function createBinder(options) {
       ownerRunnable,
       unavailable,
       resolved,
-      token: tokenless ? null : viewerToken(entry.dir),
+      // --preview keeps a token for --public-url names; its loopback names and the preview card need none
+      token: noToken || (preview && !publicOrigins.length) ? null : viewerToken(entry.dir),
       cookie: tokenCookieName(entry.dir),
       linkStyle: linkStyleOf(entry.dir),
       hub: new EventHub(options.hubOptions),
@@ -330,8 +373,7 @@ export function createBinder(options) {
       return runScript({
         handler: site.resolved[job.name].handler,
         siteDir: site.dir,
-        // map-pack handlers also read site.config (map.config.json) to find layers.
-        input: { intent: job.intent, bound: def, site: { dir: site.dir, title: site.title, config: readJsonMaybe(path.join(site.dir, "map.config.json")) } },
+        input: { intent: job.intent, bound: def, site: { dir: site.dir, title: site.title } },
         signal: ctx.signal,
         onProgress: ctx.progress,
         onRecords: ctx.records,
@@ -367,9 +409,27 @@ export function createBinder(options) {
 
   /** The viewer token from the x-bind-token header or the site cookie (?k= in the query only where allowQuery). */
   function viewerOk(site, req, url, { allowQuery = false } = {}) {
-    if (!site.token) return true;
+    if (!tokenNeeded(site, req)) return true;
     const offered = req.headers["x-bind-token"] || (allowQuery ? url.searchParams.get("k") : "") || readCookie(req, site.cookie) || "";
     return tokensEqual(String(offered), site.token);
+  }
+
+  /** Is this request's Host one of the --public-url names? */
+  function publicHost(req) {
+    const offered = String(req.headers.host || "").toLowerCase();
+    return publicOrigins.some((origin) => {
+      try {
+        return new URL(origin).host.toLowerCase() === offered;
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  /** Does this request need the viewer token? Always with one, except in preview mode off the --public-url names. */
+  function tokenNeeded(site, req) {
+    if (!site.token) return false;
+    return !preview || publicHost(req);
   }
 
   /** A request that carries the token in the x-bind-token header: a browser only sends that same-origin (CORS preflight). */
@@ -404,9 +464,28 @@ export function createBinder(options) {
    * preview domain it recorded for it (the tunnel id alone is not secret; see preview-host.mjs).
    */
   function previewHostOk(hostHeader) {
-    if (!previewTunnels) return false;
+    return previewStudioOrigins(hostHeader) !== null;
+  }
+
+  /**
+   * The Studio origins that frame the preview this capability host belongs to ([] when `instafy preview open` recorded
+   * none), or null when the host is not a preview of this port.
+   */
+  function previewStudioOrigins(hostHeader) {
+    if (!previewTunnels) return null;
     const parts = previewHostParts(hostHeader);
-    return Boolean(parts) && Boolean(previewTunnels(address?.port).get(parts.tunnel)?.has(parts.suffix));
+    const studios = parts ? previewTunnels(address?.port).get(parts.tunnel)?.get(parts.suffix) : null;
+    return studios ? [...studios] : null;
+  }
+
+  /**
+   * Who may host this page in a frame and talk to it (Ask Octo, location, follow mode): bound.json parentOrigins, plus
+   * on a preview capability host the Studio origin recorded for that preview. The bind client takes host messages
+   * from these origins only (and its own), so with none listed a framing page gets nothing.
+   */
+  function parentOriginsFor(site, req) {
+    const studios = req ? previewStudioOrigins(String(req.headers.host || "").toLowerCase()) || [] : [];
+    return [...new Set([...(site.bound.parentOrigins || []), ...studios])];
   }
 
   /**
@@ -479,7 +558,7 @@ export function createBinder(options) {
   function hello(site, req) {
     return hostMessage("hello", {
       capabilities: { intents: [...runnableFor(site, req)], asks: [...asksFor(site, req)] },
-      ...(site.bound.parentOrigins ? { parentOrigins: site.bound.parentOrigins } : {}),
+      parentOrigins: parentOriginsFor(site, req),
     });
   }
 
@@ -584,8 +663,8 @@ export function createBinder(options) {
           ok: true, host: "instafy-bind", v: PROTOCOL_VERSION, intents: [...runnableFor(site, req)],
           catalog: intentCatalog(site.bound, runnableFor(site, req)),
           asks: intentCatalog(site.bound, asksFor(site, req)).map((def) => ({ ...def, via: "host" })),
-          site: { title: site.title }, token: Boolean(site.token),
-          viewer: viewerOk(site, req, url), parentOrigins: site.bound.parentOrigins || [],
+          site: { title: site.title }, token: tokenNeeded(site, req),
+          viewer: viewerOk(site, req, url), parentOrigins: parentOriginsFor(site, req),
           executors: { script: "ready", agent: agentState },
         });
       case "session": {
@@ -640,14 +719,18 @@ export function createBinder(options) {
   }
 
   /**
-   * frame-ancestors for HTML: the site itself plus bound.json parentOrigins. On a preview capability host the
-   * header is left out: Studio frames the preview from its own origin, which the binder cannot know, and the broker
-   * strips X-Frame-Options on preview routes for the same reason. Only space members holding the unguessable
-   * capability host can load it at all.
+   * frame-ancestors for HTML: the site itself plus bound.json parentOrigins. On a preview capability host, the Studio
+   * origin `instafy preview open` recorded for it as well. A preview with no recorded Studio origin (an older
+   * controller or CLI) gets no header, so Studio can still show it, but its page then takes no host messages
+   * (parentOriginsFor): no asks, no location from the host and no follow mode.
    */
   function frameHeaders(site, req) {
     const hostHeader = String(req?.headers.host || "").toLowerCase();
-    if (req && previewHostOk(hostHeader)) return {};
+    const studios = req ? previewStudioOrigins(hostHeader) : null;
+    if (studios) {
+      const origins = parentOriginsFor(site, req);
+      return studios.length ? { "content-security-policy": `frame-ancestors 'self' ${origins.join(" ")}` } : {};
+    }
     // Preview mode on a loopback name: `instafy preview check` frames the site from a throwaway page on another
     // loopback port, so loopback origins may frame it too. Only pages served from this machine have such an origin,
     // and preview mode has no viewer token for a framing page to steal anyway.
@@ -673,7 +756,7 @@ export function createBinder(options) {
     if (match) {
       const site = siteFor(match[1]);
       if (!site) return json(res, 404, { ok: false, reason: "no bound site here" });
-      Promise.resolve(handleEndpoint(site, match[3], req, res, url)).catch((error) => {
+      Promise.resolve(handleEndpoint(site, match[2], req, res, url)).catch((error) => {
         log("error", `${req.method} ${url.pathname}: ${error.stack || error.message}`);
         if (!res.headersSent) json(res, 500, { ok: false, reason: "internal error" });
         else res.end();
@@ -711,16 +794,14 @@ export function createBinder(options) {
     } catch {
       return json(res, 400, { ok: false });
     }
-    const first = rel.split("/")[0];
-    if (PRIVATE_DIRS.has(first)) return json(res, 404, { ok: false, reason: "not found" });
-    if (VIEWER_ONLY_RE.test(rel) && !viewerOk(site, req, url)) return json(res, 401, { ok: false, reason: "token" });
+    const guard = guardedPath(site.realDir, rel);
+    if (guard.hidden) return json(res, 404, { ok: false, reason: "not found" });
+    if (guard.viewerOnly && !viewerOk(site, req, url)) return json(res, 401, { ok: false, reason: "token" });
     serveStatic(req, res, site.dir, url.pathname.slice(site.prefix.length) || "/", {
       query: url.search.slice(1),
       redirectBase: site.prefix,
-      // map-pack's engine asks __uw/health only when the site's own responses carry this header.
-      headers: { "x-uw-host": "instafy-bind" },
       htmlHeaders: frameHeaders(site, req),
-      htmlTransform: site.plain && !fs.existsSync(path.join(site.dir, "map.config.json")) ? (html) => withBindClient(html, site.prefix) : null,
+      htmlTransform: site.plain ? (html) => withBindClient(html, site.prefix) : null,
     });
   });
   server.keepAliveTimeout = 5000;
@@ -740,7 +821,8 @@ export function createBinder(options) {
       return address ? `http://${host.includes(":") ? `[${host}]` : host}:${address.port}` : null;
     },
     shareUrl(site, base = binder.url, style = site.linkStyle) {
-      if (!site.token) return `${base}${site.prefix}/`;
+      const publicBase = publicOrigins.some((origin) => origin.replace(/\/+$/, "") === String(base).replace(/\/+$/, ""));
+      if (!site.token || (preview && !publicBase)) return `${base}${site.prefix}/`;
       return style === "query" ? `${base}${site.prefix}/?k=${site.token}` : `${base}${site.prefix}/#k=${site.token}`;
     },
     adminToken: admin,

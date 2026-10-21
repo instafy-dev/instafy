@@ -1630,6 +1630,15 @@ mod tests {
         assert!(skill.contains("sends it as the clicker's own chat message"));
         assert!(skill.contains("(`agent executor: host`)"));
         assert!(!skill.contains("their own login"));
+        // A public link carries the viewer token; the bare tunnel URL is never shared.
+        assert!(skill.contains("share the `public link` it prints, whole: it carries the"));
+        assert!(skill.contains("Never share the bare tunnel URL."));
+        // The router picks it by what it is, not by shopping words in one language.
+        assert!(skill.contains(
+            "routing_keywords: bound site, bound.json, live page, check again, re-check, two-way\n"
+        ));
+        // Studio does not broker location yet: a near-me page also takes a typed place.
+        assert!(skill.contains("always a typed\n   place too"));
         // Generated pages read the progress payload, end a job's status on done or error, and
         // copy a valid uncertain claim (instafy-bind's apply tests validate that example).
         assert!(

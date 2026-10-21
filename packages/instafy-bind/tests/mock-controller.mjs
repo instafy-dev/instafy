@@ -35,7 +35,7 @@ export async function startMockController({
   const conversation = (id) => {
     if (!conversations.has(id)) {
       conversations.set(id, {
-        messages: [{ id: "old_1", role: "assistant", content: '{"schema":"uw.records@1","records":[]}', runId: "run_old", createdAt: stamp(), metadata: {} }],
+        messages: [{ id: "old_1", role: "assistant", content: '{"schema":"instafy.records@1","records":[]}', runId: "run_old", createdAt: stamp(), metadata: {} }],
         runs: [],
       });
     }

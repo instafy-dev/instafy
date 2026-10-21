@@ -166,14 +166,14 @@ test("handler error messages and crashes become error events", async () => {
 });
 
 test("handlers never see Instafy credentials; declared env names pass through; secrets need --allow-env", async () => {
-  const base = { PATH: "/bin", HOME: "/Users/owner", MY_API_KEY: "k", GITHUB_TOKEN: "g", STEP_MS: "5", INSTAFY_ACCESS_TOKEN: "secret", CONTROLLER_ACCESS_TOKEN: "s2" };
+  const base = { PATH: "/bin", HOME: "/owner-home", MY_API_KEY: "k", GITHUB_TOKEN: "g", STEP_MS: "5", INSTAFY_ACCESS_TOKEN: "secret", CONTROLLER_ACCESS_TOKEN: "s2" };
   const env = handlerEnv({ siteDir: "/s", intentId: "int_a_1234", allowLocal: false, extra: ["MY_API_KEY", "GITHUB_TOKEN", "STEP_MS", "INSTAFY_ACCESS_TOKEN"], env: base });
   assert.equal(env.STEP_MS, "5");
   assert.equal(env.MY_API_KEY, undefined, "credential-like names are refused by default");
   assert.equal(env.GITHUB_TOKEN, undefined);
   assert.equal(env.INSTAFY_ACCESS_TOKEN, undefined);
   assert.equal(env.CONTROLLER_ACCESS_TOKEN, undefined);
-  assert.notEqual(env.HOME, "/Users/owner", "HOME points at the binder cache, not the owner's home");
+  assert.notEqual(env.HOME, "/owner-home", "HOME points at the binder cache, not the owner's home");
   assert.match(env.HOME, /instafy-bind/);
   assert.equal(env.BIND_SITE, "/s");
   const allowed = handlerEnv({ siteDir: "/s", intentId: "int_a_1234", allowLocal: false, extra: ["MY_API_KEY", "INSTAFY_ACCESS_TOKEN"], allowEnv: ["MY_API_KEY", "INSTAFY_ACCESS_TOKEN"], env: base });

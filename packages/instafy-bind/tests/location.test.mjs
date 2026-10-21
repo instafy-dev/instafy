@@ -11,7 +11,7 @@ const SITE = "https://p-site.example";
 const STUDIO = "https://studio.example";
 
 /** A page running the client in a frame (or on its own), with a fake parent and a fake navigator.geolocation. */
-function load({ embedded = true, search = "?instafy_host=studio", ancestor = undefined, parentOrigins = [] } = {}) {
+function load({ embedded = true, search = "?instafy_host=studio", ancestor = undefined, parentOrigins = [STUDIO] } = {}) {
   const listeners = {};
   const sent = [];
   const geoCalls = [];
@@ -133,7 +133,7 @@ test("a layout from an origin other than the one the browser names as the parent
   assert.equal(page.bind.hostLayout, null);
   page.layout();
   assert.equal(plain(page.bind.hostLayout).caps.location, "host");
-  // a frame that hides its referrer reports "null": the direct parent is then trusted at its own origin
+  // a frame that hides its referrer reports "null": the listed origin is then trusted on its own
   const hidden = load({ ancestor: "null" });
   await tick(5);
   hidden.layout();
@@ -259,6 +259,32 @@ test("a host without location in its caps: the page asks navigator.geolocation",
   assert.equal(pos.coords.latitude, COORDS.latitude);
   assert.deepEqual(page.geoCalls, [{ fn: "getCurrentPosition", options: { enableHighAccuracy: true, timeout: 5000 } }]);
   assert.equal(page.requests().length, 0);
+});
+
+test("framed with no host that offers location (Studio today): a plain reason, never the browser or its settings", async () => {
+  for (const opts of [{ search: "" }, { search: "?instafy_host=studio" }]) {
+    const page = load(opts);
+    await tick(5);
+    // no layout ever arrives (a ?instafy_host= page waits 2 s for one first)
+    const once = page.bind.location().then(() => null, (err) => err);
+    await tick(opts.search ? 2100 : 0);
+    const err = await once;
+    assert.equal(err.code, "unavailable");
+    assert.equal(err.message, "Location is not available in this preview yet.");
+    const watch = page.bind.location({ watch: true });
+    const next = watch.next().then(() => null, (e) => e);
+    await tick(opts.search ? 2100 : 0);
+    const werr = await next;
+    assert.equal(werr.code, "unavailable");
+    assert.doesNotMatch(werr.message, /settings/i);
+    assert.deepEqual(page.geoCalls, [], "the frame never asks the browser");
+  }
+  // a host that offers neither location nor the frame's own geolocation: the same
+  const bare = load({ search: "" });
+  await tick(5);
+  bare.layout({});
+  await assert.rejects(bare.bind.location(), (err) => err.code === "unavailable" && /not available in this preview/.test(err.message));
+  assert.deepEqual(bare.geoCalls, []);
 });
 
 test("standalone: navigator.geolocation, with errors mapped to the same codes", async () => {

@@ -148,6 +148,16 @@ const BINDER_LOGIN_ENV = ["INSTAFY_ACCESS_TOKEN", "SUPABASE_ACCESS_TOKEN"];
 const CREDENTIAL_ENV_RE = /(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE|(^|_)KEY$|_KEY_|API_?KEY)/;
 
 /**
+ * Why --agent-executor is refused here, or null. It treats a click from this machine's loopback as the owner's own,
+ * which is only true on a single-user machine. An Instafy runtime (a job binding: RUNTIME_ID or CONTROLLER_BASE_URL)
+ * is shared: other members' Octo turns run there and could click on the owner's login, so it fails closed.
+ */
+export function agentExecutorRefusal(env = process.env) {
+  if (!clean(env.RUNTIME_ID) && !clean(env.CONTROLLER_BASE_URL)) return null;
+  return "--agent-executor runs Octo turns on your own login for clicks from this machine, so it needs a machine only you use; this is a shared Instafy runtime (RUNTIME_ID or CONTROLLER_BASE_URL is set). Ask Octo works without it: clicks in Studio are sent as the clicker's own message";
+}
+
+/**
  * The environment of a binder started with `serve --detach`. It outlives the Octo turn that started it and every
  * process in a runtime can read its /proc/<pid>/environ, so it keeps no credential it does not need: no runtime job
  * token or other CONTROLLER_* secret, no SUPABASE_* service values, no credential-like names (space secrets) except

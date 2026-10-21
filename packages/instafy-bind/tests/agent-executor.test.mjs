@@ -8,6 +8,11 @@ import { agentUnavailableReason, resolveControllerConfig } from "../src/config.m
 import { ControllerClient, findLatestReply, isTerminalStatus, newestFirst } from "../src/controller.mjs";
 import { cleanup, eventsUrl, intentMessage, makeSite, openSse, postIntent, sleep } from "./helpers.mjs";
 import { startBinder } from "./helpers.mjs";
+import { createBinder } from "../src/server.mjs";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "instafy-bind.mjs");
 import { TOKEN, startMockController } from "./mock-controller.mjs";
 
 const checkProduct = {
@@ -29,7 +34,7 @@ const checkProduct = {
 
 const offerReply = (note = "EU 42 in stock at 129.95") =>
   JSON.stringify({
-    schema: "uw.records@1",
+    schema: "instafy.records@1",
     note,
     records: [
       {
@@ -225,7 +230,7 @@ test("repair path: a prose reply gets one repair round-trip once the run reports
 });
 
 test("repair path: invalid records are named in the repair prompt; a second failure is error invalid", async () => {
-  const bad = JSON.stringify({ schema: "uw.records@1", records: [{ type: "offer", oid: "o 1", ref: "products:a", price: { amount: "cheap" }, prov: {} }] });
+  const bad = JSON.stringify({ schema: "instafy.records@1", records: [{ type: "offer", oid: "o 1", ref: "products:a", price: { amount: "cheap" }, prov: {} }] });
   const t = await setup({ replies: [bad, "still not json"] });
   try {
     const msg = intentMessage("check_product", params);
@@ -360,7 +365,7 @@ test("Octo budget: dispatches per hour per site, repairs included; 429 budget wh
 test("agent records are scoped to the clicked ref and the intent's origins; the binder owns observed_at", async () => {
   const scoped = { ...checkProduct, agent: { ...checkProduct.agent, allowed_origins: undefined } };
   const reply = JSON.stringify({
-    schema: "uw.records@1",
+    schema: "instafy.records@1",
     records: [
       {
         type: "offer", ref: "products:a", price: { amount: 99, currency: "EUR", kind: "regular" }, seller: { name: "Shop", trust: "unknown" },
@@ -486,7 +491,7 @@ test("extractJsonObject: raw, fenced, embedded, invalid", () => {
   assert.deepEqual(extractJsonObject('Result: {"a":4} (checked)').value, { a: 4 });
   assert.match(extractJsonObject("no json here").error, /no JSON object/);
   assert.match(extractJsonObject("{broken").error, /not valid JSON/);
-  assert.match(parseAgentReply('{"schema":"other","records":[]}').error, /uw\.records@1/);
+  assert.match(parseAgentReply('{"schema":"other","records":[]}').error, /instafy\.records@1/);
   assert.match(parseAgentReply('{"records":{}}').error, /array/);
   assert.deepEqual(parseAgentReply('{"records":[],"note":"nothing"}'), { records: [], note: "nothing" });
 });
@@ -577,6 +582,23 @@ test("--agent-executor never runs on a tokenless public link; elsewhere it runs 
     await open.close();
     await privateOnly.close();
     await tokenLink.close();
+    cleanup(dir);
+  }
+});
+
+test("--agent-executor fails closed in a shared Instafy runtime: loopback there is every member's Octo turn, not the owner", async () => {
+  const dir = makeSite({ "index.html": "<p>x</p>", "bound.json": { version: 1, intents: {} } });
+  try {
+    for (const env of [{ RUNTIME_ID: "rt_1" }, { CONTROLLER_BASE_URL: "http://controller.internal" }]) {
+      assert.throws(() => createBinder({ root: dir, port: 0, env, agentExecutor: true, accessToken: TOKEN, serverUrl: "http://127.0.0.1:9" }), /needs a machine only you use/);
+      // without the opt-in nothing changes: asks go through Studio and the binder holds no login
+      const binder = createBinder({ root: dir, port: 0, env });
+      assert.equal(binder.agentState, "host");
+    }
+    const cli = spawnSync(process.execPath, [BIN, "serve", dir, "--agent-executor", "--port", "0"], { encoding: "utf8", env: { PATH: process.env.PATH, RUNTIME_ID: "rt_1" }, timeout: 10_000 });
+    assert.equal(cli.status, 1);
+    assert.match(cli.stderr, /needs a machine only you use/);
+  } finally {
     cleanup(dir);
   }
 });

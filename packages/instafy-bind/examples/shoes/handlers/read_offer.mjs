@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 // read_offer: fetch one public product page and read its schema.org Product/Offer JSON-LD.
-// stdin:  { intent, bound, site }   (map-pack v0.2 §10 handler contract)
+// stdin:  { intent, bound, site }
 // stdout: NDJSON progress / records / done / error.
 //
 // Records carry prov.lane "local": a script on this machine read the page. The page is untrusted:
@@ -24,7 +24,7 @@ async function readStdin() {
 }
 
 function allowLocal(input) {
-  const env = process.env.BIND_ALLOW_LOCAL || process.env.UW_ALLOW_LOCAL || "";
+  const env = process.env.BIND_ALLOW_LOCAL || "";
   return env === "1" || env === "true" || input?.host?.allow_local === true || input?.allow_local === true;
 }
 

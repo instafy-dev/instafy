@@ -21,8 +21,11 @@ test("the bound-sites skill scaffolds from the compare or ranked starter and kee
   assert.match(bound, /"Check price" only without "Check all prices"/);
   assert.match(bound, /the reason is said once, under the list/);
   assert.match(bound, /a value stays with "Checking…" while a check runs, rows keep their order/);
-  assert.match(bound, /a review's list price is `"list": true`, its date in `asof` \("\$900 · list price on BabyGearLab ↗ · seen 5 Aug"\)/, "a review's list price says so on the row, with the one date word, 'seen'");
-  assert.doesNotMatch(bound, /as of 5 Aug/);
+  // product and price rules live in the cheat sheet, so the skill routes on what it is, not on shopping words
+  const sheet = flat(SHEET);
+  assert.match(sheet, /A review site's price is its list price \(`"list": true`, its date in `asof`: "\$900 · list price on BabyGearLab ↗ · seen 5 Aug"\)/, "a review's list price says so on the row, with the one date word, 'seen'");
+  assert.doesNotMatch(bound + sheet, /as of 5 Aug/);
+  assert.doesNotMatch(bound + sheet, /instafy web|web cite|handoff\//, "no commands that do not exist");
   assert.match(bound, /Keep them; render new values with them\./);
   assert.match(bound, /the starter's "Open <store> ↗"/, "the store link names the store");
   assert.doesNotMatch(bound, /each cell has ↻/);

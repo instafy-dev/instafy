@@ -1,4 +1,4 @@
-// JSON-Schema subset validator, compatible with map-pack ENGINE-SPEC v0.2 §9.2.
+// JSON-Schema subset validator for intent params and records.
 //
 // Subset (intent params): type (also an array of types), properties, required,
 // additionalProperties: false, enum, const, default, minimum, maximum, minLength,

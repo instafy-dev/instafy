@@ -59,7 +59,7 @@ function describe(record) {
  * exit 1: it crashed, reported an error, sent no records, or every record was rejected.
  * exit 64: the request itself was wrong (unknown intent, bad params, not a script intent).
  */
-export async function tryIntent(siteDir, name, rawParams = "{}", { packDir = null, allowLocal = false, allowEnv = [], timeoutMs = null, save = false } = {}) {
+export async function tryIntent(siteDir, name, rawParams = "{}", { allowLocal = false, allowEnv = [], timeoutMs = null, save = false } = {}) {
   const dir = path.resolve(siteDir);
   const lines = [];
   let bound;
@@ -71,7 +71,7 @@ export async function tryIntent(siteDir, name, rawParams = "{}", { packDir = nul
   const def = bound.intents?.[name];
   if (!def) return { exit: 64, lines: [`error unknown intent "${name}" (intents: ${Object.keys(bound.intents || {}).join(", ")})`] };
   if (executorOf(def) !== "script") return { exit: 64, lines: [`error ${name} is an agent intent; check its prompt with serve --dry-run instead`] };
-  const resolved = resolveIntent(def, { siteDir: dir, packDir });
+  const resolved = resolveIntent(def, { siteDir: dir });
   if (!resolved.ok) return { exit: 64, lines: [`error ${name}: ${resolved.reason}`] };
   let params;
   try {
@@ -94,7 +94,7 @@ export async function tryIntent(siteDir, name, rawParams = "{}", { packDir = nul
     const done = await runScript({
       handler: resolved.handler,
       siteDir: dir,
-      input: { intent, bound: def, site: { dir, title: bound.title || path.basename(dir), config: readJsonMaybe(path.join(dir, "map.config.json")) } },
+      input: { intent, bound: def, site: { dir, title: bound.title || path.basename(dir) } },
       signal: controller.signal,
       onProgress: (p) => lines.push(`…     ${p.step ?? ""}/${p.of ?? ""} ${p.message ?? ""}`.trimEnd()),
       onRecords: (batch) => records.push(...batch),

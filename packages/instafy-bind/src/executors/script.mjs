@@ -1,4 +1,4 @@
-// Script executor: run a handler as a child process (map-pack ENGINE-SPEC v0.2 §10 handler contract).
+// Script executor: run a handler as a child process (stdin: one JSON {intent, bound, site}; stdout: NDJSON messages).
 // stdin: one JSON object {intent, bound, site}. stdout: NDJSON lines
 //   {"type":"progress","step":1,"of":2,"message":"...","source":"..."}
 //   {"type":"records","records":[...]}
@@ -10,7 +10,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { defaultStateFile } from "../lookup.mjs";
 
 const KIT = pathToFileURL(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "handler-kit.mjs")).href;
 const MAX_LINE = 1024 * 1024;
@@ -31,7 +30,7 @@ export function crashLine(stderr) {
 
 /** Names that look like credentials. bound.json may declare them in `env` only when serve passes --allow-env NAME. */
 export const SECRET_ENV_RE = /(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE|(^|_)KEY$|_KEY_|API_?KEY)/;
-const RESERVED_ENV_RE = /^(INSTAFY|CONTROLLER|SUPABASE|RUNTIME|BIND|UW)_/;
+const RESERVED_ENV_RE = /^(INSTAFY|CONTROLLER|SUPABASE|RUNTIME|BIND)_/;
 
 /** Why a declared env name is not passed to handlers, or null when it is. */
 export function envNameRefusal(name, allowEnv = []) {
@@ -64,13 +63,6 @@ export function handlerEnv({ siteDir, intentId, allowLocal, extra = [], allowEnv
   Object.assign(out, {
     HOME: home, USERPROFILE: home,
     BIND_SITE: siteDir, BIND_INTENT_ID: intentId, BIND_CACHE: cache, BIND_ALLOW_LOCAL: allowLocal ? "1" : "0", BIND_KIT: KIT,
-    UW_SITE: siteDir, UW_INTENT_ID: intentId, UW_CACHE: path.join(os.homedir(), ".cache", "uw"),
-    // outside lookups (src/lookup.mjs): the same health file as the binder and the agent's commands, the declared
-    // providers, and this click as the "turn": a viewer's click always asks a site that was down once more, and
-    // within the click a site found down is not asked again
-    INSTAFY_LOOKUP_STATE: defaultStateFile(env),
-    INSTAFY_TURN_STARTED_AT: new Date().toISOString(),
-    ...(env.INSTAFY_LOOKUP_PROVIDERS ? { INSTAFY_LOOKUP_PROVIDERS: env.INSTAFY_LOOKUP_PROVIDERS } : {}),
   });
   return out;
 }

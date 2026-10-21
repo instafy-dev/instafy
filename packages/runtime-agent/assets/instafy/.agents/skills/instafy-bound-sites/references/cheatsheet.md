@@ -8,7 +8,7 @@ site/                   instafy bind init <dir> --starter compare|ranked|timelin
   theme.css, site.js    the shared look and helpers: keep them
   data.json             seed items with refs; every fact {"v", "src", "url", "date", "asof"?, "est"}
   bound.json            intents (below)
-  data/records/*.json   written by the binder (uw.records@1); never by you or a handler
+  data/records/*.json   written by the binder (instafy.records@1); never by you or a handler
   handlers/*.mjs        script handlers (optional)
 ```
 
@@ -60,11 +60,11 @@ async function main() {
   const blocked = (note) => { kit.records([kit.uncertain({ ref, attr: "price", url, note })]); kit.done(note); };
   kit.progress(1, 2, `Reading ${host}`, host);
   let page;
-  try { page = await kit.fetch(url); }             // refuses private addresses, agent-banning sites, robots.txt
+  try { page = await kit.fetch(url); }             // refuses private addresses and paths robots.txt disallows
   catch (err) { return blocked(`${host} could not be read (${err.message}); open the store link`); }
   if (!page.ok) return blocked(`${host} blocks automated price checks (HTTP ${page.status}); open the store link`);
   const html = await page.text();                  // also: await page.json()
-  const [offer] = await kit.offers(html);          // the page's schema.org price, as `instafy web cite` prints it
+  const [offer] = await kit.offers(html);          // the price the page states in its schema.org offers
   if (!offer) return blocked("no price data on the page; open the store link");
   kit.records([{ type: "offer", oid: kit.rid("off", ref, host), ref, price: { amount: offer.amount, currency: offer.currency },
     seller: { name: item.store.name }, prov: { source: host, url } }]);
@@ -73,9 +73,9 @@ async function main() {
 ```
 
 `kit.fetch` throws when a site refuses the connection, sends something unreadable, or refuses automated reads
-(its terms ban agents or robots.txt disallows the path: error code `policy`): catch it and still answer for that
+(robots.txt disallows the path for bots: error code `policy`): catch it and still answer for that
 item with `kit.uncertain({ref, attr, url, note})`, so every row ends with a value or a reason. Error code
-`unavailable` = the site did not answer (down, timed out, 5xx, or found down moments ago): the note says it could
+`unavailable` = the site did not answer (down, timed out, 5xx): the note says it could
 not be checked right now ("shop.com did not answer; check again later"), never that the item is gone; the row's
 button is the viewer's retry. Try every script
 intent before you reply: `instafy bind try <dir> <intent> '{"ref":"…","url":"…"}'` runs it as a click would and
@@ -84,7 +84,7 @@ the page opens with prices). The binder
 stamps a script record's missing `prov.observed_at`, `ttl_s`, `lane` (`local`) and `source` (the URL's host); a
 job whose every record is rejected ends as an `error` event, which the page must show in the cell.
 
-## Records (`uw.records@1`)
+## Records (`instafy.records@1`)
 
 ```jsonc
 { "type": "claim", "cid": "clm_on-cm2_in_stock_on.com", "ref": "shoes:on-cloudmonster-2", "attr": "in_stock",
@@ -149,14 +149,17 @@ Age: < 1 min "now", < 60 min "N min", < 24 h "N h", else "9 Sep". Expired = now 
 
 ## Location ("near me")
 
-Inside Studio never call `navigator.geolocation`: the frame refuses it. Studio asks the browser once for Instafy and
-shows the person which site has their location (📍, with Stop). Ask Studio instead; outside Studio the same call
-asks the browser.
+`instafyBind.location()` is the one call: on a page of its own it asks the browser. In a frame it asks only the
+host that frames it, when that host says it answers location requests. Studio's side of that (one browser prompt
+for Instafy and a 📍 marker showing which site has the position) is not built yet, so in Studio's preview card
+today `location()` rejects with code `unavailable` and the message "Location is not available in this preview
+yet." Never call `navigator.geolocation` yourself, and give every "near me" page a typed place too (a city or
+postcode field), so it works in the card and anywhere location is refused.
 
 ```js
 const pos = await instafyBind.location();                    // {coords: {latitude, longitude, accuracy}, via}
 const watch = instafyBind.location({ watch: true }, (p) => move(p.coords));   // follow me; watch.stop() when done
-// errors: err.code denied | unavailable | timeout | stopped | hidden; show err.message as is
+// errors: err.code denied | unavailable | timeout | stopped | hidden; show err.message as is, then the typed place
 ```
 
 On `stopped` say "Location is off for this site · turn it on in Studio's menu for this preview" (the page's own
@@ -164,16 +167,8 @@ button cannot undo a stop). The position is the person's: send it to a handler a
 Records are shared with every viewer and saved with the site, so return the places with their own coordinates and
 compute distances in the page. The binder keeps coordinate params (and any listed in the intent's
 `"private_params"`) out of `prov.intent`, so `retry(r)` cannot re-send them: search again with a fresh `location()`.
-A plain page without the client sends the raw message, only to the origin that sent the layout:
-
-```js
-let host = null; // Studio's origin once its layout says it answers location requests
-addEventListener("message", (e) => { const d = e.data || {}; if (e.source !== parent || d.source !== "instafy-host") return;
-  if (d.type === "layout") host = d.caps?.location === "host" ? e.origin : null;
-  else if (e.origin === host && d.payload?.id === "loc1") d.type === "location" ? showNear(d.payload.coords) : showOff(d.payload.code); });
-const locate = () => host ? parent.postMessage({ source: "instafy-site", v: 1, type: "location-request", payload: { id: "loc1" } }, host)
-  : navigator.geolocation.getCurrentPosition((p) => showNear(p.coords), (err) => showOff(err.code === 1 ? "denied" : "unavailable"));
-```
+An "Ask Octo" click becomes a chat message everyone in the conversation reads: the client rounds a position to
+about 100 m and leaves `"private_params"` out of it.
 
 ## Follow mode (one person presents, the others' copies follow)
 
@@ -196,16 +191,18 @@ addEventListener("popstate", render);                         // a presenter's v
 ```
 
 State that is not in the address (an open panel, a scroller inside the page): `instafyBind.follow({ get: () =>
-({ panel }), apply: (s) => openPanel(s.panel) })`, ≤ 2 KB. Never put the viewer's position in the query: views
-leave it out unless the presenter shares it, and mark the "me" marker `data-instafy-private` so a tap on it stays home.
-`packages/instafy-bind/examples/follow-table` is the whole thing.
+({ panel }), apply: (s) => openPanel(s.panel) })`, ≤ 2 KB. Never put the viewer's position in the query. Once a page
+has called `location()`, views leave out its query, hash and state (only the scroll goes) unless the presenter shares
+location; a page whose view never holds the position says so with `follow({ ..., locationFree: true })`. Mark the
+"me" marker `data-instafy-private` so a tap on it stays home. Studio's Present / Follow side is not built yet: the
+page is ready for it. `packages/instafy-bind/examples/follow-table` is the whole thing.
 
 ## Commands
 
 `instafy bind serve <dir> [--port 4180] [--preview] [--allow-local] [--allow-env NAME] [--public-url <tunnel url>]
 [--detach [--log <file>]]` (`--preview`: no viewer token, for `instafy preview open --port <port>`; `--detach`: keeps
 serving after your turn; `--agent-executor` is the owner's own option, never yours) ·
-`instafy bind command <dir> <name> '<json args>'` (select, flyTo, setLens, setTime, highlight, toast, reload) ·
+`instafy bind command <dir> <name> '<json args>'` (select, highlight, toast, reload) ·
 `instafy bind init <dir> [--starter <name>] [--force]` · `instafy bind confirm <dir> <job>` · `instafy bind doctor [dir]`
 
 ## Restyle on request
@@ -243,16 +240,21 @@ Never a second parallel theme, a webfont, a gradient or pill buttons unless aske
   `items`, so list them in the lede's order); one filter only from a stated constraint. A per-person checklist (`people`) asks "Whose list is this?" before showing any ticks.
 - Details holds only what the row does not already show. No emoji in labels or notes.
 
+## Products and prices
+
+- Check each product is the current model before you name it, in chat too: open the maker's line-up page or a review
+  from the last 12 months and lead with the newest generation; call an older one "previous generation" (often
+  discounted), and never judge a budget from an old list price.
+- A review site's price is its list price (`"list": true`, its date in `asof`: "$900 · list price on BabyGearLab ↗ ·
+  seen 5 Aug"). A store's price is a check record or a page you opened, with store, link and date.
+- Before a store becomes a price-check target, open its product page once as a script would (`instafy bind try`):
+  a store that refuses (403, a bot check, robots.txt) stays a plain link, and the price button goes to stores that
+  serve schema.org Product/Offer data to automated reads. Check this turn; never assume.
+
 ## Worked example: "find me running shoes, I'm a US 10"
 
-1. Shortlist 3-4 shoes of the current generation (`instafy web cite <maker's line-up page> --family "Guide"`
-   prints "19 (newest on this page), 18": the Guide 19 goes on the list, the 18 only as "previous generation");
-   `instafy bind init shoes --starter compare`, then write `data.json` (`ref`, name, why, facts, store, sources). Before a store
-   becomes a price-check target, `instafy web cite --probe <store page>`: a store that refuses stays a plain link, and the price
-   button goes to stores that serve schema.org Product/Offer data to automated reads. Most big shops refuse
-   (Oct 2026: Brooks, ASICS, HOKA, REI and B&H answered 403/406; Running Warehouse and Road Runner Sports disallow
-   AI crawlers in robots.txt; Walmart 412; Back Market a bot check); specialty shops' product pages are more often
-   readable (Fleet Feet was). Check this turn; never assume.
+1. Shortlist 3-4 shoes of the current generation (Products and prices, above);
+   `instafy bind init shoes --starter compare`, then write `data.json` (`ref`, name, why, facts, store, sources).
 2. `bound.json`: `read_offer` (script, `handlers/read_offer.mjs`, params `{url, ref, size?, attr?}`, lane
    `local`; an `uncertain` claim with a note when the store blocks the read) and, as an extra, `check_size`
    (agent, prompt "Open {{url}} … is size {{size}} in stock … claim attr {{attr}}").
@@ -260,7 +262,7 @@ Never a second parallel theme, a webfont, a gradient or pill buttons unless aske
 3. The page: the compare starter's table (a list on phones) with Price, Stock, Your size, Sizes, Store; "Check all
    prices" as the page's one primary button and no button per row (a row's caption says "Check price" only when it
    is the one row that can be checked, "Try again" after an error, "Open <store> ↗" when blocked); "Ask Octo to
-   check" only inside a row's Details. A price a research lane copied from a page (`uw handoff` printed it as checked) is seed data, the row's
+   check" only inside a row's Details. A price you copied from a page you opened is seed data, the row's
    `"price": {"v": "$145", "src": "Fleet Feet", "url": "https://…", "date": "2026-10-17"}`, shown as
    "$145 at Fleet Feet ↗ · seen 17 Oct" until a live check gives a record. Before the
    reply fill the grid: `instafy bind try shoes read_offer '{"url":"…","ref":"shoes:…"}' --save` per readable

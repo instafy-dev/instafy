@@ -624,9 +624,10 @@ proxy and stream sender, the loopback MCP proxy and the origin, at their default
 `instafy bind serve <site> --port <port> --preview --detach`, then `instafy preview open --port <port>`, shows a
 bound site in the card: a static page plus `bound.json` whose script buttons run small handlers and stream checked
 records back to every open viewer. `--preview` drops the viewer token and answers only localhost and the capability
-host of the preview opened for that port, on exactly the domain `preview open` recorded. "Ask Octo" buttons are asks
-the page hands to Studio as the clicker's own message; the binder reads no Instafy login. Also `bind init`,
-`doctor`, `try`, `command`, `confirm`, and `instafy web cite <url>` for reading one public page politely. Details:
+host of the preview opened for that port, on exactly the domain `preview open` recorded; the page takes frame
+messages only from the Studio origin `preview open` recorded with it. "Ask Octo" buttons are asks the page hands to
+Studio as the clicker's own message; the binder reads no Instafy login. Studio's side of asks, location and follow
+mode is not built yet. Also `bind init`, `doctor`, `try`, `command` and `confirm`. Details:
 [Bound-Sites.md](Bound-Sites.md).
 
 ## AI-readable diagnostics

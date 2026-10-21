@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 // "Find running shoes": a bound compare grid.
-// Reads seed items from data/items.json, renders uw.records@1 records from the binder's store,
+// Reads seed items from data/items.json, renders instafy.records@1 records from the binder's store,
 // and turns clicks into intents (read_offer = script, check_size = Octo turn).
 // Records are untrusted data: everything goes through textContent, and links must be https.
 

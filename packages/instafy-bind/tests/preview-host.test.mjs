@@ -103,15 +103,16 @@ test("previewTunnelReader returns the previews the CLI opened for one port and f
     const read = previewTunnelReader(file);
     assert.deepEqual([...read(4180)], [], "no file yet");
     writeState(file, [
-      { previewId: TUNNEL_HYPHENATED, localPort: 4180, hostSuffix: SUFFIX },
-      { previewId: OTHER_TUNNEL, localPort: 4181, hostSuffix: "preview.instafy.dev" },
+      { previewId: TUNNEL_HYPHENATED, localPort: 4180, hostSuffix: SUFFIX, studioOrigin: "http://localhost:5174" },
+      { previewId: OTHER_TUNNEL, localPort: 4181, hostSuffix: "preview.instafy.dev", studioOrigin: "https://instafy.dev/studio" },
       { previewId: "not-a-uuid", localPort: 4180, hostSuffix: SUFFIX },
       { previewId: "11111111111111111111111111111111", localPort: 4180 }, // an older CLI: no domain recorded
       { previewId: "22222222222222222222222222222222", localPort: 4180, hostSuffix: "bad/suffix" },
       null,
     ]);
-    assert.deepEqual([...read(4180)].map(([id, s]) => [id, [...s]]), [[TUNNEL, [SUFFIX]]]);
-    assert.deepEqual([...read(4181)].map(([id, s]) => [id, [...s]]), [[OTHER_TUNNEL, ["preview.instafy.dev"]]]);
+    const flat = (m) => [...m].map(([id, s]) => [id, [...s].map(([suffix, studios]) => [suffix, [...studios]])]);
+    assert.deepEqual(flat(read(4180)), [[TUNNEL, [[SUFFIX, ["http://localhost:5174"]]]]]);
+    assert.deepEqual(flat(read(4181)), [[OTHER_TUNNEL, [["preview.instafy.dev", []]]]], "a Studio origin with a path is no origin");
     fs.writeFileSync(file, "{ broken");
     assert.deepEqual([...read(4180)], [], "an unreadable file trusts nothing");
   } finally {
@@ -144,7 +145,9 @@ test("--preview: no token; localhost and this port's preview capability host are
     const page = await raw(port, { headers: { host: capHost() } });
     assert.equal(page.status, 200);
     assert.match(page.text, /hello/);
-    assert.equal(page.headers["content-security-policy"], undefined, "Studio frames the capability host from its own origin");
+    assert.equal(page.headers["content-security-policy"], undefined, "no Studio origin recorded: Studio may still show it...");
+    const unpinned = JSON.parse((await raw(port, { path: "/__bind/health", headers: { host: capHost() } })).text);
+    assert.deepEqual(unpinned.parentOrigins, [], "...but no frame may talk to the page (no asks, location or follow)");
     const local = await raw(port, { headers: { host: `127.0.0.1:${port}` } });
     assert.equal(
       local.headers["content-security-policy"],
@@ -161,6 +164,42 @@ test("--preview: no token; localhost and this port's preview capability host are
     // Same-origin is still required for intents.
     assert.equal((await intent(port, capHost(), `http://${capHost(OTHER_TUNNEL)}`)).status, 403);
     assert.equal((await intent(port, capHost(), "https://evil.example")).status, 403);
+  } finally {
+    await binder.close();
+    cleanup(dir);
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("--preview: on the capability host only the Studio that opened the preview may frame and talk to the page", async () => {
+  const dir = site();
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bind-preview-state-"));
+  const stateFile = path.join(stateDir, "cli-preview-state.json");
+  const binder = await startBinder(dir, { preview: true, previewStateFile: stateFile });
+  const port = Number(new URL(binder.url).port);
+  try {
+    writeState(stateFile, [{ previewId: TUNNEL, localPort: port, hostSuffix: SUFFIX, studioOrigin: "http://localhost:5174" }]);
+    const page = await raw(port, { headers: { host: capHost() } });
+    assert.equal(page.status, 200);
+    assert.equal(page.headers["content-security-policy"], "frame-ancestors 'self' http://localhost:5174");
+    const health = JSON.parse((await raw(port, { path: "/__bind/health", headers: { host: capHost() } })).text);
+    assert.deepEqual(health.parentOrigins, ["http://localhost:5174"], "the client hosts only this origin");
+    const hello = await new Promise((resolve, reject) => {
+      const req = http.request({ host: "127.0.0.1", port, path: "/__bind/events", headers: { host: capHost(), accept: "text/event-stream" } }, (res) => {
+        let text = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => {
+          text += chunk;
+          if (/"type":"hello"[^\n]*\n/.test(text)) { req.destroy(); resolve(text); }
+        });
+      });
+      req.on("error", reject);
+      req.end();
+    });
+    assert.match(hello, /"parentOrigins":\["http:\/\/localhost:5174"\]/, "hello carries the same list");
+    // a loopback name of the same binder is not the preview: no Studio origin there
+    const local = JSON.parse((await raw(port, { path: "/__bind/health", headers: { host: `127.0.0.1:${port}` } })).text);
+    assert.deepEqual(local.parentOrigins, []);
   } finally {
     await binder.close();
     cleanup(dir);
@@ -239,13 +278,27 @@ test("--preview refuses every other Host: public tunnels, other previews, other 
   }
 });
 
-test("--preview --public-url: the public tunnel the user asked for is served tokenless too, nothing else", async () => {
+test("--preview --public-url: the public tunnel the user asked for needs the viewer token; the card stays tokenless", async () => {
   const dir = site();
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bind-preview-state-"));
   const binder = await startBinder(dir, { preview: true, previewStateFile: path.join(stateDir, "none.json"), publicOrigins: ["https://abc123.tunnel.example"] });
   const port = Number(new URL(binder.url).port);
   try {
-    assert.equal((await intent(port, "abc123.tunnel.example", "https://abc123.tunnel.example")).status, 202);
+    assert.equal((await intent(port, "abc123.tunnel.example", "https://abc123.tunnel.example")).status, 401, "no token, no checks for strangers");
+    const s = binder.sites[0];
+    const withToken = await raw(port, {
+      method: "POST", path: "/__bind/intent",
+      headers: { host: "abc123.tunnel.example", origin: "https://abc123.tunnel.example", "content-type": "application/json", "x-bind-token": s.token },
+      body: JSON.stringify(intentMessage("hello", { name: "kim" })),
+    });
+    assert.equal(withToken.status, 202, withToken.text);
+    assert.equal((await raw(port, { path: "/bound.json", headers: { host: "abc123.tunnel.example" } })).status, 401);
+    const health = JSON.parse((await raw(port, { path: "/__bind/health", headers: { host: "abc123.tunnel.example" } })).text);
+    assert.equal(health.token, true);
+    // the loopback names (and the preview card) stay tokenless
+    assert.equal((await intent(port, `127.0.0.1:${port}`)).status, 202);
+    assert.equal(binder.shareUrl(s), `${binder.url}/`, "the local URL carries no token");
+    assert.equal(binder.shareUrl(s, "https://abc123.tunnel.example"), `https://abc123.tunnel.example/#k=${s.token}`, "the public link does");
     assert.equal((await intent(port, "other.tunnel.example", "https://other.tunnel.example")).status, 421);
   } finally {
     await binder.close();

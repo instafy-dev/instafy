@@ -22,8 +22,8 @@ test("records schema: claim, offer and item validate; bad shapes do not", () => 
   assert.ok(validateRecord(claim({ extra: 1 })).length > 0);
   assert.ok(validateRecord(claim({ prov: { lane: "made-up" } })).length > 0);
   assert.ok(validateRecord({ type: "note" }).length > 0);
-  assert.deepEqual(validateRecordsFile({ schema: "uw.records@1", records: [claim(), offer, item] }), []);
-  assert.ok(validateRecordsFile({ schema: "uw.records@2", records: [] }).length > 0);
+  assert.deepEqual(validateRecordsFile({ schema: "instafy.records@1", records: [claim(), offer, item] }), []);
+  assert.ok(validateRecordsFile({ schema: "instafy.records@2", records: [] }).length > 0);
 });
 
 test("normalizeRecord maps observer/ttl aliases", () => {

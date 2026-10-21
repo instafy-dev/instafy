@@ -1,8 +1,8 @@
-// uw.records@1 (map-pack ENGINE-SPEC v0.2 §9.6), kept identical to map-pack schemas/records.schema.json.
+// instafy.records@1: the records file every executor's results are checked against and the binder writes.
 // Validated with schema-lite (oneOf, $ref, $defs, maxProperties and additionalProperties-as-schema).
 export const RECORDS_SCHEMA = Object.freeze({
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://instafy.dev/schemas/uw.records@1.json",
+  "$id": "https://instafy.dev/schemas/instafy.records@1.json",
   "type": "object",
   "required": [
     "schema",
@@ -10,9 +10,9 @@ export const RECORDS_SCHEMA = Object.freeze({
   ],
   "properties": {
     "schema": {
-      "const": "uw.records@1"
+      "const": "instafy.records@1"
     },
-    "uw": {
+    "writer": {
       "type": "object"
     },
     "attribution": {

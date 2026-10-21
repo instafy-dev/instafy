@@ -1,10 +1,10 @@
-// uw.records@1 records: normalise, validate, merge (map-pack ENGINE-SPEC v0.2 §9.6).
+// instafy.records@1 records: normalise, validate, merge.
 // The bind client carries the same merge rules in client/bind-client.js.
 import { RECORDS_SCHEMA } from "./records-schema.mjs";
 import { validate } from "./schema-lite.mjs";
 
 export { RECORDS_SCHEMA };
-export const RECORDS_SCHEMA_ID = "uw.records@1";
+export const RECORDS_SCHEMA_ID = "instafy.records@1";
 export const RECORD_TYPES = ["claim", "offer", "item"];
 export const LANES = ["link", "official", "open", "capture", "feed", "assist", "local"];
 export const RECORDS_PATH_RE = /^data\/records\/[A-Za-z0-9_.-]{1,80}\.json$/;
@@ -148,7 +148,7 @@ export function trimRecords(records, limit = MAX_FILE_BYTES, now = Date.now()) {
 }
 
 export function emptyRecordsFile() {
-  return { schema: RECORDS_SCHEMA_ID, uw: {}, attribution: [], records: [] };
+  return { schema: RECORDS_SCHEMA_ID, writer: {}, attribution: [], records: [] };
 }
 
 /** Stable record id: "<prefix>_<slug>", within the rid pattern. */

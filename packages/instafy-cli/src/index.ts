@@ -2076,11 +2076,6 @@ program
   .description("Bound sites: serve a website whose clicks run scripts and stream records back to every viewer (instafy-bind)")
   .allowUnknownOption(true);
 
-program
-  .command("web")
-  .description("Read one public page as a fact source, the polite way: `instafy web cite <url> [--grep re]` (refuses sites that ban AI agents, robots.txt and bot checks); `instafy web handoff` checks research handoff files")
-  .allowUnknownOption(true);
-
 const tunnelCommand = program
   .command("tunnel")
   .description("Create and manage shareable tunnels");
@@ -2839,12 +2834,6 @@ export async function runCli(argv: string[] = process.argv) {
   if (args[0] === "bind") {
     // Every argument after "bind" goes to the binder unchanged (its own --help, --json, --dry-run, ...).
     process.exitCode = await runBind(args.slice(1));
-    return;
-  }
-  if (args[0] === "web") {
-    // The polite page reader ships with the binder (packages/instafy-bind/src/web.mjs), so handlers and agents
-    // share one refusal policy.
-    process.exitCode = await runBind(["web", ...args.slice(1)]);
     return;
   }
   if (args[0] === "git") {
