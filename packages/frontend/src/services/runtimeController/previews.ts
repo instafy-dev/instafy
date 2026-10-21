@@ -8,6 +8,14 @@ import {
 /** The broker's probe of the site behind a preview. `status` is the HTTP status it answered with, when it did. */
 export type SitePreviewHealth = { listening: boolean; status: number | null };
 
+/**
+ * A model-free restart of a stopped site (`POST …/wake`): `idle` when none is
+ * running, `waking` while the runtime and the site start, `failed` with the
+ * reason when the last one did not come up.
+ */
+export type SitePreviewWakeState = "idle" | "waking" | "failed";
+export type SitePreviewWake = { state: SitePreviewWakeState; startedAt: string | null; error: string | null };
+
 /** A site preview as the controller records it. It never carries an address. */
 export type ControllerSitePreview = {
   previewId: string;
@@ -22,6 +30,17 @@ export type ControllerSitePreview = {
   createdAt: string | null;
   /** Who may open it, as the controller recorded it (`private`: space members only). Absent when it did not say. */
   visibility?: string | null;
+  /**
+   * `instafy preview open` recorded how to start the site, so Open can wake it without Octo. Always set by
+   * `mapControllerSitePreview`; absent means not restartable and no wake.
+   */
+  restartable?: boolean;
+  wake?: SitePreviewWake;
+  /**
+   * Whether Open may start this preview for the person asking: they may change the space, or its machine is already
+   * up (restarting only the site costs nothing). Null when the controller did not say.
+   */
+  canStart?: boolean | null;
 };
 
 /** A member-only capability address. Keep it in memory only: never store, log or show it. */
@@ -119,6 +138,17 @@ export function mapSitePreviewHealth(value: unknown): SitePreviewHealth | null {
   return { listening: value.listening, status: readNumber(value.status) };
 }
 
+const IDLE_WAKE: SitePreviewWake = { state: "idle", startedAt: null, error: null };
+
+export function mapSitePreviewWake(value: unknown): SitePreviewWake {
+  if (!isRecord(value)) return IDLE_WAKE;
+  const state = readString(value.state)?.toLowerCase();
+  if (state !== "waking" && state !== "failed") return IDLE_WAKE;
+  // Shown on the card as plain text: one short line, nothing more.
+  const error = readString(value.error);
+  return { state, startedAt: readString(value.startedAt), error: error ? error.replace(/\s+/g, " ").slice(0, 160) : null };
+}
+
 export function mapControllerSitePreview(value: unknown): ControllerSitePreview | null {
   if (!isRecord(value)) return null;
   const previewId = readString(value.previewId);
@@ -135,6 +165,9 @@ export function mapControllerSitePreview(value: unknown): ControllerSitePreview 
     messageId: readString(value.messageId),
     createdAt: readString(value.createdAt),
     visibility: readString(value.visibility),
+    restartable: value.restartable === true,
+    wake: mapSitePreviewWake(value.wake),
+    canStart: typeof value.canStart === "boolean" ? value.canStart : null,
   };
 }
 
@@ -241,4 +274,19 @@ export async function heartbeatSitePreviewViewer(projectId: string, previewId: s
     if (cause instanceof ControllerApiError && cause.status === 410) return "gone";
     throw cause;
   }
+}
+
+/** `live`: the site already answers. `waking`: the runtime and the site are starting; follow `wake` on the preview. */
+export type SitePreviewWakeResult = { state: "live" | "waking" };
+
+/**
+ * Starts a stopped site again the way `instafy preview open` recorded it: no
+ * Octo turn, no chat message. Any member who may view it may ask while its
+ * machine is up; starting a stopped machine takes someone who may edit the
+ * space. Asking twice is harmless.
+ */
+export async function wakeSitePreview(projectId: string, previewId: string, signal?: AbortSignal): Promise<SitePreviewWakeResult> {
+  const value = await previewRequest(previewPath(projectId, previewId, "/wake"), "POST", "Could not start the preview.", { body: {}, signal });
+  const state = isRecord(value) ? readString(value.state)?.toLowerCase() : null;
+  return { state: state === "live" ? "live" : "waking" };
 }

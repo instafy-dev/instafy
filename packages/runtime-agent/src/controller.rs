@@ -1293,6 +1293,66 @@ impl ControllerClient {
         Ok(())
     }
 
+    /// Claim this runtime's preview restarts (see `preview_restarts`).
+    /// `Ok(None)` when the controller does not offer them (an older one, or
+    /// one without previews).
+    pub async fn claim_preview_restarts(
+        &self,
+        registration: &Registration,
+    ) -> Result<Option<Vec<crate::preview_restarts::PreviewRestart>>> {
+        let url = self.base_url.join("/agent/preview-restarts/claim")?;
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(self.bearer_for_agent(registration))
+            .header("content-type", "application/json")
+            .body("{}")
+            .send()
+            .await
+            .context("preview restart claim failed")?;
+        let status = response.status();
+        if status == StatusCode::NOT_FOUND || status == StatusCode::METHOD_NOT_ALLOWED {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            // The body may echo the request; keep only the status.
+            return Err(anyhow!("preview restart claim failed: status={status}"));
+        }
+        // The claim carries tunnel credentials: never put its body in an error.
+        let text = response
+            .text()
+            .await
+            .context("preview restart claim body read failed")?;
+        let claim: crate::preview_restarts::PreviewRestartClaim = serde_json::from_str(&text)
+            .map_err(|error| {
+                anyhow!(
+                    "preview restart claim was not understood ({:?} at line {} column {})",
+                    error.classify(),
+                    error.line(),
+                    error.column()
+                )
+            })?;
+        Ok(Some(claim.restarts))
+    }
+
+    /// Report how a claimed preview restart ended.
+    pub async fn report_preview_restart(
+        &self,
+        registration: &Registration,
+        wake_id: Uuid,
+        error: Option<&str>,
+    ) -> Result<()> {
+        let url = self
+            .base_url
+            .join(&format!("/agent/preview-restarts/{wake_id}/result"))?;
+        let payload = match error {
+            None => json!({ "ok": true }),
+            Some(error) => json!({ "ok": false, "error": truncate_agent_payload_text(error, 500) }),
+        };
+        self.post_agent(url, &self.bearer_for_agent(registration), payload)
+            .await
+    }
+
     async fn post_agent(&self, url: Url, agent_token: &str, payload: JsonValue) -> Result<()> {
         let response = self
             .http

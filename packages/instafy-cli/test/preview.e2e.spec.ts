@@ -667,6 +667,9 @@ describe("instafy preview", () => {
       status: "live",
       httpStatus: 200,
       messageId: "message-preview-1",
+      // No start command could be read (this host has no /proc and the CLI runs outside a space).
+      restartable: false,
+      restartNote: expect.any(String),
       viewerHostSuffix: "preview.localhost:8083",
     });
     expect(output).not.toHaveProperty("url");
@@ -687,6 +690,34 @@ describe("instafy preview", () => {
     const config = fs.readFileSync(path.join(home, ".instafy", "cli-preview-workdirs", "preview-1", "rathole.toml"), "utf8");
     expect(config).toContain(`local_addr = "127.0.0.1:${sitePort}"`);
     expect(config).toContain("[client.services.svc_preview-1]");
+  }, 30000);
+
+  it("records --serve-cmd from the command line, run from the current directory, and refuses a shell line", async () => {
+    const projectId = randomUUID();
+    const rathole = makeStubRathole();
+    const home = makeHome();
+    const controller = await startMockController({ projectId, livePids: liveRecordedClients(home) });
+    const sitePort = await startSite();
+    // The CLI runs from the package folder; make that the space's workspace.
+    const workspace = { WORKSPACE_PROJECT_DIR: new URL("../", import.meta.url).pathname };
+
+    const refused = await execCli(
+      [...openArgs({ projectId, controllerUrl: controller.url, port: sitePort, rathole: rathole.file }), "--serve-cmd", "node serve.js | tee log"],
+      home,
+      workspace,
+    );
+    expect(refused.code).not.toBe(0);
+    expect(refused.stderr).toContain("not shell syntax");
+    expect(controller.captures).toHaveLength(0);
+
+    const result = await execCli(
+      [...openArgs({ projectId, controllerUrl: controller.url, port: sitePort, rathole: rathole.file }), "--serve-cmd", "python3 -m http.server 8000"],
+      home,
+      workspace,
+    );
+    expect(result.code, result.stderr).toBe(0);
+    const create = JSON.parse(controller.captures[0]!.body) as Record<string, unknown>;
+    expect(create.serve).toEqual({ argv: ["python3", "-m", "http.server", "8000"], cwd: "." });
   }, 30000);
 
   it("closes the preview and exits 1 when the client dies at once", async () => {

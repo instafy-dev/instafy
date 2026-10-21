@@ -53,6 +53,11 @@ const HOOK_MAX_TTL_SECONDS: i64 = 30;
 /// `last_used_at` is written at most this often per session.
 const SESSION_TOUCH_INTERVAL_SECONDS: i64 = 60;
 const VIEWER_ACCESS_CACHE_TTL: Duration = Duration::from_secs(30);
+/// Viewing counts as activity in the space (the idle sweep does not stop a
+/// runtime someone is looking at), but each person's viewing does so for at
+/// most this long a day in one space: a tab left open overnight does not keep
+/// a machine running.
+pub(super) const VIEWING_ACTIVITY_CAP_SECONDS: i64 = 4 * 60 * 60;
 /// Viewer URLs one person may mint for one preview per minute. The pane mints
 /// on Open, on a 410 and for "Open in new tab"; a loop is not a viewer.
 const VIEW_MINTS_PER_MINUTE: usize = 20;
@@ -444,6 +449,8 @@ pub(super) async fn post_preview_view(
         query.tab.unwrap_or(false),
     )
     .await?;
+    // Opening a preview is activity in the space, like any Studio ping.
+    record_viewing_activity(&state.pool, &project_id, &user_id).await;
     let expires_at = (created_at + ChronoDuration::seconds(SESSION_MAX_AGE_SECONDS))
         .min(grant.record.expires_at);
     Ok(Json(PreviewViewResponse {
@@ -588,10 +595,11 @@ pub(super) async fn post_preview_view_revoke(
 /// Keep the caller's open pane alive (`POST …/:pid/view/heartbeat`). The
 /// pane calls it about once a minute while it shows the preview. It is what
 /// keeps a pane's session from the 30-minute idle limit (the hook does not:
-/// see the module comment). `204` while the session is live and its holder
-/// may still see the preview; `410` once not (revoked, idle, too old,
-/// removed from the space), so the pane mints a new one. Another user's URL
-/// is treated like a dead one. Calls within the same minute change nothing.
+/// see the module comment) and counts as viewing activity, within the
+/// person's daily window. `204` while the session is live and its holder may
+/// still see the preview; `410` once not (revoked, idle, too old, removed
+/// from the space), so the pane mints a new one. Another user's URL is
+/// treated like a dead one. Calls within the same minute change nothing.
 #[instrument(skip(state, headers, body))]
 pub(super) async fn post_preview_view_heartbeat(
     State(state): State<AppState>,
@@ -646,7 +654,7 @@ pub(super) async fn post_preview_view_heartbeat(
         return Ok(StatusCode::NO_CONTENT);
     }
     // A person removed from the space (or from a private runtime) since the
-    // Open must not keep the session alive.
+    // Open must not keep the session, or the runtime, alive.
     let project_id: Uuid = row.get("project_id");
     let tunnel = preview_id.hyphenated().to_string();
     let grant = match load_preview_grant(&state.pool, &project_id, &tunnel).await {
@@ -660,6 +668,92 @@ pub(super) async fn post_preview_view_heartbeat(
     }
     touch_preview_session(&state.pool, &capability_hash(&label)).await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Whether `user_id` may change the space: the same rule as Studio's own
+/// activity ping and as starting a stopped machine. Compute is paid by the
+/// space, so only these members' viewing keeps it running.
+async fn may_keep_space_awake(
+    pool: &PgPool,
+    project_id: &Uuid,
+    user_id: &Uuid,
+) -> Result<bool, String> {
+    let mut connection = pool.get().await.map_err(|error| error.to_string())?;
+    let transaction = connection
+        .transaction()
+        .await
+        .map_err(|error| error.to_string())?;
+    let context = crate::auth::RequestContext {
+        user_id: Some(*user_id),
+        is_service_role: false,
+        scoped_claims: None,
+    };
+    let allowed = match crate::projects::load_project_record(&transaction, project_id).await {
+        Ok(project) => {
+            crate::projects::ensure_project_write_access(&transaction, &project, &context, None)
+                .await
+                .is_ok()
+        }
+        Err(_) => false,
+    };
+    transaction
+        .commit()
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(allowed)
+}
+
+/// Viewing is activity in the space, as a Studio ping is: the idle sweep,
+/// the stop's idle check and slot reclaim all read `project_user_activity`.
+/// Only members who may change the space count (see
+/// [`may_keep_space_awake`]): a view-only member's viewing neither starts nor
+/// keeps up a machine. Each such person's viewing keeps a space up for at most
+/// [`VIEWING_ACTIVITY_CAP_SECONDS`] a day, counted from the start of their
+/// viewing window there (`runtime_preview_viewing_windows`, one row per
+/// person and space): a new session does not start a new window, so viewing
+/// alone cannot keep a runtime up forever.
+pub(super) async fn record_viewing_activity(pool: &PgPool, project_id: &Uuid, user_id: &Uuid) {
+    match may_keep_space_awake(pool, project_id, user_id).await {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => {
+            warn!(%project_id, %error, "failed to check who may keep the space awake");
+            return;
+        }
+    }
+    let result = match pool.get().await {
+        Ok(connection) => connection
+            .execute(
+                "with viewing as (
+                   insert into runtime_preview_viewing_windows as w (project_id, user_id, started_at)
+                   values ($1, $2, now())
+                   on conflict (project_id, user_id) do update
+                     set started_at = case
+                       when w.started_at <= now() - interval '24 hours' then now()
+                       else w.started_at
+                     end
+                   returning started_at
+                 )
+                 insert into project_user_activity (project_id, last_active_at)
+                 select $1, now() from viewing
+                 where viewing.started_at > now() - make_interval(secs => $3)
+                 on conflict (project_id) do update set last_active_at = now()",
+                &[project_id, user_id, &(VIEWING_ACTIVITY_CAP_SECONDS as f64)],
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| {
+                let undefined = matches!(
+                    error.as_db_error().map(|db_error| db_error.code()),
+                    Some(&SqlState::UNDEFINED_TABLE)
+                );
+                (!undefined).then(|| error.to_string())
+            }),
+        Err(error) => Err(Some(error.to_string())),
+    };
+    if let Err(Some(error)) = result {
+        warn!(%project_id, %error, "failed to record preview viewing activity");
+    }
 }
 
 /// End every viewer session of a preview tunnel. Best effort: a failure is
@@ -766,8 +860,8 @@ async fn revoke_preview_session(pool: &PgPool, hash: &str) {
 }
 
 /// Delete viewer-session rows nobody can use any more (older than the max
-/// age plus an hour, or revoked for an hour). Rows are who-viewed-what
-/// history; they are not kept forever.
+/// age plus an hour, or revoked for an hour) and viewing windows from before
+/// yesterday. Rows are who-viewed-what history; they are not kept forever.
 pub(crate) async fn prune_preview_sessions(pool: &PgPool) -> anyhow::Result<u64> {
     let connection = pool.get().await?;
     let sessions = connection
@@ -781,7 +875,14 @@ pub(crate) async fn prune_preview_sessions(pool: &PgPool) -> anyhow::Result<u64>
             ],
         )
         .await?;
-    Ok(sessions)
+    let windows = connection
+        .execute(
+            "delete from runtime_preview_viewing_windows
+             where started_at < now() - interval '48 hours'",
+            &[],
+        )
+        .await?;
+    Ok(sessions + windows)
 }
 
 /// The broker's per-label check (`POST /tunnel-broker/hooks/preview-auth`).
@@ -882,23 +983,37 @@ pub(super) async fn post_preview_auth_hook(
 
 /// Mark a session used, at most once a minute, so idle expiry tracks use
 /// without a write per proxied request (a pane's heartbeat, or a tab
-/// session's own traffic).
+/// session's own traffic). Each touch of a session younger than
+/// [`VIEWING_ACTIVITY_CAP_SECONDS`] also counts as activity in its space.
 async fn touch_preview_session(pool: &PgPool, hash: &str) {
     let result = match pool.get().await {
         Ok(connection) => connection
-            .execute(
+            .query_opt(
                 "update runtime_preview_sessions
                  set last_used_at = now()
                  where capability_hash = $1
-                   and last_used_at < now() - make_interval(secs => $2)",
-                &[&hash, &(SESSION_TOUCH_INTERVAL_SECONDS as f64)],
+                   and last_used_at < now() - make_interval(secs => $2)
+                 returning project_id, user_id, created_at > now() - make_interval(secs => $3) as within_cap",
+                &[
+                    &hash,
+                    &(SESSION_TOUCH_INTERVAL_SECONDS as f64),
+                    &(VIEWING_ACTIVITY_CAP_SECONDS as f64),
+                ],
             )
             .await
-            .map(|_| ())
             .map_err(|error| error.to_string()),
         Err(error) => Err(error.to_string()),
     };
-    if let Err(error) = result {
-        warn!(%error, "failed to touch preview session");
+    match result {
+        Ok(Some(row)) if row.get::<_, bool>("within_cap") => {
+            record_viewing_activity(
+                pool,
+                &row.get::<_, Uuid>("project_id"),
+                &row.get::<_, Uuid>("user_id"),
+            )
+            .await;
+        }
+        Ok(_) => {}
+        Err(error) => warn!(%error, "failed to touch preview session"),
     }
 }

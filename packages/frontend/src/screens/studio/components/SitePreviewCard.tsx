@@ -7,6 +7,7 @@ import {
   getSitePreview,
   sitePreviewProblem,
   sitePreviewShownState,
+  wakeSitePreview,
   type ControllerSitePreview,
 } from "../../../services/runtimeController/previews";
 import { useConversationPreviewOpener } from "../../../workspace/ConversationPreviewContext";
@@ -14,6 +15,7 @@ import { ChatActionCard, type ChatActionCardAction } from "./ChatActionCard";
 import type { SitePreviewRequest } from "./sitePreviewRequest";
 import { requestFollow, setFollowPresence, useFollowAccount, useFollowEntry } from "./previewHost/followStore";
 import { getFollowState } from "../../../services/runtimeController/previewFollow";
+import { PreviewWakeError, START_NEEDS_BUILDER_TEXT, wakeUntilLive } from "./sitePreviewWake";
 
 export type SitePreviewState = "checking" | "live" | "not_responding" | "unavailable" | "stopped";
 
@@ -23,6 +25,8 @@ export type SitePreviewState = "checking" | "live" | "not_responding" | "unavail
  * it reads the answer.
  */
 const SITE_PREVIEW_FOLLOW_MS = 15_000;
+/** How often a card follows a wake someone else started, so it says Live as soon as the site answers. */
+const SITE_PREVIEW_WAKE_FOLLOW_MS = 3_000;
 /**
  * How many times a card whose pane is not on screen follows a site with no
  * settled state (Checking, Not responding, Status unavailable) before it stops
@@ -249,6 +253,44 @@ export function SitePreviewCard({
     void refresh();
   }, [preview.previewId, refresh]);
 
+  // Wake (a model-free restart): `instafy preview open` recorded how to start
+  // this site, so Open on a stopped one starts it again without an Octo turn,
+  // then opens it. Nothing here knows what the site is.
+  const [waking, setWaking] = useState(false);
+  const [wakeError, setWakeError] = useState<string | null>(null);
+  const wakeRequest = useRef<AbortController | null>(null);
+  useEffect(() => () => wakeRequest.current?.abort(), []);
+  const wake = useCallback(async (then: (() => void) | null) => {
+    if (!projectId || wakeRequest.current) return;
+    const controller = new AbortController();
+    wakeRequest.current = controller;
+    setWaking(true);
+    setWakeError(null);
+    try {
+      const live = await wakeUntilLive({
+        signal: controller.signal,
+        wake: (signal) => wakeSitePreview(projectId, preview.previewId, signal),
+        get: (signal) => getSitePreview(projectId, preview.previewId, signal, { fresh: true }),
+        onPreview: (next) => { if (!controller.signal.aborted) member.read({ preview: next }); },
+      });
+      if (controller.signal.aborted) return;
+      if (live) {
+        member.read({ preview: live });
+        shareAnswer(preview.previewId, member, { preview: live });
+      } else renew();
+      then?.();
+    } catch (cause) {
+      if (controller.signal.aborted) return;
+      if (cause instanceof PreviewWakeError && cause.gone) member.read({ gone: true });
+      setWakeError(cause instanceof PreviewWakeError ? cause.message : "Couldn't start it.");
+    } finally {
+      if (wakeRequest.current === controller) {
+        wakeRequest.current = null;
+        setWaking(false);
+      }
+    }
+  }, [member, preview.previewId, projectId, renew]);
+
   // A failed check is no answer: ask again a few times, more slowly each
   // time and only while the page is visible, then stop.
   useEffect(() => {
@@ -290,6 +332,15 @@ export function SitePreviewCard({
     runtimeStatus: signals.runtimeStatus,
   });
   const showing = state !== "stopped" && opener?.visiblePreviewId === preview.previewId;
+  // Only a record that says how to start the site can be woken; a preview that is gone cannot.
+  const wakeable = server?.restartable === true && !gone;
+  // Starting its stopped machine takes someone who may change the space: others see why before they press Open.
+  const startBlocked = wakeable && state === "stopped" && server?.canStart === false;
+  // Someone else (another member, another tab) is waking it: follow along.
+  const wakingElsewhere = !waking && server?.wake?.state === "waking";
+  const starting = waking || wakingElsewhere;
+  // The site came back some other way (Octo restarted it, someone else woke it): the failure is old news.
+  useEffect(() => { if (state === "live" && wakeError && !waking) setWakeError(null); }, [state, wakeError, waking]);
 
   // While its pane is on screen, the card keeps up with the site, so it never
   // reads Live beside a site that stopped answering. A card whose site has no
@@ -299,7 +350,7 @@ export function SitePreviewCard({
   // controller said it will not answer.
   const settled = state === "live" || state === "stopped";
   const wantsToFollow = !failures && !cannotCheck && !gone &&
-    (showing || (!settled && !followsSpent));
+    (showing || wakingElsewhere || (!settled && !followsSpent));
   useEffect(() => setWantsToFollow(preview.previewId, member, wantsToFollow), [member, preview.previewId, wantsToFollow]);
   const following = leads && wantsToFollow;
   useEffect(() => {
@@ -316,9 +367,9 @@ export function SitePreviewCard({
         cards.unseenFollows += 1;
       }
       void refresh();
-    }, SITE_PREVIEW_FOLLOW_MS);
+    }, wakingElsewhere ? SITE_PREVIEW_WAKE_FOLLOW_MS : SITE_PREVIEW_FOLLOW_MS);
     return () => window.clearInterval(timer);
-  }, [following, preview.previewId, refresh, showing]);
+  }, [following, preview.previewId, refresh, showing, wakingElsewhere]);
 
   // Follow mode: who presents this site now (events keep it current; one look when the card first reads Live).
   const followEntry = useFollowEntry(preview.previewId);
@@ -347,12 +398,19 @@ export function SitePreviewCard({
   // The preview comes from the stored card, parsed once: nothing a press
   // carries is trusted. Opening only selects the conversation's view; the
   // pane mints its own viewer session.
-  const open = () => {
-    renew();
+  const openNow = useCallback(() => {
     opener?.openPreview({ previewId: preview.previewId, title: preview.title });
+  }, [opener, preview.previewId, preview.title]);
+  const open = () => {
+    // A stopped site that can be started: start it, then open it.
+    if (state === "stopped" && wakeable) { if (!startBlocked) void wake(openNow); return; }
+    renew();
+    openNow();
   };
 
-  const label = sitePreviewStateLabel(state, server?.port ?? preview.port);
+  const label = starting
+    ? "Starting…"
+    : wakeError ?? (startBlocked ? START_NEEDS_BUILDER_TEXT : sitePreviewStateLabel(state, server?.port ?? preview.port));
   const actions: ChatActionCardAction[] = [];
   if (opener && followable && followPresence) {
     // The pane follows as soon as it is open and knows the presentation.
@@ -365,11 +423,17 @@ export function SitePreviewCard({
     actions.push({
       id: "open-preview",
       label: showing ? "Showing" : "Open",
-      variant: showing || followable || state === "not_responding" || state === "unavailable" ? "outline" : "primary",
+      variant: showing || followable || (state === "not_responding" && !wakeable) || state === "unavailable" ? "outline" : "primary",
       onPress: open,
-      isDisabled: showing || state === "stopped",
+      isDisabled: showing || starting || (state === "stopped" && (!wakeable || startBlocked)),
+      isLoading: starting,
+      loadingLabel: "Starting…",
       testId: "preview-ready-open",
     });
+  }
+  // A site that stopped answering starts again from here (a stopped one starts with Open).
+  if (wakeable && !starting && state === "not_responding") {
+    actions.push({ id: "restart-preview", label: "Start again", variant: "outline", onPress: () => void wake(null), testId: "preview-ready-restart" });
   }
 
   return (
@@ -388,8 +452,9 @@ export function SitePreviewCard({
           className="inline-flex items-center gap-1.5"
           data-testid="preview-ready-status"
           data-state={state}
+          data-wake={starting ? "waking" : wakeError ? "failed" : undefined}
         >
-          <span className={`h-2 w-2 shrink-0 rounded-full ${STATE_DOT[state]}`} aria-hidden="true" />
+          <span className={`h-2 w-2 shrink-0 rounded-full ${starting ? STATE_DOT.checking : STATE_DOT[state]}`} aria-hidden="true" />
           {label}
         </span>
         {followLine ? (

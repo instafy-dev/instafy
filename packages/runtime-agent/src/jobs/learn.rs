@@ -118,8 +118,9 @@ const FRONTEND_PREVIEWS_TEMPLATE: &str = include_str!(concat!(
 // check`, v3 the one from before `instafy preview open` showed a running site
 // in Studio ahead of any public tunnel, v4 the one that allowed the preview
 // host only after someone reported a blocked page, v5 the one from before
-// sites in a preview asked Studio for the person's location, and v6 the one
-// from before it told sites how to be presented and followed. A workspace still holding an
+// sites in a preview asked Studio for the person's location, v6 the one
+// from before it told sites how to be presented and followed, and v7 the one
+// from before the card could start a sleeping site again. A workspace still holding an
 // unedited earlier bundled copy of this skill, browser automation or skill
 // import compat is upgraded; an edited one is kept.
 const LEGACY_FRONTEND_PREVIEWS_TEMPLATES: &[&str] = &[
@@ -129,6 +130,7 @@ const LEGACY_FRONTEND_PREVIEWS_TEMPLATES: &[&str] = &[
     include_str!("legacy/frontend-previews-v4.md"),
     include_str!("legacy/frontend-previews-v5.md"),
     include_str!("legacy/frontend-previews-v6.md"),
+    include_str!("legacy/frontend-previews-v7.md"),
 ];
 const INTEGRATION_ONBOARDING_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -1865,8 +1867,8 @@ mod tests {
     /// host on a dev server that checks `Host` before anyone opens the card, and
     /// tells a site in a preview to ask Studio for the person's location, and
     /// how to be presented and followed: without the person's own position or
-    /// secrets, and treating another person's view as untrusted. An unedited
-    /// v3, v4, v5 or v6 copy is upgraded to it; an edited one is kept.
+    /// secrets, and treating another person's view as untrusted. It says when
+    /// the card can start the site again after a sleep. An unedited v3 to v7 copy is upgraded to it; an edited one is kept.
     #[test]
     fn scaffold_upgrades_frontend_previews_to_studio_preview_cards() {
         for needle in [
@@ -1893,26 +1895,31 @@ mod tests {
             "Applying a view only changes what is shown.",
             "never fetches or opens a URL taken from it",
             "Show `from.name` as text only.",
+            "`restartable`",
+            "--serve-cmd \"<command>\"",
         ] {
             assert!(FRONTEND_PREVIEWS_TEMPLATE.contains(needle), "{needle}");
         }
         let v3 = include_str!("legacy/frontend-previews-v3.md");
         let v4 = include_str!("legacy/frontend-previews-v4.md");
-        let previous = include_str!("legacy/frontend-previews-v5.md");
+        let v5 = include_str!("legacy/frontend-previews-v5.md");
+        let v6 = include_str!("legacy/frontend-previews-v6.md");
+        let previous = include_str!("legacy/frontend-previews-v7.md");
         assert!(!v3.contains("instafy preview open"));
         assert!(v4.contains("instafy preview open"));
         assert!(!v4.contains("Allow the preview host before the person opens the card."));
-        assert!(previous.contains("Allow the preview host before the person opens the card."));
-        assert!(!previous.contains("location-request"));
-        assert!(FRONTEND_PREVIEWS_TEMPLATE.contains("instafy preview check --port <port>"));
-        let v6 = include_str!("legacy/frontend-previews-v6.md");
+        assert!(v5.contains("Allow the preview host before the person opens the card."));
+        assert!(!v5.contains("location-request"));
         assert!(v6.contains("location-request"));
         assert!(!v6.contains("layout-ack"));
+        assert!(previous.contains("layout-ack"));
+        assert!(!previous.contains("--serve-cmd"));
+        assert!(FRONTEND_PREVIEWS_TEMPLATE.contains("instafy preview check --port <port>"));
 
         let workspace = tempdir().expect("workspace tempdir");
         ensure_project_memory_scaffold(workspace.path());
         let skill = workspace.path().join(FRONTEND_PREVIEWS_RELATIVE_PATH);
-        for old in [v3, v4, previous, v6] {
+        for old in [v3, v4, v5, v6, previous] {
             fs::write(&skill, old).unwrap();
             ensure_project_memory_scaffold(workspace.path());
             assert_eq!(

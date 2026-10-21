@@ -45,6 +45,11 @@ export type PreviewOpenOptions = {
   title?: string;
   path?: string;
   ratholeBin?: string;
+  // How to start the site again after the space sleeps, when it cannot be read from the process on the port
+  // (`--serve-cmd "<command>"`). One command and its arguments, run from the current directory, never a shell.
+  serveCmd?: string;
+  // The directory `serveCmd` runs from (default: the current directory).
+  cwd?: string;
 };
 
 export type PreviewListOptions = {
@@ -73,7 +78,15 @@ export type PreviewOpenResult = PreviewSummary & {
   // Everything after `p-<label>--<id>.` in the host viewers reach the site under, or null when the
   // server does not say. A dev server that checks the Host header must allow this suffix.
   viewerHostSuffix: string | null;
+  // Open in Studio can start the site again after the space sleeps (a start command was recorded).
+  restartable: boolean;
+  // Why it is not restartable, when it is not.
+  restartNote?: string;
 };
+
+// How the site was started, as the controller records it: argv (never a shell) and the directory relative to the
+// space's workspace. A wake runs exactly this on the runtime, without a model turn.
+export type PreviewServe = { argv: string[]; cwd: string };
 
 type PreviewStateEntry = {
   previewId: string;
@@ -519,6 +532,285 @@ async function notListeningError(port: number, sitePath: string, probe: LocalSit
   return new PreviewCommandError(noAnswerMessage(port, probe, where, "retry"), PREVIEW_EXIT_NOT_LISTENING);
 }
 
+const SERVE_MAX_ARGS = 64;
+const SERVE_MAX_ARG_LENGTH = 2048;
+// Directories that do not survive the space going to sleep.
+const EPHEMERAL_PREFIXES = ["/tmp/", "/var/tmp/", "/dev/shm/", "/run/"];
+
+/**
+ * Splits `--serve-cmd` into argv the way a shell would split ONE simple command: whitespace separates words, '...'
+ * is literal, "..." allows \" \\ \$ and \`, and a backslash escapes the next character. What a shell would interpret
+ * (pipes, `;`, `&&`, redirects, `$(...)`, `$VAR`, backticks) is refused, since the wake runs argv directly: a pipeline
+ * belongs in a script. Glob characters are passed through as they are.
+ */
+export function parseServeCommand(raw: string): string[] {
+  const argv: string[] = [];
+  let current = "";
+  let inWord = false;
+  let quote: "'" | '"' | null = null;
+  const text = String(raw ?? "");
+  for (let index = 0; index < text.length; index += 1) {
+    const ch = text[index]!;
+    if (quote === "'") {
+      if (ch === "'") quote = null;
+      else current += ch;
+      continue;
+    }
+    if (quote === '"') {
+      if (ch === '"') {
+        quote = null;
+      } else if (ch === "\\" && index + 1 < text.length && '"\\$`'.includes(text[index + 1]!)) {
+        current += text[index + 1];
+        index += 1;
+      } else if (ch === "$" || ch === "`") {
+        throw new Error(`--serve-cmd takes one command and its arguments, not shell syntax (found ${ch} in quotes).`);
+      } else {
+        current += ch;
+      }
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      inWord = true;
+      continue;
+    }
+    if (ch === "\\") {
+      if (index + 1 >= text.length) throw new Error("--serve-cmd ends with a lone backslash.");
+      current += text[index + 1];
+      index += 1;
+      inWord = true;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (ch === "\n" || ch === "\r") {
+        throw new Error("--serve-cmd takes one command on one line.");
+      }
+      if (inWord) {
+        argv.push(current);
+        current = "";
+        inWord = false;
+      }
+      continue;
+    }
+    if ("|&;<>()$`".includes(ch)) {
+      throw new Error(
+        `--serve-cmd takes one command and its arguments, not shell syntax (found ${ch}). Put a pipeline or several commands in a script and pass the script.`,
+      );
+    }
+    current += ch;
+    inWord = true;
+  }
+  if (quote) throw new Error("--serve-cmd has an unterminated quote.");
+  if (inWord) argv.push(current);
+  if (argv.length === 0) throw new Error("--serve-cmd is empty.");
+  if (argv.length > SERVE_MAX_ARGS || argv.some((arg) => arg.length > SERVE_MAX_ARG_LENGTH || arg.includes("\0"))) {
+    throw new Error(`--serve-cmd must have at most ${SERVE_MAX_ARGS} arguments of at most ${SERVE_MAX_ARG_LENGTH} characters.`);
+  }
+  return argv;
+}
+
+function realDir(dir: string): string | null {
+  try {
+    const resolved = fs.realpathSync(dir);
+    return fs.statSync(resolved).isDirectory() ? resolved : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The space's workspace directory on this runtime, as the runtime agent resolves it: WORKSPACE_PROJECT_DIR, else
+ * <WORKSPACE_DIR>/<space id>. Null outside a runtime (nothing there restarts a site after a sleep).
+ */
+export function resolveWorkspaceRoot(env: NodeJS.ProcessEnv, projectId: string | null): string | null {
+  const explicit = env["WORKSPACE_PROJECT_DIR"]?.trim();
+  if (explicit) return realDir(explicit);
+  const base = env["WORKSPACE_DIR"]?.trim();
+  if (!base || !projectId) return null;
+  return realDir(path.join(base, projectId));
+}
+
+/** `dir` relative to the workspace root (`.` for the root itself), or null when it is outside it. */
+export function workspaceRelativeDir(root: string, dir: string): string | null {
+  const resolved = realDir(dir);
+  if (!resolved) return null;
+  const relative = path.relative(root, resolved);
+  if (relative === "") return ".";
+  if (relative.startsWith("..") || path.isAbsolute(relative)) return null;
+  return relative.split(path.sep).join("/");
+}
+
+type ListeningProcess = { pid: number; argv: string[]; cwd: string };
+
+function listeningSocketInodes(procRoot: string, port: number): Set<string> {
+  const inodes = new Set<string>();
+  for (const table of ["net/tcp", "net/tcp6"]) {
+    let text = "";
+    try {
+      text = fs.readFileSync(path.join(procRoot, table), "utf8");
+    } catch {
+      continue;
+    }
+    for (const line of text.split("\n").slice(1)) {
+      const fields = line.trim().split(/\s+/);
+      if (fields.length < 10) continue;
+      const local = fields[1] ?? "";
+      const portHex = local.slice(local.lastIndexOf(":") + 1);
+      // st 0A = LISTEN
+      if (fields[3] === "0A" && Number.parseInt(portHex, 16) === port && fields[9] !== "0") {
+        inodes.add(fields[9]!);
+      }
+    }
+  }
+  return inodes;
+}
+
+/**
+ * The process listening on a TCP port, read from Linux /proc: the socket inode from /proc/net/tcp{,6}, the process
+ * holding it from /proc/<pid>/fd, its argv from /proc/<pid>/cmdline and its directory from /proc/<pid>/cwd. Only
+ * processes this user may inspect are seen. When several share the socket (a forking server), the lowest pid (the
+ * parent, usually) wins. Null elsewhere or when nothing readable holds it.
+ */
+export function detectListeningProcess(port: number, procRoot = "/proc"): ListeningProcess | null {
+  const inodes = listeningSocketInodes(procRoot, port);
+  if (inodes.size === 0) return null;
+  let pids: number[] = [];
+  try {
+    pids = fs
+      .readdirSync(procRoot)
+      .filter((name) => /^\d+$/.test(name))
+      .map(Number)
+      .sort((a, b) => a - b);
+  } catch {
+    return null;
+  }
+  for (const pid of pids) {
+    let fds: string[] = [];
+    try {
+      fds = fs.readdirSync(path.join(procRoot, String(pid), "fd"));
+    } catch {
+      continue;
+    }
+    const holds = fds.some((fd) => {
+      try {
+        const target = fs.readlinkSync(path.join(procRoot, String(pid), "fd", fd));
+        const match = /^socket:\[(\d+)\]$/.exec(target);
+        return Boolean(match && inodes.has(match[1]!));
+      } catch {
+        return false;
+      }
+    });
+    if (!holds) continue;
+    try {
+      const argv = fs.readFileSync(path.join(procRoot, String(pid), "cmdline"), "utf8").split("\0");
+      while (argv.length > 0 && argv[argv.length - 1] === "") argv.pop();
+      const cwd = fs.readlinkSync(path.join(procRoot, String(pid), "cwd"));
+      if (argv.length === 0) continue;
+      return { pid, argv, cwd };
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+const SECRET_FLAG = /^-{1,2}(?!-|no-)[\w.-]*(token|secret|passw(or)?d|passwd|api[-_]?key|access[-_]?key|private[-_]?key|credentials?|auth(?![a-z]))[\w.-]*$/i;
+const SECRET_ENV = /^(?=[A-Za-z_])\w*(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|CREDENTIALS?)[\w]*=./i;
+const SECRET_VALUE = /^(sk|pk|rk)[-_][A-Za-z0-9_-]{12,}|^gh[pousr]_[A-Za-z0-9]{20,}|^xox[abposr]-|^AKIA[0-9A-Z]{12,}|^eyJ[A-Za-z0-9_-]{20,}\./;
+const URL_USERINFO = /^[a-z][a-z0-9+.-]*:\/\/[^/\s@]*:[^/\s@]*@/i;
+
+/**
+ * The argument of a start command that looks like a secret (`--api-key sk-…`, `--token=…`, `API_KEY=…`, a database
+ * URL with a password, a known key format), or null. Such a command is not recorded: the controller keeps the
+ * recorded command, and the site should read its secret from an env file instead.
+ */
+export function secretInServeCommand(argv: string[]): string | null {
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i]!;
+    const eq = arg.indexOf("=");
+    const flag = arg.startsWith("-") ? (eq > 0 ? arg.slice(0, eq) : arg) : null;
+    if (flag && SECRET_FLAG.test(flag)) {
+      const value = eq > 0 ? arg.slice(eq + 1) : argv[i + 1];
+      if (value && !value.startsWith("-")) return flag;
+    }
+    if (SECRET_ENV.test(arg)) return arg.slice(0, arg.indexOf("="));
+    const bare = eq > 0 && arg.startsWith("-") ? arg.slice(eq + 1) : arg;
+    if (URL_USERINFO.test(bare)) return "a URL with a password";
+    if (SECRET_VALUE.test(bare)) return "a key";
+  }
+  return null;
+}
+
+/**
+ * `--serve-cmd` as argv, refused when it is shell syntax or carries what looks like a secret: the controller keeps
+ * the recorded command, so a secret belongs in an env file the site reads.
+ */
+export function parseExplicitServeCommand(raw: string): string[] {
+  const argv = parseServeCommand(raw);
+  const secret = secretInServeCommand(argv);
+  if (secret) {
+    throw new Error(
+      `--serve-cmd carries what looks like a secret (${secret}), which is not recorded. Have the site read it from an env file and pass the command without it.`,
+    );
+  }
+  return argv;
+}
+
+/**
+ * How to start the site again after the space sleeps: `--serve-cmd` from the current directory, else the argv and
+ * directory of the process listening on the port. `note` says why there is none.
+ */
+export function resolvePreviewServe(params: {
+  port: number;
+  serveCmd?: string;
+  projectId: string | null;
+  env?: NodeJS.ProcessEnv;
+  cwd?: string;
+  procRoot?: string;
+  platform?: NodeJS.Platform;
+}): { serve: PreviewServe | null; note?: string } {
+  const env = params.env ?? process.env;
+  const root = resolveWorkspaceRoot(env, params.projectId);
+  const explicit = params.serveCmd?.trim();
+  if (explicit) {
+    const argv = parseExplicitServeCommand(explicit);
+    if (!root) {
+      throw new Error("--serve-cmd needs the space's workspace (WORKSPACE_DIR); run it inside the space.");
+    }
+    const cwd = workspaceRelativeDir(root, params.cwd ?? process.cwd());
+    if (!cwd) {
+      throw new Error(`--serve-cmd runs from the current directory, which must be inside the space's workspace (${root}).`);
+    }
+    return { serve: { argv, cwd } };
+  }
+  const notRestartable = (note: string) => ({ serve: null, note });
+  const platform = params.platform ?? process.platform;
+  if (platform !== "linux" && !params.procRoot) {
+    return notRestartable("the start command can only be read on a Linux space; pass --serve-cmd");
+  }
+  if (!root) return notRestartable("this is not running inside a space's workspace");
+  const found = detectListeningProcess(params.port, params.procRoot);
+  if (!found) return notRestartable(`could not see which process listens on port ${params.port}; pass --serve-cmd`);
+  const cwd = workspaceRelativeDir(root, found.cwd);
+  if (!cwd) {
+    return notRestartable(`the site runs from ${found.cwd}, outside the workspace, which does not survive a sleep`);
+  }
+  const ephemeral = found.argv.find((arg) => EPHEMERAL_PREFIXES.some((prefix) => arg.startsWith(prefix)));
+  if (ephemeral) {
+    return notRestartable(`its command uses ${ephemeral}, which does not survive a sleep; pass --serve-cmd`);
+  }
+  if (found.argv.length > SERVE_MAX_ARGS || found.argv.some((arg) => arg.length > SERVE_MAX_ARG_LENGTH)) {
+    return notRestartable("its command line is too long to record; pass --serve-cmd");
+  }
+  const secret = secretInServeCommand(found.argv);
+  if (secret) {
+    return notRestartable(
+      `its command line carries what looks like a secret (${secret}), which is not recorded; read it from an env file and pass --serve-cmd`,
+    );
+  }
+  return { serve: { argv: found.argv, cwd } };
+}
+
 // Asks the server for the preview and starts (or reuses) its rathole client, then records it. Runs under the state lock.
 async function createAndStartClient(params: {
   opts: PreviewOpenOptions;
@@ -531,6 +823,7 @@ async function createAndStartClient(params: {
   controllerUrl: string;
   serverUrl: string;
   log: (message: string) => void;
+  serve: PreviewServe | null;
 }): Promise<{
   grant: Record<string, unknown>;
   previewId: string;
@@ -539,7 +832,7 @@ async function createAndStartClient(params: {
 }> {
   // The server is asked first, so a server without previews exits 5 before anything is
   // downloaded or started here.
-  const { opts, port, title, sitePath, projectId, retryCommand, auth, controllerUrl, serverUrl, log } = params;
+  const { opts, port, title, sitePath, projectId, retryCommand, auth, controllerUrl, serverUrl, log, serve } = params;
   const conversationId = opts.conversationId?.trim() || undefined;
   const created = await controllerRequest({
     controllerUrl,
@@ -554,6 +847,7 @@ async function createAndStartClient(params: {
       path: sitePath,
       title,
       metadata: { source: "instafy-cli" },
+      ...(serve ? { serve } : {}),
     },
     retryCommand,
     notFoundMeansUnavailable: true,
@@ -655,6 +949,8 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
   const port = parsePreviewPort(opts.port);
   const title = parsePreviewTitle(opts.title);
   const sitePath = parsePreviewPath(opts.path);
+  // A malformed --serve-cmd, or one carrying a secret, is refused before anything is probed or asked for.
+  if (opts.serveCmd?.trim()) parseExplicitServeCommand(opts.serveCmd);
   const projectId = resolveProject({ project: opts.project });
   const retryCommand = `instafy preview open --port ${port} --title ${shellQuote(title)}`;
   const { auth, controllerUrl } = resolveAuth(opts, retryCommand);
@@ -666,10 +962,12 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
   if (!probe.listening) {
     throw await notListeningError(port, sitePath, probe);
   }
+  // Read before anything else changes on the port: the process listening now is the one to restart later.
+  const { serve, note: restartNote } = resolvePreviewServe({ port, serveCmd: opts.serveCmd, projectId, cwd: opts.cwd });
 
   // From the create call to the state write, one `instafy preview` command at a time on this machine.
   const { grant, previewId, entry } = await withStateLock(() =>
-    createAndStartClient({ opts, port, title, sitePath, projectId, retryCommand, auth, controllerUrl, serverUrl, log }),
+    createAndStartClient({ opts, port, title, sitePath, projectId, retryCommand, auth, controllerUrl, serverUrl, log, serve }),
   );
 
   // The client stays up if this fails: a re-run reuses it and only repeats the ready call.
@@ -694,6 +992,8 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
     throw error;
   }
   const readyBody = (ready.body && !Array.isArray(ready.body) ? ready.body : {}) as Record<string, unknown>;
+  // The server decides: an older controller ignores `serve` and answers without `restartable`.
+  const restartable = serve !== null && grant["restartable"] === true;
 
   return {
     previewId,
@@ -704,6 +1004,8 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
     httpStatus: previewHttpStatusFromHealth(readyBody),
     messageId: stringField(readyBody, "messageId"),
     viewerHostSuffix: parseViewerHostSuffix(grant["viewerHostSuffix"]) ?? null,
+    restartable,
+    ...(restartable ? {} : { restartNote: restartNote ?? "the server did not record a start command" }),
   };
 }
 
@@ -780,6 +1082,11 @@ export function printPreviewOpen(result: PreviewOpenResult, json: boolean) {
         ? kleur.yellow("Not responding yet")
         : kleur.yellow("Preview opened (the server did not report whether the site answers)");
   console.log(`${label}: ${result.title} (port ${result.port}). Open it from the card in the conversation.`);
+  if (result.restartable) {
+    console.log(kleur.gray("Open starts the site again after the space sleeps."));
+  } else {
+    console.log(kleur.yellow(`After the space sleeps, Open cannot start the site by itself: ${result.restartNote}.`));
+  }
   console.log(kleur.gray(`previewId=${result.previewId}`));
   if (result.httpStatus !== null && result.httpStatus >= 400) {
     console.log(kleur.yellow(`The site answered HTTP ${result.httpStatus} through the preview.`));

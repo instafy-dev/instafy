@@ -421,6 +421,8 @@ struct PreviewStubBroker {
     assignment_status: StdMutex<Option<String>>,
     /// What a probe that reaches the tunnel answers; `None` is a site's 200.
     probe_status: StdMutex<Option<u16>>,
+    /// The broker cannot be asked: every probe errors.
+    probe_fails: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait]
@@ -485,6 +487,9 @@ impl TunnelBroker for PreviewStubBroker {
     async fn probe_tunnel(&self, _tunnel_id: &str, _path: &str) -> anyhow::Result<TunnelProbe> {
         use std::sync::atomic::Ordering;
         self.probes.fetch_add(1, Ordering::SeqCst);
+        if self.probe_fails.load(Ordering::SeqCst) {
+            anyhow::bail!("the broker is unreachable");
+        }
         let silent = self
             .silent_probes
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
@@ -2036,6 +2041,9 @@ async fn preview_metadata_cannot_be_forged_or_dropped_through_the_tunnel_routes(
                                 "path": "@attacker.example/x",
                                 "conversationId": f.conversation,
                                 "tunnelKey": "preview:someone-else",
+                                "serve": { "argv": ["sh", "-c", "evil"], "cwd": "." },
+                                "closedAt": "2026-01-01T00:00:00Z",
+                                "wokeAt": "2026-01-01T00:00:00Z",
                             },
                         },
                     }),
@@ -2179,6 +2187,10 @@ async fn preview_metadata_cannot_be_forged_or_dropped_through_the_tunnel_routes(
     .await
 }
 
+/// Waking a stopped preview, its agent channel and viewing as activity.
+#[path = "wake_tests.rs"]
+mod wake_tests;
+
 #[tokio::test]
 async fn every_preview_route_fails_closed_when_previews_are_off_or_the_broker_cannot_serve_them(
 ) -> anyhow::Result<()> {
@@ -2271,6 +2283,12 @@ async fn every_preview_route_fails_closed_when_previews_are_off_or_the_broker_ca
                     Value::Null,
                 ),
                 (
+                    f.tokens[0].clone(),
+                    "POST",
+                    format!("{one}/wake"),
+                    json!({}),
+                ),
+                (
                     HOOK_SECRET.to_string(),
                     "POST",
                     "/tunnel-broker/hooks/preview-auth".to_string(),
@@ -2321,6 +2339,18 @@ async fn every_preview_route_fails_closed_when_previews_are_off_or_the_broker_ca
                 .await?
                 .get(0);
             assert_eq!(cards, 0, "no card was written");
+            let wakes: i64 = f
+                .state
+                .pool
+                .get()
+                .await?
+                .query_one(
+                    "select count(*) from runtime_preview_wakes where tunnel_id = $1",
+                    &[&preview_id],
+                )
+                .await?
+                .get(0);
+            assert_eq!(wakes, 0, "no wake was recorded");
             // Configured again, the same session still works.
             assert!(f.allowed(&preview_id, &label).await?);
             Ok(())

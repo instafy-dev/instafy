@@ -902,6 +902,14 @@ impl RuntimeAgent {
             registration.clone(),
             shutdown.clone(),
         ));
+        // Model-free preview restarts: a member opened a preview whose site
+        // this runtime should serve again (see `preview_restarts`).
+        let preview_restarts = crate::preview_restarts::spawn_preview_restart_task(
+            config.clone(),
+            client.clone(),
+            registration.clone(),
+            shutdown.clone(),
+        );
 
         // Renew the registration before the agent token (and the runtime token
         // minted alongside it) expires. Waiting for the lease call to return 401
@@ -936,6 +944,10 @@ impl RuntimeAgent {
         // does not leak the task.
         periodic_snapshots.abort();
         let _ = periodic_snapshots.await;
+        if let Some(task) = preview_restarts {
+            task.abort();
+            let _ = task.await;
+        }
         renewal_task.abort().await;
         let renewed_registration = renewal_receiver.borrow().clone();
 

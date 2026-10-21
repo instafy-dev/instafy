@@ -519,7 +519,7 @@ gives exit `5` and nothing else happens.
 3. Once the client has stayed up for 250 ms, asks the server to post the card, and prints the result:
 
 ```json
-{"previewId":"<uuid>","title":"Site preview","port":4173,"path":"/","status":"live","httpStatus":200,"messageId":"<uuid>","viewerHostSuffix":"<preview domain>"}
+{"previewId":"<uuid>","title":"Site preview","port":4173,"path":"/","status":"live","httpStatus":200,"messageId":"<uuid>","viewerHostSuffix":"<preview domain>","restartable":true}
 ```
 
 `viewerHostSuffix` is the part of the host name viewers reach the site under after its first label. A dev
@@ -539,6 +539,18 @@ control characters. Both follow the server's rules, so a value it would refuse i
 request.
 `--conversation <id>` picks the conversation for the card; it is needed only without a job
 token, for example in an end-to-end test.
+
+Starting the site again after the space sleeps: `open` also records how the site was started, so a
+member's **Open** on the card can start it again without an Octo turn (see [Site previews](Previews.md#waking-a-stopped-site)).
+On a Linux space it reads the argv and working directory of the process listening on the port from
+`/proc`. `--serve-cmd "<command>"` gives the command instead, run from the current directory: one command
+and its arguments, split as a shell would split one simple command but never run through a shell, so
+pipes, `;`, `&&`, redirects, `$VAR` and `$(…)` are refused (put them in a script and pass the script).
+Nothing is recorded when the directory is outside the space's workspace, the command uses a temporary
+folder (`/tmp`, `/var/tmp`, `/dev/shm`, `/run`), or the command line carries what looks like a secret
+(`--token …`, `API_KEY=…`, a URL with a password, a known key format); read secrets from an env file. The
+JSON then has `"restartable": false` and a `restartNote` saying why, and the card works as before until
+the space sleeps. A `--serve-cmd` that carries what looks like a secret is refused before anything is opened. `restartable` is `true` only when the server recorded the command too.
 
 Exit codes:
 

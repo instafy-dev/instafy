@@ -2254,6 +2254,10 @@ addAccessTokenOptions(previewOpenCommand, "Instafy access token (defaults to the
 previewOpenCommand
   .option("--conversation <id>", "Conversation for the card (only needed without a job token)")
   .option("--rathole-bin <path>", "Path to rathole binary (or set RATHOLE_BIN)")
+  .option(
+    "--serve-cmd <command>",
+    "How to start the site again after the space sleeps, run from the current directory (one command, no shell); default: read from the process listening on the port",
+  )
   .option("--json", "Output JSON")
   .action(async (opts) => {
     try {
@@ -2266,6 +2270,7 @@ previewOpenCommand
         title: opts.title,
         path: opts.path,
         ratholeBin: opts.ratholeBin,
+        serveCmd: opts.serveCmd,
       });
       printPreviewOpen(result, Boolean(opts.json));
     } catch (error) {
