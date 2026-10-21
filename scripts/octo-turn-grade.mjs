@@ -85,7 +85,8 @@ export function jobsQuery(projectId, sinceIso) {
     select id, parent_job_id as "parentJobId", plan_group_id as "planGroupId", agent_role as "agentRole",
            status, outcome, intent, created_at as "createdAt", leased_at as "leasedAt", completed_at as "completedAt",
            summary, error_message as "errorMessage", artifacts,
-           payload #> '{metadata,managedAiModelLabel}' as "modelLabel"
+           payload #> '{metadata,managedAiModelLabel}' as "modelLabel",
+           payload #> '{metadata,multiAgentPlan,rateLimitRetry}' as "planRateLimitRetry"
     from agent_jobs where project_id = '${projectId}' and created_at >= '${sinceIso}') j`;
 }
 
@@ -483,6 +484,11 @@ function check(checks, id, severity, ok, detail) {
   checks.push({ id, severity, ok, detail: detail === undefined ? null : String(detail) });
 }
 
+/** Jobs the controller started again after a short provider rate limit (`multiAgentPlan.rateLimitRetry.of`). */
+export function retriedJobIdsOf(jobs) {
+  return new Set(jobs.map((job) => job.planRateLimitRetry?.of).filter((id) => typeof id === "string"));
+}
+
 export function caseMetrics(evidence) {
   const jobs = Array.isArray(evidence?.jobs) ? evidence.jobs : [];
   const root = rootJob(jobs);
@@ -499,12 +505,16 @@ export function caseMetrics(evidence) {
   const ui = evidence?.ui ?? {};
   const modelLabel = jobs.map((job) => job.modelLabel).find((label) => typeof label === "string" && label) ?? null;
   const replyText = reply?.summary ? stripSuggestionsBlock(redactText(reply.summary)) : "";
+  // a run the controller started again after a short provider rate limit did not fail the case: the retry's
+  // own outcome counts instead
+  const retried = retriedJobIdsOf(jobs);
   return {
     jobCount: jobs.length,
-    jobStatuses: jobs.map((job) => `${job.agentRole ?? "lead"}:${job.status}/${job.outcome ?? "-"}`),
+    jobStatuses: jobs.map((job) => `${job.agentRole ?? "lead"}:${job.status}/${job.outcome ?? "-"}${retried.has(job.id) ? " (retried)" : ""}`),
     allTerminal: jobs.length > 0 && jobs.every((job) => TERMINAL_JOB_STATUSES.has(job.status)),
     rootOutcome: root ? `${root.status}/${root.outcome ?? "-"}` : null,
-    failedJobs: jobs.filter((job) => job.status === "failed" || job.outcome === "failed").length,
+    failedJobs: jobs.filter((job) => (job.status === "failed" || job.outcome === "failed") && !retried.has(job.id)).length,
+    retriedJobs: retried.size,
     modelLabel,
     route: preflight?.route ?? null,
     routeConfidence: preflight?.confidence ?? null,
