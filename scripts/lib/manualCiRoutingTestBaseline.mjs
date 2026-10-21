@@ -21,6 +21,7 @@ export const MANUAL_CI_JOBS = [
   {"file":"build.yml","key":"rust-test-proxy","toggle":"CI_RUST_SELF_HOSTED","label":"public-rust-test-proxy","hosted":"ubuntu-latest"},
   {"file":"build.yml","key":"rust-test-origin","toggle":"CI_RUST_SELF_HOSTED","label":"public-rust-test-origin","hosted":"ubuntu-latest"},
   {"file":"build.yml","key":"rust-test-git","toggle":"CI_RUST_SELF_HOSTED","label":"public-rust-test-git","hosted":"ubuntu-latest"},
+  {"file":"build.yml","key":"rust-test-broker","toggle":"CI_RUST_SELF_HOSTED","label":"public-rust-test-broker","hosted":"ubuntu-latest"},
   {"file":"browser-e2e.yml","key":"personal","toggle":"CI_BROWSER_SELF_HOSTED","label":"public-browser-personal","hosted":"ubuntu-24.04"},
   {"file":"browser-e2e.yml","key":"browser-ui","toggle":"CI_BROWSER_SELF_HOSTED","label":"public-browser-ui","hosted":"ubuntu-24.04"},
   {"file":"browser-e2e.yml","key":"shared-profile","toggle":"CI_SHARED_BROWSER_SELF_HOSTED","label":"public-shared-browser-aggregate","hosted":"ubuntu-24.04"},
@@ -42,8 +43,9 @@ export const MANUAL_CI_BASELINES = {
   // Reviewed additions: the CLI lane runs the git wrapper suite, and the
   // provider lane runs the provider core and service unit tests, and the
   // contracts lane runs the local author pseudonym key test, and the CLI lane
-  // runs the preview check suites (local-site and site-check).
-  "build.yml": { sha256: "7e21004153d883b8b22341c7ee32043ce9879e0a7750e7ab0000c33bda76a787" },
+  // runs the preview check suites (local-site and site-check), and the Rust
+  // tests aggregate gains a tunnel broker lane (complete tunnel-broker suite).
+  "build.yml": { sha256: "7e44019dd327af802f2d86ecb96a2c7a5de5c3a51f9f801a30ddf77659e7580d" },
   "browser-e2e.yml": { sha256: "5a227820568dfe71f344bd816f77fe41c4d1d8980041937792de09ab956c121b" },
   // The reviewed Auth and Controller DB baselines additionally trigger on the
   // GHCR image-mirror helper (and its lock/test for Auth, the serial-pull helper
