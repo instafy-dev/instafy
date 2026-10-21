@@ -95,7 +95,8 @@ pub(super) fn format_site_intent_context_section(metadata: Option<&JsonValue>) -
          `target.records` file, keeping the records already there. Each record has `type` (`claim`, `offer` or \
          `item`) and `ref`; a claim also has `attr`, `value` and `prov` (`source`, `ttl_s`), as the skill's cheat \
          sheet shows. Open pages fetch them when your turn ends; `instafy bind command <site folder> reload '{{}}'` \
-         refreshes them sooner where it can reach the binder (skill: instafy-bound-sites).\n\
+         refreshes them sooner where it can reach the binder; when it cannot, say nothing about it \
+         (skill: instafy-bound-sites).\n\
          - `withheld` params were left out by the page on purpose and `coarsened` ones are rounded to about 100 m; \
          do not ask for them.\n\
          - Reply in one short line: the person sees your answer in this chat and on the site."
@@ -165,6 +166,8 @@ mod tests {
         assert!(section.contains("instafy bind command <site folder> reload '{}'"));
         // Records the site's pages can show: a typed record, not free text.
         assert!(section.contains("Each record has `type` (`claim`, `offer` or `item`) and `ref`"));
+        // The clicker's page refreshes by itself: a reload Octo cannot send is not news for them.
+        assert!(section.contains("when it cannot, say nothing about it"));
         // No ask id or preview id: nothing Octo needs, nothing to leak.
         assert!(!section.contains("int_m1abc_x7k2"));
         assert!(!section.contains("11111111-1111"));
