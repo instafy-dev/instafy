@@ -312,7 +312,7 @@ mod tests {
 
     #[test]
     fn serve_refuses_a_command_line_that_looks_like_it_carries_a_secret() {
-        for argv in [
+        for (index, argv) in [
             json!(["node", "server.js", "--api-key", "sk-live-aaaaaaaaaaaaaaaa"]),
             json!(["node", "server.js", "--token=abc123"]),
             json!(["node", "server.js", "--token", "x"]),
