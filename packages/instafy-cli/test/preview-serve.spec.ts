@@ -156,7 +156,7 @@ describe("preview start command", () => {
     const ws = workspace();
     const site = path.join(ws.root, "site");
     for (const argv of [
-      ["node", "server.js", "--api-key", "sk-live-abcdefghijklmnop"],
+      ["node", "server.js", "--api-key", "sk-live-aaaaaaaaaaaaaaaa"],
       ["node", "server.js", "--token=abc123"],
       ["env", "OPENAI_API_KEY=sk-x", "node", "server.js"],
       ["node", "server.js", "--db", "postgres://app:hunter2@db.internal:5432/app"],
@@ -205,7 +205,7 @@ describe("preview start command", () => {
   it("refuses a --serve-cmd that carries a secret, as it refuses one read from the process", () => {
     const ws = workspace();
     for (const serveCmd of [
-      "node server.js --api-key sk-live-abcdefghijklmnop",
+      "node server.js --api-key sk-live-aaaaaaaaaaaaaaaa",
       "node server.js --token x",
       "env API_KEY=hunter2 node server.js",
       "node server.js --db postgres://app:hunter2@db.internal:5432/app",

@@ -313,7 +313,7 @@ mod tests {
     #[test]
     fn serve_refuses_a_command_line_that_looks_like_it_carries_a_secret() {
         for argv in [
-            json!(["node", "server.js", "--api-key", "sk-live-abcdefghijklmnop"]),
+            json!(["node", "server.js", "--api-key", "sk-live-aaaaaaaaaaaaaaaa"]),
             json!(["node", "server.js", "--token=abc123"]),
             json!(["node", "server.js", "--token", "x"]),
             json!(["env", "API_KEY=hunter2", "node", "server.js"]),
@@ -331,7 +331,7 @@ mod tests {
             ]),
             json!(["python3", "app.py", "--password", "hunter2"]),
             json!(["node", "server.js", "--auth", "basic"]),
-            json!(["node", "server.js", "--key=AKIAABCDEFGHIJKLMNOP"]),
+            json!(["node", "server.js", "--key=AKIAAAAAAAAAAAAAAAAA"]),
         ] {
             let error = PreviewServe::from_json(&json!({ "argv": argv, "cwd": "." }))
                 .expect_err(&argv.to_string());
