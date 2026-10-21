@@ -190,7 +190,7 @@ test('only self-hosted Rust children install the fixed missing native packages w
   for(const item of aggregates)assert.doesNotMatch(job(item.key),/apt-get|Install scoped Rust native prerequisites/u);
 });
 
-test('the full reviewed seven check and twelve test commands and working directories are hash-bound', () => {
+test('the full reviewed seven check and twelve test command lines (not lanes) and working directories are hash-bound', () => {
   // Exact normalized command order + working-directory from build.yml at f20002b,
   // plus the reviewed runtime-agent proxy_retry_budget and read-reference selectors,
   // the proxy_retry_budget runs for gpt-5.6-sol and gpt-5.5, and the runtime
