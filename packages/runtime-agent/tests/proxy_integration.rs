@@ -1007,6 +1007,7 @@ async fn read_reference_proxy_case(case: ReadReferenceCase) -> Result<()> {
         tenant_projects: Vec::new(),
         parent_lease_id: None,
         poll_interval: Duration::from_millis(10),
+        lease_wait: Duration::ZERO,
         lease_max_jobs: 1,
         lease_seconds: 30,
         heartbeat_seconds: 30,
