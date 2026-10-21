@@ -6,6 +6,7 @@ import { adoptLocationSite, locationSiteKey, useLocationSiteStatus, type Locatio
 import { usePreviewFollow } from "./usePreviewFollow";
 import { useFollowAccount } from "./followStore";
 import { useSiteAsks, type SiteAskHost } from "./useSiteAsks";
+import { useFrameGesture } from "./frameGesture";
 
 const NO_ERROR = () => {};
 
@@ -67,7 +68,8 @@ export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, 
     observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class", "data-theme"] });
     return () => observer.disconnect();
   }, []);
-  const siteAsks = useSiteAsks({ host: asks, projectId, previewId, siteTitle: record?.title ?? title, frameOnScreen, post: postToFrame });
+  const userGesture = useFrameGesture(frame);
+  const siteAsks = useSiteAsks({ host: asks, projectId, previewId, siteTitle: record?.title ?? title, frameOnScreen, post: postToFrame, userGesture });
   const askCaps = siteAsks.caps;
   const sendLayout = useCallback(() => { postToFrame(buildHostLayoutMessage(theme, askCaps)); }, [askCaps, postToFrame, theme]);
   useEffect(() => { sendLayout(); }, [sendLayout]);

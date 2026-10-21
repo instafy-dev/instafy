@@ -37,11 +37,12 @@ export const ASK_HIDDEN_TEXT = "Open this page in Instafy to ask Octo.";
 export const ASK_UNREADABLE_TEXT = "Instafy could not read this question, so it wasn't sent.";
 export const ASK_WAITING_TEXT = "Answer the question waiting in Instafy first.";
 export const ASK_CANCELLED_TEXT = "Not sent.";
+export const ASK_NO_CLICK_TEXT = "Instafy sends a question only right after you click it on the page.";
 
 /** The one ask waiting for the person's confirm (the intent said `confirm: true`). */
 export type PendingAskConfirm = { line: string; send: () => void; cancel: () => void };
 
-export function useSiteAsks({ host, projectId, previewId, siteTitle, frameOnScreen, post, limiter = studioAskLimiter }: {
+export function useSiteAsks({ host, projectId, previewId, siteTitle, frameOnScreen, post, userGesture, limiter = studioAskLimiter }: {
   /** Null where Studio takes no asks: the layout then leaves `caps.ask` out and the site shows none. */
   host: SiteAskHost | null;
   projectId: string;
@@ -51,6 +52,11 @@ export function useSiteAsks({ host, projectId, previewId, siteTitle, frameOnScre
   frameOnScreen: boolean;
   /** Posts to this pane's frame at the viewer's origin; false when there is no frame. */
   post: (message: unknown) => boolean;
+  /**
+   * The person just clicked or pressed a key in this pane's frame (frameGesture.ts). An ask is a message from the
+   * person who clicks: one a page's script posts on its own is never sent.
+   */
+  userGesture: () => boolean;
   limiter?: AskLimiter;
 }) {
   const hostRef = useRef(host);
@@ -61,6 +67,8 @@ export function useSiteAsks({ host, projectId, previewId, siteTitle, frameOnScre
   onScreenRef.current = frameOnScreen;
   const titleRef = useRef(siteTitle);
   titleRef.current = siteTitle;
+  const gestureRef = useRef(userGesture);
+  gestureRef.current = userGesture;
 
   /** Asks sent as a message, until their run ends: id → the caps key. */
   const awaitingRun = useRef(new Map<string, string>());
@@ -74,14 +82,14 @@ export function useSiteAsks({ host, projectId, previewId, siteTitle, frameOnScre
 
   const keyFor = useCallback(() => `${hostRef.current?.userId ?? "anonymous"}:${projectId}:${previewId}`, [previewId, projectId]);
 
-  const dispatch = useCallback(async (ask: SiteAsk, key: string, line: string) => {
+  const dispatch = useCallback(async (ask: SiteAsk, key: string, line: string, confirmed = false) => {
     const current = hostRef.current;
     if (!current) { limiter.refund(key, ask.id); status(ask.id, "declined", ASK_HIDDEN_TEXT); return; }
     let answered = false;
     const timer = setTimeout(() => { if (!answered) { answered = true; status(ask.id, "sent"); } }, ASK_SENT_DEADLINE_MS);
     let sent = false;
     try {
-      sent = await current.send({ text: line, metadata: buildSiteIntentMetadata(previewId, ask) });
+      sent = await current.send({ text: line, metadata: buildSiteIntentMetadata(previewId, ask, { confirmed }) });
     } catch {
       sent = false;
     }
@@ -103,6 +111,8 @@ export function useSiteAsks({ host, projectId, previewId, siteTitle, frameOnScre
     if (current.canAsk !== true) return status(ask.id, "declined", current.canAsk);
     // A page in a hidden pane was not clicked just now: nothing it asks is sent.
     if (!onScreenRef.current) return status(ask.id, "declined", ASK_HIDDEN_TEXT);
+    // Nor is an ask nobody just clicked: a page's own script cannot send messages as the person.
+    if (!gestureRef.current()) return status(ask.id, "declined", ASK_NO_CLICK_TEXT);
     if (confirmingRef.current) return status(ask.id, "declined", ASK_WAITING_TEXT);
     const key = keyFor();
     const admitted = limiter.admit(key, ask.id);
@@ -130,18 +140,19 @@ export function useSiteAsks({ host, projectId, previewId, siteTitle, frameOnScre
     confirmingRef.current = null;
     setConfirming(null);
     if (!send) { limiter.refund(waiting.key, waiting.ask.id); status(waiting.ask.id, "declined", ASK_CANCELLED_TEXT); return; }
-    void dispatch(waiting.ask, waiting.key, waiting.line);
+    void dispatch(waiting.ask, waiting.key, waiting.line, true);
   }, [dispatch, limiter, status]);
 
   // The pane went off screen, or a new document loaded: a confirm nobody is looking at is not left open.
   useEffect(() => { if (!frameOnScreen) settleConfirm(false); }, [frameOnScreen, settleConfirm]);
 
-  // An ask's run ended: tell the page, and let the next ask go.
+  // An ask's run started: it holds the slot until it ends. It ended: tell the page, and let the next ask go.
   const outcomes = host?.outcomes;
   useEffect(() => {
     if (!outcomes) return;
     for (const [id, key] of [...awaitingRun.current]) {
       const outcome = outcomes.get(id);
+      if (outcome === "running") limiter.running(key, id);
       if (outcome !== "done" && outcome !== "failed") continue;
       awaitingRun.current.delete(id);
       limiter.settle(key, id);

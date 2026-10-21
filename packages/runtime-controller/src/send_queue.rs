@@ -329,6 +329,31 @@ async fn enqueue_prompt_with_optional_client_id(
 ) -> Result<SendQueueEnqueueOutcome, (StatusCode, Json<ApiError>)> {
     let owner_user_id = require_user_session(context)?;
     let access = authorize_conversation_with_context(state, context, conversation_id, true).await?;
+    // An ask from a site (crate::site_intent) is checked and counted when it is
+    // queued, and only the checked copy is stored: the drain re-checks it
+    // without counting it again.
+    let mut message_value = message_value;
+    let site_ask = match message_value.get_mut("metadata") {
+        Some(metadata) => match crate::site_intent::take_site_intent_claim(metadata) {
+            Some(claim) => Some(
+                crate::site_intent::require_site_intent(state, &access.project_id, context, &claim)
+                    .await?,
+            ),
+            None => None,
+        },
+        None => None,
+    };
+    if let Some(verified) = site_ask.as_ref() {
+        if let Some(metadata) = message_value
+            .get_mut("metadata")
+            .and_then(JsonValue::as_object_mut)
+        {
+            metadata.insert(
+                crate::site_intent::SITE_INTENT_KEY.to_string(),
+                verified.json.clone(),
+            );
+        }
+    }
     let message: ConversationPromptBody = serde_json::from_value(message_value.clone())
         .map_err(|error| bad_request(format!("message is not a valid prompt body: {error}")))?;
     if message.prompt_text.trim().is_empty() {
@@ -407,6 +432,10 @@ async fn enqueue_prompt_with_optional_client_id(
         }
     }
 
+    // A retry of the same queued ask returned above without counting it twice.
+    if let Some(verified) = site_ask.as_ref() {
+        crate::site_intent::charge_site_ask(state, verified).await?;
+    }
     let row = transaction
         .query_one(
             &format!(

@@ -2275,18 +2275,19 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
   // Ask Octo from a site in a preview pane (docs/Bound-Sites.md §2a): the click is the person's own message in this
   // conversation, through the same send path and access checks as typing it. Someone who may not send messages here
-  // sees the site's ask disabled with this reason.
+  // (or whose credits are used up) sees the site's ask disabled with this reason; someone signed out sees none.
   const siteAskCaps = siteAskAccess({
     userId: currentUserId,
     capabilitiesResolved: projectCapabilitiesResolved,
     writeDisabled: projectWriteDisabled,
+    outOfCredits,
   });
   const sendSiteAsk = useMemo(() => composerAskSender(invokeSubmitMessage), [invokeSubmitMessage]);
   const siteAskOutcomes = useMemo(
     () => askOutcomesFromRuns(Object.values(runs ?? {}), activeConversationEntry?.controllerId ?? null),
     [activeConversationEntry?.controllerId, runs],
   );
-  const siteAskHost = useMemo<SiteAskHost>(() => ({
+  const siteAskHost = useMemo<SiteAskHost | null>(() => siteAskCaps === null ? null : ({
     canAsk: siteAskCaps,
     userId: currentUserId,
     send: sendSiteAsk,

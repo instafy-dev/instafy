@@ -10,8 +10,12 @@
  * itself (the intent's `say` template, else the label and a short summary of
  * the params, each value cleaned and capped), and keeps the caps Studio puts
  * on one person's asks from one site. The page never chooses the words of a
- * message beyond those fields, never adds a mention, a command or a link, and
- * cannot send more than one ask at a time or six in ten minutes.
+ * message beyond those fields, never adds a mention, markup, a link or a web
+ * address (a URL param reads as its host, which Studio writes), and cannot
+ * send more than one ask at a time or six in ten minutes. The words it does
+ * choose still reach Octo as page text: `metadata.siteIntent` carries the
+ * label and `say` line, and the runtime tells Octo the request is the intent
+ * and nothing else the line says.
  */
 
 export type SiteAsk = {
@@ -129,6 +133,24 @@ export function cleanAskText(value: string, max: number): string {
   return cap(cleaned, max);
 }
 
+/** A web address in page text: with a scheme, `www.`, or a bare `name.tld`, with whatever path follows it. */
+const PAGE_LINKS = [
+  /[\p{L}\p{N}+.-]*:\/\/\S*/giu,
+  /\bwww\.\S*/giu,
+  /(?:[\p{L}\p{N}](?:[\p{L}\p{N}-]*[\p{L}\p{N}])?\.)+\p{L}{2,}(?![\p{L}\p{N}])\S*/gu,
+];
+
+/**
+ * Words the page chose (a label, the literal text of a `say` line, a param
+ * value): {@link cleanAskText}, and no web address either, so a page cannot
+ * point Octo or the reader anywhere through the person's message.
+ */
+export function cleanPageWords(value: string, max: number): string {
+  let words = value.replace(/[\p{Cc}\p{Cf}]/gu, " ").replace(UNSAFE_CHARS, " ");
+  for (const link of PAGE_LINKS) words = words.replace(link, " ");
+  return cleanAskText(words, max);
+}
+
 /** `shoes:karhu-ikoni-3` → `Karhu ikoni 3`: what the click is about, in words. */
 export function humanizeRef(ref: string): string {
   const id = ref.slice(ref.indexOf(":") + 1);
@@ -156,17 +178,25 @@ function paramWords(key: string, value: unknown, ask: SiteAsk): string | null {
   if (ask.coarsened.includes(key)) return "my location";
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   if (typeof value !== "string" || !value.trim()) return null;
+  // A URL reads as its host: Studio's own words for it, never the page's path or query.
   const host = hostOf(value.trim());
   if (host) return cleanAskText(host, 60) || null;
   if (key === "ref" || REF_RE.test(value)) return humanizeRef(value) || null;
-  return cleanAskText(value, 60) || null;
+  return cleanPageWords(value, 60) || null;
 }
 
+const SAY_PLACEHOLDER = /\{\s*([A-Za-z0-9_]+)\s*\}/g;
+
 function renderSay(template: string, ask: SiteAsk): string {
-  return template.replace(/\{\s*([A-Za-z0-9_]+)\s*\}/g, (_, key: string) => {
-    if (key === "ref" && !(key in ask.params) && ask.ref) return humanizeRef(ask.ref);
-    return paramWords(key, ask.params[key], ask) ?? "";
-  });
+  let line = "";
+  let at = 0;
+  for (const match of template.matchAll(SAY_PLACEHOLDER)) {
+    line += ` ${cleanPageWords(template.slice(at, match.index), ASK_SAY_MAX_CHARS)} `;
+    const key = match[1];
+    line += key === "ref" && !(key in ask.params) && ask.ref ? humanizeRef(ask.ref) : paramWords(key, ask.params[key], ask) ?? "";
+    at = match.index + match[0].length;
+  }
+  return line + ` ${cleanPageWords(template.slice(at), ASK_SAY_MAX_CHARS)}`;
 }
 
 function summarize(ask: SiteAsk): string {
@@ -177,7 +207,7 @@ function summarize(ask: SiteAsk): string {
     const words = paramWords(key, value, ask);
     if (!words) continue;
     const isHost = typeof value === "string" && hostOf(value.trim()) !== null;
-    parts.push(isHost || SELF_NAMED_PARAMS.has(key) || ask.coarsened.includes(key) ? words : `${cleanAskText(key.replace(/_/g, " "), 24)} ${words}`);
+    parts.push(isHost || SELF_NAMED_PARAMS.has(key) || ask.coarsened.includes(key) ? words : `${cleanPageWords(key.replace(/_/g, " "), 24)} ${words}`);
   }
   return parts.join(", ");
 }
@@ -190,25 +220,32 @@ function summarize(ask: SiteAsk): string {
 export function renderAskMessage(ask: SiteAsk, siteTitle: string): string {
   const ref = ask.ref ? humanizeRef(ask.ref) : "";
   const summary = summarize(ask);
+  const label = cleanPageWords(ask.label, ASK_LABEL_MAX_CHARS);
   const raw = ask.say
     ? renderSay(ask.say, ask)
-    : `${ask.label}${ref ? ` · ${ref}` : ""}${summary ? ` (${summary})` : ""}`;
-  let line = cleanAskText(raw, ASK_LINE_MAX_CHARS).replace(LEADING_NON_WORD, "");
-  if (!line) line = cleanAskText(ask.label, ASK_LINE_MAX_CHARS).replace(LEADING_NON_WORD, "") || "Ask Octo";
+    : `${label}${ref ? ` · ${ref}` : ""}${summary ? ` (${summary})` : ""}`;
+  // Every piece is clean already; this joins them into one line. Spaces before punctuation come from a `say` line's
+  // placeholders ("in stock for {ref}?").
+  let line = cleanAskText(raw, ASK_LINE_MAX_CHARS).replace(/ ([?!.,:;])/g, "$1").replace(LEADING_NON_WORD, "");
+  if (!line) line = label.replace(LEADING_NON_WORD, "") || "Ask Octo";
   const site = cleanAskText(siteTitle, 60);
   return cap(site ? `${line} · via ${site}` : line, ASK_MESSAGE_MAX_CHARS);
 }
 
 /**
  * `metadata.siteIntent` on the message: which preview and intent it came
- * from, as structured data for Octo. The controller drops it unless the
- * sender may see an open preview with that id in this space, and re-checks
- * its sizes, so a composer cannot fake "via a site".
+ * from, as structured data for Octo, with the page's own words for it (label,
+ * `say`) so Octo can tell them from the person's. `confirmed` only after the
+ * person pressed Send on Studio's confirm strip. The controller refuses the
+ * send unless the sender may see an open preview with that id in this space,
+ * and re-checks its sizes, so a composer cannot fake "via a site".
  */
-export function buildSiteIntentMetadata(previewId: string, ask: SiteAsk): { siteIntent: Record<string, unknown> } {
-  const siteIntent: Record<string, unknown> = { previewId, askId: ask.id, intent: ask.intent, ref: ask.ref, params: ask.params };
+export function buildSiteIntentMetadata(previewId: string, ask: SiteAsk, { confirmed = false }: { confirmed?: boolean } = {}): { siteIntent: Record<string, unknown> } {
+  const siteIntent: Record<string, unknown> = { previewId, askId: ask.id, intent: ask.intent, label: ask.label, ref: ask.ref, params: ask.params };
+  if (ask.say) siteIntent.say = ask.say;
   if (ask.withheld.length) siteIntent.withheld = ask.withheld;
   if (ask.coarsened.length) siteIntent.coarsened = ask.coarsened;
+  if (confirmed) siteIntent.confirmed = true;
   return { siteIntent };
 }
 
@@ -218,7 +255,11 @@ export function buildSiteIntentMetadata(previewId: string, ask: SiteAsk): { site
 /** One ask at a time per person and site, and at most six in ten minutes. */
 export const ASK_WINDOW_MS = 10 * 60_000;
 export const ASK_WINDOW_MAX = 6;
-/** An ask whose run Studio never saw end stops holding the slot after this long. */
+/**
+ * An ask whose run Studio never saw start (a queued message someone removed)
+ * stops holding the slot after this long. Once its run started, the slot is
+ * held until that run ends, however long it takes.
+ */
 export const ASK_IN_FLIGHT_MAX_MS = 15 * 60_000;
 const SEEN_IDS_MAX = 500;
 
@@ -233,7 +274,7 @@ export type AskAdmission = { ok: true } | { ok: false; reason: string; duplicate
  */
 export function createAskLimiter(now: () => number = () => Date.now()) {
   const sent = new Map<string, number[]>();
-  const inFlight = new Map<string, { id: string; at: number }>();
+  const inFlight = new Map<string, { id: string; at: number; running: boolean }>();
   const seen = new Map<string, Set<string>>();
 
   return {
@@ -242,7 +283,7 @@ export function createAskLimiter(now: () => number = () => Date.now()) {
       if (ids.has(id)) return { ok: false, reason: "Already asked.", duplicate: true };
       const at = now();
       const busy = inFlight.get(key);
-      if (busy && at - busy.at < ASK_IN_FLIGHT_MAX_MS) return { ok: false, reason: ASK_BUSY_TEXT };
+      if (busy && (busy.running || at - busy.at < ASK_IN_FLIGHT_MAX_MS)) return { ok: false, reason: ASK_BUSY_TEXT };
       const recent = (sent.get(key) ?? []).filter(time => at - time < ASK_WINDOW_MS);
       if (recent.length >= ASK_WINDOW_MAX) {
         const minutes = Math.max(1, Math.ceil((ASK_WINDOW_MS - (at - recent[0])) / 60_000));
@@ -253,8 +294,13 @@ export function createAskLimiter(now: () => number = () => Date.now()) {
       seen.set(key, ids);
       recent.push(at);
       sent.set(key, recent);
-      inFlight.set(key, { id, at });
+      inFlight.set(key, { id, at, running: false });
       return { ok: true };
+    },
+    /** The ask's run started: it holds the slot until it ends ({@link settle}). */
+    running(key: string, id: string) {
+      const busy = inFlight.get(key);
+      if (busy?.id === id) busy.running = true;
     },
     /** The ask ended (sent and answered, declined or failed): the next one may go. */
     settle(key: string, id: string) {
@@ -307,43 +353,49 @@ export function askOutcomesFromRuns(
 // ---------------------------------------------------------------------------
 // The conversation's side
 
-export const ASK_SIGNED_OUT_TEXT = "Sign in to Instafy to ask Octo.";
 export const ASK_CHECKING_ACCESS_TEXT = "Checking your access to this space. Try again in a moment.";
 export const ASK_VIEW_ONLY_TEXT = "You can view this space but not send messages in it, so you can't ask Octo here.";
+export const ASK_OUT_OF_CREDITS_TEXT = "You're out of credits, so you can't ask Octo right now.";
 
 /**
  * `caps.ask` for the person looking at a conversation's preview pane: true
- * when they may send messages there (the composer's own access), else why not.
+ * when they may send messages there (the composer's own access) and a send
+ * would reach Octo, else why not. Null for someone signed out: asks are
+ * hidden, as on a public link.
  */
-export function siteAskAccess({ userId, capabilitiesResolved, writeDisabled }: {
+export function siteAskAccess({ userId, capabilitiesResolved, writeDisabled, outOfCredits = false }: {
   userId: string | null;
   /** The space's capabilities for this person are known. */
   capabilitiesResolved: boolean | null | undefined;
   /** The composer may not send here (view-only, or not known yet). */
   writeDisabled: boolean;
-}): true | string {
-  if (!userId) return ASK_SIGNED_OUT_TEXT;
+  /** The person's credits are used up: the composer would stop an Octo turn. */
+  outOfCredits?: boolean;
+}): true | string | null {
+  if (!userId) return null;
   if (capabilitiesResolved !== true) return ASK_CHECKING_ACCESS_TEXT;
-  return writeDisabled ? ASK_VIEW_ONLY_TEXT : true;
+  if (writeDisabled) return ASK_VIEW_ONLY_TEXT;
+  return outOfCredits ? ASK_OUT_OF_CREDITS_TEXT : true;
 }
 
 /** The composer's submit, as the conversational undo request uses it. */
 export type ComposerSubmit = (
   override: { message: string; editorState: null; metadata: Record<string, unknown>; targetAgentHandles: string[] },
-  options: { automatic: true; onQueued: () => void },
+  options: { automatic: true; requireAgentTurn: true; onQueued: () => void },
 ) => Promise<boolean>;
 
 /**
  * Sends an ask the way the person would type it, to Octo: an app-made send
  * (the composer's draft, focus and browser targeting stay as they are), and a
- * message queued behind a busy turn counts as sent.
+ * message queued behind a busy turn counts as sent. A send that would only
+ * record the message (no Octo turn) is not made: an ask always gets a run.
  */
 export function composerAskSender(submit: ComposerSubmit) {
   return async ({ text, metadata }: { text: string; metadata: Record<string, unknown> }): Promise<boolean> => {
     let queued = false;
     const submitted = await submit(
       { message: text, editorState: null, metadata, targetAgentHandles: ["octo"] },
-      { automatic: true, onQueued: () => { queued = true; } },
+      { automatic: true, requireAgentTurn: true, onQueued: () => { queued = true; } },
     );
     return submitted || queued;
   };

@@ -4,7 +4,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SitePreviewPane } from "../SitePreviewPane";
 import { ASK_CONFIRM_ARM_MS } from "../previewHost/AskConfirmStrip";
-import { ASK_HIDDEN_TEXT, ASK_NOT_SENT_TEXT, ASK_SENT_DEADLINE_MS, type SiteAskHost } from "../previewHost/useSiteAsks";
+import { ASK_HIDDEN_TEXT, ASK_NO_CLICK_TEXT, ASK_NOT_SENT_TEXT, ASK_SENT_DEADLINE_MS, type SiteAskHost } from "../previewHost/useSiteAsks";
+import { FRAME_GESTURE_MS } from "../previewHost/frameGesture";
 import type { AskRunOutcome } from "../previewHost/siteAsks";
 
 // Ask Octo from a site in a preview pane (docs/Bound-Sites.md §2a): the layout says who may ask, an ask from the
@@ -48,6 +49,7 @@ describe("Ask Octo from a site in a preview pane", () => {
   let posted: ReturnType<typeof vi.spyOn>;
   let userSeq = 0;
   let userId = "user-1";
+  const activation = { isActive: false };
 
   const host = (): SiteAskHost => ({ canAsk, userId, send, outcomes: new Map(outcomes) });
   async function render(options: { visible?: boolean; asks?: SiteAskHost | null } = {}) {
@@ -58,7 +60,14 @@ describe("Ask Octo from a site in a preview pane", () => {
   async function flush() { await act(async () => { await vi.advanceTimersByTimeAsync(0); }); }
   async function advance(ms: number) { await act(async () => { await vi.advanceTimersByTimeAsync(ms); }); }
   const frame = () => container.querySelector<HTMLIFrameElement>("[data-testid=site-preview-frame]")!;
-  async function fromFrame(data: unknown, { origin = ORIGIN, source }: { origin?: string; source?: MessageEventSource | null } = {}) {
+  /** The person clicks in the frame: it takes the focus, and the browser's user activation is on for a moment. */
+  function clickInFrame() {
+    frame().focus();
+    activation.isActive = true;
+  }
+  /** A message from the frame; by default right after a click in it (`clicked: false`: the page posts on its own). */
+  async function fromFrame(data: unknown, { origin = ORIGIN, source, clicked = true }: { origin?: string; source?: MessageEventSource | null; clicked?: boolean } = {}) {
+    if (clicked) clickInFrame();
     await act(async () => { window.dispatchEvent(new MessageEvent("message", { data, origin, source: source === undefined ? frame().contentWindow : source })); });
     await flush();
   }
@@ -71,6 +80,8 @@ describe("Ask Octo from a site in a preview pane", () => {
     vi.useFakeTimers();
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container);
+    activation.isActive = false;
+    Object.defineProperty(navigator, "userActivation", { configurable: true, get: () => activation });
     Object.values(mocks).forEach(mock => mock.mockReset());
     mocks.createSitePreviewViewer.mockResolvedValue({ viewerUrl: VIEWER, idleTimeoutSeconds: 1800, expiresAt: null });
     mocks.getSitePreview.mockResolvedValue(record);
@@ -86,6 +97,7 @@ describe("Ask Octo from a site in a preview pane", () => {
   });
   afterEach(async () => {
     await act(async () => root.unmount()); container.remove(); vi.useRealTimers();
+    delete (navigator as { userActivation?: unknown }).userActivation;
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
@@ -97,7 +109,7 @@ describe("Ask Octo from a site in a preview pane", () => {
     await fromFrame(ask);
     expect(send).toHaveBeenCalledExactlyOnceWith({
       text: "Is size 10 in stock for Karhu ikoni 3? · via Running shoes",
-      metadata: { siteIntent: { previewId: PREVIEW_ID, askId: ask.payload.id, intent: "check_size", ref: "shoes:karhu-ikoni-3", params: { ref: "shoes:karhu-ikoni-3", size: "10" } } },
+      metadata: { siteIntent: { previewId: PREVIEW_ID, askId: ask.payload.id, intent: "check_size", label: "Ask Octo", say: "Is size {size} in stock for {ref}?", ref: "shoes:karhu-ikoni-3", params: { ref: "shoes:karhu-ikoni-3", size: "10" } } },
     });
     expect(statuses()).toEqual([{ id: ask.payload.id, state: "sent" }]);
     expect(posted).toHaveBeenLastCalledWith(expect.objectContaining({ type: "ask-status" }), ORIGIN);
@@ -207,6 +219,8 @@ describe("Ask Octo from a site in a preview pane", () => {
     await act(async () => sendButton().click());
     await flush();
     expect(send).toHaveBeenCalledTimes(1);
+    // Studio's own strip, not the page, says the person confirmed it.
+    expect(send.mock.calls[0][0].metadata).toMatchObject({ siteIntent: { confirmed: true } });
     expect(statuses().at(-1)).toEqual({ id: ask.payload.id, state: "sent" });
     expect(container.querySelector("[data-testid=site-ask-confirm]")).toBeNull();
 
@@ -218,5 +232,63 @@ describe("Ask Octo from a site in a preview pane", () => {
     await flush();
     expect(send).toHaveBeenCalledTimes(1);
     expect(statuses().at(-1)).toEqual({ id: cancelled.payload.id, state: "declined", reason: "Not sent." });
+  });
+
+  it("an ask nobody just clicked sends nothing: a page posting on load, focus elsewhere, or an old click", async () => {
+    const onLoad = askMessage();
+    await fromFrame(onLoad, { clicked: false });
+    expect(send).not.toHaveBeenCalled();
+    expect(statuses()).toEqual([{ id: onLoad.payload.id, state: "declined", reason: ASK_NO_CLICK_TEXT }]);
+
+    // The browser saw a click, but in Studio, not in this frame.
+    activation.isActive = true;
+    (document.activeElement as HTMLElement | null)?.blur();
+    const elsewhere = askMessage();
+    await fromFrame(elsewhere, { clicked: false });
+    expect(send).not.toHaveBeenCalled();
+
+    // The frame has the focus from a click long ago; the activation is over.
+    frame().focus();
+    activation.isActive = false;
+    const later = askMessage();
+    await fromFrame(later, { clicked: false });
+    expect(send).not.toHaveBeenCalled();
+    expect(statuses().map(status => status?.reason)).toEqual([ASK_NO_CLICK_TEXT, ASK_NO_CLICK_TEXT, ASK_NO_CLICK_TEXT]);
+
+    // A real click in the frame: it is sent, and declined ones did not use up the caps.
+    await fromFrame(askMessage());
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("without the browser's user activation, focus moving into the frame a moment ago counts as the click", async () => {
+    delete (navigator as { userActivation?: unknown }).userActivation;
+    frame().focus();
+    await act(async () => { window.dispatchEvent(new Event("blur")); });
+    await advance(0);
+    await fromFrame(askMessage(), { clicked: false });
+    expect(send).toHaveBeenCalledTimes(1);
+    outcomes.set((send.mock.calls[0][0].metadata.siteIntent as { askId: string }).askId, "done");
+    await render();
+    await advance(FRAME_GESTURE_MS);
+    const stale = askMessage();
+    await fromFrame(stale, { clicked: false });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(statuses().at(-1)).toEqual({ id: stale.payload.id, state: "declined", reason: ASK_NO_CLICK_TEXT });
+  });
+
+  it("a run that started holds the one-at-a-time slot past 15 minutes, until it ends", async () => {
+    const first = askMessage();
+    await fromFrame(first);
+    outcomes.set(first.payload.id, "running");
+    await render();
+    await advance(16 * 60_000);
+    const second = askMessage();
+    await fromFrame(second);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(statuses().at(-1)).toMatchObject({ id: second.payload.id, state: "declined" });
+    outcomes.set(first.payload.id, "done");
+    await render();
+    await fromFrame(askMessage());
+    expect(send).toHaveBeenCalledTimes(2);
   });
 });

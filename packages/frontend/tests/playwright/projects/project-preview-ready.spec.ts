@@ -240,11 +240,16 @@ function askStudioForLocation(page: Page, id: string) {
   }), id);
 }
 
-type AskSiteWindow = { __host: Array<Record<string, unknown>>; __ask: (payload: Record<string, unknown>) => void };
+type AskSiteWindow = {
+  __host: Array<Record<string, unknown>>;
+  __ask: (payload: Record<string, unknown>) => void;
+  __next: Record<string, unknown> | null;
+};
 
 /**
  * Inside a framed site: records what Studio sends it and exposes the site side of Ask Octo
  * (docs/Bound-Sites.md §2a): `ask` to the parent, `ask-status` back. Any site speaks it; the bind client is one.
+ * `#e2e-ask` is the site's Ask Octo button: a real click on it posts `__next`. `__ask` posts with no click.
  */
 async function actAsAskSite(page: Page) {
   await siteBody(page).evaluate(() => {
@@ -256,11 +261,23 @@ async function actAsAskSite(page: Page) {
     });
     const post = (message: Record<string, unknown>) => window.parent.postMessage({ source: "e2e-site", v: 1, ...message }, "*");
     site.__ask = (payload) => post({ type: "ask", payload });
+    site.__next = null;
+    const button = document.createElement("button");
+    button.id = "e2e-ask";
+    button.textContent = "Ask Octo";
+    button.style.cssText = "position:fixed;left:16px;bottom:16px;z-index:9999;padding:12px";
+    button.addEventListener("click", () => { if (site.__next) site.__ask(site.__next); });
+    document.body.appendChild(button);
     // A site that speaks first is sent the layout again.
     post({ type: "hello" });
   });
 }
 const hostMessages = (page: Page) => siteBody(page).evaluate(() => (window as unknown as AskSiteWindow).__host);
+/** The person clicks the site's Ask Octo button, which asks `payload`. */
+async function clickAsk(page: Page, payload: Record<string, unknown>) {
+  await siteBody(page).evaluate((_body, next) => { (window as unknown as AskSiteWindow).__next = next; }, payload);
+  await page.frameLocator("[data-testid=site-preview-frame]").locator("#e2e-ask").click();
+}
 const askStates = async (page: Page, id: string) => (await hostMessages(page))
   .filter((message) => message.type === "ask-status" && (message.payload as { id?: string } | undefined)?.id === id)
   .map((message) => (message.payload as { state: string }).state);
@@ -432,19 +449,23 @@ test.describe("Site preview card and pane", () => {
       await expect.poll(async () => (await hostMessages(page)).filter((m) => m.type === "layout").at(-1)?.caps, { timeout: 10_000 })
         .toEqual({ location: "host", ask: true });
 
-      // A click: Studio writes the message itself, from the intent's say line and the preview's own title.
       const ask = {
         id: "int_e2e_0001", intent: "check_size", label: "Ask Octo", say: "Is size {size} in stock for {ref}?",
         params: { size: "10", ref: "shoes:karhu-ikoni-3" }, ref: "shoes:karhu-ikoni-3",
       };
-      await siteBody(page).evaluate((_body, payload) => (window as unknown as AskSiteWindow).__ask(payload), ask);
+      // The page's script asking on its own, with nobody clicking, sends nothing.
+      await siteBody(page).evaluate((_body, payload) => (window as unknown as AskSiteWindow).__ask(payload), { ...ask, id: "int_e2e_0000" });
+      await expect.poll(() => askStates(page, "int_e2e_0000"), { timeout: 5_000 }).toEqual(["declined"]);
+
+      // A click: Studio writes the message itself, from the intent's say line and the preview's own title.
+      await clickAsk(page, ask);
       await expect.poll(() => askStates(page, ask.id), { timeout: 5_000 }).toContain("sent");
       const line = `Is size 10 in stock for Karhu ikoni 3? · via ${ASK_TITLE}`;
       await expect(page.getByText(line, { exact: true }).first()).toBeVisible({ timeout: 15_000 });
 
       // The same id again asks nothing; a second ask while the first one's run is going is declined with a reason.
-      await siteBody(page).evaluate((_body, payload) => (window as unknown as AskSiteWindow).__ask(payload), ask);
-      await siteBody(page).evaluate((_body, payload) => (window as unknown as AskSiteWindow).__ask(payload), { ...ask, id: "int_e2e_0002" });
+      await clickAsk(page, ask);
+      await clickAsk(page, { ...ask, id: "int_e2e_0002" });
       await expect.poll(() => askStates(page, "int_e2e_0002"), { timeout: 5_000 }).toEqual(["declined"]);
       await expect(page.getByText(line, { exact: true })).toHaveCount(1);
 

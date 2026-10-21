@@ -12,7 +12,9 @@ use tower::ServiceExt;
 use super::tests::{run, Fixture};
 use super::*;
 use crate::dispatch::{normalize_dispatch_request, process_dispatch_prompt, DispatchPromptRequest};
-use crate::site_intent::{verified_site_intent, SITE_ASKS_PER_WINDOW};
+use crate::site_intent::{
+    charge_site_ask, verified_site_intent, SITE_ASKS_PER_WINDOW, SITE_INTENT_REFUSED,
+};
 
 fn person(user: Uuid) -> RequestContext {
     RequestContext {
@@ -41,16 +43,19 @@ async fn a_site_intent_is_kept_only_for_an_open_preview_the_sender_can_see_and_c
             let preview_id = f.open(&job).await?;
             let owner = person(f.users[0]);
 
-            let kept = verified_site_intent(
+            let verified = verified_site_intent(
                 &f.state,
                 &f.project,
                 &owner,
                 &claim(&preview_id, "int_a_0001"),
-                true,
             )
             .await
             .map_err(|(_, e)| anyhow::anyhow!(e.0.message))?
             .context("the owner's ask from an open preview is kept")?;
+            charge_site_ask(&f.state, &verified)
+                .await
+                .map_err(|(_, e)| anyhow::anyhow!(e.0.message))?;
+            let kept = verified.json;
             assert_eq!(kept["previewId"], json!(preview_id));
             assert_eq!(kept["askId"], json!("int_a_0001"));
             assert_eq!(kept["intent"], json!("check_size"));
@@ -68,8 +73,9 @@ async fn a_site_intent_is_kept_only_for_an_open_preview_the_sender_can_see_and_c
             let check = |context: RequestContext, project: Uuid, value: Value| {
                 let f = f.clone();
                 async move {
-                    verified_site_intent(&f.state, &project, &context, &value, false)
+                    verified_site_intent(&f.state, &project, &context, &value)
                         .await
+                        .map(|verified| verified.map(|verified| verified.json))
                         .map_err(|(_, e)| anyhow::anyhow!(e.0.message))
                 }
             };
@@ -121,29 +127,32 @@ async fn a_site_intent_is_kept_only_for_an_open_preview_the_sender_can_see_and_c
                 "malformed"
             );
 
-            // Six asks per person and preview in ten minutes (one already counted above).
+            // Six asks per person and site in ten minutes (one already counted above).
+            let ask = |user: Uuid, ask_id: String| {
+                let f = f.clone();
+                let preview_id = preview_id.clone();
+                async move {
+                    let verified = verified_site_intent(
+                        &f.state,
+                        &f.project,
+                        &person(user),
+                        &claim(&preview_id, &ask_id),
+                    )
+                    .await?
+                    .ok_or_else(|| crate::bad_request("not verified"))?;
+                    charge_site_ask(&f.state, &verified).await
+                }
+            };
             for index in 1..SITE_ASKS_PER_WINDOW {
-                verified_site_intent(
-                    &f.state,
-                    &f.project,
-                    &owner,
-                    &claim(&preview_id, &format!("int_b_{index:04}")),
-                    true,
-                )
-                .await
-                .map_err(|(_, e)| anyhow::anyhow!(e.0.message))?
-                .context("within the cap")?;
+                ask(f.users[0], format!("int_b_{index:04}"))
+                    .await
+                    .map_err(|(_, e)| anyhow::anyhow!(e.0.message))
+                    .context("within the cap")?;
             }
-            let refused = verified_site_intent(
-                &f.state,
-                &f.project,
-                &owner,
-                &claim(&preview_id, "int_c_0001"),
-                true,
-            )
-            .await
-            .err()
-            .context("the seventh ask in ten minutes is refused")?;
+            let refused = ask(f.users[0], "int_c_0001".to_string())
+                .await
+                .err()
+                .context("the seventh ask in ten minutes is refused")?;
             assert_eq!(refused.0, StatusCode::TOO_MANY_REQUESTS);
             assert!(
                 refused
@@ -155,16 +164,10 @@ async fn a_site_intent_is_kept_only_for_an_open_preview_the_sender_can_see_and_c
                 refused.1 .0.message
             );
             // Another person is not held up by it.
-            verified_site_intent(
-                &f.state,
-                &f.project,
-                &person(f.users[1]),
-                &claim(&preview_id, "int_c_0002"),
-                true,
-            )
-            .await
-            .map_err(|(_, e)| anyhow::anyhow!(e.0.message))?
-            .context("the builder's own cap")?;
+            ask(f.users[1], "int_c_0002".to_string())
+                .await
+                .map_err(|(_, e)| anyhow::anyhow!(e.0.message))
+                .context("the builder's own cap")?;
 
             // A closed preview takes no more asks.
             let (status, body) = f
@@ -239,7 +242,7 @@ async fn message_and_run_metadata(f: &Fixture, run_id: Uuid) -> anyhow::Result<(
 }
 
 #[tokio::test]
-async fn a_dispatched_ask_keeps_the_checked_site_intent_and_drops_a_forged_one(
+async fn a_dispatched_ask_keeps_the_checked_site_intent_and_refuses_a_forged_one(
 ) -> anyhow::Result<()> {
     run(|f| {
         Box::pin(async move {
@@ -277,8 +280,32 @@ async fn a_dispatched_ask_keeps_the_checked_site_intent_and_drops_a_forged_one(
             }
             assert_eq!(message["prompt_metadata"]["siteIntent"]["askId"], json!("int_e_0001"));
 
-            // A message that names a preview this space does not have says nothing about a site.
+            // The message's copy, which everyone in the conversation reads, leaves out a rounded position.
+            let mut located = claim(&preview_id, "int_e_0003");
+            located["params"]["near"] = json!("52.370, 4.895");
+            located["coarsened"] = json!(["near"]);
             let response = process_dispatch_prompt(
+                &f.state,
+                &owner,
+                ask_request(&f, json!({
+                    "clientMessageId": Uuid::new_v4().to_string(),
+                    "agentSelection": agent,
+                    "siteIntent": located,
+                }))?,
+            )
+            .await
+            .map_err(|(_, e)| anyhow::anyhow!(e.0.message))?;
+            let run_id = response.run_id.context("a run")?;
+            let (message, run_metadata) = message_and_run_metadata(&f, run_id).await?;
+            assert_eq!(run_metadata["siteIntent"]["params"]["near"], json!("52.370, 4.895"));
+            for metadata in [&message, &message["prompt_metadata"]] {
+                assert!(metadata["siteIntent"]["params"].get("near").is_none(), "{metadata}");
+                assert_eq!(metadata["siteIntent"]["params"]["size"], json!("10"));
+            }
+
+            // A message that names a preview this space does not have is refused, not sent without its site.
+            let before = runs_in(&f).await?;
+            let refused = process_dispatch_prompt(
                 &f.state,
                 &owner,
                 ask_request(&f, json!({
@@ -288,13 +315,97 @@ async fn a_dispatched_ask_keeps_the_checked_site_intent_and_drops_a_forged_one(
                 }))?,
             )
             .await
-            .map_err(|(_, e)| anyhow::anyhow!(e.0.message))?;
-            let run_id = response.run_id.context("a run")?;
-            let (message, run_metadata) = message_and_run_metadata(&f, run_id).await?;
-            for metadata in [&run_metadata, &message, &message["prompt_metadata"]] {
-                assert!(metadata.get("siteIntent").is_none(), "{metadata}");
-                assert!(metadata.get("site_intent").is_none(), "{metadata}");
+            .err()
+            .context("a forged site intent is refused")?;
+            assert_eq!(refused.0, StatusCode::BAD_REQUEST);
+            assert_eq!(refused.1 .0.message, SITE_INTENT_REFUSED);
+            assert_eq!(runs_in(&f).await?, before, "nothing was dispatched");
+            Ok(())
+        })
+    })
+    .await
+}
+
+async fn runs_in(f: &Fixture) -> anyhow::Result<i64> {
+    Ok(f.state
+        .pool
+        .get()
+        .await?
+        .query_one(
+            "select count(*) from runs where project_id = $1",
+            &[&f.project],
+        )
+        .await?
+        .get(0))
+}
+
+#[tokio::test]
+async fn a_queued_ask_is_checked_and_counted_when_it_is_queued() -> anyhow::Result<()> {
+    run(|f| {
+        Box::pin(async move {
+            let job = f.job(None).await?;
+            let preview_id = f.open(&job).await?;
+            let owner = person(f.users[0]);
+            let queued = |ask_id: String, preview: String| {
+                let f = f.clone();
+                let owner = owner.clone();
+                async move {
+                    crate::send_queue::enqueue_prompt_with_context(
+                        &f.state,
+                        &owner,
+                        f.conversation,
+                        &format!("send-{ask_id}"),
+                        json!({
+                            "promptText": "Is size 10 in stock for Karhu ikoni 3? · via Site preview",
+                            "metadata": {
+                                "agentSelection": { "active": ["octo"], "mentions": ["octo"] },
+                                "siteIntent": claim(&preview, &ask_id),
+                            },
+                        }),
+                    )
+                    .await
+                }
+            };
+            let first = queued("int_q_0000".to_string(), preview_id.clone())
+                .await
+                .map_err(|(_, e)| anyhow::anyhow!(e.0.message))?;
+            // Only the checked copy is stored.
+            let stored: Value = f
+                .state
+                .pool
+                .get()
+                .await?
+                .query_one(
+                    "select request from conversation_send_queue where id = $1",
+                    &[&Uuid::parse_str(first.entry["id"].as_str().context("entry id")?)?],
+                )
+                .await?
+                .get::<_, PgJson<Value>>(0)
+                .0;
+            assert_eq!(stored["metadata"]["siteIntent"]["verified"], json!(true), "{stored}");
+            assert_eq!(stored["metadata"]["siteIntent"]["site"]["port"], json!(4173));
+            // A retry of the same entry is not a second ask.
+            let retry = queued("int_q_0000".to_string(), preview_id.clone())
+                .await
+                .map_err(|(_, e)| anyhow::anyhow!(e.0.message))?;
+            assert!(retry.deduplicated);
+            for index in 1..SITE_ASKS_PER_WINDOW {
+                queued(format!("int_q_{index:04}"), preview_id.clone())
+                    .await
+                    .map_err(|(_, e)| anyhow::anyhow!(e.0.message))
+                    .context("within the cap")?;
             }
+            let refused = queued("int_q_0099".to_string(), preview_id.clone())
+                .await
+                .err()
+                .context("the seventh queued ask in ten minutes is refused")?;
+            assert_eq!(refused.0, StatusCode::TOO_MANY_REQUESTS);
+            // A forged one is refused before it is queued.
+            let forged = queued("int_q_0100".to_string(), Uuid::new_v4().to_string())
+                .await
+                .err()
+                .context("a forged queued ask is refused")?;
+            assert_eq!(forged.0, StatusCode::BAD_REQUEST);
             Ok(())
         })
     })

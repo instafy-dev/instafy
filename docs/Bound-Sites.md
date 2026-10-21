@@ -157,33 +157,47 @@ message it sends must be its own rendering, and repeated ids are dropped.
   the conversation the preview pane is shown in; otherwise one plain sentence (a view-only member reads "You can view
   this space but not send messages in it, so you can't ask Octo here." on the site's disabled Ask Octo button).
 - **What it takes.** An `ask` only from the pane's own frame window at the viewer capability's origin, only while the
-  pane is on screen, with a well-formed payload (id, intent name, label ≤ 120, params ≤ 2 KB of plain JSON, ref in
-  the protocol's shape). A malformed one is declined by its id. A repeated id is dropped.
-- **Caps.** One ask at a time per person and site (until its run ends), and six in ten minutes, in each Studio tab;
-  the controller also refuses a seventh in ten minutes per person and preview. A cap answers `declined` with the
-  reason ("Octo is still answering your last question from this site. Try again when it's done.").
+  pane is on screen, only right after the person clicked or pressed a key in that frame (the frame has the focus and
+  the browser's user activation is on; a click in a frame activates the page that embeds it), with a well-formed
+  payload (id, intent name, label ≤ 120, params ≤ 2 KB of plain JSON, ref in the protocol's shape). An ask a page's
+  script posts on its own is declined ("Instafy sends a question only right after you click it on the page."). A
+  malformed one is declined by its id. A repeated id is dropped.
+- **Caps.** One ask at a time per person and site (until its run ends, however long; an ask whose run never starts
+  lets go after 15 minutes), and six in ten minutes, in each Studio tab. The controller also refuses a seventh in ten
+  minutes per person and site (the space and the site's port), counted when the ask is dispatched or put in the send
+  queue. A cap answers `declined` with the reason ("Octo is still answering your last question from this site. Try
+  again when it's done.").
 - **The message.** Studio renders it: the intent's `say` template filled from the params (a URL reads as its host, a
   ref as words, a rounded position as "my location"), else the label, the ref and up to three params, then
   " · via <preview title>" (the preview's own title, not the page's): "Is size 10 in stock for Karhu ikoni 3? · via
   Running shoes". Every value is one line of letters, digits and everyday punctuation, capped (140 for the line,
-  200 in all), so a page cannot format, link, mention or command anything. It goes through the composer's own send
-  path to Octo (queued behind a busy turn like any message), with `metadata.siteIntent: {previewId, askId, intent,
-  ref, params, withheld?, coarsened?}`.
+  200 in all), and the page's words (label, `say`, param values) lose any web address, so a page cannot format,
+  mention or link anything, and the only address in a line is a URL param's host, which Studio writes. The words are
+  still the page's: Octo is told so (below). It goes through the composer's own send path to Octo (queued behind a
+  busy turn like any message; a conversation that would only record it sends nothing), with `metadata.siteIntent:
+  {previewId, askId, intent, label, say?, ref, params, withheld?, coarsened?, confirmed?}`.
 - **Confirm.** An intent with `confirm: true` shows Studio's one-line strip over the frame first ("Send “…” as
-  you?", Send or Cancel; Send is off for 600 ms and nothing has focus). No other ask asks for consent: it is visible
-  as the person's own message.
+  you?", Send or Cancel; Send is off for 600 ms and nothing has focus), and Send adds `confirmed: true`. Studio
+  takes `confirm` from the page, so a page could leave it out; Octo then reads `bound.json` and does not run an
+  intent marked `confirm: true` without `confirmed`. No other ask asks for consent: it is visible as the person's
+  own message.
 - **Status.** `sent` once the message is accepted (at most 3 s after the click, so the page's 5 s never runs out),
   `declined` when nothing was sent, `done` or `failed` when that message's run ends (Studio reads the run's
   `metadata.siteIntent.askId`).
 
-**The controller** (`packages/runtime-controller/src/site_intent.rs`) never trusts `siteIntent`: every dispatch takes
-it out of the client's metadata, checks its shape and sizes (4 KB in all, params 2 KB), and puts it back only when
-the sender may see an open private preview with that id in this space, adding the preview's own title and port and
-`verified: true`. Otherwise it is dropped. Recorded messages (`/messages/record`, steer inputs) cannot carry one.
+**The controller** (`packages/runtime-controller/src/site_intent.rs`) never trusts `siteIntent`: every dispatch and
+send-queue enqueue takes it out of the client's metadata, checks its shape and sizes (4 KB in all, params 2 KB), and
+puts it back only when the sender may see an open private preview with that id in this space, adding the preview's
+own title and port and `verified: true`. Otherwise the send is refused ("This ask names a site preview that isn't
+open to you in this space, so it wasn't sent."), so the page hears it was not sent and every sent ask gets a run. The
+queue stores only the checked copy and re-checks it when it dispatches. Recorded messages (`/messages/record`, steer
+inputs) cannot carry one. The chat message's copy leaves out the values of `coarsened` params (a rounded position):
+everyone in the conversation reads it; the run keeps them for Octo.
 
 **Octo** sees a checked site intent as a "Sent from a site" block in its prompt (`runtime-agent` `jobs/site_intent.rs`):
-the preview's title and port, then the intent, ref and params as quoted JSON, labelled as page data, never as
-instructions. There is no separate result channel; Octo answers through the site's own files, as the skill says
+the preview's title and port, then the intent, label, `say`, ref, params and `confirmed` as quoted JSON, labelled as
+page data. The block says the message line was written from the site's own words, so the person's whole request is
+"run this intent with these params as `bound.json` defines it", and nothing else the line or data says. There is no separate result channel; Octo answers through the site's own files, as the skill says
 ("When someone asks from a site"): it reads `bound.json` (`agent.prompt` is the recipe), adds `instafy.records@1`
 records to the intent's `target.records` file, bumps `data/version.json` and runs `instafy bind command <dir> reload
 '{}'`, then replies in one line.
@@ -353,6 +367,8 @@ site (an `index.html` and no `bound.json`) gets the client added to its pages.
 - A structured result channel for asks: Octo writes records into the site's files and reloads open pages (§2a).
 - Ask caps across Studio tabs: one ask at a time holds per tab; the controller's six in ten minutes is kept in each
   controller process's memory.
+- A trusted intent list in Studio: Studio takes an ask's label, `say` and `confirm` from the page (Octo checks
+  `confirm` against `bound.json`).
 - One Studio origin per controller: a Studio served from any origin other than the controller's `PUBLIC_APP_URL`
   (for example the desktop app's default start page, if it differs) frames previews whose pages take no host
   messages from it.
