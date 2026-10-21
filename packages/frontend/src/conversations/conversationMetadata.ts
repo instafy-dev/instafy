@@ -43,6 +43,18 @@ export function hasRecommendationOrigin(metadata: Record<string, unknown> | null
   return typeof metadata?.recommendationId === "string" && metadata.recommendationId.trim().length > 0;
 }
 
+/**
+ * The tool that wrote a conversation (`metadata.source`, trimmed, at most 64
+ * chars), or null for a chat a person started. A tool's own work thread never
+ * opens a tab by itself and is listed under Chats' "Tool threads" filter.
+ */
+export function toolSourceOf(metadata: Record<string, unknown> | null | undefined): string | null {
+  const source = metadata?.source;
+  if (typeof source !== "string") return null;
+  const trimmed = source.trim();
+  return trimmed.length > 0 ? trimmed.slice(0, 64) : null;
+}
+
 export function extractConversationTitleFromMetadata(
   metadata: Record<string, unknown> | null | undefined,
 ): string | null {

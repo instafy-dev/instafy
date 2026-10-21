@@ -408,6 +408,36 @@ describe("ConversationHistoryTab", () => {
     expect(mocks.closeTab).not.toHaveBeenCalled();
   });
 
+  it("lists a tool's own work thread only under Tool threads, never among the person's chats", async () => {
+    mocks.conversations = [
+      conversation("a", { controllerId: "remote-a" }),
+      conversation("b"),
+      // a tool's own root work thread: a private row the tool wrote, not the person
+      conversation("tool-root", { title: "Site work: orders", toolSource: "example-tool", visibility: "private" }),
+      // a tool thread nested under the person's chat stays with that chat
+      conversation("tool-child", { title: "Site work: notes", toolSource: "example-tool", parentConversationId: "remote-a", threadKind: "tool" }),
+    ];
+    await render();
+    const titles = () => Array.from(container.querySelectorAll('[data-testid="conversation-history-item"]')).map((row) => row.textContent);
+    expect(titles()).not.toContain("Site work: orders");
+    expect(titles()).toEqual(expect.arrayContaining(["Chat a", "Chat b"]));
+
+    await click('[data-testid="conversation-history-filter"]');
+    const options = Array.from(document.querySelectorAll('[role="menu"][aria-label="Chat status"] [role="menuitemradio"]'));
+    expect(options.map((option) => option.textContent)).toEqual([
+      "Active (3)", "Archived (0)", "Hidden (0)", "Trash (0)", "Tool threads (1)",
+    ]);
+    await click('[role="menuitemradio"][data-key="tools"]');
+    expect(titles()).toEqual(["Site work: orders"]);
+    expect(container.querySelector("h2")?.textContent).toBe("Tool threads");
+  });
+
+  it("offers no Tool threads filter when no tool wrote a thread", async () => {
+    await render();
+    await click('[data-testid="conversation-history-filter"]');
+    expect(document.querySelector('[role="menuitemradio"][data-key="tools"]')).toBeNull();
+  });
+
   it("keeps search results nested under matching parents and status filters usable", async () => {
     mocks.activeConversationId = null;
     mocks.conversations = [

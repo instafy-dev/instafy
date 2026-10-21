@@ -113,6 +113,15 @@ declare global {
   }
 }
 
+/**
+ * The chat to fall back to when no tab says which: the first one a person
+ * started, else the first at all. A tool's own work thread (`toolSource`) is
+ * never picked over a person's chat.
+ */
+function firstPersonConversation<T extends { toolSource?: string | null }>(conversations: readonly T[]): T | null {
+  return conversations.find((conversation) => !conversation.toolSource) ?? conversations[0] ?? null;
+}
+
 export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanelDestination, conversationWorkspaceUserId = null }: {
   children: ReactNode;
   /** Authenticated owner of conversation views; null only before sign-in resolves. */
@@ -219,7 +228,7 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
     if (activeConversationId) {
       return getTabIdForConversation(activeConversationId);
     }
-    const initialConversation = conversations[0] ?? null;
+    const initialConversation = firstPersonConversation(conversations);
     return initialConversation ? getTabIdForConversation(initialConversation.localId) : null;
   });
   const suppressPanelSyncRef = useRef<StudioPanel | null>(null);
@@ -453,7 +462,7 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
 
     const persistedConversationCount = projectState.conversations.length;
     if (persistedConversationCount > 0 && nextConversationTabs.length === 0) {
-      const fallback = conversations[0] ?? null;
+      const fallback = firstPersonConversation(conversations);
       if (fallback) {
         nextConversationTabs.push(createTabForConversation(fallback));
       }
@@ -509,11 +518,11 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
     const nonConversationTabs = tabsRef.current.filter((tab) => tab.kind !== "conversation" && (tab.kind !== "jobThread" || Boolean(tab.workspaceOwner)));
 
     if (!projectState) {
-      const targetConversationId = activeConversationId ?? conversations[0]?.localId ?? null;
+      const targetConversationId = activeConversationId ?? firstPersonConversation(conversations)?.localId ?? null;
       const conversation =
         (targetConversationId
           ? conversations.find((entry) => entry.localId === targetConversationId)
-          : null) ?? conversations[0] ?? null;
+          : null) ?? firstPersonConversation(conversations);
       if (!conversation) {
         return;
       }
@@ -664,6 +673,11 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
       if (conversation.parentConversationId || conversation.threadKind) {
         return;
       }
+      // A tool's work thread (metadata.source) is not something the person
+      // started: it stays out of the tab strip until they open it from Chats.
+      if (conversation.toolSource) {
+        return;
+      }
       if (now - conversation.createdAt > autoOpenWindowMs) {
         return;
       }
@@ -685,7 +699,7 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
       !conversationHistoryPending &&
       (hadConversationTabs || persistedOrder === null);
     if (shouldEnsureFallback) {
-      const fallback = conversations[0] ?? null;
+      const fallback = firstPersonConversation(conversations);
       if (fallback) {
         nextConversationTabs.push(createTabForConversation(fallback));
         changed = true;

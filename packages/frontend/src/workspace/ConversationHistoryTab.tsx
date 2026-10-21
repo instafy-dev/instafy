@@ -30,6 +30,8 @@ import { useStudioDesktopLayout } from "../screens/studio/useStudioDesktopLayout
 import { DrawerHeader } from "../components/DrawerHeader";
 import { SearchInput } from "../components/SearchInput";
 
+type ChatListFilter = ConversationLifecycleStatus | "tools";
+
 export interface ConversationHistoryTabProps {
   headerPortalTarget?: HTMLElement | null;
   renderMobileHeader?: (header: { title: string; actions: ReactNode }) => ReactNode;
@@ -62,7 +64,9 @@ export function ConversationHistoryTab({
   const collapsibleSearch = !isLargeScreen || externalHeader;
   const scrollIdentity = useStudioListScrollIdentity("chats");
   const [query, setQuery] = useStudioListState("chat-query", "", !isLargeScreen);
-  const [filter, setFilter] = useStudioListState<ConversationLifecycleStatus>("chat-filter", "active", !isLargeScreen);
+  // "tools": the work threads tools write (metadata.source, e.g. a site or script writing its own thread). They are not the
+  // person's chats, so the other filters leave them out.
+  const [filter, setFilter] = useStudioListState<ChatListFilter>("chat-filter", "active", !isLargeScreen);
   const [filterMenuOpen, setFilterMenuOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
@@ -216,16 +220,19 @@ export function ConversationHistoryTab({
     const needle = query.trim().toLowerCase();
     const { byId, childrenById, roots } = conversationTreeIndex;
 
-    const walk = (id: string): ConversationTreeNode | null => {
+    const walk = (id: string, depth: number): ConversationTreeNode | null => {
       const conversation = byId.get(id) ?? null;
       if (!conversation) {
         return null;
       }
-      if (conversation.lifecycleStatus !== filter) {
+      // A tool's own root thread is listed only under "Tool threads"; a tool thread nested under a chat stays there.
+      const toolRoot = depth === 0 && Boolean(conversation.toolSource);
+      if (filter === "tools" ? (depth === 0 && !toolRoot) || conversation.lifecycleStatus !== "active"
+        : toolRoot || conversation.lifecycleStatus !== filter) {
         return null;
       }
       const nextChildren = (childrenById.get(id) ?? [])
-        .map((childId) => walk(childId))
+        .map((childId) => walk(childId, depth + 1))
         .filter((child): child is ConversationTreeNode => child !== null);
       const matches = needle.length === 0 ? true : conversation.title.toLowerCase().includes(needle);
       if (needle.length > 0 && !matches && nextChildren.length === 0) {
@@ -234,7 +241,7 @@ export function ConversationHistoryTab({
       return { id, children: nextChildren };
     };
 
-    return roots.map((id) => walk(id)).filter((node): node is ConversationTreeNode => node !== null);
+    return roots.map((id) => walk(id, 0)).filter((node): node is ConversationTreeNode => node !== null);
   }, [conversationTreeIndex, filter, query]);
 
   const visibleRows = useMemo(() => {
@@ -292,17 +299,23 @@ export function ConversationHistoryTab({
   };
 
   const counts = useMemo(() => {
-    const totals: Record<ConversationLifecycleStatus, number> = {
+    const totals: Record<ChatListFilter, number> = {
       active: 0,
       archived: 0,
       hidden: 0,
-      deleted: 0
+      deleted: 0,
+      tools: 0,
     };
+    const { parentLocalIdById } = conversationTreeIndex;
     conversations.forEach((conversation) => {
+      if (conversation.toolSource && parentLocalIdById.get(conversation.localId) === null) {
+        if (conversation.lifecycleStatus === "active") totals.tools += 1;
+        return;
+      }
       totals[conversation.lifecycleStatus] += 1;
     });
     return totals;
-  }, [conversations]);
+  }, [conversationTreeIndex, conversations]);
 
   const filterOptions = useMemo(
     () => [
@@ -310,8 +323,12 @@ export function ConversationHistoryTab({
       { value: "archived" as const, label: "Archived", count: counts.archived, title: "Archived chats" },
       { value: "hidden" as const, label: "Hidden", count: counts.hidden, title: "Hidden chats" },
       { value: "deleted" as const, label: "Trash", count: counts.deleted, title: "Trash" },
+      // Only offered when a tool has written a thread (or the filter is already on).
+      ...(counts.tools > 0 || filter === "tools"
+        ? [{ value: "tools" as const, label: "Tool threads", count: counts.tools, title: "Tool threads" }]
+        : []),
     ],
-    [counts.active, counts.archived, counts.hidden, counts.deleted],
+    [counts.active, counts.archived, counts.hidden, counts.deleted, counts.tools, filter],
   );
   const selectedFilter = filterOptions.find((option) => option.value === filter) ?? filterOptions[0];
   const hasStatusFilter = filter !== "active";

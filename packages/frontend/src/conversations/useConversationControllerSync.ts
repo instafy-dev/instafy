@@ -28,6 +28,7 @@ import {
   isPlainObject,
   parseTimestamp,
   resolveConversationVisibility,
+  toolSourceOf,
 } from "./conversationMetadata";
 import {
   isAttachableConversation,
@@ -421,6 +422,10 @@ export function useConversationControllerSync({
               title: titleFromMetadata,
             });
           }
+          const toolSource = toolSourceOf(metadata);
+          if ((conversation.toolSource ?? null) !== toolSource) {
+            dispatch({ type: "SET_TOOL_SOURCE", id: conversation.localId, toolSource });
+          }
           if (conversation.remoteSummaryPending) {
             dispatch({
               type: "SET_REMOTE_SUMMARY_PENDING",
@@ -573,6 +578,7 @@ export function useConversationControllerSync({
           activeGoal: activeGoalFromMetadata,
           originMessageId: originMessageIdFromMetadata,
           delegatedByAgentId: delegatedByAgentIdFromMetadata,
+          toolSource: toolSourceOf(metadata),
           messages: [],
           draft: "",
           draftEditorState: null,
@@ -615,6 +621,8 @@ export function useConversationControllerSync({
         const latestRemote = [...remoteConversations]
           .filter((remote) => isUuid(typeof remote?.id === "string" ? remote.id : ""))
           .filter((remote) => !hasRecommendationOrigin(remote.metadata))
+          // A tool's own work thread is not the chat to land in.
+          .filter((remote) => toolSourceOf(remote.metadata) === null)
           .map((remote) => ({
             controllerId: remote.id as string,
             createdAt: parseTimestamp(remote.createdAt ?? null),

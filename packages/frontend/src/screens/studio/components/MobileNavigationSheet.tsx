@@ -40,7 +40,9 @@ function Chats({ query, onClose, onOpenAll }: { query: string; onClose: () => vo
   const navigate = useStudioNavigation();
   const scopeReady = Boolean(activeProjectId && projectKey === activeProjectId && !projectAccessPending && !projectAccessBlocked);
   const rows = useMemo(() => scopeReady ? conversations
-    .filter((chat) => chat.lifecycleStatus === "active" && (chat.title || "Untitled chat").toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
+    // A tool's own root work thread is not one of the person's chats; All chats lists it under Tool threads.
+    .filter((chat) => chat.lifecycleStatus === "active" && !(chat.toolSource && !chat.parentConversationId)
+      && (chat.title || "Untitled chat").toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
     .slice().sort((a, b) => b.createdAt - a.createdAt) : [], [conversations, query, scopeReady]);
   return (
     <section aria-label="Loaded chats" className="space-y-2">

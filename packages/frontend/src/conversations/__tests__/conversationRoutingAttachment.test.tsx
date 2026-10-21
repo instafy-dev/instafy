@@ -604,6 +604,42 @@ describe("conversation routing during controller attachment", () => {
     expect(dispatch).toHaveBeenCalledWith({ type: "CLOSE", id: LOCAL_ID });
   });
 
+  it("marks a tool's work thread from the chat list and never lands in it on first hydration", async () => {
+    const dispatch = vi.fn<(action: ConversationsAction) => void>();
+    const teammateId = "77777777-6666-4555-8444-333333333333";
+    const toolThreadId = "99999999-8888-4777-8666-555555555555";
+    const fetchProjectConversations = vi.fn().mockResolvedValue([
+      buildRemoteConversation({ title: "Shared history" }, teammateId),
+      // Newer, but a tool wrote it (metadata.source): not the chat to land in.
+      { ...buildRemoteConversation({ title: "Site work: orders", source: "  example-tool " }, teammateId),
+        id: toolThreadId, createdAt: "2026-07-13T21:00:00.000Z", updatedAt: "2026-07-13T21:00:00.000Z" },
+    ]);
+
+    await act(async () => {
+      root.render(<ControllerSyncHarness state={buildState()} dispatch={dispatch}
+        fetchProjectConversations={fetchProjectConversations} />);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(dispatch).toHaveBeenCalledWith({ type: "CREATE", select: false,
+      conversation: expect.objectContaining({ controllerId: toolThreadId, toolSource: "example-tool" }) });
+    expect(dispatch).toHaveBeenCalledWith({ type: "CREATE", select: false,
+      conversation: expect.objectContaining({ controllerId: CONTROLLER_ID, toolSource: null }) });
+    expect(dispatch).toHaveBeenCalledWith({ type: "SELECT", id: CONTROLLER_ID });
+    expect(dispatch).not.toHaveBeenCalledWith({ type: "SELECT", id: toolThreadId });
+  });
+
+  it("marks a tool's work thread created live", async () => {
+    const dispatch = vi.fn<(action: ConversationsAction) => void>();
+    await act(async () => {
+      root.render(<PendingCreationHarness state={buildState()} dispatch={dispatch}
+        creation={buildConversationCreated({ title: "Site work: orders", source: "example-tool" },
+          "77777777-6666-4555-8444-333333333333")} />);
+    });
+    expect(dispatch).toHaveBeenCalledWith({ type: "CREATE", select: false,
+      conversation: expect.objectContaining({ controllerId: CONTROLLER_ID, toolSource: "example-tool" }) });
+  });
+
   it("applies current-user routing metadata when an SSE creation attaches", async () => {
     const dispatch = vi.fn<(action: ConversationsAction) => void>();
     const routingPreferences = {
