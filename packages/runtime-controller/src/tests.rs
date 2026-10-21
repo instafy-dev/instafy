@@ -23396,8 +23396,9 @@ async fn conversation_message_dispatch_uses_one_pool_connection() -> anyhow::Res
             .ok_or_else(|| anyhow::anyhow!("Personal Browser response omitted jobId"))?,
     )?;
     let connection = pool.get().await?;
-    // Dispatch gives an org its default subscription once, in the project
-    // ensure that commits before the dispatch transaction.
+    // A send still leaves an org that had none with exactly one default
+    // subscription. Only the project ensure before the dispatch transaction
+    // creates it now; this fails if that goes too, or if a second one appears.
     let subscriptions: i64 = connection
         .query_one(
             "SELECT count(*) FROM org_subscriptions WHERE org_id = $1",
