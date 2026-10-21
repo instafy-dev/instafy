@@ -462,6 +462,16 @@ Playwright only from the image-installed absolute module path and runs from the
 runtime-agent binary directory, never from project `node_modules`. Actions
 return concrete observed page state, including the final URL and title.
 
+A browser that has just started, such as the on-demand browser on a space's own
+machine, shows exactly `about:blank`. `status` and `snapshot` report that page as
+`blank: true` with a constant, empty observation: nothing is read from the page,
+no origin is approved, and no action can target it. The agent then calls
+`navigate` with the task's address, which asks for that site's approval as usual.
+Every other page without an http(s) origin (`data:`, `about:srcdoc`, a blank page
+with a fragment, browser-internal pages) still fails closed with
+`origin_not_approvable`. Neither Studio nor the runtime opens a card's site on its
+own; the card's hosts are only shown to the person.
+
 Every high-level snapshot/action appends the cursor/action-ticker telemetry
 owned by the Shared Browser shell. The runtime records the action-log position
 before the turn and accepts completion only when it sees both a completed call

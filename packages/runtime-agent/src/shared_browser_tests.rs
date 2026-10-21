@@ -138,15 +138,26 @@ const signalsFor = () => mode === "secret-screen"
 const bodyTextFor = (currentUrl, targetId) => {
   if (currentUrl.includes("unapproved-secret")) return "Secret destination contents";
   if (targetId === "decoy-target" && !decoyLooksIdentical) return "Decoy page";
+  // An about:blank document can hold script-written content; none of it may
+  // reach an observation.
+  if (currentUrl === "about:blank") return `Script-written blank ${CANARY}`;
   if (mode === "canary-text") return `Order note ${CANARY} for the fixture`;
   if (mode === "secret-screen") return `Production key ${CANARY}`;
   return "Fixture page";
 };
 let context;
 const makePage = (targetId) => {
-  let currentUrl = targetId === "decoy-target" && !decoyLooksIdentical
-    ? "https://decoy.example.test/"
-    : "https://example.test/";
+  let currentUrl = mode === "blank-page"
+    ? "about:blank"
+    : mode === "blank-fragment"
+      ? "about:blank#instafy"
+      : mode === "srcdoc-page"
+        ? "about:srcdoc"
+        : mode === "data-page"
+          ? "data:text/html,fixture"
+          : targetId === "decoy-target" && !decoyLooksIdentical
+            ? "https://decoy.example.test/"
+            : "https://example.test/";
   const handle = {
     isVisible: async () => true,
     boundingBox: async () => ({ x: 10, y: 20, width: 120, height: 32 }),
@@ -181,6 +192,7 @@ const makePage = (targetId) => {
     url: () => currentUrl,
     title: async () => currentUrl.includes("unapproved-secret")
       ? "Secret destination title"
+      : currentUrl === "about:blank" ? "Script-written blank title"
       : targetId === "decoy-target" && !decoyLooksIdentical ? "Decoy" : "Fixture",
     bringToFront: async () => {},
     setDefaultTimeout: () => {},
@@ -1922,6 +1934,111 @@ fn deny_timeout_replay_and_stale_target_fail_closed_without_action() {
         "unexpected stale-press error: {}",
         String::from_utf8_lossy(&stale_press.stderr)
     );
+}
+
+#[test]
+fn blank_page_is_observed_as_blank_without_any_approval_or_page_content() {
+    // A browser that has just started sits on about:blank. Observing it must
+    // succeed so the agent can navigate, but it grants and reads nothing.
+    let fixture = EmbeddedControllerFixture::new();
+    let (output, requests) = fixture.run_with_decisions(
+        "blank-page",
+        "page-target",
+        "GET",
+        "/v1/snapshot",
+        None,
+        &[],
+        &[],
+    );
+    let payload = payload_of(&output);
+    assert!(requests.is_empty(), "a blank page asked for approval");
+    assert_eq!(payload["blank"], true);
+    assert_eq!(payload["url"], "about:blank");
+    assert_eq!(payload["title"], "");
+    assert_eq!(payload["visibleText"], "");
+    assert_eq!(payload["originApproved"], false);
+    assert_eq!(payload["interactiveElements"], json!([]));
+    assert!(payload["message"].as_str().unwrap().contains("navigate"));
+    let raw = String::from_utf8_lossy(&output.stdout);
+    assert!(!raw.contains("Script-written"));
+    assert_no_canary("blank snapshot", &raw);
+    let state: JsonValue = serde_json::from_slice(
+        &std::fs::read(fixture.approval_dir.join("state.json")).expect("approval state"),
+    )
+    .expect("approval state JSON");
+    assert_eq!(state["approvedOrigins"], json!([]));
+    assert_ne!(state["routineBrowsingAllowed"], true);
+    // The observation counts as action evidence without naming a page.
+    let log = fixture.action_log();
+    let event: JsonValue =
+        serde_json::from_str(log.lines().last().expect("blank snapshot action event"))
+            .expect("blank snapshot action JSON");
+    assert_eq!(event["type"], "nav_result");
+    assert_eq!(event["url"], JsonValue::Null);
+    assert!(!log.contains("Script-written"));
+
+    let status = fixture
+        .command_for("blank-page", "page-target", "GET", "/v1/status", None)
+        .output()
+        .expect("blank status");
+    let status = payload_of(&status);
+    assert_eq!(status["blank"], true);
+    assert_eq!(status["ready"], true);
+    assert!(!status.to_string().contains("Script-written"));
+    assert!(!status.to_string().contains("request access"));
+
+    // Nothing on a blank page can be acted on, even with its snapshot id.
+    let snapshot_id = payload["snapshotId"].as_str().expect("blank snapshot id");
+    let click = json!({"index": 0, "snapshotId": snapshot_id}).to_string();
+    let (clicked, click_requests) = fixture.run_with_decisions(
+        "blank-page",
+        "page-target",
+        "POST",
+        "/v1/click",
+        Some(&click),
+        &[],
+        &[],
+    );
+    assert!(!clicked.status.success());
+    assert!(click_requests.is_empty());
+    assert!(
+        String::from_utf8_lossy(&clicked.stderr).contains("origin_not_approvable_non_retryable")
+    );
+
+    // Navigating away still asks for the destination site and the step.
+    let (navigated, navigate_requests) = fixture.run_with_decisions(
+        "blank-page",
+        "page-target",
+        "POST",
+        "/v1/navigate",
+        Some(r#"{"url":"https://example.test/"}"#),
+        &[],
+        &["allow_origin", "allow_once"],
+    );
+    let navigated = payload_of(&navigated);
+    assert_eq!(navigate_requests.len(), 2);
+    assert_eq!(navigate_requests[0]["kind"], "origin");
+    assert_eq!(navigate_requests[1]["kind"], "action");
+    assert_eq!(navigated["url"], "https://example.test/");
+    assert_eq!(navigated["visibleText"], "Fixture page");
+}
+
+#[test]
+fn only_exact_about_blank_is_observed_without_an_origin() {
+    // Other origin-less pages still fail closed.
+    for mode in ["blank-fragment", "srcdoc-page", "data-page"] {
+        let fixture = EmbeddedControllerFixture::new();
+        let (output, requests) =
+            fixture.run_with_decisions(mode, "page-target", "GET", "/v1/snapshot", None, &[], &[]);
+        assert!(!output.status.success(), "{mode} was observed");
+        assert!(requests.is_empty(), "{mode}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("origin_not_approvable_non_retryable"),
+            "{mode}: {stderr}"
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).is_empty(), "{mode}");
+    }
 }
 
 #[test]

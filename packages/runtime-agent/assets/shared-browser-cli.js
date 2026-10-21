@@ -1079,7 +1079,41 @@ async function snapshot(page, { withhold = false } = {}) {
   };
 }
 
+// A browser that has just started shows exactly about:blank. It has no
+// origin to approve, so it is reported as blank, which leaves the agent free
+// to navigate to the task's site under that site's own approval. The reply is
+// constant and nothing is read from the page: an about:blank document can
+// inherit its opener's origin and hold script-written content. Every other
+// origin-less page (data:, about:srcdoc, about:blank#..., browser pages) still
+// fails closed, and no action can target a blank page.
+const BLANK_PAGE_URL = "about:blank";
+
+function isBlankPage(page) {
+  return page.url() === BLANK_PAGE_URL;
+}
+
+function blankPageResult(extra = {}) {
+  return {
+    ...extra,
+    snapshotId: snapshotFingerprint(BLANK_PAGE_URL, []),
+    browserPageId: EXPECTED_BROWSER_PAGE_ID,
+    blank: true,
+    originApproved: false,
+    redacted: false,
+    url: BLANK_PAGE_URL,
+    title: "",
+    visibleText: "",
+    secretScreen: false,
+    interactiveElements: [],
+    message:
+      "The page is blank. Call navigate with the http(s) address the task names; that site's approval applies there.",
+  };
+}
+
 async function snapshotForResult(page, options = {}) {
+  if (isBlankPage(page)) {
+    return blankPageResult();
+  }
   if (!approvalProtocol.isOriginApproved(page.url())) {
     return approvalProtocol.redactedPageResult();
   }
@@ -1407,6 +1441,9 @@ async function execute(browser, method, requestPath, body) {
       browserPageId: EXPECTED_BROWSER_PAGE_ID,
       pageCount: browser.contexts().flatMap((context) => context.pages()).length,
     };
+    if (isBlankPage(page)) {
+      return blankPageResult(shared);
+    }
     if (!approvalProtocol.isOriginApproved(page.url())) {
       return approvalProtocol.redactedPageResult(shared);
     }
@@ -1421,6 +1458,10 @@ async function execute(browser, method, requestPath, body) {
   }
 
   if (method === "GET" && requestPath === "/v1/snapshot") {
+    if (isBlankPage(page)) {
+      emitAction({ type: "nav_result", label: "Blank page", url: null });
+      return blankPageResult();
+    }
     const approvedOrigin = await approvalProtocol.ensureOriginApproved(
       page.url(),
       "Allow the assistant to read and interact with this site for this run",

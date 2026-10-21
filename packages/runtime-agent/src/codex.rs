@@ -120,6 +120,7 @@ const BROWSER_MODE_DEVELOPER_INSTRUCTIONS: &str = r#"Browser/UI execution run:
 const SHARED_BROWSER_DEVELOPER_INSTRUCTIONS: &str = r#"Shared Browser transport (managed runtime policy):
 - A headed browser in the project's isolated hosted runtime is available. Use the dedicated tools from the `instafy_shared_browser` MCP server: `status`, `snapshot`, `navigate`, `click`, `type`, `press`, `scroll`, and `request_human_input`.
 - Take a snapshot and pass both its `snapshotId` and one indexed element to each interaction. If the page or indexed target set changes, take another snapshot instead of retrying a stale target. Arbitrary CSS selectors are not accepted.
+- The browser may start on a blank page. When `status` or `snapshot` reports `blank: true`, call `navigate` with the http(s) address the task names first; that site's approval applies there. A blank page has nothing to read or act on.
 - Do not invoke Shared Browser through shell commands or write an ad-hoc Playwright/CDP script. The capability is deliberately exposed only through the bounded MCP server for this turn.
 - The controller automatically emits the visible AI cursor and action-ticker events. Do not bypass it.
 - Never type authentication, payment, or identity secrets. A sign-in, one-time code or consent step is a manual step for the user: pause on it with `request_human_input` on its fields, so the user completes it on the page and then chooses Let AI continue. Never ask for those values in chat.
@@ -5271,6 +5272,9 @@ mod tests {
             }
         }
         assert!(SHARED_BROWSER_DEVELOPER_INSTRUCTIONS.contains("Downloads are blocked"));
+        assert!(SHARED_BROWSER_DEVELOPER_INSTRUCTIONS.contains(
+            "When `status` or `snapshot` reports `blank: true`, call `navigate` with the http(s) address the task names first"
+        ));
         assert!(PERSONAL_BROWSER_DEVELOPER_INSTRUCTIONS.contains("`secretScreen: true`"));
         assert!(
             PERSONAL_BROWSER_DEVELOPER_INSTRUCTIONS
