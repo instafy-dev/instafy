@@ -11,6 +11,7 @@ import { LoadingStatus } from "../components/LoadingStatus";
 import { TreeDisclosureButton, TreeRowMarkerSlot } from "../components/TreeDisclosureButton";
 import { useConversations } from "../conversations/ConversationsProvider";
 import { isEmptyConversationPlaceholder } from "../conversations/conversationState";
+import { isToolRootThread } from "../conversations/conversationMetadata";
 import type { ConversationLifecycleStatus } from "../conversations/ConversationsProvider";
 import { MenuItemContent } from "../components/MenuItemContent";
 import { StudioPopover } from "../components/aria/StudioPopover";
@@ -64,8 +65,9 @@ export function ConversationHistoryTab({
   const collapsibleSearch = !isLargeScreen || externalHeader;
   const scrollIdentity = useStudioListScrollIdentity("chats");
   const [query, setQuery] = useStudioListState("chat-query", "", !isLargeScreen);
-  // "tools": the work threads tools write (metadata.source, e.g. a site or script writing its own thread). They are not the
-  // person's chats, so the other filters leave them out.
+  // "tools": the active top-level threads a tool wrote (metadata.source, e.g. a site or script writing its own thread). They
+  // are not the person's chats, so Active leaves them out. Once archived, hidden or trashed they are listed under that status
+  // like any chat, so they keep the one restore path.
   const [filter, setFilter] = useStudioListState<ChatListFilter>("chat-filter", "active", !isLargeScreen);
   const [filterMenuOpen, setFilterMenuOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -225,10 +227,11 @@ export function ConversationHistoryTab({
       if (!conversation) {
         return null;
       }
-      // A tool's own root thread is listed only under "Tool threads"; a tool thread nested under a chat stays there.
-      const toolRoot = depth === 0 && Boolean(conversation.toolSource);
-      if (filter === "tools" ? (depth === 0 && !toolRoot) || conversation.lifecycleStatus !== "active"
-        : toolRoot || conversation.lifecycleStatus !== filter) {
+      // An active tool root thread is listed under "From tools" instead of Active; a nested one stays with its chat.
+      const listedStatus: ChatListFilter =
+        conversation.lifecycleStatus === "active" && isToolRootThread(conversation) ? "tools" : conversation.lifecycleStatus;
+      const childStatus = filter === "tools" ? "active" : filter;
+      if (depth === 0 ? listedStatus !== filter : conversation.lifecycleStatus !== childStatus) {
         return null;
       }
       const nextChildren = (childrenById.get(id) ?? [])
@@ -306,16 +309,11 @@ export function ConversationHistoryTab({
       deleted: 0,
       tools: 0,
     };
-    const { parentLocalIdById } = conversationTreeIndex;
     conversations.forEach((conversation) => {
-      if (conversation.toolSource && parentLocalIdById.get(conversation.localId) === null) {
-        if (conversation.lifecycleStatus === "active") totals.tools += 1;
-        return;
-      }
-      totals[conversation.lifecycleStatus] += 1;
+      totals[conversation.lifecycleStatus === "active" && isToolRootThread(conversation) ? "tools" : conversation.lifecycleStatus] += 1;
     });
     return totals;
-  }, [conversationTreeIndex, conversations]);
+  }, [conversations]);
 
   const filterOptions = useMemo(
     () => [
@@ -325,7 +323,7 @@ export function ConversationHistoryTab({
       { value: "deleted" as const, label: "Trash", count: counts.deleted, title: "Trash" },
       // Only offered when a tool has written a thread (or the filter is already on).
       ...(counts.tools > 0 || filter === "tools"
-        ? [{ value: "tools" as const, label: "Tool threads", count: counts.tools, title: "Tool threads" }]
+        ? [{ value: "tools" as const, label: "From tools", count: counts.tools, title: "From tools" }]
         : []),
     ],
     [counts.active, counts.archived, counts.hidden, counts.deleted, counts.tools, filter],
@@ -476,7 +474,7 @@ export function ConversationHistoryTab({
       </IconButton>
       <StudioPopover placement="bottom end" layout="menu">
         <StudioMenu
-          aria-label="Chat status"
+          aria-label="Show chats"
           selectionMode="single"
           selectedKeys={new Set([filter])}
           onAction={(key) => {

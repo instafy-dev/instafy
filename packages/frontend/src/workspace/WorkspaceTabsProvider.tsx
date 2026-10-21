@@ -23,6 +23,7 @@ import {
 } from "../conversations/ConversationsProvider";
 import { useProject } from "../projects/useProject";
 import { isEmptyConversationPlaceholder } from "../conversations/conversationState";
+import { isToolRootThread } from "../conversations/conversationMetadata";
 import { isUUID } from "../utils/uuid";
 import type { WorkspaceGitReviewSource } from "./gitReviewTypes";
 import { useWorkspaceTabController } from "./useWorkspaceTabController";
@@ -114,12 +115,14 @@ declare global {
 }
 
 /**
- * The chat to fall back to when no tab says which: the first one a person
- * started, else the first at all. A tool's own work thread (`toolSource`) is
+ * The chat to fall back to when no tab says which: the first one that is not a
+ * tool's own top-level work thread, else the first at all. A tool's thread is
  * never picked over a person's chat.
  */
-function firstPersonConversation<T extends { toolSource?: string | null }>(conversations: readonly T[]): T | null {
-  return conversations.find((conversation) => !conversation.toolSource) ?? conversations[0] ?? null;
+function firstPersonConversation<T extends { toolSource?: string | null; parentConversationId?: string | null }>(
+  conversations: readonly T[],
+): T | null {
+  return conversations.find((conversation) => !isToolRootThread(conversation)) ?? conversations[0] ?? null;
 }
 
 export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanelDestination, conversationWorkspaceUserId = null }: {
@@ -675,7 +678,7 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
       }
       // A tool's work thread (metadata.source) is not something the person
       // started: it stays out of the tab strip until they open it from Chats.
-      if (conversation.toolSource) {
+      if (isToolRootThread(conversation)) {
         return;
       }
       if (now - conversation.createdAt > autoOpenWindowMs) {

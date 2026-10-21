@@ -29,6 +29,7 @@ import {
   extractConversationOwnerAgentFromMetadata,
   extractConversationTitleFromMetadata,
   hasRecommendationOrigin,
+  isPlainObject,
   parseTimestamp,
   resolveConversationVisibility,
   resolveConversationVisibilityCandidate,
@@ -451,6 +452,13 @@ export function usePendingConversationEffects({
           id: localId,
           goal: nextActiveGoal,
         });
+      }
+      // Only an update that carries metadata can say who wrote the row; one without it keeps the current value.
+      if (isPlainObject(update.metadata)) {
+        const nextToolSource = toolSourceOf(update.metadata);
+        if ((conversation.toolSource ?? null) !== nextToolSource) {
+          dispatch({ type: "SET_TOOL_SOURCE", id: localId, toolSource: nextToolSource });
+        }
       }
 
       const resolvedParentConversationId =

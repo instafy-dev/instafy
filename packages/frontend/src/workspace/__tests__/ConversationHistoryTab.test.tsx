@@ -322,7 +322,7 @@ describe("ConversationHistoryTab", () => {
     await search("archived-match");
     await click('[data-testid="conversation-history-filter"]');
 
-    const menu = document.querySelector('[role="menu"][aria-label="Chat status"]');
+    const menu = document.querySelector('[role="menu"][aria-label="Show chats"]');
     expect(menu).not.toBeNull();
     const options = Array.from(menu?.querySelectorAll('[role="menuitemradio"]') ?? []);
     expect(options.map((option) => option.textContent)).toEqual([
@@ -333,7 +333,7 @@ describe("ConversationHistoryTab", () => {
     ]);
 
     await click('[role="menuitemradio"][data-key="archived"]');
-    expect(document.querySelector('[role="menu"][aria-label="Chat status"]')).toBeNull();
+    expect(document.querySelector('[role="menu"][aria-label="Show chats"]')).toBeNull();
     expect(container.querySelector<HTMLInputElement>('[data-testid="conversation-history-search"]')?.value).toBe("archived-match");
     expect(container.querySelectorAll('[data-testid="conversation-history-item"]')).toHaveLength(1);
     expect(container.querySelector('[data-testid="conversation-history-item"]')?.textContent).toBe("Chat archived-match");
@@ -365,13 +365,13 @@ describe("ConversationHistoryTab", () => {
     const trigger = container.querySelector<HTMLButtonElement>('[data-testid="conversation-history-filter"]');
     await act(async () => trigger?.focus());
     await click('[data-testid="conversation-history-filter"]');
-    const menu = document.querySelector<HTMLElement>('[role="menu"][aria-label="Chat status"]');
+    const menu = document.querySelector<HTMLElement>('[role="menu"][aria-label="Show chats"]');
     expect(menu).not.toBeNull();
     await act(async () => {
       menu?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
       await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
     });
-    expect(document.querySelector('[role="menu"][aria-label="Chat status"]')).toBeNull();
+    expect(document.querySelector('[role="menu"][aria-label="Show chats"]')).toBeNull();
     expect(onRequestClose).not.toHaveBeenCalled();
     expect(document.activeElement).toBe(trigger);
   });
@@ -408,7 +408,7 @@ describe("ConversationHistoryTab", () => {
     expect(mocks.closeTab).not.toHaveBeenCalled();
   });
 
-  it("lists a tool's own work thread only under Tool threads, never among the person's chats", async () => {
+  it("lists a tool's own active work thread only under From tools, never among the person's chats", async () => {
     mocks.conversations = [
       conversation("a", { controllerId: "remote-a" }),
       conversation("b"),
@@ -423,16 +423,74 @@ describe("ConversationHistoryTab", () => {
     expect(titles()).toEqual(expect.arrayContaining(["Chat a", "Chat b"]));
 
     await click('[data-testid="conversation-history-filter"]');
-    const options = Array.from(document.querySelectorAll('[role="menu"][aria-label="Chat status"] [role="menuitemradio"]'));
+    const options = Array.from(document.querySelectorAll('[role="menu"][aria-label="Show chats"] [role="menuitemradio"]'));
     expect(options.map((option) => option.textContent)).toEqual([
-      "Active (3)", "Archived (0)", "Hidden (0)", "Trash (0)", "Tool threads (1)",
+      "Active (3)", "Archived (0)", "Hidden (0)", "Trash (0)", "From tools (1)",
     ]);
     await click('[role="menuitemradio"][data-key="tools"]');
     expect(titles()).toEqual(["Site work: orders"]);
-    expect(container.querySelector("h2")?.textContent).toBe("Tool threads");
+    expect(container.querySelector("h2")?.textContent).toBe("From tools");
   });
 
-  it("offers no Tool threads filter when no tool wrote a thread", async () => {
+  it.each([
+    ["archive", "archived"],
+    ["hide", "hidden"],
+    ["delete", "deleted"],
+  ] as const)("keeps a tool's work thread reachable after %s: it is listed under that status and restores to From tools", async (action, status) => {
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    mocks.conversations = [
+      conversation("a"),
+      conversation("tool-root", { title: "Site work: orders", toolSource: "example-tool" }),
+    ];
+    mocks.setConversationLifecycleStatus.mockImplementation((id: string, next: ConversationState["lifecycleStatus"]) => {
+      mocks.conversations = mocks.conversations.map((entry) => entry.localId === id ? { ...entry, lifecycleStatus: next } : entry);
+    });
+    const titles = () => Array.from(container.querySelectorAll('[data-testid="conversation-history-item"]')).map((row) => row.textContent);
+    const counts = async () => {
+      await click('[data-testid="conversation-history-filter"]');
+      const labels = Array.from(document.querySelectorAll('[role="menu"][aria-label="Show chats"] [role="menuitemradio"]'))
+        .map((option) => option.textContent);
+      await act(async () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+      return labels;
+    };
+    await render();
+    await selectFilter("tools");
+    expect(titles()).toEqual(["Site work: orders"]);
+
+    await click('[data-testid="conversation-history-menu-tool-root"]');
+    await click(`[role="menuitem"][data-key="${action}"]`);
+    expect(mocks.setConversationLifecycleStatus).toHaveBeenCalledWith("tool-root", status);
+    await render();
+    expect(titles()).toEqual([]);
+    const label = { archived: "Archived", hidden: "Hidden", deleted: "Trash" }[status];
+    expect(await counts()).toContain(`${label} (1)`);
+    await selectFilter(status);
+    expect(titles()).toEqual(["Site work: orders"]);
+
+    await click('[data-testid="conversation-history-menu-tool-root"]');
+    await click('[role="menuitem"][data-key="restore"]');
+    expect(mocks.setConversationLifecycleStatus).toHaveBeenLastCalledWith("tool-root", "active");
+    await render();
+    expect(titles()).toEqual([]);
+    await selectFilter("tools");
+    expect(titles()).toEqual(["Site work: orders"]);
+    await selectFilter("active");
+    expect(titles()).toEqual(["Chat a"]);
+  });
+
+  it("keeps a nested tool thread whose parent is not loaded among the person's chats", async () => {
+    mocks.conversations = [
+      conversation("a"),
+      conversation("orphan", { title: "Site work: notes", toolSource: "example-tool", parentConversationId: "remote-missing", threadKind: "tool" }),
+    ];
+    await render();
+    const titles = Array.from(container.querySelectorAll('[data-testid="conversation-history-item"]')).map((row) => row.textContent);
+    expect(titles).toEqual(expect.arrayContaining(["Chat a", "Site work: notes"]));
+    await click('[data-testid="conversation-history-filter"]');
+    expect(document.querySelector('[role="menuitemradio"][data-key="tools"]')).toBeNull();
+  });
+
+  it("offers no From tools filter when no tool wrote a thread", async () => {
     await render();
     await click('[data-testid="conversation-history-filter"]');
     expect(document.querySelector('[role="menuitemradio"][data-key="tools"]')).toBeNull();

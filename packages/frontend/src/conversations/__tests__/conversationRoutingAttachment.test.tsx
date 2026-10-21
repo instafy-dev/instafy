@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   ControllerConversationCreated,
   ControllerConversationMessage,
+  ControllerConversationUpdated,
   ControllerProjectConversation,
 } from "../../services/runtimeController/conversations";
 import {
@@ -123,6 +124,7 @@ function PendingCreationHarness({
   state,
   dispatch,
   creation,
+  updates = [],
   messages = [],
   internalConversationIds,
   updateMetadata = vi.fn(),
@@ -130,6 +132,7 @@ function PendingCreationHarness({
   state: ConversationsState;
   dispatch: (action: ConversationsAction) => void;
   creation?: ControllerConversationCreated;
+  updates?: ControllerConversationUpdated[];
   messages?: ControllerConversationMessage[];
   internalConversationIds?: Readonly<Record<string, true>>;
   updateMetadata?: (args: { conversationId: string; metadata: Record<string, unknown> }) => Promise<unknown>;
@@ -142,7 +145,7 @@ function PendingCreationHarness({
     currentUserId: USER_ID,
     pendingConversationCreations: creation ? [creation] : [],
     ackConversationCreations: vi.fn(),
-    pendingConversationUpdates: [],
+    pendingConversationUpdates: updates,
     ackConversationUpdates: vi.fn(),
     pendingConversationMessages: messages,
     internalConversationIds,
@@ -638,6 +641,58 @@ describe("conversation routing during controller attachment", () => {
     });
     expect(dispatch).toHaveBeenCalledWith({ type: "CREATE", select: false,
       conversation: expect.objectContaining({ controllerId: CONTROLLER_ID, toolSource: "example-tool" }) });
+  });
+
+  it.each([
+    ["marks", null, { localId: LOCAL_ID, source: "example-tool" }, "example-tool"],
+    ["clears", "example-tool", { localId: LOCAL_ID }, null],
+  ] as const)("%s the tool source of an already-loaded chat when a re-sync changes metadata.source", async (_verb, current, metadata, next) => {
+    const dispatch = vi.fn<(action: ConversationsAction) => void>();
+    const state = buildState();
+    state.conversations[0] = { ...state.conversations[0], controllerId: CONTROLLER_ID, toolSource: current };
+    await act(async () => {
+      root.render(<ControllerSyncHarness state={state} dispatch={dispatch}
+        fetchProjectConversations={vi.fn().mockResolvedValue([buildRemoteConversation({ ...metadata })])} />);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(dispatch).toHaveBeenCalledWith({ type: "SET_TOOL_SOURCE", id: LOCAL_ID, toolSource: next });
+  });
+
+  it("leaves the tool source alone when a re-sync does not change it", async () => {
+    const dispatch = vi.fn<(action: ConversationsAction) => void>();
+    const state = buildState();
+    state.conversations[0] = { ...state.conversations[0], controllerId: CONTROLLER_ID, toolSource: "example-tool" };
+    await act(async () => {
+      root.render(<ControllerSyncHarness state={state} dispatch={dispatch}
+        fetchProjectConversations={vi.fn().mockResolvedValue([buildRemoteConversation({ localId: LOCAL_ID, source: " example-tool " })])} />);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(dispatch.mock.calls.some(([action]) => action.type === "SET_TOOL_SOURCE")).toBe(false);
+  });
+
+  it.each([
+    ["marks", null, { source: "example-tool" }, "example-tool"],
+    ["clears", "example-tool", { title: "Renamed" }, null],
+  ] as const)("%s the tool source when a live conversation update changes metadata.source", async (_verb, current, metadata, next) => {
+    const dispatch = vi.fn<(action: ConversationsAction) => void>();
+    const state = buildState();
+    state.conversations[0] = { ...state.conversations[0], controllerId: CONTROLLER_ID, toolSource: current };
+    await act(async () => {
+      root.render(<PendingCreationHarness state={state} dispatch={dispatch}
+        updates={[{ ...buildConversationCreated({ ...metadata }), updatedAt: "2026-07-13T20:05:00.000Z" }]} />);
+    });
+    expect(dispatch).toHaveBeenCalledWith({ type: "SET_TOOL_SOURCE", id: LOCAL_ID, toolSource: next });
+  });
+
+  it("keeps the tool source when a live update carries no metadata", async () => {
+    const dispatch = vi.fn<(action: ConversationsAction) => void>();
+    const state = buildState();
+    state.conversations[0] = { ...state.conversations[0], controllerId: CONTROLLER_ID, toolSource: "example-tool" };
+    await act(async () => {
+      root.render(<PendingCreationHarness state={state} dispatch={dispatch}
+        updates={[{ ...buildConversationCreated(), metadata: null }]} />);
+    });
+    expect(dispatch.mock.calls.some(([action]) => action.type === "SET_TOOL_SOURCE")).toBe(false);
   });
 
   it("applies current-user routing metadata when an SSE creation attaches", async () => {
