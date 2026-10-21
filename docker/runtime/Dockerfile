@@ -87,6 +87,13 @@ COPY packages/instafy-cli/tsconfig.json packages/instafy-cli/tsconfig.json
 COPY packages/instafy-cli/tsup.config.ts packages/instafy-cli/tsup.config.ts
 COPY packages/instafy-cli/src packages/instafy-cli/src
 COPY packages/instafy-cli/bin packages/instafy-cli/bin
+COPY packages/instafy-cli/scripts packages/instafy-cli/scripts
+# `instafy bind`: the CLI build bundles the zero-dependency binder into dist/bind.
+COPY packages/instafy-bind/package.json packages/instafy-bind/package.json
+COPY packages/instafy-bind/LICENSE packages/instafy-bind/LICENSE
+COPY packages/instafy-bind/bin packages/instafy-bind/bin
+COPY packages/instafy-bind/src packages/instafy-bind/src
+COPY packages/instafy-bind/client packages/instafy-bind/client
 COPY packages/instafy-sdk/package.json packages/instafy-sdk/package.json
 COPY packages/instafy-sdk/src packages/instafy-sdk/src
 COPY packages/provider-client/package.json packages/provider-client/package.json

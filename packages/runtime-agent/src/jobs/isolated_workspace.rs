@@ -476,6 +476,33 @@ mod tests {
     }
 
     #[test]
+    fn a_bound_sites_binder_state_never_reaches_an_isolated_worker() {
+        let root = TempDir::new().unwrap();
+        put(root.path(), "sites/shoes/index.html", b"<p>shoes</p>");
+        put(
+            root.path(),
+            "sites/shoes/.bind/admin-token",
+            b"approves confirm jobs",
+        );
+        put(root.path(), "sites/shoes/.bind/binder.log", b"prompts");
+        put(root.path(), ".bind/admin-token", b"gallery admin");
+        let isolated = snapshot(root.path());
+        assert!(
+            isolated
+                .workspace_dir()
+                .join("sites/shoes/index.html")
+                .is_file()
+        );
+        for name in ["sites/shoes/.bind", ".bind"] {
+            assert!(
+                !isolated.workspace_dir().join(name).exists(),
+                "copied {name}"
+            );
+        }
+        assert!(snapshot_excluded("sites/shoes/.bind/admin-token"));
+    }
+
+    #[test]
     fn collects_binary_creations_edits_and_deletions_without_touching_source() {
         let root = TempDir::new().unwrap();
         put(root.path(), "owned/edit.txt", b"before");

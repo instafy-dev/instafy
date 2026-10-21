@@ -53,6 +53,9 @@ pub const SKILL_READING_RELATIVE_PATH: &str = ".agents/skills/instafy-skill-read
 pub const LEARNED_INDEX_RELATIVE_PATH: &str = ".agents/skills/instafy-learned/SKILL.md";
 pub const LEARNED_BLOCKS_DIR_RELATIVE_PATH: &str = ".agents/skills/instafy-learned/blocks";
 pub const LEARNED_USAGE_RELATIVE_PATH: &str = ".agents/skills/instafy-learned/USAGE.json";
+pub const BOUND_SITES_RELATIVE_PATH: &str = ".agents/skills/instafy-bound-sites/SKILL.md";
+pub const BOUND_SITES_CHEATSHEET_RELATIVE_PATH: &str =
+    ".agents/skills/instafy-bound-sites/references/cheatsheet.md";
 
 const DEFAULT_LOOKBACK: usize = 25;
 const MAX_LOOKBACK: usize = 200;
@@ -199,6 +202,20 @@ const PERSISTENT_CONTEXTS_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-persistent-contexts/SKILL.md"
 ));
+/// How Octo builds bound sites (`instafy bind`): live pages whose script buttons stream records
+/// back to every viewer, and whose Ask Octo buttons Studio sends as the clicker's own message.
+const BOUND_SITES_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/instafy/.agents/skills/instafy-bound-sites/SKILL.md"
+));
+const BOUND_SITES_CHEATSHEET_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/instafy/.agents/skills/instafy-bound-sites/references/cheatsheet.md"
+));
+/// Earlier bundled copies of the bound-sites skill and cheat sheet that a scaffold may replace
+/// (none yet: this is the first shipped version). A copy someone edited is kept.
+const LEGACY_BOUND_SITES_TEMPLATES: &[&str] = &[];
+const LEGACY_BOUND_SITES_CHEATSHEET_TEMPLATES: &[&str] = &[];
 const SKILL_ROUTER_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-skill-router/SKILL.md"
@@ -310,6 +327,8 @@ pub fn ensure_project_memory_scaffold(workspace_dir: &Path) {
     let skill_reading_path = workspace_dir.join(SKILL_READING_RELATIVE_PATH);
     let learned_index_path = workspace_dir.join(LEARNED_INDEX_RELATIVE_PATH);
     let learned_blocks_dir_path = workspace_dir.join(LEARNED_BLOCKS_DIR_RELATIVE_PATH);
+    let bound_sites_path = workspace_dir.join(BOUND_SITES_RELATIVE_PATH);
+    let bound_sites_cheatsheet_path = workspace_dir.join(BOUND_SITES_CHEATSHEET_RELATIVE_PATH);
 
     if fs::create_dir_all(&skills_root_dir).is_err() {
         return;
@@ -547,6 +566,23 @@ pub fn ensure_project_memory_scaffold(workspace_dir: &Path) {
         wrote_any = true;
     }
 
+    if upgrade_bundled_skill(
+        workspace_dir,
+        &bound_sites_path,
+        LEGACY_BOUND_SITES_TEMPLATES,
+        BOUND_SITES_TEMPLATE,
+    ) {
+        wrote_any = true;
+    }
+    if upgrade_bundled_skill(
+        workspace_dir,
+        &bound_sites_cheatsheet_path,
+        LEGACY_BOUND_SITES_CHEATSHEET_TEMPLATES,
+        BOUND_SITES_CHEATSHEET_TEMPLATE,
+    ) {
+        wrote_any = true;
+    }
+
     if !skill_reading_path.exists() {
         if let Some(parent) = skill_reading_path.parent() {
             let _ = fs::create_dir_all(parent);
@@ -665,6 +701,8 @@ fn maybe_commit_project_memory_scaffold(workspace_dir: &Path, _wrote_any: bool) 
         BROWSER_AUTOMATION_RELATIVE_PATH,
         SKILL_READING_RELATIVE_PATH,
         LEARNED_INDEX_RELATIVE_PATH,
+        BOUND_SITES_RELATIVE_PATH,
+        BOUND_SITES_CHEATSHEET_RELATIVE_PATH,
     ];
 
     for path in scaffold_paths {
@@ -1555,6 +1593,54 @@ mod tests {
         assert!(DIAGNOSTICS_TEMPLATE.contains("obtain explicit confirmation"));
         assert!(DIAGNOSTICS_TEMPLATE.contains("never bypass a traversal, symlink"));
         assert_eq!(CLAUDE_DOC_TEMPLATE, "@AGENTS.md\n");
+    }
+
+    #[test]
+    fn scaffold_adds_the_bound_sites_skill_and_keeps_an_edited_copy() {
+        let workspace = tempdir().expect("workspace");
+        ensure_project_memory_scaffold(workspace.path());
+        let skill = workspace.path().join(BOUND_SITES_RELATIVE_PATH);
+        let sheet = workspace.path().join(BOUND_SITES_CHEATSHEET_RELATIVE_PATH);
+        assert_eq!(fs::read_to_string(&skill).unwrap(), BOUND_SITES_TEMPLATE);
+        assert_eq!(
+            fs::read_to_string(&sheet).unwrap(),
+            BOUND_SITES_CHEATSHEET_TEMPLATE
+        );
+        // The router finds it: it is a workflow under the skill router with its own keywords.
+        assert!(BOUND_SITES_TEMPLATE.contains("context_kind: workflow"));
+        assert!(BOUND_SITES_TEMPLATE.contains("context_parent: instafy-skill-router"));
+        assert!(BOUND_SITES_TEMPLATE.contains("routing_keywords: bound site"));
+        let customized = "# my own bound-sites notes\n";
+        fs::write(&skill, customized).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&skill).unwrap(), customized);
+    }
+
+    #[test]
+    fn bound_sites_skill_never_ships_an_agent_only_site_or_a_login_step() {
+        // An agent-only site is a page of dead buttons wherever nobody can ask, and a reply that
+        // tells a Studio user to run `instafy login` sends them to a terminal they do not have.
+        let skill = BOUND_SITES_TEMPLATE;
+        assert!(skill.contains("Every site needs at least one `script` intent"));
+        assert!(skill.contains("`status: \"uncertain\"`"));
+        assert!(skill.contains("Never switch that intent to `agent` instead."));
+        assert!(skill.contains("an optional extra \"Ask Octo\" next to a script intent"));
+        assert!(skill.contains("Do not tell the user to run `instafy login`"));
+        // Ask Octo is the clicker's own message through Studio; the binder holds no login.
+        assert!(skill.contains("sends it as the clicker's own chat message"));
+        assert!(skill.contains("(`agent executor: host`)"));
+        assert!(!skill.contains("their own login"));
+        // Generated pages read the progress payload, end a job's status on done or error, and
+        // copy a valid uncertain claim (instafy-bind's apply tests validate that example).
+        assert!(
+            BOUND_SITES_CHEATSHEET_TEMPLATE
+                .contains("m.progress = {step?, of?, message?, source?}")
+        );
+        assert!(BOUND_SITES_CHEATSHEET_TEMPLATE.contains("done and error end the job"));
+        assert!(
+            BOUND_SITES_CHEATSHEET_TEMPLATE
+                .contains("\"status\": \"uncertain\", \"basis\": \"live\"")
+        );
     }
 
     #[test]

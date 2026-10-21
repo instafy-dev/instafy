@@ -1,0 +1,170 @@
+{
+  "title": "Compare three options",
+  "lede": "Option B costs least and Option A is the lightest. Option C's price was not checked.",
+  "sort": [
+    {
+      "key": "price",
+      "label": "Price, low to high",
+      "dir": "asc"
+    },
+    {
+      "key": "weight",
+      "label": "Weight, light first",
+      "dir": "asc"
+    },
+    {
+      "key": "rating",
+      "label": "Rating, high first",
+      "dir": "desc"
+    }
+  ],
+  "columns": [
+    {
+      "key": "price",
+      "label": "Price",
+      "type": "price"
+    },
+    {
+      "key": "weight",
+      "label": "Weight",
+      "type": "number"
+    },
+    {
+      "key": "rating",
+      "label": "Rating",
+      "type": "number"
+    },
+    {
+      "key": "warranty",
+      "label": "Warranty",
+      "type": "text"
+    }
+  ],
+  "items": [
+    {
+      "ref": "option:option-a",
+      "name": "Option A",
+      "why": "The lightest of the three",
+      "facts": {
+        "price": {
+          "v": "$145",
+          "src": "Example Store",
+          "url": "https://example.com/option-a",
+          "date": "2026-10-17"
+        },
+        "weight": {
+          "v": "8.9 oz",
+          "src": "Maker",
+          "url": "https://example.com/option-a/specs",
+          "date": "2026-10-17"
+        },
+        "rating": {
+          "v": "4.6 of 5",
+          "src": "Example Reviews",
+          "url": "https://example.com/reviews/option-a",
+          "date": "2026-10-16"
+        },
+        "warranty": {
+          "v": "2 years",
+          "src": "Maker",
+          "url": "https://example.com/option-a/warranty",
+          "date": "2026-10-17"
+        }
+      },
+      "store": {
+        "name": "Example Store",
+        "url": "https://example.com/option-a",
+        "readable": true
+      },
+      "more": [
+        {
+          "label": "Colours",
+          "fact": {
+            "v": "Black, white",
+            "src": "Maker",
+            "url": "https://example.com/option-a/specs",
+            "date": "2026-10-17"
+          }
+        }
+      ],
+      "sources": [
+        {
+          "name": "Maker",
+          "url": "https://example.com/option-a/specs"
+        }
+      ]
+    },
+    {
+      "ref": "option:option-b",
+      "name": "Option B",
+      "why": "The lowest price",
+      "facts": {
+        "price": {
+          "v": "$129",
+          "src": "Example Store",
+          "url": "https://example.com/option-b",
+          "date": "2026-10-17"
+        },
+        "weight": {
+          "v": "about 9.5 oz",
+          "n": 9.5,
+          "est": true,
+          "url": "https://example.com/option-b/specs"
+        },
+        "rating": {
+          "v": "4.3 of 5",
+          "src": "Example Reviews",
+          "url": "https://example.com/reviews/option-b",
+          "date": "2026-10-16"
+        },
+        "warranty": {
+          "src": "Maker",
+          "url": "https://example.com/option-b/specs",
+          "date": "2026-10-17"
+        }
+      },
+      "store": {
+        "name": "Example Store",
+        "url": "https://example.com/option-b",
+        "readable": true
+      }
+    },
+    {
+      "ref": "option:option-c",
+      "name": "Option C",
+      "why": "Last year's model, often discounted",
+      "badge": "Previous model",
+      "facts": {
+        "price": {
+          "note": "the store blocks price checks"
+        },
+        "weight": {
+          "v": "9.8 oz",
+          "src": "Maker",
+          "url": "https://example.com/option-c/specs",
+          "date": "2026-10-17"
+        },
+        "rating": {
+          "v": "4.4 of 5",
+          "src": "Example Reviews",
+          "url": "https://example.com/reviews/option-c",
+          "date": "2026-10-16"
+        },
+        "warranty": {
+          "v": "1 year",
+          "src": "Maker",
+          "url": "https://example.com/option-c/warranty",
+          "date": "2026-10-17"
+        }
+      },
+      "store": {
+        "name": "Other Store",
+        "url": "https://example.org/option-c",
+        "readable": false
+      }
+    }
+  ],
+  "unchecked": [
+    "How each holds up after a year: no long-term review was read"
+  ]
+}

@@ -88,6 +88,9 @@ type PreviewStateEntry = {
   startedAt: string;
   /** the rathole binary that was spawned; absent in entries from older CLIs */
   binary?: string;
+  // The controller's viewerHostSuffix for this preview. A tokenless local site (`instafy bind serve --preview`)
+  // accepts the capability host only on exactly this domain: the preview id alone is not a secret.
+  hostSuffix?: string;
 };
 
 type PreviewStateFile = {
@@ -547,6 +550,7 @@ async function createAndStartClient(params: {
   const workdir = workdirFor(previewId);
   const logFile = path.join(instafyDir(), "cli-preview-logs", `preview-${safePathSegment(previewId)}.log`);
   const configPath = configPathFor(workdir);
+  const hostSuffix = parseViewerHostSuffix(grant["viewerHostSuffix"]);
   const state = readStateFile();
   const current = state.previews.find((preview) => preview.previewId === previewId) ?? null;
 
@@ -620,6 +624,7 @@ async function createAndStartClient(params: {
     workdir,
     startedAt: current?.pid === pid ? current.startedAt : new Date().toISOString(),
     ...(binary ? { binary } : {}),
+    ...(hostSuffix ? { hostSuffix } : {}),
   };
   upsertPreviewState(entry);
   return { grant, previewId, entry, current };

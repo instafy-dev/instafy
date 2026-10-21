@@ -1,0 +1,142 @@
+{
+  "title": "Top three options",
+  "lede": "Option A is the best all-round pick. Option C costs least, but its price was not checked.",
+  "basis": "Ranked by review scores, then price.",
+  "items": [
+    {
+      "ref": "option:option-a",
+      "rank": 1,
+      "name": "Option A",
+      "why": "Best reviewed, and the lightest",
+      "specs": [
+        {
+          "v": "8.9 oz",
+          "src": "Maker",
+          "url": "https://example.com/option-a/specs",
+          "date": "2026-10-17"
+        },
+        {
+          "v": "2-year warranty",
+          "src": "Maker",
+          "url": "https://example.com/option-a/warranty",
+          "date": "2026-10-17"
+        }
+      ],
+      "price": {
+        "v": "$145",
+        "src": "Example Store",
+        "url": "https://example.com/option-a",
+        "date": "2026-10-17"
+      },
+      "store": {
+        "name": "Example Store",
+        "url": "https://example.com/option-a",
+        "readable": true
+      },
+      "details": [
+        {
+          "label": "Review score",
+          "fact": {
+            "v": "4.6 of 5",
+            "src": "Example Reviews",
+            "url": "https://example.com/reviews/option-a",
+            "date": "2026-10-16"
+          }
+        },
+        {
+          "label": "Colours",
+          "fact": {
+            "v": "Black, white",
+            "src": "Maker",
+            "url": "https://example.com/option-a/specs",
+            "date": "2026-10-17"
+          }
+        }
+      ],
+      "sources": [
+        {
+          "name": "Example Reviews",
+          "url": "https://example.com/reviews/option-a"
+        }
+      ],
+      "badge": "Our pick"
+    },
+    {
+      "ref": "option:option-b",
+      "rank": 2,
+      "name": "Option B",
+      "why": "Nearly as good, a little heavier",
+      "specs": [
+        {
+          "v": "about 9.5 oz",
+          "n": 9.5,
+          "est": true
+        },
+        {
+          "v": "1-year warranty",
+          "src": "Maker",
+          "url": "https://example.com/option-b/warranty",
+          "date": "2026-10-17"
+        }
+      ],
+      "price": {
+        "v": "$139",
+        "src": "Example Store",
+        "url": "https://example.com/option-b",
+        "date": "2026-10-17"
+      },
+      "store": {
+        "name": "Example Store",
+        "url": "https://example.com/option-b",
+        "readable": true
+      },
+      "details": [
+        {
+          "label": "Review score",
+          "fact": {
+            "v": "4.4 of 5",
+            "src": "Example Reviews",
+            "url": "https://example.com/reviews/option-b",
+            "date": "2026-10-16"
+          }
+        }
+      ]
+    },
+    {
+      "ref": "option:option-c",
+      "rank": 3,
+      "name": "Option C",
+      "why": "The lowest price, fewer reviews",
+      "specs": [
+        {
+          "v": "9.8 oz",
+          "src": "Maker",
+          "url": "https://example.com/option-c/specs",
+          "date": "2026-10-17"
+        }
+      ],
+      "price": {
+        "note": "the store blocks price checks"
+      },
+      "store": {
+        "name": "Other Store",
+        "url": "https://example.org/option-c",
+        "readable": false
+      },
+      "details": [
+        {
+          "label": "Review score",
+          "fact": {
+            "v": "4.1 of 5",
+            "src": "Example Reviews",
+            "url": "https://example.com/reviews/option-c",
+            "date": "2026-10-16"
+          }
+        }
+      ]
+    }
+  ],
+  "unchecked": [
+    "Check Option B's weight on the maker's spec sheet before you buy"
+  ]
+}

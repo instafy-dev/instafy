@@ -44,8 +44,10 @@ export const MANUAL_CI_BASELINES = {
   // provider lane runs the provider core and service unit tests, and the
   // contracts lane runs the local author pseudonym key test, and the CLI lane
   // runs the preview check suites (local-site and site-check), and the Rust
-  // tests aggregate gains a tunnel broker lane (complete tunnel-broker suite).
-  "build.yml": { sha256: "7e44019dd327af802f2d86ecb96a2c7a5de5c3a51f9f801a30ddf77659e7580d" },
+  // tests aggregate gains a tunnel broker lane (complete tunnel-broker suite),
+  // and the CLI lane runs the bound-sites binder suites (packages/instafy-bind
+  // and `instafy bind`).
+  "build.yml": { sha256: "a9976b1d880f0b4e44181e28b201cfa3ee721b62074f907e34780b513fe7ad38" },
   "browser-e2e.yml": { sha256: "5a227820568dfe71f344bd816f77fe41c4d1d8980041937792de09ab956c121b" },
   // The reviewed Auth and Controller DB baselines additionally trigger on the
   // GHCR image-mirror helper (and its lock/test for Auth, the serial-pull helper

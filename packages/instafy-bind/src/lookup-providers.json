@@ -1,0 +1,17 @@
+{
+  "schema": "instafy.lookup-providers@1",
+  "about": "The outside lookups instafy-bind makes (src/lookup.mjs). A page read goes straight to the page's own site; its health is kept per host, so one store that is down never slows the others. INSTAFY_LOOKUP_PROVIDERS adds or replaces providers and chains (e.g. a declared fake provider for an outage drill).",
+  "providers": {
+    "direct": {
+      "protocol": "http-page",
+      "label": "the page's site",
+      "health": "host",
+      "timeout_ms": 20000,
+      "cooldown_s": 300,
+      "fail_threshold": 1
+    }
+  },
+  "chains": {
+    "page": ["direct"]
+  }
+}

@@ -1,0 +1,316 @@
+/* Compare starter: 2-8 options side by side. A table when the page is wide, a list on phones, same order and ids.
+ * You design the content in data.json; keep theme.css and site.js. Restyle only when asked.
+ *
+ * data.json:
+ *   title, lede            the page title and its one-line answer: the verdict, and the biggest unknown about the
+ *                          title's question if there is one ("Option B costs least. None was tested in the rain.")
+ *   sort: [{key, label, dir: "asc"|"desc"}]   the first entry is the person's main criterion: phones show its value
+ *                          on the right of each row. A "Sort by" select appears only with 5 or more options and more
+ *                          than one entry, and only then are rows sorted (fresh values first, then ones that may have
+ *                          changed, then missing ones). Otherwise rows keep the order of "items", before and after a
+ *                          price check: put them in the order the lede talks about them.
+ *   columns: [{key, label, type: "price"|"number"|"text"}]   at most 5; a "price" column can be checked live
+ *   filter (only for a constraint the person stated): {key, max, label: "Under $160", rest: "over $160"}
+ *   items: [{ref: "option:a", name, why (one short line), badge?: "Previous model", note?, facts: {key: fact},
+ *            store: {name, url, readable}, more?: [{label, fact}], sources?: [{name, url}]}]
+ *   unchecked: ["what was not checked", …]     listed once in the footer
+ *   fact: {"v": "$145", "src": "Example Store", "url": "https://…", "date": "2026-10-17", "asof"?: "2026-08-05", "est": false}
+ *   A source you read that does not give the value: the fact without "v" ({"src", "url", "date"}) reads "Not listed ·
+ *   Maker ↗". "Not checked" means nobody checked it ({"note": "what to check"}).
+ * When most of a column comes from one source on one date, the cells show just the value and one line under the list
+ * names the source; so does a row whose own values come from one other source ("Option C (Support and Ride): Fleet
+ * Feet product page ↗"). Any other cell keeps its own caption.
+ * Query: ?sort=<key>&show=all&open=<slug>. Rows: id="row-<slug>", data-ref="<ref>".
+ * SPDX-License-Identifier: AGPL-3.0-only */
+(function () {
+  "use strict";
+  var h = site.h;
+  var TABLE_MIN = 760; // the list's own width (not the screen's): Studio's pane and a phone get the same rule
+  var lastOrder = [];  // row order while a live check runs, so rows never move under the pointer
+
+  site.start({
+    data: "data.json",
+    state: function (data) {
+      return { sort: (data.sort && data.sort[0] && data.sort[0].key) || "", show: data.filter ? "fit" : "all", open: "" };
+    },
+    select: function (ref) { return { open: site.slug(ref) }; },
+    render: render
+  });
+  var wideNow = null;
+  if (window.ResizeObserver) {
+    new ResizeObserver(function () { if (isWide() !== wideNow) site.render(); }).observe(document.querySelector("main") || document.body);
+  } else {
+    window.addEventListener("resize", function () { if (isWide() !== wideNow) site.render(); });
+  }
+  function isWide() {
+    var main = document.querySelector("main") || document.body;
+    var cs = getComputedStyle(main);
+    return main.clientWidth - parseFloat(cs.paddingLeft || 0) - parseFloat(cs.paddingRight || 0) >= TABLE_MIN;
+  }
+
+  function columns(data) { return (data.columns || []).slice(0, 5); }
+  function isPrice(col) { return col && col.type === "price"; }
+  function colOf(data, key) { return columns(data).filter(function (c) { return c.key === key; })[0] || null; }
+  function seedOf(item, col) { return (item.facts || {})[col.key] || null; }
+  /** The value shown for a cell: a live check for the price column, else the seed fact. */
+  function valueOf(item, col) {
+    var seed = seedOf(item, col);
+    if (!isPrice(col)) return seed;
+    var live = site.live(item.ref, col.key);
+    if (live && site.blocked(item.ref)) return seed; // a blocked check keeps the seed value
+    return live || seed;
+  }
+  /** Per column: the source most of its cells share ({src, date, asof, url}), when two or more cells and over half do. */
+  function sharedSources(data, items) {
+    var out = {};
+    columns(data).forEach(function (c) {
+      if (isPrice(c)) return;
+      var count = {};
+      items.forEach(function (i) {
+        var f = seedOf(i, c);
+        if (!f || !f.src || f.est || f.v == null) return;
+        var k = [f.src, f.date || "", f.asof || ""].join("|");
+        count[k] = count[k] || { n: 0, fact: f };
+        count[k].n++;
+      });
+      var best = Object.keys(count).sort(function (a, b) { return count[b].n - count[a].n; })[0];
+      if (best && count[best].n >= 2 && count[best].n * 2 > items.length) out[c.key] = { key: best, fact: count[best].fact };
+    });
+    return out;
+  }
+  function isShared(shared, item, col) {
+    var s = shared[col.key];
+    var f = seedOf(item, col);
+    return !!(s && f && f.src && !f.est && [f.src, f.date || "", f.asof || ""].join("|") === s.key);
+  }
+  /** Per row: the one source its own cells share ({key, fact, labels}), when two or more of its cells outside the
+   * price column come from one source on one date that is not their column's. The line under the list names it once
+   * ("Option C (Support and Ride): Fleet Feet product page ↗ · seen 16 Oct"), so the row is not a stack of links. */
+  function rowSources(data, items, shared) {
+    var out = {};
+    items.forEach(function (i) {
+      var by = {};
+      columns(data).forEach(function (c) {
+        if (isPrice(c) || isShared(shared, i, c)) return;
+        var f = seedOf(i, c);
+        if (!f || !f.src || f.est) return;
+        var k = [f.src, f.date || "", f.asof || ""].join("|");
+        (by[k] = by[k] || { key: k, fact: f, labels: [], values: 0 }).labels.push(c.label);
+        if (f.v != null) by[k].values++;
+      });
+      var keys = Object.keys(by);
+      if (keys.length === 1 && by[keys[0]].labels.length >= 2 && by[keys[0]].values >= 1) out[i.ref] = by[keys[0]];
+    });
+    return out;
+  }
+  function ownRow(rows, item, col) {
+    var r = rows[item.ref];
+    var f = seedOf(item, col);
+    return !!(r && f && f.src && !f.est && !isPrice(col) && [f.src, f.date || "", f.asof || ""].join("|") === r.key);
+  }
+  /** label: say what was not checked ("Price not checked") where no column header or fact label says it. */
+  function cell(item, col, src, label) {
+    if (isPrice(col)) {
+      return site.trust(valueOf(item, col), { price: true, ref: item.ref, intent: "read_offer", store: item.store, seed: seedOf(item, col), label: label });
+    }
+    return site.trust(valueOf(item, col), { shared: isShared(src.cols, item, col) || ownRow(src.rows, item, col), label: label });
+  }
+  function hasMore(item) { return !!(item.note || (item.more && item.more.length) || (item.sources && item.sources.length)); }
+
+  /** The "Sort by" select shows (and rows are sorted) only with 5 or more options and more than one way to sort. */
+  function sortShown(data) { return (data.sort || []).length > 1 && (data.items || []).length >= 5; }
+  /** Sorted by the chosen key: fresh values first, then values that may have changed (an old price never leads), then
+   * rows without one. */
+  function sortItems(data, items, st) {
+    var def = (data.sort || []).filter(function (s) { return s.key === st.sort; })[0] || (data.sort || [])[0];
+    if (!def) return items;
+    var col = colOf(data, def.key) || { key: def.key };
+    var tier = function (i) { var v = valueOf(i, col); return site.num(v) == null ? 2 : site.old(v, isPrice(col)) ? 1 : 0; };
+    return items.slice().sort(function (a, b) {
+      var ta = tier(a), tb = tier(b);
+      if (ta !== tb) return ta - tb;
+      if (ta === 2) return 0;
+      var x = site.num(valueOf(a, col)), y = site.num(valueOf(b, col));
+      return def.dir === "desc" ? y - x : x - y;
+    });
+  }
+  function fits(data, item) {
+    var f = data.filter;
+    if (!f) return true;
+    var n = site.num(valueOf(item, colOf(data, f.key) || { key: f.key }));
+    if (n == null) return true;
+    return (f.max == null || n <= f.max) && (f.min == null || n >= f.min);
+  }
+
+  function render(data, st) {
+    site.head(data);
+    var all = data.items || [];
+    // without a "Sort by" select the rows keep their authored order: nothing moves when a check comes back
+    var items = sortShown(data) ? sortItems(data, all, st) : all.slice();
+    // while a check runs, keep the order the person was looking at; sort once when every check has finished
+    if (site.anyPending(all) && lastOrder.length === all.length) {
+      items = lastOrder.map(function (ref) { return all.filter(function (i) { return i.ref === ref; })[0]; }).filter(Boolean);
+    }
+    lastOrder = items.map(function (i) { return i.ref; });
+    var shown = st.show === "all" ? items : items.filter(function (i) { return fits(data, i); });
+    var hidden = items.length - shown.length;
+    var hasPrice = columns(data).some(isPrice);
+    var cols = sharedSources(data, all);
+    var shared = { cols: cols, rows: rowSources(data, all, cols) };
+
+    // the one control row: the sort (5+ options) and the one filter on the left, the one primary button on the right
+    var bar = document.getElementById("bar");
+    bar.replaceChildren();
+    if (sortShown(data)) {
+      bar.appendChild(site.selectField("sort", "Sort by", data.sort.map(function (s) { return { value: s.key, label: s.label }; }), st.sort,
+        function (v) { site.setState({ sort: v }); }));
+    }
+    if (data.filter) {
+      bar.appendChild(site.seg("show", "Show", [{ value: "all", label: "All" }, { value: "fit", label: data.filter.label }], st.show,
+        function (v) { site.setState({ show: v }); }));
+    }
+    if (hasPrice) site.append(bar, site.checkAll(all));
+    bar.hidden = !bar.firstChild;
+
+    var list = document.getElementById("list");
+    list.replaceChildren();
+    if (!items.length) {
+      list.appendChild(site.empty("No options yet.", null, "Ask in chat to add some."));
+    } else {
+      var stores = hasPrice ? site.priceNotice(all) : null;
+      wideNow = isWide();
+      var wrap = h("div", { "class": "stack" }, wideNow ? table(data, shown, st, shared) : cards(data, shown, st, shared));
+      var lines = [];
+      if (hidden > 0) {
+        lines.push(h("p", { "class": "cap hidden-line" }, hidden + " more " + (data.filter.rest || "hidden") + " · ",
+          h("button", { "class": "link-btn", text: "Show", attrs: { type: "button", "data-key": "show-all" }, on: { click: function () { site.setState({ show: "all" }); } } })));
+      }
+      var missing = sortShown(data) ? missingLine(data, shown, st) : null;
+      if (missing) lines.push(missing);
+      var from = sharedLine(data, shared, all);
+      if (from) lines.push(from);
+      if (lines.length) wrap.appendChild(h("div", { "class": "stack tight" }, lines));
+      if (stores) wrap.appendChild(stores);
+      list.appendChild(wrap);
+    }
+
+    var sources = [];
+    items.forEach(function (i) {
+      columns(data).forEach(function (c) { sources = sources.concat(site.sourcesOf([(i.facts || {})[c.key]])); });
+      (i.sources || []).forEach(function (s) { sources.push(s); });
+    });
+    // a source the line under the list already names is not named again under "Sources"
+    var named = [];
+    Object.keys(cols).forEach(function (k) { named.push(cols[k].fact); });
+    Object.keys(shared.rows).forEach(function (k) { named.push(shared.rows[k].fact); });
+    sources = sources.filter(function (s) {
+      return !named.some(function (f) { return f.src === s.name || (site.host(f.url) && site.host(f.url) === site.host(s.url)); });
+    });
+    // the footer belongs to a list: an empty page has nothing to confirm
+    site.notes(items.length ? data.unchecked : [], items.length ? sources : []);
+  }
+
+  /** "2 without a price are listed last." when the sort key is missing for some rows. */
+  function missingLine(data, items, st) {
+    var def = (data.sort || []).filter(function (s) { return s.key === st.sort; })[0] || (data.sort || [])[0];
+    if (!def) return null;
+    var col = colOf(data, def.key) || { key: def.key, label: def.key };
+    var n = items.filter(function (i) { return site.num(valueOf(i, col)) == null; }).length;
+    if (!n || n === items.length) return null;
+    return h("p", { "class": "cap", text: n + " without " + (/^[aeiou]/i.test(col.label) ? "an " : "a ") + String(col.label).toLowerCase() + (n === 1 ? " is" : " are") + " listed last." });
+  }
+  /** "Support and Heel drop: Running Shoes Guru ↗ · seen 16 Oct", plus ", unless a value says otherwise" when a cell
+   * of those columns has its own source. */
+  function sharedLine(data, src, items) {
+    var groups = {};
+    var and = function (list) { return list.length > 1 ? list.slice(0, -1).join(", ") + " and " + list[list.length - 1] : list[0]; };
+    columns(data).forEach(function (c) {
+      var s = src.cols[c.key];
+      if (!s) return;
+      var g = groups[s.key] = groups[s.key] || { fact: s.fact, labels: [], others: false };
+      g.labels.push(c.label);
+      // a value with its own source that no row line names keeps its own caption: "unless a value says otherwise"
+      if (items.some(function (i) { var f = seedOf(i, c); return f && f.src && f.v != null && !isShared(src.cols, i, c) && !ownRow(src.rows, i, c); })) g.others = true;
+    });
+    var out = Object.keys(groups).map(function (k) {
+      var g = groups[k];
+      var when = site.seen(g.fact);
+      return h("p", { "class": "cap" }, and(g.labels) + ": ", site.link(g.fact.url, g.fact.src), when ? [" · ", h("span", { "class": "nowrap", text: when })] : "", g.others ? ", unless a value says otherwise" : "");
+    });
+    items.forEach(function (i) {
+      var r = src.rows[i.ref];
+      if (!r) return;
+      var when = site.seen(r.fact);
+      out.push(h("p", { "class": "cap" }, i.name + " (" + and(r.labels) + "): ", site.link(r.fact.url, r.fact.src), when ? [" · ", h("span", { "class": "nowrap", text: when })] : ""));
+    });
+    return out.length ? h("div", null, out) : null;
+  }
+
+  function nameBlock(item) {
+    return [
+      h("div", { "class": "name-line" }, h("span", { "class": "name", text: item.name }), item.badge ? h("span", { "class": "badge", text: item.badge }) : null),
+      item.why ? h("p", { "class": "cap", text: item.why }) : null
+    ];
+  }
+  function detailsButton(item, st) {
+    if (!hasMore(item)) return null;
+    var open = st.open === site.slug(item.ref);
+    return h("button", {
+      "class": "btn quiet more-btn",
+      text: open ? "Hide details" : "Details",
+      attrs: { type: "button", "aria-expanded": open ? "true" : "false", "aria-label": (open ? "Hide details for " : "Details for ") + item.name, "data-key": "details:" + item.ref },
+      on: { click: function () { site.setState({ open: open ? "" : site.slug(item.ref) }); } }
+    });
+  }
+  function more(item) {
+    var facts = (item.more || []).slice(0, 8);
+    var linked = {};
+    facts.forEach(function (f) { if (f.fact && f.fact.url) linked[f.fact.url] = 1; });
+    var sources = (item.sources || []).filter(function (s) { return s && !linked[s.url]; });
+    return h("div", { "class": "more" },
+      item.note ? h("p", { text: item.note }) : null,
+      facts.length ? h("dl", { "class": "facts" }, facts.map(function (f) {
+        return h("div", null, h("dt", { text: f.label }), h("dd", null, site.trust(f.fact)));
+      })) : null,
+      sources.length ? h("p", { "class": "cap" }, "Sources: ", sources.map(function (s, i) {
+        return [i ? ", " : "", site.link(s.url, s.name)];
+      })) : null);
+  }
+
+  function table(data, items, st, shared) {
+    var cols = columns(data);
+    var anyMore = items.some(hasMore);
+    var head = h("tr", null, h("th", { text: "Option", attrs: { scope: "col" } }),
+      cols.map(function (c) { return h("th", { "class": c.type === "text" ? null : "num", text: c.label, attrs: { scope: "col" } }); }),
+      anyMore ? h("th", { attrs: { scope: "col" } }, h("span", { "class": "sr-only", text: "Details" })) : null);
+    var body = h("tbody");
+    items.forEach(function (item) {
+      body.appendChild(h("tr", { attrs: site.rowAttrs(item.ref) },
+        h("td", null, nameBlock(item)),
+        cols.map(function (c) { return h("td", { "class": c.type === "text" ? null : "num" }, cell(item, c, shared)); }),
+        anyMore ? h("td", { "class": "act" }, detailsButton(item, st)) : null));
+      if (st.open === site.slug(item.ref) && hasMore(item)) {
+        body.appendChild(h("tr", { "class": "more-row" }, h("td", { attrs: { colspan: cols.length + 1 + (anyMore ? 1 : 0) } }, more(item))));
+      }
+    });
+    return h("div", { "class": "table-wrap" }, h("table", { "class": "table" }, h("thead", null, head), body));
+  }
+
+  /** Phones: one list, a row per option. The sorted value (with its caption) sits on the right, so you compare by
+   * scanning down the right edge; the other columns follow as facts in the same order on every row. */
+  function cards(data, items, st, shared) {
+    var cols = columns(data);
+    var sortCol = colOf(data, st.sort) || colOf(data, ((data.sort || [])[0] || {}).key);
+    return h("ol", { "class": "list cards" }, items.map(function (item) {
+      var open = st.open === site.slug(item.ref);
+      var rest = cols.filter(function (c) { return c !== sortCol; });
+      return h("li", { attrs: site.rowAttrs(item.ref) },
+        h("div", { "class": "card-head" },
+          h("div", null, nameBlock(item)),
+          sortCol ? h("div", { "class": "sortv" }, cell(item, sortCol, shared, sortCol.label)) : null),
+        rest.length ? h("dl", { "class": "facts" }, rest.map(function (c) { return h("div", null, h("dt", { text: c.label }), h("dd", null, cell(item, c, shared))); })) : null,
+        hasMore(item) ? h("div", { "class": "actions" }, detailsButton(item, st)) : null,
+        open && hasMore(item) ? more(item) : null);
+    }));
+  }
+})();

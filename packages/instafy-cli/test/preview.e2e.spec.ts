@@ -290,7 +290,7 @@ function writeState(home: string, previews: unknown[]) {
 }
 
 function readState(home: string): {
-  previews: Array<{ previewId: string; pid: number; localPort: number; workdir: string }>;
+  previews: Array<{ previewId: string; pid: number; localPort: number; workdir: string; hostSuffix?: string }>;
 } {
   return JSON.parse(fs.readFileSync(path.join(home, ".instafy", "cli-preview-state.json"), "utf8"));
 }
@@ -642,6 +642,9 @@ describe("instafy preview", () => {
     const result = await execCli(openArgs({ projectId, controllerUrl: controller.url, port: sitePort, rathole: rathole.file }), home);
 
     expect(result.code, result.stderr).toBe(0);
+    // A tokenless local site (`instafy bind serve --preview`) accepts the capability host only on this exact domain,
+    // which it reads from the state file: the preview id alone is not a secret.
+    expect(readState(home).previews[0]!.hostSuffix).toBe("preview.localhost:8083");
     const output = JSON.parse(result.stdout) as Record<string, unknown>;
     expect(output).toEqual({
       previewId: "preview-1",

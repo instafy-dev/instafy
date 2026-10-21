@@ -619,6 +619,16 @@ proxy and stream sender, the loopback MCP proxy and the origin, at their default
 `PROXY_BASE_URL`, `INSTAFY_PROVIDER_HOST_URL`, `INSTAFY_PERSONAL_BROWSER_CONTROL_URL`) move them to. Add more with
 `INSTAFY_PREVIEW_DENY_PORTS` (comma separated); an entry that is not a port refuses every port until it is fixed.
 
+### Bound sites: `instafy bind`
+
+`instafy bind serve <site> --port <port> --preview --detach`, then `instafy preview open --port <port>`, shows a
+bound site in the card: a static page plus `bound.json` whose script buttons run small handlers and stream checked
+records back to every open viewer. `--preview` drops the viewer token and answers only localhost and the capability
+host of the preview opened for that port, on exactly the domain `preview open` recorded. "Ask Octo" buttons are asks
+the page hands to Studio as the clicker's own message; the binder reads no Instafy login. Also `bind init`,
+`doctor`, `try`, `command`, `confirm`, and `instafy web cite <url>` for reading one public page politely. Details:
+[Bound-Sites.md](Bound-Sites.md).
+
 ## AI-readable diagnostics
 
 `instafy diagnostics` exposes existing, user-authorized diagnostic records as stable JSON for

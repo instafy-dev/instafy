@@ -67,9 +67,23 @@ test("npm artifact installs and runs without workspace dependencies", () => {
     const packResult = JSON.parse(packOutput.slice(jsonStart));
     const tarball = path.join(packDirectory, packResult[0].filename);
 
+    const packedFiles = packResult[0].files.map(({ path: filePath }) => filePath).sort();
     assert.deepEqual(
-      packResult[0].files.map(({ path: filePath }) => filePath).sort(),
+      packedFiles.filter((filePath) => !filePath.startsWith("dist/bind/")),
       ["LICENSE", "README.md", "bin/instafy.js", "dist/cli.js", "package.json"],
+    );
+    // The bound-sites binder ships inside the CLI (zero dependencies, copied at build time).
+    // `instafy bind init <dir> --starter <name>` copies its pages from dist/bind/src/starters.
+    for (const required of [
+      "dist/bind/bin/instafy-bind.mjs", "dist/bind/src/server.mjs", "dist/bind/client/bind-client.js", "dist/bind/LICENSE",
+      "dist/bind/src/starters/theme.css", "dist/bind/src/starters/site.js", "dist/bind/src/starters/compare/index.html",
+      "dist/bind/src/starters/checklist/data.json", "dist/bind/src/starters/handlers/read_offer.mjs",
+    ]) {
+      assert.ok(packedFiles.includes(required), `${required} is packed`);
+    }
+    assert.ok(
+      packedFiles.filter((filePath) => filePath.startsWith("dist/bind/")).every((filePath) => /^dist\/bind\/(bin|src|client)\/|^dist\/bind\/LICENSE$/.test(filePath)),
+      "only the binder's bin, src and client are packed (no tests or examples)",
     );
 
     run("npm", ["init", "--yes"], installDirectory);
@@ -131,6 +145,13 @@ test("npm artifact installs and runs without workspace dependencies", () => {
       process.execPath,
       [installedCli, "--help"],
       installDirectory,
+    );
+    // `instafy bind` runs the bundled binder from the installed package (what an Octo runtime has).
+    assert.match(run(process.execPath, [installedCli, "bind", "--help"], installDirectory), /instafy-bind serve <dir\|gallery>/);
+    run(process.execPath, [installedCli, "bind", "init", "site"], installDirectory);
+    assert.match(
+      run(process.execPath, [installedCli, "bind", "doctor", "site"], installDirectory),
+      /site: hello -> script handlers\/hello\.mjs/,
     );
     assert.match(installedHelp, /Usage: instafy/);
     assert.match(installedHelp, /diagnostics/);
