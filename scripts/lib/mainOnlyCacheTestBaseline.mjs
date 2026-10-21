@@ -42,14 +42,16 @@ function inJob(source, key, rewrite) {
 }
 
 const inverses = {
+  // Eleven Rust children: the ten reviewed lanes plus the tunnel broker test lane,
+  // added after the change with the same restore-only and main-only save steps.
   "build.yml": (source) => {
     source = replaceExactly(source,
       `      - name: Restore cargo cache without saving\n${restoreIf}`,
-      `      - name: Restore cargo cache without saving\n${previousRestoreIf}`, 10, "Rust restore-only condition");
+      `      - name: Restore cargo cache without saving\n${previousRestoreIf}`, 11, "Rust restore-only condition");
     source = replaceExactly(source,
       `      - name: Restore cargo cache\n${saveIf}`,
-      `      - name: Restore cargo cache\n${previousSaveIf}`, 10, "Rust main-only save condition");
-    source = replaceExactly(source, cargoPaths, previousCargoPaths, 20, "Rust cargo cache paths");
+      `      - name: Restore cargo cache\n${previousSaveIf}`, 11, "Rust main-only save condition");
+    source = replaceExactly(source, cargoPaths, previousCargoPaths, 22, "Rust cargo cache paths");
     source = replaceExactly(source,
       "      - name: Restore Supabase Postgres image cache without saving\n"
         + "        if: github.ref != 'refs/heads/main'\n"

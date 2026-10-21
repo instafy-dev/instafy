@@ -30,7 +30,9 @@ const suites = [
   ['proxy', 'OpenAI proxy', 'openai-proxy-server'],
   ['origin', 'origin server', 'origin-http-server'],
   ['git', 'git service', 'git-service'],
-].map(([suffix, name, pkg]) => ({ key: `rust-test-${suffix}`, label: `public-rust-test-${suffix}`, name: `Rust test ${name}`, pkg }));
+  // The broker's suite is plain Cargo: no workspace Node install or hosted disk cleanup.
+  ['broker', 'tunnel broker', 'tunnel-broker', false],
+].map(([suffix, name, pkg, node = true]) => ({ key: `rust-test-${suffix}`, label: `public-rust-test-${suffix}`, name: `Rust test ${name}`, pkg, node }));
 const aggregates = [
   { key: 'rust', label: 'public-rust-check-aggregate', name: 'Rust packages', children: checks },
   { key: 'rust-tests', label: 'public-rust-test-aggregate', name: 'Rust tests', children: suites },
@@ -111,8 +113,8 @@ test('the actual inline aggregates reject every failed, cancelled, skipped, miss
   }
 });
 
-test('all twelve selectors are independently default-off and preserve the Ubuntu hosted fallback', () => {
-  assert.equal((source.match(/vars\.CI_RUST_SELF_HOSTED/g) ?? []).length, 12);
+test('all thirteen selectors are independently default-off and preserve the Ubuntu hosted fallback', () => {
+  assert.equal((source.match(/vars\.CI_RUST_SELF_HOSTED/g) ?? []).length, 13);
   const labels = new Set();
   for (const item of jobs) for (const event of ['pull_request', 'push']) {
     const github = context(event), trust = event === 'pull_request' ? 'pr' : 'main';
@@ -126,7 +128,7 @@ test('all twelve selectors are independently default-off and preserve the Ubuntu
       assert.notEqual(route(item.key, { ...github, [field]: '2002' }, 'true').labels[3], route(item.key, github, 'true').labels[3]);
     }
   }
-  assert.equal(labels.size, 12);
+  assert.equal(labels.size, 13);
 });
 
 test('public visibility, forks, unrelated repositories and unsupported events cannot select a self-hosted Rust job', () => {
@@ -143,7 +145,7 @@ test('public visibility, forks, unrelated repositories and unsupported events ca
   }
 });
 
-test('ten bounded children independently check out exact source and retain native stable Rust', () => {
+test('eleven bounded children independently check out exact source and retain native stable Rust', () => {
   for (const item of children) {
     const text = job(item.key);
     assert.match(text, new RegExp(`^    name: ${item.name}$`, 'mu'));
@@ -166,7 +168,7 @@ test('ten bounded children independently check out exact source and retain nativ
 });
 
 test('only self-hosted Rust children install the fixed missing native packages within the original thirty-minute job', () => {
-  assert.equal((source.match(/      - name: Install scoped Rust native prerequisites/g) ?? []).length,10);
+  assert.equal((source.match(/      - name: Install scoped Rust native prerequisites/g) ?? []).length,11);
   const commands=[];
   for(const item of children){
     const text=job(item.key),install=step(item.key,'Install scoped Rust native prerequisites');
@@ -188,16 +190,17 @@ test('only self-hosted Rust children install the fixed missing native packages w
   for(const item of aggregates)assert.doesNotMatch(job(item.key),/apt-get|Install scoped Rust native prerequisites/u);
 });
 
-test('the full reviewed seven check and ten test commands and working directories are hash-bound', () => {
+test('the full reviewed seven check and twelve test commands and working directories are hash-bound', () => {
   // Exact normalized command order + working-directory from build.yml at f20002b,
   // plus the reviewed runtime-agent proxy_retry_budget and read-reference selectors,
   // the proxy_retry_budget runs for gpt-5.6-sol and gpt-5.5, and the runtime
   // provider core and service unit tests in the provider check, plus the inert
-  // native_compaction selector for the real proxy's ChatGPT and API-key paths.
+  // native_compaction selector for the real proxy's ChatGPT and API-key paths,
+  // plus the complete tunnel-broker suite in its own lane.
   // Commands are literal steps, not a matrix/shell fragment that can drop a crate.
   for (const [list, stepName, hash, expectedCount] of [
     [checks, 'Check public Rust package', '7ab805f6d9f99e7d6cae9fd5ab924ebb4cc3612d07690f954330bbc0f6381608', 7],
-    [suites, 'Run database-free Rust test suite', 'efa4f77121bf47700befffc23a65eb0d864b5d5680e1da144b6a47d29aa99ced', 11],
+    [suites, 'Run database-free Rust test suite', 'cb16802c4356a8010f1c099d8754ccd4e9c11506ed35e1e928e43e0d1606df57', 12],
   ]) {
     const inventory = list.flatMap(item => {
       const part = step(item.key, stepName);
@@ -216,7 +219,10 @@ test('the full reviewed seven check and ten test commands and working directorie
     assert.equal(inventory.length, expectedCount);
     assert.equal(createHash('sha256').update(JSON.stringify(inventory)).digest('hex'), hash);
   }
-  assert.equal(children.reduce((sum, item) => sum + (job(item.key).match(/^          cargo (?:check|test) /gmu) ?? []).length, 0), 16);
+  assert.equal(children.reduce((sum, item) => sum + (job(item.key).match(/^          cargo (?:check|test) /gmu) ?? []).length, 0), 17);
+  // The whole tunnel-broker workspace (broker and its types crate), locked like its check lane.
+  assert.match(step('rust-test-broker', 'Run database-free Rust test suite'),
+    /run: \|\n          cargo test --locked --manifest-path packages\/tunnel-broker\/Cargo.toml\n/u);
   const agent = step('rust-test-agent', 'Run database-free Rust test suite');
   assert.match(agent, /--no-run\n          cargo test .* --lib --test controller_client --test proxy_retry_budget -- --test-threads=1/u);
   assert.match(agent, /cargo test --manifest-path packages\/runtime-agent\/Cargo.toml --test proxy_integration codex_read_reference_ -- --test-threads=1\n/u);
@@ -225,7 +231,7 @@ test('the full reviewed seven check and ten test commands and working directorie
 });
 
 test('test children preserve unfiltered frozen Node20 installation and host-only disk cleanup', () => {
-  for (const item of suites) {
+  for (const item of suites.filter(item => item.node)) {
     const text = job(item.key);
     assert.match(text, /pnpm\/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1/u);
     assert.match(text, /node-version: "20"/u);
@@ -236,7 +242,7 @@ test('test children preserve unfiltered frozen Node20 installation and host-only
     assert.match(disk, /if: runner\.environment == 'github-hosted'/u);
     assert.match(disk, /sudo rm -rf \/usr\/share\/dotnet \/usr\/local\/lib\/android \/opt\/ghc \/opt\/hostedtoolcache\/CodeQL\n          df -h \//u);
   }
-  for (const item of checks) assert.doesNotMatch(job(item.key), /pnpm install|Free runner disk space/u);
+  for (const item of [...checks, ...suites.filter(item => !item.node)]) assert.doesNotMatch(job(item.key), /pnpm install|Free runner disk space/u);
 });
 
 test('only the runtime-agent Cargo step defaults self-hosted Linux linking, with no job-wide environment mutation', () => {
@@ -334,13 +340,13 @@ test('Rust children save cargo caches only from hosted main; self-hosted runs an
     const cargoStep = item.key.startsWith('rust-check-') ? 'Check public Rust package' : 'Run database-free Rust test suite';
     assert.ok(job(item.key).indexOf(restore) < job(item.key).indexOf(step(item.key, cargoStep)));
   }
-  assert.equal((source.match(/uses: actions\/cache\/restore@/gu) ?? []).length, 11);
-  // Ten Rust saves plus the migration-image save; no pull request reaches an actions/cache step that saves.
-  assert.equal(assertNoPullRequestCacheSave(source, 'build.yml'), 11);
+  assert.equal((source.match(/uses: actions\/cache\/restore@/gu) ?? []).length, 12);
+  // Eleven Rust saves plus the migration-image save; no pull request reaches an actions/cache step that saves.
+  assert.equal(assertNoPullRequestCacheSave(source, 'build.yml'), 12);
 });
 
 test('the restore-only mitigation preserves every other byte of the reviewed Build workflow', () => {
-  assert.equal((source.match(/ -o DPkg::Lock::Timeout=120/g) ?? []).length,10);
+  assert.equal((source.match(/ -o DPkg::Lock::Timeout=120/g) ?? []).length,11);
   // Start from the bytes before main-only saves and trimmed cargo paths (their
   // finite inverse is exact), then undo the separately tested cancelled-main
   // aggregate guards as well.
@@ -357,10 +363,11 @@ test('the restore-only mitigation preserves every other byte of the reviewed Bui
   // proxy_retry_budget and read-reference selectors, the code-mode host build, the
   // per-model proxy_retry_budget runs, the runtime provider core and service unit
   // tests, CLI git wrapper suite, local author pseudonym key test and inert native
-  // compaction selector and CLI preview check suites: retains all functional commands,
-  // aggregate guards, routing, permissions and other jobs.
+  // compaction selector and CLI preview check suites, and the tunnel broker test lane
+  // with its Rust tests aggregate entry: retains all functional commands, aggregate
+  // guards, routing, permissions and other jobs.
   assert.equal(createHash('sha256').update(normalized).digest('hex'),
-    '5aa6e094118786c51313208d08d38a11de724d2008c552747c8f8a21105315f5');
+    '56e31ea8ce3a3117578eb276e48c3cf84666dca52ad8d087e16b81902ae1eb9b');
 });
 
 test('actual inline runner qualification rejects wrong native identity, ambient private env and missing compilers', () => {
