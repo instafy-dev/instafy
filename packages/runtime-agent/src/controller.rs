@@ -644,6 +644,8 @@ impl ControllerClient {
         });
         if !self.lease_wait.is_zero() {
             payload["wait_ms"] = json!(self.lease_wait.as_millis() as u64);
+            // A held poll re-checks at least this often, as this runtime polled.
+            payload["poll_interval_ms"] = json!(self.poll_interval.as_millis() as u64);
         }
 
         // A controller may hold the poll for up to `lease_wait`; the usual

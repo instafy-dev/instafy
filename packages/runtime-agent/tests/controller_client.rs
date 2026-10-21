@@ -696,6 +696,7 @@ async fn controller_client_registers_and_leases() {
     );
     // A runtime configured not to wait polls the way it always did.
     assert!(lease_request.body.get("wait_ms").is_none());
+    assert!(lease_request.body.get("poll_interval_ms").is_none());
 
     let heartbeat_request = &captured.heartbeat[0];
     assert_eq!(
@@ -1254,4 +1255,8 @@ async fn controller_client_asks_the_controller_to_wait_for_work() {
 
     let captured = shared.lock().unwrap();
     assert_eq!(captured.lease[0].body["wait_ms"].as_u64(), Some(3_000));
+    assert_eq!(
+        captured.lease[0].body["poll_interval_ms"].as_u64(),
+        Some(config.poll_interval.as_millis() as u64)
+    );
 }

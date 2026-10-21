@@ -425,17 +425,24 @@ fn spawn_waiting_lease(
     runtime_id: Uuid,
     wait_ms: u64,
 ) -> tokio::task::JoinHandle<anyhow::Result<(StatusCode, JsonValue, Duration)>> {
+    spawn_lease_with_body(
+        state,
+        project_id,
+        runtime_id,
+        json!({ "max": 1, "lease_seconds": 120, "wait_ms": wait_ms }),
+    )
+}
+
+fn spawn_lease_with_body(
+    state: &AppState,
+    project_id: Uuid,
+    runtime_id: Uuid,
+    body: JsonValue,
+) -> tokio::task::JoinHandle<anyhow::Result<(StatusCode, JsonValue, Duration)>> {
     let state = state.clone();
     tokio::spawn(async move {
         let started = std::time::Instant::now();
-        let (status, body) = lease_with_body(
-            &state,
-            &project_id,
-            &runtime_id,
-            None,
-            json!({ "max": 1, "lease_seconds": 120, "wait_ms": wait_ms }),
-        )
-        .await?;
+        let (status, body) = lease_with_body(&state, &project_id, &runtime_id, None, body).await?;
         Ok((status, body, started.elapsed()))
     })
 }
@@ -533,6 +540,92 @@ async fn a_waiting_lease_poll_frees_its_connection_and_answers_empty_after_its_w
             (StatusCode::OK, json!({ "jobs": [], "waited": true }))
         );
         assert!(elapsed >= Duration::from_millis(700), "took {elapsed:?}");
+        Ok(())
+    })
+    .await
+}
+
+/// Queued work this runtime may not take yet still holds a poll that asked to
+/// wait, instead of sending the runtime back to polling blind. Here another
+/// runtime is pinned, so the untargeted job is counted but not leased; a run
+/// event of the project ends the hold early.
+#[tokio::test]
+async fn a_poll_that_leases_nothing_is_still_held() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("a_poll_that_leases_nothing_is_still_held").await?;
+    let project_id = Uuid::new_v4();
+    let fixture = SharedDbFixture {
+        projects: vec![project_id],
+        ..SharedDbFixture::default()
+    };
+    with_shared_db_fixture(fixture, async {
+        seed_project(&pool, &project_id).await?;
+        let preferred = add_runtime(&pool, &project_id, Some(5)).await?;
+        let other = add_runtime(&pool, &project_id, Some(5)).await?;
+        let state = build_test_state(pool.clone(), hosted_config("lease-wait-unleasable"));
+        state
+            .runtime_preferences
+            .set(project_id, Some(preferred), Some("test".to_string()), None)
+            .await;
+        queue_job(&pool, &project_id, None, json!({})).await?;
+
+        let poll = spawn_waiting_lease(&state, project_id, other, 8_000);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        crate::publish_controller_event(
+            &state.events,
+            "run.completed",
+            Some(project_id),
+            None,
+            None,
+            None,
+            json!({}),
+        );
+
+        let (status, body, elapsed) = poll.await??;
+        assert_eq!(
+            (status, body),
+            (StatusCode::OK, json!({ "jobs": [], "waited": true }))
+        );
+        assert!(
+            elapsed >= Duration::from_millis(350) && elapsed < Duration::from_millis(1_500),
+            "held until the run event, took {elapsed:?}"
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// A runtime that polls faster than the default re-check has its held poll
+/// re-checked at its own interval, so work queued without a run event is
+/// still found no later than its own polling would have found it.
+#[tokio::test]
+async fn a_held_poll_rechecks_at_the_runtimes_own_poll_interval() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("a_held_poll_rechecks_at_the_runtimes_own").await?;
+    let project_id = Uuid::new_v4();
+    let fixture = SharedDbFixture {
+        projects: vec![project_id],
+        ..SharedDbFixture::default()
+    };
+    with_shared_db_fixture(fixture, async {
+        seed_project(&pool, &project_id).await?;
+        let runtime_id = add_runtime(&pool, &project_id, Some(5)).await?;
+        let state = build_test_state(pool.clone(), hosted_config("lease-wait-recheck"));
+
+        let poll = spawn_lease_with_body(
+            &state,
+            project_id,
+            runtime_id,
+            json!({ "max": 1, "lease_seconds": 120, "wait_ms": 8_000, "poll_interval_ms": 300 }),
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Queued without a run event: only a re-check can find it.
+        queue_job(&pool, &project_id, Some(&runtime_id), json!({})).await?;
+
+        let (status, body, elapsed) = poll.await??;
+        assert_eq!(
+            (status, body),
+            (StatusCode::OK, json!({ "jobs": [], "waited": true }))
+        );
+        assert!(elapsed < Duration::from_millis(1_200), "took {elapsed:?}");
         Ok(())
     })
     .await

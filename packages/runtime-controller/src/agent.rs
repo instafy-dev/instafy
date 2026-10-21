@@ -76,6 +76,10 @@ pub(crate) struct AgentLeasePayload {
     /// between polls. Absent from older agents, which keep polling.
     #[serde(default)]
     wait_ms: Option<u64>,
+    /// The runtime's own poll interval, so a held poll re-checks at least as
+    /// often as the runtime used to poll.
+    #[serde(default)]
+    poll_interval_ms: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -91,22 +95,31 @@ pub(crate) struct AgentLeaseResponse {
 /// The longest a lease poll is held, well under the runtime agent's request
 /// timeout.
 const LEASE_WAIT_MAX: std::time::Duration = std::time::Duration::from_secs(10);
-/// A held poll still re-checks this often, the old poll interval, so work that
-/// is queued without a run event is found no later than before.
+/// A held poll still re-checks this often, the default poll interval, so work
+/// queued without a run event is found no later than before. A runtime that
+/// polls faster has its poll re-checked at its own interval, down to
+/// [`LEASE_WAIT_RECHECK_MIN`].
 const LEASE_WAIT_RECHECK: std::time::Duration = std::time::Duration::from_secs(2);
+const LEASE_WAIT_RECHECK_MIN: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// Holds an idle lease poll, with no pool connection, until a re-check finds
-/// that there may be work or the wait ends. It re-checks on each run event of
-/// the project and every [`LEASE_WAIT_RECHECK`]. A held poll never leases: the
+/// One lease poll that may be held: when it ends, how often it re-checks, and
+/// what wakes it.
+struct LeaseHold {
+    deadline: tokio::time::Instant,
+    recheck: std::time::Duration,
+    waker: std::sync::Arc<tokio::sync::Notify>,
+}
+
+/// Holds a lease poll, with no pool connection, until a re-check finds that
+/// there may be work or the wait ends. It re-checks on each run event of the
+/// project and every [`LeaseHold::recheck`]. A held poll never leases: the
 /// runtime polls again at once and leases in a fresh request. A job leased at
 /// the end of a long request could go to a runtime that already gave up on it,
 /// and would stay leased to nobody until the lease expired.
-#[allow(clippy::too_many_arguments)]
-async fn hold_idle_lease_poll<'a>(
+async fn hold_lease_poll<'a>(
     state: &AppState,
-    waker: &'a tokio::sync::Notify,
+    hold: &'a LeaseHold,
     mut notified: std::pin::Pin<&mut tokio::sync::futures::Notified<'a>>,
-    deadline: tokio::time::Instant,
     project_id: &Uuid,
     runtime_id: &Uuid,
     token_lease_id: Option<Uuid>,
@@ -114,17 +127,17 @@ async fn hold_idle_lease_poll<'a>(
 ) -> Result<AgentLeaseResponse, (StatusCode, Json<ApiError>)> {
     loop {
         let now = tokio::time::Instant::now();
-        if now >= deadline {
+        if now >= hold.deadline {
             break;
         }
-        let recheck = deadline.min(now + LEASE_WAIT_RECHECK);
+        let recheck = hold.deadline.min(now + hold.recheck);
         if tokio::time::timeout_at(recheck, notified.as_mut())
             .await
             .is_ok()
         {
             // Registered again before the re-check, so an event between the
             // two still counts.
-            notified.set(waker.notified());
+            notified.set(hold.waker.notified());
             notified.as_mut().enable();
         }
         let connection = state
@@ -869,6 +882,7 @@ pub(crate) async fn agent_lease(
         resources,
         supports_workspace_token,
         wait_ms,
+        poll_interval_ms,
     } = payload;
 
     let token = extract_agent_token(&headers)?;
@@ -987,39 +1001,22 @@ pub(crate) async fn agent_lease(
     // queued just after its last poll is found at once rather than up to a
     // whole poll interval later. Registering for the wake before the first
     // idle check means a job committed in between still wakes it.
-    let wait = wait_ms
+    let lease_hold = wait_ms
         .map(|ms| std::time::Duration::from_millis(ms).min(LEASE_WAIT_MAX))
-        .filter(|wait| !wait.is_zero());
-    if let Some(wait) = wait {
-        let deadline = tokio::time::Instant::now() + wait;
-        let waker = state.events.lease_waker(project_id);
-        let mut notified = std::pin::pin!(waker.notified());
-        notified.as_mut().enable();
-        if idle_lease_poll_finds_no_work(
-            &state,
-            &connection,
-            &project_id,
-            &runtime_id,
-            token_lease_id,
-            token_runtime_generation,
-        )
-        .await?
-        {
-            drop(connection);
-            let answer = hold_idle_lease_poll(
-                &state,
-                &waker,
-                notified,
-                deadline,
-                &project_id,
-                &runtime_id,
-                token_lease_id,
-                token_runtime_generation,
-            )
-            .await?;
-            return Ok(Json(answer));
-        }
-    } else if idle_lease_poll_finds_no_work(
+        .filter(|wait| !wait.is_zero())
+        .map(|wait| LeaseHold {
+            deadline: tokio::time::Instant::now() + wait,
+            recheck: poll_interval_ms
+                .map(std::time::Duration::from_millis)
+                .unwrap_or(LEASE_WAIT_RECHECK)
+                .clamp(LEASE_WAIT_RECHECK_MIN, LEASE_WAIT_RECHECK),
+            waker: state.events.lease_waker(project_id),
+        });
+    let mut notified = std::pin::pin!(lease_hold.as_ref().map(|hold| hold.waker.notified()));
+    if let Some(armed) = notified.as_mut().as_pin_mut() {
+        armed.enable();
+    }
+    if idle_lease_poll_finds_no_work(
         &state,
         &connection,
         &project_id,
@@ -1029,6 +1026,20 @@ pub(crate) async fn agent_lease(
     )
     .await?
     {
+        if let (Some(hold), Some(armed)) = (lease_hold.as_ref(), notified.as_mut().as_pin_mut()) {
+            drop(connection);
+            let answer = hold_lease_poll(
+                &state,
+                hold,
+                armed,
+                &project_id,
+                &runtime_id,
+                token_lease_id,
+                token_runtime_generation,
+            )
+            .await?;
+            return Ok(Json(answer));
+        }
         info!(project_id = %project_id, "agent lease returned no jobs");
         return Ok(Json(AgentLeaseResponse {
             jobs: Vec::new(),
@@ -1154,6 +1165,27 @@ pub(crate) async fn agent_lease(
         .commit()
         .await
         .map_err(|error| internal_error(format!("failed to commit agent lease: {error}")))?;
+
+    // Nothing this runtime may take yet, though the idle check counted queued
+    // work (a plan worker waiting for a slot, untargeted work while another
+    // runtime is pinned) or its last_seen was due. A runtime that asked to wait
+    // is held as an idle one would be, rather than sent back to polling blind.
+    if jobs.is_empty() {
+        if let (Some(hold), Some(armed)) = (lease_hold.as_ref(), notified.as_mut().as_pin_mut()) {
+            drop(connection);
+            let answer = hold_lease_poll(
+                &state,
+                hold,
+                armed,
+                &project_id,
+                &runtime_id,
+                token_lease_id,
+                token_runtime_generation,
+            )
+            .await?;
+            return Ok(Json(answer));
+        }
+    }
 
     if !jobs.is_empty() {
         attach_controller_tokens(
