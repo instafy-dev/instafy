@@ -3350,3 +3350,178 @@ async fn a_plan_lane_that_hit_a_short_rate_limit_runs_once_more_after_the_wait(
     test_result?;
     cleanup
 }
+
+/// A plan lane whose turn ran out of time continues in a new turn of the same group, on the
+/// runtime that holds its files, with its prompt and its note: at most twice, the second marked
+/// the last. A completion seen twice is continued once. A continuation turn that stops on a short
+/// provider rate limit runs once more as that turn (the time-limited turn it continued is not an
+/// earlier failure of the lane). The lead's final checkpoint waits for the continuations and reads
+/// each continued job as superseded.
+#[tokio::test]
+async fn a_plan_lane_that_ran_out_of_turn_time_continues_at_most_twice_then_the_lead_reports(
+) -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping plan turn continuation test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let space = ManagedSpace::seed(pool, "plan-turn-continuation").await?;
+    let test_result: anyhow::Result<()> = async {
+        const RATE_LIMITED: &str = "rate limit exceeded: The upstream provider rate limit was reached (upstream_rate_limit, 429). Please try again in 7.632s.";
+        let state = build_test_state(space.pool.clone(), space.config("plan-turn-continuation"));
+        let group_id = Uuid::new_v4();
+        let lead = json!({ "leadHandle": "octo", "continuationPrompt": "Report the trip.", "expectedReportFormat": "text" });
+        let plan = json!({
+            "groupId": group_id, "role": "worker", "mode": "read_only", "lead": lead,
+            "parentRuntimeId": space.hosted_runtime_id,
+        });
+        let seed = json!({
+            "type": "multi_agent_plan", "mode": "read_only",
+            "agents": [
+                { "handle": "tokyo", "label": "Tokyo", "prompt": "Research Tokyo lodging.", "scopeSummary": "Tokyo" },
+                { "handle": "kyoto", "label": "Kyoto", "prompt": "Research Kyoto lodging.", "scopeSummary": "Kyoto" },
+            ],
+            "lead": lead,
+        });
+        let request = |ended_by: &str, note: &str| json!([
+            { "kind": "codex/run-log", "events": [] },
+            { "kind": "agent/turn-continuation", "requested": true, "endedBy": ended_by, "note": note },
+        ]);
+        let end = |job: Uuid, status: &'static str, error: Option<&'static str>, artifacts: serde_json::Value| {
+            let pool = space.pool.clone();
+            async move {
+                let outcome = if status == "completed" { "succeeded" } else { "failed" };
+                pool.get()
+                    .await?
+                    .execute(
+                        "update agent_jobs set status = $2, outcome = $3, error_message = $4,
+                             completed_at = now(), artifacts = $5 where id = $1",
+                        &[&job, &status, &outcome, &error, &PgJson(artifacts)],
+                    )
+                    .await?;
+                anyhow::Ok(())
+            }
+        };
+        let enqueue = |job: Uuid, payload: serde_json::Value| {
+            let state = state.clone();
+            async move {
+                crate::multi_agent_plan::maybe_enqueue_lead_continuation_after_completion(&state, job, &payload)
+                    .await
+                    .map_err(|error| controller_error("plan job completion", error))
+            }
+        };
+        let jobs = |conversation_id: Uuid| {
+            let pool = space.pool.clone();
+            async move {
+                let rows = pool
+                    .get()
+                    .await?
+                    .query(
+                        "select id, payload, target_runtime_id from agent_jobs
+                         where conversation_id = $1 order by created_at asc, id",
+                        &[&conversation_id],
+                    )
+                    .await?;
+                anyhow::Ok(
+                    rows.iter()
+                        .map(|row| {
+                            (
+                                row.get::<_, Uuid>("id"),
+                                row.get::<_, PgJson<serde_json::Value>>("payload").0,
+                                row.get::<_, Option<Uuid>>("target_runtime_id"),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            }
+        };
+        let role = |payload: &serde_json::Value| {
+            payload["metadata"]["multiAgentPlan"]["role"].as_str().unwrap_or_default().to_string()
+        };
+        let newest = |all: &[(Uuid, serde_json::Value, Option<Uuid>)], known: &[Uuid]| {
+            all.iter().find(|(id, _, _)| !known.contains(id)).cloned().expect("a new job")
+        };
+
+        // Two lanes run; Tokyo ends its turn early with a note while Kyoto still works.
+        let (conversation_id, tokyo, tokyo_payload) =
+            insert_finished_plan_lane(&space, None, "tokyo", plan.clone(), seed.clone()).await?;
+        let (_, kyoto, kyoto_payload) =
+            insert_finished_plan_lane(&space, Some(conversation_id), "kyoto", plan.clone(), seed).await?;
+        space
+            .pool
+            .get()
+            .await?
+            .execute("update agent_jobs set status = 'leased', outcome = null, completed_at = null where id = $1", &[&kyoto])
+            .await?;
+        end(tokyo, "completed", None, request("agent", "two sources left, then the summaries")).await?;
+
+        // 1. its second turn is queued on the runtime that holds its files, with its note
+        assert!(enqueue(tokyo, tokyo_payload.clone()).await?);
+        let all = jobs(conversation_id).await?;
+        assert_eq!(all.len(), 3, "the two lanes and Tokyo's next turn: {all:?}");
+        let (second, second_payload, second_target) = newest(&all, &[tokyo, kyoto]);
+        let continuation = &second_payload["metadata"]["multiAgentPlan"]["continuation"];
+        assert_eq!(continuation["of"], json!(tokyo.to_string()));
+        assert_eq!(continuation["turn"], 1);
+        assert_eq!(continuation["last"], false);
+        assert_eq!(continuation["endedBy"], "agent");
+        assert_eq!(second_payload["metadata"]["multiAgentPlan"]["groupId"], json!(group_id.to_string()));
+        assert_eq!(role(&second_payload), "worker");
+        assert_eq!(second_target, Some(space.hosted_runtime_id), "on the runtime that holds its files");
+        let prompt = second_payload["prompt_text"].as_str().unwrap_or_default();
+        assert!(prompt.contains("Research Tokyo lodging."), "{prompt}");
+        assert!(!prompt.contains("Research Kyoto lodging."), "{prompt}");
+        assert!(prompt.contains("two sources left, then the summaries"), "{prompt}");
+
+        // 2. the same completion seen again starts nothing more
+        assert!(!enqueue(tokyo, tokyo_payload).await?);
+        assert_eq!(jobs(conversation_id).await?.len(), 3);
+
+        // 3. the second turn is stopped at its limit: a third and last turn; the lead is not woken
+        end(second, "failed", Some("Codex run timed out"), request("time_limit", "summaries still running")).await?;
+        assert!(enqueue(second, second_payload).await?);
+        let all = jobs(conversation_id).await?;
+        assert_eq!(all.len(), 4, "{all:?}");
+        assert!(all.iter().all(|(_, payload, _)| role(payload) == "worker"), "no lead checkpoint");
+        let (third, third_payload, _) = newest(&all, &[tokyo, kyoto, second]);
+        assert_eq!(third_payload["metadata"]["multiAgentPlan"]["continuation"]["turn"], 2);
+        assert_eq!(third_payload["metadata"]["multiAgentPlan"]["continuation"]["last"], true);
+        let prompt = third_payload["prompt_text"].as_str().unwrap_or_default();
+        assert_eq!(prompt.matches("--- Continuation of your previous turn ---").count(), 1, "{prompt}");
+        assert!(prompt.contains("was stopped at its time limit"), "{prompt}");
+
+        // 4. the last turn stops on a short rate limit before it acts: it runs once more as that turn
+        end(third, "failed", Some(RATE_LIMITED), json!([])).await?;
+        assert!(enqueue(third, third_payload).await?, "the retry keeps the group going");
+        let all = jobs(conversation_id).await?;
+        assert_eq!(all.len(), 5, "{all:?}");
+        assert!(all.iter().all(|(_, payload, _)| role(payload) == "worker"), "no lead checkpoint");
+        let (retry, retry_payload, _) = newest(&all, &[tokyo, kyoto, second, third]);
+        let retry_plan = &retry_payload["metadata"]["multiAgentPlan"];
+        assert_eq!(retry_plan["rateLimitRetry"]["of"], json!(third.to_string()));
+        assert_eq!(retry_plan["continuation"]["turn"], 2, "retried as that turn");
+        assert_eq!(retry_plan["continuation"]["last"], true);
+        let prompt = retry_payload["prompt_text"].as_str().unwrap_or_default();
+        assert!(prompt.contains("summaries still running"), "the turn's note is kept: {prompt}");
+
+        // 5. the retry asks to continue again: it was the last turn, so nothing more starts
+        end(retry, "completed", None, request("agent", "one summary left")).await?;
+        assert!(!enqueue(retry, retry_payload).await?, "Kyoto still runs");
+        assert_eq!(jobs(conversation_id).await?.len(), 5);
+
+        // 6. Kyoto ends: the lead reports, reading each continued or retried Tokyo run as superseded
+        end(kyoto, "completed", None, json!([])).await?;
+        assert!(enqueue(kyoto, kyoto_payload).await?, "the final checkpoint");
+        let all = jobs(conversation_id).await?;
+        assert_eq!(all.len(), 6, "{all:?}");
+        let (_, lead_payload, _) = all.iter().find(|(_, payload, _)| role(payload) == "lead_continuation").cloned().expect("the lead");
+        let prompt = lead_payload["prompt_text"].as_str().unwrap_or_default();
+        assert!(prompt.contains(&format!("the controller continued it as job={second}")), "{prompt}");
+        assert!(prompt.contains(&format!("the controller continued it as job={third}")), "{prompt}");
+        assert!(prompt.contains(&format!("the controller ran it again as job={retry}")), "{prompt}");
+        Ok(())
+    }
+    .await;
+    let cleanup = space.cleanup().await;
+    test_result?;
+    cleanup
+}

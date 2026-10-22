@@ -25,6 +25,7 @@ import {
   rankRunOf,
   redactDeep,
   redactText,
+  renderReport,
   replyIsQuestionOnly,
   replyStats,
   runLogOf,
@@ -32,6 +33,7 @@ import {
   skillsOfCommand,
   statementsOf,
   stripSuggestionsBlock,
+  timingOf,
   usageOf,
   validateCases,
 } from "./octo-turn-grade.mjs";
@@ -622,4 +624,59 @@ test("a report cell keeps a backslash before a pipe from escaping the pipe", () 
   assert.equal(markdownCell("a\\|b"), "a\\\\\\|b");
   assert.equal(markdownCell("x|y\nz"), "x\\|y z");
   assert.equal(markdownCell(null), "-");
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Where the time went, and turns that ran out of time.
+
+const at = (s) => new Date(Date.parse(SENT) + s * 1000).toISOString();
+function teamJobs() {
+  const lead = { ...job({ id: "lead", route: "multi_agent_candidate" }), createdAt: at(0), leasedAt: at(1), completedAt: at(30) };
+  const lane = (id, handle, end) => ({ ...job({ id, role: "worker", parent: "lead", route: null }), agentHandle: handle,
+    createdAt: at(30), leasedAt: at(31), completedAt: at(end) });
+  const timings = (commands, extra = {}) => ({ kind: "agent/turn-timings", commandMs: commands.reduce((a, c) => a + c.ms, 0), commands, ...extra });
+  const first = { ...job({ id: "kyoto-1", role: "worker", parent: "lead", route: null, status: "failed", outcome: "failed" }),
+    agentHandle: "kyoto", createdAt: at(30), leasedAt: at(31), completedAt: at(631), errorMessage: "Codex run timed out" };
+  first.artifacts = [...first.artifacts,
+    timings([{ command: "fetch-sources --all", ms: 900, status: "completed" }, { command: "wait-job sources-1", ms: 50_000, status: "completed" },
+      { command: "summarize --timeout 240", ms: 240_000, status: "unfinished" }], { wrapUp: { atMs: 480_000, steered: true },
+      steps: [{ step: "lodging", phase: "fetch", ms: 238_000 }, { step: "transit", phase: "fetch", ms: 108_000 }, { step: "total", phase: "total", ms: 560_000 }] }),
+    { kind: "agent/turn-continuation", requested: true, endedBy: "time_limit", note: "summaries left" }];
+  const second = { ...job({ id: "kyoto-2", role: "worker", parent: "lead", route: null }), agentHandle: "kyoto",
+    planContinuation: { of: "kyoto-1", turn: 1, last: false }, createdAt: at(632), leasedAt: at(633), completedAt: at(733) };
+  const report = { ...job({ id: "lead-2", role: "lead_continuation", parent: "lead", route: null }), createdAt: at(734), leasedAt: at(735), completedAt: at(755) };
+  return [lead, lane("tokyo", "tokyo", 150), first, second, report];
+}
+
+test("a lane turn that ran out of time and was continued does not fail the case; the report says where its time went", () => {
+  const m = caseMetrics({ sentAt: SENT, jobs: teamJobs(), ui: OPENED_UI });
+  assert.equal(m.failedJobs, 0, "the stopped turn was continued");
+  assert.ok(m.jobStatuses.includes("worker:failed/failed (continued)"));
+  assert.equal(m.timing.timedOut, 1);
+  assert.equal(m.timing.continuations, 1);
+  assert.equal(m.timing.lanesSec, 600);
+  const first = m.timing.jobs.find((j) => j.handle === "kyoto" && j.turn === 0);
+  assert.equal(first.wrapUpSec, 480);
+  assert.equal(first.continuation, "time_limit");
+  assert.deepEqual(first.slowest[0], { command: "summarize --timeout 240", sec: 240, status: "unfinished" });
+  assert.deepEqual(first.steps.map((t) => t.step), ["lodging", "transit"], "the total is not a step");
+  assert.equal(first.stepsTotalSec, 560);
+  // a failed turn nobody continued still fails
+  const jobs = teamJobs().filter((j) => j.id !== "kyoto-2");
+  assert.equal(caseMetrics({ sentAt: SENT, jobs, ui: OPENED_UI }).failedJobs, 1);
+  assert.equal(timingOf([]).jobs.length, 0);
+
+  const grade = { runId: "r", gradedAt: SENT, totals: { passed: 1, cases: 1, inputTokens: 1, outputTokens: 1, credits: 1, wallSec: 1 },
+    results: [{ caseId: "trip", pass: true, score: 1, mustFailures: [], shouldFailures: [], checks: [], metrics: { ...m, uiSummary: {} } }] };
+  const report = renderReport(grade);
+  assert.match(report, /- Time: slowest lane 600 s; 1 job\(s\) stopped at the turn limit; 1 continuation\(s\)/);
+  assert.match(report, /worker @kyoto: failed\/failed, waited 1 s, ran 600 s, commands 290\.9 s, wrap-up at 480 s, asked to continue \(time_limit\)/);
+  assert.match(report, /slowest commands: summarize --timeout 240 240 s \(unfinished\)/);
+  assert.match(report, /tool steps \(560 s in all\): lodging 238 s; transit 108 s/);
+  assert.match(report, /worker @kyoto \(turn 2\): completed\/succeeded/);
+});
+
+test("the jobs query reads the continuation and the agent", () => {
+  const q = jobsQuery(PROJECT, SENT);
+  for (const k of ['"planContinuation"', '"agentHandle"']) assert.ok(q.includes(k), k);
 });

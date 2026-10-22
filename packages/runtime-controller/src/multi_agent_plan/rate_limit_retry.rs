@@ -33,21 +33,11 @@ use tokio_postgres::types::Json as PgJson;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use std::str::FromStr;
-
-use axum::http::StatusCode;
-
-use super::{
-    build_worker_dispatch_metadata, build_worker_dispatch_prompt, extract_agent_handle,
-    extract_uuid, normalize_agent_handle, parse_skill_multi_agent_plan, SiblingJobSnapshot,
-    SkillMultiAgentPlanAgent,
+use super::turn_continuation::{
+    leased_runtime_id, plan_job_agent, redispatch_plan_agent, PlanAgentRedispatch,
 };
-use crate::auth::RequestContext;
-use crate::dispatch::{
-    normalize_dispatch_request, process_dispatch_prompt, DispatchPromptRequest,
-    DispatchPromptResponse,
-};
-use crate::{ApiError, AppState};
+use super::{normalize_agent_handle, RerunReason, SiblingJobSnapshot};
+use crate::AppState;
 
 pub(crate) const RATE_LIMIT_RETRY_ARTIFACT: &str = "agent/rate-limit-retry";
 /// The longest stated wait that counts as short: the proxy's own bound for a wait it derives
@@ -127,9 +117,11 @@ pub(crate) fn rate_limit_retry_wait(
     }
     let wait = short_rate_limit_wait(failed.error_message.as_deref())?;
     let handle = failed.handle.as_deref().and_then(normalize_agent_handle)?;
+    // a turn stopped at its time limit and continued is not a failure of the agent
     let failed_before = workers.iter().any(|worker| {
         worker.id != job_id
             && worker.status == "failed"
+            && !matches!(worker.retried_as, Some((_, RerunReason::TurnContinuation)))
             && worker
                 .handle
                 .as_deref()
@@ -138,115 +130,6 @@ pub(crate) fn rate_limit_retry_wait(
                 == Some(handle.as_str())
     });
     (!failed_before).then_some(wait)
-}
-
-/// The lane a plan job ran, as its plan seed declared it.
-fn plan_job_agent(payload: &JsonValue) -> Option<SkillMultiAgentPlanAgent> {
-    let handle =
-        extract_agent_handle(payload).and_then(|handle| normalize_agent_handle(&handle))?;
-    let seed = parse_skill_multi_agent_plan(payload.get("plan_seed")?).ok()?;
-    seed.agents
-        .into_iter()
-        .find(|agent| normalize_agent_handle(&agent.handle).as_deref() == Some(handle.as_str()))
-}
-
-/// The plan seed of the retry: the original seed with only `agent`, running `prompt`.
-fn retry_seed(seed: &JsonValue, agent: &SkillMultiAgentPlanAgent, prompt: &str) -> JsonValue {
-    let mut seed = seed.clone();
-    if let Some(map) = seed.as_object_mut() {
-        map.remove("lanes");
-        map.remove("workers");
-        map.insert(
-            "agents".to_string(),
-            json!([{
-                "handle": agent.handle,
-                "label": agent.label,
-                "prompt": prompt,
-                "scopeSummary": agent.scope_summary,
-                "writeScope": agent.write_scope,
-            }]),
-        );
-        map.insert(
-            "rationale".to_string(),
-            json!("Started by the controller: the agent's previous run stopped on a short provider rate limit"),
-        );
-        map.insert("runtimeRouting".to_string(), json!({"strategy": "reuse"}));
-    }
-    seed
-}
-
-/// Queue the lane of `job_id` once more in its group, as a one-agent plan with the same lead and
-/// handoff paths, as a service-role dispatch.
-#[allow(clippy::too_many_arguments)]
-async fn redispatch_lane(
-    state: &AppState,
-    project_id: Uuid,
-    conversation_id: Uuid,
-    group_id: &str,
-    job_id: Uuid,
-    job_payload: &JsonValue,
-    plan_meta: &JsonMap<String, JsonValue>,
-    agent: &SkillMultiAgentPlanAgent,
-    runtime_id: Option<Uuid>,
-    retry: JsonValue,
-) -> Result<DispatchPromptResponse, (StatusCode, axum::Json<ApiError>)> {
-    let group_uuid = Uuid::from_str(group_id)
-        .map_err(|_| crate::bad_request(format!("plan group id {group_id} is not a uuid")))?;
-    let seed = job_payload
-        .get("plan_seed")
-        .ok_or_else(|| crate::bad_request("the plan job has no plan seed"))?;
-    let plan = parse_skill_multi_agent_plan(&retry_seed(
-        seed,
-        agent,
-        &rate_limit_retry_prompt(&agent.prompt),
-    ))?;
-    let meta_uuid = |key: &str| {
-        plan_meta
-            .get(key)
-            .and_then(JsonValue::as_str)
-            .and_then(|value| Uuid::from_str(value.trim()).ok())
-    };
-    let parent_runtime_id = meta_uuid("parentRuntimeId");
-    let runtime_id = runtime_id.or(parent_runtime_id);
-    let mut metadata = build_worker_dispatch_metadata(
-        &plan,
-        group_uuid,
-        meta_uuid("parentJobId").unwrap_or(job_id),
-        meta_uuid("parentRunId"),
-        parent_runtime_id,
-    );
-    metadata["multiAgentPlan"]["rateLimitRetry"] = retry;
-    let dispatch = DispatchPromptRequest {
-        project_id: Some(project_id.to_string()),
-        session_id: extract_uuid(job_payload, &["session_id"]).map(|value| value.to_string()),
-        prompt_text: Some(build_worker_dispatch_prompt(
-            &plan,
-            "The agent's previous run stopped on a short provider rate limit; the controller started it once more.",
-        )),
-        intent: Some("multi_agent_plan".to_string()),
-        plan_seed: Some(plan.raw.clone()),
-        metadata: Some(metadata),
-        conversation_metadata: None,
-        parent_conversation_id: None,
-        thread_kind: None,
-        tool_limits: None,
-        repo: None,
-        ui: None,
-        priority: None,
-        runtime_type: None,
-        idle_ttl_seconds: None,
-        conversation_id: Some(conversation_id.to_string()),
-        runtime_id: runtime_id.map(|value| value.to_string()),
-        runtime_display_name: None,
-        prefer_runtime: Some(false),
-    };
-    let context = RequestContext {
-        user_id: extract_uuid(job_payload, &["user_id"]),
-        is_service_role: true,
-        scoped_claims: None,
-    };
-    let normalized = normalize_dispatch_request(dispatch)?;
-    process_dispatch_prompt(state, &context, normalized).await
 }
 
 /// Queue the lane of the job that just failed once more when it stopped on a short rate limit
@@ -277,20 +160,36 @@ where
     let runtime_id = workers
         .iter()
         .find(|worker| worker.id == job_id)
-        .and_then(|worker| worker.lease_metrics.as_ref())
-        .and_then(|metrics| metrics.get("leasedByRuntimeId"))
-        .and_then(JsonValue::as_str)
-        .and_then(|value| Uuid::parse_str(value).ok());
+        .and_then(leased_runtime_id);
     let hold = retry_hold(wait, job_id);
     let wait_ms = wait.as_millis() as u64;
     let hold_ms = hold.as_millis() as u64;
-    let retry = json!({
-        "of": job_id,
-        "waitMs": wait_ms,
-        "holdMs": hold_ms,
-        "reason": "upstream_rate_limit",
-    });
-    let response = match redispatch_lane(
+    let mut entries = vec![(
+        "rateLimitRetry",
+        json!({
+            "of": job_id,
+            "waitMs": wait_ms,
+            "holdMs": hold_ms,
+            "reason": "upstream_rate_limit",
+        }),
+    )];
+    // a continuation turn is retried as that turn, so its turn count carries on
+    if let Some(continuation) = plan_meta
+        .get("continuation")
+        .filter(|value| value.is_object())
+    {
+        entries.push(("continuation", continuation.clone()));
+    }
+    let handle = agent.handle.clone();
+    let redispatch = PlanAgentRedispatch {
+        prompt: rate_limit_retry_prompt(&agent.prompt),
+        agent,
+        rationale: "Started by the controller: the agent's previous run stopped on a short provider rate limit",
+        reason: "The agent's previous run stopped on a short provider rate limit; the controller started it once more.",
+        runtime_id,
+        plan_meta: entries,
+    };
+    let response = match redispatch_plan_agent(
         state,
         project_id,
         conversation_id,
@@ -298,9 +197,7 @@ where
         job_id,
         job_payload,
         plan_meta,
-        &agent,
-        runtime_id,
-        retry,
+        redispatch,
     )
     .await
     {
@@ -309,7 +206,7 @@ where
             warn!(
                 %group_id,
                 %job_id,
-                handle = %agent.handle,
+                handle = %handle,
                 status = status.as_u16(),
                 error = %error.message,
                 "could not queue the lane again after a rate limit; the group goes on without it"
@@ -338,7 +235,7 @@ where
     info!(
         %group_id,
         %job_id,
-        handle = %agent.handle,
+        handle = %handle,
         wait_ms,
         hold_ms,
         retry_job_id = ?response.job_id,
@@ -349,6 +246,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::super::parse_skill_multi_agent_plan;
     use super::*;
 
     const EVIDENCE: &str = "rate limit exceeded: The upstream provider rate limit was reached (upstream_rate_limit, 429). Please try again in 7.632s.";
@@ -478,7 +376,7 @@ mod tests {
             last_message: None,
             acting_tool_count: 0,
             retried_as: None,
-            rate_limit_retry_of: None,
+            rerun_of: None,
         }
     }
 
@@ -499,9 +397,9 @@ mod tests {
 
         // its retry failed the same way: no third run
         let mut retry = worker("@Tokyo", "failed", Some(EVIDENCE));
-        retry.rate_limit_retry_of = Some(failed.id);
+        retry.rerun_of = Some((failed.id, RerunReason::RateLimit));
         let mut first = failed.clone();
-        first.retried_as = Some(retry.id);
+        first.retried_as = Some((retry.id, RerunReason::RateLimit));
         let workers = vec![first.clone(), other.clone(), retry.clone()];
         assert_eq!(rate_limit_retry_wait(retry.id, &workers), None);
         assert_eq!(
@@ -535,10 +433,11 @@ mod tests {
         });
         let agent = plan_job_agent(&payload).expect("the lane");
         assert_eq!(agent.prompt, "Research Kyoto.");
-        let seed = retry_seed(
+        let seed = super::super::turn_continuation::redispatch_seed(
             &payload["plan_seed"],
             &agent,
             &rate_limit_retry_prompt(&agent.prompt),
+            "retried",
         );
         let plan = parse_skill_multi_agent_plan(&seed).expect("a valid plan");
         assert_eq!(plan.agents.len(), 1);
@@ -567,8 +466,8 @@ mod tests {
         let mut failed = worker("tokyo", "failed", Some(EVIDENCE));
         let mut retry = worker("tokyo", "completed", None);
         retry.summary = Some("Saved Tokyo lodging.".into());
-        retry.rate_limit_retry_of = Some(failed.id);
-        failed.retried_as = Some(retry.id);
+        retry.rerun_of = Some((failed.id, RerunReason::RateLimit));
+        failed.retried_as = Some((retry.id, RerunReason::RateLimit));
         let workers = vec![failed.clone(), retry.clone()];
         let note = format!("the controller ran it again as job={}", retry.id);
         let lead = super::super::SkillMultiAgentLead {

@@ -86,7 +86,9 @@ export function jobsQuery(projectId, sinceIso) {
            status, outcome, intent, created_at as "createdAt", leased_at as "leasedAt", completed_at as "completedAt",
            summary, error_message as "errorMessage", artifacts,
            payload #> '{metadata,managedAiModelLabel}' as "modelLabel",
-           payload #> '{metadata,multiAgentPlan,rateLimitRetry}' as "planRateLimitRetry"
+           payload #> '{metadata,multiAgentPlan,continuation}' as "planContinuation",
+           payload #> '{metadata,multiAgentPlan,rateLimitRetry}' as "planRateLimitRetry",
+           payload #>> '{metadata,agent,handle}' as "agentHandle"
     from agent_jobs where project_id = '${projectId}' and created_at >= '${sinceIso}') j`;
 }
 
@@ -489,6 +491,48 @@ export function retriedJobIdsOf(jobs) {
   return new Set(jobs.map((job) => job.planRateLimitRetry?.of).filter((id) => typeof id === "string"));
 }
 
+/** Jobs that ran out of turn time and were continued by a later turn (`multiAgentPlan.continuation.of`). */
+export function continuedJobIdsOf(jobs) {
+  return new Set(jobs.map((job) => job.planContinuation?.of).filter((id) => typeof id === "string"));
+}
+
+const secs = (ms) => (Number.isFinite(ms) ? Math.round(ms / 100) / 10 : null);
+const spanSec = (from, to) => { const a = Date.parse(from ?? ""), b = Date.parse(to ?? ""); return Number.isFinite(a) && Number.isFinite(b) ? secs(b - a) : null; };
+
+/** Where a case's time went, from each job's lease and completion times and its `agent/turn-timings` artifact
+ *  (every command's duration, the wrap-up, and the steps tools reported). */
+export function timingOf(jobs) {
+  const perJob = jobs.map((job) => {
+    const timings = artifactsOf(job, "agent/turn-timings")[0] ?? null;
+    const commands = Array.isArray(timings?.commands) ? timings.commands : [];
+    const steps = Array.isArray(timings?.steps) ? timings.steps : [];
+    return {
+      role: job.agentRole ?? "lead",
+      handle: job.agentHandle ?? null,
+      turn: job.planContinuation?.turn ?? 0,
+      status: `${job.status}/${job.outcome ?? "-"}`,
+      timedOut: /timed out/i.test(job.errorMessage ?? ""),
+      queueSec: spanSec(job.createdAt, job.leasedAt),
+      wallSec: spanSec(job.leasedAt, job.completedAt),
+      commandSec: timings ? secs(timings.commandMs) : null,
+      wrapUpSec: timings?.wrapUp?.atMs != null ? secs(timings.wrapUp.atMs) : null,
+      continuation: (artifactsOf(job, "agent/turn-continuation")[0] ?? null)?.endedBy ?? null,
+      slowest: [...commands].sort((a, b) => (b.ms ?? 0) - (a.ms ?? 0)).slice(0, 5)
+        .map((c) => ({ command: redactText(String(c.command ?? "")).slice(0, 120), sec: secs(c.ms), status: c.status ?? null })),
+      steps: steps.filter((t) => t.step !== "total" && t.phase !== "job").sort((a, b) => (b.ms ?? 0) - (a.ms ?? 0)).slice(0, 8)
+        .map((t) => ({ step: redactText(String(t.step ?? "")).slice(0, 80), phase: t.phase ?? null, sec: secs(t.ms) })),
+      stepsTotalSec: secs(steps.find((t) => t.step === "total")?.ms),
+    };
+  });
+  const lanes = perJob.filter((j) => j.role === "worker");
+  return {
+    timedOut: perJob.filter((j) => j.timedOut).length,
+    continuations: jobs.filter((job) => job.planContinuation).length,
+    lanesSec: lanes.length ? Math.max(...lanes.map((j) => j.wallSec ?? 0)) : null,
+    jobs: perJob,
+  };
+}
+
 export function caseMetrics(evidence) {
   const jobs = Array.isArray(evidence?.jobs) ? evidence.jobs : [];
   const root = rootJob(jobs);
@@ -505,16 +549,18 @@ export function caseMetrics(evidence) {
   const ui = evidence?.ui ?? {};
   const modelLabel = jobs.map((job) => job.modelLabel).find((label) => typeof label === "string" && label) ?? null;
   const replyText = reply?.summary ? stripSuggestionsBlock(redactText(reply.summary)) : "";
-  // a run the controller started again after a short provider rate limit did not fail the case: the retry's
-  // own outcome counts instead
+  // a turn that ran out of time and was continued by a later turn of the same agent did not fail the case, nor
+  // did a run the controller started again after a short rate limit (the retry's own outcome counts instead)
+  const continued = continuedJobIdsOf(jobs);
   const retried = retriedJobIdsOf(jobs);
   return {
     jobCount: jobs.length,
-    jobStatuses: jobs.map((job) => `${job.agentRole ?? "lead"}:${job.status}/${job.outcome ?? "-"}${retried.has(job.id) ? " (retried)" : ""}`),
+    jobStatuses: jobs.map((job) => `${job.agentRole ?? "lead"}:${job.status}/${job.outcome ?? "-"}${continued.has(job.id) ? " (continued)" : ""}${retried.has(job.id) ? " (retried)" : ""}`),
     allTerminal: jobs.length > 0 && jobs.every((job) => TERMINAL_JOB_STATUSES.has(job.status)),
     rootOutcome: root ? `${root.status}/${root.outcome ?? "-"}` : null,
-    failedJobs: jobs.filter((job) => (job.status === "failed" || job.outcome === "failed") && !retried.has(job.id)).length,
+    failedJobs: jobs.filter((job) => (job.status === "failed" || job.outcome === "failed") && !continued.has(job.id) && !retried.has(job.id)).length,
     retriedJobs: retried.size,
+    timing: timingOf(jobs),
     modelLabel,
     route: preflight?.route ?? null,
     routeConfidence: preflight?.confidence ?? null,
@@ -888,12 +934,28 @@ export function renderReport(grade) {
     lines.push(`- Commands: ${m.runLog.commandCount} (${m.runLog.failedCommands} failed), research ${m.runLog.researchCommands}, preview open ${m.runLog.previewOpenOk}, preview check ${m.runLog.previewCheckOk}${m.runLog.truncated ? ", run log truncated" : ""}`);
     lines.push(`- Site: ${cell(JSON.stringify(m.uiSummary))}`);
     lines.push(`- Applied paths: ${m.appliedPaths.length}${m.builtPages.length ? `, HTML pages ${m.builtPages.length}` : ""}; space skills: ${m.spaceSkills ? cell(m.spaceSkills.join(", ") || "none") : "not listed"}`);
+    lines.push(...renderTiming(m.timing));
     lines.push("", "Reply:", "", ...String(m.reply || "(none)").split(/\r?\n/).map((l) => `> ${l}`), "");
     lines.push("| Check | Severity | Result | Detail |", "|---|---|---|---|");
     for (const c of r.checks) lines.push(`| ${cell(c.id)} | ${c.severity} | ${c.ok === null ? "n/a" : c.ok ? "pass" : "**fail**"} | ${cell(c.detail)} |`);
   }
   lines.push("");
   return lines.join("\n");
+}
+
+/** "Where the time went": per job, its wait, its turn, its commands' share, the wrap-up and its slowest commands and
+ *  tool steps. Empty for evidence without job times. */
+export function renderTiming(timing) {
+  if (!timing?.jobs?.length) return [];
+  const lines = [`- Time: slowest lane ${timing.lanesSec ?? "-"} s; ${timing.timedOut} job(s) stopped at the turn limit; ${timing.continuations} continuation(s)`];
+  for (const j of timing.jobs) {
+    const head = `  - ${j.role}${j.handle ? ` @${j.handle}` : ""}${j.turn ? ` (turn ${j.turn + 1})` : ""}: ${j.status}, waited ${j.queueSec ?? "-"} s, ran ${j.wallSec ?? "-"} s`
+      + `${j.commandSec != null ? `, commands ${j.commandSec} s` : ""}${j.wrapUpSec != null ? `, wrap-up at ${j.wrapUpSec} s` : ""}${j.continuation ? `, asked to continue (${j.continuation})` : ""}`;
+    lines.push(cell(head).replace(/^ {2}- /, "  - "));
+    if (j.slowest.length) lines.push(`    - slowest commands: ${cell(j.slowest.map((c) => `${c.command} ${c.sec} s${c.status === "unfinished" ? " (unfinished)" : ""}`).join("; "))}`);
+    if (j.steps.length) lines.push(`    - tool steps${j.stepsTotalSec != null ? ` (${j.stepsTotalSec} s in all)` : ""}: ${cell(j.steps.map((t) => `${t.step} ${t.sec} s`).join("; "))}`);
+  }
+  return lines;
 }
 
 export function buildRollup(grades) {

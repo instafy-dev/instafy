@@ -72,6 +72,7 @@ mod skill_routing;
 mod skill_routing_eval_tests;
 mod skills;
 mod turn_baseline;
+mod turn_continuation;
 mod workspace_change_detection;
 mod workspace_commit;
 
@@ -2922,18 +2923,28 @@ struct TurnClockGuard {
 }
 
 impl TurnClockGuard {
-    fn start() -> Self {
+    /// With `files`, the shell also learns where to report step timings and, for a job that can
+    /// be continued, where to leave the note on what is left (`turn_continuation`).
+    fn start(files: Option<&turn_continuation::TurnFiles>) -> Self {
         let started = chrono::Utc::now();
         let limit = chrono::Duration::from_std(crate::codex::resolve_codex_run_timeout())
             .unwrap_or_else(|_| chrono::Duration::seconds(600));
         let format = |at: chrono::DateTime<chrono::Utc>| {
             at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
         };
+        let mut overrides = vec![
+            EnvOverride::apply("INSTAFY_TURN_STARTED_AT", &format(started)),
+            EnvOverride::apply("INSTAFY_TURN_DEADLINE", &format(started + limit)),
+        ];
+        match files {
+            Some(files) => overrides.extend(files.env_overrides()),
+            None => {
+                overrides.push(EnvOverride::remove("INSTAFY_STEP_TIMINGS_FILE"));
+                overrides.push(EnvOverride::remove("INSTAFY_TURN_CONTINUE_FILE"));
+            }
+        }
         Self {
-            _overrides: vec![
-                EnvOverride::apply("INSTAFY_TURN_STARTED_AT", &format(started)),
-                EnvOverride::apply("INSTAFY_TURN_DEADLINE", &format(started + limit)),
-            ],
+            _overrides: overrides,
         }
     }
 }
@@ -5947,6 +5958,7 @@ impl JobProcessor {
             );
         }
         let task_usage = TaskUsage::default();
+        let turn_files = turn_continuation::TurnFiles::for_job(job);
         let result = self
             .run_apply_job_observed(
                 registration,
@@ -5956,8 +5968,10 @@ impl JobProcessor {
                 cancel_signal,
                 active_turn_input,
                 &task_usage,
+                &turn_files,
             )
             .await;
+        let result = turn_continuation::attach_turn_records(result, &turn_files);
         // The job ends here, unless it lost its lease and a later lease may
         // resume it: only then is the record of how its turn began kept.
         if !result
@@ -5979,6 +5993,7 @@ impl JobProcessor {
         cancel_signal: Option<JobCancelSignal>,
         active_turn_input: Option<ActiveTurnInputReceiver>,
         task_usage: &TaskUsage,
+        turn_files: &turn_continuation::TurnFiles,
     ) -> Result<JobExecution> {
         let proxy_envelope = job.proxy.as_ref().or(registration.proxy.as_ref());
 
@@ -6506,6 +6521,12 @@ impl JobProcessor {
             active_turn_input,
             input_images: Vec::new(),
             isolated_tool_worker: false,
+            // Shortly before the hard limit the turn is told to save and end (and, for a job
+            // the controller can continue, to leave a note for its next turn).
+            turn_wrap_up: turn_continuation::turn_wrap_up(
+                crate::codex::resolve_codex_run_timeout(),
+                turn_files.continuable(),
+            ),
         };
 
         let routing_pre_observation = if should_run_routing_pre_observation_before_main(
@@ -6749,7 +6770,7 @@ impl JobProcessor {
         let runtime_id_for_messages = registration.runtime_id;
         let _client_timezone_guard =
             ClientTimezoneGuard::from_metadata(job.payload.get("metadata"));
-        let _turn_clock_guard = TurnClockGuard::start();
+        let _turn_clock_guard = TurnClockGuard::start(Some(turn_files));
         let native_prompt =
             without_project_preferences(&prompt, &project_id, &project_preferences)?;
         let output_result = if streaming_context.is_some() {
@@ -6792,7 +6813,17 @@ impl JobProcessor {
         let output = match output_result {
             Ok(output) => output,
             Err(error) => {
-                return Err(error);
+                // A turn stopped by its time limit (or any error) keeps what it did: the run
+                // log and command timings of the events streamed so far.
+                let artifacts = streaming_context
+                    .as_ref()
+                    .map(|ctx| turn_continuation::failed_turn_artifacts(&ctx.events))
+                    .unwrap_or_default();
+                if artifacts.is_empty() {
+                    return Err(error);
+                }
+                let message = format!("{error}");
+                return Err(error.context(JobFailureWithArtifacts { message, artifacts }));
             }
         };
         if !codex_run_options.input_images.is_empty() {
@@ -7417,7 +7448,7 @@ impl JobProcessor {
                 explicit_shared_browser_execution.then(crate::shared_browser::action_log_len);
             let _client_timezone_guard =
                 ClientTimezoneGuard::from_metadata(job.payload.get("metadata"));
-            let _turn_clock_guard = TurnClockGuard::start();
+            let _turn_clock_guard = TurnClockGuard::start(Some(turn_files));
             // Stream the retry like the first attempt: an invisible retry means
             // users watch a dead conversation while real work happens, and the
             // run trace loses the retry's interim evidence.
@@ -7794,7 +7825,7 @@ impl JobProcessor {
                 let codex_guard = CODEX_EXECUTION_LOCK.lock().await;
                 let _client_timezone_guard =
                     ClientTimezoneGuard::from_metadata(job.payload.get("metadata"));
-                let _turn_clock_guard = TurnClockGuard::start();
+                let _turn_clock_guard = TurnClockGuard::start(Some(turn_files));
                 let native_finalization_prompt = without_project_preferences(
                     &finalization_prompt,
                     &project_id,
@@ -13482,6 +13513,7 @@ fn finalization_codex_run_options(first_attempt: &CodexRunOptions) -> CodexRunOp
     options.persist_conversation_thread = false;
     options.provider_conversation_state = None;
     options.input_images.clear();
+    options.turn_wrap_up = None;
     options
 }
 
@@ -17171,6 +17203,7 @@ fn append_focus_value(value: &JsonValue, output: &mut Vec<String>) {
 fn build_codex_artifacts(output: &CodexRunOutput, outcome: &CodexOutcome) -> Vec<JsonValue> {
     let mut artifacts = Vec::new();
     artifacts.push(build_codex_run_log_artifact(&output.events, None));
+    artifacts.extend(turn_continuation::turn_timings_artifact(&output.events));
 
     let file_entries: Vec<JsonValue> = outcome
         .files
@@ -28199,7 +28232,7 @@ mod tests {
             chrono::DateTime::parse_from_rfc3339(&env::var(key).expect(key)).expect("rfc3339")
         };
         {
-            let _guard = TurnClockGuard::start();
+            let _guard = TurnClockGuard::start(None);
             let span = parse("INSTAFY_TURN_DEADLINE") - parse("INSTAFY_TURN_STARTED_AT");
             assert_eq!(span.num_seconds(), 900);
             let started = parse("INSTAFY_TURN_STARTED_AT").with_timezone(&chrono::Utc);
