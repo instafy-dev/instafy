@@ -31,6 +31,17 @@ import {
 } from "./utils/codexPreflightProxy.js";
 import { resolvePlaywrightControllerUrl } from "./utils/controllerUrl.js";
 import { e2eModelFromEnv } from "./utils/e2eModel.js";
+import {
+  ownedProjectIdsSql,
+  ownedProjectLookup,
+  ownedRuntimeContainerIds,
+  ownedRuntimeNetworkIds,
+  ownedRuntimeRowsCleanupSql,
+  parseProjectIds,
+  queryLocalDb,
+  runtimeCleanupDisabled,
+  runtimeComposeNames,
+} from "./utils/runtimeCleanupScope.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -481,55 +492,45 @@ function finalizeCodexPreflight({
   }
 }
 
-function cleanupRuntimeContainers() {
+/** Run `sql` against the local stack's database (see `queryLocalDb`). */
+function localDbQuery(sql: string): string {
+  const dbUrl = resolveSupabaseDbUrl();
+  if (!dbUrl) {
+    throw new Error("Supabase DB URL unavailable");
+  }
+  return queryLocalDb(sql, {
+    dbUrl,
+    cwd: repoRoot,
+    env: process.env,
+    psqlBin: resolveBinary("psql"),
+  });
+}
+
+/** The projects owned by the suite's own test users (see `runtimeCleanupScope`). */
+function playwrightOwnedProjectIds(): string[] {
+  return parseProjectIds(localDbQuery(ownedProjectIdsSql(process.env)));
+}
+
+function cleanupRuntimeContainers(projectIds: readonly string[]) {
   try {
-    const dockerProjectPrefix =
-      (process.env.DOCKER_PROJECT_PREFIX ||
-        process.env.RUNTIME_DOCKER_PROJECT_PREFIX ||
-        "instafy-runtime-")
-        .trim() || "instafy-runtime-";
-    const baseComposeProject =
-      (process.env.COMPOSE_PROJECT_NAME || "instafy-runtime").trim() || "instafy-runtime";
-
-    const rows = run(
-      "docker",
-      [
-        "ps",
-        "-a",
-        "--format",
-        "{{.ID}}\t{{.Names}}\t{{.Label \"com.docker.compose.project\"}}",
-        "--filter",
-        `name=${dockerProjectPrefix}`,
-      ],
-      {
-        silent: true,
-      }
-    )
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
-    const ids = rows
-      .map((row) => {
-        const [id, name, composeProject] = row.split("\t");
-        if (!id) return null;
-        const project = (composeProject || "").trim();
-        if (project) {
-          if (project !== baseComposeProject && project.startsWith(dockerProjectPrefix)) {
-            return id;
-          }
-          return null;
-        }
-
-        const containerName = (name || "").trim();
-        if (containerName.startsWith(dockerProjectPrefix)) {
-          return id;
-        }
-
-        return null;
-      })
-      .filter((id): id is string => Boolean(id));
+    const { prefix, baseComposeProject } = runtimeComposeNames(process.env);
+    const ids = ownedRuntimeContainerIds(
+      run(
+        "docker",
+        [
+          "ps",
+          "-a",
+          "--format",
+          "{{.ID}}\t{{.Names}}\t{{.Label \"com.docker.compose.project\"}}",
+          "--filter",
+          `name=${prefix}`,
+        ],
+        { silent: true },
+      ),
+      { prefix, baseComposeProject, projectIds },
+    );
     if (ids.length === 0) return;
-    log(`Removing ${ids.length} lingering runtime containers...`);
+    log(`Removing ${ids.length} lingering runtime containers of Playwright projects...`);
     run("docker", ["rm", "-f", ...ids]);
   } catch (error) {
     console.warn(
@@ -540,16 +541,17 @@ function cleanupRuntimeContainers() {
   }
 }
 
-function cleanupRuntimeNetworks() {
+function cleanupRuntimeNetworks(projectIds: readonly string[]) {
   try {
-    const ids = run("docker", ["network", "ls", "-q", "--filter", "name=instafy-runtime-"], {
-      silent: true,
-    })
-      .split(/\r?\n/)
-      .map((id) => id.trim())
-      .filter(Boolean);
+    const { prefix } = runtimeComposeNames(process.env);
+    const ids = ownedRuntimeNetworkIds(
+      run("docker", ["network", "ls", "--format", "{{.ID}}\t{{.Name}}", "--filter", `name=${prefix}`], {
+        silent: true,
+      }),
+      { prefix, projectIds },
+    );
     if (ids.length === 0) return;
-    log(`Removing ${ids.length} lingering runtime networks...`);
+    log(`Removing ${ids.length} lingering runtime networks of Playwright projects...`);
     for (const id of ids) {
       try {
         run("docker", ["network", "rm", id], { silent: true });
@@ -566,62 +568,14 @@ function cleanupRuntimeNetworks() {
   }
 }
 
-function cleanupRuntimeTables() {
+function cleanupRuntimeTables(projectIds: readonly string[]) {
+  const sql = ownedRuntimeRowsCleanupSql(projectIds);
+  if (!sql) return;
   try {
     log(
-      "Clearing runtime tables (runtime_tunnel_grants, origin_instances, runtime_leases, runtimes)..."
+      `Clearing runtime rows (runtime_tunnel_grants, origin_instances, runtime_leases, runtimes) of ${projectIds.length} Playwright project(s)...`
     );
-    const dbUrl = resolveSupabaseDbUrl();
-    if (!dbUrl) {
-      log("Skipping runtime table cleanup: Supabase DB URL unavailable.");
-      return;
-    }
-    const sql =
-      "update runtimes set active_lease_id = null; delete from runtime_tunnel_grants; delete from origin_instances; delete from runtimes; delete from runtime_leases;";
-    const psqlBin = resolveBinary("psql");
-    const result = psqlBin
-      ? spawnSync(
-          psqlBin,
-          ["-d", dbUrl, "-v", "ON_ERROR_STOP=1", "-c", sql],
-          {
-            cwd: repoRoot,
-            env: process.env,
-            stdio: ["ignore", "pipe", "pipe"],
-          }
-        )
-      : (() => {
-          if (!isLocalSupabaseDbUrl(dbUrl)) {
-            throw new Error(
-              "host psql is unavailable and the configured Supabase DB URL is not local"
-            );
-          }
-          const dockerBin = resolveBinary("docker") ?? "docker";
-          return spawnSync(
-            dockerBin,
-            [
-              "exec",
-              "supabase_db_supabase",
-              "psql",
-              "-U",
-              "postgres",
-              "-d",
-              "postgres",
-              "-v",
-              "ON_ERROR_STOP=1",
-              "-c",
-              sql,
-            ],
-            {
-              cwd: repoRoot,
-              env: process.env,
-              stdio: ["ignore", "pipe", "pipe"],
-            }
-          );
-        })();
-    const exitCode = result.status ?? result["code"] ?? 1;
-    if (exitCode !== 0) {
-      throw new Error(formatSpawnFailure(result, exitCode, "runtime table cleanup"));
-    }
+    localDbQuery(sql);
   } catch (error) {
     console.warn(
       `[global-setup] Failed to clear runtime tables: ${
@@ -635,55 +589,53 @@ function log(s: string) {
   console.log(`[global-setup] ${s}`);
 }
 
-function formatSpawnFailure(
-  result: {
-    error?: Error;
-    stderr?: string | Buffer | null;
-    stdout?: string | Buffer | null;
-  },
-  exitCode: number,
-  label: string,
-): string {
-  const errorMessage = result.error?.message?.trim();
-  if (errorMessage) {
-    return `${label} failed: ${errorMessage}`;
-  }
-  const stderr =
-    typeof result.stderr === "string"
-      ? result.stderr.trim()
-      : result.stderr?.toString().trim();
-  if (stderr && stderr.length > 0) {
-    return stderr;
-  }
-  const stdout =
-    typeof result.stdout === "string"
-      ? result.stdout.trim()
-      : result.stdout?.toString().trim();
-  if (stdout && stdout.length > 0) {
-    return stdout;
-  }
-  return `${label} exited with code ${exitCode}`;
-}
-
-function isLocalSupabaseDbUrl(dbUrl: string): boolean {
-  try {
-    const host = new URL(dbUrl).hostname.trim().toLowerCase();
-    return host === "127.0.0.1" || host === "localhost" || host === "::1";
-  } catch {
-    return false;
-  }
-}
-
 let initialRuntimeCleanupDone = false;
+/** Projects of the suite's own users, read once before the run cleans anything; null when unknown. */
+let ownedProjectIds: string[] | null = null;
 
+/**
+ * Clear what earlier Playwright runs left behind: the runtimes, containers, networks and runtime
+ * rows of projects the suite's own users own. Nothing of a developer's spaces or of the stack's
+ * shared services is removed, and nothing at all with KEEP_RUNTIME=1 or PLAYWRIGHT_CLEANUP_RUNTIME=0.
+ */
 function ensureInitialRuntimeCleanup() {
   if (USE_EXTERNAL_PLAYWRIGHT_TARGET || initialRuntimeCleanupDone) {
     return;
   }
   initialRuntimeCleanupDone = true;
-  cleanupRuntimeContainers();
-  cleanupRuntimeNetworks();
-  cleanupRuntimeTables();
+  if (runtimeCleanupDisabled(process.env)) {
+    log("KEEP_RUNTIME=1 or PLAYWRIGHT_CLEANUP_RUNTIME=0: leaving runtimes, containers and runtime rows as they are.");
+    return;
+  }
+  try {
+    ownedProjectIds = playwrightOwnedProjectIds();
+  } catch (error) {
+    log(
+      `Skipping runtime cleanup: cannot tell which projects are Playwright's own (${
+        error instanceof Error ? error.message : String(error)
+      }).`
+    );
+    return;
+  }
+  if (ownedProjectIds.length === 0) return;
+  cleanupRuntimeContainers(ownedProjectIds);
+  cleanupRuntimeNetworks(ownedProjectIds);
+  cleanupRuntimeTables(ownedProjectIds);
+}
+
+/**
+ * Whether the run may reset `projectId`'s runtime state and conversations: only a project owned
+ * by one of the suite's users (PLAYWRIGHT_PROJECT_ID can name a developer's own space).
+ */
+function mayResetPlaywrightProject(projectId: string | null): projectId is string {
+  if (!projectId) return false;
+  // a project the suite created after the first read is not in it yet: read again before refusing
+  const { owned, ids } = ownedProjectLookup(projectId, ownedProjectIds, playwrightOwnedProjectIds);
+  ownedProjectIds = ids ? [...ids] : null;
+  if (!owned) {
+    log(`Leaving project ${projectId} as it is: it is not owned by a Playwright test user.`);
+  }
+  return owned;
 }
 
 async function ensureControllerProviders(serviceRoleKey: string) {
@@ -1384,6 +1336,9 @@ async function purgeControllerQueues(
     log("Skipping Supabase conversation purge because PLAYWRIGHT_PROJECT_ID is unavailable.");
     return;
   }
+  if (!mayResetPlaywrightProject(projectId)) {
+    return;
+  }
   const tables = [
     "conversation_messages",
     "agent_jobs",
@@ -1909,6 +1864,9 @@ async function cleanupProjectRuntimeState(
   controllerAdminToken: string,
   supabaseServiceRoleKey: string
 ) {
+  if (runtimeCleanupDisabled(process.env) || !mayResetPlaywrightProject(projectId)) {
+    return;
+  }
   const cleanedUrl = controllerUrl.replace(/\/+$/, "");
   const controllerHeaders = {
     authorization: `Bearer ${controllerAdminToken}`,

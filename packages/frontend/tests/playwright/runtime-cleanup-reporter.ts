@@ -7,6 +7,15 @@ import {
   summarizeRuntimeLifecycleLogs,
   type RuntimeLifecycleSummary,
 } from "./utils/runtimeLifecycleDiagnostics.js";
+import {
+  composeProjectOwnedBy,
+  findPsql,
+  ownedRuntimeNetworkIds,
+  readPlaywrightOwnedProjectIds,
+  runtimeCleanupDisabled,
+  runtimeComposeNames,
+} from "./utils/runtimeCleanupScope.js";
+import { resolveLocalSupabaseDbUrl } from "../../../../scripts/lib/localSupabaseEnv.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -57,6 +66,7 @@ function runDocker(cmd: string, args: string[]): string {
 function listHostedComposeContainers(
   dockerProjectPrefix: string,
   baseComposeProject: string,
+  projectIds: readonly string[],
 ): HostedComposeContainer[] {
   return runDocker("docker", [
     "ps",
@@ -73,7 +83,11 @@ function listHostedComposeContainers(
       const [id, , composeProject, composeService] = row.split("\t");
       if (!id) return null;
       const project = (composeProject || "").trim();
-      if (!project || project === baseComposeProject || !project.startsWith(dockerProjectPrefix)) {
+      if (
+        !project ||
+        project === baseComposeProject ||
+        !composeProjectOwnedBy(project, dockerProjectPrefix, projectIds)
+      ) {
         return null;
       }
       return {
@@ -140,15 +154,27 @@ function captureRuntimeLifecycleDiagnostics(containers: HostedComposeContainer[]
   }
 }
 
-function cleanupRuntimeContainers(captureBeforeRemoval: boolean): void {
-  const dockerProjectPrefix =
-    (process.env.DOCKER_PROJECT_PREFIX ||
-      process.env.RUNTIME_DOCKER_PROJECT_PREFIX ||
-      "instafy-runtime-").trim() || "instafy-runtime-";
-  const baseComposeProject = (process.env.COMPOSE_PROJECT_NAME || "instafy-runtime").trim() || "instafy-runtime";
-
+/** The projects owned by the suite's own users; null when the local database cannot tell. */
+function playwrightOwnedProjectIds(): string[] | null {
   try {
-    const containers = listHostedComposeContainers(dockerProjectPrefix, baseComposeProject);
+    return readPlaywrightOwnedProjectIds({
+      dbUrl:
+        resolveLocalSupabaseDbUrl({ env: process.env }) ||
+        "postgresql://postgres:postgres@127.0.0.1:54322/postgres",
+      cwd: repoRoot,
+      env: process.env,
+      psqlBin: findPsql(process.env),
+    });
+  } catch {
+    return null;
+  }
+}
+
+/** Remove the runtime containers of `projectIds` (the suite's own projects) only. */
+function cleanupRuntimeContainers(captureBeforeRemoval: boolean, projectIds: readonly string[]): void {
+  const { prefix, baseComposeProject } = runtimeComposeNames(process.env);
+  try {
+    const containers = listHostedComposeContainers(prefix, baseComposeProject, projectIds);
     const ids = containers.map((container) => container.id);
 
     if (ids.length > 0) {
@@ -162,34 +188,13 @@ function cleanupRuntimeContainers(captureBeforeRemoval: boolean): void {
   }
 }
 
-function cleanupRuntimeNetworks(): void {
-  const dockerProjectPrefix =
-    (process.env.DOCKER_PROJECT_PREFIX ||
-      process.env.RUNTIME_DOCKER_PROJECT_PREFIX ||
-      "instafy-runtime-").trim() || "instafy-runtime-";
-
+function cleanupRuntimeNetworks(projectIds: readonly string[]): void {
+  const { prefix } = runtimeComposeNames(process.env);
   try {
-    const rows = runDocker("docker", [
-      "network",
-      "ls",
-      "--format",
-      "{{.ID}}\t{{.Name}}",
-      "--filter",
-      `name=${dockerProjectPrefix}`,
-    ])
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
-
-    const ids = rows
-      .map((row) => {
-        const [id, name] = row.split("\t");
-        if (!id || !name) return null;
-        if (!name.startsWith(dockerProjectPrefix)) return null;
-        return id;
-      })
-      .filter((id): id is string => Boolean(id));
-
+    const ids = ownedRuntimeNetworkIds(
+      runDocker("docker", ["network", "ls", "--format", "{{.ID}}\t{{.Name}}", "--filter", `name=${prefix}`]),
+      { prefix, projectIds },
+    );
     if (ids.length > 0) {
       spawnSync("docker", ["network", "rm", ...ids], { cwd: repoRoot, env: process.env, stdio: "ignore" });
     }
@@ -199,15 +204,16 @@ function cleanupRuntimeNetworks(): void {
 }
 
 function maybeCleanupDockerRuntimeResources(test: TestCase, result: TestResult): void {
-  if (process.env.KEEP_RUNTIME === "1") return;
-  if ((process.env.PLAYWRIGHT_CLEANUP_RUNTIME ?? "1").trim() === "0") return;
+  if (runtimeCleanupDisabled(process.env)) return;
 
   // Avoid doing work for the setup project when only the runtime stack is starting.
   const titlePath = test.titlePath();
   if (titlePath.includes("runtime-setup")) return;
 
-  cleanupRuntimeContainers(result.status !== test.expectedStatus);
-  cleanupRuntimeNetworks();
+  const projectIds = playwrightOwnedProjectIds();
+  if (!projectIds?.length) return;
+  cleanupRuntimeContainers(result.status !== test.expectedStatus, projectIds);
+  cleanupRuntimeNetworks(projectIds);
 }
 
 export default class RuntimeCleanupReporter implements Reporter {

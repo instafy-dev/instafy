@@ -4,6 +4,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_CONTROLLER_URL, resolvePlaywrightControllerUrl } from "./utils/controllerUrl.js";
 import { runGenericTunnelGrantCleanup } from "./utils/globalTeardownSafety.js";
+import {
+  findPsql,
+  ownedRuntimeContainerIds,
+  ownedRuntimeNetworkIds,
+  readPlaywrightOwnedProjectIds,
+  runtimeCleanupDisabled,
+  runtimeComposeNames,
+} from "./utils/runtimeCleanupScope.js";
+import { resolveLocalSupabaseDbUrl } from "../../../../scripts/lib/localSupabaseEnv.mjs";
 const EXTERNAL_BASE_URL = (process.env.PLAYWRIGHT_EXTERNAL_BASE_URL ?? "").trim();
 const USE_EXTERNAL_PLAYWRIGHT_TARGET =
   EXTERNAL_BASE_URL.length > 0 || (process.env.PLAYWRIGHT_EXTERNAL_STACK ?? "").trim() === "1";
@@ -114,56 +123,53 @@ function runDocker(cmd: string, args: string[]): string {
   return (result.stdout || "").toString();
 }
 
-function cleanupRuntimeContainers(): void {
-  const dockerProjectPrefix =
-    (process.env.DOCKER_PROJECT_PREFIX ||
-      process.env.RUNTIME_DOCKER_PROJECT_PREFIX ||
-      "instafy-runtime-").trim() || "instafy-runtime-";
-  const baseComposeProject = (process.env.COMPOSE_PROJECT_NAME || "instafy-runtime").trim() || "instafy-runtime";
-
+/** The projects owned by the suite's own users; null when the local database cannot tell. */
+function playwrightOwnedProjectIds(): string[] | null {
   try {
-    const rows = runDocker("docker", [
-      "ps",
-      "-a",
-      "--format",
-      "{{.ID}}\t{{.Names}}\t{{.Label \"com.docker.compose.project\"}}",
-      "--filter",
-      `name=${dockerProjectPrefix}`,
-    ])
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
+    return readPlaywrightOwnedProjectIds({
+      dbUrl:
+        resolveLocalSupabaseDbUrl({ env: process.env }) ||
+        "postgresql://postgres:postgres@127.0.0.1:54322/postgres",
+      cwd: repoRoot,
+      env: process.env,
+      psqlBin: findPsql(process.env),
+    });
+  } catch (error) {
+    console.warn(
+      "[global-teardown] Cannot tell which projects are Playwright's own; leaving runtime containers as they are:",
+      error instanceof Error ? error.message : String(error),
+    );
+    return null;
+  }
+}
 
-    const ids = rows
-      .map((row) => {
-        const [id, _name, composeProject] = row.split("\t");
-        if (!id) return null;
-        const project = (composeProject || "").trim();
-        if (!project) return null;
-        if (project === baseComposeProject) return null;
-        if (!project.startsWith(dockerProjectPrefix)) return null;
-        return id;
-      })
-      .filter((id): id is string => Boolean(id));
-
+/** Remove the runtime containers and networks of `projectIds` (the suite's own projects) only. */
+function cleanupRuntimeContainers(projectIds: readonly string[]): void {
+  const { prefix, baseComposeProject } = runtimeComposeNames(process.env);
+  try {
+    const ids = ownedRuntimeContainerIds(
+      runDocker("docker", [
+        "ps",
+        "-a",
+        "--format",
+        "{{.ID}}\t{{.Names}}\t{{.Label \"com.docker.compose.project\"}}",
+        "--filter",
+        `name=${prefix}`,
+      ]),
+      { prefix, baseComposeProject, projectIds },
+    );
     if (ids.length > 0) {
-      console.log(`[global-teardown] Removing ${ids.length} lingering runtime containers...`);
-      try {
-        const result = spawnSync("docker", ["rm", "-f", ...ids], {
-          cwd: repoRoot,
-          env: process.env,
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "pipe"],
-        });
-        if (result.status !== 0) {
-          const stderr = (result.stderr || "").trim();
-          if (stderr) {
-            console.warn(
-              `[global-teardown] docker rm reported non-zero exit (${result.status}): ${stderr}`,
-            );
-          }
-        }
-      } catch {}
+      console.log(`[global-teardown] Removing ${ids.length} lingering runtime containers of Playwright projects...`);
+      const result = spawnSync("docker", ["rm", "-f", ...ids], {
+        cwd: repoRoot,
+        env: process.env,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      const stderr = (result.stderr || "").trim();
+      if (result.status !== 0 && stderr) {
+        console.warn(`[global-teardown] docker rm reported non-zero exit (${result.status}): ${stderr}`);
+      }
     }
   } catch (error) {
     console.warn(
@@ -173,46 +179,22 @@ function cleanupRuntimeContainers(): void {
   }
 
   try {
-    const networks = runDocker("docker", [
-      "network",
-      "ls",
-      "--format",
-      "{{.ID}}\t{{.Name}}",
-      "--filter",
-      `name=${dockerProjectPrefix}`,
-    ])
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
-
-    const ids = networks
-      .map((row) => {
-        const [id, name] = row.split("\t");
-        if (!id || !name) return null;
-        if (!name.startsWith(dockerProjectPrefix)) return null;
-        // base network is `instafy-runtime_default` (no dash), so prefix filter already avoids it.
-        return id;
-      })
-      .filter((id): id is string => Boolean(id));
-
+    const ids = ownedRuntimeNetworkIds(
+      runDocker("docker", ["network", "ls", "--format", "{{.ID}}\t{{.Name}}", "--filter", `name=${prefix}`]),
+      { prefix, projectIds },
+    );
     if (ids.length > 0) {
-      console.log(`[global-teardown] Removing ${ids.length} lingering runtime networks...`);
-      try {
-        const result = spawnSync("docker", ["network", "rm", ...ids], {
-          cwd: repoRoot,
-          env: process.env,
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "pipe"],
-        });
-        if (result.status !== 0) {
-          const stderr = (result.stderr || "").trim();
-          if (stderr) {
-            console.warn(
-              `[global-teardown] docker network rm reported non-zero exit (${result.status}): ${stderr}`,
-            );
-          }
-        }
-      } catch {}
+      console.log(`[global-teardown] Removing ${ids.length} lingering runtime networks of Playwright projects...`);
+      const result = spawnSync("docker", ["network", "rm", ...ids], {
+        cwd: repoRoot,
+        env: process.env,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      const stderr = (result.stderr || "").trim();
+      if (result.status !== 0 && stderr) {
+        console.warn(`[global-teardown] docker network rm reported non-zero exit (${result.status}): ${stderr}`);
+      }
     }
   } catch (error) {
     console.warn(
@@ -298,7 +280,8 @@ function restoreTunnelBrokerFixtureConfigs(): void {
   }
 }
 
-async function stopHostedRuntimes(): Promise<void> {
+/** Stop the hosted runtimes of the projects the run touched that are the suite's own. */
+async function stopHostedRuntimes(ownedProjectIds: readonly string[]): Promise<void> {
   const controllerUrl = resolvePlaywrightControllerUrl(process.env) || DEFAULT_CONTROLLER_URL;
   const serviceRole =
     process.env.SUPABASE_SERVICE_ROLE_KEY ||
@@ -310,7 +293,7 @@ async function stopHostedRuntimes(): Promise<void> {
     return;
   }
 
-  const projectIds = collectProjectIds();
+  const projectIds = collectProjectIds().filter((id) => ownedProjectIds.includes(id.toLowerCase()));
   if (projectIds.length === 0) {
     return;
   }
@@ -541,14 +524,18 @@ export default async function globalTeardown() {
       error instanceof Error ? error.message : String(error),
     );
   }
-  if (process.env.KEEP_RUNTIME === "1") {
-    console.log("[global-teardown] KEEP_RUNTIME=1 -> skipping teardown");
+  if (runtimeCleanupDisabled(process.env)) {
+    console.log("[global-teardown] KEEP_RUNTIME=1 or PLAYWRIGHT_CLEANUP_RUNTIME=0 -> skipping teardown");
     return;
   }
   if (USE_EXTERNAL_PLAYWRIGHT_TARGET) {
     console.log("[global-teardown] External Playwright target enabled; skipping local runtime/container teardown.");
     return;
   }
-  await stopHostedRuntimes();
-  cleanupRuntimeContainers();
+  const ownedProjectIds = playwrightOwnedProjectIds();
+  if (ownedProjectIds === null) {
+    return;
+  }
+  await stopHostedRuntimes(ownedProjectIds);
+  cleanupRuntimeContainers(ownedProjectIds);
 }
