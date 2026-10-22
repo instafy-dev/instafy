@@ -556,7 +556,7 @@ function SkillImportMessageBody({ label, command }: { label: string; command: st
 /**
  * The record of a continuation sent to Instafy's browser for a
  * request_browser card: a muted one-line notice, "Octo opened Instafy's
- * browser at <host>", not a bubble the person wrote. The task it sent is
+ * browser for <host>", not a bubble the person wrote. The task it sent is
  * kept as the prompt's dispatched content.
  */
 export function BrowserRequestNoticeRow({ message }: { message: ChatMessage }) {

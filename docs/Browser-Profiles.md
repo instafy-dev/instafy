@@ -37,9 +37,10 @@ whose controller policy covers it, Studio also presses it by itself for Instafy'
 on the conversation's own machine, which starts that browser on demand, on the web as in
 the desktop app. Everywhere else the card waits for the person's press. Either way the
 task goes to that exact browser once it is ready, and the chat records a one-line notice
-("Octo opened Instafy's browser at dashboard.stripe.com") in place of the task, which the
-record keeps as the dispatched prompt. Studio starts a card
-by itself only:
+("Octo opened Instafy's browser for dashboard.stripe.com") in place of the task, which the
+record keeps as the dispatched prompt. The host in the notice, and on the card, comes from
+the task's text: it is where the task is headed, not a page the browser has loaded. Studio
+starts a card by itself only:
 
 - in the desktop app's browser, for a person on their own AI connection; or in
   Instafy's browser on the conversation's own machine, when the controller covers the

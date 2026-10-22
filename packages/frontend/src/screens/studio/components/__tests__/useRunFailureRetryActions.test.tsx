@@ -250,14 +250,14 @@ describe("useRunFailureRetryActions", () => {
       id: "notice-1",
       role: "user",
       authorId: CURRENT_USER_ID,
-      content: "Octo opened Instafy's browser at app.example.test",
+      content: "Octo opened Instafy's browser for app.example.test",
       timestamp: 1,
       metadata: {
         clientMessageId: "client-notice-1",
         client: { sessionId: CHAT_CLIENT_SESSION_ID, userId: CURRENT_USER_ID },
         browserRequestOf: "job:card-job",
         browserTransport: "shared",
-        displayContent: "Octo opened Instafy's browser at app.example.test",
+        displayContent: "Octo opened Instafy's browser for app.example.test",
         dispatchContent: "Continue this browser task using the browser attached to this turn.\n\nOpen https://app.example.test",
       },
     });

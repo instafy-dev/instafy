@@ -236,9 +236,10 @@ export function ActionRequestEntry({
 }) {
   const { showStatus } = useStatus();
   const parsed = useMemo(() => parseActionRequestDetails(details), [details]);
-  // A request_browser card names where its press goes, so the press is consent
-  // to a destination the person can see, and it cannot be pressed where no
-  // browser can open.
+  // A request_browser card names where its task is headed, so the press is
+  // consent to a destination the person can see, and it cannot be pressed
+  // where no browser can open. The host comes from the task's text, not from
+  // the page the browser reached, so the card never says the site opened.
   const browserHost = useContext(BrowserRequestHostContext);
   const browserRequest = useMemo(() => browserRequestFromMessage(message), [message]);
   const browserDestinations = useMemo(
@@ -248,9 +249,10 @@ export function ActionRequestEntry({
   const browserUnavailable =
     browserRequest && browserHost ? browserRequestUnavailableReason(browserRequest, browserHost) : null;
   // Studio opens the browser for a card by itself where it can: the card then
-  // reads Opening and then Opened in place of its button. Where it cannot,
-  // the button stays, with the reason when there is one. A continued card
-  // reads Opened after a reload too, so an old card is not pressed again.
+  // reads Opening and then Browser opened in place of its button. Where it
+  // cannot, the button stays, with the reason when there is one. A continued
+  // card reads Browser opened after a reload too, so an old card is not
+  // pressed again.
   const browserKey = browserRequest ? browserRequestKey(message) : null;
   const browserCardState = browserKey ? browserHost?.cardStates?.get(browserKey) ?? null : null;
   const browserPhase = browserKey && (browserHost?.continuedKeys?.has(browserKey) || browserCardState?.kind === "opened")
@@ -386,20 +388,25 @@ export function ActionRequestEntry({
                 <Spinner aria-hidden="true" tone="slate" size="sm" />
                 <span>
                   Opening Instafy&apos;s browser{browserDestinations.length > 0 ? (
-                    <> at <span className="font-mono text-slate-700 dark:text-slate-200">{browserDestinations[0]}</span></>
+                    <> for <span className="font-mono text-slate-700 dark:text-slate-200">{browserDestinations[0]}</span></>
                   ) : null}
                 </span>
               </Text>
             ) : browserPhase === "opened" ? (
               <div className="flex items-center gap-2" data-testid="browser-request-opened">
-                <Badge tone="success">Opened</Badge>
+                <Badge tone="success">Browser opened</Badge>
                 {browserDestinations.length > 0 ? (
-                  <Text as="span" variant="caption" tone="muted" className="break-all font-mono">{browserDestinations.join(", ")}</Text>
+                  <>
+                    {" "}
+                    <Text as="span" variant="caption" tone="muted" className="break-all">
+                      for <span className="font-mono">{browserDestinations.join(", ")}</span>
+                    </Text>
+                  </>
                 ) : null}
               </div>
             ) : browserDestinations.length > 0 ? (
               <Text as="div" variant="caption" tone="muted" className="break-all" data-testid="browser-request-destination">
-                Opens <span className="font-mono text-slate-700 dark:text-slate-200">{browserDestinations.join(", ")}</span>
+                For <span className="font-mono text-slate-700 dark:text-slate-200">{browserDestinations.join(", ")}</span>
               </Text>
             ) : null}
             {browserPhase === "opening" && browserCardState?.kind === "opening" && browserCardState.note ? (

@@ -773,15 +773,15 @@ section: questions are asked in chat, secrets are requested by name through the 
 and never pasted into the conversation, dependencies are installed inside the skill folder,
 and schedules are created through the normal automation flow. When a skill declares the
 address where the person signs in to the provider, the setup also offers once, beside the
-secret cards, the **Open browser and continue** card: pressing it opens Instafy's browser at
-that address and walks to the screen that lists the value. Studio presses it by itself only
-once a reply has shown that address, and only in the desktop app for a person on their own
-AI connection, or in Instafy's browser on the conversation's own machine in a space the
-controller covers, while nobody else is using that browser (see
+secret cards, the **Open browser and continue** card: pressing it opens Instafy's browser for
+that address, and the agent goes there and walks to the screen that lists the value. Studio
+presses it by itself only once a reply has shown that address, and only in the desktop app
+for a person on their own AI connection, or in Instafy's browser on the conversation's own
+machine in a space the controller covers, while nobody else is using that browser (see
 [Browser Profiles](Browser-Profiles.md)); everywhere else nothing opens before the press.
-The card names the host it opens. The person signs in themselves: the walk pauses at the
-sign-in, they sign in on the page and choose **Let AI continue**, and the agent types no
-credential. The walk stops on that list: the agent is told never to open, or ask the person
+The card names the host its task is headed for. The person signs in themselves: the walk
+pauses at the sign-in, they sign in on the page and choose **Let AI continue**, and the agent
+types no credential. The walk stops on that list: the agent is told never to open, or ask the person
 to open, a screen in Instafy's browser that shows the value itself, because others watching
 that browser can see it, it often cannot be copied out, and a browser turn starts from a
 snapshot of the page. Instead it tells the person to open the same page in a tab of their own

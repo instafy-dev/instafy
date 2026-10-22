@@ -133,10 +133,10 @@ describe("useChatBrowserHandoff", () => {
     const value = options();
     await render(value);
     await expect(resultRef.current!.continueShared("Continue this browser task.\n\nOpen https://app.example.test", {
-      display: "Octo opened Instafy's browser at app.example.test",
+      display: "Octo opened Instafy's browser for app.example.test",
       metadata: { browserRequestOf: "job:job-1", browserAutoStarted: true, browserTransport: "desktop-personal" },
     })).resolves.toBe(true);
-    expect(value.onSubmit).toHaveBeenCalledExactlyOnceWith("conversation-1", "Octo opened Instafy's browser at app.example.test", expect.objectContaining({
+    expect(value.onSubmit).toHaveBeenCalledExactlyOnceWith("conversation-1", "Octo opened Instafy's browser for app.example.test", expect.objectContaining({
       dispatchInput: "Continue this browser task.\n\nOpen https://app.example.test",
       metadata: expect.objectContaining({
         browserRequestOf: "job:job-1", browserAutoStarted: true,
@@ -157,7 +157,7 @@ describe("useChatBrowserHandoff", () => {
     await render(value);
     // Even an extras object that still says Studio opened it by itself.
     const extras = {
-      display: "Octo opened Instafy's browser at app.example.test",
+      display: "Octo opened Instafy's browser for app.example.test",
       metadata: { browserRequestOf: "job:job-1", browserAutoStarted: true },
       autoStarted: true,
     };
@@ -189,7 +189,7 @@ describe("useChatBrowserHandoff", () => {
     } as Partial<Options["personal"]>) });
     await render(value);
     void resultRef.current!.startPersonal("Open https://app.example.test", {
-      display: "Octo opened Instafy's browser at app.example.test",
+      display: "Octo opened Instafy's browser for app.example.test",
       metadata: { browserRequestOf: "job:job-1", ...(automatic ? { browserAutoStarted: true } : {}) },
       knownHosts: ["app.example.test"],
     }).catch(() => null);

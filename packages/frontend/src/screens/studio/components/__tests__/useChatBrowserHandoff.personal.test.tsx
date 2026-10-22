@@ -172,7 +172,7 @@ describe("Personal handoff with the real React browser bridge", () => {
     if (preferred) await act(async () => resultRef.current!.personal.setPreferredApprovalMode(preferred));
     await act(async () => {
       void resultRef.current!.handoff.startPersonal("Continue this browser task.\n\nOpen https://app.example.test and https://docs.example.test", {
-        display: "Octo opened Instafy's browser at app.example.test",
+        display: "Octo opened Instafy's browser for app.example.test",
         metadata: { browserRequestOf: "job:job-1", browserAutoStarted: true },
         knownHosts: ["app.example.test", "docs.example.test"],
       }).catch(() => null);

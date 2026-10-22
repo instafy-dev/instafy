@@ -200,7 +200,7 @@ describe("Chat browser request handoff", () => {
 
   it("reads the task back from the continuation when its card is no longer loaded", async () => {
     const task = "Open https://app.example.test/settings and stop on API keys.";
-    const notice: ChatMessage = { id: "notice-1", role: "user", content: "Octo opened Instafy's browser at app.example.test", timestamp: 2,
+    const notice: ChatMessage = { id: "notice-1", role: "user", content: "Octo opened Instafy's browser for app.example.test", timestamp: 2,
       metadata: { prompt_metadata: { browserRequestOf: "job:old", browserTransport: "shared",
         dispatchContent: `Continue this browser task using the browser attached to this turn. Inspect its current state first, preserve existing session state, and avoid repeating work that is already complete.\n\n${task}` } } };
     value.messages = [notice]; value.transport = "shared"; value.open = true; value.sharedReady = true;
@@ -210,7 +210,7 @@ describe("Chat browser request handoff", () => {
     await advance();
     expect(await sent).toBe(true);
     expect(value.continueTask).toHaveBeenCalledExactlyOnceWith("shared", expect.stringMatching(/\n\nOpen https:\/\/app\.example\.test\/settings and stop on API keys\.$/), {
-      display: "Octo opened Instafy's browser at app.example.test",
+      display: "Octo opened Instafy's browser for app.example.test",
       metadata: { retryOfMessageId: "failure-1", browserRequestOf: "job:old" },
       knownHosts: ["app.example.test"],
     });
@@ -377,7 +377,7 @@ describe("Studio starting a request_browser card by itself", () => {
     // It is marked as Studio's own start, so the browser chooses its approval
     // mode by the Desktop's policy, and carries the hosts the card shows.
     expect(value.continueTask).toHaveBeenCalledExactlyOnceWith("personal", expect.stringContaining(TASK), {
-      display: "Octo opened Instafy's browser at app.example.test",
+      display: "Octo opened Instafy's browser for app.example.test",
       metadata: { browserRequestOf: "job:job-1", browserAutoStarted: true },
       knownHosts: ["app.example.test"],
     });
@@ -529,7 +529,7 @@ describe("Studio starting a request_browser card by itself", () => {
     await openHost();
     expect(host.refreshHost).toHaveBeenCalledWith({ force: true });
     expect(value.continueTask).toHaveBeenCalledExactlyOnceWith("shared", expect.stringContaining(TASK), {
-      display: "Octo opened Instafy's browser at app.example.test",
+      display: "Octo opened Instafy's browser for app.example.test",
       metadata: { browserRequestOf: "job:job-1", browserAutoStarted: true },
       knownHosts: ["app.example.test"],
     });
