@@ -805,6 +805,27 @@ async fn checkpoint_plan_group(
         return Ok(false);
     }
 
+    // A lane that ran out of turn time asked to continue: its next turn starts now and keeps the
+    // group open, so nothing below runs until it ends.
+    if turn_continuation::maybe_dispatch_turn_continuation(
+        &transaction,
+        state,
+        project_id,
+        conversation_id,
+        group_id,
+        trigger_job_id,
+        trigger_job_payload,
+        plan_meta,
+        &workers,
+    )
+    .await
+    {
+        transaction.commit().await.map_err(|error| {
+            internal_error(format!("failed to release checkpoint lock: {error}"))
+        })?;
+        return Ok(true);
+    }
+
     // A lane that stopped on a short provider rate limit before it acted runs once more after
     // the stated wait: its retry keeps the group open, so the failure wakes no one meanwhile.
     if rate_limit_retry::maybe_dispatch_rate_limit_retry(
@@ -1157,20 +1178,16 @@ where
                 .map(|content| truncate_for_status(content.as_str(), 300)),
             acting_tool_count: row.get("acting_tool_count"),
             retried_as: None,
-            rate_limit_retry_of: plan_meta
-                .and_then(|plan| plan.get("rateLimitRetry"))
-                .and_then(|retry| retry.get("of"))
-                .and_then(JsonValue::as_str)
-                .and_then(|value| Uuid::from_str(value.trim()).ok()),
+            rerun_of: plan_meta.and_then(RerunReason::of),
         });
     }
-    let retries: Vec<(Uuid, Uuid)> = workers
+    let reruns: Vec<(Uuid, Uuid, RerunReason)> = workers
         .iter()
-        .filter_map(|worker| worker.rate_limit_retry_of.map(|of| (of, worker.id)))
+        .filter_map(|worker| worker.rerun_of.map(|(of, reason)| (of, worker.id, reason)))
         .collect();
-    for (of, retry) in retries {
+    for (of, rerun, reason) in reruns {
         if let Some(worker) = workers.iter_mut().find(|worker| worker.id == of) {
-            worker.retried_as = Some(retry);
+            worker.retried_as = Some((rerun, reason));
         }
     }
 
@@ -1204,7 +1221,8 @@ pub(crate) fn sibling_snapshot_to_json(worker: &SiblingJobSnapshot) -> JsonValue
         "paths": worker.paths,
         "lastMessage": worker.last_message,
         "terminal": is_terminal_job_status(worker.status.as_str()),
-        "retriedAs": worker.retried_as,
+        "retriedAs": worker.retried_as.map(|(rerun, _)| rerun),
+        "retriedFor": worker.retried_as.map(|(_, reason)| reason.as_str()),
     })
 }
 
@@ -2103,20 +2121,57 @@ pub(crate) struct SiblingJobSnapshot {
     /// The run's tool calls that act rather than read: commands, MCP tool calls and file changes
     /// (every recorded tool update but a web search).
     acting_tool_count: i64,
-    /// The job of the group that ran this one's agent again after it stopped on a short provider
-    /// rate limit (its result stands for this one's).
-    retried_as: Option<Uuid>,
-    /// The job this one ran again after a short provider rate limit, from
-    /// `metadata.multiAgentPlan.rateLimitRetry.of`.
-    rate_limit_retry_of: Option<Uuid>,
+    /// The job of the group that ran this one's agent again (its result stands for this one's),
+    /// and why.
+    retried_as: Option<(Uuid, RerunReason)>,
+    /// The job this one ran again, and why: from `metadata.multiAgentPlan.rateLimitRetry.of` (after
+    /// a short provider rate limit) or `continuation.of` (the agent's next turn).
+    rerun_of: Option<(Uuid, RerunReason)>,
 }
 
-/// For a run the controller started again after a short provider rate limit: where its result is.
+/// Why the controller started a plan agent again in its group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RerunReason {
+    /// Its run stopped on a short provider rate limit before it acted (`rate_limit_retry`).
+    RateLimit,
+    /// Its turn ran out of time with work left (`turn_continuation`).
+    TurnContinuation,
+}
+
+impl RerunReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::RateLimit => "rate_limit",
+            Self::TurnContinuation => "turn_continuation",
+        }
+    }
+
+    /// Where the rerun is recorded in the new job's `metadata.multiAgentPlan`. A retry of a
+    /// continuation turn carries both; the retry is what replaced the failed run.
+    fn of(plan_meta: &JsonMap<String, JsonValue>) -> Option<(Uuid, Self)> {
+        [
+            ("rateLimitRetry", Self::RateLimit),
+            ("continuation", Self::TurnContinuation),
+        ]
+        .into_iter()
+        .find_map(|(key, reason)| {
+            plan_meta
+                .get(key)
+                .and_then(|rerun| rerun.get("of"))
+                .and_then(JsonValue::as_str)
+                .and_then(|value| Uuid::from_str(value.trim()).ok())
+                .map(|of| (of, reason))
+        })
+    }
+}
+
+/// For a run the controller started again: why, and where its result is.
 fn retried_note(worker: &SiblingJobSnapshot) -> String {
     worker
         .retried_as
-        .map(|retry| {
-            format!(" (stopped on a short provider rate limit; the controller ran it again as job={retry}, whose line is this lane's result)")
+        .map(|(rerun, reason)| match reason {
+            RerunReason::RateLimit => format!(" (stopped on a short provider rate limit; the controller ran it again as job={rerun}, whose line is this lane's result)"),
+            RerunReason::TurnContinuation => format!(" (ran out of turn time with work left; the controller continued it as job={rerun}, whose line is this lane's result)"),
         })
         .unwrap_or_default()
 }
@@ -2701,6 +2756,8 @@ fn normalize_agent_handle(raw: &str) -> Option<String> {
 #[path = "multi_agent_plan/rate_limit_retry.rs"]
 mod rate_limit_retry;
 pub(crate) use rate_limit_retry::stated_rate_limit_wait;
+#[path = "multi_agent_plan/turn_continuation.rs"]
+mod turn_continuation;
 
 #[cfg(test)]
 #[path = "multi_agent_plan/completion_tests.rs"]
@@ -3408,7 +3465,7 @@ mod tests {
                 last_message: None,
                 acting_tool_count: 0,
                 retried_as: None,
-                rate_limit_retry_of: None,
+                rerun_of: None,
             },
             SiblingJobSnapshot {
                 id: Uuid::nil(),
@@ -3436,7 +3493,7 @@ mod tests {
                 last_message: None,
                 acting_tool_count: 0,
                 retried_as: None,
-                rate_limit_retry_of: None,
+                rerun_of: None,
             },
         ];
 
@@ -3518,7 +3575,7 @@ mod tests {
                 last_message: None,
                 acting_tool_count: 0,
                 retried_as: None,
-                rate_limit_retry_of: None,
+                rerun_of: None,
             },
             SiblingJobSnapshot {
                 id: Uuid::nil(),
@@ -3534,7 +3591,7 @@ mod tests {
                 last_message: None,
                 acting_tool_count: 0,
                 retried_as: None,
-                rate_limit_retry_of: None,
+                rerun_of: None,
             },
         ];
 

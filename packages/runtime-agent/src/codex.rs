@@ -695,7 +695,28 @@ pub struct CodexRunOptions {
     /// this order. Absolute paths that the turn's attachment hold keeps on disk; Codex reads
     /// each file once when the turn starts.
     pub input_images: Vec<PathBuf>,
+    /// Steer the live turn once, this long after it started, with a wrap-up note: the turn's
+    /// hard limit is near (see `TurnWrapUp`).
+    pub turn_wrap_up: Option<TurnWrapUp>,
+    /// The file a team lane's agent may leave its continuation note in (see
+    /// `jobs::turn_continuation`). Each attempt starts without one, so a note an earlier attempt
+    /// left is not taken for this one's. A run that has one is not retried here when it times out:
+    /// the controller continues it in a new turn instead.
+    pub turn_continue_note: Option<PathBuf>,
 }
+
+/// A turn nearing its hard limit is told so while it still runs (one steering input, as a
+/// person's mid-turn message would be), so it can save its work and end on its own instead
+/// of being cut off mid-command with nothing saved.
+#[derive(Debug, Clone)]
+pub struct TurnWrapUp {
+    /// When to steer, counted from the start of the turn.
+    pub after: Duration,
+    pub message: String,
+}
+
+/// The run-log event a wrap-up steer leaves (whether Codex took it, and when).
+pub(crate) const TURN_WRAP_UP_EVENT_TYPE: &str = "runtime.turn_wrap_up";
 
 impl CodexRunOptions {
     /// Whether this run continues the provider thread its state names. That thread already
@@ -717,6 +738,25 @@ impl CodexRunOptions {
             self.input_images.clear();
         }
         self
+    }
+
+    /// Clears what an earlier attempt of this run left for the turn's end: its continuation note.
+    fn start_attempt(&self) {
+        if let Some(note) = self.turn_continue_note.as_ref() {
+            match std::fs::remove_file(note) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    tracing::warn!(%error, "could not clear the turn's continuation note")
+                }
+            }
+        }
+    }
+
+    /// Whether a run that timed out may be run again here: not one the controller continues in a
+    /// new turn (`turn_continue_note`), which would otherwise redo a whole turn first.
+    fn retries_a_timed_out_run(&self, attempt: usize, max_retries: usize) -> bool {
+        attempt < max_retries && self.turn_continue_note.is_none()
     }
 }
 
@@ -993,6 +1033,7 @@ impl CodexClient {
 
         let mut attempt: usize = 0;
         loop {
+            options.start_attempt();
             let mut attempt_options = if attempt == 0 {
                 options.clone()
             } else {
@@ -1137,7 +1178,7 @@ impl CodexClient {
                     tokio::time::sleep(delay).await;
                 }
                 Err(_) => {
-                    let should_retry = attempt < max_retries;
+                    let should_retry = options.retries_a_timed_out_run(attempt, max_retries);
                     if !should_retry {
                         return Err(anyhow!("Codex run timed out"));
                     }
@@ -1192,6 +1233,7 @@ impl CodexClient {
         usage_attempt: Option<UsageAttempt>,
         attempt_threads: CodexThreadRegistration,
     ) -> Result<CodexRunOutput> {
+        let turn_started = std::time::Instant::now();
         let browser_mode = options.expect_browser_session;
         let personal_browser_mode =
             options.personal_browser && personal_browser_capability_is_present();
@@ -1914,7 +1956,7 @@ impl CodexClient {
                     configured.model, configured.model_provider_id
                 );
             }
-            collect_events(&mut aggregator, &config_event, &mut events, on_event)?;
+            collect_events(&mut aggregator, &config_event, &mut events, on_event, turn_started)?;
         }
 
         if should_refresh_mcp_servers(
@@ -2037,6 +2079,10 @@ impl CodexClient {
         let mut active_turn_input = options.active_turn_input.clone();
         let mut active_turn_input_readiness: Option<ActiveTurnInputReadinessGuard> = None;
 
+        let mut wrap_up = options
+            .turn_wrap_up
+            .clone()
+            .map(|wrap_up| (tokio::time::Instant::from_std(turn_started) + wrap_up.after, wrap_up.message));
         loop {
             let event = if let Some(receiver) = active_turn_input.as_ref() {
                 tokio::select! {
@@ -2052,17 +2098,38 @@ impl CodexClient {
                             }
                         }
                     }
+                    _ = turn_wrap_up_due(&wrap_up) => {
+                        if let Some((_, message)) = wrap_up.take() {
+                            let note = steer_turn_wrap_up(&conversation, &active_turn_id, message, turn_started).await;
+                            if let Some(handler) = on_event.as_mut() {
+                                handler(&note)?;
+                            }
+                            events.push(note);
+                        }
+                        continue;
+                    }
                     event = next_codex_event(
                         &conversation,
                         cancel_signal.as_ref(),
                     ) => event?,
                 }
             } else {
-                next_codex_event(
-                    &conversation,
-                    cancel_signal.as_ref(),
-                )
-                .await?
+                tokio::select! {
+                    _ = turn_wrap_up_due(&wrap_up) => {
+                        if let Some((_, message)) = wrap_up.take() {
+                            let note = steer_turn_wrap_up(&conversation, &active_turn_id, message, turn_started).await;
+                            if let Some(handler) = on_event.as_mut() {
+                                handler(&note)?;
+                            }
+                            events.push(note);
+                        }
+                        continue;
+                    }
+                    event = next_codex_event(
+                        &conversation,
+                        cancel_signal.as_ref(),
+                    ) => event?,
+                }
             };
             if browser_mode && bool_from_env("CODEX_DEBUG_BROWSER_EVENTS").unwrap_or(false) {
                 eprintln!("[codex-browser-events] event_msg={:?}", &event.msg);
@@ -2082,7 +2149,7 @@ impl CodexClient {
                 ));
             }
 
-            collect_events(&mut aggregator, &event, &mut events, on_event)?;
+            collect_events(&mut aggregator, &event, &mut events, on_event, turn_started)?;
             // The process supervisor must retain exact counts even if this child later
             // crashes or must be killed. RawResponseCompleted is the same authoritative
             // observation used by TaskUsage, not a restored/estimated TokenCount total.
@@ -2402,6 +2469,42 @@ async fn confirm_shared_browser_shutdown(conversation: &CodexThread) -> Result<(
         )
     })??;
     Ok(())
+}
+
+/// Resolves when the turn's wrap-up time has come; never while none is set.
+async fn turn_wrap_up_due(wrap_up: &Option<(tokio::time::Instant, String)>) {
+    match wrap_up {
+        Some((at, _)) => tokio::time::sleep_until(*at).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+/// Steer the live turn with the wrap-up note. Returns the run-log event that records it.
+async fn steer_turn_wrap_up(
+    conversation: &CodexThread,
+    active_turn_id: &str,
+    message: String,
+    turn_started: std::time::Instant,
+) -> JsonValue {
+    let request = TurnInputRequest::new(TurnInput::UserInput {
+        content: vec![UserInput::Text {
+            text: message,
+            text_elements: Vec::new(),
+        }],
+        client_id: Some("instafy-turn-wrap-up".to_string()),
+    });
+    let steered = matches!(
+        conversation
+            .steer_turn(request, active_turn_id.to_string())
+            .await,
+        Ok(SteerSubmission::Steered { .. })
+    );
+    tracing::info!(steered, "steered the turn to wrap up before its time limit");
+    serde_json::json!({
+        "type": TURN_WRAP_UP_EVENT_TYPE,
+        "steered": steered,
+        "atMs": u64::try_from(turn_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+    })
 }
 
 async fn next_codex_event(
@@ -4870,14 +4973,31 @@ fn collect_events(
     event: &Event,
     out: &mut Vec<JsonValue>,
     on_event: &mut Option<&mut (dyn FnMut(&JsonValue) -> Result<()> + Send)>,
+    turn_started: std::time::Instant,
 ) -> Result<()> {
-    for value in aggregator.collect(event) {
+    for mut value in aggregator.collect(event) {
+        stamp_item_event(&mut value, turn_started.elapsed());
         if let Some(handler) = on_event.as_mut() {
             handler(&value)?;
         }
         out.push(value);
     }
     Ok(())
+}
+
+/// An item's start and end carry `atMs`, the milliseconds since the turn started, so the run
+/// log shows how long each command and tool call took (`agent/turn-timings`).
+fn stamp_item_event(value: &mut JsonValue, elapsed: Duration) {
+    let is_item_edge = matches!(
+        value.get("type").and_then(JsonValue::as_str),
+        Some("item.started" | "item.completed")
+    );
+    if let (true, Some(map)) = (is_item_edge, value.as_object_mut()) {
+        map.insert(
+            "atMs".to_string(),
+            JsonValue::from(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)),
+        );
+    }
 }
 
 fn shell_join(parts: &[String]) -> String {
@@ -5232,6 +5352,31 @@ mod tests {
     };
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Mutex, OnceLock};
+
+    #[test]
+    fn a_continued_lanes_attempt_starts_without_a_note_and_a_timeout_is_not_rerun_here() {
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("continue.md");
+        std::fs::write(&note, "left from an earlier attempt").unwrap();
+        let lane = CodexRunOptions {
+            turn_continue_note: Some(note.clone()),
+            ..CodexRunOptions::default()
+        };
+        lane.start_attempt();
+        assert!(
+            !note.exists(),
+            "an earlier attempt's note is not this one's"
+        );
+        lane.start_attempt();
+        assert!(
+            !lane.retries_a_timed_out_run(0, 1),
+            "the controller continues it instead"
+        );
+        let own = CodexRunOptions::default();
+        own.start_attempt();
+        assert!(own.retries_a_timed_out_run(0, 1));
+        assert!(!own.retries_a_timed_out_run(1, 1));
+    }
 
     /// Octo opens Instafy's browser without a press, but nothing in a browser
     /// turn's run-level policy may tell it to skip the browser's own site and

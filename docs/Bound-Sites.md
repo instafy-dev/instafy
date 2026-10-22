@@ -123,6 +123,24 @@ Every endpoint is under `__bind/`, relative to the site (a gallery's site at `/<
   assist and capture records never replace another lane's.
 - **Files**: `data/records/<intent>.json` (or `target.records`), and `data/version.json` (`{v, updated_at, files, jobs}`)
   so polling-only viewers also update.
+- **Saving those files**: the binder writes them between turns, for clicks, so no turn reports them. In a folder of an
+  Instafy space (a `.instafy/.git` checkout above the site) the binder is their save owner: a few seconds after its
+  last write (2 s of quiet, at most 10 s while writes keep coming, and at once when `serve` itself stops) it commits the
+  files it wrote to the checkout's branch, locally, with no credential and no network call ("Save what the `<site>`
+  site recorded"). The space's next save publishes the branch's commits as it does a turn's: the pre-turn refresh, a
+  turn's save or a stop's flush. It commits under the origin's own workspace lock (`.instafy/origin-apply.lock`), so
+  it never interleaves with a publish, a refresh or a stop: while the origin holds the lock the save waits and is tried
+  again a few seconds later. It builds the commit with git plumbing (the bytes it wrote, hashed with no filters) and
+  moves HEAD only from the commit it started from; hooks, fsmonitor, signing, global and system git config and the
+  binder's environment are all left out, so nothing in the checkout's config runs. Only the binder's own writes are
+  committed: a file whose content is no longer what the binder wrote (a person or a turn changed it since) is left
+  alone, and so is every other changed file, so work nobody saved is still kept as unsaved work. Ignored paths are
+  never added. Outside a space (a plain folder, or a person's own repository) nothing is committed. `serve --no-save`
+  turns it off. Any other site backend can be the save owner of its writes the same way, with the same module
+  (`src/save-owner.mjs`).
+  Limits: a machine stop does not ask the binder to save first, so a click in the last few seconds before a stop (up to
+  10 s on a busy site) can still be kept by that stop as unsaved work. A save made while a turn runs is a local commit
+  like the turn's own, so a stop during that turn keeps it with the turn's work.
 
 ## 2a. Ask Octo (host-mediated)
 

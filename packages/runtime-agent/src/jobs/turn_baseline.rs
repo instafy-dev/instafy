@@ -13,8 +13,15 @@
 //! - A lease that resumes an interrupted attempt reads the job's record
 //!   rather than writing one. When there is none, it records the folder as
 //!   it finds it, for a later lease.
+//! - A team lane's turn that ran out of time and asks to continue in a new
+//!   job (`turn_continuation`) also keeps its record, and that new job,
+//!   which names it as the job it continues, begins from it: the stopped
+//!   turn's unsaved work is then counted as the continuation's own, as a
+//!   resumed lease counts its cut-off attempt's. The continued job's record
+//!   is left for a rate-limit retry of the continuation to read too, and
+//!   ages out like any other.
 //! - The job's end removes the record (see `JobProcessor::run_apply_job`),
-//!   unless the job lost its lease. A stop that ends the process mid-turn
+//!   unless the job lost its lease or asks to continue. A stop that ends the process mid-turn
 //!   removes nothing. A job that loses its lease and never comes back here
 //!   (a cancelled turn, or one another runtime resumed) leaves its record
 //!   until a later record finds it older than [`RECORD_MAX_AGE`].
@@ -40,14 +47,23 @@ const RECORD_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// Begins a write turn of job `job_id` in `workspace_dir`, whose `git status`
 /// is `status` now. On a lease that resumes an interrupted attempt, returns
 /// the status this job's earliest attempt in the folder began with, when it
-/// has a record. Otherwise records `status` and returns `None`.
+/// has a record. A job that continues job `continues` (a team lane's next
+/// turn) whose record is here begins from that record: it is recorded as
+/// this job's own and returned. Otherwise records `status` and returns `None`.
 pub(super) fn begin(
     workspace_dir: &Path,
     job_id: Uuid,
     resumes_an_interrupted_attempt: bool,
+    continues: Option<Uuid>,
     status: &HashMap<String, GitStatusEntry>,
 ) -> Option<HashMap<String, GitStatusEntry>> {
     if resumes_an_interrupted_attempt && let Some(earlier) = read(workspace_dir, job_id) {
+        return Some(earlier);
+    }
+    if let Some(earlier) = continues.and_then(|continued| read(workspace_dir, continued)) {
+        if let Err(error) = write(workspace_dir, job_id, &earlier) {
+            warn!(%job_id, %error, "could not record how the continued turn's folder began");
+        }
         return Some(earlier);
     }
     if let Err(error) = write(workspace_dir, job_id, status) {
@@ -154,7 +170,7 @@ mod tests {
         let resumed = status(&[("notes.md", " M", "a"), ("ALIAS.md", "??", "b")]);
 
         // The first lease records the folder; nothing is resumed.
-        assert_eq!(begin(workspace.path(), job_id, false, &first), None);
+        assert_eq!(begin(workspace.path(), job_id, false, None, &first), None);
         assert!(
             workspace
                 .path()
@@ -165,24 +181,27 @@ mod tests {
         );
         // A resumed lease gets that record back, and keeps it for another.
         assert_eq!(
-            begin(workspace.path(), job_id, true, &resumed),
+            begin(workspace.path(), job_id, true, None, &resumed),
             Some(first.clone())
         );
         assert_eq!(
-            begin(workspace.path(), job_id, true, &resumed),
+            begin(workspace.path(), job_id, true, None, &resumed),
             Some(first.clone())
         );
         // Another job has a record of its own.
         assert_eq!(
-            begin(workspace.path(), Uuid::new_v4(), true, &resumed),
+            begin(workspace.path(), Uuid::new_v4(), true, None, &resumed),
             None
         );
 
         // Once the job ends, a lease finds no record and makes its own.
         forget(workspace.path(), job_id);
         forget(workspace.path(), job_id);
-        assert_eq!(begin(workspace.path(), job_id, true, &resumed), None);
-        assert_eq!(begin(workspace.path(), job_id, true, &first), Some(resumed));
+        assert_eq!(begin(workspace.path(), job_id, true, None, &resumed), None);
+        assert_eq!(
+            begin(workspace.path(), job_id, true, None, &first),
+            Some(resumed)
+        );
     }
 
     #[test]
@@ -191,8 +210,8 @@ mod tests {
         fs::create_dir(workspace.path().join(".git")).unwrap();
         let (stale, recent) = (Uuid::new_v4(), Uuid::new_v4());
         let first = status(&[("ALIAS.md", "??", "a")]);
-        assert_eq!(begin(workspace.path(), stale, false, &first), None);
-        assert_eq!(begin(workspace.path(), recent, false, &first), None);
+        assert_eq!(begin(workspace.path(), stale, false, None, &first), None);
+        assert_eq!(begin(workspace.path(), recent, false, None, &first), None);
         let stale_path = workspace
             .path()
             .join(".git")
@@ -206,9 +225,15 @@ mod tests {
             .set_modified(eight_days_ago)
             .unwrap();
 
-        assert_eq!(begin(workspace.path(), Uuid::new_v4(), false, &first), None);
+        assert_eq!(
+            begin(workspace.path(), Uuid::new_v4(), false, None, &first),
+            None
+        );
         assert!(!stale_path.exists());
-        assert_eq!(begin(workspace.path(), recent, true, &first), Some(first));
+        assert_eq!(
+            begin(workspace.path(), recent, true, None, &first),
+            Some(first)
+        );
     }
 
     #[test]
@@ -219,9 +244,12 @@ mod tests {
         let stale = status(&[("old.md", "??", "a")]);
         let now = status(&[]);
 
-        assert_eq!(begin(workspace.path(), job_id, false, &stale), None);
-        assert_eq!(begin(workspace.path(), job_id, false, &now), None);
-        assert_eq!(begin(workspace.path(), job_id, true, &stale), Some(now));
+        assert_eq!(begin(workspace.path(), job_id, false, None, &stale), None);
+        assert_eq!(begin(workspace.path(), job_id, false, None, &now), None);
+        assert_eq!(
+            begin(workspace.path(), job_id, true, None, &stale),
+            Some(now)
+        );
     }
 
     #[test]
@@ -231,7 +259,7 @@ mod tests {
         let job_id = Uuid::new_v4();
         let first = status(&[("ALIAS.md", "??", "a")]);
 
-        assert_eq!(begin(workspace.path(), job_id, false, &first), None);
+        assert_eq!(begin(workspace.path(), job_id, false, None, &first), None);
         assert!(
             workspace
                 .path()
@@ -241,7 +269,7 @@ mod tests {
                 .is_file()
         );
         assert_eq!(
-            begin(workspace.path(), job_id, true, &status(&[])),
+            begin(workspace.path(), job_id, true, None, &status(&[])),
             Some(first)
         );
     }
@@ -253,15 +281,15 @@ mod tests {
 
         // No repository here (a parent folder's, say): none is created.
         let plain = tempfile::tempdir().unwrap();
-        assert_eq!(begin(plain.path(), job_id, false, &first), None);
+        assert_eq!(begin(plain.path(), job_id, false, None, &first), None);
         assert!(!plain.path().join(".git").exists());
-        assert_eq!(begin(plain.path(), job_id, true, &first), None);
+        assert_eq!(begin(plain.path(), job_id, true, None, &first), None);
 
         // A linked worktree's `.git` file.
         let worktree = tempfile::tempdir().unwrap();
         fs::write(worktree.path().join(".git"), "gitdir: elsewhere\n").unwrap();
-        assert_eq!(begin(worktree.path(), job_id, false, &first), None);
-        assert_eq!(begin(worktree.path(), job_id, true, &first), None);
+        assert_eq!(begin(worktree.path(), job_id, false, None, &first), None);
+        assert_eq!(begin(worktree.path(), job_id, true, None, &first), None);
 
         // A `.git` link is not followed.
         #[cfg(unix)]
@@ -269,8 +297,57 @@ mod tests {
             let linked = tempfile::tempdir().unwrap();
             let target = tempfile::tempdir().unwrap();
             std::os::unix::fs::symlink(target.path(), linked.path().join(".git")).unwrap();
-            assert_eq!(begin(linked.path(), job_id, false, &first), None);
+            assert_eq!(begin(linked.path(), job_id, false, None, &first), None);
             assert!(!target.path().join(RECORDS_DIR).exists());
         }
+    }
+
+    #[test]
+    fn a_continuation_begins_from_the_record_of_the_turn_it_continues() {
+        let workspace = tempfile::tempdir().unwrap();
+        fs::create_dir(workspace.path().join(".git")).unwrap();
+        let (stopped, next, last) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let first = status(&[("notes.md", " M", "a")]);
+        // the stopped turn left day-1.md unsaved
+        let later = status(&[("notes.md", " M", "a"), ("day-1.md", "??", "b")]);
+
+        assert_eq!(begin(workspace.path(), stopped, false, None, &first), None);
+        assert_eq!(
+            begin(workspace.path(), next, false, Some(stopped), &later),
+            Some(first.clone())
+        );
+        // a retry of the continuation reads it too; the continuation's own
+        // record carries it to the turn after
+        assert_eq!(
+            begin(
+                workspace.path(),
+                Uuid::new_v4(),
+                false,
+                Some(stopped),
+                &later
+            ),
+            Some(first.clone())
+        );
+        assert_eq!(
+            begin(workspace.path(), last, false, Some(next), &later),
+            Some(first.clone())
+        );
+        // with no record of the continued turn here (another runtime's), the
+        // continuation records its own start
+        let elsewhere = Uuid::new_v4();
+        assert_eq!(
+            begin(
+                workspace.path(),
+                elsewhere,
+                false,
+                Some(Uuid::new_v4()),
+                &later
+            ),
+            None
+        );
+        assert_eq!(
+            begin(workspace.path(), elsewhere, true, None, &first),
+            Some(later)
+        );
     }
 }

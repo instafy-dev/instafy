@@ -2176,11 +2176,14 @@ pub(crate) struct HostedRuntimeAffordability {
 /// instead. Accounts for the lazy daily refill: a zero balance still counts
 /// as affordable when today's refill hasn't been applied yet and the limit
 /// covers the burn. Fails open when no balance row exists.
-pub(crate) async fn check_hosted_runtime_affordability(
-    transaction: &Transaction<'_>,
+pub(crate) async fn check_hosted_runtime_affordability<C>(
+    transaction: &C,
     org_id: &Uuid,
     burn_amount: i32,
-) -> Result<HostedRuntimeAffordability, (StatusCode, Json<ApiError>)> {
+) -> Result<HostedRuntimeAffordability, (StatusCode, Json<ApiError>)>
+where
+    C: GenericClient + Sync,
+{
     let row = transaction
         .query_opt(
             "select balance, credit_limit from org_credit_balances where org_id = $1",
@@ -2321,11 +2324,14 @@ async fn attempt_daily_refill(
     }))
 }
 
-async fn daily_window_allows(
-    transaction: &Transaction<'_>,
+async fn daily_window_allows<C>(
+    transaction: &C,
     org_id: &Uuid,
     now: DateTime<Utc>,
-) -> Result<bool, (StatusCode, Json<ApiError>)> {
+) -> Result<bool, (StatusCode, Json<ApiError>)>
+where
+    C: GenericClient + Sync,
+{
     let last_refill = transaction
         .query_opt(
             "select created_at from org_credit_ledger where org_id = $1 and reason = $2 order by created_at desc limit 1",
