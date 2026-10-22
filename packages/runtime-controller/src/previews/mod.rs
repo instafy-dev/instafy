@@ -112,6 +112,9 @@ const PREVIEW_SOURCE_MAX_CHARS: usize = 64;
 /// The `messageIds` key prefix of a card written without a job run; the
 /// conversation id follows, so each conversation gets its own card.
 const PREVIEW_MANUAL_RUN_KEY: &str = "manual";
+/// `{conversation id: card id}`: one card per conversation for the same
+/// site, whichever run or machine start made it ready again.
+pub(crate) const PREVIEW_CONVERSATION_CARDS_KEY: &str = "conversationCards";
 const PREVIEW_HEALTH_CACHE_TTL: Duration = Duration::from_secs(10);
 /// `/ready` runs right after the CLI spawned the rathole client, which still
 /// has to connect. Probe again after these pauses (about 3 s in all) before
@@ -900,7 +903,8 @@ async fn post_preview(
     preview.insert("path".to_string(), json!(path));
     preview.insert("title".to_string(), json!(title));
     // The grant upsert carries the cards of a still-live preview with the
-    // same title and path over; anything else gets a card of its own.
+    // same title and path over, and its card per conversation also across a
+    // machine restart; anything else gets a card of its own.
     preview.insert("messageIds".to_string(), json!({}));
     if let Some(conversation_id) = conversation_id {
         preview.insert("conversationId".to_string(), json!(conversation_id));
@@ -1178,6 +1182,28 @@ async fn post_preview_ready(
         return Ok(Json(PreviewReadyResponse { message_id, health }));
     }
 
+    // The same site (this preview, same title and path) made ready again in
+    // a conversation that already has its card: another run's re-open, or a
+    // re-open after the machine restarted. The card names the preview by id
+    // and shows its live state, so it stays the one card; no second one.
+    if let Some(message_id) = conversation_card(&transaction, &metadata, &target).await? {
+        record_preview_card(&mut metadata, &run_key, &target, message_id);
+        transaction
+            .execute(
+                "update runtime_tunnel_grants
+                 set metadata = $2, updated_at = now()
+                 where id = $1",
+                &[&grant.record.id, &metadata],
+            )
+            .await
+            .map_err(|error| internal_error(format!("failed to record preview card: {error}")))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| internal_error(format!("failed to finish preview card: {error}")))?;
+        return Ok(Json(PreviewReadyResponse { message_id, health }));
+    }
+
     let title = grant.title();
     let message = record_agent_conversation_message(
         &transaction,
@@ -1197,21 +1223,7 @@ async fn post_preview_ready(
     )
     .await?;
 
-    if let Some(map) = metadata
-        .get_mut(PREVIEW_TUNNEL_METADATA_KEY)
-        .and_then(JsonValue::as_object_mut)
-    {
-        let ids = map
-            .entry("messageIds".to_string())
-            .or_insert_with(|| json!({}));
-        if !ids.is_object() {
-            *ids = json!({});
-        }
-        if let Some(ids) = ids.as_object_mut() {
-            ids.insert(run_key, json!(message.id));
-        }
-        map.insert("messageId".to_string(), json!(message.id));
-    }
+    record_preview_card(&mut metadata, &run_key, &target, message.id);
     transaction
         .execute(
             "update runtime_tunnel_grants
@@ -1231,6 +1243,67 @@ async fn post_preview_ready(
         message_id: message.id,
         health,
     }))
+}
+
+/// The card this preview already has in the target's conversation, when it
+/// is still there. `conversationCards` survives a re-open with the same title
+/// and path, also after the machine stopped (see the grant upsert), and is
+/// dropped by a new title or path, or a close on purpose.
+async fn conversation_card(
+    transaction: &tokio_postgres::Transaction<'_>,
+    metadata: &JsonValue,
+    target: &PreviewCardTarget,
+) -> ApiResult<Option<Uuid>> {
+    let Some(message_id) = metadata
+        .get(PREVIEW_TUNNEL_METADATA_KEY)
+        .and_then(|preview| preview.get(PREVIEW_CONVERSATION_CARDS_KEY))
+        .and_then(|cards| cards.get(target.conversation_id.to_string()))
+        .and_then(JsonValue::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+    else {
+        return Ok(None);
+    };
+    let still_there = transaction
+        .query_opt(
+            "select 1 from conversation_messages where id = $1 and conversation_id = $2",
+            &[&message_id, &target.conversation_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load preview card: {error}")))?
+        .is_some();
+    Ok(still_there.then_some(message_id))
+}
+
+/// Remember a card: per run (`messageIds`), per conversation
+/// (`conversationCards`) and as the latest (`messageId`).
+fn record_preview_card(
+    metadata: &mut JsonValue,
+    run_key: &str,
+    target: &PreviewCardTarget,
+    message_id: Uuid,
+) {
+    let Some(map) = metadata
+        .get_mut(PREVIEW_TUNNEL_METADATA_KEY)
+        .and_then(JsonValue::as_object_mut)
+    else {
+        return;
+    };
+    for (key, entry) in [
+        ("messageIds", run_key.to_string()),
+        (
+            PREVIEW_CONVERSATION_CARDS_KEY,
+            target.conversation_id.to_string(),
+        ),
+    ] {
+        let ids = map.entry(key.to_string()).or_insert_with(|| json!({}));
+        if !ids.is_object() {
+            *ids = json!({});
+        }
+        if let Some(ids) = ids.as_object_mut() {
+            ids.insert(entry, json!(message_id));
+        }
+    }
+    map.insert("messageId".to_string(), json!(message_id));
 }
 
 async fn ensure_preview_card_conversation(

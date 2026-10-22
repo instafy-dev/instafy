@@ -16,7 +16,10 @@ public, and no consent question is asked. A public link is still `instafy tunnel
    tells the controller it is ready. It never prints a URL. Its JSON output has ids, the port, the path, a status and
    `viewerHostSuffix` (for a dev server's allowed-hosts list).
 3. The controller records a **Ready to preview** card in the conversation: an `action_request` message whose
-   `details.preview` holds the preview's id and port, and no URL.
+   `details.preview` holds the preview's id and port, and no URL. A conversation gets one card per site: opening the
+   same site again there (another turn, or after the machine restarted; same port, title and path) keeps that card,
+   which follows the preview's state. A new title or path, a re-open after `instafy preview close`, or a card someone
+   removed gets a new one.
 4. A member presses **Open** on the card. Studio asks the controller for a viewer session and shows the site as a tab in
    the conversation's side pane, next to Chat, Browser and files, under the same browser bar (title, Reload, Open in
    new tab). The card never opens by itself, and cards in history never open anything.
