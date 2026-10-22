@@ -1,13 +1,18 @@
-//! A turn that runs out of time hands its work to a new turn instead of dying.
+//! A team lane's turn that runs out of time hands its work to a new turn instead of dying.
 //!
-//! - **Wrap-up.** Shortly before an ordinary turn's hard limit the runtime steers it once with a
-//!   note (`TurnWrapUp`): finish the step, save the work, end the turn.
-//! - **Continuation note.** A job the controller can continue (a team's lane or follow-on agent
-//!   that has continuations left) gets `INSTAFY_TURN_CONTINUE_FILE`: the agent writes what is left
-//!   there before it ends. The runtime records it as `agent/turn-continuation`, and the controller
-//!   starts the continuation turn from it. A turn the hard limit stops anyway is recorded the same
-//!   way (`endedBy: "time_limit"`), with its last commands as the note when it wrote none, and its
-//!   run log is kept.
+//! - **Wrap-up.** Shortly before a lane's hard limit the runtime steers its turn once with a note
+//!   (`TurnWrapUp`): finish the step, save the work, end the turn. Other turns (a person's own, a
+//!   lead's) get none.
+//! - **Continuation note.** A lane the controller can continue (it has continuations left) gets
+//!   `INSTAFY_TURN_CONTINUE_FILE`: the agent writes what is left there before it ends. Each attempt
+//!   of the turn starts without one. The runtime records it as `agent/turn-continuation`, and the
+//!   controller starts the continuation turn from it. A turn the hard limit stops anyway is
+//!   recorded the same way (`endedBy: "time_limit"`), with its last commands as the note when it
+//!   wrote none, and its run log is kept. Such a turn is not run again in-process: its next turn
+//!   is the continuation.
+//! - **Unsaved work.** A stopped turn's edits are not saved by that turn. The continuation, which
+//!   names the job it continues (`continuation.of`), begins from that job's record of how the
+//!   folder began (`turn_baseline`), so its save counts the stopped turn's edits too.
 //! - **Timings.** Every command's start and duration (`atMs` on the run log's item events), the
 //!   wrap-up, and the steps tools report in `INSTAFY_STEP_TIMINGS_FILE` (one JSON object per line)
 //!   become `agent/turn-timings`, so an eval can show where a turn's time went.
@@ -33,6 +38,8 @@ pub(super) struct TurnFiles {
     dir: PathBuf,
     timings: PathBuf,
     continue_note: Option<PathBuf>,
+    /// A team lane's turn: it is told to wrap up before its hard limit.
+    lane: bool,
 }
 
 impl TurnFiles {
@@ -41,21 +48,36 @@ impl TurnFiles {
             env::temp_dir()
                 .join("instafy-turns")
                 .join(job.id.to_string()),
+            is_multi_agent_worker_payload(&job.payload),
             job_turn_can_continue(&job.payload),
         )
     }
 
-    pub(super) fn in_dir(dir: PathBuf, continuable: bool) -> Self {
+    pub(super) fn in_dir(dir: PathBuf, lane: bool, continuable: bool) -> Self {
         let _ = fs::create_dir_all(&dir);
         Self {
             timings: dir.join("step-timings.ndjson"),
             continue_note: continuable.then(|| dir.join("continue.md")),
             dir,
+            lane,
         }
     }
 
     pub(super) fn continuable(&self) -> bool {
         self.continue_note.is_some()
+    }
+
+    /// Where the agent may leave its continuation note; None when the job cannot be continued.
+    pub(super) fn continue_note_path(&self) -> Option<PathBuf> {
+        self.continue_note.clone()
+    }
+
+    /// The wrap-up steer of this job's turn with this hard limit: only a lane's.
+    pub(super) fn wrap_up(&self, run_timeout: Duration) -> Option<TurnWrapUp> {
+        if !self.lane {
+            return None;
+        }
+        turn_wrap_up(run_timeout, self.continuable())
     }
 
     /// The variables the agent's shell gets for this turn.
@@ -96,8 +118,8 @@ impl TurnFiles {
     }
 }
 
-/// Whether the controller may start another turn for this job: a team's lane or follow-on agent
-/// whose continuation (if it is one) is not marked the last one.
+/// Whether the controller may start another turn for this job: a team's lane whose continuation
+/// (if it is one) is not marked the last one.
 pub(super) fn job_turn_can_continue(payload: &JsonValue) -> bool {
     is_multi_agent_worker_payload(payload)
         && payload
@@ -106,8 +128,28 @@ pub(super) fn job_turn_can_continue(payload: &JsonValue) -> bool {
             != Some(true)
 }
 
-/// The wrap-up steer for an ordinary turn with this hard limit, or None when the limit is too
-/// short to leave room for one.
+/// The job this one continues, when it is a lane's continuation turn (`continuation.of`, which a
+/// rate-limit retry of that turn carries too).
+pub(super) fn continued_job_id(payload: &JsonValue) -> Option<Uuid> {
+    payload
+        .pointer("/metadata/multiAgentPlan/continuation/of")
+        .and_then(JsonValue::as_str)
+        .and_then(|value| Uuid::parse_str(value.trim()).ok())
+}
+
+/// Whether the job's result asks the controller for a continuation turn.
+pub(super) fn requests_continuation(result: &Result<JobExecution>) -> bool {
+    let artifacts = match result {
+        Ok(execution) => execution.artifacts.as_slice(),
+        Err(error) => extract_job_failure_artifacts(error).unwrap_or_default(),
+    };
+    artifacts.iter().any(|artifact| {
+        artifact["kind"] == TURN_CONTINUATION_ARTIFACT && artifact["requested"] == true
+    })
+}
+
+/// The wrap-up steer for a lane's turn with this hard limit, or None when the limit is too short
+/// to leave room for one.
 pub(super) fn turn_wrap_up(run_timeout: Duration, continuable: bool) -> Option<TurnWrapUp> {
     let window = env::var("INSTAFY_TURN_WRAP_UP_SECONDS")
         .ok()
@@ -178,7 +220,7 @@ pub(super) fn turn_timings_artifact(events: &[JsonValue]) -> Option<JsonValue> {
             .or_else(|| item.get("tool"))
             .or_else(|| item.get("query"))
             .and_then(JsonValue::as_str)
-            .map(|text| shorten_command(text))
+            .map(shorten_command)
             .unwrap_or_else(|| kind.to_string());
         match event.get("type").and_then(JsonValue::as_str) {
             Some("item.started") => {
@@ -303,6 +345,13 @@ pub(super) fn attach_turn_records(
     result: Result<JobExecution>,
     files: &TurnFiles,
 ) -> Result<JobExecution> {
+    // a lease that resumes the job keeps its files (its next attempt starts without a note)
+    if result
+        .as_ref()
+        .is_err_and(crate::agent_executor::is_lease_lost)
+    {
+        return result;
+    }
     let steps = files.step_timings();
     let note = files.continuation_note();
     let continuable = files.continuable();
@@ -338,9 +387,6 @@ pub(super) fn attach_turn_records(
             Ok(execution)
         }
         Err(error) => {
-            if crate::agent_executor::is_lease_lost(&error) {
-                return Err(error);
-            }
             let ended_by = if is_turn_time_limit(&error) {
                 Some("time_limit")
             } else {
@@ -382,6 +428,68 @@ mod tests {
             !job_turn_can_continue(&json!({"metadata": {}})),
             "a person's own turn"
         );
+    }
+
+    #[test]
+    fn only_a_lanes_turn_is_told_to_wrap_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let limit = Duration::from_secs(600);
+        let lane = TurnFiles::in_dir(dir.path().join("lane"), true, true);
+        assert!(
+            lane.wrap_up(limit)
+                .expect("a lane wraps up")
+                .message
+                .contains("INSTAFY_TURN_CONTINUE_FILE")
+        );
+        // a lane's last turn wraps up too, but leaves no note
+        let last = TurnFiles::in_dir(dir.path().join("last"), true, false);
+        assert!(
+            !last
+                .wrap_up(limit)
+                .expect("a last turn wraps up")
+                .message
+                .contains("INSTAFY_TURN_CONTINUE_FILE")
+        );
+        assert!(last.continue_note_path().is_none());
+        // a person's own turn, or a lead's, runs to its limit untold
+        let own = TurnFiles::in_dir(dir.path().join("own"), false, false);
+        assert!(own.wrap_up(limit).is_none());
+    }
+
+    #[test]
+    fn a_continuation_names_the_job_it_continues_and_a_request_is_read_from_the_result() {
+        let of = Uuid::new_v4();
+        assert_eq!(
+            continued_job_id(&worker_payload(
+                json!({"of": of.to_string(), "turn": 1, "last": false})
+            )),
+            Some(of)
+        );
+        assert_eq!(continued_job_id(&worker_payload(JsonValue::Null)), None);
+        let request =
+            json!({"kind": TURN_CONTINUATION_ARTIFACT, "requested": true, "endedBy": "time_limit"});
+        assert!(requests_continuation(&Ok(execution(vec![request.clone()]))));
+        assert!(!requests_continuation(&Ok(execution(Vec::new()))));
+        let stopped = anyhow!("Codex run timed out").context(JobFailureWithArtifacts {
+            message: "Codex run timed out".into(),
+            artifacts: vec![request],
+        });
+        assert!(requests_continuation(&Err(stopped)));
+        assert!(!requests_continuation(&Err(anyhow!("upstream 502"))));
+    }
+
+    #[test]
+    fn a_lost_lease_keeps_the_jobs_turn_files_for_the_lease_that_resumes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = TurnFiles::in_dir(dir.path().join("job"), true, true);
+        fs::write(&files.timings, "{\"step\":\"source 1\",\"ms\":10}\n").unwrap();
+        let error = attach_turn_records(Err(anyhow!("job lease lost")), &files).unwrap_err();
+        assert!(extract_job_failure_artifacts(&error).is_none());
+        assert!(files.timings.is_file(), "the step timings are kept");
+        // the job's end removes them
+        let done = attach_turn_records(Ok(execution(Vec::new())), &files).unwrap();
+        assert_eq!(done.artifacts[0]["steps"][0]["step"], "source 1");
+        assert!(!dir.path().join("job").exists());
     }
 
     #[test]
@@ -443,10 +551,10 @@ mod tests {
     #[test]
     fn a_note_the_agent_left_asks_for_a_continuation_and_tool_steps_join_the_timings() {
         let dir = tempfile::tempdir().unwrap();
-        let files = TurnFiles::in_dir(dir.path().join("job"), true);
+        let files = TurnFiles::in_dir(dir.path().join("job"), true, true);
         fs::write(
             &files.timings,
-            "{\"tool\":\"uw\",\"step\":\"lodging Kyoto\",\"ms\":4100}\nnot json\n",
+            "{\"tool\":\"fetch-sources\",\"step\":\"source 3\",\"ms\":4100}\nnot json\n",
         )
         .unwrap();
         fs::write(
@@ -468,7 +576,7 @@ mod tests {
             .iter()
             .find(|a| a["kind"] == TURN_TIMINGS_ARTIFACT)
             .unwrap();
-        assert_eq!(timings["steps"][0]["step"], "lodging Kyoto");
+        assert_eq!(timings["steps"][0]["step"], "source 3");
         assert!(
             !dir.path().join("job").exists(),
             "the turn's files are removed"
@@ -478,7 +586,7 @@ mod tests {
     #[test]
     fn a_turn_finished_without_a_note_asks_for_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        let files = TurnFiles::in_dir(dir.path().join("job"), true);
+        let files = TurnFiles::in_dir(dir.path().join("job"), true, true);
         let done = attach_turn_records(Ok(execution(Vec::new())), &files).unwrap();
         assert!(done.artifacts.is_empty());
     }
@@ -486,7 +594,7 @@ mod tests {
     #[test]
     fn a_turn_stopped_at_its_time_limit_keeps_its_run_log_and_asks_for_a_continuation() {
         let dir = tempfile::tempdir().unwrap();
-        let files = TurnFiles::in_dir(dir.path().join("job"), true);
+        let files = TurnFiles::in_dir(dir.path().join("job"), true, true);
         let events = vec![
             json!({"type": "item.started", "atMs": 100, "item": {"id": "a", "type": "command_execution", "command": "summarize --timeout 240"}}),
         ];
@@ -513,7 +621,7 @@ mod tests {
                 .contains("summarize --timeout 240 (still running)")
         );
         // a job that cannot be continued records the run log, but asks for nothing
-        let solo = TurnFiles::in_dir(dir.path().join("solo"), false);
+        let solo = TurnFiles::in_dir(dir.path().join("solo"), true, false);
         let error = anyhow!("Codex run timed out").context(JobFailureWithArtifacts {
             message: "Codex run timed out".into(),
             artifacts: failed_turn_artifacts(&events),
@@ -529,7 +637,7 @@ mod tests {
         // any other failure is not a time limit
         let other = attach_turn_records(
             Err(anyhow!("upstream 502")),
-            &TurnFiles::in_dir(dir.path().join("x"), true),
+            &TurnFiles::in_dir(dir.path().join("x"), true, true),
         )
         .unwrap_err();
         assert!(extract_job_failure_artifacts(&other).is_none());

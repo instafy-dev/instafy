@@ -3452,6 +3452,13 @@ async fn a_plan_lane_that_ran_out_of_turn_time_continues_at_most_twice_then_the_
             .await?
             .execute("update agent_jobs set status = 'leased', outcome = null, completed_at = null where id = $1", &[&kyoto])
             .await?;
+        // Tokyo ran on another runtime than the lead's
+        space
+            .pool
+            .get()
+            .await?
+            .execute("update agent_jobs set leased_by_runtime_id = $2 where id = $1", &[&tokyo, &space.acme_runtime_id])
+            .await?;
         end(tokyo, "completed", None, request("agent", "two sources left, then the summaries")).await?;
 
         // 1. its second turn is queued on the runtime that holds its files, with its note
@@ -3466,7 +3473,7 @@ async fn a_plan_lane_that_ran_out_of_turn_time_continues_at_most_twice_then_the_
         assert_eq!(continuation["endedBy"], "agent");
         assert_eq!(second_payload["metadata"]["multiAgentPlan"]["groupId"], json!(group_id.to_string()));
         assert_eq!(role(&second_payload), "worker");
-        assert_eq!(second_target, Some(space.hosted_runtime_id), "on the runtime that holds its files");
+        assert_eq!(second_target, Some(space.acme_runtime_id), "on the runtime that holds its files, not the lead's");
         let prompt = second_payload["prompt_text"].as_str().unwrap_or_default();
         assert!(prompt.contains("Research Tokyo lodging."), "{prompt}");
         assert!(!prompt.contains("Research Kyoto lodging."), "{prompt}");
@@ -3518,6 +3525,129 @@ async fn a_plan_lane_that_ran_out_of_turn_time_continues_at_most_twice_then_the_
         assert!(prompt.contains(&format!("the controller continued it as job={second}")), "{prompt}");
         assert!(prompt.contains(&format!("the controller continued it as job={third}")), "{prompt}");
         assert!(prompt.contains(&format!("the controller ran it again as job={retry}")), "{prompt}");
+        Ok(())
+    }
+    .await;
+    let cleanup = space.cleanup().await;
+    test_result?;
+    cleanup
+}
+
+/// A lane of a plan whose send ran on Instafy AI is not continued once the org cannot pay for
+/// another managed prompt: the group goes on without the continuation. With credit again, the
+/// same completion is continued. A cancelled lane is never continued.
+#[tokio::test]
+async fn a_plan_lane_of_a_managed_send_is_not_continued_when_its_org_is_out_of_credit(
+) -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping plan turn continuation credit test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let space = ManagedSpace::seed(pool, "plan-turn-continuation-credit").await?;
+    let test_result: anyhow::Result<()> = async {
+        let state = build_test_state(space.pool.clone(), space.config("plan-turn-continuation-credit"));
+        let connection = space.pool.get().await?;
+        // the send that started the plan, on Instafy AI
+        let send_conversation = Uuid::new_v4();
+        let send_run = Uuid::new_v4();
+        connection
+            .execute(
+                "insert into conversations (id, project_id, created_by, metadata, visibility)
+                 values ($1, $2, $3, '{}'::jsonb, 'private')",
+                &[&send_conversation, &space.project_id, &space.owner_user_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into runs (id, project_id, conversation_id, run_type, status, metadata)
+                 values ($1, $2, $3, 'prompt', 'success',
+                         '{\"aiAccessMode\": \"managed\", \"managedAiUsed\": true}'::jsonb)",
+                &[&send_run, &space.project_id, &send_conversation],
+            )
+            .await?;
+        let lead = json!({ "leadHandle": "octo", "continuationPrompt": "Report the trip.", "expectedReportFormat": "text" });
+        let plan = json!({
+            "groupId": Uuid::new_v4(), "role": "worker", "mode": "read_only", "lead": lead,
+            "parentRuntimeId": space.hosted_runtime_id, "parentRunId": send_run,
+        });
+        let seed = json!({
+            "type": "multi_agent_plan", "mode": "read_only",
+            "agents": [
+                { "handle": "tokyo", "label": "Tokyo", "prompt": "Research Tokyo lodging.", "scopeSummary": "Tokyo" },
+                { "handle": "kyoto", "label": "Kyoto", "prompt": "Research Kyoto lodging.", "scopeSummary": "Kyoto" },
+            ],
+            "lead": lead,
+        });
+        let (conversation_id, tokyo, tokyo_payload) =
+            insert_finished_plan_lane(&space, None, "tokyo", plan.clone(), seed.clone()).await?;
+        let (_, kyoto, _) =
+            insert_finished_plan_lane(&space, Some(conversation_id), "kyoto", plan, seed).await?;
+        connection
+            .execute("update agent_jobs set status = 'leased', outcome = null, completed_at = null where id = $1", &[&kyoto])
+            .await?;
+        connection
+            .execute(
+                "update agent_jobs set artifacts = $2 where id = $1",
+                &[&tokyo, &PgJson(json!([
+                    { "kind": "agent/turn-continuation", "requested": true, "endedBy": "agent", "note": "two sources left" },
+                ]))],
+            )
+            .await?;
+        let count = || {
+            let pool = space.pool.clone();
+            async move {
+                anyhow::Ok(
+                    pool.get()
+                        .await?
+                        .query_one("select count(*)::bigint from agent_jobs where conversation_id = $1", &[&conversation_id])
+                        .await?
+                        .get::<_, i64>(0),
+                )
+            }
+        };
+        let enqueue = || {
+            let state = state.clone();
+            let payload = tokyo_payload.clone();
+            async move {
+                crate::multi_agent_plan::maybe_enqueue_lead_continuation_after_completion(&state, tokyo, &payload)
+                    .await
+                    .map_err(|error| controller_error("plan job completion", error))
+            }
+        };
+
+        // a lane the person cancelled is not started again, whatever its late result asks
+        connection
+            .execute("update agent_jobs set status = 'cancelled' where id = $1", &[&tokyo])
+            .await?;
+        assert!(!enqueue().await?, "a cancelled lane is not continued");
+        assert_eq!(count().await?, 2);
+        connection
+            .execute("update agent_jobs set status = 'completed' where id = $1", &[&tokyo])
+            .await?;
+
+        // out of credit, and today's refill already ran
+        connection
+            .execute(
+                "insert into org_credit_ledger (org_id, project_id, delta, reason, metadata)
+                 values ($1, $2, 20, 'auto_refill_daily', '{}'::jsonb)",
+                &[&space.org_id, &space.project_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "update org_credit_balances set balance = 0, credit_limit = 40 where org_id = $1",
+                &[&space.org_id],
+            )
+            .await?;
+        assert!(!enqueue().await?, "no continuation, and Kyoto still runs");
+        assert_eq!(count().await?, 2, "nothing was queued");
+
+        // with credit again, the lane continues
+        connection
+            .execute("update org_credit_balances set balance = 40 where org_id = $1", &[&space.org_id])
+            .await?;
+        assert!(enqueue().await?, "its next turn");
+        assert_eq!(count().await?, 3);
         Ok(())
     }
     .await;

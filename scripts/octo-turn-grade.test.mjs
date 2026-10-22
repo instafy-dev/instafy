@@ -654,7 +654,7 @@ test("a lane turn that ran out of time and was continued does not fail the case;
   assert.ok(m.jobStatuses.includes("worker:failed/failed (continued)"));
   assert.equal(m.timing.timedOut, 1);
   assert.equal(m.timing.continuations, 1);
-  assert.equal(m.timing.lanesSec, 600);
+  assert.equal(m.timing.lanesSec, 700, "Kyoto's two turns");
   const first = m.timing.jobs.find((j) => j.handle === "kyoto" && j.turn === 0);
   assert.equal(first.wrapUpSec, 480);
   assert.equal(first.continuation, "time_limit");
@@ -669,11 +669,26 @@ test("a lane turn that ran out of time and was continued does not fail the case;
   const grade = { runId: "r", gradedAt: SENT, totals: { passed: 1, cases: 1, inputTokens: 1, outputTokens: 1, credits: 1, wallSec: 1 },
     results: [{ caseId: "trip", pass: true, score: 1, mustFailures: [], shouldFailures: [], checks: [], metrics: { ...m, uiSummary: {} } }] };
   const report = renderReport(grade);
-  assert.match(report, /- Time: slowest lane 600 s; 1 job\(s\) stopped at the turn limit; 1 continuation\(s\)/);
+  assert.match(report, /- Time: slowest lane 700 s \(all its turns\); 1 job\(s\) stopped at the turn limit; 1 continuation\(s\)/);
   assert.match(report, /worker @kyoto: failed\/failed, waited 1 s, ran 600 s, commands 290\.9 s, wrap-up at 480 s, asked to continue \(time_limit\)/);
   assert.match(report, /slowest commands: summarize --timeout 240 240 s \(unfinished\)/);
   assert.match(report, /tool steps \(560 s in all\): lodging 238 s; transit 108 s/);
   assert.match(report, /worker @kyoto \(turn 2\): completed\/succeeded/);
+});
+
+test("a continuation turn's rate-limit retry is not another continuation, and a provider timeout is not the turn limit", () => {
+  const jobs = teamJobs();
+  const second = jobs.find((j) => j.id === "kyoto-2");
+  second.status = "failed";
+  second.outcome = "failed";
+  second.errorMessage = "rate limit exceeded: upstream request timed out (429). Please try again in 7s.";
+  const retry = { ...job({ id: "kyoto-2r", role: "worker", parent: "lead", route: null }), agentHandle: "kyoto",
+    planContinuation: { of: "kyoto-1", turn: 1, last: false }, planRateLimitRetry: { of: "kyoto-2" },
+    createdAt: at(740), leasedAt: at(748), completedAt: at(800) };
+  const t = timingOf([...jobs, retry]);
+  assert.equal(t.continuations, 1, "kyoto-2 only");
+  assert.equal(t.timedOut, 1, "kyoto-1 only");
+  assert.equal(t.lanesSec, 752, "Kyoto's three runs");
 });
 
 test("the jobs query reads the continuation and the agent", () => {

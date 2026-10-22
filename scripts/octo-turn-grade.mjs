@@ -511,7 +511,8 @@ export function timingOf(jobs) {
       handle: job.agentHandle ?? null,
       turn: job.planContinuation?.turn ?? 0,
       status: `${job.status}/${job.outcome ?? "-"}`,
-      timedOut: /timed out/i.test(job.errorMessage ?? ""),
+      // the turn's hard limit only, not a provider's "request timed out"
+      timedOut: (job.errorMessage ?? "").startsWith("Codex run timed out"),
       queueSec: spanSec(job.createdAt, job.leasedAt),
       wallSec: spanSec(job.leasedAt, job.completedAt),
       commandSec: timings ? secs(timings.commandMs) : null,
@@ -524,11 +525,18 @@ export function timingOf(jobs) {
       stepsTotalSec: secs(steps.find((t) => t.step === "total")?.ms),
     };
   });
-  const lanes = perJob.filter((j) => j.role === "worker");
+  // a lane's time is all its turns' (its continuations and retries share its handle)
+  const laneSec = new Map();
+  perJob.forEach((j, index) => {
+    if (j.role !== "worker") return;
+    const key = j.handle ?? `job:${jobs[index].id}`;
+    laneSec.set(key, (laneSec.get(key) ?? 0) + (j.wallSec ?? 0));
+  });
   return {
     timedOut: perJob.filter((j) => j.timedOut).length,
-    continuations: jobs.filter((job) => job.planContinuation).length,
-    lanesSec: lanes.length ? Math.max(...lanes.map((j) => j.wallSec ?? 0)) : null,
+    // a rate-limit retry of a continuation turn carries its `continuation` entry but is not another turn
+    continuations: jobs.filter((job) => job.planContinuation && !job.planRateLimitRetry).length,
+    lanesSec: laneSec.size ? Math.round(Math.max(...laneSec.values()) * 10) / 10 : null,
     jobs: perJob,
   };
 }
@@ -947,7 +955,7 @@ export function renderReport(grade) {
  *  tool steps. Empty for evidence without job times. */
 export function renderTiming(timing) {
   if (!timing?.jobs?.length) return [];
-  const lines = [`- Time: slowest lane ${timing.lanesSec ?? "-"} s; ${timing.timedOut} job(s) stopped at the turn limit; ${timing.continuations} continuation(s)`];
+  const lines = [`- Time: slowest lane ${timing.lanesSec ?? "-"} s (all its turns); ${timing.timedOut} job(s) stopped at the turn limit; ${timing.continuations} continuation(s)`];
   for (const j of timing.jobs) {
     const head = `  - ${j.role}${j.handle ? ` @${j.handle}` : ""}${j.turn ? ` (turn ${j.turn + 1})` : ""}: ${j.status}, waited ${j.queueSec ?? "-"} s, ran ${j.wallSec ?? "-"} s`
       + `${j.commandSec != null ? `, commands ${j.commandSec} s` : ""}${j.wrapUpSec != null ? `, wrap-up at ${j.wrapUpSec} s` : ""}${j.continuation ? `, asked to continue (${j.continuation})` : ""}`;

@@ -698,6 +698,11 @@ pub struct CodexRunOptions {
     /// Steer the live turn once, this long after it started, with a wrap-up note: the turn's
     /// hard limit is near (see `TurnWrapUp`).
     pub turn_wrap_up: Option<TurnWrapUp>,
+    /// The file a team lane's agent may leave its continuation note in (see
+    /// `jobs::turn_continuation`). Each attempt starts without one, so a note an earlier attempt
+    /// left is not taken for this one's. A run that has one is not retried here when it times out:
+    /// the controller continues it in a new turn instead.
+    pub turn_continue_note: Option<PathBuf>,
 }
 
 /// A turn nearing its hard limit is told so while it still runs (one steering input, as a
@@ -733,6 +738,25 @@ impl CodexRunOptions {
             self.input_images.clear();
         }
         self
+    }
+
+    /// Clears what an earlier attempt of this run left for the turn's end: its continuation note.
+    fn start_attempt(&self) {
+        if let Some(note) = self.turn_continue_note.as_ref() {
+            match std::fs::remove_file(note) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    tracing::warn!(%error, "could not clear the turn's continuation note")
+                }
+            }
+        }
+    }
+
+    /// Whether a run that timed out may be run again here: not one the controller continues in a
+    /// new turn (`turn_continue_note`), which would otherwise redo a whole turn first.
+    fn retries_a_timed_out_run(&self, attempt: usize, max_retries: usize) -> bool {
+        attempt < max_retries && self.turn_continue_note.is_none()
     }
 }
 
@@ -1009,6 +1033,7 @@ impl CodexClient {
 
         let mut attempt: usize = 0;
         loop {
+            options.start_attempt();
             let mut attempt_options = if attempt == 0 {
                 options.clone()
             } else {
@@ -1153,7 +1178,7 @@ impl CodexClient {
                     tokio::time::sleep(delay).await;
                 }
                 Err(_) => {
-                    let should_retry = attempt < max_retries;
+                    let should_retry = options.retries_a_timed_out_run(attempt, max_retries);
                     if !should_retry {
                         return Err(anyhow!("Codex run timed out"));
                     }
@@ -5327,6 +5352,31 @@ mod tests {
     };
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Mutex, OnceLock};
+
+    #[test]
+    fn a_continued_lanes_attempt_starts_without_a_note_and_a_timeout_is_not_rerun_here() {
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("continue.md");
+        std::fs::write(&note, "left from an earlier attempt").unwrap();
+        let lane = CodexRunOptions {
+            turn_continue_note: Some(note.clone()),
+            ..CodexRunOptions::default()
+        };
+        lane.start_attempt();
+        assert!(
+            !note.exists(),
+            "an earlier attempt's note is not this one's"
+        );
+        lane.start_attempt();
+        assert!(
+            !lane.retries_a_timed_out_run(0, 1),
+            "the controller continues it instead"
+        );
+        let own = CodexRunOptions::default();
+        own.start_attempt();
+        assert!(own.retries_a_timed_out_run(0, 1));
+        assert!(!own.retries_a_timed_out_run(1, 1));
+    }
 
     /// Octo opens Instafy's browser without a press, but nothing in a browser
     /// turn's run-level policy may tell it to skip the browser's own site and

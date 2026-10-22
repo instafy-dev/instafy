@@ -5973,10 +5973,12 @@ impl JobProcessor {
             .await;
         let result = turn_continuation::attach_turn_records(result, &turn_files);
         // The job ends here, unless it lost its lease and a later lease may
-        // resume it: only then is the record of how its turn began kept.
+        // resume it, or its turn ran out of time and a new job continues it:
+        // only then is the record of how its turn began kept.
         if !result
             .as_ref()
             .is_err_and(|error| crate::agent_executor::is_lease_lost(error))
+            && !turn_continuation::requests_continuation(&result)
             && let Ok(project_id) = self.project_id_for_job(job)
         {
             turn_baseline::forget(&self.config.project_workspace_dir(&project_id), job.id);
@@ -6521,12 +6523,10 @@ impl JobProcessor {
             active_turn_input,
             input_images: Vec::new(),
             isolated_tool_worker: false,
-            // Shortly before the hard limit the turn is told to save and end (and, for a job
-            // the controller can continue, to leave a note for its next turn).
-            turn_wrap_up: turn_continuation::turn_wrap_up(
-                crate::codex::resolve_codex_run_timeout(),
-                turn_files.continuable(),
-            ),
+            // Shortly before the hard limit a team lane's turn is told to save and end (and,
+            // when the controller can continue it, to leave a note for its next turn).
+            turn_wrap_up: turn_files.wrap_up(crate::codex::resolve_codex_run_timeout()),
+            turn_continue_note: turn_files.continue_note_path(),
         };
 
         let routing_pre_observation = if should_run_routing_pre_observation_before_main(
@@ -6743,6 +6743,7 @@ impl JobProcessor {
                     &workspace_dir,
                     job.id,
                     job.resumes_an_interrupted_attempt(),
+                    turn_continuation::continued_job_id(&job.payload),
                     status,
                 )
             });
@@ -13514,6 +13515,8 @@ fn finalization_codex_run_options(first_attempt: &CodexRunOptions) -> CodexRunOp
     options.provider_conversation_state = None;
     options.input_images.clear();
     options.turn_wrap_up = None;
+    // the note is the turn's own: a finalization run neither clears it nor hands the turn off
+    options.turn_continue_note = None;
     options
 }
 

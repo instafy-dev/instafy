@@ -1,6 +1,7 @@
-//! A turn nearing its hard limit is steered once to wrap up, while its tool still runs, and a
-//! team job's note on what is left becomes its continuation request (`agent/turn-continuation`).
-//! Every command's time is in `agent/turn-timings`. Through the real proxy with an inert,
+//! A team lane's turn nearing its hard limit is steered once to wrap up, while its tool still
+//! runs, and its note on what is left becomes its continuation request (`agent/turn-continuation`).
+//! Every command's time is in `agent/turn-timings`. A turn the limit stops leaves its edits
+//! unsaved, and the continuation's save counts them. Through the real proxy with an inert,
 //! localhost provider; the shell commands are real.
 
 use super::*;
@@ -16,6 +17,9 @@ enum Case {
     WrapUp,
     /// No wrap-up (turned off); the hard limit stops the turn mid-command.
     TimeLimit,
+    /// A writing lane is stopped at its limit after it wrote one file; its continuation writes
+    /// another, and its save holds both.
+    ContinuedWrite,
 }
 
 impl Case {
@@ -26,6 +30,9 @@ impl Case {
             }
             Self::TimeLimit => {
                 "turn_wrap_up::a_team_job_stopped_at_its_time_limit_keeps_its_run_log_and_asks_for_a_continuation_via_proxy"
+            }
+            Self::ContinuedWrite => {
+                "turn_wrap_up::a_continuation_saves_what_the_turn_it_continues_wrote_before_its_time_limit_via_proxy"
             }
         }
     }
@@ -41,6 +48,12 @@ fn a_team_job_near_its_time_limit_is_told_to_wrap_up_and_its_note_asks_for_a_con
 fn a_team_job_stopped_at_its_time_limit_keeps_its_run_log_and_asks_for_a_continuation_via_proxy()
 -> Result<()> {
     run(Case::TimeLimit)
+}
+
+#[test]
+fn a_continuation_saves_what_the_turn_it_continues_wrote_before_its_time_limit_via_proxy()
+-> Result<()> {
+    run(Case::ContinuedWrite)
 }
 
 fn run(case: Case) -> Result<()> {
@@ -114,6 +127,25 @@ async fn provider_request(
         assert_eq!(index, 0, "the turn is stopped during its first step");
         return respond(shell("stuck_step", "sleep 40; echo never"));
     }
+    if state.case == Case::ContinuedWrite {
+        return match index {
+            // the first turn writes one day, then is stopped in its next step
+            0 => respond(shell(
+                "first_day",
+                "printf 'day one\\n' > day-1.md && sleep 40; echo never",
+            )),
+            // its continuation writes the next day and ends
+            1 => respond(shell("second_day", "printf 'day two\\n' > day-2.md")),
+            2 => respond(json!({
+                "id":format!("msg_{}",Uuid::new_v4()),"type":"message","role":"assistant",
+                "status":"completed","phase":"final_answer",
+                "content":[{"type":"output_text","text":json!({
+                    "summary":"Wrote day two.","code":"","files":[],"actions":[]
+                }).to_string()}]
+            })),
+            _ => panic!("unexpected extra provider request {index}"),
+        };
+    }
     match index {
         // a long step: the wrap-up comes while it runs
         0 => respond(shell("long_step", "sleep 7; echo step-done")),
@@ -176,7 +208,7 @@ async fn run_case(case: Case) -> Result<()> {
             settings.push(EnvGuard::set("INSTAFY_TURN_WRAP_UP_SECONDS", "20"));
         }
         // a 6 s turn with no wrap-up: `sleep 40` is still running when it ends
-        Case::TimeLimit => {
+        Case::TimeLimit | Case::ContinuedWrite => {
             settings.push(EnvGuard::set("CODEX_RUN_TIMEOUT_SECONDS", "6"));
             settings.push(EnvGuard::set("INSTAFY_TURN_WRAP_UP_SECONDS", "0"));
         }
@@ -261,8 +293,18 @@ async fn run_case(case: Case) -> Result<()> {
         parent_dispositions_runtime_on_shutdown: false,
     });
     let registration = registration_for_live(Uuid::new_v4());
+    let processor = JobProcessor::new(config);
+    if case == Case::ContinuedWrite {
+        let result = continued_write(&processor, &registration, &workspace, project_id).await;
+        drop(proxy_guard);
+        drop(stub_guard);
+        proxy_task.await??;
+        stub_task.await??;
+        drop(settings);
+        return result;
+    }
     let (sender, _messages) = tokio::sync::mpsc::unbounded_channel();
-    let result = JobProcessor::new(config)
+    let result = processor
         .run_apply_job(
             &registration,
             &team_job(project_id),
@@ -366,6 +408,108 @@ async fn run_case(case: Case) -> Result<()> {
     proxy_task.await??;
     stub_task.await??;
     drop(settings);
+    Ok(())
+}
+
+/// Turn 1 of a writing lane writes day-1.md and is stopped at its limit; turn 2, its
+/// continuation, writes day-2.md. Turn 2's save holds both: nothing saved turn 1's edit.
+async fn continued_write(
+    processor: &JobProcessor,
+    registration: &Registration,
+    workspace: &Path,
+    project_id: Uuid,
+) -> Result<()> {
+    fs::write(workspace.join("base.md"), "base\n")?;
+    git_in(workspace, &["init", "-q", "-b", "main"])?;
+    git_in(workspace, &["add", "base.md"])?;
+    git_in(
+        workspace,
+        &[
+            "-c",
+            "user.name=Instafy Test",
+            "-c",
+            "user.email=test@instafy.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "main",
+        ],
+    )?;
+    let mut first = team_job(project_id);
+    first.payload["prompt_text"] = json!("Write the day files.");
+    first.payload["metadata"]["runtimeExpectations"]["workspaceFileChanges"] = json!(true);
+    let record = |job: &LeaseJob| {
+        workspace
+            .join(".git/instafy-turn-baselines")
+            .join(format!("{}.json", job.id))
+    };
+    let (sender, _messages) = tokio::sync::mpsc::unbounded_channel();
+    let error = processor
+        .run_apply_job(
+            registration,
+            &first,
+            true,
+            Some(JobProgress {
+                sender,
+                status: Arc::new(AtomicBool::new(true)),
+            }),
+            None,
+            None,
+        )
+        .await
+        .expect_err("the hard limit stops the first turn");
+    let artifacts = extract_job_failure_artifacts(&error).context("artifacts kept")?;
+    assert!(
+        artifacts
+            .iter()
+            .any(|artifact| artifact["kind"] == "agent/turn-continuation"),
+        "the stopped turn asks to continue"
+    );
+    assert_eq!(fs::read_to_string(workspace.join("day-1.md"))?, "day one\n");
+    assert!(
+        record(&first).is_file(),
+        "the stopped turn keeps the record of how its folder began"
+    );
+
+    let mut next = team_job(project_id);
+    next.payload = first.payload.clone();
+    next.payload["metadata"]["multiAgentPlan"]["continuation"] =
+        json!({"of": first.id.to_string(), "turn": 1, "last": false, "endedBy": "time_limit"});
+    let (sender, _messages) = tokio::sync::mpsc::unbounded_channel();
+    let execution = processor
+        .run_apply_job(
+            registration,
+            &next,
+            true,
+            Some(JobProgress {
+                sender,
+                status: Arc::new(AtomicBool::new(true)),
+            }),
+            None,
+            None,
+        )
+        .await
+        .context("the continuation turn")?;
+    let files = execution
+        .artifacts
+        .iter()
+        .find(|artifact| artifact["kind"] == "apply/files")
+        .and_then(|artifact| artifact["files"].as_array())
+        .context("apply/files")?;
+    let paths: Vec<&str> = files
+        .iter()
+        .filter_map(|file| file["workspacePath"].as_str())
+        .collect();
+    assert!(paths.contains(&"day-2.md"), "its own edit: {paths:?}");
+    assert!(
+        paths.contains(&"day-1.md"),
+        "the edit of the turn it continues: {paths:?}"
+    );
+    assert!(!paths.contains(&"base.md"), "{paths:?}");
+    assert!(
+        !record(&next).exists(),
+        "the continuation's end removes its own record"
+    );
     Ok(())
 }
 
