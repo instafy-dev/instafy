@@ -2437,6 +2437,17 @@ async fn cleanup_origin_project(pool: &PgPool, project_id: &Uuid) -> anyhow::Res
     connection
         .execute("DELETE FROM projects WHERE id = $1", &[project_id])
         .await?;
+    // What the space's rate limits taught the upstream pacing, including the platform-wide row
+    // they may have vouched for: a later test's platform lanes start unpaced.
+    connection
+        .execute(
+            "DELETE FROM upstream_pacing WHERE upstream_key = any($1)",
+            &[&vec![
+                "platform".to_string(),
+                crate::upstream_pacing::platform_project_key(project_id),
+            ]],
+        )
+        .await?;
     Ok(())
 }
 

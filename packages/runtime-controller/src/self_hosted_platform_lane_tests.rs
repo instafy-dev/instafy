@@ -3547,3 +3547,188 @@ async fn team_plan_agents_of_one_upstream_wait_queued_while_it_is_rate_limited(
     second_cleanup?;
     first_cleanup
 }
+
+/// A rate limit of an ordinary turn holds plan agents for its stated wait but never lowers how many
+/// may run: it is no lane, and with none running it would have capped every team at one. On the
+/// platform's shared upstream one space's reports pace only its own plan agents; every space's
+/// are paced once another space reports a rate limit too. The ordinary turn's end goes through
+/// `/agent/complete`, so its settlement is what teaches the pacing. A controller that runs before
+/// the pacing migration leases unpaced instead of failing the lease.
+#[tokio::test]
+async fn an_ordinary_turns_rate_limit_never_caps_lanes_and_one_space_cannot_pace_every_space(
+) -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping platform upstream pacing test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let first = ManagedSpace::seed(pool.clone(), "platform-pacing-first").await?;
+    let second = ManagedSpace::seed(pool.clone(), "platform-pacing-second").await?;
+    let pacing_rows = vec![
+        "platform".to_string(),
+        crate::upstream_pacing::platform_project_key(&first.project_id),
+        crate::upstream_pacing::platform_project_key(&second.project_id),
+    ];
+    async fn clear_pacing(pool: &PgPool, rows: &[String]) -> anyhow::Result<()> {
+        pool.get()
+            .await?
+            .execute(
+                "delete from upstream_pacing where upstream_key = any($1) or upstream_key like 'platform:project:%'",
+                &[&rows],
+            )
+            .await?;
+        Ok(())
+    }
+    let test_result: anyhow::Result<()> = async {
+        const RATE_LIMITED: &str = "rate limit exceeded: The upstream provider rate limit was reached (upstream_rate_limit, 429). Please try again in 24.535s.";
+        clear_pacing(&pool, &pacing_rows).await?;
+        let state = build_test_state(pool.clone(), first.config("platform-pacing"));
+        let app = crate::agent::router().with_state(state.clone());
+        let token = crate::auth::issue_agent_token(
+            &state.config,
+            &first.project_id,
+            &first.hosted_runtime_id,
+            None,
+            None,
+        )
+        .map_err(|error| controller_error("issue agent token", error))?
+        .token;
+        let lane = |group: Uuid| json!({
+            "agent": { "handle": "lane" },
+            "multiAgentPlan": { "groupId": group, "role": "worker", "mode": "read_only" },
+        });
+        let pacing = |key: String| {
+            let pool = pool.clone();
+            async move {
+                let row = pool
+                    .get()
+                    .await?
+                    .query_opt(
+                        "select ceiling, extract(epoch from cooldown_until - now())::double precision as wait
+                         from upstream_pacing where upstream_key = $1",
+                        &[&key],
+                    )
+                    .await?;
+                anyhow::Ok(row.map(|row| (row.get::<_, f64>("ceiling"), row.get::<_, f64>("wait"))))
+            }
+        };
+        let first_key = crate::upstream_pacing::platform_project_key(&first.project_id);
+        let second_key = crate::upstream_pacing::platform_project_key(&second.project_id);
+
+        // 1. one lane of the first space runs on the platform's upstream; an ordinary turn of the
+        // same space stops on a rate limit and reports it through /agent/complete
+        let (_, _, running_lane, _) =
+            insert_leased_plan_job(&first, first.hosted_runtime_id, None, lane(Uuid::new_v4())).await?;
+        let (_, _, turn, _) = insert_leased_plan_job(
+            &first,
+            first.hosted_runtime_id,
+            None,
+            json!({ "agent": { "handle": "octo" } }),
+        )
+        .await?;
+        let request = Request::builder()
+            .method("POST")
+            .uri("/agent/complete")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::from(
+                json!({ "job_id": turn, "outcome": "failed", "error_message": RATE_LIMITED, "artifacts": [] })
+                    .to_string(),
+            ))?;
+        let response = app.clone().oneshot(request).await?;
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await?;
+        anyhow::ensure!(status == StatusCode::OK, "complete returned {status}: {}", String::from_utf8_lossy(&body));
+        let (ceiling, wait) = pacing(first_key.clone()).await?.expect("the space's own row");
+        assert!(ceiling >= 1_000.0, "an ordinary turn's rate limit sets no ceiling: {ceiling}");
+        assert!((20.0..=24.6).contains(&wait), "the stated wait: {wait}");
+        assert_eq!(pacing("platform".to_string()).await?, None, "one space alone paces no other space");
+
+        // 2. the first space's next lane waits out the stated wait; the second space's does not
+        let held = Uuid::new_v4();
+        let waiting = insert_queued_plan_job(&first, None, "kyoto", "worker", held).await?;
+        let elsewhere = Uuid::new_v4();
+        let other_space_lane = insert_queued_plan_job(&second, None, "nara", "worker", elsewhere).await?;
+        assert_eq!(
+            lease_plan_group_job(&pool, first.project_id, first.hosted_runtime_id, false, held).await?,
+            None,
+            "held for the stated wait"
+        );
+        assert_eq!(
+            lease_plan_group_job(&pool, second.project_id, second.hosted_runtime_id, false, elsewhere).await?,
+            Some(other_space_lane),
+            "another space is not paced by the first space's report"
+        );
+
+        // 3. after the wait it starts beside the lane that runs: the ceiling was not lowered
+        pool.get()
+            .await?
+            .execute(
+                "update upstream_pacing set cooldown_until = now() - interval '1 second' where upstream_key = $1",
+                &[&first_key],
+            )
+            .await?;
+        assert_eq!(
+            lease_plan_group_job(&pool, first.project_id, first.hosted_runtime_id, false, held).await?,
+            Some(waiting),
+            "not capped at one"
+        );
+
+        // 4. a lane of the second space stops on a rate limit too: now every space is paced
+        let (_, _, stopped, _) =
+            insert_leased_plan_job(&second, second.hosted_runtime_id, None, lane(Uuid::new_v4())).await?;
+        pool.get()
+            .await?
+            .execute(
+                "update agent_jobs set status = 'failed', outcome = 'failed', error_message = $2,
+                     completed_at = now() where id = $1",
+                &[&stopped, &RATE_LIMITED],
+            )
+            .await?;
+        crate::upstream_pacing::record_job_end(&pool, stopped).await;
+        let (second_ceiling, _) = pacing(second_key).await?.expect("the second space's own row");
+        assert_eq!(second_ceiling, 1.0, "half of the one lane of that space that ran");
+        let (shared_ceiling, shared_wait) =
+            pacing("platform".to_string()).await?.expect("vouched for by two spaces");
+        assert!((20.0..=24.6).contains(&shared_wait), "{shared_wait}");
+        assert!(shared_ceiling >= 1.0, "{shared_ceiling}");
+        assert_eq!(
+            lease_plan_group_job(&pool, first.project_id, first.hosted_runtime_id, false, held).await?,
+            None,
+            "every space waits out the shared wait"
+        );
+
+        // 5. before the pacing migration, a lease is unpaced rather than failed
+        let mut connection = pool.get().await?;
+        let transaction = connection.transaction().await?;
+        transaction
+            .execute("alter table upstream_pacing rename to upstream_pacing_unmigrated", &[])
+            .await?;
+        let leased = agent::lease_next_agent_job(
+            &transaction,
+            &first.project_id,
+            Some(&first.hosted_runtime_id),
+            60,
+            true,
+            false,
+            false,
+            false,
+            None,
+            Some(held.to_string().as_str()),
+            false,
+        )
+        .await
+        .map_err(|error| controller_error("lease before the migration", error))?;
+        transaction.rollback().await?;
+        assert_eq!(leased.map(|job| job.id), Some(waiting), "unpaced, not failed");
+        let _ = running_lane;
+        Ok(())
+    }
+    .await;
+    let pacing_cleanup = clear_pacing(&pool, &pacing_rows).await;
+    let second_cleanup = second.cleanup().await;
+    let first_cleanup = first.cleanup().await;
+    test_result?;
+    pacing_cleanup?;
+    second_cleanup?;
+    first_cleanup
+}
