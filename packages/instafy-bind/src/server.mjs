@@ -8,6 +8,7 @@ import { createHash } from "node:crypto";
 import { BOUND_FILE, executorOf, intentCatalog, loadBound, resolveIntent } from "./bound.mjs";
 import { applyDefaults, formatErrors, validate } from "./schema-lite.mjs";
 import { checkRecords, collectRecords } from "./apply.mjs";
+import { ownSiteWrites, releaseSiteWrites } from "./save-owner.mjs";
 import { AgentBudget, DEFAULT_AGENT_BUDGET_PER_HOUR } from "./budget.mjs";
 import { EventHub } from "./sse.mjs";
 import { JobManager } from "./jobs.mjs";
@@ -215,6 +216,9 @@ export function withBindClient(html, prefix = "") {
  * @param {boolean} [options.trustProxy] believe x-forwarded-host (only behind your own proxy)
  * @param {number} [options.agentBudget] Octo dispatches per site per hour (repairs included)
  * @param {string[]} [options.allowEnv] credential-like env names bound.json may pass to handlers
+ * @param {boolean} [options.save] in a space's checkout, commit the data files the binder writes (default on; see
+ *   save-owner.mjs). Off (`serve --no-save`) leaves them as changed files, which a stop keeps as unsaved work
+ * @param {{delayMs?: number, maxDelayMs?: number}} [options.saveOptions] commit timing (tests)
  * @param {(level: string, text: string) => void} [options.log]
  * @param {(prompt: string, job: object) => void} [options.onDryRun]
  * @param {(config: object) => object|null} [options.createClient] controller client factory (tests)
@@ -226,7 +230,7 @@ export function createBinder(options) {
     port = 4180, host = "127.0.0.1", noToken = false, dryRun = false, confirm = false, allowLocal = false,
     log: externalLog = () => {}, onDryRun = () => {}, pollMs, killGraceMs, publicOrigins = [], lookup, env = process.env,
     trustProxy = false, agentBudget = DEFAULT_AGENT_BUDGET_PER_HOUR, allowEnv = [], preview = false,
-    previewStateFile = defaultPreviewStateFile(), agentExecutor = false,
+    previewStateFile = defaultPreviewStateFile(), agentExecutor = false, save = true, saveOptions = {},
   } = options;
   // Preview mode is tokenless too: the broker's forwardAuth on the capability host is the auth.
   const tokenless = noToken || preview;
@@ -334,6 +338,10 @@ export function createBinder(options) {
       session: agentSession(entry.dir),
       budget: new AgentBudget({ dir: entry.dir, perHour: agentBudget }),
     };
+    // The binder owns what it writes for clicks: in a space's checkout it commits those files (save-owner.mjs).
+    site.saver = save
+      ? ownSiteWrites(entry.dir, { ...saveOptions, label: `the ${entry.name} site`, log: (level, text) => log(level, `[${entry.name}] ${text}`) })
+      : null;
     site.jobs = new JobManager({
       site,
       hub: site.hub,
@@ -851,6 +859,8 @@ export function createBinder(options) {
       for (const site of sites) {
         site.jobs.close();
         site.hub.close();
+        // What is left is committed now, so a stopped binder leaves nothing it wrote unsaved.
+        if (site.saver) releaseSiteWrites(site.dir);
       }
       server.closeAllConnections?.();
       await new Promise((resolve) => server.close(() => resolve()));

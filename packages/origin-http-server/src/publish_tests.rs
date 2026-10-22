@@ -7436,3 +7436,124 @@ fn a_revert_never_brings_back_a_name_main_holds_in_another_case() {
         assert_eq!(sc.disk("TODO.md").as_deref(), Some("person list\n"));
     }
 }
+
+/// Commit `path` as a site's own backend does between turns
+/// (packages/instafy-bind/src/save-owner.mjs): the bytes hashed with no
+/// filters into a temporary index, `commit-tree`, HEAD moved by
+/// compare-and-swap, and the checkout's index given the same entry without
+/// stat data.
+fn site_backend_commit(sc: &Scenario, path: &str, bytes: &[u8]) -> String {
+    use std::process::Command;
+    sc.write(path, bytes);
+    let head = sc.head();
+    let blob = git_output(
+        &sc.ws,
+        &[
+            "--git-dir",
+            ".instafy/.git",
+            "hash-object",
+            "-w",
+            "--no-filters",
+            "--stdin",
+        ],
+        Some(bytes),
+    );
+    assert!(blob.status.success());
+    let blob = String::from_utf8_lossy(&blob.stdout).trim().to_string();
+    let info = format!("100644 {blob}\t{path}\0");
+    let tmp = tempfile::tempdir().unwrap();
+    let index = tmp.path().join("index");
+    let git = |args: &[&str], stdin: Option<&[u8]>| -> String {
+        use std::io::Write as _;
+        let mut command = Command::new("git");
+        command
+            .current_dir(&sc.ws)
+            .args(["--git-dir", ".instafy/.git", "--work-tree", "."])
+            .args(args)
+            .env("GIT_INDEX_FILE", &index)
+            .env("GIT_AUTHOR_NAME", "Instafy site")
+            .env("GIT_AUTHOR_EMAIL", "site@instafy.dev")
+            .env("GIT_COMMITTER_NAME", "Instafy site")
+            .env("GIT_COMMITTER_EMAIL", "site@instafy.dev")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stdin.unwrap_or_default())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "git {args:?}");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    git(&["read-tree", &head], None);
+    git(
+        &["update-index", "-z", "--index-info"],
+        Some(info.as_bytes()),
+    );
+    let tree = git(&["write-tree"], None);
+    let commit = git(
+        &["commit-tree", &tree, "-p", &head, "-F", "-"],
+        Some(b"Save what the hello site recorded\n\nInstafy-Saved-By: site backend\n"),
+    );
+    ig(&sc.ws, &["update-ref", "HEAD", &commit, &head]);
+    let real = git_output(
+        &sc.ws,
+        &[
+            "--git-dir",
+            ".instafy/.git",
+            "--work-tree",
+            ".",
+            "update-index",
+            "-z",
+            "--index-info",
+        ],
+        Some(info.as_bytes()),
+    );
+    assert!(real.status.success());
+    commit
+}
+
+/// A site's own backend saves the data files it wrote for clicks as a local
+/// commit between turns. The pre-turn refresh and a stop's flush (with no
+/// turn running) publish that commit as they publish a turn's: it reaches
+/// canonical `main` as it is, nothing is parked as unsaved, no recovery copy
+/// is left, and the checkout is clean.
+#[test]
+fn a_site_backends_commit_between_turns_is_published_and_never_parked() {
+    for via_flush in [false, true] {
+        let sc = Scenario::new(Options {
+            hook: true,
+            ..Options::default()
+        });
+        let records = b"{\"records\":[{\"value\":\"hi ada\"}]}\n";
+        let saved = site_backend_commit(&sc, "hello/data/records/hello.json", records);
+        assert_eq!(sc.status(), "", "the backend's save leaves nothing changed");
+        sc.push_other(
+            &[("notes/plan.md", Some(b"plan\n"))],
+            "Save version: notes/plan.md",
+        );
+        if via_flush {
+            let report = flush(&sc.ctx(true), false).unwrap();
+            assert!(report.recovery_refs.is_empty(), "{report:?}");
+            assert_eq!(report.parked_commits, 0, "{report:?}");
+            assert_eq!(report.unpushed_refs, 0, "{report:?}");
+            assert!(report.publish_error.is_none(), "{report:?}");
+        } else {
+            let report = refresh(&sc.ctx(true)).unwrap();
+            assert_eq!(report.unpushed_refs, 0, "{report:?}");
+        }
+        assert_eq!(
+            sc.remote_file("hello/data/records/hello.json").as_deref(),
+            Some(std::str::from_utf8(records).unwrap()),
+            "via_flush={via_flush}"
+        );
+        assert!(sc.remote_log().contains(&saved), "{}", sc.remote_log());
+        assert_eq!(sc.remote_file("notes/plan.md").as_deref(), Some("plan\n"));
+        assert!(sc.local_refs(LOCAL_RECOVERY_ROOT).is_empty());
+        assert!(sc.remote_refs("refs/instafy/").is_empty());
+        assert_eq!(sc.status(), "");
+    }
+}

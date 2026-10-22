@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { DEFAULT_AGENT_LANE, DEFAULT_SCRIPT_LANES, executorOf, targetOf } from "./bound.mjs";
 import { formatErrors } from "./schema-lite.mjs";
+import { noteSiteWrite } from "./save-owner.mjs";
 import { originAllowed, uriParamOrigins } from "./net.mjs";
 import {
   MAX_FILE_BYTES, RECORDS_PATH_RE, RECORDS_SCHEMA_ID, emptyRecordsFile, mergeRecords, normalizeRecord, rid, trimRecords, validateRecord,
@@ -43,6 +44,8 @@ function writeJsonAtomic(file, value, { pretty = false } = {}) {
   const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
   fs.writeFileSync(tmp, text);
   fs.renameSync(tmp, file);
+  // In a space's checkout, the serving binder owns this write and commits it (save-owner.mjs).
+  noteSiteWrite(file, text);
   return Buffer.byteLength(text);
 }
 

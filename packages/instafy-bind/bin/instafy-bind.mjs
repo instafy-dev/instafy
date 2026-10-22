@@ -24,7 +24,7 @@ Usage:
                      [--agent-executor [--space <id>] [--conversation <id>] [--agent-conversation <id>]
                      [--server-url <url>] [--agent-budget ${DEFAULT_AGENT_BUDGET_PER_HOUR}]] [--dry-run] [--confirm] [--allow-local]
                      [--allow-env NAME] [--public-url <url>] [--trust-proxy]
-                     [--json] [--verbose] [--detach [--log <file>]]
+                     [--no-save] [--json] [--verbose] [--detach [--log <file>]]
   instafy-bind init <dir> [--starter compare|ranked|timeline|checklist|blank] [--force]
   instafy-bind command <dir> <name> [json-args]    names: ${COMMAND_NAMES.join(", ")}
   instafy-bind confirm <dir> <job|all> [--no]
@@ -48,6 +48,9 @@ serve      Serve the site (or every subfolder with a bound.json) with the binder
            --detach: start the binder in the background (its own session, output to --log, default
            <tmp>/instafy-bind-<port>.log), wait until it answers, print where it serves and exit. A server
            started in an agent turn without it stops when the turn ends.
+           In a folder of an Instafy space, the binder saves the data files it writes for clicks (records,
+           data/version.json): it commits them to the space's checkout a few seconds after the last write, and
+           the space's next save publishes them. --no-save leaves them as changed files.
 init       Write a starter bound.json, index.html and handlers/hello.mjs. --starter <name>: a themed page instead,
            with theme.css and site.js (compare 2-8 options; ranked a top-N; timeline days or steps in time;
            checklist ticks; blank anything else). You design the content in data.json and app.js. Existing
@@ -68,7 +71,7 @@ function parseArgs(argv) {
   const positional = [];
   const flags = {};
   const repeatable = new Set(["public-url", "allow-env"]);
-  const booleans = new Set(["no-token", "preview", "dry-run", "confirm", "allow-local", "json", "verbose", "force", "no", "help", "trust-proxy", "detach", "save", "agent-executor"]);
+  const booleans = new Set(["no-token", "preview", "dry-run", "confirm", "allow-local", "json", "verbose", "force", "no", "help", "trust-proxy", "detach", "save", "no-save", "agent-executor"]);
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "-h") flags.help = true;
@@ -190,6 +193,7 @@ async function serve(dir, flags) {
       confirm: Boolean(flags.confirm),
       allowLocal: Boolean(flags["allow-local"]),
       publicOrigins: flags["public-url"] || [],
+      save: !flags["no-save"],
       log,
       onDryRun,
     });
