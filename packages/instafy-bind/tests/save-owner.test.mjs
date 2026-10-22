@@ -1,12 +1,12 @@
 // The binder is the save owner of the data files it writes for clicks (src/save-owner.mjs). In an Instafy space's
-// checkout (`.instafy/.git` above the site) it commits them locally, so the space's next save publishes them and a stop
-// never parks them as "unsaved work". Work it did not write stays a changed file, so a stop still keeps it as unsaved.
+// checkout (`.instafy/.git` above the site) it commits them locally, under the origin's workspace lock, so the space's
+// next save publishes them. Work it did not write stays a changed file, so a stop still keeps it as unsaved.
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { findSpaceCheckout, noteSiteWrite, ownSiteWrites, releaseSiteWrites, SaveOwner } from "../src/save-owner.mjs";
 import { writeRecords } from "../src/apply.mjs";
 import { cleanup, eventsUrl, intentMessage, openSse, postIntent, simpleParams, sleep, startBinder, claim } from "./helpers.mjs";
@@ -201,6 +201,84 @@ test("the owner never touches the checkout's git folder, and writes outside the 
     assert.equal(owner.relative(path.join(os.tmpdir(), "elsewhere.json")), null);
     assert.equal(owner.relative(path.join(space, "hello", "index.html")), "hello/index.html");
   } finally {
+    cleanup(space);
+  }
+});
+
+test("while the origin holds the workspace lock (a publish, refresh or stop), the save waits and is tried again", async () => {
+  const { space, siteDir } = makeSpace();
+  const owner = ownSiteWrites(siteDir, { delayMs: 60_000, maxDelayMs: 60_000 });
+  // The origin's lock is an exclusive flock on .instafy/origin-apply.lock, held by another process.
+  const holder = spawn("perl", ["-MFcntl=:flock", "-e", '$| = 1; open(my $f, ">>", $ARGV[0]) or die; flock($f, LOCK_EX) or die; print "held\\n"; <STDIN>;', path.join(space, ".instafy", "origin-apply.lock")], { stdio: ["pipe", "pipe", "inherit"] });
+  try {
+    await new Promise((resolve) => holder.stdout.once("data", resolve));
+    writeRecords(siteDir, "data/records/hello.json", [claim()]);
+    const busy = await owner.flush();
+    assert.equal(busy.skipped, true);
+    assert.match(busy.reason, /busy/);
+    assert.deepEqual(subjects(space), ["instafy: init"], "nothing moved HEAD while the origin held the workspace");
+    holder.stdin.end();
+    await new Promise((resolve) => holder.once("exit", resolve));
+    const saved = await owner.flush();
+    assert.equal(saved.committed, true);
+    assert.deepEqual(lastFiles(space), ["hello/data/records/hello.json", "hello/data/version.json"]);
+    assert.deepEqual(status(space), []);
+  } finally {
+    holder.kill();
+    releaseSiteWrites(siteDir);
+    cleanup(space);
+  }
+});
+
+test("the checkout's own git config runs nothing, and git gets none of the backend's credentials", async () => {
+  const { space, siteDir } = makeSpace({ extra: { ".gitattributes": "*.json filter=exfil\n" } });
+  const ran = path.join(space, "..", `${path.basename(space)}-filter-ran`);
+  const seen = path.join(space, "..", `${path.basename(space)}-git-env`);
+  gitIn(space, ["config", "filter.exfil.clean", `sh -c 'ps -o command= -p $PPID >> "${ran}"; cat'`]);
+  // A git that writes down the environment it got, then runs the real one.
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "bind-fake-git-"));
+  const realGit = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+  fs.writeFileSync(path.join(bin, "git"), `#!/bin/sh\nenv >> "${seen}"\nexec "${realGit}" "$@"\n`, { mode: 0o755 });
+  const saved = { PATH: process.env.PATH, token: process.env.INSTAFY_TEST_SITE_TOKEN };
+  process.env.PATH = `${bin}${path.delimiter}${process.env.PATH}`;
+  process.env.INSTAFY_TEST_SITE_TOKEN = "not-for-git";
+  const owner = ownSiteWrites(siteDir, { delayMs: 60_000, maxDelayMs: 60_000 });
+  try {
+    writeRecords(siteDir, "data/records/hello.json", [claim()]);
+    const result = await owner.flush();
+    assert.equal(result.committed, true, JSON.stringify(result));
+    assert.equal(fs.existsSync(ran) ? fs.readFileSync(ran, "utf8") : false, false, "a clean filter from the checkout's config ran");
+    const env = fs.readFileSync(seen, "utf8");
+    assert.ok(!env.includes("not-for-git"), "the backend's environment reached git");
+    assert.match(env, /GIT_CONFIG_GLOBAL=\/dev\/null/);
+    assert.match(env, /GIT_CONFIG_NOSYSTEM=1/);
+    const records = JSON.parse(gitIn(space, ["show", "HEAD:hello/data/records/hello.json"]));
+    assert.equal(records.records.length, 1, "the bytes the binder wrote were committed as they are");
+  } finally {
+    process.env.PATH = saved.PATH;
+    if (saved.token === undefined) delete process.env.INSTAFY_TEST_SITE_TOKEN;
+    else process.env.INSTAFY_TEST_SITE_TOKEN = saved.token;
+    releaseSiteWrites(siteDir);
+    cleanup(bin);
+    fs.rmSync(ran, { force: true });
+    fs.rmSync(seen, { force: true });
+    cleanup(space);
+  }
+});
+
+test("a save after a stop's durable answer clears it, so the checkout is kept for the next start to publish", async () => {
+  const { space, siteDir } = makeSpace();
+  const marker = path.join(space, ".instafy", ".git", "instafy-stopped-clean");
+  const owner = ownSiteWrites(siteDir, { delayMs: 60_000, maxDelayMs: 60_000 });
+  try {
+    fs.writeFileSync(marker, "durable\n");
+    assert.equal((await owner.flush()).reason, "nothing to save");
+    assert.ok(fs.existsSync(marker), "nothing saved: the stop's answer still holds");
+    writeRecords(siteDir, "data/records/hello.json", [claim()]);
+    assert.equal((await owner.flush()).committed, true);
+    assert.equal(fs.existsSync(marker), false);
+  } finally {
+    releaseSiteWrites(siteDir);
     cleanup(space);
   }
 });
