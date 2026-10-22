@@ -1,0 +1,4 @@
+---
+---
+
+The frontend Playwright suite now cleans up only what belongs to its own test users. Global setup, the per-test cleanup reporter and global teardown remove the runtime containers, networks and runtime rows (`runtimes`, `runtime_leases`, `origin_instances`, `runtime_tunnel_grants`) of projects owned by the configured Playwright user or by the disposable users the harness signs up, and nothing else: a developer's own spaces, their runtimes and the stack's shared services (the model proxy, the gateways) are left alone. `PLAYWRIGHT_PROJECT_ID`'s runtime state and conversations are reset only when that project is a test user's. `KEEP_RUNTIME=1` or `PLAYWRIGHT_CLEANUP_RUNTIME=0` now turns runtime cleanup off in global setup and teardown too, not only in the reporter. Test tooling only; no package changes.
