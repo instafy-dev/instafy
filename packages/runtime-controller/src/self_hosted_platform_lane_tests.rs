@@ -3350,3 +3350,200 @@ async fn a_plan_lane_that_hit_a_short_rate_limit_runs_once_more_after_the_wait(
     test_result?;
     cleanup
 }
+
+/// A queued plan job of `space`, pinned to its hosted runtime: `role` "worker" (a lane) or
+/// "lead_continuation", on `credential_id` (else the platform's upstream).
+async fn insert_queued_plan_job(
+    space: &ManagedSpace,
+    credential_id: Option<Uuid>,
+    handle: &str,
+    role: &str,
+    group_id: Uuid,
+) -> anyhow::Result<Uuid> {
+    let conversation_id = Uuid::new_v4();
+    let run_id = Uuid::new_v4();
+    let job_id = Uuid::new_v4();
+    let payload = json!({
+        "project_id": space.project_id,
+        "conversation_id": conversation_id,
+        "user_id": space.owner_user_id,
+        "prompt_text": "Research one city.",
+        "metadata": { "agent": { "handle": handle }, "multiAgentPlan": { "groupId": group_id, "role": role } },
+    });
+    let connection = space.pool.get().await?;
+    connection
+        .execute(
+            "insert into conversations (id, project_id, created_by, metadata, visibility)
+             values ($1, $2, $3, '{}'::jsonb, 'private')",
+            &[&conversation_id, &space.project_id, &space.owner_user_id],
+        )
+        .await?;
+    connection
+        .execute(
+            "insert into runs (id, project_id, conversation_id, run_type, status)
+             values ($1, $2, $3, 'prompt', 'queued')",
+            &[&run_id, &space.project_id, &conversation_id],
+        )
+        .await?;
+    connection
+        .execute(
+            "insert into agent_jobs (id, project_id, run_id, conversation_id, status, intent,
+                 credential_id, target_runtime_id, payload)
+             values ($1, $2, $3, $4, 'queued', 'feature', $5, $6, $7)",
+            &[
+                &job_id,
+                &space.project_id,
+                &run_id,
+                &conversation_id,
+                &credential_id,
+                &space.hosted_runtime_id,
+                &PgJson(payload),
+            ],
+        )
+        .await?;
+    Ok(job_id)
+}
+
+/// The plan agents of all spaces on one AI upstream start in step with it. A lane that stops on a
+/// short rate limit holds every queued plan agent of that upstream, in any space, until the stated
+/// wait has passed; they stay queued, not failed. Then only as many run at once as the rate limit
+/// left room for (half of those that ran), and each lane that ends without one makes a little
+/// more. A lead on the same upstream, and a lane of another upstream, start meanwhile.
+#[tokio::test]
+async fn team_plan_agents_of_one_upstream_wait_queued_while_it_is_rate_limited(
+) -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping upstream pacing test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let first = ManagedSpace::seed(pool.clone(), "upstream-pacing-first").await?;
+    let second = ManagedSpace::seed(pool.clone(), "upstream-pacing-second").await?;
+    let credential_id = Uuid::new_v4();
+    let upstream = format!("credential:{credential_id}");
+    let test_result: anyhow::Result<()> = async {
+        const RATE_LIMITED: &str = "rate limit exceeded: The upstream provider rate limit was reached (upstream_rate_limit, 429). Please try again in 24.535s.";
+        pool.get()
+            .await?
+            .execute(
+                "insert into user_credentials (id, user_id, kind, label, nonce_b64, ciphertext_b64)
+                 values ($1, $2, 'openai_api_key', 'Team key', 'fixture', 'fixture')",
+                &[&credential_id, &first.owner_user_id],
+            )
+            .await?;
+        let lane = |group: Uuid| json!({
+            "agent": { "handle": "lane" },
+            "multiAgentPlan": { "groupId": group, "role": "worker", "mode": "read_only" },
+        });
+        // Four lanes of the first space's team run on the key; one stops on a rate limit.
+        let group = Uuid::new_v4();
+        let mut running = Vec::new();
+        for _ in 0..3 {
+            let (_, _, job, _) =
+                insert_leased_plan_job(&first, first.hosted_runtime_id, Some(credential_id), lane(group)).await?;
+            running.push(job);
+        }
+        let (_, _, stopped, _) =
+            insert_leased_plan_job(&first, first.hosted_runtime_id, Some(credential_id), lane(group)).await?;
+        let connection = pool.get().await?;
+        // they started a while ago
+        connection
+            .execute(
+                "update agent_jobs set leased_at = now() - interval '2 minutes' where id = any($1)",
+                &[&running],
+            )
+            .await?;
+        connection
+            .execute(
+                "update agent_jobs set status = 'failed', outcome = 'failed', error_message = $2,
+                     completed_at = now() where id = $1",
+                &[&stopped, &RATE_LIMITED],
+            )
+            .await?;
+        drop(connection);
+        crate::upstream_pacing::record_job_end(&pool, stopped).await;
+        let learned = pool
+            .get()
+            .await?
+            .query_one(
+                "select ceiling, extract(epoch from cooldown_until - now())::double precision as wait
+                 from upstream_pacing where upstream_key = $1",
+                &[&upstream],
+            )
+            .await?;
+        assert_eq!(learned.get::<_, f64>("ceiling"), 2.0, "half of the four that ran");
+        let wait: f64 = learned.get("wait");
+        assert!((20.0..=24.6).contains(&wait), "the stated wait: {wait}");
+
+        // The second space: two lanes on the same key, a lane on the platform's upstream, and a
+        // lead checkpoint on the same key.
+        let paced = Uuid::new_v4();
+        let waiting = insert_queued_plan_job(&second, Some(credential_id), "tokyo", "worker", paced).await?;
+        let other_upstream = Uuid::new_v4();
+        let platform_lane = insert_queued_plan_job(&second, None, "kyoto", "worker", other_upstream).await?;
+        let leads = Uuid::new_v4();
+        let lead = insert_queued_plan_job(&second, Some(credential_id), "octo", "lead_continuation", leads).await?;
+        let lease = |group: Uuid| lease_plan_group_job(&pool, second.project_id, second.hosted_runtime_id, false, group);
+
+        // 1. within the stated wait no lane on the key starts, in any space
+        assert_eq!(lease(paced).await?, None, "held for the stated wait");
+        assert_eq!(lease(other_upstream).await?, Some(platform_lane), "another upstream is not held");
+        assert_eq!(lease(leads).await?, Some(lead), "a lead is never held");
+        let status: String = pool
+            .get()
+            .await?
+            .query_one("select status from agent_jobs where id = $1", &[&waiting])
+            .await?
+            .get(0);
+        assert_eq!(status, "queued", "a held lane stays queued");
+
+        // 2. the wait has passed, but three still run on the key: at the ceiling of two
+        pool.get()
+            .await?
+            .execute(
+                "update upstream_pacing set cooldown_until = now() - interval '1 second' where upstream_key = $1",
+                &[&upstream],
+            )
+            .await?;
+        assert_eq!(lease(paced).await?, None, "at the ceiling");
+
+        // 3. two of them end without a rate limit: one runs, so one more may start
+        for job in &running[..2] {
+            pool.get()
+                .await?
+                .execute(
+                    "update agent_jobs set status = 'completed', outcome = 'succeeded', completed_at = now()
+                     where id = $1",
+                    &[job],
+                )
+                .await?;
+            crate::upstream_pacing::record_job_end(&pool, *job).await;
+        }
+        let ceiling: f64 = pool
+            .get()
+            .await?
+            .query_one("select ceiling from upstream_pacing where upstream_key = $1", &[&upstream])
+            .await?
+            .get(0);
+        assert!((2.8..2.95).contains(&ceiling), "one over the ceiling per lane: {ceiling}");
+        assert_eq!(lease(paced).await?, Some(waiting), "room again");
+        Ok(())
+    }
+    .await;
+    let pacing_cleanup: anyhow::Result<()> = async {
+        pool.get()
+            .await?
+            .execute(
+                "delete from upstream_pacing where upstream_key = $1",
+                &[&upstream],
+            )
+            .await?;
+        Ok(())
+    }
+    .await;
+    let second_cleanup = second.cleanup().await;
+    let first_cleanup = first.cleanup().await;
+    test_result?;
+    pacing_cleanup?;
+    second_cleanup?;
+    first_cleanup
+}

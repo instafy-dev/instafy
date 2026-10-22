@@ -2700,6 +2700,7 @@ fn normalize_agent_handle(raw: &str) -> Option<String> {
 
 #[path = "multi_agent_plan/rate_limit_retry.rs"]
 mod rate_limit_retry;
+pub(crate) use rate_limit_retry::stated_rate_limit_wait;
 
 #[cfg(test)]
 #[path = "multi_agent_plan/completion_tests.rs"]

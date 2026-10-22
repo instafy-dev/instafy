@@ -120,6 +120,7 @@ mod tests_presence_beat;
 mod tests_runtime_stop_fence;
 mod tokens;
 mod tunnels;
+mod upstream_pacing;
 mod utils;
 mod workspace;
 

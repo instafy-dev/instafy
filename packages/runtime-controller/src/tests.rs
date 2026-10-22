@@ -1932,6 +1932,14 @@ async fn create_runtime_spread_scope_tables(client: &tokio_postgres::Client) -> 
     client
         .batch_execute(
             "ALTER TABLE agent_jobs ADD COLUMN IF NOT EXISTS agent_role text;
+            CREATE TEMP TABLE upstream_pacing (
+                upstream_key text PRIMARY KEY,
+                cooldown_until timestamptz,
+                ceiling double precision NOT NULL,
+                last_rate_limited_at timestamptz NOT NULL,
+                decreased_at timestamptz NOT NULL,
+                updated_at timestamptz NOT NULL DEFAULT now()
+            );
             CREATE TEMP TABLE project_multi_agent_settings (
                 project_id uuid PRIMARY KEY,
                 max_agents_per_plan integer NOT NULL DEFAULT 64,
@@ -14240,6 +14248,14 @@ async fn lease_next_agent_job_scopes_grouped_runtime_spread_to_plan_runtimes() -
                 updated_at timestamptz NOT NULL DEFAULT now()
             );
             ALTER TABLE agent_jobs ADD COLUMN agent_role text;
+            CREATE TEMP TABLE upstream_pacing (
+                upstream_key text PRIMARY KEY,
+                cooldown_until timestamptz,
+                ceiling double precision NOT NULL,
+                last_rate_limited_at timestamptz NOT NULL,
+                decreased_at timestamptz NOT NULL,
+                updated_at timestamptz NOT NULL DEFAULT now()
+            );
             CREATE TEMP TABLE project_multi_agent_settings (
                 project_id uuid PRIMARY KEY,
                 max_agents_per_plan integer NOT NULL DEFAULT 64,

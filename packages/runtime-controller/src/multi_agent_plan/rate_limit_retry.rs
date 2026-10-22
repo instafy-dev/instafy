@@ -73,6 +73,11 @@ pub(crate) fn short_rate_limit_wait(error: Option<&str>) -> Option<Duration> {
     (!wait.is_zero() && wait <= MAX_SHORT_WAIT).then_some(wait)
 }
 
+/// The wait a message states after its last "try again in" (`{n}s` or `{n}ms`), whatever its kind.
+pub(crate) fn stated_rate_limit_wait(message: &str) -> Option<Duration> {
+    stated_wait(&message.to_ascii_lowercase())
+}
+
 /// The wait after the last "try again in" of a lowercased message: `{n}s` or `{n}ms`.
 fn stated_wait(lower: &str) -> Option<Duration> {
     const PREFIX: &str = "try again in ";
