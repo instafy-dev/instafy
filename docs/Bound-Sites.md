@@ -123,6 +123,17 @@ Every endpoint is under `__bind/`, relative to the site (a gallery's site at `/<
   assist and capture records never replace another lane's.
 - **Files**: `data/records/<intent>.json` (or `target.records`), and `data/version.json` (`{v, updated_at, files, jobs}`)
   so polling-only viewers also update.
+- **Saving those files**: the binder writes them between turns, for clicks, so no turn reports them. In a folder of an
+  Instafy space (a `.instafy/.git` checkout above the site) the binder is their save owner: a few seconds after its
+  last write (at most 20 s while writes keep coming, and at once when it stops) it commits the files it wrote to the
+  checkout's branch, locally, with no credential and no network call ("Save what the `<site>` site recorded"). The
+  space's next save publishes the branch's commits as it does a turn's: the pre-turn refresh, a turn's save or a stop's
+  flush. So a click's results are saved and never shown as "Some work wasn't saved". Only the binder's own writes are
+  committed: a file whose content is no longer what the binder wrote (a person or a turn changed it since) is left
+  alone, and so is every other changed file, so work nobody saved is still kept as unsaved work. Ignored paths are never
+  added; hooks are off for these commits; a busy index is tried again. Outside a space (a plain folder, or a person's own
+  repository) nothing is committed. `serve --no-save` turns it off. Any other site backend can be the save owner of its
+  writes the same way, with the same module (`src/save-owner.mjs`).
 
 ## 2a. Ask Octo (host-mediated)
 
