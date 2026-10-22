@@ -24,7 +24,7 @@ export function ActionRequestOrPreviewEntry({
   projectId: string | null;
 }) {
   const preview = sitePreviewFromMessage(message);
-  if (preview) return <SitePreviewCard preview={preview} projectId={projectId} />;
+  if (preview) return <SitePreviewCard preview={preview} projectId={projectId} postedAt={message.timestamp} messageKey={message.id} />;
   if (declaresSitePreview(message)) {
     return <ActionRequestEntry message={message} details={details ? { ...details, actions: [] } : null} />;
   }

@@ -1224,8 +1224,8 @@ async fn preview_ready_writes_one_card_per_run_and_publishes_it() -> anyhow::Res
             assert!(!text.contains("href") && !text.contains("http"), "{text}");
             drop(db);
 
-            // The next run re-opens the same port in the same conversation:
-            // same tunnel and the same card, now also the next run's.
+            // The next run re-opens the same port: same tunnel, its own card,
+            // and the first run's card survives in messageIds.
             let next = f.job(Some(&job)).await?;
             assert_eq!(f.open(&next).await?, preview_id);
             let (status, result) = f
@@ -1240,11 +1240,7 @@ async fn preview_ready_writes_one_card_per_run_and_publishes_it() -> anyhow::Res
                 .request(&next.token, "POST", &ready_path, json!({}))
                 .await?;
             assert_eq!(status, StatusCode::OK, "{second}");
-            assert_eq!(
-                second["messageId"],
-                json!(message_id),
-                "one card per conversation for the same site"
-            );
+            assert_ne!(second["messageId"], json!(message_id));
             let metadata = f.grant_metadata(&preview_id).await?;
             assert_eq!(
                 metadata[PREVIEW_TUNNEL_METADATA_KEY]["messageIds"][job.run_id.to_string()],
@@ -1279,86 +1275,6 @@ async fn preview_ready_writes_one_card_per_run_and_publishes_it() -> anyhow::Res
                 .request(&f.tokens[3], "GET", &f.path(""), Value::Null)
                 .await?;
             assert_eq!(status, StatusCode::FORBIDDEN);
-            Ok(())
-        })
-    })
-    .await
-}
-
-#[tokio::test]
-async fn a_site_made_ready_again_in_its_conversation_keeps_its_one_card() -> anyhow::Result<()> {
-    run(|f| {
-        Box::pin(async move {
-            let cards = |preview_id: String| {
-                let f = f.clone();
-                async move {
-                    let db = f.state.pool.get().await?;
-                    let rows = db
-                        .query(
-                            "select id from conversation_messages
-                             where conversation_id = $1
-                               and metadata->'details'->'details'->'preview'->>'previewId' = $2",
-                            &[&f.conversation, &preview_id],
-                        )
-                        .await?;
-                    anyhow::Ok(rows.len())
-                }
-            };
-            let job = f.job(None).await?;
-            let preview_id = f.open(&job).await?;
-            let first = f.ready(&job.token, &preview_id).await?["messageId"].clone();
-
-            // The machine stops (its previews are revoked) and starts again;
-            // a run there opens the same site on the same port: still one card.
-            let db = f.state.pool.get().await?;
-            db.execute(
-                "update runtime_tunnel_grants set status = 'revoked' where tunnel_id = $1",
-                &[&preview_id],
-            )
-            .await?;
-            drop(db);
-            let next = f.job(Some(&job)).await?;
-            assert_eq!(f.open(&next).await?, preview_id);
-            assert_eq!(
-                f.ready(&next.token, &preview_id).await?["messageId"],
-                first,
-                "a re-open after a restart reuses the card"
-            );
-            assert_eq!(cards(preview_id.clone()).await?, 1);
-            let metadata = f.grant_metadata(&preview_id).await?;
-            assert_eq!(
-                metadata[PREVIEW_TUNNEL_METADATA_KEY][PREVIEW_CONVERSATION_CARDS_KEY]
-                    [f.conversation.to_string()],
-                first
-            );
-            assert_eq!(
-                metadata[PREVIEW_TUNNEL_METADATA_KEY]["messageIds"][next.run_id.to_string()],
-                first
-            );
-
-            // A card someone removed is not reused: the site gets a new one.
-            let db = f.state.pool.get().await?;
-            let first_id = Uuid::parse_str(first.as_str().context("messageId")?)?;
-            db.execute(
-                "delete from conversation_messages where id = $1",
-                &[&first_id],
-            )
-            .await?;
-            drop(db);
-            let third = f.job(Some(&job)).await?;
-            assert_eq!(f.open(&third).await?, preview_id);
-            let replaced = f.ready(&third.token, &preview_id).await?["messageId"].clone();
-            assert_ne!(replaced, first);
-
-            // A changed site (another title) is a new card.
-            let fourth = f.job(Some(&job)).await?;
-            let mut body = f.open_body(&fourth, 4173);
-            body["title"] = json!("Another site");
-            let (status, opened) = f.request(&fourth.token, "POST", &f.path(""), body).await?;
-            assert_eq!(status, StatusCode::CREATED, "{opened}");
-            let renamed = f.ready(&fourth.token, &preview_id).await?["messageId"].clone();
-            assert_ne!(renamed, replaced);
-            assert_eq!(cards(preview_id.clone()).await?, 2);
             Ok(())
         })
     })

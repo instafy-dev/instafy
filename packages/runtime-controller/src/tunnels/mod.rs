@@ -41,7 +41,7 @@ use crate::{
 pub(crate) const ACTIVE_JOB_TUNNEL_METADATA_KEY: &str = "_instafyActiveJob";
 pub(crate) const ACTIVE_JOB_TUNNEL_SOURCE: &str = "instafy-cli";
 /// Grant metadata the previews module owns: `{ visibility, path, title,
-/// conversationId, tunnelKey, messageIds, messageId, conversationCards }`. A grant is a preview
+/// conversationId, tunnelKey, messageIds, messageId }`. A grant is a preview
 /// when it has this object.
 pub(crate) const PREVIEW_TUNNEL_METADATA_KEY: &str = "_instafyPreview";
 /// Grant metadata keys only the controller writes. Clients and the broker
@@ -1384,9 +1384,6 @@ async fn insert_runtime_tunnel_grant(
     // and port. Re-opening a still-live preview with the same title and path
     // keeps the cards it already has, merged under the row lock so a /ready
     // racing this upsert keeps its card; anything else starts without cards.
-    // Its card per conversation (`conversationCards`) is kept for the same
-    // title and path also after the machine stopped (a re-open on its next
-    // start is the same site), and dropped after a close on purpose.
     let row = match connection
         .query_one(
             "insert into runtime_tunnel_grants
@@ -1404,6 +1401,8 @@ async fn insert_runtime_tunnel_grant(
                    metadata = case
                      when jsonb_typeof(excluded.metadata->'_instafyPreview') = 'object'
                       and jsonb_typeof(runtime_tunnel_grants.metadata->'_instafyPreview') = 'object'
+                      and lower(btrim(runtime_tunnel_grants.status)) not in ('revoked', 'expired', 'failed')
+                      and runtime_tunnel_grants.expires_at > now()
                       and runtime_tunnel_grants.metadata->'_instafyPreview'->'title'
                           is not distinct from excluded.metadata->'_instafyPreview'->'title'
                       and runtime_tunnel_grants.metadata->'_instafyPreview'->'path'
@@ -1411,21 +1410,9 @@ async fn insert_runtime_tunnel_grant(
                      then jsonb_set(
                        excluded.metadata,
                        '{_instafyPreview}',
-                       (excluded.metadata->'_instafyPreview')
-                       || case
-                            when lower(btrim(runtime_tunnel_grants.status)) not in ('revoked', 'expired', 'failed')
-                             and runtime_tunnel_grants.expires_at > now()
-                            then jsonb_strip_nulls(jsonb_build_object(
-                              'messageIds', runtime_tunnel_grants.metadata->'_instafyPreview'->'messageIds',
-                              'messageId', runtime_tunnel_grants.metadata->'_instafyPreview'->'messageId'))
-                            else '{}'::jsonb
-                          end
-                       || case
-                            when not (runtime_tunnel_grants.metadata->'_instafyPreview' ? 'closedAt')
-                            then jsonb_strip_nulls(jsonb_build_object(
-                              'conversationCards', runtime_tunnel_grants.metadata->'_instafyPreview'->'conversationCards'))
-                            else '{}'::jsonb
-                          end)
+                       (excluded.metadata->'_instafyPreview') || jsonb_strip_nulls(jsonb_build_object(
+                         'messageIds', runtime_tunnel_grants.metadata->'_instafyPreview'->'messageIds',
+                         'messageId', runtime_tunnel_grants.metadata->'_instafyPreview'->'messageId')))
                      else coalesce(excluded.metadata, runtime_tunnel_grants.metadata)
                    end
              returning *",
