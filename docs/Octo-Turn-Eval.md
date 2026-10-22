@@ -118,6 +118,14 @@ The shipped cases: a map, a comparison table, a ranked list, a timeline, a check
 and three asks that must stay in chat. Add a case when a real prompt surprised you. Keep the asks that must stay in
 chat: they catch skills that grab too much.
 
+## Where the time went
+
+Each case's section of the report has a `Time:` line: the slowest lane, how many jobs the turn limit stopped, and
+how many continuation turns ran. Under it, per job: how long it waited and ran, its commands' share, when the
+wrap-up came, its slowest commands, and the steps its tools reported. The numbers come from the jobs' times and
+their `agent/turn-timings` artifact. A turn that ran out of time and was continued by a later turn of the same
+agent does not fail `job_succeeded`.
+
 ## What the grader checks
 
 From the `agent_jobs` rows (preflight, prompt context, task usage, run log, applied paths, `summary` as the
@@ -126,7 +134,7 @@ when no must fails. Its score is the share of graded checks that passed.
 
 | Check | Severity | Rule |
 |---|---|---|
-| `job_succeeded` | must | Every job terminal, root `completed/succeeded`, none failed, no timeout |
+| `job_succeeded` | must | Every job terminal, root `completed/succeeded`, none failed, no timeout (a run the controller continued in a new turn or retried after a short rate limit counts by the run that replaced it) |
 | `route` | must | As expected; a team also passes on worker jobs, `direct` fails when workers ran |
 | `skill:*`, `skill_any_of`, `not_skill:*` | must | Against the skills seen; n/a when the space does not have the skill |
 | `card_posted` | must | A "Ready to preview" card; n/a on a server without site previews |
