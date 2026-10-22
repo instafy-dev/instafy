@@ -33,6 +33,7 @@ import { resolvePlaywrightControllerUrl } from "./utils/controllerUrl.js";
 import { e2eModelFromEnv } from "./utils/e2eModel.js";
 import {
   ownedProjectIdsSql,
+  ownedProjectLookup,
   ownedRuntimeContainerIds,
   ownedRuntimeNetworkIds,
   ownedRuntimeRowsCleanupSql,
@@ -628,14 +629,9 @@ function ensureInitialRuntimeCleanup() {
  */
 function mayResetPlaywrightProject(projectId: string | null): projectId is string {
   if (!projectId) return false;
-  if (ownedProjectIds === null) {
-    try {
-      ownedProjectIds = playwrightOwnedProjectIds();
-    } catch {
-      return false;
-    }
-  }
-  const owned = ownedProjectIds.includes(projectId.toLowerCase());
+  // a project the suite created after the first read is not in it yet: read again before refusing
+  const { owned, ids } = ownedProjectLookup(projectId, ownedProjectIds, playwrightOwnedProjectIds);
+  ownedProjectIds = ids ? [...ids] : null;
   if (!owned) {
     log(`Leaving project ${projectId} as it is: it is not owned by a Playwright test user.`);
   }

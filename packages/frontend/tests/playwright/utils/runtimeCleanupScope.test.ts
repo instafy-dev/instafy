@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   DISPOSABLE_TEST_USER_EMAIL_PATTERNS,
   isPlaywrightTestUserEmail,
+  localSupabaseDbContainer,
   ownedProjectIdsSql,
+  ownedProjectLookup,
   ownedRuntimeContainerIds,
   ownedRuntimeNetworkIds,
   ownedRuntimeRowsCleanupSql,
@@ -92,5 +94,48 @@ describe("Playwright runtime cleanup scope", () => {
       prefix: "x-",
       baseComposeProject: "x",
     });
+  });
+
+  it("checks a project missing from the first read again before calling it not owned", () => {
+    let reads = 0;
+    const reread = () => {
+      reads += 1;
+      return [OWNED];
+    };
+    // created by the suite after the first read (empty on a fresh database)
+    expect(ownedProjectLookup(OWNED.toUpperCase(), [], reread)).toEqual({ owned: true, ids: [OWNED] });
+    expect(reads).toBe(1);
+    // already known: no second read
+    expect(ownedProjectLookup(OWNED, [OWNED], reread)).toEqual({ owned: true, ids: [OWNED] });
+    expect(reads).toBe(1);
+    // a developer's space stays not owned, and a failed re-read never says owned
+    expect(ownedProjectLookup(DEVELOPERS, [OWNED], reread).owned).toBe(false);
+    expect(
+      ownedProjectLookup(DEVELOPERS, null, () => {
+        throw new Error("db down");
+      }),
+    ).toEqual({ owned: false, ids: null });
+  });
+
+  it("runs psql in the repo's own Supabase container only for that container's database", () => {
+    const config = [
+      'project_id = "supabase"',
+      "[api]",
+      "port = 54321",
+      "[db]",
+      "# the local database",
+      "port = 54322",
+      "[db.pooler]",
+      "port = 54329",
+    ].join("\n");
+    expect(localSupabaseDbContainer("postgresql://postgres:postgres@127.0.0.1:54322/postgres", config, {})).toBe(
+      "supabase_db_supabase",
+    );
+    // another stack's database on this machine is not this repo's container
+    expect(localSupabaseDbContainer("postgresql://postgres:postgres@127.0.0.1:55432/postgres", config, {})).toBeNull();
+    expect(localSupabaseDbContainer("postgresql://postgres:postgres@127.0.0.1:54322/postgres", null, {})).toBeNull();
+    expect(
+      localSupabaseDbContainer("postgresql://127.0.0.1:55432/postgres", config, { SUPABASE_DB_CONTAINER: " other_db " }),
+    ).toBe("other_db");
   });
 });

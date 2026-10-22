@@ -1,4 +1,6 @@
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 
 /**
  * What the Playwright suite may clean up on a local stack it shares with a developer's own
@@ -161,9 +163,56 @@ function isLocalDbUrl(dbUrl: string): boolean {
 }
 
 /**
- * Run `sql` against the local stack's database (host psql, else psql in the local Supabase
- * container) and return its unaligned output. Throws when it cannot run; never targets a
- * database that is not on this machine.
+ * The repo's local Supabase database container, for running psql inside it when the host has no
+ * psql: SUPABASE_DB_CONTAINER when set, else `supabase_db_<project_id>` from the repo's Supabase
+ * config, and only when `dbUrl` is that config's database port. Null otherwise, so a database URL
+ * that names another stack is never answered by this repo's container (or another project's).
+ */
+export function localSupabaseDbContainer(
+  dbUrl: string,
+  configToml: string | null,
+  env: NodeJS.ProcessEnv,
+): string | null {
+  const explicit = (env.SUPABASE_DB_CONTAINER ?? "").trim();
+  if (explicit) return explicit;
+  if (!configToml) return null;
+  let section = "";
+  let projectId: string | undefined;
+  let configPort: string | undefined;
+  for (const raw of configToml.split(/\r?\n/)) {
+    const line = raw.replace(/#.*$/, "").trim();
+    const header = /^\[([^\]]+)\]$/.exec(line);
+    if (header) {
+      section = header[1].trim();
+      continue;
+    }
+    const entry = /^([A-Za-z0-9_]+)\s*=\s*"?([^"]*)"?$/.exec(line);
+    if (!entry) continue;
+    if (section === "" && entry[1] === "project_id") projectId = entry[2].trim();
+    if (section === "db" && entry[1] === "port") configPort = entry[2].trim();
+  }
+  if (!projectId || !configPort) return null;
+  let urlPort: string;
+  try {
+    urlPort = new URL(dbUrl).port || "5432";
+  } catch {
+    return null;
+  }
+  return urlPort === configPort ? `supabase_db_${projectId}` : null;
+}
+
+function readSupabaseConfig(cwd: string): string | null {
+  try {
+    return fs.readFileSync(path.join(cwd, "supabase", "supabase", "config.toml"), "utf8");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Run `sql` against the local stack's database (host psql, else psql in the repo's local Supabase
+ * container, see `localSupabaseDbContainer`) and return its unaligned output. Throws when it cannot
+ * run; never targets a database that is not on this machine.
  */
 export function queryLocalDb(
   sql: string,
@@ -172,23 +221,51 @@ export function queryLocalDb(
   if (!isLocalDbUrl(options.dbUrl)) {
     throw new Error("refusing to clean up a database that is not on this machine");
   }
-  const result = options.psqlBin
-    ? spawnSync(options.psqlBin, ["-d", options.dbUrl, "-At", "-v", "ON_ERROR_STOP=1", "-c", sql], {
-        cwd: options.cwd,
-        env: options.env,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      })
-    : spawnSync(
-        "docker",
-        ["exec", "supabase_db_supabase", "psql", "-U", "postgres", "-d", "postgres", "-At", "-v", "ON_ERROR_STOP=1", "-c", sql],
-        { cwd: options.cwd, env: options.env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+  const psqlArgs = ["-At", "-v", "ON_ERROR_STOP=1", "-c", sql];
+  const spawnOptions = {
+    cwd: options.cwd,
+    env: options.env,
+    encoding: "utf8" as const,
+    stdio: ["ignore", "pipe", "pipe"] as ["ignore", "pipe", "pipe"],
+  };
+  let result;
+  if (options.psqlBin) {
+    result = spawnSync(options.psqlBin, ["-d", options.dbUrl, ...psqlArgs], spawnOptions);
+  } else {
+    const container = localSupabaseDbContainer(options.dbUrl, readSupabaseConfig(options.cwd), options.env);
+    if (!container) {
+      throw new Error(
+        "no psql on the PATH, and the database is not the repo's local Supabase (set SUPABASE_DB_CONTAINER)",
       );
+    }
+    result = spawnSync("docker", ["exec", container, "psql", "-U", "postgres", "-d", "postgres", ...psqlArgs], spawnOptions);
+  }
   if (result.error) throw result.error;
   if (result.status !== 0) {
     throw new Error((result.stderr || "").trim() || `psql exited with code ${result.status}`);
   }
   return result.stdout || "";
+}
+
+/**
+ * Whether `projectId` is one of the suite's own projects. A project missing from `known` (read
+ * before the run created it, say) is checked again with `reread`; the returned list is the one to
+ * keep. A failed re-read answers not owned.
+ */
+export function ownedProjectLookup(
+  projectId: string,
+  known: readonly string[] | null,
+  reread: () => string[],
+): { owned: boolean; ids: readonly string[] | null } {
+  const id = projectId.toLowerCase();
+  if (known?.includes(id)) return { owned: true, ids: known };
+  let ids: string[];
+  try {
+    ids = reread();
+  } catch {
+    return { owned: false, ids: known };
+  }
+  return { owned: ids.includes(id), ids };
 }
 
 /** `psql` when it is on the PATH, else null (`queryLocalDb` then uses the Supabase container's). */
