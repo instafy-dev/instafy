@@ -1932,6 +1932,14 @@ async fn create_runtime_spread_scope_tables(client: &tokio_postgres::Client) -> 
     client
         .batch_execute(
             "ALTER TABLE agent_jobs ADD COLUMN IF NOT EXISTS agent_role text;
+            CREATE TEMP TABLE upstream_pacing (
+                upstream_key text PRIMARY KEY,
+                cooldown_until timestamptz,
+                ceiling double precision NOT NULL,
+                last_rate_limited_at timestamptz NOT NULL,
+                decreased_at timestamptz NOT NULL,
+                updated_at timestamptz NOT NULL DEFAULT now()
+            );
             CREATE TEMP TABLE project_multi_agent_settings (
                 project_id uuid PRIMARY KEY,
                 max_agents_per_plan integer NOT NULL DEFAULT 64,
@@ -2428,6 +2436,17 @@ async fn cleanup_origin_project(pool: &PgPool, project_id: &Uuid) -> anyhow::Res
     let connection = pool.get().await?;
     connection
         .execute("DELETE FROM projects WHERE id = $1", &[project_id])
+        .await?;
+    // What the space's rate limits taught the upstream pacing, including the platform-wide row
+    // they may have vouched for: a later test's platform lanes start unpaced.
+    connection
+        .execute(
+            "DELETE FROM upstream_pacing WHERE upstream_key = any($1)",
+            &[&vec![
+                "platform".to_string(),
+                crate::upstream_pacing::platform_project_key(project_id),
+            ]],
+        )
         .await?;
     Ok(())
 }
@@ -14240,6 +14259,14 @@ async fn lease_next_agent_job_scopes_grouped_runtime_spread_to_plan_runtimes() -
                 updated_at timestamptz NOT NULL DEFAULT now()
             );
             ALTER TABLE agent_jobs ADD COLUMN agent_role text;
+            CREATE TEMP TABLE upstream_pacing (
+                upstream_key text PRIMARY KEY,
+                cooldown_until timestamptz,
+                ceiling double precision NOT NULL,
+                last_rate_limited_at timestamptz NOT NULL,
+                decreased_at timestamptz NOT NULL,
+                updated_at timestamptz NOT NULL DEFAULT now()
+            );
             CREATE TEMP TABLE project_multi_agent_settings (
                 project_id uuid PRIMARY KEY,
                 max_agents_per_plan integer NOT NULL DEFAULT 64,

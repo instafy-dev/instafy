@@ -3757,6 +3757,9 @@ impl CompletionSettlement {
             }
         }
 
+        // Before the group's checkpoint, so a retry or the next lane queued by it is paced by
+        // what this run's end says about its AI upstream.
+        crate::upstream_pacing::record_job_end(&state.pool, self.job_id).await;
         // After the billing, so a lead continuation starts from the settled
         // balance.
         if let Err((status, Json(api_error))) =
@@ -4470,6 +4473,13 @@ pub(crate) async fn lease_next_agent_job(
     // Root/lead jobs are exempt so a full worker pool cannot block coordination.
     let worker_capacity_available =
         crate::multi_agent_settings::worker_slot_available(transaction, project_id, None).await?;
+    // Plan agents whose AI upstream is rate limited, or has as many running or starting as it
+    // can take, wait queued (`upstream_pacing`).
+    let closed_upstreams = if worker_capacity_available {
+        crate::upstream_pacing::closed_upstreams(transaction, project_id).await?
+    } else {
+        Vec::new()
+    };
     let runtime_uuid: Option<Uuid> = runtime_id.cloned();
     let batch_conversation_uuid: Option<Uuid> = batch_conversation_id.cloned();
     let batch_multi_agent_group: Option<String> = batch_multi_agent_group_id.map(str::to_string);
@@ -4528,6 +4538,12 @@ pub(crate) async fn lease_next_agent_job(
                 where aj.project_id = $1
                   and status = 'queued'
                   and ($11::bool or coalesce(aj.agent_role, aj.payload #>> '{metadata,multiAgentPlan,role}', '') <> 'worker')
+                  -- A plan agent waits while its AI upstream is paced
+                  -- (`upstream_pacing`).
+                  and not (
+                        coalesce(aj.agent_role, aj.payload #>> '{metadata,multiAgentPlan,role}', '') = 'worker'
+                        and coalesce('credential:' || aj.credential_id::text, 'platform') = any($12::text[])
+                  )
                   and not (
                         $10::bool
                         and aj.credential_id is null
@@ -4746,6 +4762,7 @@ pub(crate) async fn lease_next_agent_job(
                 &batch_multi_agent_group,
                 &exclude_platform_ai_jobs,
                 &worker_capacity_available,
+                &closed_upstreams,
             ],
         )
         .await
