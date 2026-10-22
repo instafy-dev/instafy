@@ -91,23 +91,23 @@ browser in use only holds the card: it is looked at again once that clears. A fa
 or a continuation the controller did not take, leaves the button and says why, and leaves
 no notice. A continuation the controller put in the conversation's send queue, behind a
 run that took the lane first, counts as sent: the notice stays and the card reads
-**Opened**. A press, or an opened card, reads **Opened** from then on, also after a reload,
-so displaying an old message never runs it again. **Try again** on a failed browser run
-sends the card's task again through the browser, with the card it continues, never the
-notice text. A browser Studio opened by itself grants nothing a press does not: Instafy's
-browser starts in Ask with the per-run site approval, as a press does. In the browser on
-this device, it asks for routine browsing only from a Desktop whose routine is the owner
-tier (approval policy
+**Browser opened**. A press, or an opened card, reads **Browser opened** from then on, also
+after a reload, so displaying an old message never runs it again. **Try again** on a failed
+browser run sends the card's task again through the browser, with the card it continues,
+never the notice text. A browser Studio opened by itself grants nothing a press does not:
+Instafy's browser starts in Ask with the per-run site approval, as a press does. In the
+browser on this device, it asks for routine browsing only from a Desktop whose routine is
+the owner tier (approval policy
 version 2: reading and plain links free, forms, purchases, messages and credentials still
 ask), and only when the person has not chosen Ask; on an older Desktop it uses Ask, so it
 never requests the earlier routine that submits ordinary forms. A start, pressed or
 automatic, also gives an owner-tier Desktop in routine the hosts the card shows (at most
 three) as the run's own sites; they are not recorded with the prompt, and an older Desktop
-never receives them.
-The card shows the host its task opens. The card says nothing about which browsers exist,
-because the Workspace browser starts on demand, on the space's own machine or as a runtime
-of its own; Studio disables the button, with the reason, only when the Workspace browser
-is known not to open and there is no Personal Browser. Until then it counts as available.
+never receives them. The card shows the host its task is headed for. The card says nothing
+about which browsers exist, because the Workspace browser starts on demand, on the space's
+own machine or as a runtime of its own; Studio disables the button, with the reason, only
+when the Workspace browser is known not to open and there is no Personal Browser. Until
+then it counts as available.
 A skill setup offers the same card once, to walk to the provider screen that lists a value
 the skill asks for (see [Product](Product.md)). In a chat opened with
 `/skills import <source> --start` or `/skills start <name>`, the composer stays a chat

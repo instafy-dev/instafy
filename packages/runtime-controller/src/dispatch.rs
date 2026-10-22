@@ -6424,7 +6424,7 @@ mod tests {
 
     /// Studio records a continuation it sends for a request_browser card as a
     /// notice and names the card in the prompt's metadata, which is how the
-    /// card reads Opened and the notice shows after a reload. The Shared
+    /// card reads Browser opened and the notice shows after a reload. The Shared
     /// Browser canonicalization must keep those keys.
     #[test]
     fn shared_browser_dispatch_keeps_the_card_a_continuation_answers() {

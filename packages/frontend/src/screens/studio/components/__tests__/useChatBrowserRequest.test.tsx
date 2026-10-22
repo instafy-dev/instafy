@@ -169,7 +169,7 @@ describe("Chat browser request handoff", () => {
   });
 
   it("restores the button with the error when the continuation is not dispatched", async () => {
-    // The dispatch failed: nothing opened, so the card must not read Opened.
+    // The dispatch failed: nothing opened, so the card must not read Browser opened.
     value.continueTask = vi.fn(async () => { throw new Error("The controller did not start a browser turn."); });
     await render();
     const attempt = await begin();

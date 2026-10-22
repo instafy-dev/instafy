@@ -780,15 +780,15 @@ for a person on their own AI connection, or in Instafy's browser on the conversa
 machine in a space the controller covers, while nobody else is using that browser (see
 [Browser Profiles](Browser-Profiles.md)); everywhere else nothing opens before the press.
 The card names the host its task is headed for. The person signs in themselves: the walk
-pauses at the sign-in, they sign in on the page and choose **Let AI continue**, and the agent
-types no credential. The walk stops on that list: the agent is told never to open, or ask the person
-to open, a screen in Instafy's browser that shows the value itself, because others watching
-that browser can see it, it often cannot be copied out, and a browser turn starts from a
-snapshot of the page. Instead it tells the person to open the same page in a tab of their own
-browser and copy the value into its card there. That rule is guidance for the model, not a
-block the browser enforces. In that chat the composer stays a chat composer, even while the
-browser is shown, so each reply continues the setup instead of starting another browser task;
-the walk goes on only through the browser's own controls (see
+pauses at the sign-in, they sign in on the page and choose **Let AI continue**, and the
+agent types no credential. The walk stops on that list: the agent is told never to open, or
+ask the person to open, a screen in Instafy's browser that shows the value itself, because
+others watching that browser can see it, it often cannot be copied out, and a browser turn
+starts from a snapshot of the page. Instead it tells the person to open the same page in a
+tab of their own browser and copy the value into its card there. That rule is guidance for
+the model, not a block the browser enforces. In that chat the composer stays a chat
+composer, even while the browser is shown, so each reply continues the setup instead of
+starting another browser task; the walk goes on only through the browser's own controls (see
 [Browser Profiles](Browser-Profiles.md)). A skill that declares no address gets no browser;
 one that declares several (such as live and demo) gets it once the person has picked one. The
 walk does not depend on the runtime running the chat turn, since Instafy's browser starts
