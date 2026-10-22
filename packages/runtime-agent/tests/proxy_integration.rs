@@ -120,11 +120,17 @@ enum StubResponse {
     /// A final answer that is a retryable gateway error, with no files.
     UpstreamErrorSummary,
     /// A stop cuts the turn off while this request is open (optionally after
-    /// the turn wrote `UNPUBLISHED_FILE`): the stub cancels `stop` and answers
-    /// only once `stopped_request_released` is cancelled.
+    /// the turn wrote `UNPUBLISHED_FILE`, and its model committed it): the
+    /// stub cancels `stop` and answers only once `stopped_request_released`
+    /// is cancelled.
     CutOff {
         writes_file: bool,
+        commits_it: bool,
     },
+    /// [`StubResponse::ReadReference`], after the turn's model wrote
+    /// `COMMITTED_FILE` and committed it itself, as a `git commit` in its
+    /// shell does.
+    CommitThenReadReference,
 }
 
 struct StubState {
@@ -304,8 +310,13 @@ async fn handle_stub_chatgpt(
             )
                 .into_response()
         }
-        StubResponse::CutOff { writes_file } => {
-            if writes_file {
+        StubResponse::CutOff {
+            writes_file,
+            commits_it,
+        } => {
+            if commits_it {
+                commit_file(&state.workspace, UNPUBLISHED_FILE, UNPUBLISHED_FILE_CONTENT);
+            } else if writes_file {
                 fs::write(
                     state.workspace.join(UNPUBLISHED_FILE),
                     UNPUBLISHED_FILE_CONTENT,
@@ -323,10 +334,15 @@ async fn handle_stub_chatgpt(
                 .into_response()
         }
         response @ (StubResponse::ReadReference
+        | StubResponse::CommitThenReadReference
         | StubResponse::EmptyFinal
         | StubResponse::UpstreamErrorSummary) => {
-            // Unlike Success, this fixture never changes the workspace. Any
-            // changed bytes therefore came from processing the final descriptor.
+            if matches!(response, StubResponse::CommitThenReadReference) {
+                commit_file(&state.workspace, COMMITTED_FILE, COMMITTED_FILE_CONTENT);
+            }
+            // Unlike Success, this fixture changes the workspace only by the
+            // commit above. Any other changed bytes therefore came from
+            // processing the final descriptor.
             // The API-key proxy leg requests JSON, even when native Codex asks
             // the proxy for SSE. Returning the ChatGPT SSE fixture here would
             // test transport retries instead of final-result normalization.
@@ -338,7 +354,9 @@ async fn handle_stub_chatgpt(
                 "read-reference fixtures must bypass routing"
             );
             Json(read_reference_fixture_response(match response {
-                StubResponse::ReadReference => Some(read_reference_answer()),
+                StubResponse::ReadReference | StubResponse::CommitThenReadReference => {
+                    Some(read_reference_answer())
+                }
                 StubResponse::UpstreamErrorSummary => Some(json!({
                     "summary": "unexpected status 502 Bad Gateway: upstream request failed",
                     "code": "",
@@ -727,6 +745,12 @@ enum ReadReferenceCase {
     ResumedRequiredWriteWithoutAFinalAnswer,
     /// A resumed required write whose cut-off attempt wrote nothing.
     ResumedRequiredWriteWithNothingNew,
+    /// [`ReadReferenceCase::ResumedRequiredWrite`], with the cut-off
+    /// attempt's model having committed `UNPUBLISHED_FILE` itself.
+    ResumedRequiredWriteTheCutOffAttemptCommitted,
+    /// A required write whose model commits its file itself and reports no
+    /// file: the commit is the turn's write, which the turn reports and saves.
+    RequiredWriteTheModelCommits,
 }
 
 impl ReadReferenceCase {
@@ -741,11 +765,16 @@ impl ReadReferenceCase {
                 | Self::ResumedRequiredWriteAfterTransientError
                 | Self::ResumedRequiredWriteWithoutAFinalAnswer
                 | Self::ResumedRequiredWriteWithNothingNew
+                | Self::ResumedRequiredWriteTheCutOffAttemptCommitted
         )
     }
 
     fn in_git_checkout(self) -> bool {
-        self.resumed() || self == Self::RequiredWriteBesideUnpublishedFile
+        self.resumed()
+            || matches!(
+                self,
+                Self::RequiredWriteBesideUnpublishedFile | Self::RequiredWriteTheModelCommits
+            )
     }
 
     /// The cut-off attempt wrote `UNPUBLISHED_FILE`.
@@ -758,6 +787,17 @@ impl ReadReferenceCase {
         self.cut_off_attempt_writes() && self != Self::ResumedRequiredWriteWithoutAFinalAnswer
     }
 
+    /// The file the job wrote and saves, besides reading the reference.
+    fn written_file(self) -> Option<&'static str> {
+        if self == Self::RequiredWriteTheModelCommits {
+            Some(COMMITTED_FILE)
+        } else if self.saves_the_cut_off_attempts_file() {
+            Some(UNPUBLISHED_FILE)
+        } else {
+            None
+        }
+    }
+
     /// The job's answer reads the reference file.
     fn reads_the_reference(self) -> bool {
         self != Self::ResumedRequiredWriteWithoutAFinalAnswer
@@ -767,7 +807,7 @@ impl ReadReferenceCase {
     fn failure(self) -> Option<&'static str> {
         if self == Self::ResumedRequiredWriteWithoutAFinalAnswer {
             Some("without returning a final assistant message")
-        } else if self.required_write() && !self.saves_the_cut_off_attempts_file() {
+        } else if self.required_write() && self.written_file().is_none() {
             Some("did not apply any workspace changes")
         } else {
             None
@@ -777,7 +817,11 @@ impl ReadReferenceCase {
     /// Why the job's last attempt retried, where the case checks it.
     fn retry_reason(self) -> Option<&'static str> {
         match self {
-            Self::Initial | Self::Recovery | Self::ResumedRequiredWrite => None,
+            Self::Initial
+            | Self::Recovery
+            | Self::ResumedRequiredWrite
+            | Self::ResumedRequiredWriteTheCutOffAttemptCommitted
+            | Self::RequiredWriteTheModelCommits => None,
             Self::ResumedRequiredWriteAfterTransientError => Some("transient_upstream_error"),
             Self::ResumedRequiredWriteWithoutAFinalAnswer => {
                 Some("missing_final_assistant_message")
@@ -795,6 +839,32 @@ const UNPUBLISHED_FILE_CONTENT: &str = "# Alias\n";
 /// work, or the person's own edit.
 const PARKED_FILE: &str = "notes/parked.md";
 const PARKED_FILE_CONTENT: &str = "# Parked\n";
+/// What the model of `RequiredWriteTheModelCommits` writes and commits.
+const COMMITTED_FILE: &str = ".agents/skills/wave/SKILL.md";
+const COMMITTED_FILE_CONTENT: &str = "# Wave\n";
+
+/// Writes `path` in `dir` and commits it, as a `git commit` in a turn's
+/// shell does.
+fn commit_file(dir: &Path, path: &str, content: &str) {
+    let file = dir.join(path);
+    fs::create_dir_all(file.parent().expect("the file's folder")).expect("create its folder");
+    fs::write(&file, content).expect("write the file");
+    git_in(dir, &["add", path]).expect("stage it");
+    git_in(
+        dir,
+        &[
+            "-c",
+            "user.name=Instafy Test",
+            "-c",
+            "user.email=test@instafy.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "the turn's own commit",
+        ],
+    )
+    .expect("commit it");
+}
 
 /// Runs git in `dir` without the operator's own git configuration.
 fn git_in(dir: &Path, args: &[&str]) -> Result<()> {
@@ -850,6 +920,18 @@ fn codex_read_reference_on_resumed_job_without_a_final_answer_fails_via_proxy() 
 fn codex_read_reference_on_resumed_job_with_nothing_new_does_not_satisfy_required_write_via_proxy()
 -> Result<()> {
     run_read_reference_proxy_case(ReadReferenceCase::ResumedRequiredWriteWithNothingNew)
+}
+
+#[test]
+fn codex_read_reference_beside_a_file_the_model_committed_satisfies_required_write_via_proxy()
+-> Result<()> {
+    run_read_reference_proxy_case(ReadReferenceCase::RequiredWriteTheModelCommits)
+}
+
+#[test]
+fn codex_read_reference_on_resumed_job_saves_the_file_the_interrupted_attempt_committed_via_proxy()
+-> Result<()> {
+    run_read_reference_proxy_case(ReadReferenceCase::ResumedRequiredWriteTheCutOffAttemptCommitted)
 }
 
 fn run_read_reference_proxy_case(case: ReadReferenceCase) -> Result<()> {
@@ -952,6 +1034,7 @@ async fn read_reference_proxy_case(case: ReadReferenceCase) -> Result<()> {
     if case.resumed() {
         responses.push(StubResponse::CutOff {
             writes_file: case.cut_off_attempt_writes(),
+            commits_it: case == ReadReferenceCase::ResumedRequiredWriteTheCutOffAttemptCommitted,
         });
     }
     responses.extend(match case {
@@ -965,6 +1048,12 @@ async fn read_reference_proxy_case(case: ReadReferenceCase) -> Result<()> {
                 StubResponse::ReadReference,
             ]
         }
+        // A retry, which only a turn blind to the commit would make, commits
+        // nothing more.
+        ReadReferenceCase::RequiredWriteTheModelCommits => vec![
+            StubResponse::CommitThenReadReference,
+            StubResponse::ReadReference,
+        ],
         _ => vec![StubResponse::ReadReference],
     });
     let (stub_addr, stub_shutdown, stub_state) = spawn_stub_chatgpt_server_with_responses(
@@ -1149,7 +1238,10 @@ async fn read_reference_proxy_case(case: ReadReferenceCase) -> Result<()> {
     }
     let expected_retries = usize::from(!matches!(
         case,
-        ReadReferenceCase::Initial | ReadReferenceCase::ResumedRequiredWrite
+        ReadReferenceCase::Initial
+            | ReadReferenceCase::ResumedRequiredWrite
+            | ReadReferenceCase::ResumedRequiredWriteTheCutOffAttemptCommitted
+            | ReadReferenceCase::RequiredWriteTheModelCommits
     ));
     let result_diagnostics = match &result {
         Ok(execution) => json!({
@@ -1216,22 +1308,23 @@ async fn read_reference_proxy_case(case: ReadReferenceCase) -> Result<()> {
             reference.get("content").is_none(),
             "display references must not retain inline write content"
         );
-        let saves_unpublished_file = case.saves_the_cut_off_attempts_file();
+        let written = case.written_file();
         // Nothing the folder held before the job (the parked file, the memory
         // scaffold) counts as the turn's.
         assert_eq!(
             files.len(),
-            1 + usize::from(saves_unpublished_file),
+            1 + usize::from(written.is_some()),
             "apply/files={files:?}"
         );
-        if saves_unpublished_file {
-            // The resumed turn counts the cut-off attempt's file as its own and
-            // hands it to the save (this harness has no controller to save to).
-            let unpublished = files
+        if let Some(written) = written {
+            // The turn counts the file as its own (the cut-off attempt's, or
+            // the one its model committed) and hands it to the save (this
+            // harness has no controller to save to).
+            let written = files
                 .iter()
-                .find(|file| file["workspacePath"] == UNPUBLISHED_FILE)
-                .context("apply/files should list the interrupted attempt's file")?;
-            assert_eq!(unpublished["changeType"], "created");
+                .find(|file| file["workspacePath"] == written)
+                .context("apply/files should list the file the job wrote")?;
+            assert_eq!(written["changeType"], "created");
             assert!(
                 artifacts.iter().any(|artifact| {
                     artifact.get("kind").and_then(Value::as_str) == Some("origin/apply-skipped")

@@ -6016,6 +6016,14 @@ impl JobProcessor {
 
         let project_id = self.project_id_for_job(job)?;
         let workspace_dir = self.prepare_workspace_dir(&project_id)?;
+        // The commit a lease that resumes a cut-off attempt finds the folder
+        // on, before the refresh below publishes what that attempt committed
+        // and moves the checkout (see `ResumedAttempt`).
+        let head_as_found = if job.resumes_an_interrupted_attempt() {
+            collect_git_head(&workspace_dir).await
+        } else {
+            None
+        };
         // Bring the checkout up to date before anything writes into it. The
         // `/sync` lane publishes on its own.
         let pre_turn_refresh = if commit_to_workspace
@@ -6710,21 +6718,24 @@ impl JobProcessor {
         }
 
         // Always taken, so the checkpoint can save files the turn changed
-        // without reporting them.
+        // without reporting them, or committed itself.
         let git_status_before = collect_git_status_porcelain(&workspace_dir).await;
-        // How the folder began this job's earliest attempt here, when this
-        // lease resumes one a stop cut off (see `turn_baseline`).
-        let earlier_attempt_status = git_status_before
-            .as_ref()
-            .filter(|_| tracks_workspace_file_changes)
-            .and_then(|status| {
-                turn_baseline::begin(
+        let head_before = collect_git_head(&workspace_dir).await;
+        let resumed_attempt = match git_status_before.as_ref() {
+            Some(status) if tracks_workspace_file_changes => {
+                ResumedAttempt::begin(
                     &workspace_dir,
-                    job.id,
-                    job.resumes_an_interrupted_attempt(),
-                    status,
+                    job,
+                    turn_baseline::TurnStart {
+                        status: status.clone(),
+                        head: head_before.clone(),
+                    },
+                    head_as_found.as_deref(),
                 )
-            });
+                .await
+            }
+            _ => None,
+        };
         let codex_guard = CODEX_EXECUTION_LOCK.lock().await;
         let shared_browser_action_log_before =
             explicit_shared_browser_execution.then(crate::shared_browser::action_log_len);
@@ -6975,7 +6986,8 @@ impl JobProcessor {
             &mut outcome.files,
             tracks_workspace_file_changes,
             git_status_before.as_ref(),
-            earlier_attempt_status.as_ref(),
+            head_before.as_deref(),
+            resumed_attempt.as_ref(),
         )
         .await?
             == 0;
@@ -7575,7 +7587,8 @@ impl JobProcessor {
                 &mut retry_outcome.files,
                 tracks_workspace_file_changes,
                 git_status_before.as_ref(),
-                earlier_attempt_status.as_ref(),
+                head_before.as_deref(),
+                resumed_attempt.as_ref(),
             )
             .await?;
             // Recognize each attempt independently before merging: event IDs may
@@ -8033,6 +8046,7 @@ impl JobProcessor {
                     Box::pin(checkpoint_files_with_status_delta(
                         &workspace_dir,
                         git_status_before.as_ref(),
+                        head_before.as_deref(),
                         &retry_outcome.files,
                     ))
                     .await
@@ -8212,6 +8226,7 @@ impl JobProcessor {
                 Box::pin(checkpoint_files_with_status_delta(
                     &workspace_dir,
                     git_status_before.as_ref(),
+                    head_before.as_deref(),
                     &outcome.files,
                 ))
                 .await
@@ -9595,12 +9610,13 @@ async fn collect_workspace_change_receipts(
     files: &mut Vec<CodexFileDescriptor>,
     tracks_changes: bool,
     before: Option<&HashMap<String, GitStatusEntry>>,
-    earlier_attempt: Option<&HashMap<String, GitStatusEntry>>,
+    head_before: Option<&str>,
+    resumed: Option<&ResumedAttempt>,
 ) -> Result<usize> {
     if tracks_changes
         && files.is_empty()
         && let Some(before) = before
-        && let Some(after) = collect_git_status_porcelain(workspace_dir).await
+        && let Some(after) = collect_turn_end_status(workspace_dir, head_before).await
     {
         *files = normalize_codex_files(
             workspace_dir,
@@ -9610,7 +9626,7 @@ async fn collect_workspace_change_receipts(
     // Retry checks weigh this attempt separately from work a stopped lease saved.
     let own_files_len = files.len();
     if tracks_changes {
-        add_resumed_turn_files(files, earlier_attempt, before);
+        add_resumed_turn_files(files, resumed);
     }
     Ok(own_files_len)
 }
@@ -15591,22 +15607,29 @@ async fn fetch_agent_context_cards_for_scope(
     Ok(filter_project_context_cards(cards, terms))
 }
 
-fn git_status_command_args(workspace_dir: &Path) -> Vec<String> {
-    let status_args = vec![
-        "status".to_string(),
-        "--porcelain=v1".to_string(),
-        "-z".to_string(),
-        "--no-renames".to_string(),
-        "--untracked-files=all".to_string(),
-    ];
-    // Canonical workspaces keep the repository at `.instafy/.git` with no
-    // top-level `.git`, so a plain `git status` fails and silently disables
-    // the only file-change evidence channel for write jobs.
+/// `args` for the folder's own repository. Canonical workspaces keep it at
+/// `.instafy/.git` with no top-level `.git`, so a plain `git status` fails and
+/// silently disables the only file-change evidence channel for write jobs.
+fn workspace_git_args(workspace_dir: &Path, args: &[&str]) -> Vec<String> {
+    let args = args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
     if workspace_uses_instafy_canonical_git(workspace_dir) {
-        canonical_git_args(workspace_dir, &status_args)
+        canonical_git_args(workspace_dir, &args)
     } else {
-        status_args
+        args
     }
+}
+
+fn git_status_command_args(workspace_dir: &Path) -> Vec<String> {
+    workspace_git_args(
+        workspace_dir,
+        &[
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--no-renames",
+            "--untracked-files=all",
+        ],
+    )
 }
 
 async fn collect_git_status_porcelain(
@@ -15617,6 +15640,64 @@ async fn collect_git_status_porcelain(
         &git_status_command_args(workspace_dir),
     )
     .await
+}
+
+/// The commit the folder's `HEAD` names, taken as a write turn begins: the
+/// turn's own commits are counted from it (see [`collect_turn_end_status`]).
+async fn collect_git_head(workspace_dir: &Path) -> Option<String> {
+    workspace_change_detection::git_commit_id(
+        workspace_dir,
+        &workspace_git_args(
+            workspace_dir,
+            &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+        ),
+    )
+    .await
+}
+
+/// The folder's `git status` at the end of a turn that began on commit
+/// `head_before`, plus every path the commits made on top of it changed. A
+/// turn's model may run `git commit` itself: its work is then clean in `git
+/// status`, but it is still the turn's work, which the turn reports and its
+/// checkpoint saves (a checkpoint with no files publishes nothing).
+async fn collect_turn_end_status(
+    workspace_dir: &Path,
+    head_before: Option<&str>,
+) -> Option<HashMap<String, GitStatusEntry>> {
+    let mut status = collect_git_status_porcelain(workspace_dir).await?;
+    if let Some(head_before) = head_before {
+        add_commits(workspace_dir, head_before, "HEAD", &mut status).await;
+    }
+    Some(status)
+}
+
+/// Adds to `status`, a `git status` of the folder, every path that the
+/// commits made on top of commit `from` up to `to` changed (`git diff
+/// from...to`).
+async fn add_commits(
+    workspace_dir: &Path,
+    from: &str,
+    to: &str,
+    status: &mut HashMap<String, GitStatusEntry>,
+) {
+    let commits = format!("{from}...{to}");
+    workspace_change_detection::add_committed_paths(
+        workspace_dir,
+        &workspace_git_args(
+            workspace_dir,
+            &[
+                "diff",
+                "--no-color",
+                "--name-status",
+                "-z",
+                "--no-renames",
+                &commits,
+                "--",
+            ],
+        ),
+        status,
+    )
+    .await;
 }
 
 fn git_status_delta_paths(
@@ -15728,19 +15809,21 @@ async fn restore_clean_baseline_git_status_delta_excluding(
 
 /// The files a turn's checkpoint saves: what the turn reported, plus every
 /// path whose `git status` changed during the turn (tools, generators and
-/// installs write files nobody reports). Changed paths that may never be
+/// installs write files nobody reports), and every path the turn's own
+/// commits on top of `head_before` changed. Changed paths that may never be
 /// published are left out here rather than reported as "Not saved": nobody
 /// asked for them, and they stay on this machine.
 async fn checkpoint_files_with_status_delta(
     workspace_dir: &Path,
     before: Option<&HashMap<String, GitStatusEntry>>,
+    head_before: Option<&str>,
     reported: &[CodexFileDescriptor],
 ) -> Vec<CodexFileDescriptor> {
     let mut files = reported.to_vec();
     let Some(before) = before else {
         return files;
     };
-    let Some(after) = collect_git_status_porcelain(workspace_dir).await else {
+    let Some(after) = collect_turn_end_status(workspace_dir, head_before).await else {
         return files;
     };
     files.extend(status_delta_files_for_checkpoint(before, &after, reported));
@@ -15772,23 +15855,58 @@ fn status_delta_files_for_checkpoint(
         .collect()
 }
 
-/// A job a stop (or an expired lease) requeued mid-turn may resume in the
-/// folder its cut-off attempt wrote to, and need not write that attempt's
-/// work again for the turn to have made it. So a resumed write turn adds to
-/// its files the paths whose status changed between `earlier_attempt` (how
-/// the folder began this job's earliest attempt here) and `before` (how it
-/// began this one), by the checkpoint's filter: the file-change requirement
-/// counts them and the checkpoint saves them. Without that record (a first
+/// How the folder began the job's earliest attempt here, and how this lease
+/// found it, when this lease resumes an attempt a stop (or an expired lease)
+/// cut off. That attempt's work is the job's, and the turn need not write it
+/// again (see `turn_baseline`).
+struct ResumedAttempt {
+    began: HashMap<String, GitStatusEntry>,
+    /// The folder's `git status` as this turn begins, plus every path the
+    /// commits made since `began` changed, up to the commit this lease found
+    /// the folder on: the cut-off attempt's commits are clean in `git
+    /// status`, and the pre-turn refresh publishes them and may merge other
+    /// people's work on top, which is not the job's.
+    found: HashMap<String, GitStatusEntry>,
+}
+
+impl ResumedAttempt {
+    /// Begins a write turn of `job` in `workspace_dir`, which is as `start`
+    /// says now (see [`turn_baseline::begin`]). `head_as_found` is the
+    /// commit the folder was on before this lease's pre-turn refresh. `None`
+    /// when this lease resumes no attempt that began here.
+    async fn begin(
+        workspace_dir: &Path,
+        job: &LeaseJob,
+        start: turn_baseline::TurnStart,
+        head_as_found: Option<&str>,
+    ) -> Option<Self> {
+        let earliest = turn_baseline::begin(
+            workspace_dir,
+            job.id,
+            job.resumes_an_interrupted_attempt(),
+            &start,
+        )?;
+        let mut found = start.status;
+        if let (Some(from), Some(to)) = (earliest.head.as_deref(), head_as_found) {
+            add_commits(workspace_dir, from, to, &mut found).await;
+        }
+        Some(Self {
+            began: earliest.status,
+            found,
+        })
+    }
+}
+
+/// A resumed write turn adds to its files the paths that changed between how
+/// the job's earliest attempt here began and how this lease found the folder,
+/// by the checkpoint's filter: the file-change requirement counts them and
+/// the checkpoint saves them. Without a record of that attempt (a first
 /// lease, or another folder's attempt), it adds nothing.
-fn add_resumed_turn_files(
-    files: &mut Vec<CodexFileDescriptor>,
-    earlier_attempt: Option<&HashMap<String, GitStatusEntry>>,
-    before: Option<&HashMap<String, GitStatusEntry>>,
-) {
-    let (Some(earlier_attempt), Some(before)) = (earlier_attempt, before) else {
+fn add_resumed_turn_files(files: &mut Vec<CodexFileDescriptor>, resumed: Option<&ResumedAttempt>) {
+    let Some(resumed) = resumed else {
         return;
     };
-    let resumed = status_delta_files_for_checkpoint(earlier_attempt, before, files);
+    let resumed = status_delta_files_for_checkpoint(&resumed.began, &resumed.found, files);
     files.extend(resumed);
 }
 
@@ -19704,8 +19822,13 @@ mod tests {
             (".instafy/state.json".to_string(), entry("??", "i")),
         ]);
 
+        let resumed = ResumedAttempt {
+            began: earlier_attempt.clone(),
+            found: before,
+        };
+
         let mut files = Vec::new();
-        add_resumed_turn_files(&mut files, Some(&earlier_attempt), Some(&before));
+        add_resumed_turn_files(&mut files, Some(&resumed));
         assert_eq!(paths(&files), ["ALIAS.md", "notes/rolling.md", "old.md"]);
         let kind = |path: &str| {
             files
@@ -19719,17 +19842,22 @@ mod tests {
 
         // A path the turn reports itself is not added again.
         let mut files = vec![reported("notes/rolling.md")];
-        add_resumed_turn_files(&mut files, Some(&earlier_attempt), Some(&before));
+        add_resumed_turn_files(&mut files, Some(&resumed));
         assert_eq!(paths(&files), ["ALIAS.md", "notes/rolling.md", "old.md"]);
 
         // Without a record of an earlier attempt in this folder (a first
-        // lease, or one another folder ran), or a status for this one, it
-        // adds nothing, whatever the folder holds. Nor does it when nothing
-        // changed since that attempt began.
+        // lease, or one another folder ran), it adds nothing, whatever the
+        // folder holds. Nor does it when nothing changed since that attempt
+        // began.
         let mut files = Vec::new();
-        add_resumed_turn_files(&mut files, None, Some(&before));
-        add_resumed_turn_files(&mut files, Some(&earlier_attempt), None);
-        add_resumed_turn_files(&mut files, Some(&earlier_attempt), Some(&earlier_attempt));
+        add_resumed_turn_files(&mut files, None);
+        add_resumed_turn_files(
+            &mut files,
+            Some(&ResumedAttempt {
+                began: earlier_attempt.clone(),
+                found: earlier_attempt,
+            }),
+        );
         assert!(files.is_empty());
     }
 
@@ -23454,6 +23582,10 @@ mod tests {
             false,
             RuntimeFinalOutputMode::PlainTextWrite,
         );
+        let earlier = ResumedAttempt {
+            began: earlier,
+            found: before.clone(),
+        };
 
         let mut resumed = Vec::new();
         let own_count = collect_workspace_change_receipts(
@@ -23461,6 +23593,7 @@ mod tests {
             &mut resumed,
             tracking,
             Some(&before),
+            None,
             Some(&earlier),
         )
         .await
@@ -23495,6 +23628,7 @@ mod tests {
                 &mut files,
                 tracking,
                 Some(&before),
+                None,
                 Some(&earlier),
             )
             .await
@@ -23514,6 +23648,7 @@ mod tests {
                 &mut files,
                 tracking,
                 Some(&before),
+                None,
                 Some(&earlier)
             )
             .await
@@ -23553,6 +23688,7 @@ mod tests {
                 &mut unchanged,
                 tracking,
                 Some(&after),
+                None,
                 None
             )
             .await
@@ -23563,6 +23699,236 @@ mod tests {
             unchanged.is_empty(),
             "a completed no-change review has no invented file receipt"
         );
+    }
+
+    /// A model that runs `git commit` itself leaves its work clean in `git
+    /// status`. The turn still reports that work and its checkpoint still
+    /// sends it to the origin; before, both were empty and nothing reached
+    /// `main` until a later turn's refresh.
+    #[tokio::test]
+    async fn a_turn_that_commits_its_own_work_still_reports_and_saves_it() {
+        let tmp = tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=Instafy Test",
+                    "-c",
+                    "user.email=test@instafy.dev",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .current_dir(&workspace)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "--quiet"]);
+        fs::write(workspace.join("personal.md"), "saved\n").unwrap();
+        fs::write(workspace.join("old.md"), "to remove\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "start"]);
+        fs::write(workspace.join("personal.md"), "the person's own edit\n").unwrap();
+        let before = collect_git_status_porcelain(&workspace).await.unwrap();
+        let head_before = collect_git_head(&workspace).await;
+        assert!(head_before.is_some());
+
+        // The model's turn: a new file and a removal it commits itself, and
+        // one more file it leaves uncommitted.
+        fs::create_dir_all(workspace.join(".agents/skills/wave")).unwrap();
+        fs::write(workspace.join(".agents/skills/wave/SKILL.md"), "# Wave\n").unwrap();
+        git(&["add", ".agents"]);
+        git(&["rm", "--quiet", "old.md"]);
+        git(&["commit", "--quiet", "-m", "add the wave skill"]);
+        fs::write(workspace.join("notes.md"), "not committed\n").unwrap();
+
+        let kinds = |files: &[CodexFileDescriptor]| {
+            let mut kinds = files
+                .iter()
+                .map(|file| {
+                    let kind = match file.change.as_ref().map(|change| &change.kind) {
+                        Some(FileChangeKind::Created) => "created",
+                        Some(FileChangeKind::Deleted) => "deleted",
+                        _ => "changed",
+                    };
+                    (file.workspace_path.clone(), kind)
+                })
+                .collect::<Vec<_>>();
+            kinds.sort();
+            kinds
+        };
+        let turns_work = vec![
+            (".agents/skills/wave/SKILL.md".to_string(), "created"),
+            ("notes.md".to_string(), "created"),
+            ("old.md".to_string(), "deleted"),
+        ];
+
+        let checkpoint = checkpoint_files_with_status_delta(
+            &workspace,
+            Some(&before),
+            head_before.as_deref(),
+            &[],
+        )
+        .await;
+        assert_eq!(kinds(&checkpoint), turns_work);
+        let mut receipts = Vec::new();
+        let own = collect_workspace_change_receipts(
+            &workspace,
+            &mut receipts,
+            true,
+            Some(&before),
+            head_before.as_deref(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(own, 3, "the turn made changes, so it is not retried");
+        assert_eq!(kinds(&receipts), turns_work);
+
+        // Without the commit the turn began on, only the uncommitted file.
+        let status_only =
+            checkpoint_files_with_status_delta(&workspace, Some(&before), None, &[]).await;
+        assert_eq!(
+            kinds(&status_only),
+            vec![("notes.md".to_string(), "created")]
+        );
+
+        // A turn that commits nothing adds nothing.
+        let unchanged = collect_git_status_porcelain(&workspace).await.unwrap();
+        let head_now = collect_git_head(&workspace).await;
+        assert!(
+            checkpoint_files_with_status_delta(
+                &workspace,
+                Some(&unchanged),
+                head_now.as_deref(),
+                &[],
+            )
+            .await
+            .is_empty()
+        );
+    }
+
+    /// A stop or an expired lease can cut off an attempt whose model already
+    /// committed its work. The lease that resumes the job finds that work
+    /// clean in `git status`, and its pre-turn refresh then publishes it and
+    /// may merge other people's work on top. The resumed turn counts the
+    /// cut-off attempt's commits as the job's work, and nothing the refresh
+    /// brought; before, it counted nothing and failed as a required write
+    /// that changed no files.
+    #[tokio::test]
+    async fn a_resumed_turn_counts_what_its_cut_off_attempt_committed() {
+        async fn turn_start(workspace: &Path) -> turn_baseline::TurnStart {
+            turn_baseline::TurnStart {
+                status: collect_git_status_porcelain(workspace).await.unwrap(),
+                head: collect_git_head(workspace).await,
+            }
+        }
+        /// What the resumed turn counts as the job's files, and how many of
+        /// them it wrote itself, when it changes nothing.
+        async fn receipts(
+            workspace: &Path,
+            job: &LeaseJob,
+            head_as_found: Option<&str>,
+        ) -> (usize, Vec<(String, bool)>) {
+            let start = turn_start(workspace).await;
+            let (before, head_before) = (start.status.clone(), start.head.clone());
+            let resumed = ResumedAttempt::begin(workspace, job, start, head_as_found)
+                .await
+                .expect("the job's record of its first attempt");
+            let mut files = Vec::new();
+            let own = collect_workspace_change_receipts(
+                workspace,
+                &mut files,
+                true,
+                Some(&before),
+                head_before.as_deref(),
+                Some(&resumed),
+            )
+            .await
+            .unwrap();
+            let files = files
+                .into_iter()
+                .map(|file| {
+                    let created = matches!(
+                        file.change.map(|change| change.kind),
+                        Some(FileChangeKind::Created)
+                    );
+                    (file.workspace_path, created)
+                })
+                .collect();
+            (own, files)
+        }
+
+        let tmp = tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=Instafy Test",
+                    "-c",
+                    "user.email=test@instafy.dev",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .current_dir(&workspace)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "--quiet", "-b", "main"]);
+        fs::write(workspace.join("README.md"), "start\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "start"]);
+        fs::write(workspace.join("personal.md"), "the person's own edit\n").unwrap();
+
+        // The job's first attempt records how the folder began, and its model
+        // commits the pack before the attempt is cut off.
+        let job = test_lease_job(Some("feature"), json!({}));
+        assert!(
+            ResumedAttempt::begin(&workspace, &job, turn_start(&workspace).await, None)
+                .await
+                .is_none()
+        );
+        fs::create_dir_all(workspace.join(".agents/skills/wave")).unwrap();
+        fs::write(workspace.join(".agents/skills/wave/SKILL.md"), "# Wave\n").unwrap();
+        git(&["add", ".agents"]);
+        git(&["commit", "--quiet", "-m", "add the wave skill"]);
+
+        // The lease that resumes the job finds the folder on that commit, and
+        // its refresh merges someone else's work.
+        let job = LeaseJob {
+            lease_attempts: 2,
+            ..job
+        };
+        let head_as_found = collect_git_head(&workspace).await;
+        git(&["checkout", "--quiet", "-b", "theirs", "HEAD~1"]);
+        fs::write(workspace.join("theirs.md"), "someone else's work\n").unwrap();
+        git(&["add", "theirs.md"]);
+        git(&["commit", "--quiet", "-m", "theirs"]);
+        git(&["checkout", "--quiet", "main"]);
+        git(&["merge", "--quiet", "--no-edit", "theirs"]);
+
+        assert_eq!(
+            receipts(&workspace, &job, head_as_found.as_deref()).await,
+            (0, vec![(".agents/skills/wave/SKILL.md".to_string(), true)]),
+            "the cut-off attempt's pack, and not the merged work or the person's edit"
+        );
+        // Without the commit the lease found the folder on, it sees none of it.
+        assert_eq!(receipts(&workspace, &job, None).await, (0, Vec::new()));
     }
 
     #[test]

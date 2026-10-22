@@ -4,7 +4,9 @@
 //! may resume it in the folder its cut-off attempt wrote to. To count that
 //! attempt's work as the job's own, and nothing else the folder holds (the
 //! person's own edits, other turns' unsaved work, the runtime's memory
-//! scaffold), a write turn records the folder's `git status` as it begins:
+//! scaffold), a write turn records the folder's `git status` and the commit
+//! its `HEAD` names as it begins (work the attempt committed is clean in
+//! `git status`):
 //!
 //! - The record lives in the checkout's git directory, which `git status`
 //!   never lists and no save publishes. A folder without one of its own (no
@@ -25,6 +27,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use origin_http_server::workspace_fs::WorkspaceDir;
+use serde::{Deserialize, Serialize};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -37,20 +40,34 @@ const RECORDS_DIR: &str = "instafy-turn-baselines";
 /// requeued job waits for its next lease.
 const RECORD_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
-/// Begins a write turn of job `job_id` in `workspace_dir`, whose `git status`
-/// is `status` now. On a lease that resumes an interrupted attempt, returns
-/// the status this job's earliest attempt in the folder began with, when it
-/// has a record. Otherwise records `status` and returns `None`.
+/// How a folder began a write turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct TurnStart {
+    /// Its `git status`.
+    pub(super) status: HashMap<String, GitStatusEntry>,
+    /// The commit its `HEAD` named, if it had one.
+    pub(super) head: Option<String>,
+}
+
+/// A full commit id, as `git rev-parse` prints one (SHA-1 or SHA-256).
+fn is_commit_id(rev: &str) -> bool {
+    matches!(rev.len(), 40 | 64) && rev.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Begins a write turn of job `job_id` in `workspace_dir`, which is as
+/// `start` says now. On a lease that resumes an interrupted attempt, returns
+/// how this job's earliest attempt in the folder began, when it has a
+/// record. Otherwise records `start` and returns `None`.
 pub(super) fn begin(
     workspace_dir: &Path,
     job_id: Uuid,
     resumes_an_interrupted_attempt: bool,
-    status: &HashMap<String, GitStatusEntry>,
-) -> Option<HashMap<String, GitStatusEntry>> {
+    start: &TurnStart,
+) -> Option<TurnStart> {
     if resumes_an_interrupted_attempt && let Some(earlier) = read(workspace_dir, job_id) {
         return Some(earlier);
     }
-    if let Err(error) = write(workspace_dir, job_id, status) {
+    if let Err(error) = write(workspace_dir, job_id, start) {
         warn!(%job_id, %error, "could not record how the turn's folder began");
     }
     None
@@ -68,23 +85,27 @@ pub(super) fn forget(workspace_dir: &Path, job_id: Uuid) {
     }
 }
 
-fn read(workspace_dir: &Path, job_id: Uuid) -> Option<HashMap<String, GitStatusEntry>> {
+fn read(workspace_dir: &Path, job_id: Uuid) -> Option<TurnStart> {
     let mut raw = String::new();
     records(workspace_dir, false)
         .and_then(|records| records.open_file(&file_name(job_id)))
         .and_then(|mut file| file.read_to_string(&mut raw))
         .ok()?;
-    serde_json::from_str(&raw)
+    let start: TurnStart = serde_json::from_str(&raw)
+        // A record written before records held the commit: its status alone.
+        .or_else(|_| serde_json::from_str(&raw).map(|status| TurnStart { status, head: None }))
         .inspect_err(|error| warn!(%job_id, %error, "ignoring an unreadable turn start record"))
-        .ok()
+        .ok()?;
+    // The record is where a turn's model can write, and its commit goes to a
+    // git command line: anything but a commit id would be read as an option.
+    Some(TurnStart {
+        head: start.head.filter(|head| is_commit_id(head)),
+        ..start
+    })
 }
 
-fn write(
-    workspace_dir: &Path,
-    job_id: Uuid,
-    status: &HashMap<String, GitStatusEntry>,
-) -> io::Result<()> {
-    let raw = serde_json::to_vec(status).map_err(io::Error::other)?;
+fn write(workspace_dir: &Path, job_id: Uuid, start: &TurnStart) -> io::Result<()> {
+    let raw = serde_json::to_vec(start).map_err(io::Error::other)?;
     let records = records(workspace_dir, true)?;
     remove_stale_records(&records);
     records.replace_file(&file_name(job_id), &mut raw.as_slice(), false)?;
@@ -133,16 +154,20 @@ mod tests {
 
     use super::*;
 
-    fn status(entries: &[(&str, &str, &str)]) -> HashMap<String, GitStatusEntry> {
-        entries
-            .iter()
-            .map(|(path, code, fingerprint)| {
-                (
-                    path.to_string(),
-                    GitStatusEntry::new(*code, Some(fingerprint.to_string())),
-                )
-            })
-            .collect()
+    /// A folder whose `git status` lists `entries`, on no commit yet.
+    fn status(entries: &[(&str, &str, &str)]) -> TurnStart {
+        TurnStart {
+            status: entries
+                .iter()
+                .map(|(path, code, fingerprint)| {
+                    (
+                        path.to_string(),
+                        GitStatusEntry::new(*code, Some(fingerprint.to_string())),
+                    )
+                })
+                .collect(),
+            head: None,
+        }
     }
 
     #[test]
@@ -150,8 +175,14 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         fs::create_dir(workspace.path().join(".git")).unwrap();
         let job_id = Uuid::new_v4();
-        let first = status(&[("notes.md", " M", "a")]);
-        let resumed = status(&[("notes.md", " M", "a"), ("ALIAS.md", "??", "b")]);
+        let first = TurnStart {
+            head: Some("1".repeat(40)),
+            ..status(&[("notes.md", " M", "a")])
+        };
+        let resumed = TurnStart {
+            head: Some("2".repeat(40)),
+            ..status(&[("notes.md", " M", "a"), ("ALIAS.md", "??", "b")])
+        };
 
         // The first lease records the folder; nothing is resumed.
         assert_eq!(begin(workspace.path(), job_id, false, &first), None);
@@ -272,5 +303,44 @@ mod tests {
             assert_eq!(begin(linked.path(), job_id, false, &first), None);
             assert!(!target.path().join(RECORDS_DIR).exists());
         }
+    }
+
+    #[test]
+    fn a_record_that_holds_only_the_status_still_reads() {
+        let workspace = tempfile::tempdir().unwrap();
+        let job_id = Uuid::new_v4();
+        let first = status(&[("ALIAS.md", "??", "a")]);
+        let records = workspace.path().join(".git").join(RECORDS_DIR);
+        fs::create_dir_all(&records).unwrap();
+        fs::write(
+            records.join(file_name(job_id)),
+            serde_json::to_vec(&first.status).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            begin(workspace.path(), job_id, true, &status(&[])),
+            Some(first)
+        );
+    }
+
+    #[test]
+    fn a_recorded_commit_that_is_no_commit_id_is_left_out() {
+        let workspace = tempfile::tempdir().unwrap();
+        fs::create_dir(workspace.path().join(".git")).unwrap();
+        let job_id = Uuid::new_v4();
+        let first = TurnStart {
+            head: Some("--output=/tmp/elsewhere".to_string()),
+            ..status(&[("ALIAS.md", "??", "a")])
+        };
+
+        assert_eq!(begin(workspace.path(), job_id, false, &first), None);
+        assert_eq!(
+            begin(workspace.path(), job_id, true, &status(&[])),
+            Some(TurnStart {
+                head: None,
+                ..first
+            })
+        );
     }
 }
