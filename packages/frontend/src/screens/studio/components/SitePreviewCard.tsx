@@ -68,22 +68,42 @@ type SharedAnswer = { preview: ControllerSitePreview } | { gone: true };
 type CardMember = {
   read: (answer: SharedAnswer) => void;
   setLeads: (leads: boolean) => void;
+  setLatest: (latest: boolean) => void;
   /** Whether this card would follow its site now, if it were the one to. */
   wants: boolean;
+  /** When its message was posted, and which message it is (a message drawn twice is one card). */
+  postedAt: number;
+  messageKey: string;
 };
 type PreviewCards = { members: Set<CardMember>; unseenFollows: number };
 
 /**
- * The cards on the page for each preview, oldest first. Octo may post several
- * for one site (each time it opens it again). Only the newest card that would
+ * The cards on the page for each preview. Octo may post several for one site
+ * (each run that opens it again posts its own). Only the latest posted card is
+ * drawn in full; an earlier one shrinks to a line that points to it, so a
+ * conversation shows one card per site. Only the latest card that would
  * follow the site does, every card reads each answer, and follow-ups made
  * while the pane is not on screen are counted once per preview, so N cards
  * never ask N times.
  */
 const cardsByPreview = new Map<string, PreviewCards>();
 
+function latestKey(cards: PreviewCards): string | null {
+  let latest: CardMember | null = null;
+  for (const member of cards.members) {
+    if (!latest || member.postedAt > latest.postedAt || (member.postedAt === latest.postedAt && member.messageKey > latest.messageKey)) {
+      latest = member;
+    }
+  }
+  return latest?.messageKey ?? null;
+}
+
 function electFollower(cards: PreviewCards) {
-  const follower = [...cards.members].reverse().find((member) => member.wants) ?? null;
+  const key = latestKey(cards);
+  for (const member of cards.members) member.setLatest(member.messageKey === key);
+  const follower = [...cards.members].reverse().find((member) => member.wants && member.messageKey === key)
+    ?? [...cards.members].reverse().find((member) => member.wants)
+    ?? null;
   for (const member of cards.members) member.setLeads(member === follower);
 }
 
@@ -188,9 +208,15 @@ function useStoreSignals(previewId: string, runtimeId: string | null) {
 export function SitePreviewCard({
   preview,
   projectId,
+  postedAt = 0,
+  messageKey = "",
 }: {
   preview: SitePreviewRequest;
   projectId: string | null;
+  /** When the card's message was posted: of several cards for one site, the latest is drawn in full. */
+  postedAt?: number;
+  /** The card's message id. */
+  messageKey?: string;
 }) {
   const opener = useConversationPreviewOpener();
   const [server, setServer] = useState<ControllerSitePreview | null>(null);
@@ -205,6 +231,8 @@ export function SitePreviewCard({
   const request = useRef<AbortController | null>(null);
   // Whether this is the card that follows its preview for every card of it.
   const [leads, setLeads] = useState(false);
+  // Whether this is the latest card posted for its preview on the page (drawn in full).
+  const [latest, setLatest] = useState(true);
   const member = useMemo<CardMember>(() => ({
     read: (answer) => {
       if ("gone" in answer) {
@@ -217,7 +245,12 @@ export function SitePreviewCard({
       setCannotCheck(false);
     },
     setLeads,
+    setLatest,
     wants: false,
+    postedAt: Number.isFinite(postedAt) ? postedAt : 0,
+    messageKey,
+    // A card's message keeps its time and id.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }), []);
   useEffect(() => joinPreviewCards(preview.previewId, member), [member, preview.previewId]);
 
@@ -434,6 +467,22 @@ export function SitePreviewCard({
   // A site that stopped answering starts again from here (a stopped one starts with Open).
   if (wakeable && !starting && state === "not_responding") {
     actions.push({ id: "restart-preview", label: "Start again", variant: "outline", onPress: () => void wake(null), testId: "preview-ready-restart" });
+  }
+
+  // An earlier card for a site Octo opened again: the latest one, further down, is the one to use.
+  if (!latest) {
+    return (
+      <Text
+        as="div"
+        variant="caption"
+        tone="muted"
+        className="inline-flex items-center gap-1.5"
+        data-testid="preview-ready-earlier"
+      >
+        <WebWindow className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+        {`${preview.title} · opened again further down`}
+      </Text>
+    );
   }
 
   return (
