@@ -1,5 +1,5 @@
-//! A turn that stops on a short upstream rate limit before it acted goes back to the queue once,
-//! through `/agent/complete` (`turn_rate_limit_retry`).
+//! A turn that stops on a short upstream rate limit before it acted goes back to the queue, at
+//! most `MAX_RERUNS` times, through `/agent/complete` (`turn_rate_limit_retry`).
 
 use super::*;
 
@@ -102,11 +102,12 @@ async fn insert_tool_message(
 
 /// The lead's planning turn of r10-pacing3, rate-limited on its first request: it goes back to
 /// the queue instead of failing, with no failure posted and its run shown waiting; no runtime
-/// takes it before the hold; the pacing learns the rate limit; and a second rate limit fails it.
+/// takes it before the hold; the pacing learns the rate limit; a rate limit on a re-run puts it
+/// back again (run r11-pacing), and the one after its last re-run fails it.
 /// A turn that acted, or stopped on a spent usage limit, fails as before.
 #[tokio::test]
-async fn a_lead_turn_rate_limited_before_it_acted_runs_once_more_after_the_wait(
-) -> anyhow::Result<()> {
+async fn a_lead_turn_rate_limited_before_it_acted_runs_again_after_the_wait() -> anyhow::Result<()>
+{
     let Some(pool) = setup_origin_test_pool().await? else {
         eprintln!("skipping turn rate-limit retry test: TEST_DATABASE_URL not set");
         return Ok(());
@@ -167,6 +168,7 @@ async fn a_lead_turn_rate_limited_before_it_acted_runs_once_more_after_the_wait(
         assert!((7_632..=7_632 + 3_816).contains(&hold_ms), "{hold_ms}");
         assert!(retry["heldUntilMs"].is_u64(), "{retry}");
         assert_eq!(retry["error"], RATE_LIMITED);
+        assert_eq!(retry["attempts"], 1);
         assert_eq!(requeued.run_status, "queued", "the run waits again");
         assert_eq!(requeued.run_stage.as_deref(), Some("requeued"));
         assert_eq!(
@@ -193,16 +195,23 @@ async fn a_lead_turn_rate_limited_before_it_acted_runs_once_more_after_the_wait(
             Vec::<Uuid>::new(),
             "held"
         );
-        pool.get()
-            .await?
-            .execute(
-                "update agent_jobs
-                 set payload = jsonb_set(payload, '{rateLimitRetry,heldUntilMs}',
-                     to_jsonb(floor(extract(epoch from now()) * 1000)::bigint - 1))
-                 where id = $1",
-                &[&lead],
-            )
-            .await?;
+        let end_hold = || {
+            let pool = pool.clone();
+            async move {
+                pool.get()
+                    .await?
+                    .execute(
+                        "update agent_jobs
+                         set payload = jsonb_set(payload, '{rateLimitRetry,heldUntilMs}',
+                             to_jsonb(floor(extract(epoch from now()) * 1000)::bigint - 1))
+                         where id = $1",
+                        &[&lead],
+                    )
+                    .await?;
+                anyhow::Ok(())
+            }
+        };
+        end_hold().await?;
         assert_eq!(
             lease_all_jobs(&app, &state.config, space.project_id, space.hosted_runtime_id, None)
                 .await?,
@@ -212,7 +221,24 @@ async fn a_lead_turn_rate_limited_before_it_acted_runs_once_more_after_the_wait(
         assert_eq!(resumed.job_status, "leased");
         assert_eq!(resumed.run_status, "in_progress");
 
-        // 3. its second rate limit fails it: once per job
+        // 3. a re-run that is rate limited again goes back again (r11-pacing: the other teams had
+        //    used up the window), until its last re-run
+        for attempt in 2..=crate::turn_rate_limit_retry::MAX_RERUNS {
+            complete_failed(&app, &token, lead, RATE_LIMITED).await?;
+            let again = turn_state(&pool, lead).await?;
+            assert_eq!(again.job_status, "queued", "re-run {attempt}");
+            assert_eq!(again.payload["rateLimitRetry"]["attempts"], attempt);
+            assert_eq!(again.run_status, "queued");
+            assert_eq!(again.failure_messages, 0, "no failure is posted");
+            end_hold().await?;
+            assert_eq!(
+                lease_all_jobs(&app, &state.config, space.project_id, space.hosted_runtime_id, None)
+                    .await?,
+                vec![lead]
+            );
+        }
+
+        // the rate limit after its last re-run fails it
         complete_failed(&app, &token, lead, RATE_LIMITED).await?;
         let failed = turn_state(&pool, lead).await?;
         assert_eq!(failed.job_status, "failed");
