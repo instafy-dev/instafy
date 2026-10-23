@@ -3701,27 +3701,58 @@ async fn scoped_plan_group_status_is_bound_to_token_run_and_conversation() -> an
                 )
                 .await?;
         }
-        // job_a opened a preview card: its grant carries the job it ran in.
-        connection
-            .execute(
-                "insert into runtime_tunnel_grants
-                   (id, project_id, runtime_id, runtime_lease_id, provider, tunnel_id,
-                    hostname, url, status, expires_at, metadata)
-                 values ($1, $2, $3, $4, 'self_hosted', $5, 'card.invalid', 'https://card.invalid',
-                         'active', now() + interval '10 minutes', $6)",
-                &[
-                    &Uuid::new_v4(),
-                    &project_id,
-                    &runtime_id,
-                    &runtime_lease_id,
-                    &format!("card-{job_a}"),
-                    &PgJson(json!({
+        // job_a opened a preview and its card was posted: the grant carries the job it ran
+        // in, and the controller-owned `_instafyPreview` its title and the card. It also
+        // opened a plain tunnel with a title of its own, and a preview that never became
+        // ready: neither posted a card.
+        for (tunnel, metadata) in [
+            (
+                "card",
+                json!({
+                    "localPort": 4173,
+                    "_instafyPreview": {
                         "title": "Two weeks in the north",
-                        "_instafyActiveJob": {"jobId": job_a}
-                    })),
-                ],
-            )
-            .await?;
+                        "path": "/",
+                        "messageIds": {"run-of-job-a": Uuid::new_v4()}
+                    },
+                    "_instafyActiveJob": {"jobId": job_a}
+                }),
+            ),
+            (
+                "plain",
+                json!({
+                    "title": "Not a card",
+                    "_instafyActiveJob": {"jobId": job_a}
+                }),
+            ),
+            (
+                "unready",
+                json!({
+                    "_instafyPreview": {"title": "Never ready", "path": "/", "messageIds": {}},
+                    "_instafyActiveJob": {"jobId": job_a}
+                }),
+            ),
+        ] {
+            connection
+                .execute(
+                    "insert into runtime_tunnel_grants
+                       (id, project_id, runtime_id, runtime_lease_id, provider, tunnel_id,
+                        hostname, url, status, expires_at, metadata)
+                     values ($1, $2, $3, $4, 'self_hosted', $5, $6, $7,
+                             'active', now() + interval '10 minutes', $8)",
+                    &[
+                        &Uuid::new_v4(),
+                        &project_id,
+                        &runtime_id,
+                        &runtime_lease_id,
+                        &format!("{tunnel}-{job_a}"),
+                        &format!("{tunnel}-{job_a}.invalid"),
+                        &format!("https://{tunnel}-{job_a}.invalid"),
+                        &PgJson(metadata),
+                    ],
+                )
+                .await?;
+        }
     }
 
     let config = build_app_config(
@@ -3782,7 +3813,8 @@ async fn scoped_plan_group_status_is_bound_to_token_run_and_conversation() -> an
         Some(1)
     );
     assert_eq!(allowed_a_payload["workers"][0]["jobId"], json!(job_a));
-    // The lead's checkpoint names the cards a lane opened from this record.
+    // The lead's checkpoint names the cards a lane posted from this record: the preview
+    // whose card the controller posted, by its own title, and no other tunnel.
     assert_eq!(
         allowed_a_payload["workers"][0]["openedPreviews"],
         json!([{"title": "Two weeks in the north", "status": "active"}])
