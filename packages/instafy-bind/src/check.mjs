@@ -2,7 +2,9 @@
 // A builder that loses an item to a lookup that timed out, or trims a list to what fits, must not ship a page that
 // quietly leaves it out. The check reads what the page can show without a browser: the text of its HTML pages and
 // every string in its data files (data.json, data/**/*.json, records included). Items come from --expect and from
-// an "expect" array in data.json. Pure helpers are exported for the tests.
+// an "expect" array in data.json. Text that only says an item is unavailable ("Not found yet: Tokyo", a data file's
+// "missing" list) does not count as showing it: builders are told to say on the page what they could not add, and
+// that line must not pass the check. Pure helpers are exported for the tests.
 // SPDX-License-Identifier: AGPL-3.0-only
 import fs from "node:fs";
 import path from "node:path";
@@ -58,12 +60,34 @@ export function htmlText(html) {
     .replace(/\s+/g, " ");
 }
 
-/** Every string value in a JSON value (keys are not shown, values are). */
+/** A line or string that only says an item is unavailable (the eval grader reads pages the same way). */
+export const UNAVAILABLE_RE = /^\s*(not found( yet)?|missing|not on the (map|page)( yet)?|could ?n[o']t (find|add|place)|unavailable|not available)\b/i;
+/** Data keys that list what the page could not show ("missing": [...] in the map pack's data). */
+const UNAVAILABLE_KEYS = new Set(["expect", "missing", "notfound", "not_found", "unavailable", "unplaced"]);
+
+/** The visible text of an HTML page as lines (block ends and <br> break them), without lines that only say an item is
+ *  unavailable. */
+export function htmlLines(html) {
+  const blocks = String(html ?? "")
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<(script|style|template)\b[\s\S]*?<\/\1\s*>/gi, " ")
+    .replace(/<br\s*\/?>|<\/(p|div|li|dt|dd|tr|td|th|h[1-6]|section|article|header|footer|aside|nav|figcaption|caption|summary|details|blockquote|pre|ul|ol|dl|table|main)\s*>/gi, "\n");
+  return htmlText(blocks.replace(/\n/g, " \u0000 "))
+    .split("\u0000")
+    .map((line) => line.trim())
+    .filter((line) => line && !UNAVAILABLE_RE.test(line));
+}
+
+/** Every string value in a JSON value (keys are not shown, values are), except the "expect" list, lists of what is
+ *  unavailable, and strings that only say an item is. */
 export function jsonStrings(value, out = []) {
-  if (typeof value === "string") out.push(value);
-  else if (typeof value === "number") out.push(String(value));
+  if (typeof value === "string") {
+    if (!UNAVAILABLE_RE.test(value)) out.push(value);
+  } else if (typeof value === "number") out.push(String(value));
   else if (Array.isArray(value)) for (const v of value) jsonStrings(v, out);
-  else if (value && typeof value === "object") for (const [k, v] of Object.entries(value)) if (k !== "expect") jsonStrings(v, out);
+  else if (value && typeof value === "object") {
+    for (const [k, v] of Object.entries(value)) if (!UNAVAILABLE_KEYS.has(k.toLowerCase())) jsonStrings(v, out);
+  }
   return out;
 }
 
@@ -114,7 +138,7 @@ export function readSite(dir) {
       }
       if (rel === "data.json" && Array.isArray(value?.expect)) declared = parseExpect(value.expect);
       parts.push({ file: rel, text: jsonStrings(value).join("\n") });
-    } else parts.push({ file: rel, text: htmlText(raw) });
+    } else parts.push({ file: rel, text: htmlLines(raw).join("\n") });
   }
   return { root, parts, declared };
 }

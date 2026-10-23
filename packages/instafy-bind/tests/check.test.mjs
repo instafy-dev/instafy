@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { checkSite, htmlText, names, parseExpect } from "../src/check.mjs";
+import { checkSite, htmlLines, htmlText, jsonStrings, names, parseExpect } from "../src/check.mjs";
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "instafy-bind.mjs");
 const cleanEnv = { PATH: process.env.PATH, HOME: os.tmpdir() };
@@ -66,6 +66,28 @@ test("check passes once every item is on the page, from --expect or data.json's 
     assert.equal(declared.status, 1, declared.stdout);
     assert.match(declared.stdout, /does not show: Saucony Guide 18\./);
     assert.deepEqual(checkSite(dir).missing, ["Saucony Guide 18"]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("text that only says an item is unavailable does not count as showing it", () => {
+  // a builder that says on the page what it could not add must still fail the check for that item
+  assert.deepEqual(htmlLines("<h1>Trip</h1><p>Taipei, 3 nights</p><p class=note>Not found yet: Tokyo, Hakone</p><li>Could not place Kyoto<br>Osaka</li>"),
+    ["Trip", "Taipei, 3 nights", "Osaka"]);
+  assert.deepEqual(jsonStrings({ items: [{ name: "Brooks Ghost 16" }], missing: [{ name: "Tokyo" }], notes: ["Not found yet: Hoka Arahi 7"], expect: ["x"] }),
+    ["Brooks Ghost 16"]);
+  const dir = compareSite(["Brooks Ghost 16"]);
+  try {
+    const data = JSON.parse(fs.readFileSync(path.join(dir, "data.json"), "utf8"));
+    data.notes = ["Not found yet: Hoka Arahi 7"];
+    data.missing = [{ name: "Saucony Guide 18" }];
+    fs.writeFileSync(path.join(dir, "data.json"), JSON.stringify(data));
+    fs.writeFileSync(path.join(dir, "missing.html"), "<!doctype html><p>Missing: Nike Pegasus 41</p><p>Unavailable - ASICS Novablast 5</p>");
+    const out = run("check", dir, "--expect", "Brooks Ghost 16, Hoka Arahi 7, Saucony Guide 18, Nike Pegasus 41, ASICS Novablast 5");
+    assert.equal(out.status, 1, out.stdout + out.stderr);
+    assert.match(out.stdout, /does not show: Hoka Arahi 7, Saucony Guide 18, Nike Pegasus 41, ASICS Novablast 5\./);
+    assert.match(out.stdout, /1 of 5 expected item\(s\) shown: Brooks Ghost 16\./);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
