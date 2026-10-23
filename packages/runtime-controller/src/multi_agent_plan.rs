@@ -2808,7 +2808,7 @@ fn normalize_agent_handle(raw: &str) -> Option<String> {
 
 #[path = "multi_agent_plan/rate_limit_retry.rs"]
 mod rate_limit_retry;
-pub(crate) use rate_limit_retry::stated_rate_limit_wait;
+pub(crate) use rate_limit_retry::{retry_hold, short_rate_limit_wait, stated_rate_limit_wait};
 pub(crate) mod team_clock;
 #[path = "multi_agent_plan/turn_continuation.rs"]
 mod turn_continuation;

@@ -57,7 +57,7 @@ pub(super) fn interruption_reason_token(raw: &str) -> &str {
 /// the earliest the requeued-job expiry may give the turn up. A run that was
 /// not running, such as a queued job's, is left as it is. It runs in the
 /// requeue's transaction, so a stop that rolls back marks nothing.
-pub(super) async fn mark_interrupted_runs(
+pub(crate) async fn mark_interrupted_runs(
     transaction: &Transaction<'_>,
     project_id: &Uuid,
     requeued_job_ids: &[Uuid],
@@ -200,6 +200,55 @@ pub(super) async fn announce_interrupted_runs_on(
             interrupted_run_event_data(&snapshot, &job_id),
             snapshot.updated_at,
         );
+    }
+}
+
+/// Publish the run of `job_id` as the `run.progress` it is while the job waits queued to resume
+/// (see [`announce_interrupted_runs`]): a job that went back to the queue on its own, not with a
+/// runtime stop (`turn_rate_limit_retry`). Best effort, like the stop's.
+pub(crate) async fn announce_requeued_job_run(state: &AppState, job_id: &Uuid) {
+    let connection = match state.pool.get().await {
+        Ok(connection) => connection,
+        Err(error) => {
+            warn!(%job_id, %error, "failed to get a connection to announce a requeued run");
+            return;
+        }
+    };
+    let row = connection
+        .query_opt(
+            "select r.id, r.project_id, r.session_id, r.conversation_id, r.prompt_id,
+                    r.run_type, r.status, r.progress, r.progress_stage, r.preview_url,
+                    r.last_message, r.metadata, r.created_at, r.updated_at,
+                    j.payload->>'user_id' as initiating_user_id
+             from agent_jobs j
+             join runs r on r.id = j.run_id
+             where j.id = $1
+               and j.status = 'queued'
+               and j.payload ? 'requeuedAt'
+               and r.status = 'queued'
+               and r.progress_stage = 'requeued'
+               and r.metadata #>> '{interruption,jobId}' = j.id::text",
+            &[job_id],
+        )
+        .await;
+    drop(connection);
+    match row {
+        Ok(Some(row)) => {
+            let snapshot = map_run_row(&row);
+            crate::state::publish_controller_event_with_conversation_at(
+                &state.events,
+                "run.progress",
+                snapshot.project_id,
+                snapshot.session_id,
+                snapshot.conversation_id,
+                Some(snapshot.id),
+                Some(*job_id),
+                interrupted_run_event_data(&snapshot, job_id),
+                snapshot.updated_at,
+            );
+        }
+        Ok(None) => {}
+        Err(error) => warn!(%job_id, %error, "failed to load a requeued run to announce"),
     }
 }
 

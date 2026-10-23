@@ -88,6 +88,7 @@ export function jobsQuery(projectId, sinceIso) {
            payload #> '{metadata,managedAiModelLabel}' as "modelLabel",
            payload #> '{metadata,multiAgentPlan,continuation}' as "planContinuation",
            payload #> '{metadata,multiAgentPlan,rateLimitRetry}' as "planRateLimitRetry",
+           payload #> '{rateLimitRetry}' as "turnRateLimitRetry",
            payload #>> '{metadata,agent,handle}' as "agentHandle"
     from agent_jobs where project_id = '${projectId}' and created_at >= '${sinceIso}') j`;
 }
@@ -584,6 +585,9 @@ export function timingOf(jobs) {
       commandSec: timings ? secs(timings.commandMs) : null,
       wrapUpSec: timings?.wrapUp?.atMs != null ? secs(timings.wrapUp.atMs) : null,
       continuation: (artifactsOf(job, "agent/turn-continuation")[0] ?? null)?.endedBy ?? null,
+      // put back in the queue once after a short rate limit (`turn_rate_limit_retry`): its wait
+      // includes the first attempt and the hold
+      requeuedHoldSec: Number.isFinite(job.turnRateLimitRetry?.holdMs) ? secs(job.turnRateLimitRetry.holdMs) : null,
       slowest: [...commands].sort((a, b) => (b.ms ?? 0) - (a.ms ?? 0)).slice(0, 5)
         .map((c) => ({ command: redactText(String(c.command ?? "")).slice(0, 120), sec: secs(c.ms), status: c.status ?? null })),
       steps: steps.filter((t) => t.step !== "total" && t.phase !== "job").sort((a, b) => (b.ms ?? 0) - (a.ms ?? 0)).slice(0, 8)
@@ -1035,7 +1039,8 @@ export function renderTiming(timing) {
   const lines = [`- Time: slowest lane ${timing.lanesSec ?? "-"} s (all its turns); ${timing.timedOut} job(s) stopped at the turn limit; ${timing.continuations} continuation(s)`];
   for (const j of timing.jobs) {
     const head = `  - ${j.role}${j.handle ? ` @${j.handle}` : ""}${j.turn ? ` (turn ${j.turn + 1})` : ""}: ${j.status}, waited ${j.queueSec ?? "-"} s, ran ${j.wallSec ?? "-"} s`
-      + `${j.commandSec != null ? `, commands ${j.commandSec} s` : ""}${j.wrapUpSec != null ? `, wrap-up at ${j.wrapUpSec} s` : ""}${j.continuation ? `, asked to continue (${j.continuation})` : ""}`;
+      + `${j.commandSec != null ? `, commands ${j.commandSec} s` : ""}${j.wrapUpSec != null ? `, wrap-up at ${j.wrapUpSec} s` : ""}${j.continuation ? `, asked to continue (${j.continuation})` : ""}`
+      + `${j.requeuedHoldSec != null ? `, started again after a short rate limit (held ${j.requeuedHoldSec} s)` : ""}`;
     lines.push(cell(head).replace(/^ {2}- /, "  - "));
     if (j.slowest.length) lines.push(`    - slowest commands: ${cell(j.slowest.map((c) => `${c.command} ${c.sec} s${c.status === "unfinished" ? " (unfinished)" : ""}`).join("; "))}`);
     if (j.steps.length) lines.push(`    - tool steps${j.stepsTotalSec != null ? ` (${j.stepsTotalSec} s in all)` : ""}: ${cell(j.steps.map((t) => `${t.step} ${t.sec} s`).join("; "))}`);

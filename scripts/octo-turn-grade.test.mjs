@@ -28,6 +28,7 @@ import {
   redactDeep,
   redactText,
   renderReport,
+  renderTiming,
   replyIsQuestionOnly,
   replyStats,
   runLogOf,
@@ -695,7 +696,16 @@ test("a continuation turn's rate-limit retry is not another continuation, and a 
 
 test("the jobs query reads the continuation and the agent", () => {
   const q = jobsQuery(PROJECT, SENT);
-  for (const k of ['"planContinuation"', '"agentHandle"']) assert.ok(q.includes(k), k);
+  for (const k of ['"planContinuation"', '"agentHandle"', '"turnRateLimitRetry"']) assert.ok(q.includes(k), k);
+});
+
+test("a lead turn put back in the queue after a short rate limit says so in its timing", () => {
+  const lead = { ...job({ id: "lead" }), agentHandle: "octo", createdAt: at(0), leasedAt: at(45), completedAt: at(400),
+    turnRateLimitRetry: { waitMs: 29010, holdMs: 31250, error: "rate limit exceeded (upstream_rate_limit, 429). Please try again in 29.01s." } };
+  const t = timingOf([lead]);
+  assert.equal(t.jobs[0].requeuedHoldSec, 31.3);
+  assert.match(renderTiming(t).join("\n"), /lead @octo: completed\/succeeded, waited 45 s, ran 355 s, started again after a short rate limit \(held 31\.3 s\)/);
+  assert.equal(timingOf([job({ id: "plain" })]).jobs[0].requeuedHoldSec, null);
 });
 
 // ---------------------------------------------------------------------------------------------------------------

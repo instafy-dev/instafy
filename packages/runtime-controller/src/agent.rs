@@ -3299,6 +3299,29 @@ pub(crate) async fn agent_complete(
         None,
     );
 
+    // A turn that stopped on a short provider rate limit before it acted goes back to the queue
+    // once instead of failing (`turn_rate_limit_retry`): nothing of a failure is written.
+    if job_status == "failed" {
+        if let Some(requeued) = crate::turn_rate_limit_retry::maybe_requeue_or_fail(
+            &mut transaction,
+            project_id,
+            job_uuid,
+            run_id,
+            &job_payload,
+            error_message.as_deref(),
+        )
+        .await
+        {
+            transaction.commit().await.map_err(|error| {
+                internal_error(format!("failed to commit the turn's requeue: {error}"))
+            })?;
+            drop(connection);
+            crate::send_intents::publish_job_input_state_updates(&state, &job_input_state_updates);
+            requeued.publish(&state).await;
+            return Ok(Json(AgentCompleteResponseBody { ok: true }));
+        }
+    }
+
     let job_session_id = job_payload
         .get("session_id")
         .and_then(JsonValue::as_str)
@@ -4558,6 +4581,15 @@ pub(crate) async fn lease_next_agent_job(
                         $10::bool
                         and aj.credential_id is null
                         and lower(btrim(coalesce(aj.intent, ''))) <> 'terminal_command'
+                  )
+                  -- A turn put back in the queue after a short provider
+                  -- rate limit waits out its hold first
+                  -- (`turn_rate_limit_retry`).
+                  and not coalesce(
+                        jsonb_typeof(aj.payload #> '{rateLimitRetry,heldUntilMs}') = 'number'
+                        and (aj.payload #>> '{rateLimitRetry,heldUntilMs}')::double precision
+                            > extract(epoch from statement_timestamp()) * 1000,
+                        false
                   )
                   -- A plan lane started again after a short provider rate
                   -- limit waits out the stated delay first
