@@ -307,15 +307,19 @@ fn normalize_domain(domain: &str) -> String {
     domain.trim().trim_end_matches('.').to_ascii_lowercase()
 }
 
-/// True when the two domains are equal or one sits under the other.
-fn domains_overlap(a: &str, b: &str) -> bool {
-    a == b || a.ends_with(&format!(".{b}")) || b.ends_with(&format!(".{a}"))
+/// True when one domain sits strictly under the other.
+fn domains_nested(a: &str, b: &str) -> bool {
+    a.ends_with(&format!(".{b}")) || b.ends_with(&format!(".{a}"))
 }
 
 /// Validates the preview pair. The domain is interpolated into a Traefik regex and the address
-/// into forwardAuth config, so anything unexpected disables private routing instead. The preview
-/// domain must also be separate from the tunnel domain, or public tunnel sites would share a
-/// cookie scope with member-only previews.
+/// into forwardAuth config, so anything unexpected disables private routing instead.
+///
+/// The preview domain may be `TUNNEL_DOMAIN` itself: one user-content domain then carries both
+/// name shapes, each a single label under it (`<uuid hex>.<domain>` for public tunnels,
+/// `p-<label>--<tunnel hex>.<domain>` for capability hosts), which never match each other's
+/// routers. It must not sit above or below the tunnel domain, where one kind of host would be
+/// a parent of the other's.
 fn preview_config(
     domain: Option<&str>,
     auth_address: Option<&str>,
@@ -339,9 +343,10 @@ fn preview_config(
         tracing::warn!("ignoring invalid PREVIEW_DOMAIN or PREVIEW_AUTH_ADDRESS");
         return None;
     }
-    if domains_overlap(&domain, &normalize_domain(tunnel_domain)) {
+    if domains_nested(&domain, &normalize_domain(tunnel_domain)) {
         tracing::warn!(
-            "PREVIEW_DOMAIN must be separate from TUNNEL_DOMAIN; private previews are off"
+            "PREVIEW_DOMAIN must equal TUNNEL_DOMAIN or be separate from it, not above or \
+             below it; private previews are off"
         );
         return None;
     }
@@ -379,11 +384,10 @@ mod tests {
     }
 
     #[test]
-    fn preview_domain_must_be_separate_from_the_tunnel_domain() {
+    fn preview_domain_must_not_sit_above_or_below_the_tunnel_domain() {
         for (preview, tunnel) in [
-            ("rt.test", "rt.test"),
-            ("RT.test.", "rt.test"),
             ("preview.rt.test", "rt.test"),
+            ("Preview.RT.test.", "rt.test"),
             ("rt.test", "tunnels.rt.test"),
         ] {
             assert!(
@@ -394,6 +398,14 @@ mod tests {
         // A shared suffix that is not a parent domain is fine.
         assert!(preview_config(Some("xrt.test"), BROKER, "rt.test").is_some());
         assert!(preview_config(Some("preview.localhost"), BROKER, "rt.test").is_some());
+    }
+
+    #[test]
+    fn preview_domain_may_be_the_tunnel_domain_itself() {
+        for (preview, tunnel) in [("rt.test", "rt.test"), ("RT.test.", " rt.test ")] {
+            let cfg = preview_config(Some(preview), BROKER, tunnel).expect("shared domain");
+            assert_eq!(cfg.domain, "rt.test");
+        }
     }
 
     #[test]

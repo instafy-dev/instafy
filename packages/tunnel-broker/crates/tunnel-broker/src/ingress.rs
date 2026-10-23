@@ -41,10 +41,21 @@ pub const PREVIEW_PAGES_SERVICE: &str = "instafy-preview-pages";
 /// Public bindings get a plain `Host(<uuid>.<TUNNEL_DOMAIN>)` router. Private bindings get no
 /// router on that host at all: only a capability `HostRegexp` on `PREVIEW_DOMAIN`, behind the
 /// broker's forwardAuth. Without the preview config a private binding renders nothing.
+///
+/// `PREVIEW_DOMAIN` may equal `TUNNEL_DOMAIN`. The two name shapes stay apart there: a public
+/// host is one 32-hex label, which never starts with `p-`, and the capability regex is anchored
+/// on `p-<label>--<this tunnel's hex>`. Labels starting with `p-` under the preview domain are
+/// reserved for capability hosts, so a public binding whose stored hostname claims one gets no
+/// router rather than a `Host` rule that would shadow a capability host.
 pub fn render_traefik_dynamic_config(cfg: &BrokerConfig, bindings: &[RatholeBinding]) -> String {
     let routed: Vec<&RatholeBinding> = bindings
         .iter()
-        .filter(|binding| !binding.is_private() || cfg.preview.is_some())
+        .filter(|binding| match cfg.preview.as_ref() {
+            None => !binding.is_private(),
+            Some(preview) => {
+                binding.is_private() || !in_capability_namespace(&binding.hostname, &preview.domain)
+            }
+        })
         .collect();
     if routed.is_empty() {
         return "{}\n".to_string();
@@ -142,6 +153,15 @@ pub fn render_traefik_dynamic_config(cfg: &BrokerConfig, bindings: &[RatholeBind
     }
 
     out
+}
+
+/// Whether `hostname` is under `preview_domain` with a leftmost label starting `p-`, the prefix
+/// of every capability host.
+fn in_capability_namespace(hostname: &str, preview_domain: &str) -> bool {
+    let host = hostname.trim().trim_end_matches('.').to_ascii_lowercase();
+    host.strip_suffix(preview_domain)
+        .and_then(|rest| rest.strip_suffix('.'))
+        .is_some_and(|rest| rest.starts_with("p-"))
 }
 
 /// Config validation limits the domain to `[a-z0-9.-]`, so only the dots need escaping.
@@ -462,5 +482,192 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// One user-content domain for both kinds of host.
+    fn shared_cfg() -> BrokerConfig {
+        let mut cfg = test_cfg();
+        cfg.tunnel_domain = "usercontent.test".into();
+        cfg.preview = Some(PreviewConfig {
+            domain: "usercontent.test".into(),
+            auth_address: "http://broker:8080".into(),
+        });
+        cfg
+    }
+
+    fn shared_binding(cfg: &BrokerConfig, port: i32, visibility: &str) -> RatholeBinding {
+        let tunnel_id = Uuid::new_v4();
+        RatholeBinding {
+            tunnel_id,
+            hostname: cfg.hostname_for(&tunnel_id),
+            ..binding(&format!("tunnel_{port}"), port, "", visibility)
+        }
+    }
+
+    type HostMatcher = Box<dyn Fn(&str) -> bool>;
+
+    /// Each router's name and a matcher built from its rendered rule, the way Traefik reads
+    /// it: `Host` compares case-insensitively, `HostRegexp` runs the regex on the host.
+    fn router_matchers(rendered: &str) -> Vec<(String, HostMatcher)> {
+        router_blocks(rendered)
+            .into_iter()
+            .map(|(name, block)| {
+                let rule = block
+                    .lines()
+                    .find_map(|line| line.trim().strip_prefix("rule: "))
+                    .expect("every router has a rule")
+                    .trim_matches('"')
+                    // YAML double-quoted escapes: `\\` is one backslash.
+                    .replace("\\\\", "\\");
+                let matcher: HostMatcher = if let Some(host) = rule
+                    .strip_prefix("Host(`")
+                    .and_then(|rest| rest.strip_suffix("`)"))
+                {
+                    let host = host.to_string();
+                    Box::new(move |candidate| candidate.eq_ignore_ascii_case(&host))
+                } else {
+                    let pattern = rule
+                        .strip_prefix("HostRegexp(`")
+                        .and_then(|rest| rest.strip_suffix("`)"))
+                        .unwrap_or_else(|| panic!("unexpected rule {rule}"));
+                    let regex = regex::Regex::new(pattern).expect("rendered regex compiles");
+                    Box::new(move |candidate| regex.is_match(candidate))
+                };
+                (name, matcher)
+            })
+            .collect()
+    }
+
+    fn capability_host(label: &str, tunnel: &RatholeBinding, domain: &str) -> String {
+        format!("p-{label}--{}.{domain}", tunnel.tunnel_hex())
+    }
+
+    #[test]
+    fn shared_domain_routers_never_match_each_others_hosts() {
+        let cfg = shared_cfg();
+        let public: Vec<RatholeBinding> = (0..3)
+            .map(|i| shared_binding(&cfg, 20000 + i, "public"))
+            .collect();
+        let private: Vec<RatholeBinding> = (0..3)
+            .map(|i| shared_binding(&cfg, 21000 + i, "private"))
+            .collect();
+        let bindings: Vec<RatholeBinding> = public.iter().chain(&private).cloned().collect();
+        let rendered = render_traefik_dynamic_config(&cfg, &bindings);
+        let routers = router_matchers(&rendered);
+        assert_eq!(routers.len(), bindings.len());
+        let matching = |host: &str| -> Vec<String> {
+            routers
+                .iter()
+                .filter(|(_, matches)| matches(host))
+                .map(|(name, _)| name.clone())
+                .collect()
+        };
+        let label = "abcdefghijklmnopqrstuvwxyz";
+        let other_label = "234567234567234567234567ab";
+
+        for tunnel in &public {
+            let own = vec![sanitize_traefik_name(&tunnel.rathole_service)];
+            // A public host reaches its own router and nothing else.
+            assert_eq!(matching(&tunnel.hostname), own);
+            assert_eq!(matching(&tunnel.hostname.to_ascii_uppercase()), own);
+            // A capability host naming a public tunnel reaches nothing: public tunnels have no
+            // capability router, so no label can open one through the preview path.
+            for label in [label, other_label] {
+                assert!(
+                    matching(&capability_host(label, tunnel, "usercontent.test")).is_empty(),
+                    "capability host for public {}",
+                    tunnel.rathole_service
+                );
+            }
+        }
+        for tunnel in &private {
+            let own = vec![sanitize_traefik_name(&tunnel.rathole_service)];
+            // Its plain `<uuid>.<domain>` host has no router at all.
+            assert!(matching(&tunnel.hostname).is_empty());
+            assert!(!rendered.contains(&tunnel.hostname));
+            // Any well-formed label reaches only this tunnel's capability router, which carries
+            // the forwardAuth check.
+            for label in [label, other_label] {
+                assert_eq!(
+                    matching(&capability_host(label, tunnel, "usercontent.test")),
+                    own
+                );
+            }
+            // Malformed or misplaced capability hosts reach nothing.
+            for host in [
+                capability_host("abc", tunnel, "usercontent.test"),
+                capability_host(label, tunnel, "x.usercontent.test"),
+                capability_host(label, tunnel, "usercontent.test.evil"),
+                format!("x{}", capability_host(label, tunnel, "usercontent.test")),
+                format!("p-{label}--{}.usercontent.test", tunnel.tunnel_id),
+            ] {
+                assert!(matching(&host).is_empty(), "{host}");
+            }
+        }
+        for (name, block) in router_blocks(&rendered) {
+            let private = block.contains("HostRegexp(");
+            assert_eq!(
+                block.contains(&format!("- {PREVIEW_AUTH_MIDDLEWARE}\n")),
+                private,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn shared_domain_needs_one_wildcard_certificate() {
+        let cfg = shared_cfg();
+        let bindings = [
+            shared_binding(&cfg, 20000, "public"),
+            shared_binding(&cfg, 20001, "private"),
+        ];
+        let rendered = render_traefik_dynamic_config(&cfg, &bindings);
+        let blocks = router_blocks(&rendered);
+        assert_eq!(blocks.len(), 2);
+        for (name, block) in &blocks {
+            assert!(
+                block.ends_with(concat!(
+                    "      tls:\n",
+                    "        certResolver: le\n",
+                    "        domains:\n",
+                    "          - main: \"usercontent.test\"\n",
+                    "            sans:\n",
+                    "              - \"*.usercontent.test\"\n",
+                )),
+                "{name}: {block}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_public_binding_never_claims_a_capability_host() {
+        let cfg = shared_cfg();
+        let private = shared_binding(&cfg, 20001, "private");
+        let squatter = binding(
+            "tunnel_squat",
+            20002,
+            &capability_host("abcdefghijklmnopqrstuvwxyz", &private, "usercontent.test"),
+            "public",
+        );
+        let rendered = render_traefik_dynamic_config(
+            &cfg,
+            &[
+                shared_binding(&cfg, 20000, "public"),
+                private,
+                squatter.clone(),
+            ],
+        );
+        assert!(!rendered.contains("tunnel_squat"), "{rendered}");
+        assert!(!rendered.contains(&squatter.hostname));
+        assert!(!rendered.contains("rathole:20002"));
+        assert_eq!(router_blocks(&rendered).len(), 2);
+
+        // With a separate preview domain the reservation only covers that domain.
+        let separate = test_cfg();
+        let rendered = render_traefik_dynamic_config(
+            &separate,
+            &[binding("tunnel_p", 20003, "p-ok.rt.test", "public")],
+        );
+        assert!(rendered.contains("Host(`p-ok.rt.test`)"));
     }
 }

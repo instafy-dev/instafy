@@ -106,9 +106,21 @@ fn a_preview_domain_off_the_public_suffix_list_is_flagged_as_one_shared_cookie_s
         "preview.example.co.uk",
         "instafy-preview.dev",
     ] {
-        let warning = preview_cookie_scope_warning(domain).expect("warned");
-        assert!(warning.contains("Public Suffix List"), "{warning}");
-        assert!(warning.contains(domain), "{warning}");
+        for shared_with_tunnels in [false, true] {
+            let warning =
+                preview_cookie_scope_warning(domain, shared_with_tunnels).expect("warned");
+            assert!(warning.contains("Public Suffix List"), "{warning}");
+            assert!(warning.contains(domain), "{warning}");
+            assert!(
+                warning.contains("until it is, all users' sites share one cookie scope"),
+                "{warning}"
+            );
+            assert_eq!(
+                warning.contains("every public tunnel"),
+                shared_with_tunnels,
+                "{warning}"
+            );
+        }
     }
     // A listed suffix separates each viewer host, and local stacks are exempt.
     for domain in [
@@ -118,8 +130,66 @@ fn a_preview_domain_off_the_public_suffix_list_is_flagged_as_one_shared_cookie_s
         "preview.localhost",
         "127.0.0.1",
     ] {
-        assert_eq!(preview_cookie_scope_warning(domain), None, "{domain}");
+        for shared_with_tunnels in [false, true] {
+            assert_eq!(
+                preview_cookie_scope_warning(domain, shared_with_tunnels),
+                None,
+                "{domain}"
+            );
+        }
     }
+}
+
+#[test]
+fn previews_may_share_the_tunnel_domain_as_one_user_content_domain() {
+    let config = |preview: &str, tunnels: &str| {
+        let mut config = build_app_config(
+            test_origin_private_key(),
+            test_origin_public_key(),
+            "previews-shared-domain",
+        );
+        config.public_app_url = "https://studio.example.com".to_string();
+        config._controller_external_url = Some("https://api.example.com".to_string());
+        config.previews = PreviewSettings::from_values(None, Some(preview), None, Some(tunnels));
+        config
+    };
+    for (preview, tunnels) in [
+        ("usercontent.app", "usercontent.app"),
+        ("UserContent.app.", "usercontent.app"),
+        ("usercontent.app", "*.usercontent.app"),
+        ("sites.usercontent.app", "sites.usercontent.app"),
+        ("preview.localhost", "preview.localhost"),
+    ] {
+        assert!(
+            check_preview_domain(&config(preview, tunnels)).is_ok(),
+            "{preview} / {tunnels}"
+        );
+    }
+    // Above, below or next to the tunnel domain is still refused, and so is a
+    // shared domain that shares a cookie scope with Studio or the API.
+    for (preview, tunnels, refused_by) in [
+        ("p.usercontent.app", "usercontent.app", "TUNNEL_DOMAIN"),
+        ("usercontent.app", "rt.usercontent.app", "TUNNEL_DOMAIN"),
+        ("p.usercontent.app", "rt.usercontent.app", "TUNNEL_DOMAIN"),
+        (
+            "usercontent.example.com",
+            "usercontent.example.com",
+            "PUBLIC_APP_URL",
+        ),
+        ("example.com", "example.com", "PUBLIC_APP_URL"),
+    ] {
+        let error = check_preview_domain(&config(preview, tunnels)).expect_err("overlap refused");
+        assert!(error.to_string().contains("cookie scope"), "{error}");
+        assert!(error.to_string().contains(refused_by), "{error}");
+    }
+    let mut api_only = config("sites.api-host.net", "sites.api-host.net");
+    api_only.public_app_url = "https://studio.example.com".to_string();
+    api_only._controller_external_url = Some("https://controller.api-host.net".to_string());
+    let error = check_preview_domain(&api_only).expect_err("next to the API refused");
+    assert!(
+        error.to_string().contains("CONTROLLER_EXTERNAL_URL"),
+        "{error}"
+    );
 }
 
 #[test]

@@ -108,8 +108,9 @@ Every part fails closed. A missing setting turns previews off; it never makes th
 | CLI (in the space's machine) | `INSTAFY_PREVIEW_DENY_PORTS` (comma-separated), checked before the controller is asked | only the CLI's built-in list of the machine's own service ports |
 
 The broker reports what it serves at `GET /capabilities` (`{privatePreviews, previewDomain}`), and the controller
-checks it before it creates anything. The controller refuses to start when `PREVIEW_DOMAIN` is the Studio, API or
-`TUNNEL_DOMAIN` host or sits under one of them.
+checks it before it creates anything. The controller refuses to start when `PREVIEW_DOMAIN` shares a cookie scope with
+the Studio or API host: equal to it, under or above it, or under the same registrable domain. `PREVIEW_DOMAIN` may be
+`TUNNEL_DOMAIN` itself (see [One user-content domain](#one-user-content-domain)); under, above or next to it is refused.
 
 Where a part is older or unconfigured:
 
@@ -119,6 +120,29 @@ Where a part is older or unconfigured:
   tunnel only when asked.
 - Studio: no card means no tab. A pane whose preview the controller no longer serves says "Previews are not available
   here".
+
+### One user-content domain
+
+Public tunnels and private previews can share one domain: set `PREVIEW_DOMAIN` (broker, ingress sidecar and controller)
+to the same value as `TUNNEL_DOMAIN`. Both kinds of host are then a single label under it, and neither reaches the
+other's router:
+
+| Host | Routed to |
+|---|---|
+| `<tunnel id, 32 hex>.<domain>` | a public tunnel's `Host` router. A private tunnel has no router on this host. |
+| `p-<26 base32>--<tunnel hex>.<domain>` | that private tunnel's anchored `HostRegexp` router, behind forwardAuth. A public tunnel has none, and a public binding whose stored hostname starts with `p-` under the domain gets no router. |
+
+The broker's tests compile the rendered Traefik rules and check that no host of one shape matches a router of the other.
+
+- **TLS.** Every router asks for the same certificate, `<domain>` plus `*.<domain>`: one wildcard.
+- **DNS.** The broker writes `A/AAAA` records for each `<tunnel id>.<domain>`. Capability hosts are minted by the
+  controller and have no records of their own, so add one wildcard `*.<domain>` record that reaches the ingress serving
+  private tunnels. Names with their own records keep them; the wildcard only answers the rest.
+- **Cookies.** Use one registrable domain dedicated to user content, never a name under Studio's or the API's domain
+  (the controller refuses that), and list it on the [Public Suffix List](https://publicsuffix.org/). Until it is listed,
+  all users' sites on it, previews and public tunnels alike, share one cookie scope: any of them can set
+  `Domain=<domain>` cookies the others receive, and they count as same-site to each other. The controller logs a
+  warning at startup while the domain is not a public suffix.
 
 ### Local stack
 
@@ -335,9 +359,11 @@ Octo this.
 
 None of these block a local or self-hosted merge, because everything is off by default.
 
-- **Preview domain.** Hosted previews need a separate registrable domain, listed on the Public Suffix List with
-  `*.<domain>`, plus wildcard DNS and TLS. Until it is listed, previews on that domain can set cookies for each other.
-  The controller's startup check keeps the domain off the Studio, API and tunnel hosts.
+- **User-content domain.** Hosted previews need a registrable domain dedicated to user content (it may be the tunnel
+  domain, see [One user-content domain](#one-user-content-domain)), listed on the Public Suffix List, plus wildcard
+  DNS and TLS. Until it is listed, all users' sites on that domain can set cookies for each other. The controller's
+  startup check keeps the domain off the Studio and API hosts and off anything above, below or next to the tunnel
+  domain.
 - **Label binding.** Bind each label to the first browser that opens it with a partitioned `__Host-` cookie, so a
   leaked label stops working elsewhere. That needs Traefik 3.1 or later (`addAuthCookiesToResponse`); the stack runs
   3.0. Keep the short idle window as the fallback where partitioned cookies are not supported.
