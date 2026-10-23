@@ -1,6 +1,5 @@
 import { useCallback, useState } from "react";
 import { Button } from "../../../components/Button";
-import { Spinner } from "../../../components/Spinner";
 import { Surface } from "../../../components/Surface";
 import { Text } from "../../../components/Text";
 
@@ -50,16 +49,16 @@ export function NotificationsNudgeBubble({
       tone="default"
       radius="2xl"
       shadow="sm"
-      className="w-full max-w-[32rem] border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-200"
+      className="w-full max-w-lg px-3 py-2.5"
       data-testid="notifications-nudge-bubble"
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <Text as="p" variant="bodyStrong" className="truncate">
+          <Text as="p" variant="bodyStrong" tone="primary" role={phase === "enabled" ? "status" : undefined}>
             {phase === "enabled" ? "Notifications enabled." : title}
           </Text>
           {phase === "enabled" ? null : (
-            <Text as="p" variant="caption" tone="muted" className="mt-0.5">
+            <Text as="p" variant="caption" tone={phase === "error" ? "danger" : "muted"} role={phase === "error" ? "alert" : phase === "requesting" ? "status" : undefined} className="mt-0.5">
               {phase === "requesting"
                 ? "Requesting permission…"
                 : phase === "error"
@@ -74,19 +73,15 @@ export function NotificationsNudgeBubble({
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <Button
             variant="primary"
-            size="xs"
-            radius="full"
+            preset="inline"
             onPress={() => void handleEnable()}
-            isDisabled={isBusy}
-            className="gap-2"
+            isPending={isBusy}
           >
-            {isBusy ? <Spinner size="sm" /> : null}
             Enable
           </Button>
           <Button
             variant="ghost"
-            size="xs"
-            radius="full"
+            preset="inline"
             onPress={onDismiss}
             isDisabled={isBusy}
           >

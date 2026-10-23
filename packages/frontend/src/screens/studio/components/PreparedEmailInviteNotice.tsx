@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { Button } from "../../../components/Button";
-import { Spinner } from "../../../components/Spinner";
-import { Text } from "../../../components/Text";
+import { InlineNotice } from "../../../components/InlineNotice";
 import { writeClipboardText } from "../../../runtime/runtimeMenuShared";
 import {
   buildPreparedEmailInviteSharePayload,
@@ -72,42 +71,35 @@ export function PreparedEmailInviteNotice({
   };
 
   return (
-    <div
-      className="space-y-2.5 rounded-2xl border border-amber-300/50 bg-amber-50/80 p-3 dark:border-amber-300/20 dark:bg-amber-300/[0.06]"
+    <InlineNotice
+      tone="warning"
+      role="status"
+      title={<span className="break-words">Invite prepared for {invite.email}</span>}
       data-testid={`${testIdPrefix}-prepared`}
-    >
-      <div className="min-w-0">
-        <Text variant="bodyStrong" tone="primary" className="truncate text-sm">
-          Invite prepared for {invite.email}
-        </Text>
-        <Text as="p" variant="caption" tone="muted" className="mt-1 leading-snug">
-          Instafy has not sent an email. Share it now or copy the secure accept link.
-        </Text>
-      </div>
-      <div className="flex flex-col gap-2 sm:flex-row">
+      actions={<>
         <Button
           type="button"
           variant="primary"
           preset="inline"
           onPress={() => void handleShare()}
-          isDisabled={sharePending}
+          isPending={sharePending}
           data-testid={`${testIdPrefix}-share`}
         >
-          {sharePending ? <Spinner aria-hidden="true" tone="primary" size="xs" /> : null}
           {shareAvailable ? "Share invite" : "Open email"}
         </Button>
         <Button
           type="button"
-          variant="outline"
+          variant="ghost"
           preset="inline"
           onPress={() => void handleCopy()}
-          isDisabled={copyPending}
+          isPending={copyPending}
           data-testid={`${testIdPrefix}-copy`}
         >
-          {copyPending ? <Spinner aria-hidden="true" tone="primary" size="xs" /> : null}
           Copy link
         </Button>
-      </div>
-    </div>
+      </>}
+    >
+      Instafy has not sent an email. Share it now or copy the secure accept link.
+    </InlineNotice>
   );
 }

@@ -344,7 +344,7 @@ jobs:
           # installed or changed by the local test script on a user's machine.
           sudo ln -sf "$chromium_path" /usr/bin/chromium
       - name: Install fixture display, database and compiler prerequisites
-        timeout-minutes: 5
+        timeout-minutes: 10
         shell: bash
         run: |
           set -euo pipefail
@@ -498,7 +498,7 @@ jobs:
           # installed or changed by the local test script on a user's machine.
           sudo ln -sf "$chromium_path" /usr/bin/chromium
       - name: Install fixture display, database and compiler prerequisites
-        timeout-minutes: 5
+        timeout-minutes: 10
         shell: bash
         run: |
           set -euo pipefail

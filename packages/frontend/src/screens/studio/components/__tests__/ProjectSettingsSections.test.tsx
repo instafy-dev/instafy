@@ -191,10 +191,36 @@ describe("ProjectSettingsSections", () => {
     })} />));
 
     const guests = container.querySelector('[data-testid="project-guests-section"]');
-    expect(guests?.querySelector('[role="alert"]')?.textContent).toBe("Unable to load guests.");
+    expect(guests?.querySelector('[role="alert"]')?.textContent).toContain("Unable to load guests.");
     expect(guests?.textContent).not.toContain("No guests have accepted access yet");
     const retry = [...guests!.querySelectorAll("button")].find((button) => button.textContent === "Retry");
     await act(async () => retry!.click());
     expect(onRetryProjectMembers).toHaveBeenCalledOnce();
+  });
+
+  it("announces an invite conflict once and keeps both choices disabled while updating", async () => {
+    const props = createProps({
+      projectInviteRoleConflict: { invitationId: "pending-1", email: "alex@example.test", existingRole: "viewer", requestedRole: "builder" },
+    });
+    await act(async () => root.render(<ProjectSettingsSections {...props} />));
+    const notice = container.querySelector('[data-testid="project-invite-role-conflict"]')!;
+    expect(notice.getAttribute("role")).toBe("status");
+    expect(notice.textContent).toContain("alex@example.test already has a pending viewer invite.");
+    const [change, keep] = [...notice.querySelectorAll("button")];
+    await act(async () => change.click());
+    expect(props.onApplyProjectInviteRoleConflict).toHaveBeenCalledOnce();
+    await act(async () => root.render(<ProjectSettingsSections {...props} projectInviteConflictPending />));
+    expect(change.disabled).toBe(true);
+    expect(keep.disabled).toBe(true);
+    await act(async () => { change.click(); keep.click(); });
+    expect(props.onApplyProjectInviteRoleConflict).toHaveBeenCalledOnce();
+    expect(props.onDismissProjectInviteRoleConflict).not.toHaveBeenCalled();
+  });
+
+  it("shows the invitation-list failure in its own section only", async () => {
+    await act(async () => root.render(<ProjectSettingsSections {...createProps({ projectInvitationsError: "Unable to load pending invitations." })} />));
+    const notices = [...container.querySelectorAll('[role="alert"]')].filter((notice) => notice.textContent?.includes("Unable to load pending invitations."));
+    expect(notices).toHaveLength(1);
+    expect(notices[0].closest("section")?.textContent).toContain("Pending invitations");
   });
 });

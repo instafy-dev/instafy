@@ -157,6 +157,29 @@ Cancel remains the initial focus. Team settings errors and invitation conflicts 
 states use `LoadingStatus`; permissions and the scope of each recovery action stay with
 the owning screen.
 
+Project invitations follow the same notice and action presets as team invitations,
+including pending-role conflicts and prepared email invitations. Notification settings
+use shared text and recovery notices while retaining their saving live region and
+device-permission behavior. The notification prompt uses the shared surface palette;
+its location and available width remain owned by the conversation.
+
+Automation editors use the shared editor frame, responsive body/footer gutters and
+`SettingsFormActions`. Schedule fields and weekday choices keep their own arrangement.
+The phone editor retains `MobileFocusDialog`, so its keyboard-aware scroll area and
+short-viewport footer behavior remain consistent with other focused forms.
+
+Space-switcher utilities and shared local-tab controls use the same quiet utility-button
+shape and 8px spacing as other toolbars. The remote keyboard's inline trigger is a
+toolbar utility; its standalone floating trigger retains its separate shape. Navigation
+rows retain their intentional 48px targets, and identity avatars retain their own shapes.
+In a shared browser pane narrower than 360px, Release moves into More so the current
+view mode stays readable. This uses the pane width, including panes inside wide screens.
+
+The `style-followups-settings`, `style-followups-controls` and
+`style-followups-automation` fixtures under `packages/frontend/tests/fixtures` exercise
+these production components with inert data. Their READMEs document interaction checks;
+the shared fixture guide covers accurate mobile/desktop before-and-after captures.
+
 Secrets uses the comfortable page width and a plain, wrapping list. Recovery uses one
 `InlineNotice` with its Retry action; agent choices keep a bounded scroll area within
 the editor. Secrets and AI connection editors opt all shared sections into responsive

@@ -1246,6 +1246,12 @@ lockfile, with no old-lock or cross-architecture fallback. Only the Studio child
 saves it, from hosted `main`; the profile child restores that entry and never
 saves.
 
+The display, database and compiler prerequisite installation has a ten-minute
+step limit inside each child's unchanged 30-minute budget. Slow but progressing
+APT downloads can exceed five minutes. Both steps retain two download retries,
+30-second HTTP/HTTPS timeouts, noninteractive installation and explicit package
+verification; an incomplete installation still fails before the fixture runs.
+
 The two restore-only compiler steps used by self-hosted runs set
 `SEGMENT_DOWNLOAD_TIMEOUT_MINS=2`; the Studio step also serves hosted runs
 outside `main`.

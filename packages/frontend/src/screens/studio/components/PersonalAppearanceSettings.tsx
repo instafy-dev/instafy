@@ -1,3 +1,4 @@
+import { Text } from "../../../components/Text";
 import { SegmentedControl } from "../../../components/SegmentedControl";
 import { SettingsFormLayout } from "../../../components/SettingsFormLayout";
 import { useTheme, type ThemeMode } from "../../../theme/ThemeProvider";
@@ -9,7 +10,7 @@ export function PersonalAppearanceSettings() {
     <SettingsFormLayout data-testid="personal-appearance-settings">
       <SettingsSection title="Appearance" description="Choose how Instafy looks on this device. Changes apply immediately.">
         <div className="max-w-sm">
-          <p id="appearance-theme-label" className="mb-2 text-sm font-medium text-slate-900 dark:text-slate-100">Theme</p>
+          <Text id="appearance-theme-label" variant="bodyStrong" tone="primary" className="mb-2">Theme</Text>
           <SegmentedControl<ThemeMode>
             aria-labelledby="appearance-theme-label"
             value={themeMode}
@@ -21,7 +22,7 @@ export function PersonalAppearanceSettings() {
               { value: "dark", label: "Dark", testId: "profile-preference-theme-dark" },
             ]}
           />
-          <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">System follows your device’s light or dark appearance.</p>
+          <Text variant="body" tone="muted" className="mt-2">System follows your device’s light or dark appearance.</Text>
         </div>
       </SettingsSection>
     </SettingsFormLayout>

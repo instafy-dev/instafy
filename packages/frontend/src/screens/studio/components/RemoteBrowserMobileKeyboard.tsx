@@ -8,6 +8,7 @@ import {
 } from "react";
 import { flushSync } from "react-dom";
 import { InputField, Xmark } from "iconoir-react";
+import { IconButton } from "../../../components/Button";
 
 import { cdpScreencastModifiers } from "./cdpScreencastProtocol";
 import { remoteBrowserKeyDownText, type RemoteBrowserVirtualInputMessage } from "./remoteBrowserInput";
@@ -355,16 +356,26 @@ export function RemoteBrowserMobileKeyboard({
             <Xmark aria-hidden="true" className="h-5 w-5" />
           </button>
         </div>
+      ) : inlineTrigger ? (
+        <IconButton
+          aria-label="Open remote keyboard"
+          className="pointer-events-auto"
+          variant="ghost"
+          data-testid="shared-browser-mobile-keyboard-open"
+          onPress={handleOpen}
+        >
+          <InputField aria-hidden="true" className="h-4 w-4" />
+        </IconButton>
       ) : (
         <button
           aria-label="Open remote keyboard"
-          className={`pointer-events-auto inline-flex h-11 min-w-11 items-center justify-center gap-1.5 rounded-full text-xs font-semibold text-slate-700 hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/50 dark:text-slate-200 ${inlineTrigger ? "w-11" : "border border-slate-300/80 bg-white/95 px-3 shadow-lg backdrop-blur dark:border-slate-700 dark:bg-slate-950/95"}`}
+          className="pointer-events-auto inline-flex h-11 min-w-11 items-center justify-center gap-1.5 rounded-full border border-slate-300/80 bg-white/95 px-3 text-xs font-semibold text-slate-700 shadow-lg backdrop-blur hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/50 dark:border-slate-700 dark:bg-slate-950/95 dark:text-slate-200"
           data-testid="shared-browser-mobile-keyboard-open"
           onClick={handleOpen}
           type="button"
         >
           <InputField aria-hidden="true" className="h-4 w-4" />
-          {inlineTrigger ? null : <span>Keyboard</span>}
+          <span>Keyboard</span>
         </button>
       )}
     </div>

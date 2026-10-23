@@ -80,7 +80,6 @@ export function StudioSidebarMobileDrillIn({
         <IconButton
           variant="ghost"
           size="sm"
-          radius="full"
           aria-label={backLabel}
           data-testid={backTestId}
           onPress={goBack}
@@ -91,7 +90,7 @@ export function StudioSidebarMobileDrillIn({
         <Text as="h2" id={titleId} variant="bodyStrong" tone="primary" className="min-w-0 flex-1 truncate">
           {title}
         </Text>
-        {headerActionsRef ? <div ref={headerActionsRef} className="flex shrink-0 items-center gap-1" /> : null}
+        {headerActionsRef ? <div ref={headerActionsRef} className="flex shrink-0 items-center gap-2" /> : null}
       </div>
       <div
         className="min-h-0 flex-1 overflow-y-auto px-1"

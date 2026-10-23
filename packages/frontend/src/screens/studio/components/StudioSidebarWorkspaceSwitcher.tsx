@@ -243,12 +243,11 @@ export function StudioSidebarWorkspaceSwitcher({
   );
 
   const spaceActions = (
-    <div className="flex items-center gap-1">
+    <div className="flex items-center gap-2">
       {canSearchSpaces ? (
         <IconButton
           variant="ghost"
           size="sm"
-          radius="full"
           aria-label={showProjectSearch ? "Clear space search" : "Search spaces"}
           data-testid="sidebar-project-search-toggle"
           onPress={onToggleProjectSearch}
@@ -261,7 +260,6 @@ export function StudioSidebarWorkspaceSwitcher({
         <IconButton
           variant="ghost"
           size="sm"
-          radius="full"
           aria-label="Current space settings"
           data-testid="sidebar-project-settings"
           onPress={onOpenProjectSettings}
@@ -274,7 +272,6 @@ export function StudioSidebarWorkspaceSwitcher({
         <IconButton
           variant="ghost"
           size="sm"
-          radius="full"
           aria-label="New space"
           data-testid="sidebar-project-new"
           onPress={onCreateProject}
@@ -292,12 +289,11 @@ export function StudioSidebarWorkspaceSwitcher({
         label="Team"
         headerClassName="pr-0"
         actions={
-          <div className="flex items-center gap-1">
-            {onOpenOrgOverview ? <IconButton variant="ghost" size="sm" radius="full" aria-label="Team overview" data-testid="sidebar-org-overview-button" onPress={onOpenOrgOverview} tone="muted"><Group className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" /></IconButton> : null}
+          <div className="flex items-center gap-2">
+            {onOpenOrgOverview ? <IconButton variant="ghost" size="sm" aria-label="Team overview" data-testid="sidebar-org-overview-button" onPress={onOpenOrgOverview} tone="muted"><Group className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" /></IconButton> : null}
             <IconButton
               variant="ghost"
               size="sm"
-              radius="full"
               aria-label="Team settings"
               data-testid="sidebar-org-settings-button"
               isDisabled={!onOpenOrgSettings}
@@ -313,7 +309,6 @@ export function StudioSidebarWorkspaceSwitcher({
               <IconButton
                 variant="ghost"
                 size="sm"
-                radius="full"
                 aria-label="New team"
                 data-testid="sidebar-org-new"
                 onPress={onCreateOrg}
@@ -338,7 +333,7 @@ export function StudioSidebarWorkspaceSwitcher({
           data-testid="sidebar-project-discovery-error">
           <p role="status">{projectsError}</p>
           {onRetryProjects ? (
-            <Button variant="outline" size="xs" onPress={onRetryProjects}
+            <Button variant="outline" preset="inline" onPress={onRetryProjects}
               isDisabled={projectsRefreshing} data-testid="sidebar-project-discovery-retry">
               {projectsRefreshing ? "Retrying…" : "Retry"}
             </Button>
