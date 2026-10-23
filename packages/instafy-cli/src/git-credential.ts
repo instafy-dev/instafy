@@ -98,6 +98,9 @@ function configuredGitHosts(): string[] {
   ].filter((host): host is string => Boolean(host));
 }
 
+/** The local stack's git service names: `git-edge`, `git-shard` and `git-shard-<n>`, with no dots. */
+const LOCAL_STACK_GIT_HOST = /^(?:git-edge|git-shard(?:-[a-z0-9]+)*)$/;
+
 function isAllowedGitHost(rawHost: string | null): boolean {
   if (!rawHost) return false;
   const normalized = normalizeHost(rawHost);
@@ -118,8 +121,9 @@ function isAllowedGitHost(rawHost: string | null): boolean {
     return true;
   }
 
-  // Local dev stack defaults to docker-compose service names.
-  if (normalized.hostname === "git-edge" || normalized.hostname.startsWith("git-shard")) {
+  // Local dev stack: docker-compose service names, which are single labels (git-edge, git-shard-0). A name with a
+  // dot is a real DNS host anyone can register, so it never matches here.
+  if (LOCAL_STACK_GIT_HOST.test(normalized.hostname)) {
     return true;
   }
 

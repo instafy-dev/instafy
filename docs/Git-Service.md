@@ -254,7 +254,8 @@ git clone "<git-base>/<uuid>.git"
 
 `instafy login` installs a git credential helper which mints short-lived scoped tokens automatically when Git asks for credentials. It answers
 only exact hosts: the hosted git service (`git.instafy.dev`), the configured controller's host, the host of
-`ORIGIN_GIT_REMOTE_URL`, loopback and the local stack's `git-edge`/`git-shard-*` names. Name any other git host in
+`ORIGIN_GIT_REMOTE_URL`, loopback and the local stack's single-label service names (`git-edge`, `git-shard`, `git-shard-<n>`).
+A dotted host that merely starts with one of those names is not answered. Name any other git host in
 `INSTAFY_GIT_HOSTS` (comma-separated).
 
 ### Controller-only disposable repository cleanup
