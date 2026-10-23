@@ -430,6 +430,11 @@ PROXY_UPSTREAM_CHATGPT_ENDPOINT=http://host.docker.internal:8790/backend-api/cod
   docker compose -p instafy-runtime -f docker/docker-compose.runtime.yml up -d --no-deps proxy
 ```
 
+A runtime started by the runtime provider from the same Compose file gets its own `proxy`
+service, and its model requests go through that one, not the shared proxy. To send those through
+the fake upstream too, start the provider with the same `PROXY_UPSTREAM_CHATGPT_ENDPOINT`; only
+runtimes started after that use it.
+
 For an API key, use `--target https://api.openai.com` and `CODEX_OPENAI_ENDPOINT` (or
 `PROXY_UPSTREAM_OPENAI_ENDPOINT` for the Compose proxy) with `/v1/responses`. Rules:
 
@@ -438,8 +443,9 @@ For an API key, use `--target https://api.openai.com` and `CODEX_OPENAI_ENDPOINT
   proxy streams on stays a short rate limit, which a team agent is started again after.
 - `--fail-rate F` refuses that fraction of requests with `--retry-after` seconds (default 10).
 - `--window A-B` applies the rules only from A to B seconds after they were loaded (repeatable).
-- `--scope new` limits only requests that start a conversation (a Responses `input` of system,
-  developer and user messages only); requests that continue one always pass. `--scope all`
+- `--scope new` limits only requests that start a conversation (a Responses `input` with nothing
+  the model made yet: no assistant message, reasoning, tool call or tool result; Codex's
+  `additional_tools` item may be there); requests that continue one always pass. `--scope all`
   (the default) limits every POST, or every POST under `--path`.
 - `--rules FILE` reads the same keys (`limit`, `failRate`, `windows`, `scope`, `path`,
   `retryAfter`) from a JSON file, again whenever it changes, so a run can start with plain
