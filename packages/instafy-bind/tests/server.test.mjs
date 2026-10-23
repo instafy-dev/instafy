@@ -429,6 +429,68 @@ test("cancel on a shared job only detaches the caller's id", async () => {
   }
 });
 
+test("a same-name cookie another host planted does not shadow the site cookie", async () => {
+  const dir = site();
+  const binder = await startBinder(dir);
+  try {
+    const s = binder.sites[0];
+    // A page on a sibling host can set `Domain=<parent>` cookies; the browser then sends both, the planted one first
+    // when its Path is longer.
+    const cookie = `${s.cookie}=${"p".repeat(32)}; ${s.cookie}=${s.token}`;
+    assert.equal((await fetch(`${binder.url}/__bind/records`, { headers: { cookie } })).status, 200);
+    const intent = await postIntent(binder, intentMessage("hello", { name: "planted" }), { token: null, headers: { cookie, origin: binder.url } });
+    assert.equal(intent.status, 202);
+    const onlyPlanted = `${s.cookie}=${"p".repeat(32)}; __Host-${s.cookie}=${"q".repeat(32)}`;
+    assert.equal((await fetch(`${binder.url}/__bind/records`, { headers: { cookie: onlyPlanted } })).status, 401);
+    const wrongHeader = await fetch(`${binder.url}/__bind/records`, { headers: { cookie: `${s.cookie}=${s.token}`, "x-bind-token": "x".repeat(32) } });
+    assert.equal(wrongHeader.status, 401, "an explicit wrong token is not rescued by a cookie");
+  } finally {
+    await binder.close();
+    cleanup(dir);
+  }
+});
+
+function rawRequest(port, { method = "GET", path: reqPath, headers }) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: "127.0.0.1", port, path: reqPath, method, headers }, (res) => {
+      res.resume();
+      res.on("end", () => resolve(res));
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+test("on HTTPS the site cookie is Secure, and __Host- for a site at the root", async () => {
+  const dir = site();
+  const binder = await startBinder(dir, { trustProxy: true, publicOrigins: ["https://site.tunnel.test"] });
+  try {
+    const s = binder.sites[0];
+    const port = new URL(binder.url).port;
+    const plain = await fetch(`${binder.url}/__bind/session`, { method: "POST", headers: { "x-bind-token": s.token } });
+    assert.match(plain.headers.get("set-cookie"), new RegExp(`^${s.cookie}=`), "plain HTTP keeps the unprefixed cookie");
+    assert.doesNotMatch(plain.headers.get("set-cookie"), /Secure/);
+
+    for (const headers of [
+      { "x-forwarded-proto": "https" },
+      { host: "site.tunnel.test" },
+    ]) {
+      const res = await rawRequest(port, { method: "POST", path: "/__bind/session", headers: { "x-bind-token": s.token, ...headers } });
+      assert.equal(res.statusCode, 200);
+      const setCookie = String(res.headers["set-cookie"]);
+      assert.match(setCookie, new RegExp(`^__Host-${s.cookie}=`), JSON.stringify(headers));
+      assert.match(setCookie, /; Path=\/;/);
+      assert.match(setCookie, /; Secure$/);
+      assert.doesNotMatch(setCookie, /Domain=/i);
+      const records = await fetch(`${binder.url}/__bind/records`, { headers: { cookie: setCookie.split(";")[0] } });
+      assert.equal(records.status, 200);
+    }
+  } finally {
+    await binder.close();
+    cleanup(dir);
+  }
+});
+
 test("pages without the bind client: ?k= sets a site cookie that authorises intents and events; no alias header", async () => {
   const dir = site();
   fs.writeFileSync(path.join(dir, "index.html"), "<!doctype html><title>page</title><script type=module src=app/app.js></script>");
