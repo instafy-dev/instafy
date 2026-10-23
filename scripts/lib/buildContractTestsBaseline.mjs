@@ -18,6 +18,7 @@ export const ADDED_BUILD_CONTRACT_TESTS = [
   "scripts/lib/localTunnelBroker.test.mjs",
   "scripts/octo-turn-grade.test.mjs",
   "scripts/fake-rate-limit-upstream.test.mjs",
+  "scripts/octo-turn-release.test.mjs",
 ];
 
 export const addedBuildContractTestLine = (file) => `            ${file} \\\n`;
