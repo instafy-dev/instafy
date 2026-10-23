@@ -166,6 +166,72 @@ export function promptContextOf(job) {
   };
 }
 
+/** The items a team planned a lane for: each lane's label, a lane for several stops ("Hualien and Taitung") counting
+ *  as each of them, from every plan its lead or checkpoint emitted (the run log's final message). The builder is not an
+ *  item. When no plan message survived (a long run log keeps only its tail), the lanes' handles stand in, marked
+ *  `fromHandle`. Exported for the tests. */
+export function teamItemsOf(jobs) {
+  const items = [];
+  const add = (name, fromHandle = false) => {
+    const clean = String(name ?? "").trim();
+    if (clean && !items.some((x) => normItem(x.name) === normItem(clean))) items.push({ name: clean, ...(fromHandle ? { fromHandle } : {}) });
+  };
+  for (const job of jobs ?? []) {
+    if (job.agentRole === "worker") continue;
+    for (const artifact of artifactsOf(job, "codex/run-log")) {
+      for (const event of artifact.events ?? []) {
+        const text = event?.item?.type === "agent_message" ? event.item.text : null;
+        if (typeof text !== "string" || !text.includes("multi_agent_plan")) continue;
+        let message;
+        try {
+          message = JSON.parse(text);
+        } catch {
+          continue;
+        }
+        for (const action of Array.isArray(message?.actions) ? message.actions : []) {
+          if (action?.type !== "multi_agent_plan") continue;
+          for (const agent of Array.isArray(action.agents) ? action.agents : []) {
+            const label = typeof agent?.label === "string" ? agent.label : "";
+            if (!label || agent?.handle === "build" || /\bbuilder\b/i.test(label)) continue;
+            for (const part of label.split(/\s+(?:and|&|\+)\s+|\s*[,/、]\s*/i)) add(part);
+          }
+        }
+      }
+    }
+  }
+  if (!items.length) {
+    // a builder owns a folder (`sites/<slug>/**`) where lanes own one file each
+    const builds = (job) => job.planStage === "then" || job.agentHandle === "build" || (Array.isArray(job.ownedPaths) && job.ownedPaths.some((p) => /\*/.test(String(p))));
+    for (const job of jobs ?? []) {
+      if (job.agentRole === "worker" && job.agentHandle && !builds(job)) add(String(job.agentHandle).replace(/[-_]+/g, " "), true);
+    }
+  }
+  return items;
+}
+
+// A line where the page says what it could not show ("Not found yet: Hualien, Taitung") names an item without
+// showing it.
+const MISSING_LINE_RE = /^\s*(not found yet|missing|not on the (map|page)( yet)?|could ?n[o']t (find|add|place)|unavailable)\b/i;
+
+/** Which team items the page's text leaves out. A handle stands for its item when the text names it, or names every
+ *  word of it ("hualien taitung" for a lane over two stops). Exported for the tests. */
+export function itemsMissingFrom(text, items) {
+  const shown = String(text ?? "").split(/\r?\n/).filter((line) => !MISSING_LINE_RE.test(line)).join("\n");
+  return items.filter((item) => !(textNamesItem(shown, item.name)
+    || (item.fromHandle && item.name.split(/\s+/).filter((w) => w.length >= 3).every((w) => textNamesItem(shown, w)))));
+}
+
+const normItem = (text) => String(text ?? "").normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+
+/** Does the page's text name the item, as whole words in any case and punctuation (a script without spaces between
+ *  words: as a substring)? */
+export function textNamesItem(text, item) {
+  const want = normItem(item);
+  if (!want) return false;
+  const hay = ` ${normItem(text)} `;
+  return /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(want) ? hay.includes(want) : hay.includes(` ${want} `);
+}
+
 export function usageOf(jobs) {
   const total = { input: 0, cachedInput: 0, output: 0, reasoningOutput: 0 };
   const byPhase = {};
@@ -593,6 +659,7 @@ export function caseMetrics(evidence) {
     replyStats: replyStats(replyText),
     replySourceLinks: replySourceLinks(replyText),
     siteShape: siteShapeOf(ui),
+    teamItems: teamItemsOf(jobs),
     siteLanguage: typeof ui.siteText === "string" ? detectLanguage(ui.siteText).language : null,
     siteFilePaths: typeof ui.siteText === "string" ? hasFilePaths(ui.siteText) : null,
     credits: creditsOf(evidence, jobs, usage),
@@ -699,6 +766,16 @@ export function gradeCase(caseDef, evidence) {
     // The kind of page asked for: a table, a ranking, a checklist, a timeline. Counted, not judged.
     check(checks, `site_shape:${key}`, "must", ui.opened === true && m.siteShape[key] >= min,
       `${m.siteShape[key]} ${key}, want >= ${min}${ui.opened ? "" : " (site not opened)"}`);
+  }
+  if (expect.siteRequired && m.teamItems.length) {
+    // Every item the team researched (a stop, a product) is on the page the person opens: a builder that loses one
+    // to a slow lookup must not ship a page that quietly leaves it out.
+    const text = typeof ui.siteText === "string" ? ui.siteText : null;
+    const missing = text === null ? [] : itemsMissingFrom(text, m.teamItems).map((item) => item.name);
+    // (not opened, or its text not saved: n/a here; site_opens says so)
+    check(checks, "team_items_on_site", "must", ui.opened === true && text !== null ? missing.length === 0 : null,
+      text === null ? (ui.opened ? "page text not saved" : `site not opened; ${m.teamItems.length} item(s) planned`)
+        : missing.length ? `not on the page: ${missing.join(", ")} (${m.teamItems.length - missing.length} of ${m.teamItems.length} shown)` : `all ${m.teamItems.length} shown`);
   }
   if (expect.map) {
     // Any map library counts once its container rendered with a size.

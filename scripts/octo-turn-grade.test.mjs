@@ -18,6 +18,8 @@ import {
   gradeCase,
   gradeRunDir,
   hasFilePaths,
+  itemsMissingFrom,
+  teamItemsOf,
   jobsQuery,
   jobsSettled,
   loadCases,
@@ -694,4 +696,60 @@ test("a continuation turn's rate-limit retry is not another continuation, and a 
 test("the jobs query reads the continuation and the agent", () => {
   const q = jobsQuery(PROJECT, SENT);
   for (const k of ['"planContinuation"', '"agentHandle"']) assert.ok(q.includes(k), k);
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Every item the team researched is on the page (in our team runs a trip map left out two of the six stops the person
+// asked for, and the grader passed the page).
+
+const planMessage = (agents) => ({
+  type: "item.completed",
+  item: { type: "agent_message", text: JSON.stringify({ summary: "Researching in parallel.", files: [], actions: [{ type: "multi_agent_plan", mode: "write_scoped",
+    agents, then: { handle: "build", label: "Builder", prompt: "build" } }] }) },
+});
+const lane = (handle, label) => ({ handle, label, prompt: `Research ${label}`, needsTools: true });
+const TEAM_CASE = {
+  id: "trip-big", kind: "itinerary",
+  expect: { route: "multi_agent_candidate", siteRequired: true },
+  budget: { seconds: 900, inputTokens: 8_000_000, outputTokens: 150_000 },
+};
+const teamTurn = (siteText, { agents = [lane("north", "Northtown"), lane("east", "Eastport and Southbay"), lane("west", "Westvale")], ui = {} } = {}) => ({
+  sentAt: SENT,
+  jobs: [
+    job({ id: "lead", route: "multi_agent_candidate", commands: [planMessage(agents)], paths: [] }),
+    { ...job({ id: "w1", role: "worker", parent: "lead", route: null, paths: [] }), agentHandle: "north", ownedPaths: ["handoff/t/north.json"] },
+    { ...job({ id: "b1", role: "worker", parent: "lead", route: null, commands: BUILD_COMMANDS }), agentHandle: "build", planStage: "then", ownedPaths: ["sites/t/**"] },
+  ],
+  ui: { ...OPENED_UI, siteText, ...ui },
+});
+
+test("a team's items are its lanes' labels, a lane over several stops counting as each, never the builder", () => {
+  const ev = teamTurn("");
+  assert.deepEqual(teamItemsOf(ev.jobs).map((x) => x.name), ["Northtown", "Eastport", "Southbay", "Westvale"]);
+  // the plan message did not survive (a long run log keeps its tail): the lanes' handles stand in
+  const noPlan = ev.jobs.map((j) => (j.id === "lead" ? job({ id: "lead", route: "multi_agent_candidate", commands: [], paths: [] }) : j));
+  assert.deepEqual(teamItemsOf(noPlan), [{ name: "north", fromHandle: true }]);
+});
+
+test("team_items_on_site fails when the page leaves out an item the team researched, and a 'Not found yet' line does not count as showing it", () => {
+  const all = gradeCase(TEAM_CASE, teamTurn("Mon 1 Nov · Northtown\nWed 3 Nov · Eastport\nFri 5 Nov · Southbay\nSun 7 Nov · Westvale"));
+  assert.equal(byId(all, "team_items_on_site").ok, true, byId(all, "team_items_on_site").detail);
+  const short = gradeCase(TEAM_CASE, teamTurn("Not found yet: Eastport, Southbay\nMon 1 Nov · Northtown\nSun 7 Nov · Westvale"));
+  assert.equal(byId(short, "team_items_on_site").ok, false);
+  assert.equal(byId(short, "team_items_on_site").severity, "must");
+  assert.equal(byId(short, "team_items_on_site").detail, "not on the page: Eastport, Southbay (2 of 4 shown)");
+  assert.ok(short.mustFailures.includes("team_items_on_site"));
+  // a page that did not open is site_opens' failure, not this one's
+  const closed = gradeCase(TEAM_CASE, teamTurn(null, { ui: { opened: false, siteText: undefined } }));
+  assert.equal(byId(closed, "team_items_on_site").ok, null);
+  // a case without a page asks nothing
+  assert.equal(byId(gradeCase({ ...TEAM_CASE, expect: { route: "multi_agent_candidate" } }, teamTurn("")), "team_items_on_site"), undefined);
+});
+
+test("an item counts as shown as whole words in any case and punctuation; a handle also by each of its words", () => {
+  assert.deepEqual(itemsMissingFrom("ASICS Gel Kayano 31 · seen 17 Oct", [{ name: "ASICS Gel-Kayano 31" }]), []);
+  assert.deepEqual(itemsMissingFrom("Hoka Arahi 75", [{ name: "Hoka Arahi 7" }]).map((x) => x.name), ["Hoka Arahi 7"]);
+  assert.deepEqual(itemsMissingFrom("東京 → 京都", [{ name: "京都" }]), []);
+  assert.deepEqual(itemsMissingFrom("Eastport 2 nights\nSouthbay 2 nights", [{ name: "eastport southbay", fromHandle: true }]), []);
+  assert.deepEqual(itemsMissingFrom("Missing: Eastport\nSouthbay", [{ name: "Eastport" }]).map((x) => x.name), ["Eastport"]);
 });
