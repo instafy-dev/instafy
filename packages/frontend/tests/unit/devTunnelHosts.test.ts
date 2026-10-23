@@ -26,11 +26,13 @@ describe("dev server tunnel hosts", () => {
     expect(tunnelAllowedHosts(".rt.test")).toEqual([".rt.test"]);
   });
 
-  it("adds nothing when TUNNEL_DOMAIN is unset or unreadable", () => {
+  it("adds nothing when TUNNEL_DOMAIN is unset, unreadable or a single label", () => {
     expect(tunnelAllowedHosts(undefined)).toEqual([]);
     expect(tunnelAllowedHosts("  ")).toEqual([]);
     expect(tunnelAllowedHosts("rt example")).toEqual([]);
     expect(tunnelAllowedHosts("https://instafy.site")).toEqual([]);
+    expect(tunnelAllowedHosts("site")).toEqual([]);
+    expect(tunnelAllowedHosts("*.site")).toEqual([]);
   });
 
   it("is what Studio's dev server allows, read from TUNNEL_DOMAIN", async () => {

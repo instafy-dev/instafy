@@ -298,16 +298,7 @@ pub(super) fn preview_domain_overlaps(preview: &str, other: &str) -> bool {
 }
 
 pub(super) fn normalize_preview_domain(raw: &str) -> Option<String> {
-    let domain = raw
-        .trim()
-        .trim_start_matches("*.")
-        .trim_matches('.')
-        .to_ascii_lowercase();
-    let valid = !domain.is_empty()
-        && domain
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'));
-    valid.then_some(domain)
+    crate::config::normalize_domain_setting(raw)
 }
 
 pub(super) fn mint_capability_label() -> String {

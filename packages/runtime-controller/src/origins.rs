@@ -6400,6 +6400,7 @@ MCowBQYDK2VwAyEAFQAEX0aYqix3VQUBg05FFISGxhx2Ry93VE51GzM5iXA=
         // Only the configured domain is a tunnel domain.
         for endpoint in [
             "https://abc123.rt.example.com",
+            "https://abc123.rt.instafy.dev",
             "https://abc123.evilinstafy.site",
             "https://instafy.site.example.com",
         ] {
@@ -6439,6 +6440,10 @@ MCowBQYDK2VwAyEAFQAEX0aYqix3VQUBg05FFISGxhx2Ry93VE51GzM5iXA=
         assert!(!origin_endpoint_is_proxyable(
             &config,
             "https://abc123.instafy.site"
+        ));
+        assert!(!origin_endpoint_is_proxyable(
+            &config,
+            "https://abc123.rt.instafy.dev"
         ));
         assert!(origin_endpoint_is_proxyable(
             &config,

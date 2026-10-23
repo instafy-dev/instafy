@@ -923,6 +923,22 @@ pub struct PreviewSettings {
     pub tunnel_domain: Option<String>,
 }
 
+/// A domain setting (`PREVIEW_DOMAIN`, `TUNNEL_DOMAIN`) lowercased, without
+/// a leading `*.` or surrounding dots, or `None` when it is not made of
+/// letters, digits, dots and hyphens.
+pub(crate) fn normalize_domain_setting(raw: &str) -> Option<String> {
+    let domain = raw
+        .trim()
+        .trim_start_matches("*.")
+        .trim_matches('.')
+        .to_ascii_lowercase();
+    let valid = !domain.is_empty()
+        && domain
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'));
+    valid.then_some(domain)
+}
+
 /// The local tunnel broker's default domain. `.test` never resolves on the
 /// public internet, so it is recognised without any setting.
 const LOCAL_TUNNEL_DOMAIN: &str = "rt.test";
@@ -930,7 +946,8 @@ const LOCAL_TUNNEL_DOMAIN: &str = "rt.test";
 impl AppConfig {
     /// Whether `host` is a tunnel host: `TUNNEL_DOMAIN` or a name under it,
     /// or the local broker's `rt.test`. With `TUNNEL_DOMAIN` unset only local
-    /// tunnels count, and an unreadable value matches nothing.
+    /// tunnels count, and a value that is unreadable or a public suffix (see
+    /// [`PreviewSettings::usable_tunnel_domain`]) matches nothing.
     pub fn is_tunnel_host(&self, host: &str) -> bool {
         let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
         let within = |domain: &str| {
@@ -939,22 +956,43 @@ impl AppConfig {
                     .strip_suffix(domain)
                     .is_some_and(|rest| rest.len() > 1 && rest.ends_with('.'))
         };
-        let configured = self
-            .previews
-            .tunnel_domain
-            .as_deref()
-            .map(|value| value.trim().trim_matches('.').to_ascii_lowercase())
-            .filter(|domain| {
-                !domain.is_empty()
-                    && domain
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
-            });
-        within(LOCAL_TUNNEL_DOMAIN) || configured.is_some_and(|domain| within(&domain))
+        within(LOCAL_TUNNEL_DOMAIN)
+            || self
+                .previews
+                .usable_tunnel_domain()
+                .is_some_and(|domain| within(&domain))
     }
 }
 
 impl PreviewSettings {
+    /// `TUNNEL_DOMAIN` read the same way as `PREVIEW_DOMAIN` (lowercase, no
+    /// leading `*.` or surrounding dots), or `None` when it is unset or
+    /// unusable: unreadable, a single label, or a public suffix that is not a
+    /// private one (`site`, `co.uk`), which would make every site under it a
+    /// tunnel. A domain listed in the Public Suffix List's private section,
+    /// as a user-content domain should be, stays usable.
+    pub fn usable_tunnel_domain(&self) -> Option<String> {
+        let domain = normalize_domain_setting(self.tunnel_domain.as_deref()?)?;
+        let public_suffix = psl::suffix(domain.as_bytes()).is_some_and(|suffix| {
+            suffix.as_bytes() == domain.as_bytes() && suffix.typ() != Some(psl::Type::Private)
+        });
+        (domain.contains('.') && !public_suffix).then_some(domain)
+    }
+
+    /// A startup warning when `TUNNEL_DOMAIN` is set but unusable, so public
+    /// tunnels quietly losing Studio's browser view and speech has a cause in
+    /// the log.
+    pub fn tunnel_domain_warning(&self) -> Option<String> {
+        let raw = self.tunnel_domain.as_deref()?;
+        self.usable_tunnel_domain().is_none().then(|| {
+            format!(
+                "TUNNEL_DOMAIN ({raw}) is not a domain that can hold tunnels (it is \
+                 unreadable, a single label or a public suffix), so only local rt.test \
+                 tunnels are proxied; set it to the tunnel broker's domain"
+            )
+        })
+    }
+
     pub(crate) fn from_values(
         base_url: Option<&str>,
         domain: Option<&str>,
@@ -1923,6 +1961,57 @@ mod tests {
     use uuid::Uuid;
 
     const STRONG_SECRET: &str = "0123456789abcdef0123456789abcdef";
+
+    fn tunnel_settings(value: &str) -> super::PreviewSettings {
+        super::PreviewSettings::from_values(None, None, None, Some(value))
+    }
+
+    #[test]
+    fn tunnel_domain_is_read_like_the_preview_domain() {
+        for value in ["instafy.site", "*.Instafy.Site.", ".instafy.site"] {
+            assert_eq!(
+                tunnel_settings(value).usable_tunnel_domain().as_deref(),
+                Some("instafy.site"),
+                "{value}"
+            );
+            assert!(tunnel_settings(value).tunnel_domain_warning().is_none());
+        }
+        let mut config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "test-origin-key",
+        );
+        config.previews = tunnel_settings("*.instafy.site");
+        assert!(config.is_tunnel_host("k7m2qa.instafy.site"));
+        assert!(!config.is_tunnel_host("abc.rt.instafy.dev"));
+    }
+
+    #[test]
+    fn a_public_suffix_or_single_label_tunnel_domain_matches_nothing() {
+        let mut config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "test-origin-key",
+        );
+        for value in ["site", "dev", "co.uk", "*.site", "rt example", "."] {
+            let settings = tunnel_settings(value);
+            assert!(settings.usable_tunnel_domain().is_none(), "{value}");
+            assert!(
+                settings
+                    .tunnel_domain_warning()
+                    .is_some_and(|warning| warning.contains("TUNNEL_DOMAIN")),
+                "{value}"
+            );
+            config.previews = settings;
+            assert!(!config.is_tunnel_host("k7m2qa.site"), "{value}");
+            assert!(!config.is_tunnel_host("evil.co.uk"), "{value}");
+            assert!(!config.is_tunnel_host("dev"), "{value}");
+            assert!(config.is_tunnel_host("abc.rt.test"), "{value}");
+        }
+        assert!(super::PreviewSettings::default()
+            .tunnel_domain_warning()
+            .is_none());
+    }
 
     #[test]
     fn rolling_saves_are_on_unless_switched_off() {

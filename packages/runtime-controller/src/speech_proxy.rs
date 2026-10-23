@@ -421,6 +421,7 @@ mod tests {
         assert!(!allowed("https://evilinstafy.site"));
         assert!(!allowed("https://instafy.site.example.com"));
         assert!(!allowed("https://abc.rt.example.com"));
+        assert!(!allowed("https://abc.rt.instafy.dev"));
         assert!(!allowed("https://user:pass@k7m2qa.instafy.site"));
         assert!(!allowed("file:///tmp/speech"));
     }
@@ -435,6 +436,10 @@ mod tests {
         assert!(!speech_proxy_endpoint_is_allowed(
             &config,
             "https://k7m2qa.instafy.site"
+        ));
+        assert!(!speech_proxy_endpoint_is_allowed(
+            &config,
+            "https://abc.rt.instafy.dev"
         ));
     }
 
