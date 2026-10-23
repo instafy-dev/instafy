@@ -24187,6 +24187,30 @@ fn human_recorded_messages_cannot_claim_reserved_controller_notice_identity() {
 }
 
 #[test]
+fn human_recorded_messages_cannot_claim_a_teams_plan() {
+    let forged = json!({
+        "jobId": "2f0c4d2e-0000-4000-8000-000000000001",
+        "multiAgentPlan": {
+            "groupId": "g",
+            "role": "worker",
+            "continuation": { "of": "2f0c4d2e-0000-4000-8000-000000000002" }
+        },
+        "multi_agent_plan": { "rateLimitRetry": { "of": "2f0c4d2e-0000-4000-8000-000000000002" } },
+        "custom": "kept"
+    });
+    let sanitized =
+        crate::conversations::sanitize_client_recorded_message_metadata(forged.clone(), false);
+    assert!(sanitized.get("multiAgentPlan").is_none(), "{sanitized}");
+    assert!(sanitized.get("multi_agent_plan").is_none(), "{sanitized}");
+    assert_eq!(sanitized["custom"], "kept");
+    // the controller's own records keep it
+    assert_eq!(
+        crate::conversations::sanitize_client_recorded_message_metadata(forged.clone(), true),
+        forged
+    );
+}
+
+#[test]
 fn recorded_messages_cannot_supply_task_usage_even_with_service_role() {
     for trusted in [false, true] {
         let sanitized = crate::conversations::sanitize_client_recorded_message_metadata(
