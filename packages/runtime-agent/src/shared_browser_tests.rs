@@ -61,6 +61,13 @@ const special = {
   "invite-button": { description: control("Invite member") },
   "generate-key": { description: control("Generate API key") },
   "plain-button": { description: control("Show details") },
+  // Script-driven save buttons: no form owner, only the commit word.
+  "save-button": { description: control("Speichern") },
+  "save-button-en": { description: control("Save changes") },
+  "cross-site-link": {
+    description: control("Pricing", { tag: "a", inputType: "", href: "https://other.example/pricing" }),
+    policy: { href: "https://other.example/pricing", linkSelf: true },
+  },
   "export-link": {
     description: control("Export CSV", { tag: "a", inputType: "", href: "https://example.test/reports/export.csv" }),
     policy: { href: "https://example.test/reports/export.csv", linkSelf: true },
@@ -464,10 +471,36 @@ impl EmbeddedControllerFixture {
         approved_origins: &[&str],
         decisions: &[&str],
     ) -> (Output, Vec<JsonValue>) {
+        self.prepare_authority(page_id, approved_origins);
+        self.decide_prepared(
+            self.command_for(mode, page_id, method, request_path, body),
+            decisions,
+        )
+    }
+
+    /// Seeds the run's state the way the guard does on an attested browser
+    /// host, after `prepare_authority` wrote the marker.
+    fn prepare_routine_start(&self, page_id: &str) {
+        self.prepare_authority(page_id, &[]);
+        write_routine_approval_state(
+            &self.approval_dir,
+            &self.owner_id.to_string(),
+            self.run_id,
+            self.initiator_user_id,
+            page_id,
+        )
+        .expect("seed routine start");
+    }
+
+    /// Runs `command` against the already prepared authority, answering each
+    /// request it publishes with the next of `decisions` (then "deny").
+    fn decide_prepared(
+        &self,
+        command: EmbeddedControllerCommand,
+        decisions: &[&str],
+    ) -> (Output, Vec<JsonValue>) {
         use std::time::{Duration, Instant};
 
-        self.prepare_authority(page_id, approved_origins);
-        let command = self.command_for(mode, page_id, method, request_path, body);
         let mut child = command
             .spawn()
             .expect("spawn embedded Shared Browser controller");
@@ -479,49 +512,16 @@ impl EmbeddedControllerFixture {
             .expect("poll embedded controller")
             .is_none()
         {
-            let approval_path = self.approval_dir.join("request.json");
-            if approval_path.is_file()
-                && let Ok(raw) = std::fs::read(&approval_path)
-                && let Ok(request) = serde_json::from_slice::<JsonValue>(&raw)
+            if let Some(request) = self.pending_request()
+                && request["approvalId"].as_str().unwrap_or_default() != last_approval_id
             {
-                let approval_id = request["approvalId"].as_str().unwrap_or_default();
-                if !approval_id.is_empty() && approval_id != last_approval_id {
-                    let decision = decisions.get(observed.len()).copied().unwrap_or("deny");
-                    let now = unix_time_millis();
-                    let response = json!({
-                        "version": 1,
-                        "approvalId": approval_id,
-                        "requestFingerprint": request["requestFingerprint"],
-                        "decision": decision,
-                        "decidedByUserId": self.initiator_user_id,
-                        "decidedAtMs": now,
-                        "expiresAtMs": request["expiresAtMs"],
-                    });
-                    let decision_path = self.approval_dir.join("decision.json");
-                    let decision_temp_path =
-                        self.approval_dir.join(".instafy-approval-fixture-decision");
-                    let mut options = OpenOptions::new();
-                    options.write(true).create_new(true);
-                    #[cfg(unix)]
-                    options.mode(0o600);
-                    let mut file = options
-                        .open(&decision_temp_path)
-                        .expect("create approval fixture decision");
-                    file.write_all(&serde_json::to_vec(&response).expect("decision JSON"))
-                        .expect("write approval fixture decision");
-                    file.sync_all().expect("sync approval fixture decision");
-                    drop(file);
-                    #[cfg(unix)]
-                    std::fs::set_permissions(
-                        &decision_temp_path,
-                        std::fs::Permissions::from_mode(0o600),
-                    )
-                    .expect("protect approval fixture decision");
-                    std::fs::rename(&decision_temp_path, &decision_path)
-                        .expect("publish approval fixture decision");
-                    last_approval_id = approval_id.to_string();
-                    observed.push(request);
-                }
+                let decision = decisions.get(observed.len()).copied().unwrap_or("deny");
+                self.answer(&request, decision);
+                last_approval_id = request["approvalId"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                observed.push(request);
             }
             assert!(
                 started.elapsed() < Duration::from_secs(5),
@@ -535,6 +535,46 @@ impl EmbeddedControllerFixture {
                 .expect("collect embedded controller output"),
             observed,
         )
+    }
+
+    fn pending_request(&self) -> Option<JsonValue> {
+        let raw = std::fs::read(self.approval_dir.join("request.json")).ok()?;
+        let request = serde_json::from_slice::<JsonValue>(&raw).ok()?;
+        request["approvalId"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+            .then_some(request)
+    }
+
+    /// Writes the initiating user's decision the way origin does.
+    fn answer(&self, request: &JsonValue, decision: &str) {
+        let response = json!({
+            "version": 1,
+            "approvalId": request["approvalId"],
+            "requestFingerprint": request["requestFingerprint"],
+            "decision": decision,
+            "decidedByUserId": self.initiator_user_id,
+            "decidedAtMs": unix_time_millis(),
+            "expiresAtMs": request["expiresAtMs"],
+        });
+        let decision_path = self.approval_dir.join("decision.json");
+        let decision_temp_path = self.approval_dir.join(".instafy-approval-fixture-decision");
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options
+            .open(&decision_temp_path)
+            .expect("create approval fixture decision");
+        file.write_all(&serde_json::to_vec(&response).expect("decision JSON"))
+            .expect("write approval fixture decision");
+        file.sync_all().expect("sync approval fixture decision");
+        drop(file);
+        #[cfg(unix)]
+        std::fs::set_permissions(&decision_temp_path, std::fs::Permissions::from_mode(0o600))
+            .expect("protect approval fixture decision");
+        std::fs::rename(&decision_temp_path, &decision_path)
+            .expect("publish approval fixture decision");
     }
 
     fn snapshot_id(&self, mode: &str) -> String {
@@ -867,6 +907,7 @@ async fn agent_control_guard_drop_removes_its_owned_marker() {
     let guard = SharedBrowserAgentControlGuard::acquire_with_path(
         path.clone(),
         directory.path().join("approvals"),
+        ApprovalStart::Ask,
         Uuid::new_v4(),
         Uuid::new_v4(),
         "page-target",
@@ -892,6 +933,7 @@ async fn confirmed_guard_drop_recycles_when_marker_cannot_be_verified() {
     let guard = SharedBrowserAgentControlGuard::acquire_with_path(
         path.clone(),
         directory.path().join("approvals"),
+        ApprovalStart::Ask,
         Uuid::new_v4(),
         Uuid::new_v4(),
         "page-target",
@@ -922,6 +964,7 @@ async fn confirmed_guard_drop_recycles_when_approval_cleanup_is_not_bounded() {
     let guard = SharedBrowserAgentControlGuard::acquire_with_path(
         path.clone(),
         approval_dir.clone(),
+        ApprovalStart::Ask,
         Uuid::new_v4(),
         Uuid::new_v4(),
         "page-target",
@@ -948,6 +991,7 @@ async fn agent_control_heartbeat_failure_cancels_the_browser_turn() {
     let guard = SharedBrowserAgentControlGuard::acquire_with_path(
         path.clone(),
         directory.path().join("approvals"),
+        ApprovalStart::Ask,
         Uuid::new_v4(),
         Uuid::new_v4(),
         "page-target",
@@ -982,6 +1026,7 @@ async fn unconfirmed_guard_drop_preserves_marker_and_requests_runtime_recycle() 
     let guard = SharedBrowserAgentControlGuard::acquire_with_path(
         path.clone(),
         directory.path().join("approvals"),
+        ApprovalStart::Ask,
         Uuid::new_v4(),
         Uuid::new_v4(),
         "page-target",
@@ -1014,6 +1059,7 @@ async fn a_lazy_browser_host_is_poisoned_instead_of_recycling_the_runtime() {
     let guard = SharedBrowserAgentControlGuard::acquire_with_path(
         path.clone(),
         directory.path().join("approvals"),
+        ApprovalStart::Ask,
         Uuid::new_v4(),
         Uuid::new_v4(),
         "page-target",
@@ -1045,6 +1091,7 @@ async fn caller_abort_preserves_marker_and_requests_runtime_recycle() {
         let _guard = SharedBrowserAgentControlGuard::acquire_with_path(
             path_for_task,
             approval_dir_for_task,
+            ApprovalStart::Ask,
             Uuid::new_v4(),
             Uuid::new_v4(),
             "page-target",
@@ -3026,4 +3073,556 @@ fn every_controller_connection_denies_downloads() {
         assert_eq!(pair[0]["params"], json!({"behavior": "deny"}));
         assert_eq!(pair[1]["method"], "close");
     }
+}
+
+#[test]
+fn only_an_attested_browser_host_starts_runs_in_routine_browsing() {
+    use crate::browser_host::mode::{LazyMode, force_lazy_mode_for_tests};
+
+    {
+        let _boot_time_or_no_browser = force_lazy_mode_for_tests(None);
+        assert_eq!(run_approval_start(), ApprovalStart::Ask);
+    }
+    for persist in [false, true] {
+        let _host = force_lazy_mode_for_tests(Some(LazyMode { persist }));
+        assert_eq!(run_approval_start(), ApprovalStart::Routine);
+    }
+}
+
+#[tokio::test]
+async fn a_routine_start_writes_bound_private_state_that_the_run_end_revokes() {
+    let directory = tempfile::tempdir().expect("marker tempdir");
+    let path = directory.path().join("agent-control.json");
+    let approval_dir = directory.path().join("approvals");
+    let run_id = Uuid::new_v4();
+    let initiator_user_id = Uuid::new_v4();
+    let cancel_signal = JobCancelSignal::new();
+    let guard = SharedBrowserAgentControlGuard::acquire_with_path(
+        path.clone(),
+        approval_dir.clone(),
+        ApprovalStart::Routine,
+        run_id,
+        initiator_user_id,
+        "page-target",
+        "Octo",
+        cancel_signal.clone(),
+        Duration::from_secs(60),
+    )
+    .expect("acquire routine run");
+
+    let marker: JsonValue =
+        serde_json::from_slice(&std::fs::read(&path).expect("marker")).expect("marker JSON");
+    let state_path = approval_dir.join("state.json");
+    let state: JsonValue =
+        serde_json::from_slice(&std::fs::read(&state_path).expect("state")).expect("state JSON");
+    assert_eq!(
+        state,
+        json!({
+            "version": 1,
+            "ownerId": marker["ownerId"],
+            "runId": run_id.to_string(),
+            "initiatorUserId": initiator_user_id.to_string(),
+            "browserPageId": "page-target",
+            "approvedOrigins": [],
+            "consumedApprovalIds": [],
+            "routineBrowsingAllowed": true,
+        })
+    );
+    for key in ["ownerId", "runId", "initiatorUserId", "browserPageId"] {
+        assert_eq!(state[key], marker[key], "{key}");
+    }
+    assert_eq!(state["ownerId"], guard.owner_id.to_lowercase());
+    #[cfg(unix)]
+    assert_eq!(
+        std::fs::metadata(&state_path)
+            .expect("state metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    let entries = std::fs::read_dir(&approval_dir)
+        .expect("approval directory")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(entries, vec![std::ffi::OsString::from("state.json")]);
+
+    cancel_signal.confirm_shared_browser_shutdown();
+    drop(guard);
+    assert!(!state_path.exists(), "the run's grant ends with the run");
+    assert!(!path.exists());
+
+    // Ask writes no state: the scripts start from their empty Ask state.
+    let cancel_signal = JobCancelSignal::new();
+    let guard = SharedBrowserAgentControlGuard::acquire_with_path(
+        path.clone(),
+        approval_dir.clone(),
+        ApprovalStart::Ask,
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        "page-target",
+        "Octo",
+        cancel_signal.clone(),
+        Duration::from_secs(60),
+    )
+    .expect("acquire ask run");
+    assert_eq!(
+        std::fs::read_dir(&approval_dir)
+            .expect("approval directory")
+            .count(),
+        0
+    );
+    cancel_signal.confirm_shared_browser_shutdown();
+    drop(guard);
+}
+
+#[test]
+fn a_routine_start_that_cannot_be_written_publishes_no_state() {
+    let directory = tempfile::tempdir().expect("approval tempdir");
+    let owner_id = Uuid::new_v4().to_string();
+    // The temporary file's place is taken, so the write fails.
+    std::fs::create_dir(
+        directory
+            .path()
+            .join(format!(".instafy-approval-{owner_id}")),
+    )
+    .expect("block the temporary file");
+    let error = write_routine_approval_state(
+        directory.path(),
+        &owner_id,
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        "page-target",
+    )
+    .expect_err("a blocked write fails");
+    assert!(format!("{error:#}").contains("Shared Browser approval state"));
+    assert!(!directory.path().join("state.json").exists());
+}
+
+#[test]
+fn a_routine_start_reads_navigates_and_follows_links_to_new_sites_without_a_prompt() {
+    let fixture = EmbeddedControllerFixture::new();
+    // "100" fails any prompt this run would publish as unanswered.
+    let run = |mode: &str, method: &str, path: &str, body: Option<&str>| {
+        fixture.prepare_routine_start("page-target");
+        let output = fixture
+            .command_for_with_timeout(mode, "page-target", method, path, body, "100")
+            .output()
+            .expect("run routine step");
+        assert!(
+            !fixture.approval_dir.join("request.json").exists(),
+            "{method} {path} asked"
+        );
+        payload_of(&output)
+    };
+
+    // From the blank page to a site the run has not used, then reading there.
+    let navigated = run(
+        "blank-page",
+        "POST",
+        "/v1/navigate",
+        Some(r#"{"url":"https://new.example/x"}"#),
+    );
+    assert_eq!(navigated["url"], "https://new.example/x");
+    assert_ne!(navigated["redacted"], true);
+    let snapshot = run("safe", "GET", "/v1/snapshot", None);
+    assert_eq!(snapshot["url"], "https://example.test/");
+    assert_ne!(snapshot["redacted"], true);
+
+    // A second site, by address and by a plain cross-site link.
+    let navigated = run(
+        "safe",
+        "POST",
+        "/v1/navigate",
+        Some(r#"{"url":"https://another.example/docs"}"#),
+    );
+    assert_eq!(navigated["url"], "https://another.example/docs");
+    let snapshot = run("cross-site-link", "GET", "/v1/snapshot", None);
+    let body = json!({"index": 0, "snapshotId": snapshot["snapshotId"]}).to_string();
+    run("cross-site-link", "POST", "/v1/click", Some(&body));
+    assert!(fixture.action_log().contains("\"type\":\"click\""));
+
+    // Ordinary clicks, typing that does not submit and non-activation keys.
+    for (mode, path, extra) in [
+        ("plain-button", "/v1/click", json!({})),
+        ("safe", "/v1/type", json!({"text": "ordinary search"})),
+        ("safe", "/v1/press", json!({"key": "Tab"})),
+    ] {
+        let snapshot = run(mode, "GET", "/v1/snapshot", None);
+        let mut body = json!({"index": 0, "snapshotId": snapshot["snapshotId"]});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        run(mode, "POST", path, Some(&body.to_string()));
+    }
+}
+
+#[test]
+fn a_routine_start_still_asks_for_every_risky_step() {
+    let clicks = [
+        ("invite-button", "Sharing or access change: Invite member"),
+        ("export-link", "Download or export: Export CSV"),
+        ("generate-key", "Key or password change: Generate API key"),
+        ("aria-delete", ""),
+        ("form-submit-button", ""),
+        // Script-driven save buttons have no form to check.
+        ("save-button", "Change something: Speichern"),
+        ("save-button-en", "Change something: Save changes"),
+    ];
+    for (mode, label) in clicks {
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(mode);
+        fixture.prepare_routine_start("page-target");
+        let body = json!({"index": 0, "snapshotId": snapshot_id}).to_string();
+        let (output, requests) = fixture.decide_prepared(
+            fixture.command_for(mode, "page-target", "POST", "/v1/click", Some(&body)),
+            &["deny"],
+        );
+        assert!(!output.status.success(), "{mode} ran without asking");
+        assert_eq!(requests.len(), 1, "{mode}");
+        assert_eq!(requests[0]["kind"], "action", "{mode}");
+        if !label.is_empty() {
+            assert_eq!(requests[0]["display"]["label"], label, "{mode}");
+        }
+        assert!(String::from_utf8_lossy(&output.stderr).contains("approval_denied"));
+        assert!(
+            !fixture.action_log().contains("\"type\":\"click\""),
+            "{mode}"
+        );
+    }
+
+    for (path, extra) in [
+        ("/v1/type", json!({"text": "ordinary text", "submit": true})),
+        ("/v1/press", json!({"key": "Enter"})),
+        ("/v1/press", json!({"key": "Space"})),
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id("safe");
+        fixture.prepare_routine_start("page-target");
+        let mut body = json!({"index": 0, "snapshotId": snapshot_id});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let (output, requests) = fixture.decide_prepared(
+            fixture.command_for("safe", "page-target", "POST", path, Some(&body.to_string())),
+            &["deny"],
+        );
+        assert!(
+            !output.status.success(),
+            "{path} {extra} ran without asking"
+        );
+        assert_eq!(requests.len(), 1, "{path} {extra}");
+        assert_eq!(requests[0]["kind"], "action");
+    }
+
+    for url in [
+        "https://example.test/logout",
+        "https://example.test/reports/export?format=csv",
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        fixture.prepare_routine_start("page-target");
+        let body = json!({ "url": url }).to_string();
+        let (output, requests) = fixture.decide_prepared(
+            fixture.command_for("safe", "page-target", "POST", "/v1/navigate", Some(&body)),
+            &["deny"],
+        );
+        assert!(!output.status.success(), "{url} opened without asking");
+        assert_eq!(requests.len(), 1, "{url}");
+        assert_eq!(requests[0]["operation"], "navigate");
+        assert!(!fixture.action_log().contains("\"type\":\"navigate\""));
+    }
+
+    // Unanswered, a risky step fails as unanswered and does nothing.
+    let fixture = EmbeddedControllerFixture::new();
+    let snapshot_id = fixture.snapshot_id("save-button");
+    fixture.prepare_routine_start("page-target");
+    let body = json!({"index": 0, "snapshotId": snapshot_id}).to_string();
+    let output = fixture
+        .command_for_with_timeout(
+            "save-button",
+            "page-target",
+            "POST",
+            "/v1/click",
+            Some(&body),
+            "100",
+        )
+        .output()
+        .expect("unanswered routine step");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("approval_timeout_non_retryable"));
+    assert!(!fixture.action_log().contains("\"type\":\"click\""));
+
+    // An allowed risky step runs once, and the run stays in routine browsing.
+    let fixture = EmbeddedControllerFixture::new();
+    let snapshot_id = fixture.snapshot_id("save-button");
+    fixture.prepare_routine_start("page-target");
+    let body = json!({"index": 0, "snapshotId": snapshot_id}).to_string();
+    let (output, requests) = fixture.decide_prepared(
+        fixture.command_for(
+            "save-button",
+            "page-target",
+            "POST",
+            "/v1/click",
+            Some(&body),
+        ),
+        &["allow_once"],
+    );
+    payload_of(&output);
+    assert_eq!(requests.len(), 1);
+    assert!(fixture.action_log().contains("\"type\":\"click\""));
+    let output = fixture
+        .command_for_with_timeout(
+            "save-button",
+            "page-target",
+            "POST",
+            "/v1/navigate",
+            Some(r#"{"url":"https://later.example/next"}"#),
+            "100",
+        )
+        .output()
+        .expect("routine navigation after an answered prompt");
+    payload_of(&output);
+}
+
+#[test]
+fn a_routine_start_still_refuses_the_users_own_steps_without_a_prompt() {
+    for (mode, path, extra, code) in [
+        ("reveal-key", "/v1/click", json!({}), "step_refused_secret"),
+        (
+            "sign-in-email",
+            "/v1/type",
+            json!({"text": "person@example.test"}),
+            "step_refused_sign_in",
+        ),
+        ("file-input", "/v1/click", json!({}), "step_refused_upload"),
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(mode);
+        fixture.prepare_routine_start("page-target");
+        let mut body = json!({"index": 0, "snapshotId": snapshot_id});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let (output, requests) = fixture.decide_prepared(
+            fixture.command_for(mode, "page-target", "POST", path, Some(&body.to_string())),
+            &["allow_once"],
+        );
+        assert!(!output.status.success(), "{mode}");
+        assert!(requests.is_empty(), "{mode} prompted");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(code),
+            "{mode}"
+        );
+    }
+}
+
+#[test]
+fn a_routine_start_bound_to_another_run_fails_closed() {
+    let fixture = EmbeddedControllerFixture::new();
+    for (owner_id, run_id) in [
+        (Uuid::new_v4(), fixture.run_id),
+        (fixture.owner_id, Uuid::new_v4()),
+    ] {
+        fixture.prepare_authority("page-target", &[]);
+        write_routine_approval_state(
+            &fixture.approval_dir,
+            &owner_id.to_string(),
+            run_id,
+            fixture.initiator_user_id,
+            "page-target",
+        )
+        .expect("seed a foreign routine start");
+        let output = fixture
+            .command_for_with_timeout("safe", "page-target", "GET", "/v1/snapshot", None, "100")
+            .output()
+            .expect("snapshot under a foreign state");
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("belongs to another run"));
+    }
+}
+
+#[test]
+fn the_approval_window_agrees_across_the_script_the_tool_and_the_origin() {
+    let script_constant = |name: &str| -> u128 {
+        let declaration = format!("const {name} = ");
+        let line = SHARED_BROWSER_APPROVAL_SCRIPT
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with(&declaration))
+            .unwrap_or_else(|| panic!("{name} is declared"));
+        line[declaration.len()..]
+            .trim_end_matches(';')
+            .replace('_', "")
+            .parse()
+            .unwrap_or_else(|_| panic!("{name} is a number"))
+    };
+    assert_eq!(
+        script_constant("DEFAULT_APPROVAL_WAIT_MS"),
+        DEFAULT_APPROVAL_WAIT.as_millis()
+    );
+    assert_eq!(
+        script_constant("MAX_APPROVAL_WAIT_MS"),
+        MAX_APPROVAL_WAIT.as_millis()
+    );
+    // A shorter origin cap would refuse the script's requests unseen.
+    assert_eq!(
+        u128::from(origin_http_server::SHARED_BROWSER_MAX_APPROVAL_LIFETIME_MS),
+        MAX_APPROVAL_WAIT.as_millis()
+    );
+    assert_eq!(DEFAULT_APPROVAL_WAIT, Duration::from_secs(120));
+    assert_eq!(MAX_APPROVAL_WAIT, Duration::from_secs(300));
+
+    assert_eq!(approval_wait_budget(None), DEFAULT_APPROVAL_WAIT);
+    assert_eq!(
+        approval_wait_budget(Some(" 5000 ")),
+        Duration::from_millis(5000)
+    );
+    assert_eq!(approval_wait_budget(Some("10")), Duration::from_millis(100));
+    assert_eq!(approval_wait_budget(Some("900000")), MAX_APPROVAL_WAIT);
+    assert_eq!(approval_wait_budget(Some("NaN")), DEFAULT_APPROVAL_WAIT);
+    // A value this side cannot read never sizes the tool below the script.
+    assert_eq!(approval_wait_budget(Some("soon")), MAX_APPROVAL_WAIT);
+}
+
+#[test]
+fn a_person_gets_the_full_default_window_to_answer() {
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_authority("page-target", &[]);
+    let mut command = fixture.command_for("safe", "page-target", "GET", "/v1/snapshot", None);
+    command.0.env_remove(APPROVAL_TIMEOUT_MS_ENV);
+    let (output, requests) = fixture.decide_prepared(command, &["deny"]);
+    assert!(!output.status.success());
+    assert_eq!(requests.len(), 1);
+    let lifetime = requests[0]["expiresAtMs"].as_u64().unwrap()
+        - requests[0]["requestedAtMs"].as_u64().unwrap();
+    // Measured from the call's start, so a few milliseconds already passed.
+    assert!(
+        lifetime <= 120_000 && lifetime > 119_000,
+        "lifetime {lifetime}"
+    );
+}
+
+#[test]
+fn a_site_prompt_and_its_step_prompt_share_one_deadline() {
+    use std::time::{Duration, Instant};
+
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_authority("page-target", &[]);
+    let mut child = fixture
+        .command_for(
+            "safe",
+            "page-target",
+            "POST",
+            "/v1/navigate",
+            Some(r#"{"url":"https://new.example/x"}"#),
+        )
+        .spawn()
+        .expect("spawn Ask-mode navigation");
+    let started = Instant::now();
+    let mut requests: Vec<JsonValue> = Vec::new();
+    while child.try_wait().expect("poll controller").is_none() {
+        if let Some(request) = fixture.pending_request()
+            && requests
+                .last()
+                .is_none_or(|last| last["approvalId"] != request["approvalId"])
+        {
+            if requests.is_empty() {
+                // The person takes a while with the site prompt.
+                std::thread::sleep(Duration::from_millis(400));
+                fixture.answer(&request, "allow_origin");
+            } else {
+                fixture.answer(&request, "deny");
+            }
+            requests.push(request);
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "fixture timed out"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let output = child.wait_with_output().expect("controller output");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("approval_denied"));
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["kind"], "origin");
+    assert_eq!(requests[1]["kind"], "action");
+    // The step prompt ends when the site prompt would have: the late answer
+    // did not buy the call a second full window.
+    assert_eq!(requests[1]["expiresAtMs"], requests[0]["expiresAtMs"]);
+    let step_window = requests[1]["expiresAtMs"].as_u64().unwrap()
+        - requests[1]["requestedAtMs"].as_u64().unwrap();
+    assert!(step_window <= 5_000 - 400, "step window {step_window}");
+}
+
+#[test]
+fn an_unanswered_prompt_ends_the_turn_without_reading_as_a_denial() {
+    let unanswered = terminal_consent_call_result("approval_timeout");
+    assert_ne!(unanswered.is_error, Some(true));
+    let text = serde_json::to_string(&unanswered.content).expect("content JSON");
+    assert!(text.contains("has not answered"), "{text}");
+    assert!(text.contains("End this turn now"), "{text}");
+    assert!(text.contains("do not retry"), "{text}");
+    let signal = unanswered
+        .structured_content
+        .expect("terminal consent signal")["terminalConsent"]
+        .clone();
+    assert_eq!(
+        signal,
+        json!({
+            "state": "blocked",
+            "terminal": true,
+            "retryable": false,
+            "code": "approval_timeout",
+        })
+    );
+
+    let denied = terminal_consent_call_result("approval_denied");
+    assert_eq!(denied.is_error, Some(true));
+    assert_eq!(
+        denied.structured_content.expect("terminal consent signal")["terminalConsent"]["code"],
+        "approval_denied"
+    );
+}
+
+#[tokio::test]
+async fn an_unanswered_prompt_still_blocks_every_later_browser_call() {
+    let server = SharedBrowserMcpServer::new();
+    let click = mcp_tool_request(
+        "click",
+        json!({ "index": 0, "snapshotId": SNAPSHOT_ID })
+            .as_object()
+            .cloned(),
+    )
+    .unwrap();
+    let first = server
+        .execute_with_failure_latch(&click, || async {
+            Err(anyhow::anyhow!(
+                "Shared Browser approval timed out [approval_timeout_non_retryable]"
+            ))
+        })
+        .await;
+    assert!(matches!(
+        first,
+        Err(SharedBrowserMcpExecutionFailure::TerminalConsent(
+            "approval_timeout"
+        ))
+    ));
+    let navigate = mcp_tool_request(
+        "navigate",
+        json!({ "url": "https://example.test/" })
+            .as_object()
+            .cloned(),
+    )
+    .unwrap();
+    let later = server
+        .execute_with_failure_latch(&navigate, || async {
+            panic!("an unanswered prompt must not open another one in this turn")
+        })
+        .await;
+    assert!(matches!(
+        later,
+        Err(SharedBrowserMcpExecutionFailure::TerminalConsent(
+            "approval_timeout"
+        ))
+    ));
 }

@@ -14,8 +14,17 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
   const MAX_OPERATION_BYTES = 64;
   const MAX_LABEL_BYTES = 240;
   const MAX_PAGE_ID_BYTES = 256;
-  const MAX_APPROVAL_WAIT_MS = 60_000;
-  const DEFAULT_APPROVAL_WAIT_MS = 30_000;
+  // How long a person has to answer the prompts of one browser tool call.
+  // One helper process runs one tool call, and every prompt it shows ends by
+  // the same deadline, so a site prompt and the step prompt after it share
+  // this budget. runtime-agent sizes the browser tool's timeout from these
+  // values, and origin-http-server caps a request's lifetime at the maximum:
+  // change all three together (`shared_browser_tests.rs` checks they agree).
+  const MAX_APPROVAL_WAIT_MS = 300_000;
+  const DEFAULT_APPROVAL_WAIT_MS = 120_000;
+  // The origin refuses a request that lives less than this, so a call whose
+  // budget is spent ends as unanswered instead of publishing one.
+  const MIN_REQUEST_WINDOW_MS = 100;
   const POLL_INTERVAL_MS = 50;
   const CLOCK_SKEW_MS = 1_000;
   const UUID_PATTERN =
@@ -313,6 +322,7 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
     const timeoutMs = Number.isFinite(requestedTimeout)
       ? Math.max(100, Math.min(MAX_APPROVAL_WAIT_MS, Math.floor(requestedTimeout)))
       : DEFAULT_APPROVAL_WAIT_MS;
+    const callDeadlineMs = Date.now() + timeoutMs;
     if (!path.isAbsolute(markerPath)) {
       fail("approval_storage_invalid", "Shared Browser authority marker path must be absolute");
     }
@@ -476,7 +486,7 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
           true,
         ),
         requestedAtMs: now,
-        expiresAtMs: now + timeoutMs,
+        expiresAtMs: Math.min(now + timeoutMs, callDeadlineMs),
       };
       const requestFingerprint = sha256(JSON.stringify(requestCore));
       return { ...requestCore, requestFingerprint, display };
@@ -540,6 +550,10 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
         removeRegularFile(decisionPath);
         fail("approval_stale_or_replayed", "A stale Shared Browser approval decision was rejected");
       }
+      if (request.expiresAtMs - Date.now() < MIN_REQUEST_WINDOW_MS) {
+        // An earlier prompt of this call used up the shared budget.
+        fail("approval_timeout", "Shared Browser approval timed out; the action was not performed");
+      }
       atomicWriteJson(requestPath, request, REQUEST_MAX_BYTES);
       let cleanupRequired = true;
       try {
@@ -602,8 +616,11 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       });
       const { decision, state } = await awaitDecision(request);
       readAuthority(initialAuthority);
-      // Only the authenticated initiating user's explicit origin-prompt choice
-      // can grant this policy. It never comes from tool arguments or job metadata.
+      // Routine browsing comes only from the authenticated initiating user's
+      // explicit origin-prompt choice, or from runtime-agent itself, which
+      // writes it into the run's state before the run starts on a
+      // controller-attested browser host. It never comes from tool arguments
+      // or job metadata.
       if (decision.decision === "allow_routine") {
         state.routineBrowsingAllowed = true;
       }

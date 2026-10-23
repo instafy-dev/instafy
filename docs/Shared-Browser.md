@@ -279,8 +279,22 @@ browser path.
 
 ## Human approval policy
 
-Shared Browser defaults to confirmation, rather than a site denylist, as its
-sensitive-site policy. Before the agent can observe a page, the user who
+How a run's approvals start depends on the runtime, never on the job, the
+caller or the model:
+
+- **On the space's own machine** (a lazy browser host the controller attests
+  for a covered space, see "Browser on the space's own machine" below), every
+  run starts in **routine browsing**. runtime-agent writes that into the run's protected
+  approval state before any Codex or MCP process starts, bound to the run's
+  owner, run, initiating user and page, and the job fails if the write fails.
+  Octo opens, reads and navigates sites without a site prompt; the steps listed
+  under routine browsing below still ask.
+- **Everywhere else** (the boot-time browser session and self-hosted
+  runtimes), a run starts in **Ask** with the per-run site approval described
+  next.
+
+In Ask, Shared Browser defaults to confirmation, rather than a site denylist,
+as its sensitive-site policy. Before the agent can observe a page, the user who
 started the run must approve that exact normalized origin for the current run.
 Cross-origin navigation or controls require a separate origin approval before
 the destination can be read. Origin approval does not authorize an action.
@@ -295,15 +309,18 @@ the page origin has been approved because it changes no remote state. Typing
 authentication, payment, or identity secrets remains blocked outright and is
 not made possible by approval.
 
-The first site prompt also offers **Always allow routine browsing for this turn**
+In Ask, the first site prompt also offers **Always allow routine browsing for this turn**
 when the runtime advertises `approvalModes: ["ask", "routine"]`. This is an
 explicit grant across HTTP(S) sites for the exact current run, initiating user,
 runtime generation and selected page—not permanent site trust, a project-wide
-default, or permission inherited by the next turn. Ordinary navigation, clicks,
-non-sensitive field filling and non-activation keys then proceed without another
-site/action prompt, including an address typed for a site the run has not used
-yet. Steps in a named risk category (below), risky addresses, form submissions,
-and Enter/Space activation still require one-shot confirmation. Secret entry,
+default, or permission inherited by the next turn. A run on the space's own
+machine starts with the same grant, scoped the same way. Under routine browsing,
+ordinary navigation, clicks, non-sensitive field filling and non-activation keys
+proceed without another site/action prompt, including an address typed for a
+site the run has not used yet. Steps in a named risk category (below), risky
+addresses, form submissions, buttons whose label commits a change (such as
+Save, Speichern or Buchen, even when page script runs them without a form), and
+Enter/Space activation still require one-shot confirmation. Secret entry,
 fresh-target checks, exact authority, denial and cancellation boundaries are
 unchanged. Stopping or completing the turn ends the grant.
 
@@ -315,7 +332,10 @@ both kinds of controls.
 Routine mode deliberately relaxes universal confirmation. Its consequence
 classifier uses page descriptors and URL text; it cannot prove that arbitrary
 website JavaScript has no side effects or recognize every language/custom control.
-Use **Ask** when reviewing every state-changing interaction is important.
+A plain link whose address has side effects but is not on the risky-address list,
+or a control with neither a risky nor a commit word in its label, can still act
+without a prompt. **Ask** reviews every state-changing interaction; a run on the
+space's own machine cannot be switched to it yet (see "Remaining work").
 
 ### Redaction, step categories and downloads
 
@@ -411,26 +431,48 @@ only while nobody else has that browser open, controls it, runs in it or is
 starting it (see "How Studio opens it" below and
 [Browser Profiles](Browser-Profiles.md)). It never starts, stops or replaces a
 machine for this, and every other card waits for the person's press. The
-continuation is an ordinary Shared turn with consent version `1`: it starts in
-**Ask**, with the per-run origin approval above. Studio never answers a site or
-action prompt for the person, and **Allow routine browsing** stays the person's
-own choice. Under that grant, steps in a named risk category still ask, because
-the browser runtime enforces them.
+continuation is an ordinary Shared turn with consent version `1`. On the space's
+own machine it starts in routine browsing, as every run there does (see "Human
+approval policy" above); elsewhere it starts in **Ask**, with the per-run origin
+approval, and **Allow routine browsing** stays the person's own choice. Studio
+never answers a site or action prompt for the person, and neither Studio nor the
+job metadata chooses the starting mode. Under routine browsing, steps in a named
+risk category still ask, because the browser runtime enforces them.
 
 This is an additive runtime-origin policy choice, not caller-authored job metadata.
-Consent version `1` continues to attest the bounded browser lane and its default
-one-shot policy. The authenticated origin bridge accepts the new `allow_routine`
+Consent version `1` continues to attest the bounded browser lane and its one-shot
+policy for the steps that ask. The authenticated origin bridge accepts the new `allow_routine`
 decision only on an exact pending origin prompt, and the runtime stores it only
 inside that run's protected approval state. Older runtimes do not advertise it
 and reject that decision; older clients retain the existing Ask-only choices.
 No database migration, cookie copy or broader controller/workspace grant is added.
 
-A denial, timeout, stale request, revocation, storage failure, or malformed
-approval protocol is terminal for that browser run. The runtime latches the
-failure, rejects later mutations without opening another prompt, and reports
+A person has two minutes to answer the prompts of one browser step. The
+approval script's default window is 120 seconds and its cap is 300 seconds; the
+origin accepts a request that lives up to the same 300 seconds, and the two must
+move together, or the origin refuses the request and the sheet never shows
+(`shared_browser_tests.rs` checks that they agree). One tool call's prompts share
+one deadline counted from the call's start, so in Ask a site prompt and the step
+prompt after it fit in the same two minutes. The Shared Browser tool's Codex
+timeout is that budget plus 60 seconds for the navigation, settling and snapshot
+that follow the last answer (180 seconds by default), well inside the
+600-second turn cap. `INSTAFY_SHARED_BROWSER_APPROVAL_TIMEOUT_MS` overrides the
+window for tests, from 100 ms to 300 seconds; production never sets it.
+
+A denial, an unanswered prompt, a stale request, revocation, storage failure, or
+malformed approval protocol is terminal for that browser run. The runtime latches
+the failure, rejects later mutations without opening another prompt, and reports
 machine-readable terminal-consent state so the job layer does not invoke its
 normal missing-action retry. The user starts a new turn if they want to try
-again. This keeps “Deny” from becoming a sequence of repeated consent prompts.
+again. This keeps “Deny” from becoming a sequence of repeated consent prompts,
+and an unanswered prompt from becoming a chain of prompts while the person is
+away. What the person reads tells the two apart, with no code: an unanswered
+prompt reads "I'm waiting for your OK to continue in Instafy's browser. Nothing
+was opened or changed.", a denial reads "You declined, so I stopped. Nothing
+was changed.", and every other terminal code reads one plain message. The code
+stays in the run's `browser/terminal-consent` artifact. The tool result tells
+the model that an unanswered prompt is not a denial and that it must end the
+turn without retrying.
 If the client temporarily loses its network, it retains the exact visible
 request, shows reconnecting state, and retries the bounded poll/decision path;
 the origin's one-use fingerprint and replay checks remain authoritative.
@@ -1381,9 +1423,16 @@ Operational invariants:
 
 ## Remaining work
 
-- Evaluate optional risk-based prompt reduction only after deployment evidence;
-  never weaken the universal per-origin and one-shot confirmation baseline for
-  authenticated sessions.
+- Evaluate further risk-based prompt reduction only after deployment evidence;
+  keep one-shot confirmation for the named risky steps, commit buttons,
+  submissions and activation keys in every mode.
+- On the space's own machine, let a person choose Ask for their runs (a
+  downgrade the runtime honours, never an upgrade), show in Studio that a run
+  started in routine browsing, and give the routine start a kill switch of its
+  own; today turning it off means turning off the browser host policy or
+  shipping a new runtime image.
+- Under routine browsing, a plain link whose address has side effects but is
+  not on the risky-address list still opens without a prompt.
 - Prove TURN and forced-relay WebRTC from signed Electron and normal web clients.
 - Turn the shipped CDP frame/relay telemetry into capacity alerts and limits before considering a new direct media path.
 - Close the profile snapshot's sub-30-second hard-kill edge and add per-user private keys for a private tier.

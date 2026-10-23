@@ -45,7 +45,11 @@ const ORIGIN_MAX_BYTES: usize = 512;
 const MAX_APPROVED_ORIGINS: usize = 32;
 const MAX_CONSUMED_APPROVALS: usize = 64;
 const MAX_RECENT_DECISIONS: usize = 64;
-const MAX_APPROVAL_LIFETIME_MS: u64 = 60_000;
+/// The longest a runtime approval request may live. It equals the Shared
+/// Browser approval script's `MAX_APPROVAL_WAIT_MS` in runtime-agent, which
+/// checks that they agree: a shorter cap here would reject the script's
+/// requests, and the person would never see the prompt.
+pub const MAX_APPROVAL_LIFETIME_MS: u64 = 300_000;
 const MIN_APPROVAL_LIFETIME_MS: u64 = 100;
 const CLOCK_SKEW_MS: u64 = 1_000;
 const JS_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;

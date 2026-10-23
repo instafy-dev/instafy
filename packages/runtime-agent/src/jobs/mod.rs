@@ -6122,6 +6122,10 @@ impl JobProcessor {
                         .as_ref()
                         .expect("Shared Browser execution must have a cancellation signal")
                         .clone(),
+                    // Decided by this process (an attested browser host starts
+                    // in routine browsing), never by the job or the model, and
+                    // written before any Codex or MCP process starts.
+                    crate::shared_browser::run_approval_start(),
                 )?,
             )
         } else {
@@ -13188,12 +13192,25 @@ fn apply_terminal_shared_browser_summary(
     let Some(code) = terminal_consent_failure else {
         return;
     };
-    *summary = if code == "human_input_required" {
-        "Your input is needed in Browser. After control returns to you, fill the highlighted fields directly and choose Done, continue. Your field values are not requested in chat.".to_string()
-    } else {
-        format!("Shared Browser consent ended this run ({code}). No browser action was retried.")
-    };
+    *summary = terminal_shared_browser_summary(code).to_string();
     *fallback_kind = None;
+}
+
+/// What the person reads when a Shared Browser run ended on its approval
+/// lane. The code itself stays in the `browser/terminal-consent` artifact.
+fn terminal_shared_browser_summary(code: &str) -> &'static str {
+    match code {
+        "human_input_required" => {
+            "Your input is needed in Browser. After control returns to you, fill the highlighted fields directly and choose Done, continue. Your field values are not requested in chat."
+        }
+        "approval_timeout" => {
+            "I'm waiting for your OK to continue in Instafy's browser. Nothing was opened or changed. Send a message when you're ready and I'll ask again."
+        }
+        "approval_denied" => "You declined, so I stopped. Nothing was changed.",
+        _ => {
+            "Instafy's browser stopped this step to keep it safe, so nothing was changed. Send a message to try again."
+        }
+    }
 }
 
 #[cfg(test)]
@@ -24133,28 +24150,48 @@ mod tests {
                 7,
             ));
 
+            let expected = match code {
+                "approval_denied" => "You declined, so I stopped. Nothing was changed.",
+                _ => {
+                    "I'm waiting for your OK to continue in Instafy's browser. Nothing was opened or changed. Send a message when you're ready and I'll ask again."
+                }
+            };
             let mut summary = "internal no-final fallback".to_string();
             let mut fallback = Some(CodexFallbackSummaryKind::MissingFinalAssistantMessage);
             apply_terminal_shared_browser_summary(&mut summary, &mut fallback, terminal);
-            assert_eq!(
-                summary,
-                format!(
-                    "Shared Browser consent ended this run ({code}). No browser action was retried."
-                )
-            );
+            assert_eq!(summary, expected);
+            assert!(!summary.contains(code), "the person never reads {code}");
             assert_eq!(fallback, None);
 
             let mut false_success = "Done — the requested browser action succeeded.".to_string();
             let mut no_fallback = None;
             apply_terminal_shared_browser_summary(&mut false_success, &mut no_fallback, terminal);
             assert_eq!(
-                false_success,
-                format!(
-                    "Shared Browser consent ended this run ({code}). No browser action was retried."
-                ),
+                false_success, expected,
                 "terminal consent must never preserve a false success summary"
             );
             assert_eq!(no_fallback, None);
+        }
+
+        // Every other terminal code reads the same plain message, without
+        // the code, which stays in the terminal-consent artifact.
+        for code in [
+            "approval_stale",
+            "approval_stale_or_replayed",
+            "approval_authority_revoked",
+            "approval_storage_invalid",
+            "approval_protocol_invalid",
+            "approval_state_invalid",
+            "approval_state_full",
+        ] {
+            let mut summary = "Done.".to_string();
+            let mut fallback = None;
+            apply_terminal_shared_browser_summary(&mut summary, &mut fallback, Some(code));
+            assert_eq!(
+                summary,
+                "Instafy's browser stopped this step to keep it safe, so nothing was changed. Send a message to try again."
+            );
+            assert!(!should_retry_codex_once(Some(code), true));
         }
 
         assert!(should_retry_codex_once(None, true));

@@ -663,13 +663,18 @@ function refuseUserStep(classification) {
 }
 
 // Under routine browsing a step still asks when its category is named, when
-// the older consequential pattern matches, or when the page's structural
-// facts are missing.
+// its label commits a change ("Save", "Speichern", "Buchen"), when the older
+// consequential pattern matches, or when the page's structural facts are
+// missing. A commit button run by page script has no form for the submission
+// checks to see, so its label is what tells it apart from an ordinary click.
 function routineCovers(classification, description, { consequential = true } = {}) {
   if (!description.policy) {
     return false;
   }
   if (classification.verdict === "ask" && ROUTINE_CONFIRMED_CATEGORIES.has(classification.category)) {
+    return false;
+  }
+  if (classification.verdict === "ask" && classification.commit === true) {
     return false;
   }
   return !consequential || !isConsequentialAction(description);
@@ -1108,7 +1113,7 @@ function blankPageResult(page, extra = {}) {
     secretScreen: false,
     interactiveElements: [],
     message:
-      "The page is blank. Call navigate with the http(s) address the task names; that site's approval applies there.",
+      "The page is blank. Call navigate with the http(s) address the task names; any approval the browser asks for applies there.",
   };
 }
 
@@ -1217,9 +1222,11 @@ function assertSafeTypeTarget(description) {
   }
 }
 
-// Routine browsing is an explicit, run-scoped user grant, not a claim that
+// Routine browsing is a run-scoped grant (the person's choice, or the runtime's
+// own at the start of a run on an attested browser host), not a claim that
 // arbitrary website JavaScript is side-effect-free. Keep recognized consequential
-// controls, form submissions and activation keys behind one-shot confirmation.
+// controls, commit buttons, form submissions and activation keys behind
+// one-shot confirmation.
 const CONSEQUENTIAL_ACTION_PATTERN =
   /\b(?:buy|purchase|pay|checkout|place[\s_-]*order|delete|remove|erase|destroy|send|post|publish|submit|authorize|approve|allow|confirm[\s_-]*(?:order|payment|purchase)|transfer|withdraw|book|reserve|sign[\s_-]*(?:contract|document|agreement))\b/i;
 
@@ -1532,7 +1539,8 @@ async function execute(browser, method, requestPath, body) {
     const sourceOrigin = approvalProtocol.normalizedOrigin(page.url());
     // Risky addresses (sign-out, exports, files, one-time links, action
     // addresses) are judged by the address alone and ask even under routine
-    // browsing. Typing an address for a new site never asks on its own.
+    // browsing. Under routine browsing, an address for a site the run has not
+    // used yet does not ask on its own.
     const step = classifyStep("navigate", null, { url });
     await approvalProtocol.ensureOriginApproved(
       url,

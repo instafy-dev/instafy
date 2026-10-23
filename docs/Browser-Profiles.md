@@ -94,10 +94,14 @@ run that took the lane first, counts as sent: the notice stays and the card read
 **Browser opened**. A press, or an opened card, reads **Browser opened** from then on, also
 after a reload, so displaying an old message never runs it again. **Try again** on a failed
 browser run sends the card's task again through the browser, with the card it continues,
-never the notice text. A browser Studio opened by itself grants nothing a press does not:
-Instafy's browser starts in Ask with the per-run site approval, as a press does. In the
-browser on this device, it asks for routine browsing only from a Desktop whose routine is
-the owner tier (approval policy
+never the notice text. A browser Studio opened by itself grants nothing a press does not.
+On the space's own machine, Instafy's browser starts every run in routine browsing, pressed
+or not: Octo opens, reads and navigates sites without a site prompt, while purchases,
+transfers, messages, sharing or access changes, key or password changes, downloads,
+deletions and sign-outs, save or confirm buttons and submissions still ask. The runtime
+decides this, never the card or the job. Elsewhere Instafy's browser starts in Ask with the
+per-run site approval, as a press does. In the browser on this device, it asks for routine
+browsing only from a Desktop whose routine is the owner tier (approval policy
 version 2: reading and plain links free, forms, purchases, messages and credentials still
 ask), and only when the person has not chosen Ask; on an older Desktop it uses Ask, so it
 never requests the earlier routine that submits ordinary forms. A start, pressed or
@@ -216,9 +220,9 @@ Both interactive modes have an **Expand** control, including compact layouts.
 It fills the app viewport; it does not create a different browser, profile or
 OS window. Collapse returns to the docked browser with the same page.
 
-Shared offers **Always allow routine browsing** at the first site prompt for that
-turn. Personal Browser keeps the routine choice in Browser settings. Until the
-person chooses, it is on for a Desktop reporting approval policy version 2 and
+On the space's own machine, Shared starts every turn in routine browsing. Elsewhere it
+offers **Always allow routine browsing** at the first site prompt for that turn. Personal
+Browser keeps the routine choice in Browser settings. Until the person chooses, it is on for a Desktop reporting approval policy version 2 and
 off (Ask) for an older one; a choice either way is kept. On a version 2 Desktop
 the setting reads **Let Octo browse and read without asking for each site**:
 reading, tabs, menus and plain links go ahead, while forms, other buttons and

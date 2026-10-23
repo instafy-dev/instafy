@@ -92,6 +92,13 @@ const TERMINAL_APPROVAL_FAILURE_CODES: [&str; 10] = [
     "approval_state_invalid",
     "approval_state_full",
 ];
+/// How long a person has to answer the prompts of one Shared Browser tool
+/// call, as `assets/shared-browser-approval.js` reads it. The script's
+/// `DEFAULT_APPROVAL_WAIT_MS` and `MAX_APPROVAL_WAIT_MS`, and the origin's
+/// request lifetime cap, must stay equal to these.
+pub(crate) const DEFAULT_APPROVAL_WAIT: Duration = Duration::from_secs(120);
+pub(crate) const MAX_APPROVAL_WAIT: Duration = Duration::from_secs(300);
+const MIN_APPROVAL_WAIT: Duration = Duration::from_millis(100);
 #[cfg(not(test))]
 const UNCONFIRMED_BROWSER_SHUTDOWN_EXIT_CODE: i32 = 70;
 const ALLOWED_PRESS_KEYS: [&str; 15] = [
@@ -111,6 +118,50 @@ const ALLOWED_PRESS_KEYS: [&str; 15] = [
     " ",
     "Space",
 ];
+
+/// How a Shared Browser run's approval state starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ApprovalStart {
+    /// The person approves each site, and each step unless they allow routine
+    /// browsing at the first site prompt.
+    Ask,
+    /// Routine browsing from the start: sites, reading, plain links, menus,
+    /// ordinary clicks, typing that does not submit and non-activation keys
+    /// run without prompts. Named risky steps, commit buttons, risky
+    /// addresses, submissions and Enter/Space still ask.
+    Routine,
+}
+
+/// The approval start of every Shared Browser run in this process. Runs on a
+/// lazy browser host start in routine browsing: the controller attests that
+/// host only for a covered space's own machine, and this process captures it
+/// once at startup. Job metadata, tool arguments and the model never choose
+/// it. Every other runtime starts in Ask.
+pub(crate) fn run_approval_start() -> ApprovalStart {
+    if crate::browser_host::lazy_mode() {
+        ApprovalStart::Routine
+    } else {
+        ApprovalStart::Ask
+    }
+}
+
+/// The approval budget the script uses for an
+/// `INSTAFY_SHARED_BROWSER_APPROVAL_TIMEOUT_MS` value, clamped the same way.
+/// A value this side cannot read counts as the maximum, so a tool timeout
+/// sized from it never falls short of the script's budget.
+pub(crate) fn approval_wait_budget(raw: Option<&str>) -> Duration {
+    let Some(raw) = raw else {
+        return DEFAULT_APPROVAL_WAIT;
+    };
+    match raw.trim().parse::<f64>() {
+        Ok(millis) if millis.is_finite() => Duration::from_millis(millis.floor().clamp(
+            MIN_APPROVAL_WAIT.as_millis() as f64,
+            MAX_APPROVAL_WAIT.as_millis() as f64,
+        ) as u64),
+        Ok(_) => DEFAULT_APPROVAL_WAIT,
+        Err(_) => MAX_APPROVAL_WAIT,
+    }
+}
 
 /// Runtime-local authority marker consumed by origin-http-server. The marker
 /// never contains page contents, typed text, or credentials; it only tells the
@@ -354,45 +405,65 @@ fn write_agent_control_marker(
         "expiresAtMs": expires_at_ms,
     }))?;
     let temp_path = path.with_extension(format!("{}.tmp", owner_id));
+    publish_private_file(
+        &temp_path,
+        path,
+        &payload,
+        "Shared Browser agent-control marker",
+    )
+}
+
+/// Writes `payload` to a new owner-only file at `temp_path`, syncs it and
+/// renames it over `path`.
+fn publish_private_file(temp_path: &Path, path: &Path, payload: &[u8], what: &str) -> Result<()> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     options.mode(0o600);
-    let mut file = options.open(&temp_path).with_context(|| {
-        format!(
-            "failed to create Shared Browser agent-control marker {}",
-            temp_path.display()
-        )
-    })?;
-    file.write_all(&payload).with_context(|| {
-        format!(
-            "failed to write Shared Browser agent-control marker {}",
-            temp_path.display()
-        )
-    })?;
-    file.sync_all().with_context(|| {
-        format!(
-            "failed to sync Shared Browser agent-control marker {}",
-            temp_path.display()
-        )
-    })?;
+    let mut file = options
+        .open(temp_path)
+        .with_context(|| format!("failed to create {what} {}", temp_path.display()))?;
+    file.write_all(payload)
+        .with_context(|| format!("failed to write {what} {}", temp_path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("failed to sync {what} {}", temp_path.display()))?;
     drop(file);
     #[cfg(unix)]
-    std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o600)).with_context(
-        || {
-            format!(
-                "failed to protect Shared Browser agent-control marker {}",
-                temp_path.display()
-            )
-        },
-    )?;
-    std::fs::rename(&temp_path, path).with_context(|| {
-        format!(
-            "failed to publish Shared Browser agent-control marker {}",
-            path.display()
-        )
-    })?;
+    std::fs::set_permissions(temp_path, std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("failed to protect {what} {}", temp_path.display()))?;
+    std::fs::rename(temp_path, path)
+        .with_context(|| format!("failed to publish {what} {}", path.display()))?;
     Ok(())
+}
+
+/// Starts the run's approval state in routine browsing, bound to the exact
+/// authority the marker will carry. The approval scripts read this file as
+/// the run's state; they reject it if any binding differs from the marker.
+fn write_routine_approval_state(
+    approval_dir: &Path,
+    owner_id: &str,
+    run_id: Uuid,
+    initiator_user_id: Uuid,
+    browser_page_id: &str,
+) -> Result<()> {
+    let payload = serde_json::to_vec(&json!({
+        "version": 1,
+        "ownerId": owner_id,
+        "runId": run_id,
+        "initiatorUserId": initiator_user_id,
+        "browserPageId": browser_page_id,
+        "approvedOrigins": [],
+        "consumedApprovalIds": [],
+        "routineBrowsingAllowed": true,
+    }))?;
+    // The temporary name uses the prefix the approval directory cleanup
+    // accepts, so a write cut short is revoked with the rest of the run.
+    publish_private_file(
+        &approval_dir.join(format!(".instafy-approval-{owner_id}")),
+        &approval_dir.join("state.json"),
+        &payload,
+        "Shared Browser approval state",
+    )
 }
 
 fn remove_owned_agent_control_marker(
@@ -494,16 +565,18 @@ fn remove_owned_agent_control_marker_with(
 }
 
 impl SharedBrowserAgentControlGuard {
-    pub fn acquire(
+    pub(crate) fn acquire(
         run_id: Uuid,
         initiator_user_id: Uuid,
         browser_page_id: &str,
         display_name: &str,
         cancel_signal: JobCancelSignal,
+        approval_start: ApprovalStart,
     ) -> Result<Self> {
         Self::acquire_with_path(
             agent_control_file_path(),
             approval_dir_path(),
+            approval_start,
             run_id,
             initiator_user_id,
             browser_page_id,
@@ -516,6 +589,7 @@ impl SharedBrowserAgentControlGuard {
     fn acquire_with_path(
         path: PathBuf,
         approval_dir: PathBuf,
+        approval_start: ApprovalStart,
         run_id: Uuid,
         initiator_user_id: Uuid,
         browser_page_id: &str,
@@ -531,14 +605,30 @@ impl SharedBrowserAgentControlGuard {
         let browser_page_id = validate_page_id(browser_page_id)?;
         cancel_signal.reset_shared_browser_shutdown_confirmation();
         prepare_clean_approval_directory(&approval_dir)?;
-        write_agent_control_marker(
+        // The starting state goes in before the marker, so no approval script
+        // can act for this run without it, and a failed write ends the job
+        // before anything holds the browser.
+        if approval_start == ApprovalStart::Routine {
+            write_routine_approval_state(
+                &approval_dir,
+                &owner_id,
+                run_id,
+                initiator_user_id,
+                &browser_page_id,
+            )?;
+        }
+        if let Err(error) = write_agent_control_marker(
             &path,
             &owner_id,
             run_id,
             initiator_user_id,
             &browser_page_id,
             &display_name,
-        )?;
+        ) {
+            // Nothing holds this run's authority, so its state is revoked too.
+            let _ = prepare_clean_approval_directory(&approval_dir);
+            return Err(error);
+        }
 
         let active = Arc::new(AtomicBool::new(true));
         let marker_io = Arc::new(Mutex::new(()));
@@ -714,6 +804,15 @@ fn terminal_consent_call_result(code: &'static str) -> CallToolResult {
     if code == "human_input_required" {
         let mut result = CallToolResult::success(vec![Content::text(
             "Human input is needed. End this turn now. The user will fill the highlighted fields directly after confirmed shutdown, then explicitly continue in a fresh browser turn. Never request or repeat their values.",
+        )]);
+        result.structured_content = Some(terminal_consent_signal(code));
+        return result;
+    }
+    if code == "approval_timeout" {
+        // Unanswered is not a denial, but it still ends the browser for this
+        // turn, so prompts never chain while the person is away.
+        let mut result = CallToolResult::success(vec![Content::text(
+            "The person has not answered the browser's approval prompt yet, so the step was not performed. End this turn now: do not retry or call another browser tool. Say in one short sentence what you were waiting for their OK on. They will continue in a new message when they are ready.",
         )]);
         result.structured_content = Some(terminal_consent_signal(code));
         return result;

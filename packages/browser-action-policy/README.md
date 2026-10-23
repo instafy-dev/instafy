@@ -14,9 +14,11 @@ publish it on `globalThis.__instafyBrowserRedaction` and
 - `redaction.js`: masks key-like values in page text, titles, addresses and
   control names, and decides when a page is a secret screen.
 - `actionPolicy.js`: `classifyStep(op, target, ctx)` returns
-  `{ verdict, category, reason, code? }` for a navigation, click, typing step,
-  submission or key press. Free verdicts come only from structure; label words
-  only add risk.
+  `{ verdict, category, reason, code?, commit? }` for a navigation, click,
+  typing step, submission or key press. Free verdicts come only from structure;
+  label words only add risk. `commit: true` marks an ordinary control whose
+  label commits a change (Save, Speichern), which the Shared Browser still asks
+  for under routine browsing.
 
 The tests live with the Desktop Personal Browser
 (`packages/desktop-app/test/personal-browser-redaction.test.mjs`,

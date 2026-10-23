@@ -32,6 +32,8 @@ export type PersonalBrowserStepClassification = {
   category: PersonalBrowserStepCategory;
   reason: string;
   code?: PersonalBrowserStepRefusalCode;
+  /** Set on an ordinary "change" control whose label commits a change, such as Save or Speichern. */
+  commit?: boolean;
 };
 
 export type PersonalBrowserStepContext = {
