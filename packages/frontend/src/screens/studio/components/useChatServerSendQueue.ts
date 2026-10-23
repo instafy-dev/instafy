@@ -9,6 +9,7 @@ import {
   enqueueSendQueueEntry,
   listSendQueue,
   reorderSendQueueEntry,
+  restoreSendQueueEntry,
   type ControllerSendQueueEntry,
   type ControllerSendQueueEntryStatus,
   type ConversationSendQueueEventDetail,
@@ -21,6 +22,8 @@ export type ServerQueuedChatSendItem = QueuedChatSendItem & {
   source: "server";
   status: ControllerSendQueueEntryStatus;
   errorMessage: string | null;
+  updatedAt?: string;
+  intent?: string;
 };
 
 export type EnqueueServerSendQueuePayload = {
@@ -173,6 +176,8 @@ export function mapServerSendQueueEntryToQueuedItem(
     source: "server",
     status: entry.status,
     errorMessage: entry.errorMessage,
+    ...(entry.updatedAt ? { updatedAt: entry.updatedAt } : {}),
+    ...(typeof entry.message.intent === "string" ? { intent: entry.message.intent } : {}),
   };
 }
 
@@ -189,6 +194,7 @@ export function useChatServerSendQueue({
   const [serverQueueReordering, setServerQueueReordering] = useState(false);
   const [hydratedConversationId, setHydratedConversationId] = useState<string | null>(null);
   const reorderInFlightRef = useRef<symbol | null>(null);
+  const canceledEntryVersionsRef = useRef(new Map<string, string>());
   const refreshEpochRef = useRef(0);
   const queueGenerationRef = useRef(0);
   const conversationControllerIdRef = useRef(conversationControllerId);
@@ -351,6 +357,9 @@ export function useChatServerSendQueue({
         if (!result?.ok) {
           return false;
         }
+        if (result.entry?.updatedAt) {
+          canceledEntryVersionsRef.current.set(`${conversationId}:${entryId}`, result.entry.updatedAt);
+        }
         mutation.commit((previous) => previous.filter((entry) => entry.id !== entryId));
         return true;
       } catch (error) {
@@ -361,6 +370,44 @@ export function useChatServerSendQueue({
       }
     },
     [beginQueueMutation, conversationControllerId, refreshServerSendQueue, runtimeControllerEnabled],
+  );
+
+  const restoreServerSendQueueItem = useCallback(
+    async (entryId: string, payload: EnqueueServerSendQueuePayload, status: ControllerSendQueueEntryStatus = "queued"): Promise<boolean> => {
+      if (!runtimeControllerEnabled || !conversationControllerId) {
+        return false;
+      }
+      const conversationId = conversationControllerId;
+      const mutation = beginQueueMutation(conversationId);
+      const versionKey = `${conversationId}:${entryId}`;
+      const expectedUpdatedAt = canceledEntryVersionsRef.current.get(versionKey);
+      if (!expectedUpdatedAt) {
+        return false;
+      }
+      try {
+        const result = await restoreSendQueueEntry({
+          conversationId,
+          entryId,
+          message: buildServerSendQueuePromptBody(payload),
+          targetAgentHandles: payload.targetAgentHandles,
+          status,
+          expectedUpdatedAt,
+        });
+        if (!result?.ok) {
+          return false;
+        }
+        mutation.commit((previous) => sortServerQueueEntriesByPosition([
+          ...previous.filter((entry) => entry.id !== entryId),
+          ...(result.entry ? [result.entry] : []),
+        ]));
+        canceledEntryVersionsRef.current.delete(versionKey);
+        return true;
+      } catch (error) {
+        console.warn("[chat] server send queue restore failed:", error instanceof Error ? error.message : String(error));
+        return false;
+      }
+    },
+    [beginQueueMutation, conversationControllerId, runtimeControllerEnabled],
   );
 
   const dispatchServerSendQueueEntryNow = useCallback(
@@ -460,6 +507,7 @@ export function useChatServerSendQueue({
     enqueueServerSendQueueItem,
     refreshServerSendQueue,
     removeServerSendQueueEntry,
+    restoreServerSendQueueItem,
     reorderServerSendQueueEntry,
     serverQueueReordering,
     serverQueueEnabled,

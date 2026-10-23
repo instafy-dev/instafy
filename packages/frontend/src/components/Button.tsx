@@ -164,6 +164,16 @@ export type ButtonProps = Omit<AriaButtonProps, "className"> & {
     }
 );
 
+function buttonStyles(variant: ButtonVariant, tone: ButtonTone, elevation: ButtonElevation,
+  size: ButtonSize, radius: ButtonRadius, preset?: ButtonPreset) {
+  return [BASE, appearanceClasses(variant, tone, elevation), TARGET_CLASSES,
+    preset
+      ? variant === "outline" ? PRESET_OUTLINE_SIZE_CLASSES[preset] : PRESET_SIZE_CLASSES[preset]
+      : variant === "text" ? TEXT_SIZE_CLASSES[size] : SIZE_CLASSES[size],
+    RADIUS_CLASSES[radius],
+  ].join(" ");
+}
+
 function assignForwardedRef<T>(ref: ForwardedRef<T>, value: T | null) {
   if (typeof ref === "function") {
     ref(value);
@@ -217,13 +227,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       ref={buttonRef}
       className={composeRenderProps(className, (value) =>
         [
-          BASE,
-          appearanceClasses(variant, tone, elevation),
-          TARGET_CLASSES,
-          preset
-            ? variant === "outline" ? PRESET_OUTLINE_SIZE_CLASSES[preset] : PRESET_SIZE_CLASSES[preset]
-            : variant === "text" ? TEXT_SIZE_CLASSES[size] : SIZE_CLASSES[size],
-          RADIUS_CLASSES[radius],
+          buttonStyles(variant, tone, elevation, size, radius, preset),
           fullWidth ? "w-full" : "",
           value
         ]
@@ -277,6 +281,15 @@ const ICON_SIZES = {
   md: "h-9 w-9 text-base",
   lg: "h-10 w-10 text-lg"
 };
+
+/** Native drag activators need their sensor's keyboard handling rather than
+ * React Aria press handling, but share the same icon-button appearance. */
+export function iconButtonStyles({ variant = "secondary", tone = "neutral", size = "sm", radius = "lg", elevation = "raised" }: {
+  variant?: ButtonVariant; tone?: ButtonTone; size?: keyof typeof ICON_SIZES;
+  radius?: ButtonRadius; elevation?: ButtonElevation;
+} = {}) {
+  return `${buttonStyles(variant, tone, elevation, "icon", radius)} ${ICON_SIZES[size]}`;
+}
 
 export type IconButtonProps = Omit<ButtonProps, "size" | "icon" | "preset"> & {
   size?: keyof typeof ICON_SIZES;

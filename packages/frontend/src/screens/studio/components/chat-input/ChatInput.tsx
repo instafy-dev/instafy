@@ -7,11 +7,11 @@ import { HistoryPlugin } from "@lexical/react/LexicalHistoryPlugin";
 import { OnChangePlugin } from "@lexical/react/LexicalOnChangePlugin";
 import { useLexicalComposerContext } from "@lexical/react/LexicalComposerContext";
 import type { EditorState, LexicalEditor } from "lexical";
-import { $createParagraphNode, $createTextNode, $getRoot, $getSelection, $isRangeSelection } from "lexical";
+import { $getRoot, $getSelection, $isRangeSelection } from "lexical";
 import { Microphone } from "iconoir-react";
-import { parseAssistantMentions } from "../assistantMentionUI";
 import { AgentMentionNode } from "./AgentMentionNode";
-import { $createAssistantMentionNode, AssistantMentionNode } from "./AssistantMentionNode";
+import { AssistantMentionNode } from "./AssistantMentionNode";
+import { $applyChatInputText } from "./chatInputState";
 import { AssistantMentionsPlugin, type MentionAgentProfile } from "./AssistantMentionsPlugin";
 import { formatGhostSuggestionRemainderForDisplay } from "./ghostSuggestionDisplay";
 import { SlashCommandsPlugin } from "./SlashCommandsPlugin";
@@ -63,34 +63,6 @@ type ChatInputProps = {
   readOnly?: boolean;
   onReadOnlyKeyDown?: () => void;
 };
-
-function applyTextToEditor(text: string) {
-  const root = $getRoot();
-  root.clear();
-  const lines = text.split(/\n/);
-  if (lines.length === 0) {
-    root.append($createParagraphNode());
-    return;
-  }
-  for (const line of lines) {
-    const paragraph = $createParagraphNode();
-    const chunks = parseAssistantMentions(line);
-    if (chunks.length === 0) {
-      root.append(paragraph);
-      continue;
-    }
-    for (const chunk of chunks) {
-      if (chunk.type === "text") {
-        if (chunk.value.length > 0) {
-          paragraph.append($createTextNode(chunk.value));
-        }
-      } else {
-        paragraph.append($createAssistantMentionNode(chunk.value));
-      }
-    }
-    root.append(paragraph);
-  }
-}
 
 function applySerializedEditorState(editor: LexicalEditor, serializedState: string): boolean {
   try {
@@ -223,7 +195,7 @@ function ChatInputEditor(
       clear: () => {
         lastValueRef.current = "";
         lastEditorStateRef.current = null;
-        editor.update(() => applyTextToEditor(""));
+        editor.update(() => $applyChatInputText(""));
       },
     }),
     [editor]
@@ -261,9 +233,9 @@ function ChatInputEditor(
     const stateChanged = nextState !== lastEditorStateRef.current;
     if (stateChanged) {
       if (nextState && !applySerializedEditorState(editor, nextState)) {
-        editor.update(() => applyTextToEditor(nextValue));
+        editor.update(() => $applyChatInputText(nextValue));
       } else if (!nextState) {
-        editor.update(() => applyTextToEditor(nextValue));
+        editor.update(() => $applyChatInputText(nextValue));
       }
       lastEditorStateRef.current = nextState;
       lastValueRef.current = nextValue;
@@ -277,7 +249,7 @@ function ChatInputEditor(
       return;
     }
     if (nextValue !== lastValueRef.current) {
-      editor.update(() => applyTextToEditor(nextValue));
+      editor.update(() => $applyChatInputText(nextValue));
       lastValueRef.current = nextValue;
       if (pendingSelectEndAfterSyncRef.current) {
         pendingSelectEndAfterSyncRef.current = false;
@@ -422,7 +394,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
         if (initialEditorState && applySerializedEditorState(editor, initialEditorState)) {
           return;
         }
-        editor.update(() => applyTextToEditor(initialValue));
+        editor.update(() => $applyChatInputText(initialValue));
       }
     }),
     []

@@ -2,15 +2,17 @@ import {
   useCallback,
   useEffect,
   useRef,
+  useState,
   type Dispatch,
   type MutableRefObject,
   type SetStateAction,
 } from "react";
 import type { StatusIntent } from "../../../status/useStatus";
 import { withUserMentionMetadata } from "../../../conversations/userMentions";
-import { queuedComposerDispatchMessage } from "./chatSendQueueComposer";
+import { queuedComposerDispatchMessage, queuedComposerEditorStateMatches } from "./chatSendQueueComposer";
 import type { ChatSubmitOverride } from "./chatSubmitPlanning";
-import type { EditingQueuedChatItem, QueuedChatSendItem } from "./chatSendQueueStorage";
+import { restoreEditedQueueItem, type EditingQueuedChatItem, type QueuedChatSendItem } from "./chatSendQueueStorage";
+import { resolveComposerDraftReplaceBlock } from "./messageStashLifecycle";
 import {
   isServerQueuedChatSendItem,
   type EnqueueServerSendQueuePayload,
@@ -45,7 +47,7 @@ type UseChatSendQueueActionsOptions = {
   chatSendQueue: QueuedChatSendItem[];
   dispatchServerSendQueueEntryNow: (entryId: string) => Promise<boolean>;
   editingQueuedItem: EditingQueuedChatItem | null;
-  enqueueServerSendQueueItem: (payload: EnqueueServerSendQueuePayload) => Promise<boolean>;
+  restoreServerSendQueueItem: (entryId: string, payload: EnqueueServerSendQueuePayload, status?: "queued" | "failed") => Promise<boolean>;
   focusInput: FocusInput;
   hostedRuntimeEnsuring: boolean;
   imageAttachmentCount: number;
@@ -81,7 +83,7 @@ export function useChatSendQueueActions({
   chatSendQueue,
   dispatchServerSendQueueEntryNow,
   editingQueuedItem,
-  enqueueServerSendQueueItem,
+  restoreServerSendQueueItem,
   focusInput,
   hostedRuntimeEnsuring,
   imageAttachmentCount,
@@ -111,10 +113,58 @@ export function useChatSendQueueActions({
   waitingForPreferredRuntime,
 }: UseChatSendQueueActionsOptions) {
   const chatSendQueueDrainRef = useRef(false);
+  const queuedEditMutationRef = useRef(false);
+  const [queueEditPending, setQueueEditPending] = useState(false);
+  const interruptedEditsRef = useRef(new Map<string, EditingQueuedChatItem>());
+  const currentComposerRef = useRef({ activeConversationId, imageAttachmentCount, sendingAttachment, inputEditorState });
+  currentComposerRef.current = { activeConversationId, imageAttachmentCount, sendingAttachment, inputEditorState };
+
+  useEffect(() => {
+    if (!activeConversationId) return;
+    const interrupted = interruptedEditsRef.current.get(activeConversationId);
+    if (interrupted) {
+      setEditingQueuedItem({ ...interrupted, restoreOnly: true });
+    }
+  }, [activeConversationId, setEditingQueuedItem]);
+
+  const restoreQueuedItem = useCallback(async (editing: EditingQueuedChatItem, item: QueuedChatSendItem, status: "queued" | "failed" = "queued") => {
+    if (isServerQueuedChatSendItem(editing.item)) {
+      return restoreServerSendQueueItem(editing.item.id, {
+        message: queuedComposerDispatchMessage(item),
+        composerMessage: item.message,
+        editorState: item.editorState,
+        browserPageTarget: item.browserPageTarget,
+        browserLaunchMode: item.browserLaunchMode,
+        targetAgentHandles: item.targetAgentHandles,
+        metadata: item.metadata ?? null,
+        ...(editing.item.intent ? { intent: editing.item.intent } : {}),
+        ...(item.runtimeOverride ? { runtimeOverride: item.runtimeOverride } : {}),
+      }, status);
+    }
+    setChatSendQueue((previous) => restoreEditedQueueItem(previous, item, editing.originalQueueOrder));
+    return true;
+  }, [restoreServerSendQueueItem, setChatSendQueue]);
+
+  const explainDraftBlock = useCallback(() => {
+    const block = resolveComposerDraftReplaceBlock({
+      composerText: latestInputValueRef.current,
+      attachmentCount: currentComposerRef.current.imageAttachmentCount,
+    });
+    if (currentComposerRef.current.sendingAttachment || block === "attachments") {
+      showStatus("Send or remove the images in your draft before editing a queued message.", "info", 4500);
+      return true;
+    }
+    if (block === "composer_text") {
+      showStatus("Stash, send, or clear your current draft before editing a queued message.", "info", 4500);
+      focusInput({ force: true });
+      return true;
+    }
+    return false;
+  }, [focusInput, latestInputValueRef, showStatus]);
 
   const handleSendQueuedMessageNow = useCallback(
     async (queuedId: string) => {
-      if (!activeConversationId || sendingAttachment) {
+      if (!activeConversationId || sendingAttachment || queuedEditMutationRef.current || chatSendQueueDrainRef.current) {
         return;
       }
       const serverItem = serverSendQueueItems.find((entry) => entry.id === queuedId) ?? null;
@@ -187,7 +237,7 @@ export function useChatSendQueueActions({
 
   const handleEditQueuedMessage = useCallback(
     async (queuedId: string) => {
-      if (!activeConversationId) {
+      if (!activeConversationId || editingQueuedItem || queuedEditMutationRef.current || chatSendQueueDrainRef.current || explainDraftBlock()) {
         return;
       }
       const serverItem = serverSendQueueItems.find((entry) => entry.id === queuedId) ?? null;
@@ -195,131 +245,127 @@ export function useChatSendQueueActions({
       if (!item) {
         return;
       }
-      const targetAgentHandles = queuedTargetHandlesByItemId.get(item.id) ?? resolveQueuedItemTargets(item);
-      if (serverItem) {
-        // Remove the server entry before steering it into the composer;
-        // otherwise a failed removal (or an entry the server drain already
-        // dispatched) would let a later save re-enqueue a duplicate message.
-        const removed = await removeServerSendQueueEntry(serverItem.id);
-        if (!removed) {
-          showStatus(
-            "Couldn't remove the queued message — it may have already been sent.",
-            "info",
-            5000,
-          );
-          void refreshServerSendQueue();
-          return;
-        }
-      } else {
-        setChatSendQueue((previous) => previous.filter((entry) => entry.id !== queuedId));
+      if (serverItem && !serverItem.updatedAt) {
+        showStatus("Update the controller before editing queued messages. Your draft and queue are unchanged.", "info", 5000);
+        return;
       }
-      setEditingQueuedItem({ item, targetAgentHandles });
-      latestInputValueRef.current = item.message;
-      onInputChange(activeConversationId, item.message, item.editorState);
-      setPendingBrowserLaunchMode(item.browserLaunchMode);
-      focusInput({ force: true });
-      setChatSendQueueExpanded(false);
+      const targetAgentHandles = queuedTargetHandlesByItemId.get(item.id) ?? resolveQueuedItemTargets(item);
+      const editing = {
+        item,
+        targetAgentHandles,
+        originalQueueOrder: (serverItem ? serverSendQueueItems : chatSendQueue).map((entry) => entry.id),
+      };
+      queuedEditMutationRef.current = true;
+      setQueueEditPending(true);
+      try {
+        if (serverItem) {
+          // Claim the entry before editing so the controller cannot dispatch
+          // the old text while the user is changing it.
+          const removed = await removeServerSendQueueEntry(serverItem.id);
+          if (!removed) {
+            showStatus("Couldn't remove the queued message — it may have already been sent.", "info", 5000);
+            void refreshServerSendQueue();
+            return;
+          }
+          interruptedEditsRef.current.set(activeConversationId, editing);
+          // A cancellation can take time. Never replace text typed while it
+          // was pending, nor install the old conversation's edit in a new one.
+          const conversationChanged = currentComposerRef.current.activeConversationId !== activeConversationId;
+          if (conversationChanged || explainDraftBlock()) {
+            const restored = await restoreQueuedItem(editing, item, serverItem.status);
+            if (restored) {
+              interruptedEditsRef.current.delete(activeConversationId);
+              if (currentComposerRef.current.activeConversationId === activeConversationId) {
+                // Returning during the request may have shown its recovery action.
+                setEditingQueuedItem((current) => current?.restoreOnly && current.item.id === item.id ? null : current);
+              }
+            } else {
+              showStatus("Couldn't return the message to the queue. Your draft is safe; retry restoring the queued message.", "error", 6000);
+              if (currentComposerRef.current.activeConversationId === activeConversationId) {
+                // Keep a recoverable edit without replacing the current draft.
+                setEditingQueuedItem({ ...editing, restoreOnly: true });
+              }
+            }
+            return;
+          }
+        } else {
+          setChatSendQueue((previous) => previous.filter((entry) => entry.id !== queuedId));
+          interruptedEditsRef.current.set(activeConversationId, editing);
+        }
+        setEditingQueuedItem(editing);
+        latestInputValueRef.current = item.message;
+        onInputChange(activeConversationId, item.message, item.editorState);
+        setPendingBrowserLaunchMode(item.browserLaunchMode);
+        focusInput({ force: true });
+        setChatSendQueueExpanded(false);
+      } finally {
+        queuedEditMutationRef.current = false;
+        setQueueEditPending(false);
+      }
     },
-    [
-      activeConversationId,
-      chatSendQueue,
-      focusInput,
-      latestInputValueRef,
-      onInputChange,
-      queuedTargetHandlesByItemId,
-      refreshServerSendQueue,
-      removeServerSendQueueEntry,
-      resolveQueuedItemTargets,
-      serverSendQueueItems,
-      setChatSendQueue,
-      setChatSendQueueExpanded,
-      setEditingQueuedItem,
-      setPendingBrowserLaunchMode,
-      showStatus,
-    ],
+    [activeConversationId, chatSendQueue, editingQueuedItem, explainDraftBlock, focusInput, latestInputValueRef,
+      onInputChange, queuedTargetHandlesByItemId, refreshServerSendQueue, removeServerSendQueueEntry,
+      resolveQueuedItemTargets, restoreQueuedItem, serverSendQueueItems, setChatSendQueue,
+      setChatSendQueueExpanded, setEditingQueuedItem, setPendingBrowserLaunchMode, showStatus],
   );
 
-  const handleCancelQueuedEdit = useCallback(() => {
-    if (!editingQueuedItem) {
+  const handleCancelQueuedEdit = useCallback(async () => {
+    if (!editingQueuedItem || queuedEditMutationRef.current) {
       return;
     }
-    const restoredTargetHandles =
-      editingQueuedItem.item.targetAgentHandles.length > 0
-        ? editingQueuedItem.item.targetAgentHandles
-        : editingQueuedItem.targetAgentHandles;
-    const restoredItem: QueuedChatSendItem = {
-      id: editingQueuedItem.item.id,
-      message: editingQueuedItem.item.message,
-      editorState: editingQueuedItem.item.editorState,
-      createdAt: editingQueuedItem.item.createdAt,
-      targetAgentHandles: restoredTargetHandles,
-      browserPageTarget: editingQueuedItem.item.browserPageTarget,
-      browserLaunchMode: editingQueuedItem.item.browserLaunchMode,
-      metadata: editingQueuedItem.item.metadata ?? null,
-      ...(editingQueuedItem.item.runtimeOverride
-        ? { runtimeOverride: editingQueuedItem.item.runtimeOverride }
-        : {}),
+    const restoredItem = {
+      ...editingQueuedItem.item,
+      targetAgentHandles: editingQueuedItem.item.targetAgentHandles.length > 0
+        ? editingQueuedItem.item.targetAgentHandles : editingQueuedItem.targetAgentHandles,
     };
-    const restoreLocally = () => {
-      setChatSendQueue((previous) => {
-        if (previous.some((entry) => entry.id === restoredItem.id)) {
-          return previous;
-        }
-        return [...previous, restoredItem];
-      });
-    };
-    if (isServerQueuedChatSendItem(editingQueuedItem.item)) {
-      void enqueueServerSendQueueItem({
-        message: queuedComposerDispatchMessage(restoredItem),
-        composerMessage: restoredItem.message,
-        editorState: restoredItem.editorState,
-        browserPageTarget: restoredItem.browserPageTarget,
-        browserLaunchMode: restoredItem.browserLaunchMode,
-        targetAgentHandles: restoredTargetHandles,
-        metadata: restoredItem.metadata ?? null,
-        ...(restoredItem.runtimeOverride
-          ? { runtimeOverride: restoredItem.runtimeOverride }
-          : {}),
-      }).then((queued) => {
-        if (!queued) {
-          restoreLocally();
-        }
-      });
-    } else {
-      restoreLocally();
+    queuedEditMutationRef.current = true;
+    setQueueEditPending(true);
+    try {
+      const restored = await restoreQueuedItem(editingQueuedItem, restoredItem,
+        isServerQueuedChatSendItem(editingQueuedItem.item) ? editingQueuedItem.item.status : "queued");
+      if (!restored) {
+        showStatus("Couldn't restore the queued message. Your edit is still here; try Cancel again.", "error", 5000);
+        return;
+      }
+      if (activeConversationId) interruptedEditsRef.current.delete(activeConversationId);
+      if (currentComposerRef.current.activeConversationId !== activeConversationId) {
+        return;
+      }
+      if (!editingQueuedItem.restoreOnly && activeConversationId &&
+          currentComposerRef.current.imageAttachmentCount === 0 && !currentComposerRef.current.sendingAttachment &&
+          queuedComposerEditorStateMatches(editingQueuedItem.item, currentComposerRef.current.inputEditorState) &&
+          latestInputValueRef.current.trim() === editingQueuedItem.item.message.trim()) {
+        latestInputValueRef.current = "";
+        onInputChange(activeConversationId, "", null);
+        setPendingBrowserLaunchMode(null);
+      }
+      setEditingQueuedItem(null);
+    } finally {
+      queuedEditMutationRef.current = false;
+      setQueueEditPending(false);
     }
-    if (activeConversationId && latestInputValueRef.current.trim() === editingQueuedItem.item.message.trim()) {
-      latestInputValueRef.current = "";
-      onInputChange(activeConversationId, "", null);
-    }
-    setPendingBrowserLaunchMode(null);
-    setEditingQueuedItem(null);
-  }, [
-    activeConversationId,
-    editingQueuedItem,
-    enqueueServerSendQueueItem,
-    latestInputValueRef,
-    onInputChange,
-    setChatSendQueue,
-    setEditingQueuedItem,
-    setPendingBrowserLaunchMode,
-  ]);
+  }, [activeConversationId, editingQueuedItem, latestInputValueRef, onInputChange,
+    restoreQueuedItem, setEditingQueuedItem, setPendingBrowserLaunchMode, showStatus]);
 
-  const handleRequeueEditedMessage = useCallback(() => {
-    if (!editingQueuedItem || !activeConversationId) {
-      return;
+  const handleRequeueEditedMessage = useCallback(async (): Promise<boolean> => {
+    if (!editingQueuedItem || editingQueuedItem.restoreOnly || !activeConversationId || queuedEditMutationRef.current) {
+      return false;
+    }
+    if (currentComposerRef.current.imageAttachmentCount > 0 || currentComposerRef.current.sendingAttachment) {
+      showStatus("Remove the images before saving this queued text message.", "info", 4500);
+      return false;
     }
     const trimmed = inputValue.trim();
     if (!trimmed) {
       focusInput({ force: true });
-      return;
+      return false;
     }
     let metadata: Record<string, unknown>;
     try {
       metadata = withUserMentionMetadata(editingQueuedItem.item.metadata, inputEditorState);
     } catch (error) {
       showStatus(error instanceof Error ? error.message : String(error), "error", 4500);
-      return;
+      return false;
     }
     const selection = resolvePromptAgentTargets(trimmed, {
       useSticky: true,
@@ -333,7 +379,7 @@ export function useChatSendQueueActions({
       id: editingQueuedItem.item.id,
       message: trimmed,
       editorState: inputEditorState ?? null,
-      createdAt: Date.now(),
+      createdAt: editingQueuedItem.item.createdAt,
       targetAgentHandles,
       browserPageTarget: editingQueuedItem.item.browserPageTarget,
       browserLaunchMode: editingQueuedItem.item.browserLaunchMode,
@@ -342,56 +388,45 @@ export function useChatSendQueueActions({
         ? { runtimeOverride: editingQueuedItem.item.runtimeOverride }
         : {}),
     };
-    const requeueLocally = () => {
-      setChatSendQueue((previous) => {
-        const withoutCurrent = previous.filter((entry) => entry.id !== updatedItem.id);
-        return [...withoutCurrent, updatedItem];
-      });
-    };
-    if (isServerQueuedChatSendItem(editingQueuedItem.item)) {
-      void enqueueServerSendQueueItem({
-        message: queuedComposerDispatchMessage(updatedItem),
-        composerMessage: updatedItem.message,
-        editorState: updatedItem.editorState,
-        browserPageTarget: updatedItem.browserPageTarget,
-        browserLaunchMode: updatedItem.browserLaunchMode,
-        targetAgentHandles,
-        metadata: updatedItem.metadata ?? null,
-        ...(updatedItem.runtimeOverride
-          ? { runtimeOverride: updatedItem.runtimeOverride }
-          : {}),
-      }).then((queued) => {
-        if (!queued) {
-          requeueLocally();
-        }
-      });
-    } else {
-      requeueLocally();
+    queuedEditMutationRef.current = true;
+    setQueueEditPending(true);
+    try {
+      if (!await restoreQueuedItem(editingQueuedItem, updatedItem)) {
+        showStatus("Couldn't save the queued message. Your edit is still here; try Save queue again.", "error", 5000);
+        return false;
+      }
+      interruptedEditsRef.current.delete(activeConversationId);
+      if (currentComposerRef.current.activeConversationId !== activeConversationId) {
+        return true;
+      }
+      // Preserve new text typed while the save was in flight.
+      if (latestInputValueRef.current.trim() === trimmed && currentComposerRef.current.inputEditorState === inputEditorState) {
+        latestInputValueRef.current = "";
+        onInputChange(activeConversationId, "", null);
+        setPendingBrowserLaunchMode(null);
+      }
+      setEditingQueuedItem(null);
+      setChatSendQueueExpanded(false);
+      return true;
+    } finally {
+      queuedEditMutationRef.current = false;
+      setQueueEditPending(false);
     }
-    latestInputValueRef.current = "";
-    onInputChange(activeConversationId, "", null);
-    setPendingBrowserLaunchMode(null);
-    setEditingQueuedItem(null);
-    setChatSendQueueExpanded(false);
-  }, [
-    activeConversationId,
-    editingQueuedItem,
-    enqueueServerSendQueueItem,
-    focusInput,
-    inputEditorState,
-    inputValue,
-    latestInputValueRef,
-    onInputChange,
-    resolvePromptAgentTargets,
-    setChatSendQueue,
-    setChatSendQueueExpanded,
-    setEditingQueuedItem,
-    setPendingBrowserLaunchMode,
-    showStatus,
-  ]);
+  }, [activeConversationId, editingQueuedItem, focusInput, inputEditorState, inputValue,
+    latestInputValueRef, onInputChange, resolvePromptAgentTargets, restoreQueuedItem,
+    setChatSendQueueExpanded, setEditingQueuedItem, setPendingBrowserLaunchMode, showStatus]);
+
+  const handleQueuedEditComposerSubmit = useCallback((override?: ChatSubmitOverride): Promise<boolean> | null => {
+    if (!editingQueuedItem || editingQueuedItem.restoreOnly || override) return null;
+    return handleRequeueEditedMessage();
+  }, [editingQueuedItem, handleRequeueEditedMessage]);
 
   const handleSendEditedMessageNow = useCallback(async () => {
-    if (!editingQueuedItem) {
+    if (!editingQueuedItem || editingQueuedItem.restoreOnly || queuedEditMutationRef.current) {
+      return;
+    }
+    if (currentComposerRef.current.imageAttachmentCount > 0 || currentComposerRef.current.sendingAttachment) {
+      showStatus("Remove the images before sending this queued text message.", "info", 4500);
       return;
     }
     const trimmed = inputValue.trim();
@@ -406,22 +441,33 @@ export function useChatSendQueueActions({
       showStatus(error instanceof Error ? error.message : String(error), "error", 4500);
       return;
     }
-    const ok = await submitMessage(
-      {
-        message: trimmed,
-        editorState: inputEditorState ?? null,
-        browserPageTarget: editingQueuedItem.item.browserPageTarget,
-        browserLaunchMode: editingQueuedItem.item.browserLaunchMode,
-        metadata,
-        runtimeOverride: editingQueuedItem.item.runtimeOverride ?? null,
-      },
-      { allowWhileBusy: true },
-    );
-    if (ok) {
-      setPendingBrowserLaunchMode(null);
-      setEditingQueuedItem(null);
+    queuedEditMutationRef.current = true;
+    setQueueEditPending(true);
+    try {
+      const ok = await submitMessage(
+        {
+          message: trimmed,
+          editorState: inputEditorState ?? null,
+          browserPageTarget: editingQueuedItem.item.browserPageTarget,
+          browserLaunchMode: editingQueuedItem.item.browserLaunchMode,
+          metadata,
+          runtimeOverride: editingQueuedItem.item.runtimeOverride ?? null,
+        },
+        { allowWhileBusy: true },
+      );
+      if (ok) {
+        if (activeConversationId) interruptedEditsRef.current.delete(activeConversationId);
+        if (currentComposerRef.current.activeConversationId === activeConversationId) {
+          setPendingBrowserLaunchMode(null);
+          setEditingQueuedItem(null);
+        }
+      }
+    } finally {
+      queuedEditMutationRef.current = false;
+      setQueueEditPending(false);
     }
   }, [
+    activeConversationId,
     editingQueuedItem,
     focusInput,
     inputEditorState,
@@ -436,7 +482,7 @@ export function useChatSendQueueActions({
   // the controller send queue are dispatched server-side when the target agents
   // go idle, so draining them here would double-send.
   useEffect(() => {
-    if (chatSendQueueDrainRef.current || editingQueuedItem || !activeConversationId) {
+    if (chatSendQueueDrainRef.current || queuedEditMutationRef.current || queueEditPending || editingQueuedItem || !activeConversationId) {
       return;
     }
     if (!serverQueueHydrated || serverSendQueueItems.length > 0) {
@@ -490,6 +536,7 @@ export function useChatSendQueueActions({
     inputValue,
     invitePromptOpen,
     isAssistantTyping,
+    queueEditPending,
     runtimeReady,
     sendingAttachment,
     serverQueueHydrated,
@@ -500,9 +547,11 @@ export function useChatSendQueueActions({
   ]);
 
   return {
+    queueEditPending,
     handleCancelQueuedEdit,
     handleEditQueuedMessage,
     handleRequeueEditedMessage,
+    handleQueuedEditComposerSubmit,
     handleSendEditedMessageNow,
     handleSendQueuedMessageNow,
   };

@@ -152,6 +152,18 @@ checks, queue ownership, and stash ownership are controller decisions; browser-s
 are hints rather than authority. Provider-specific active-turn mechanics stay behind runtime
 capabilities.
 
+Editing a pending queue item cancels its delivery while the composer is open. Save and Cancel
+restore that same row through
+`POST /conversations/:conversationId/send-queue/:entryId/restore`, preserving its ID, creation
+time and queue position. The request carries the prompt `message`, canonical
+`targetAgentHandles`, `status` (`queued` or `failed`), and the exact `expectedUpdatedAt` string
+returned by cancellation. The controller rechecks write access and ownership, serializes
+restoration with reorder/drain, and rejects a stale cancellation version. Matching retries
+acknowledge already-restored or dispatched work without reviving it. Cancel preserves a failed
+entry's failed status. Studio leaves an unsuccessful restoration available for retry; it does
+not create a second local fallback entry. Older controllers without queue-entry `updatedAt`
+remain usable for sending, removing and reordering, but Studio blocks Edit before cancellation.
+
 ## Runtime Providers
 - Docker provider is the default for local dev.
 - Desktop runtime agents can run outside Docker (use `PROXY_BASE_URL=http://127.0.0.1:8789`).

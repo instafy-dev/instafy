@@ -1,13 +1,6 @@
 import type { Ref } from "react";
-import { TaskList } from "iconoir-react";
-import { Button, IconButton } from "../../../components/Button";
-import { Surface } from "../../../components/Surface";
+import { Button } from "../../../components/Button";
 import { Text } from "../../../components/Text";
-import {
-  DARK_DIVIDER_BORDER_CLASS,
-  DARK_PANEL_BORDER_CLASS,
-  DARK_PANEL_STRONG_BG_CLASS,
-} from "../../../theme/darkSurfaces";
 import {
   buildQueuedMessageAccessiblePreview,
   ChatSendQueue,
@@ -19,6 +12,7 @@ export const CHAT_SEND_QUEUE_ITEMS_ID = "chat-send-queue-items";
 
 type EditingQueuedChatItemLike = {
   targetAgentHandles: string[];
+  restoreOnly?: boolean;
 };
 
 export type ChatSendQueueSurfaceProps = {
@@ -68,28 +62,21 @@ export function ChatSendQueueTrigger({
     : `Queued messages (${totalQueuedCount})`;
 
   return (
-    <IconButton
+    <Button
       type="button"
       aria-label={title}
       title={title}
       aria-controls={CHAT_SEND_QUEUE_ITEMS_ID}
       aria-expanded={expanded}
       ref={triggerRef}
-      variant="outline"
-      size="sm"
-      radius="full"
+      variant={expanded ? "secondary" : "ghost"}
+      preset="toolbar"
       onPress={onToggleExpanded}
-      className="relative h-9 w-9 flex-none border-slate-200/70 bg-white/80 text-slate-600 dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-raised-control)] dark:text-slate-300"
+      className="shrink-0 whitespace-nowrap"
       data-testid="chat-send-queue-agent-summary"
     >
-      <TaskList aria-hidden="true" className="h-4 w-4" data-testid="chat-send-queue-icon" />
-      <span
-        aria-hidden="true"
-        className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary-600 px-1 text-3xs font-semibold leading-none text-white ring-2 ring-white dark:bg-primary-500 dark:ring-[color:var(--color-studio-dark-panel)]"
-      >
-        {countLabel}
-      </span>
-    </IconButton>
+      <span>Queued {countLabel}</span>
+    </Button>
   );
 }
 
@@ -126,31 +113,12 @@ export function ChatSendQueuePanel({
       aria-label="Queued messages"
       className="basis-full"
     >
-      <Surface
-        tone="default"
-        radius="xl"
-        shadow="none"
-        className={`ml-auto w-full overflow-hidden border border-slate-200/70 bg-white/95 sm:w-[min(24rem,100%)] ${DARK_PANEL_STRONG_BG_CLASS} ${DARK_PANEL_BORDER_CLASS}`}
-      >
+      <div className={editingQueuedItem ? "w-full" : "ml-auto w-full sm:w-[min(24rem,100%)]"}>
         {totalQueuedCount > 0 && chatSendQueueExpanded ? (
-          <div
-            className="flex min-h-10 items-center gap-2 px-3 py-1.5"
-            data-testid="chat-send-queue-panel-header"
-          >
-            <TaskList aria-hidden="true" className="h-4 w-4 flex-none text-slate-500 dark:text-slate-400" />
-            <span className="min-w-0 flex-1 text-sm font-medium text-slate-800 dark:text-slate-100">
-              Queue
-            </span>
-          </div>
+          <span className="sr-only" data-testid="chat-send-queue-panel-header">Queue</span>
         ) : null}
         {chatSendQueueDisplay.length > 0 && chatSendQueueExpanded ? (
-          <div
-            className={
-              totalQueuedCount > 0
-                ? `max-h-[min(16rem,35dvh)] overflow-y-auto overscroll-contain border-t border-slate-200/70 ${DARK_DIVIDER_BORDER_CLASS}`
-                : "max-h-[min(16rem,35dvh)] overflow-y-auto overscroll-contain"
-            }
-          >
+          <div className="max-h-[min(32rem,60dvh)] overflow-y-auto overscroll-contain">
             <ChatSendQueue
               items={chatSendQueueDisplay}
               onRemove={onRemoveQueuedItem}
@@ -167,38 +135,32 @@ export function ChatSendQueuePanel({
         ) : null}
         {editingQueuedItem ? (
           <div
-            className={`flex flex-wrap items-center justify-between gap-2 px-3 py-2.5 ${
-              totalQueuedCount > 0 || (chatSendQueueDisplay.length > 0 && chatSendQueueExpanded)
-                ? `border-t border-slate-200/70 ${DARK_DIVIDER_BORDER_CLASS}`
-                : ""
-            }`}
+            className="flex flex-wrap items-center justify-between gap-2 p-1"
           >
             <div className="min-w-0">
-              <Text as="div" variant="caption" tone="muted" className="text-xxs">
-                Editing queued message
+              <Text as="div" variant="captionStrong" tone="muted">
+                {editingQueuedItem.restoreOnly ? "Restore queued message" : "Editing queued message"}
               </Text>
-              <Text as="div" variant="caption" tone="muted" className="truncate text-xxs">
+              <Text as="div" variant="caption" tone="muted" className="truncate">
                 {editingQueuedItem.targetAgentHandles.length > 0
                   ? editingQueuedItem.targetAgentHandles.map((handle) => `@${handle}`).join(" ")
                   : "No explicit agent targets"}
               </Text>
             </div>
-            <div className="flex items-center gap-1">
+            <div className="flex flex-wrap items-center gap-2">
               <Button
                 type="button"
                 variant="ghost"
-                size="xs"
-                radius="full"
+                preset="inline"
                 onPress={onCancelQueuedEdit}
                 isDisabled={sendingAttachment || mutationDisabled}
               >
-                Cancel
+                {editingQueuedItem.restoreOnly ? "Retry restore" : "Cancel"}
               </Button>
-              <Button
+              {!editingQueuedItem.restoreOnly ? <><Button
                 type="button"
                 variant="outline"
-                size="xs"
-                radius="full"
+                preset="inline"
                 onPress={onRequeueEditedMessage}
                 isDisabled={!canSaveEditedMessage}
               >
@@ -207,8 +169,7 @@ export function ChatSendQueuePanel({
               <Button
                 type="button"
                 variant="primary"
-                size="xs"
-                radius="full"
+                preset="inline"
                 onPress={() => {
                   void onSendEditedMessageNow();
                 }}
@@ -216,10 +177,11 @@ export function ChatSendQueuePanel({
               >
                 Send now
               </Button>
+              </> : null}
             </div>
           </div>
         ) : null}
-      </Surface>
+      </div>
     </div>
   );
 }

@@ -18,7 +18,37 @@ export type QueuedChatSendItem = {
 export type EditingQueuedChatItem = {
   item: QueuedChatSendItem;
   targetAgentHandles: string[];
+  originalQueueOrder?: string[];
+  restoreOnly?: boolean;
 };
+
+// Keep the edited item beside its surviving neighbours. A new message added
+// during the edit must not move ahead of it just because it was temporarily
+// taken out of the queue.
+export function restoreEditedQueueItem(
+  items: QueuedChatSendItem[],
+  item: QueuedChatSendItem,
+  originalQueueOrder?: string[],
+): QueuedChatSendItem[] {
+  const remaining = items.filter((entry) => entry.id !== item.id);
+  const originalIndex = originalQueueOrder?.indexOf(item.id) ?? -1;
+  if (!originalQueueOrder || originalIndex < 0) {
+    return [...remaining, item];
+  }
+  const following = originalQueueOrder.slice(originalIndex + 1);
+  const nextId = following.find((id) => remaining.some((entry) => entry.id === id));
+  if (nextId) {
+    remaining.splice(remaining.findIndex((entry) => entry.id === nextId), 0, item);
+    return remaining;
+  }
+  const preceding = originalQueueOrder.slice(0, originalIndex).reverse();
+  const previousId = preceding.find((id) => remaining.some((entry) => entry.id === id));
+  const insertAt = previousId
+    ? remaining.findIndex((entry) => entry.id === previousId) + 1
+    : 0;
+  remaining.splice(insertAt, 0, item);
+  return remaining;
+}
 
 export function createChatSendQueueKey(projectId: string, conversationId: string): string {
   return `${CHAT_SEND_QUEUE_STORAGE_PREFIX}:${projectId}:${conversationId}`;

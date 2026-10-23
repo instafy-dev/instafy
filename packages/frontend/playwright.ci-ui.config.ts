@@ -33,6 +33,7 @@ const REQUIRED_BROWSER_UI_SPECS = [
   "browser-cursor-overlay.spec.ts",
   "browser-live-proof.spec.ts",
   "conversation-surfaces.spec.ts",
+  "queue-composer.spec.ts",
   "mobile-sidebar-keyboard.spec.ts",
   "mobile-editor-dialogs.spec.ts",
   "mobile-sidebar-safe-area.spec.ts",

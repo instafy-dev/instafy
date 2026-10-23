@@ -7,6 +7,126 @@ async function screenshot(page: Page, info: TestInfo, name: string) {
   return path;
 }
 
+async function mountComposerViews(page: Page) {
+  const deps = await resolveViteReactDependencies(page);
+  const layoutModule = await (await page.request.get("/src/workspace/ConversationSurfaceLayout.tsx")).text();
+  const iconModule = layoutModule.match(/["']([^"']+iconoir-react[^"']+)["']/)?.[1];
+  if (!iconModule) throw new Error("Could not resolve the layout's Vite icon dependency");
+  await page.route("**/__composer-views__", route => route.fulfill({ contentType: "text/html", body: `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><script type="module">import R from '/@react-refresh'; R.injectIntoGlobalHook(window); window.$RefreshReg$=()=>{};window.$RefreshSig$=()=>x=>x;window.__vite_plugin_react_preamble_installed__=true;</script><script type="module" src="/__composer-views__.js"></script></head><body style="margin:0"><div id="root"></div></body></html>` }));
+  await page.route("**/__composer-views__.js", route => route.fulfill({ contentType: "application/javascript", body: `
+    import '/src/styles/tailwind.css';
+    import ReactNS from '${deps.react}'; import ReactDOMNS from '${deps.reactDomClient}';
+    import { Globe, Page } from '${iconModule}';
+    import { ConversationSurfaceTabs } from '/src/workspace/ConversationSurfaceLayout.tsx';
+    import { DEFAULT_CONVERSATION_SURFACES, selectConversationView, openConversationFile, closeConversationFile, conversationFileLabel } from '/src/workspace/conversationSurfaces.ts';
+    const R=ReactNS.default??ReactNS, h=R.createElement, {createRoot}=ReactDOMNS.default??ReactDOMNS;
+    function App(){
+      const [state,setState]=R.useState(DEFAULT_CONVERSATION_SURFACES),[paneWidth,setPaneWidth]=R.useState(null);
+      window.configureComposer=({width,paths})=>{
+        setPaneWidth(width);
+        setState(paths.reduce((next,path)=>openConversationFile(next,{id:'file:'+path,path}),DEFAULT_CONVERSATION_SURFACES));
+      };
+      return h('main',{className:'bg-white text-slate-900',style:{minHeight:'100vh'}},
+        h('section',{'data-testid':'composer-pane',style:{width:paneWidth??'100%',maxWidth:'100%',display:'flex',flexDirection:'column'}},
+          h(ConversationSurfaceTabs,{
+            presentation:'composer',chatPanelId:'chat-panel',activeId:state.activeId,resourceId:state.resourceId,split:false,wide:false,ratio:state.ratio,
+            resources:[{id:'browser',label:'Browser',panelId:'browser-panel',icon:h(Globe,{className:'h-3.5 w-3.5'}),attention:h('span',{'data-testid':'approval-marker'},'Approve')},
+              ...state.files.map(file=>({id:file.id,label:conversationFileLabel(file,state.files),title:file.path,panelId:'file-panel',icon:h(Page,{className:'h-3.5 w-3.5'}),
+                onClose:()=>setState(current=>closeConversationFile(current,file.id,true))}))],
+            onSelect:id=>setState(current=>selectConversationView(current,id)),onSplitChange:()=>{}
+          }),h('div',{id:'chat-panel',tabIndex:-1},'Chat'),h('div',{id:'browser-panel'},'Browser'),h('div',{id:'file-panel'},'File')));
+    } createRoot(document.getElementById('root')).render(h(App));` }));
+  await page.goto("/__composer-views__");
+  await expect(page.getByRole("tab", { name: "Chat", exact: true })).toBeVisible();
+  await page.evaluate(() => document.fonts.ready);
+}
+
+for (const touch of [false, true]) {
+  test(`composer views stay compact and scroll within their pane with a ${touch ? "touch" : "mouse"} pointer`, async ({ page }) => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: touch, maxTouchPoints: 1 });
+    await mountComposerViews(page);
+    const pane = page.getByTestId("composer-pane");
+    const strip = page.getByTestId("conversation-subtabs");
+    const chat = page.getByRole("tab", { name: "Chat", exact: true });
+    const browser = page.getByRole("tab", { name: "Browser, approval needed", exact: true });
+    const viewport = page.getByTestId("conversation-resource-tabs").locator(".overflow-x-auto");
+    let compactWidth: number | undefined;
+    const files = ["docs/long-resource-name-that-should-truncate.md", ...Array.from({ length: 10 }, (_, i) => `docs/chapter-${i}.md`)];
+    for (const { width, paneWidth } of [
+      { width: 390, paneWidth: null },
+      { width: 768, paneWidth: null },
+      { width: 1023, paneWidth: null },
+      // Width follows the actual composer pane, even inside a desktop window.
+      { width: 1440, paneWidth: 390 },
+    ]) {
+      await page.setViewportSize({ width, height: 900 });
+      expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(touch);
+      await page.evaluate(width => (window as unknown as {
+        configureComposer: (options: { width: number | null; paths: string[] }) => void;
+      }).configureComposer({ width, paths: [] }), paneWidth);
+      await expect(chat).toHaveAttribute("aria-selected", "true");
+      await expect(strip).toHaveAttribute("data-presentation", "composer");
+      const paneBounds = (await pane.boundingBox())!;
+      const stripBounds = (await strip.boundingBox())!;
+      expect(stripBounds.width).toBeLessThan(paneBounds.width - 40);
+      if (compactWidth === undefined) compactWidth = stripBounds.width;
+      else expect(Math.abs(stripBounds.width - compactWidth)).toBeLessThan(1);
+      // A selected surface must not paint a large, unclickable area beyond its tab.
+      for (const tab of [chat, browser]) {
+        const bounds = (await tab.boundingBox())!;
+        const surfaceBounds = (await tab.locator("..").boundingBox())!;
+        expect(Math.abs(surfaceBounds.width - bounds.width)).toBeLessThan(1);
+        expect(Math.abs(surfaceBounds.x - bounds.x)).toBeLessThan(1);
+        expect(bounds.height).toBeGreaterThanOrEqual(44);
+        expect(bounds.width).toBeGreaterThanOrEqual(44);
+      }
+      await expect(page.getByTestId("approval-marker")).toBeVisible();
+      const browserBounds = (await browser.boundingBox())!;
+      const edge = { x: browserBounds.width - 3, y: browserBounds.height / 2 };
+      if (touch) {
+        await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: browserBounds.x + edge.x, y: browserBounds.y + edge.y }] });
+        await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      } else await browser.click({ position: edge });
+      await expect(browser).toHaveAttribute("aria-selected", "true");
+      await browser.press("Home");
+      await expect(chat).toBeFocused();
+      await page.evaluate(({ width, paths }) => (window as unknown as {
+        configureComposer: (options: { width: number | null; paths: string[] }) => void;
+      }).configureComposer({ width, paths }), { width: paneWidth, paths: files });
+      const last = page.getByRole("tab", { name: "chapter-9.md", exact: true });
+      await expect(last).toHaveAttribute("aria-selected", "true");
+      await expect(page.getByRole("button", { name: "Scroll views left" })).toBeEnabled();
+      const viewportBounds = (await viewport.boundingBox())!;
+      const lastBounds = (await last.locator("..").boundingBox())!;
+      expect(lastBounds.x).toBeGreaterThanOrEqual(viewportBounds.x - 1);
+      expect(lastBounds.x + lastBounds.width).toBeLessThanOrEqual(viewportBounds.x + viewportBounds.width + 1);
+      expect((await strip.boundingBox())!.width).toBeLessThanOrEqual(paneBounds.width + 1);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await last.focus();
+      await last.press("Delete");
+      const previous = page.getByRole("tab", { name: "chapter-8.md", exact: true });
+      await expect(previous).toBeFocused();
+      await expect(last).toHaveCount(0);
+      await previous.press("Home");
+      await expect(chat).toBeFocused();
+      await chat.press("ArrowRight");
+      await expect(browser).toBeFocused();
+      await expect(page.getByTestId("approval-marker")).toBeVisible();
+      await browser.press("ArrowRight");
+      const longName = page.getByRole("tab", { name: "long-resource-name-that-should-truncate.md", exact: true });
+      await expect(longName).toBeFocused();
+      await expect(longName).toHaveAttribute("title", "docs/long-resource-name-that-should-truncate.md");
+      const label = longName.locator(".truncate");
+      expect(await label.evaluate(node => node.scrollWidth > node.clientWidth)).toBe(true);
+    }
+    expect(errors).toEqual([]);
+    await cdp.detach();
+  });
+}
+
 test("conversation views preserve mounted resources, drafts and split size across narrow layouts", async ({ page }, testInfo) => {
   const deps = await resolveViteReactDependencies(page);
   const layoutModule = await (await page.request.get("/src/workspace/ConversationSurfaceLayout.tsx")).text();

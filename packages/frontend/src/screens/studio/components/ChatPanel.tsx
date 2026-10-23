@@ -935,6 +935,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     refreshServerSendQueue,
     removeServerSendQueueEntry,
     reorderServerSendQueueEntry,
+    restoreServerSendQueueItem,
     serverQueueReordering,
     serverQueueHydrated,
     serverSendQueueItems,
@@ -2157,6 +2158,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const [goalDetailsCollapseToken, setGoalDetailsCollapseToken] = useState(0);
 
   const submitMessageRef = useRef<SubmitMessageFn>(async () => false);
+  const queuedEditSubmitRef = useRef<(override?: Parameters<SubmitMessageFn>[0]) => Promise<boolean> | null>(() => null);
   const composerPrimaryActionRef = useRef<{
     mode: "send" | "steer";
     expectedActiveJobId: string | null;
@@ -2165,6 +2167,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const invokeSubmitMessage = useCallback<SubmitMessageFn>(async (override, options) => {
     if (!ensureProjectWriteAccess()) {
       return false;
+    }
+    const queuedEditSubmission = queuedEditSubmitRef.current(override);
+    if (queuedEditSubmission) {
+      return await queuedEditSubmission;
     }
     const restoredStash = override ? null : restoredMessageStash;
     const restoredEnvelope = restoredStash
@@ -2533,6 +2539,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     event.preventDefault();
     event.stopPropagation();
     event.nativeEvent.stopImmediatePropagation?.();
+    if (editingQueuedItem && !editingQueuedItem.restoreOnly) {
+      void invokeSubmitMessage(undefined, { intent: "queue" });
+      return;
+    }
     if (enterAction === "stash") {
       void handleStashDraft();
       return;
@@ -5237,9 +5247,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   });
 
   const {
+    queueEditPending,
     handleCancelQueuedEdit,
     handleEditQueuedMessage,
     handleRequeueEditedMessage,
+    handleQueuedEditComposerSubmit,
     handleSendEditedMessageNow,
     handleSendQueuedMessageNow,
   } = useChatSendQueueActions({
@@ -5248,7 +5260,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     chatSendQueue,
     dispatchServerSendQueueEntryNow,
     editingQueuedItem,
-    enqueueServerSendQueueItem,
+    restoreServerSendQueueItem,
     focusInput,
     hostedRuntimeEnsuring,
     imageAttachmentCount: imageAttachments.length,
@@ -5277,6 +5289,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     targetsOverlapActiveRuns,
     waitingForPreferredRuntime,
   });
+  queuedEditSubmitRef.current = handleQueuedEditComposerSubmit;
 
   const dismissNotificationsNudge = useCallback(() => {
     setNotificationsNudgeOpen(false);
@@ -6398,6 +6411,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           chatSendQueueDisplay,
           sendingAttachment,
           inputValue,
+          mutationDisabled: queueEditPending,
           onToggleExpanded: () => setChatSendQueueExpanded((current) => !current),
           onSendQueuedMessageNow: handleSendQueuedMessageNow,
           onRemoveQueuedItem: removeChatSendQueueItem,

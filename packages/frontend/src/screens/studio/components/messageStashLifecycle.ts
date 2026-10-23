@@ -11,17 +11,19 @@ export function shouldDeleteRestoredMessageStashAfterAction({
   return action === "send" || action === "queue" || action === "steer";
 }
 
-export type MessageStashRestoreBlock = "attachments" | "composer_text" | null;
+export type ComposerDraftReplaceBlock = "attachments" | "composer_text" | null;
 
-export function resolveMessageStashRestoreBlock({
+export function resolveComposerDraftReplaceBlock({
   composerText,
   attachmentCount,
 }: {
   composerText: string;
   attachmentCount: number;
-}): MessageStashRestoreBlock {
+}): ComposerDraftReplaceBlock {
   if (attachmentCount > 0) {
     return "attachments";
   }
   return composerText.trim().length > 0 ? "composer_text" : null;
 }
+
+export const resolveMessageStashRestoreBlock = resolveComposerDraftReplaceBlock;

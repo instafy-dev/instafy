@@ -60,7 +60,7 @@ describe("ChatSendQueueSurface", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  it("keeps the collapsed queue behind a counted task-list icon", async () => {
+  it("keeps the collapsed queue behind a labelled queue control", async () => {
     const onToggleExpanded = vi.fn();
     const onEditQueuedMessage = vi.fn();
 
@@ -75,9 +75,7 @@ describe("ChatSendQueueSurface", () => {
     expect(summary?.getAttribute("aria-label")).toBe("Queued messages (1): two");
     expect(summary?.getAttribute("aria-expanded")).toBe("false");
     expect(container.querySelector(`#${summary?.getAttribute("aria-controls")}`)).not.toBeNull();
-    expect(container.querySelector('[data-testid="chat-send-queue-icon"]')).not.toBeNull();
-    expect(summary?.querySelector('span[aria-hidden="true"]')?.className).toContain("bg-primary-600");
-    expect(container.textContent).toBe("1");
+    expect(summary?.textContent).toBe("Queued 1");
 
     await act(async () => {
       (summary as HTMLButtonElement).click();
@@ -118,7 +116,7 @@ describe("ChatSendQueueSurface", () => {
 
     const editButton = container.querySelector('[data-testid="chat-send-queue-steer-collapsed"]');
     expect(editButton).toBeNull();
-    expect(container.textContent).toBe("2");
+    expect(container.textContent).toBe("Queued 2");
 
     await act(async () => {
       (container.querySelector('[data-testid="chat-send-queue-agent-summary"]') as HTMLButtonElement).click();
@@ -199,6 +197,32 @@ describe("ChatSendQueueSurface", () => {
     expect(container.querySelector('[data-testid="chat-send-queue-agent-summary"]')).toBeNull();
     expect(container.querySelector('[data-testid="chat-send-queue-icon"]')).toBeNull();
     expect(container.querySelector('[aria-label="Queued messages"][role="region"]')).not.toBeNull();
+  });
+
+  it("keeps a preserved draft separate from a queued message awaiting restoration", async () => {
+    const onCancelQueuedEdit = vi.fn();
+    await act(async () => root.render(<ChatSendQueueSurface {...buildProps({
+      editingQueuedItem: { targetAgentHandles: ["octo"], restoreOnly: true },
+      inputValue: "Keep this new draft",
+      onCancelQueuedEdit,
+    })} />));
+    expect(container.textContent).toContain("Restore queued message");
+    expect(container.textContent).not.toContain("Save queue");
+    expect(container.textContent).not.toContain("Send now");
+    const retry = Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+      .find(button => button.textContent === "Retry restore")!;
+    await act(async () => retry.click());
+    expect(onCancelQueuedEdit).toHaveBeenCalledOnce();
+  });
+
+  it("disables edit actions during an in-flight queue mutation", async () => {
+    await act(async () => root.render(<ChatSendQueueSurface {...buildProps({
+      editingQueuedItem: { targetAgentHandles: ["octo"] },
+      inputValue: "Updated message", mutationDisabled: true,
+    })} />));
+    for (const button of container.querySelectorAll<HTMLButtonElement>("button")) {
+      expect(button.disabled).toBe(true);
+    }
   });
 
   it("bounds long queued-message previews in the trigger name", async () => {

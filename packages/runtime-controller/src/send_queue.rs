@@ -56,6 +56,10 @@ pub(crate) fn router() -> Router<AppState> {
             "/conversations/:conversation_id/send-queue/:entry_id/reorder",
             post(reorder_send_queue_entry),
         )
+        .route(
+            "/conversations/:conversation_id/send-queue/:entry_id/restore",
+            post(restore_send_queue_entry),
+        )
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,6 +77,36 @@ pub(crate) struct SendQueueEnqueueBody {
 struct SendQueueReorderBody {
     #[serde(default)]
     before_entry_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum SendQueueRestoreStatus {
+    #[default]
+    Queued,
+    Failed,
+}
+
+impl SendQueueRestoreStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SendQueueRestoreBody {
+    // Exact version returned by the edit's cancellation, fencing a stale
+    // response retry from restoring a subsequent edit or deletion.
+    expected_updated_at: DateTime<Utc>,
+    message: JsonValue,
+    #[serde(default)]
+    target_agent_handles: Vec<String>,
+    #[serde(default)]
+    status: SendQueueRestoreStatus,
 }
 
 fn normalize_agent_handle(raw: &str) -> Option<String> {
@@ -175,13 +209,14 @@ fn entry_row_to_json(row: &tokio_postgres::Row) -> JsonValue {
         "errorMessage": row.get::<_, Option<String>>("error_message"),
         "queuePosition": row.get::<_, i64>("queue_position"),
         "createdAt": row.get::<_, chrono::DateTime<chrono::Utc>>("created_at"),
+        "updatedAt": row.get::<_, chrono::DateTime<chrono::Utc>>("updated_at"),
         "dispatchedAt": row.get::<_, Option<chrono::DateTime<chrono::Utc>>>("dispatched_at"),
     })
 }
 
 const ENTRY_COLUMNS: &str = "id, conversation_id, user_id, client_send_id, status, \
                              target_agent_handles, request, error_message, created_at, \
-                             dispatched_at, queue_position";
+                             dispatched_at, queue_position, updated_at";
 
 fn publish_send_queue_event(
     state: &AppState,
@@ -319,16 +354,21 @@ pub(crate) async fn enqueue_prompt_with_context(
     .await
 }
 
-async fn enqueue_prompt_with_optional_client_id(
+// Enqueue and edit restoration accept the same prompt envelope and target lanes.
+async fn prepare_queue_message(
     state: &AppState,
     context: &RequestContext,
-    conversation_id: Uuid,
-    client_send_id: Option<String>,
+    project_id: Uuid,
     message_value: JsonValue,
     supplied_target_agent_handles: Option<&[String]>,
-) -> Result<SendQueueEnqueueOutcome, (StatusCode, Json<ApiError>)> {
-    let owner_user_id = require_user_session(context)?;
-    let access = authorize_conversation_with_context(state, context, conversation_id, true).await?;
+) -> Result<
+    (
+        JsonValue,
+        Vec<String>,
+        Option<crate::site_intent::VerifiedSiteIntent>,
+    ),
+    (StatusCode, Json<ApiError>),
+> {
     // An ask from a site (crate::site_intent) is checked and counted when it is
     // queued, and only the checked copy is stored: the drain re-checks it
     // without counting it again.
@@ -336,7 +376,7 @@ async fn enqueue_prompt_with_optional_client_id(
     let site_ask = match message_value.get_mut("metadata") {
         Some(metadata) => match crate::site_intent::take_site_intent_claim(metadata) {
             Some(claim) => Some(
-                crate::site_intent::require_site_intent(state, &access.project_id, context, &claim)
+                crate::site_intent::require_site_intent(state, &project_id, context, &claim)
                     .await?,
             ),
             None => None,
@@ -367,6 +407,28 @@ async fn enqueue_prompt_with_optional_client_id(
             ));
         }
     }
+
+    Ok((message_value, handles, site_ask))
+}
+
+async fn enqueue_prompt_with_optional_client_id(
+    state: &AppState,
+    context: &RequestContext,
+    conversation_id: Uuid,
+    client_send_id: Option<String>,
+    message_value: JsonValue,
+    supplied_target_agent_handles: Option<&[String]>,
+) -> Result<SendQueueEnqueueOutcome, (StatusCode, Json<ApiError>)> {
+    let owner_user_id = require_user_session(context)?;
+    let access = authorize_conversation_with_context(state, context, conversation_id, true).await?;
+    let (message_value, handles, site_ask) = prepare_queue_message(
+        state,
+        context,
+        access.project_id,
+        message_value,
+        supplied_target_agent_handles,
+    )
+    .await?;
 
     let mut connection = state
         .pool
@@ -793,6 +855,187 @@ pub(crate) async fn cancel_send_queue_entry(
     );
 
     Ok(Json(json!({ "ok": true, "entry": entry })))
+}
+
+#[derive(Debug)]
+struct SendQueueRestoreOutcome {
+    restored: bool,
+    entry: JsonValue,
+}
+
+async fn restore_owned_send_queue_entry(
+    state: &AppState,
+    conversation_id: Uuid,
+    owner_user_id: Uuid,
+    entry_id: Uuid,
+    message: JsonValue,
+    handles: Vec<String>,
+    status: SendQueueRestoreStatus,
+    expected_updated_at: DateTime<Utc>,
+    site_ask: Option<crate::site_intent::VerifiedSiteIntent>,
+) -> Result<SendQueueRestoreOutcome, (StatusCode, Json<ApiError>)> {
+    let mut connection = state
+        .pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
+    let transaction = connection
+        .transaction()
+        .await
+        .map_err(|error| internal_error(format!("failed to start queue restore: {error}")))?;
+    // The canceled row retains its slot while being edited. Restore it before
+    // the drain can claim another row or a reorder can permute those slots.
+    let lock_key = format!("send-queue-drain:{conversation_id}");
+    transaction
+        .query_one(
+            "select pg_advisory_xact_lock(hashtextextended($1, 0))",
+            &[&lock_key],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!("failed to acquire queue restore lock: {error}"))
+        })?;
+    let row = transaction
+        .query_opt(
+            &format!(
+                "select {ENTRY_COLUMNS} from conversation_send_queue
+                 where id = $1 and conversation_id = $2 and user_id = $3
+                 for update"
+            ),
+            &[&entry_id, &conversation_id, &owner_user_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load queued message: {error}")))?
+        .ok_or_else(|| not_found("queued message not found"))?;
+    let existing_request = row.get::<_, PgJson<JsonValue>>("request").0;
+    let existing_status = row.get::<_, String>("status");
+    if existing_status != "canceled" {
+        // A lost response may be retried after the restored item has already
+        // been claimed or failed. Acknowledge the same content without ever
+        // reviving a dispatched item or replacing a newer edit.
+        if matches!(
+            existing_status.as_str(),
+            "queued" | "failed" | "dispatched" | "recorded"
+        ) && existing_request == message
+            && canonical_target_handles_from_value(&existing_request)? == handles
+        {
+            transaction.commit().await.map_err(|error| {
+                internal_error(format!("failed to finalize queue restore lookup: {error}"))
+            })?;
+            return Ok(SendQueueRestoreOutcome {
+                restored: false,
+                entry: entry_row_to_json(&row),
+            });
+        }
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ApiError::new(
+                "queued message changed before it could be restored",
+            )),
+        ));
+    }
+    if row.get::<_, DateTime<Utc>>("updated_at") != expected_updated_at {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ApiError::new(
+                "queued message changed during editing; reload the queue",
+            )),
+        ));
+    }
+    if let Some(verified) = site_ask.as_ref() {
+        let previous_site_intent = existing_request
+            .get("metadata")
+            .and_then(|metadata| metadata.get(crate::site_intent::SITE_INTENT_KEY));
+        if previous_site_intent != Some(&verified.json) {
+            // Editing text keeps the original checked ask and its charge;
+            // changing to a different site ask still consumes its quota.
+            crate::site_intent::charge_site_ask(state, verified).await?;
+        }
+    }
+    let row = transaction
+        .query_one(
+            &format!(
+                "update conversation_send_queue
+                 set request = $4::jsonb, target_agent_handles = $5,
+                     status = $6, updated_at = now(), dispatched_at = null,
+                     error_message = case when $6 = 'failed' then error_message else null end
+                 where id = $1 and conversation_id = $2 and user_id = $3
+                   and status = 'canceled'
+                 returning {ENTRY_COLUMNS}"
+            ),
+            &[
+                &entry_id,
+                &conversation_id,
+                &owner_user_id,
+                &PgJson(&message),
+                &handles,
+                &status.as_str(),
+            ],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to restore queued message: {error}")))?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| internal_error(format!("failed to commit queue restore: {error}")))?;
+    Ok(SendQueueRestoreOutcome {
+        restored: true,
+        entry: entry_row_to_json(&row),
+    })
+}
+
+async fn restore_send_queue_entry(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: HeaderMap,
+    AxumPath((conversation_id_raw, entry_id_raw)): AxumPath<(String, String)>,
+    Json(body): Json<SendQueueRestoreBody>,
+) -> Result<Json<JsonValue>, (StatusCode, Json<ApiError>)> {
+    let (context, conversation_id, access) =
+        authorize_conversation(&state, &headers, conversation_id_raw.as_str(), true).await?;
+    let entry_id = Uuid::from_str(entry_id_raw.trim())
+        .map_err(|_| bad_request("entryId must be a valid UUID"))?;
+    let owner_user_id = require_user_session(&context)?;
+    let (message, handles, site_ask) = prepare_queue_message(
+        &state,
+        &context,
+        access.project_id,
+        body.message,
+        Some(&body.target_agent_handles),
+    )
+    .await?;
+    let outcome = restore_owned_send_queue_entry(
+        &state,
+        conversation_id,
+        owner_user_id,
+        entry_id,
+        message,
+        handles,
+        body.status,
+        body.expected_updated_at,
+        site_ask,
+    )
+    .await?;
+    if outcome.restored {
+        publish_send_queue_event(
+            &state,
+            access.project_id,
+            access.session_id,
+            conversation_id,
+            Some(owner_user_id),
+            "restored",
+            outcome.entry.clone(),
+        );
+    }
+    if outcome.entry["status"] == "queued" {
+        // Also recover the wakeup after a lost first response; failed entries
+        // restored by Cancel must remain stopped until explicitly retried.
+        spawn_send_queue_drain(state.clone(), conversation_id);
+    }
+    Ok(Json(json!({
+        "ok": true,
+        "restored": outcome.restored,
+        "entry": outcome.entry,
+    })))
 }
 
 pub(crate) async fn dispatch_send_queue_entry_now(
@@ -1786,6 +2029,27 @@ mod tests {
     }
 
     #[test]
+    fn queue_restore_only_accepts_mutable_destination_statuses() {
+        for status in ["queued", "failed"] {
+            assert!(serde_json::from_value::<SendQueueRestoreBody>(json!({
+                "message": {}, "status": status, "expectedUpdatedAt": "2026-10-23T12:00:00Z"
+            }))
+            .is_ok());
+        }
+        for status in ["dispatched", "recorded", "canceled", "unknown"] {
+            assert!(serde_json::from_value::<SendQueueRestoreBody>(json!({
+                "message": {}, "status": status, "expectedUpdatedAt": "2026-10-23T12:00:00Z"
+            }))
+            .is_err());
+        }
+        let default: SendQueueRestoreBody = serde_json::from_value(
+            json!({ "message": {}, "expectedUpdatedAt": "2026-10-23T12:00:00Z" }),
+        )
+        .expect("status is optional");
+        assert_eq!(default.status, SendQueueRestoreStatus::Queued);
+    }
+
+    #[test]
     fn queue_dispatch_retry_preserves_a_stable_client_message_id() {
         let mut body: ConversationPromptBody = serde_json::from_value(prompt_with_metadata(
             json!({ "clientMessageId": "interactive-send-1", "custom": true }),
@@ -2126,6 +2390,406 @@ mod tests {
         .expect_err("a claimed entry is no longer mutable");
         assert_eq!(status, StatusCode::NOT_FOUND);
 
+        cleanup_owned_queue_fixture(&pool, project_id, &[other_user_id, owner_user_id]).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn queue_restore_route_rechecks_write_access_and_prompt_validation() -> anyhow::Result<()>
+    {
+        let Some(pool) = crate::tests::setup_origin_test_pool().await? else {
+            eprintln!("skipping queue restore route test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        let project_id = Uuid::new_v4();
+        let conversation_id = Uuid::new_v4();
+        let owner_user_id = Uuid::new_v4();
+        let viewer_user_id = Uuid::new_v4();
+        let entry_id = Uuid::new_v4();
+        insert_queue_test_user(&pool, owner_user_id).await?;
+        insert_queue_test_user(&pool, viewer_user_id).await?;
+        insert_service_queue_fixture(&pool, project_id, conversation_id).await?;
+        let message = prompt_with_metadata(json!({}));
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "update projects set owner_user_id = $2 where id = $1",
+                &[&project_id, &owner_user_id],
+            )
+            .await?;
+        connection.execute(
+            "insert into project_memberships (project_id, user_id, role) values ($1, $2, 'viewer')",
+            &[&project_id, &viewer_user_id],
+        ).await?;
+        connection.execute(
+            "insert into conversation_send_queue (id, project_id, conversation_id, user_id, status, request)
+             values ($1, $2, $3, $4, 'canceled', $5)",
+            &[&entry_id, &project_id, &conversation_id, &owner_user_id, &PgJson(&message)],
+        ).await?;
+        let expected_updated_at: DateTime<Utc> = connection
+            .query_one(
+                "select updated_at from conversation_send_queue where id = $1",
+                &[&entry_id],
+            )
+            .await?
+            .get(0);
+        drop(connection);
+        let state = crate::tests::build_test_state(
+            pool.clone(),
+            crate::tests::build_app_config(
+                crate::tests::test_origin_private_key(),
+                crate::tests::test_origin_public_key(),
+                "queue-restore-route",
+            ),
+        );
+        let headers_for = |user_id: Uuid| -> anyhow::Result<HeaderMap> {
+            let token = crate::auth::issue_controller_token(&state.config, &user_id)
+                .map_err(|(_, error)| anyhow::anyhow!(error.0.message))?
+                .token;
+            let mut headers = HeaderMap::new();
+            headers.insert("authorization", format!("Bearer {token}").parse()?);
+            Ok(headers)
+        };
+        let body = |message, target_agent_handles| SendQueueRestoreBody {
+            expected_updated_at,
+            message,
+            target_agent_handles,
+            status: SendQueueRestoreStatus::Failed,
+        };
+        let route = |headers, body| {
+            restore_send_queue_entry(
+                axum::extract::State(state.clone()),
+                headers,
+                AxumPath((conversation_id.to_string(), entry_id.to_string())),
+                Json(body),
+            )
+        };
+        let (status, Json(error)) = route(HeaderMap::new(), body(message.clone(), vec![]))
+            .await
+            .expect_err("restoring requires a signed-in user");
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{}", error.message);
+        let (status, Json(error)) =
+            route(headers_for(viewer_user_id)?, body(message.clone(), vec![]))
+                .await
+                .expect_err("read-only membership cannot restore a pending prompt");
+        assert_eq!(status, StatusCode::FORBIDDEN, "{}", error.message);
+        let (status, Json(error)) = route(
+            headers_for(owner_user_id)?,
+            body(message.clone(), vec!["reviewer".into()]),
+        )
+        .await
+        .expect_err("presentation targets cannot override prompt target lanes");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{}", error.message);
+        let mut empty_prompt = message.clone();
+        empty_prompt["promptText"] = json!("  ");
+        let (status, Json(error)) = route(headers_for(owner_user_id)?, body(empty_prompt, vec![]))
+            .await
+            .expect_err("empty edits must not be restored");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{}", error.message);
+        let Json(restored) = route(headers_for(owner_user_id)?, body(message, vec![]))
+            .await
+            .map_err(|(status, Json(error))| {
+                anyhow::anyhow!("restore route failed ({status}): {}", error.message)
+            })?;
+        assert_eq!(restored["ok"], true);
+        assert_eq!(restored["restored"], true);
+        assert_eq!(restored["entry"]["id"], entry_id.to_string());
+        assert_eq!(restored["entry"]["status"], "failed");
+        cleanup_owned_queue_fixture(&pool, project_id, &[viewer_user_id, owner_user_id]).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn queue_restore_keeps_owner_slot_and_is_idempotent_after_dispatch() -> anyhow::Result<()>
+    {
+        let Some(pool) = crate::tests::setup_origin_test_pool().await? else {
+            eprintln!("skipping queue restore test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        let project_id = Uuid::new_v4();
+        let conversation_id = Uuid::new_v4();
+        let owner_user_id = Uuid::new_v4();
+        let other_user_id = Uuid::new_v4();
+        let first_id = Uuid::new_v4();
+        let edited_id = Uuid::new_v4();
+        let foreign_id = Uuid::new_v4();
+        let last_id = Uuid::new_v4();
+        insert_queue_test_user(&pool, owner_user_id).await?;
+        insert_queue_test_user(&pool, other_user_id).await?;
+        insert_service_queue_fixture(&pool, project_id, conversation_id).await?;
+        let original = prompt_with_metadata(json!({
+            "agentSelection": { "active": ["octo"], "mentions": [] }
+        }));
+        let handles = vec!["octo".to_owned()];
+        let connection = pool.get().await?;
+        for (entry_id, user_id, status) in [
+            (first_id, owner_user_id, "queued"),
+            (edited_id, owner_user_id, "canceled"),
+            (foreign_id, other_user_id, "canceled"),
+            (last_id, owner_user_id, "queued"),
+        ] {
+            connection
+                .execute(
+                    "insert into conversation_send_queue (
+                    id, project_id, conversation_id, user_id, status, request
+                 ) values ($1, $2, $3, $4, $5, $6)",
+                    &[
+                        &entry_id,
+                        &project_id,
+                        &conversation_id,
+                        &user_id,
+                        &status,
+                        &PgJson(&original),
+                    ],
+                )
+                .await?;
+        }
+        let original_row = connection
+            .query_one(
+                "select queue_position, created_at, updated_at from conversation_send_queue where id = $1",
+                &[&edited_id],
+            )
+            .await?;
+        let original_position: i64 = original_row.get("queue_position");
+        let original_created_at: DateTime<Utc> = original_row.get("created_at");
+        let expected_updated_at: DateTime<Utc> = original_row.get("updated_at");
+        drop(connection);
+        let state = crate::tests::build_test_state(
+            pool.clone(),
+            crate::tests::build_app_config(
+                crate::tests::test_origin_private_key(),
+                crate::tests::test_origin_public_key(),
+                "queue-restore",
+            ),
+        );
+        for (requested_conversation, requested_entry) in [
+            (conversation_id, foreign_id),
+            (Uuid::new_v4(), edited_id),
+            (conversation_id, Uuid::new_v4()),
+        ] {
+            let (status, _) = restore_owned_send_queue_entry(
+                &state,
+                requested_conversation,
+                owner_user_id,
+                requested_entry,
+                original.clone(),
+                handles.clone(),
+                SendQueueRestoreStatus::Queued,
+                expected_updated_at,
+                None,
+            )
+            .await
+            .expect_err("foreign or missing entries must not be revealed or restored");
+            assert_eq!(status, StatusCode::NOT_FOUND);
+        }
+        // Another tab may reorder the remaining rows while the edit is
+        // open. Their permutation must not borrow the canceled row's slot.
+        reorder_owned_send_queue_entry(
+            &state,
+            conversation_id,
+            owner_user_id,
+            last_id,
+            Some(first_id),
+        )
+        .await
+        .map_err(|(status, Json(error))| {
+            anyhow::anyhow!("reorder during edit failed ({status}): {}", error.message)
+        })?;
+        let mut edited = original.clone();
+        edited["promptText"] = json!("Changed while keeping the original place");
+        let (first, retry) = tokio::join!(
+            restore_owned_send_queue_entry(
+                &state,
+                conversation_id,
+                owner_user_id,
+                edited_id,
+                edited.clone(),
+                handles.clone(),
+                SendQueueRestoreStatus::Queued,
+                expected_updated_at,
+                None,
+            ),
+            restore_owned_send_queue_entry(
+                &state,
+                conversation_id,
+                owner_user_id,
+                edited_id,
+                edited.clone(),
+                handles.clone(),
+                SendQueueRestoreStatus::Queued,
+                expected_updated_at,
+                None,
+            ),
+        );
+        let unwrap_restore =
+            |result: Result<SendQueueRestoreOutcome, (StatusCode, Json<ApiError>)>| {
+                result.map_err(|(status, Json(error))| {
+                    anyhow::anyhow!("queue restore failed ({status}): {}", error.message)
+                })
+            };
+        let first = unwrap_restore(first)?;
+        let retry = unwrap_restore(retry)?;
+        assert_ne!(
+            first.restored, retry.restored,
+            "concurrent retries restore exactly once"
+        );
+        assert_eq!(first.entry["id"], edited_id.to_string());
+        assert_eq!(first.entry["queuePosition"], original_position);
+        assert_eq!(first.entry["createdAt"], json!(original_created_at));
+        assert_eq!(first.entry["message"], edited);
+        let connection = pool.get().await?;
+        let restored_order = connection
+            .query(
+                "select id from conversation_send_queue where conversation_id = $1
+             and status = 'queued' order by queue_position, id",
+                &[&conversation_id],
+            )
+            .await?
+            .iter()
+            .map(|row| row.get::<_, Uuid>(0))
+            .collect::<Vec<_>>();
+        assert_eq!(restored_order, vec![last_id, edited_id, first_id]);
+        let positions = connection.query_one(
+            "select count(*) = count(distinct queue_position) from conversation_send_queue where conversation_id = $1",
+            &[&conversation_id],
+        ).await?;
+        assert!(
+            positions.get::<_, bool>(0),
+            "restoration must never duplicate another queue slot"
+        );
+        // A retry from an older edit cannot revive the next edit or deletion.
+        let next_edit_updated_at: DateTime<Utc> = connection.query_one(
+            "update conversation_send_queue set status = 'canceled', updated_at = clock_timestamp()
+             where id = $1 returning updated_at",
+            &[&edited_id],
+        ).await?.get(0);
+        drop(connection);
+        let (status, _) = restore_owned_send_queue_entry(
+            &state,
+            conversation_id,
+            owner_user_id,
+            edited_id,
+            edited.clone(),
+            handles.clone(),
+            SendQueueRestoreStatus::Queued,
+            expected_updated_at,
+            None,
+        )
+        .await
+        .expect_err("the previous edit version cannot restore a newer cancellation");
+        assert_eq!(status, StatusCode::CONFLICT);
+        unwrap_restore(
+            restore_owned_send_queue_entry(
+                &state,
+                conversation_id,
+                owner_user_id,
+                edited_id,
+                edited.clone(),
+                handles.clone(),
+                SendQueueRestoreStatus::Queued,
+                next_edit_updated_at,
+                None,
+            )
+            .await,
+        )?;
+        let connection = pool.get().await?;
+        connection.execute(
+            "update conversation_send_queue set status = 'dispatched', dispatched_at = now() where id = $1",
+            &[&edited_id],
+        ).await?;
+        drop(connection);
+        let replay = unwrap_restore(
+            restore_owned_send_queue_entry(
+                &state,
+                conversation_id,
+                owner_user_id,
+                edited_id,
+                edited.clone(),
+                handles.clone(),
+                SendQueueRestoreStatus::Queued,
+                expected_updated_at,
+                None,
+            )
+            .await,
+        )?;
+        assert!(!replay.restored);
+        assert_eq!(
+            replay.entry["status"], "dispatched",
+            "a retry must never send a second copy"
+        );
+        let (status, _) = restore_owned_send_queue_entry(
+            &state,
+            conversation_id,
+            owner_user_id,
+            edited_id,
+            original.clone(),
+            handles.clone(),
+            SendQueueRestoreStatus::Queued,
+            expected_updated_at,
+            None,
+        )
+        .await
+        .expect_err("different content must not replace already-dispatched work");
+        assert_eq!(status, StatusCode::CONFLICT);
+        pool.get()
+            .await?
+            .execute(
+                "update conversation_send_queue set status = 'recorded' where id = $1",
+                &[&edited_id],
+            )
+            .await?;
+        let recorded = unwrap_restore(
+            restore_owned_send_queue_entry(
+                &state,
+                conversation_id,
+                owner_user_id,
+                edited_id,
+                edited,
+                handles.clone(),
+                SendQueueRestoreStatus::Queued,
+                expected_updated_at,
+                None,
+            )
+            .await,
+        )?;
+        assert!(!recorded.restored);
+        assert_eq!(recorded.entry["status"], "recorded");
+        // Cancel on a previously failed item restores its failure, rather than
+        // implicitly retrying it or appending a new queued copy.
+        pool.get().await?.execute(
+            "update conversation_send_queue set status = 'canceled', error_message = 'Machine stopped' where id = $1",
+            &[&first_id],
+        ).await?;
+        let failed_updated_at: DateTime<Utc> = pool
+            .get()
+            .await?
+            .query_one(
+                "select updated_at from conversation_send_queue where id = $1",
+                &[&first_id],
+            )
+            .await?
+            .get(0);
+        let failed = unwrap_restore(
+            restore_owned_send_queue_entry(
+                &state,
+                conversation_id,
+                owner_user_id,
+                first_id,
+                original,
+                handles,
+                SendQueueRestoreStatus::Failed,
+                failed_updated_at,
+                None,
+            )
+            .await,
+        )?;
+        assert_eq!(failed.entry["status"], "failed");
+        assert_eq!(failed.entry["errorMessage"], "Machine stopped");
+        let claim = match claim_for_test(&state, conversation_id).await? {
+            QueueClaimAttempt::Claimed(claim) => claim,
+            _ => panic!("only the last still-queued entry should be claimed"),
+        };
+        assert_eq!(claim.entry_id, last_id);
         cleanup_owned_queue_fixture(&pool, project_id, &[other_user_id, owner_user_id]).await?;
         Ok(())
     }

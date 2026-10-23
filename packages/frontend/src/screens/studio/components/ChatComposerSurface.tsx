@@ -13,6 +13,7 @@ import {
   Archery,
   Bookmark,
   Collapse,
+  Check,
   Lock,
   Menu,
   Microphone,
@@ -326,6 +327,7 @@ export function ChatComposerSurface({
   );
   const queueExpandedFromParent = Boolean(queueSurfaceProps.chatSendQueueExpanded);
   const queueEditingItem = queueSurfaceProps.editingQueuedItem;
+  const editingQueueMessage = Boolean(queueEditingItem && !queueEditingItem.restoreOnly);
   const queuedMessageCount = queueSurfaceProps.totalQueuedCount;
   const onToggleQueueExpanded = queueSurfaceProps.onToggleExpanded;
   const {
@@ -393,7 +395,7 @@ export function ChatComposerSurface({
   // partial transcript becomes a draft. In particular, a hold must not lose
   // its pointer-owning DOM node before release.
   const showInlineVoiceAction =
-    voiceInputAvailable && (!composerHasUsablePayload || voiceCaptureInProgress);
+    voiceInputAvailable && ((!editingQueueMessage && !composerHasUsablePayload) || voiceCaptureInProgress);
   const runStopActionProps = {
     controller: composerRunStopController,
     hasUsablePayload: composerHasUsablePayload,
@@ -412,6 +414,7 @@ export function ChatComposerSurface({
         : "A reply is in progress. Stop is available, or press Escape.";
   const modifierPreviewBaseAvailable =
     !showVoicePrimaryAction &&
+    !editingQueueMessage &&
     composerHasUsablePayload &&
     !mutationDisabled;
   const queueModifierAvailable =
@@ -448,8 +451,8 @@ export function ChatComposerSurface({
           stashModifierAvailable
         ? "stash"
         : null;
-  const visiblePrimaryActionMode = visibleDesktopSendModifierMode ?? primaryActionMode;
-  const primaryActionLabel =
+  const visiblePrimaryActionMode = editingQueueMessage ? "save-queue" : visibleDesktopSendModifierMode ?? primaryActionMode;
+  const primaryActionLabel = editingQueueMessage ? "Save queued message" :
     visibleDesktopSendModifierMode === "queue"
       ? "Queue message (Command or Ctrl plus Enter)"
       : visibleDesktopSendModifierMode === "stash"
@@ -460,8 +463,9 @@ export function ChatComposerSurface({
   // On touch, Enter adds a line (the mobile convention, see enterBehavior.ts);
   // the hint said "Enter sends the message" and people waited for a send that
   // never came.
-  const primaryActionStatus =
-    visibleDesktopSendModifierMode === "queue"
+  const primaryActionStatus = editingQueueMessage
+    ? touchLikeInput ? "Save returns this message to its place in the queue." : "Enter saves this message in its place in the queue."
+    : visibleDesktopSendModifierMode === "queue"
       ? "Queue selected. Press Enter or click to queue the message."
       : visibleDesktopSendModifierMode === "stash"
         ? "Stash selected. Press Enter or click to stash the draft."
@@ -502,6 +506,7 @@ export function ChatComposerSurface({
   const [queueDragActive, setQueueDragActive] = useState(false);
   const stashTrayTriggerRef = useRef<HTMLButtonElement | null>(null);
   const queueTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const joinedToolbarRef = useRef<HTMLDivElement | null>(null);
   const savedMessageDialogRef = useRef<HTMLDivElement | null>(null);
   const savedMessagePopoverContentRef = useRef<HTMLDivElement | null>(null);
   const savedMessagePopoverHadFocusRef = useRef(false);
@@ -521,7 +526,7 @@ export function ChatComposerSurface({
   const compactNavigationLayout = showComposerNavigationButton && composerNavigationDestination !== "drawer";
   const foldSuggestionIntoMenu = showMobileGhostSuggestionAcceptButton;
   const imageUploadDisabled =
-    mutationDisabled || sendingAttachment || onboardingInputLocked || Boolean(imageUploadUnavailableReason);
+    mutationDisabled || editingQueueMessage || sendingAttachment || onboardingInputLocked || Boolean(imageUploadUnavailableReason);
   const sendingImageCount = imageAttachments.filter((attachment) => attachment.sending).length;
 
   useEffect(() => {
@@ -821,6 +826,10 @@ export function ChatComposerSurface({
         return;
       }
       markSendPressHandled();
+      if (editingQueueMessage) {
+        queueSurfaceProps.onRequeueEditedMessage();
+        return;
+      }
       if (event.pointerType !== "touch") {
         const eventModifierMode = resolveAvailableDesktopSendModifierMode(event);
         const modifierMode =
@@ -839,6 +848,8 @@ export function ChatComposerSurface({
       onSendButtonPress?.(event);
     },
     [
+      editingQueueMessage,
+      queueSurfaceProps,
       markSendPressHandled,
       onQueueMessageFromComposer,
       onSendButtonPress,
@@ -854,6 +865,10 @@ export function ChatComposerSurface({
         return;
       }
       event.preventDefault();
+      if (editingQueueMessage) {
+        if (!queueSurfaceProps.mutationDisabled && !sendingAttachment && chatInputProps.value.trim()) queueSurfaceProps.onRequeueEditedMessage();
+        return;
+      }
       const eventModifierMode = resolveAvailableDesktopSendModifierMode(event);
       const modifierMode =
         eventModifierMode === visibleDesktopSendModifierMode
@@ -873,6 +888,10 @@ export function ChatComposerSurface({
       onSendButtonPress?.({ pointerType: "mouse" } as never);
     },
     [
+      editingQueueMessage,
+      queueSurfaceProps,
+      sendingAttachment,
+      chatInputProps.value,
       onQueueMessageFromComposer,
       onSendButtonPress,
       onStashDraftFromComposer,
@@ -907,6 +926,8 @@ export function ChatComposerSurface({
   const actionMenuNode = (
     <ComposerActionMenu
       {...composerActionMenuProps}
+      queueDisabled={editingQueueMessage || composerActionMenuProps.queueDisabled}
+      stashDisabled={editingQueueMessage || composerActionMenuProps.stashDisabled}
       onExpandDraft={draftExpanded ? undefined : () => setDraftExpanded(true)}
       mutationDisabled={mutationDisabled}
       onUploadImage={onOpenImagePicker}
@@ -984,12 +1005,14 @@ export function ChatComposerSurface({
     !showInlineVoiceAction ? (
         <IconButton
           type="button"
-          {...touchSendModePicker.triggerProps}
+          {...(editingQueueMessage ? {} : touchSendModePicker.triggerProps)}
           onPress={handleSendPress}
           onClick={handleSendClick}
           isDisabled={
             mutationDisabled ||
-            (visibleDesktopSendModifierMode === null && sendButtonDisabled)
+            (editingQueueMessage
+              ? queueSurfaceProps.mutationDisabled || sendingAttachment || !chatInputProps.value.trim() || imageAttachments.length > 0
+              : visibleDesktopSendModifierMode === null && sendButtonDisabled)
           }
           aria-label={primaryActionLabel}
           title={primaryActionLabel}
@@ -1015,7 +1038,7 @@ export function ChatComposerSurface({
           data-send-options-open={touchSendModePicker.isOpen ? "true" : "false"}
         >
           <span className="sr-only">{primaryActionLabel}</span>
-          {visibleDesktopSendModifierMode === "queue" ? (
+          {editingQueueMessage ? <Check className={sendIconClass} aria-hidden="true" /> : visibleDesktopSendModifierMode === "queue" ? (
             <TaskList
               className={sendIconClass}
               aria-hidden="true"
@@ -1275,115 +1298,6 @@ export function ChatComposerSurface({
               <AccessCheckingNotice flash={blockedInputFlash} />
             ) : null}
             {silenceHintProps ? <OctoSilenceHint {...silenceHintProps} /> : null}
-            {stashTrayProps?.stashes.length || queuedMessageCount > 0 || queueEditingItem ? (
-              <div
-                role="group"
-                aria-label="Saved messages"
-                className="mx-1 flex flex-wrap items-start justify-end gap-2 sm:mx-2"
-                data-testid="chat-saved-message-controls"
-              >
-                {stashTrayProps && !queueEditingItem ? (
-                  <div className="contents" data-testid="chat-message-stashes">
-                    <ChatMessageStashTrigger
-                      count={stashTrayProps.stashes.length}
-                      expanded={openSavedMessagePanel === "stash"}
-                      onExpandedChange={handleStashTrayExpandedChange}
-                      triggerRef={stashTrayTriggerRef}
-                    />
-                  </div>
-                ) : null}
-                {queuedMessageCount > 0 && !queueEditingItem ? (
-                  <div className="contents" data-testid="chat-send-queue">
-                    <ChatSendQueueTrigger
-                      totalQueuedCount={queuedMessageCount}
-                      collapsedQueuedMessageSummary={queueSurfaceProps.collapsedQueuedMessageSummary}
-                      expanded={openSavedMessagePanel === "queue"}
-                      onToggleExpanded={handleQueuePanelToggle}
-                      triggerRef={queueTriggerRef}
-                    />
-                  </div>
-                ) : null}
-                {openSavedMessagePanel !== "stash" && stashTrayProps?.stashes.length && !queueEditingItem ? (
-                  <span id={CHAT_MESSAGE_STASH_PANEL_ID} hidden />
-                ) : null}
-                {queueEditingItem ? (
-                  <div
-                    className="contents"
-                    data-testid="chat-send-queue"
-                  >
-                    <ChatSendQueuePanel
-                      {...queueSurfaceProps}
-                      chatSendQueueExpanded={false}
-                      mutationDisabled={mutationDisabled}
-                      onToggleExpanded={handleQueuePanelToggle}
-                      triggerRef={queueTriggerRef}
-                    />
-                  </div>
-                ) : queuedMessageCount > 0 && openSavedMessagePanel !== "queue" ? (
-                  <span id={CHAT_SEND_QUEUE_ITEMS_ID} hidden />
-                ) : null}
-                {openSavedMessagePanel !== null && !queueEditingItem ? (
-                  <StudioPopover
-                    key={openSavedMessagePanel}
-                    triggerRef={savedMessagePopoverTriggerRef}
-                    isOpen
-                    onOpenChange={handleSavedMessagePopoverOpenChange}
-                    isNonModal
-                    isKeyboardDismissDisabled={queueDragActive}
-                    placement="top end"
-                    offset={8}
-                    containerPadding={8}
-                    className="max-h-[calc(100dvh-1rem)] w-[min(24rem,calc(100dvw-1rem))] overflow-hidden p-0 [&>div:first-child]:hidden"
-                    data-testid="chat-saved-message-popover"
-                  >
-                    <div
-                      ref={savedMessageDialogRef}
-                      role="dialog"
-                      aria-label={
-                        openSavedMessagePanel === "stash" ? "Stashed drafts" : "Queued messages"
-                      }
-                      tabIndex={-1}
-                      className="outline-none"
-                      onFocusCapture={() => {
-                        savedMessagePopoverHadFocusRef.current = true;
-                      }}
-                    >
-                      <div
-                        ref={savedMessagePopoverContentRef}
-                        onKeyDown={handleSavedMessagePopoverKeyDown}
-                      >
-                        {openSavedMessagePanel === "stash" && stashTrayProps ? (
-                          <ChatMessageStashPanel
-                            stashes={stashTrayProps.stashes}
-                            restoredStashId={stashTrayProps.restoredStashId}
-                            busy={stashTrayProps.busy}
-                            onRestore={(stash) => {
-                              stashTrayProps.onRestore(stash);
-                              handleStashTrayExpandedChange(false);
-                            }}
-                            onDelete={stashTrayProps.onDelete}
-                          />
-                        ) : (
-                          <ChatSendQueuePanel
-                            {...queueSurfaceProps}
-                            chatSendQueueExpanded
-                            mutationDisabled={mutationDisabled}
-                            reorderDisabled={
-                              mutationDisabled || queueSurfaceProps.reorderDisabled
-                            }
-                            onDraggingChange={setQueueDragActive}
-                            onToggleExpanded={handleQueuePanelToggle}
-                            onEditQueuedMessage={handleEditQueuedMessageFromPopover}
-                            triggerRef={queueTriggerRef}
-                          />
-                        )}
-                      </div>
-                    </div>
-                  </StudioPopover>
-                ) : null}
-              </div>
-            ) : null}
-            {viewNavigation}
             <Surface
               tone="default"
               radius="none"
@@ -1395,6 +1309,124 @@ export function ChatComposerSurface({
               data-compact-navigation={compactNavigationLayout ? "true" : undefined}
               data-testid="chat-composer-surface"
             >
+              {viewNavigation || stashTrayProps?.stashes.length || queuedMessageCount > 0 || queueEditingItem ? (
+                <div
+                  ref={joinedToolbarRef}
+                  className="flex min-w-0 flex-wrap items-center gap-2 px-1 pb-1"
+                  data-testid="chat-composer-joined-toolbar"
+                >
+                  {viewNavigation ? <div className="min-w-0 flex-1">{viewNavigation}</div> : null}
+                  {stashTrayProps?.stashes.length || queuedMessageCount > 0 || queueEditingItem ? (
+                    <div
+                      role="group"
+                      aria-label="Saved messages"
+                      className={`ml-auto flex flex-wrap items-center justify-end gap-2 ${queueEditingItem ? "w-full" : "shrink-0"}`}
+                      data-testid="chat-saved-message-controls"
+                    >
+                      {stashTrayProps && !queueEditingItem ? (
+                        <div className="contents" data-testid="chat-message-stashes">
+                          <ChatMessageStashTrigger
+                            count={stashTrayProps.stashes.length}
+                            expanded={openSavedMessagePanel === "stash"}
+                            onExpandedChange={handleStashTrayExpandedChange}
+                            triggerRef={stashTrayTriggerRef}
+                          />
+                        </div>
+                      ) : null}
+                      {queuedMessageCount > 0 && !queueEditingItem ? (
+                        <div className="contents" data-testid="chat-send-queue">
+                          <ChatSendQueueTrigger
+                            totalQueuedCount={queuedMessageCount}
+                            collapsedQueuedMessageSummary={queueSurfaceProps.collapsedQueuedMessageSummary}
+                            expanded={openSavedMessagePanel === "queue"}
+                            onToggleExpanded={handleQueuePanelToggle}
+                            triggerRef={queueTriggerRef}
+                          />
+                        </div>
+                      ) : null}
+                      {openSavedMessagePanel !== "stash" && stashTrayProps?.stashes.length && !queueEditingItem ? (
+                        <span id={CHAT_MESSAGE_STASH_PANEL_ID} hidden />
+                      ) : null}
+                      {queueEditingItem ? (
+                        <div
+                          className="contents"
+                          data-testid="chat-send-queue"
+                        >
+                          <ChatSendQueuePanel
+                            {...queueSurfaceProps}
+                            chatSendQueueExpanded={false}
+                            mutationDisabled={mutationDisabled || queueSurfaceProps.mutationDisabled}
+                            onToggleExpanded={handleQueuePanelToggle}
+                            triggerRef={queueTriggerRef}
+                          />
+                        </div>
+                      ) : queuedMessageCount > 0 && openSavedMessagePanel !== "queue" ? (
+                        <span id={CHAT_SEND_QUEUE_ITEMS_ID} hidden />
+                      ) : null}
+                      {openSavedMessagePanel !== null && !queueEditingItem ? (
+                        <StudioPopover
+                          key={openSavedMessagePanel}
+                          triggerRef={openSavedMessagePanel === "queue" ? joinedToolbarRef : savedMessagePopoverTriggerRef}
+                          isOpen
+                          onOpenChange={handleSavedMessagePopoverOpenChange}
+                          isNonModal
+                          surface={openSavedMessagePanel === "queue" ? "none" : "default"}
+                          isKeyboardDismissDisabled={queueDragActive}
+                          placement="top end"
+                          offset={openSavedMessagePanel === "queue" ? 16 : 8}
+                          containerPadding={8}
+                          className={`max-h-[calc(100dvh-1rem)] p-0 ${openSavedMessagePanel === "queue" ? "w-[min(24rem,calc(100dvw-4rem))]" : "w-[min(24rem,calc(100dvw-1rem))]"}`}
+                          data-testid="chat-saved-message-popover"
+                        >
+                          <div
+                            ref={savedMessageDialogRef}
+                            role="dialog"
+                            aria-label={
+                              openSavedMessagePanel === "stash" ? "Stashed drafts" : "Queued messages"
+                            }
+                            tabIndex={-1}
+                            className="outline-none"
+                            onFocusCapture={() => {
+                              savedMessagePopoverHadFocusRef.current = true;
+                            }}
+                          >
+                            <div
+                              ref={savedMessagePopoverContentRef}
+                              onKeyDown={handleSavedMessagePopoverKeyDown}
+                            >
+                              {openSavedMessagePanel === "stash" && stashTrayProps ? (
+                                <ChatMessageStashPanel
+                                  stashes={stashTrayProps.stashes}
+                                  restoredStashId={stashTrayProps.restoredStashId}
+                                  busy={stashTrayProps.busy}
+                                  onRestore={(stash) => {
+                                    stashTrayProps.onRestore(stash);
+                                    handleStashTrayExpandedChange(false);
+                                  }}
+                                  onDelete={stashTrayProps.onDelete}
+                                />
+                              ) : (
+                                <ChatSendQueuePanel
+                                  {...queueSurfaceProps}
+                                  chatSendQueueExpanded
+                                  mutationDisabled={mutationDisabled || queueSurfaceProps.mutationDisabled}
+                                  reorderDisabled={
+                                    mutationDisabled || queueSurfaceProps.mutationDisabled || queueSurfaceProps.reorderDisabled
+                                  }
+                                  onDraggingChange={setQueueDragActive}
+                                  onToggleExpanded={handleQueuePanelToggle}
+                                  onEditQueuedMessage={handleEditQueuedMessageFromPopover}
+                                  triggerRef={queueTriggerRef}
+                                />
+                              )}
+                            </div>
+                          </div>
+                        </StudioPopover>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
               {draftExpanded ? (
                 <div className="flex shrink-0 items-center justify-between gap-2 px-2 pb-1">
                   <span className="text-sm font-medium text-slate-600 dark:text-slate-300">Draft</span>

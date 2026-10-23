@@ -55,13 +55,13 @@ export function ConversationSurfaceTabs({
     view.onClose();
   };
   return resources.length || chatActions ? (
-    <div className={`flex min-w-0 shrink-0 items-center ${besideComposer ? "rounded-2xl bg-slate-100/90 p-1 dark:bg-slate-800/80" : `border-b border-slate-200/70 bg-white ${DARK_DIVIDER_BORDER_CLASS} ${DARK_PANEL_BG_CLASS}`}`} data-testid="conversation-subtabs" data-presentation={presentation} data-browser-session-safe-zone="true">
+    <div className={`flex min-w-0 shrink-0 items-center ${besideComposer ? "w-fit max-w-full self-start py-1" : `border-b border-slate-200/70 bg-white ${DARK_DIVIDER_BORDER_CLASS} ${DARK_PANEL_BG_CLASS}`}`} data-testid="conversation-subtabs" data-presentation={presentation} data-browser-session-safe-zone="true">
       {split || !resources.length ? <div data-testid="conversation-chat-toolbar" className="flex min-w-0 shrink-0 items-center gap-1.5 px-4 text-xs text-slate-500 dark:text-slate-400" style={{ width: split ? `calc((1 - var(--conversation-resource-ratio, ${ratio})) * 100%)` : "100%" }}>
         <ChatBubble className="h-3.5 w-3.5 shrink-0" aria-hidden="true" /><span>Chat</span><div className="ml-auto">{chatActions}</div>
       </div> : null}
       <div hidden={!resources.length} className="flex min-w-0 flex-1 items-center" role="tablist" aria-label="Conversation views">
         <HorizontalTabStrip
-          activeItemId={selected} className="min-w-0 flex-1" contentClassName={besideComposer ? "flex w-max min-w-full items-center gap-1" : "flex w-max items-center"} testId="conversation-resource-tabs"
+          activeItemId={selected} className="min-w-0 flex-1" contentClassName={besideComposer ? "flex w-max items-center gap-1" : "flex w-max items-center"} testId="conversation-resource-tabs"
           renderScrollControl={({ direction, canScroll, scrollByDirection }) => (
             <IconButton aria-label={direction === -1 ? "Scroll views left" : "Scroll views right"} variant="ghost" size="sm" radius="none" isDisabled={!canScroll} onPress={() => scrollByDirection(direction)} className="h-9 w-8 max-[540px]:h-10">
               {direction === -1 ? <NavArrowLeft className="h-4 w-4" /> : <NavArrowRight className="h-4 w-4" />}
@@ -69,7 +69,7 @@ export function ConversationSurfaceTabs({
           )}
         >
           {views.map((view, index) => (
-            <div key={view.id} data-tab-id={view.id} className={`flex shrink-0 items-center ${besideComposer ? `flex-1 rounded-xl ${selected === view.id ? "bg-white dark:bg-slate-700" : ""}` : ""} ${selected === view.id ? "text-slate-900 dark:text-slate-100" : "text-slate-500 dark:text-slate-400"}`}>
+            <div key={view.id} data-tab-id={view.id} className={`flex shrink-0 items-center ${besideComposer ? `rounded-xl ${selected === view.id ? "bg-white dark:bg-slate-700" : ""}` : ""} ${selected === view.id ? "text-slate-900 dark:text-slate-100" : "text-slate-500 dark:text-slate-400"}`}>
               <button
                 ref={node => { if (node) tabs.current.set(view.id, node); else tabs.current.delete(view.id); }}
                 type="button" role="tab" aria-controls={view.panelId}
@@ -87,7 +87,7 @@ export function ConversationSurfaceTabs({
                   onSelect(views[next].id);
                   tabs.current.get(views[next].id)?.focus();
                 }}
-              ><span className={besideComposer ? "inline-flex min-w-0 max-w-full items-center gap-1.5" : "contents"}><TabLabel label={view.label} icon={view.icon} dirty={view.dirty}>{view.attention}</TabLabel></span></button>
+              ><span className={besideComposer ? "inline-flex min-w-0 max-w-full items-center gap-1.5" : "contents"}><TabLabel label={view.label} icon={besideComposer ? undefined : view.icon} dirty={view.dirty}>{view.attention}</TabLabel></span></button>
               {view.onClose ? <TabCloseButton label={`Close ${view.label} view`} onClose={() => close(view)} className="mr-1 text-inherit" /> : null}
             </div>
           ))}

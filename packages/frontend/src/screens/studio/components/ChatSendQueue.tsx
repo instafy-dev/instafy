@@ -18,9 +18,11 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { Drag, Send, Trash } from "iconoir-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Button, IconButton } from "../../../components/Button";
+import { Button, IconButton, iconButtonStyles } from "../../../components/Button";
+import { Surface } from "../../../components/Surface";
+import { Text } from "../../../components/Text";
 
 export type QueuedChatPrompt = {
   id: string;
@@ -68,6 +70,23 @@ export function ChatSendQueue({
   reorderDisabled?: boolean;
   onDraggingChange?: (dragging: boolean) => void;
 }) {
+  const listRef = useRef<HTMLOListElement | null>(null);
+  const removedFocus = useRef<{ id: string; index: number; control: string; element: Element | null } | null>(null);
+  useLayoutEffect(() => {
+    const pending = removedFocus.current;
+    if (!pending || items.some(item => item.id === pending.id)) return;
+    removedFocus.current = null;
+    if (document.activeElement !== document.body && document.activeElement !== pending.element) return;
+    const rows = listRef.current?.querySelectorAll('[data-testid="chat-send-queue-item"]');
+    const row = rows?.[Math.min(pending.index, items.length - 1)];
+    row?.querySelector<HTMLButtonElement>(`[data-testid="${pending.control}"]`)?.focus({ preventScroll: true });
+  }, [items]);
+  const preserveActionFocus = (id: string, control: string, action: (id: string) => void) => {
+    const index = items.findIndex(item => item.id === id);
+    const row = listRef.current?.querySelectorAll('[data-testid="chat-send-queue-item"]')[index];
+    if (row?.contains(document.activeElement)) removedFocus.current = { id, index, control, element: document.activeElement };
+    action(id);
+  };
   const [activeId, setActiveId] = useState<string | null>(null);
   const sensors = useSensors(
     useSensor(MouseSensor, { activationConstraint: { distance: 8 } }),
@@ -151,7 +170,8 @@ export function ChatSendQueue({
     >
       <SortableContext items={itemIds} strategy={verticalListSortingStrategy}>
         <ol
-          className="divide-y divide-slate-200/70 touch-pan-y dark:divide-slate-800/80"
+          ref={listRef}
+          className="flex touch-pan-y flex-col items-end gap-2 p-1"
           aria-label="Queued messages"
           data-testid="chat-send-queue-list"
         >
@@ -167,8 +187,8 @@ export function ChatSendQueue({
               sendNowDisabled={sendNowDisabled}
               removeDisabled={removeDisabled}
               onEdit={onEdit}
-              onSendNow={onSendNow}
-              onRemove={onRemove}
+              onSendNow={onSendNow ? id => preserveActionFocus(id, "chat-send-queue-send-now", onSendNow) : undefined}
+              onRemove={id => preserveActionFocus(id, "chat-send-queue-remove", onRemove)}
             />
           ))}
         </ol>
@@ -239,83 +259,80 @@ function SortableQueuedChatPrompt({
     <li
       ref={setNodeRef}
       style={style}
-      className={`flex items-center gap-1.5 px-2 py-2.5 ${
-        isDragging ? "relative z-10 opacity-40" : ""
-      }`}
+      className={`w-full min-w-0 ${isDragging ? "relative z-10 opacity-40" : ""}`}
       data-testid="chat-send-queue-item"
     >
-      {showReorderHandle ? (
-        <button
-          ref={setActivatorNodeRef}
-          type="button"
-          {...attributes}
-          {...listeners}
-          aria-label={`Reorder queued message ${index + 1} of ${count}: ${accessibleMessage}`}
-          title="Drag to reorder"
-          disabled={reorderDisabled}
-          className="inline-flex h-9 w-9 flex-none touch-none cursor-grab items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 active:cursor-grabbing disabled:cursor-not-allowed disabled:opacity-40 pointer-coarse:h-11 pointer-coarse:w-11 dark:text-slate-500 dark:hover:bg-slate-800"
-          data-testid="chat-send-queue-reorder"
-        >
-          <Drag aria-hidden="true" className="h-4 w-4" />
-        </button>
-      ) : null}
-      <div className="min-w-0 flex-1" title={item.errorMessage ?? undefined}>
-        <span className="min-w-0">
-          <span className="block truncate text-sm font-normal text-slate-800 dark:text-slate-100">
-            {item.message}
-          </span>
-          {item.browserTargetLabel ? (
-            <span className="mt-0.5 block truncate text-xxs uppercase tracking-[0.14em] text-primary-600 dark:text-primary-300">
-              Browser: {item.browserTargetLabel}
-            </span>
-          ) : null}
-          {item.errorMessage ? (
-            <span className="mt-0.5 block truncate text-xs text-rose-600 dark:text-rose-300">
-              {item.errorMessage}
-            </span>
-          ) : null}
-        </span>
-      </div>
-      <div className="flex flex-none items-center gap-0.5">
-        {onSendNow ? (
-          <IconButton
-            aria-label={`Send queued message ${index + 1} now: ${accessibleMessage}`}
-            variant="ghost"
-            size="xs"
-            radius="full"
-            isDisabled={sendNowDisabled}
-            onPress={() => onSendNow(item.id)}
-            data-testid="chat-send-queue-send-now"
-          >
-            <Send aria-hidden="true" className="h-4 w-4" />
-          </IconButton>
+      <Surface tone="floating" radius="2xl" shadow="sm" className="p-3" title={item.errorMessage ?? undefined}>
+        <Text variant="caption" tone="muted" className="mb-1">
+          Queued {index + 1} of {count}
+        </Text>
+        <Text variant="bodyCompact" tone="primary" className="line-clamp-3 whitespace-pre-wrap break-words" title={item.message}>
+          {item.message}
+        </Text>
+        {item.browserTargetLabel ? (
+          <Text variant="caption" tone="muted" className="mt-1 truncate">
+            Browser: {item.browserTargetLabel}
+          </Text>
         ) : null}
-        {onEdit ? (
-          <Button
-            aria-label={`Edit queued message ${index + 1}: ${accessibleMessage}`}
-            variant="outline"
-            size="xs"
-            radius="full"
-            isDisabled={editDisabled}
-            onPress={() => onEdit(item.id)}
-            className="h-7 px-2 text-xs"
-            data-testid="chat-send-queue-steer"
-          >
-            Edit
-          </Button>
+        {item.errorMessage ? (
+          <Text variant="caption" tone="danger" className="mt-1 break-words">
+            {item.errorMessage}
+          </Text>
         ) : null}
-        <IconButton
-          aria-label={`Remove queued message ${index + 1}: ${accessibleMessage}`}
-          variant="ghost"
-          size="xs"
-          radius="full"
-          isDisabled={removeDisabled}
-          onPress={() => onRemove(item.id)}
-          data-testid="chat-send-queue-remove"
-        >
-          <Trash aria-hidden="true" className="h-4 w-4" />
-        </IconButton>
-      </div>
+        <div className="mt-2 flex items-center justify-between gap-2">
+          {showReorderHandle ? (
+            <button
+              ref={setActivatorNodeRef}
+              type="button"
+              {...attributes}
+              {...listeners}
+              aria-label={`Reorder queued message ${index + 1} of ${count}: ${accessibleMessage}`}
+              title="Drag to reorder"
+              disabled={reorderDisabled}
+              className={`${iconButtonStyles({ variant: "ghost", tone: "muted" })} touch-none cursor-grab active:cursor-grabbing`}
+              data-testid="chat-send-queue-reorder"
+            >
+              <Drag aria-hidden="true" className="h-4 w-4" />
+            </button>
+          ) : null}
+          <div className="ml-auto flex items-center gap-2">
+            {onSendNow ? (
+              <IconButton
+                aria-label={`Send queued message ${index + 1} now: ${accessibleMessage}`}
+                title="Send now"
+                variant="ghost"
+                isDisabled={sendNowDisabled}
+                onPress={() => onSendNow(item.id)}
+                data-testid="chat-send-queue-send-now"
+              >
+                <Send aria-hidden="true" className="h-4 w-4" />
+              </IconButton>
+            ) : null}
+            {onEdit ? (
+              <Button
+                aria-label={`Edit queued message ${index + 1}: ${accessibleMessage}`}
+                variant="ghost"
+                preset="inline"
+                isDisabled={editDisabled}
+                onPress={() => onEdit(item.id)}
+                data-testid="chat-send-queue-steer"
+              >
+                Edit
+              </Button>
+            ) : null}
+            <IconButton
+              aria-label={`Remove queued message ${index + 1}: ${accessibleMessage}`}
+              title="Remove queued message"
+              variant="ghost"
+              isDisabled={removeDisabled}
+              onPress={() => onRemove(item.id)}
+              data-testid="chat-send-queue-remove"
+            >
+              <Trash aria-hidden="true" className="h-4 w-4" />
+            </IconButton>
+          </div>
+        </div>
+      </Surface>
     </li>
   );
 }

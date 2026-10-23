@@ -217,6 +217,9 @@ describe("ChatSendQueue", () => {
         secondHandle.dispatchEvent(
           new KeyboardEvent("keydown", { key, code, bubbles: true, cancelable: true }),
         );
+        secondHandle.dispatchEvent(
+          new KeyboardEvent("keyup", { key, code, bubbles: true, cancelable: true }),
+        );
         await new Promise((resolve) => window.setTimeout(resolve, 0));
       });
     };

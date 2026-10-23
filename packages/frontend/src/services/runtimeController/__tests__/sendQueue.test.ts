@@ -24,6 +24,7 @@ import {
   enqueueSendQueueEntry,
   listSendQueue,
   reorderSendQueueEntry,
+  restoreSendQueueEntry,
 } from "../sendQueue";
 
 const CONVERSATION_ID = "22222222-2222-2222-2222-222222222222";
@@ -53,6 +54,35 @@ describe("sendQueue controller client", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it.each(["queued", "failed", "dispatched", "recorded"])("restores the same queue entry without reviving completed work: %s", async (status) => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, json: async () => ({ ok: true, entry: buildEntryPayload({ status }) }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await restoreSendQueueEntry({
+      conversationId: CONVERSATION_ID, entryId: ENTRY_ID,
+      message: { promptText: "Edited message" }, targetAgentHandles: ["octo"], status: "queued", expectedUpdatedAt: "2026-10-23T12:00:00.123456Z",
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      `http://controller.test/conversations/${CONVERSATION_ID}/send-queue/${ENTRY_ID}/restore`,
+      expect.objectContaining({ method: "POST" }),
+    );
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+    expect(body).toEqual({ message: { promptText: "Edited message" }, targetAgentHandles: ["octo"], status: "queued", expectedUpdatedAt: "2026-10-23T12:00:00.123456Z" });
+    expect(result?.ok).toBe(true);
+    expect(result?.entry?.id ?? null).toBe(status === "queued" || status === "failed" ? ENTRY_ID : null);
+  });
+
+  it("rejects a restore response belonging to a different entry", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true, json: async () => ({ ok: true, entry: buildEntryPayload({ id: "wrong-entry" }) }),
+    }));
+    await expect(restoreSendQueueEntry({
+      conversationId: CONVERSATION_ID, entryId: ENTRY_ID,
+      message: { promptText: "Edited message" }, targetAgentHandles: ["octo"], status: "queued", expectedUpdatedAt: "2026-10-23T12:00:00.123456Z",
+    })).rejects.toThrow("invalid response");
   });
 
   it("lists queued entries oldest first with normalized fields", async () => {

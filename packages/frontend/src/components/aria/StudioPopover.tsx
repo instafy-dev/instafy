@@ -27,6 +27,8 @@ type TriggerRefLike = { current: Element | null };
 export type StudioPopoverProps = PopoverProps & {
   /** Shared geometry for anchored actions or a trigger-width field picker. */
   layout?: "menu" | "form";
+  /** Disconnected floating content, such as message bubbles, owns its surfaces. */
+  surface?: "default" | "none";
 };
 
 const POPOVER_LAYOUT_CLASSES = {
@@ -47,6 +49,7 @@ export function StudioPopover({
   className,
   style,
   layout,
+  surface = "default",
   offset,
   containerPadding,
   isNonModal = false,
@@ -102,17 +105,17 @@ export function StudioPopover({
         ...value,
       })) : style}
       className={composeRenderProps(className, (value) =>
-        `${POPOVER_BASE}${layout ? ` ${POPOVER_LAYOUT_CLASSES[layout]}` : ""}${value ? ` ${value}` : ""}`
+        `${surface === "none" ? "relative flex min-h-0 flex-col outline-none" : POPOVER_BASE}${layout ? ` ${POPOVER_LAYOUT_CLASSES[layout]}` : ""}${value ? ` ${value}` : ""}`
       )}
       children={composeRenderProps(children, (resolvedChildren) => (
         <>
-          <div
+          {surface === "default" ? <div
             aria-hidden="true"
             className={[
               "pointer-events-none absolute inset-0 rounded-[inherit] border border-slate-200/70 bg-white/[0.98] shadow-[inherit]",
               `${DARK_FLOATING_SOLID_BG_CLASS} dark:border-transparent`,
             ].join(" ")}
-          />
+          /> : null}
           {/* Flex shrinking accounts for the popover's own padding when React
               Aria limits its height. Keep decoration outside the scroll area;
               the small gutter preserves focus rings without moving content. */}
