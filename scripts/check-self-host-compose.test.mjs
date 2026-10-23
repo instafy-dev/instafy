@@ -122,6 +122,63 @@ test(
   },
 );
 
+// The local proxy sends a ChatGPT login's and an API key's requests to the
+// provider unless PROXY_UPSTREAM_*_ENDPOINT names another upstream (such as
+// scripts/fake-rate-limit-upstream.mjs). The runtime's own
+// CODEX_PROXY_CHATGPT_ENDPOINT and CODEX_OPENAI_ENDPOINT, which point at this
+// proxy, must never become its upstream: that would send it to itself.
+test(
+  "the local proxy's upstream is the provider unless PROXY_UPSTREAM_* names another",
+  { skip: !composeAvailable && "Docker Compose v2 unavailable" },
+  () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-compose-upstream-"));
+    try {
+      const emptyEnvFile = path.join(root, "empty.env");
+      fs.writeFileSync(emptyEnvFile, "");
+      fs.mkdirSync(path.join(root, "docker"));
+      fs.writeFileSync(path.join(root, "docker", ".env.local"), "");
+      const upstreams = (overrides) => {
+        const result = spawnSync(
+          "docker",
+          ["compose", "--project-directory", root, "--env-file", emptyEnvFile, "--file", path.join(REPO_ROOT, COMPOSE_FILE), "config", "--format", "json", "proxy"],
+          {
+            encoding: "utf8",
+            env: {
+              PATH: process.env.PATH,
+              HOME: process.env.HOME,
+              ...(process.env.DOCKER_CONFIG ? { DOCKER_CONFIG: process.env.DOCKER_CONFIG } : {}),
+              INSTAFY_ENV_DIR: root,
+              ...overrides,
+            },
+            timeout: 30_000,
+          },
+        );
+        assert.equal(result.status, 0, result.stderr);
+        const environment = JSON.parse(result.stdout).services.proxy.environment;
+        return [environment.CODEX_PROXY_CHATGPT_ENDPOINT, environment.CODEX_OPENAI_ENDPOINT];
+      };
+      assert.deepEqual(upstreams({}), ["", ""], "unset is the provider itself");
+      assert.deepEqual(
+        upstreams({
+          CODEX_PROXY_CHATGPT_ENDPOINT: "http://host.docker.internal:8789/backend-api/codex/responses",
+          CODEX_OPENAI_ENDPOINT: "http://host.docker.internal:8789/v1/responses",
+        }),
+        ["", ""],
+        "the runtime's endpoints, which point at this proxy, never become its upstream",
+      );
+      assert.deepEqual(
+        upstreams({
+          PROXY_UPSTREAM_CHATGPT_ENDPOINT: "http://host.docker.internal:8790/backend-api/codex/responses",
+          PROXY_UPSTREAM_OPENAI_ENDPOINT: "http://host.docker.internal:8790/v1/responses",
+        }),
+        ["http://host.docker.internal:8790/backend-api/codex/responses", "http://host.docker.internal:8790/v1/responses"],
+      );
+    } finally {
+      fs.rmSync(root, { force: true, recursive: true });
+    }
+  },
+);
+
 // A provider launch hands the managed launch metadata to the runtime only as
 // the environment of the `docker compose` process (allocator/docker.rs).
 // Compose passes a variable into the container only when the runtime
