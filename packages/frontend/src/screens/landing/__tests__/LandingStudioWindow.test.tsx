@@ -241,7 +241,7 @@ describe("landing studio window turn column", () => {
     // No deploy (a tunnel preview link instead), no device viewport, no visible Ready.
     expect(copy).not.toContain("forma.site/pricing");
     expect(copy).not.toMatch(/390 wide|\bReady\b/);
-    expect(SESSION_SCENARIOS[2].browser!.url).toMatch(/^https:\/\/[a-z0-9]+\.rt\.instafy\.dev\//);
+    expect(SESSION_SCENARIOS[2].browser!.url).toMatch(/^https:\/\/[a-z0-9]+\.instafy\.site\//);
     // Command captions are the command's own text (books once used prose).
     for (const scenario of SESSION_SCENARIOS) {
       for (const step of scenario.steps) {

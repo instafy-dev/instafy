@@ -8,6 +8,7 @@ import { loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import { buildNativeOtaChannelMarker } from "./nativeOtaChannel.js";
 import { createCheckoutTmpIgnore } from "./devWatchIgnore.js";
+import { tunnelAllowedHosts } from "./devTunnelHosts.js";
 import { sanitizeCodexSubscriptionAuthJson } from "./tests/playwright/utils/codexSubscriptionAuthJson.js";
 import {
   FRONTEND_FEATURE_MANIFEST_ENV,
@@ -400,7 +401,7 @@ export default defineConfig(({ mode, command }) => {
   },
   server: {
     port: 5173,
-    allowedHosts: [".rt.instafy.dev"],
+    allowedHosts: tunnelAllowedHosts(loadEnv(mode, frontendPackageRoot, "").TUNNEL_DOMAIN),
     watch: {
       ignored: [
         // tmp/ relative to this checkout, never an ancestor: a worktree under

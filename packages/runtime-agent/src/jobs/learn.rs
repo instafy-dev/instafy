@@ -119,8 +119,9 @@ const FRONTEND_PREVIEWS_TEMPLATE: &str = include_str!(concat!(
 // in Studio ahead of any public tunnel, v4 the one that allowed the preview
 // host only after someone reported a blocked page, v5 the one from before
 // sites in a preview asked Studio for the person's location, v6 the one
-// from before it told sites how to be presented and followed, and v7 the one
-// from before the card could start a sleeping site again. A workspace still holding an
+// from before it told sites how to be presented and followed, v7 the one
+// from before the card could start a sleeping site again, and v8 the one that
+// named a fixed tunnel domain for Vite's allowed hosts. A workspace still holding an
 // unedited earlier bundled copy of this skill, browser automation or skill
 // import compat is upgraded; an edited one is kept.
 const LEGACY_FRONTEND_PREVIEWS_TEMPLATES: &[&str] = &[
@@ -131,6 +132,7 @@ const LEGACY_FRONTEND_PREVIEWS_TEMPLATES: &[&str] = &[
     include_str!("legacy/frontend-previews-v5.md"),
     include_str!("legacy/frontend-previews-v6.md"),
     include_str!("legacy/frontend-previews-v7.md"),
+    include_str!("legacy/frontend-previews-v8.md"),
 ];
 const INTEGRATION_ONBOARDING_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -1904,14 +1906,17 @@ mod tests {
             "Show `from.name` as text only.",
             "`restartable`",
             "--serve-cmd \"<command>\"",
+            "the host of the URL that `instafy tunnel start` printed",
         ] {
             assert!(FRONTEND_PREVIEWS_TEMPLATE.contains(needle), "{needle}");
         }
+        assert!(!FRONTEND_PREVIEWS_TEMPLATE.contains("rt.instafy.dev"));
         let v3 = include_str!("legacy/frontend-previews-v3.md");
         let v4 = include_str!("legacy/frontend-previews-v4.md");
         let v5 = include_str!("legacy/frontend-previews-v5.md");
         let v6 = include_str!("legacy/frontend-previews-v6.md");
-        let previous = include_str!("legacy/frontend-previews-v7.md");
+        let v7 = include_str!("legacy/frontend-previews-v7.md");
+        let previous = include_str!("legacy/frontend-previews-v8.md");
         assert!(!v3.contains("instafy preview open"));
         assert!(v4.contains("instafy preview open"));
         assert!(!v4.contains("Allow the preview host before the person opens the card."));
@@ -1919,14 +1924,16 @@ mod tests {
         assert!(!v5.contains("location-request"));
         assert!(v6.contains("location-request"));
         assert!(!v6.contains("layout-ack"));
-        assert!(previous.contains("layout-ack"));
-        assert!(!previous.contains("--serve-cmd"));
+        assert!(v7.contains("layout-ack"));
+        assert!(!v7.contains("--serve-cmd"));
+        assert!(previous.contains("--serve-cmd"));
+        assert!(previous.contains(".rt.instafy.dev"));
         assert!(FRONTEND_PREVIEWS_TEMPLATE.contains("instafy preview check --port <port>"));
 
         let workspace = tempdir().expect("workspace tempdir");
         ensure_project_memory_scaffold(workspace.path());
         let skill = workspace.path().join(FRONTEND_PREVIEWS_RELATIVE_PATH);
-        for old in [v3, v4, v5, v6, previous] {
+        for old in [v3, v4, v5, v6, v7, previous] {
             fs::write(&skill, old).unwrap();
             ensure_project_memory_scaffold(workspace.path());
             assert_eq!(
