@@ -421,6 +421,7 @@ mod tests {
         assert!(!allowed("https://evilinstafy.site"));
         assert!(!allowed("https://instafy.site.example.com"));
         assert!(!allowed("https://abc.rt.example.com"));
+        assert!(!allowed("https://abc.rt.instafy.dev"));
         assert!(!allowed("https://user:pass@k7m2qa.instafy.site"));
         assert!(!allowed("file:///tmp/speech"));
     }
@@ -436,6 +437,32 @@ mod tests {
             &config,
             "https://k7m2qa.instafy.site"
         ));
+        assert!(!speech_proxy_endpoint_is_allowed(
+            &config,
+            "https://abc.rt.instafy.dev"
+        ));
+    }
+
+    #[test]
+    fn tunnel_domain_is_read_like_the_preview_domain() {
+        let config = config_with_tunnel_domain(Some("*.instafy.site"));
+        assert!(config.is_tunnel_host("k7m2qa.instafy.site"));
+        assert!(!config.is_tunnel_host("abc.rt.instafy.dev"));
+    }
+
+    #[test]
+    fn a_public_suffix_or_single_label_tunnel_domain_matches_no_tunnel() {
+        for value in ["site", "dev", "co.uk", "*.site", "rt example", "."] {
+            let config = config_with_tunnel_domain(Some(value));
+            assert!(!config.is_tunnel_host("k7m2qa.site"), "{value}");
+            assert!(!config.is_tunnel_host("evil.co.uk"), "{value}");
+            assert!(!config.is_tunnel_host("dev"), "{value}");
+            assert!(
+                !speech_proxy_endpoint_is_allowed(&config, "https://k7m2qa.site"),
+                "{value}"
+            );
+            assert!(config.is_tunnel_host("abc.rt.test"), "{value}");
+        }
     }
 
     #[test]
