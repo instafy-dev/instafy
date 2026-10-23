@@ -117,7 +117,7 @@ describe("continuations of a card", () => {
 
   it("records a continuation as a one-line notice naming the agent and the host, without em dashes", () => {
     expect(browserRequestNotice("Octo", "Open https://dashboard.stripe.com/apikeys and stop on the list."))
-      .toBe("Octo opened Instafy's browser at dashboard.stripe.com");
+      .toBe("Octo opened Instafy's browser for dashboard.stripe.com");
     expect(browserRequestNotice("", "Continue comparing the saved items.")).toBe("Octo opened Instafy's browser");
     expect(browserRequestNotice("Cub", "Open https://a.example")).not.toMatch(/\u2014/);
   });
@@ -125,7 +125,7 @@ describe("continuations of a card", () => {
 
 describe("browserRequestFromContinuationPrompt", () => {
   const continuation = (metadata: Record<string, unknown>): ChatMessage => ({ id: "p1", role: "user", timestamp: 3,
-    content: "Octo opened Instafy's browser at app.example.test", metadata });
+    content: "Octo opened Instafy's browser for app.example.test", metadata });
   const dispatched = browserRequestContinuation({ task: "Open https://app.example.test and stop on API keys.", location: "auto" });
 
   it("reads the task a continuation sent, and the browser it ran in, never the notice", () => {
@@ -141,7 +141,7 @@ describe("browserRequestFromContinuationPrompt", () => {
     expect(browserRequestFromContinuationPrompt(continuation({ dispatchContent: dispatched }))).toBeNull();
     expect(browserRequestFromContinuationPrompt(continuation({ browserRequestOf: "job:job-1" }))).toBeNull();
     expect(browserRequestFromContinuationPrompt(continuation({
-      browserRequestOf: "job:job-1", dispatchContent: "Octo opened Instafy's browser at app.example.test",
+      browserRequestOf: "job:job-1", dispatchContent: "Octo opened Instafy's browser for app.example.test",
     }))).toBeNull();
   });
 });

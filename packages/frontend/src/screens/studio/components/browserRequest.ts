@@ -99,9 +99,11 @@ const ADDRESS_PATTERN = /\bhttps?:\/\/[^\s<>"'`)\]]+/gi;
 const LEADING_HOST_PATTERN = /^\s*(?:please\s+)?(?:open|go to|visit)\s+((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63})(?=[/:\s,;)]|\.?$|\.\s)/i;
 
 /**
- * The hosts a card's task will open, as the card shows them before the press:
- * every http(s) address in the task, or else the host a task opens with
+ * The hosts a card's task is headed for, as the card shows them: every
+ * http(s) address in the task, or else the host a task opens with
  * ("Open app.example.com and ..."). At most three, in order, without repeats.
+ * They come from the task's text, not from the page the browser reached, so
+ * copy names them as a destination only.
  */
 export function browserRequestDestinations(task: string): string[] {
   const hosts: string[] = [];
@@ -238,10 +240,11 @@ export function browserRequestFromContinuationPrompt(
 
 /**
  * The one-line record a continuation leaves in the chat, in place of the task
- * it sent: "Octo opened Instafy's browser at dashboard.stripe.com".
+ * it sent: "Octo opened Instafy's browser for dashboard.stripe.com". The host
+ * is where the task is headed; the browser may not have loaded it yet.
  */
 export function browserRequestNotice(agentName: string, task: string): string {
   const name = agentName.trim() || "Octo";
   const [host] = browserRequestDestinations(task);
-  return host ? `${name} opened Instafy's browser at ${host}` : `${name} opened Instafy's browser`;
+  return host ? `${name} opened Instafy's browser for ${host}` : `${name} opened Instafy's browser`;
 }

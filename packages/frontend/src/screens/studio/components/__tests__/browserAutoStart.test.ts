@@ -321,7 +321,7 @@ describe("addresses Studio may open by itself", () => {
       message({ role: "assistant", metadata: { jobId: "job-2" }, content: "The best deal is on cheapflights.example." }),
     ]],
     ["an address only a teammate wrote", [message({ authorId: "user-2", content: "Try cheapflights.example" })]],
-    ["an address only a notice named", [message({ authorId: ME, content: "Octo opened Instafy's browser at cheapflights.example",
+    ["an address only a notice named", [message({ authorId: ME, content: "Octo opened Instafy's browser for cheapflights.example",
       metadata: { browserRequestOf: "job:job-0" } })]],
     ["a look-alike of an address the person wrote", [message({ authorId: ME, content: "Use flights.example" })]],
   ] as const)("leaves the card for %s", (_name, earlier) => {

@@ -379,8 +379,8 @@ export function useChatBrowserRequest(options: Options) {
   }, []);
 
   /**
-   * Runs a press, or a retry, of a card: the card reads Opened once the task
-   * went out, and keeps its button with the error when it did not.
+   * Runs a press, or a retry, of a card: the card reads Browser opened once
+   * the task went out, and keeps its button with the error when it did not.
    */
   const startByHand = useCallback(async (
     key: string,

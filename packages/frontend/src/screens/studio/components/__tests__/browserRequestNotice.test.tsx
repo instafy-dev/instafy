@@ -32,7 +32,7 @@ function storedContinuation() {
     metadata: {
       prompt_metadata: {
         clientMessageId: "client-1",
-        displayContent: "Octo opened Instafy's browser at dashboard.stripe.com",
+        displayContent: "Octo opened Instafy's browser for dashboard.stripe.com",
         dispatchContent: TASK,
         browserRequestOf: "job:job-1",
         browserAutoStarted: true,
@@ -61,7 +61,7 @@ describe("the record of a continuation sent to Instafy's browser", () => {
 
   it("keeps the notice and the card it continues after a reload", () => {
     const message = storedContinuation();
-    expect(message.content).toBe("Octo opened Instafy's browser at dashboard.stripe.com");
+    expect(message.content).toBe("Octo opened Instafy's browser for dashboard.stripe.com");
     expect([...browserRequestContinuedKeys([message])]).toEqual(["job:job-1"]);
   });
 
@@ -70,7 +70,7 @@ describe("the record of a continuation sent to Instafy's browser", () => {
     // never took it, so nothing opened.
     forgetPromptsSentFromThisPageForTests();
     const local: ChatMessage = { id: "local-1", role: "user", authorId: "user-1", timestamp: 1,
-      content: "Octo opened Instafy's browser at dashboard.stripe.com",
+      content: "Octo opened Instafy's browser for dashboard.stripe.com",
       metadata: { clientMessageId: "client-2", browserRequestOf: "job:job-1", dispatchContent: TASK } };
     rememberPromptSentFromThisPage(local);
     expect([...browserRequestContinuedKeys([local])]).toEqual(["job:job-1"]);
@@ -85,7 +85,7 @@ describe("the record of a continuation sent to Instafy's browser", () => {
   it("reads as a one-line notice, not as a message the person wrote", async () => {
     await act(async () => root.render(<UserMessageBubble message={storedContinuation()} />));
     const notice = container.querySelector('[data-testid="chat-browser-request-notice"]');
-    expect(notice?.textContent).toBe("Octo opened Instafy's browser at dashboard.stripe.com");
+    expect(notice?.textContent).toBe("Octo opened Instafy's browser for dashboard.stripe.com");
     expect(container.querySelector('[data-testid="chat-bubble-user"]')).toBeNull();
     expect(container.textContent).not.toContain("Continue this browser task");
   });

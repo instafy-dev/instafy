@@ -64,9 +64,12 @@ describe("a request_browser card", () => {
 
   const web: BrowserRequestHost = { transport: "shared", personalAvailable: false, sharedUnavailable: false };
 
-  it("names the host its press opens", async () => {
+  // The host comes from the task's text, not from the page the browser
+  // reached, so the card names it as where the task is headed, never as a
+  // page that opened.
+  it("names the host its task is headed for", async () => {
     const card = await render({ task: "Open https://app.freefinance.at/login and take me to Verbundene Apps.", location: "auto" }, web);
-    expect(card.destination).toBe("Opens app.freefinance.at");
+    expect(card.destination).toBe("For app.freefinance.at");
     expect(card.unavailable).toBeNull();
     expect(card.button?.disabled).toBe(false);
   });
@@ -120,20 +123,21 @@ describe("a request_browser card", () => {
     const card = await render(task, { ...web, cardStates: new Map([["job:job-1", {
       kind: "opening", note: "This space's machine restarts with the browser. This takes about two minutes and one billing interval.",
     }]]) });
-    expect(card.opening).toBe("Opening Instafy's browser at dashboard.stripe.com");
+    expect(card.opening).toBe("Opening Instafy's browser for dashboard.stripe.com");
     expect(card.openingNote).toContain("about two minutes and one billing interval");
     expect(card.button).toBeNull();
     expect(card.destination).toBeNull();
   });
 
-  it("reads Opened, without its button, once continued, also after a reload", async () => {
+  it("reads Browser opened, without its button, once continued, also after a reload", async () => {
     for (const host of [
       { ...web, cardStates: new Map([["job:job-1", { kind: "opened" } as const]]) },
       { ...web, continuedKeys: new Set(["job:job-1"]) },
     ]) {
       const card = await render(task, host);
-      expect(card.opened).toContain("Opened");
-      expect(card.opened).toContain("dashboard.stripe.com");
+      // The browser opened; whether the site loaded is for the browser to
+      // show, so the host stays a destination.
+      expect(card.opened).toBe("Browser opened for dashboard.stripe.com");
       expect(card.button).toBeNull();
     }
   });
@@ -143,7 +147,7 @@ describe("a request_browser card", () => {
       kind: "button", reason: "This starts a second cloud machine for this space.",
     } as const]]) });
     expect(card.reason).toBe("This starts a second cloud machine for this space.");
-    expect(card.destination).toBe("Opens dashboard.stripe.com");
+    expect(card.destination).toBe("For dashboard.stripe.com");
     expect(card.button?.disabled).toBe(false);
   });
 
@@ -157,7 +161,7 @@ describe("a request_browser card", () => {
 
   it("keeps its old behaviour where Studio provides no browser information", async () => {
     const card = await render({ task: "Open https://app.example.test", location: "device" }, null);
-    expect(card.destination).toBe("Opens app.example.test");
+    expect(card.destination).toBe("For app.example.test");
     expect(card.unavailable).toBeNull();
     expect(card.button?.disabled).toBe(false);
   });
