@@ -34,7 +34,7 @@ pub(crate) use access::{
     set_self_hosted_access_attestation, spread_plan_parent_is_private,
 };
 pub(crate) use db::{
-    ensure_runtime_record, mark_runtime_ready, record_runtime_event,
+    db_error_summary, ensure_runtime_record, mark_runtime_ready, record_runtime_event,
     record_runtime_event_with_conversation, touch_runtime_last_seen, RuntimeRecord,
     RUNTIME_LAST_SEEN_TOUCH_INTERVAL_SECONDS,
 };

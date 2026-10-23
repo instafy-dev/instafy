@@ -120,6 +120,21 @@ pub(super) async fn ensure_project_exists(
     Ok(())
 }
 
+/// A Postgres error's code and message: its plain `Display` is only "db error", which hid a
+/// deadlock behind every runtime-record failure.
+pub(crate) fn db_error_summary(error: &tokio_postgres::Error) -> String {
+    error
+        .as_db_error()
+        .map(|db_error| {
+            format!(
+                "postgres {}: {}",
+                db_error.code().code(),
+                db_error.message()
+            )
+        })
+        .unwrap_or_else(|| error.to_string())
+}
+
 pub(crate) async fn ensure_runtime_record(
     transaction: &Transaction<'_>,
     project_id: &Uuid,
@@ -182,7 +197,7 @@ pub(crate) async fn ensure_runtime_record(
                     ],
                 )
                 .await
-                .map_err(|error| internal_error(format!("failed to update runtime record: {error}")))?;
+                .map_err(|error| internal_error(format!("failed to update runtime record: {}", db_error_summary(&error))))?;
             return map_runtime_row(&updated);
         }
 
@@ -262,7 +277,7 @@ pub(crate) async fn ensure_runtime_record(
                 ],
             )
             .await
-            .map_err(|error| internal_error(format!("failed to update runtime record: {error}")))?;
+            .map_err(|error| internal_error(format!("failed to update runtime record: {}", db_error_summary(&error))))?;
         return map_runtime_row(&updated);
     }
 
@@ -322,16 +337,7 @@ pub(crate) async fn create_runtime_lease(
         )
         .await
         .map_err(|error| {
-            let summary = error
-                .as_db_error()
-                .map(|db_error| {
-                    format!(
-                        "postgres {}: {}",
-                        db_error.code().code(),
-                        db_error.message()
-                    )
-                })
-                .unwrap_or_else(|| error.to_string());
+            let summary = db_error_summary(&error);
             internal_error(format!("failed to create runtime lease: {summary}"))
         })?;
 

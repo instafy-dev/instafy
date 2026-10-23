@@ -16,7 +16,10 @@
 //! ([`org_can_pay_for_a_managed_turn`]); otherwise the group goes on without the continuation.
 //!
 //! [`redispatch_plan_agent`] is how the controller starts one agent of a group again, here and for
-//! a run that stopped on a short provider rate limit (`rate_limit_retry`).
+//! a run that stopped on a short provider rate limit (`rate_limit_retry`). A dispatch that fails
+//! on the server's side (a statement lost to a concurrent dispatch, in run r11-pacing) is tried
+//! once more after a short pause, unless the first one was queued after all: a lost re-run would
+//! leave the group without the agent for good.
 
 use std::str::FromStr;
 
@@ -222,14 +225,14 @@ where
     )
     .await
     {
-        Ok(response) => {
+        Ok(continuation_job_id) => {
             info!(
                 %group_id,
                 %job_id,
                 handle = %handle,
                 turn = next,
                 ended_by = %request.ended_by,
-                continuation_job_id = ?response.job_id,
+                ?continuation_job_id,
                 "queued the next turn of a plan agent that ran out of time"
             );
             true
@@ -373,8 +376,45 @@ pub(crate) fn redispatch_seed(
     seed
 }
 
+/// How long a re-run whose dispatch failed on the server's side waits before its second try.
+const REDISPATCH_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The job already queued to run the agent of `job_id` again, as its continuation or its
+/// rate-limit retry.
+async fn queued_rerun_of(
+    state: &AppState,
+    project_id: Uuid,
+    job_id: Uuid,
+) -> Result<Option<Uuid>, (StatusCode, axum::Json<ApiError>)> {
+    let connection = state
+        .pool
+        .get()
+        .await
+        .map_err(|error| crate::internal_error(format!("failed to get connection: {error}")))?;
+    let row = connection
+        .query_opt(
+            "select id from agent_jobs
+             where project_id = $1
+               and $2 in (
+                     payload #>> '{metadata,multiAgentPlan,continuation,of}',
+                     payload #>> '{metadata,multiAgentPlan,rateLimitRetry,of}'
+                   )
+             limit 1",
+            &[&project_id, &job_id.to_string()],
+        )
+        .await
+        .map_err(|error| {
+            crate::internal_error(format!(
+                "failed to look for the agent's queued run: {}",
+                crate::runtime::db_error_summary(&error)
+            ))
+        })?;
+    Ok(row.map(|row| row.get("id")))
+}
+
 /// Queue `redispatch.agent` as a one-agent plan in the group of the plan job `job_id` that just
-/// ended, with the same lead and handoff paths, as a service-role dispatch.
+/// ended, with the same lead and handoff paths, as a service-role dispatch. Returns the new job.
+/// A dispatch that fails on the server's side is tried once more (see the module).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn redispatch_plan_agent(
     state: &AppState,
@@ -385,7 +425,7 @@ pub(crate) async fn redispatch_plan_agent(
     job_payload: &JsonValue,
     plan_meta: &JsonMap<String, JsonValue>,
     redispatch: PlanAgentRedispatch,
-) -> Result<DispatchPromptResponse, (StatusCode, axum::Json<ApiError>)> {
+) -> Result<Option<Uuid>, (StatusCode, axum::Json<ApiError>)> {
     let group_uuid = Uuid::from_str(group_id)
         .map_err(|_| crate::bad_request(format!("plan group id {group_id} is not a uuid")))?;
     let seed = job_payload
@@ -444,7 +484,26 @@ pub(crate) async fn redispatch_plan_agent(
         scoped_claims: None,
     };
     let normalized = normalize_dispatch_request(dispatch)?;
-    process_dispatch_prompt(state, &context, normalized).await
+    match process_dispatch_prompt(state, &context, normalized.clone()).await {
+        Ok(response) => Ok(response.job_id),
+        Err((status, axum::Json(error))) if status.is_server_error() => {
+            warn!(
+                %group_id,
+                %job_id,
+                status = status.as_u16(),
+                error = %error.message,
+                "could not queue a plan agent again; trying once more"
+            );
+            tokio::time::sleep(REDISPATCH_RETRY_PAUSE).await;
+            if let Some(queued) = queued_rerun_of(state, project_id, job_id).await? {
+                return Ok(Some(queued));
+            }
+            process_dispatch_prompt(state, &context, normalized)
+                .await
+                .map(|response| response.job_id)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(test)]

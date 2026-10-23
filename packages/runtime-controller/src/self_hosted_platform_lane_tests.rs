@@ -3351,6 +3351,163 @@ async fn a_plan_lane_that_hit_a_short_rate_limit_runs_once_more_after_the_wait(
     cleanup
 }
 
+/// Run r11-pacing lost a lane's rate-limit retry: the retry's dispatch deadlocked with a concurrent
+/// dispatch while it ensured its runtime, the failure left the dispatch's transaction aborted, and
+/// the group went on without the lane. Ensuring the runtime now runs in a savepoint, and a re-run
+/// whose dispatch fails on the server's side is tried once more, unless the first was queued.
+#[tokio::test]
+async fn a_lanes_rate_limit_retry_survives_a_failed_statement_while_it_is_queued(
+) -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping plan retry failure test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let space = ManagedSpace::seed(pool, "plan-retry-db-failure").await?;
+    let suffix = space.project_id.simple().to_string();
+    let runtimes_function = format!("test_deadlock_runtimes_{suffix}");
+    let jobs_function = format!("test_deadlock_jobs_once_{suffix}");
+    let jobs_sequence = format!("test_deadlock_jobs_seq_{suffix}");
+    let drop_injections = || {
+        let pool = space.pool.clone();
+        let (runtimes_function, jobs_function, jobs_sequence) = (
+            runtimes_function.clone(),
+            jobs_function.clone(),
+            jobs_sequence.clone(),
+        );
+        async move {
+            pool.get()
+                .await?
+                .batch_execute(&format!(
+                    "drop trigger if exists {runtimes_function} on runtimes;
+                     drop function if exists {runtimes_function}();
+                     drop trigger if exists {jobs_function} on agent_jobs;
+                     drop function if exists {jobs_function}();
+                     drop sequence if exists {jobs_sequence};"
+                ))
+                .await?;
+            anyhow::Ok(())
+        }
+    };
+    let test_result: anyhow::Result<()> = async {
+        const RATE_LIMITED: &str = "rate limit exceeded: The upstream provider rate limit was reached (upstream_rate_limit, 429). Please try again in 7.632s.";
+        let state = build_test_state(space.pool.clone(), space.config("plan-retry-db-failure"));
+        let seed = json!({
+            "type": "multi_agent_plan", "mode": "read_only",
+            "agents": [
+                { "handle": "tokyo", "label": "Tokyo", "prompt": "Research Tokyo lodging.", "scopeSummary": "Tokyo" },
+                { "handle": "osaka", "label": "Osaka", "prompt": "Research Osaka lodging.", "scopeSummary": "Osaka" },
+            ],
+            "lead": { "leadHandle": "octo", "continuationPrompt": "Report the trip.", "expectedReportFormat": "text" },
+        });
+        let plan_for = |group_id: Uuid| json!({
+            "groupId": group_id, "role": "worker", "mode": "read_only",
+            "lead": { "leadHandle": "octo", "continuationPrompt": "Report the trip.", "expectedReportFormat": "text" },
+            "parentRuntimeId": space.hosted_runtime_id,
+        });
+        // One lane stops on a short rate limit while the other still runs; returns the retry.
+        let retry_of_a_rate_limited_lane = || {
+            let space = &space;
+            let state = state.clone();
+            let seed = seed.clone();
+            async move {
+                let group_id = Uuid::new_v4();
+                let (conversation_id, failed, payload) =
+                    insert_finished_plan_lane(space, None, "osaka", plan_for(group_id), seed.clone()).await?;
+                let (_, other, _) =
+                    insert_finished_plan_lane(space, Some(conversation_id), "tokyo", plan_for(group_id), seed).await?;
+                let connection = space.pool.get().await?;
+                connection
+                    .execute(
+                        "update agent_jobs set status = 'leased', outcome = null, completed_at = null where id = $1",
+                        &[&other],
+                    )
+                    .await?;
+                connection
+                    .execute(
+                        "update agent_jobs set status = 'failed', outcome = 'failed', summary = null,
+                             error_message = $2, completed_at = now() where id = $1",
+                        &[&failed, &RATE_LIMITED],
+                    )
+                    .await?;
+                crate::multi_agent_plan::maybe_enqueue_lead_continuation_after_completion(&state, failed, &payload)
+                    .await
+                    .map_err(|error| controller_error("plan job completion", error))?;
+                let retry: Option<Uuid> = connection
+                    .query_opt(
+                        "select id from agent_jobs
+                         where payload #>> '{metadata,multiAgentPlan,rateLimitRetry,of}' = $1",
+                        &[&failed.to_string()],
+                    )
+                    .await?
+                    .map(|row| row.get("id"));
+                anyhow::Ok(retry)
+            }
+        };
+
+        // 1. ensuring the retry's runtime fails every time (the deadlock of r11-pacing): the
+        //    retry is still queued, on the runtime that ran the lane
+        space
+            .pool
+            .get()
+            .await?
+            .batch_execute(&format!(
+                "create function {runtimes_function}() returns trigger language plpgsql as $$
+                 begin
+                     if new.project_id = '{project}'::uuid then
+                         raise exception 'deadlock detected (injected)' using errcode = '40P01';
+                     end if;
+                     return new;
+                 end $$;
+                 create trigger {runtimes_function} before update on runtimes
+                     for each row execute function {runtimes_function}();",
+                project = space.project_id,
+            ))
+            .await?;
+        let retry = retry_of_a_rate_limited_lane().await?;
+        assert!(retry.is_some(), "the retry is queued although ensuring its runtime failed");
+        drop_injections().await?;
+
+        // 2. the retry's dispatch fails once as a whole: it is tried once more and queued once
+        space
+            .pool
+            .get()
+            .await?
+            .batch_execute(&format!(
+                "create sequence {jobs_sequence};
+                 create function {jobs_function}() returns trigger language plpgsql as $$
+                 begin
+                     if new.project_id = '{project}'::uuid
+                        and new.payload #> '{{metadata,multiAgentPlan,rateLimitRetry}}' is not null
+                        and nextval('{jobs_sequence}') = 1 then
+                         raise exception 'deadlock detected (injected once)' using errcode = '40P01';
+                     end if;
+                     return new;
+                 end $$;
+                 create trigger {jobs_function} before insert on agent_jobs
+                     for each row execute function {jobs_function}();",
+                project = space.project_id,
+            ))
+            .await?;
+        let retry = retry_of_a_rate_limited_lane().await?;
+        assert!(retry.is_some(), "the retry is queued on its second try");
+        let tries: i64 = space
+            .pool
+            .get()
+            .await?
+            .query_one(&format!("select last_value from {jobs_sequence}"), &[])
+            .await?
+            .get(0);
+        assert_eq!(tries, 2, "one failed try, one that queued it");
+        Ok(())
+    }
+    .await;
+    let injections = drop_injections().await;
+    let cleanup = space.cleanup().await;
+    test_result?;
+    injections?;
+    cleanup
+}
+
 /// A plan lane whose turn ran out of time continues in a new turn of the same group, on the
 /// runtime that holds its files, with its prompt and its note: at most twice, the second marked
 /// the last. A completion seen twice is continued once. A continuation turn that stops on a short
