@@ -273,7 +273,7 @@ All relative to the site root, under `__bind/`:
 |---|---|---|
 | `GET health` | none | `{ok, host: "instafy-bind", v: 2, intents, catalog, site, token, viewer, parentOrigins, executors}` |
 | `GET client.js` | none | The bind client |
-| `POST session` | viewer token (header) | Sets the `HttpOnly; SameSite=Lax` site cookie |
+| `POST session` | viewer token (header) | Sets the `HttpOnly; SameSite=Lax` site cookie (also `Secure` on HTTPS, named `__Host-...` for a site at the root) |
 | `POST intent` | viewer token | `202 {status: queued\|needs_confirm, id, job, cancel_key}`, `400` (envelope, params, `params_too_large`, `policy`), `401`, `403` (foreign Origin for a cookie-only request; a cancel without the key), `404` (unknown or unavailable intent), `409` (duplicate id), `413` (body over 8 KB), `415`, `429` (`cooldown`, `rate`, `busy` or `budget`, with `retry_after_s`). The reserved `cancel` intent with `{id, key}` cancels the caller's own intent |
 | `GET events` | viewer token (cookie, header or `?k=`: EventSource sends no header, and a page framed by another site may not get its cookie) | SSE. A per-connection `hello`, then `ack`, `progress`, `results`, `done`, `error`, `command`, one event per intent id. Every viewer gets every event; `Last-Event-ID` replays from a ring buffer (200 events, 2 MB); a ping comment every 15 s; at most 50 streams per site and 8 per source (503 past either). A stream ends after 60 s and EventSource reconnects, so whatever checks the viewer in front of the binder checks again |
 | `GET jobs` | viewer or admin token | The last 50 jobs |
@@ -285,7 +285,10 @@ All relative to the site root, under `__bind/`:
 
 - **Viewer token.** `serve` keeps a random token per site in `<site>/.bind/viewer-token` and prints the share URL with
   `#k=<token>` (the hash never reaches servers or referrers). The client trades it for an `HttpOnly` cookie and drops
-  it from the address bar. Intents, events, jobs, `__bind/records`, `bound.json`, `data/version.json` and
+  it from the address bar. On HTTPS (a `--public-url` that is `https://`, or `x-forwarded-proto: https` with
+  `--trust-proxy`) the cookie is `Secure`, and a site at the root gets the `__Host-` prefix, so another host under the
+  same parent domain cannot set or shadow it. The binder checks every cookie of that name a request carries, so a
+  same-name cookie planted with `Domain=<parent>` does not lock a viewer out. Intents, events, jobs, `__bind/records`, `bound.json`, `data/version.json` and
   `data/records/*` need it; the page, its assets and seed data stay public. `handlers/`, `test/`, `tests/` and
   `node_modules/` are never served. Both rules compare the path as a case-insensitive filesystem reads it (lower
   case, trailing dots, spaces and `:stream` cut) and the real path of the file it names, so `/Bound.json` and

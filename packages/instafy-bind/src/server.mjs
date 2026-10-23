@@ -127,13 +127,25 @@ export function tokenCookieName(siteDir) {
   return `bind_k_${createHash("sha256").update(siteDir).digest("hex").slice(0, 12)}`;
 }
 
-function readCookie(req, name) {
+/**
+ * Every value the request carries for these cookie names. A browser sends one entry per (name, domain, path), so a
+ * page on a sibling subdomain can add a `Domain=<parent>` cookie of the same name next to ours, and it may come first;
+ * callers check each value instead of trusting the first.
+ */
+function readCookies(req, names) {
+  const values = [];
   for (const part of String(req.headers.cookie || "").split(";")) {
     const eq = part.indexOf("=");
-    if (eq > 0 && part.slice(0, eq).trim() === name) return part.slice(eq + 1).trim();
+    if (eq > 0 && names.includes(part.slice(0, eq).trim())) values.push(part.slice(eq + 1).trim());
   }
-  return "";
+  return values;
 }
+
+/**
+ * The `__Host-` form of the site cookie: browsers accept it only from a secure page, host-only (no Domain) and with
+ * Path=/, so no other host can set or shadow it.
+ */
+const hostCookieName = (name) => `__Host-${name}`;
 
 /** "hash" when the site's index.html loads the bind client (it reads #k=), else "query" (?k= sets a cookie). */
 function linkStyleOf(siteDir) {
@@ -429,8 +441,9 @@ export function createBinder(options) {
   /** The viewer token from the x-bind-token header or the site cookie (?k= in the query only where allowQuery). */
   function viewerOk(site, req, url, { allowQuery = false } = {}) {
     if (!tokenNeeded(site, req)) return true;
-    const offered = req.headers["x-bind-token"] || (allowQuery ? url.searchParams.get("k") : "") || readCookie(req, site.cookie) || "";
-    return tokensEqual(String(offered), site.token);
+    const offered = req.headers["x-bind-token"] || (allowQuery ? url.searchParams.get("k") : "");
+    if (offered) return tokensEqual(String(offered), site.token);
+    return readCookies(req, [hostCookieName(site.cookie), site.cookie]).some((value) => tokensEqual(value, site.token));
   }
 
   /** Is this request's Host one of the --public-url names? */
@@ -732,9 +745,32 @@ export function createBinder(options) {
     return true;
   }
 
+  /**
+   * Is the viewer's page HTTPS? Behind a trusted proxy that says so, or on a --public-url name whose URL is https
+   * (the tunnel terminates TLS for it).
+   */
+  function viewerOnHttps(req) {
+    if (trustProxy && req.headers["x-forwarded-proto"] === "https") return true;
+    const offered = String(req.headers.host || "").toLowerCase();
+    return publicOrigins.some((origin) => {
+      try {
+        const url = new URL(origin);
+        return url.protocol === "https:" && url.host.toLowerCase() === offered;
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  /**
+   * The site cookie. On HTTPS it is Secure, and a site served at the root takes the `__Host-` prefix, so a page on
+   * another host under the same parent domain (another tunnel, say) cannot plant or shadow it.
+   */
   function tokenCookie(site, req) {
-    const secure = trustProxy && req.headers["x-forwarded-proto"] === "https" ? "; Secure" : "";
-    return `${site.cookie}=${site.token}; Path=${site.prefix || "/"}; HttpOnly; SameSite=Lax${secure}`;
+    const secure = viewerOnHttps(req);
+    const path = site.prefix || "/";
+    const name = secure && path === "/" ? hostCookieName(site.cookie) : site.cookie;
+    return `${name}=${site.token}; Path=${path}; HttpOnly; SameSite=Lax${secure ? "; Secure" : ""}`;
   }
 
   /**
