@@ -814,6 +814,19 @@ test("team_items_on_site fails when the page leaves out an item the team researc
   assert.equal(byId(gradeCase({ ...TEAM_CASE, expect: { route: "multi_agent_candidate" } }, teamTurn("")), "team_items_on_site"), undefined);
 });
 
+test("a lane labelled with more than its item ('Tokyo Research' for @tokyo) counts as shown when the page names the item", () => {
+  // r11-fin-complete3 japan-1: the page showed Tokyo, Kyoto and Osaka; the lead had labelled its lanes "Tokyo Research"…
+  const agents = [lane("tokyo", "Tokyo Research"), lane("kyoto", "Kyoto Research"), lane("osaka", "Osaka Research")];
+  const items = teamItemsOf(teamTurn("", { agents }).jobs);
+  assert.deepEqual(items, [{ name: "Tokyo Research", core: "tokyo" }, { name: "Kyoto Research", core: "kyoto" }, { name: "Osaka Research", core: "osaka" }]);
+  const shown = gradeCase(TEAM_CASE, teamTurn("Sun 1 Nov · Tokyo\nWed 4 Nov · Kyoto\nSun 8 Nov · Osaka", { agents }));
+  assert.equal(byId(shown, "team_items_on_site").ok, true, byId(shown, "team_items_on_site").detail);
+  const short = gradeCase(TEAM_CASE, teamTurn("Sun 1 Nov · Tokyo\nNot found yet: Osaka\nWed 4 Nov · Kyoto", { agents }));
+  assert.equal(byId(short, "team_items_on_site").detail, "not on the page: Osaka Research (2 of 3 shown)");
+  // a handle that is not part of its label adds nothing ("east" for "Eastport and Southbay"; "north" for "Northtown")
+  assert.deepEqual(teamItemsOf(teamTurn("").jobs).filter((x) => x.core), []);
+});
+
 test("an item counts as shown as whole words in any case and punctuation; a handle also by each of its words", () => {
   assert.deepEqual(itemsMissingFrom("ASICS Gel Kayano 31 · seen 17 Oct", [{ name: "ASICS Gel-Kayano 31" }]), []);
   assert.deepEqual(itemsMissingFrom("Hoka Arahi 75", [{ name: "Hoka Arahi 7" }]).map((x) => x.name), ["Hoka Arahi 7"]);

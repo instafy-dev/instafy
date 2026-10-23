@@ -169,13 +169,14 @@ export function promptContextOf(job) {
 
 /** The items a team planned a lane for: each lane's label, a lane for several stops ("Hualien and Taitung") counting
  *  as each of them, from every plan its lead or checkpoint emitted (the run log's final message). The builder is not an
- *  item. When no plan message survived (a long run log keeps only its tail), the lanes' handles stand in, marked
- *  `fromHandle`. Exported for the tests. */
+ *  item. A one-item label that adds words to its lane's handle ("Tokyo Research" for `tokyo`) keeps the handle's words
+ *  as its `core`: the page names the item when it names the core. When no plan message survived (a long run log keeps
+ *  only its tail), the lanes' handles stand in, marked `fromHandle`. Exported for the tests. */
 export function teamItemsOf(jobs) {
   const items = [];
-  const add = (name, fromHandle = false) => {
+  const add = (name, fromHandle = false, core = null) => {
     const clean = String(name ?? "").trim();
-    if (clean && !items.some((x) => normItem(x.name) === normItem(clean))) items.push({ name: clean, ...(fromHandle ? { fromHandle } : {}) });
+    if (clean && !items.some((x) => normItem(x.name) === normItem(clean))) items.push({ name: clean, ...(fromHandle ? { fromHandle } : {}), ...(core ? { core } : {}) });
   };
   for (const job of jobs ?? []) {
     if (job.agentRole === "worker") continue;
@@ -194,7 +195,11 @@ export function teamItemsOf(jobs) {
           for (const agent of Array.isArray(action.agents) ? action.agents : []) {
             const label = typeof agent?.label === "string" ? agent.label : "";
             if (!label || agent?.handle === "build" || /\bbuilder\b/i.test(label)) continue;
-            for (const part of label.split(/\s+(?:and|&|\+)\s+|\s*[,/、]\s*/i)) add(part);
+            const parts = label.split(/\s+(?:and|&|\+)\s+|\s*[,/、]\s*/i);
+            // the handle's words, when the label holds all of them and more ("tokyo" in "Tokyo Research")
+            const core = normItem(String(agent?.handle ?? "").replace(/[-_]+/g, " "));
+            const holdsCore = parts.length === 1 && core && normItem(label) !== core && textNamesItem(label, core);
+            for (const part of parts) add(part, false, holdsCore ? core : null);
           }
         }
       }
@@ -219,6 +224,7 @@ const MISSING_LINE_RE = /^\s*(not found yet|missing|not on the (map|page)( yet)?
 export function itemsMissingFrom(text, items) {
   const shown = String(text ?? "").split(/\r?\n/).filter((line) => !MISSING_LINE_RE.test(line)).join("\n");
   return items.filter((item) => !(textNamesItem(shown, item.name)
+    || (item.core && textNamesItem(shown, item.core))
     || (item.fromHandle && item.name.split(/\s+/).filter((w) => w.length >= 3).every((w) => textNamesItem(shown, w)))));
 }
 
