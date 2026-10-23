@@ -916,9 +916,42 @@ pub struct PreviewSettings {
     /// `PREVIEW_DENY_PORTS` entries that are not ports. Startup refuses any,
     /// so a typo never leaves a moved service exposed.
     pub invalid_deny_ports: Vec<String>,
-    /// `TUNNEL_DOMAIN`, when set here too: public tunnel hosts. The preview
-    /// domain may equal it but must not sit above, below or next to it.
+    /// `TUNNEL_DOMAIN`, the same setting as the tunnel broker's: public tunnel
+    /// hosts are this domain or names under it (see
+    /// [`AppConfig::is_tunnel_host`]). The preview domain may equal it but must
+    /// not sit above, below or next to it.
     pub tunnel_domain: Option<String>,
+}
+
+/// The local tunnel broker's default domain. `.test` never resolves on the
+/// public internet, so it is recognised without any setting.
+const LOCAL_TUNNEL_DOMAIN: &str = "rt.test";
+
+impl AppConfig {
+    /// Whether `host` is a tunnel host: `TUNNEL_DOMAIN` or a name under it,
+    /// or the local broker's `rt.test`. With `TUNNEL_DOMAIN` unset only local
+    /// tunnels count, and an unreadable value matches nothing.
+    pub fn is_tunnel_host(&self, host: &str) -> bool {
+        let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+        let within = |domain: &str| {
+            host == domain
+                || host
+                    .strip_suffix(domain)
+                    .is_some_and(|rest| rest.len() > 1 && rest.ends_with('.'))
+        };
+        let configured = self
+            .previews
+            .tunnel_domain
+            .as_deref()
+            .map(|value| value.trim().trim_matches('.').to_ascii_lowercase())
+            .filter(|domain| {
+                !domain.is_empty()
+                    && domain
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+            });
+        within(LOCAL_TUNNEL_DOMAIN) || configured.is_some_and(|domain| within(&domain))
+    }
 }
 
 impl PreviewSettings {

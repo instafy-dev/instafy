@@ -58,6 +58,7 @@ Setting `PREVIEW_DOMAIN` to the same value as `TUNNEL_DOMAIN` puts public tunnel
 
 ## Controller wiring (recommended)
 1. Configure broker base URL + bearer token in controller env (keep separate from runtime/Studio env).
+   Set the controller's `TUNNEL_DOMAIN` to the broker's value too. The controller treats that domain and the names under it (plus the local `rt.test`) as tunnel hosts: Studio's browser view and the speech proxy reach them through the controller. Unset, only local `rt.test` tunnels count.
 2. On desktop runtime start (or hosted runtime needing a tunnel):
    - Call `POST /tunnels` with `{ project_id, org_id, runtime_id, lease_id }`.
    - Persist `tunnel_id`, `hostname`, `token`, `token_expires_at`, and `url` into your `runtime_tunnel_grants` (or equivalent) row.

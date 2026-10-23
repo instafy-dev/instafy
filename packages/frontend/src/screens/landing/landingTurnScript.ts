@@ -231,7 +231,7 @@ export interface ScenarioPane {
 export interface BrowserScript {
   /** The task request_browser carries (browserRequest.ts), sent back by Ada's press. */
   task: string;
-  /** The preview's tunnel origin (instafy tunnel start; *.rt.instafy.dev). */
+  /** The preview's tunnel origin (instafy tunnel start). */
   origin: string;
   url: string;
   /** The page title nav_result reports. */
@@ -371,8 +371,8 @@ const PRICING_NOTES: PaneFile = {
 // draw that "x" as a multiplication sign.
 const SITE_BROWSER: BrowserScript = {
   task: "Click through the Team plan.",
-  origin: "https://k7m2qa.rt.instafy.dev",
-  url: "https://k7m2qa.rt.instafy.dev/pricing",
+  origin: "https://k7m2qa.instafy.site",
+  url: "https://k7m2qa.instafy.site/pricing",
   title: "Pricing · Forma",
   clickLabel: "Choose Team",
   steps: [

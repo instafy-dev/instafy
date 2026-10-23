@@ -28,6 +28,12 @@ import {
 } from "../../../runtime/utils/webdevRuntime";
 import { runtimeDebugLog } from "../../../runtime/utils/runtimeDebug";
 import { generateUUID } from "../../../utils/uuid";
+import {
+  buildBrowserOriginHttpUrl,
+  buildBrowserOriginWebSocketUrl,
+  type BrowserOriginHttpPath,
+  type BrowserOriginSocketPath,
+} from "./browserOriginUrls";
 import type { StatusIntent } from "../../../status/useStatus";
 import { useBrowserSessionActions } from "./useBrowserSessionActions";
 import { useExpandedBrowserViewport } from "./useExpandedBrowserViewport";
@@ -353,53 +359,14 @@ function SharedBrowserControlOwnerPill({
   );
 }
 
-function shouldProxyVncThroughController(hostname: string): boolean {
-  const normalized = hostname.trim().toLowerCase();
-  if (!normalized) {
-    return false;
-  }
-  return (
-    normalized === "rt.instafy.dev" ||
-    normalized.endsWith(".rt.instafy.dev") ||
-    normalized === "rt.test" ||
-    normalized.endsWith(".rt.test") ||
-    normalized === "127.0.0.1" ||
-    normalized === "localhost" ||
-    normalized === "host.docker.internal"
-  );
-}
-
 function buildBrowserWebSocketUrl(params: {
   endpoint: string;
   token: string;
-  browserPath: "vnc" | "screencast" | "input" | "collaboration";
+  browserPath: BrowserOriginSocketPath;
   originId?: string | null;
   pageId?: string | null;
 }): string {
-  const url = new URL(params.endpoint);
-  const originId = params.originId?.trim() ?? "";
-  if (originId && controllerBaseUrl && shouldProxyVncThroughController(url.hostname)) {
-    const controllerUrl = new URL(controllerBaseUrl);
-    controllerUrl.protocol = controllerUrl.protocol === "https:" ? "wss:" : "ws:";
-    controllerUrl.pathname = `/origin/${encodeURIComponent(originId)}/browser/${params.browserPath}`;
-    controllerUrl.search = "";
-    controllerUrl.searchParams.set("token", params.token);
-    if (params.pageId?.trim()) {
-      controllerUrl.searchParams.set("pageId", params.pageId.trim());
-    }
-    return controllerUrl.toString();
-  }
-
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  // Preserve any origin proxy prefix (e.g. controller endpoints like /origin/<id>).
-  const basePath = url.pathname === "/" ? "" : url.pathname.replace(/\/+$/, "");
-  url.pathname = `${basePath}/browser/${params.browserPath}`;
-  url.search = "";
-  url.searchParams.set("token", params.token);
-  if (params.pageId?.trim()) {
-    url.searchParams.set("pageId", params.pageId.trim());
-  }
-  return url.toString();
+  return buildBrowserOriginWebSocketUrl({ ...params, controllerBaseUrl });
 }
 
 function buildVncWebSocketUrl(params: {
@@ -412,22 +379,10 @@ function buildVncWebSocketUrl(params: {
 
 function buildBrowserHttpUrl(params: {
   endpoint: string;
-  browserPath: "webrtc/offer";
+  browserPath: BrowserOriginHttpPath;
   originId?: string | null;
 }): string {
-  const url = new URL(params.endpoint);
-  const originId = params.originId?.trim() ?? "";
-  if (originId && controllerBaseUrl && shouldProxyVncThroughController(url.hostname)) {
-    const controllerUrl = new URL(controllerBaseUrl);
-    controllerUrl.pathname = `/origin/${encodeURIComponent(originId)}/browser/${params.browserPath}`;
-    controllerUrl.search = "";
-    return controllerUrl.toString();
-  }
-
-  const basePath = url.pathname === "/" ? "" : url.pathname.replace(/\/+$/, "");
-  url.pathname = `${basePath}/browser/${params.browserPath}`;
-  url.search = "";
-  return url.toString();
+  return buildBrowserOriginHttpUrl({ ...params, controllerBaseUrl });
 }
 
 export function BrowserSessionModal({
