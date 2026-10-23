@@ -151,8 +151,9 @@ export function useBrowserSessionPages(params: {
   const commandError = commandState.scopeKey === scopeKey ? commandState.error : null;
   // One unbroken run of `browser_host_not_ready` answers for this scope: when
   // it began, and whether it has lasted past the bound. Any page read that
-  // succeeds ends it. Token and gateway failures neither start nor end it, so
-  // a machine that is still starting is not counted.
+  // succeeds, and any change of scope, ends it. Token and gateway failures
+  // neither start nor end it, so a machine that is still starting is not
+  // counted.
   const [notReadyState, setNotReadyState] = useState<{
     scopeKey: string;
     sinceMs: number;
@@ -542,6 +543,9 @@ export function useBrowserSessionPages(params: {
       unsupported: false,
     });
     setCommandState({ scopeKey, pending: null, error: null });
+    // Each open counts its own run of not-ready answers: closing the browser
+    // and opening it again never brings back an earlier one.
+    setNotReadyState(null);
     void refreshCapabilities();
   }, [refreshCapabilities, scopeKey]);
 

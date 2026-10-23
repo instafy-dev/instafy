@@ -62,7 +62,8 @@ export type BrowserAutoStartOptions = {
   /**
    * Why Studio leaves this conversation's cards to the person right now (a
    * draft in the composer), or null when it may start one. The layout never
-   * holds a card.
+   * holds a card. The card shows the reason only while it holds a card that
+   * would otherwise open by itself.
    */
   blocked: { reason: string | null } | null;
   /** Another person or agent run holds the browser. */
@@ -210,6 +211,21 @@ function sameCardState(a: BrowserRequestCardState | undefined, b: BrowserRequest
   return true;
 }
 
+/** The card a draft holds right now, and what it says while the hold lasts. */
+type DraftHold = { key: string; reason: string | null };
+
+/**
+ * What deciding the newest card left: whether it waits on a reading of
+ * Instafy's browser, and the card a draft holds.
+ */
+type CardDecision = { waiting: boolean; draftHold: DraftHold | null };
+const DECIDED: CardDecision = { waiting: false, draftHold: null };
+const WAITING: CardDecision = { waiting: true, draftHold: null };
+
+function sameDraftHold(a: DraftHold | null, b: DraftHold | null): boolean {
+  return a === b || (a !== null && b !== null && a.key === b.key && a.reason === b.reason);
+}
+
 /**
  * An automatic start that no longer applies by the time the browser is
  * ready: the card stays a button, without a reason or a toast.
@@ -291,10 +307,14 @@ function autoStartStillApplies(current: Options, key: string): boolean {
  * running for two minutes, the card says so at once. On the conversation's
  * machine it also reads that browser (at once when it was open already,
  * otherwise after three seconds, then every three seconds): a poisoned one,
- * or one that failed again after a new start, ends the press with the
- * reason. A browser that was open already, or whose machine's browser went
- * idle, stopped or failed, is asked once to attach again, never while
- * another run or person holds it.
+ * or one that failed again in a new start after the press asked it to
+ * attach again, ends the press with the reason. A browser that was open
+ * already but shows no page, or whose machine's browser went idle, stopped
+ * or failed, is asked once to attach again, never while another run or
+ * person holds it.
+ *
+ * A draft holds a card that would open by itself, and the card says so only
+ * while the hold lasts.
  */
 export function useChatBrowserRequest(options: Options) {
   const latest = useRef(options);
@@ -312,6 +332,9 @@ export function useChatBrowserRequest(options: Options) {
   // Instafy's browser, or because that browser is someone else's for now.
   const [autoWaiting, setAutoWaiting] = useState(false);
   const [cardStates, setCardStates] = useState<ReadonlyMap<string, BrowserRequestCardState>>(() => new Map());
+  // Kept out of cardStates, so the draft's reason goes away with the hold:
+  // once the draft is sent or cleared, or a newer card arrives.
+  const [draftHold, setDraftHold] = useState<DraftHold | null>(null);
   const [visible, setVisible] = useState(isDocumentVisible);
 
   const setCardState = useCallback((key: string, state: BrowserRequestCardState) => {
@@ -368,14 +391,18 @@ export function useChatBrowserRequest(options: Options) {
       let hostReading: Awaited<ReturnType<SharedBrowserHostRefresh>> = null;
       let hostCheckedAtMs = Number.NEGATIVE_INFINITY;
       // A press: when it asked the browser view to attach again (once at
-      // most), and when it last read the browser.
+      // most), the generation of the browser's run it read then (null while
+      // idle; undefined when no reading said), and when it last read the
+      // browser.
       let reattachedAtMs: number | null = null;
+      let reattachedFromGeneration: string | null | undefined;
       let pressCheckedAtMs = Number.NEGATIVE_INFINITY;
-      const reattach = () => {
+      const reattach = (generation?: string | null) => {
         const sharedHost = latest.current.sharedHost;
         // Never while another run or person holds the browser.
         if (reattachedAtMs !== null || !sharedHost?.reattach || sharedHost.heldByOther) return;
         reattachedAtMs = Date.now();
+        reattachedFromGeneration = generation;
         sharedHost.reattach();
       };
       // Let React commit the chosen surface before considering a cached
@@ -480,10 +507,12 @@ export function useChatBrowserRequest(options: Options) {
           const sharedHost = current.sharedHost;
           const readable = Boolean(sharedHost?.refresh && sharedHost.runtimeId) &&
             (current.sharedRuntimeId ?? null) === sharedHost?.runtimeId;
+          // A browser that was open already and still shows no page. One that
+          // shows its page and only waits for the conversation is left alone.
+          const openWithoutPage = wasOpen && !current.sharedReady;
           if (!readable) {
-            // Not Instafy's browser on the conversation's machine: a browser
-            // that was open already and still shows no page attaches again.
-            if (wasOpen) reattach();
+            // Not Instafy's browser on the conversation's machine.
+            if (openWithoutPage) reattach();
           } else {
             const now = Date.now();
             if ((wasOpen || now - activatedAtMs >= BROWSER_PRESS_HOST_CHECK_MS) &&
@@ -493,20 +522,24 @@ export function useChatBrowserRequest(options: Options) {
               const snapshot = reading && reading.fetchedAtMs >= startedAtMs ? reading.snapshot : null;
               if (snapshot) {
                 if (snapshot.state === "poisoned") throw new Error(SHARED_BROWSER_HOST_COPY.poisoned);
-                // It failed again after the browser view was asked to start it.
-                if (snapshot.state === "failed" && reattachedAtMs !== null && reading!.fetchedAtMs >= reattachedAtMs) {
+                // It failed again in a start after the browser view was asked
+                // to attach again: a newer generation than the one read then.
+                // The run that had failed before is not this press's answer;
+                // without a reading then, the view's own error says it.
+                if (snapshot.state === "failed" && reattachedFromGeneration !== undefined &&
+                    snapshot.generation !== null && snapshot.generation !== reattachedFromGeneration) {
                   throw new Error(SHARED_BROWSER_HOST_COPY.didNotStart);
                 }
-                // Attach again when the browser was open already, or when its
-                // browser went idle, is stopping or failed after the view had
-                // its chance to start it; never while another person's run
-                // works in it.
+                // Attach again when the browser was open already and shows no
+                // page, or when its browser went idle, is stopping or failed
+                // after the view had its chance to start it; never while
+                // another person's run works in it.
                 const otherRun = snapshot.agentRunActive && !snapshot.agentRunStartedByYou;
                 const stalled = snapshot.state === "idle" || snapshot.state === "stopping" || snapshot.state === "failed";
-                if (!otherRun && (wasOpen || (stalled && Date.now() - activatedAtMs >= BROWSER_PRESS_REATTACH_AFTER_MS))) {
-                  reattach();
+                if (!otherRun && (openWithoutPage || (stalled && Date.now() - activatedAtMs >= BROWSER_PRESS_REATTACH_AFTER_MS))) {
+                  reattach(snapshot.generation);
                 }
-              } else if (wasOpen) {
+              } else if (openWithoutPage) {
                 // No reading: attach again anyway; the view says why it cannot.
                 reattach();
               }
@@ -536,8 +569,10 @@ export function useChatBrowserRequest(options: Options) {
     extraMetadata: Record<string, unknown> | null,
   ) => {
     const epoch = generation.current;
-    // A pressed card is never also started by itself.
+    // A pressed card is never also started by itself, and no draft holds it
+    // any more: the card shows how the press goes.
     claimBrowserAutoStart(key);
+    setDraftHold((current) => current?.key === key ? null : current);
     try {
       await start(key, request, null, extraMetadata);
       setCardState(key, { kind: "opened" });
@@ -605,40 +640,41 @@ export function useChatBrowserRequest(options: Options) {
 
   /**
    * Decides the newest card once: starts it, leaves it a button, or waits.
-   * True only while it is left unclaimed until a reading of Instafy's
-   * browser says more (a `pending` plan, or the browser is in use for now).
+   * Waiting means it is left unclaimed until a reading of Instafy's browser
+   * says more (a `pending` plan, or the browser is in use for now). A draft
+   * holds only a card that would otherwise open by itself now.
    */
-  function decideNewestCard(): boolean {
+  function decideNewestCard(): CardDecision {
     const current = latest.current;
     const auto = current.auto;
-    if (!auto || !current.canWrite || !current.ready || pending.current) return false;
+    if (!auto || !current.canWrite || !current.ready || pending.current) return DECIDED;
     const index = newestCardIndex;
-    if (index < 0 || index >= current.messages.length) return false;
+    if (index < 0 || index >= current.messages.length) return DECIDED;
     const message = current.messages[index]!;
     const request = browserRequestFromMessage(message)!;
     const key = browserRequestKey(message);
-    if (isBrowserAutoStartClaimed(key)) return false;
+    if (isBrowserAutoStartClaimed(key)) return DECIDED;
     // Answered already: someone wrote after it, or it was continued.
-    if (current.messages.slice(index + 1).some((entry) => entry.role === "user")) return false;
-    if (browserRequestContinuedKeys(current.messages).has(key)) return false;
+    if (current.messages.slice(index + 1).some((entry) => entry.role === "user")) return DECIDED;
+    if (browserRequestContinuedKeys(current.messages).has(key)) return DECIDED;
     // History never starts a browser: only a card that arrived after this
     // conversation was opened, and within ten minutes.
-    if (!isRunFailureRecentForAutoRetry(message) || message.timestamp < openedAt.current - 1_000) return false;
+    if (!isRunFailureRecentForAutoRetry(message) || message.timestamp < openedAt.current - 1_000) return DECIDED;
     // Only the tab whose own prompt started the run that sent the card, by
     // the person who sent it, and never for a card a browser turn sent.
     const jobId = browserRequestJobId(message);
     const sent = jobId ? findPromptSentFromThisPageForRun(jobId) : null;
-    if (!jobId || !sent) return false;
+    if (!jobId || !sent) return DECIDED;
     const sentMetadata = typeof sent.metadata === "object" && sent.metadata !== null && !Array.isArray(sent.metadata)
       ? sent.metadata as Record<string, unknown> : null;
     if (!isRunFailurePromptFromThisClient({
       promptMessage: { authorId: null, metadata: sentMetadata },
       currentUserId: auto.currentUserId,
       chatClientSessionId: auto.chatClientSessionId,
-    })) return false;
-    if (isBrowserTurnPromptMetadata(sent.metadata)) return false;
+    })) return DECIDED;
+    if (isBrowserTurnPromptMetadata(sent.metadata)) return DECIDED;
     // Wait for that run to finish and for the person to see this tab.
-    if (current.busy || auto.activeRunIds.has(jobId) || !visible) return false;
+    if (current.busy || auto.activeRunIds.has(jobId) || !visible) return DECIDED;
 
     // Settled for good: the card is left to the person on this page.
     const leave = (reason: string | null) => {
@@ -648,7 +684,7 @@ export function useChatBrowserRequest(options: Options) {
     const conversation = current.identity;
     if (isBrowserAutoStartDeclined(conversation)) {
       leave(null);
-      return false;
+      return DECIDED;
     }
     // A card that continues in Instafy's browser while it is open on the
     // conversation's machine starts nothing new, so the once-per-conversation
@@ -656,7 +692,7 @@ export function useChatBrowserRequest(options: Options) {
     const openHostId = openSharedBrowserHostId(current);
     if (!openHostId && browserAutoStartedRecently(conversation)) {
       leave(null);
-      return false;
+      return DECIDED;
     }
     // An address Octo found itself, such as on a page or in a search result,
     // is the person's to check first.
@@ -667,40 +703,48 @@ export function useChatBrowserRequest(options: Options) {
       currentUserId: auto.currentUserId,
     })) {
       leave(BROWSER_AUTO_START_COPY.unseenAddress);
-      return false;
+      return DECIDED;
     }
     const host = hostOf(current);
     // The card says itself why no browser opens here.
-    if (browserRequestUnavailableReason(request, host)) return false;
+    if (browserRequestUnavailableReason(request, host)) return DECIDED;
     // Held for now: the button shows why, and the card is looked at again
     // once that changes.
-    if (auto.blocked) {
-      setCardState(key, { kind: "button", reason: auto.blocked.reason });
-      return false;
-    }
     if (auto.heldByOther) {
       setCardState(key, { kind: "button", reason: BROWSER_AUTO_START_COPY.inUse });
-      return false;
+      return DECIDED;
     }
     const plan = auto.plan(request, browserRequestTransport(request, current.transport, host));
     // Instafy's browser on the space's machine needs a fresh reading first:
-    // the reading changes the revision, and the card is decided again.
+    // the reading changes the revision, and the card is decided again. A
+    // draft that holds this card keeps saying so meanwhile.
     if (plan.kind === "pending") {
       void auto.refreshHost?.();
-      return true;
+      return {
+        waiting: true,
+        draftHold: auto.blocked && draftHold?.key === key ? { key, reason: auto.blocked.reason } : null,
+      };
     }
+    // Studio does not open this card by itself: the button says why, also
+    // over a draft.
     if (plan.kind === "button") {
       setCardState(key, { kind: "button", reason: plan.reason });
       // In use for now: read the browser again until it is free.
-      return plan.reason === BROWSER_AUTO_START_COPY.hostInUse;
+      return plan.reason === BROWSER_AUTO_START_COPY.hostInUse ? WAITING : DECIDED;
     }
     // Only a continuation in that same open browser skips the window.
     if (openHostId && (plan.kind !== "attach" || plan.runtimeId !== openHostId) &&
         browserAutoStartedRecently(conversation)) {
       leave(null);
-      return false;
+      return DECIDED;
     }
-    if (!claimBrowserAutoStart(key)) return false;
+    // It would open by itself now, but the person is writing: it waits, and
+    // says why only while the draft holds it.
+    if (auto.blocked) {
+      setCardState(key, { kind: "button", reason: null });
+      return { waiting: false, draftHold: { key, reason: auto.blocked.reason } };
+    }
+    if (!claimBrowserAutoStart(key)) return DECIDED;
     recordBrowserAutoStart(conversation);
     setCardState(key, { kind: "opening", note: null });
     const epoch = generation.current;
@@ -716,12 +760,14 @@ export function useChatBrowserRequest(options: Options) {
         if (generation.current === epoch) latest.current.onError(reason);
       },
     );
-    return false;
+    return DECIDED;
   }
 
   useEffect(() => {
+    const decision = decideNewestCard();
     // Whether the newest card waits on Instafy's browser (see autoWaiting).
-    setAutoWaiting(decideNewestCard());
+    setAutoWaiting(decision.waiting);
+    setDraftHold((current) => sameDraftHold(current, decision.draftHold) ? current : decision.draftHold);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     activeRunIdsKey,
@@ -740,5 +786,13 @@ export function useChatBrowserRequest(options: Options) {
     visible,
   ]);
 
-  return { cardStates, retryContinuation, autoWaiting };
+  // The draft's reason shows on the card it holds, over what the card said
+  // before the hold.
+  const shownCardStates = useMemo(() => {
+    if (!draftHold) return cardStates;
+    const held: BrowserRequestCardState = { kind: "button", reason: draftHold.reason };
+    return sameCardState(cardStates.get(draftHold.key), held) ? cardStates : new Map(cardStates).set(draftHold.key, held);
+  }, [cardStates, draftHold]);
+
+  return { cardStates: shownCardStates, retryContinuation, autoWaiting };
 }

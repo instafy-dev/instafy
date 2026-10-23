@@ -381,8 +381,44 @@ describe("Pressing a card for Instafy's browser on the conversation's machine", 
     await advance();
     expect(reattach).toHaveBeenCalledTimes(1);
     expect(attempt.settled()).toBeUndefined();
+    // The view started it again, and that new run failed too.
+    reading = host({ state: "failed", generation: "gen-2", failure: "chromium_exited" });
     await advance(3_100);
     expect(attempt.settled()).toMatchObject({ message: SHARED_BROWSER_HOST_COPY.didNotStart });
+  });
+
+  it("waits for the view to start the browser again instead of taking the run that failed before as its answer", async () => {
+    // A slow controller: the view's new start lands well after the next reading.
+    reading = host({ state: "failed", failure: "chromium_exited" });
+    await render();
+    const attempt = await begin();
+    await advance();
+    expect(reattach).toHaveBeenCalledTimes(1);
+    await advance(9_000);
+    expect(refresh.mock.calls.length).toBeGreaterThan(2);
+    expect(attempt.settled()).toBeUndefined();
+    reading = host({ state: "ready", generation: "gen-2", startedByYou: true });
+    value.sharedReady = true;
+    await render(); await advance();
+    expect(await attempt.result).toBeNull();
+    expect(value.continueTask).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["on the conversation's machine", () => { reading = host({ state: "ready", startedByYou: true }); }],
+    ["on another machine", () => { value.sharedRuntimeId = "browser-session-runtime"; }],
+  ] as const)("never attaches again an open browser that shows its page %s while the conversation is busy", async (_name, arrange) => {
+    value.sharedReady = true; value.busy = true;
+    arrange();
+    await render();
+    const attempt = await begin();
+    await advance(5_000);
+    expect(reattach).not.toHaveBeenCalled();
+    value.busy = false;
+    await render(); await advance();
+    expect(await attempt.result).toBeNull();
+    expect(value.continueTask).toHaveBeenCalledTimes(1);
+    expect(reattach).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -953,14 +989,96 @@ describe("Studio starting a request_browser card by itself", () => {
     const host = coveredHost();
     auto.blocked = { reason: BROWSER_AUTO_START_COPY.draftHeld };
     await cardArrives();
-    expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.draftHeld });
-    expect(host.refreshHost).not.toHaveBeenCalled();
-    auto.blocked = null;
-    await render();
-    // Cleared: it reads the host first, then attaches.
+    // It reads the host first, to know whether the card would open by itself.
     expect(host.refreshHost).toHaveBeenCalledWith();
     await settleReading();
+    expect(value.activate).not.toHaveBeenCalled();
+    expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.draftHeld });
+    auto.blocked = null;
+    await render();
     expect(value.activate).toHaveBeenCalledExactlyOnceWith("shared", { kind: "attach", runtimeId: HOST_ID });
+  });
+
+  it("keeps the draft's reason while it reads the browser again", async () => {
+    const host = coveredHost();
+    auto.blocked = { reason: BROWSER_AUTO_START_COPY.draftHeld };
+    await cardArrives(); await settleReading();
+    expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.draftHeld });
+    // The reading went stale while the person kept writing.
+    await advance(6_000);
+    host.refreshHost.mockClear();
+    auto.revision = "later";
+    await render();
+    expect(host.refreshHost).toHaveBeenCalledWith();
+    expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.draftHeld });
+    await settleReading();
+    expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.draftHeld });
+    expect(value.activate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a space where Studio leaves Instafy's browser to a press", () => {
+      const now = new Date().toISOString();
+      const runtimes = [{ runtimeId: "rt-1", status: "ready", provider: "instafy-cloud", displayName: "hosted runtime",
+        health: "online", isLocal: false, lastSeenAt: now, idleTtlSeconds: 900, isPreferred: true, createdAt: now,
+        origin: { originId: "origin-space", endpoint: "https://origin.test", protocols: ["http"] } }] as ControllerRuntimeStatusEntry[];
+      value.transport = "shared"; value.personalAvailable = false;
+      plan.mockImplementation((_request, transport) => browserAutoStartPlan({
+        transport: transport as "shared", personalAvailable: false, personalOwnAi: false, projectId: "project-1", runtimes,
+        sharedBrowserHostPolicy: "off", conversationRuntimeId: "rt-1", host: null, hostReadAtMs: null, nowMs: Date.now(),
+      }));
+    }, BROWSER_AUTO_START_COPY.restartsMachine],
+    ["a person on Instafy AI", () => {
+      plan.mockReturnValue({ kind: "button", reason: BROWSER_AUTO_START_COPY.personalNeedsOwnAi });
+    }, BROWSER_AUTO_START_COPY.personalNeedsOwnAi],
+    ["a failed host", () => { coveredHost({ state: "failed" }); }, BROWSER_AUTO_START_COPY.hostFailed],
+    ["a browser someone else is using", () => { auto.heldByOther = true; }, BROWSER_AUTO_START_COPY.inUse],
+  ] as const)("never says a draft holds a card that would not open by itself: %s", async (_name, arrange, reason) => {
+    arrange();
+    auto.blocked = { reason: BROWSER_AUTO_START_COPY.draftHeld };
+    await cardArrives(); await settleReading();
+    expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason });
+    auto.blocked = null;
+    await render(); await settleReading();
+    expect(value.activate).not.toHaveBeenCalled();
+    expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason });
+  });
+
+  it.each([
+    ["the person sends the draft", () => {
+      value.messages = [...value.messages, { id: "reply", role: "user", authorId: "user-1", content: "Yes, go ahead", timestamp: Date.now() }];
+      auto.blocked = null;
+    }],
+    ["a newer card arrives", () => {
+      value.messages = [...value.messages, card("job-2")];
+    }],
+  ] as const)("drops the draft's reason when %s", async (_name, change) => {
+    coveredHost();
+    auto.blocked = { reason: BROWSER_AUTO_START_COPY.draftHeld };
+    await cardArrives(); await settleReading();
+    expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.draftHeld });
+    change();
+    await render(); await settleReading(); await advance(5_000);
+    expect(value.activate).not.toHaveBeenCalled();
+    expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason: null });
+  });
+
+  it("shows how a press of a card a draft holds went, not the draft's reason", async () => {
+    auto.blocked = { reason: BROWSER_AUTO_START_COPY.draftHeld };
+    value.open = true; value.personalReady = true;
+    value.continueTask = vi.fn(async () => false);
+    await cardArrives();
+    expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.draftHeld });
+    const detail: { messageId: string; completion?: Promise<unknown> } = { messageId: "card-job-1" };
+    await act(async () => { window.dispatchEvent(new CustomEvent("instafy:request-browser", { detail })); });
+    const completion = detail.completion?.catch(() => null);
+    await advance(); await advance();
+    await act(async () => { await completion; });
+    expect(value.continueTask).toHaveBeenCalledTimes(1);
+    expect(lastState?.cardStates.get("job:job-1")).toEqual({
+      kind: "button",
+      reason: "The browser task was not sent. You can retry from its message.",
+    });
   });
 
   /** A first card opened Instafy's browser on the host and its task went out. */
@@ -1005,6 +1123,25 @@ describe("Studio starting a request_browser card by itself", () => {
     await secondCardArrives();
     expect(value.activate).toHaveBeenCalledTimes(1);
     expect(value.continueTask).toHaveBeenCalledTimes(1);
+    expect(lastState?.cardStates.get("job:job-2")).toEqual({ kind: "button", reason: null });
+  });
+
+  it("leaves a second card for the browser on this device a button within ten minutes, while Instafy's browser is open on the conversation's machine", async () => {
+    await firstCardContinued();
+    // The person is on their own AI in the desktop app: the plan would start
+    // the browser on this device, which opens a browser of its own.
+    value.personalAvailable = true;
+    await render();
+    await advance(60_000);
+    const prompt = sendPrompt({}, "job-2");
+    const deviceCard = card("job-2");
+    deviceCard.metadata = { ...deviceCard.metadata,
+      details: { browserRequest: { task: TASK, location: "device" } } };
+    value.messages = [...value.messages, prompt, deviceCard];
+    await render(); await advance(10); await settleReading();
+    expect(plan).toHaveBeenLastCalledWith(expect.objectContaining({ task: TASK, location: "device" }), "personal");
+    expect(plan.mock.results.at(-1)?.value).toEqual({ kind: "personal" });
+    expect(value.activate).toHaveBeenCalledTimes(1);
     expect(lastState?.cardStates.get("job:job-2")).toEqual({ kind: "button", reason: null });
   });
 

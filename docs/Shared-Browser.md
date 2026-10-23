@@ -840,7 +840,9 @@ unless the policy is `"covered"`.
 - **Pages while it starts.** The origin answers 503 `browser_host_not_ready`
   until the browser runs. An open browser keeps polling quietly, for at most
   120 s of unbroken `browser_host_not_ready` answers (token and gateway
-  failures, as while the machine itself starts, are not counted). After that the
+  failures, as while the machine itself starts, are not counted). Each open
+  counts its own run, so closing the browser and opening it again starts over.
+  After that the
   address bar reads "Instafy's browser did not start. Try again." in place of
   "Connecting to Shared Browser…", and a card waiting on it says the same. A
   page read that does not answer in 10 s is given up and asked again. A hidden
@@ -866,13 +868,17 @@ unless the policy is `"covered"`.
   then try again." On the conversation's own machine the press also reads
   `GET browser/host`, at once when the browser was already open, otherwise
   after 3 s, then every 3 s: a poisoned browser ends the press with the
-  restart copy, and one that failed again after a new start with "Instafy's
-  browser did not start. Try again." A browser that was already open but shows
-  no page, or whose machine's browser went idle, is stopping or failed (after
-  the view had 10 s to start it), is asked once to attach again, as the
+  restart copy, and one that failed again in a new start (a newer
+  `generation` than the one read when the press asked the view to attach
+  again) with "Instafy's browser did not start. Try again." The run that had
+  failed before is not the press's answer. A browser that was already open but
+  shows no page, or whose machine's browser went idle, is stopping or failed
+  (after the view had 10 s to start it), is asked once to attach again, as the
   person's own Retry does: it reads the host again, starts it when idle, and
   keeps the last frame meanwhile. A press never attaches again while another
-  run or person holds the browser, and an automatic start never does.
+  run or person holds the browser, an open browser that shows its page and
+  only waits for the conversation to be idle is left as it is, and an
+  automatic start never attaches again.
 - **Viewers reconnect within a bound.** A fatal viewer error with no other
   viewer to fall back to schedules a reconnect (at most five within a minute,
   also when a connection succeeds in between) and then shows "Browser session
@@ -908,10 +914,11 @@ unless the policy is `"covered"`.
   without `sharedBrowserHost` and an uncovered space keep the press. The
   person's own Retry or press inside the browser still may start the machine.
   Only a draft in the composer holds a card ("Opens by itself once your draft
-  is empty."); a narrow pane or side-by-side view turned off does not, and the
-  browser takes the view as a press does. A card that asks to continue in
-  Instafy's browser while that same browser is already open on the
-  conversation's machine continues there without a press, even within ten
+  is empty.", shown only on a card that would otherwise open by itself, and
+  only while the draft holds it); a narrow pane or side-by-side view turned off
+  does not, and the browser takes the view as a press does. A card that asks
+  to continue in Instafy's browser while that same browser is already open on
+  the conversation's machine continues there without a press, even within ten
   minutes of the last automatic start; the declined check, the browser-turn
   check and every check before sending still apply.
 - **Stale pins.** A pin to a session that is gone moves to the space's own live

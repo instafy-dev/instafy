@@ -74,7 +74,10 @@ starts a card by itself only:
 - when no one else is using the browser and the composer holds no draft. The layout
   never holds a card: in a narrow pane, on a phone, or with side-by-side view off, the
   browser takes the view by itself, as a press does, and the chat stays one tab away. A
-  draft holds the card with "Opens by itself once your draft is empty."
+  draft holds a card that would otherwise open by itself, and only then does the card say
+  "Opens by itself once your draft is empty." A card Studio leaves to a press keeps its
+  own reason, and the draft's reason goes away once the draft is sent or cleared, or a
+  newer card arrives.
 
 Once the browser is ready and before the task goes out, Studio checks again: if someone
 wrote after the card, another run started, a draft appeared, or someone else holds the

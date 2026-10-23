@@ -384,6 +384,37 @@ describe("useBrowserSessionPages", () => {
     }
   });
 
+  it("starts a new run of not-ready answers when the browser is closed and opened again", async () => {
+    vi.useFakeTimers();
+    try {
+      const notReady = () => Object.assign(new Error("browser pages unavailable (503)"), {
+        status: 503,
+        code: "browser_host_not_ready",
+      });
+      fetchPagesMock.mockReset().mockImplementation(async () => { throw notReady(); });
+      await renderHook();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(121_000);
+      });
+      expect(latestResult?.hostNotReady).toBe(true);
+      // Closed: a hidden session, as ChatPanel passes it.
+      hookSuspendOnUnavailable = true;
+      await renderHook();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10 * 60_000);
+      });
+      // Opened again; its first page read has not answered yet.
+      fetchPagesMock.mockReset().mockImplementation(() => new Promise(() => {}));
+      hookSuspendOnUnavailable = false;
+      await renderHook();
+      expect(latestResult?.resolved).toBe(false);
+      expect(latestResult?.hostNotReady).toBe(false);
+      expect(latestResult?.hostNotReadySinceMs).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("gives up a page read that never answers after ten seconds and asks again", async () => {
     vi.useFakeTimers();
     try {
