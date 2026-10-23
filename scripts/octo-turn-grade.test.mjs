@@ -10,6 +10,7 @@ import {
   EXPECT_KEYS,
   buildRollup,
   casesFileOfRun,
+  pointsToCard,
   caseMetrics,
   creditsQuery,
   datedLinesOf,
@@ -146,6 +147,24 @@ test("a reply that sends the person to a card fails when the turn posted none, i
   assert.equal(byId(gradeCase(CHAT_CASE, chatTurn("Here is the phrase. Tap the preview card to hear it.")), "reply_card_exists").ok, false);
   // Without the browser's card count it is not graded.
   assert.equal(byId(gradeCase(TABLE_CASE, built({ summary: pointer }, {})), "reply_card_exists"), undefined);
+});
+
+test("a reply that says plainly there is no card does not count as sending the person to one", () => {
+  // r11-fin-complete2 taiwan-1: the builder never opened its preview and the lead said so; the grader read
+  // "no preview card was opened" as a pointer to a card
+  const noCard = { previewsAvailable: true, previewsListed: 0, cardCount: 0, opened: false };
+  for (const honest of [
+    "The itinerary map includes all six cities, but train legs weren't added, and no preview card was opened.",
+    "The page was not previewed, so there is no card to open.",
+    "The preview card wasn't posted this time.",
+    "El mapa está listo, pero sin tarjeta de vista previa.",
+  ]) {
+    assert.equal(pointsToCard(honest), false, honest);
+    assert.equal(byId(gradeCase(TABLE_CASE, built({ summary: honest }, noCard)), "reply_card_exists").ok, true, honest);
+  }
+  // a pointer in another sentence still counts
+  assert.equal(pointsToCard("No sights were found for day 3. Open it from the card above."), true);
+  assert.equal(pointsToCard("Ábrelo desde la tarjeta de arriba."), true);
 });
 
 test("only wording that points at a card counts as sending the person to one", () => {
