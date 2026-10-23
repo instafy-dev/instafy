@@ -194,7 +194,7 @@ where
         runtime_id,
         plan_meta: entries,
     };
-    let response = match redispatch_plan_agent(
+    let retried_by = match redispatch_plan_agent(
         state,
         project_id,
         conversation_id,
@@ -206,7 +206,7 @@ where
     )
     .await
     {
-        Ok(response) => response,
+        Ok(retried_by) => retried_by,
         Err((status, axum::Json(error))) => {
             warn!(
                 %group_id,
@@ -221,7 +221,7 @@ where
     };
     let artifact = json!({
         "kind": RATE_LIMIT_RETRY_ARTIFACT,
-        "retriedBy": response.job_id,
+        "retriedBy": retried_by,
         "waitMs": wait_ms,
         "holdMs": hold_ms,
     });
@@ -243,7 +243,7 @@ where
         handle = %handle,
         wait_ms,
         hold_ms,
-        retry_job_id = ?response.job_id,
+        retry_job_id = ?retried_by,
         "queued a lane once more after a short provider rate limit"
     );
     true

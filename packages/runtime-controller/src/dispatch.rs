@@ -1731,8 +1731,16 @@ pub(crate) async fn process_dispatch_prompt_timed(
         // unavailable Instafy Cloud runtime.
         Some(record)
     } else {
+        // The dispatch goes on without the record when ensuring it fails, so the attempt runs in
+        // a savepoint: a failed statement (a deadlock with a concurrent dispatch, in run
+        // r11-pacing) must not leave the dispatch's transaction aborted, which failed every
+        // statement after it and lost the dispatch.
+        let savepoint = transaction
+            .savepoint("dispatch_ensure_runtime")
+            .await
+            .map_err(|error| internal_error(format!("failed to open a savepoint: {error}")))?;
         match runtime::ensure_runtime_record(
-            &transaction,
+            &savepoint,
             &project.id,
             runtime_id,
             runtime_type,
@@ -1743,8 +1751,16 @@ pub(crate) async fn process_dispatch_prompt_timed(
         )
         .await
         {
-            Ok(record) => Some(record),
+            Ok(record) => {
+                savepoint.commit().await.map_err(|error| {
+                    internal_error(format!("failed to keep the runtime record: {error}"))
+                })?;
+                Some(record)
+            }
             Err((status, Json(api_error))) => {
+                savepoint.rollback().await.map_err(|error| {
+                    internal_error(format!("failed to roll back the runtime record: {error}"))
+                })?;
                 warn!(
                     project_id = %project.id,
                     runtime_type,
