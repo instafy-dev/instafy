@@ -10475,9 +10475,18 @@ fn parse_codex_multi_agent_plan_action(
 /// (a lane's `readOnlyPaths`, a routing `rationale`, a whole `handoffPaths`). Those nulls are left
 /// out here, at every depth, before the plan is read and sent: the controller treats a missing
 /// field as its default but refuses a null where it expects a value, such as a write scope's path
-/// list. A null inside a list is an entry, not a left-out field, so it stays for the controller to
-/// refuse.
+/// list. A field holding an object of nothing but nulls (a write scope with every field null) says
+/// no more than a null, so it is left out the same way. A null inside a list is an entry, not a
+/// left-out field, so it stays for the controller to refuse; so does any other value of the wrong
+/// type.
 fn without_null_fields(map: &JsonMap<String, JsonValue>) -> JsonMap<String, JsonValue> {
+    fn only_nulls(value: &JsonValue) -> bool {
+        match value {
+            JsonValue::Null => true,
+            JsonValue::Object(map) => !map.is_empty() && map.values().all(only_nulls),
+            _ => false,
+        }
+    }
     fn strip(value: &JsonValue) -> JsonValue {
         match value {
             JsonValue::Object(map) => JsonValue::Object(without_null_fields(map)),
@@ -10486,7 +10495,7 @@ fn without_null_fields(map: &JsonMap<String, JsonValue>) -> JsonMap<String, Json
         }
     }
     map.iter()
-        .filter(|(_, field)| !field.is_null())
+        .filter(|(_, field)| !only_nulls(field))
         .map(|(key, field)| (key.clone(), strip(field)))
         .collect()
 }
@@ -29531,6 +29540,52 @@ mod tests {
             plan["agents"][0]["writeScope"]["ownedPaths"],
             json!(["handoff/japan/tokyo.json", null])
         );
+
+        // Only nulls are left out: a value of the wrong type is passed on for the controller to
+        // refuse.
+        let mut wrong_type = fixture["written"].clone();
+        wrong_type["agents"][0]["writeScope"]["ownedPaths"] = json!(5);
+        wrong_type["agents"][1]["writeScope"]["mode"] = json!(1);
+        let (plan, _, _) =
+            parse_codex_multi_agent_plan_action(wrong_type.as_object().unwrap()).expect("a plan");
+        assert_eq!(plan["agents"][0]["writeScope"]["ownedPaths"], json!(5));
+        assert_eq!(plan["agents"][1]["writeScope"]["mode"], json!(1));
+
+        // A write scope with every field null says no more than `"writeScope": null`: in a
+        // read-only plan both leave the lane on the default read-only scope.
+        let read_only_plan = |write_scope: JsonValue| {
+            json!({
+                "type": "multi_agent_plan",
+                "rationale": "Two independent reviews.",
+                "mode": "read_only",
+                "agents": [
+                    { "handle": "alpha", "prompt": "Review the API.", "writeScope": write_scope },
+                    { "handle": "beta", "prompt": "Review the UI.", "writeScope": null }
+                ]
+            })
+        };
+        let all_null_scope = json!({
+            "mode": null,
+            "readOnlyPaths": null,
+            "ownedPaths": null,
+            "ownedPathGlobs": null,
+            "rationale": null
+        });
+        let (all_null, _, _) = parse_codex_multi_agent_plan_action(
+            read_only_plan(all_null_scope).as_object().unwrap(),
+        )
+        .expect("a plan");
+        let (left_out, _, _) = parse_codex_multi_agent_plan_action(
+            read_only_plan(JsonValue::Null).as_object().unwrap(),
+        )
+        .expect("a plan");
+        assert_eq!(all_null, left_out);
+        assert!(all_null["agents"][0].get("writeScope").is_none());
+        // An empty object the model wrote as such is its own value and stays.
+        let (empty, _, _) =
+            parse_codex_multi_agent_plan_action(read_only_plan(json!({})).as_object().unwrap())
+                .expect("a plan");
+        assert_eq!(empty["agents"][0]["writeScope"], json!({}));
     }
 
     #[test]

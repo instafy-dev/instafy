@@ -2818,6 +2818,19 @@ mod tests {
                 "@{handle}: {scope}"
             );
         }
+
+        // Why the runtime leaves out a write scope of nothing but nulls instead of sending `{}`:
+        // in a read-only plan a lane without a scope gets the default read-only scope, while an
+        // empty scope is refused.
+        let read_only = scopes(&json!({
+            "mode": "read_only",
+            "agents": [
+                { "handle": "alpha", "prompt": "Review the API." },
+                { "handle": "beta", "prompt": "Review the UI.", "writeScope": {} }
+            ]
+        }));
+        assert_eq!(read_only[0].1["mode"], json!("read_only"));
+        assert_eq!(read_only[1].1["mode"], json!("coordination_required"));
     }
 
     #[test]
