@@ -6,8 +6,17 @@ import {
   type RuntimeBrowserSessionPage,
 } from "../../../sdk/instafy";
 import type { BrowserSessionPage } from "./browserSessionPages";
+import { SHARED_BROWSER_HOST_WAIT_TIMEOUT_MS } from "./sharedBrowserHostAttach";
 
 const BROWSER_SESSION_POLL_INTERVAL_MS = 2500;
+/** A page read that has not answered by then is given up, so the next poll can ask again. */
+export const BROWSER_SESSION_PAGES_REQUEST_TIMEOUT_MS = 10_000;
+/**
+ * How long an open browser may keep answering `browser_host_not_ready` before
+ * the hook says it did not start (the same bound as the browser view's own
+ * wait for Instafy's browser).
+ */
+export const BROWSER_HOST_NOT_READY_TIMEOUT_MS = SHARED_BROWSER_HOST_WAIT_TIMEOUT_MS;
 /**
  * The origin's answer while Instafy's browser on the space's own machine is
  * not running yet (or any more). The open modal starts it; until then the
@@ -140,6 +149,19 @@ export function useBrowserSessionPages(params: {
     capabilityState.scopeKey === scopeKey ? capabilityState.unsupported : false;
   const commandPending = commandState.scopeKey === scopeKey ? commandState.pending : null;
   const commandError = commandState.scopeKey === scopeKey ? commandState.error : null;
+  // One unbroken run of `browser_host_not_ready` answers for this scope: when
+  // it began, and whether it has lasted past the bound. Any page read that
+  // succeeds, and any change of scope, ends it. Token and gateway failures
+  // neither start nor end it, so a machine that is still starting is not
+  // counted.
+  const [notReadyState, setNotReadyState] = useState<{
+    scopeKey: string;
+    sinceMs: number;
+    expired: boolean;
+  } | null>(null);
+  const notReady = notReadyState?.scopeKey === scopeKey ? notReadyState : null;
+  const hostNotReadySinceMs = notReady?.sinceMs ?? null;
+  const hostNotReady = notReady?.expired === true;
 
   const scopeIsCurrent = useCallback(
     (requestScope: string) => mountedRef.current && scopeKeyRef.current === requestScope,
@@ -188,13 +210,22 @@ export function useBrowserSessionPages(params: {
 
     const request = (async (): Promise<boolean> => {
       let livePages: RuntimeBrowserSessionPage[] | null;
+      const abort = new AbortController();
+      const timer = setTimeout(() => abort.abort(), BROWSER_SESSION_PAGES_REQUEST_TIMEOUT_MS);
       try {
-        livePages = await controllerClient.browserSessions.fetchPages({
-          projectId,
-          browserSessionId,
-          preferRuntimeId,
-          includePlaceholder,
-        });
+        livePages = await Promise.race([
+          controllerClient.browserSessions.fetchPages({
+            projectId,
+            browserSessionId,
+            preferRuntimeId,
+            includePlaceholder,
+            signal: abort.signal,
+          }),
+          // Even a read that ignores its signal ends at the bound.
+          new Promise<never>((_resolve, reject) => {
+            abort.signal.addEventListener("abort", () => reject(new Error("Browser pages did not answer in time.")), { once: true });
+          }),
+        ]);
       } catch (error) {
         if (!scopeIsCurrent(requestScope)) {
           return false;
@@ -210,11 +241,16 @@ export function useBrowserSessionPages(params: {
           ) {
             preferredActivePageIdRef.current = { scopeKey: requestScope, pageId: null };
             setPageState({ scopeKey: requestScope, pages: [], resolved: false });
+            setNotReadyState((current) => current?.scopeKey === requestScope
+              ? current
+              : { scopeKey: requestScope, sinceMs: Date.now(), expired: false });
             return false;
           }
           return handleUnavailable(requestScope);
         }
         throw error;
+      } finally {
+        clearTimeout(timer);
       }
 
       if (!scopeIsCurrent(requestScope) || livePages === null) {
@@ -222,6 +258,7 @@ export function useBrowserSessionPages(params: {
       }
 
       unavailableSuspendedRef.current = { scopeKey: requestScope, suspended: false };
+      setNotReadyState((current) => current?.scopeKey === requestScope ? null : current);
       const preferredPageId =
         preferredActivePageIdRef.current.scopeKey === requestScope
           ? preferredActivePageIdRef.current.pageId
@@ -506,6 +543,9 @@ export function useBrowserSessionPages(params: {
       unsupported: false,
     });
     setCommandState({ scopeKey, pending: null, error: null });
+    // Each open counts its own run of not-ready answers: closing the browser
+    // and opening it again never brings back an earlier one.
+    setNotReadyState(null);
     void refreshCapabilities();
   }, [refreshCapabilities, scopeKey]);
 
@@ -521,6 +561,17 @@ export function useBrowserSessionPages(params: {
     },
     [],
   );
+
+  // Marks the run of `browser_host_not_ready` answers as past its bound.
+  useEffect(() => {
+    if (!notReady || notReady.expired) return;
+    const { scopeKey: notReadyScope, sinceMs } = notReady;
+    const timer = window.setTimeout(() => {
+      setNotReadyState((current) =>
+        current?.scopeKey === notReadyScope && current.sinceMs === sinceMs ? { ...current, expired: true } : current);
+    }, Math.max(0, sinceMs + BROWSER_HOST_NOT_READY_TIMEOUT_MS - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [notReady]);
 
   useEffect(() => {
     if (!enabled || !projectId || !capabilitiesRetryable) {
@@ -568,6 +619,13 @@ export function useBrowserSessionPages(params: {
   return {
     pages,
     resolved,
+    /**
+     * Since when the open browser has kept answering that Instafy's browser
+     * is not running; null once a page read succeeds.
+     */
+    hostNotReadySinceMs,
+    /** That has lasted past BROWSER_HOST_NOT_READY_TIMEOUT_MS. */
+    hostNotReady,
     capabilities,
     capabilitiesResolved,
     capabilitiesUnsupported,

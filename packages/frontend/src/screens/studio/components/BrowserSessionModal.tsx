@@ -155,6 +155,19 @@ const WEBRTC_REQUESTED =
   (import.meta.env.VITE_INSTAFY_SHARED_BROWSER_WEBRTC ?? "").trim() === "1";
 const MAX_AUTO_CONNECT_RETRIES = 5;
 const AUTO_CONNECT_RETRY_BASE_DELAY_MS = 1000;
+/**
+ * Reconnects that fatal viewer errors may ask for within this window, even
+ * when a connection succeeds in between, so a lane that keeps failing ends in
+ * an error instead of reconnecting forever.
+ */
+const FATAL_VIEWER_ERROR_WINDOW_MS = 60_000;
+/**
+ * How long a connected browser may wait for its roster before it knows which
+ * viewer this participant may use; then it says so and offers Retry.
+ */
+export const SHARED_BROWSER_VIEWER_WAIT_TIMEOUT_MS = 20_000;
+export const SHARED_BROWSER_VIEWER_WAIT_COPY = "The browser did not finish connecting. Try again.";
+export const SHARED_BROWSER_LOST_CONNECTION_COPY = "Browser session disconnected. Click Retry to reconnect.";
 const DOCKED_BROWSER_ASPECT_RATIO = 1280 / 720;
 const connectedBrowserSessionScopes = new Set<string>();
 const BROWSER_SESSION_SAFE_ZONE_SELECTOR = "[data-browser-session-safe-zone='true']";
@@ -428,6 +441,8 @@ export function BrowserSessionModal({
   presentation = "modal",
   hideCollapsedConnectedCard = false,
   expandRequestToken = 0,
+  attachRequestToken = 0,
+  onConnectionErrorChange = null,
   fillContainer = false,
   toolbarLeading,
   transportActive = true,
@@ -469,6 +484,15 @@ export function BrowserSessionModal({
   presentation?: BrowserSessionPresentation;
   hideCollapsedConnectedCard?: boolean;
   expandRequestToken?: number;
+  /**
+   * Bumped by a press on a card while this browser is open: the browser
+   * attaches to its machine again, as the person's own Retry does, keeping
+   * the last frame. It starts Instafy's browser when it went idle and shows
+   * why when it cannot.
+   */
+  attachRequestToken?: number;
+  /** The error this browser shows, or null; null again once it closes. */
+  onConnectionErrorChange?: ((error: string | null) => void) | null;
   fillContainer?: boolean;
   toolbarLeading?: ReactNode;
   transportActive?: boolean;
@@ -603,6 +627,8 @@ export function BrowserSessionModal({
   sharedBrowserViewportOnlyRef.current = sharedBrowserViewportOnly;
   const reconnectTimerRef = useRef<number | null>(null);
   const autoRetryCountRef = useRef(0);
+  // Reconnects fatal viewer errors asked for lately (see FATAL_VIEWER_ERROR_WINDOW_MS).
+  const fatalViewerErrorsRef = useRef<{ count: number; lastAtMs: number }>({ count: 0, lastAtMs: 0 });
   const [status, setStatus] = useState<BrowserSessionStatus>("idle");
   const [error, setError] = useState<string | null>(null);
   const [runtimeLimitDetails, setRuntimeLimitDetails] =
@@ -999,6 +1025,7 @@ export function BrowserSessionModal({
       reconnectTimerRef.current = null;
     }
     autoRetryCountRef.current = 0;
+    fatalViewerErrorsRef.current = { count: 0, lastAtMs: 0 };
     setRuntimeLimitActionBusy(false);
     setStatus("connecting");
     setError(null);
@@ -1025,6 +1052,11 @@ export function BrowserSessionModal({
           reason,
           projectId,
         });
+        return true;
+      }
+      // A reconnect is already on its way: a second report of the same
+      // failure (an error, then the socket closing) does not count twice.
+      if (reconnectTimerRef.current !== null) {
         return true;
       }
       if (autoRetryCountRef.current < MAX_AUTO_CONNECT_RETRIES) {
@@ -1960,6 +1992,25 @@ export function BrowserSessionModal({
     isOpen,
   ]);
 
+  // Once this browser has its connection, the wait for its roster (which
+  // says which viewer this participant may use) is bounded.
+  const viewerWaiting =
+    isOpen &&
+    !browserDataClearInFlight &&
+    activeSharedBrowserViewerKind === null &&
+    sharedBrowserCapabilitiesResolved &&
+    sharedBrowserCapabilitiesAvailable &&
+    !collaboration.client.state &&
+    browserOriginConnection !== null;
+  const [viewerWaitExpiredFor, setViewerWaitExpiredFor] = useState<BrowserOriginConnection | null>(null);
+  const viewerWaitExpired = viewerWaiting && viewerWaitExpiredFor === browserOriginConnection;
+  useEffect(() => {
+    if (!viewerWaiting) return;
+    const connection = browserOriginConnection;
+    const timer = window.setTimeout(() => setViewerWaitExpiredFor(connection), SHARED_BROWSER_VIEWER_WAIT_TIMEOUT_MS);
+    return () => window.clearTimeout(timer);
+  }, [browserOriginConnection, viewerWaiting]);
+
   useEffect(() => {
     if (
       !isOpen ||
@@ -1972,6 +2023,11 @@ export function BrowserSessionModal({
       return;
     }
     if (sharedBrowserCapabilitiesAvailable && !collaboration.client.state) {
+      if (viewerWaitExpired) {
+        setStatus("error");
+        setError(SHARED_BROWSER_VIEWER_WAIT_COPY);
+        return;
+      }
       setStatus("connecting");
       setError(null);
       return;
@@ -1995,6 +2051,7 @@ export function BrowserSessionModal({
     sharedBrowserCapabilitiesAvailable,
     sharedBrowserCapabilitiesResolved,
     sharedBrowserCapabilitiesUnsupported,
+    viewerWaitExpired,
   ]);
 
   useEffect(() => {
@@ -2034,6 +2091,38 @@ export function BrowserSessionModal({
     }
     setFullscreen(true);
   }, [fillContainer, fullscreen, isOpen, presentation, smallViewport]);
+
+  // A press on a card while this browser is open: attach to its machine
+  // again, as Retry does (the person's own action, so it may start the
+  // space's machine), but keep the last frame on screen meanwhile.
+  const handledAttachRequestRef = useRef(attachRequestToken);
+  useEffect(() => {
+    if (attachRequestToken === handledAttachRequestRef.current) {
+      return;
+    }
+    handledAttachRequestRef.current = attachRequestToken;
+    if (!isOpen || browserDataClearInFlightRef.current) {
+      return;
+    }
+    personRetryRef.current = true;
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    autoRetryCountRef.current = 0;
+    fatalViewerErrorsRef.current = { count: 0, lastAtMs: 0 };
+    freezeCurrentBrowserFrame();
+    setRuntimeLimitDetails(null);
+    setStatus("connecting");
+    setError(null);
+    setConnectAttempt((value) => value + 1);
+    runtimeDebugLog("browser-session:reattach", { projectId });
+  }, [attachRequestToken, freezeCurrentBrowserFrame, isOpen, projectId]);
+
+  useEffect(() => {
+    onConnectionErrorChange?.(isOpen ? error : null);
+  }, [error, isOpen, onConnectionErrorChange]);
+  useEffect(() => () => onConnectionErrorChange?.(null), [onConnectionErrorChange]);
 
   useEffect(() => {
     if (!isOpen || expandRequestToken <= 0) {
@@ -2500,10 +2589,23 @@ export function BrowserSessionModal({
       if (fallBackFromViewer(message)) {
         return;
       }
-      setStatus("connecting");
-      setError(null);
+      // A lane that failed for good (the input socket closed, a renderer
+      // that never became ready) reconnects, within a bound, rather than
+      // waiting in "connecting" with nothing on its way.
+      const now = Date.now();
+      const recent = now - fatalViewerErrorsRef.current.lastAtMs < FATAL_VIEWER_ERROR_WINDOW_MS;
+      const pendingReconnect = reconnectTimerRef.current !== null;
+      const count = pendingReconnect
+        ? fatalViewerErrorsRef.current.count
+        : (recent ? fatalViewerErrorsRef.current.count : 0) + 1;
+      fatalViewerErrorsRef.current = { count, lastAtMs: now };
+      if (count <= MAX_AUTO_CONNECT_RETRIES && scheduleReconnectAttempt("connect_failure", wsUrl ?? "")) {
+        return;
+      }
+      setStatus("error");
+      setError(SHARED_BROWSER_LOST_CONNECTION_COPY);
     },
-    [fallBackFromViewer, wsUrl],
+    [fallBackFromViewer, scheduleReconnectAttempt, wsUrl],
   );
 
   const handleWebRtcConnected = useCallback(() => {

@@ -66,10 +66,18 @@ starts a card by itself only:
   first, and so does an address Studio cannot compare: localhost, an IPv6 literal, an
   internationalized host, a host written with a fullwidth dot, or an address that does
   not parse;
-- once the tab is visible, once per card, at most once per conversation in ten
-  minutes, and never after the person closed, paused or stopped the browser there;
-- when no one else is using the browser, the composer holds no draft, and side-by-side
-  view is on in a layout wide enough to show the browser beside the chat.
+- once the tab is visible, once per card, at most one start that opens the browser per
+  conversation in ten minutes, and never after the person closed, paused or stopped the
+  browser there. A card that continues in Instafy's browser while it is already open on
+  the conversation's machine opens nothing, so the ten-minute window does not hold it;
+  every other check, and every check before the task goes out, still applies;
+- when no one else is using the browser and the composer holds no draft. The layout
+  never holds a card: in a narrow pane, on a phone, or with side-by-side view off, the
+  browser takes the view by itself, as a press does, and the chat stays one tab away. A
+  draft holds a card that would otherwise open by itself, and only then does the card say
+  "Opens by itself once your draft is empty." A card Studio leaves to a press keeps its
+  own reason, and the draft's reason goes away once the draft is sent or cleared, or a
+  newer card arrives.
 
 Once the browser is ready and before the task goes out, Studio checks again: if someone
 wrote after the card, another run started, a draft appeared, or someone else holds the

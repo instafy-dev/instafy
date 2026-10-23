@@ -5,7 +5,7 @@ import type { ChatMessage } from "../../types";
 import {
   BROWSER_AUTO_START_COPY,
   browserAutoStartAddressesSeen,
-  browserAutoStartHeldByComposerOrLayout,
+  browserAutoStartHeldByDraft,
   browserAutoStartHeldByOther,
   browserAutoStartPlan,
   browserAutoStartedRecently,
@@ -134,12 +134,15 @@ describe("browserAutoStartPlan", () => {
       .toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.restartsMachine });
   });
 
-  it("leaves the card to the person while side-by-side view is off", () => {
-    // The browser would open over the chat the person is reading.
-    expect(browserAutoStartHeldByComposerOrLayout({ draft: "", wideSurfaces: true, splitView: false })).toBe(true);
-    expect(browserAutoStartHeldByComposerOrLayout({ draft: "", wideSurfaces: false, splitView: true })).toBe(true);
-    expect(browserAutoStartHeldByComposerOrLayout({ draft: " Wait ", wideSurfaces: true, splitView: true })).toBe(true);
-    expect(browserAutoStartHeldByComposerOrLayout({ draft: "  ", wideSurfaces: true, splitView: true })).toBe(false);
+  it("holds a card only for a draft, never for a narrow pane or side-by-side view off", () => {
+    // Owner decision ("Always, no prompt"): the browser takes the view as a
+    // press does, so the layout plays no part. Only the input it reads exists.
+    expect(browserAutoStartHeldByDraft({ draft: "" })).toBe(false);
+    expect(browserAutoStartHeldByDraft({ draft: "  \n" })).toBe(false);
+    expect(browserAutoStartHeldByDraft({ draft: " Wait " })).toBe(true);
+    // The held card says why, in plain words.
+    expect(BROWSER_AUTO_START_COPY.draftHeld).toBe("Opens by itself once your draft is empty.");
+    expect(BROWSER_AUTO_START_COPY.draftHeld).not.toMatch(/\u2014/);
   });
 
   it("holds a card while a sign-in handoff is pending after its request cleared", () => {
