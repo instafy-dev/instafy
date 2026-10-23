@@ -195,7 +195,9 @@ kit.done("Read 1 price");
 (`[{ amount, high?, currency, availability?, name? }]`); given a `kit.fetch` response it throws code `policy` for a bot wall and `upstream` for an HTTP error, so the
 handler can answer with `kit.uncertain`. `instafy bind try <dir> <intent> '<params>' --save` runs a script intent as
 a click would and keeps its accepted records in the site (same checks, provenance and version bump), so a new page
-opens with its values.
+opens with its values. `instafy bind check <dir> --expect "<item>,<item>"` then says whether the page shows every
+item the request named (from its HTML text and data files; an `"expect"` array in `data.json` is checked too) and
+exits 1 when one is missing.
 
 On timeout the binder sends SIGTERM, then SIGKILL after 3 s, and reports `error timeout`.
 

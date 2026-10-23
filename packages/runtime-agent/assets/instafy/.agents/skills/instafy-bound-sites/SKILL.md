@@ -89,8 +89,9 @@ Not for: a one-off answer in chat, or a static page with nothing to check (use `
 9. **Verify:** `instafy bind doctor <dir>` (bound.json, handlers, controller, and lint warnings: fix every one),
    then run each script intent as a click would, for every item with a readable store, with `--save` so the page
    opens with its values: `instafy bind try <dir> <intent> '<params json>' --save`. Each must end with a value or
-   an uncertain note (exit 0); a crash, an `error` or a rejected record (exit 1) is fixed before the reply. The page shows a failed check to the
-   viewer either way, but a button that always fails is not a feature. If every store refuses automated reads, the
+   an uncertain note (exit 0); a crash, an `error` or a rejected record (exit 1) is fixed before the reply: a button
+   that always fails is not a feature. Then `instafy bind check <dir> --expect "<each item asked for>"`: add each
+   item it lists as missing, or name it in the reply. If every store refuses automated reads, the
    re-check becomes a link per store (the starter's "Open <store> ↗": set `store.readable: false`) and the
    page says these stores block automated price checks: the user asked for a way to re-check, so they always get one.
    Reply in the user's terms: never file paths, command names or framing/preview internals.
