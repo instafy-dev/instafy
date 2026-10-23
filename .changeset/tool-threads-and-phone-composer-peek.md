@@ -1,4 +1,0 @@
----
----
-
-Studio keeps a tool's own work threads out of the way. A top-level conversation whose `metadata.source` names the tool that wrote it never opens a tab by itself, and is never the chat Studio falls back to or lands in on first load. While active it moves out of the default Chats list and the phone's loaded chats into a "From tools" view (offered only when there is one); once archived, hidden or moved to Trash it is listed under that status like any chat and restores the same way. A tool thread nested under a chat stays with that chat. Live conversation updates and re-syncs keep the classification current. On phones, an auto-hidden composer keeps its 12 px peek again: it is moved by its inline transform alone, because Tailwind 4's `translate-y-full` sets the CSS `translate` property, which adds to `transform` and pushed the whole composer off screen. No package changes.
