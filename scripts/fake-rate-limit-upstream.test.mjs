@@ -54,7 +54,23 @@ test("limits, windows and flags parse, and bad values are refused", () => {
   assert.throws(() => parseArgs(["--target", "file:///etc/passwd"]), /http or https/);
 });
 
-test("only a Responses body of system, developer and user messages starts a conversation", () => {
+test("a Responses body with nothing the model made yet starts a conversation", () => {
+  // Codex's first request of a turn, as the local proxy sends it upstream (shape seen live)
+  const codexFirst = body({ input: [
+    { type: "message", role: "user", content: [] },
+    { type: "additional_tools", role: "developer", tools: [] },
+    { type: "message", role: "user", content: [] },
+  ] });
+  assert.equal(startsConversation(codexFirst), true);
+  const codexLater = body({ input: [
+    ...JSON.parse(codexFirst).input,
+    { type: "reasoning", summary: [] },
+    { type: "custom_tool_call", name: "exec", input: "" },
+    { type: "custom_tool_call_output", output: "" },
+  ] });
+  assert.equal(startsConversation(codexLater), false);
+  assert.equal(startsConversation(body({ input: [{ type: "function_call_output", output: "" }] })), false);
+  assert.equal(startsConversation(body({ input: [{ type: "item_reference", role: "assistant" }] })), false);
   assert.equal(startsConversation(NEW), true);
   assert.equal(startsConversation(body({ input: "hello" })), true);
   assert.equal(startsConversation(body({ input: [{ role: "user", content: "hi" }] })), true);

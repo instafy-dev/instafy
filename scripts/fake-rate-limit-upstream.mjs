@@ -22,8 +22,9 @@
 //   --window A-B      apply the rules only from A to B seconds after the rules were loaded
 //                     (repeatable); without one they always apply.
 //   --scope all|new   which requests a rule may refuse. `new` limits only requests that start a
-//                     conversation: an OpenAI Responses body whose `input` holds only system,
-//                     developer and user messages (no assistant output or tool result yet).
+//                     conversation: an OpenAI Responses body whose `input` holds nothing the model
+//                     made yet (no assistant message, reasoning, tool call or tool result). What
+//                     the client sends first, such as Codex's `additional_tools` item, is allowed.
 //                     Requests that continue a conversation always pass and are not counted.
 //   --path P          only POST requests whose path starts with P count (default: every POST).
 //   --retry-after S   Retry-After of a --fail-rate refusal (default 10).
@@ -50,7 +51,9 @@ const HOP_BY_HOP = new Set([
   "upgrade",
   "host",
 ]);
-const CONVERSATION_ROLES = new Set(["system", "developer", "user"]);
+const PERSON_ROLES = new Set(["system", "developer", "user"]);
+/** Input item types the model made in an earlier request of the same conversation. */
+const MODEL_ITEM_TYPE = /^(reasoning|compaction|compaction_summary)$|_call$|_call_output$|_output$/;
 
 /** `6/20s`, `6/20` or `6/1m` as { count, windowMs }. */
 export function parseLimit(text) {
@@ -143,8 +146,10 @@ export function parseArgs(argv) {
   return o;
 }
 
-/** Whether an OpenAI Responses request body starts a conversation: its `input` is a string or holds
- *  only system, developer and user messages. A body that is not such a request is not new. */
+/** Whether an OpenAI Responses request body starts a conversation: its `input` is a string, or a
+ *  list in which nothing was made by the model yet (no assistant message, reasoning, tool call or
+ *  tool result). Items the client adds, such as Codex's `additional_tools`, may come with it. A body
+ *  that is not such a request is not new. */
 export function startsConversation(body) {
   let parsed;
   try {
@@ -157,8 +162,8 @@ export function startsConversation(body) {
   if (!Array.isArray(input) || input.length === 0) return false;
   return input.every((item) => {
     if (!item || typeof item !== "object") return false;
-    if (item.type != null && item.type !== "message") return false;
-    return CONVERSATION_ROLES.has(item.role);
+    if (item.type == null || item.type === "message") return PERSON_ROLES.has(item.role);
+    return typeof item.type === "string" && !MODEL_ITEM_TYPE.test(item.type) && item.role !== "assistant";
   });
 }
 
