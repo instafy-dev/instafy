@@ -148,6 +148,80 @@ describe("multi-agent lifecycle from persisted runs", () => {
     expect(status("poet10")).toContain("status queued");
   });
 
+  describe("a lane the controller ran again", () => {
+    const stopped = () => {
+      const value = run("poet10", "failed");
+      value.createdAt = "2026-10-15T08:00:00Z";
+      return value;
+    };
+    const continuation = (status: RunRecord["status"], key: "continuation" | "rateLimitRetry" = "continuation") => {
+      const value = run("poet10", status);
+      value.id = "poet10-next-run";
+      value.createdAt = "2026-10-15T08:10:00Z";
+      value.metadata = { ...value.metadata, jobId: "poet10-next-job",
+        multiAgentPlan: { parentJobId: "parent-job", groupId: "parent-job-group", role: "worker", [key]: { of: "parent-job-poet10-job" } } };
+      return value;
+    };
+    const message = (id: string, jobId: string, timestamp: number, extra: Record<string, unknown>, content = ""): ChatMessage => ({
+      id, role: "assistant", timestamp, content,
+      metadata: { jobId, agent: { handle: "poet10" }, ...extra,
+        multiAgentPlan: { parentJobId: "parent-job", groupId: "parent-job-group", role: "worker", ...(extra.multiAgentPlan as object) } },
+    });
+    const notice = () => container.querySelector('[data-testid="plan-rerun-notice"]');
+
+    it("shows a continued lane as its continuation with one quiet line, even when only the stopped run is in the feed", async () => {
+      const opened: Array<{ jobId: string; title: string }> = [];
+      const working = message("next-update", "poet10-next-job", 9, { kind: "update", multiAgentPlan: { continuation: { of: "parent-job-poet10-job" } } });
+      await act(async () => root.render(
+        <MultiAgentRunsContext.Provider value={{ runs: { a: run("poet09", "success"), b: stopped() }, scopeKey: "viewer" }}>
+          <MultiAgentPlanEntry details={details} planMessage={plan} conversationMessages={[working]}
+            conversationLocalId="local" onOpenWorkerRunTrace={(value) => opened.push(value)} />
+        </MultiAgentRunsContext.Provider>,
+      ));
+      expect(status("poet10")).toBe("Open run trace for @poet10; status active");
+      expect(container.querySelector('[data-testid="multi-agent-inline-status"]')?.getAttribute("aria-label")).not.toContain("need attention");
+      expect(container.querySelectorAll('[data-testid="plan-rerun-notice"]')).toHaveLength(1);
+      expect(notice()?.textContent).toBe("@poet10 ran out of turn time and continued in a new turn.Open continuation");
+      await act(async () => (container.querySelector('[data-testid="plan-rerun-open"]') as HTMLButtonElement).click());
+      expect(opened).toEqual([{ jobId: "poet10-next-job", title: "@poet10 run" }]);
+      (container.querySelector('[data-agent-handle="@poet10"]') as HTMLButtonElement).click();
+      expect(opened[1]).toEqual({ jobId: "poet10-next-job", title: "@poet10 run" });
+    });
+
+    it("reads the continuation's own run over the stopped one whatever order the feed holds them in", async () => {
+      await render([continuation("success"), run("poet09", "success"), stopped()]);
+      expect(status("poet10")).toContain("status done");
+      expect(container.querySelector('[data-testid="multi-agent-inline-status"]')?.getAttribute("aria-label")).toContain("2/2 lanes done");
+      expect(notice()?.getAttribute("data-rerun-reason")).toBe("turn_continuation");
+    });
+
+    it("does not let the stopped run's error decide a lane whose continuation has not posted yet", async () => {
+      const failure = message("stop", "parent-job-poet10-job", 5, { messageType: "error", outcome: "failed" }, "Codex run timed out");
+      const queued = message("queued", "poet10-next-job", 6, { kind: "update", multiAgentPlan: { continuation: { of: "parent-job-poet10-job" } } });
+      await render([run("poet09", "success")], [failure, queued]);
+      expect(status("poet10")).toContain("status active");
+      expect(container.textContent).not.toContain("need attention");
+    });
+
+    it("shows a rate-limit retry from the group status the same way", async () => {
+      const historicalPlan = { ...plan, metadata: { ...plan.metadata, multiAgentPlan: { groupId: "old-group" } } };
+      controller.fetchPlanGroupStatus.mockResolvedValue({ groupId: "old-group", workers: [
+        { jobId: "job-nine", handle: "poet09", status: "completed" },
+        { jobId: "job-ten", handle: "poet10", status: "failed", retriedAs: "job-ten-again", retriedFor: "rate_limit" },
+        { jobId: "job-ten-again", handle: "poet10", status: "leased" },
+      ] });
+      await render([], [], historicalPlan);
+      expect(status("poet10")).toContain("status active");
+      expect(notice()?.textContent).toContain("@poet10 stopped on a short rate limit and ran again.");
+    });
+
+    it("keeps a lane that failed without a rerun red and says nothing about continuing", async () => {
+      await render([run("poet09", "success"), stopped()]);
+      expect(status("poet10")).toContain("status failed");
+      expect(notice()).toBeNull();
+    });
+  });
+
   it("shows a refused plan's reason without inventing queued workers or offering cancellation", async () => {
     await render([], [], { ...plan, metadata: { ...plan.metadata, multiAgentPlan: {
       groupId: "refused-group", status: "refused", refusalReason: "This project allows at most 8 agents per plan; 10 were requested.",

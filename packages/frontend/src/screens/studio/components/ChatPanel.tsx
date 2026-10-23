@@ -168,6 +168,7 @@ import {
 } from "./ChatPanelOverlays";
 import { ConversationMessageRows } from "./ConversationMessageRows";
 import { MultiAgentRunsContext } from "./MultiAgentPlanEntry";
+import { RunTraceRerunNotice } from "./PlanRerunNotice";
 import { useConversationPreviewThreads } from "./useConversationPreviewThreads";
 import { buildHumanLabelByUserId } from "./chatHumanLabels";
 import {
@@ -5595,6 +5596,18 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     return visibleJobMessages;
   }, [activeConversationId, messages, normalizedJobThread]);
 
+  // A plan job the controller ran again (a continued turn, a rate-limit
+  // retry) ends with a quiet line to the run that stands for it.
+  const jobThreadRerunSources = useMemo(
+    () => (normalizedJobThread ? [...Object.values(runs), ...messages] : []),
+    [messages, normalizedJobThread, runs],
+  );
+  const openJobThreadRerun = useCallback((jobId: string) => {
+    if (!normalizedJobThread) return;
+    requestUrlPush();
+    openJobThreadTab({ conversationId: normalizedJobThread.conversationId, jobId });
+  }, [normalizedJobThread, openJobThreadTab, requestUrlPush]);
+
   const beginHistoryRetry = useStudioChatPerformance({
     projectId: activeProjectId,
     organizationId: activeOrgId,
@@ -5838,6 +5851,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                   </ChatBubbleRow>
                 );
               })}
+              <RunTraceRerunNotice jobId={normalizedJobThread.jobId} sources={jobThreadRerunSources} onOpen={openJobThreadRerun} />
             </ChatColumn>
           </div>
         </div>
