@@ -361,6 +361,17 @@ const REPLY_ASSUMED_RE = /\bassumed(?:\*\*|_)?\s*:/i;
 // wording that points at a card as the place to look: "the cashback on this card" or "a SIM card" is not a pointer.
 const REPLY_CARD_POINTER_RE =
   /\b(?:from|tap|open|click)\s+(?:it\s+(?:from|in|on)\s+)?(?:the|this|that|its)\s+(?:preview\s+|site\s+|page\s+|map\s+)?card\b|\bcards?\s+(?:above|below|in the chat)\b|\bpreview cards?\b|\b(?:desde|en)\s+la\s+tarjeta\b|\btarjeta\s+de\s+(?:arriba|abajo)\b/i;
+// A sentence that says there is no card ("no preview card was opened", "there is no card to open", "sin tarjeta")
+// tells the person the truth; it does not send them to one.
+const REPLY_NO_CARD_RE =
+  /\b(?:no|not|never|without|none)\b[^.!?\n]{0,40}\b(?:card|tarjeta)s?\b|\b(?:card|tarjeta)s?\b[^.!?\n]{0,40}(?:\bnot\b|\bnever\b|n[’']t\b)|\b(?:wasn|isn|weren|aren|didn|hasn|haven)[’']t\b[^.!?\n]{0,40}\bcards?\b|\b(?:sin|ninguna?)\b[^.!?\n]{0,40}\btarjetas?\b/i;
+
+/** Whether the reply sends the person to a card: a sentence that points at one and does not say there is none. */
+export function pointsToCard(body) {
+  return String(body ?? "")
+    .split(/(?<=[.!?])\s+|\n+/)
+    .some((sentence) => REPLY_CARD_POINTER_RE.test(sentence) && !REPLY_NO_CARD_RE.test(sentence));
+}
 
 /** A reply that mostly asks: more than half its sentences are questions. "Built your checklist: 24 items. Want due
  *  dates?" is a result with an offer, not a question-only reply. */
@@ -449,7 +460,7 @@ export function replyStats(text) {
     // What a vague ask was built on, stated in one line ("Assumed: 2 adults, mid-range, …").
     assumedLine: REPLY_ASSUMED_RE.test(body),
     // Sends the person to a card ("Open it from the card above").
-    pointsToCard: REPLY_CARD_POINTER_RE.test(body),
+    pointsToCard: pointsToCard(body),
     filePaths: hasFilePaths(body),
     statements: statementsOf(body),
     language: detectLanguage(body).language,
