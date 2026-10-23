@@ -341,12 +341,62 @@ enum JobEnd {
 /// plan agent that ended without one. Errors are logged, never returned: a completion does not
 /// fail on its pacing.
 pub(crate) async fn record_job_end(pool: &PgPool, job_id: Uuid) {
-    if let Err(error) = record_job_end_inner(pool, job_id).await {
+    if let Err(error) = record_job_end_inner(pool, job_id, None).await {
         warn!(%job_id, %error, "could not record the job's end for upstream pacing");
     }
 }
 
-async fn record_job_end_inner(pool: &PgPool, job_id: Uuid) -> anyhow::Result<()> {
+/// Teach the pacing that an attempt of `job_id` stopped with `error`, though the job itself went
+/// back to the queue for another attempt (`turn_rate_limit_retry`): its rate limit holds the
+/// upstream as a failed job's would.
+pub(crate) async fn record_requeued_attempt_end(pool: &PgPool, job_id: Uuid, error: &str) {
+    if let Err(error) = record_job_end_inner(pool, job_id, Some(error)).await {
+        warn!(%job_id, %error, "could not record the attempt's end for upstream pacing");
+    }
+}
+
+/// How much is left of the cooldown the job's AI upstream is in (what paces this space's plan
+/// agents on it): zero when none runs, or before the `upstream_pacing` migration.
+pub(crate) async fn cooldown_left<C>(connection: &C, job_id: Uuid) -> anyhow::Result<Duration>
+where
+    C: tokio_postgres::GenericClient + Sync,
+{
+    let migrated: bool = connection
+        .query_one("select to_regclass('upstream_pacing') is not null", &[])
+        .await?
+        .get(0);
+    if !migrated {
+        return Ok(Duration::ZERO);
+    }
+    let seconds: Option<f64> = connection
+        .query_one(
+            &format!(
+                "select extract(epoch from max(learned.cooldown_until) - statement_timestamp())::double precision
+                 from agent_jobs aj
+                 join upstream_pacing learned
+                   on learned.upstream_key in (
+                          {key},
+                          case when {key} = '{PLATFORM_KEY}'
+                               then 'platform:project:' || aj.project_id::text end
+                      )
+                 where aj.id = $1",
+                key = upstream_key_sql("aj"),
+            ),
+            &[&job_id],
+        )
+        .await?
+        .get(0);
+    Ok(seconds
+        .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+        .map(|seconds| Duration::from_secs_f64(seconds.min(MAX_COOLDOWN.as_secs_f64())))
+        .unwrap_or_default())
+}
+
+async fn record_job_end_inner(
+    pool: &PgPool,
+    job_id: Uuid,
+    requeued_attempt_error: Option<&str>,
+) -> anyhow::Result<()> {
     let mut connection = pool.get().await?;
     let transaction = connection.transaction().await?;
     let Some(job) = transaction
@@ -365,10 +415,16 @@ async fn record_job_end_inner(pool: &PgPool, job_id: Uuid) -> anyhow::Result<()>
     };
     let upstream_key: String = job.get("upstream_key");
     let project_id: Uuid = job.get("project_id");
-    let status: String = job.get("status");
     let plan_agent: bool = job.get("plan_agent");
+    let (status, error_message) = match requeued_attempt_error {
+        Some(error) => ("failed".to_string(), Some(error.to_string())),
+        None => (
+            job.get::<_, String>("status"),
+            job.get::<_, Option<String>>("error_message"),
+        ),
+    };
     let cooldown = (status == "failed")
-        .then(|| job.get::<_, Option<String>>("error_message"))
+        .then_some(error_message)
         .flatten()
         .and_then(|error| rate_limit_cooldown(&error));
     let end = match cooldown {

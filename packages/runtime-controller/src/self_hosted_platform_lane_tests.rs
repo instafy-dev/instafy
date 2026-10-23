@@ -4275,3 +4275,6 @@ async fn an_ordinary_turns_rate_limit_never_caps_lanes_and_one_space_cannot_pace
     second_cleanup?;
     first_cleanup
 }
+
+#[path = "turn_rate_limit_retry_tests.rs"]
+mod turn_rate_limit_retry_tests;
