@@ -154,7 +154,16 @@ describe("instafy git credential helper", () => {
     };
 
     try {
-      for (const host of ["other.instafy.dev", "sub.git.instafy.dev", "sub.git.example.test", "instafy.dev"]) {
+      for (const host of [
+        "other.instafy.dev",
+        "sub.git.instafy.dev",
+        "sub.git.example.test",
+        "instafy.dev",
+        "git-shard.attacker.example",
+        "git-shard-1.example.test",
+        "git-shardz",
+        "git-edge.example.test",
+      ]) {
         const result = await runCli(["git", "credential", "get"], {
           env,
           input: `protocol=https\nhost=${host}\npath=${projectId}.git\n\n`,
@@ -164,14 +173,14 @@ describe("instafy git credential helper", () => {
       }
       expect(requests).toBe(0);
 
-      for (const host of ["git.example.test", "remote.example.test", `127.0.0.1:${addr.port}`]) {
+      for (const host of ["git.example.test", "remote.example.test", `127.0.0.1:${addr.port}`, "git-shard-0", "git-edge"]) {
         const result = await runCli(["git", "credential", "get"], {
           env,
           input: `protocol=https\nhost=${host}\npath=${projectId}.git\n\n`,
         });
         expect(result.stdout, host).toContain("password=git-token-123");
       }
-      expect(requests).toBe(3);
+      expect(requests).toBe(5);
     } finally {
       server.close();
     }

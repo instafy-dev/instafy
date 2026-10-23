@@ -916,8 +916,8 @@ pub struct PreviewSettings {
     /// `PREVIEW_DENY_PORTS` entries that are not ports. Startup refuses any,
     /// so a typo never leaves a moved service exposed.
     pub invalid_deny_ports: Vec<String>,
-    /// `TUNNEL_DOMAIN`, when set here too: public tunnel hosts, which the
-    /// preview domain must not overlap.
+    /// `TUNNEL_DOMAIN`, when set here too: public tunnel hosts. The preview
+    /// domain may equal it but must not sit above, below or next to it.
     pub tunnel_domain: Option<String>,
 }
 
