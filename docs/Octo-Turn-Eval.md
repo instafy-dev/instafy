@@ -146,6 +146,7 @@ when no must fails. Its score is the share of graded checks that passed.
 | `card_posted` | must | A "Ready to preview" card; n/a on a server without site previews |
 | `site_opens` | must | A page was found (card or previews) and opened with text and no HTTP error |
 | `site_shape:*` | must | The page has at least the case's counts (a table, a ranking, checkboxes, dated steps) |
+| `team_items_on_site` | must | A team's page names every item it planned a lane for (each lane's label; a lane over several stops counts as each). A line that says what is missing ("Not found yet: …") does not count. When the plan message did not survive in the run log, the lanes' handles stand in |
 | `map_ready` | must | A MapLibre, Mapbox, Leaflet, OpenLayers or Google map rendered with a size |
 | `no_site`, `no_file_changes` | must | Chat cases: no card, no preview listed, no `instafy preview open`; no file changed |
 | `reply_present`, `reply_no_internal_urls`, `reply_no_file_paths` | must | A reply, without localhost, preview or tunnel hosts, and without file or folder paths (links excluded) |
