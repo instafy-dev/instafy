@@ -444,6 +444,28 @@ mod tests {
     }
 
     #[test]
+    fn tunnel_domain_is_read_like_the_preview_domain() {
+        let config = config_with_tunnel_domain(Some("*.instafy.site"));
+        assert!(config.is_tunnel_host("k7m2qa.instafy.site"));
+        assert!(!config.is_tunnel_host("abc.rt.instafy.dev"));
+    }
+
+    #[test]
+    fn a_public_suffix_or_single_label_tunnel_domain_matches_no_tunnel() {
+        for value in ["site", "dev", "co.uk", "*.site", "rt example", "."] {
+            let config = config_with_tunnel_domain(Some(value));
+            assert!(!config.is_tunnel_host("k7m2qa.site"), "{value}");
+            assert!(!config.is_tunnel_host("evil.co.uk"), "{value}");
+            assert!(!config.is_tunnel_host("dev"), "{value}");
+            assert!(
+                !speech_proxy_endpoint_is_allowed(&config, "https://k7m2qa.site"),
+                "{value}"
+            );
+            assert!(config.is_tunnel_host("abc.rt.test"), "{value}");
+        }
+    }
+
+    #[test]
     fn build_upstream_speech_url_rewrites_local_rt_test_to_loopback() {
         let (url, host_override) =
             build_upstream_speech_url("http://abc.rt.test:8443", "transcribe", None)

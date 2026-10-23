@@ -1969,30 +1969,21 @@ mod tests {
     #[test]
     fn tunnel_domain_is_read_like_the_preview_domain() {
         for value in ["instafy.site", "*.Instafy.Site.", ".instafy.site"] {
+            let settings = tunnel_settings(value);
             assert_eq!(
-                tunnel_settings(value).usable_tunnel_domain().as_deref(),
+                settings.usable_tunnel_domain().as_deref(),
                 Some("instafy.site"),
                 "{value}"
             );
-            assert!(tunnel_settings(value).tunnel_domain_warning().is_none());
+            assert!(settings.tunnel_domain_warning().is_none(), "{value}");
         }
-        let mut config = crate::tests::build_app_config(
-            crate::tests::test_origin_private_key(),
-            crate::tests::test_origin_public_key(),
-            "test-origin-key",
-        );
-        config.previews = tunnel_settings("*.instafy.site");
-        assert!(config.is_tunnel_host("k7m2qa.instafy.site"));
-        assert!(!config.is_tunnel_host("abc.rt.instafy.dev"));
+        assert!(super::PreviewSettings::default()
+            .tunnel_domain_warning()
+            .is_none());
     }
 
     #[test]
-    fn a_public_suffix_or_single_label_tunnel_domain_matches_nothing() {
-        let mut config = crate::tests::build_app_config(
-            crate::tests::test_origin_private_key(),
-            crate::tests::test_origin_public_key(),
-            "test-origin-key",
-        );
+    fn a_public_suffix_or_single_label_tunnel_domain_is_not_used() {
         for value in ["site", "dev", "co.uk", "*.site", "rt example", "."] {
             let settings = tunnel_settings(value);
             assert!(settings.usable_tunnel_domain().is_none(), "{value}");
@@ -2002,15 +1993,7 @@ mod tests {
                     .is_some_and(|warning| warning.contains("TUNNEL_DOMAIN")),
                 "{value}"
             );
-            config.previews = settings;
-            assert!(!config.is_tunnel_host("k7m2qa.site"), "{value}");
-            assert!(!config.is_tunnel_host("evil.co.uk"), "{value}");
-            assert!(!config.is_tunnel_host("dev"), "{value}");
-            assert!(config.is_tunnel_host("abc.rt.test"), "{value}");
         }
-        assert!(super::PreviewSettings::default()
-            .tunnel_domain_warning()
-            .is_none());
     }
 
     #[test]
