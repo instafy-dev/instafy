@@ -17,6 +17,13 @@
 //!   wrap-up, and the steps tools report in `INSTAFY_STEP_TIMINGS_FILE` (one JSON object per line)
 //!   become `agent/turn-timings`, so an eval can show where a turn's time went.
 //!
+//! - **Team clock.** A team answers within its time budget: every job of a team carries its
+//!   deadline (`metadata.multiAgentPlan.teamClock`, set by the controller's `team_clock`). A turn
+//!   of such a job ends by it: its hard limit is the time left (at least [`MIN_TEAM_TURN`], at
+//!   most the usual limit), its wrap-up comes before that limit, and a turn after which no
+//!   further turn fits is told to finish instead of leaving a note for one. A lead's turn is held
+//!   to the same deadline as its lanes.
+//!
 //! Skills say how to use the note and the timings file; nothing here knows a skill.
 
 use super::*;
@@ -31,6 +38,12 @@ const STEP_RECORD_MAX_BYTES: usize = 2_000;
 const TIMED_COMMANDS_MAX: usize = 200;
 const COMMAND_TEXT_MAX_CHARS: usize = 160;
 const DEFAULT_WRAP_UP_SECONDS: u64 = 120;
+/// The shortest turn a team's job gets, even once the team's time is up, and the shortest further
+/// turn the controller starts (its `team_clock::MIN_TEAM_TURN`).
+const MIN_TEAM_TURN: Duration = Duration::from_secs(180);
+/// A turn leaves a note for a next one only when the next still fits with this to spare: the
+/// controller decides at the turn's end, after saving and settling it took a while.
+const CONTINUATION_GRACE: Duration = Duration::from_secs(60);
 
 /// The files a turn's tools may write, in a folder of the job's own outside the workspace (so
 /// nothing in it is ever published).
@@ -40,26 +53,48 @@ pub(super) struct TurnFiles {
     continue_note: Option<PathBuf>,
     /// A team lane's turn: it is told to wrap up before its hard limit.
     lane: bool,
+    budget: TurnBudget,
 }
 
 impl TurnFiles {
     pub(super) fn for_job(job: &LeaseJob) -> Self {
-        Self::in_dir(
+        let budget = turn_budget(
+            crate::codex::resolve_codex_run_timeout(),
+            team_deadline(&job.payload),
+            chrono::Utc::now(),
+        );
+        Self::in_dir_with(
             env::temp_dir()
                 .join("instafy-turns")
                 .join(job.id.to_string()),
             is_multi_agent_worker_payload(&job.payload),
-            job_turn_can_continue(&job.payload),
+            job_turn_can_continue(&job.payload) && budget.room_for_another,
+            budget,
         )
     }
 
+    #[cfg(test)]
     pub(super) fn in_dir(dir: PathBuf, lane: bool, continuable: bool) -> Self {
+        Self::in_dir_with(
+            dir,
+            lane,
+            continuable,
+            turn_budget(
+                crate::codex::resolve_codex_run_timeout(),
+                None,
+                chrono::Utc::now(),
+            ),
+        )
+    }
+
+    fn in_dir_with(dir: PathBuf, lane: bool, continuable: bool, budget: TurnBudget) -> Self {
         let _ = fs::create_dir_all(&dir);
         Self {
             timings: dir.join("step-timings.ndjson"),
             continue_note: continuable.then(|| dir.join("continue.md")),
             dir,
             lane,
+            budget,
         }
     }
 
@@ -72,12 +107,22 @@ impl TurnFiles {
         self.continue_note.clone()
     }
 
-    /// The wrap-up steer of this job's turn with this hard limit: only a lane's.
-    pub(super) fn wrap_up(&self, run_timeout: Duration) -> Option<TurnWrapUp> {
-        if !self.lane {
-            return None;
+    /// This turn's hard limit.
+    pub(super) fn limit(&self) -> Duration {
+        self.budget.limit
+    }
+
+    /// The wrap-up steer before this turn's hard limit: a lane's, and any turn its team's deadline
+    /// cuts short (a lead's included). A person's own turn, or a lead's with time to spare, gets
+    /// none.
+    pub(super) fn wrap_up(&self) -> Option<TurnWrapUp> {
+        if self.budget.team_bounded {
+            team_turn_wrap_up(self.budget.limit, self.continuable())
+        } else if self.lane {
+            turn_wrap_up(self.budget.limit, self.continuable())
+        } else {
+            None
         }
-        turn_wrap_up(run_timeout, self.continuable())
     }
 
     /// The variables the agent's shell gets for this turn.
@@ -151,11 +196,32 @@ pub(super) fn requests_continuation(result: &Result<JobExecution>) -> bool {
 /// The wrap-up steer for a lane's turn with this hard limit, or None when the limit is too short
 /// to leave room for one.
 pub(super) fn turn_wrap_up(run_timeout: Duration, continuable: bool) -> Option<TurnWrapUp> {
-    let window = env::var("INSTAFY_TURN_WRAP_UP_SECONDS")
+    wrap_up_within(run_timeout, wrap_up_window(), continuable)
+}
+
+/// The wrap-up steer for a turn its team's deadline cut short: its window is at most a quarter of
+/// the turn, so a short last turn still gets most of its time for work.
+fn team_turn_wrap_up(run_timeout: Duration, continuable: bool) -> Option<TurnWrapUp> {
+    wrap_up_within(
+        run_timeout,
+        wrap_up_window().min(run_timeout / 4),
+        continuable,
+    )
+}
+
+fn wrap_up_window() -> Duration {
+    env::var("INSTAFY_TURN_WRAP_UP_SECONDS")
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
         .map(Duration::from_secs)
-        .unwrap_or(Duration::from_secs(DEFAULT_WRAP_UP_SECONDS));
+        .unwrap_or(Duration::from_secs(DEFAULT_WRAP_UP_SECONDS))
+}
+
+fn wrap_up_within(
+    run_timeout: Duration,
+    window: Duration,
+    continuable: bool,
+) -> Option<TurnWrapUp> {
     if window.is_zero() || window >= run_timeout {
         return None;
     }
@@ -163,6 +229,54 @@ pub(super) fn turn_wrap_up(run_timeout: Duration, continuable: bool) -> Option<T
         after: run_timeout - window,
         message: turn_wrap_up_message(window, continuable),
     })
+}
+
+/// When the team a job belongs to must have answered, if it is a team's job with a clock: the time
+/// left the controller stated at lease, counted from now on this runtime's clock (a runtime whose
+/// clock is off still ends by the team's deadline), else the deadline itself.
+pub(super) fn team_deadline(payload: &JsonValue) -> Option<chrono::DateTime<chrono::Utc>> {
+    let clock = payload.pointer("/metadata/multiAgentPlan/teamClock")?;
+    if let Some(left) = clock.get("leftSecondsAtLease").and_then(JsonValue::as_i64) {
+        return Some(chrono::Utc::now() + chrono::Duration::seconds(left.max(0)));
+    }
+    clock
+        .get("deadlineAt")
+        .and_then(JsonValue::as_str)
+        .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+        .map(|at| at.with_timezone(&chrono::Utc))
+}
+
+/// How long a turn may run, and whether a further turn fits after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TurnBudget {
+    pub(super) limit: Duration,
+    /// The team's deadline, not the usual limit, set `limit`.
+    pub(super) team_bounded: bool,
+    pub(super) room_for_another: bool,
+}
+
+/// The budget of a turn that starts at `now`: the usual limit, or the time its team has left (at
+/// least [`MIN_TEAM_TURN`]); another turn fits when at least that much, and [`CONTINUATION_GRACE`],
+/// is left after this one.
+pub(super) fn turn_budget(
+    usual: Duration,
+    team_deadline: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> TurnBudget {
+    let Some(deadline) = team_deadline else {
+        return TurnBudget {
+            limit: usual,
+            team_bounded: false,
+            room_for_another: true,
+        };
+    };
+    let left = (deadline - now).to_std().unwrap_or_default();
+    let limit = left.max(MIN_TEAM_TURN).min(usual);
+    TurnBudget {
+        limit,
+        team_bounded: limit < usual,
+        room_for_another: left.saturating_sub(limit) >= MIN_TEAM_TURN + CONTINUATION_GRACE,
+    }
 }
 
 pub(super) fn turn_wrap_up_message(window: Duration, continuable: bool) -> String {
@@ -433,10 +547,9 @@ mod tests {
     #[test]
     fn only_a_lanes_turn_is_told_to_wrap_up() {
         let dir = tempfile::tempdir().unwrap();
-        let limit = Duration::from_secs(600);
         let lane = TurnFiles::in_dir(dir.path().join("lane"), true, true);
         assert!(
-            lane.wrap_up(limit)
+            lane.wrap_up()
                 .expect("a lane wraps up")
                 .message
                 .contains("INSTAFY_TURN_CONTINUE_FILE")
@@ -445,7 +558,7 @@ mod tests {
         let last = TurnFiles::in_dir(dir.path().join("last"), true, false);
         assert!(
             !last
-                .wrap_up(limit)
+                .wrap_up()
                 .expect("a last turn wraps up")
                 .message
                 .contains("INSTAFY_TURN_CONTINUE_FILE")
@@ -453,7 +566,7 @@ mod tests {
         assert!(last.continue_note_path().is_none());
         // a person's own turn, or a lead's, runs to its limit untold
         let own = TurnFiles::in_dir(dir.path().join("own"), false, false);
-        assert!(own.wrap_up(limit).is_none());
+        assert!(own.wrap_up().is_none());
     }
 
     #[test]
@@ -503,6 +616,142 @@ mod tests {
         assert!(
             turn_wrap_up(Duration::from_secs(100), true).is_none(),
             "a turn shorter than the wrap-up"
+        );
+    }
+
+    #[test]
+    fn a_team_turn_ends_by_the_teams_deadline_and_only_leaves_a_note_when_another_fits() {
+        let usual = Duration::from_secs(600);
+        let now = chrono::DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        let after = |seconds: i64| Some(now + chrono::Duration::seconds(seconds));
+        // no clock: the usual turn
+        assert_eq!(
+            turn_budget(usual, None, now),
+            TurnBudget {
+                limit: usual,
+                team_bounded: false,
+                room_for_another: true
+            }
+        );
+        // plenty of time: the usual turn, and another after it
+        assert_eq!(
+            turn_budget(usual, after(1_000), now),
+            TurnBudget {
+                limit: usual,
+                team_bounded: false,
+                room_for_another: true
+            }
+        );
+        // a next turn is only offered with a margin over the shortest the controller starts
+        assert!(turn_budget(usual, after(840), now).room_for_another);
+        assert!(!turn_budget(usual, after(839), now).room_for_another);
+        // the follow-on agent of a team that has 671 s left: one usual turn, no further turn
+        assert_eq!(
+            turn_budget(usual, after(671), now),
+            TurnBudget {
+                limit: usual,
+                team_bounded: false,
+                room_for_another: false
+            }
+        );
+        // 436 s left: the turn ends at the deadline
+        assert_eq!(
+            turn_budget(usual, after(436), now),
+            TurnBudget {
+                limit: Duration::from_secs(436),
+                team_bounded: true,
+                room_for_another: false
+            }
+        );
+        // the time is up: a short last turn (a lead's report, or work it still started)
+        assert_eq!(
+            turn_budget(usual, after(-60), now),
+            TurnBudget {
+                limit: MIN_TEAM_TURN,
+                team_bounded: true,
+                room_for_another: false
+            }
+        );
+        // a turn cut short wraps up within its last quarter
+        let wrap = team_turn_wrap_up(Duration::from_secs(436), false).expect("room for it");
+        assert_eq!(wrap.after, Duration::from_secs(327));
+        assert!(!wrap.message.contains("INSTAFY_TURN_CONTINUE_FILE"));
+        let last = team_turn_wrap_up(MIN_TEAM_TURN, false).expect("room for it");
+        assert_eq!(last.after, Duration::from_secs(135));
+    }
+
+    #[test]
+    fn a_team_jobs_turn_files_carry_its_shorter_limit_and_no_note_when_no_turn_fits() {
+        let job = |role: &str, left: i64| -> LeaseJob {
+            let deadline = (chrono::Utc::now() + chrono::Duration::seconds(left))
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            serde_json::from_value(json!({
+                "id": Uuid::new_v4(),
+                "payload": {"metadata": {"multiAgentPlan": {"role": role, "groupId": "g",
+                    "teamClock": {"startedAt": "2026-10-21T07:09:58Z", "budgetSeconds": 780, "deadlineAt": deadline}}}},
+            }))
+            .expect("lease job")
+        };
+        let usual = crate::codex::resolve_codex_run_timeout();
+        // a lane with five minutes of its team's time left: a turn of about that, ending by the
+        // deadline, with no note for a next turn
+        let lane = TurnFiles::for_job(&job("worker", 300));
+        assert!(
+            lane.limit() <= Duration::from_secs(300) && lane.limit() >= Duration::from_secs(295),
+            "{:?}",
+            lane.limit()
+        );
+        assert!(!lane.continuable());
+        let wrap = lane.wrap_up().expect("wrap-up");
+        assert!(
+            wrap.after >= lane.limit() * 3 / 4 && wrap.after < lane.limit(),
+            "{:?}",
+            wrap.after
+        );
+        assert!(!wrap.message.contains("INSTAFY_TURN_CONTINUE_FILE"));
+        lane.remove();
+        // a lead whose team's time is up still gets a short turn to report
+        let lead = TurnFiles::for_job(&job("lead_continuation", -30));
+        assert_eq!(lead.limit(), MIN_TEAM_TURN.min(usual));
+        // its deadline cut it short, so it is told to wrap up too
+        assert!(lead.wrap_up().is_some());
+        lead.remove();
+        // a lead with time to spare runs to its limit untold, as a person's own turn does
+        let calm_lead = TurnFiles::for_job(&job("lead_continuation", 3_600));
+        assert_eq!(calm_lead.limit(), usual);
+        assert!(calm_lead.wrap_up().is_none());
+        calm_lead.remove();
+        // a lane with time for more: the usual turn, and a note for the next one
+        let early = TurnFiles::for_job(&job("worker", 3_600));
+        assert_eq!(early.limit(), usual);
+        assert!(early.continuable());
+        early.remove();
+    }
+
+    #[test]
+    fn a_jobs_team_deadline_is_read_from_its_team_clock() {
+        let job = json!({"metadata": {"multiAgentPlan": {"role": "lead_continuation", "teamClock": {
+            "startedAt": "2026-10-21T07:09:58Z", "budgetSeconds": 780, "deadlineAt": "2026-10-21T07:22:58Z"}}}});
+        assert_eq!(
+            team_deadline(&job),
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2026-10-21T07:22:58Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc)
+            )
+        );
+        assert_eq!(team_deadline(&worker_payload(JsonValue::Null)), None);
+        // the time left the controller stated at lease wins over a deadline this clock may misread
+        let leased = json!({"metadata": {"multiAgentPlan": {"teamClock": {
+            "deadlineAt": "2026-10-21T07:22:58Z", "leftSecondsAtLease": 300}}}});
+        let deadline = team_deadline(&leased).expect("deadline");
+        let left = (deadline - chrono::Utc::now()).num_seconds();
+        assert!((298..=300).contains(&left), "{left}");
+        assert_eq!(
+            team_deadline(
+                &json!({"metadata": {"multiAgentPlan": {"teamClock": {"deadlineAt": "soon"}}}})
+            ),
+            None
         );
     }
 

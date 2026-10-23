@@ -180,6 +180,17 @@ where
         );
         return false;
     }
+    // Too little of the team's time is left for another turn: the group goes on to its lead,
+    // which reports what is done and what is unfinished.
+    if !super::team_clock::room_for_another_turn(plan_meta, chrono::Utc::now()) {
+        info!(
+            %group_id,
+            %job_id,
+            handle = %agent.handle,
+            "the team's time budget leaves no room for the plan agent's next turn"
+        );
+        return false;
+    }
     let next = turn + 1;
     let handle = agent.handle.clone();
     let redispatch = PlanAgentRedispatch {
@@ -404,6 +415,8 @@ pub(crate) async fn redispatch_plan_agent(
     for (key, value) in redispatch.plan_meta {
         metadata["multiAgentPlan"][key] = value;
     }
+    // A restarted agent keeps its team's clock.
+    super::team_clock::carry(&mut metadata, plan_meta);
     let dispatch = DispatchPromptRequest {
         project_id: Some(project_id.to_string()),
         session_id: extract_uuid(job_payload, &["session_id"]).map(|value| value.to_string()),

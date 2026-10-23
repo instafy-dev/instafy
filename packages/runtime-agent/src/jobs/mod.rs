@@ -2927,8 +2927,12 @@ impl TurnClockGuard {
     /// be continued, where to leave the note on what is left (`turn_continuation`).
     fn start(files: Option<&turn_continuation::TurnFiles>) -> Self {
         let started = chrono::Utc::now();
-        let limit = chrono::Duration::from_std(crate::codex::resolve_codex_run_timeout())
-            .unwrap_or_else(|_| chrono::Duration::seconds(600));
+        let limit = chrono::Duration::from_std(
+            files.map_or_else(crate::codex::resolve_codex_run_timeout, |files| {
+                files.limit()
+            }),
+        )
+        .unwrap_or_else(|_| chrono::Duration::seconds(600));
         let format = |at: chrono::DateTime<chrono::Utc>| {
             at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
         };
@@ -6525,8 +6529,10 @@ impl JobProcessor {
             isolated_tool_worker: false,
             // Shortly before the hard limit a team lane's turn is told to save and end (and,
             // when the controller can continue it, to leave a note for its next turn).
-            turn_wrap_up: turn_files.wrap_up(crate::codex::resolve_codex_run_timeout()),
+            turn_wrap_up: turn_files.wrap_up(),
             turn_continue_note: turn_files.continue_note_path(),
+            // A team's turn ends by the team's deadline (`turn_continuation`).
+            run_timeout: Some(turn_files.limit()),
         };
 
         let routing_pre_observation = if should_run_routing_pre_observation_before_main(
@@ -10450,6 +10456,26 @@ fn parse_codex_multi_agent_plan_action(
             }
         }
         out.insert("runtimeRouting".to_string(), runtime_routing);
+    }
+    // How long the team has, when its skill declares it: the controller starts the team's clock
+    // from it (`team_clock` in the runtime controller). A positive number, passed on as given.
+    for (keys, canonical) in [
+        (
+            ["timeBudgetMinutes", "time_budget_minutes"],
+            "timeBudgetMinutes",
+        ),
+        (
+            ["timeBudgetSeconds", "time_budget_seconds"],
+            "timeBudgetSeconds",
+        ),
+    ] {
+        if let Some(value) = keys
+            .iter()
+            .find_map(|key| plan_map.get(*key))
+            .filter(|value| value.as_f64().is_some_and(|n| n.is_finite() && n > 0.0))
+        {
+            out.insert(canonical.to_string(), value.clone());
+        }
     }
     out.insert(
         "synthesis".to_string(),
@@ -18061,6 +18087,50 @@ mod tests {
     use std::fs;
     use std::time::Duration;
     use tempfile::tempdir;
+
+    #[test]
+    fn a_plans_declared_time_budget_reaches_the_controller() {
+        let plan = |extra: JsonValue| {
+            let mut action = json!({
+                "type": "multi_agent_plan",
+                "mode": "read_only",
+                "rationale": "Independent research per stop",
+                "thresholdReason": "10 days, 3 stops",
+                "agents": [
+                    {"handle": "tokyo", "label": "Tokyo", "prompt": "Research Tokyo."},
+                    {"handle": "kyoto", "label": "Kyoto", "prompt": "Research Kyoto."}
+                ],
+                "lead": {"leadHandle": "octo", "continuationPrompt": "Final reply.", "expectedReportFormat": "2-5 lines."}
+            });
+            for (key, value) in extra.as_object().unwrap() {
+                action[key] = value.clone();
+            }
+            parse_codex_multi_agent_plan_action(action.as_object().unwrap())
+                .expect("a plan")
+                .0
+        };
+        let declared = plan(json!({"timeBudgetMinutes": 12}));
+        assert_eq!(declared["timeBudgetMinutes"], json!(12));
+        assert_eq!(
+            plan(json!({"time_budget_seconds": 600}))["timeBudgetSeconds"],
+            json!(600)
+        );
+        // none declared, a null (a strict schema's left-out field), or not a positive number: no
+        // budget is made up
+        for extra in [
+            json!({}),
+            json!({"timeBudgetMinutes": null}),
+            json!({"timeBudgetMinutes": 0}),
+            json!({"timeBudgetMinutes": "soon"}),
+        ] {
+            let parsed = plan(extra);
+            assert!(
+                parsed.get("timeBudgetMinutes").is_none()
+                    && parsed.get("timeBudgetSeconds").is_none(),
+                "{parsed}"
+            );
+        }
+    }
 
     #[test]
     fn separated_controller_token_cannot_fall_back_as_workspace_token() {

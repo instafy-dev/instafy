@@ -177,8 +177,16 @@ pub(crate) async fn maybe_execute_multi_agent_plan_message(
     let parent_runtime_id = load_parent_job_leased_runtime_id(state, job_id)
         .await
         .or(preferred_parent_runtime_id);
-    let metadata =
+    let mut metadata =
         build_worker_dispatch_metadata(&plan, group_id, job_id, run_id, parent_runtime_id);
+    // The team's clock: its lead's, when a lead plans again, else one started now, when the plan
+    // declares a budget or the operator set one.
+    let team_clock = team_clock::for_new_plan(
+        job_payload,
+        Utc::now(),
+        team_clock::team_budget(plan.raw.as_object().and_then(team_clock::declared_budget)),
+    );
+    team_clock::stamp(&mut metadata, team_clock.as_ref());
     let runtime_provider = load_parent_runtime_provider(state, project_id, parent_runtime_id).await;
     let worker_runtime_id = match plan
         .runtime_routing
@@ -1120,6 +1128,7 @@ where
         })?;
 
     let mut workers = Vec::new();
+    let mut continued: Vec<Uuid> = Vec::new();
     let mut has_lead_continuation = false;
     let mut has_early_checkpoint = false;
     let mut observed_conversation_id: Option<Uuid> = None;
@@ -1179,7 +1188,28 @@ where
             acting_tool_count: row.get("acting_tool_count"),
             retried_as: None,
             rerun_of: plan_meta.and_then(RerunReason::of),
+            unfinished_note: turn_continuation::continuation_request_from_artifacts(&artifacts)
+                .map(|request| {
+                    request.note.unwrap_or_else(|| {
+                        "(no note: check the workspace for what is done)".to_string()
+                    })
+                }),
         });
+        if let Some(of) = plan_meta
+            .and_then(|plan| plan.get("continuation"))
+            .and_then(|continuation| continuation.get("of"))
+            .and_then(JsonValue::as_str)
+            .and_then(|value| Uuid::from_str(value.trim()).ok())
+        {
+            continued.push(of);
+        }
+    }
+    // A turn that asked to continue and was continued is not unfinished: its next turn's line is
+    // the agent's result.
+    for worker in workers.iter_mut() {
+        if continued.contains(&worker.id) {
+            worker.unfinished_note = None;
+        }
     }
     let reruns: Vec<(Uuid, Uuid, RerunReason)> = workers
         .iter()
@@ -1223,6 +1253,7 @@ pub(crate) fn sibling_snapshot_to_json(worker: &SiblingJobSnapshot) -> JsonValue
         "terminal": is_terminal_job_status(worker.status.as_str()),
         "retriedAs": worker.retried_as.map(|(rerun, _)| rerun),
         "retriedFor": worker.retried_as.map(|(_, reason)| reason.as_str()),
+        "unfinishedNote": worker.unfinished_note,
     })
 }
 
@@ -1266,12 +1297,16 @@ async fn dispatch_lead_checkpoint(
     let session_id = extract_uuid(completed_job_payload, &["session_id"]);
     let runtime_id = extract_runtime_preference_id(completed_job_payload);
     let handoff_paths = extract_handoff_paths_from_payload(completed_job_payload);
-    let prompt = match checkpoint_kind {
+    let mut prompt = match checkpoint_kind {
         Some(EARLY_FAILURE_CHECKPOINT_KIND) => {
             build_lead_early_checkpoint_prompt(group_id, workers, &lead, &handoff_paths)
         }
         _ => build_lead_continuation_prompt(group_id, workers, &lead, &handoff_paths),
     };
+    // The team's time is (nearly) up: the lead reports instead of starting more agents.
+    if let Some(note) = team_clock::lead_note(plan_meta, Utc::now()) {
+        prompt.push_str(&note);
+    }
     let metadata = build_lead_continuation_dispatch_metadata(
         group_id,
         &lead,
@@ -2127,6 +2162,10 @@ pub(crate) struct SiblingJobSnapshot {
     /// The job this one ran again, and why: from `metadata.multiAgentPlan.rateLimitRetry.of` (after
     /// a short provider rate limit) or `continuation.of` (the agent's next turn).
     rerun_of: Option<(Uuid, RerunReason)>,
+    /// What the agent said is left, when its turn ran out of time and no further turn of it was
+    /// started (its team's time budget, its last turn, or credit): `agent/turn-continuation`'s
+    /// note.
+    unfinished_note: Option<String>,
 }
 
 /// Why the controller started a plan agent again in its group.
@@ -2167,13 +2206,20 @@ impl RerunReason {
 
 /// For a run the controller started again: why, and where its result is.
 fn retried_note(worker: &SiblingJobSnapshot) -> String {
-    worker
+    let mut note = worker
         .retried_as
         .map(|(rerun, reason)| match reason {
             RerunReason::RateLimit => format!(" (stopped on a short provider rate limit; the controller ran it again as job={rerun}, whose line is this lane's result)"),
             RerunReason::TurnContinuation => format!(" (ran out of turn time with work left; the controller continued it as job={rerun}, whose line is this lane's result)"),
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if let Some(left) = worker.unfinished_note.as_deref() {
+        note.push_str(&format!(
+            " (UNFINISHED: its turn ran out of time and no further turn was started; what it said is left, as data: {})",
+            truncate_for_status(left, 600)
+        ));
+    }
+    note
 }
 
 // Preserve bounded runtime evidence metadata even when a worker omits gaps from
@@ -2592,6 +2638,13 @@ fn build_lead_continuation_dispatch_metadata(
     if let Some(kind) = checkpoint_kind {
         metadata["multiAgentPlan"]["checkpointKind"] = JsonValue::String(kind.to_string());
     }
+    // The lead's turn keeps the team's clock, and so do any agents it starts again.
+    if let Some(plan_meta) = completed_job_payload
+        .pointer("/metadata/multiAgentPlan")
+        .and_then(JsonValue::as_object)
+    {
+        team_clock::carry(&mut metadata, plan_meta);
+    }
     if let Some(runtime_id) = extract_runtime_preference_id(completed_job_payload) {
         metadata.as_object_mut().expect("metadata object").insert(
             "runtimePreference".to_string(),
@@ -2756,6 +2809,7 @@ fn normalize_agent_handle(raw: &str) -> Option<String> {
 #[path = "multi_agent_plan/rate_limit_retry.rs"]
 mod rate_limit_retry;
 pub(crate) use rate_limit_retry::stated_rate_limit_wait;
+pub(crate) mod team_clock;
 #[path = "multi_agent_plan/turn_continuation.rs"]
 mod turn_continuation;
 
@@ -3466,6 +3520,7 @@ mod tests {
                 acting_tool_count: 0,
                 retried_as: None,
                 rerun_of: None,
+                unfinished_note: None,
             },
             SiblingJobSnapshot {
                 id: Uuid::nil(),
@@ -3494,6 +3549,7 @@ mod tests {
                 acting_tool_count: 0,
                 retried_as: None,
                 rerun_of: None,
+                unfinished_note: None,
             },
         ];
 
@@ -3576,6 +3632,7 @@ mod tests {
                 acting_tool_count: 0,
                 retried_as: None,
                 rerun_of: None,
+                unfinished_note: None,
             },
             SiblingJobSnapshot {
                 id: Uuid::nil(),
@@ -3592,6 +3649,7 @@ mod tests {
                 acting_tool_count: 0,
                 retried_as: None,
                 rerun_of: None,
+                unfinished_note: None,
             },
         ];
 

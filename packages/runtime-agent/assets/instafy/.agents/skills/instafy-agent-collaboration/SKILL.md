@@ -141,6 +141,7 @@ Runtime routing is a skill decision, not a domain rule:
 
 - Omit `runtimeRouting` or use `strategy = "reuse"` for normal teams where coordination quality matters more than wall-clock speed. `reuse` means sibling jobs may stay pinned to the same runtime, so do not use it when the plan rationale says separate runtimes are preferred.
 - Use the canonical value `runtimeRouting.strategy = "spread"` when the user explicitly values acceleration, asks for separate/different runtimes, or the task is broad/long-running enough that parallel runtime slots are worth the overhead. Do not invent softer strategy names such as "prefer separate runtimes"; explain preference in `runtimeRouting.rationale` instead.
+- Set `timeBudgetMinutes` only when the person waits for the team's answer (a research reply). The controller then ends each turn by it and starts no agent once it is nearly spent, and the lead answers with what is ready. Omit it for long build or coding work.
 - Use spread for read-only investigation or clearly disjoint write-scoped lanes. Do not ask for spread when write scope is unclear, paths overlap, the task needs one shared browser/session/process state, or a single agent would be faster.
 - Set `desiredSlots` to the useful parallelism, usually the sibling count capped to the number of genuinely independent lanes. Do not inflate slots just because more agents are possible.
 

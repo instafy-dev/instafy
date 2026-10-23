@@ -382,6 +382,7 @@ mod tests {
             acting_tool_count: 0,
             retried_as: None,
             rerun_of: None,
+            unfinished_note: None,
         }
     }
 
