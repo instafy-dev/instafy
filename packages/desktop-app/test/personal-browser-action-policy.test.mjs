@@ -22,6 +22,9 @@ for (const entry of table.cases) {
     assert.equal(result.verdict, entry.verdict, `${entry.name}: ${JSON.stringify(result)}`);
     assert.equal(result.category, entry.category, `${entry.name}: ${JSON.stringify(result)}`);
     if (entry.code) assert.equal(result.code, entry.code);
+    // `commit` marks a button whose label commits a change, never a menu
+    // item, tab, tree item, opener or navigation item.
+    assert.equal(result.commit === true, entry.commit === true, `${entry.name} commit: ${JSON.stringify(result)}`);
     if (result.verdict === "ask") {
       assert.ok(policy.categoryTitle(result.category), `ask category ${result.category} has a dialog title`);
     }
