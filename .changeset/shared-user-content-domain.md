@@ -1,0 +1,4 @@
+---
+---
+
+Support one user-content domain for public tunnels and private previews: `PREVIEW_DOMAIN` may now equal `TUNNEL_DOMAIN` in the tunnel broker and the controller. Both name shapes are a single label under it (`<tunnel hex>.<domain>` and `p-<label>--<tunnel hex>.<domain>`), served under one wildcard certificate, and tests on the rendered Traefik rules check that neither reaches the other's router. Labels starting with `p-` under the preview domain are reserved for capability hosts, so a public binding never gets a router there. A preview domain above or below the tunnel domain, or sharing a registrable domain with Studio or the API, is still refused. The controller's Public Suffix List warning now says that until the domain is listed, all users' sites on it share one cookie scope. No package changes.

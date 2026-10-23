@@ -140,14 +140,20 @@ impl PreviewOrigin {
 }
 
 /// Refuse to start with a preview domain that shares a cookie scope with
-/// Studio, the API or public tunnels: equal to one of their hosts, under or
-/// above it, or a sibling under the same registrable domain (by the Public
-/// Suffix List). A viewer host runs whatever site the space serves, so it
-/// must not be able to set cookies those hosts receive. Hosted deployments
-/// want a registrable domain of their own, best listed on the Public Suffix
-/// List itself. Loopback development hosts (`localhost`) are only checked
-/// for equality: `preview.localhost` next to a Studio on `localhost:5173` is
-/// the local stack's own layout.
+/// Studio or the API: equal to one of their hosts, under or above it, or a
+/// sibling under the same registrable domain (by the Public Suffix List). A
+/// viewer host runs whatever site the space serves, so it must not be able to
+/// set cookies those hosts receive. Hosted deployments want a registrable
+/// domain dedicated to user content, listed on the Public Suffix List.
+///
+/// `TUNNEL_DOMAIN` holds user content too, so the preview domain may be that
+/// same domain: public tunnels (`<uuid hex>.<domain>`) and viewer hosts
+/// (`p-<label>--<hex>.<domain>`) are then single labels under it, with one
+/// wildcard certificate and DNS record. Under, above or next to the tunnel
+/// domain is still refused, as is anything else sharing its registrable
+/// domain. Loopback development hosts (`localhost`) are only checked for
+/// equality: `preview.localhost` next to a Studio on `localhost:5173` is the
+/// local stack's own layout.
 pub(crate) fn check_preview_domain(config: &crate::config::AppConfig) -> anyhow::Result<()> {
     let settings = &config.previews;
     if !settings.invalid_deny_ports.is_empty() {
@@ -187,12 +193,17 @@ pub(crate) fn check_preview_domain(config: &crate::config::AppConfig) -> anyhow:
     {
         others.push(("CONTROLLER_EXTERNAL_URL", host));
     }
+    let mut shared_with_tunnels = false;
     if let Some(domain) = settings.tunnel_domain.as_deref() {
         // An unreadable tunnel domain cannot be compared, so it is refused
         // rather than skipped.
         let domain = normalize_preview_domain(domain)
             .ok_or_else(|| anyhow::anyhow!("TUNNEL_DOMAIN is set but is not a valid domain"))?;
-        others.push(("TUNNEL_DOMAIN", domain));
+        if domain == origin.domain() {
+            shared_with_tunnels = true;
+        } else {
+            others.push(("TUNNEL_DOMAIN", domain));
+        }
     }
     for (name, host) in others {
         let Some(host) = normalize_preview_domain(&host) else {
@@ -201,36 +212,47 @@ pub(crate) fn check_preview_domain(config: &crate::config::AppConfig) -> anyhow:
         if preview_domain_overlaps(origin.domain(), &host) {
             anyhow::bail!(
                 "the preview domain {} shares a cookie scope with {name} ({host}); \
-                 use a separate domain for previews",
+                 use a registrable domain dedicated to user content for previews \
+                 (it may be TUNNEL_DOMAIN itself)",
                 origin.domain()
             );
         }
     }
-    if let Some(warning) = preview_cookie_scope_warning(origin.domain()) {
+    if let Some(warning) = preview_cookie_scope_warning(origin.domain(), shared_with_tunnels) {
         tracing::warn!("{warning}");
     }
     Ok(())
 }
 
-/// A warning when previews of different spaces share one cookie scope: the
-/// preview domain is not itself a public suffix, so a site previewed in one
-/// space can set `Domain=<preview domain>` cookies that every other space's
-/// preview receives, and they count as same-site to each other. Listing the
-/// domain on the Public Suffix List separates them. Loopback hosts and IP
-/// addresses are exempt: they are local stacks, and an IP address takes no
-/// `Domain=` cookie.
-pub(super) fn preview_cookie_scope_warning(domain: &str) -> Option<String> {
+/// A warning when users' sites share one cookie scope: the preview domain is
+/// not itself a public suffix, so a site previewed in one space can set
+/// `Domain=<preview domain>` cookies that every other space's preview
+/// receives, and they count as same-site to each other. With
+/// `shared_with_tunnels` (the preview domain is `TUNNEL_DOMAIN`) every public
+/// tunnel is in that scope too. Listing the domain on the Public Suffix List
+/// separates them. Loopback hosts and IP addresses are exempt: they are local
+/// stacks, and an IP address takes no `Domain=` cookie.
+pub(super) fn preview_cookie_scope_warning(
+    domain: &str,
+    shared_with_tunnels: bool,
+) -> Option<String> {
     if is_loopback_host(domain) || domain.parse::<std::net::IpAddr>().is_ok() {
         return None;
     }
     if psl::suffix_str(domain).is_some_and(|suffix| suffix.eq_ignore_ascii_case(domain)) {
         return None;
     }
+    let sites = if shared_with_tunnels {
+        "every space's previews and every public tunnel (TUNNEL_DOMAIN is the same domain)"
+    } else {
+        "every space's previews"
+    };
     Some(format!(
-        "the preview domain {domain} is not on the Public Suffix List, so every \
-         space's previews share one cookie scope: a site previewed in one space \
-         can set cookies the others receive. List the domain on the Public \
-         Suffix List before serving previews of untrusted sites."
+        "the user-content domain {domain} is not on the Public Suffix List, so \
+         until it is, all users' sites share one cookie scope: {sites} can set \
+         cookies the others receive, and they count as same-site to each other. \
+         List the domain on the Public Suffix List before serving sites you do \
+         not trust."
     ))
 }
 
