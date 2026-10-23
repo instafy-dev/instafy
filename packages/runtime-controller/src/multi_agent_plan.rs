@@ -2768,6 +2768,59 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_strict_schema_plan_as_the_runtime_sends_it_passes_the_write_scope_validator() {
+        // The runtime's parse of `written` must equal `sent` (its jobs/mod.rs test reads this
+        // same fixture). Here the controller's own validator judges both, through the worker
+        // dispatch metadata the plan produces.
+        let fixture: JsonValue = serde_json::from_str(include_str!(
+            "../../runtime-agent/src/jobs/strict_plan_fixture.json"
+        ))
+        .expect("fixture");
+        let scopes = |plan_value: &JsonValue| {
+            let plan = parse_skill_multi_agent_plan(plan_value).expect("plan");
+            let handles: Vec<String> = plan.agents.iter().map(|a| a.handle.clone()).collect();
+            let metadata =
+                build_worker_dispatch_metadata(&plan, Uuid::nil(), Uuid::nil(), None, None);
+            let assignments = crate::agent_write_scopes::build_agent_write_scope_plan(
+                &metadata,
+                "",
+                &handles,
+                &Default::default(),
+            );
+            handles
+                .into_iter()
+                .map(|handle| (handle.clone(), assignments[&handle].to_json()))
+                .collect::<Vec<_>>()
+        };
+
+        let sent = scopes(&fixture["sent"]);
+        let modes: Vec<_> = sent
+            .iter()
+            .map(|(handle, scope)| (handle.as_str(), scope["mode"].clone()))
+            .collect();
+        assert_eq!(
+            modes,
+            [
+                ("tokyo", json!("owned")),
+                ("kyoto", json!("owned")),
+                ("brief", json!("read_only"))
+            ]
+        );
+        assert_eq!(sent[0].1["ownedPaths"], json!(["handoff/japan/tokyo.json"]));
+        assert_eq!(sent[1].1["rationale"], json!("Kyoto's file only"));
+        assert_eq!(sent[2].1["readOnlyPaths"], json!(["docs/brief.md"]));
+
+        // The nulls as the model wrote them stay refused: the controller does not guess.
+        for (handle, scope) in scopes(&fixture["written"]) {
+            assert_eq!(
+                scope["mode"],
+                json!("coordination_required"),
+                "@{handle}: {scope}"
+            );
+        }
+    }
+
+    #[test]
     fn plan_capacity_preserves_ten_workers_and_rejects_oversized_plans() {
         let value = |count: usize| {
             json!({

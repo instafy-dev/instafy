@@ -10240,10 +10240,11 @@ fn parse_codex_actions(value: &JsonValue) -> Vec<CodexAction> {
 fn parse_codex_multi_agent_plan_action(
     map: &serde_json::Map<String, JsonValue>,
 ) -> Option<(JsonValue, usize, Option<String>)> {
+    let map = without_null_fields(map);
     let plan_map = map
         .get("plan")
         .and_then(JsonValue::as_object)
-        .unwrap_or(map);
+        .unwrap_or(&map);
 
     let rationale = first_string(plan_map, &["rationale", "reason"])
         .map(str::to_string)
@@ -10467,6 +10468,27 @@ fn parse_codex_multi_agent_plan_action(
     );
 
     Some((JsonValue::Object(out), agents.len(), rationale))
+}
+
+/// A plan's fields as the controller reads them. The strict plan output schema makes every
+/// optional field required and nullable, so the model writes null for each one it leaves out
+/// (a lane's `readOnlyPaths`, a routing `rationale`, a whole `handoffPaths`). Those nulls are left
+/// out here, at every depth, before the plan is read and sent: the controller treats a missing
+/// field as its default but refuses a null where it expects a value, such as a write scope's path
+/// list. A null inside a list is an entry, not a left-out field, so it stays for the controller to
+/// refuse.
+fn without_null_fields(map: &JsonMap<String, JsonValue>) -> JsonMap<String, JsonValue> {
+    fn strip(value: &JsonValue) -> JsonValue {
+        match value {
+            JsonValue::Object(map) => JsonValue::Object(without_null_fields(map)),
+            JsonValue::Array(items) => JsonValue::Array(items.iter().map(strip).collect()),
+            other => other.clone(),
+        }
+    }
+    map.iter()
+        .filter(|(_, field)| !field.is_null())
+        .map(|(key, field)| (key.clone(), strip(field)))
+        .collect()
 }
 
 fn canonical_runtime_routing_strategy(raw: &str) -> Option<&'static str> {
@@ -29469,6 +29491,46 @@ mod tests {
             }
             _ => panic!("expected multi-agent plan action"),
         }
+    }
+
+    #[test]
+    fn a_plan_written_under_the_strict_schema_reaches_the_controller_without_its_nulls() {
+        // The controller's multi_agent_plan tests read this same fixture and check that its own
+        // write-scope validator accepts every lane of `sent`.
+        let fixture: JsonValue =
+            serde_json::from_str(include_str!("strict_plan_fixture.json")).expect("fixture");
+        let actions = parse_codex_actions(&json!({ "actions": [fixture["written"].clone()] }));
+        assert_eq!(actions.len(), 1);
+        let CodexAction::MultiAgentPlan {
+            plan, agent_count, ..
+        } = &actions[0]
+        else {
+            panic!(
+                "expected the plan to reach the controller, got {:?}",
+                actions[0]
+            );
+        };
+        assert_eq!(*agent_count, 3);
+        assert_eq!(plan, &fixture["sent"]);
+
+        // A null left out at every depth, the same way through the legacy `plan` wrapper.
+        let wrapped = json!({ "type": "multi_agent_plan", "plan": fixture["written"].clone() });
+        let (plan, _, _) =
+            parse_codex_multi_agent_plan_action(wrapped.as_object().unwrap()).expect("a plan");
+        assert_eq!(plan, fixture["sent"]);
+
+        // A null entry inside a list is a value, not a left-out field: it stays, for the
+        // controller to refuse.
+        let mut with_null_entry = fixture["written"].clone();
+        with_null_entry["agents"][0]["writeScope"]["ownedPaths"] =
+            json!(["handoff/japan/tokyo.json", null]);
+        let (plan, _, _) =
+            parse_codex_multi_agent_plan_action(with_null_entry.as_object().unwrap())
+                .expect("a plan");
+        assert_eq!(
+            plan["agents"][0]["writeScope"]["ownedPaths"],
+            json!(["handoff/japan/tokyo.json", null])
+        );
     }
 
     #[test]
