@@ -484,7 +484,8 @@ fn multi_agent_plan_final_output_json_schema() -> JsonValue {
                   "agents",
                   "lead",
                   "runtimeRouting",
-                  "presentation"
+                  "presentation",
+                  "timeBudgetMinutes"
                 ],
                 "properties": {
                   "type": { "type": "string" },
@@ -559,6 +560,10 @@ fn multi_agent_plan_final_output_json_schema() -> JsonValue {
                       "leadSummaryVisibility": { "type": ["string", "null"] },
                       "showThresholdReason": { "type": ["boolean", "null"] }
                     }
+                  },
+                  "timeBudgetMinutes": {
+                    "type": ["number", "null"],
+                    "description": "Only when a skill sets one: the minutes the team has to answer. Null otherwise."
                   }
                 }
               }
@@ -703,6 +708,9 @@ pub struct CodexRunOptions {
     /// left is not taken for this one's. A run that has one is not retried here when it times out:
     /// the controller continues it in a new turn instead.
     pub turn_continue_note: Option<PathBuf>,
+    /// The run's hard limit, when it is not the usual one (`resolve_codex_run_timeout`): a team's
+    /// turn ends by the team's deadline.
+    pub run_timeout: Option<Duration>,
 }
 
 /// A turn nearing its hard limit is told so while it still runs (one steering input, as a
@@ -757,6 +765,11 @@ impl CodexRunOptions {
     /// new turn (`turn_continue_note`), which would otherwise redo a whole turn first.
     fn retries_a_timed_out_run(&self, attempt: usize, max_retries: usize) -> bool {
         attempt < max_retries && self.turn_continue_note.is_none()
+    }
+
+    /// The run's hard limit: its own (a team's turn ends by the team's deadline), else the usual.
+    fn hard_limit(&self) -> Duration {
+        self.run_timeout.unwrap_or_else(resolve_codex_run_timeout)
     }
 }
 
@@ -1017,7 +1030,7 @@ impl CodexClient {
             runtime_reuse_is_safe(),
             "Codex thread cleanup is unconfirmed; runtime restart required"
         );
-        let run_timeout = resolve_codex_run_timeout();
+        let run_timeout = options.hard_limit();
         let max_retries = if options.isolated_tool_worker || uses_bounded_proxy_retries(&options) {
             // Codex recovers within the same session, preserving completed tool receipts.
             // Replaying execute_inner would reset that budget and could repeat side effects.
@@ -6607,6 +6620,17 @@ mod tests {
             action["properties"]["agents"]["items"]["properties"]["writeScope"]["additionalProperties"],
             false
         );
+        // A team's declared time budget fits the strict schema too (nullable, so optional).
+        assert_eq!(
+            action["properties"]["timeBudgetMinutes"]["type"],
+            json!(["number", "null"])
+        );
+        assert!(
+            action["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("timeBudgetMinutes"))
+        );
 
         match previous {
             Some(value) => unsafe {
@@ -6614,6 +6638,18 @@ mod tests {
             },
             None => unsafe { std::env::remove_var("CODEX_DISABLE_FINAL_OUTPUT_JSON_SCHEMA") },
         }
+    }
+
+    #[test]
+    fn a_run_with_its_own_limit_ends_by_it_and_others_by_the_usual_one() {
+        let _env_lock = env_lock();
+        let usual = resolve_codex_run_timeout();
+        assert_eq!(CodexRunOptions::default().hard_limit(), usual);
+        let team_turn = CodexRunOptions {
+            run_timeout: Some(Duration::from_secs(436)),
+            ..CodexRunOptions::default()
+        };
+        assert_eq!(team_turn.hard_limit(), Duration::from_secs(436));
     }
 
     #[test]

@@ -4544,6 +4544,16 @@ pub(crate) async fn lease_next_agent_job(
                         coalesce(aj.agent_role, aj.payload #>> '{metadata,multiAgentPlan,role}', '') = 'worker'
                         and coalesce('credential:' || aj.credential_id::text, 'platform') = any($12::text[])
                   )
+                  -- No plan agent starts once its team has less than a short turn
+                  -- left; the idle sweep settles it as not started
+                  -- (`multi_agent_plan::team_clock`).
+                  and not coalesce(
+                        coalesce(aj.agent_role, aj.payload #>> '{metadata,multiAgentPlan,role}', '') = 'worker'
+                        and jsonb_typeof(aj.payload #> '{metadata,multiAgentPlan,teamClock,deadlineEpoch}') = 'number'
+                        and (aj.payload #>> '{metadata,multiAgentPlan,teamClock,deadlineEpoch}')::numeric
+                            < extract(epoch from statement_timestamp()) + $13::int,
+                        false
+                  )
                   and not (
                         $10::bool
                         and aj.credential_id is null
@@ -4763,6 +4773,7 @@ pub(crate) async fn lease_next_agent_job(
                 &exclude_platform_ai_jobs,
                 &worker_capacity_available,
                 &closed_upstreams,
+                &(crate::multi_agent_plan::team_clock::MIN_TEAM_TURN.as_secs() as i32),
             ],
         )
         .await
@@ -4776,6 +4787,10 @@ pub(crate) async fn lease_next_agent_job(
     let run_id: Option<Uuid> = row.get("run_id");
     let credential_id: Option<Uuid> = row.try_get("credential_id").unwrap_or(None);
     let mut payload: JsonValue = row.get("payload");
+    // A team's job: the time its team has left, by the controller's clock.
+    if let Some(leased_at) = row.get::<_, Option<chrono::DateTime<chrono::Utc>>>("leased_at") {
+        crate::multi_agent_plan::team_clock::stamp_left_at_lease(&mut payload, leased_at);
+    }
 
     if let Some(run_uuid) = run_id {
         transaction
