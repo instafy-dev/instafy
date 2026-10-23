@@ -6,7 +6,7 @@ import { TextLink } from "../components/TextLink";
 import { SOCIAL_CARD_IMAGE, applyPageMeta } from "../utils/seo";
 
 const LAST_UPDATED = "October 23, 2026";
-/** Where abuse reports go. The one place to change it. */
+/** Where abuse reports go. `public/abuse.html` repeats it; a test keeps the two in step. */
 export const ABUSE_CONTACT_EMAIL = "contact@instafy.dev";
 const ABUSE_SUBJECT = "Abuse report";
 

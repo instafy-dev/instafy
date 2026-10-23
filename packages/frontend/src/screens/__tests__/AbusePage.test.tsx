@@ -1,5 +1,8 @@
 // @vitest-environment jsdom
 
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { RouterProvider } from "react-router-dom";
@@ -49,5 +52,24 @@ describe("/abuse", () => {
     expect(container.textContent).toContain("What to include");
     expect(container.textContent).toContain("aim to reply within two business days");
     expect(document.title).toBe("Report abuse · Instafy");
+  });
+
+  it("has a copy that reads the same without JavaScript", async () => {
+    const router = createInstafyRouter({ routes: [] } as unknown as FrontendFeatureComposition);
+    await act(async () => root.render(<RouterProvider router={router} />));
+    const html = readFileSync(
+      path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../public/abuse.html"),
+      "utf8",
+    );
+    const page = new DOMParser().parseFromString(html, "text/html");
+
+    // Word spacing differs between JSX and hand-written HTML; the words must not.
+    const words = (node: Element | null) => node?.textContent?.replace(/\s+/g, "") ?? "";
+    expect(words(page.querySelector("main"))).not.toBe("");
+    expect(words(page.querySelector("main"))).toBe(words(container.querySelector("main")));
+    expect(page.title).toBe("Report abuse · Instafy");
+    const links = (scope: ParentNode) =>
+      Array.from(scope.querySelectorAll("main a"), (link) => link.getAttribute("href"));
+    expect(links(page)).toEqual(links(container));
   });
 });
