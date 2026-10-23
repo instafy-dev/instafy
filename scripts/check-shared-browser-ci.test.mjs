@@ -1,5 +1,6 @@
 import { withoutManualCiRouting } from "./lib/manualCiRoutingTestBaseline.mjs";
 import { assertMainOnlySave, assertNoPullRequestCacheSave, cacheStepRuns, CACHE_REFS, withoutMainOnlyCaches } from "./lib/mainOnlyCacheTestBaseline.mjs";
+import { withoutSharedPrerequisiteTimeout } from "./lib/sharedBrowserPrerequisitesTestBaseline.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { createHash } from "node:crypto";
@@ -14,7 +15,8 @@ const aggregateIf = "    if: ${{ always() && !(github.repository == 'instafy-dev
 // They start from the bytes before main-only saves, the shared compiler key and
 // trimmed cargo paths; the current policy is asserted directly below. Each proof
 // rebuilds it, so a cache-policy regression fails that proof, not the module.
-const previousAggregateWorkflow = () => withoutMainOnlyCaches("browser-e2e.yml", workflow).replace(aggregateIf, "    if: ${{ always() }}");
+// The separately checked prerequisite budgets are also reversed exactly.
+const previousAggregateWorkflow = () => withoutSharedPrerequisiteTimeout("browser-e2e.yml", withoutMainOnlyCaches("browser-e2e.yml", workflow)).replace(aggregateIf, "    if: ${{ always() }}");
 const jobs = [
   { key: "shared-profile", label: "public-shared-browser-aggregate", name: "Shared Browser profile E2E", minutes: 5 },
   { key: "shared-profile-lifecycle", label: "public-shared-browser-profile", name: "Shared Browser profile lifecycle", minutes: 30, script: "browser-profile-e2e.mjs" },
@@ -148,6 +150,39 @@ test("each Shared child preserves a complete independent dependency, migrated au
     assert.doesNotMatch(source, /SUPABASE_DATABASE_ONLY|--ignore-scripts|--no-sandbox|--allow-unauthenticated|continue-on-error|--grep|--retries=|--pass-with-no-tests/u);
   }
   assert.doesNotMatch(workflow, /secrets:|secrets\.|NODE_OPTIONS|NODE_TLS_REJECT_UNAUTHORIZED|HTTP_PROXY:|HTTPS_PROXY:/u);
+});
+test("only both Shared prerequisite steps allow ten minutes while network limits and verification remain exact", () => {
+  const name = "Install fixture display, database and compiler prerequisites";
+  const marker = `      - name: ${name}\n`;
+  assert.equal(workflow.split(marker).length - 1, 2);
+  const expected = [
+    marker.trimEnd(),
+    "        timeout-minutes: 10",
+    "        shell: bash",
+    "        run: |",
+    "          set -euo pipefail",
+    "          sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update",
+    "          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends x11-utils sqlite3 postgresql-client build-essential pkg-config libssl-dev clang lld cmake libcap-dev protobuf-compiler",
+    "          for package in x11-utils sqlite3 postgresql-client build-essential pkg-config libssl-dev clang lld cmake libcap-dev protobuf-compiler; do",
+    '            [[ "$(dpkg-query --show --showformat=\'${Status}\' "$package")" == \'install ok installed\' ]]',
+    "          done",
+    "          pkg-config --exists libcap openssl",
+  ].join("\n");
+  for (const job of jobs.filter(job => job.script)) {
+    assert.equal(section(job.key).split(marker).length - 1, 1, job.key);
+    assert.equal(cacheStep(job.key, name), expected, job.key);
+    assert.match(section(job.key), /^    timeout-minutes: 30$/mu);
+  }
+  assert.match(section("shared-profile"), /^    timeout-minutes: 5$/mu);
+  assert.doesNotMatch(section("shared-profile"), /Install fixture display, database and compiler prerequisites/u);
+  const previous = withoutSharedPrerequisiteTimeout("browser-e2e.yml", workflow);
+  assert.equal(previous.split(`${marker}        timeout-minutes: 5\n`).length - 1, 2);
+  assert.equal(previous.replaceAll(`${marker}        timeout-minutes: 5\n`, `${marker}        timeout-minutes: 10\n`), workflow);
+  for (const changed of [
+    workflow.replace(`${marker}        timeout-minutes: 10\n`, `${marker}        timeout-minutes: 11\n`),
+    workflow.replace(marker, ""),
+    workflow + `${marker}        timeout-minutes: 10\n`,
+  ]) assert.throws(() => withoutSharedPrerequisiteTimeout("browser-e2e.yml", changed));
 });
 function withoutPersonalElectronPreparation(source) {
   const step = "      - name: Install the locked Electron binary\n        timeout-minutes: 5\n        env:\n          NODE_USE_ENV_PROXY: \"1\"\n        run: pnpm --filter @instafy/desktop-app exec install-electron\n";

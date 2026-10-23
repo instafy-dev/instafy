@@ -2,6 +2,7 @@ import { withoutManualCiRouting } from "./lib/manualCiRoutingTestBaseline.mjs";
 import { ADDED_BUILD_CONTRACT_TESTS, addedBuildContractTestLine, withoutAddedBuildContractTests } from "./lib/buildContractTestsBaseline.mjs";
 import { cacheStepRuns, CACHE_REFS, withoutMainOnlyCaches } from "./lib/mainOnlyCacheTestBaseline.mjs";
 import { withoutMergeQueue } from "./lib/mergeQueueTestBaseline.mjs";
+import { withoutSharedPrerequisiteTimeout } from "./lib/sharedBrowserPrerequisitesTestBaseline.mjs";
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
@@ -140,7 +141,7 @@ test('only four job if lines differ from the complete reviewed workflows plus th
     }
     // The old guard is reconstructed literally; all routes, needs, inline gates,
     // permissions, concurrency, timeouts and step-level always cleanup stay exact.
-    const original = withoutMainOnlyCaches(workflow.file, workflow.text).replaceAll(aggregateIf, '    if: ${{ always() }}');
+    const original = withoutSharedPrerequisiteTimeout(workflow.file, withoutMainOnlyCaches(workflow.file, workflow.text)).replaceAll(aggregateIf, '    if: ${{ always() }}');
     assert.equal(createHash('sha256').update(original).digest('hex'), workflow.previousHash, workflow.file);
   }
 });
