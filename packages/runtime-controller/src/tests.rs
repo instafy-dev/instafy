@@ -3701,6 +3701,27 @@ async fn scoped_plan_group_status_is_bound_to_token_run_and_conversation() -> an
                 )
                 .await?;
         }
+        // job_a opened a preview card: its grant carries the job it ran in.
+        connection
+            .execute(
+                "insert into runtime_tunnel_grants
+                   (id, project_id, runtime_id, runtime_lease_id, provider, tunnel_id,
+                    hostname, url, status, expires_at, metadata)
+                 values ($1, $2, $3, $4, 'self_hosted', $5, 'card.invalid', 'https://card.invalid',
+                         'active', now() + interval '10 minutes', $6)",
+                &[
+                    &Uuid::new_v4(),
+                    &project_id,
+                    &runtime_id,
+                    &runtime_lease_id,
+                    &format!("card-{job_a}"),
+                    &PgJson(json!({
+                        "title": "Two weeks in the north",
+                        "_instafyActiveJob": {"jobId": job_a}
+                    })),
+                ],
+            )
+            .await?;
     }
 
     let config = build_app_config(
@@ -3761,6 +3782,11 @@ async fn scoped_plan_group_status_is_bound_to_token_run_and_conversation() -> an
         Some(1)
     );
     assert_eq!(allowed_a_payload["workers"][0]["jobId"], json!(job_a));
+    // The lead's checkpoint names the cards a lane opened from this record.
+    assert_eq!(
+        allowed_a_payload["workers"][0]["openedPreviews"],
+        json!([{"title": "Two weeks in the north", "status": "active"}])
+    );
 
     let allowed_legacy_lease_less = app
         .clone()

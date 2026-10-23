@@ -149,6 +149,7 @@ when no must fails. Its score is the share of graded checks that passed.
 | `map_ready` | must | A MapLibre, Mapbox, Leaflet, OpenLayers or Google map rendered with a size |
 | `no_site`, `no_file_changes` | must | Chat cases: no card, no preview listed, no `instafy preview open`; no file changed |
 | `reply_present`, `reply_no_internal_urls`, `reply_no_file_paths` | must | A reply, without localhost, preview or tunnel hosts, and without file or folder paths (links excluded) |
+| `reply_card_exists` | must | A reply that sends the person to a card ("Open it from the card above", "tap the preview card") only when the turn posted one; not graded when the browser did not look for cards |
 | `reply_not_question_only` | must | Pages, and cases that ask for it: no more than half the sentences are questions, so "Built X. Want Y?" passes (a trailing `suggestions` chips block is not counted) |
 | `reply_answers` | must | At least one sentence that is not a question and has six or more words (a CJK character counts as a word). Length does not matter: "Keep it short" is honoured |
 | `reply_assumed`, `reply_language` | must | An `Assumed:` line; the reply reads in the case's language (n/a when too short to tell) |

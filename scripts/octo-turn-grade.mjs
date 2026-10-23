@@ -290,6 +290,10 @@ const REPLY_UNVERIFIED_RE =
   /unverified|not verified|haven[’']?t verified|aren[’']?t verified|isn[’']?t verified|not (?:yet )?(?:checked|confirmed)|check (?:the |current |live )?(?:prices?|times?|timetables?|availability)|estimate|approximate/i;
 
 const REPLY_ASSUMED_RE = /\bassumed(?:\*\*|_)?\s*:/i;
+// A reply that sends the person to a card: "Open it from the card above", "tap the card", "the preview card". Only
+// wording that points at a card as the place to look: "the cashback on this card" or "a SIM card" is not a pointer.
+const REPLY_CARD_POINTER_RE =
+  /\b(?:from|tap|open|click)\s+(?:it\s+(?:from|in|on)\s+)?(?:the|this|that|its)\s+(?:preview\s+|site\s+|page\s+|map\s+)?card\b|\bcards?\s+(?:above|below|in the chat)\b|\bpreview cards?\b|\b(?:desde|en)\s+la\s+tarjeta\b|\btarjeta\s+de\s+(?:arriba|abajo)\b/i;
 
 /** A reply that mostly asks: more than half its sentences are questions. "Built your checklist: 24 items. Want due
  *  dates?" is a result with an offer, not a question-only reply. */
@@ -377,6 +381,8 @@ export function replyStats(text) {
     questions: body ? (body.match(/[?？](?=\s|$|\*|\))/g) ?? []).length : 0,
     // What a vague ask was built on, stated in one line ("Assumed: 2 adults, mid-range, …").
     assumedLine: REPLY_ASSUMED_RE.test(body),
+    // Sends the person to a card ("Open it from the card above").
+    pointsToCard: REPLY_CARD_POINTER_RE.test(body),
     filePaths: hasFilePaths(body),
     statements: statementsOf(body),
     language: detectLanguage(body).language,
@@ -733,6 +739,12 @@ export function gradeCase(caseDef, evidence) {
 
   check(checks, "reply_present", "must", m.replyStats.chars > 0, `${m.replyStats.chars} chars`);
   check(checks, "reply_no_internal_urls", "must", !m.replyStats.forbidden, m.replyStats.forbidden ? "localhost/preview/tunnel/p-label in reply" : "clean");
+  // A reply may send the person to a card only when the turn posted one: "Open it from the card above" with no card
+  // sends them to nothing. Not graded when the browser did not look for cards.
+  if (typeof ui.cardCount === "number" && m.replyStats.chars > 0) {
+    check(checks, "reply_card_exists", "must", !m.replyStats.pointsToCard || cards > 0,
+      m.replyStats.pointsToCard ? `points to a card; cards posted ${cards}` : "no card mentioned");
+  }
   if (!expect.allowFilePaths) {
     check(checks, "reply_no_file_paths", "must", !m.replyStats.filePaths, m.replyStats.filePaths ? "a file or folder path in the reply" : "clean");
   }

@@ -122,7 +122,44 @@ test("a page found only through the space's previews opens, but the missing card
   assert.equal(byId(result, "site_opens").ok, true);
   assert.match(byId(result, "site_opens").detail, /found through the previews/);
   assert.equal(byId(result, "site_shape:tableRows").ok, true);
-  assert.deepEqual(result.mustFailures, ["card_posted"]);
+  // The reply still says "Open it from the card above", which sends the person to nothing.
+  assert.deepEqual(result.mustFailures, ["card_posted", "reply_card_exists"]);
+});
+
+test("a reply that sends the person to a card fails when the turn posted none, in any case", () => {
+  // r10-finish2 taiwan-1: the builder never opened its preview, and the lead's reply still ended with this.
+  const pointer = "The map is ready, but Hualien and Taitung are missing. Open it from the card above.";
+  const noCard = { previewsAvailable: true, previewsListed: 0, cardCount: 0, opened: false };
+  const result = gradeCase(TABLE_CASE, built({ summary: pointer }, noCard));
+  assert.equal(byId(result, "reply_card_exists").ok, false);
+  assert.equal(byId(result, "reply_card_exists").detail, "points to a card; cards posted 0");
+  assert.ok(result.mustFailures.includes("reply_card_exists"));
+  // The same reply with its card passes.
+  assert.equal(byId(gradeCase(TABLE_CASE, built({ summary: pointer })), "reply_card_exists").ok, true);
+  // A reply that says what was not shown, without a card, passes.
+  const honest = "The research is done, but the map was not built: Hualien and Taitung are missing.";
+  assert.equal(byId(gradeCase(TABLE_CASE, built({ summary: honest }, noCard)), "reply_card_exists").ok, true);
+  // A chat answer is held to it too.
+  assert.equal(byId(gradeCase(CHAT_CASE, chatTurn("Here is the phrase. Tap the preview card to hear it.")), "reply_card_exists").ok, false);
+  // Without the browser's card count it is not graded.
+  assert.equal(byId(gradeCase(TABLE_CASE, built({ summary: pointer }, {})), "reply_card_exists"), undefined);
+});
+
+test("only wording that points at a card counts as sending the person to one", () => {
+  for (const text of [
+    "Open it from the card above.",
+    "Open it from the card.",
+    "Tap the card to open the map.",
+    "Open the preview card in the chat.",
+    "Click the card below.",
+    "Ábrelo desde la tarjeta de arriba.",
+  ]) assert.equal(replyStats(text).pointsToCard, true, text);
+  for (const text of [
+    "The cashback on this card is 2% on groceries.",
+    "Buy a SIM card at the airport.",
+    "A rail card saves a third on most trains.",
+    "Pay by card or cash at the door.",
+  ]) assert.equal(replyStats(text).pointsToCard, false, text);
 });
 
 test("on a server without site previews the card is n/a, and an unseen page still fails (fail closed)", () => {

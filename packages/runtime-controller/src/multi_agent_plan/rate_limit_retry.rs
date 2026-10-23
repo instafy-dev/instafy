@@ -379,6 +379,7 @@ mod tests {
             paths: Vec::new(),
             initial_evidence_gaps: None,
             last_message: None,
+            previews: Vec::new(),
             acting_tool_count: 0,
             retried_as: None,
             rerun_of: None,
