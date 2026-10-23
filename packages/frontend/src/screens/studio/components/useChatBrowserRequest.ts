@@ -36,6 +36,7 @@ import {
   type BrowserRequestCardState,
   type BrowserRequestHost,
 } from "./browserRequest";
+import { SHARED_BROWSER_HOST_COPY, SHARED_BROWSER_HOST_WAIT_TIMEOUT_MS } from "./sharedBrowserHostAttach";
 import type { BrowserTransport } from "./usePersonalBrowserBridge";
 import type { SharedBrowserHostRefresh } from "./useSharedBrowserHostSnapshot";
 
@@ -60,8 +61,8 @@ export type BrowserAutoStartOptions = {
   activeRunIds: ReadonlySet<string>;
   /**
    * Why Studio leaves this conversation's cards to the person right now (a
-   * draft in the composer, a narrow layout, side-by-side view off), or null
-   * when it may start one.
+   * draft in the composer), or null when it may start one. The layout never
+   * holds a card.
    */
   blocked: { reason: string | null } | null;
   /** Another person or agent run holds the browser. */
@@ -84,6 +85,31 @@ export type BrowserAutoStartOptions = {
   revision: string;
 };
 
+/**
+ * Instafy's browser on the conversation's own machine, as a press and a card
+ * that continues in an open browser see it.
+ */
+export type SharedBrowserPressHost = {
+  /**
+   * The conversation's machine when it starts Instafy's browser on demand
+   * (conversationBrowserHostId); null otherwise.
+   */
+  runtimeId: string | null;
+  /** Reads that browser again (see useSharedBrowserHostSnapshot). */
+  refresh?: SharedBrowserHostRefresh;
+  /**
+   * Asks the open browser view to attach to its machine again, as the
+   * person's own Retry does: it starts the browser when it went idle, and
+   * shows why when it cannot.
+   */
+  reattach?: () => void;
+  /** Another agent run or person holds the browser: a press never attaches again then. */
+  heldByOther: boolean;
+};
+
+/** The error Instafy's browser view shows, and when it appeared. */
+export type SharedBrowserViewError = { message: string; atMs: number };
+
 type Options = {
   identity: string;
   messages: ChatMessage[];
@@ -101,6 +127,15 @@ type Options = {
   sharedRuntimeId?: string | null;
   /** The Workspace browser is already known not to open here; unknown counts as available. */
   sharedUnavailable: boolean;
+  /** Instafy's browser on the conversation's machine; null when there is none. */
+  sharedHost?: SharedBrowserPressHost | null;
+  /** The error Instafy's browser view shows right now; null when none. */
+  sharedError?: SharedBrowserViewError | null;
+  /**
+   * Since when Instafy's browser has kept answering that it is not running
+   * yet, in one unbroken run of page reads; null once a read succeeds.
+   */
+  sharedNotReadySinceMs?: number | null;
   /** The agent the notice names, as in "Octo opened Instafy's browser". */
   agentName?: string;
   activate: (transport: BrowserTransport, plan: BrowserAutoStartPlan | null) => void;
@@ -121,6 +156,39 @@ export const BROWSER_REQUEST_HANDOFF_DEADLINE_MS = 120_000;
  * space's machine first (up to three minutes) and then its browser.
  */
 export const BROWSER_REQUEST_PRESS_DEADLINE_MS = 240_000;
+/**
+ * A press for Instafy's browser on the conversation's machine reads that
+ * browser this long after it opened when it was not open already, and then
+ * this often while it waits, so a browser that cannot open says so at once.
+ */
+export const BROWSER_PRESS_HOST_CHECK_MS = 3_000;
+/**
+ * How long a browser the press opened has to start Instafy's browser itself
+ * before the press asks it to attach again.
+ */
+export const BROWSER_PRESS_REATTACH_AFTER_MS = 10_000;
+
+export const BROWSER_REQUEST_COPY = {
+  browserFailed: "Instafy's browser could not open. See the browser for details, then try again.",
+} as const;
+
+const SHARED_BROWSER_HOST_MESSAGES = new Set<string>(Object.values(SHARED_BROWSER_HOST_COPY));
+
+/** What a card says when the browser view could not open: its own words when they are plain. */
+function browserViewFailure(message: string): string {
+  return SHARED_BROWSER_HOST_MESSAGES.has(message) ? message : BROWSER_REQUEST_COPY.browserFailed;
+}
+
+/**
+ * The machine Instafy's browser is open on, when that is the conversation's
+ * own machine with Instafy's browser on demand; null otherwise.
+ */
+function openSharedBrowserHostId(options: Options): string | null {
+  const hostId = options.sharedHost?.runtimeId ?? null;
+  return options.open && options.transport === "shared" && hostId && (options.sharedRuntimeId ?? null) === hostId
+    ? hostId
+    : null;
+}
 
 function hostOf(options: Options): BrowserRequestHost {
   return {
@@ -199,8 +267,11 @@ function autoStartStillApplies(current: Options, key: string): boolean {
  * - never for a card a browser turn sent, so a pause or a denial cannot loop;
  * - for an address the person could have seen ({@link browserAutoStartAddressesSeen});
  * - once that run is finished, and once the tab is visible;
- * - once per card on this page, at most once per conversation in ten minutes,
- *   and never after the person closed, paused or stopped the browser there;
+ * - once per card on this page, at most one start that opens the browser per
+ *   conversation in ten minutes (a card that continues in Instafy's browser
+ *   while it is open on the conversation's machine opens nothing, so the
+ *   window does not hold it), and never after the person closed, paused or
+ *   stopped the browser there;
  * - only where browserAutoStartPlan allows it: the browser in the desktop app
  *   for a person on their own AI, or Instafy's browser on the conversation's
  *   own machine in a space the controller covers, when nobody else has it,
@@ -214,6 +285,16 @@ function autoStartStillApplies(current: Options, key: string): boolean {
  *   bound ends every wait.
  * A start opens with the person's own approval settings, exactly as a press
  * does. A failed start leaves the button and says why.
+ *
+ * A press for Instafy's browser never waits silently: when the browser view
+ * shows an error, or Instafy's browser keeps answering that it is not
+ * running for two minutes, the card says so at once. On the conversation's
+ * machine it also reads that browser (at once when it was open already,
+ * otherwise after three seconds, then every three seconds): a poisoned one,
+ * or one that failed again after a new start, ends the press with the
+ * reason. A browser that was open already, or whose machine's browser went
+ * idle, stopped or failed, is asked once to attach again, never while
+ * another run or person holds it.
  */
 export function useChatBrowserRequest(options: Options) {
   const latest = useRef(options);
@@ -267,6 +348,11 @@ export function useChatBrowserRequest(options: Options) {
       throw new BrowserAutoStartDropped();
     }
     const attachRuntimeId = plan?.kind === "attach" ? plan.runtimeId : null;
+    // A press for Instafy's browser reads it while it waits, and may ask the
+    // browser view to attach again; an automatic start never does either.
+    const pressed = !autoStarted && transport === "shared";
+    const wasOpen = captured.open && captured.transport === "shared";
+    const startedAtMs = Date.now();
     pending.current = true;
     try {
       captured.activate(transport, plan);
@@ -281,6 +367,17 @@ export function useChatBrowserRequest(options: Options) {
       let attachBound = false;
       let hostReading: Awaited<ReturnType<SharedBrowserHostRefresh>> = null;
       let hostCheckedAtMs = Number.NEGATIVE_INFINITY;
+      // A press: when it asked the browser view to attach again (once at
+      // most), and when it last read the browser.
+      let reattachedAtMs: number | null = null;
+      let pressCheckedAtMs = Number.NEGATIVE_INFINITY;
+      const reattach = () => {
+        const sharedHost = latest.current.sharedHost;
+        // Never while another run or person holds the browser.
+        if (reattachedAtMs !== null || !sharedHost?.reattach || sharedHost.heldByOther) return;
+        reattachedAtMs = Date.now();
+        sharedHost.reattach();
+      };
       // Let React commit the chosen surface before considering a cached
       // ready runtime. Identity, closure and explicit location changes cancel
       // the handoff instead of sending it to a different browser.
@@ -365,6 +462,57 @@ export function useChatBrowserRequest(options: Options) {
           });
           if (!sent) throw new Error("The browser task was not sent. You can retry from its message.");
           return;
+        }
+        if (transport === "shared" && activated) {
+          // The browser view shows why it cannot open: the card says so now
+          // instead of waiting out the deadline. An error from before this
+          // start is not this start's answer.
+          const viewError = current.sharedError ?? null;
+          if (viewError && viewError.atMs >= startedAtMs) throw new Error(browserViewFailure(viewError.message));
+          // Instafy's browser kept answering that it is not running.
+          const notReadySince = current.sharedNotReadySinceMs ?? null;
+          if (notReadySince !== null &&
+              Date.now() - Math.max(notReadySince, startedAtMs) >= SHARED_BROWSER_HOST_WAIT_TIMEOUT_MS) {
+            throw new Error(SHARED_BROWSER_HOST_COPY.didNotStart);
+          }
+        }
+        if (pressed && activated) {
+          const sharedHost = current.sharedHost;
+          const readable = Boolean(sharedHost?.refresh && sharedHost.runtimeId) &&
+            (current.sharedRuntimeId ?? null) === sharedHost?.runtimeId;
+          if (!readable) {
+            // Not Instafy's browser on the conversation's machine: a browser
+            // that was open already and still shows no page attaches again.
+            if (wasOpen) reattach();
+          } else {
+            const now = Date.now();
+            if ((wasOpen || now - activatedAtMs >= BROWSER_PRESS_HOST_CHECK_MS) &&
+                now - pressCheckedAtMs >= BROWSER_PRESS_HOST_CHECK_MS) {
+              pressCheckedAtMs = now;
+              const reading = await settledBefore(sharedHost!.refresh!({ force: true }), deadline);
+              const snapshot = reading && reading.fetchedAtMs >= startedAtMs ? reading.snapshot : null;
+              if (snapshot) {
+                if (snapshot.state === "poisoned") throw new Error(SHARED_BROWSER_HOST_COPY.poisoned);
+                // It failed again after the browser view was asked to start it.
+                if (snapshot.state === "failed" && reattachedAtMs !== null && reading!.fetchedAtMs >= reattachedAtMs) {
+                  throw new Error(SHARED_BROWSER_HOST_COPY.didNotStart);
+                }
+                // Attach again when the browser was open already, or when its
+                // browser went idle, is stopping or failed after the view had
+                // its chance to start it; never while another person's run
+                // works in it.
+                const otherRun = snapshot.agentRunActive && !snapshot.agentRunStartedByYou;
+                const stalled = snapshot.state === "idle" || snapshot.state === "stopping" || snapshot.state === "failed";
+                if (!otherRun && (wasOpen || (stalled && Date.now() - activatedAtMs >= BROWSER_PRESS_REATTACH_AFTER_MS))) {
+                  reattach();
+                }
+              } else if (wasOpen) {
+                // No reading: attach again anyway; the view says why it cannot.
+                reattach();
+              }
+              continue;
+            }
+          }
         }
         if (Date.now() >= deadline) {
           throw new Error(autoStarted
@@ -498,7 +646,15 @@ export function useChatBrowserRequest(options: Options) {
       setCardState(key, { kind: "button", reason });
     };
     const conversation = current.identity;
-    if (isBrowserAutoStartDeclined(conversation) || browserAutoStartedRecently(conversation)) {
+    if (isBrowserAutoStartDeclined(conversation)) {
+      leave(null);
+      return false;
+    }
+    // A card that continues in Instafy's browser while it is open on the
+    // conversation's machine starts nothing new, so the once-per-conversation
+    // window does not hold it; every other check still does.
+    const openHostId = openSharedBrowserHostId(current);
+    if (!openHostId && browserAutoStartedRecently(conversation)) {
       leave(null);
       return false;
     }
@@ -538,6 +694,12 @@ export function useChatBrowserRequest(options: Options) {
       // In use for now: read the browser again until it is free.
       return plan.reason === BROWSER_AUTO_START_COPY.hostInUse;
     }
+    // Only a continuation in that same open browser skips the window.
+    if (openHostId && (plan.kind !== "attach" || plan.runtimeId !== openHostId) &&
+        browserAutoStartedRecently(conversation)) {
+      leave(null);
+      return false;
+    }
     if (!claimBrowserAutoStart(key)) return false;
     recordBrowserAutoStart(conversation);
     setCardState(key, { kind: "opening", note: null });
@@ -570,7 +732,9 @@ export function useChatBrowserRequest(options: Options) {
     options.canWrite,
     options.identity,
     options.messages,
+    options.open,
     options.ready,
+    options.sharedRuntimeId,
     setCardState,
     start,
     visible,

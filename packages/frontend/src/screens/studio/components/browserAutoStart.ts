@@ -72,6 +72,7 @@ export const BROWSER_AUTO_START_COPY = {
   hostFailed: "Instafy's browser stopped unexpectedly. Open it to start it again.",
   hostPoisoned: "Instafy's browser needs this space's machine to restart before it can open again.",
   presenceUnavailable: "Studio could not check who else is in Instafy's browser. Open it from the message to continue.",
+  draftHeld: "Opens by itself once your draft is empty.",
 } as const;
 
 /** How old a reading of Instafy's browser on the space's machine may be for a decision. */
@@ -244,16 +245,14 @@ export function browserAutoStartHeldByOther(input: {
 }
 
 /**
- * Whether the person's draft or layout leaves a card to them for now: a draft
- * in the composer, a layout too narrow to show the browser beside the chat, or
- * side-by-side view turned off, where the browser would cover the chat.
+ * Whether the person's draft leaves a card to them for now: Studio does not
+ * open the browser over a message the person is still writing. The layout
+ * never holds a card (owner decision, Oct 19: "Always, no prompt"): in a
+ * narrow pane or with side-by-side view off, the browser takes the view, as a
+ * press does, and the chat stays one tab away.
  */
-export function browserAutoStartHeldByComposerOrLayout(input: {
-  draft: string;
-  wideSurfaces: boolean;
-  splitView: boolean;
-}): boolean {
-  return input.draft.trim().length > 0 || !input.wideSurfaces || !input.splitView;
+export function browserAutoStartHeldByDraft(input: { draft: string }): boolean {
+  return input.draft.trim().length > 0;
 }
 
 /**
@@ -403,7 +402,11 @@ const autoStartedAt = new Map<string, number>();
 const declinedConversations = new Set<string>();
 const MAX_REMEMBERED = 500;
 
-/** One automatic start per conversation in this window. */
+/**
+ * One automatic start that opens the browser per conversation in this window.
+ * A card that continues in Instafy's browser while it is already open on the
+ * conversation's machine starts nothing, so this window does not apply to it.
+ */
 export const BROWSER_AUTO_START_CONVERSATION_WINDOW_MS = 10 * 60_000;
 
 function remember<T>(collection: Set<T> | Map<T, unknown>) {

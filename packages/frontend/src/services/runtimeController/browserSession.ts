@@ -637,6 +637,7 @@ export async function fetchRuntimeBrowserSessionPages(params: {
   preferRuntimeId?: string | null;
   accessToken?: string | null;
   includePlaceholder?: boolean;
+  signal?: AbortSignal;
 }): Promise<RuntimeBrowserSessionPage[] | null> {
   const token = await requestOriginAccessToken({
     projectId: params.projectId,
@@ -650,6 +651,9 @@ export async function fetchRuntimeBrowserSessionPages(params: {
   if (!token) {
     return null;
   }
+  // The token request keeps its own timeout and shared in-flight request; the
+  // signal ends the page read itself.
+  params.signal?.throwIfAborted();
 
   const endpoint = buildOriginEndpointUrl(token.endpoint, "/browser/pages");
   const response = await fetch(
@@ -659,6 +663,7 @@ export async function fetchRuntimeBrowserSessionPages(params: {
         authorization: `Bearer ${token.token}`,
         accept: "application/json",
       },
+      signal: params.signal,
     },
   );
 

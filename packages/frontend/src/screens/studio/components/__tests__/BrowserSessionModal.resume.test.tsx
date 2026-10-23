@@ -321,12 +321,14 @@ describe("Shared modal attach mode", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
   async function render(options: { resumeRuntimeId?: string | null; canControlBrowser?: boolean; canClearBrowserData?: boolean;
-    attachOnly?: boolean; spaceBusy?: boolean; conversationRuntimeId?: string | null; openedByPerson?: boolean } = {}) {
+    attachOnly?: boolean; spaceBusy?: boolean; conversationRuntimeId?: string | null; openedByPerson?: boolean;
+    attachRequestToken?: number; onConnectionErrorChange?: (error: string | null) => void } = {}) {
     await act(async () => { root.render(<BrowserSessionModal isOpen onOpenChange={vi.fn()} projectId={projectId}
       currentUserId="user-1" preferRuntimeId={null} resumeRuntimeId={options.resumeRuntimeId ?? null} onRuntimeIdResolved={onResolved}
       presentation="docked" fillContainer canControlBrowser={options.canControlBrowser ?? true} canClearBrowserData={options.canClearBrowserData ?? false}
       ensureSpaceMachine={ensureSpaceMachine} conversationRuntimeId={options.conversationRuntimeId ?? null}
       attachOnly={options.attachOnly ?? false} spaceBusy={options.spaceBusy ?? false} openedByPerson={options.openedByPerson ?? true}
+      attachRequestToken={options.attachRequestToken ?? 0} onConnectionErrorChange={options.onConnectionErrorChange ?? null}
       sharedBrowserCapabilitiesResolved={false} />); });
   }
   const settle = (ms = 0) => act(async () => new Promise<void>(resolve => setTimeout(resolve, ms)));
@@ -393,6 +395,56 @@ describe("Shared modal attach mode", () => {
     await settle();
     expect(text()).toContain(SHARED_BROWSER_HOST_COPY.askBuilder);
     expect(mocks.startHost).not.toHaveBeenCalled();
+  });
+
+  it("attaches again for a press while open: it reads the host again and starts it once it went idle", async () => {
+    mocks.fetchStatus.mockResolvedValue(covered(hostEntry()));
+    await render();
+    await settle();
+    expect(mocks.startHost).not.toHaveBeenCalled();
+    const readsBefore = mocks.fetchHost.mock.calls.length;
+    const statusBefore = mocks.fetchStatus.mock.calls.length;
+    // The browser went idle after the last run.
+    mocks.fetchHost.mockReset().mockResolvedValueOnce(host("idle")).mockResolvedValue(host("ready"));
+    await render({ attachRequestToken: 1 });
+    await settle(700);
+    expect(mocks.fetchStatus.mock.calls.length).toBeGreaterThan(statusBefore);
+    expect(mocks.fetchHost.mock.calls.length).toBeGreaterThan(0);
+    expect(readsBefore).toBeGreaterThan(0);
+    expect(mocks.startHost).toHaveBeenCalledTimes(1);
+    expect(text()).not.toContain(SHARED_BROWSER_HOST_COPY.didNotStart);
+    // The same token again is not a new press.
+    const statusAfter = mocks.fetchStatus.mock.calls.length;
+    await render({ attachRequestToken: 1 });
+    await settle();
+    expect(mocks.fetchStatus.mock.calls.length).toBe(statusAfter);
+  });
+
+  it("lets a press start the machine again in a browser Studio opened by itself", async () => {
+    mocks.fetchStatus.mockResolvedValue(covered(stoppedHost()));
+    await render({ attachOnly: true, resumeRuntimeId: hostId });
+    await settle();
+    expect(text()).toContain(SHARED_BROWSER_HOST_COPY.machineStopped);
+    expect(ensureSpaceMachine).not.toHaveBeenCalled();
+    mocks.fetchStatus.mockReset()
+      .mockResolvedValueOnce(covered(stoppedHost()))
+      .mockResolvedValue(covered(hostEntry()));
+    await render({ attachOnly: true, resumeRuntimeId: hostId, attachRequestToken: 1 });
+    await settle();
+    expect(ensureSpaceMachine).toHaveBeenCalledTimes(1);
+    expect(onResolved).toHaveBeenLastCalledWith(hostId);
+  });
+
+  it("tells the card the error it shows, and nothing once it closes", async () => {
+    const onConnectionErrorChange = vi.fn();
+    mocks.fetchStatus.mockResolvedValue(covered(hostEntry()));
+    mocks.fetchHost.mockResolvedValue(host("poisoned"));
+    await render({ onConnectionErrorChange });
+    await settle();
+    expect(onConnectionErrorChange).toHaveBeenLastCalledWith(SHARED_BROWSER_HOST_COPY.poisoned);
+    await act(async () => root.unmount());
+    expect(onConnectionErrorChange).toHaveBeenLastCalledWith(null);
+    root = createRoot(container);
   });
 
   it("says a poisoned host needs this space's machine to restart", async () => {

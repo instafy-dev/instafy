@@ -838,9 +838,17 @@ unless the policy is `"covered"`.
   shows the space's browser, so generic recovery keeps the space's machine up.
   **Start new session** and the runtime-limit takeover are hidden.
 - **Pages while it starts.** The origin answers 503 `browser_host_not_ready`
-  until the browser runs. An open browser keeps polling quietly. A hidden one
-  suspends as before, so an idle browser behind a hidden tab is never polled and
-  never started. Only the open browser view starts it.
+  until the browser runs. An open browser keeps polling quietly, for at most
+  120 s of unbroken `browser_host_not_ready` answers (token and gateway
+  failures, as while the machine itself starts, are not counted). After that the
+  address bar reads "Instafy's browser did not start. Try again." in place of
+  "Connecting to Shared Browser…", and a card waiting on it says the same. A
+  page read that does not answer in 10 s is given up and asked again. A hidden
+  one suspends as before, so an idle browser behind a hidden tab is never polled
+  and never started. Only the open browser view starts it.
+- **Bounded requests.** Each `GET browser/host` and `POST browser/host/start` of
+  the 120 s wait ends after 10 s, or at the end of the wait, and is polled again
+  like a gateway error, so a hung request cannot outlast the wait.
 - **Cold press.** When the space is covered and a press finds nothing to open,
   or the exact pin names the space's own machine while it is stopped or no
   longer listed, Studio first starts that machine through the generic hosted
@@ -851,6 +859,27 @@ unless the policy is `"covered"`.
   first live host. If the machine comes up without `sharedBrowserHost`, Studio
   takes the legacy path at once. A press for Instafy's browser may take up to
   four minutes in all; the browser on this device keeps two.
+- **Press on a card.** A press never waits silently. Once the browser view
+  shows an error, the card says so at once: in that error's words when they are
+  plain (such as "This space's machine is stopping. Try again in a moment."),
+  otherwise "Instafy's browser could not open. See the browser for details,
+  then try again." On the conversation's own machine the press also reads
+  `GET browser/host`, at once when the browser was already open, otherwise
+  after 3 s, then every 3 s: a poisoned browser ends the press with the
+  restart copy, and one that failed again after a new start with "Instafy's
+  browser did not start. Try again." A browser that was already open but shows
+  no page, or whose machine's browser went idle, is stopping or failed (after
+  the view had 10 s to start it), is asked once to attach again, as the
+  person's own Retry does: it reads the host again, starts it when idle, and
+  keeps the last frame meanwhile. A press never attaches again while another
+  run or person holds the browser, and an automatic start never does.
+- **Viewers reconnect within a bound.** A fatal viewer error with no other
+  viewer to fall back to schedules a reconnect (at most five within a minute,
+  also when a connection succeeds in between) and then shows "Browser session
+  disconnected. Click Retry to reconnect." An error and the socket closing
+  after it count once. A browser that has its connection but waits for its
+  roster to know which viewer this participant may use gives up after 20 s
+  with "The browser did not finish connecting. Try again."
 - **Only the person starts the machine.** An open Studio restored by itself (a
   reload, or a return to a conversation whose browser was left open) never
   wakes the space's machine: it says the machine is not running and starts it
@@ -878,6 +907,13 @@ unless the policy is `"covered"`.
   run works in it. A stopped machine, a machine
   without `sharedBrowserHost` and an uncovered space keep the press. The
   person's own Retry or press inside the browser still may start the machine.
+  Only a draft in the composer holds a card ("Opens by itself once your draft
+  is empty."); a narrow pane or side-by-side view turned off does not, and the
+  browser takes the view as a press does. A card that asks to continue in
+  Instafy's browser while that same browser is already open on the
+  conversation's machine continues there without a press, even within ten
+  minutes of the last automatic start; the declined check, the browser-turn
+  check and every check before sending still apply.
 - **Stale pins.** A pin to a session that is gone moves to the space's own live
   browser when there is one.
 - **Clear data restarts the same machine.** The controller call is unchanged.

@@ -57,6 +57,8 @@ export function useChatComposerBrowserTargeting({
   const {
     pages: liveBrowserSessionPages,
     resolved: liveBrowserSessionPagesResolved,
+    hostNotReady: liveBrowserHostNotReady,
+    hostNotReadySinceMs: liveBrowserHostNotReadySinceMs,
     capabilities: sharedBrowserCapabilities,
     capabilitiesResolved: sharedBrowserCapabilitiesResolved,
     capabilitiesUnsupported: sharedBrowserCapabilitiesUnsupported,
@@ -218,6 +220,8 @@ export function useChatComposerBrowserTargeting({
     sharedBrowserCapabilitiesUnsupported,
     sharedBrowserChromePages: sharedBrowserActivated ? liveBrowserSessionPages : [],
     sharedBrowserChromeResolved: sharedBrowserActivated && liveBrowserSessionPagesResolved,
+    sharedBrowserHostNotReady: sharedBrowserActivated && liveBrowserHostNotReady,
+    sharedBrowserHostNotReadySinceMs: sharedBrowserActivated ? liveBrowserHostNotReadySinceMs : null,
     sharedBrowserCommandPending,
     sharedBrowserCommandError,
     clearSharedBrowserCommandError,

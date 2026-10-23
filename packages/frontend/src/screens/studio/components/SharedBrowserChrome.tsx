@@ -24,6 +24,11 @@ export type SharedBrowserChromeProps = {
   historyActive?: boolean;
   pages: BrowserSessionPage[];
   resolved: boolean;
+  /**
+   * Shown in place of "Connecting to Shared Browser…" while the pages are not
+   * resolved, when the browser is known not to have started.
+   */
+  unavailableMessage?: string | null;
   pendingAction: string | null;
   error: string | null;
   onNavigate: (pageId: string, url: string) => void;
@@ -95,6 +100,7 @@ export function SharedBrowserChrome({
   historyActive = true,
   pages,
   resolved,
+  unavailableMessage = null,
   pendingAction,
   error,
   onNavigate,
@@ -281,7 +287,7 @@ export function SharedBrowserChrome({
                 currentPage={resolved && historyActive ? activePage : null}
                 onNavigate={navigateToAddress}
                 errorMessage={displayedError}
-                placeholder={resolved ? "Enter an address" : "Connecting to Shared Browser…"}
+                placeholder={resolved ? "Enter an address" : unavailableMessage ?? "Connecting to Shared Browser…"}
                 onBlur={(event) => {
                   const nextFocus = event.relatedTarget;
                   if (
