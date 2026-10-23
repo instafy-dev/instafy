@@ -1,4 +1,5 @@
-//! A turn that stopped on a short upstream rate limit before it acted goes back to the queue once.
+//! A turn that stopped on a short upstream rate limit before it acted goes back to the queue, at
+//! most [`MAX_RERUNS`] times.
 //!
 //! A team's lane that hits a short provider rate limit runs once more in its group
 //! (`multi_agent_plan::rate_limit_retry`). Any other turn failed outright: a person's turn, which
@@ -20,15 +21,19 @@
 //! - The turn did not act: no command (other than the routing pre-observation the runtime itself
 //!   runs before the model), MCP tool call or file change, no visible reply, and no job it
 //!   started. Searching the web is not acting. A second run on top of an effect could repeat it.
-//! - Once per job: the job keeps `payload.rateLimitRetry`, so its second rate limit fails it.
+//! - At most [`MAX_RERUNS`] times per job: the job keeps `payload.rateLimitRetry` with the number
+//!   of `attempts`, so the rate limit after the last one fails it. One re-run was not enough when
+//!   four teams started at once on an upstream that takes two requests per 30 s: the re-run landed
+//!   in a window the other teams' lanes had used up (run r11-pacing).
 //! - Not a team's lane or follow-on agent (its group retries it), not a terminal command, and not
 //!   a turn bound to a person's own or a shared browser, which a stop does not move either.
 //!
 //! The hold is the stated wait plus a jitter fixed per job, as for lanes, and never ends before
 //! the cooldown the pacing (`upstream_pacing`) holds the job's upstream in, which the attempt's
-//! own rate limit also teaches. Billing does not change: an attempt that failed this way reported
-//! no finished model turn, so it billed nothing beyond the send's reserve, which the requeued job
-//! keeps for the attempt that runs.
+//! own rate limit also teaches. Billing does not change: the send's one flat reserve stays with the
+//! job and covers every attempt, as it does for a turn a runtime stop puts back. An attempt that
+//! failed this way finished no model turn, so it has no turn usage to settle; a routing call it
+//! made before the refused request is covered by that reserve, as a failed turn's would be.
 
 use std::time::Duration;
 
@@ -42,8 +47,10 @@ use crate::AppState;
 /// The reason the run of a requeued turn records (`metadata.interruption.reason`) and the job
 /// (`payload.requeuedReason`).
 pub(crate) const REQUEUE_REASON: &str = "upstream_rate_limit";
-/// Where the job records its retry; its presence is what makes the retry once only.
+/// Where the job records its retries; its `attempts` is what bounds them.
 pub(crate) const PAYLOAD_KEY: &str = "rateLimitRetry";
+/// How many times one job runs again after a short rate limit.
+pub(crate) const MAX_RERUNS: u64 = 3;
 /// The longest hold: the pacing's longest cooldown.
 const MAX_HOLD: Duration = Duration::from_secs(60);
 /// The runtime's own routing pre-observation, which it runs before the model (`agent.rs`).
@@ -61,9 +68,20 @@ pub(crate) struct EndedTurn<'a> {
     pub(crate) acted: bool,
 }
 
+/// How many times the job already went back to the queue after a short rate limit. A record
+/// without `attempts` was written when a job ran again once only.
+pub(crate) fn reruns_so_far(payload: &JsonValue) -> u64 {
+    payload.get(PAYLOAD_KEY).map_or(0, |retry| {
+        retry
+            .get("attempts")
+            .and_then(JsonValue::as_u64)
+            .unwrap_or(1)
+    })
+}
+
 /// The wait the turn's failure states when the turn goes back to the queue (see the module).
 pub(crate) fn retry_wait(turn: &EndedTurn<'_>) -> Option<Duration> {
-    if turn.status != "failed" || turn.acted || turn.payload.get(PAYLOAD_KEY).is_some() {
+    if turn.status != "failed" || turn.acted || reruns_so_far(turn.payload) >= MAX_RERUNS {
         return None;
     }
     let plan_role = turn
@@ -172,10 +190,12 @@ pub(crate) async fn maybe_requeue(
     let cooldown_left = crate::upstream_pacing::cooldown_left(transaction, job_id).await?;
     let hold = hold(wait, job_id, cooldown_left);
     let error = error.unwrap_or_default().to_string();
+    let attempts = reruns_so_far(payload) + 1;
     let retry = json!({
         "waitMs": wait.as_millis() as u64,
         "holdMs": hold.as_millis() as u64,
         "error": error,
+        "attempts": attempts,
     });
     let requeued = transaction
         .execute(
@@ -221,7 +241,9 @@ pub(crate) async fn maybe_requeue(
         %job_id,
         wait_ms = wait.as_millis() as u64,
         hold_ms = hold.as_millis() as u64,
-        "a turn that stopped on a short provider rate limit before it acted goes back to the queue once"
+        attempt = attempts,
+        max_attempts = MAX_RERUNS,
+        "a turn that stopped on a short provider rate limit before it acted goes back to the queue"
     );
     Ok(Some(RequeuedTurn { job_id, error }))
 }
@@ -337,12 +359,27 @@ mod tests {
         acted.acted = true;
         assert_eq!(retry_wait(&acted), None, "acted");
 
-        let retried = json!({"metadata": {}, PAYLOAD_KEY: {"waitMs": 5_000}});
-        assert_eq!(
-            retry_wait(&turn(&retried, RATE_LIMITED)),
-            None,
-            "once per job"
+        let again =
+            json!({"metadata": {}, PAYLOAD_KEY: {"waitMs": 5_000, "attempts": MAX_RERUNS - 1}});
+        assert!(
+            retry_wait(&turn(&again, RATE_LIMITED)).is_some(),
+            "it runs again until its last re-run"
         );
+        let spent = json!({"metadata": {}, PAYLOAD_KEY: {"waitMs": 5_000, "attempts": MAX_RERUNS}});
+        assert_eq!(
+            retry_wait(&turn(&spent, RATE_LIMITED)),
+            None,
+            "at most MAX_RERUNS times per job"
+        );
+        let mut legacy = json!({"metadata": {}, PAYLOAD_KEY: {"waitMs": 5_000}});
+        assert_eq!(
+            reruns_so_far(&legacy),
+            1,
+            "a record from before the count is one re-run"
+        );
+        legacy[PAYLOAD_KEY]["attempts"] = json!("two");
+        assert_eq!(reruns_so_far(&legacy), 1);
+        assert_eq!(reruns_so_far(&payload), 0);
 
         let lane = json!({"metadata": {"multiAgentPlan": {"role": "worker"}}});
         assert_eq!(

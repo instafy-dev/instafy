@@ -743,6 +743,8 @@ test("a lead turn put back in the queue after a short rate limit says so in its 
   assert.equal(t.jobs[0].requeuedHoldSec, 31.3);
   assert.match(renderTiming(t).join("\n"), /lead @octo: completed\/succeeded, waited 45 s, ran 355 s, started again after a short rate limit \(held 31\.3 s\)/);
   assert.equal(timingOf([job({ id: "plain" })]).jobs[0].requeuedHoldSec, null);
+  const twice = { ...lead, turnRateLimitRetry: { ...lead.turnRateLimitRetry, holdMs: 40000, attempts: 2 } };
+  assert.match(renderTiming(timingOf([twice])).join("\n"), /started again 2 times after a short rate limit \(last held 40 s\)/);
 });
 
 // ---------------------------------------------------------------------------------------------------------------
