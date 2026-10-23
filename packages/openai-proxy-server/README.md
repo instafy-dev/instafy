@@ -410,6 +410,47 @@ plan limit, a rate limit window too long to wait out, quota exhaustion and every
 keep their HTTP error, and a request that does not stream, every Chat Completions request
 included, keeps the HTTP 429.
 
+### Trying a rate limit locally
+
+`scripts/fake-rate-limit-upstream.mjs` is a fake rate-limited upstream for development. It sits
+between the proxy and the real provider, forwards every request unchanged, and answers some of
+them itself with HTTP 429, a `Retry-After` and an OpenAI-style `rate_limit_exceeded` body, as a
+provider does. Nothing in the product starts it; it listens on loopback only unless told
+otherwise, never logs headers or bodies, and with no rules it only forwards.
+
+```bash
+# At most 6 requests that start a conversation in any 20 seconds; the rest get 429.
+node scripts/fake-rate-limit-upstream.mjs --target https://chatgpt.com --limit 6/20s --scope new
+
+# A standalone proxy on a ChatGPT login, sent through it:
+CODEX_PROXY_CHATGPT_ENDPOINT=http://127.0.0.1:8790/backend-api/codex/responses cargo run --bin proxy
+
+# The local Compose proxy (docker/docker-compose.runtime.yml) reaches it through the host:
+PROXY_UPSTREAM_CHATGPT_ENDPOINT=http://host.docker.internal:8790/backend-api/codex/responses \
+  docker compose -p instafy-runtime -f docker/docker-compose.runtime.yml up -d --no-deps proxy
+```
+
+For an API key, use `--target https://api.openai.com` and `CODEX_OPENAI_ENDPOINT` (or
+`PROXY_UPSTREAM_OPENAI_ENDPOINT` for the Compose proxy) with `/v1/responses`. Rules:
+
+- `--limit N/Ws` forwards at most N requests in any W seconds and tells the rest, in
+  `Retry-After`, when the oldest leaves the window. With W at 30 seconds or less the wait the
+  proxy streams on stays a short rate limit, which a team agent is started again after.
+- `--fail-rate F` refuses that fraction of requests with `--retry-after` seconds (default 10).
+- `--window A-B` applies the rules only from A to B seconds after they were loaded (repeatable).
+- `--scope new` limits only requests that start a conversation (a Responses `input` of system,
+  developer and user messages only); requests that continue one always pass. `--scope all`
+  (the default) limits every POST, or every POST under `--path`.
+- `--rules FILE` reads the same keys (`limit`, `failRate`, `windows`, `scope`, `path`,
+  `retryAfter`) from a JSON file, again whenever it changes, so a run can start with plain
+  forwarding and be limited later without restarting the proxy.
+
+Each request is one JSON line on stdout (or `--log FILE`): time, path, `forwarded` or
+`refused`, the reason and the upstream status. The proxy answers a refused streaming request
+with the stream failure above, so Codex waits and retries once, and a run whose retry is
+refused too ends with the provider rate-limit error the controller paces team agents on.
+`node --test scripts/fake-rate-limit-upstream.test.mjs` runs its tests.
+
 ### Compaction output
 
 When a ChatGPT upstream emits a `compaction` item in `response.output_item.done`, the proxy
