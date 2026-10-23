@@ -6,6 +6,7 @@ import { SettingsActionRow } from "../../../components/SettingsActionRow";
 import { Button } from "../../../components/Button";
 import { HumanAvatar } from "../../../components/HumanAvatar";
 import { Input } from "../../../components/Input";
+import { InlineNotice } from "../../../components/InlineNotice";
 import { Select } from "../../../components/Select";
 import { Text } from "../../../components/Text";
 import { LoadingStatus } from "../../../components/LoadingStatus";
@@ -195,8 +196,7 @@ export function ProjectSettingsSections({
                   onPress={onRefreshProjectDefaults}
                   isDisabled={!canWriteProject || !activeProjectId || !runtimeControllerEnabled || projectDefaultsRefreshPending}
                   variant="outline"
-                  size="md"
-                  radius="xl"
+                  preset="form"
                   data-testid="project-defaults-refresh"
                   className="shrink-0 whitespace-nowrap"
                 >
@@ -212,11 +212,6 @@ export function ProjectSettingsSections({
             title="Prepare email invite"
             description="Create a space-specific secure link to send yourself. Instafy does not send the email yet. Read & write can edit; read-only can view."
           >
-        {projectInvitationsError ? (
-          <Text variant="caption" tone="danger">
-            {projectInvitationsError}
-          </Text>
-        ) : null}
         {!canShareProject ? (
           <Text variant="caption" tone="muted">
             {canWriteProject
@@ -254,32 +249,26 @@ export function ProjectSettingsSections({
             </Field>
           </div>
           {projectInviteError ? (
-            <Text
-              variant="caption"
+            <InlineNotice
               tone="danger"
+              role="alert"
               className="mt-1"
               data-testid="project-member-invite-error"
             >
               {projectInviteError}
-            </Text>
+            </InlineNotice>
           ) : null}
           {projectInviteRoleConflict ? (
-            <div
-              className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-300/60 bg-amber-50/80 px-3 py-2 dark:border-amber-700/50 dark:bg-amber-950/30"
+            <InlineNotice
+              tone="warning"
+              role="status"
               data-testid="project-invite-role-conflict"
-            >
-              <Text variant="caption" tone="secondary">
-                {projectInviteRoleConflict.email} already has a pending{" "}
-                {projectInviteRoleConflict.existingRole} invite. Its link keeps
-                working either way.
-              </Text>
-              <div className="flex items-center gap-2">
+              actions={<>
                 <Button
                   onPress={onApplyProjectInviteRoleConflict}
                   isDisabled={projectInviteConflictPending}
                   variant="primary"
-                  size="xs"
-                  radius="full"
+                  preset="inline"
                   data-testid="project-invite-role-conflict-apply"
                 >
                   {projectInviteConflictPending
@@ -290,22 +279,24 @@ export function ProjectSettingsSections({
                   onPress={onDismissProjectInviteRoleConflict}
                   isDisabled={projectInviteConflictPending}
                   variant="ghost"
-                  size="xs"
-                  radius="full"
+                  preset="inline"
                   data-testid="project-invite-role-conflict-dismiss"
                 >
                   Keep {projectInviteRoleConflict.existingRole}
                 </Button>
-              </div>
-            </div>
+              </>}
+            >
+              {projectInviteRoleConflict.email} already has a pending{" "}
+              {projectInviteRoleConflict.existingRole} invite. Its link keeps
+              working either way.
+            </InlineNotice>
           ) : null}
           <div className="flex justify-end">
             <Button
               onPress={onInviteProjectMember}
               isDisabled={projectInvitePending || !projectInviteEmailValid || !canShareProject}
               variant="primary"
-              size="sm"
-              radius="xl"
+              preset="form"
               data-testid="project-member-invite-submit"
               className="w-full @min-[32rem]/settings-content:w-auto"
             >
@@ -333,9 +324,9 @@ export function ProjectSettingsSections({
           >
         <SettingsSurface padding="none" className="overflow-hidden">
           {projectInvitationsError ? (
-            <Text variant="caption" tone="danger" className="px-3 py-3">
+            <InlineNotice tone="danger" role="alert" className="m-3">
               {projectInvitationsError}
-            </Text>
+            </InlineNotice>
           ) : projectInvitationsLoading && projectInvitations.length === 0 ? (
             <Text variant="caption" tone="muted" className="px-3 py-3">
               Loading invitations…
@@ -406,9 +397,8 @@ export function ProjectSettingsSections({
                       <Button
                         onPress={() => onCancelProjectInvite(invite.id, invite.email)}
                         isDisabled={cancelDisabled || roleUpdatePending}
-                        variant="outline"
-                        size="xs"
-                        radius="full"
+                        variant="ghost"
+                        preset="inline"
                         data-testid={`project-invite-cancel-${invite.id}`}
                       >
                         {cancelDisabled ? "Canceling…" : "Cancel"}
@@ -427,17 +417,17 @@ export function ProjectSettingsSections({
             description={
               <>
                 Create a link that grants access to{" "}
-                <span className="font-medium text-slate-700 dark:text-slate-200">
+                <Text as="span" variant="captionStrong" tone="secondary">
                   {activeProjectName ?? "this space"}
-                </span>
+                </Text>
                 . Guests won&apos;t see your other spaces.
               </>
             }
           >
         {inviteLinksError ? (
-          <Text variant="caption" tone="danger">
+          <InlineNotice tone="danger" role="alert">
             {inviteLinksError}
-          </Text>
+          </InlineNotice>
         ) : null}
         {!canShareProject ? (
           <Text variant="caption" tone="muted">
@@ -463,8 +453,7 @@ export function ProjectSettingsSections({
               onPress={onCreateInviteLink}
               isDisabled={!canShareProject || inviteLinkPending}
               variant="outline"
-              size="sm"
-              radius="xl"
+              preset="form"
               data-testid="org-invite-link-create"
               className="w-full @min-[32rem]/settings-content:w-auto"
             >
@@ -481,8 +470,7 @@ export function ProjectSettingsSections({
                 <Button
                   onPress={onCopyInviteLink}
                   variant="primary"
-                  size="sm"
-                  radius="xl"
+                  preset="form"
                   data-testid="org-invite-link-copy"
                   className="w-full @min-[32rem]/settings-content:w-auto"
                 >
@@ -492,8 +480,7 @@ export function ProjectSettingsSections({
                   onPress={onRevokeInviteLink}
                   isDisabled={!canShareProject || inviteLinkPending}
                   variant="outline"
-                  size="sm"
-                  radius="xl"
+                  preset="form"
                   data-testid="org-invite-link-revoke"
                   className="w-full @min-[32rem]/settings-content:w-auto"
                 >
@@ -581,14 +568,14 @@ export function ProjectSettingsSections({
                         <option value="builder">Read &amp; write</option>
                       </Select>
                     </div>
-                    <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
-                      <span>Joined {new Date(member.createdAt).toLocaleDateString()}</span>
+                    <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                      <Text as="span" variant="caption" tone="muted">Joined {new Date(member.createdAt).toLocaleDateString()}</Text>
                       <Button
                         onPress={() => onRemoveProjectMember(member.userId, label)}
                         isDisabled={removeDisabled}
-                        variant="outline"
-                        size="xs"
-                        radius="full"
+                        variant="ghost"
+                        tone="danger"
+                        preset="inline"
                         data-testid={`project-member-remove-${member.userId}`}
                       >
                         {projectMemberRemovePendingId === member.userId ? "Removing…" : "Remove"}
@@ -601,12 +588,11 @@ export function ProjectSettingsSections({
           </SettingsSurface>
         ) : null}
         {projectMembersError ? (
-          <div className="flex flex-wrap items-center gap-3">
-            <Text role="alert" variant="caption" tone="danger">{projectMembersError}</Text>
-            <Button onPress={onRetryProjectMembers} isDisabled={projectMembersLoading} variant="outline" size="sm">
+          <InlineNotice role="alert" tone="danger" actions={
+            <Button onPress={onRetryProjectMembers} isDisabled={projectMembersLoading} variant="ghost" preset="inline">
               Retry
             </Button>
-          </div>
+          }>{projectMembersError}</InlineNotice>
         ) : null}
           </SettingsSection>
 

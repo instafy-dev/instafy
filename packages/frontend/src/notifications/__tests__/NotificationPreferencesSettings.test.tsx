@@ -168,7 +168,7 @@ describe("notification preferences in Settings", () => {
   it("shows unavailable preferences without defaulting to editable controls, and retries", async () => {
     mocks.get.mockRejectedValueOnce(new Error("Unable to load notification preferences (404)"));
     await render();
-    expect(container.querySelector('[role="alert"]')?.textContent).toBe("Notification preferences are unavailable on this server.");
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("Notification preferences are unavailable on this server.");
     expect(container.querySelector("input")).toBeNull();
     expect(container.textContent).not.toContain("Loading notification preferences");
     await clickButton("Retry");

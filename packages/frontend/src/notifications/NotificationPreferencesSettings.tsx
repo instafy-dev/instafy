@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { InlineNotice } from "../components/InlineNotice";
 import { Button } from "../components/Button";
 import { SettingsFormLayout } from "../components/SettingsFormLayout";
 import { Toggle } from "../components/Toggle";
@@ -174,13 +175,13 @@ export function NotificationPreferencesSettings({ userId, accessToken }: {
   const canRecheckDevice = deviceState?.permission === "denied" || deviceState?.permission === "unknown";
   const channelControls = (channel: NotificationChannel) => (
     <fieldset className="min-w-0" disabled={state?.pending} data-testid={`notification-channel-${channel}`}>
-      <legend className="text-sm font-semibold text-slate-700 dark:text-slate-200">{CHANNEL_LABELS[channel]}</legend>
+      <Text as="legend" variant="bodyStrong" tone="secondary">{CHANNEL_LABELS[channel]}</Text>
       <div className="mt-2 divide-y divide-slate-200/70 dark:divide-[color:var(--color-studio-dark-divider)]">
         {NOTIFICATION_CATEGORIES.map((category) => (
           <Toggle key={category} layout="row"
             label={CATEGORY_LABELS[category]}
             aria-label={`${CATEGORY_LABELS[category]} ${CHANNEL_LABELS[channel]}`}
-            className="min-h-11 py-2.5"
+            className="py-2.5"
             isSelected={preferences?.preferences.find((preference) => preference.category === category && preference.channel === channel)?.enabled ?? true}
             isDisabled={state?.pending}
             onChange={(enabled) => void change({ preferences: [{ category, channel, enabled }] })}
@@ -195,15 +196,15 @@ export function NotificationPreferencesSettings({ userId, accessToken }: {
       <SettingsFormLayout>
         <Text variant="caption" tone="muted">Choose which alerts reach you. Activity stays available in Home when alerts are off.</Text>
         {state?.error ? (
-          <div className="flex flex-wrap items-start gap-2">
-            <p role="alert" className="min-w-0 flex-1 text-sm text-rose-600 dark:text-rose-400">{state.error}</p>
-            {!state.value ? <Button variant="ghost" size="sm" onPress={() => void load()}>Retry</Button> : null}
-          </div>
+          <InlineNotice tone="danger" role="alert" density="comfortable"
+            actions={!state.value ? <Button variant="ghost" preset="inline" onPress={() => void load()}>Retry</Button> : null}>
+            {state.error}
+          </InlineNotice>
         ) : null}
-        {deviceCleanupAccount === userId ? <div className="flex flex-wrap items-start gap-2">
-          <p role="alert" className="min-w-0 flex-1 text-sm text-rose-600 dark:text-rose-400">Alerts are off in this app, but push delivery could not be disconnected. Retry to finish turning them off.</p>
-          <Button variant="ghost" size="sm" isDisabled={state?.pending || !preferences} onPress={() => void change("disable-device")}>Retry turning off</Button>
-        </div> : null}
+        {deviceCleanupAccount === userId ? <InlineNotice tone="danger" role="alert" density="comfortable"
+          actions={<Button variant="ghost" preset="inline" isDisabled={state?.pending || !preferences} onPress={() => void change("disable-device")}>Retry turning off</Button>}>
+          Alerts are off in this app, but push delivery could not be disconnected. Retry to finish turning them off.
+        </InlineNotice> : null}
         {!state || state.loading ? <Text role="status" tone="muted">Loading notification preferences…</Text> : preferences ? (
           <>
             <div data-testid="notification-device-permission" className="space-y-2">
@@ -212,12 +213,12 @@ export function NotificationPreferencesSettings({ userId, accessToken }: {
                 aria-label="Notifications on this device"
                 aria-describedby={deviceDescription ? deviceDescriptionId : undefined}
                 description={deviceDescription ? <span id={deviceDescriptionId}>{deviceDescription}</span> : undefined}
-                className="min-h-11 py-2.5"
+                className="py-2.5"
                 isSelected={deviceEnabled}
                 isDisabled={state.pending || !canChangeDevice}
                 onChange={(enabled) => void change(enabled ? "enable-device" : "disable-device")}
               />
-              {canRecheckDevice ? <Button variant="outline" radius="xl" isDisabled={state.pending} onPress={() => void refreshDevicePermission()}>
+              {canRecheckDevice ? <Button variant="outline" preset="inline" isDisabled={state.pending} onPress={() => void refreshDevicePermission()}>
                 Check permission
               </Button> : null}
             </div>
@@ -229,7 +230,7 @@ export function NotificationPreferencesSettings({ userId, accessToken }: {
               label="Hide lock-screen previews"
               aria-label="Hide lock-screen previews"
               description="Show a generic alert. Turning this off shows the type of activity, never message or report contents."
-              className="min-h-11 py-1"
+              className="py-1"
               isSelected={preferences.hidePreviews}
               isDisabled={state.pending}
               onChange={(hidePreviews) => void change({ hidePreviews })}
@@ -244,7 +245,7 @@ export function NotificationPreferencesSettings({ userId, accessToken }: {
                 {NOTIFICATION_CHANNELS.filter((channel) => channel !== primaryChannel).map((channel) => <div key={channel}>{channelControls(channel)}</div>)}
               </div>
             </details>
-            <p role="status" aria-label="Notification saving status" className="min-h-5 text-xs text-slate-500 dark:text-slate-400">{state.pending ? state.status ?? "Saving changes…" : state.status ?? "Changes save automatically."}</p>
+            <Text role="status" aria-label="Notification saving status" variant="caption" tone="muted" className="min-h-5">{state.pending ? state.status ?? "Saving changes…" : state.status ?? "Changes save automatically."}</Text>
           </>
         ) : null}
       </SettingsFormLayout>

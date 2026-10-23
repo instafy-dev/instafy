@@ -12,13 +12,13 @@ import { AutomationsPanel } from "../AutomationsPanel";
 
 const mocks = vi.hoisted(() => ({
   list: vi.fn(), create: vi.fn(), openConversationTab: vi.fn(), requestUrlPush: vi.fn(),
-  fetchRuns: vi.fn(), projectId: "project-a", userId: "user-a",
+  fetchRuns: vi.fn(), showStatus: vi.fn(), projectId: "project-a", userId: "user-a",
   runs: {} as Record<string, RunRecord>,
 }));
 vi.mock("../../../../providers/AuthProvider", () => ({ useAuth: () => ({ user: { id: mocks.userId } }) }));
 vi.mock("../../../../projects/useProjects", () => ({ useProjects: () => ({ activeProjectId: mocks.projectId }) }));
 vi.mock("../../../../runtime/RuntimeStateProvider", () => ({ useRuntimeState: () => ({ runs: mocks.runs }) }));
-vi.mock("../../../../status/useStatus", () => ({ useStatus: () => ({ showStatus: vi.fn() }) }));
+vi.mock("../../../../status/useStatus", () => ({ useStatus: () => ({ showStatus: mocks.showStatus }) }));
 vi.mock("../../../../workspace/WorkspaceTabsProvider", () => ({ useWorkspaceTabs: () => ({ openConversationTab: mocks.openConversationTab, requestUrlPush: mocks.requestUrlPush }) }));
 vi.mock("../../../../sdk/instafy", () => ({ controllerClient: { automations: { listForProject: mocks.list, create: mocks.create }, runs: { fetch: mocks.fetchRuns } } }));
 vi.mock("../SettingsShell", () => ({ SettingsShell: ({ children, actions }: { children: ReactNode; actions: ReactNode }) => <div>{actions}{children}</div> }));
@@ -70,6 +70,7 @@ describe("automation activity and thread navigation", () => {
     mocks.projectId = "project-a";
     mocks.userId = "user-a";
     mocks.list.mockReset().mockResolvedValue([automation]);
+    mocks.create.mockReset().mockResolvedValue(undefined);
     mocks.fetchRuns.mockReset().mockImplementation(async () => fetchedRuns(Object.values(mocks.runs)));
     queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     container = document.createElement("div");
@@ -127,6 +128,11 @@ describe("automation activity and thread navigation", () => {
     await act(async () => weekly.click());
     expect(container.querySelector<HTMLInputElement>('[data-testid="automation-byhour-input"]')?.labels?.[0]?.textContent).toBe("Hour (0-23)");
     expect(container.querySelector<HTMLInputElement>('[data-testid="automation-byminute-input"]')?.labels?.[0]?.textContent).toBe("Minute (0-59)");
+    const weeklySchedule = container.querySelector("fieldset");
+    expect(weeklySchedule?.querySelector("legend")?.textContent).toBe("Weekly schedule");
+    expect([...weeklySchedule!.querySelectorAll("button")].map(button => button.getAttribute("aria-label"))).toEqual([
+      "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
+    ]);
   });
 
   it("keeps checkbox and weekday choices local until Save, then sends their explicit values", async () => {
@@ -163,6 +169,40 @@ describe("automation activity and thread navigation", () => {
     expect(mocks.create.mock.calls[0][0]).toMatchObject({
       status: "paused", silentWhenNothingToReport: true, scheduleKind: "weekly", byDay: ["tu", "we", "th", "fr", "sa"],
     });
+  });
+
+  it("keeps the shared editor actions disabled while saving and preserves a failed draft", async () => {
+    let rejectSave!: (reason: Error) => void;
+    mocks.create.mockReturnValue(new Promise((_resolve, reject) => { rejectSave = reject; }));
+    await render();
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="automations-create-button"]')!.click());
+    await act(async () => {
+      for (const [testId, value, element] of [
+        ["automation-name-input", "Weekly report", HTMLInputElement],
+        ["automation-prompt-input", "Review the latest changes", HTMLTextAreaElement],
+      ] as const) {
+        const field = container.querySelector(`[data-testid="${testId}"]`)!;
+        Object.getOwnPropertyDescriptor(element.prototype, "value")!.set!.call(field, value);
+        field.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    });
+    const save = container.querySelector<HTMLButtonElement>('[data-testid="automation-save-button"]')!;
+    const cancel = [...container.querySelectorAll<HTMLButtonElement>("button")].find(button => button.textContent === "Cancel")!;
+    await act(async () => save.click());
+    expect(save.disabled).toBe(true);
+    expect(save.textContent).toBe("Saving…");
+    expect(cancel.disabled).toBe(true);
+    expect(container.querySelector<HTMLButtonElement>('[aria-label="Close automation editor"]')?.disabled).toBe(true);
+    expect(draftStore!.getSnapshot().protections.some(item => !item.discard)).toBe(true);
+    await act(async () => cancel.click());
+    expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+    await act(async () => rejectSave(new Error("Review save failed")));
+    expect(mocks.showStatus).toHaveBeenCalledWith("Review save failed", "error", 6000);
+    expect(save.disabled).toBe(false);
+    expect(cancel.disabled).toBe(false);
+    expect(container.querySelector<HTMLInputElement>('[data-testid="automation-name-input"]')?.value).toBe("Weekly report");
+    expect(container.querySelector<HTMLTextAreaElement>('[data-testid="automation-prompt-input"]')?.value).toBe("Review the latest changes");
+    expect(draftStore!.getSnapshot().protections.every(item => item.discard)).toBe(true);
   });
 
   it("does not protect an untouched automation editor and releases the guard when its edit is reverted", async () => {

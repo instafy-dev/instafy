@@ -11,8 +11,10 @@ import { MoreHoriz, NavArrowDown, NavArrowLeft, Xmark } from "iconoir-react";
 import { BrowserToolsPopover } from "./BrowserToolsPopover";
 import { Button, IconButton } from "../../../components/Button";
 import { Select } from "../../../components/Select";
+import { Text } from "../../../components/Text";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { browserShareClient, type BrowserShare } from "../../../services/runtimeController/browserShares";
+import { DARK_PANEL_BORDER_CLASS } from "../../../theme/darkSurfaces";
 
 export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { projectId: string; share: BrowserShare; onClose: () => void; onEnded: (id: string) => void }) {
   const [videoStream,setVideoStream]=useState<MediaStream|null>(null);
@@ -175,24 +177,27 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
   const width = imageSize.width ? imageSize.width * scale : undefined;
   const height = imageSize.height ? imageSize.height * scale : undefined;
   const inlineHeight = Math.max(160, bounds.width && imageSize.width ? bounds.width * imageSize.height / imageSize.width : 240);
-  const panel = <section aria-label="Shared local browser tab" className={`relative flex min-h-0 min-w-0 flex-col overflow-hidden border border-slate-300 bg-slate-950 ${fullscreen ? "h-full border-0" : "rounded-lg"}`} style={{ paddingBottom: keyboardOccupiedHeight }} data-testid="local-browser-share-viewer">
-    <div role="toolbar" aria-label="Shared tab controls" data-testid="local-tab-toolbar" className="flex h-14 shrink-0 items-center gap-1 bg-slate-100 px-1.5 text-xs text-slate-800 dark:bg-slate-900 dark:text-slate-100">
-      {exploring ? <IconButton className="!h-11 !w-11 shrink-0" variant="ghost" aria-label="Back in your browsing page" onPress={() => command("exploreNavigate", {viewId:explore!.view!.viewId,action:"back"})}><NavArrowLeft aria-hidden="true" className="h-5 w-5" /></IconButton> : null}
+  // A shared tab can be narrow inside a wide desktop layout. Keep the current
+  // mode readable, with Release available in More when the pane is crowded.
+  const narrowToolbar = bounds.width > 0 && bounds.width < 360;
+  const panel = <section aria-label="Shared local browser tab" className={`relative flex min-h-0 min-w-0 flex-col overflow-hidden border border-slate-300 bg-slate-950 ${DARK_PANEL_BORDER_CLASS} ${fullscreen ? "h-full border-0" : "rounded-lg"}`} style={{ paddingBottom: keyboardOccupiedHeight }} data-testid="local-browser-share-viewer">
+    <div role="toolbar" aria-label="Shared tab controls" data-testid="local-tab-toolbar" className="flex min-h-12 min-w-0 shrink-0 items-center gap-2 bg-slate-100 p-1 text-slate-800 dark:bg-slate-900 dark:text-slate-100">
+      {exploring ? <IconButton className="shrink-0" variant="ghost" aria-label="Back in your browsing page" onPress={() => command("exploreNavigate", {viewId:explore!.view!.viewId,action:"back"})}><NavArrowLeft aria-hidden="true" className="h-5 w-5" /></IconButton> : null}
       <BrowserToolsPopover label="Shared tab view" isOpen={modeOpen} onOpenChange={setModeOpen} trigger={
-        <Button variant="ghost" className="!h-11 min-w-0 gap-1" aria-label="Choose shared tab view" data-testid="local-tab-view-mode">
+        <Button preset="toolbar" variant="ghost" className="min-w-0 max-w-56" aria-label="Choose shared tab view" data-testid="local-tab-view-mode">
           <span className="truncate">{exploring ? "Browsing" : selfControls ? "You control" : explore?.requested ? "Browse requested" : control?.requested ? "Control requested" : "Following"}</span><NavArrowDown aria-hidden="true" className="h-4 w-4 shrink-0" />
         </Button>
       }>
-        <p className="font-medium">{exploring ? "Browsing independently" : selfControls ? "Controlling the shared tab" : "Following the shared tab"}</p>
-        <p className="text-xs text-slate-500">{exploring ? "Your page and scroll are separate. Website logins and saved data are shared. Reload to see others’ changes; behavior depends on the website." : "Watch the owner’s page, or ask to browse with your own page and scroll. Independent browsing shares this browser’s website logins and saved data."}</p>
-        {explore?.available ? <Button size="sm" variant="secondary" data-testid="local-tab-explore-action" isDisabled={!exploring && selfControls} onPress={() => { command(exploring || explore.requested ? "exploreReturn" : "exploreRequest", exploring || explore.requested ? {} : {viewport:viewerViewport()}); setModeOpen(false); }}>{exploring ? "Follow owner again" : explore.requested ? "Cancel browsing request" : "Browse independently"}</Button> : null}
+        <Text variant="bodyStrong" tone="primary">{exploring ? "Browsing independently" : selfControls ? "Controlling the shared tab" : "Following the shared tab"}</Text>
+        <Text variant="caption" tone="muted">{exploring ? "Your page and scroll are separate. Website logins and saved data are shared. Reload to see others’ changes; behavior depends on the website." : "Watch the owner’s page, or ask to browse with your own page and scroll. Independent browsing shares this browser’s website logins and saved data."}</Text>
+        {explore?.available ? <Button preset="inline" variant="secondary" data-testid="local-tab-explore-action" isDisabled={!exploring && selfControls} onPress={() => { command(exploring || explore.requested ? "exploreReturn" : "exploreRequest", exploring || explore.requested ? {} : {viewport:viewerViewport()}); setModeOpen(false); }}>{exploring ? "Follow owner again" : explore.requested ? "Cancel browsing request" : "Browse independently"}</Button> : null}
       </BrowserToolsPopover>
       <span role="status" className="sr-only">{exploring ? "Browsing independently · Shared website session" : hasPicture && selfControls ? "Live tab · You control" : hasPicture && control?.grant ? "Live tab · Another participant controls" : state}</span>
-      <div className="flex-1" />
-      {selfControls && !exploring ? <Button size="sm" className="!h-11 shrink-0" variant="secondary" data-testid="local-tab-control-action" aria-label="Release control" onPress={() => command("releaseControl")}>Release</Button> : null}
+      <div className="ml-auto flex shrink-0 items-center gap-2">
+      {selfControls && !exploring && !narrowToolbar ? <Button preset="inline" className="shrink-0" variant="secondary" data-testid="local-tab-control-action" aria-label="Release control" onPress={() => command("releaseControl")}>Release</Button> : null}
       <RemoteBrowserMobileKeyboard inlineTrigger enabled={(selfControls || exploring) && !panOnly && hasPicture} onMessage={sendInput} onOccupiedHeightChange={setKeyboardOccupiedHeight} />
       <BrowserToolsPopover label="Shared tab options" isOpen={toolsOpen} onOpenChange={setToolsOpen} trigger={
-        <IconButton className="!h-11 !w-11 shrink-0" variant="ghost" aria-label="Shared tab options"><MoreHoriz aria-hidden="true" className="h-5 w-5" /></IconButton>
+        <IconButton className="shrink-0" variant="ghost" aria-label="Shared tab options"><MoreHoriz aria-hidden="true" className="h-5 w-5" /></IconButton>
       }>
         <Select aria-label="Shared tab zoom" value={zoom} disabled={!hasPicture} size="sm" onChange={event => {
           setZoom(event.target.value);
@@ -200,17 +205,19 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
         }}>
           <option value="fit">Fit to view</option><option value="1">100% · Read size</option><option value="1.5">150%</option><option value="2">200%</option>
         </Select>
-        <div className="flex flex-col items-stretch gap-1">
-          <Button size="sm" variant="ghost" onPress={() => { setToolsOpen(false); setFullscreen(current => !current); }} aria-label={fullscreen ? "Minimize shared tab" : "Expand shared tab"}>{fullscreen ? "Minimize" : "Expand"}</Button>
-          {exploring ? <Button size="sm" variant="ghost" aria-label="Reload your browsing page" onPress={() => { command("exploreNavigate",{viewId:explore!.view!.viewId,action:"reload"}); setToolsOpen(false); }}>Reload</Button> : null}
-          {!exploring && !selfControls && hasPicture && control?.available ? <Button size="sm" variant="ghost" data-testid="local-tab-control-action" onPress={() => { command(control.requested ? "releaseControl" : "requestControl"); setToolsOpen(false); }}>{control.requested ? "Cancel control request" : "Request control"}</Button> : null}
-          {selfControls || exploring ? <Button size="sm" variant="ghost" aria-pressed={panOnly} onPress={() => { setPanOnly(current => !current); setToolsOpen(false); }}>{panOnly ? "Control page" : "Pan view"}</Button> : null}
+        <div className="flex flex-col items-stretch gap-2">
+          <Button preset="inline" variant="ghost" onPress={() => { setToolsOpen(false); setFullscreen(current => !current); }} aria-label={fullscreen ? "Minimize shared tab" : "Expand shared tab"}>{fullscreen ? "Minimize" : "Expand"}</Button>
+          {exploring ? <Button preset="inline" variant="ghost" aria-label="Reload your browsing page" onPress={() => { command("exploreNavigate",{viewId:explore!.view!.viewId,action:"reload"}); setToolsOpen(false); }}>Reload</Button> : null}
+          {!exploring && !selfControls && hasPicture && control?.available ? <Button preset="inline" variant="ghost" data-testid="local-tab-control-action" onPress={() => { command(control.requested ? "releaseControl" : "requestControl"); setToolsOpen(false); }}>{control.requested ? "Cancel control request" : "Request control"}</Button> : null}
+          {selfControls && !exploring && narrowToolbar ? <Button preset="inline" variant="ghost" data-testid="local-tab-control-action" aria-label="Release control" onPress={() => { command("releaseControl"); setToolsOpen(false); }}>Release control</Button> : null}
+          {selfControls || exploring ? <Button preset="inline" variant="ghost" aria-pressed={panOnly} onPress={() => { setPanOnly(current => !current); setToolsOpen(false); }}>{panOnly ? "Control page" : "Pan view"}</Button> : null}
         </div>
-        <p className="text-xs text-slate-500">{exploring ? "Your page and scroll are separate. Website logins and saved data are shared. Reload to see others’ changes; behavior depends on the website." : selfControls ? "You can click and type using the owner’s account. Release returns control to the owner." : "You are viewing the shared page. Request control to click and type using the owner’s account."}</p>
+        <Text variant="caption" tone="muted">{exploring ? "Your page and scroll are separate. Website logins and saved data are shared. Reload to see others’ changes; behavior depends on the website." : selfControls ? "You can click and type using the owner’s account. Release returns control to the owner." : "You are viewing the shared page. Request control to click and type using the owner’s account."}</Text>
       </BrowserToolsPopover>
-      <IconButton className="!h-11 !w-11 shrink-0" variant="ghost" aria-label="Leave shared tab" onPress={onClose}><Xmark aria-hidden="true" className="h-5 w-5" /></IconButton>
+      <IconButton className="shrink-0" variant="ghost" aria-label="Leave shared tab" onPress={onClose}><Xmark aria-hidden="true" className="h-5 w-5" /></IconButton>
+      </div>
     </div>
-    {!hasPicture ? <div className="flex items-center justify-between gap-2 p-3 text-xs text-slate-300"><span>{state}</span>{canReconnect ? <Button size="sm" variant="secondary" data-testid="local-tab-reconnect" onPress={() => { setCanReconnect(false); setConnectionAttempt(attempt => attempt + 1); }}>Reconnect</Button> : null}</div> : null}
+    {!hasPicture ? <div className="flex items-center justify-between gap-2 p-3 text-xs text-slate-300"><span>{state}</span>{canReconnect ? <Button preset="inline" variant="secondary" data-testid="local-tab-reconnect" onPress={() => { setCanReconnect(false); setConnectionAttempt(attempt => attempt + 1); }}>Reconnect</Button> : null}</div> : null}
     <div className={`relative min-h-0 min-w-0 ${fullscreen ? "flex flex-1 flex-col" : ""}`}>
     <div ref={setViewport} tabIndex={hasPicture ? 0 : undefined} role="region" aria-label="Shared tab image viewport" data-testid="local-browser-share-pan"
       className={`relative min-h-0 min-w-0 overflow-auto overscroll-contain ${fullscreen ? "flex-1" : ""}`}

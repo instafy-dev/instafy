@@ -95,11 +95,10 @@ export function StudioSidebarWorkspacePanel({
           titleAs="h2"
           frame="rail"
           actions={<>
-            {headerActionsRef ? <div ref={headerActionsRef} className="flex items-center gap-1" /> : null}
+            {headerActionsRef ? <div ref={headerActionsRef} className="flex items-center gap-2" /> : null}
             <IconButton
               variant="ghost"
               size="sm"
-              radius="full"
               aria-label={mode === "spaces" ? "Close spaces" : "Close team and spaces"}
               data-testid="sidebar-project-switcher-close"
               tone="muted"

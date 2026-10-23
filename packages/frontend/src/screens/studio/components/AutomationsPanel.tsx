@@ -7,7 +7,9 @@ import { Button, IconButton } from "../../../components/Button";
 import { Field } from "../../../components/Field";
 import { Input } from "../../../components/Input";
 import { SegmentedControl } from "../../../components/SegmentedControl";
-import { StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
+import { StudioDialogBody, StudioDialogFooter, StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
+import { SettingsFormActions } from "../../../components/SettingsFormActions";
+import { SettingsFormLayout } from "../../../components/SettingsFormLayout";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { MobileFocusDialog } from "../../../components/aria/MobileFocusDialog";
 import { useBreakpoint } from "../../../hooks/useBreakpoint";
@@ -406,8 +408,8 @@ function ProjectAutomationsPanel({ activeProjectId, userId }: { activeProjectId:
 
   const editorTitle = draft.id ? "Edit automation" : "Create automation";
   const editorBody = (
-    <div className="flex-1 overflow-y-auto overscroll-contain px-4 py-4">
-      <div className="space-y-4">
+    <StudioDialogBody scrollable={desktopEditor}>
+      <SettingsFormLayout>
         <div className="grid gap-3 md:grid-cols-2">
           <Field label="Name" htmlFor={`${fieldId}-name`}>
             <Input
@@ -483,7 +485,8 @@ function ProjectAutomationsPanel({ activeProjectId, userId }: { activeProjectId:
             />
           </Field>
         ) : draft.scheduleKind === "weekly" ? (
-          <div className="space-y-3 rounded-2xl border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-950">
+          <fieldset className="min-w-0 space-y-3">
+            <Text as="legend" variant="caption" tone="muted" className="mb-3">Weekly schedule</Text>
             <div className="flex flex-wrap items-center gap-2">
               {WEEK_DAYS.map((day) => {
                 const active = draft.byDay.includes(day.code);
@@ -541,7 +544,7 @@ function ProjectAutomationsPanel({ activeProjectId, userId }: { activeProjectId:
                 />
               </Field>
             </div>
-          </div>
+          </fieldset>
         ) : (
           <Field label="Interval hours" htmlFor={`${fieldId}-interval`}>
             <Input
@@ -587,25 +590,14 @@ function ProjectAutomationsPanel({ activeProjectId, userId }: { activeProjectId:
           isDisabled={saving}
           data-testid="automation-silent-when-nothing-to-report-toggle"
         />
-      </div>
-    </div>
+      </SettingsFormLayout>
+    </StudioDialogBody>
   );
   const editorFooter = (
-    <div className="flex items-center justify-end gap-2 border-t border-slate-200 px-4 py-3 dark:border-slate-800">
-      <Button variant="ghost" size="sm" radius="xl" onPress={dismissEditor} isDisabled={saving}>
-        Cancel
-      </Button>
-      <Button
-        variant="primary"
-        size="sm"
-        radius="xl"
-        onPress={persistDraft}
-        isDisabled={saving || !activeProjectId}
-        data-testid="automation-save-button"
-      >
-        {saving ? "Saving…" : "Save"}
-      </Button>
-    </div>
+    <StudioDialogFooter padding="default">
+      <SettingsFormActions saveLabel="Save" saving={saving} disabled={!activeProjectId}
+        onSave={persistDraft} onCancel={dismissEditor} saveTestId="automation-save-button" />
+    </StudioDialogFooter>
   );
 
   return (
@@ -790,20 +782,21 @@ function ProjectAutomationsPanel({ activeProjectId, userId }: { activeProjectId:
           onOpenChange={(open) => { if (!open) dismissEditor(); }}
           isKeyboardDismissDisabled={saving}
           dialogAriaLabel="Automation editor"
-          modalClassName="max-w-2xl overflow-hidden max-h-[min(90dvh,48rem)]"
-          dialogClassName="flex max-h-[inherit] flex-col"
+          size="lg"
+          gutter="responsive"
+          layout="editor"
         >
           <StudioDialogHeader title={editorTitle} description="Runs in a private thread."
-            onClose={dismissEditor} closeButtonDisabled={saving} closeLabel="Close automation editor"
-            className="px-4 py-3" />
+            onClose={dismissEditor} closeButtonDisabled={saving} closeLabel="Close automation editor" />
           {editorBody}
           {editorFooter}
         </StudioDialogModal>
       ) : (
         <MobileFocusDialog isOpen={editorOpen} onOpenChange={(open) => { if (!open) dismissEditor(); }}
           dialogAriaLabel="Automation editor" dismissLabel="Close automation editor" closeDisabled={saving}
-          header={<div><h2 className="truncate text-base font-semibold">{editorTitle}</h2>
-            <p className="text-xs text-slate-500 dark:text-slate-400">Runs in a private thread.</p></div>}
+          gutter="responsive"
+          header={<div><Text as="h2" variant="subtitle" tone="primary" className="truncate">{editorTitle}</Text>
+            <Text variant="caption" tone="muted">Runs in a private thread.</Text></div>}
           footer={editorFooter}>
           {editorBody}
         </MobileFocusDialog>
