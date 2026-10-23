@@ -32,7 +32,11 @@ export type PersonalBrowserStepClassification = {
   category: PersonalBrowserStepCategory;
   reason: string;
   code?: PersonalBrowserStepRefusalCode;
-  /** Set on an ordinary "change" control whose label commits a change, such as Save or Speichern. */
+  /**
+   * Set on an ordinary "change" control whose label commits a change, such as
+   * a Save or Speichern button. Never set on a menu item, tab, tree item,
+   * disclosure or menu opener, or navigation-area item.
+   */
   commit?: boolean;
 };
 

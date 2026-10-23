@@ -6122,10 +6122,6 @@ impl JobProcessor {
                         .as_ref()
                         .expect("Shared Browser execution must have a cancellation signal")
                         .clone(),
-                    // Decided by this process (an attested browser host starts
-                    // in routine browsing), never by the job or the model, and
-                    // written before any Codex or MCP process starts.
-                    crate::shared_browser::run_approval_start(),
                 )?,
             )
         } else {
@@ -13198,17 +13194,20 @@ fn apply_terminal_shared_browser_summary(
 
 /// What the person reads when a Shared Browser run ended on its approval
 /// lane. The code itself stays in the `browser/terminal-consent` artifact.
+/// Only the step that asked is known not to have run: earlier steps of the
+/// same turn may have opened pages or changed something, so the text speaks
+/// about that step and never about the whole turn.
 fn terminal_shared_browser_summary(code: &str) -> &'static str {
     match code {
         "human_input_required" => {
             "Your input is needed in Browser. After control returns to you, fill the highlighted fields directly and choose Done, continue. Your field values are not requested in chat."
         }
         "approval_timeout" => {
-            "I'm waiting for your OK to continue in Instafy's browser. Nothing was opened or changed. Send a message when you're ready and I'll ask again."
+            "I'm waiting for your OK to continue in Instafy's browser. I haven't done that step yet. Send a message when you're ready and I'll ask again."
         }
-        "approval_denied" => "You declined, so I stopped. Nothing was changed.",
+        "approval_denied" => "You declined, so I stopped before that step.",
         _ => {
-            "Instafy's browser stopped this step to keep it safe, so nothing was changed. Send a message to try again."
+            "Instafy's browser stopped this step to keep it safe, so it wasn't done. Send a message to try again."
         }
     }
 }
@@ -24151,9 +24150,9 @@ mod tests {
             ));
 
             let expected = match code {
-                "approval_denied" => "You declined, so I stopped. Nothing was changed.",
+                "approval_denied" => "You declined, so I stopped before that step.",
                 _ => {
-                    "I'm waiting for your OK to continue in Instafy's browser. Nothing was opened or changed. Send a message when you're ready and I'll ask again."
+                    "I'm waiting for your OK to continue in Instafy's browser. I haven't done that step yet. Send a message when you're ready and I'll ask again."
                 }
             };
             let mut summary = "internal no-final fallback".to_string();
@@ -24189,13 +24188,79 @@ mod tests {
             apply_terminal_shared_browser_summary(&mut summary, &mut fallback, Some(code));
             assert_eq!(
                 summary,
-                "Instafy's browser stopped this step to keep it safe, so nothing was changed. Send a message to try again."
+                "Instafy's browser stopped this step to keep it safe, so it wasn't done. Send a message to try again."
             );
             assert!(!should_retry_codex_once(Some(code), true));
         }
 
         assert!(should_retry_codex_once(None, true));
         assert!(!should_retry_codex_once(None, false));
+    }
+
+    /// Under routine browsing a turn opens pages and clicks before the step
+    /// that asks, and the person may have allowed one risky step already. The
+    /// summary of the step that then went unanswered or was declined speaks
+    /// about that step only, never claims the turn changed nothing.
+    #[test]
+    fn terminal_shared_browser_summary_speaks_only_about_the_step_that_asked() {
+        for code in [
+            "approval_timeout",
+            "approval_denied",
+            "approval_stale",
+            "approval_authority_revoked",
+        ] {
+            let mut events = ["navigate", "click"]
+                .into_iter()
+                .map(|tool| {
+                    json!({
+                        "type": "item.completed",
+                        "item": {
+                            "id": format!("call-{tool}"),
+                            "type": "mcp_tool_call",
+                            "server": "instafy_shared_browser",
+                            "tool": tool,
+                            "status": "completed",
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            events.push(json!({
+                "type": "item.completed",
+                "item": {
+                    "id": format!("call-{code}"),
+                    "type": "mcp_tool_call",
+                    "server": "instafy_shared_browser",
+                    "tool": "click",
+                    "status": "failed",
+                    "terminalConsent": {
+                        "state": "blocked",
+                        "terminal": true,
+                        "retryable": false,
+                        "code": code,
+                    }
+                }
+            }));
+            let messages = extract_codex_messages(&events);
+            assert!(has_successful_shared_browser_mcp_message(&messages));
+            let terminal = shared_browser_terminal_consent_failure(&messages);
+            assert_eq!(terminal, Some(code));
+
+            let mut summary = "Opened the invoice and saved it.".to_string();
+            let mut fallback = None;
+            apply_terminal_shared_browser_summary(&mut summary, &mut fallback, terminal);
+            let lowered = summary.to_lowercase();
+            for whole_turn in ["nothing was", "nothing has", "no changes"] {
+                assert!(
+                    !lowered.contains(whole_turn),
+                    "{code}: {summary:?} speaks about the whole turn"
+                );
+            }
+            assert!(
+                lowered.contains("that step") || lowered.contains("this step"),
+                "{code}: {summary:?} does not name the step"
+            );
+            assert!(!summary.contains(code), "the person never reads {code}");
+        }
     }
 
     #[test]

@@ -320,7 +320,10 @@ proceed without another site/action prompt, including an address typed for a
 site the run has not used yet. Steps in a named risk category (below), risky
 addresses, form submissions, buttons whose label commits a change (such as
 Save, Speichern or Buchen, even when page script runs them without a form), and
-Enter/Space activation still require one-shot confirmation. Secret entry,
+Enter/Space activation still require one-shot confirmation. Menu items, tabs,
+tree items, disclosure and menu openers and navigation items are navigation: a
+commit word in their label (such as Neue Rechnung, Start or Neu) does not make
+them ask. Secret entry,
 fresh-target checks, exact authority, denial and cancellation boundaries are
 unchanged. Stopping or completing the turn ends the grant.
 
@@ -333,8 +336,9 @@ Routine mode deliberately relaxes universal confirmation. Its consequence
 classifier uses page descriptors and URL text; it cannot prove that arbitrary
 website JavaScript has no side effects or recognize every language/custom control.
 A plain link whose address has side effects but is not on the risky-address list,
-or a control with neither a risky nor a commit word in its label, can still act
-without a prompt. **Ask** reviews every state-changing interaction; a run on the
+a control with neither a risky nor a commit word in its label, or a menu item,
+tab or navigation item whose only risky word is a commit word (such as
+"Als bezahlt markieren" in a menu), can still act without a prompt. **Ask** reviews every state-changing interaction; a run on the
 space's own machine cannot be switched to it yet (see "Remaining work").
 
 ### Redaction, step categories and downloads
@@ -467,10 +471,12 @@ normal missing-action retry. The user starts a new turn if they want to try
 again. This keeps “Deny” from becoming a sequence of repeated consent prompts,
 and an unanswered prompt from becoming a chain of prompts while the person is
 away. What the person reads tells the two apart, with no code: an unanswered
-prompt reads "I'm waiting for your OK to continue in Instafy's browser. Nothing
-was opened or changed.", a denial reads "You declined, so I stopped. Nothing
-was changed.", and every other terminal code reads one plain message. The code
-stays in the run's `browser/terminal-consent` artifact. The tool result tells
+prompt reads "I'm waiting for your OK to continue in Instafy's browser. I
+haven't done that step yet.", a denial reads "You declined, so I stopped before
+that step.", and every other terminal code reads one plain message. Each speaks
+only about the step that asked, because earlier steps of the same turn may
+already have opened pages or changed something. The code stays in the run's
+`browser/terminal-consent` artifact. The tool result tells
 the model that an unanswered prompt is not a denial and that it must end the
 turn without retrying.
 If the client temporarily loses its network, it retains the exact visible

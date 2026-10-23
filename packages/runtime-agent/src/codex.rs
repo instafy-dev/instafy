@@ -1418,22 +1418,14 @@ impl CodexClient {
                 }),
             )
         };
-        let mode_developer_instructions = mode_developer_instructions
-            .map(|instructions| {
-                // The same process-wide decision that seeds the run's approval
-                // state, so the policy the model reads matches the browser.
-                append_shared_browser_developer_instructions(
-                    instructions,
-                    shared_browser_mode,
-                    crate::shared_browser::run_approval_start(),
-                )
-            })
-            .map(|instructions| {
-                append_personal_browser_developer_instructions(instructions, personal_browser_mode)
-            })
-            .map(|instructions| {
-                append_local_browser_developer_instructions(instructions, local_browser_mode)
-            });
+        let mode_developer_instructions = mode_developer_instructions.map(|instructions| {
+            append_browser_developer_instructions_for_turn(
+                instructions,
+                shared_browser_mode,
+                personal_browser_mode,
+                local_browser_mode,
+            )
+        });
         let base_instructions = runtime_base_instructions(
             RuntimeBaseInstructionsLane {
                 mcp: mcp_mode,
@@ -3782,6 +3774,26 @@ fn should_refresh_mcp_servers(
     mcp_mode && has_mcp_servers && !personal_browser_mode
 }
 
+/// The browser policies a turn's mode instructions carry. The Shared Browser
+/// policy follows this process's own approval start, the same decision that
+/// seeds the run's approval state, so the policy the model reads matches the
+/// browser.
+fn append_browser_developer_instructions_for_turn(
+    base: String,
+    shared_browser_mode: bool,
+    personal_browser_mode: bool,
+    local_browser_mode: bool,
+) -> String {
+    let instructions = append_shared_browser_developer_instructions(
+        base,
+        shared_browser_mode,
+        crate::shared_browser::run_approval_start(),
+    );
+    let instructions =
+        append_personal_browser_developer_instructions(instructions, personal_browser_mode);
+    append_local_browser_developer_instructions(instructions, local_browser_mode)
+}
+
 fn append_shared_browser_developer_instructions(
     base: String,
     enabled: bool,
@@ -5848,6 +5860,65 @@ mod tests {
         assert_eq!(differing, 1, "only the approval-start line differs");
         assert!(!ask.contains("that site's approval applies there"));
         assert!(ask.contains("any approval the browser asks for applies there"));
+    }
+
+    /// The policy a turn carries follows this runtime's own approval start,
+    /// the same decision that seeds the run's approval state: routine browsing
+    /// on an attested browser host, Ask everywhere else.
+    #[test]
+    fn a_turns_shared_browser_policy_follows_the_runtimes_approval_start() {
+        use crate::browser_host::mode::{LazyMode, force_lazy_mode_for_tests};
+        use crate::shared_browser::ApprovalStart;
+
+        let base = "Browser/UI execution run".to_string();
+        {
+            let _boot_time_or_no_browser = force_lazy_mode_for_tests(None);
+            let ask =
+                append_browser_developer_instructions_for_turn(base.clone(), true, false, false);
+            assert_eq!(
+                ask,
+                append_shared_browser_developer_instructions(
+                    base.clone(),
+                    true,
+                    ApprovalStart::Ask
+                )
+            );
+            assert!(
+                ask.contains("By default, the authenticated initiating user approves each site")
+            );
+            assert!(!ask.contains("This run starts in routine browsing"));
+        }
+        for persist in [false, true] {
+            let _host = force_lazy_mode_for_tests(Some(LazyMode { persist }));
+            let routine =
+                append_browser_developer_instructions_for_turn(base.clone(), true, false, false);
+            assert_eq!(
+                routine,
+                append_shared_browser_developer_instructions(
+                    base.clone(),
+                    true,
+                    ApprovalStart::Routine
+                )
+            );
+            assert!(routine.contains("This run starts in routine browsing"));
+            assert!(!routine.contains("approves each site"));
+
+            // The other browser policies ride along unchanged, and a turn
+            // without the Shared Browser reads none of its policy.
+            let personal =
+                append_browser_developer_instructions_for_turn(base.clone(), false, true, false);
+            assert_eq!(
+                personal,
+                append_personal_browser_developer_instructions(base.clone(), true)
+            );
+            let local =
+                append_browser_developer_instructions_for_turn(base.clone(), false, false, true);
+            assert_eq!(
+                local,
+                append_local_browser_developer_instructions(base.clone(), true)
+            );
+            assert!(!local.contains("instafy_shared_browser"));
+        }
     }
 
     /// One Shared Browser call can wait for a person through its whole

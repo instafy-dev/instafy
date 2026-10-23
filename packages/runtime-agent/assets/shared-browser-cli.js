@@ -91,7 +91,8 @@ const PAGE_POLICY_SOURCES = Object.freeze({
 // separate controller processes of one run.
 const WITHHELD_DOCUMENT_KEY = "instafy.sharedBrowser.withheldDocument";
 // Named categories ask even under routine browsing. Ordinary record changes
-// ("change") still ask only at submission, as before.
+// ("change") still ask only at submission, except a button whose label commits
+// a change (`commit: true`). Menus, tabs and navigation items never carry it.
 const ROUTINE_CONFIRMED_CATEGORIES = new Set([
   "purchase",
   "transfer",

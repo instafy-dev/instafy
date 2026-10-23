@@ -64,6 +64,23 @@ const special = {
   // Script-driven save buttons: no form owner, only the commit word.
   "save-button": { description: control("Speichern") },
   "save-button-en": { description: control("Save changes") },
+  // Menus, tabs, tree items, openers and navigation items whose label holds
+  // a commit word. Their structure, not the word, decides.
+  "menu-item-new": {
+    description: control("Neue Rechnung", { tag: "li", role: "menuitem", inputType: "" }),
+    policy: { areas: "menu" },
+  },
+  "tab-start": {
+    description: control("Start", { tag: "div", role: "tab", inputType: "" }),
+    policy: { areas: "tablist" },
+  },
+  "tree-item-new": {
+    description: control("Neuer Ordner", { tag: "div", role: "treeitem", inputType: "" }),
+    policy: { areas: "tree" },
+  },
+  "summary-edit": { description: control("Bearbeiten", { tag: "summary", inputType: "" }) },
+  "opener-new": { description: control("Neu"), policy: { menuOpener: true } },
+  "nav-start": { description: control("Start"), policy: { areas: "nav" } },
   "cross-site-link": {
     description: control("Pricing", { tag: "a", inputType: "", href: "https://other.example/pricing" }),
     policy: { href: "https://other.example/pricing", linkSelf: true },
@@ -3089,6 +3106,58 @@ fn only_an_attested_browser_host_starts_runs_in_routine_browsing() {
     }
 }
 
+/// The guard a job acquires starts its run as this process decides: routine
+/// browsing on an attested browser host, Ask everywhere else. Nothing the job
+/// passes can choose it.
+#[tokio::test]
+async fn a_jobs_guard_starts_its_run_as_the_runtime_decides() {
+    use crate::browser_host::mode::{LazyMode, force_lazy_mode_for_tests};
+
+    let directory = tempfile::tempdir().expect("marker tempdir");
+    let path = directory.path().join("agent-control.json");
+    let approval_dir = directory.path().join("approvals");
+    let state_path = approval_dir.join("state.json");
+    let acquire = || {
+        let cancel_signal = JobCancelSignal::new();
+        let guard = SharedBrowserAgentControlGuard::acquire_at(
+            path.clone(),
+            approval_dir.clone(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "page-target",
+            "Octo",
+            cancel_signal.clone(),
+        )
+        .expect("acquire a job's guard");
+        (guard, cancel_signal)
+    };
+
+    {
+        let _boot_time_or_no_browser = force_lazy_mode_for_tests(None);
+        let (guard, cancel_signal) = acquire();
+        assert!(path.exists());
+        assert!(!state_path.exists(), "an Ask start writes no state");
+        cancel_signal.confirm_shared_browser_shutdown();
+        drop(guard);
+    }
+    for persist in [false, true] {
+        let _host = force_lazy_mode_for_tests(Some(LazyMode { persist }));
+        let (guard, cancel_signal) = acquire();
+        let marker: JsonValue =
+            serde_json::from_slice(&std::fs::read(&path).expect("marker")).expect("marker JSON");
+        let state: JsonValue =
+            serde_json::from_slice(&std::fs::read(&state_path).expect("routine state"))
+                .expect("state JSON");
+        assert_eq!(state["routineBrowsingAllowed"], true);
+        for key in ["ownerId", "runId", "initiatorUserId", "browserPageId"] {
+            assert_eq!(state[key], marker[key], "{key}");
+        }
+        cancel_signal.confirm_shared_browser_shutdown();
+        drop(guard);
+        assert!(!state_path.exists(), "the run's grant ends with the run");
+    }
+}
+
 #[tokio::test]
 async fn a_routine_start_writes_bound_private_state_that_the_run_end_revokes() {
     let directory = tempfile::tempdir().expect("marker tempdir");
@@ -3382,6 +3451,45 @@ fn a_routine_start_still_asks_for_every_risky_step() {
         .output()
         .expect("routine navigation after an answered prompt");
     payload_of(&output);
+}
+
+/// A commit word only marks a button. Menu items, tabs, tree items,
+/// disclosure and menu openers and navigation items whose label holds one
+/// ("Neue Rechnung", "Start", "Neu") are navigation, so routine browsing runs
+/// them without a prompt, while the formless save buttons above still ask.
+#[test]
+fn a_routine_start_runs_menus_tabs_and_openers_with_commit_words_without_a_prompt() {
+    for mode in [
+        "menu-item-new",
+        "tab-start",
+        "tree-item-new",
+        "summary-edit",
+        "opener-new",
+        "nav-start",
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(mode);
+        fixture.prepare_routine_start("page-target");
+        let body = json!({"index": 0, "snapshotId": snapshot_id}).to_string();
+        // "100" fails any prompt this click would publish as unanswered.
+        let output = fixture
+            .command_for_with_timeout(mode, "page-target", "POST", "/v1/click", Some(&body), "100")
+            .output()
+            .expect("routine click");
+        assert!(
+            output.status.success(),
+            "{mode} asked: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !fixture.approval_dir.join("request.json").exists(),
+            "{mode} asked"
+        );
+        assert!(
+            fixture.action_log().contains("\"type\":\"click\""),
+            "{mode}"
+        );
+    }
 }
 
 #[test]

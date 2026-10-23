@@ -18,7 +18,8 @@ publish it on `globalThis.__instafyBrowserRedaction` and
   typing step, submission or key press. Free verdicts come only from structure;
   label words only add risk. `commit: true` marks an ordinary control whose
   label commits a change (Save, Speichern), which the Shared Browser still asks
-  for under routine browsing.
+  for under routine browsing. Menu items, tabs, tree items, disclosure and menu
+  openers and navigation-area items never carry it.
 
 The tests live with the Desktop Personal Browser
 (`packages/desktop-app/test/personal-browser-redaction.test.mjs`,

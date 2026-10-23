@@ -10,7 +10,8 @@
  *   code     the refusal code for a "refuse" verdict
  *   commit   true on an ordinary "change" control whose label commits a
  *            change (Save, Speichern, Buchen), so a host that lets ordinary
- *            clicks run can still ask for it
+ *            clicks run can still ask for it; never on menu items, tabs,
+ *            tree items, disclosure or menu openers or navigation-area items
  *
  * A free ("allow") verdict only ever comes from structure: tag, role, link
  * shape, form method, page area. Label words only add risk. The one exception
@@ -479,8 +480,15 @@
     if (namedCategory) return ask(namedCategory, "labelled control");
     if (credentialish(target, label)) return ask("may_show_secret", "entry in a credential context");
     // A script-driven save button has no form, so the form checks above miss
-    // it; its commit word is what marks it.
-    if (COMMIT.test(label)) return { ...ask("change", "control"), commit: true };
+    // it; its commit word is what marks it. Menu items, tabs, tree items,
+    // disclosure and menu openers and navigation-area items are structure:
+    // a commit word there ("Neue Rechnung", "Start", "Neu") only keeps them
+    // out of the free rules above, as it did before.
+    const structural = ["menuitem", "menuitemcheckbox", "menuitemradio", "treeitem", "tab"].includes(role) ||
+      tag === "summary" ||
+      target.menuOpener === true ||
+      areas.some((area) => NAVIGATION_AREAS.includes(area));
+    if (!structural && COMMIT.test(label)) return { ...ask("change", "control"), commit: true };
     return ask("change", "control");
   }
 

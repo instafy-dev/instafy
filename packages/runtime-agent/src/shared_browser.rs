@@ -565,18 +565,43 @@ fn remove_owned_agent_control_marker_with(
 }
 
 impl SharedBrowserAgentControlGuard {
+    /// Publishes a job's agent control. The run's approval start is this
+    /// process's own decision (an attested browser host starts in routine
+    /// browsing), never the job's or the model's, and its state is written
+    /// before any Codex or MCP process starts.
     pub(crate) fn acquire(
         run_id: Uuid,
         initiator_user_id: Uuid,
         browser_page_id: &str,
         display_name: &str,
         cancel_signal: JobCancelSignal,
-        approval_start: ApprovalStart,
     ) -> Result<Self> {
-        Self::acquire_with_path(
+        Self::acquire_at(
             agent_control_file_path(),
             approval_dir_path(),
-            approval_start,
+            run_id,
+            initiator_user_id,
+            browser_page_id,
+            display_name,
+            cancel_signal,
+        )
+    }
+
+    /// [`Self::acquire`] at explicit paths, so a test reaches the same
+    /// approval-start decision a job does.
+    fn acquire_at(
+        path: PathBuf,
+        approval_dir: PathBuf,
+        run_id: Uuid,
+        initiator_user_id: Uuid,
+        browser_page_id: &str,
+        display_name: &str,
+        cancel_signal: JobCancelSignal,
+    ) -> Result<Self> {
+        Self::acquire_with_path(
+            path,
+            approval_dir,
+            run_approval_start(),
             run_id,
             initiator_user_id,
             browser_page_id,
