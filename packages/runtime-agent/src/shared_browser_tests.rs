@@ -79,6 +79,33 @@ const special = {
     policy: { areas: "tree" },
   },
   "summary-edit": { description: control("Bearbeiten", { tag: "summary", inputType: "" }) },
+  // Menu items whose label records or finalizes something (bookkeeping
+  // German and English) ask even under routine browsing; a menu item that
+  // only names a list ("Buchungen") stays navigation.
+  "menu-item-finalize": {
+    description: control("Festschreiben", { tag: "li", role: "menuitem", inputType: "" }),
+    policy: { areas: "menu" },
+  },
+  "menu-item-book": {
+    description: control("Buchen", { tag: "li", role: "menuitem", inputType: "" }),
+    policy: { areas: "menu" },
+  },
+  "menu-item-mark-paid": {
+    description: control("Als bezahlt markieren", { tag: "li", role: "menuitem", inputType: "" }),
+    policy: { areas: "menu" },
+  },
+  "menu-item-save": {
+    description: control("Speichern", { tag: "li", role: "menuitem", inputType: "" }),
+    policy: { areas: "menu" },
+  },
+  "menu-item-mark-paid-en": {
+    description: control("Mark as paid", { tag: "li", role: "menuitem", inputType: "" }),
+    policy: { areas: "menu" },
+  },
+  "menu-item-bookings": {
+    description: control("Buchungen", { tag: "li", role: "menuitem", inputType: "" }),
+    policy: { areas: "menu" },
+  },
   "opener-new": { description: control("Neu"), policy: { menuOpener: true } },
   "nav-start": { description: control("Start"), policy: { areas: "nav" } },
   "cross-site-link": {
@@ -3466,6 +3493,7 @@ fn a_routine_start_runs_menus_tabs_and_openers_with_commit_words_without_a_promp
         "summary-edit",
         "opener-new",
         "nav-start",
+        "menu-item-bookings",
     ] {
         let fixture = EmbeddedControllerFixture::new();
         let snapshot_id = fixture.snapshot_id(mode);
@@ -3488,6 +3516,40 @@ fn a_routine_start_runs_menus_tabs_and_openers_with_commit_words_without_a_promp
         assert!(
             fixture.action_log().contains("\"type\":\"click\""),
             "{mode}"
+        );
+    }
+}
+
+/// A menu item whose label records or finalizes something ("Festschreiben",
+/// "Buchen", "Als bezahlt markieren", "Speichern", "Mark as paid") is a
+/// consequential step, so a routine start still asks before running it.
+#[test]
+fn a_routine_start_still_asks_for_menu_items_that_record_or_finalize() {
+    for mode in [
+        "menu-item-finalize",
+        "menu-item-book",
+        "menu-item-mark-paid",
+        "menu-item-save",
+        "menu-item-mark-paid-en",
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(mode);
+        fixture.prepare_routine_start("page-target");
+        let body = json!({"index": 0, "snapshotId": snapshot_id}).to_string();
+        // "100" fails the prompt this click must publish as unanswered.
+        let output = fixture
+            .command_for_with_timeout(mode, "page-target", "POST", "/v1/click", Some(&body), "100")
+            .output()
+            .expect("routine click");
+        assert!(!output.status.success(), "{mode} ran without asking");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("approval_timeout_non_retryable"),
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !fixture.action_log().contains("\"type\":\"click\""),
+            "{mode} clicked"
         );
     }
 }

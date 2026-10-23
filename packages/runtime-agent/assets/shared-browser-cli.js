@@ -1228,8 +1228,11 @@ function assertSafeTypeTarget(description) {
 // arbitrary website JavaScript is side-effect-free. Keep recognized consequential
 // controls, commit buttons, form submissions and activation keys behind
 // one-shot confirmation.
+// English and the German of bookkeeping tools: steps that record, finalize,
+// pay or mark something paid stay consequential even on a menu item, while a
+// menu item that only names a list ("Buchungen") is navigation.
 const CONSEQUENTIAL_ACTION_PATTERN =
-  /\b(?:buy|purchase|pay|checkout|place[\s_-]*order|delete|remove|erase|destroy|send|post|publish|submit|authorize|approve|allow|confirm[\s_-]*(?:order|payment|purchase)|transfer|withdraw|book|reserve|sign[\s_-]*(?:contract|document|agreement))\b/i;
+  /(?<![\p{L}\p{N}])(?:buy|purchase|pay|checkout|place[\s_-]*order|delete|remove|erase|destroy|send|post|publish|submit|authorize|approve|allow|confirm[\s_-]*(?:order|payment|purchase)|transfer|withdraw|book|reserve|sign[\s_-]*(?:contract|document|agreement)|save|finalize|mark[\s_-]*(?:as[\s_-]*)?paid|speichern|buchen|verbuchen|festschreiben|als[\s_-]*bezahlt|bezahlen|überweisen|freigeben|absenden|versenden|löschen|stornieren)(?![\p{L}\p{N}])/iu;
 
 function isConsequentialAction(description) {
   return CONSEQUENTIAL_ACTION_PATTERN.test(descriptionContent(description));
