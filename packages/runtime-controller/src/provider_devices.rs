@@ -106,8 +106,6 @@ async fn list_provider_devices(
         return Err(unauthorized("user session required"));
     }
 
-    ensure_provider_device_tables(&state).await?;
-
     let project_id = parse_project_id(project_id_raw.as_str())?;
     let provider_id = normalize_optional_provider_id(query.provider_id.as_deref())?;
     let provider_family_id =
@@ -169,8 +167,6 @@ async fn record_provider_device_heartbeat(
     if context.user_id.is_none() && !context.is_service_role {
         return Err(unauthorized("user session required"));
     }
-
-    ensure_provider_device_tables(&state).await?;
 
     let project_id = parse_project_id(project_id_raw.as_str())?;
     let provider_id = normalize_provider_id(body.provider_id.as_str())?;
@@ -251,47 +247,6 @@ async fn record_provider_device_heartbeat(
     Ok(Json(provider_device_to_payload(&map_provider_device_row(
         &row,
     ))))
-}
-
-async fn ensure_provider_device_tables(
-    state: &AppState,
-) -> Result<(), (StatusCode, Json<ApiError>)> {
-    let connection = state
-        .pool
-        .get()
-        .await
-        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
-    connection
-        .batch_execute(
-            "
-            create table if not exists project_provider_devices (
-              project_id uuid not null,
-              provider_id text not null,
-              provider_family_id text not null,
-              device_id text not null,
-              device_label text,
-              platform text,
-              status text not null default 'ready',
-              connection_type text not null default 'native_runtime',
-              metadata jsonb not null default '{}'::jsonb,
-              created_at timestamptz not null default now(),
-              updated_at timestamptz not null default now(),
-              last_seen_at timestamptz not null default now(),
-              primary key (project_id, provider_id, device_id)
-            );
-
-            create index if not exists project_provider_devices_project_idx
-              on project_provider_devices (project_id, provider_family_id, last_seen_at desc);
-
-            alter table project_provider_devices enable row level security;
-            revoke all privileges on table project_provider_devices from anon, authenticated;
-            ",
-        )
-        .await
-        .map_err(|error| {
-            internal_error(format!("failed to ensure provider device tables: {error}"))
-        })?;
-    Ok(())
 }
 
 async fn ensure_provider_is_attached(

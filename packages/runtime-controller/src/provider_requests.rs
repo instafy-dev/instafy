@@ -8,7 +8,6 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value as JsonValue};
-use tokio::sync::OnceCell;
 use tokio::time::sleep;
 use tokio_postgres::types::Json as PgJson;
 use tokio_postgres::{error::SqlState, Row};
@@ -43,7 +42,6 @@ const DEFAULT_WAIT_TIMEOUT_MS: u64 = 45_000;
 const MAX_WAIT_TIMEOUT_MS: u64 = 120_000;
 const MIN_WAIT_TIMEOUT_MS: u64 = 5_000;
 const WAIT_POLL_INTERVAL_MS: u64 = 350;
-static PROVIDER_REQUEST_TABLES_READY: OnceCell<()> = OnceCell::const_new();
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -204,8 +202,6 @@ async fn dispatch_provider_tool_call(
         return Err(unauthorized("user session required"));
     }
 
-    ensure_provider_request_tables(&state).await?;
-
     let project_id = parse_project_id(project_id_raw.as_str())?;
     let provider_id = normalize_provider_id(body.provider_id.as_str())?;
     let tool_name = normalize_named_identifier(body.name.as_str(), "tool name", TOOL_NAME_MAX_LEN)?;
@@ -283,8 +279,6 @@ async fn dispatch_provider_resource_read(
     if context.user_id.is_none() && !context.is_service_role {
         return Err(unauthorized("user session required"));
     }
-
-    ensure_provider_request_tables(&state).await?;
 
     let project_id = parse_project_id(project_id_raw.as_str())?;
     let provider_id = normalize_provider_id(body.provider_id.as_str())?;
@@ -365,8 +359,6 @@ async fn list_provider_requests(
         return Err(unauthorized("user session required"));
     }
 
-    ensure_provider_request_tables(&state).await?;
-
     let project_id = parse_project_id(project_id_raw.as_str())?;
     let provider_id = normalize_provider_id(query.provider_id.as_str())?;
     let statuses = normalize_status_filters(query.statuses);
@@ -424,8 +416,6 @@ async fn claim_provider_request(
     if context.user_id.is_none() && !context.is_service_role {
         return Err(unauthorized("user session required"));
     }
-
-    ensure_provider_request_tables(&state).await?;
 
     let project_id = parse_project_id(project_id_raw.as_str())?;
     let request_id = parse_request_id(request_id_raw.as_str())?;
@@ -521,8 +511,6 @@ async fn complete_provider_request(
     if context.user_id.is_none() && !context.is_service_role {
         return Err(unauthorized("user session required"));
     }
-
-    ensure_provider_request_tables(&state).await?;
 
     let project_id = parse_project_id(project_id_raw.as_str())?;
     let request_id = parse_request_id(request_id_raw.as_str())?;
@@ -845,59 +833,6 @@ async fn ensure_provider_is_attached(
         return Err(bad_request("provider is not attached to this project"));
     }
 
-    Ok(())
-}
-
-async fn ensure_provider_request_tables(
-    state: &AppState,
-) -> Result<(), (StatusCode, Json<ApiError>)> {
-    PROVIDER_REQUEST_TABLES_READY
-        .get_or_try_init(|| async {
-            let connection = state
-                .pool
-                .get()
-                .await
-                .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
-            connection
-                .batch_execute(
-                    "
-                    create table if not exists project_provider_requests (
-                      id uuid primary key,
-                      project_id uuid not null,
-                      provider_id text not null,
-                      request_kind text not null,
-                      tool_name text,
-                      resource_uri text,
-                      arguments jsonb not null default '{}'::jsonb,
-                      status text not null,
-                      requested_by uuid,
-                      claimed_by_device_id text,
-                      claimed_by_device_label text,
-                      response jsonb,
-                      error text,
-                      created_at timestamptz not null default now(),
-                      claimed_at timestamptz,
-                      completed_at timestamptz,
-                      updated_at timestamptz not null default now()
-                    );
-
-                    create index if not exists project_provider_requests_lookup_idx
-                      on project_provider_requests (project_id, provider_id, status, created_at);
-
-                    create index if not exists project_provider_requests_project_idx
-                      on project_provider_requests (project_id, created_at desc);
-
-                    alter table project_provider_requests enable row level security;
-                    revoke all privileges on table project_provider_requests from anon, authenticated;
-                    ",
-                )
-                .await
-                .map_err(|error| {
-                    internal_error(format!("failed to ensure provider request table: {error}"))
-                })?;
-            Ok(())
-        })
-        .await?;
     Ok(())
 }
 
