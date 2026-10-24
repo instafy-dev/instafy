@@ -370,13 +370,25 @@ export function isSensitivePersonalBrowserEditable(
   return SENSITIVE_EDITABLE_PATTERN.test(descriptorText(value));
 }
 
+function highImpactText(parts: Array<string | null | undefined>): boolean {
+  const text = parts.filter((part): part is string => typeof part === "string").join(" ");
+  return HIGH_IMPACT_ACTION_PATTERN.test(text);
+}
+
 export function isHighImpactPersonalBrowserAction(
   value: PersonalBrowserActionDescriptor,
 ): boolean {
-  const text = [value.text, value.ariaLabel, value.title, value.value, value.href, value.formActionText]
-    .filter((part): part is string => typeof part === "string")
-    .join(" ");
-  return HIGH_IMPACT_ACTION_PATTERN.test(text);
+  return highImpactText([value.text, value.ariaLabel, value.title, value.value, value.href, value.formActionText]);
+}
+
+/**
+ * The same check on the control's own names and address only. The form's
+ * submit label belongs to another control, so a page wrapped in one form
+ * whose button says "Submit" does not make every menu toggle in it
+ * high-impact. Submitting the form is judged by the classifier.
+ */
+function isHighImpactPersonalBrowserControl(value: PersonalBrowserActionDescriptor): boolean {
+  return highImpactText([value.text, value.ariaLabel, value.title, value.value, value.href]);
 }
 
 /**
@@ -411,7 +423,7 @@ export function personalBrowserActivationRequiresConfirmation(
     // including every submit, asks.
     const step = classifyPersonalBrowserStep("click", value, context);
     if (step.verdict !== "allow") return true;
-    return !ROUTINE_STRUCTURAL_CATEGORIES.has(step.category) && isHighImpactPersonalBrowserAction(value);
+    return !ROUTINE_STRUCTURAL_CATEGORIES.has(step.category) && isHighImpactPersonalBrowserControl(value);
   }
   return (
     isHighImpactPersonalBrowserAction(value) ||

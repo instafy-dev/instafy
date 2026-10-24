@@ -511,6 +511,18 @@ test("opening a menu keeps the target fingerprint; only the opener's presence is
   );
 });
 
+test("a toggle naming the region it controls, or a Bootstrap toggle, is an opener; a dangling reference is not", async () => {
+  const harness = createPageHarness();
+  const sidebar = new harness.Element("div", { id: "sidebar", role: "button", text: "Seitenleiste" });
+  const toggle = new harness.HTMLButtonElement({ type: "button", title: "Menü ein-/ausklappen", "aria-controls": "sidebar" });
+  const collapse = new harness.HTMLButtonElement({ type: "button", text: "Filter", "data-bs-toggle": "collapse" });
+  const dangling = new harness.HTMLButtonElement({ type: "button", text: "Filter", "aria-controls": "missing" });
+  harness.document.elements = [toggle, collapse, dangling, sidebar];
+  const snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
+  assert.deepEqual(Array.from(snapshot.interactive.slice(0, 3), (item) => item.descriptor.menuOpener), [true, true, false]);
+  assert.equal(security.classifyPersonalBrowserStep("click", snapshot.interactive[0].descriptor).category, "disclosure");
+});
+
 test("descriptors carry form, link and page-area structure for the step classifier", async () => {
   const harness = createPageHarness();
   const form = new harness.HTMLFormElement({ method: "POST" });

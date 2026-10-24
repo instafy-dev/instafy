@@ -333,7 +333,30 @@ unchanged. Stopping or completing the turn ends the grant.
 Button descriptors retain the browser's normalized type. An ordinary
 non-submitting button inside a form can therefore use the routine grant, while
 submission controls still ask. Consequential-action checks remain in force for
-both kinds of controls.
+both kinds of controls. They read a control's own names (label, accessible
+name, visible text, title, value, id, name, address, tooltip and image text),
+never its structure: a `<button>` without a `type` attribute reports the type
+`submit` even outside a form, and a control in a POST form reports the method
+`post`, so neither alone makes a step ask.
+
+A control that only opens or closes part of the page is a disclosure toggle
+and free like a menu opener: it has `aria-expanded`, `aria-haspopup`,
+`aria-controls` naming an element on the page or a Bootstrap-style
+`data-bs-toggle` (or `data-toggle`) of `collapse`, `dropdown`, `offcanvas` or
+`sidebar`; or its whole name is a toggle name such as "Menü ein-/ausklappen",
+"Seitenleiste ein-/ausblenden", "Toggle menu", "Menu" or "Expand/collapse"; or
+it has no name and a hamburger, caret or kebab icon. A risk or commit word in
+its name, a risky icon, a reveal word, a dialog or a form submit still decides.
+An icon-only control whose icon is a trash can, a paper plane, a cart or card,
+a share or add-user, a download or a sign-out asks in that category, and one
+whose icon is a floppy disk, pencil or plus asks as a commit button.
+
+A control with no accessible name or visible text is named from its own
+hints rather than its index: a tooltip attribute or described-by text, its
+image's alt text or svg title, a generic noun for its icon, and where it sits,
+for example "profile picture button in the top right". The name is masked like
+any other control name before it reaches a snapshot, a prompt or the action
+log.
 
 Routine mode deliberately relaxes universal confirmation. Its consequence
 classifier uses page descriptors and URL text; it cannot prove that arbitrary

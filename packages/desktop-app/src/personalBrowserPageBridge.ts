@@ -409,9 +409,17 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
       ].filter(Boolean).join(" "), 160);
       const expanded = structureAttribute(element, "aria-expanded") ?? structureAttribute(link, "aria-expanded");
       const popup = structureAttribute(element, "aria-haspopup");
+      // A control that names the region it shows or hides, or a
+      // Bootstrap-style collapse, dropdown or offcanvas toggle, opens part
+      // of the page the way an aria-expanded opener does.
+      const controlsRegion = clean(structureAttribute(element, "aria-controls"), 200)
+        .split(/\\s+/)
+        .some((id) => id && Boolean(document.getElementById(id)));
+      const toggleKind = clean(structureAttribute(element, "data-bs-toggle") || structureAttribute(element, "data-toggle"), 32).toLowerCase();
+      const pageToggle = ["collapse", "dropdown", "offcanvas", "sidebar"].includes(toggleKind);
       return {
         areas: parentFacts.areas.join(" "),
-        menuOpener: expanded !== null || (popup !== null && popup !== "false"),
+        menuOpener: expanded !== null || (popup !== null && popup !== "false") || controlsRegion || pageToggle,
         credentialContext: credentialContextPattern.test([parentFacts.dialogLabel, heading, header, rowText].join(" ")),
         row: Boolean(row),
         contextLabel,

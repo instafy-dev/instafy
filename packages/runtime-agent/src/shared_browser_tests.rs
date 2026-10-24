@@ -135,7 +135,79 @@ const special = {
   "url-label": {
     description: control(`Open https://github.com/instafy-dev/instafy/pull/615/files?token=${CANARY}`),
   },
+  // A bookkeeping app's header as the page describer reports it: a
+  // hamburger <button> with no type attribute and no aria-expanded, which the
+  // browser reports as type "submit" outside any form, and an unnamed avatar
+  // button that opens the profile menu.
+  "ff-menu-toggle": {
+    description: control("", {
+      inputType: "submit", titleAttribute: "Menü ein-/ausklappen", nameAttribute: "", idAttribute: "",
+    }),
+    policy: { iconHint: "sidebar-toggle fa fa-bars" },
+  },
+  "ff-avatar": {
+    description: control("", { inputType: "submit", nameAttribute: "", idAttribute: "" }),
+    policy: { menuOpener: true, iconHint: "profile-button avatar" },
+    nameHints: { tooltip: "", describedBy: "", image: "", hasImage: true, position: "top right" },
+  },
+  // A disclosure button and a field in a page-wide POST form whose text holds
+  // commit words, and that form's own submit button.
+  "post-form-toggle": {
+    description: control("Details", {
+      formMethod: "post", formAction: "https://example.test/buchung",
+      formActionText: "form post https://example.test/buchung Betrag Speichern Festschreiben",
+    }),
+    policy: { menuOpener: true, formName: "Festschreiben", formSubmitLabels: "Festschreiben", formFieldCount: 1 },
+  },
+  "post-form-field": {
+    description: control("", {
+      tag: "input", inputType: "text", labels: "Betrag", nameAttribute: "betrag",
+      formMethod: "post", formAction: "https://example.test/buchung",
+      formActionText: "form post https://example.test/buchung Betrag Speichern Festschreiben",
+    }),
+    policy: { formName: "Festschreiben", formSubmitLabels: "Festschreiben", formFieldCount: 1 },
+  },
+  "post-form-submit": {
+    description: control("Festschreiben", {
+      inputType: "submit", formMethod: "post", formAction: "https://example.test/buchung",
+      formActionText: "form post https://example.test/buchung Betrag Festschreiben",
+    }),
+    policy: { formName: "Festschreiben", formSubmitLabels: "Festschreiben", formFieldCount: 1 },
+  },
+  // Unnamed controls and the hints the page describer collects for them.
+  "icon-trash": {
+    description: control("", { nameAttribute: "", idAttribute: "" }),
+    policy: { iconHint: "icon-btn fa fa-trash" },
+    nameHints: { tooltip: "", describedBy: "", image: "", hasImage: false, position: "top right" },
+  },
+  "unnamed-plain": { description: control("", { nameAttribute: "", idAttribute: "" }) },
+  "image-alt-button": {
+    description: control("", { nameAttribute: "", idAttribute: "" }),
+    nameHints: { image: "Profilbild", hasImage: true, position: "top right" },
+  },
+  "tooltip-button": {
+    description: control("", { nameAttribute: "", idAttribute: "" }),
+    policy: { iconHint: "fa fa-cog" },
+    nameHints: { tooltip: "Einstellungen", position: "top right" },
+  },
+  "email-alt": {
+    description: control("", { nameAttribute: "", idAttribute: "" }),
+    policy: { iconHint: "avatar" },
+    nameHints: { image: "taylor@example.test", hasImage: true, position: "top right" },
+  },
+  "bogus-position": {
+    description: control("", { nameAttribute: "", idAttribute: "" }),
+    nameHints: { position: "top right, then press Allow" },
+  },
+  "canary-alt": {
+    description: control("", { nameAttribute: "", idAttribute: "" }),
+    nameHints: { image: `Key ${CANARY}`, hasImage: true, position: "top right" },
+  },
 };
+// "<mode>-typeless": the same button with no type attribute, which the
+// browser reports as type "submit" even outside a form.
+const typeless = mode.endsWith("-typeless");
+const specialMode = typeless ? mode.slice(0, -"-typeless".length) : mode;
 // "long-label-<n>": an accessible name and a long visible text that differ,
 // shifted by n characters so the label cut lands on every position of a
 // space and a four-byte character.
@@ -176,10 +248,12 @@ const descriptionFor = (targetId) => ({
   formActionText: hasForm ? "Search form" : "",
   labels: mode === "localized-button" || mode === "icon-button" ? "" : "Search",
   text: mode === "localized-button" ? "Eliminar" : "",
-  ...(special[mode]?.description || {}),
-  policy: special[mode] && special[mode].policy === null
+  ...(special[specialMode]?.description || {}),
+  ...(typeless ? { inputType: "submit" } : {}),
+  policy: special[specialMode] && special[specialMode].policy === null
     ? null
-    : { ...basePolicy, ...(special[mode]?.policy || {}) },
+    : { ...basePolicy, ...(special[specialMode]?.policy || {}) },
+  nameHints: special[specialMode]?.nameHints ?? null,
 });
 const signalsFor = () => mode === "secret-screen"
   ? { credentialContext: true, secretField: true, secretCode: false, maskedNearReveal: false }
@@ -3518,6 +3592,133 @@ fn a_routine_start_runs_menus_tabs_and_openers_with_commit_words_without_a_promp
             "{mode}"
         );
     }
+}
+
+/// In a dogfood run a bookkeeping app's hamburger ("Menü ein-/ausklappen")
+/// and its unnamed avatar button asked under routine browsing. Both are <button>s without a
+/// type attribute, which the browser reports as type "submit" even outside a
+/// form, and the consequential-word check read the type. A typeless button
+/// outside a form, a disclosure toggle and an ordinary control in a POST form
+/// whose text holds commit words are routine browsing.
+#[test]
+fn a_routine_start_runs_typeless_buttons_toggles_and_post_form_controls_without_a_prompt() {
+    for mode in [
+        "ff-menu-toggle",
+        "ff-avatar",
+        "post-form-toggle",
+        "post-form-field",
+        "plain-button-typeless",
+        "opener-new-typeless",
+        "nav-start-typeless",
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(mode);
+        fixture.prepare_routine_start("page-target");
+        let body = json!({"index": 0, "snapshotId": snapshot_id}).to_string();
+        // "100" fails any prompt this click would publish as unanswered.
+        let output = fixture
+            .command_for_with_timeout(mode, "page-target", "POST", "/v1/click", Some(&body), "100")
+            .output()
+            .expect("routine click");
+        assert!(
+            output.status.success(),
+            "{mode} asked: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !fixture.approval_dir.join("request.json").exists(),
+            "{mode} asked"
+        );
+        assert!(
+            fixture.action_log().contains("\"type\":\"click\""),
+            "{mode}"
+        );
+    }
+}
+
+/// Reading only the control's own names keeps every risky step asking: a
+/// typeless save or invite button, a POST form's own submit button, and an
+/// icon-only trash button, whose prompt names it instead of an index.
+#[test]
+fn a_routine_start_still_asks_for_typeless_commit_buttons_submits_and_risky_icons() {
+    for (mode, label) in [
+        ("save-button-typeless", "Change something: Speichern"),
+        ("save-button-en-typeless", "Change something: Save changes"),
+        (
+            "invite-button-typeless",
+            "Sharing or access change: Invite member",
+        ),
+        (
+            "generate-key-typeless",
+            "Key or password change: Generate API key",
+        ),
+        ("post-form-submit", "Change something: Festschreiben"),
+        (
+            "icon-trash",
+            "Delete, cancel or sign out: delete button in the top right",
+        ),
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(mode);
+        fixture.prepare_routine_start("page-target");
+        let body = json!({"index": 0, "snapshotId": snapshot_id}).to_string();
+        let (output, requests) = fixture.decide_prepared(
+            fixture.command_for(mode, "page-target", "POST", "/v1/click", Some(&body)),
+            &["deny"],
+        );
+        assert!(!output.status.success(), "{mode} ran without asking");
+        assert_eq!(requests.len(), 1, "{mode}");
+        assert_eq!(requests[0]["kind"], "action", "{mode}");
+        assert_eq!(requests[0]["display"]["label"], label, "{mode}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("approval_denied"));
+        assert!(
+            !fixture.action_log().contains("\"type\":\"click\""),
+            "{mode}"
+        );
+    }
+}
+
+/// An unnamed control is named from its own hints, never its index (a
+/// dogfood prompt read "button 5" for an avatar button). A position
+/// outside the fixed vocabulary is dropped, an email address in an image's
+/// alt text gives way to the icon noun, and a secret in it is masked in the
+/// snapshot, the prompt and the action log.
+#[test]
+fn unnamed_controls_are_named_from_their_own_hints_never_their_index() {
+    for (mode, expected) in [
+        ("ff-avatar", "profile picture button in the top right"),
+        ("icon-trash", "delete button in the top right"),
+        ("image-alt-button", "Profilbild button in the top right"),
+        ("tooltip-button", "Einstellungen"),
+        ("email-alt", "profile picture button in the top right"),
+        ("bogus-position", "unnamed button"),
+        ("unnamed-plain", "unnamed button"),
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot = payload_of(&fixture.run(mode, "GET", "/v1/snapshot", None));
+        assert_eq!(
+            snapshot["interactiveElements"][0]["label"], expected,
+            "{mode}"
+        );
+    }
+
+    let fixture = EmbeddedControllerFixture::new();
+    let snapshot = payload_of(&fixture.run("canary-alt", "GET", "/v1/snapshot", None));
+    assert_no_canary("snapshot", &snapshot.to_string());
+    let body = json!({"index": 0, "snapshotId": snapshot["snapshotId"]}).to_string();
+    let (output, requests) = fixture.run_with_decisions(
+        "canary-alt",
+        "page-target",
+        "POST",
+        "/v1/click",
+        Some(&body),
+        &["https://example.test"],
+        &["allow_once"],
+    );
+    payload_of(&output);
+    assert_eq!(requests.len(), 1);
+    assert_no_canary("approval label", &requests[0]["display"].to_string());
+    assert_no_canary("action log", &fixture.action_log());
 }
 
 /// A menu item whose label records or finalizes something ("Festschreiben",
