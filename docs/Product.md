@@ -861,6 +861,8 @@ shows pending message bubbles above the right side of the composer; long queues 
 that overlay without moving the input. The existing Edit, Send now, Remove and drag/keyboard
 reorder controls remain available. These are pending messages, not sent transcript bubbles.
 Stashed drafts remain a separate, private collection.
+Escape closes the queue or stash overlay and returns focus to its trigger, unless focus has
+already moved elsewhere, for example into the composer to keep typing.
 
 Editing a queued message requires an empty composer without image attachments; an existing
 draft must be stashed or cleared first. Save and Cancel restore the message's original place
