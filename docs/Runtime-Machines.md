@@ -208,6 +208,17 @@ older hold does not count: a machine started from another tab or device after
 it, then lost, is recovered as before. Every automatic start reads the holds
 once more right before it asks for a machine.
 
+A tab can miss a stop's `runtime.stopped`, for instance while its event
+stream reconnects, and then hears of the stop only as the origin expiring a
+minute later. Before it recovers such a loss it reads the lost machine's
+`lastStopReason` in the runtime status (see "A launch that does not come up"
+below). An idle or other platform stop there holds the space like an idle
+pause, and a person's stop holds it like their Stop (when it leaves no live
+hosted machine), unless a hosted launch was requested after that stop. Each
+hold lifts as it always does: the idle pause on writing in the chat, Send or
+Start, the Stop on Send, Start or Reconnect. A controller from before the
+field reports none, and the loss is recovered as before.
+
 Every hosted stop is followed, about a minute later, by `origin.expired` for
 the stopped machine's origin. The origin server beats every 20 seconds, and
 once its last heartbeat is 60 seconds old, three beats, the origin presence

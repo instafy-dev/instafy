@@ -29,6 +29,7 @@ import {
 import {
   isHostedRuntime,
   latestHostedLaunchRequestedAtMs,
+  reportedRuntimeStopHold,
   runtimeEntryIsReady,
 } from "../utils/runtimeEntry";
 import {
@@ -264,6 +265,42 @@ export function useHostedRuntimeRecoveryEffects({
       debugLog("hosted-runtime:auto-ensure-held-for-person-stop", {
         projectId,
         runtimeId: lostRuntimeId,
+      });
+      return true;
+    },
+    [debugLog],
+  );
+
+  // The stop the controller reports for the lost machine (lastStopReason:
+  // its newest stop since it came up, with no launch asked for since) holds
+  // the space as that stop's runtime.stopped does in the listener below: a
+  // person's stop like Stop, when it leaves no live hosted machine there, a
+  // platform stop like an idle pause. A tab can miss that event, as while
+  // its event stream reconnects, and then hears of the stop only as the
+  // origin expiring a minute later. True when such a stop held the space. A
+  // controller older than the field reports none, and the loss is recovered
+  // as before.
+  const holdForReportedStop = useCallback(
+    (projectId: string, lostRuntimeId: string | null) => {
+      if (!lostRuntimeId) {
+        return false;
+      }
+      const lost = runtimeStatusesRef.current.find(
+        (entry) => Boolean(entry) && entry.runtimeId === lostRuntimeId,
+      );
+      const hold = reportedRuntimeStopHold(lost);
+      if (hold === null) {
+        return false;
+      }
+      if (hold === "idle_pause") {
+        markIdlePaused(projectId);
+      } else if (stopLeavesNoLiveHostedRuntime(runtimeStatusesRef.current, lostRuntimeId)) {
+        markManualStop(projectId);
+      }
+      debugLog("hosted-runtime:unexpected-loss-held-for-reported-stop", {
+        projectId,
+        runtimeId: lostRuntimeId,
+        reason: lost?.lastStopReason ?? null,
       });
       return true;
     },
@@ -517,6 +554,9 @@ export function useHostedRuntimeRecoveryEffects({
     if (autoEnsureHostedRef.current) {
       return;
     }
+    if (activeProjectId && holdForReportedStop(activeProjectId, pendingRecovery?.runtimeId ?? null)) {
+      return;
+    }
     debugLog("hosted-runtime:ensure-unexpected-loss-recovery", {
       projectId: activeProjectId,
       runtimeId: pendingRecovery?.runtimeId ?? null,
@@ -536,6 +576,7 @@ export function useHostedRuntimeRecoveryEffects({
     hasHostedRuntimeInProgress,
     hasLocalRuntime,
     holdCoversLoss,
+    holdForReportedStop,
     hostedRuntimeEnsuring,
     pendingHostedRuntimeRecoveryRef,
     projectReadyForRuntime,

@@ -89,6 +89,16 @@ function hostedEntry(
   } as ControllerRuntimeStatusEntry;
 }
 
+/** `entry` with the stop the controller reports for it, if any. */
+function withLastStop(
+  entry: ControllerRuntimeStatusEntry,
+  lastStop: { reason: string; atMs: number } | undefined,
+): ControllerRuntimeStatusEntry {
+  return lastStop
+    ? { ...entry, lastStopReason: lastStop.reason, lastStoppedAt: new Date(lastStop.atMs).toISOString() }
+    : entry;
+}
+
 interface HarnessProps {
   stopped: boolean;
   preferred: boolean;
@@ -107,6 +117,13 @@ interface HarnessProps {
    * booting window, so the ensure hook still reads it as no machine.
    */
   launchRequestedAtMs?: number;
+  /**
+   * The stop the controller reports for the stopped machine
+   * (`lastStopReason`, `lastStoppedAt`): its newest stop since it came up.
+   */
+  lastStop?: { reason: string; atMs: number };
+  /** A second hosted machine in the space, stopped, with this reported stop. */
+  otherLastStop?: { reason: string; atMs: number };
   /** The runs this tab knows. */
   runs?: Record<string, RunRecord> | null;
   /** The controller's runs read for the space (GET /runs). */
@@ -131,13 +148,19 @@ describe("useHostedRuntimeRecoveryEffects after a stop", () => {
     otherReady = false,
     releasing = false,
     launchRequestedAtMs,
+    lastStop,
+    otherLastStop,
     runs = null,
     fetchProjectRuns,
     activeProjectId = PROJECT_ID,
   }: HarnessProps) {
     const status = stopped ? (releasing || launchRequestedAtMs !== undefined ? "requested" : "stopped") : "ready";
-    const entry = hostedEntry(status, RUNTIME_ID, launchRequestedAtMs);
-    const statuses = otherReady ? [entry, hostedEntry("ready", OTHER_RUNTIME_ID)] : [entry];
+    const entry = withLastStop(hostedEntry(status, RUNTIME_ID, launchRequestedAtMs), stopped ? lastStop : undefined);
+    const statuses = otherReady
+      ? [entry, hostedEntry("ready", OTHER_RUNTIME_ID)]
+      : otherLastStop
+        ? [entry, withLastStop(hostedEntry("stopped", OTHER_RUNTIME_ID), otherLastStop)]
+        : [entry];
     const readyRuntimeCount = (stopped ? 0 : 1) + (otherReady ? 1 : 0);
     const autoEnsureHostedRef = useRef(false);
     const pendingHostedPollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -547,6 +570,89 @@ describe("useHostedRuntimeRecoveryEffects after a stop", () => {
 
     expect(ensureHostedRuntime).toHaveBeenCalledTimes(1);
     expect(isManualStopHeld(PROJECT_ID)).toBe(false);
+  });
+
+  describe("when the stop's runtime.stopped never reached this tab", () => {
+    // The machine's origin expires about a minute after every stop. Without
+    // the stop's own event that expiry reads as an unexpected loss. The
+    // status still names the stop (lastStopReason, lastStoppedAt) until the
+    // machine comes up again.
+    const aMinuteAgo = () => Date.now() - 60_000;
+
+    it.each([
+      ["fallback runtime", false, false],
+      ["preferred runtime", true, false],
+      ["fallback runtime, during the release", false, true],
+    ])("holds an idle stop like an idle pause (%s)", async (_label, preferred, releasing) => {
+      const idle = { preferred, hasPendingProjectWork: false };
+      await render({ ...idle, stopped: false });
+      await publishOriginExpired();
+      await render({ ...idle, stopped: true, releasing, lastStop: { reason: "idle", atMs: aMinuteAgo() } });
+
+      expect(ensureHostedRuntime).not.toHaveBeenCalled();
+      expect(isIdlePaused(PROJECT_ID)).toBe(true);
+      expect(isManualStopHeld(PROJECT_ID)).toBe(false);
+
+      // Writing in the chat lifts the pause and the machine starts, though
+      // the status still names the stop.
+      await act(async () => {
+        clearIdlePaused(PROJECT_ID);
+      });
+      expect(ensureHostedRuntime).toHaveBeenCalledTimes(1);
+    });
+
+    it("holds a person's stop made elsewhere like Stop, before reading the runs", async () => {
+      const fetchProjectRuns = vi.fn(async () => [] as RunRecord[]);
+      const busy = { preferred: false, hasPendingProjectWork: true, fetchProjectRuns };
+      await render({ ...busy, stopped: false });
+      await publishOriginExpired();
+      await render({ ...busy, stopped: true, lastStop: { reason: "user_stop", atMs: aMinuteAgo() } });
+
+      expect(ensureHostedRuntime).not.toHaveBeenCalled();
+      expect(isManualStopHeld(PROJECT_ID)).toBe(true);
+      expect(isIdlePaused(PROJECT_ID)).toBe(false);
+      expect(fetchProjectRuns).not.toHaveBeenCalled();
+    });
+
+    it.each(["heartbeat_timeout", "launch_timeout", "other"])(
+      "still recovers a machine whose last stop was a %s",
+      async (reason) => {
+        const idle = { preferred: false, hasPendingProjectWork: false };
+        await render({ ...idle, stopped: false });
+        await publishOriginExpired();
+        await render({ ...idle, stopped: true, lastStop: { reason, atMs: aMinuteAgo() } });
+
+        expect(ensureHostedRuntime).toHaveBeenCalledTimes(1);
+        expect(isIdlePaused(PROJECT_ID)).toBe(false);
+        expect(isManualStopHeld(PROJECT_ID)).toBe(false);
+      },
+    );
+
+    it("still recovers a launch asked for after the stop", async () => {
+      const idle = { preferred: false, hasPendingProjectWork: false };
+      await render({ ...idle, stopped: false });
+      await publishOriginExpired();
+      await render({
+        ...idle,
+        stopped: true,
+        launchRequestedAtMs: Date.now() - 30_000,
+        lastStop: { reason: "idle", atMs: aMinuteAgo() },
+      });
+
+      expect(ensureHostedRuntime).toHaveBeenCalledTimes(1);
+      expect(isIdlePaused(PROJECT_ID)).toBe(false);
+    });
+
+    it("does not hold the space for the stop of another machine", async () => {
+      const idle = { preferred: false, hasPendingProjectWork: false };
+      const other = { ...idle, otherLastStop: { reason: "idle", atMs: aMinuteAgo() } };
+      await render({ ...other, stopped: false });
+      await publishOriginExpired();
+      await render({ ...other, stopped: true });
+
+      expect(ensureHostedRuntime).toHaveBeenCalledTimes(1);
+      expect(isIdlePaused(PROJECT_ID)).toBe(false);
+    });
   });
 
   it.each([

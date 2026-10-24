@@ -46,6 +46,20 @@ export interface ControllerRuntimeStatusEntry {
   stopRequestedAt?: string | null;
   /** The reason of that stop, such as `user_stop`. Absent as above. */
   stopReason?: string | null;
+  /**
+   * The reason of the runtime's newest stop since it last came up, such as
+   * `idle` or `user_stop`, for as long as it has not come up again: during
+   * the stop's provider release and after it. Absent once the runtime
+   * registers again, for a runtime that never stopped, and from controllers
+   * older than the field.
+   */
+  lastStopReason?: string | null;
+  /**
+   * When that stop was recorded, on the controller's clock: its quarantine
+   * (`stopRequestedAt`) while the release runs, then its finish. Absent as
+   * above.
+   */
+  lastStoppedAt?: string | null;
   endpointUrl?: string | null;
   taskRef?: string | null;
   isLocal: boolean;
