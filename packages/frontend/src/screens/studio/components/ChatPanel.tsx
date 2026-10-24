@@ -414,7 +414,7 @@ import {
   type SharedBrowserPresence,
 } from "./browserAutoStart";
 import { useSharedBrowserHostSnapshot } from "./useSharedBrowserHostSnapshot";
-import { useSharedBrowserAutoAttach } from "./useSharedBrowserAutoAttach";
+import { sharedBrowserLateAttachInputs, useSharedBrowserAutoAttach } from "./useSharedBrowserAutoAttach";
 import { hostedBrowserPagesActive, type HostedBrowserViewKind } from "./hostedBrowserViewState";
 import { isSkillSetupConversation } from "./skillSetupConversation";
 import { sharedBrowserConversationRunIds } from "./browserHandoffRouting";
@@ -4628,9 +4628,12 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     open: browserSessionOpen,
     off: sharedBrowserViewOff,
     host: sharedBrowserHost,
-    // Only while Instafy's browser is the one shown.
-    view: browserTransport === "shared" ? { kind: sharedBrowserViewKind, error: sharedBrowserViewError } : undefined,
-    hostRuntimeId: conversationBrowserHostRuntimeId,
+    ...sharedBrowserLateAttachInputs({
+      transport: browserTransport,
+      kind: sharedBrowserViewKind,
+      error: sharedBrowserViewError,
+      hostRuntimeId: conversationBrowserHostRuntimeId,
+    }),
   });
   const sharedBrowserHostKey = sharedBrowserHost.snapshot
     ? [

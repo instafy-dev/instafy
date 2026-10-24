@@ -484,6 +484,67 @@ describe("startSpaceMachineForBrowser", () => {
     await expect(coldStart({ fetchStatus, ...clock })).resolves.toMatchObject({ kind: "attach" });
   });
 
+  it("keeps waiting while the machine has registered but lists no origin yet", async () => {
+    // It can take work but has nothing to attach to yet: that is not a start
+    // that ended, also over several reads at the 10 s cadence.
+    const clock = fakeClock();
+    const registered = host({ origin: null });
+    const fetchStatus = vi.fn(async () => ({
+      runtimes: [clock.now() < 60_000 ? launching() : clock.now() < 90_000 ? registered : host()],
+      preferredRuntimeId: null,
+    }));
+    await expect(coldStart({ fetchStatus, ...clock }))
+      .resolves.toMatchObject({ kind: "attach", candidate: { runtimeId: "space", mode: "lazy" } });
+    expect(clock.now()).toBe(90_000);
+    expect(clock.sleeps).toEqual([...Array<number>(30).fill(2_000), 10_000, 10_000, 10_000]);
+  });
+
+  it("ends the wait like any start once a launch was seen after an ensure that did not answer", async () => {
+    const clock = fakeClock();
+    const fetchStatus = statusSequence([launching()], [stopped()], [stopped()], [host()]);
+    await expect(coldStart({ ensureSpaceMachine: async () => false, fetchStatus, ...clock }))
+      .resolves.toEqual({ kind: "error", errorKind: "machine", reason: "space machine start ended" });
+    expect(fetchStatus).toHaveBeenCalledTimes(3);
+  });
+
+  it("says it is slow a minute after the press while the ensure has not answered yet", async () => {
+    vi.useFakeTimers();
+    onTestFinished(() => { vi.useRealTimers(); });
+    const pressedAtMs = Date.now();
+    const slowAtMs: number[] = [];
+    // Both 45 s attempts time out behind the controller's launch lock.
+    const ensureSpaceMachine = () => new Promise<boolean>((resolve) => { setTimeout(() => resolve(false), 90_000); });
+    const result = coldStart({
+      ensureSpaceMachine,
+      fetchStatus: statusSequence([launching()], [host()]),
+      onSlow: () => { slowAtMs.push(Date.now() - pressedAtMs); },
+    });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(slowAtMs).toEqual([60_000]);
+    await vi.advanceTimersByTimeAsync(40_000);
+    await expect(result).resolves.toMatchObject({ kind: "attach" });
+    expect(slowAtMs).toEqual([60_000]);
+  });
+
+  it("never says it is slow after it returned or was cancelled", async () => {
+    vi.useFakeTimers();
+    onTestFinished(() => { vi.useRealTimers(); });
+    const onSlow = vi.fn();
+    await expect(coldStart({ fetchStatus: statusSequence([host()]), onSlow })).resolves.toMatchObject({ kind: "attach" });
+    const controller = new AbortController();
+    const cancelled = coldStart({
+      ensureSpaceMachine: () => new Promise<boolean>((resolve) => { setTimeout(() => resolve(true), 90_000); }),
+      fetchStatus: statusSequence([launching()]),
+      onSlow,
+      signal: controller.signal,
+    });
+    await vi.advanceTimersByTimeAsync(30_000);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    await expect(cancelled).resolves.toEqual({ kind: "cancelled" });
+    expect(onSlow).not.toHaveBeenCalled();
+  });
+
   it("gives up at ten minutes from the press on a launch that never comes up", async () => {
     const clock = fakeClock();
     const onSlow = vi.fn();

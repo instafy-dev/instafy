@@ -6,6 +6,9 @@ import {
   type HostedBrowserViewKind,
 } from "./hostedBrowserViewState";
 import type { SharedBrowserHostRefresh } from "./useSharedBrowserHostSnapshot";
+import type { BrowserTransport } from "./usePersonalBrowserBridge";
+
+type SharedBrowserView = { kind: HostedBrowserViewKind | null; error: { message: string; atMs: number } | null };
 
 type Options = {
   /** Whether the browser view is open. Closing it forgets the run it attached to. */
@@ -19,10 +22,25 @@ type Options = {
     refresh: SharedBrowserHostRefresh;
   };
   /** What the open view shows: its kind, and the sentence of its error with when that came. */
-  view?: { kind: HostedBrowserViewKind | null; error: { message: string; atMs: number } | null };
+  view?: SharedBrowserView;
   /** The conversation's machine while it is a live host (conversationBrowserHostId), else null. */
   hostRuntimeId?: string | null;
 };
+
+/**
+ * ChatPanel's `view` and `hostRuntimeId` for useSharedBrowserAutoAttach: what
+ * Instafy's browser view shows and the conversation's machine while it is a
+ * live host, only while Instafy's browser is the one shown.
+ */
+export function sharedBrowserLateAttachInputs(input: {
+  transport: BrowserTransport;
+  kind: HostedBrowserViewKind | null;
+  error: { message: string; atMs: number } | null;
+  hostRuntimeId: string | null;
+}): { view: SharedBrowserView | undefined; hostRuntimeId: string | null } {
+  if (input.transport !== "shared") return { view: undefined, hostRuntimeId: null };
+  return { view: { kind: input.kind, error: input.error }, hostRuntimeId: input.hostRuntimeId };
+}
 
 /**
  * Studio asking the browser view to attach by itself (its `autoAttachToken`).

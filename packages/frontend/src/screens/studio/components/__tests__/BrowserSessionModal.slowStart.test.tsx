@@ -136,6 +136,24 @@ describe("Shared modal while the space's machine starts slowly", () => {
     expect(mocks.fetchStatus.mock.calls.length).toBeLessThan(60);
   });
 
+  it("says it is opening the browser again once the machine is up and its browser starts", async () => {
+    machineComesUpAt(100_000);
+    // Instafy's browser on the machine takes a while to start too.
+    mocks.fetchHost.mockReset().mockImplementation(async () =>
+      host(Date.now() - pressedAtMs >= 140_000 ? "ready" : "starting"));
+    await render();
+    await advanceTo(75_000);
+    expect(sentence()).toBe(SHARED_BROWSER_HOST_COPY.stillStartingMachine);
+    await advanceTo(120_000);
+    expect(mocks.fetchHost).toHaveBeenCalledWith(expect.objectContaining({ runtimeId: hostId }));
+    expect(mocks.requestAccessToken).not.toHaveBeenCalled();
+    expect(sentence()).toBe(SHARED_BROWSER_HOST_COPY.opening);
+    await advanceTo(150_000);
+    expect(mocks.requestAccessToken).toHaveBeenCalled();
+    await act(async () => { mocks.cdpProps[mocks.cdpProps.length - 1]!.onConnected(); });
+    expect(sentence()).toBeNull();
+  });
+
   it("says the machine did not start at ten minutes, and a press opens it again from the start", async () => {
     machineComesUpAt(Number.POSITIVE_INFINITY);
     await render();

@@ -993,8 +993,10 @@ unless the policy is `"covered"`.
   the first minute after the press, then every 10 s, for at most ten minutes
   from the press (the controller gives up on a launch that never comes up after
   15 minutes). A first launch on a new node can take minutes while it pulls
-  the image. After the first minute the view says "Still starting this space's
-  machine…"; its pill and its lack of a button stay as they were. It waits on the pinned
+  the image. A minute after the press, also while the ensure has not answered
+  yet, the view says "Still starting this space's machine…"; its pill and its
+  lack of a button stay as they were. Once the machine is up, the view says
+  "Opening Instafy's browser…" again while that browser starts. It waits on the pinned
   machine or the conversation's machine only when that is the space's own
   Instafy Cloud machine, never a Desktop, self-hosted or separate browser
   session machine; otherwise it waits for the first live host. It waits only

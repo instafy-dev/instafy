@@ -415,7 +415,8 @@ export type SpaceMachineColdStartResult =
  * (spaceMachineLaunchOnItsWay; with no listed target, a launch of any of the
  * space's machines). It reads status every 2 s for the first minute after the
  * press, then every 10 s, for at most ten minutes, and calls `onSlow` once
- * when that first minute has passed.
+ * when that first minute has passed: by a timer while the ensure has not
+ * answered (it can take 90 s), then by the loop's own clock.
  *
  * - An ensure that did not answer still waits when one status read shows the
  *   launch on its way: both of its 45 s attempts can time out behind the
@@ -449,18 +450,26 @@ export async function startSpaceMachineForBrowser(params: {
   const pressedAtMs = now();
   const deadline = pressedAtMs + (params.timeoutMs ?? SPACE_MACHINE_COLD_START_TIMEOUT_MS);
   const cancelled = () => params.signal?.aborted === true;
+  let slowReported = false;
+  const reportSlow = () => {
+    if (slowReported || cancelled()) return;
+    slowReported = true;
+    params.onSlow?.();
+  };
+  const slowTimer = globalThis.setTimeout(reportSlow, SPACE_MACHINE_COLD_START_SLOW_AFTER_MS);
   let ensured = false;
   try {
     ensured = await params.ensureSpaceMachine();
   } catch {
     ensured = false;
+  } finally {
+    globalThis.clearTimeout(slowTimer);
   }
   if (cancelled()) return { kind: "cancelled" };
 
   // Whether a launch is known: the ensure answered, or a read showed one.
   let launchKnown = ensured;
   let endedReads = 0;
-  let slowReported = false;
   while (!cancelled()) {
     const status = await params.fetchStatus({
       projectId: params.projectId,
@@ -508,10 +517,7 @@ export async function startSpaceMachineForBrowser(params: {
     }
     const elapsed = now() - pressedAtMs;
     const slow = elapsed >= SPACE_MACHINE_COLD_START_SLOW_AFTER_MS;
-    if (slow && !slowReported) {
-      slowReported = true;
-      params.onSlow?.();
-    }
+    if (slow) reportSlow();
     const remaining = deadline - now();
     if (remaining <= 0) break;
     if (!(await sleep(Math.min(slow ? SPACE_MACHINE_COLD_START_SLOW_POLL_MS : pollMs, remaining), params.signal))) break;

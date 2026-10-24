@@ -8,7 +8,8 @@ vi.mock("../../../../sdk/instafy", () => ({ controllerClient: { browserSessions:
 
 import type { HostedBrowserViewKind } from "../hostedBrowserViewState";
 import { SHARED_BROWSER_HOST_COPY, SPACE_MACHINE_LATE_READY_WINDOW_MS } from "../sharedBrowserHostAttach";
-import { useSharedBrowserAutoAttach } from "../useSharedBrowserAutoAttach";
+import { sharedBrowserLateAttachInputs, useSharedBrowserAutoAttach } from "../useSharedBrowserAutoAttach";
+import type { BrowserTransport } from "../usePersonalBrowserBridge";
 import { SHARED_BROWSER_HOST_SNAPSHOT_POLL_MS, useSharedBrowserHostSnapshot } from "../useSharedBrowserHostSnapshot";
 
 function snapshot(overrides: Partial<SharedBrowserHostSnapshot> = {}): SharedBrowserHostSnapshot {
@@ -30,8 +31,9 @@ describe("useSharedBrowserAutoAttach", () => {
   } | null = null;
 
   type View = { kind: HostedBrowserViewKind | null; error: { message: string; atMs: number } | null };
-  function Harness({ open, off, writer, view, hostRuntimeId }: {
-    open: boolean; off: boolean; writer: boolean; view?: View; hostRuntimeId?: string | null;
+  /** As ChatPanel wires it when `transport` is set, else with `view` and `hostRuntimeId` as given. */
+  function Harness({ open, off, writer, view, hostRuntimeId, transport }: {
+    open: boolean; off: boolean; writer: boolean; view?: View; hostRuntimeId?: string | null; transport?: BrowserTransport;
   }) {
     const host = useSharedBrowserHostSnapshot({
       projectId: "project-1",
@@ -41,14 +43,28 @@ describe("useSharedBrowserAutoAttach", () => {
       poll: off,
       fetchHost,
     });
-    const attach = useSharedBrowserAutoAttach({ open, off, host, view, hostRuntimeId });
+    const attach = useSharedBrowserAutoAttach({
+      open,
+      off,
+      host,
+      ...(transport
+        ? sharedBrowserLateAttachInputs({
+          transport,
+          kind: view?.kind ?? null,
+          error: view?.error ?? null,
+          hostRuntimeId: hostRuntimeId ?? null,
+        })
+        : { view, hostRuntimeId }),
+    });
     latest = { host, attach };
     return null;
   }
-  async function render(props: { open?: boolean; off: boolean; writer?: boolean; view?: View; hostRuntimeId?: string | null }) {
+  async function render(props: {
+    open?: boolean; off: boolean; writer?: boolean; view?: View; hostRuntimeId?: string | null; transport?: BrowserTransport;
+  }) {
     await act(async () => {
       root.render(<Harness open={props.open ?? true} off={props.off} writer={props.writer ?? true}
-        view={props.view} hostRuntimeId={props.hostRuntimeId} />);
+        view={props.view} hostRuntimeId={props.hostRuntimeId} transport={props.transport} />);
     });
     await advance(0);
   }
@@ -184,6 +200,19 @@ describe("useSharedBrowserAutoAttach", () => {
       expect(token()).toBe(0);
     });
 
+    it("attaches once through ChatPanel's inputs, and only while Instafy's browser is shown", async () => {
+      const failedAt = Date.now();
+      await render({ off: false, transport: "personal", view: machineFailed(failedAt), hostRuntimeId: "host-1" });
+      expect(token()).toBe(0);
+      await render({ off: false, transport: "shared", view: machineFailed(failedAt), hostRuntimeId: null });
+      expect(token()).toBe(0);
+      vi.setSystemTime(failedAt + 2 * 60_000);
+      await render({ off: false, transport: "shared", view: machineFailed(failedAt), hostRuntimeId: "host-1" });
+      expect(token()).toBe(1);
+      await render({ off: false, transport: "shared", view: machineFailed(failedAt), hostRuntimeId: "host-1" });
+      expect(token()).toBe(1);
+    });
+
     it("never attaches while the view is off, blocked or closed", async () => {
       const error = { message: SHARED_BROWSER_HOST_COPY.machineDidNotStart, atMs: Date.now() };
       await render({ off: false, view: { kind: "blocked", error }, hostRuntimeId: "host-1" });
@@ -201,5 +230,21 @@ describe("useSharedBrowserAutoAttach", () => {
     expect(fetchHost).not.toHaveBeenCalled();
     await act(async () => { await latest!.host.refresh({ force: true }); });
     expect(token()).toBe(0);
+  });
+});
+
+describe("sharedBrowserLateAttachInputs", () => {
+  const error = { message: SHARED_BROWSER_HOST_COPY.machineDidNotStart, atMs: 1 };
+
+  it("hands on what Instafy's browser view shows and the conversation's live host", () => {
+    expect(sharedBrowserLateAttachInputs({ transport: "shared", kind: "failed", error, hostRuntimeId: "host-1" }))
+      .toEqual({ view: { kind: "failed", error }, hostRuntimeId: "host-1" });
+    expect(sharedBrowserLateAttachInputs({ transport: "shared", kind: null, error: null, hostRuntimeId: null }))
+      .toEqual({ view: { kind: null, error: null }, hostRuntimeId: null });
+  });
+
+  it("hands on nothing while the browser on this device is the one shown", () => {
+    expect(sharedBrowserLateAttachInputs({ transport: "personal", kind: "failed", error, hostRuntimeId: "host-1" }))
+      .toEqual({ view: undefined, hostRuntimeId: null });
   });
 });

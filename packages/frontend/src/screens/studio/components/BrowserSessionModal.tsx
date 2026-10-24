@@ -647,8 +647,8 @@ export function BrowserSessionModal({
   const [failure, setFailure] = useState<HostedBrowserFailure | null>(null);
   const error = failure?.reason ?? null;
   // A press's start of the space's machine has taken over a minute: the view
-  // says the machine is still starting. Each attempt, error and connection
-  // clears it.
+  // says the machine is still starting. The machine coming up, and each
+  // attempt, error and connection, clears it.
   const [machineStartSlow, setMachineStartSlow] = useState(false);
   const [runtimeLimitDetails, setRuntimeLimitDetails] =
     useState<HostedRuntimeLimitErrorDetails | null>(null);
@@ -1532,6 +1532,8 @@ export function BrowserSessionModal({
               fail(coldStart.errorKind, coldStart.reason);
               return;
             }
+            // The machine is up: what is left is opening its browser.
+            setMachineStartSlow(false);
             if (coldStart.kind === "attach") {
               selection = { kind: "selected", candidate: coldStart.candidate };
               setSessionChoices({
