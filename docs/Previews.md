@@ -97,8 +97,10 @@ preview id) every time. After a `TUNNEL_DOMAIN` change it instead retires a tunn
 mints a new one, so the next `instafy preview open` (or wake) of that port gets a new preview id. The controller then
 closes every earlier preview of the same key as the close route does: it stops, gets `closedAt` and `supersededBy`
 (the new id), its viewer sessions and any presentation end, and `tunnel.grant_revoked` tells Studio, so its card
-shows it stopped rather than probing a tunnel that is gone. Cards name a preview by id, so they stay with the old
-preview; the new one posts its own card when it is ready. The broker's own `tunnel.revoked` event for a tunnel the
+shows it stopped rather than probing a tunnel that is gone. Only previews recorded before the new one close, so an
+open or wake that got an older tunnel of the key but finishes late never closes the newer preview. Cards name a
+preview by id, so they stay with the old preview; the new one posts its own card when it is ready, even when a wake
+copied an old preview's card ids onto it after another open had already closed that preview. The broker's own `tunnel.revoked` event for a tunnel the
 controller did not revoke stops that grant too (not closed: it may be opened again). The event names the tunnel's
 expiry, and an event whose expiry is earlier than the grant's (a late one about an issue of the tunnel the broker has
 since refreshed), a duplicate, or one for an unknown tunnel changes nothing.
