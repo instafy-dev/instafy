@@ -179,7 +179,12 @@ does:
   `data-turbo-method`, `hx-post` or `onclick`, not an entry in a credential row
   or dialog, and not labelled with a purchase, transfer, delete, cancel,
   sign-out, sharing, key, download or message word), tabs, `<summary>`,
-  menu and popup openers, neutral menu, tree, tab and navigation items, page
+  menu and popup openers, menu and section toggles (a control naming the
+  region it controls with `aria-controls`, a `data-bs-toggle` collapse,
+  dropdown, offcanvas or sidebar toggle, a whole name such as "Menü
+  ein-/ausklappen" or "Toggle menu", or an unnamed hamburger icon; judged by
+  the control's own names, never by the label of its form's submit button),
+  neutral menu, tree, tab and navigation items, page
   numbers, privacy-preserving cookie dismissals (Reject all, Necessary only,
   Close, Alle ablehnen, Nur notwendige, Schließen; a bare Decline or Ablehnen
   asks), clicking into a field, typing

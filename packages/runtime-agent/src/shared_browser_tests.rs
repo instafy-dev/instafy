@@ -135,7 +135,79 @@ const special = {
   "url-label": {
     description: control(`Open https://github.com/instafy-dev/instafy/pull/615/files?token=${CANARY}`),
   },
+  // A bookkeeping app's header as the page describer reports it: a
+  // hamburger <button> with no type attribute and no aria-expanded, which the
+  // browser reports as type "submit" outside any form, and an unnamed avatar
+  // button that opens the profile menu.
+  "ff-menu-toggle": {
+    description: control("", {
+      inputType: "submit", titleAttribute: "Menü ein-/ausklappen", nameAttribute: "", idAttribute: "",
+    }),
+    policy: { iconHint: "sidebar-toggle fa fa-bars" },
+  },
+  "ff-avatar": {
+    description: control("", { inputType: "submit", nameAttribute: "", idAttribute: "" }),
+    policy: { menuOpener: true, iconHint: "profile-button avatar" },
+    nameHints: { tooltip: "", describedBy: "", image: "", hasImage: true, position: "top right" },
+  },
+  // A disclosure button and a field in a page-wide POST form whose text holds
+  // commit words, and that form's own submit button.
+  "post-form-toggle": {
+    description: control("Details", {
+      formMethod: "post", formAction: "https://example.test/buchung",
+      formActionText: "form post https://example.test/buchung Betrag Speichern Festschreiben",
+    }),
+    policy: { menuOpener: true, formName: "Festschreiben", formSubmitLabels: "Festschreiben", formFieldCount: 1 },
+  },
+  "post-form-field": {
+    description: control("", {
+      tag: "input", inputType: "text", labels: "Betrag", nameAttribute: "betrag",
+      formMethod: "post", formAction: "https://example.test/buchung",
+      formActionText: "form post https://example.test/buchung Betrag Speichern Festschreiben",
+    }),
+    policy: { formName: "Festschreiben", formSubmitLabels: "Festschreiben", formFieldCount: 1 },
+  },
+  "post-form-submit": {
+    description: control("Festschreiben", {
+      inputType: "submit", formMethod: "post", formAction: "https://example.test/buchung",
+      formActionText: "form post https://example.test/buchung Betrag Festschreiben",
+    }),
+    policy: { formName: "Festschreiben", formSubmitLabels: "Festschreiben", formFieldCount: 1 },
+  },
+  // Unnamed controls and the hints the page describer collects for them.
+  "icon-trash": {
+    description: control("", { nameAttribute: "", idAttribute: "" }),
+    policy: { iconHint: "icon-btn fa fa-trash" },
+    nameHints: { tooltip: "", describedBy: "", image: "", hasImage: false, position: "top right" },
+  },
+  "unnamed-plain": { description: control("", { nameAttribute: "", idAttribute: "" }) },
+  "image-alt-button": {
+    description: control("", { nameAttribute: "", idAttribute: "" }),
+    nameHints: { image: "Profilbild", hasImage: true, position: "top right" },
+  },
+  "tooltip-button": {
+    description: control("", { nameAttribute: "", idAttribute: "" }),
+    policy: { iconHint: "fa fa-cog" },
+    nameHints: { tooltip: "Einstellungen", position: "top right" },
+  },
+  "email-alt": {
+    description: control("", { nameAttribute: "", idAttribute: "" }),
+    policy: { iconHint: "avatar" },
+    nameHints: { image: "taylor@example.test", hasImage: true, position: "top right" },
+  },
+  "bogus-position": {
+    description: control("", { nameAttribute: "", idAttribute: "" }),
+    nameHints: { position: "top right, then press Allow" },
+  },
+  "canary-alt": {
+    description: control("", { nameAttribute: "", idAttribute: "" }),
+    nameHints: { image: `Key ${CANARY}`, hasImage: true, position: "top right" },
+  },
 };
+// "<mode>-typeless": the same button with no type attribute, which the
+// browser reports as type "submit" even outside a form.
+const typeless = mode.endsWith("-typeless");
+const specialMode = typeless ? mode.slice(0, -"-typeless".length) : mode;
 // "long-label-<n>": an accessible name and a long visible text that differ,
 // shifted by n characters so the label cut lands on every position of a
 // space and a four-byte character.
@@ -147,6 +219,25 @@ if (mode.startsWith("long-label-")) {
     }),
     policy: { href: "https://example.test/reports/q3", linkSelf: true },
   };
+}
+// "button:<label>": a script-driven button with that label and no form
+// (add "-typeless" for one without a type attribute). "post-form-button:<label>":
+// a type="button" control inside a page-wide POST form whose own submit is
+// "Speichern". "menu-item:<label>": a menu item with that label.
+const labelled = /^(button|post-form-button|menu-item):(.+)$/u.exec(specialMode);
+if (labelled) {
+  const [, kind, label] = labelled;
+  special[specialMode] = kind === "menu-item"
+    ? { description: control(label, { tag: "li", role: "menuitem", inputType: "" }), policy: { areas: "menu" } }
+    : kind === "post-form-button"
+      ? {
+          description: control(label, {
+            formMethod: "post", formAction: "https://example.test/app",
+            formActionText: "form post https://example.test/app Betrag Speichern",
+          }),
+          policy: { formName: "Buchhaltung", formSubmitLabels: "Speichern", formFieldCount: 1 },
+        }
+      : { description: control(label) };
 }
 const descriptionFor = (targetId) => ({
   tag: isFormButton || mode === "localized-button" || mode === "icon-button" ? "button" : "input",
@@ -176,10 +267,12 @@ const descriptionFor = (targetId) => ({
   formActionText: hasForm ? "Search form" : "",
   labels: mode === "localized-button" || mode === "icon-button" ? "" : "Search",
   text: mode === "localized-button" ? "Eliminar" : "",
-  ...(special[mode]?.description || {}),
-  policy: special[mode] && special[mode].policy === null
+  ...(special[specialMode]?.description || {}),
+  ...(typeless ? { inputType: "submit" } : {}),
+  policy: special[specialMode] && special[specialMode].policy === null
     ? null
-    : { ...basePolicy, ...(special[mode]?.policy || {}) },
+    : { ...basePolicy, ...(special[specialMode]?.policy || {}) },
+  nameHints: special[specialMode]?.nameHints ?? null,
 });
 const signalsFor = () => mode === "secret-screen"
   ? { credentialContext: true, secretField: true, secretCode: false, maskedNearReveal: false }
@@ -199,6 +292,14 @@ const bodyTextFor = (currentUrl, targetId) => {
   return "Fixture page";
 };
 let context;
+let browserConnected = true;
+const closedPages = new Set();
+// A closed tab leaves the context's pages, as it does in Chromium.
+const closePage = (targetId) => {
+  closedPages.add(targetId);
+  const index = pages.findIndex((page) => page.targetId === targetId);
+  if (index >= 0) pages.splice(index, 1);
+};
 const makePage = (targetId) => {
   let currentUrl = mode === "blank-page"
     ? "about:blank"
@@ -228,6 +329,20 @@ const makePage = (targetId) => {
       if (mode === "click-error-canary") {
         throw new Error(`element <button data-key="${CANARY}"> is not attached to the DOM`);
       }
+      // The tab or the browser closed while the click ran. Playwright's
+      // client error keeps the plain name "Error".
+      if (mode === "page-closed-during-click") {
+        closePage(targetId);
+        throw new Error("Target page, context or browser has been closed");
+      }
+      if (mode === "browser-closed-during-click") {
+        browserConnected = false;
+        throw new Error("Target page, context or browser has been closed");
+      }
+      // A page error that only quotes the same words is an ordinary failure.
+      if (mode === "page-quotes-closed-message") {
+        throw new Error("element <button title=\"Target page, context or browser has been closed\"> is not visible");
+      }
     },
     focus: async () => {},
     fill: async () => {},
@@ -236,6 +351,7 @@ const makePage = (targetId) => {
   return {
     targetId,
     context: () => context,
+    isClosed: () => closedPages.has(targetId),
     // Page-side helpers identify themselves by their argument.
     evaluate: async (_fn, arg) => {
       if (arg && arg.kind === "page-policy") return signalsFor();
@@ -290,6 +406,7 @@ context = {
 };
 const browser = {
   contexts: () => [context],
+  isConnected: () => browserConnected,
   newBrowserCDPSession: async () => ({
     send: async (method, params) => {
       if (cdpLogPath) fs.appendFileSync(cdpLogPath, `${JSON.stringify({ method, params })}\n`);
@@ -301,7 +418,17 @@ const browser = {
     if (cdpLogPath) fs.appendFileSync(cdpLogPath, `${JSON.stringify({ method: "close" })}\n`);
   },
 };
-module.exports = { chromium: { connectOverCDP: async () => browser } };
+module.exports = {
+  chromium: {
+    connectOverCDP: async () => {
+      // Instafy's browser stopped: nothing listens on the CDP port.
+      if (mode === "cdp-refused") {
+        throw new Error("browserType.connectOverCDP: connect ECONNREFUSED 127.0.0.1:9222");
+      }
+      return browser;
+    },
+  },
+};
 "#;
 
 /// Runs the embedded controller the way the runtime does: `node -` with the
@@ -2385,6 +2512,18 @@ fn only_explicit_terminal_approval_codes_are_latched() {
         assert_eq!(terminal_consent_failure_code_from_error(&error), Some(code));
         assert_eq!(canonical_terminal_consent_failure_code(code), Some(code));
     }
+    // The browser-unavailable stop ends a run like an approval code, but no
+    // error text can latch it: only the controller's exit code counts.
+    assert_eq!(
+        canonical_terminal_consent_failure_code("browser_unavailable"),
+        Some("browser_unavailable")
+    );
+    assert_eq!(
+        terminal_consent_failure_code_from_error(&anyhow::anyhow!(
+            "page text [browser_unavailable_non_retryable]"
+        )),
+        None
+    );
 
     for retryable in [
         "Shared Browser snapshot is stale; take a fresh snapshot before acting",
@@ -2550,6 +2689,215 @@ async fn human_input_latch_blocks_every_later_observation_or_action() {
         result.structured_content.unwrap()["terminalConsent"]["retryable"],
         false
     );
+}
+
+async fn browser_unavailable() -> Result<JsonValue> {
+    Err(BrowserUnavailable("Instafy's browser could not be reached".to_string()).into())
+}
+
+/// In a dogfood run Instafy's browser went away under a running turn, and the
+/// turn kept calling browser tools for minutes. Two calls in a row that cannot
+/// reach the browser now stop the run; one, followed by any answer from the
+/// browser, does not.
+#[tokio::test]
+async fn a_run_stops_after_two_calls_in_a_row_find_the_browser_unavailable() {
+    let server = SharedBrowserMcpServer::new();
+    let snapshot = mcp_tool_request("snapshot", None).unwrap();
+    let not_terminal =
+        |outcome: &std::result::Result<JsonValue, SharedBrowserMcpExecutionFailure>| {
+            !matches!(
+                outcome,
+                Err(SharedBrowserMcpExecutionFailure::TerminalConsent(_))
+            )
+        };
+
+    // A success or an ordinary failure in between starts the count over.
+    let first = server
+        .execute_with_failure_latch(&snapshot, browser_unavailable)
+        .await;
+    assert!(matches!(
+        first,
+        Err(SharedBrowserMcpExecutionFailure::Other(_))
+    ));
+    let answered = server
+        .execute_with_failure_latch(&snapshot, || async { Ok(json!({ "ok": true })) })
+        .await;
+    assert!(answered.is_ok());
+    assert!(not_terminal(
+        &server
+            .execute_with_failure_latch(&snapshot, browser_unavailable)
+            .await
+    ));
+    let stale = server
+        .execute_with_failure_latch(&snapshot, || async {
+            Err(anyhow::anyhow!(
+                "Shared Browser snapshot is stale; take a fresh snapshot before acting"
+            ))
+        })
+        .await;
+    assert!(matches!(
+        stale,
+        Err(SharedBrowserMcpExecutionFailure::Other(_))
+    ));
+    assert!(not_terminal(
+        &server
+            .execute_with_failure_latch(&snapshot, browser_unavailable)
+            .await
+    ));
+
+    let second = server
+        .execute_with_failure_latch(&snapshot, browser_unavailable)
+        .await;
+    assert!(matches!(
+        second,
+        Err(SharedBrowserMcpExecutionFailure::TerminalConsent(
+            "browser_unavailable"
+        ))
+    ));
+
+    // Nothing runs after that, and status says the browser is not ready.
+    let calls = Arc::new(AtomicUsize::new(0));
+    let later_calls = Arc::clone(&calls);
+    let later = server
+        .execute_with_failure_latch(&snapshot, || async move {
+            later_calls.fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(json!({ "unexpected": "ran after the stop" }))
+        })
+        .await;
+    assert!(matches!(
+        later,
+        Err(SharedBrowserMcpExecutionFailure::TerminalConsent(
+            "browser_unavailable"
+        ))
+    ));
+    assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
+    let status = mcp_tool_request("status", None).unwrap();
+    let status_payload = server
+        .execute_with_failure_latch(&status, || async {
+            panic!("a stopped run must not reach the browser")
+        })
+        .await
+        .expect("a stopped run's status stays readable");
+    assert_eq!(status_payload["ready"], false);
+    assert_eq!(
+        status_payload["terminalConsent"]["code"],
+        "browser_unavailable"
+    );
+
+    let result = terminal_consent_call_result("browser_unavailable");
+    assert_eq!(result.is_error, Some(true));
+    let text = format!("{:?}", result.content);
+    assert!(text.contains("End this turn now"), "{text}");
+    assert!(!text.contains('\u{2014}'), "{text}");
+    let signal = result.structured_content.expect("terminal signal")["terminalConsent"].clone();
+    assert_eq!(signal["retryable"], false);
+    assert_eq!(signal["code"], "browser_unavailable");
+}
+
+/// An approval code still ends a run on its first failure, whatever the
+/// browser-unavailable count is.
+#[tokio::test]
+async fn approval_codes_still_latch_at_once_during_a_browser_unavailable_streak() {
+    let server = SharedBrowserMcpServer::new();
+    let click = mcp_tool_request(
+        "click",
+        json!({ "index": 0, "snapshotId": SNAPSHOT_ID })
+            .as_object()
+            .cloned(),
+    )
+    .unwrap();
+    assert!(matches!(
+        server
+            .execute_with_failure_latch(&click, browser_unavailable)
+            .await,
+        Err(SharedBrowserMcpExecutionFailure::Other(_))
+    ));
+    assert!(matches!(
+        server
+            .execute_with_failure_latch(&click, || async {
+                Err(anyhow::anyhow!(
+                    "Shared Browser approval was denied [approval_denied_non_retryable]"
+                ))
+            })
+            .await,
+        Err(SharedBrowserMcpExecutionFailure::TerminalConsent(
+            "approval_denied"
+        ))
+    ));
+    assert!(matches!(
+        server
+            .execute_with_failure_latch(&click, browser_unavailable)
+            .await,
+        Err(SharedBrowserMcpExecutionFailure::TerminalConsent(
+            "approval_denied"
+        ))
+    ));
+}
+
+/// The controller tells the runtime the browser is unavailable by its exit
+/// code: when it cannot connect over CDP, when the run's tab is gone, or when
+/// the tab or the browser closes under a command. Playwright's error for that
+/// is a plain "Error", so the controller asks the browser, never the error.
+/// Any other failure exits 1, including a page error that quotes
+/// Playwright's words.
+#[test]
+fn the_controller_reports_an_unreachable_browser_by_its_exit_code() {
+    let unavailable = |output: &Output| {
+        controller_failure(output.status, &output.stderr)
+            .downcast_ref::<BrowserUnavailable>()
+            .is_some()
+    };
+    let fixture = EmbeddedControllerFixture::new();
+    let refused = fixture.run("cdp-refused", "GET", "/v1/snapshot", None);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(
+        refused.status.code(),
+        Some(BROWSER_UNAVAILABLE_EXIT_CODE),
+        "{stderr}"
+    );
+    assert!(stderr.contains("could not be reached"), "{stderr}");
+    assert!(unavailable(&refused));
+
+    let missing = fixture.run_for_page("safe", "missing-target", "GET", "/v1/snapshot", None);
+    let stderr = String::from_utf8_lossy(&missing.stderr);
+    assert_eq!(
+        missing.status.code(),
+        Some(BROWSER_UNAVAILABLE_EXIT_CODE),
+        "{stderr}"
+    );
+    assert!(stderr.contains("is unavailable"), "{stderr}");
+    assert!(unavailable(&missing));
+
+    for (mode, code, error) in [
+        (
+            "page-closed-during-click",
+            BROWSER_UNAVAILABLE_EXIT_CODE,
+            "has been closed",
+        ),
+        (
+            "browser-closed-during-click",
+            BROWSER_UNAVAILABLE_EXIT_CODE,
+            "has been closed",
+        ),
+        ("page-quotes-closed-message", 1, "is not visible"),
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(mode);
+        fixture.prepare_routine_start("page-target");
+        let body = json!({"index": 0, "snapshotId": snapshot_id}).to_string();
+        let output = fixture
+            .command_for_with_timeout(mode, "page-target", "POST", "/v1/click", Some(&body), "100")
+            .output()
+            .expect("click");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(code), "{mode}: {stderr}");
+        assert!(stderr.contains(error), "{mode}: {stderr}");
+        assert_eq!(
+            unavailable(&output),
+            code == BROWSER_UNAVAILABLE_EXIT_CODE,
+            "{mode}"
+        );
+    }
 }
 
 const CANARY_MARKER: &str = "INSTAFYCANARY";
@@ -3518,6 +3866,257 @@ fn a_routine_start_runs_menus_tabs_and_openers_with_commit_words_without_a_promp
             "{mode}"
         );
     }
+}
+
+/// In a dogfood run a bookkeeping app's hamburger ("Menü ein-/ausklappen")
+/// and its unnamed avatar button asked under routine browsing. Both are <button>s without a
+/// type attribute, which the browser reports as type "submit" even outside a
+/// form, and the consequential-word check read the type. A typeless button
+/// outside a form, a disclosure toggle and an ordinary control in a POST form
+/// whose text holds commit words are routine browsing.
+#[test]
+fn a_routine_start_runs_typeless_buttons_toggles_and_post_form_controls_without_a_prompt() {
+    for mode in [
+        "ff-menu-toggle",
+        "ff-avatar",
+        "post-form-toggle",
+        "post-form-field",
+        "plain-button-typeless",
+        "opener-new-typeless",
+        "nav-start-typeless",
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(mode);
+        fixture.prepare_routine_start("page-target");
+        let body = json!({"index": 0, "snapshotId": snapshot_id}).to_string();
+        // "100" fails any prompt this click would publish as unanswered.
+        let output = fixture
+            .command_for_with_timeout(mode, "page-target", "POST", "/v1/click", Some(&body), "100")
+            .output()
+            .expect("routine click");
+        assert!(
+            output.status.success(),
+            "{mode} asked: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !fixture.approval_dir.join("request.json").exists(),
+            "{mode} asked"
+        );
+        assert!(
+            fixture.action_log().contains("\"type\":\"click\""),
+            "{mode}"
+        );
+    }
+}
+
+/// Reading only the control's own names keeps every risky step asking: a
+/// typeless save or invite button, a POST form's own submit button, and an
+/// icon-only trash button, whose prompt names it instead of an index.
+#[test]
+fn a_routine_start_still_asks_for_typeless_commit_buttons_submits_and_risky_icons() {
+    for (mode, label) in [
+        ("save-button-typeless", "Change something: Speichern"),
+        ("save-button-en-typeless", "Change something: Save changes"),
+        (
+            "invite-button-typeless",
+            "Sharing or access change: Invite member",
+        ),
+        (
+            "generate-key-typeless",
+            "Key or password change: Generate API key",
+        ),
+        ("post-form-submit", "Change something: Festschreiben"),
+        (
+            "icon-trash",
+            "Delete, cancel or sign out: delete button in the top right",
+        ),
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(mode);
+        fixture.prepare_routine_start("page-target");
+        let body = json!({"index": 0, "snapshotId": snapshot_id}).to_string();
+        let (output, requests) = fixture.decide_prepared(
+            fixture.command_for(mode, "page-target", "POST", "/v1/click", Some(&body)),
+            &["deny"],
+        );
+        assert!(!output.status.success(), "{mode} ran without asking");
+        assert_eq!(requests.len(), 1, "{mode}");
+        assert_eq!(requests[0]["kind"], "action", "{mode}");
+        assert_eq!(requests[0]["display"]["label"], label, "{mode}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("approval_denied"));
+        assert!(
+            !fixture.action_log().contains("\"type\":\"click\""),
+            "{mode}"
+        );
+    }
+}
+
+/// Bookkeeping steps that rebook, reverse, file, issue, record, reconcile or
+/// close a record ask under routine browsing. A dogfood harness found them
+/// running without a prompt on a <button> with no type attribute outside any
+/// form and on a type="button" control inside a POST form, where no form
+/// submission check sees them; only their own names tell them apart.
+#[test]
+fn a_routine_start_still_asks_for_bookkeeping_write_steps() {
+    for label in [
+        "Umbuchen",
+        "Ausbuchen",
+        "Abbuchen",
+        "Rückbuchen",
+        "Gegenbuchen",
+        "Stornobuchung",
+        "An FinanzOnline übermitteln",
+        "Einreichen",
+        "UVA abgeben",
+        "Rechnung ausstellen",
+        "Beleg erfassen",
+        "Abgleichen",
+        "Erledigt",
+        "Fakturieren",
+        "Verrechnen",
+        "Reconcile",
+        "Void invoice",
+        "Write off",
+        "Issue refund",
+        "File tax return",
+    ] {
+        for mode in [
+            format!("button:{label}-typeless"),
+            format!("post-form-button:{label}"),
+        ] {
+            let fixture = EmbeddedControllerFixture::new();
+            let snapshot_id = fixture.snapshot_id(&mode);
+            fixture.prepare_routine_start("page-target");
+            let body = json!({"index": 0, "snapshotId": snapshot_id}).to_string();
+            let (output, requests) = fixture.decide_prepared(
+                fixture.command_for(&mode, "page-target", "POST", "/v1/click", Some(&body)),
+                &["deny"],
+            );
+            assert!(!output.status.success(), "{mode} ran without asking");
+            assert_eq!(requests.len(), 1, "{mode}");
+            assert_eq!(requests[0]["kind"], "action", "{mode}");
+            assert_eq!(
+                requests[0]["display"]["label"],
+                format!("Change something: {label}"),
+                "{mode}"
+            );
+            assert!(
+                !fixture.action_log().contains("\"type\":\"click\""),
+                "{mode} clicked"
+            );
+        }
+    }
+}
+
+/// On a menu item the verbs that write a record still ask, while names of
+/// lists ("Buchungen", "Stornobuchung") and the steps that only fill in a
+/// record ("Erfassen", "Abgleichen") stay navigation: the classifier's commit
+/// words never apply to menu items, tabs or navigation entries, and a "File"
+/// menu is not a filing step.
+#[test]
+fn a_routine_start_asks_for_menu_items_that_write_and_frees_menu_items_that_name_lists() {
+    for label in [
+        "Umbuchen",
+        "Stornobuchen",
+        "An FinanzOnline übermitteln",
+        "Einreichen",
+        "Rechnung ausstellen",
+    ] {
+        let mode = format!("menu-item:{label}");
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(&mode);
+        fixture.prepare_routine_start("page-target");
+        let body = json!({"index": 0, "snapshotId": snapshot_id}).to_string();
+        // "100" fails the prompt this click must publish as unanswered.
+        let output = fixture
+            .command_for_with_timeout(
+                &mode,
+                "page-target",
+                "POST",
+                "/v1/click",
+                Some(&body),
+                "100",
+            )
+            .output()
+            .expect("routine click");
+        assert!(!output.status.success(), "{mode} ran without asking");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("approval_timeout_non_retryable"),
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    for mode in [
+        "menu-item:Buchungen",
+        "menu-item:Stornobuchung",
+        "menu-item:Belege erfassen",
+        "menu-item:Abgleichen",
+        "menu-item:File",
+        "button:File",
+        "button:Choose file",
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(mode);
+        fixture.prepare_routine_start("page-target");
+        let body = json!({"index": 0, "snapshotId": snapshot_id}).to_string();
+        let output = fixture
+            .command_for_with_timeout(mode, "page-target", "POST", "/v1/click", Some(&body), "100")
+            .output()
+            .expect("routine click");
+        assert!(
+            output.status.success(),
+            "{mode} asked: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            fixture.action_log().contains("\"type\":\"click\""),
+            "{mode}"
+        );
+    }
+}
+
+/// An unnamed control is named from its own hints, never its index (a
+/// dogfood prompt read "button 5" for an avatar button). A position
+/// outside the fixed vocabulary is dropped, an email address in an image's
+/// alt text gives way to the icon noun, and a secret in it is masked in the
+/// snapshot, the prompt and the action log.
+#[test]
+fn unnamed_controls_are_named_from_their_own_hints_never_their_index() {
+    for (mode, expected) in [
+        ("ff-avatar", "profile picture button in the top right"),
+        ("icon-trash", "delete button in the top right"),
+        ("image-alt-button", "Profilbild button in the top right"),
+        ("tooltip-button", "Einstellungen"),
+        ("email-alt", "profile picture button in the top right"),
+        ("bogus-position", "unnamed button"),
+        ("unnamed-plain", "unnamed button"),
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot = payload_of(&fixture.run(mode, "GET", "/v1/snapshot", None));
+        assert_eq!(
+            snapshot["interactiveElements"][0]["label"], expected,
+            "{mode}"
+        );
+    }
+
+    let fixture = EmbeddedControllerFixture::new();
+    let snapshot = payload_of(&fixture.run("canary-alt", "GET", "/v1/snapshot", None));
+    assert_no_canary("snapshot", &snapshot.to_string());
+    let body = json!({"index": 0, "snapshotId": snapshot["snapshotId"]}).to_string();
+    let (output, requests) = fixture.run_with_decisions(
+        "canary-alt",
+        "page-target",
+        "POST",
+        "/v1/click",
+        Some(&body),
+        &["https://example.test"],
+        &["allow_once"],
+    );
+    payload_of(&output);
+    assert_eq!(requests.len(), 1);
+    assert_no_canary("approval label", &requests[0]["display"].to_string());
+    assert_no_canary("action log", &fixture.action_log());
 }
 
 /// A menu item whose label records or finalizes something ("Festschreiben",

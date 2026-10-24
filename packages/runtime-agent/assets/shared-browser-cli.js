@@ -105,7 +105,17 @@ const ROUTINE_CONFIRMED_CATEGORIES = new Set([
 ]);
 // Before one of these steps runs, the page and the page it opens are withheld.
 const WITHHOLDING_CATEGORIES = new Set(["credential", "may_show_secret"]);
+// The exit code when Instafy's browser or the run's own tab cannot be
+// reached. The runtime ends a run that keeps getting it; its
+// BROWSER_UNAVAILABLE_EXIT_CODE must stay equal to this.
+const BROWSER_UNAVAILABLE_EXIT_CODE = 75;
 let actionOrdinal = 0;
+
+// The browser could not be reached over CDP, or the run's page target is gone.
+class BrowserUnavailableError extends Error {}
+
+// The run's page as resolveExpectedPage last found it.
+let resolvedPage = null;
 
 function validatePlaywrightModulePath(modulePath, trustedRootPath) {
   const configuredModule = String(modulePath || "").trim();
@@ -243,12 +253,41 @@ async function resolveExpectedPage(browser) {
   for (const page of pages) {
     const targetId = await cdpTargetIdForPage(page).catch(() => "");
     if (targetId === EXPECTED_BROWSER_PAGE_ID) {
+      resolvedPage = page;
       return page;
     }
   }
-  throw new Error(
+  throw new BrowserUnavailableError(
     `Shared Browser selected page ${EXPECTED_BROWSER_PAGE_ID} is unavailable; select a live browser tab and retry`,
   );
+}
+
+// Whether a failed command failed because Instafy's browser or the run's tab
+// went away: the connection dropped, the page Playwright resolved for this
+// run closed, or the run's page target is no longer among the browser's
+// pages. Playwright's own "closed" error carries the plain name "Error" and a
+// message that can quote page markup, so the browser itself is asked instead.
+// A check that does not finish in time proves nothing.
+async function browserWentAway(browser) {
+  if (!browser.isConnected()) {
+    return true;
+  }
+  if (resolvedPage && resolvedPage.isClosed()) {
+    return true;
+  }
+  let timer;
+  const deadline = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(false), 5_000);
+  });
+  const pageGone = resolveExpectedPage(browser).then(
+    () => false,
+    (error) => error instanceof BrowserUnavailableError,
+  );
+  try {
+    return await Promise.race([pageGone, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // Runs inside the page through Playwright, so it must not use anything from
@@ -436,6 +475,17 @@ function describeInPage(element, sources) {
     const link = element.closest("a[href]");
     const expanded = attribute(element, "aria-expanded") ?? attribute(link, "aria-expanded");
     const popup = attribute(element, "aria-haspopup");
+    // A control that names the region it shows or hides (aria-controls), or
+    // a Bootstrap-style collapse, dropdown or offcanvas toggle, opens part of
+    // the page the way an aria-expanded opener does.
+    const controlsRegion = bounded(attribute(element, "aria-controls"), 200)
+      .split(/\s+/)
+      .some((id) => id && Boolean(element.ownerDocument?.getElementById(id)));
+    const toggleKind = bounded(
+      attribute(element, "data-bs-toggle") || attribute(element, "data-toggle") || "",
+      32,
+    ).toLowerCase();
+    const pageToggle = ["collapse", "dropdown", "offcanvas", "sidebar"].includes(toggleKind);
 
     const controls = form ? Array.from(form.elements || []) : [];
     const isSubmit = (control) =>
@@ -479,7 +529,7 @@ function describeInPage(element, sources) {
       signInIdentifier: Boolean(identifier) && identifier === element,
       contentEditable: element.isContentEditable === true,
       areas: areas.join(" "),
-      menuOpener: expanded !== null || (popup !== null && popup !== "false"),
+      menuOpener: expanded !== null || (popup !== null && popup !== "false") || controlsRegion || pageToggle,
       credentialContext: credentialPattern.test([dialogLabel, heading, header, rowText].join(" ")),
       row: Boolean(row),
       nearMaskedText,
@@ -492,6 +542,61 @@ function describeInPage(element, sources) {
   } catch (_) {
     // Missing facts make every step ask.
     policy = null;
+  }
+
+  // Hints for naming a control the page left unnamed (an avatar or icon
+  // button), so a prompt reads "profile picture button in the top right"
+  // rather than an index. Attributes, image text and geometry only: never a
+  // field value or nearby page text.
+  let nameHints = null;
+  try {
+    const read = (node, name) =>
+      node && typeof node.getAttribute === "function" ? node.getAttribute(name) : null;
+    const image = element.querySelector(
+      "img[alt], [role='img'][aria-label], svg title, svg[aria-label], i[aria-label], i[title], span[aria-hidden='true'][title]",
+    );
+    const imageTag = image && typeof image.tagName === "string" ? image.tagName.toLowerCase() : "";
+    const imageText = !image
+      ? ""
+      : imageTag === "img"
+        ? read(image, "alt")
+        : imageTag === "title"
+          ? image.textContent
+          : read(image, "aria-label") || read(image, "title");
+    const describedBy = bounded(read(element, "aria-describedby"))
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 8)
+      .map((id) => element.ownerDocument?.getElementById(id)?.textContent || "")
+      .join(" ");
+    const view = element.ownerDocument?.defaultView;
+    const rect = element.getBoundingClientRect();
+    const width = view?.innerWidth || 0;
+    const height = view?.innerHeight || 0;
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+    let position = "";
+    if (width > 0 && height > 0 && x >= 0 && x <= width && y >= 0 && y <= height) {
+      const row = y < height / 4 ? "top" : y > (3 * height) / 4 ? "bottom" : "";
+      const column = x < width / 3 ? "left" : x > (2 * width) / 3 ? "right" : "";
+      position = [row, column].filter(Boolean).join(" ") || "middle";
+    }
+    nameHints = {
+      tooltip: bounded(
+        read(element, "data-bs-original-title") || read(element, "data-original-title") ||
+          read(element, "data-tippy-content") || read(element, "data-tooltip") ||
+          read(element, "data-tip") || read(element, "aria-description") || "",
+        120,
+      ),
+      describedBy: bounded(describedBy, 120),
+      image: bounded(imageText || "", 120),
+      hasImage:
+        Boolean(element.querySelector("img, picture, [role='img']")) ||
+        /url\(/.test(view?.getComputedStyle(element).backgroundImage || ""),
+      position,
+    };
+  } catch (_) {
+    nameHints = null;
   }
 
   return {
@@ -520,7 +625,32 @@ function describeInPage(element, sources) {
     labels,
     text: bounded(element.textContent || ""),
     policy,
+    nameHints,
   };
+}
+
+// Bounds and types the page's naming hints; anything malformed is empty.
+const NAME_POSITIONS = new Set([
+  "top left", "top right", "bottom left", "bottom right", "top", "bottom", "left", "right", "middle",
+]);
+function nameHintsOf(raw) {
+  const valid = raw && typeof raw === "object" && !Array.isArray(raw);
+  const text = (value, max) => (valid && typeof value === "string" ? value.slice(0, max) : "");
+  return {
+    tooltip: text(raw?.tooltip, 120),
+    describedBy: text(raw?.describedBy, 120),
+    image: text(raw?.image, 120),
+    hasImage: valid && raw.hasImage === true,
+    position: valid && NAME_POSITIONS.has(raw.position) ? raw.position : "",
+  };
+}
+
+// The hints that name a control, without the ones that change while a
+// person hovers (described-by tooltips) or the layout moves (position), so
+// fingerprints stay stable across an approval.
+function stableNameHints(description) {
+  const hints = description.nameHints || nameHintsOf(null);
+  return { tooltip: hints.tooltip, image: hints.image, hasImage: hints.hasImage };
 }
 
 async function describeElement(locator, index) {
@@ -531,7 +661,9 @@ async function describeElement(locator, index) {
   if (!attributes || !box) {
     return null;
   }
-  const label = [
+  const policy = policyFactsOf(attributes.policy);
+  const nameHints = nameHintsOf(attributes.nameHints);
+  const named = [
     attributes.ariaLabel,
     attributes.ariaLabelledByText,
     attributes.labels,
@@ -541,8 +673,19 @@ async function describeElement(locator, index) {
     attributes.nameAttribute,
   ]
     .find((value) => typeof value === "string" && value.trim())
-    ?.trim()
-    .slice(0, MAX_LABEL_CHARS) || `${attributes.tag} ${index}`;
+    ?.trim();
+  // An unnamed control gets a name from its own hints, never its index: the
+  // index means nothing to the person reading a prompt.
+  const label = (
+    named ||
+    actionPolicy.unnamedControlName({
+      tag: attributes.tag,
+      role: attributes.role,
+      type: attributes.inputType,
+      ...nameHints,
+      iconHint: policy ? policy.iconHint : "",
+    })
+  ).slice(0, MAX_LABEL_CHARS);
   return {
     index,
     label,
@@ -565,7 +708,8 @@ async function describeElement(locator, index) {
     formAction: attributes.formAction,
     formMethod: attributes.formMethod,
     formActionText: attributes.formActionText,
-    policy: policyFactsOf(attributes.policy),
+    policy,
+    nameHints,
     box: {
       x: Math.round(box.x),
       y: Math.round(box.y),
@@ -610,13 +754,17 @@ function policyTarget(description) {
   const type = String(description.inputType || "").toLowerCase();
   const buttonLike =
     tag === "button" || (tag === "input" && ["button", "submit", "reset", "image"].includes(type));
+  const hints = description.nameHints || nameHintsOf(null);
   return {
     tag,
     role: description.role || "",
     type,
-    ariaLabel: description.ariaLabel || description.ariaLabelledByText || description.labels || "",
+    // An image's alt text is part of a button's accessible name, and a
+    // tooltip library keeps the title in data-bs-original-title, so their
+    // risk words count like any other name's.
+    ariaLabel: description.ariaLabel || description.ariaLabelledByText || description.labels || hints.image || "",
     text: description.text || "",
-    title: description.titleAttribute || "",
+    title: description.titleAttribute || hints.tooltip || "",
     value: buttonLike ? description.valueAttribute || "" : "",
     placeholder: description.placeholder || "",
     name: description.nameAttribute || "",
@@ -746,6 +894,7 @@ function snapshotFingerprint(url, interactive) {
     formMethod: description.formMethod,
     formActionText: description.formActionText,
     policy: description.policy,
+    nameHints: stableNameHints(description),
   }));
   return crypto
     .createHash("sha256")
@@ -779,6 +928,7 @@ function targetFingerprint(description) {
         formMethod: description.formMethod,
         formActionText: description.formActionText,
         policy: description.policy,
+        nameHints: stableNameHints(description),
       }),
     )
     .digest("hex");
@@ -1228,14 +1378,46 @@ function assertSafeTypeTarget(description) {
 // arbitrary website JavaScript is side-effect-free. Keep recognized consequential
 // controls, commit buttons, form submissions and activation keys behind
 // one-shot confirmation.
-// English and the German of bookkeeping tools: steps that record, finalize,
-// pay or mark something paid stay consequential even on a menu item, while a
-// menu item that only names a list ("Buchungen") is navigation.
+// English and the German of bookkeeping tools: steps that record, rebook,
+// finalize, file, issue, pay or mark something paid stay consequential even
+// on a menu item, while a menu item that only names a list ("Buchungen",
+// "Stornobuchung") is navigation. The shared classifier's commit words hold
+// the same verbs for buttons.
 const CONSEQUENTIAL_ACTION_PATTERN =
-  /(?<![\p{L}\p{N}])(?:buy|purchase|pay|checkout|place[\s_-]*order|delete|remove|erase|destroy|send|post|publish|submit|authorize|approve|allow|confirm[\s_-]*(?:order|payment|purchase)|transfer|withdraw|book|reserve|sign[\s_-]*(?:contract|document|agreement)|save|finalize|mark[\s_-]*(?:as[\s_-]*)?paid|speichern|buchen|verbuchen|festschreiben|als[\s_-]*bezahlt|bezahlen|überweisen|freigeben|absenden|versenden|löschen|stornieren)(?![\p{L}\p{N}])/iu;
+  /(?<![\p{L}\p{N}])(?:buy|purchase|pay|checkout|place[\s_-]*order|delete|remove|erase|destroy|send|post|publish|submit|authorize|approve|allow|confirm[\s_-]*(?:order|payment|purchase)|transfer|withdraw|book|reserve|sign[\s_-]*(?:contract|document|agreement)|save|finalize|mark[\s_-]*(?:as[\s_-]*)?paid|speichern|buchen|verbuchen|(?:um|aus|ab|rück|zurück|gegen|storno)buchen|übermitteln|einreichen|abgeben|ausstellen|festschreiben|als[\s_-]*bezahlt|bezahlen|überweisen|freigeben|absenden|versenden|löschen|stornieren)(?![\p{L}\p{N}])/iu;
+
+// The control's own names and address, the fields the Desktop Personal
+// Browser's high-impact check reads, plus its id and name attributes. Never
+// its structure: every <button> without a type attribute reports the input
+// type "submit", every control in a POST form reports the method "post", and
+// formActionText carries the text of the whole form, so scanning them made
+// every typeless menu button, and every control on a page wrapped in one
+// form, ask under routine browsing. Form submission is checked on its own
+// (isFormSubmissionControl).
+function controlNameContent(description) {
+  const hints = description.nameHints || nameHintsOf(null);
+  return [
+    description.label,
+    description.idAttribute,
+    description.ariaLabel,
+    description.ariaLabelledByText,
+    description.placeholder,
+    description.nameAttribute,
+    description.titleAttribute,
+    description.valueAttribute,
+    description.labels,
+    description.text,
+    description.href,
+    hints.tooltip,
+    hints.image,
+  ]
+    .filter((value) => typeof value === "string")
+    .join(" ")
+    .trim();
+}
 
 function isConsequentialAction(description) {
-  return CONSEQUENTIAL_ACTION_PATTERN.test(descriptionContent(description));
+  return CONSEQUENTIAL_ACTION_PATTERN.test(controlNameContent(description));
 }
 
 function isFormSubmissionControl(description) {
@@ -1858,10 +2040,26 @@ async function main() {
   if (method === "POST") {
     validateRequestBody(requestPath, body);
   }
-  const browser = await chromium.connectOverCDP(CDP_URL, { timeout: 15_000 });
+  let browser;
+  try {
+    browser = await chromium.connectOverCDP(CDP_URL, { timeout: 15_000 });
+  } catch (error) {
+    const reason = error && error.message ? error.message : String(error);
+    throw new BrowserUnavailableError(`Instafy's browser could not be reached: ${reason}`);
+  }
   try {
     await denyDownloads(browser);
-    const result = await execute(browser, method, requestPath, body || {});
+    let result;
+    try {
+      result = await execute(browser, method, requestPath, body || {});
+    } catch (error) {
+      if (!(error instanceof BrowserUnavailableError) && (await browserWentAway(browser))) {
+        // The message is kept, so an approval code in it still ends the run.
+        const reason = error && error.message ? error.message : String(error);
+        throw new BrowserUnavailableError(`Instafy's browser or the run's tab closed: ${reason}`);
+      }
+      throw error;
+    }
     await writeStdout(`${JSON.stringify({ ok: true, ...result }, null, 2)}\n`);
   } finally {
     await browser.close().catch(() => {});
@@ -1880,6 +2078,6 @@ main().then(
       // Keep the fixed message.
     }
     process.stderr.write(`Shared Browser command failed: ${masked}\n`);
-    process.exit(1);
+    process.exit(error instanceof BrowserUnavailableError ? BROWSER_UNAVAILABLE_EXIT_CODE : 1);
   },
 );

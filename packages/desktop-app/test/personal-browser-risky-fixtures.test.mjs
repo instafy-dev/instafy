@@ -163,6 +163,36 @@ test("billing page: masked card numbers and View links stay ordinary", async () 
   expectVerdict(classify("View documentation"), "allow", "navigation", "View documentation");
 });
 
+// The pages a dogfood harness ran against real Chromium: typeless buttons
+// outside any form, and type="button" controls inside one page-wide POST
+// form. Their own names mark the steps that write a record.
+test("bookkeeping write steps ask as commits through the real bridge; list names stay navigation", async () => {
+  const page = loadPage(`<!doctype html><body>
+    <main><button>Umbuchen</button><button>Rechnung ausstellen</button></main>
+    <form method="post" action="/app">
+      <ul role="menu"><li role="menuitem">Buchungen</li><li role="menuitem">Stornobuchung</li><li role="menuitem">Ausbuchen</li></ul>
+      <button type="button">An FinanzOnline &uuml;bermitteln</button>
+      <button type="button">Beleg erfassen</button>
+      <button type="button">Erledigt</button>
+      <button type="submit">Speichern</button>
+    </form>
+  </body>`, "buchungen.html");
+  const { byName, classify } = await describePage(page);
+  const pageUrl = page.window.location.href;
+  for (const name of ["Umbuchen", "Rechnung ausstellen", "An FinanzOnline übermitteln", "Beleg erfassen", "Erledigt"]) {
+    const result = classify(name);
+    expectVerdict(result, "ask", "change", name);
+    assert.equal(result.commit, true, `${name}: ${JSON.stringify(result)}`);
+    assert.equal(security.personalBrowserActivationRequiresConfirmation(byName.get(name), "routine", { pageUrl }), true, name);
+  }
+  expectVerdict(classify("Ausbuchen"), "ask", "change", "Ausbuchen menu item");
+  assert.equal(security.personalBrowserActivationRequiresConfirmation(byName.get("Ausbuchen"), "routine", { pageUrl }), true);
+  for (const name of ["Buchungen", "Stornobuchung"]) {
+    expectVerdict(classify(name), "allow", "navigation", `${name} menu item`);
+    assert.equal(security.personalBrowserActivationRequiresConfirmation(byName.get(name), "routine", { pageUrl }), false, name);
+  }
+});
+
 test("ordinary header sign-in controls are not refused", async () => {
   const { classify } = await describePage(loadPage(`<!doctype html><body><header>
     <button type="button">Log in</button>

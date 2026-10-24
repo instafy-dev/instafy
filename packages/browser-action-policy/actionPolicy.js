@@ -14,9 +14,15 @@
  *            tree items, disclosure or menu openers or navigation-area items
  *
  * A free ("allow") verdict only ever comes from structure: tag, role, link
- * shape, form method, page area. Label words only add risk. The one exception
- * is the short list of cookie dismissals and page numbers, which also needs
- * the right structure.
+ * shape, form method, page area. Label words and icon names only add risk.
+ * The exceptions are short lists that also need the right structure: cookie
+ * dismissals, page numbers, and the names and icons of controls that only
+ * open or close part of the page ("Menü ein-/ausklappen", "Toggle
+ * navigation", a hamburger icon) on a button outside a dialog.
+ *
+ * unnamedControlName(hints) names a control the page left unnamed from its
+ * own hints (tooltip attribute, image text, icon name, position), so a
+ * prompt never reads "button 5". Hosts mask it like any other control name.
  *
  * Plain script: it uses the redaction module's credential words and nothing
  * else. Evaluated where `module` is undefined, it reads
@@ -103,7 +109,19 @@
     "importieren", "hochladen", "ja", "starten", "ausführen", "umbenennen", "verschieben", "kopieren",
     "mark", "markieren", "pay\\s+off", "settle", "verbuchen", "ausgleichen",
     "duplicate", "duplizieren", "clone", "klonen", "restore", "wiederherstellen",
+    // Bookkeeping steps that rebook, reverse, file, issue, record, reconcile
+    // or close a record. "Issue" and "file" count only with their object, so
+    // a "File" menu or "Choose file" is not one.
+    "(?:um|aus|ab|rück|zurück|gegen|storno)buchen", "übermitteln", "einreichen", "abgeben", "ausstellen",
+    "erledigt", "abgleichen", "erfassen", "fakturieren", "verrechnen",
+    "reconcile", "void", "write[\\s-]*off",
+    "issue\\s+(?:an?\\s+)?(?:invoices?|refunds?|credit\\s+notes?)",
+    "file\\s+(?:a\\s+|the\\s+)?(?:(?:tax\\s+)?returns?|reports?|tax(?:es)?)",
   ]);
+  // Bookkeeping nouns that name a step on a button ("Stornobuchung" posts a
+  // reversal) but a list on a menu item, tab or navigation entry. They only
+  // mark a button as a commit and leave the free navigation rules alone.
+  const COMMIT_NOUN = words(["stornobuchung"]);
   const REVEAL = words([
     "reveal", "show", "view", "copy", "unhide", "display", "unmask",
     "anzeigen", "einblenden", "kopieren", "zeigen", "ansehen", "aufdecken",
@@ -128,6 +146,78 @@
   const SEARCH_LABEL = words(["search", "suche", "suchen", "filter", "find", "finden", "durchsuchen"]);
   const DISMISS_EXACT = /^(?:reject\s+all|decline\s+all|only\s+necessary|necessary\s+only|use\s+necessary\s+only|essential\s+only|only\s+essential|close|dismiss|alle\s+ablehnen|nur\s+notwendige|nur\s+notwendige\s+cookies|nur\s+erforderliche|nur\s+essenzielle|schließen|×|✕)$/iu;
   const PAGE_LABEL = /^(?:\d{1,4}|next|next\s+page|previous|previous\s+page|prev|first|last|older|newer|weiter|zurück|vor|nächste|nächste\s+seite|vorherige|vorherige\s+seite|erste|letzte|seite\s+\d{1,4}|page\s+\d{1,4}|[‹›«»<>…]|\.\.\.)$/iu;
+  // Whole names of controls that only open or close part of the page: a side
+  // menu, a menu, a section. Bare verbs that could switch a setting
+  // ("Toggle", "Umschalten", "Erweitern") are not on the list, and neither is
+  // anything with a reveal word ("Mehr anzeigen", "Show more").
+  const TOGGLE_OBJECT_EN =
+    "(?:(?:main|side|navigation|nav|user|account|profile)\\s+)?(?:menu|navigation|nav|sidebar|side\\s*bar|side\\s*menu|drawer|panel|section|filters?|options|menu\\s+bar|toolbar)";
+  const TOGGLE_OBJECT_DE =
+    "(?:haupt|seiten|navigations|benutzer|profil|konto)?menü|(?:haupt|seiten)?navigation|seitenleiste|menüleiste|bereich|filter|optionen";
+  const TOGGLE_VERB_DE =
+    "ein-?\\s*/\\s*ausklappen|aus-?\\s*/\\s*einklappen|einklappen|ausklappen|aufklappen|zuklappen|öffnen|schließen|ein-?\\s*/\\s*ausblenden|ausblenden|umschalten|minimieren|maximieren";
+  const TOGGLE_LABEL = new RegExp(
+    `^(?:${[
+      TOGGLE_OBJECT_EN,
+      `(?:toggle|open|close|expand|collapse)(?:\\s+the)?\\s+${TOGGLE_OBJECT_EN}`,
+      `${TOGGLE_OBJECT_EN}\\s+(?:toggle|toggler|button)`,
+      "expand\\s*/\\s*collapse", "collapse\\s*/\\s*expand", "(?:expand|collapse)(?:\\s+all)?",
+      "more(?:\\s+(?:options|actions))?", "actions", "hamburger(?:\\s+menu)?",
+      `(?:${TOGGLE_OBJECT_DE})`,
+      `(?:${TOGGLE_OBJECT_DE})\\s+(?:${TOGGLE_VERB_DE})`,
+      "ein-?\\s*/\\s*ausklappen", "aus-?\\s*/\\s*einklappen", "einklappen", "ausklappen", "aufklappen", "zuklappen",
+      "alle\\s+(?:ein|aus)klappen", "mehr", "weitere(?:\\s+(?:optionen|aktionen|funktionen))?", "aktionen",
+      // Icon-font ligatures read as text.
+      "menu_open", "more_(?:vert|horiz)", "expand_(?:more|less)", "unfold_(?:more|less)", "arrow_drop_(?:down|up)",
+    ].join("|")})$`,
+    "iu",
+  );
+  // Icon and class names of the same controls (fa-bars, pi-bars, a
+  // hamburger, navbar-toggler, a sidebar toggle, a down caret, a kebab).
+  // A bare chevron is left out: a wizard's next arrow is one.
+  const TOGGLE_ICON =
+    /(?<![\p{L}])(?:bars|hamburger|burger|menu|navbar-toggler|(?:side(?:bar|nav)|nav(?:bar)?|menu|drawer)[-_]?toggler?|toggle[-_](?:menu|nav|sidebar|drawer)|(?:chevron|caret|angle|arrow)[-_]?(?:down|up)|caret|collapsed?|expand(?:[-_](?:more|less))?|unfold(?:[-_]?(?:more|less))?|ellipsis(?:[-_][hv])?|dots(?:[-_](?:vertical|horizontal))?|kebab|more[-_](?:vert|horiz))(?![\p{L}])/iu;
+  // Icon and class names that add risk the way label words do. Checked in
+  // order, so "add-to-cart" is a purchase, not a commit.
+  const RISKY_ICONS = [
+    ["purchase", /(?<![\p{L}])(?:cart|shopping[-_]?cart|basket|credit[-_]?card|wallet|payment)(?![\p{L}])/iu],
+    ["destructive", /(?<![\p{L}])(?:trash(?:[-_]?(?:can|alt|o))?|delete|remove|bin|garbage|archive|sign[-_]?out|log[-_]?out|logout|signout|power[-_]?off)(?![\p{L}])/iu],
+    ["permission", /(?<![\p{L}])(?:share(?:[-_]?alt)?|user[-_]?(?:plus|add)|person[-_]?add|group[-_]?add)(?![\p{L}])/iu],
+    ["download", /(?<![\p{L}])(?:download|cloud[-_]?download|file[-_]?(?:export|download|csv|pdf|excel|zip)|export)(?![\p{L}])/iu],
+    ["message", /(?<![\p{L}])(?:paper[-_]?plane|send)(?![\p{L}])/iu],
+    // "check" is left out: Bootstrap marks every checkbox "form-check".
+    ["commit", /(?<![\p{L}])(?:save|floppy(?:[-_]?(?:o|disk))?|content[-_]?save|plus|add|upload|cloud[-_]?upload|edit|pencil|pen)(?![\p{L}])/iu],
+  ];
+  // Where an unnamed control sits in the visible page, by thirds across and
+  // quarters down. Anything else a host passes is dropped.
+  const POSITION_PHRASES = new Map([
+    ["top left", "in the top left"], ["top right", "in the top right"],
+    ["bottom left", "in the bottom left"], ["bottom right", "in the bottom right"],
+    ["top", "at the top"], ["bottom", "at the bottom"],
+    ["left", "on the left"], ["right", "on the right"], ["middle", "in the middle"],
+  ]);
+  // Generic nouns for an unnamed control's icon, never page text.
+  const ICON_NOUNS = [
+    ["profile", /(?<![\p{L}])(?:avatar|profile|profil|user|account|person|konto|benutzer)(?![\p{L}])/iu],
+    ["menu", /(?<![\p{L}])(?:bars|hamburger|burger|menu|navbar-toggler)(?![\p{L}])|(?:side(?:bar|nav)|nav(?:bar)?|drawer)[-_]?toggler?/iu],
+    ["notifications", /(?<![\p{L}])(?:bell|notifications?|benachrichtigungen?)(?![\p{L}])/iu],
+    ["search", /(?<![\p{L}])(?:search|magnifier|magnifying[-_]?glass|lupe|suche)(?![\p{L}])/iu],
+    ["settings", /(?<![\p{L}])(?:cog|cogs|gear|gears|settings|einstellungen)(?![\p{L}])/iu],
+    ["help", /(?<![\p{L}])(?:help|question(?:[-_]?circle)?|hilfe)(?![\p{L}])/iu],
+    ["close", /(?<![\p{L}])(?:close|times|xmark)(?![\p{L}])/iu],
+    ["more", /(?<![\p{L}])(?:ellipsis(?:[-_][hv])?|dots|kebab|more[-_](?:vert|horiz))(?![\p{L}])/iu],
+    ["delete", /(?<![\p{L}])(?:trash(?:[-_]?(?:can|alt|o))?|delete|remove|garbage)(?![\p{L}])/iu],
+    ["download", /(?<![\p{L}])download(?![\p{L}])/iu],
+    ["save", /(?<![\p{L}])(?:save|floppy(?:[-_]?(?:o|disk))?)(?![\p{L}])/iu],
+    ["edit", /(?<![\p{L}])(?:edit|pencil|pen)(?![\p{L}])/iu],
+    ["add", /(?<![\p{L}])(?:plus|add)(?![\p{L}])/iu],
+    ["filter", /(?<![\p{L}])(?:filter|funnel)(?![\p{L}])/iu],
+    ["calendar", /(?<![\p{L}])calendar(?![\p{L}])/iu],
+    ["print", /(?<![\p{L}])print(?:er)?(?![\p{L}])/iu],
+    ["mail", /(?<![\p{L}])(?:mail|envelope)(?![\p{L}])/iu],
+    ["home", /(?<![\p{L}])(?:home|house)(?![\p{L}])/iu],
+    ["expand", /(?<![\p{L}])(?:(?:chevron|caret|angle|arrow)[-_]?(?:down|up)|caret|expand(?:[-_](?:more|less))?)(?![\p{L}])/iu],
+  ];
   const FILE_EXTENSION = /\.(?:csv|tsv|xls|xlsx|json|xml|txt|pdf|zip|gz|ofx|qif|mt940|sta|camt|053|xbrl)$/i;
   const FREE_KEYS = new Set(["Tab", "Escape", "PageUp", "PageDown", "Home", "End"]);
   const ARROW_KEYS = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"]);
@@ -306,6 +396,64 @@
     return categoryOfLabel(label) !== null || COMMIT.test(label);
   }
 
+  /** The risk an icon or class name adds: a category, "commit", or null. */
+  function categoryOfIcon(iconHint) {
+    const hint = cleanText(iconHint);
+    if (!hint) return null;
+    for (const [category, pattern] of RISKY_ICONS) {
+      if (pattern.test(hint)) return category;
+    }
+    return null;
+  }
+
+  // A button-like control that only opens or closes part of the page, by its
+  // own names or, when it has none, by its icon. The caller has already ruled
+  // out risk words, risky icons, reveal words, form submits and dialogs.
+  function isToggleControl(target, label) {
+    if (!isButtonLike(target) && lower(target.tag) !== "a") return false;
+    const names = [target.ariaLabel, target.text, target.title].map(cleanText).filter(Boolean);
+    if (names.some((name) => TOGGLE_LABEL.test(name))) return true;
+    return !label && TOGGLE_ICON.test(cleanText(target.iconHint));
+  }
+
+  function controlKind(hints) {
+    const tag = lower(hints.tag);
+    const role = lower(hints.role);
+    const type = lower(hints.type);
+    if (role === "link" || (tag === "a" && !role)) return "link";
+    if (["menuitem", "menuitemcheckbox", "menuitemradio"].includes(role)) return "menu item";
+    if (role === "tab") return "tab";
+    if (role === "checkbox" || role === "switch" || (tag === "input" && type === "checkbox")) return "checkbox";
+    if (tag === "select" || role === "combobox" || role === "listbox") return "list";
+    if (tag === "textarea" || role === "textbox" || role === "searchbox" ||
+      (tag === "input" && TEXT_INPUT_TYPES.has(type))) return "field";
+    if (isButtonLike(hints)) return "button";
+    return "control";
+  }
+
+  /**
+   * A short name for a control the page left unnamed, built from the page's
+   * own hints: a tooltip attribute or described-by text, an image's alt text
+   * or an svg title, a generic noun for its icon, and where it sits ("top
+   * right"). Never field values or nearby page text. An image text that is
+   * an address or an email address is replaced by the icon noun.
+   */
+  function unnamedControlName(hints) {
+    const source = hints && typeof hints === "object" ? hints : {};
+    const short = (value) => Array.from(cleanText(value)).slice(0, 80).join("");
+    const kind = controlKind(source);
+    const where = POSITION_PHRASES.get(lower(source.position)) || "";
+    const placed = (base) => (where ? `${base} ${where}` : base);
+    const tooltip = short(source.tooltip) || short(source.describedBy);
+    if (tooltip) return tooltip;
+    const image = short(source.image);
+    if (image && !/@|:\/\/|^www\./i.test(image)) return placed(`${image} ${kind}`);
+    const hint = cleanText(source.iconHint);
+    const noun = hint ? (ICON_NOUNS.find(([, pattern]) => pattern.test(hint)) || [null])[0] : null;
+    if (noun === "profile") return placed(`${source.hasImage === true ? "profile picture" : "account"} ${kind}`);
+    return placed(noun ? `${noun} ${kind}` : `unnamed ${kind}`);
+  }
+
   function idLike(segment) {
     return /^\d{1,20}$/.test(segment) ||
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(segment) ||
@@ -456,10 +604,22 @@
     }
 
     const namedCategory = categoryOfLabel(label);
+    // An icon-only control's icon adds risk the way a label word does. A
+    // labelled control is judged by its words, so a navigation entry with a
+    // cart or credit-card icon stays navigation.
+    const iconCategory = !label && !rowTarget ? categoryOfIcon(target.iconHint) : null;
+    const risky = riskyLabel(label) || iconCategory !== null;
     const editable = isEditable(target);
     if (!editable && !isValueWidget(target)) {
-      if ((role === "tab" || tag === "summary" || target.menuOpener === true) && !riskyLabel(label) && !inDialog) {
+      if ((role === "tab" || tag === "summary" || target.menuOpener === true) && !risky && !inDialog) {
         return allow("disclosure", "tab, details or menu opener");
+      }
+      // A button that only opens or closes a side menu, menu or section, by
+      // its own name or its icon ("Menü ein-/ausklappen", a hamburger). Next
+      // to masked text or under a credential heading it may unfold a secret,
+      // so it asks there as "may show a secret".
+      if (!revealLike && !risky && !inDialog && !credentialish(target, label) && isToggleControl(target, label)) {
+        return allow("disclosure", "menu or section toggle");
       }
       const inNavigationArea = areas.some((area) => NAVIGATION_AREAS.includes(area)) || areas.includes("pagination");
       if (inNavigationArea && !inDialog && PAGE_LABEL.test(label)) {
@@ -478,6 +638,7 @@
     // context the row itself may open the secret.
     if (rowTarget && credentialish(target, label)) return ask("may_show_secret", "row in a credential context");
     if (namedCategory) return ask(namedCategory, "labelled control");
+    if (iconCategory && iconCategory !== "commit") return ask(iconCategory, "icon-only control");
     if (credentialish(target, label)) return ask("may_show_secret", "entry in a credential context");
     // A script-driven save button has no form, so the form checks above miss
     // it; its commit word is what marks it. Menu items, tabs, tree items,
@@ -488,7 +649,9 @@
       tag === "summary" ||
       target.menuOpener === true ||
       areas.some((area) => NAVIGATION_AREAS.includes(area));
-    if (!structural && COMMIT.test(label)) return { ...ask("change", "control"), commit: true };
+    if (!structural && (COMMIT.test(label) || COMMIT_NOUN.test(label) || iconCategory === "commit")) {
+      return { ...ask("change", "control"), commit: true };
+    }
     return ask("change", "control");
   }
 
@@ -590,6 +753,7 @@
     categoryTitle,
     refusalFor,
     stepLabels,
+    unnamedControlName,
     isEditable,
     isSearchField,
   });

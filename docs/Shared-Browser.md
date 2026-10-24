@@ -326,17 +326,46 @@ Save, Speichern or Buchen, even when page script runs them without a form), and
 Enter/Space activation still require one-shot confirmation. Menu items, tabs,
 tree items, disclosure and menu openers and navigation items are navigation: a
 commit word in their label (such as Neue Rechnung, Start or Neu) does not make
-them ask. A control of any kind whose label records, finalizes or pays
-(Festschreiben, Buchen, Speichern, Als bezahlt markieren, Mark as paid, Delete)
-is consequential and still asks; a menu item that only names a list
-(Buchungen, Zahlungen) stays navigation. Secret entry,
+them ask. A control of any kind whose label records, rebooks, files, issues,
+finalizes or pays (Festschreiben, Buchen, Umbuchen, Ausbuchen, Abbuchen,
+Stornobuchen, An FinanzOnline übermitteln, Einreichen, Abgeben, Rechnung
+ausstellen, Speichern, Als bezahlt markieren, Mark as paid, Delete) is
+consequential and still asks; a menu item that only names a list (Buchungen,
+Stornobuchung, Zahlungen) stays navigation. Buttons whose label fills in,
+reconciles, closes or voids a record (Beleg erfassen, Abgleichen, Erledigt,
+Fakturieren, Verrechnen, Stornobuchung, Reconcile, Void, Write off, Issue
+refund, File tax return) also ask as commit buttons; "Issue" and "File" count
+only with such an object, so a "File" menu or "Choose file" does not. Secret entry,
 fresh-target checks, exact authority, denial and cancellation boundaries are
 unchanged. Stopping or completing the turn ends the grant.
 
 Button descriptors retain the browser's normalized type. An ordinary
 non-submitting button inside a form can therefore use the routine grant, while
 submission controls still ask. Consequential-action checks remain in force for
-both kinds of controls.
+both kinds of controls. They read a control's own names (label, accessible
+name, visible text, title, value, id, name, address, tooltip and image text),
+never its structure: a `<button>` without a `type` attribute reports the type
+`submit` even outside a form, and a control in a POST form reports the method
+`post`, so neither alone makes a step ask.
+
+A control that only opens or closes part of the page is a disclosure toggle
+and free like a menu opener: it has `aria-expanded`, `aria-haspopup`,
+`aria-controls` naming an element on the page or a Bootstrap-style
+`data-bs-toggle` (or `data-toggle`) of `collapse`, `dropdown`, `offcanvas` or
+`sidebar`; or its whole name is a toggle name such as "Menü ein-/ausklappen",
+"Seitenleiste ein-/ausblenden", "Toggle menu", "Menu" or "Expand/collapse"; or
+it has no name and a hamburger, caret or kebab icon. A risk or commit word in
+its name, a risky icon, a reveal word, a dialog or a form submit still decides.
+An icon-only control whose icon is a trash can, a paper plane, a cart or card,
+a share or add-user, a download or a sign-out asks in that category, and one
+whose icon is a floppy disk, pencil or plus asks as a commit button.
+
+A control with no accessible name or visible text is named from its own
+hints rather than its index: a tooltip attribute or described-by text, its
+image's alt text or svg title, a generic noun for its icon, and where it sits,
+for example "profile picture button in the top right". The name is masked like
+any other control name before it reaches a snapshot, a prompt or the action
+log.
 
 Routine mode deliberately relaxes universal confirmation. Its consequence
 classifier uses page descriptors and URL text; it cannot prove that arbitrary
@@ -344,8 +373,8 @@ website JavaScript has no side effects or recognize every language/custom contro
 A plain link whose address has side effects but is not on the risky-address list,
 a control with neither a risky nor a commit word in its label, or a menu item,
 tab or navigation item whose only risky word is a commit word outside the
-consequential list (such as "Neu" or "Weiter" in a menu), can still act without
-a prompt. **Ask** reviews every state-changing interaction; a run on the
+consequential list (such as "Neu", "Weiter", "Erfassen" or "Abgleichen" in a
+menu), can still act without a prompt. **Ask** reviews every state-changing interaction; a run on the
 space's own machine cannot be switched to it yet (see "Remaining work").
 
 ### Redaction, step categories and downloads
@@ -486,6 +515,21 @@ already have opened pages or changed something. The code stays in the run's
 `browser/terminal-consent` artifact. The tool result tells
 the model that an unanswered prompt is not a denial and that it must end the
 turn without retrying.
+
+A run also stops when Instafy's browser goes away under it. The controller
+exits with code 75 when it cannot connect to the browser over CDP, when the
+run's own tab is gone, or when a command fails and the browser then shows the
+connection dropped, the run's tab closed, or the tab is no longer among its
+pages. Playwright reports a closed tab or browser with a plain `Error` whose
+message can quote page markup, so the controller asks the browser and never
+reads the error; any other failure exits 1. The runtime judges that by the exit
+code alone, never by error text a page could shape. Two such tool calls in a row latch the
+terminal code `browser_unavailable` like an approval code: later calls do not
+start the controller, status reports `ready: false`, the tool result tells the
+model to end the turn, and the person reads "Instafy's browser closed or
+stopped responding, so I stopped there. Open the browser again and send a
+message to continue." One failed call followed by any other answer starts the
+count over, so a single slow connect does not end a turn.
 If the client temporarily loses its network, it retains the exact visible
 request, shows reconnecting state, and retries the bounded poll/decision path;
 the origin's one-use fingerprint and replay checks remain authoritative.
@@ -838,8 +882,8 @@ to the webdev one:
   the space. Neither field names a lease or a person.
 - **Origin routes.** The controller proxies exactly `GET`/`HEAD browser/host`
   (`browser.view`) and `POST browser/host/start` (`browser.control`, body at
-  most 4 KiB). Both answer 404 `origin path not found` unless the policy covers
-  the origin's space.
+  most 4 KiB). Both answer 404 `origin path not found` with the code
+  `browser_host_policy_off` unless the policy covers the origin's space.
 - **Dispatch.** Shared dispatch to a registered host answers 409 when the
   policy does not cover its space, and the request is not sent to another
   runtime. Registration does not read the policy: the stored consent lasts
@@ -1465,8 +1509,10 @@ owns the child and makes every state change:
 Origin serves the host only when the process that runs it hands it one
 (runtime-agent, through `OriginHttpServer::set_browser_host`). Desktop, the
 boot-time Shared Browser and the multi-tenant gateway have none: there
-`/browser/host` and `/browser/host/start` answer 404 and every other browser
-route behaves as before.
+`/browser/host` and `/browser/host/start` answer 404 with the code
+`browser_host_absent`, and every other browser route behaves as before. The
+code tells origin's own answer apart from a 404 that the controller (its
+`browser_host_policy_off`) or anything else in front of origin gives.
 
 - `GET /browser/host` (`browser.view`, `Cache-Control: no-store`) answers
   `{"version":1,"mode":"lazy","state":"idle|starting|ready|stopping|failed|poisoned","generation":"<uuid>|null","failure":"<token>|null","startedByYou":false,"othersPresent":false,"controlledByOther":false,"agentRunActive":false,"agentRunStartedByYou":false}`.

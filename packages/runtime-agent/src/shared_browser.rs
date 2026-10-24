@@ -7,7 +7,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -92,6 +92,21 @@ const TERMINAL_APPROVAL_FAILURE_CODES: [&str; 10] = [
     "approval_state_invalid",
     "approval_state_full",
 ];
+/// The terminal code a run stops on when Instafy's browser, or the run's own
+/// tab, went away: [`BROWSER_UNAVAILABLE_STREAK_LIMIT`] tool calls in a row
+/// could not reach it. Not an approval code: nothing in a command's error
+/// text can set it, only the controller's exit code.
+const BROWSER_UNAVAILABLE_CODE: &str = "browser_unavailable";
+/// The exit code of `assets/shared-browser-cli.js` when it could not connect
+/// to the browser over CDP, the run's page target is gone, or the browser
+/// closed under the command. The script's `BROWSER_UNAVAILABLE_EXIT_CODE`
+/// must stay equal to it.
+const BROWSER_UNAVAILABLE_EXIT_CODE: i32 = 75;
+/// Tool calls in a row that may find the browser unavailable before the run
+/// stops using it. Two, so one slow connect under load does not end a turn,
+/// while a browser that is gone ends it within seconds instead of the model
+/// retrying for minutes.
+const BROWSER_UNAVAILABLE_STREAK_LIMIT: u32 = 2;
 /// How long a person has to answer the prompts of one Shared Browser tool
 /// call, as `assets/shared-browser-approval.js` reads it. The script's
 /// `DEFAULT_APPROVAL_WAIT_MS` and `MAX_APPROVAL_WAIT_MS`, and the origin's
@@ -786,12 +801,28 @@ struct SharedBrowserRequest {
     body: Option<JsonValue>,
 }
 
+/// A code that ends a Shared Browser run: one of the approval codes, or
+/// [`BROWSER_UNAVAILABLE_CODE`].
 pub(crate) fn canonical_terminal_consent_failure_code(raw: &str) -> Option<&'static str> {
     TERMINAL_APPROVAL_FAILURE_CODES
         .iter()
         .copied()
+        .chain(std::iter::once(BROWSER_UNAVAILABLE_CODE))
         .find(|code| raw == *code)
 }
+
+/// The controller could not reach Instafy's browser or the run's own tab
+/// (exit code [`BROWSER_UNAVAILABLE_EXIT_CODE`]).
+#[derive(Debug)]
+struct BrowserUnavailable(String);
+
+impl std::fmt::Display for BrowserUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for BrowserUnavailable {}
 
 fn terminal_consent_failure_code_from_error(error: &anyhow::Error) -> Option<&'static str> {
     let rendered = format!("{error:#}");
@@ -817,7 +848,10 @@ fn terminal_consent_status(code: &'static str) -> JsonValue {
     let object = status
         .as_object_mut()
         .expect("terminal consent signal is always an object");
-    object.insert("ready".to_string(), JsonValue::Bool(true));
+    object.insert(
+        "ready".to_string(),
+        JsonValue::Bool(code != BROWSER_UNAVAILABLE_CODE),
+    );
     object.insert("originApproved".to_string(), JsonValue::Bool(false));
     object.insert("redacted".to_string(), JsonValue::Bool(true));
     object.insert("url".to_string(), JsonValue::Null);
@@ -829,6 +863,13 @@ fn terminal_consent_call_result(code: &'static str) -> CallToolResult {
     if code == "human_input_required" {
         let mut result = CallToolResult::success(vec![Content::text(
             "Human input is needed. End this turn now. The user will fill the highlighted fields directly after confirmed shutdown, then explicitly continue in a fresh browser turn. Never request or repeat their values.",
+        )]);
+        result.structured_content = Some(terminal_consent_signal(code));
+        return result;
+    }
+    if code == BROWSER_UNAVAILABLE_CODE {
+        let mut result = CallToolResult::error(vec![Content::text(
+            "Instafy's browser closed or stopped responding on this space's machine. End this turn now: do not retry or call another browser tool. Say in one short sentence that the browser closed and that they can open it again and send a message to continue.",
         )]);
         result.structured_content = Some(terminal_consent_signal(code));
         return result;
@@ -860,6 +901,8 @@ struct SharedBrowserMcpServer {
     tools: Arc<Vec<Tool>>,
     action_lock: Arc<AsyncMutex<()>>,
     terminal_consent_failure: Arc<AsyncMutex<Option<&'static str>>>,
+    /// Tool calls in a row that found the browser unavailable.
+    browser_unavailable_streak: Arc<AtomicU32>,
 }
 
 impl SharedBrowserMcpServer {
@@ -868,7 +911,20 @@ impl SharedBrowserMcpServer {
             tools: Arc::new(shared_browser_mcp_tools()),
             action_lock: Arc::new(AsyncMutex::new(())),
             terminal_consent_failure: Arc::new(AsyncMutex::new(None)),
+            browser_unavailable_streak: Arc::new(AtomicU32::new(0)),
         }
+    }
+
+    /// Latches `code` unless a code is already latched, and answers with the
+    /// latched one.
+    async fn latch_terminal_failure(&self, code: &'static str) -> SharedBrowserMcpExecutionFailure {
+        let mut latch = self.terminal_consent_failure.lock().await;
+        if latch.is_none() {
+            *latch = Some(code);
+        }
+        SharedBrowserMcpExecutionFailure::TerminalConsent(
+            latch.expect("terminal consent failure was just latched"),
+        )
     }
 
     async fn execute_with_failure_latch<F, Fut>(
@@ -887,19 +943,31 @@ impl SharedBrowserMcpServer {
             return Err(SharedBrowserMcpExecutionFailure::TerminalConsent(code));
         }
 
-        match execute().await {
+        let outcome = execute().await;
+        // Only an unreachable browser continues the streak; any other answer
+        // proves the browser and the run's tab were there.
+        let unavailable = outcome
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.downcast_ref::<BrowserUnavailable>().is_some());
+        let streak = if unavailable {
+            self.browser_unavailable_streak
+                .fetch_add(1, Ordering::SeqCst)
+                .saturating_add(1)
+        } else {
+            self.browser_unavailable_streak.store(0, Ordering::SeqCst);
+            0
+        };
+        match outcome {
             Ok(payload) => Ok(payload),
             Err(error) => {
-                let Some(code) = terminal_consent_failure_code_from_error(&error) else {
-                    return Err(SharedBrowserMcpExecutionFailure::Other(error));
-                };
-                let mut latch = self.terminal_consent_failure.lock().await;
-                if latch.is_none() {
-                    *latch = Some(code);
+                if let Some(code) = terminal_consent_failure_code_from_error(&error) {
+                    return Err(self.latch_terminal_failure(code).await);
                 }
-                Err(SharedBrowserMcpExecutionFailure::TerminalConsent(
-                    latch.expect("terminal consent failure was just latched"),
-                ))
+                if streak >= BROWSER_UNAVAILABLE_STREAK_LIMIT {
+                    return Err(self.latch_terminal_failure(BROWSER_UNAVAILABLE_CODE).await);
+                }
+                Err(SharedBrowserMcpExecutionFailure::Other(error))
             }
         }
     }
@@ -1392,20 +1460,30 @@ async fn execute_request(request: &SharedBrowserRequest) -> Result<JsonValue> {
         );
     }
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let message = stderr.trim();
-        bail!(
-            "Shared Browser command exited with {}: {}",
-            output.status,
-            if message.is_empty() {
-                "no error details"
-            } else {
-                message
-            }
-        );
+        return Err(controller_failure(output.status, &output.stderr));
     }
     serde_json::from_slice::<JsonValue>(&output.stdout)
         .context("Shared Browser controller returned invalid JSON")
+}
+
+/// The error of a controller command that exited unsuccessfully. Only its
+/// exit code, never its error text, marks the browser as unavailable.
+fn controller_failure(status: std::process::ExitStatus, stderr: &[u8]) -> anyhow::Error {
+    let stderr = String::from_utf8_lossy(stderr);
+    let details = stderr.trim();
+    let message = format!(
+        "Shared Browser command exited with {status}: {}",
+        if details.is_empty() {
+            "no error details"
+        } else {
+            details
+        }
+    );
+    if status.code() == Some(BROWSER_UNAVAILABLE_EXIT_CODE) {
+        BrowserUnavailable(message).into()
+    } else {
+        anyhow!(message)
+    }
 }
 
 fn embedded_shared_browser_script() -> String {

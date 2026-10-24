@@ -16,10 +16,19 @@ publish it on `globalThis.__instafyBrowserRedaction` and
 - `actionPolicy.js`: `classifyStep(op, target, ctx)` returns
   `{ verdict, category, reason, code?, commit? }` for a navigation, click,
   typing step, submission or key press. Free verdicts come only from structure;
-  label words only add risk. `commit: true` marks an ordinary control whose
-  label commits a change (Save, Speichern), which the Shared Browser still asks
-  for under routine browsing. Menu items, tabs, tree items, disclosure and menu
-  openers and navigation-area items never carry it.
+  label words and the icons of icon-only controls only add risk. The
+  exceptions are short whole-name lists that also need the right structure:
+  cookie dismissals, page numbers and menu or section toggles ("Menü
+  ein-/ausklappen", "Toggle navigation", or a hamburger icon on an unnamed
+  button). `commit: true` marks an ordinary control whose label or icon commits
+  a change (Save, Speichern, Umbuchen, Beleg erfassen, Stornobuchung, a floppy
+  disk), which the Shared Browser still asks for under routine browsing. Menu
+  items, tabs, tree items, disclosure and menu openers and navigation-area items
+  never carry it, and a menu item named for a list ("Buchungen",
+  "Stornobuchung") stays navigation.
+  `unnamedControlName(hints)` names a control the page left unnamed from its
+  tooltip attribute, image text, icon and position, so a prompt never shows an
+  index such as "button 5".
 
 The tests live with the Desktop Personal Browser
 (`packages/desktop-app/test/personal-browser-redaction.test.mjs`,

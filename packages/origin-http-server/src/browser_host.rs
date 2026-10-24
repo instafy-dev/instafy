@@ -86,6 +86,10 @@ pub const BROWSER_HOST_STOPPING_CODE: &str = "browser_host_stopping";
 pub const BROWSER_HOST_NOT_READY_CODE: &str = "browser_host_not_ready";
 /// 409 from a start while a pre-stop flush holds the machine's stop fence.
 pub const MACHINE_STOPPING_CODE: &str = "machine_stopping";
+/// 404 from `/browser/host` and `/browser/host/start` on an origin the process
+/// gave no browser host. It tells origin's own answer apart from a 404 that a
+/// proxy or a controller in front of it gives.
+pub const BROWSER_HOST_ABSENT_CODE: &str = "browser_host_absent";
 
 /// Every failure token a snapshot may carry: the host's own start reasons
 /// (`runtime-entrypoint start-browser-host`), then the agent's. Origin
@@ -183,7 +187,12 @@ fn not_ready() -> OriginError {
 }
 
 fn no_host() -> OriginError {
-    OriginError::not_found("this machine has no browser host")
+    OriginError::with_report(
+        StatusCode::NOT_FOUND,
+        BROWSER_HOST_ABSENT_CODE,
+        "this machine has no browser host",
+        serde_json::json!({}),
+    )
 }
 
 fn public_failure(snapshot: &BrowserHostSnapshot) -> Option<&'static str> {

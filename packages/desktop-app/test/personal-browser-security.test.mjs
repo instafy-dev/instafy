@@ -104,6 +104,50 @@ test("routine frees reading-style steps: plain links, menus, tabs, dismissals an
   }
 });
 
+// A page wrapped in one form (FreeFinance) has every control inside it. The
+// form's submit label is not the toggle's own name, so it does not make a
+// menu or section toggle ask; the form's own submit still does.
+test("routine judges a toggle inside a form by its own names, not the form's submit label", () => {
+  const page = { pageUrl: "https://app.example.test/invoices" };
+  const form = { formOwnerIdentity: "doc:form-1", formMethod: "post", formActionText: "Submit" };
+  for (const descriptor of [
+    { tag: "button", type: "button", text: "Details", menuOpener: true, ...form },
+    { tag: "button", type: "button", title: "Menü ein-/ausklappen", ...form },
+    { tag: "button", type: "button", text: "", menuOpener: true, iconHint: "profile-button avatar", ...form },
+  ]) {
+    assert.equal(personalBrowserActivationRequiresConfirmation(descriptor, "routine", page), false, JSON.stringify(descriptor));
+    assert.equal(personalBrowserActivationRequiresConfirmation(descriptor, "ask", page), true, JSON.stringify(descriptor));
+  }
+  for (const descriptor of [
+    { tag: "button", type: "submit", text: "Submit", ...form },
+    { tag: "button", text: "Menu", ...form },
+    { tag: "button", type: "button", text: "Delete", menuOpener: true, ...form },
+  ]) {
+    assert.equal(personalBrowserActivationRequiresConfirmation(descriptor, "routine", page), true, JSON.stringify(descriptor));
+  }
+});
+
+// Bookkeeping steps that rebook, reverse, file, issue or record ask in
+// routine, on a button and on a menu item, while a menu item that names a
+// list ("Buchungen", "Stornobuchung") or a "File" menu stays free.
+test("routine asks for bookkeeping write steps and frees menu items that name lists", () => {
+  const page = { pageUrl: "https://app.example.test/buchungen" };
+  const form = { formOwnerIdentity: "doc:form-1", formMethod: "post", formSubmitLabels: "Speichern" };
+  for (const label of ["Umbuchen", "Ausbuchen", "An FinanzOnline übermitteln", "Einreichen", "Rechnung ausstellen"]) {
+    for (const descriptor of [
+      { tag: "button", type: "submit", text: label },
+      { tag: "button", type: "button", text: label, ...form },
+      { tag: "li", role: "menuitem", text: label, areas: "menu" },
+    ]) {
+      assert.equal(personalBrowserActivationRequiresConfirmation(descriptor, "routine", page), true, JSON.stringify(descriptor));
+    }
+  }
+  for (const label of ["Buchungen", "Stornobuchung", "File"]) {
+    const descriptor = { tag: "li", role: "menuitem", text: label, areas: "menu" };
+    assert.equal(personalBrowserActivationRequiresConfirmation(descriptor, "routine", page), false, JSON.stringify(descriptor));
+  }
+});
+
 test("routine asks for every other click, submit, risky address and Enter outside search", () => {
   const page = { pageUrl: "https://example.test/list" };
   for (const descriptor of [
