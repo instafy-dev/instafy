@@ -373,6 +373,17 @@ replaces the lease. A launch quarantined after a failed provider call is not a
 stop and carries neither, and a controller from before these fields sends
 neither.
 
+Those two go with the quarantine, so the entry also names the runtime's newest
+stop since it last came up, for as long as it has not come up again:
+`lastStopReason`, the same bounded token, and `lastStoppedAt`. While the
+quarantine lasts they are `stopReason` and `stopRequestedAt`; after the
+release they are the reason and time of the stop's `stopped` record. The
+runtime's next registration clears them, and so does a status that reads it
+`ready`, `running` or `draining`. They are read from `runtime_events` (the
+newest `stopped` record against the newest `registered` one), so a stop older
+than the 14-day event retention still counts: `stopped` records are never
+pruned. A controller from before these fields sends neither.
+
 The Studio takes such a runtime for a stop when it knows of one newer than
 that launch: this tab's own Stop or Remove, a turn a person's stop put back in
 the queue (see "Stop reasons"), or the runtime's own `stopRequestedAt` (or,

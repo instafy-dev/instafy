@@ -790,6 +790,82 @@ async fn the_runtime_status_tells_a_stops_release_from_a_launch() -> anyhow::Res
         assert_eq!(stopped["status"], "stopped", "{stopped}");
         assert!(stopped.get("stopRequestedAt").is_none(), "{stopped}");
         assert!(stopped.get("stopReason").is_none(), "{stopped}");
+        // The stop itself is still the runtime's last word.
+        assert_eq!(stopped["lastStopReason"], "user_stop", "{stopped}");
+        Ok(())
+    })
+    .await
+}
+
+/// A stop's quarantine names the stop only while the provider releases the
+/// machine. A tab that missed an idle stop's `runtime.stopped` reads the
+/// origin expiry that follows every stop as an unexpected loss, and starts
+/// the machine again. So the entry keeps naming the runtime's newest stop
+/// (`lastStopReason`, `lastStoppedAt`) after the release, until the runtime
+/// comes up again.
+#[tokio::test]
+async fn the_runtime_status_keeps_an_idle_stops_reason_after_its_release() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("last stop status test").await?;
+    let project_id = Uuid::new_v4();
+    with_shared_db_fixture(fixture(project_id), async {
+        let turn = RunningTurn::start(
+            pool.clone(),
+            project_id,
+            RuntimeShape::Hosted,
+            StatusCode::NO_CONTENT,
+        )
+        .await?;
+        let running = turn.status_entry().await?;
+        assert!(running.get("lastStopReason").is_none(), "{running}");
+        assert!(running.get("lastStoppedAt").is_none(), "{running}");
+
+        let (status, body, releasing) = turn
+            .post_while_releasing(
+                "/runtime/stop",
+                json!({ "runtime_id": turn.runtime_id, "reason": "idle" }),
+                turn.status_entry(),
+            )
+            .await?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let releasing = releasing?;
+        assert_eq!(releasing["stopReason"], "idle", "{releasing}");
+        assert_eq!(releasing["lastStopReason"], "idle", "{releasing}");
+        assert_eq!(
+            releasing["lastStoppedAt"], releasing["stopRequestedAt"],
+            "{releasing}"
+        );
+
+        // The release is done and the quarantine with it. The stop is not.
+        let stopped = turn.status_entry().await?;
+        assert_eq!(stopped["status"], "stopped", "{stopped}");
+        assert!(stopped.get("stopReason").is_none(), "{stopped}");
+        assert_eq!(stopped["lastStopReason"], "idle", "{stopped}");
+        assert!(
+            json_time(&stopped["lastStoppedAt"])? >= json_time(&releasing["lastStoppedAt"])?,
+            "{stopped}"
+        );
+
+        // The runtime registers again, then reads `requested` again without
+        // a stop, as a launch reset leaves it: that stop is not its last
+        // word any more.
+        let connection = turn.pool.get().await?;
+        connection
+            .execute(
+                "insert into runtime_events (runtime_id, project_id, kind, data)
+                 values ($1, $2, 'registered', '{}'::jsonb)",
+                &[&turn.runtime_id, &turn.project_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "update runtimes set status = 'requested', last_seen_at = null where id = $1",
+                &[&turn.runtime_id],
+            )
+            .await?;
+        drop(connection);
+        let came_up = turn.status_entry().await?;
+        assert!(came_up.get("lastStopReason").is_none(), "{came_up}");
+        assert!(came_up.get("lastStoppedAt").is_none(), "{came_up}");
         Ok(())
     })
     .await

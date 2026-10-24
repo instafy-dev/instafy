@@ -90,6 +90,19 @@ pub(crate) struct RuntimeStatusEntry {
     /// That stop's reason, such as `user_stop` or `idle`, as a bounded token.
     #[serde(skip_serializing_if = "Option::is_none")]
     stop_reason: Option<String>,
+    /// The reason of the runtime's newest stop since it last came up, as a
+    /// bounded token like `stopReason`, for as long as it has not come up
+    /// again: the stop above while its quarantine lasts, and its `stopped`
+    /// record once the provider release is done. A tab that missed the stop's
+    /// `runtime.stopped` can tell from it that the machine it lost was
+    /// stopped. Its next registration clears it (see
+    /// [`last_stop_since_ready`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_stop_reason: Option<String>,
+    /// When that stop was recorded: its quarantine (`stopRequestedAt`) while
+    /// it lasts, then the stop's finish.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_stopped_at: Option<String>,
     endpoint_url: Option<String>,
     task_ref: Option<String>,
     #[serde(default)]
@@ -166,6 +179,47 @@ fn shared_browser_host_status(
         && !is_private_self_hosted
         && super::managed::runtime_is_registered_browser_host(provider, capabilities, lease_id))
     .then_some(SharedBrowserHostStatus::LAZY)
+}
+
+/// A stop as a status entry reports it in `lastStopReason` and
+/// `lastStoppedAt`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LastStop {
+    reason: String,
+    at: DateTime<Utc>,
+}
+
+/// The newest stop of a runtime since it last came up, or none.
+///
+/// - A stop whose quarantine holds the active lease (`quarantine`) is that
+///   stop: no registration gets past a quarantine.
+/// - Otherwise it is the runtime's newest `stopped` record (`finished`), when
+///   that is newer than its newest registration. A stop of a runtime that
+///   came up again since is no longer its last word.
+/// - A runtime that reads `ready`, `running` or `draining` is up, whatever
+///   the records say: retention prunes a registration after 14 days but never
+///   a `stopped` record.
+///
+/// The reason is the bounded token `stopReason` uses.
+fn last_stop_since_ready(
+    status: &str,
+    quarantine: Option<(DateTime<Utc>, &str)>,
+    finished: Option<(DateTime<Utc>, &str)>,
+    last_registered_at: Option<DateTime<Utc>>,
+) -> Option<LastStop> {
+    if matches!(status, "ready" | "running" | "draining") {
+        return None;
+    }
+    let (at, reason) = match quarantine {
+        Some(stop) => stop,
+        None => finished.filter(|(stopped_at, _)| {
+            last_registered_at.map_or(true, |ready| *stopped_at > ready)
+        })?,
+    };
+    Some(LastStop {
+        reason: super::run_interruptions::interruption_reason_token(reason).to_string(),
+        at,
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -916,7 +970,10 @@ async fn load_runtime_status_response_for_viewer(
                     rl.status as lease_status,
                     rl.released_at as lease_released_at,
                     quarantine.created_at as stop_requested_at,
-                    quarantine.reason as stop_reason
+                    quarantine.reason as stop_reason,
+                    finished_stop.created_at as finished_stop_at,
+                    finished_stop.reason as finished_stop_reason,
+                    last_registration.created_at as last_registered_at
              from runtimes r
              left join runtime_leases rl
                on rl.id = r.active_lease_id
@@ -937,6 +994,26 @@ async fn load_runtime_status_response_for_viewer(
                 order by e.created_at asc
                 limit 1
              ) quarantine on true
+             -- The runtime's newest finished stop and its newest
+             -- registration, which tell whether that stop is still its last
+             -- word once the quarantine is gone (last_stop_since_ready). Each
+             -- reads one row of runtime_events_runtime_idx.
+             left join lateral (
+                select e.created_at, e.data ->> 'reason' as reason
+                from runtime_events e
+                where e.runtime_id = r.id
+                  and e.kind = 'stopped'
+                order by e.created_at desc
+                limit 1
+             ) finished_stop on true
+             left join lateral (
+                select e.created_at
+                from runtime_events e
+                where e.runtime_id = r.id
+                  and e.kind = 'registered'
+                order by e.created_at desc
+                limit 1
+             ) last_registration on true
              left join lateral (
                 select oi.*
                 from origin_instances oi
@@ -996,11 +1073,21 @@ async fn load_runtime_status_response_for_viewer(
         let created_at: Option<DateTime<Utc>> = row.get("created_at");
         let launch_requested_at: Option<DateTime<Utc>> = row.get("lease_requested_at");
         let stop_requested_at: Option<DateTime<Utc>> = row.get("stop_requested_at");
-        let stop_reason: Option<&str> = row.get("stop_reason");
+        let quarantine_reason: Option<&str> = row.get("stop_reason");
         let stop_reason = stop_requested_at.map(|_| {
-            super::run_interruptions::interruption_reason_token(stop_reason.unwrap_or_default())
-                .to_string()
+            super::run_interruptions::interruption_reason_token(
+                quarantine_reason.unwrap_or_default(),
+            )
+            .to_string()
         });
+        let finished_stop_at: Option<DateTime<Utc>> = row.get("finished_stop_at");
+        let finished_stop_reason: Option<&str> = row.get("finished_stop_reason");
+        let last_stop = last_stop_since_ready(
+            &status,
+            stop_requested_at.map(|at| (at, quarantine_reason.unwrap_or_default())),
+            finished_stop_at.map(|at| (at, finished_stop_reason.unwrap_or_default())),
+            row.get("last_registered_at"),
+        );
         let idle_ttl_seconds: i32 = row.get("idle_ttl_seconds");
         let origin = origin_info_from_status_row(&row);
         let is_private_self_hosted =
@@ -1041,6 +1128,8 @@ async fn load_runtime_status_response_for_viewer(
             launch_requested_at: launch_requested_at.map(|value| value.to_rfc3339()),
             stop_requested_at: stop_requested_at.map(|value| value.to_rfc3339()),
             stop_reason,
+            last_stopped_at: last_stop.as_ref().map(|stop| stop.at.to_rfc3339()),
+            last_stop_reason: last_stop.map(|stop| stop.reason),
             endpoint_url: endpoint_url.clone(),
             task_ref: row.get("task_ref"),
             is_local,
@@ -2053,6 +2142,78 @@ mod tests {
             .get_private(&project_id, &owner_user_id)
             .await
             .is_some());
+    }
+
+    #[test]
+    fn the_last_stop_outlives_its_quarantine_until_the_runtime_comes_up() {
+        let launched = Utc::now() - ChronoDuration::hours(1);
+        let quarantined = launched + ChronoDuration::minutes(31);
+        let finished = quarantined + ChronoDuration::seconds(47);
+        let stop = |reason: &str, at| {
+            Some(LastStop {
+                reason: reason.to_string(),
+                at,
+            })
+        };
+
+        // While the idle stop's quarantine holds the lease, and after its
+        // release, the entry names that stop.
+        assert_eq!(
+            last_stop_since_ready(
+                "requested",
+                Some((quarantined, "idle")),
+                None,
+                Some(launched)
+            ),
+            stop("idle", quarantined)
+        );
+        assert_eq!(
+            last_stop_since_ready("stopped", None, Some((finished, "idle")), Some(launched)),
+            stop("idle", finished)
+        );
+        // Also a person's stop, and a runtime whose registration retention
+        // pruned.
+        assert_eq!(
+            last_stop_since_ready("stopped", None, Some((finished, "user_stop")), None),
+            stop("user_stop", finished)
+        );
+        // A reason that is not a plain token reads as `other`, like
+        // `stopReason`.
+        assert_eq!(
+            last_stop_since_ready("stopped", None, Some((finished, "Stopped by ops")), None),
+            stop("other", finished)
+        );
+
+        // A stop the runtime came up after is not its last word. A launch
+        // asked for since the stop that has not come up yet still names it:
+        // the Studio compares it with `launchRequestedAt`.
+        let registered = finished + ChronoDuration::minutes(5);
+        assert_eq!(
+            last_stop_since_ready(
+                "requested",
+                None,
+                Some((finished, "idle")),
+                Some(registered)
+            ),
+            None
+        );
+        assert_eq!(
+            last_stop_since_ready("requested", None, Some((finished, "idle")), Some(launched)),
+            stop("idle", finished)
+        );
+        // A runtime that reads up has come up, whatever the records say.
+        for status in ["ready", "running", "draining"] {
+            assert_eq!(
+                last_stop_since_ready(status, None, Some((finished, "idle")), None),
+                None,
+                "{status}"
+            );
+        }
+        // A runtime that never stopped has none.
+        assert_eq!(
+            last_stop_since_ready("requested", None, None, Some(launched)),
+            None
+        );
     }
 
     #[test]
