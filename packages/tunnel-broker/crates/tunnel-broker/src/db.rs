@@ -582,11 +582,15 @@ pub async fn replace_tunnel(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow::anyhow!("only an idempotent tunnel can be replaced"))?;
     let mut tx = pool.begin().await?;
-    // Take the locks a create or refresh takes, in their order (zone row, then the ingress
-    // allocation lock), before touching the stale row, so a replacement never waits on them
-    // while holding a tunnel row one of those writers wants. The insert re-takes both freely.
+    // Take the locks a create or refresh takes, in their order (zone row, the ingress
+    // allocation lock, then the expired rows its sweep revokes), before touching the stale
+    // row, so a replacement never waits on them while holding a tunnel row one of those
+    // writers wants. The sweep also locks expired rows in the order the ingress sidecar's
+    // sweep does, so an expired stale row is taken there rather than ahead of the rest. The
+    // insert re-takes all of them freely.
     ensure_pdns_domain_row(&mut tx, &cfg.tunnel_domain).await?;
     lock_ingress_allocations(&mut tx, ingress.id).await?;
+    revoke_expired_on_ingress(&mut tx, ingress.id).await?;
     let retired = sqlx::query_as::<_, TunnelRecord>(
         r#"
         UPDATE tunnels
@@ -890,24 +894,7 @@ async fn allocate_rathole_binding(
     tunnel_id: Uuid,
 ) -> Result<(String, i32)> {
     lock_ingress_allocations(tx, ingress_id).await?;
-
-    // Revoke any expired tunnels so their ports can be reused.
-    sqlx::query(
-        r#"
-        update tunnels
-        set status = 'revoked',
-            token = '',
-            token_expires_at = null,
-            updated_at = now()
-        where ingress_id = $1
-          and status != 'revoked'
-          and expires_at is not null
-          and expires_at <= now()
-        "#,
-    )
-    .bind(ingress_id)
-    .execute(&mut **tx)
-    .await?;
+    revoke_expired_on_ingress(tx, ingress_id).await?;
 
     let start = cfg.rathole_port_range_start.max(1024);
     let end = cfg.rathole_port_range_end.max(start);
@@ -933,6 +920,31 @@ async fn allocate_rathole_binding(
 
     let service = format!("tunnel_{}", tunnel_id.simple());
     Ok((service, port))
+}
+
+/// Revokes the ingress's expired tunnels so their ports can be reused. Callers hold the
+/// allocation lock.
+async fn revoke_expired_on_ingress(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ingress_id: Uuid,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        update tunnels
+        set status = 'revoked',
+            token = '',
+            token_expires_at = null,
+            updated_at = now()
+        where ingress_id = $1
+          and status != 'revoked'
+          and expires_at is not null
+          and expires_at <= now()
+        "#,
+    )
+    .bind(ingress_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 /// Serializes port allocation on one ingress for the rest of the transaction. A transaction

@@ -42,7 +42,10 @@ enum Reuse {
 }
 
 fn reuse_existing_tunnel(cfg: &BrokerConfig, existing: &TunnelRecord, now: DateTime<Utc>) -> Reuse {
-    if !cfg.hostname_in_tunnel_domain(&existing.hostname) {
+    // A hostname this configuration would mint for the row is current by definition, so a
+    // `TUNNEL_DOMAIN` the hostname check cannot parse never makes every reuse a replacement.
+    let minted_here = existing.hostname == cfg.hostname_for(&existing.id);
+    if !minted_here && !cfg.hostname_in_tunnel_domain(&existing.hostname) {
         Reuse::Replace
     } else if should_return_existing_tunnel(&existing.status, existing.expires_at, now) {
         Reuse::Return
@@ -693,6 +696,15 @@ mod tests {
     }
 
     #[test]
+    fn a_tunnel_minted_under_the_current_config_is_never_replaced() {
+        let mut cfg = test_broker_config();
+        cfg.tunnel_domain = " rt.test".into();
+        let row = row_on(&cfg, "active", Some(60));
+        assert!(!cfg.hostname_in_tunnel_domain(&row.hostname));
+        assert_eq!(reuse_existing_tunnel(&cfg, &row, Utc::now()), Reuse::Return);
+    }
+
+    #[test]
     fn tunnels_minted_under_another_domain_are_replaced_in_any_status() {
         let before = test_broker_config();
         let mut after = test_broker_config();
@@ -985,6 +997,73 @@ mod tests {
                     .await
                     .unwrap();
             assert_eq!(rows, 2, "the retired row and one replacement");
+        }
+
+        /// The ingress sidecar revokes expired tunnels on its ingress in one statement, so it
+        /// locks them in scan order. A replacement must take those rows in the same order (the
+        /// allocation sweep first, the stale row after), or it deadlocks with a sweep that has
+        /// locked an earlier expired row and is waiting on the stale one.
+        #[tokio::test]
+        #[ignore = "needs TUNNEL_BROKER_TEST_DATABASE_URL"]
+        async fn replacing_an_expired_tunnel_waits_for_a_concurrent_expiry_sweep() {
+            let _serial = serial().await;
+            let before = broker("sweep-old.test", "sweep-old-preview.test").await;
+            let after = broker("sweep-new.test", "sweep-new-preview.test").await;
+            let project_id = Uuid::new_v4();
+            let other = open(&before, &request(project_id, "tunnel:other", None)).await;
+            let body = request(project_id, "tunnel:sweep", None);
+            let stale = open(&before, &body).await;
+            for (id, seconds) in [(other.tunnel_id, 2), (stale.tunnel_id, 1)] {
+                sqlx::query(
+                    "update tunnels set expires_at = now() - make_interval(secs => $2) \
+                     where id = $1",
+                )
+                .bind(id)
+                .bind(seconds as f64)
+                .execute(after.pool())
+                .await
+                .unwrap();
+            }
+            // Store rows in expiry order, so every plan for the sweep reaches `other` first.
+            sqlx::query("cluster tunnels using tunnels_expires_at_idx")
+                .execute(after.pool())
+                .await
+                .unwrap();
+
+            // A sweep that has revoked the earlier expired row and not yet the stale one.
+            let revoke = "update tunnels set status = 'revoked', token = '', \
+                          token_expires_at = null, updated_at = now() where id = $1";
+            let mut sweep = after.pool().begin().await.unwrap();
+            sqlx::query(revoke)
+                .bind(other.tunnel_id)
+                .execute(&mut *sweep)
+                .await
+                .unwrap();
+            let replacing = {
+                let state = after.clone();
+                let body = body.clone();
+                tokio::spawn(async move {
+                    create(State(state), Json(body))
+                        .await
+                        .map(|Json(response)| response.tunnel.tunnel_id)
+                        .map_err(|error| format!("{error:?}"))
+                })
+            };
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            sqlx::query(revoke)
+                .bind(stale.tunnel_id)
+                .execute(&mut *sweep)
+                .await
+                .expect("the sweep reaches the stale row");
+            sweep.commit().await.unwrap();
+
+            let replaced = replacing.await.unwrap().expect("the replacement succeeds");
+            assert_ne!(replaced, stale.tunnel_id);
+            assert_retired(&after, stale.tunnel_id).await;
+            assert_eq!(
+                key_owner(&after, project_id, "tunnel:sweep").await,
+                replaced
+            );
         }
     }
 }
