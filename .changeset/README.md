@@ -18,10 +18,10 @@ backward-compatible change. Changes confined to a package's `test/` directory do
 changeset because that directory is excluded from the npm artifact.
 
 Protected-main automation combines pending changesets into a signed version pull request. That
-pull request updates package manifests and changelogs and consumes the changeset files. After the
-version pull request is reviewed and merged, the release workflow packs and tests the exact npm
-artifacts without credentials, then publishes those same artifacts from the protected
-`npm-release` environment.
+pull request updates package manifests and changelogs and consumes the changeset files. Merging the
+version pull request publishes automatically, with no manual approval: the release workflow packs
+and tests the exact npm artifacts without credentials, then publishes those same artifacts from
+the protected-branch-only `npm-release` environment.
 
 Changesets do not version Docker images, hosted services, database migrations, the frontend, or
 Desktop releases. Those surfaces retain their immutable commit/digest deployment receipts.
