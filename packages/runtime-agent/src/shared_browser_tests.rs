@@ -283,6 +283,8 @@ const controlsFor = (targetId) => {
     return [
       { shown: false, name: mode === "hidden-secret-name" ? `Copy ${CANARY}` : "Kontenplan" },
       descriptionFor(targetId),
+      // An icon-only button in a closed menu has no name.
+      { shown: false, name: "" },
     ];
   }
   if (mode === "page-links") {
@@ -3167,6 +3169,9 @@ fn a_snapshot_lists_only_what_a_person_can_see_and_actions_index_the_same_list()
     );
     assert_eq!(payload["visibleText"], "Fixture page");
     assert_eq!(payload["secretScreen"], false);
+    // The list says how many controls it leaves out, named or not, so a cut
+    // list does not read as the whole page.
+    assert_eq!(payload["omittedControls"], 2);
 
     // Index 0 of the snapshot is the same control for the action: the
     // second element on the page, not the hidden first one.
@@ -3256,6 +3261,8 @@ fn snapshot_controls_leave_out_empty_fields_and_name_same_site_links_by_path() {
             { "index": 4, "label": "Account", "tag": "button", "inputType": "button" },
         ])
     );
+    // Nothing is left out, so there is no count.
+    assert!(payload.get("omittedControls").is_none(), "{payload}");
 
     // The approval still binds the link's full address.
     let snapshot_id = payload["snapshotId"].as_str().expect("snapshot id");
@@ -3299,6 +3306,77 @@ fn mcp_results_carry_compact_json_text_beside_the_structured_payload() {
     );
     assert!(!text.contains('\n'));
     assert_eq!(result.structured_content, Some(payload));
+}
+
+#[test]
+fn navigate_takes_a_snapshot_link_path_on_the_page_site_only() {
+    // A path from a snapshot's href passes the runtime's check; a path that
+    // names another host does not, however it is spelled.
+    let navigate = |url: &str| {
+        mcp_tool_request(
+            "navigate",
+            Some(JsonMap::from_iter([("url".to_string(), json!(url))])),
+        )
+    };
+    assert!(navigate("/app/belege/BEL-2026-1200?view=full").is_ok());
+    assert!(navigate("https://example.test/app").is_ok());
+    for escaping in [
+        "//other.example/app",
+        "/\\other.example/app",
+        "/\t/other.example/app",
+        "/\\user:secret@other.example/",
+    ] {
+        assert!(navigate(escaping).is_err(), "{escaping:?} passed");
+    }
+    assert!(navigate("app/belege").is_err());
+
+    // The controller resolves the path against the page's own site, and the
+    // approval binds the full address.
+    let fixture = EmbeddedControllerFixture::new();
+    let (output, requests) = fixture.run_with_decisions(
+        "safe",
+        "page-target",
+        "POST",
+        "/v1/navigate",
+        Some(r#"{"url":"/reports/q3?view=full"}"#),
+        &["https://example.test"],
+        &["allow_once"],
+    );
+    let payload = payload_of(&output);
+    assert_eq!(payload["url"], "https://example.test/reports/q3?view=full");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["operation"], "navigate");
+    assert_eq!(requests[0]["destinationOrigin"], "https://example.test");
+    let full_address = {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(b"https://example.test/reports/q3?view=full")
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    assert_eq!(requests[0]["destinationFingerprint"], full_address);
+
+    // The controller holds the same line when called directly.
+    for (mode, url, refusal) in [
+        (
+            "safe",
+            "//other.example/app",
+            "must stay on the page's site",
+        ),
+        (
+            "safe",
+            "/\\other.example/app",
+            "must stay on the page's site",
+        ),
+        ("blank-page", "/reports/q3", "needs a full address"),
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let body = json!({ "url": url }).to_string();
+        let output = fixture.run(mode, "POST", "/v1/navigate", Some(&body));
+        assert!(!output.status.success(), "{mode} {url:?} navigated");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(refusal), "{mode} {url:?}: {stderr}");
+    }
 }
 
 #[test]

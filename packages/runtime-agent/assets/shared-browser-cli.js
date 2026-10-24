@@ -298,7 +298,8 @@ async function browserWentAway(browser) {
 // scrolled to (a closed off-canvas drawer), or when a box it is laid out in
 // clips it to nothing with overflow hidden or clip (a menu collapsed with
 // max-height: 0). A scroll container with a real size only scrolls, so what it
-// holds can be brought into its box and counts as reachable there.
+// holds can be brought into its box and counts as reachable there. An open
+// modal dialog or popover is drawn over the page, so no box around it clips it.
 function shownRuleInPage() {
   // Less than half a pixel either way is nothing a person can see or click.
   const MIN_SIZE = 0.5;
@@ -351,10 +352,28 @@ function shownRuleInPage() {
     if (overflow === "hidden" || overflow === "clip" || (scrolls && size < MIN_SIZE)) return "clip";
     return scrolls ? "scroll" : "";
   };
+  const topLayer = new Map();
+  // An open modal dialog or popover, or a fullscreen element, is drawn in the
+  // top layer: over the viewport, whatever the boxes around it clip.
+  const inTopLayer = (element) => {
+    if (!topLayer.has(element)) {
+      let found = false;
+      for (const state of [":modal", ":popover-open", ":fullscreen"]) {
+        try {
+          found = found || element.matches(state);
+        } catch (_) {
+          // A browser without this state draws nothing of that kind there.
+        }
+      }
+      topLayer.set(element, found);
+    }
+    return topLayer.get(element);
+  };
   // Whether `rect`, laid out with `position` inside `from`, can be seen once
   // the page and its scroll containers are scrolled to it. Only the boxes that
-  // contain it clip it: an absolutely positioned box escapes static ones, and
-  // a fixed one escapes all but a transformed or contained box.
+  // contain it clip it: an absolutely positioned box escapes static ones, a
+  // fixed one escapes all but a transformed or contained box, and nothing
+  // outside a top-layer box clips what is in it.
   const reachable = (rect, from, startPosition, doc) => {
     if (!(rect.width >= MIN_SIZE && rect.height >= MIN_SIZE)) return false;
     let { left, top, right, bottom } = rect;
@@ -380,26 +399,31 @@ function shownRuleInPage() {
           : position === "absolute"
             ? holdsFixed || style.position !== "static"
             : true;
-      if (!holds) continue;
-      position = style.position;
-      const box = boxOf(node);
-      const x = overflowAxis(style.overflowX, box.width);
-      const y = overflowAxis(style.overflowY, box.height);
-      if (x === "clip") {
-        left = Math.max(left, box.left);
-        right = Math.min(right, box.right);
-      } else if (x === "scroll") {
-        left = box.left;
-        right = box.right;
+      if (holds) {
+        position = style.position;
+        const box = boxOf(node);
+        const x = overflowAxis(style.overflowX, box.width);
+        const y = overflowAxis(style.overflowY, box.height);
+        if (x === "clip") {
+          left = Math.max(left, box.left);
+          right = Math.min(right, box.right);
+        } else if (x === "scroll") {
+          left = box.left;
+          right = box.right;
+        }
+        if (y === "clip") {
+          top = Math.max(top, box.top);
+          bottom = Math.min(bottom, box.bottom);
+        } else if (y === "scroll") {
+          top = box.top;
+          bottom = box.bottom;
+        }
+        if (right - left < MIN_SIZE || bottom - top < MIN_SIZE) return false;
       }
-      if (y === "clip") {
-        top = Math.max(top, box.top);
-        bottom = Math.min(bottom, box.bottom);
-      } else if (y === "scroll") {
-        top = box.top;
-        bottom = box.bottom;
+      if (inTopLayer(node)) {
+        position = "fixed";
+        break;
       }
-      if (right - left < MIN_SIZE || bottom - top < MIN_SIZE) return false;
     }
     const view = doc.defaultView;
     const width = view.innerWidth;
@@ -444,8 +468,11 @@ function shownRuleInPage() {
     }
     const doc = element.ownerDocument;
     const rect = element.getBoundingClientRect();
-    const position = styleOf(element).position;
-    if (rendered(element) && reachable(rect, flatParent(element), position, doc)) return true;
+    // A control drawn in the top layer itself is judged against the viewport.
+    const drawnOnTop = inTopLayer(element);
+    const from = drawnOnTop ? null : flatParent(element);
+    const position = drawnOnTop ? "fixed" : styleOf(element).position;
+    if (rendered(element) && reachable(rect, from, position, doc)) return true;
     // A native control that something else draws is still what a person
     // operates: checkbox and switch libraries lay it transparent over the
     // styled one, and a visually hidden one is operated through its label.
@@ -458,7 +485,7 @@ function shownRuleInPage() {
       return false;
     }
     const parent = boxed(flatParent(element));
-    if ((!parent || rendered(parent)) && reachable(rect, flatParent(element), position, doc)) return true;
+    if ((!parent || rendered(parent)) && reachable(rect, from, position, doc)) return true;
     return Array.from(element.labels || []).some((label) => elementShown(label));
   };
   return { styleOf, isElement, flatParent, hiddenFromPeople, reachable, textRendered, elementShown };
@@ -467,8 +494,8 @@ function shownRuleInPage() {
 // Runs inside the page (see withShownRule). The text a person can see, in
 // reading order, judged by the same rule as the controls. Block boundaries
 // become line breaks and table cells tabs, as in innerText; a closed select
-// shows its chosen option. Field values are never read, and open shadow roots
-// are read where they render.
+// shows its chosen option as a word of its own. Field values are never read,
+// and open shadow roots are read where they render.
 function shownTextInPage(rule, request) {
   const doc = document;
   if (!doc.body) return "";
@@ -495,6 +522,9 @@ function shownTextInPage(rule, request) {
     const next = preserve || (line.trim() && !/\s$/.test(line)) ? value : value.replace(/^ +/, "");
     line += next;
   };
+  const space = () => {
+    if (line && !/\s$/.test(line)) line += " ";
+  };
   const text = (node) => {
     const parent = rule.flatParent(node);
     const raw = node.nodeValue || "";
@@ -502,7 +532,7 @@ function shownTextInPage(rule, request) {
     const style = rule.styleOf(parent);
     if (style.visibility !== "visible") return;
     if (!raw.trim()) {
-      if (line && !/\s$/.test(line)) line += " ";
+      space();
       return;
     }
     if (!rule.textRendered(parent)) return;
@@ -522,7 +552,11 @@ function shownTextInPage(rule, request) {
       .map((option) => String(option.label || option.text || "").replace(/\s+/g, " ").trim())
       .filter(Boolean)
       .join(", ");
-    if (value && rule.elementShown(element)) add(value, false);
+    if (value && rule.elementShown(element)) {
+      space();
+      add(value, false);
+      space();
+    }
   };
   const walk = (node, depth) => {
     if (size + line.length >= limit || depth > 512) return;
@@ -1009,15 +1043,16 @@ const DESCRIBE_IN_PAGE = withShownRule(describeInPage);
 const SHOWN_TEXT_IN_PAGE = withShownRule(shownTextInPage);
 const AREA_NAMES = new Set(["dialog", "menu", "tabs", "nav", "search", "header", "footer", "aside"]);
 
-// `hiddenNames` collects the names of controls a person cannot see; they are
-// left out of the observation but still count for the secret-screen check.
+// `hiddenNames` collects one name, empty when it has none, for each control a
+// person cannot see; they are left out of the observation but still count for
+// the secret-screen check, and their number tells the model some are left out.
 async function describeElement(locator, index, hiddenNames) {
   const attributes = await locator
     .evaluate(DESCRIBE_IN_PAGE, PAGE_POLICY_SOURCES)
     .catch(() => null);
   if (attributes && attributes.shown === false) {
-    if (hiddenNames && typeof attributes.name === "string" && attributes.name) {
-      hiddenNames.push(attributes.name.slice(0, 4_000));
+    if (hiddenNames) {
+      hiddenNames.push(typeof attributes.name === "string" ? attributes.name.slice(0, 4_000) : "");
     }
     return null;
   }
@@ -1637,6 +1672,9 @@ async function snapshot(page, { withhold = false } = {}) {
           : description.autocomplete,
       }),
     ),
+    // How many controls were left out because a person cannot see them yet,
+    // so a cut list does not read as the whole page.
+    ...(hiddenNames.length ? { omittedControls: hiddenNames.length } : {}),
   };
 }
 
@@ -1835,9 +1873,36 @@ function isFormSubmissionControl(description) {
   );
 }
 
+// Runs inside the page through Playwright, so it must not use anything from
+// this file's scope. Waits, at most `timeoutMs`, for the running animations
+// and transitions that end, such as a menu opening or a drawer sliding in.
+// Endless ones, such as a spinner, are not waited for.
+function animationsSettledInPage(request) {
+  const timeoutMs = Math.min(Math.max(Number(request && request.timeoutMs) || 0, 0), 2_000);
+  const running = typeof document.getAnimations === "function"
+    ? document.getAnimations().filter((animation) => {
+        try {
+          return animation.playState === "running" &&
+            Number.isFinite(animation.effect.getComputedTiming().endTime);
+        } catch (_) {
+          return false;
+        }
+      })
+    : [];
+  if (!running.length) return true;
+  return Promise.race([
+    Promise.all(running.map((animation) => animation.finished.catch(() => null))).then(() => true),
+    new Promise((resolve) => setTimeout(() => resolve(false), timeoutMs)),
+  ]);
+}
+
 async function settleAfterAction(page) {
   await page.waitForLoadState("domcontentloaded", { timeout: 8_000 }).catch(() => {});
   await page.waitForTimeout(250).catch(() => {});
+  // A menu or drawer that opens with a transition is observed where it lands.
+  await page
+    .evaluate(animationsSettledInPage, { kind: "animations-settled", timeoutMs: 1_000 })
+    .catch(() => {});
 }
 
 function resolvedTargetDestination(description, currentUrl) {
@@ -1911,11 +1976,29 @@ async function viewport(page) {
   return { viewportW: size.width ?? null, viewportH: size.height ?? null };
 }
 
-function validateNavigationUrl(raw) {
+// Only the form of a path is checked before the page is known.
+const PATH_FORM_ORIGIN = "https://path.invalid";
+
+// A navigation address: a full URL, or a path on the page's own site such as
+// a snapshot link's href, resolved against `pageOrigin`. A path cannot leave
+// that site, and a page without an http(s) origin takes full addresses only.
+function validateNavigationUrl(raw, pageOrigin = PATH_FORM_ORIGIN) {
   if (typeof raw !== "string" || !raw.trim() || raw.length > MAX_URL_CHARS) {
     throw new Error("Shared Browser navigation requires a bounded URL string");
   }
-  const url = new URL(raw.trim());
+  const value = raw.trim();
+  let url;
+  if (value.startsWith("/")) {
+    if (!pageOrigin) {
+      throw new Error("Shared Browser navigation needs a full address on a page without a site");
+    }
+    url = new URL(value, pageOrigin);
+    if (url.origin !== pageOrigin) {
+      throw new Error("Shared Browser navigation path must stay on the page's site");
+    }
+  } else {
+    url = new URL(value);
+  }
   if (
     (url.protocol !== "http:" && url.protocol !== "https:") ||
     !url.hostname ||
@@ -2126,8 +2209,8 @@ async function execute(browser, method, requestPath, body) {
   }
 
   if (method === "POST" && requestPath === "/v1/navigate") {
-    const url = validateNavigationUrl(body.url);
     const sourceOrigin = approvalProtocol.normalizedOrigin(page.url());
+    const url = validateNavigationUrl(body.url, sourceOrigin);
     // Risky addresses (sign-out, exports, files, one-time links, action
     // addresses) are judged by the address alone and ask even under routine
     // browsing. Under routine browsing, an address for a site the run has not
@@ -2152,7 +2235,7 @@ async function execute(browser, method, requestPath, body) {
     if (sourceOrigin) {
       assertSameOrigin(page.url(), sourceOrigin);
     }
-    const revalidatedUrl = validateNavigationUrl(body.url);
+    const revalidatedUrl = validateNavigationUrl(body.url, sourceOrigin);
     // An address the agent opens itself is not the page a credential step
     // opened.
     approvalProtocol.clearWithholdNextDocument();
