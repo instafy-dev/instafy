@@ -19,7 +19,11 @@ import {
 } from "../../../runtime/utils/runtimeEntry";
 import type { ChatMessage } from "../types";
 import type { StudioPanel } from "../types";
-import type { BrowserSessionPage, BrowserSessionPageTarget } from "./browserSessionPages";
+import {
+  toBrowserSessionPageTarget,
+  type BrowserSessionPage,
+  type BrowserSessionPageTarget,
+} from "./browserSessionPages";
 import { resolvePrivateConversationInvitePrompt } from "./chatPrivateConversationInvitePrompt";
 import { buildChatSubmitPlan, type ChatSubmitOverride } from "./chatSubmitPlanning";
 import { runChatSubmitPreflight } from "./chatSubmitPreflight";
@@ -194,6 +198,7 @@ export function useChatSubmitFlow({
   scrollToBottom,
   sendingAttachment,
   sharedBrowserActive: sharedBrowserShown,
+  sharedBrowserBindingPage = null,
   sharedBrowserRuntimeId,
   showCredentialsGate,
   showStatus,
@@ -306,6 +311,12 @@ export function useChatSubmitFlow({
   sendingAttachment: boolean;
   /** The composer belongs to the Shared Browser shown beside it. */
   sharedBrowserActive: boolean;
+  /**
+   * The live tab a browser task binds to when no real page is open (a browser
+   * that just started shows only a blank tab). Only its CDP target goes into
+   * the task metadata; it is never named in the message.
+   */
+  sharedBrowserBindingPage?: BrowserSessionPage | null;
   sharedBrowserRuntimeId: string | null;
   showCredentialsGate: () => void;
   showStatus: ShowStatus;
@@ -487,7 +498,10 @@ export function useChatSubmitFlow({
       queuedRuntimeOverride ??
       personalBrowserRouting.runtimeOverride ??
       sharedBrowserRouting.runtimeOverride;
-    if (useSharedBrowserRuntime && !browserPageTarget) {
+    const sharedBrowserPageTarget =
+      browserPageTarget ??
+      (sharedBrowserBindingPage ? toBrowserSessionPageTarget(sharedBrowserBindingPage) : null);
+    if (useSharedBrowserRuntime && !sharedBrowserPageTarget) {
       showStatus(
         "Open a page in the browser before sending a browser task. Your message is kept.",
         "warning",
@@ -504,7 +518,7 @@ export function useChatSubmitFlow({
         ? buildSharedBrowserSubmitMetadata({
             baseMetadata: resolvedBaseSubmitMetadata,
             browserPageTarget:
-              browserLaunchMode === "new_page" ? null : browserPageTarget,
+              browserLaunchMode === "new_page" ? null : sharedBrowserPageTarget,
             runtimeId: submitRuntimeOverride.runtimeId,
           })
       : resolvedBaseSubmitMetadata;
@@ -885,6 +899,7 @@ export function useChatSubmitFlow({
     scrollToBottom,
     sendingAttachment,
     sharedBrowserActive,
+    sharedBrowserBindingPage,
     sharedBrowserRuntimeId,
     showCredentialsGate,
     showStatus,

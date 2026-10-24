@@ -148,6 +148,11 @@ type ChatComposerSurfaceProps = {
   sendButtonDisabled: boolean;
   sendButtonVariant: ComponentProps<typeof IconButton>["variant"];
   primaryActionMode?: "send" | "steer";
+  /**
+   * Why a send or steer would be refused right now (the browser's composer
+   * whose browser is still connecting). Announced in place of the Enter hint.
+   */
+  primaryActionBlockedStatus?: string | null;
   onSendButtonPress: ComponentProps<typeof IconButton>["onPress"];
   // Shared control geometry keeps the primary slot steady as mic becomes Send.
   composerGhostActionClass: string;
@@ -305,6 +310,7 @@ export function ChatComposerSurface({
   sendButtonDisabled,
   sendButtonVariant,
   primaryActionMode = "send",
+  primaryActionBlockedStatus = null,
   onSendButtonPress,
   composerGhostActionClass: ghostActionClass,
   composerPrimaryActionClass: primaryActionClass,
@@ -493,13 +499,15 @@ export function ChatComposerSurface({
       ? "Queue selected. Press Enter or click to queue the message."
       : visibleDesktopSendModifierMode === "stash"
         ? "Stash selected. Press Enter or click to stash the draft."
-        : touchLikeInput
-          ? primaryActionMode === "steer"
-            ? "Enter adds a new line. The send button steers the current reply."
-            : "Enter adds a new line. The send button sends the message."
-          : primaryActionMode === "steer"
-            ? "Enter steers the current reply."
-            : "Enter sends the message.";
+        : primaryActionBlockedStatus
+          ? primaryActionBlockedStatus
+          : touchLikeInput
+            ? primaryActionMode === "steer"
+              ? "Enter adds a new line. The send button steers the current reply."
+              : "Enter adds a new line. The send button sends the message."
+            : primaryActionMode === "steer"
+              ? "Enter steers the current reply."
+              : "Enter sends the message.";
   // Hold-to-talk must keep the same microphone DOM node from press through
   // release. The richer active strip is reserved for tap/continuous modes;
   // hold mode communicates activity on the stable button itself.

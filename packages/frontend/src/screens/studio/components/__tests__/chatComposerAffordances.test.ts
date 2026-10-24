@@ -109,4 +109,13 @@ describe("resolveChatComposerAffordances", () => {
   it("disables Send while participation and submit preflight are in flight", () => {
     expect(resolveAffordances({ submissionPending: true }).sendButtonDisabled).toBe(true);
   });
+
+  it("disables Send while a send from the browser's composer would be refused", () => {
+    const blocked = resolveAffordances({ inputValue: "Open example.com", sharedBrowserSendBlocked: true });
+    expect(blocked.sendButtonDisabled).toBe(true);
+    expect(blocked.sendButtonVariant).toBe("ghost");
+    const ready = resolveAffordances({ inputValue: "Open example.com", sharedBrowserSendBlocked: false });
+    expect(ready.sendButtonDisabled).toBe(false);
+    expect(ready.sendButtonVariant).toBe("primary");
+  });
 });
