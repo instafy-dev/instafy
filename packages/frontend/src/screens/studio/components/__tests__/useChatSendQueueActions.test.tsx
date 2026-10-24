@@ -665,6 +665,22 @@ describe("useChatSendQueueActions", () => {
     );
   });
 
+  it("drains a local fallback entry as no new typed message", async () => {
+    const options = createOptions({
+      chatSendQueue: [
+        createLocalItem({ metadata: { input: { kind: "typed" }, mentionedUserIds: ["user-1"] } }),
+      ],
+    });
+    await renderHook(options);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const payload = vi.mocked(options.submitMessage).mock.calls[0][0];
+    expect(payload?.metadata).toEqual({ input: null, mentionedUserIds: ["user-1"] });
+  });
+
   it("keeps local fallback entries behind the visible server queue", async () => {
     const options = createOptions({
       chatSendQueue: [createLocalItem()],

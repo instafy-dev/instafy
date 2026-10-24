@@ -70,6 +70,22 @@ export type SubmitMessageFn = (
   },
 ) => Promise<boolean>;
 
+/**
+ * A message the person sends from the composer says they made it
+ * (`metadata.input`), so the controller can tell it from a send the app makes
+ * on their behalf, which says nothing. A message that already says how it was
+ * made keeps that.
+ */
+export function withPersonInput(
+  metadata: Record<string, unknown>,
+  automatic: boolean,
+): Record<string, unknown> {
+  if (automatic || metadata.input !== undefined) {
+    return metadata;
+  }
+  return { ...metadata, input: { kind: "typed" } };
+}
+
 export function resolvePersonalBrowserSubmitRouting(input: {
   active: boolean;
   messageRequiresAi: boolean;
@@ -389,9 +405,9 @@ export function useChatSubmitFlow({
     const submittedEditorState = override ? override.editorState : trimmed ? inputEditorState : null;
     let baseSubmitMetadata: Record<string, unknown>;
     try {
-      baseSubmitMetadata = withUserMentionMetadata(
-        override?.metadata ?? options?.metadata,
-        submittedEditorState,
+      baseSubmitMetadata = withPersonInput(
+        withUserMentionMetadata(override?.metadata ?? options?.metadata, submittedEditorState),
+        automatic,
       );
     } catch (error) {
       showStatus(error instanceof Error ? error.message : String(error), "error", 4500);

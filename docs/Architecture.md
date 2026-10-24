@@ -123,6 +123,8 @@ body: whose cause it was and when the controller received it, on the database cl
   (`device_voice`) for `{"kind": "voice", "deviceId": ...}`. A resend (`retryOfMessageId`) or a
   goal's next turn (`goalContinuation`) is a `resend`. A job token's, the service role's, an
   automation's and an agent plan's sends are `automatic`. A send that says nothing has no trigger.
+- Web chat's composer sends `{"kind": "typed"}`. What the app sends on the person's behalf, an
+  automatic retry or its local fallback queue's drain, says nothing.
 - A queued message is received when it was queued; Send now, when it is pressed.
 - Where device grants are on for its sender, a user message also keeps the kind as
   `metadata.trigger`, over any value a client wrote; anywhere else it keeps no such key. Device

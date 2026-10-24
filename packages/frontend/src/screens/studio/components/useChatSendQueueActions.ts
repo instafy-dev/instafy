@@ -480,7 +480,10 @@ export function useChatSendQueueActions({
 
   // Client auto-drain only covers the localStorage fallback queue. Entries in
   // the controller send queue are dispatched server-side when the target agents
-  // go idle, so draining them here would double-send.
+  // go idle, so draining them here would double-send. A drained entry says
+  // nothing of how it was made (`input: null`): the controller cannot tell when
+  // it was queued, so it must not count as a message the person types now
+  // (useChatSubmitFlow.ts withPersonInput).
   useEffect(() => {
     if (chatSendQueueDrainRef.current || queuedEditMutationRef.current || queueEditPending || editingQueuedItem || !activeConversationId) {
       return;
@@ -515,7 +518,7 @@ export function useChatSendQueueActions({
             editorState: next.editorState,
             browserPageTarget: next.browserPageTarget,
             browserLaunchMode: next.browserLaunchMode,
-            metadata: next.metadata ?? null,
+            metadata: { ...(next.metadata ?? {}), input: null },
             runtimeOverride: next.runtimeOverride ?? null,
           },
           { allowWhileBusy: true },

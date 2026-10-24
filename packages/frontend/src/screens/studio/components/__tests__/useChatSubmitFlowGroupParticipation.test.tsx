@@ -648,4 +648,32 @@ describe("useChatSubmitFlow group participation ordering", () => {
     expect(options.performSubmit).toHaveBeenCalledWith(expect.objectContaining({ runtimeOverride: null }));
     expect(vi.mocked(options.performSubmit).mock.calls[0][0].metadata).not.toHaveProperty("browserTransport");
   });
+  it.each([
+    { name: "a message the person sends from the composer says they made it", options: undefined, input: { kind: "typed" } },
+    { name: "a send the app makes on the person's behalf says nothing", options: { automatic: true }, input: undefined },
+    { name: "a message that says a device heard it keeps that", options: { metadata: { input: { kind: "voice", deviceId: "device-1" } } }, input: { kind: "voice", deviceId: "device-1" } },
+  ])("$name", async ({ options: submitOptions, input }) => {
+    const options = createOptions({
+      credentialsReady: true, runtimeReady: true, isAssistantTyping: false, outOfCredits: false,
+      targetsOverlapActiveRuns: vi.fn(() => false), inputValue: "Look to the left",
+      resolveGroupParticipationBeforeSubmit: vi.fn(async ({ metadata }) => ({ mode: "dispatch" as const, metadata })),
+    });
+    const resultRef: MutableRefObject<HookResult | null> = { current: null };
+    await act(async () => root.render(<Harness options={options} resultRef={resultRef} />));
+    await act(async () => { expect(await resultRef.current!.submitMessage(undefined, submitOptions)).toBe(true); });
+    expect(vi.mocked(options.performSubmit).mock.calls[0][0].metadata?.input).toEqual(input);
+  });
+
+  it("queues the person's message behind a busy agent still saying they made it", async () => {
+    const options = createOptions({
+      credentialsReady: true, runtimeReady: true, isAssistantTyping: true, outOfCredits: false,
+      targetsOverlapActiveRuns: vi.fn(() => true), inputValue: "Then look right",
+      resolveGroupParticipationBeforeSubmit: vi.fn(async ({ metadata }) => ({ mode: "dispatch" as const, metadata })),
+    });
+    const resultRef: MutableRefObject<HookResult | null> = { current: null };
+    await act(async () => root.render(<Harness options={options} resultRef={resultRef} />));
+    await act(async () => { await resultRef.current!.submitMessage(); });
+    expect(options.performSubmit).not.toHaveBeenCalled();
+    expect(vi.mocked(options.enqueueServerSendQueueItem).mock.calls[0][0].metadata).toMatchObject({ input: { kind: "typed" } });
+  });
 });
