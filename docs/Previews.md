@@ -90,6 +90,19 @@ agent asks for claims every 3 s: one indexed update of `runtime_preview_wakes` p
 previews configured, the wake route answers 503 like the others and the claim route 404, which the agent reads as "not
 offered here" and then asks only every 5 minutes. `runtime_preview_wakes` keeps who asked and how each wake ended.
 
+### When the broker replaces a preview's tunnel
+
+A preview's tunnel is keyed by its machine and port, and the broker normally hands that key the same tunnel id (the
+preview id) every time. After a `TUNNEL_DOMAIN` change it instead retires a tunnel minted under the old domain and
+mints a new one, so the next `instafy preview open` (or wake) of that port gets a new preview id. The controller then
+closes every earlier preview of the same key as the close route does: it stops, gets `closedAt` and `supersededBy`
+(the new id), its viewer sessions and any presentation end, and `tunnel.grant_revoked` tells Studio, so its card
+shows it stopped rather than probing a tunnel that is gone. Cards name a preview by id, so they stay with the old
+preview; the new one posts its own card when it is ready. The broker's own `tunnel.revoked` event for a tunnel the
+controller did not revoke stops that grant too (not closed: it may be opened again). The event names the tunnel's
+expiry, and an event whose expiry is earlier than the grant's (a late one about an issue of the tunnel the broker has
+since refreshed), a duplicate, or one for an unknown tunnel changes nothing.
+
 ## Configuration
 
 Every part fails closed. A missing setting turns previews off; it never makes them public.

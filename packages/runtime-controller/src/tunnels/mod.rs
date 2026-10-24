@@ -1317,6 +1317,10 @@ async fn post_tunnel_broker_event_hook(
     let org_id = parse_optional_uuid_param(payload.org_id.clone(), "org_id")?;
     let runtime_id = parse_optional_uuid_param(payload.runtime_id.clone(), "runtime_id")?;
     let lease_id = parse_optional_uuid_param(payload.lease_id.clone(), "lease_id")?;
+    let data = payload.data.unwrap_or_else(|| json!({}));
+    let revoked_by_broker = (event_kind == "tunnel.revoked")
+        .then(|| project_id.zip(BrokerRevokedTunnel::from_event_data(&data)))
+        .flatten();
 
     publish_controller_event(
         &state.events,
@@ -1325,10 +1329,126 @@ async fn post_tunnel_broker_event_hook(
         org_id,
         runtime_id,
         lease_id,
-        sanitize_tunnel_broadcast_data(payload.data.unwrap_or_else(|| json!({}))),
+        sanitize_tunnel_broadcast_data(data),
     );
 
+    if let Some((project_id, tunnel)) = revoked_by_broker {
+        // The broker ignores this answer, so a failure is only logged; the
+        // grant then stays as it was, as it did before this hook read it.
+        if let Err((status, Json(error))) =
+            end_grant_revoked_by_broker(&state, &project_id, &tunnel).await
+        {
+            warn!(
+                %project_id,
+                tunnel_id = %tunnel.tunnel_id,
+                status = status.as_u16(),
+                error = %error.message,
+                "failed to end a grant the tunnel broker revoked"
+            );
+        }
+    }
+
     Ok(Json(json!({ "status": "ok" })))
+}
+
+/// The tunnel a broker `tunnel.revoked` event names, read from its tunnel
+/// descriptor.
+#[derive(Clone, Debug)]
+pub(crate) struct BrokerRevokedTunnel {
+    pub(crate) tunnel_id: String,
+    /// The tunnel's expiry when it was revoked. A revocation does not change
+    /// it and a refresh does, so it tells which issue of the tunnel id the
+    /// event is about.
+    pub(crate) expires_at: DateTime<Utc>,
+}
+
+impl BrokerRevokedTunnel {
+    /// `None` unless the descriptor names a tunnel id and its expiry: without
+    /// the expiry an event cannot be told from a late one about an earlier
+    /// issue of the same id.
+    pub(crate) fn from_event_data(data: &JsonValue) -> Option<Self> {
+        let tunnel_id = data
+            .get("tunnel_id")
+            .and_then(JsonValue::as_str)
+            .and_then(|value| Uuid::parse_str(value.trim()).ok())?
+            .hyphenated()
+            .to_string();
+        let expires_at = data
+            .get("expires_at")
+            .and_then(JsonValue::as_str)
+            .and_then(|value| DateTime::parse_from_rfc3339(value.trim()).ok())?
+            .with_timezone(&Utc);
+        Some(Self {
+            tunnel_id,
+            expires_at,
+        })
+    }
+}
+
+/// How far a grant's recorded expiry may lie past the one a revocation names
+/// and still be the same issue of the tunnel. Both come from the broker's
+/// own row, so they normally match exactly; a refresh moves the expiry by
+/// the tunnel's lifetime.
+const BROKER_REVOCATION_EXPIRY_SLACK_SECONDS: i64 = 1;
+
+/// The broker revoked a tunnel the controller did not ask it to revoke (it
+/// retired one whose hostname is under a domain it no longer serves, say):
+/// the grant for it stops, as a runtime stop leaves it. Its viewer sessions
+/// end, its presentation ends and Studio hears `tunnel.grant_revoked`.
+///
+/// Only an active grant of `project_id` for that tunnel whose expiry is not
+/// later than the revoked tunnel's changes, so a duplicate event, one for a
+/// tunnel or project the controller does not know, and a late one about an
+/// earlier issue of a tunnel id the broker has since refreshed all change
+/// nothing. The broker is not asked again. Returns the grant it stopped.
+pub(crate) async fn end_grant_revoked_by_broker(
+    state: &AppState,
+    project_id: &Uuid,
+    tunnel: &BrokerRevokedTunnel,
+) -> Result<Option<RuntimeTunnelGrantRecord>, (StatusCode, Json<ApiError>)> {
+    let latest_expiry =
+        tunnel.expires_at + ChronoDuration::seconds(BROKER_REVOCATION_EXPIRY_SLACK_SECONDS);
+    let connection = state
+        .pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to acquire connection: {error}")))?;
+    let row = connection
+        .query_opt(
+            "update runtime_tunnel_grants
+             set status = 'revoked', updated_at = now()
+             where project_id = $1
+               and tunnel_id = $2
+               and lower(btrim(status)) not in ('revoked', 'expired', 'failed')
+               and expires_at <= $3
+             returning *",
+            &[project_id, &tunnel.tunnel_id, &latest_expiry],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to end revoked tunnel grant: {error}")))?;
+    drop(connection);
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let ended = runtime_tunnel_grant_from_row(&row);
+    if crate::previews::grant_metadata_is_preview(ended.metadata.as_ref()) {
+        crate::previews::end_preview_of_revoked_grant(state, &ended).await;
+    }
+    publish_grant_revoked(state, &ended);
+    Ok(Some(ended))
+}
+
+/// `tunnel.grant_revoked` for a grant that stopped.
+pub(crate) fn publish_grant_revoked(state: &AppState, record: &RuntimeTunnelGrantRecord) {
+    publish_controller_event(
+        &state.events,
+        "tunnel.grant_revoked",
+        Some(record.project_id),
+        None,
+        None,
+        None,
+        tunnel_event_payload(record),
+    );
 }
 
 #[derive(Clone, Debug)]
@@ -2080,17 +2200,7 @@ pub(crate) async fn revoke_tunnel_record(
     metadata_override: Option<&JsonValue>,
 ) -> Result<RuntimeTunnelGrantRecord, (StatusCode, Json<ApiError>)> {
     let updated = revoke_tunnel_grant(state, record, metadata_override).await?;
-
-    publish_controller_event(
-        &state.events,
-        "tunnel.grant_revoked",
-        Some(updated.project_id),
-        None,
-        None,
-        None,
-        tunnel_event_payload(&updated),
-    );
-
+    publish_grant_revoked(state, &updated);
     Ok(updated)
 }
 

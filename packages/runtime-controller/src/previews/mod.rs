@@ -45,11 +45,11 @@ use crate::tunnels::{
     authorize_active_job_tunnel, authorize_live_runtime_machine_tunnel,
     ensure_private_runtime_access, ensure_project_authorized, ensure_project_write_authorized,
     ensure_runtime_tunnel_generation_is_live, load_runtime_tunnel_grant_by_tunnel_id,
-    mark_issuing_tunnel_active, parse_required_uuid, request_runtime_tunnel_with_overrides,
-    resolve_canonical_tunnel_runtime_id, revoke_tunnel_record, runtime_tunnel_grant_from_row,
-    tunnel_status_is_active, RuntimeTunnelGenerationState, RuntimeTunnelGrantRecord, TunnelProbe,
-    TunnelRequestOverrides, ACTIVE_JOB_TUNNEL_METADATA_KEY, ACTIVE_JOB_TUNNEL_SOURCE,
-    PREVIEW_TUNNEL_METADATA_KEY,
+    mark_issuing_tunnel_active, parse_required_uuid, publish_grant_revoked,
+    request_runtime_tunnel_with_overrides, resolve_canonical_tunnel_runtime_id,
+    revoke_tunnel_record, runtime_tunnel_grant_from_row, tunnel_status_is_active,
+    RuntimeTunnelGenerationState, RuntimeTunnelGrantRecord, TunnelProbe, TunnelRequestOverrides,
+    ACTIVE_JOB_TUNNEL_METADATA_KEY, ACTIVE_JOB_TUNNEL_SOURCE, PREVIEW_TUNNEL_METADATA_KEY,
 };
 use crate::{
     bad_request, forbidden, internal_error, load_project_record, not_found, too_many_requests,
@@ -933,9 +933,10 @@ async fn post_preview(
         Some(&runtime_id),
         runtime_lease_id.as_ref(),
         Some(JsonValue::Object(metadata)),
-        preview_tunnel_overrides(tunnel_key),
+        preview_tunnel_overrides(tunnel_key.clone()),
     )
     .await?;
+    retire_previews_superseded_by(&state, &project_id, &tunnel_key, &grant.tunnel_id).await;
 
     Ok((
         StatusCode::CREATED,
@@ -1598,6 +1599,198 @@ async fn post_preview_close(
         .follow
         .end_preview(&grant.record.tunnel_id, follow::EndReason::Closed);
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// What ends with a preview grant the broker revoked on its own: its viewer
+/// sessions and any presentation of it.
+pub(crate) async fn end_preview_of_revoked_grant(
+    state: &AppState,
+    grant: &RuntimeTunnelGrantRecord,
+) {
+    revoke_preview_sessions_for_tunnel(&state.pool, &grant.tunnel_id).await;
+    state
+        .follow
+        .end_preview(&grant.tunnel_id, follow::EndReason::Closed);
+}
+
+/// The broker keeps one tunnel per idempotency key, and a preview's key is
+/// its runtime and port. When an open hands back another tunnel than an
+/// earlier grant of the same key holds (the broker retired that tunnel, as it
+/// does one minted under a domain it no longer serves), the earlier grant is
+/// a preview nobody can reach again: its tunnel is gone and a wake would get
+/// the new one. Close each such grant as `POST /previews/{id}/close` does
+/// (stopped, `closedAt`, sessions and presentation ended, Studio told with
+/// `tunnel.grant_revoked`, so its card shows it ended), recording the
+/// successor as `supersededBy`. The broker already revoked those tunnels and
+/// is not asked again.
+///
+/// Cards name a preview by its id, so they are not moved: the successor gets
+/// its own card on its first `/ready`. A successor that copied the closed
+/// grant's card ids (a wake reconnects with the preview's stored metadata)
+/// forgets them, so that card is written. Closed grants are skipped, so
+/// running this again changes nothing.
+async fn retire_superseded_previews(
+    state: &AppState,
+    project_id: &Uuid,
+    tunnel_key: &str,
+    successor_tunnel_id: &str,
+) -> ApiResult<()> {
+    let mut connection = state
+        .pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to acquire connection: {error}")))?;
+    let transaction = connection
+        .transaction()
+        .await
+        .map_err(|error| internal_error(format!("failed to start preview retirement: {error}")))?;
+    let rows = transaction
+        .query(
+            "update runtime_tunnel_grants
+             set status = case
+                   when lower(btrim(status)) in ('revoked', 'expired', 'failed') then status
+                   else 'revoked'
+                 end,
+                 metadata = jsonb_set(
+                   jsonb_set(metadata, '{_instafyPreview,closedAt}', to_jsonb(now())),
+                   '{_instafyPreview,supersededBy}',
+                   to_jsonb($3::text)
+                 ),
+                 updated_at = now()
+             where project_id = $1
+               and jsonb_typeof(metadata->'_instafyPreview') = 'object'
+               and metadata->'_instafyPreview'->>'tunnelKey' = $2
+               and tunnel_id <> $3
+               and not (metadata->'_instafyPreview' ? 'closedAt')
+             returning *",
+            &[project_id, &tunnel_key, &successor_tunnel_id],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!("failed to retire superseded previews: {error}"))
+        })?;
+    let retired: Vec<RuntimeTunnelGrantRecord> =
+        rows.iter().map(runtime_tunnel_grant_from_row).collect();
+    let retired_cards: Vec<String> = retired
+        .iter()
+        .flat_map(|grant| preview_card_ids(grant.metadata.as_ref()))
+        .collect();
+    if !retired_cards.is_empty() {
+        let successor = transaction
+            .query_opt(
+                "select id, metadata from runtime_tunnel_grants
+                 where project_id = $1 and tunnel_id = $2
+                 for update",
+                &[project_id, &successor_tunnel_id],
+            )
+            .await
+            .map_err(|error| internal_error(format!("failed to load the new preview: {error}")))?;
+        if let Some(successor) = successor {
+            let mut metadata: Option<JsonValue> = successor.get("metadata");
+            if forget_preview_cards(metadata.as_mut(), &retired_cards) {
+                let successor_id: Uuid = successor.get("id");
+                transaction
+                    .execute(
+                        "update runtime_tunnel_grants
+                         set metadata = $2, updated_at = now()
+                         where id = $1",
+                        &[&successor_id, &metadata],
+                    )
+                    .await
+                    .map_err(|error| {
+                        internal_error(format!("failed to update the new preview's cards: {error}"))
+                    })?;
+            }
+        }
+    }
+    transaction.commit().await.map_err(|error| {
+        internal_error(format!("failed to retire superseded previews: {error}"))
+    })?;
+    drop(connection);
+
+    for grant in &retired {
+        tracing::info!(
+            %project_id,
+            retired_tunnel_id = %grant.tunnel_id,
+            %successor_tunnel_id,
+            "closed a preview whose tunnel the broker replaced"
+        );
+        end_preview_of_revoked_grant(state, grant).await;
+        publish_grant_revoked(state, grant);
+    }
+    Ok(())
+}
+
+/// [`retire_superseded_previews`] after an open or a wake got `tunnel_id` for
+/// `tunnel_key`. The open itself succeeded, so a failure is only logged; the
+/// next open of the same key tries again.
+pub(super) async fn retire_previews_superseded_by(
+    state: &AppState,
+    project_id: &Uuid,
+    tunnel_key: &str,
+    tunnel_id: &str,
+) {
+    if let Err((status, Json(error))) =
+        retire_superseded_previews(state, project_id, tunnel_key, tunnel_id).await
+    {
+        warn!(
+            %project_id,
+            %tunnel_id,
+            status = status.as_u16(),
+            error = %error.message,
+            "failed to close previews whose tunnel the broker replaced"
+        );
+    }
+}
+
+/// The card message ids a preview grant records.
+fn preview_card_ids(metadata: Option<&JsonValue>) -> Vec<String> {
+    let Some(preview) = metadata.and_then(|metadata| metadata.get(PREVIEW_TUNNEL_METADATA_KEY))
+    else {
+        return Vec::new();
+    };
+    let mut ids: Vec<String> = preview
+        .get("messageIds")
+        .and_then(JsonValue::as_object)
+        .map(|ids| {
+            ids.values()
+                .filter_map(JsonValue::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(id) = preview.get("messageId").and_then(JsonValue::as_str) {
+        ids.push(id.to_string());
+    }
+    ids
+}
+
+/// Drop `cards` from a preview grant's card ids. Whether anything changed.
+fn forget_preview_cards(metadata: Option<&mut JsonValue>, cards: &[String]) -> bool {
+    let Some(preview) = metadata
+        .and_then(|metadata| metadata.get_mut(PREVIEW_TUNNEL_METADATA_KEY))
+        .and_then(JsonValue::as_object_mut)
+    else {
+        return false;
+    };
+    let names = |id: &JsonValue| {
+        id.as_str()
+            .is_some_and(|id| cards.iter().any(|card| card == id))
+    };
+    let mut changed = false;
+    if let Some(ids) = preview
+        .get_mut("messageIds")
+        .and_then(JsonValue::as_object_mut)
+    {
+        let before = ids.len();
+        ids.retain(|_, id| !names(id));
+        changed |= ids.len() != before;
+    }
+    if preview.get("messageId").is_some_and(names) {
+        preview.remove("messageId");
+        changed = true;
+    }
+    changed
 }
 
 /// A closed preview stays closed: `closedAt` (in the controller-owned preview
