@@ -1042,11 +1042,13 @@ unless the policy is `"covered"`.
   has. A reconnect that reads the runtime with the same id but a new origin
   drops the old connection at once (`browser-session:origin-replaced`). The
   grant refresh keeps the controller's status (`requestAccessTokenResult`): a
-  400 (not the runtime's online origin any more) drops the connection and
-  looks the runtime up once through the bounded reconnect; a 404 drops it and
-  stops, with no new look-up, so nothing cold-starts; a 401 or 403 drops it and
-  shows the failed state; any other failure is asked again after 5, 10, 20, 40
-  and then 60 s. No refresh runs while the view shows an error.
+  400 (not the runtime's online origin any more, with the code
+  `browser_origin_replaced` from controllers that send it) drops the
+  connection and looks the runtime up once through the bounded reconnect; a
+  404 drops it and stops, with no new look-up, so nothing cold-starts; a 401
+  or 403 drops it and shows the failed state; any other failure is asked
+  again after 5, 10, 20, 40 and then 60 s. No refresh runs while the view
+  shows an error.
 - **Only the person starts the machine.** An automatic reconnect never starts
   the machine or its browser: an idle browser is off, a stopped machine is
   off, and the host wait never posts `browser/host/start` for it. An open
