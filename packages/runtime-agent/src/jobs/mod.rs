@@ -5202,8 +5202,26 @@ impl JobProcessor {
 
     fn prepare_workspace(&self, project_id: &Uuid) -> Result<PathBuf> {
         let path = self.prepare_workspace_dir(project_id)?;
-        learn::ensure_project_memory_scaffold(&path);
+        learn::ensure_project_memory_scaffold_in(&path, self.scaffold_scope());
         Ok(path)
+    }
+
+    /// Who keeps the bundled Instafy files in this runtime's workspace
+    /// folders current: in a hosted checkout with a canonical remote, the
+    /// controller's bootstrap (see [`learn::ScaffoldScope`]).
+    fn scaffold_scope(&self) -> learn::ScaffoldScope {
+        let canonical = self.config.origin.as_ref().is_some_and(|settings| {
+            matches!(settings.mode.as_str(), "efs" | "hosted")
+                && settings
+                    .git_remote_url
+                    .as_deref()
+                    .is_some_and(|url| !url.trim().is_empty())
+        });
+        if canonical {
+            learn::ScaffoldScope::Canonical
+        } else {
+            learn::ScaffoldScope::Local
+        }
     }
 
     /// The workspace directory, created if missing, without the project
@@ -6061,7 +6079,7 @@ impl JobProcessor {
         } else {
             None
         };
-        learn::ensure_project_memory_scaffold(&workspace_dir);
+        learn::ensure_project_memory_scaffold_in(&workspace_dir, self.scaffold_scope());
         let explicit_personal_browser_execution =
             crate::personal_browser::payload_requests_personal_browser(&job.payload);
         let explicit_shared_browser_execution =
@@ -20015,6 +20033,81 @@ mod tests {
             )
             .await;
         assert_eq!(calls.lock().unwrap().len(), 1);
+    }
+
+    /// In a hosted checkout of a git-canonical space the controller's
+    /// bootstrap keeps the bundled Instafy files: a turn that changes
+    /// nothing leaves the folder as `main` has it, so no turn-end save keeps
+    /// the runtime's own copies as unsaved work. A Desktop folder is still
+    /// scaffolded.
+    #[test]
+    fn a_turn_leaves_a_canonical_checkout_as_main_has_it() {
+        // `run_apply_job` needs a runtime-sized stack, as in production.
+        const STACK_SIZE: usize = 32 * 1024 * 1024;
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .worker_threads(2)
+                    .thread_stack_size(STACK_SIZE)
+                    .build()
+                    .unwrap()
+                    .block_on(turn_leaves_a_canonical_checkout_as_main_has_it())
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    async fn turn_leaves_a_canonical_checkout_as_main_has_it() {
+        for (mode, canonical) in [("hosted", true), ("efs", true), ("desktop", false)] {
+            let tmp = tempdir().expect("temp dir");
+            let base = test_job_processor(tmp.path());
+            let mut config = (*base.config).clone();
+            let mut origin = test_origin_settings(Some("http://127.0.0.1:9/project.git"));
+            origin.mode = mode.to_string();
+            config.origin = Some(origin);
+            let processor = JobProcessor::new(Arc::new(config.clone()));
+            let job = test_lease_job(None, json!({ "prompt_text": "/mcp list" }));
+            let project_id = job.project_id.unwrap();
+            let workspace = config.project_workspace_dir(&project_id);
+            learn::commit_test_checkout(
+                &workspace,
+                "Add the team's notes",
+                "someone@example.com",
+                &[("notes.md", "# Notes\n")],
+            );
+
+            let execution = processor
+                .run_apply_job(
+                    &test_registration_with_proxy(),
+                    &job,
+                    true,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .expect("the mcp lane finishes");
+            assert_eq!(execution.provider, "mcp");
+            // A multi-agent worker prepares the same folder.
+            processor
+                .prepare_workspace(&project_id)
+                .expect("worker workspace");
+
+            if canonical {
+                assert_eq!(learn::test_checkout_status(&workspace), "", "{mode}");
+                assert!(!workspace.join(learn::INSTAFY_FILENAME).exists(), "{mode}");
+                assert!(
+                    !workspace.join(learn::BOUND_SITES_RELATIVE_PATH).exists(),
+                    "{mode}"
+                );
+            } else {
+                assert!(workspace.join(learn::INSTAFY_FILENAME).exists());
+                assert!(workspace.join(learn::BOUND_SITES_RELATIVE_PATH).exists());
+            }
+        }
     }
 
     #[test]

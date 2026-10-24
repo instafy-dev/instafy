@@ -750,6 +750,21 @@ loses only work that never reached the remote:
   origin fetches with its own `git.read` credential and moves the checkout
   only when it holds nothing unpublished. The outcome is recorded on the turn
   as an `origin/refresh` artifact; a failure never fails the turn.
+- The files the runtime bundles (`INSTAFY.md`, `AGENTS.md`, `CLAUDE.md`,
+  `AGENTS.py` and the `.agents/skills/instafy-*` skills in
+  `packages/runtime-agent/assets/instafy`) reach `main` through the
+  controller's project memory bootstrap
+  (`POST /projects/:project_id/memory/bootstrap`, which Studio calls when it
+  opens a space). It writes a missing file, and replaces one only while it
+  still holds exactly what the bootstrap last wrote, so a team's edit stays.
+  Once the checkout holds history beyond the seed commit, the runtime's
+  scaffold writes none of these files: its copies would stay in the folder
+  as unsaved work, which each rolling save keeps on the folder's slot and
+  Studio lists under Unsaved work once the runtime stops. A seed repository
+  is still scaffolded and committed by the runtime, and a Desktop folder or
+  a runtime without a canonical remote keeps the runtime's scaffold. A
+  canonical space gets a changed bundled file the next time someone opens it
+  in Studio.
 - After a model turn the agent saves the files the model reported plus every
   file whose `git status` changed during the turn, minus paths that are never
   published. A client's `autoSyncAfterApply: false` is ignored: every turn

@@ -304,7 +304,37 @@ pub struct LearnRequest {
     pub lookback: usize,
 }
 
+/// Who keeps a workspace folder's bundled Instafy files (the project memory
+/// scaffold) current.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ScaffoldScope {
+    /// A folder whose bundled files this runtime keeps: a Desktop folder, a
+    /// runtime without a canonical remote, a test directory. The scaffold
+    /// writes and upgrades them, and commits them only in a new or seed
+    /// repository.
+    Local,
+    /// A hosted checkout of a git-canonical space. The controller's
+    /// bootstrap commits the managed defaults to `main`, so once the
+    /// checkout holds history beyond the seed commit the scaffold writes
+    /// nothing there: its own copies would stay in the folder as unsaved
+    /// work that every turn-end save keeps for recovery, and they would
+    /// replace a person's edits to those files. A new or seed repository
+    /// is scaffolded and committed as in [`ScaffoldScope::Local`].
+    Canonical,
+}
+
+/// [`ensure_project_memory_scaffold_in`] for a folder this runtime keeps.
+#[cfg(test)]
 pub fn ensure_project_memory_scaffold(workspace_dir: &Path) {
+    ensure_project_memory_scaffold_in(workspace_dir, ScaffoldScope::Local);
+}
+
+/// Writes and upgrades the bundled Instafy files in `workspace_dir`, unless
+/// `scope` leaves them to the controller (see [`ScaffoldScope`]).
+pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldScope) {
+    if scope == ScaffoldScope::Canonical && holds_canonical_history(workspace_dir) {
+        return;
+    }
     let mut wrote_any = false;
     let instafy_path = workspace_dir.join(INSTAFY_FILENAME);
     let agents_doc_path = workspace_dir.join(AGENTS_DOC_FILENAME);
@@ -669,13 +699,9 @@ pub fn parse_learn_request(prompt_text: &str) -> Option<LearnRequest> {
 }
 
 fn maybe_commit_project_memory_scaffold(workspace_dir: &Path, _wrote_any: bool) {
-    let git_dir = workspace_dir.join(".instafy").join(".git");
-    if !git_dir.exists() {
-        return;
-    }
-
-    let has_head = git_has_head(workspace_dir);
-    if has_head && !is_instafy_seed_repo(workspace_dir) {
+    if !workspace_dir.join(".instafy").join(".git").exists()
+        || holds_canonical_history(workspace_dir)
+    {
         return;
     }
 
@@ -765,6 +791,14 @@ fn is_instafy_seed_repo(workspace_dir: &Path) -> bool {
     )
 }
 
+/// Whether the folder's `.instafy` repository holds a history of its own: a
+/// HEAD that is not the seed commit a new space starts from.
+fn holds_canonical_history(workspace_dir: &Path) -> bool {
+    workspace_dir.join(".instafy").join(".git").exists()
+        && git_has_head(workspace_dir)
+        && !is_instafy_seed_repo(workspace_dir)
+}
+
 fn git_has_head(workspace_dir: &Path) -> bool {
     run_git(workspace_dir, &["rev-parse", "--verify", "HEAD"])
         .map(|output| output.status.success())
@@ -800,6 +834,46 @@ fn run_git(workspace_dir: &Path, args: &[&str]) -> Option<std::process::Output> 
         .args(args)
         .output()
         .ok()
+}
+
+/// Test support: a `.instafy` repository in `workspace_dir` with one commit
+/// of `files`, its subject `subject` and its author `author_email`.
+#[cfg(test)]
+pub(super) fn commit_test_checkout(
+    workspace_dir: &Path,
+    subject: &str,
+    author_email: &str,
+    files: &[(&str, &str)],
+) {
+    fs::create_dir_all(workspace_dir.join(".instafy")).expect("checkout folder");
+    let git = |args: &[&str]| {
+        let output = run_git(workspace_dir, args).expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "--quiet"]);
+    git(&["config", "user.name", "Test"]);
+    git(&["config", "user.email", author_email]);
+    for (path, content) in files {
+        let file = workspace_dir.join(path);
+        fs::create_dir_all(file.parent().expect("parent")).expect("parent folder");
+        fs::write(&file, content).expect("file");
+        git(&["add", "--", path]);
+    }
+    git(&["commit", "--quiet", "--no-gpg-sign", "-m", subject]);
+}
+
+/// Test support: the folder's `git status`, untracked files listed one by one.
+#[cfg(test)]
+pub(super) fn test_checkout_status(workspace_dir: &Path) -> String {
+    git_stdout_trimmed(
+        workspace_dir,
+        &["status", "--porcelain", "--untracked-files=all"],
+    )
+    .expect("git status")
 }
 
 fn parse_learn_command(prompt_text: &str) -> LearnRequest {
@@ -1629,6 +1703,85 @@ mod tests {
         ensure_project_memory_scaffold(workspace.path());
         assert_eq!(fs::read_to_string(&skill).unwrap(), BOUND_SITES_TEMPLATE);
         assert!(BOUND_SITES_TEMPLATE.contains("## When someone asks from a site"));
+    }
+
+    #[test]
+    fn a_canonical_checkout_with_history_is_left_as_main_has_it() {
+        let workspace = tempdir().expect("workspace");
+        let folder = workspace.path();
+        // A space's main: managed files as the controller committed them, one
+        // edited by the team and one older than this runtime's bundle, and no
+        // bound-sites skill yet.
+        let edited = "# How our team works together\n";
+        let older = "an older bundled agent-collaboration skill\n";
+        commit_test_checkout(
+            folder,
+            "Add the team's notes",
+            "someone@example.com",
+            &[
+                (INSTAFY_FILENAME, INSTAFY_TEMPLATE),
+                (COLLABORATION_RELATIVE_PATH, edited),
+                (AGENT_COLLABORATION_RELATIVE_PATH, older),
+            ],
+        );
+
+        ensure_project_memory_scaffold_in(folder, ScaffoldScope::Canonical);
+
+        assert_eq!(test_checkout_status(folder), "", "nothing left unsaved");
+        assert!(!folder.join(AGENTS_DOC_FILENAME).exists());
+        assert!(!folder.join(BOUND_SITES_RELATIVE_PATH).exists());
+        assert!(!folder.join(BOUND_SITES_CHEATSHEET_RELATIVE_PATH).exists());
+        let read = |path: &str| fs::read_to_string(folder.join(path)).unwrap();
+        assert_eq!(read(COLLABORATION_RELATIVE_PATH), edited);
+        assert_eq!(read(AGENT_COLLABORATION_RELATIVE_PATH), older);
+
+        // The same folder kept by this runtime (a Desktop folder) is still
+        // scaffolded, and nothing is committed to its history.
+        ensure_project_memory_scaffold_in(folder, ScaffoldScope::Local);
+        assert_eq!(read(BOUND_SITES_RELATIVE_PATH), BOUND_SITES_TEMPLATE);
+        assert_eq!(
+            read(AGENT_COLLABORATION_RELATIVE_PATH),
+            AGENT_COLLABORATION_TEMPLATE
+        );
+        assert_eq!(
+            git_stdout_trimmed(folder, &["rev-list", "--count", "HEAD"]).as_deref(),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn a_canonical_seed_repo_is_scaffolded_and_committed() {
+        let workspace = tempdir().expect("workspace");
+        let folder = workspace.path();
+        commit_test_checkout(
+            folder,
+            "instafy: init",
+            "service-runtime@instafy.dev",
+            &[("README.md", "# A new space\n")],
+        );
+
+        ensure_project_memory_scaffold_in(folder, ScaffoldScope::Canonical);
+
+        assert_eq!(
+            git_stdout_trimmed(folder, &["log", "-1", "--pretty=%s"]).as_deref(),
+            Some("instafy: bootstrap workspace memory")
+        );
+        let committed =
+            git_stdout_trimmed(folder, &["show", "--name-only", "--pretty=format:", "HEAD"])
+                .expect("committed paths");
+        for path in [
+            INSTAFY_FILENAME,
+            AGENTS_DOC_FILENAME,
+            COLLABORATION_RELATIVE_PATH,
+            BOUND_SITES_RELATIVE_PATH,
+            BOUND_SITES_CHEATSHEET_RELATIVE_PATH,
+        ] {
+            assert!(
+                committed.lines().any(|line| line == path),
+                "{path} committed"
+            );
+        }
+        assert_eq!(test_checkout_status(folder), "");
     }
 
     #[test]
