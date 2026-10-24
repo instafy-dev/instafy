@@ -11,6 +11,8 @@ import { SHARED_BROWSER_HOST_WAIT_TIMEOUT_MS } from "./sharedBrowserHostAttach";
 const BROWSER_SESSION_POLL_INTERVAL_MS = 2500;
 /** A page read that has not answered by then is given up, so the next poll can ask again. */
 export const BROWSER_SESSION_PAGES_REQUEST_TIMEOUT_MS = 10_000;
+/** A capability read that has not answered by then is given up and asked again. */
+export const BROWSER_SESSION_CAPABILITIES_REQUEST_TIMEOUT_MS = 10_000;
 /**
  * How long an open browser may keep answering `browser_host_not_ready` before
  * the hook says it did not start (the same bound as the browser view's own
@@ -327,12 +329,22 @@ export function useBrowserSessionPages(params: {
     }
 
     const request = (async (): Promise<boolean> => {
+      const abort = new AbortController();
+      const timer = setTimeout(() => abort.abort(), BROWSER_SESSION_CAPABILITIES_REQUEST_TIMEOUT_MS);
       try {
-        const nextCapabilities = await controllerClient.browserSessions.fetchCapabilities({
-          projectId,
-          browserSessionId,
-          preferRuntimeId,
-        });
+        const nextCapabilities = await Promise.race([
+          controllerClient.browserSessions.fetchCapabilities({
+            projectId,
+            browserSessionId,
+            preferRuntimeId,
+            signal: abort.signal,
+          }),
+          // Even a read that ignores its signal ends at the bound, and is
+          // retried like any other failed read.
+          new Promise<never>((_resolve, reject) => {
+            abort.signal.addEventListener("abort", () => reject(new Error("Browser capabilities did not answer in time.")), { once: true });
+          }),
+        ]);
         if (!scopeIsCurrent(requestScope)) {
           return false;
         }
@@ -365,6 +377,8 @@ export function useBrowserSessionPages(params: {
           unsupported,
         });
         return false;
+      } finally {
+        clearTimeout(timer);
       }
     })();
 

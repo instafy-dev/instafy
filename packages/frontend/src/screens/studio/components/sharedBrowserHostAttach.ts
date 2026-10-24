@@ -6,6 +6,7 @@ import type {
 } from "../../../services/runtimeController";
 import type { SharedBrowserHostSnapshot } from "../../../services/runtimeController/browserSession";
 import { runtimeEntryIsDispatchable } from "../../../runtime/utils/runtimeEntry";
+import { runtimeDebugLog } from "../../../runtime/utils/runtimeDebug";
 import {
   isManagedInstafyCloudProvider,
   listBrowserRuntimeCandidates,
@@ -28,6 +29,8 @@ export const SHARED_BROWSER_HOST_COPY = {
   didNotStart: "Instafy's browser did not start. Try again.",
   machineStopping: "This space's machine is stopping. Try again in a moment.",
   notAvailable: "Instafy's browser is not available on this space's machine right now. Try again.",
+  policyOff: "Instafy's browser is turned off for this space.",
+  restarted: "Instafy's browser restarted on this space's machine. Press Retry to open it again.",
   machineStopped: "This space's machine stopped. Open the browser to start it.",
   machineNotRunning: "This space's machine is not running. Press Retry to start it.",
   machineDidNotStart: "This space's machine did not start. Try again.",
@@ -91,6 +94,19 @@ function isTokenError(error: unknown): boolean {
   return error instanceof Error && error.name === "SharedBrowserHostTokenError";
 }
 
+/** The controller's 404 `code` while the space's hosted browser policy is off. */
+const POLICY_OFF_CODE = "browser_host_policy_off";
+
+/**
+ * A 404 that is not the machine's own "no browser host" answer, with its
+ * code (null without one); undefined for any other error.
+ */
+function hostNotFoundCode(error: unknown): string | null | undefined {
+  if (!(error instanceof Error) || error.name !== "SharedBrowserHostNotFoundError") return undefined;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" ? code : null;
+}
+
 /** A read or start of Instafy's browser that did not answer in time; polled like a gateway error. */
 export class SharedBrowserHostRequestTimeoutError extends Error {
   constructor() {
@@ -141,11 +157,14 @@ async function requestWithTimeout<T>(
  * | idle, failed                     | start (control) or ask a builder (view)  |
  * | starting, stopping, unknown      | poll again                               |
  * | poisoned                         | error: the machine must restart          |
+ * | no host (the machine's own 404)  | error: not available                     |
+ * | policy off (`browser_host_policy_off`) | error: turned off for this space   |
  *
  * A start refused with `browser_host_stopping` is asked again after a second.
- * Gateway errors (502, 503, 504), token failures and a read or start that
- * has not answered in ten seconds are polled through; the whole wait is
- * capped, and no request outlasts it.
+ * Gateway errors (502, 503, 504), any other 404 (the controller or something
+ * in front of it, logged as `browser-session:host-404`), token failures and a
+ * read or start that has not answered in ten seconds are polled through; the
+ * whole wait is capped, and no request outlasts it.
  */
 export async function waitForSharedBrowserHostReady(params: {
   projectId: string;
@@ -189,13 +208,27 @@ export async function waitForSharedBrowserHostReady(params: {
     return sleep(Math.min(ms, remaining), params.signal);
   };
 
+  // A 404 that is not the machine's own answer: the policy-off code ends the
+  // wait; any other is polled through (the controller restarting, a proxy).
+  const notFoundOutcome = (error: unknown): SharedBrowserHostWaitResult | "poll" | null => {
+    const code = hostNotFoundCode(error);
+    if (code === undefined) return null;
+    if (code === POLICY_OFF_CODE) {
+      return { kind: "error", message: SHARED_BROWSER_HOST_COPY.policyOff };
+    }
+    runtimeDebugLog("browser-session:host-404", { status: 404, code });
+    return "poll";
+  };
+
   while (!cancelled() && now() < deadline) {
     let snapshot: SharedBrowserHostSnapshot | null;
     try {
       snapshot = await bounded((value) => params.client.fetchHost(value));
     } catch (error) {
       if (cancelled()) break;
-      if (params.client.isUnavailableError(error) || isTokenError(error) || isRequestTimeout(error)) {
+      const notFound = notFoundOutcome(error);
+      if (notFound && notFound !== "poll") return notFound;
+      if (notFound === "poll" || params.client.isUnavailableError(error) || isTokenError(error) || isRequestTimeout(error)) {
         if (!(await pause(pollMs))) break;
         continue;
       }
@@ -245,7 +278,9 @@ export async function waitForSharedBrowserHostReady(params: {
           }
           return { kind: "error", message: SHARED_BROWSER_HOST_COPY.didNotStart };
         }
-        if (!params.client.isUnavailableError(error) && !isTokenError(error) && !isRequestTimeout(error)) {
+        const notFound = notFoundOutcome(error);
+        if (notFound && notFound !== "poll") return notFound;
+        if (!notFound && !params.client.isUnavailableError(error) && !isTokenError(error) && !isRequestTimeout(error)) {
           return { kind: "error", message: error instanceof Error ? error.message : String(error) };
         }
       }

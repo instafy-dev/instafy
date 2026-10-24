@@ -228,6 +228,37 @@ describe("useBrowserSessionPages", () => {
     }
   });
 
+  it("gives up a capability read that never answers after ten seconds and asks again", async () => {
+    vi.useFakeTimers();
+    try {
+      fetchCapabilitiesMock.mockReset()
+        .mockImplementationOnce(() => new Promise(() => {}))
+        .mockResolvedValue({
+          version: 2,
+          viewerKinds: ["cdp-screencast", "rfb"],
+          preferredViewer: "cdp-screencast",
+          viewportOnly: true,
+          controls: { navigate: true, history: true, reload: true, focusPage: true },
+        });
+      await renderHook();
+      expect(latestResult?.capabilitiesResolved).toBe(false);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      // The browser view stops waiting on it and says it cannot connect yet.
+      expect((fetchCapabilitiesMock.mock.calls[0]![0] as { signal: AbortSignal }).signal.aborted).toBe(true);
+      expect(latestResult?.capabilitiesResolved).toBe(true);
+      expect(latestResult?.capabilities).toBeNull();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_500);
+      });
+      expect(fetchCapabilitiesMock).toHaveBeenCalledTimes(2);
+      expect(latestResult?.capabilities?.preferredViewer).toBe("cdp-screencast");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("restores the active page immediately when focusing another tab fails", async () => {
     fetchPagesMock.mockResolvedValue([
       {

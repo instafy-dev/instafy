@@ -146,6 +146,28 @@ export function isSharedBrowserHostRefusedError(
   return error instanceof SharedBrowserHostRefusedError;
 }
 
+/** The origin's 404 `code` on `browser/host` when its machine has no browser host. */
+export const SHARED_BROWSER_HOST_ABSENT_CODE = "browser_host_absent";
+/** The controller's 404 `code` on `browser/host` while the space's hosted browser policy is off. */
+export const SHARED_BROWSER_HOST_POLICY_OFF_CODE = "browser_host_policy_off";
+
+/**
+ * A 404 on `browser/host` that is not the machine's own answer that it has no
+ * browser host: the controller's policy-off answer (`code` is
+ * SHARED_BROWSER_HOST_POLICY_OFF_CODE), or a 404 from the controller or
+ * something in front of it, which does not say anything about the browser.
+ */
+export class SharedBrowserHostNotFoundError extends Error {
+  readonly status = 404;
+  readonly code: string | null;
+
+  constructor(code: string | null, message: string) {
+    super(message);
+    this.name = "SharedBrowserHostNotFoundError";
+    this.code = code;
+  }
+}
+
 const BROWSER_ERROR_CODE_MAX_LENGTH = 64;
 
 /** The `code` of an origin error body (`{error, code}`), when there is one. */
@@ -391,6 +413,7 @@ export async function fetchRuntimeBrowserSessionCapabilities(params: {
   browserSessionId: string;
   preferRuntimeId?: string | null;
   accessToken?: string | null;
+  signal?: AbortSignal;
 }): Promise<RuntimeBrowserSessionCapabilities | null> {
   const token = await requestOriginAccessToken({
     projectId: params.projectId,
@@ -405,11 +428,13 @@ export async function fetchRuntimeBrowserSessionCapabilities(params: {
     return null;
   }
 
+  params.signal?.throwIfAborted();
   const response = await fetch(buildOriginEndpointUrl(token.endpoint, "/browser/capabilities"), {
     headers: {
       authorization: `Bearer ${token.token}`,
       accept: "application/json",
     },
+    signal: params.signal,
   });
 
   if (browserSessionStatusIndicatesUnavailable(response.status)) {
@@ -561,12 +586,39 @@ async function requestSharedBrowserHostToken(
   return token;
 }
 
+/**
+ * Whether a 404 body on `browser/host` is the origin's own answer that its
+ * machine has no browser host: the `browser_host_absent` code, or (from an
+ * origin that predates it) the origin's `{error, code: "not_found"}` body.
+ * The controller's own errors carry `message`, never `error`.
+ */
+export function isSharedBrowserHostAbsentAnswer(text: string): boolean {
+  const code = readBrowserErrorCode(text);
+  if (code === SHARED_BROWSER_HOST_ABSENT_CODE) {
+    return true;
+  }
+  if (code !== "not_found") {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(text) as { error?: unknown };
+    return typeof parsed.error === "string";
+  } catch {
+    return false;
+  }
+}
+
 async function readSharedBrowserHostResponse(
   response: Response,
   label: string,
 ): Promise<SharedBrowserHostSnapshot | null> {
   if (response.status === 404) {
-    return null;
+    const text = await response.text().catch(() => "");
+    if (isSharedBrowserHostAbsentAnswer(text)) {
+      return null;
+    }
+    const code = readBrowserErrorCode(text);
+    throw new SharedBrowserHostNotFoundError(code, `${label} not found (404)${code ? `: ${code}` : ""}`);
   }
   if (response.status === 409) {
     const text = await response.text().catch(() => "");
@@ -590,8 +642,11 @@ async function readSharedBrowserHostResponse(
 
 /**
  * Instafy's browser on the space's own machine, as the person sees it. Null
- * when the machine has none (404, also when the space's policy is off).
- * Throws BrowserSessionUnavailableError on 502, 503 and 504.
+ * only when the machine itself answers that it has none (see
+ * isSharedBrowserHostAbsentAnswer). Any other 404 throws
+ * SharedBrowserHostNotFoundError, whose `code` is `browser_host_policy_off`
+ * when the space's policy is off. Throws BrowserSessionUnavailableError on
+ * 502, 503 and 504.
  */
 export async function fetchSharedBrowserHost(
   params: SharedBrowserHostRequestParams,

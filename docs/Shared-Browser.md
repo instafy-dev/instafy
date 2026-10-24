@@ -95,9 +95,12 @@ clicking the shared page can still open the takeover confirmation.
 
 Personal and Shared Browser use one `BrowserAddressField` and the common Instafy
 `Input`, `Button`, `IconButton` and `Checkbox` primitives for their address, actions
-and settings. Navigation state, permissions and control ownership stay in each
-browser controller; the shared components supply consistent themes, keyboard focus
-and touch targets.
+and settings. Focusing the address, by keyboard or by the click that focuses it,
+selects the whole address, so typing replaces it; a range dragged on that click is
+kept, and later clicks place the caret. A blank tab (`about:blank` or a new-tab page)
+shows an empty address with its placeholder. Navigation state, permissions and
+control ownership stay in each browser controller; the shared components supply
+consistent themes, keyboard focus and touch targets.
 In compact Personal Browser panes, **Browser settings** keeps **Back** and
 **Forward** available when they are hidden from the toolbar. Choosing a history
 action closes the menu and restores the native page; control and history
@@ -486,6 +489,25 @@ turn without retrying.
 If the client temporarily loses its network, it retains the exact visible
 request, shows reconnecting state, and retries the bounded poll/decision path;
 the origin's one-use fingerprint and replay checks remain authoritative.
+
+Studio also shows a pending prompt as a card in the run's own conversation, for
+the person who started the run only (the run's controller-set `initiatingUserId`).
+The card names the step and the site, counts down to the prompt's expiry and
+offers **Deny** and **Allow once** (**Allow site** for a site prompt); routine
+browsing stays a choice of the browser view's sheet. Its poll uses the running
+job's own machine and page (the run's `browserRuntimeId` and `browserPageId`, which
+the prompt is bound to) and its own `browser.view` + `browser.control` grant, never
+the browser view's pages list, host read, picture or grant. So the prompt stays
+visible and answerable while the browser view reconnects, shows an error, is
+hidden behind the Chat tab, collapsed in a narrow pane or was never opened in this
+tab. The browser view's sheet shows the same poll for that machine, so both
+surfaces share one state: an answer in either settles both, and the card then says
+**Allowed**, **Denied** or, after the window, **Expired**. A press answers only the
+prompt that surface shows: a newer prompt the poll found first, or another run's,
+is never answered by it, and the card's buttons are off while it still shows a
+prompt that is no longer the one waiting. The pending and decision
+endpoints, their scopes and the origin's initiator and page checks are unchanged.
+A teammate polls nothing and sees no card.
 
 The agent controls the page through one runtime-owned, required MCP server:
 
@@ -885,8 +907,16 @@ unless the policy is `"covered"`.
   `{"version": 1}`, then polls every 500 ms until the browser is ready (at most
   120 s). A viewer is told to ask a space builder, and a poisoned browser says
   the space's machine must restart first. A state Studio does not know is
-  polled like `starting`. Studio never ensures, recycles or stops a runtime for
-  this. It lets go of the browser runtime claim once the first status read
+  polled like `starting`. Only the machine's own 404 (code
+  `browser_host_absent`, or `not_found` with the origin's `{error, code}` body
+  from an origin that predates it) reads as "Instafy's browser is not available
+  on this space's machine right now." Any other 404 on `browser/host` comes from
+  the controller or something in front of it and says nothing about the browser:
+  it is polled within the same 120 s and logged as `browser-session:host-404`.
+  A 404 with the code `browser_host_policy_off` ends the wait with "Instafy's
+  browser is turned off for this space." Studio never ensures, recycles or stops
+  a runtime for this. It lets go of the browser runtime claim once the first
+  status read
   shows the space's browser, so generic recovery keeps the space's machine up.
   **Start new session** and the runtime-limit takeover are hidden.
 - **Pages while it starts.** The origin answers 503 `browser_host_not_ready`
@@ -931,13 +961,27 @@ unless the policy is `"covered"`.
   run or person holds the browser, an open browser that shows its page and
   only waits for the conversation to be idle is left as it is, and an
   automatic start never attaches again.
-- **Viewers reconnect within a bound.** A fatal viewer error with no other
-  viewer to fall back to schedules a reconnect (at most five within a minute,
-  also when a connection succeeds in between) and then shows "Browser session
-  disconnected. Click Retry to reconnect." An error and the socket closing
-  after it count once. A browser that has its connection but waits for its
-  roster to know which viewer this participant may use gives up after 20 s
-  with "The browser did not finish connecting. Try again."
+- **Viewers reconnect within a bound.** A fatal viewer error or a closed
+  picture with no other viewer to fall back to schedules a reconnect (at most
+  five within a minute, also when a connection succeeds in between) and then
+  shows "Browser session disconnected. Click Retry to reconnect." An error and
+  the socket closing after it count once. **Reconnecting…** by itself lasts at
+  most 60 s; then the browser says it lost the connection and offers Retry. The
+  abandoned attempt is stopped, so it reads and starts nothing more, and its
+  late answer does not bring the wait back. A
+  person's Retry or press is not cut short this way. An attempt that ends with
+  the same connection (a cached grant) leaves a picture that is already back,
+  or the error on screen, as it is. A browser that has its connection but waits
+  for its roster to know which viewer this participant may use gives up after
+  20 s with "The browser did not finish connecting. Try again." A capability
+  read that does not answer in 10 s is given up and asked again.
+- **The same browser, or a restarted one.** The view remembers the host
+  `generation` it connected to. A reconnect that finds the host ready with that
+  generation keeps its connection and last frame and only reconnects the
+  picture. One that finds a new generation while the view reconnected by
+  itself stops there with "Instafy's browser restarted on this space's machine.
+  Press Retry to open it again.", because the pages it showed are gone. A
+  person's own Retry or press just opens the restarted browser.
 - **Only the person starts the machine.** An open Studio restored by itself (a
   reload, or a return to a conversation whose browser was left open) never
   wakes the space's machine: it says the machine is not running and starts it

@@ -134,6 +134,9 @@ const AddressControls = forwardRef<HTMLInputElement, Pick<BrowserAddressFieldPro
 }, ref) {
   const id = useId();
   const formRef = useRef<HTMLFormElement>(null);
+  // The click that focuses the field places a caret when it ends; like a
+  // browser's address bar, that first click selects the whole address instead.
+  const selectAllOnClickEnd = useRef(false);
   const focusInput = () => formRef.current?.querySelector("input")?.focus();
   const state = useContext(ComboBoxStateContext);
   // The phone dialog replaces the popover. Register the same interaction
@@ -197,7 +200,20 @@ const AddressControls = forwardRef<HTMLInputElement, Pick<BrowserAddressFieldPro
         inputMode="url"
         enterKeyHint="go"
         autoFocus={mobile}
-        onFocus={mobile ? event => event.currentTarget.select() : undefined}
+        onPointerDown={event => {
+          selectAllOnClickEnd.current = document.activeElement !== event.currentTarget;
+        }}
+        onFocus={event => event.currentTarget.select()}
+        onMouseUp={event => {
+          if (!selectAllOnClickEnd.current) return;
+          selectAllOnClickEnd.current = false;
+          const input = event.currentTarget;
+          // A drag that chose part of the address keeps that choice.
+          if (input.selectionStart === input.selectionEnd) {
+            event.preventDefault();
+            input.select();
+          }
+        }}
         size="xs"
         className={`h-8 min-w-0 pl-3 pr-9 aria-invalid:border-rose-400 aria-invalid:focus-visible:ring-rose-500/20 max-[540px]:h-10 max-[540px]:pr-11 pointer-coarse:h-11 pointer-coarse:pr-12 ${mobile ? "!h-11 !pr-24" : ""}`}
         data-testid={`${testIdPrefix}-address`}

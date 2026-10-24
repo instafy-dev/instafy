@@ -357,6 +357,8 @@ import {
   shouldDeleteRestoredMessageStashAfterAction,
 } from "./messageStashLifecycle";
 import { LazyBrowserSessionModal } from "./LazyBrowserSessionModal";
+import { SharedBrowserApprovalChatCard } from "./SharedBrowserApprovalChatCard";
+import { useChatSharedBrowserApproval } from "./useChatSharedBrowserApproval";
 import type { SharedBrowserChromeProps } from "./SharedBrowserChrome";
 import { resolveSharedBrowserViewerKind } from "./sharedBrowserViewer";
 import { LocalBrowserSharing, LocalBrowserTabPublisher } from "./LocalBrowserSharing";
@@ -818,9 +820,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const generatedChatPanelId = useId();
   const browserPanelId = conversationWorkspace ? "conversation-workspace-browser" : generatedBrowserPanelId;
   const chatPanelId = conversationWorkspace ? "conversation-workspace-chat" : generatedChatPanelId;
-  useEffect(() => {
-    if (conversationWorkspace) setConversationBrowser(surfaceScope, hasBrowserView, sharedBrowserApprovalPending);
-  }, [conversationWorkspace, setConversationBrowser, surfaceScope, hasBrowserView, sharedBrowserApprovalPending]);
   useLayoutEffect(() => {
     if (browserSessionOpen && browserSessionExpandRequestToken > 0) {
       setBrowserSubtab("browser");
@@ -3108,6 +3107,36 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     browserPageId: preferredBrowserPage?.id ?? null,
     browserRuntimeId: resolvedBrowserRuntimeId,
   });
+  // The prompts of this conversation's running Instafy's browser job, for the
+  // person who started it, whatever the browser view is doing.
+  const chatBrowserApproval = useChatSharedBrowserApproval({
+    enabled: runtimeControllerEnabled && canWriteProject && !jobThread,
+    projectId: activeProjectId ?? null,
+    userId: currentUserId,
+    runs: activeConversationRuns,
+    browserSessionId: sharedBrowserSurfaceSessionId,
+  });
+  const chatBrowserApprovalTarget = chatBrowserApproval.target;
+  const chatBrowserApprovalAsking = chatBrowserApproval.approval.pending !== null;
+  const browserRunApproval = useMemo(
+    () => chatBrowserApprovalTarget
+      ? { runtimeId: chatBrowserApprovalTarget.runtimeId, approval: chatBrowserApproval.approval }
+      : null,
+    [chatBrowserApproval.approval, chatBrowserApprovalTarget],
+  );
+  const browserApprovalAttention = sharedBrowserApprovalPending || chatBrowserApprovalAsking;
+  useEffect(() => {
+    if (conversationWorkspace) setConversationBrowser(surfaceScope, hasBrowserView, browserApprovalAttention);
+  }, [conversationWorkspace, setConversationBrowser, surfaceScope, hasBrowserView, browserApprovalAttention]);
+  const chatBrowserApprovalAgentName = (() => {
+    const handle = chatBrowserApprovalTarget
+      ? extractAgentIdentityFromMetadata(chatBrowserApprovalTarget.runMetadata)?.handle ?? null
+      : null;
+    if (!handle) return typingAgentDisplayName;
+    const profile = agentByHandle.get(handle) ?? null;
+    return getBuiltInAssistantDisplayName(handle) ??
+      (profile?.displayName?.trim() ? profile.displayName.trim() : `@${handle}`);
+  })();
   const typingAgents = useMemo<AssistantTypingAgent[]>(() => {
     const order: string[] = [];
     const thinkingHandles = new Set<string>();
@@ -5933,7 +5962,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const resourceTabs: ConversationSurface[] = [
     ...(hasBrowserView ? [{
       id: "browser", label: "Browser", panelId: browserPanelId, icon: <Globe className="h-3.5 w-3.5" />,
-      attention: sharedBrowserApprovalPending ? <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-800 dark:bg-amber-400/15 dark:text-amber-200" data-testid="shared-browser-approval-attention">Approve</span> : undefined,
+      attention: browserApprovalAttention ? <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-800 dark:bg-amber-400/15 dark:text-amber-200" data-testid="shared-browser-approval-attention">Approve</span> : undefined,
     }] : []),
     ...surfaces.files.map(file => ({
       id: file.id, label: conversationFileLabel(file, surfaces.files), title: file.path,
@@ -6197,7 +6226,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
               typingStatusLabel={typingStatusLabel}
               typingStatusAriaLabel={typingStatusAriaLabel}
               suppressAssistantStatus={
-                showOutOfCreditsNotice || workspaceStartStall.showNotice || stoppedTurnNotice !== null
+                showOutOfCreditsNotice || workspaceStartStall.showNotice || stoppedTurnNotice !== null ||
+                chatBrowserApprovalAsking
               }
               isThinkingLabelExpanded={isThinkingLabelExpanded}
               onToggleThinkingLabel={() => setIsThinkingLabelExpanded((current) => !current)}
@@ -6206,6 +6236,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
               typingStatusWraps={typingStatusIsRuntimeBusyNotice}
               renderAssistantAvatar={renderAssistantAvatar}
             />
+            {chatBrowserApprovalTarget ? (
+              <SharedBrowserApprovalChatCard
+                key={chatBrowserApprovalTarget.runId}
+                agentDisplayName={chatBrowserApprovalAgentName}
+                approval={chatBrowserApproval.approval}
+                avatar={renderAssistantAvatar(chatBrowserApprovalTarget.runMetadata)}
+              />
+            ) : null}
             {stoppedTurnNotice ? <StoppedTurnRow text={stoppedTurnNotice} /> : null}
             {workspaceStartStall.showNotice ? (
               <WorkspaceStartStalledRow
@@ -6321,6 +6359,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     attachOnly={browserAttachOnly}
                     conversationRuntimeId={effectiveRuntimeId ?? null}
                     spaceBusy={spaceRunActive}
+                    runApproval={browserRunApproval}
                   />
                 </div>
               ) : null}

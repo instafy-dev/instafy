@@ -2,11 +2,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   controllerClient,
   type RuntimeSharedBrowserApprovalDecision,
+  type RuntimeSharedBrowserApprovalRequest,
   type RuntimeSharedBrowserPendingApproval,
 } from "../../../sdk/instafy";
 
 const APPROVAL_IDLE_POLL_INTERVAL_MS = 1_500;
 const APPROVAL_PENDING_POLL_INTERVAL_MS = 400;
+
+/** A decision the origin accepted. */
+export type SharedBrowserApprovalSettlement = {
+  approvalId: string;
+  decision: RuntimeSharedBrowserApprovalDecision;
+};
 
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";
@@ -20,6 +27,7 @@ export function useSharedBrowserApproval({
   browserPageId,
   originEndpoint,
   originAccessToken,
+  acceptsRequest,
 }: {
   active: boolean;
   projectId: string | null;
@@ -28,15 +36,20 @@ export function useSharedBrowserApproval({
   browserPageId: string | null;
   originEndpoint: string | null;
   originAccessToken: string | null;
+  /** Which polled prompts a caller may answer here; every prompt when absent. */
+  acceptsRequest?: (request: RuntimeSharedBrowserApprovalRequest) => boolean;
 }) {
   const [pending, setPending] = useState<RuntimeSharedBrowserPendingApproval | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [routineApprovedRunId, setRoutineApprovedRunId] = useState<string | null>(null);
+  const [lastDecision, setLastDecision] = useState<SharedBrowserApprovalSettlement | null>(null);
   const submittingRef = useRef(false);
   const pendingRef = useRef<RuntimeSharedBrowserPendingApproval | null>(null);
   const settledApprovalIdRef = useRef<string | null>(null);
   const decisionAbortRef = useRef<AbortController | null>(null);
+  const acceptsRequestRef = useRef(acceptsRequest);
+  acceptsRequestRef.current = acceptsRequest;
   pendingRef.current = pending;
 
   const identity = JSON.stringify([projectId, browserSessionId, runtimeId, browserPageId]);
@@ -56,6 +69,7 @@ export function useSharedBrowserApproval({
     setSubmitting(false);
     setError(null);
     setRoutineApprovedRunId(null);
+    setLastDecision(null);
     decisionAbortRef.current?.abort();
     decisionAbortRef.current = null;
   }, [scope]);
@@ -141,13 +155,20 @@ export function useSharedBrowserApproval({
     [],
   );
 
+  /**
+   * Answers the prompt `approvalId` names, the one the surface showed. The
+   * latest poll may already hold another prompt (it updates before the next
+   * render), and that one is never answered by a press for this one.
+   */
   const decide = useCallback(
-    async (decision: RuntimeSharedBrowserApprovalDecision) => {
+    async (decision: RuntimeSharedBrowserApprovalDecision, approvalId: string) => {
       const current = pendingRef.current;
       if (
         !active ||
         submittingRef.current ||
         !current ||
+        current.request.approvalId !== approvalId ||
+        (acceptsRequestRef.current && !acceptsRequestRef.current(current.request)) ||
         !projectId ||
         !runtimeId ||
         !browserPageId ||
@@ -183,6 +204,7 @@ export function useSharedBrowserApproval({
           setRoutineApprovedRunId(current.request.runId);
         }
         settledApprovalIdRef.current = current.request.approvalId;
+        setLastDecision({ approvalId: current.request.approvalId, decision });
         if (pendingRef.current?.request.approvalId === current.request.approvalId) {
           pendingRef.current = null;
           setPending(null);
@@ -211,6 +233,10 @@ export function useSharedBrowserApproval({
     submitting,
     error,
     routineApprovedRunId,
+    /** The last decision accepted here, whichever surface asked for it. */
+    lastDecision,
     decide,
   };
 }
+
+export type SharedBrowserApprovalState = ReturnType<typeof useSharedBrowserApproval>;

@@ -25,7 +25,10 @@ export function sharedBrowserApprovalAllowDecision(
   return kind === "origin" ? "allow_origin" : "allow_once";
 }
 
-function actionDescription(request: SharedBrowserApprovalPromptRequest): string {
+/** What the agent waits to do, as the end of "is waiting to …". */
+export function sharedBrowserApprovalActionDescription(
+  request: Pick<SharedBrowserApprovalPromptRequest, "operation" | "display">,
+): string {
   const label = request.display.label.trim();
   const target = label ? ` “${label}”` : "";
   switch (request.operation) {
@@ -131,7 +134,7 @@ export function SharedBrowserApprovalPrompt({
               >
                 {isOriginApproval
                   ? "Shared Browser is paused before the AI agent can read or act on a new site."
-                  : `The AI agent is waiting to ${actionDescription(request)}.`}
+                  : `The AI agent is waiting to ${sharedBrowserApprovalActionDescription(request)}.`}
               </Text>
             </div>
           </div>

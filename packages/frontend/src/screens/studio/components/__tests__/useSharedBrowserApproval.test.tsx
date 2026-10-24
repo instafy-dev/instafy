@@ -18,7 +18,7 @@ vi.mock("../../../../sdk/instafy", () => ({
   },
 }));
 
-import { useSharedBrowserApproval } from "../useSharedBrowserApproval";
+import { useSharedBrowserApproval, type SharedBrowserApprovalState } from "../useSharedBrowserApproval";
 
 const pending = {
   runtimeId: "11111111-1111-4111-8111-111111111111",
@@ -44,6 +44,8 @@ const pending = {
   },
 };
 
+let latestApproval: SharedBrowserApprovalState | null = null;
+
 function Harness({
   active = true,
   browserSessionId = "browser-surface-1",
@@ -66,16 +68,21 @@ function Harness({
     originEndpoint: "https://origin.example.test",
     originAccessToken,
   });
+  latestApproval = approval;
+  const shownApprovalId = approval.pending?.request.approvalId ?? "";
   return (
     <div>
       <span data-testid="pending">{approval.pending?.request.approvalId ?? "none"}</span>
       <span data-testid="error">{approval.error ?? "none"}</span>
       <span data-testid="routine-run">{approval.routineApprovedRunId ?? "none"}</span>
       <span data-testid="submitting">{String(approval.submitting)}</span>
-      <button type="button" onClick={() => void approval.decide("allow_once")}>
+      <span data-testid="last-decision">
+        {approval.lastDecision ? `${approval.lastDecision.approvalId}:${approval.lastDecision.decision}` : "none"}
+      </span>
+      <button type="button" onClick={() => void approval.decide("allow_once", shownApprovalId)}>
         Decide
       </button>
-      <button data-testid="allow-routine" type="button" onClick={() => void approval.decide("allow_routine")}>
+      <button data-testid="allow-routine" type="button" onClick={() => void approval.decide("allow_routine", shownApprovalId)}>
         Allow routine browsing
       </button>
     </div>
@@ -89,6 +96,7 @@ describe("useSharedBrowserApproval", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(5_000);
+    latestApproval = null;
     fetchPendingApprovalMock.mockReset();
     decideApprovalMock.mockReset();
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -132,6 +140,34 @@ describe("useSharedBrowserApproval", () => {
     });
     expect(fetchPendingApprovalMock).toHaveBeenCalledTimes(2);
     expect(container.querySelector('[data-testid="pending"]')?.textContent).toBe("none");
+  });
+
+  it("remembers the decision the origin accepted, for every surface that shows the prompt", async () => {
+    fetchPendingApprovalMock.mockResolvedValue(pending);
+    decideApprovalMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+    await act(async () => {
+      root.render(<Harness />);
+      await Promise.resolve();
+    });
+    const lastDecision = () => container.querySelector('[data-testid="last-decision"]')?.textContent;
+    expect(lastDecision()).toBe("none");
+    // A refused decision is not one.
+    await act(async () => {
+      container.querySelector("button")?.click();
+      await Promise.resolve();
+    });
+    expect(lastDecision()).toBe("none");
+    await act(async () => {
+      container.querySelector("button")?.click();
+      await Promise.resolve();
+    });
+    expect(lastDecision()).toBe(`${pending.request.approvalId}:allow_once`);
+    // A new grant starts over.
+    await act(async () => {
+      root.render(<Harness originAccessToken="rotated-token" />);
+      await Promise.resolve();
+    });
+    expect(lastDecision()).toBe("none");
   });
 
   it("does not poll when the approval surface is inactive", async () => {
@@ -268,6 +304,27 @@ describe("useSharedBrowserApproval", () => {
     );
     expect(container.querySelector('[data-testid="submitting"]')?.textContent).toBe("false");
     expect(container.querySelector('[data-testid="error"]')?.textContent).toBe("none");
+  });
+
+  it("answers only the prompt that was shown, not one polled since", async () => {
+    // The poll updates what the lane holds before the next render shows it.
+    const nextPending = { ...pending, request: { ...pending.request, approvalId: "next-approval" } };
+    fetchPendingApprovalMock.mockResolvedValueOnce(pending).mockResolvedValue(nextPending);
+    decideApprovalMock.mockResolvedValue(true);
+    await act(async () => { root.render(<Harness />); });
+    expect(container.querySelector('[data-testid="pending"]')?.textContent).toBe(pending.request.approvalId);
+    const shown = latestApproval!;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400);
+      await shown.decide("allow_once", pending.request.approvalId);
+    });
+    expect(decideApprovalMock).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-testid="pending"]')?.textContent).toBe("next-approval");
+    expect(container.querySelector('[data-testid="last-decision"]')?.textContent).toBe("none");
+    await act(async () => { await latestApproval!.decide("allow_once", "next-approval"); });
+    expect(decideApprovalMock).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ pending: nextPending, decision: "allow_once" }),
+    );
   });
 
   it("does not clear a newly polled approval when an earlier decision completes", async () => {
