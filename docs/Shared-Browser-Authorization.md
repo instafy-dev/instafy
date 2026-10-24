@@ -29,11 +29,11 @@ input changes an ephemeral Chromium session, not the canonical workspace.
   input share one protocol. The origin rechecks ownership before every
   client-to-VNC packet.
 - `GET /browser/host` requires `browser.view` and `POST /browser/host/start`
-  requires `browser.control`. Both answer 404 on an origin without a browser
-  host. The state reports only caller-relative flags, never a subject or user
-  id. While a host is not ready, pages, page commands, CDP screencast, input
-  and RFB answer 503 `browser_host_not_ready` before any CDP request or
-  WebSocket upgrade.
+  requires `browser.control`. Both answer 404 `browser_host_absent` on an
+  origin without a browser host. The state reports only caller-relative
+  flags, never a subject or user id. While a host is not ready, pages, page
+  commands, CDP screencast, input and RFB answer 503 `browser_host_not_ready`
+  before any CDP request or WebSocket upgrade.
 
 Builder-or-higher Shared Browser surfaces request both scopes; Viewer surfaces
 request `browser.view` only. Narrow metadata and command helpers request only

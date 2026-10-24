@@ -4114,17 +4114,24 @@ fn is_browser_host_route(path: &CanonicalOriginProxyPath) -> bool {
     )
 }
 
+/// The code of the 404 [`ensure_browser_host_route_allowed`] answers, so a
+/// client can tell the policy being off from origin's own
+/// `browser_host_absent` and from a 404 of something in between.
+const BROWSER_HOST_POLICY_OFF_CODE: &str = "browser_host_policy_off";
+
 /// The rollback lever for the browser host routes: when the hosted browser
-/// policy does not cover the space, they answer 404 like any unlisted path,
-/// so turning the policy off stops new starts at once, not only at the next
-/// relaunch.
+/// policy does not cover the space, they answer 404 like any unlisted path
+/// (with the code `browser_host_policy_off`), so turning the policy off stops
+/// new starts at once, not only at the next relaunch.
 fn ensure_browser_host_route_allowed(
     config: &crate::config::AppConfig,
     path: &CanonicalOriginProxyPath,
     project_id: &Uuid,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
     if is_browser_host_route(path) && !config.hosted_browser_host.allows_project(project_id) {
-        return Err(not_found("origin path not found"));
+        let (status, Json(mut error)) = not_found("origin path not found");
+        error.code = Some(BROWSER_HOST_POLICY_OFF_CODE.to_string());
+        return Err((status, Json(error)));
     }
     Ok(())
 }
@@ -5924,12 +5931,17 @@ MCowBQYDK2VwAyEAFQAEX0aYqix3VQUBg05FFISGxhx2Ry93VE51GzM5iXA=
         let start = canonical_origin_proxy_path("/browser/host/start").unwrap();
         let pages = canonical_origin_proxy_path("/browser/pages").unwrap();
 
-        // Off by default: both host routes are 404, other routes are untouched.
+        // Off by default: both host routes are 404 with a code of their own,
+        // other routes are untouched.
         for path in [&host, &start] {
             let refused =
                 ensure_browser_host_route_allowed(&config, path, &covered).expect_err("policy off");
             assert_eq!(refused.0, StatusCode::NOT_FOUND);
             assert_eq!(refused.1 .0.message, "origin path not found");
+            assert_eq!(
+                refused.1 .0.code.as_deref(),
+                Some("browser_host_policy_off")
+            );
         }
         assert!(ensure_browser_host_route_allowed(&config, &pages, &covered).is_ok());
 
@@ -5937,11 +5949,12 @@ MCowBQYDK2VwAyEAFQAEX0aYqix3VQUBg05FFISGxhx2Ry93VE51GzM5iXA=
             crate::config::HostedBrowserHostPolicy::Projects(vec![covered]);
         for path in [&host, &start] {
             assert!(ensure_browser_host_route_allowed(&config, path, &covered).is_ok());
+            let outside_refusal = ensure_browser_host_route_allowed(&config, path, &outside)
+                .expect_err("outside the policy");
+            assert_eq!(outside_refusal.0, StatusCode::NOT_FOUND);
             assert_eq!(
-                ensure_browser_host_route_allowed(&config, path, &outside)
-                    .expect_err("outside the policy")
-                    .0,
-                StatusCode::NOT_FOUND
+                outside_refusal.1 .0.code.as_deref(),
+                Some("browser_host_policy_off")
             );
         }
 

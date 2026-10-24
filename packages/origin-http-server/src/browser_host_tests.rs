@@ -417,8 +417,13 @@ async fn host_routes_follow_the_browser_scopes_and_need_a_host() {
         .send()
         .await
         .unwrap();
+    // Origin's own answer has a code of its own, so a client can tell it from
+    // a 404 that a proxy or controller in front of origin gives.
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
-    assert_eq!(body(missing).await["code"], "not_found");
+    assert_eq!(
+        body(missing).await,
+        json!({ "error": "this machine has no browser host", "code": "browser_host_absent" })
+    );
 
     let start = |base: &str, token: &str| {
         client
@@ -436,10 +441,9 @@ async fn host_routes_follow_the_browser_scopes_and_need_a_host() {
         StatusCode::UNAUTHORIZED
     );
     assert_eq!(host.inner().start_calls, 0);
-    assert_eq!(
-        status(start(without_host, &control).await.unwrap()),
-        StatusCode::NOT_FOUND
-    );
+    let absent = start(without_host, &control).await.unwrap();
+    assert_eq!(absent.status(), StatusCode::NOT_FOUND);
+    assert_eq!(body(absent).await["code"], "browser_host_absent");
 
     let started = start(with_host, &control).await.unwrap();
     assert_eq!(started.status(), StatusCode::ACCEPTED);

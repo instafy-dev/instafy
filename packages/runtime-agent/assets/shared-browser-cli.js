@@ -105,7 +105,21 @@ const ROUTINE_CONFIRMED_CATEGORIES = new Set([
 ]);
 // Before one of these steps runs, the page and the page it opens are withheld.
 const WITHHOLDING_CATEGORIES = new Set(["credential", "may_show_secret"]);
+// The exit code when Instafy's browser or the run's own tab cannot be
+// reached. The runtime ends a run that keeps getting it; its
+// BROWSER_UNAVAILABLE_EXIT_CODE must stay equal to this.
+const BROWSER_UNAVAILABLE_EXIT_CODE = 75;
 let actionOrdinal = 0;
+
+// The browser could not be reached over CDP, or the run's page target is gone.
+class BrowserUnavailableError extends Error {}
+
+// Playwright's error when the page, its context or the browser closed while
+// a command ran. Judged by the error's class name only, never its message,
+// which can quote page markup.
+function isBrowserClosedError(error) {
+  return Boolean(error) && error.name === "TargetClosedError";
+}
 
 function validatePlaywrightModulePath(modulePath, trustedRootPath) {
   const configuredModule = String(modulePath || "").trim();
@@ -246,7 +260,7 @@ async function resolveExpectedPage(browser) {
       return page;
     }
   }
-  throw new Error(
+  throw new BrowserUnavailableError(
     `Shared Browser selected page ${EXPECTED_BROWSER_PAGE_ID} is unavailable; select a live browser tab and retry`,
   );
 }
@@ -1999,7 +2013,13 @@ async function main() {
   if (method === "POST") {
     validateRequestBody(requestPath, body);
   }
-  const browser = await chromium.connectOverCDP(CDP_URL, { timeout: 15_000 });
+  let browser;
+  try {
+    browser = await chromium.connectOverCDP(CDP_URL, { timeout: 15_000 });
+  } catch (error) {
+    const reason = error && error.message ? error.message : String(error);
+    throw new BrowserUnavailableError(`Instafy's browser could not be reached: ${reason}`);
+  }
   try {
     await denyDownloads(browser);
     const result = await execute(browser, method, requestPath, body || {});
@@ -2021,6 +2041,10 @@ main().then(
       // Keep the fixed message.
     }
     process.stderr.write(`Shared Browser command failed: ${masked}\n`);
-    process.exit(1);
+    process.exit(
+      error instanceof BrowserUnavailableError || isBrowserClosedError(error)
+        ? BROWSER_UNAVAILABLE_EXIT_CODE
+        : 1,
+    );
   },
 );

@@ -13193,7 +13193,8 @@ fn apply_terminal_shared_browser_summary(
 }
 
 /// What the person reads when a Shared Browser run ended on its approval
-/// lane. The code itself stays in the `browser/terminal-consent` artifact.
+/// lane, or because its browser could not be reached for several tool calls
+/// in a row. The code itself stays in the `browser/terminal-consent` artifact.
 /// Only the step that asked is known not to have run: earlier steps of the
 /// same turn may have opened pages or changed something, so the text speaks
 /// about that step and never about the whole turn.
@@ -13206,6 +13207,9 @@ fn terminal_shared_browser_summary(code: &str) -> &'static str {
             "I'm waiting for your OK to continue in Instafy's browser. I haven't done that step yet. Send a message when you're ready and I'll ask again."
         }
         "approval_denied" => "You declined, so I stopped before that step.",
+        "browser_unavailable" => {
+            "Instafy's browser closed or stopped responding, so I stopped there. Open the browser again and send a message to continue."
+        }
         _ => {
             "Instafy's browser stopped this step to keep it safe, so it wasn't done. Send a message to try again."
         }
@@ -24195,6 +24199,48 @@ mod tests {
 
         assert!(should_retry_codex_once(None, true));
         assert!(!should_retry_codex_once(None, false));
+    }
+
+    /// A run whose browser went away (in a dogfood run the turn kept thinking
+    /// for minutes) ends without a retry, and the person reads a plain message
+    /// with no internal code.
+    #[test]
+    fn a_browser_that_went_away_ends_the_turn_with_a_plain_message() {
+        let events = vec![json!({
+            "type": "item.completed",
+            "item": {
+                "id": "call-browser-unavailable",
+                "type": "mcp_tool_call",
+                "server": "instafy_shared_browser",
+                "tool": "snapshot",
+                "status": "failed",
+                "terminalConsent": {
+                    "state": "blocked",
+                    "terminal": true,
+                    "retryable": false,
+                    "code": "browser_unavailable",
+                }
+            }
+        })];
+        let messages = extract_codex_messages(&events);
+        let terminal = shared_browser_terminal_consent_failure(&messages);
+        assert_eq!(terminal, Some("browser_unavailable"));
+        assert!(!should_retry_codex_once(terminal, true));
+        assert!(!shared_browser_execution_missing_after_attempt(
+            true,
+            &messages,
+            terminal,
+            Some(7),
+            7,
+        ));
+        let mut summary = "Still working on it.".to_string();
+        let mut fallback = Some(CodexFallbackSummaryKind::MissingFinalAssistantMessage);
+        apply_terminal_shared_browser_summary(&mut summary, &mut fallback, terminal);
+        assert_eq!(
+            summary,
+            "Instafy's browser closed or stopped responding, so I stopped there. Open the browser again and send a message to continue."
+        );
+        assert_eq!(fallback, None);
     }
 
     /// Under routine browsing a turn opens pages and clicks before the step

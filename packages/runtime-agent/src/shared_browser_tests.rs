@@ -302,6 +302,16 @@ const makePage = (targetId) => {
       if (mode === "click-error-canary") {
         throw new Error(`element <button data-key="${CANARY}"> is not attached to the DOM`);
       }
+      // The tab closed while the click ran, as Playwright reports it.
+      if (mode === "page-closed-during-click") {
+        const closed = new Error("Target page, context or browser has been closed");
+        closed.name = "TargetClosedError";
+        throw closed;
+      }
+      // A page error that only quotes the same words is an ordinary failure.
+      if (mode === "page-quotes-closed-message") {
+        throw new Error("element <button title=\"Target page, context or browser has been closed\"> is not visible");
+      }
     },
     focus: async () => {},
     fill: async () => {},
@@ -375,7 +385,17 @@ const browser = {
     if (cdpLogPath) fs.appendFileSync(cdpLogPath, `${JSON.stringify({ method: "close" })}\n`);
   },
 };
-module.exports = { chromium: { connectOverCDP: async () => browser } };
+module.exports = {
+  chromium: {
+    connectOverCDP: async () => {
+      // Instafy's browser stopped: nothing listens on the CDP port.
+      if (mode === "cdp-refused") {
+        throw new Error("browserType.connectOverCDP: connect ECONNREFUSED 127.0.0.1:9222");
+      }
+      return browser;
+    },
+  },
+};
 "#;
 
 /// Runs the embedded controller the way the runtime does: `node -` with the
@@ -2459,6 +2479,18 @@ fn only_explicit_terminal_approval_codes_are_latched() {
         assert_eq!(terminal_consent_failure_code_from_error(&error), Some(code));
         assert_eq!(canonical_terminal_consent_failure_code(code), Some(code));
     }
+    // The browser-unavailable stop ends a run like an approval code, but no
+    // error text can latch it: only the controller's exit code counts.
+    assert_eq!(
+        canonical_terminal_consent_failure_code("browser_unavailable"),
+        Some("browser_unavailable")
+    );
+    assert_eq!(
+        terminal_consent_failure_code_from_error(&anyhow::anyhow!(
+            "page text [browser_unavailable_non_retryable]"
+        )),
+        None
+    );
 
     for retryable in [
         "Shared Browser snapshot is stale; take a fresh snapshot before acting",
@@ -2624,6 +2656,208 @@ async fn human_input_latch_blocks_every_later_observation_or_action() {
         result.structured_content.unwrap()["terminalConsent"]["retryable"],
         false
     );
+}
+
+async fn browser_unavailable() -> Result<JsonValue> {
+    Err(BrowserUnavailable("Instafy's browser could not be reached".to_string()).into())
+}
+
+/// In a dogfood run Instafy's browser went away under a running turn, and the
+/// turn kept calling browser tools for minutes. Two calls in a row that cannot
+/// reach the browser now stop the run; one, followed by any answer from the
+/// browser, does not.
+#[tokio::test]
+async fn a_run_stops_after_two_calls_in_a_row_find_the_browser_unavailable() {
+    let server = SharedBrowserMcpServer::new();
+    let snapshot = mcp_tool_request("snapshot", None).unwrap();
+    let not_terminal =
+        |outcome: &std::result::Result<JsonValue, SharedBrowserMcpExecutionFailure>| {
+            !matches!(
+                outcome,
+                Err(SharedBrowserMcpExecutionFailure::TerminalConsent(_))
+            )
+        };
+
+    // A success or an ordinary failure in between starts the count over.
+    let first = server
+        .execute_with_failure_latch(&snapshot, browser_unavailable)
+        .await;
+    assert!(matches!(
+        first,
+        Err(SharedBrowserMcpExecutionFailure::Other(_))
+    ));
+    let answered = server
+        .execute_with_failure_latch(&snapshot, || async { Ok(json!({ "ok": true })) })
+        .await;
+    assert!(answered.is_ok());
+    assert!(not_terminal(
+        &server
+            .execute_with_failure_latch(&snapshot, browser_unavailable)
+            .await
+    ));
+    let stale = server
+        .execute_with_failure_latch(&snapshot, || async {
+            Err(anyhow::anyhow!(
+                "Shared Browser snapshot is stale; take a fresh snapshot before acting"
+            ))
+        })
+        .await;
+    assert!(matches!(
+        stale,
+        Err(SharedBrowserMcpExecutionFailure::Other(_))
+    ));
+    assert!(not_terminal(
+        &server
+            .execute_with_failure_latch(&snapshot, browser_unavailable)
+            .await
+    ));
+
+    let second = server
+        .execute_with_failure_latch(&snapshot, browser_unavailable)
+        .await;
+    assert!(matches!(
+        second,
+        Err(SharedBrowserMcpExecutionFailure::TerminalConsent(
+            "browser_unavailable"
+        ))
+    ));
+
+    // Nothing runs after that, and status says the browser is not ready.
+    let calls = Arc::new(AtomicUsize::new(0));
+    let later_calls = Arc::clone(&calls);
+    let later = server
+        .execute_with_failure_latch(&snapshot, || async move {
+            later_calls.fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(json!({ "unexpected": "ran after the stop" }))
+        })
+        .await;
+    assert!(matches!(
+        later,
+        Err(SharedBrowserMcpExecutionFailure::TerminalConsent(
+            "browser_unavailable"
+        ))
+    ));
+    assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
+    let status = mcp_tool_request("status", None).unwrap();
+    let status_payload = server
+        .execute_with_failure_latch(&status, || async {
+            panic!("a stopped run must not reach the browser")
+        })
+        .await
+        .expect("a stopped run's status stays readable");
+    assert_eq!(status_payload["ready"], false);
+    assert_eq!(
+        status_payload["terminalConsent"]["code"],
+        "browser_unavailable"
+    );
+
+    let result = terminal_consent_call_result("browser_unavailable");
+    assert_eq!(result.is_error, Some(true));
+    let text = format!("{:?}", result.content);
+    assert!(text.contains("End this turn now"), "{text}");
+    assert!(!text.contains('\u{2014}'), "{text}");
+    let signal = result.structured_content.expect("terminal signal")["terminalConsent"].clone();
+    assert_eq!(signal["retryable"], false);
+    assert_eq!(signal["code"], "browser_unavailable");
+}
+
+/// An approval code still ends a run on its first failure, whatever the
+/// browser-unavailable count is.
+#[tokio::test]
+async fn approval_codes_still_latch_at_once_during_a_browser_unavailable_streak() {
+    let server = SharedBrowserMcpServer::new();
+    let click = mcp_tool_request(
+        "click",
+        json!({ "index": 0, "snapshotId": SNAPSHOT_ID })
+            .as_object()
+            .cloned(),
+    )
+    .unwrap();
+    assert!(matches!(
+        server
+            .execute_with_failure_latch(&click, browser_unavailable)
+            .await,
+        Err(SharedBrowserMcpExecutionFailure::Other(_))
+    ));
+    assert!(matches!(
+        server
+            .execute_with_failure_latch(&click, || async {
+                Err(anyhow::anyhow!(
+                    "Shared Browser approval was denied [approval_denied_non_retryable]"
+                ))
+            })
+            .await,
+        Err(SharedBrowserMcpExecutionFailure::TerminalConsent(
+            "approval_denied"
+        ))
+    ));
+    assert!(matches!(
+        server
+            .execute_with_failure_latch(&click, browser_unavailable)
+            .await,
+        Err(SharedBrowserMcpExecutionFailure::TerminalConsent(
+            "approval_denied"
+        ))
+    ));
+}
+
+/// The controller tells the runtime the browser is unavailable by its exit
+/// code: when it cannot connect over CDP, when the run's tab is gone, or when
+/// the tab closes under a command. Any other failure exits 1, including a
+/// page error that quotes Playwright's words.
+#[test]
+fn the_controller_reports_an_unreachable_browser_by_its_exit_code() {
+    let unavailable = |output: &Output| {
+        controller_failure(output.status, &output.stderr)
+            .downcast_ref::<BrowserUnavailable>()
+            .is_some()
+    };
+    let fixture = EmbeddedControllerFixture::new();
+    let refused = fixture.run("cdp-refused", "GET", "/v1/snapshot", None);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(
+        refused.status.code(),
+        Some(BROWSER_UNAVAILABLE_EXIT_CODE),
+        "{stderr}"
+    );
+    assert!(stderr.contains("could not be reached"), "{stderr}");
+    assert!(unavailable(&refused));
+
+    let missing = fixture.run_for_page("safe", "missing-target", "GET", "/v1/snapshot", None);
+    let stderr = String::from_utf8_lossy(&missing.stderr);
+    assert_eq!(
+        missing.status.code(),
+        Some(BROWSER_UNAVAILABLE_EXIT_CODE),
+        "{stderr}"
+    );
+    assert!(stderr.contains("is unavailable"), "{stderr}");
+    assert!(unavailable(&missing));
+
+    for (mode, code, error) in [
+        (
+            "page-closed-during-click",
+            BROWSER_UNAVAILABLE_EXIT_CODE,
+            "has been closed",
+        ),
+        ("page-quotes-closed-message", 1, "is not visible"),
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(mode);
+        fixture.prepare_routine_start("page-target");
+        let body = json!({"index": 0, "snapshotId": snapshot_id}).to_string();
+        let output = fixture
+            .command_for_with_timeout(mode, "page-target", "POST", "/v1/click", Some(&body), "100")
+            .output()
+            .expect("click");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(code), "{mode}: {stderr}");
+        assert!(stderr.contains(error), "{mode}: {stderr}");
+        assert_eq!(
+            unavailable(&output),
+            code == BROWSER_UNAVAILABLE_EXIT_CODE,
+            "{mode}"
+        );
+    }
 }
 
 const CANARY_MARKER: &str = "INSTAFYCANARY";

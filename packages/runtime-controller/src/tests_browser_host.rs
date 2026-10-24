@@ -822,6 +822,10 @@ async fn origin_proxy_browser_host_routes_follow_the_policy() -> anyhow::Result<
         let (status, body) = send(off.clone(), "GET", "browser/host", &view, vec![]).await?;
         assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
         assert!(body.contains("origin path not found"), "{body}");
+        assert!(
+            body.contains("\"code\":\"browser_host_policy_off\""),
+            "{body}"
+        );
         let (status, body) = send(
             off.clone(),
             "POST",

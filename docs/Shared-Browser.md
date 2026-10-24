@@ -506,6 +506,18 @@ already have opened pages or changed something. The code stays in the run's
 `browser/terminal-consent` artifact. The tool result tells
 the model that an unanswered prompt is not a denial and that it must end the
 turn without retrying.
+
+A run also stops when Instafy's browser goes away under it. The controller
+exits with code 75 when it cannot connect to the browser over CDP, when the
+run's own tab is gone, or when Playwright reports that the tab or browser
+closed during the command; the runtime judges that by the exit code alone,
+never by error text a page could shape. Two such tool calls in a row latch the
+terminal code `browser_unavailable` like an approval code: later calls do not
+start the controller, status reports `ready: false`, the tool result tells the
+model to end the turn, and the person reads "Instafy's browser closed or
+stopped responding, so I stopped there. Open the browser again and send a
+message to continue." One failed call followed by any other answer starts the
+count over, so a single slow connect does not end a turn.
 If the client temporarily loses its network, it retains the exact visible
 request, shows reconnecting state, and retries the bounded poll/decision path;
 the origin's one-use fingerprint and replay checks remain authoritative.
@@ -839,8 +851,8 @@ to the webdev one:
   the space. Neither field names a lease or a person.
 - **Origin routes.** The controller proxies exactly `GET`/`HEAD browser/host`
   (`browser.view`) and `POST browser/host/start` (`browser.control`, body at
-  most 4 KiB). Both answer 404 `origin path not found` unless the policy covers
-  the origin's space.
+  most 4 KiB). Both answer 404 `origin path not found` with the code
+  `browser_host_policy_off` unless the policy covers the origin's space.
 - **Dispatch.** Shared dispatch to a registered host answers 409 when the
   policy does not cover its space, and the request is not sent to another
   runtime. Registration does not read the policy: the stored consent lasts
@@ -1444,8 +1456,10 @@ owns the child and makes every state change:
 Origin serves the host only when the process that runs it hands it one
 (runtime-agent, through `OriginHttpServer::set_browser_host`). Desktop, the
 boot-time Shared Browser and the multi-tenant gateway have none: there
-`/browser/host` and `/browser/host/start` answer 404 and every other browser
-route behaves as before.
+`/browser/host` and `/browser/host/start` answer 404 with the code
+`browser_host_absent`, and every other browser route behaves as before. The
+code tells origin's own answer apart from a 404 that the controller (its
+`browser_host_policy_off`) or anything else in front of origin gives.
 
 - `GET /browser/host` (`browser.view`, `Cache-Control: no-store`) answers
   `{"version":1,"mode":"lazy","state":"idle|starting|ready|stopping|failed|poisoned","generation":"<uuid>|null","failure":"<token>|null","startedByYou":false,"othersPresent":false,"controlledByOther":false,"agentRunActive":false,"agentRunStartedByYou":false}`.
