@@ -6827,27 +6827,71 @@ mod project_memory_bootstrap_tests {
         snapshot
     }
 
-    /// The runtime commits none of its bundled files in a git-canonical
-    /// space with history, so a bundled file missing here never reaches
-    /// `main` there.
-    #[test]
-    fn managed_defaults_cover_every_bundled_runtime_asset() {
+    /// Lists the bundled asset files under `root`, sorted. A file whose name
+    /// starts with `.` or ends with `~` (a Finder `.DS_Store`, an editor swap
+    /// file or backup) is not a bundled asset and is skipped. Only file names
+    /// are filtered, so the `.agents` folder is still walked.
+    fn bundled_asset_files(root: &std::path::Path) -> Vec<String> {
         fn collect(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>) {
             for entry in std::fs::read_dir(dir).expect("assets folder") {
                 let path = entry.expect("asset entry").path();
                 if path.is_dir() {
                     collect(root, &path, out);
-                } else {
-                    let relative = path.strip_prefix(root).expect("under the assets root");
-                    out.push(relative.to_string_lossy().replace('\\', "/"));
+                    continue;
                 }
+                let name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy())
+                    .unwrap_or_default();
+                if name.starts_with('.') || name.ends_with('~') {
+                    continue;
+                }
+                let relative = path.strip_prefix(root).expect("under the assets root");
+                out.push(relative.to_string_lossy().replace('\\', "/"));
             }
         }
+        let mut files = Vec::new();
+        collect(root, root, &mut files);
+        files.sort();
+        files
+    }
+
+    #[test]
+    fn bundled_asset_listing_skips_finder_and_editor_files() {
+        let root = tempfile::tempdir().expect("temp assets folder");
+        std::fs::create_dir_all(root.path().join(".agents/skills/instafy-example"))
+            .expect("skill folder");
+        for (path, content) in [
+            ("INSTAFY.md", "bundled"),
+            ("INSTAFY.md~", "editor backup"),
+            (".DS_Store", "finder"),
+            (".agents/skills/.DS_Store", "finder"),
+            (".agents/skills/instafy-example/SKILL.md", "bundled"),
+            (
+                ".agents/skills/instafy-example/.SKILL.md.swp",
+                "editor swap",
+            ),
+        ] {
+            std::fs::write(root.path().join(path), content).expect("asset file");
+        }
+
+        assert_eq!(
+            bundled_asset_files(root.path()),
+            vec![
+                ".agents/skills/instafy-example/SKILL.md".to_string(),
+                "INSTAFY.md".to_string(),
+            ]
+        );
+    }
+
+    /// The runtime commits none of its bundled files in a git-canonical
+    /// space with history, so a bundled file missing here never reaches
+    /// `main` there.
+    #[test]
+    fn managed_defaults_cover_every_bundled_runtime_asset() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../runtime-agent/assets/instafy");
-        let mut bundled = Vec::new();
-        collect(&root, &root, &mut bundled);
-        bundled.sort();
+        let bundled = bundled_asset_files(&root);
 
         let mut managed: Vec<String> = PROJECT_MEMORY_TEMPLATE_FILES
             .iter()
