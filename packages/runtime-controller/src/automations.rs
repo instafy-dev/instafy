@@ -1011,6 +1011,11 @@ async fn execute_automation_once(
             dispatch_queue_entry_id: None,
             allow_silent_automation_decline: record.silent_when_nothing_to_report,
             allow_internal_review: record.mode == MODE_SPACE_REVIEW,
+            trigger: Some(crate::job_trigger::JobTrigger::new(
+                crate::job_trigger::TriggerKind::Automatic,
+                Some(record.user_id),
+            )),
+            stamps_trigger: false,
         },
     )
     .await;

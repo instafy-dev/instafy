@@ -762,6 +762,7 @@ pub(crate) async fn create_project_conversation(
     }
 
     request.conversation_is_new = true;
+    request.trigger = crate::job_trigger::JobTrigger::of_send(&context, &request.metadata);
 
     if let Some(conversation_id) = request.conversation_id {
         inject_conversation_metadata(&mut request.metadata, &conversation_id);
@@ -1361,8 +1362,18 @@ pub(crate) async fn record_conversation_message_only(
         Some(JsonValue::Object(map)) => JsonValue::Object(map),
         _ => json!({}),
     };
+    let trigger = crate::job_trigger::JobTrigger::of_send(&context, &metadata_value);
     let mut metadata_value =
         sanitize_client_recorded_message_metadata(metadata_value, context.is_service_role);
+    if let Some(map) = metadata_value.as_object_mut().filter(|_| role == "user") {
+        crate::job_trigger::stamp_message(
+            map,
+            trigger.as_ref(),
+            context
+                .user_id
+                .is_some_and(|user_id| state.config.device_grants_allow(user_id)),
+        );
+    }
     normalize_human_mention_metadata(&mut metadata_value)?;
     strip_client_internal_metadata(&mut metadata_value);
     let client_message_id = body
@@ -2733,6 +2744,9 @@ pub(crate) async fn post_conversation_message(
 
     request.conversation_is_new = false;
     request.expected_lane_idle = expected_lane_idle;
+    // From the caller's own credential, never `access_context`: a job token
+    // acts as its subject there, but is no person typing.
+    request.trigger = crate::job_trigger::JobTrigger::of_send(&context, &request.metadata);
 
     if let Some(conversation_id) = request.conversation_id {
         inject_conversation_metadata(&mut request.metadata, &conversation_id);
@@ -4136,6 +4150,9 @@ fn build_conversation_message_metadata(request: &DispatchPromptNormalized) -> Js
         map.insert(crate::site_intent::SITE_INTENT_KEY.to_string(), copy);
     }
     map.insert("prompt_metadata".to_string(), prompt_metadata);
+    if request.stamps_trigger {
+        crate::job_trigger::stamp_message(&mut map, request.trigger.as_ref(), true);
+    }
     // Prompt metadata is otherwise nested for the runtime. Persist the validated
     // human identities at the same canonical message key as record-only sends.
     if let Some(mentions) = request.metadata.get("mentionedUserIds") {

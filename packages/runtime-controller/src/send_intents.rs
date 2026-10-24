@@ -790,8 +790,16 @@ pub(crate) async fn apply_steer_send_intent(
         Some(JsonValue::Object(map)) => JsonValue::Object(map),
         _ => json!({}),
     };
+    let trigger = crate::job_trigger::JobTrigger::of_send(&context, &metadata);
     metadata = sanitize_client_recorded_message_metadata(metadata, context.is_service_role);
     let metadata_map = metadata.as_object_mut().unwrap_or_else(|| unreachable!());
+    crate::job_trigger::stamp_message(
+        metadata_map,
+        trigger.as_ref(),
+        context
+            .user_id
+            .is_some_and(|user_id| state.config.device_grants_allow(user_id)),
+    );
     metadata_map.insert(
         "clientMessageId".to_string(),
         JsonValue::String(client_send_id.clone()),

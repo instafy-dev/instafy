@@ -275,6 +275,8 @@ pub(crate) fn build_app_config(private_key: &str, public_key: &str, key_id: &str
         strict_mode: false,
         dev_isolation_mode: false,
         dev_mode: false,
+        device_grants_enabled: false,
+        device_grants_user_ids: vec![],
         runtime_idle_release_seconds: 150,
         runtime_idle_stop_seconds: 1800,
         runtime_limit_reclaim_idle_seconds: 120,
@@ -2215,6 +2217,16 @@ pub(crate) async fn require_origin_test_pool_with_max_size(
                 "{test_name} requires TEST_DATABASE_URL; run it through `pnpm test:controller`"
             )
         })
+}
+
+/// Runs one statement on a connection of its own from `pool`, returned as
+/// soon as it ends, and gives the number of rows it changed.
+pub(crate) async fn sql(
+    pool: &PgPool,
+    statement: &str,
+    params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+) -> anyhow::Result<u64> {
+    Ok(pool.get().await?.execute(statement, params).await?)
 }
 
 /// Sends one request to `app` with `authorization` as its header, and returns

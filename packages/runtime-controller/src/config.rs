@@ -861,6 +861,12 @@ pub struct AppConfig {
     pub strict_mode: bool,
     pub dev_isolation_mode: bool,
     pub dev_mode: bool,
+    /// `DEVICE_GRANTS_ENABLED`, off by default: the switch for letting a
+    /// person's agents use that person's own devices. With it on, that holds
+    /// for every user under `DEV_MODE` and otherwise only for
+    /// `DEVICE_GRANTS_USER_IDS` ([`AppConfig::device_grants_allow`]).
+    pub device_grants_enabled: bool,
+    pub device_grants_user_ids: Vec<Uuid>,
     pub runtime_idle_release_seconds: i64,
     /// Stop a healthy hosted runtime after this many seconds with no user
     /// activity and no leased job. Without this, an abandoned runtime bills
@@ -1099,7 +1105,23 @@ pub(crate) fn working_state_saves_enabled(raw: Option<&str>) -> bool {
     )
 }
 
+/// `DEVICE_GRANTS_ENABLED`: off unless set to `on` (or `1`, `true`, `yes`).
+pub(crate) fn device_grants_enabled(raw: Option<&str>) -> bool {
+    matches!(
+        raw.map(|value| value.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("on" | "1" | "true" | "yes")
+    )
+}
+
 impl AppConfig {
+    /// Whether device grants are on for `user_id`. With
+    /// `DEVICE_GRANTS_ENABLED` off they are on for nobody.
+    pub fn device_grants_allow(&self, user_id: Uuid) -> bool {
+        self.device_grants_enabled
+            && (self.dev_mode || self.device_grants_user_ids.contains(&user_id))
+    }
+
     pub fn from_env() -> anyhow::Result<Self> {
         fn read_first_env(vars: &[&str]) -> Option<String> {
             vars.iter().find_map(|name| {
@@ -1399,6 +1421,12 @@ impl AppConfig {
             .map(|value| parse_uuid_list(&value))
             .unwrap_or_default();
         let bug_reports_operator_user_ids = std::env::var("BUG_REPORTS_OPERATOR_USER_IDS")
+            .ok()
+            .map(|value| parse_uuid_list(&value))
+            .unwrap_or_default();
+        let device_grants_enabled =
+            device_grants_enabled(std::env::var("DEVICE_GRANTS_ENABLED").ok().as_deref());
+        let device_grants_user_ids = std::env::var("DEVICE_GRANTS_USER_IDS")
             .ok()
             .map(|value| parse_uuid_list(&value))
             .unwrap_or_default();
@@ -1835,6 +1863,8 @@ impl AppConfig {
             strict_mode,
             dev_isolation_mode,
             dev_mode,
+            device_grants_enabled,
+            device_grants_user_ids,
             runtime_idle_release_seconds,
             runtime_idle_stop_seconds,
             runtime_limit_reclaim_idle_seconds,
@@ -1982,14 +2012,14 @@ impl StripeConfig {
 #[cfg(test)]
 mod tests {
     use super::{
-        created_admin_user_id, database_pool_size_from_values, find_admin_user_by_email,
-        jwks_on_demand_interval_seconds, managed_ai_chat_reasoning_effort,
-        managed_ai_decline_waiver_units, match_admin_users_page, normalize_public_app_url,
-        normalized_admin_user_email, parse_browser_profile_persist_project_ids,
-        published_development_key_warning, resolve_credential_encryption_key,
-        resolve_credential_key_ring, resolve_user_token_secret, working_state_saves_enabled,
-        AdminUserLookup, AdminUsersPage, CredentialEncryptionKey, HostedBrowserHostPolicy,
-        DEV_USER_TOKEN_SECRET,
+        created_admin_user_id, database_pool_size_from_values, device_grants_enabled,
+        find_admin_user_by_email, jwks_on_demand_interval_seconds,
+        managed_ai_chat_reasoning_effort, managed_ai_decline_waiver_units, match_admin_users_page,
+        normalize_public_app_url, normalized_admin_user_email,
+        parse_browser_profile_persist_project_ids, published_development_key_warning,
+        resolve_credential_encryption_key, resolve_credential_key_ring, resolve_user_token_secret,
+        working_state_saves_enabled, AdminUserLookup, AdminUsersPage, CredentialEncryptionKey,
+        HostedBrowserHostPolicy, DEV_USER_TOKEN_SECRET,
     };
     use crate::credential_keys::{
         credential_key_id, CredentialKeySlot, MAX_PREVIOUS_CREDENTIAL_KEYS,
@@ -2031,6 +2061,16 @@ mod tests {
                     .is_some_and(|warning| warning.contains("TUNNEL_DOMAIN")),
                 "{value}"
             );
+        }
+    }
+
+    #[test]
+    fn device_grants_are_off_unless_switched_on() {
+        for on in ["on", "1", "true", " Yes "] {
+            assert!(device_grants_enabled(Some(on)), "{on:?}");
+        }
+        for off in [None, Some(""), Some("off"), Some("0"), Some("enabled")] {
+            assert!(!device_grants_enabled(off), "{off:?}");
         }
     }
 

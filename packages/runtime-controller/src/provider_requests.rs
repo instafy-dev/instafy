@@ -25,7 +25,7 @@ use crate::{
 const PROVIDER_ID_MAX_LEN: usize = 128;
 const TOOL_NAME_MAX_LEN: usize = 256;
 const RESOURCE_URI_MAX_LEN: usize = 512;
-const DEVICE_ID_MAX_LEN: usize = 256;
+pub(crate) const DEVICE_ID_MAX_LEN: usize = 256;
 const DEVICE_LABEL_MAX_LEN: usize = 256;
 const REQUEST_STATUS_PENDING: &str = "pending";
 const REQUEST_STATUS_CLAIMED: &str = "claimed";

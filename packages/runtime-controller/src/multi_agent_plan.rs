@@ -13,6 +13,7 @@ use crate::dispatch::{
     is_managed_ai_hosted_runtime_refusal, normalize_dispatch_request, process_dispatch_prompt,
     DispatchPromptRequest, MANAGED_AI_HOSTED_RUNTIME_REQUIRED_CODE,
 };
+use crate::job_trigger::{JobTrigger, TriggerKind};
 use crate::runs::{load_run_snapshot, run_snapshot_to_json};
 use crate::{
     bad_request, internal_error, publish_controller_event_with_conversation, ApiError, AppState,
@@ -223,7 +224,8 @@ pub(crate) async fn maybe_execute_multi_agent_plan_message(
         is_service_role: true,
         scoped_claims: None,
     };
-    let normalized = normalize_dispatch_request(dispatch)?;
+    let mut normalized = normalize_dispatch_request(dispatch)?;
+    normalized.trigger = Some(JobTrigger::new(TriggerKind::Automatic, user_id));
     let response = match process_dispatch_prompt(state, &context, normalized).await {
         Ok(response) => response,
         // Workers without a credential of their own would run only on the
@@ -1439,7 +1441,8 @@ async fn dispatch_lead_checkpoint(
         is_service_role: true,
         scoped_claims: None,
     };
-    let normalized = normalize_dispatch_request(dispatch)?;
+    let mut normalized = normalize_dispatch_request(dispatch)?;
+    normalized.trigger = Some(JobTrigger::new(TriggerKind::Automatic, user_id));
     let response = match process_dispatch_prompt(state, &context, normalized).await {
         Ok(response) => response,
         // A lead without a credential of its own would be pinned to the

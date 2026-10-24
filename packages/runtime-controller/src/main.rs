@@ -50,6 +50,7 @@ mod git_events;
 mod group_participation;
 mod imports;
 mod integrations;
+mod job_trigger;
 mod jwks;
 mod message_search;
 mod message_stashes;
@@ -106,6 +107,8 @@ mod tests_deleted_space_fence;
 mod tests_hosted_runtime_billing;
 #[cfg(test)]
 mod tests_idle_lease_poll;
+#[cfg(test)]
+mod tests_job_trigger_and_delivery;
 #[cfg(test)]
 mod tests_managed_ai_refund;
 #[cfg(test)]

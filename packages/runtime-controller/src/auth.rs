@@ -1008,6 +1008,8 @@ mod tests {
             strict_mode: false,
             dev_isolation_mode: false,
             dev_mode: false,
+            device_grants_enabled: false,
+            device_grants_user_ids: vec![],
             runtime_idle_release_seconds: 150,
             runtime_idle_stop_seconds: 1800,
             runtime_limit_reclaim_idle_seconds: 120,

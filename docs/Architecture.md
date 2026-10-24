@@ -112,6 +112,23 @@ answers through `/projects/:id/provider-requests` (list, claim, complete).
   usual reconnect and refusal backoff. It also asks for `events.resync` and hands it on as
   `onResync`, so a device reads its requests again after the stream dropped events.
 
+## Agent Job Trigger
+
+Each agent job records what started it, from the caller's own credential and never from a request
+body: whose cause it was and when the controller received it, on the database clock
+(`agent_jobs.trigger_user_id`, `trigger_received_at`).
+
+- The message routes count a send as its person's (`person`) only when their own signed-in
+  session says `metadata.input: {"kind": "typed"}`, and as speech one of their devices heard
+  (`device_voice`) for `{"kind": "voice", "deviceId": ...}`. A resend (`retryOfMessageId`) or a
+  goal's next turn (`goalContinuation`) is a `resend`. A job token's, the service role's, an
+  automation's and an agent plan's sends are `automatic`. A send that says nothing has no trigger.
+- A queued message is received when it was queued; Send now, when it is pressed.
+- Where device grants are on for its sender, a user message also keeps the kind as
+  `metadata.trigger`, over any value a client wrote; anywhere else it keeps no such key. Device
+  grants are off unless `DEVICE_GRANTS_ENABLED` is on, and then on for every user under
+  `DEV_MODE` and otherwise only for `DEVICE_GRANTS_USER_IDS`.
+
 ## Canonical Workspace Modes
 There are two supported canonical filesystem modes:
 

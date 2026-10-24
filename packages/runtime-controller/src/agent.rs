@@ -4448,6 +4448,7 @@ pub(crate) async fn enqueue_agent_job_record(
         extract_job_hierarchy_from_payload(&payload_json);
     let payload_param = PgJson(&payload_json);
     let status = "queued";
+    let trigger = request.trigger.as_ref();
 
     let row = transaction
         .query_opt(
@@ -4465,11 +4466,14 @@ pub(crate) async fn enqueue_agent_job_record(
                  target_runtime_id,
                  parent_job_id,
                  plan_group_id,
-                 agent_role
+                 agent_role,
+                 trigger_user_id,
+                 trigger_received_at
              ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11,
                  (select parent.id from agent_jobs parent
                   where parent.id = $12 and parent.project_id = $1),
-                 $13, $14)
+                 $13, $14, $15,
+                 case when $16 then coalesce($17, now()) end)
              returning id",
             &[
                 &project.id,
@@ -4486,6 +4490,9 @@ pub(crate) async fn enqueue_agent_job_record(
                 &parent_job_id,
                 &plan_group_id,
                 &agent_role,
+                &trigger.and_then(|trigger| trigger.user_id),
+                &trigger.is_some(),
+                &trigger.and_then(|trigger| trigger.received_at),
             ],
         )
         .await

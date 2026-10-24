@@ -25,6 +25,7 @@ use crate::ai_metering::job_record::{insert_platform_job_record, PlatformJobReco
 use crate::auth::{authenticate_request, RequestContext};
 use crate::bug_reports::{record_system_bug_report, SystemBugReportInput};
 use crate::credentials;
+use crate::job_trigger::JobTrigger;
 use crate::model_defaults::DEFAULT_MANAGED_AI_PROVIDER_ID;
 use crate::state::publish_controller_event_to_user;
 use crate::{
@@ -221,6 +222,14 @@ pub(crate) struct DispatchPromptNormalized {
     /// deliberately absent from the public dispatch request shape.
     pub(crate) allow_silent_automation_decline: bool,
     pub(crate) allow_internal_review: bool,
+    /// What started the jobs this dispatch queues. Set only by the code that
+    /// authenticated the cause, never from a request body
+    /// ([`crate::job_trigger`]).
+    pub(crate) trigger: Option<JobTrigger>,
+    /// Whether its user message says what made it
+    /// ([`crate::job_trigger::stamp_message`]). Dispatch sets it for a sender
+    /// device grants are on for.
+    pub(crate) stamps_trigger: bool,
 }
 
 fn normalize_agent_handle(raw: &str) -> Option<String> {
@@ -930,6 +939,7 @@ async fn dispatch_prompt(
 ) -> Result<Json<DispatchPromptResponse>, (StatusCode, Json<ApiError>)> {
     let context = authenticate_request(&state.config, &headers).await?;
     let mut request = normalize_dispatch_request(payload)?;
+    request.trigger = JobTrigger::of_send(&context, &request.metadata);
 
     if !state.config.dev_mode && !context.is_service_role {
         if let Some(user_id) = context.user_id {
@@ -987,6 +997,9 @@ pub(crate) async fn process_dispatch_prompt_timed(
     timings: &mut DispatchPhaseTimings,
 ) -> Result<DispatchPromptResponse, (StatusCode, Json<ApiError>)> {
     let started = Instant::now();
+    request.stamps_trigger = context
+        .user_id
+        .is_some_and(|user_id| state.config.device_grants_allow(user_id));
     crate::task_usage::strip_authoring_claims(&mut request.metadata);
     crate::user_input_requests::routing::strip_claims(&mut request.metadata);
     // "Via a site" is the controller's to say: a client's claim is checked
@@ -3094,6 +3107,8 @@ pub(crate) fn normalize_dispatch_request(
         dispatch_queue_entry_id: None,
         allow_silent_automation_decline: false,
         allow_internal_review: false,
+        trigger: None,
+        stamps_trigger: false,
     })
 }
 
