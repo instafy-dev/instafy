@@ -1,4 +1,0 @@
----
----
-
-Read the tunnel domain from configuration instead of hard-coding it. The controller treats a host as a tunnel host when it is `TUNNEL_DOMAIN` (the tunnel broker's setting) or a name under it, plus the local `rt.test`; its origin proxy for Studio's browser view and its speech proxy both use that one check. Studio no longer keeps its own list of tunnel domains: it uses the endpoint the controller's access-token response returns, which already points at the controller for tunnel hosts. Studio's dev server allows `.<TUNNEL_DOMAIN>` when that variable is set and nothing extra otherwise. The bundled frontend-previews skill tells agents to allow the domain of the tunnel URL `instafy tunnel start` printed; workspaces holding an unedited copy of the previous version are upgraded. The controller needs `TUNNEL_DOMAIN` set to the broker's value; without it only local tunnels are proxied. No package changes.
