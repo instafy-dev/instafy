@@ -944,11 +944,22 @@ const PERSISTENT_CONTEXTS_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../runtime-agent/assets/instafy/.agents/skills/instafy-persistent-contexts/SKILL.md"
 ));
+const BOUND_SITES_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../runtime-agent/assets/instafy/.agents/skills/instafy-bound-sites/SKILL.md"
+));
+const BOUND_SITES_CHEATSHEET_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../runtime-agent/assets/instafy/.agents/skills/instafy-bound-sites/references/cheatsheet.md"
+));
 const PROJECT_MEMORY_MANAGED_DEFAULTS_STATE_PATH: &str =
     ".agents/.instafy-managed-defaults-state.json";
 const PROJECT_MEMORY_ASSETS_ROOT_ENV: &str = "INSTAFY_PROJECT_MEMORY_ASSETS_ROOT";
 
-const PROJECT_MEMORY_TEMPLATE_FILES: [ProjectMemoryTemplateFile; 27] = [
+/// Every file the runtime bundles under `assets/instafy`. In a git-canonical
+/// space with history the runtime commits none of them, so this bootstrap is
+/// what brings each one to `main`.
+const PROJECT_MEMORY_TEMPLATE_FILES: [ProjectMemoryTemplateFile; 29] = [
     ProjectMemoryTemplateFile {
         path: "INSTAFY.md",
         asset_relative_path: "INSTAFY.md",
@@ -1083,6 +1094,16 @@ const PROJECT_MEMORY_TEMPLATE_FILES: [ProjectMemoryTemplateFile; 27] = [
         path: ".agents/skills/instafy-persistent-contexts/SKILL.md",
         asset_relative_path: ".agents/skills/instafy-persistent-contexts/SKILL.md",
         fallback_content: PERSISTENT_CONTEXTS_TEMPLATE,
+    },
+    ProjectMemoryTemplateFile {
+        path: ".agents/skills/instafy-bound-sites/SKILL.md",
+        asset_relative_path: ".agents/skills/instafy-bound-sites/SKILL.md",
+        fallback_content: BOUND_SITES_TEMPLATE,
+    },
+    ProjectMemoryTemplateFile {
+        path: ".agents/skills/instafy-bound-sites/references/cheatsheet.md",
+        asset_relative_path: ".agents/skills/instafy-bound-sites/references/cheatsheet.md",
+        fallback_content: BOUND_SITES_CHEATSHEET_TEMPLATE,
     },
 ];
 
@@ -6804,6 +6825,76 @@ mod project_memory_bootstrap_tests {
             );
         }
         snapshot
+    }
+
+    /// The runtime commits none of its bundled files in a git-canonical
+    /// space with history, so a bundled file missing here never reaches
+    /// `main` there.
+    #[test]
+    fn managed_defaults_cover_every_bundled_runtime_asset() {
+        fn collect(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).expect("assets folder") {
+                let path = entry.expect("asset entry").path();
+                if path.is_dir() {
+                    collect(root, &path, out);
+                } else {
+                    let relative = path.strip_prefix(root).expect("under the assets root");
+                    out.push(relative.to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../runtime-agent/assets/instafy");
+        let mut bundled = Vec::new();
+        collect(&root, &root, &mut bundled);
+        bundled.sort();
+
+        let mut managed: Vec<String> = PROJECT_MEMORY_TEMPLATE_FILES
+            .iter()
+            .map(|template| template.path.to_string())
+            .collect();
+        managed.sort();
+        assert_eq!(managed, bundled);
+
+        for template in PROJECT_MEMORY_TEMPLATE_FILES {
+            assert_eq!(template.path, template.asset_relative_path);
+            assert_eq!(
+                template.fallback_content,
+                std::fs::read_to_string(root.join(template.asset_relative_path))
+                    .expect("bundled asset"),
+                "{}",
+                template.path
+            );
+        }
+    }
+
+    #[test]
+    fn missing_bound_sites_files_are_written_and_current_ones_left_alone() {
+        let skill = ".agents/skills/instafy-bound-sites/SKILL.md";
+        let sheet = ".agents/skills/instafy-bound-sites/references/cheatsheet.md";
+        let template = |path: &str| {
+            let template = PROJECT_MEMORY_TEMPLATE_FILES
+                .iter()
+                .find(|template| template.path == path)
+                .expect("bound-sites managed default");
+            load_project_memory_template_content(template)
+        };
+
+        let writes = plan_project_memory_writes(&snapshot_with(&[])).expect("plan");
+        for path in [skill, sheet] {
+            let write = writes
+                .iter()
+                .find(|write| write.path == path)
+                .unwrap_or_else(|| panic!("{path} written"));
+            assert_eq!(write.content, template(path));
+        }
+
+        let (skill_text, sheet_text) = (template(skill), template(sheet));
+        let current = snapshot_with(&[(skill, &skill_text), (sheet, &sheet_text)]);
+        let writes = plan_project_memory_writes(&current).expect("plan");
+        assert!(writes
+            .iter()
+            .all(|write| write.path != skill && write.path != sheet));
     }
 
     #[test]
