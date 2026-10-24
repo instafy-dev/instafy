@@ -103,19 +103,45 @@ test("queue bubbles keep six long messages scrollable and keyboard reordering re
   const { errors } = await openFixture(page, { width: 390, count: 6 });
   await trigger(page).click();
   await expect(page.getByTestId("chat-send-queue-item")).toHaveCount(6);
-  const grip = page.getByTestId("chat-send-queue-reorder").first();
-  await grip.focus();
-  await page.keyboard.press("Space");
-  await expect(page.getByTestId("chat-send-queue-drag-overlay")).toBeVisible();
+  const startKeyboardDrag = async (index: number) => {
+    const grip = page.getByTestId("chat-send-queue-reorder").nth(index);
+    await grip.focus();
+    await expect(grip).toBeInViewport();
+    await page.keyboard.press("Space");
+    await expect(page.getByTestId("chat-send-queue-drag-overlay")).toBeVisible();
+    // dnd-kit defers its keyboard listener to the next task so the pickup key
+    // cannot also drop. Complete that task before sending another key.
+    await page.evaluate(() => new Promise<void>(resolve => window.setTimeout(resolve, 0)));
+  };
+  await startKeyboardDrag(0);
   await page.keyboard.press("ArrowDown");
+  // Verify the rendered destination before committing the drop.
+  await expect(page.getByRole("status").filter({ hasText: "Queued message will move to position 2 of 6." })).toHaveCount(1);
   await page.keyboard.press("Space");
   await expect.poll(() => order(page)).toEqual(["queue-2", "queue-1", "queue-3", "queue-4", "queue-5", "queue-6"]);
   await expect(page.getByTestId("chat-send-queue-drag-overlay")).toHaveCount(0);
+
+  // Focusing the final row scrolls the bubble list. Reordering upward must use
+  // the new scrolled coordinates, and Escape must leave that order intact.
+  await startKeyboardDrag(5);
+  await page.keyboard.press("ArrowUp");
+  await expect(page.getByRole("status").filter({ hasText: "Queued message will move to position 5 of 6." })).toHaveCount(1);
+  await page.keyboard.press("Space");
+  const reordered = ["queue-2", "queue-1", "queue-3", "queue-4", "queue-6", "queue-5"];
+  await expect.poll(() => order(page)).toEqual(reordered);
+  await expect(page.getByTestId("chat-send-queue-drag-overlay")).toHaveCount(0);
+  await startKeyboardDrag(4);
+  await page.keyboard.press("ArrowDown");
+  await expect(page.getByRole("status").filter({ hasText: "Queued message will move to position 6 of 6." })).toHaveCount(1);
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("chat-send-queue-drag-overlay")).toHaveCount(0);
+  await expect.poll(() => order(page)).toEqual(reordered);
+  await expect(page.getByTestId("chat-send-queue-list")).toBeVisible();
   const lastRemove = page.getByTestId("chat-send-queue-remove").last();
   await lastRemove.focus();
   await expect(lastRemove).toBeInViewport();
   await lastRemove.press("Enter");
-  await expect.poll(() => order(page)).toEqual(["queue-2", "queue-1", "queue-3", "queue-4", "queue-5"]);
+  await expect.poll(() => order(page)).toEqual(["queue-2", "queue-1", "queue-3", "queue-4", "queue-6"]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("chat-send-queue-list")).toHaveCount(0);
@@ -157,33 +183,50 @@ test("read-only queue keeps the bubble list visible while disabling mutations", 
   expect(errors).toEqual([]);
 });
 
-test("joined toolbar fits stashed drafts and queue controls at 320px", async ({ page }) => {
-  const { errors } = await openFixture(page, { width: 320, stash: true });
-  const toolbar = page.getByTestId("chat-composer-joined-toolbar");
-  const stash = page.getByTestId("chat-message-stashes-summary");
-  await expect(stash).toBeInViewport();
-  await expect(trigger(page)).toBeInViewport();
-  const toolbarBounds = (await toolbar.boundingBox())!;
-  expect(toolbarBounds.x + toolbarBounds.width).toBeLessThanOrEqual(320);
-  const viewport = toolbar.getByTestId("conversation-resource-tabs").locator(".overflow-x-auto");
-  const viewBounds = (await viewport.boundingBox())!;
-  for (const name of ["Chat", "Browser"]) {
-    const bounds = (await toolbar.getByRole("tab", { name, exact: true }).boundingBox())!;
-    expect(bounds.x).toBeGreaterThanOrEqual(viewBounds.x - 1);
-    expect(bounds.x + bounds.width).toBeLessThanOrEqual(viewBounds.x + viewBounds.width + 1);
-  }
-  const browser = toolbar.getByRole("tab", { name: "Browser", exact: true });
-  await browser.focus();
-  await browser.press("Enter");
-  await expect(browser).toHaveAttribute("aria-selected", "true");
-  await trigger(page).click();
-  await expect(page.getByRole("dialog", { name: "Queued messages" })).toBeVisible();
-  await stash.click();
-  await expect(page.getByRole("dialog", { name: "Stashed drafts" })).toBeVisible();
-  await expect(page.getByRole("dialog", { name: "Queued messages" })).toHaveCount(0);
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-  expect(errors).toEqual([]);
-});
+for (const theme of ["light", "dark"]) for (const fontSize of [16, 20]) {
+  test(`joined toolbar fits stashed drafts and queue controls at 320px in ${theme} with ${fontSize}px text`, async ({ page }) => {
+    const { errors } = await openFixture(page, { width: 320, stash: true, theme });
+    // Exercise wider system-font metrics / increased text size without shrinking
+    // the labels or their touch targets to make them fit.
+    await page.addStyleTag({ content: `html { font-size: ${fontSize}px; }` });
+    const toolbar = page.getByTestId("chat-composer-joined-toolbar");
+    const stash = page.getByTestId("chat-message-stashes-summary");
+    await expect(stash).toBeInViewport();
+    await expect(trigger(page)).toBeInViewport();
+    const toolbarBounds = (await toolbar.boundingBox())!;
+    expect(toolbarBounds.x + toolbarBounds.width).toBeLessThanOrEqual(320);
+    const viewport = toolbar.getByTestId("conversation-resource-tabs").locator(".overflow-x-auto");
+    const tabs = ["Chat", "Browser"].map(name => toolbar.getByRole("tab", { name, exact: true }));
+    for (const tab of tabs) await expect(tab).toBeVisible();
+    await expect.poll(async () => {
+      const viewBounds = (await viewport.boundingBox())!;
+      return (await Promise.all(tabs.map(async tab => {
+        const bounds = (await tab.boundingBox())!;
+        return bounds.x >= viewBounds.x - 1 && bounds.x + bounds.width <= viewBounds.x + viewBounds.width + 1;
+      }))).every(Boolean);
+    }).toBe(true);
+    await expect(toolbar.getByRole("button", { name: /Scroll views/ })).toHaveCount(0);
+    const viewsBounds = (await toolbar.getByTestId("conversation-subtabs").boundingBox())!;
+    const controlsBounds = (await page.getByTestId("chat-saved-message-controls").boundingBox())!;
+    expect(controlsBounds.y >= viewsBounds.y + viewsBounds.height || controlsBounds.x >= viewsBounds.x + viewsBounds.width).toBe(true);
+    for (const button of [stash, trigger(page), ...tabs]) {
+      const bounds = (await button.boundingBox())!;
+      expect(bounds.width).toBeGreaterThanOrEqual(44);
+      expect(bounds.height).toBeGreaterThanOrEqual(44);
+    }
+    const browser = toolbar.getByRole("tab", { name: "Browser", exact: true });
+    await browser.focus();
+    await browser.press("Enter");
+    await expect(browser).toHaveAttribute("aria-selected", "true");
+    await trigger(page).click();
+    await expect(page.getByRole("dialog", { name: "Queued messages" })).toBeVisible();
+    await stash.click();
+    await expect(page.getByRole("dialog", { name: "Stashed drafts" })).toBeVisible();
+    await expect(page.getByRole("dialog", { name: "Queued messages" })).toHaveCount(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    expect(errors).toEqual([]);
+  });
+}
 
 test("joined toolbar hides an empty queue while keeping the mobile views and editor", async ({ page }) => {
   const { errors } = await openFixture(page, { width: 320, count: 0 });

@@ -1315,12 +1315,14 @@ export function ChatComposerSurface({
                   className="flex min-w-0 flex-wrap items-center gap-2 px-1 pb-1"
                   data-testid="chat-composer-joined-toolbar"
                 >
-                  {viewNavigation ? <div className="min-w-0 flex-1">{viewNavigation}</div> : null}
+                  {/* Wrap the saved controls before squeezing the view labels into
+                      an overflowing strip (font metrics vary across platforms). */}
+                  {viewNavigation ? <div className="min-w-0 max-w-full flex-auto">{viewNavigation}</div> : null}
                   {stashTrayProps?.stashes.length || queuedMessageCount > 0 || queueEditingItem ? (
                     <div
                       role="group"
                       aria-label="Saved messages"
-                      className={`ml-auto flex flex-wrap items-center justify-end gap-2 ${queueEditingItem ? "w-full" : "shrink-0"}`}
+                      className={`ml-auto flex max-w-full flex-wrap items-center justify-end gap-2 ${queueEditingItem ? "w-full" : "shrink-0"}`}
                       data-testid="chat-saved-message-controls"
                     >
                       {stashTrayProps && !queueEditingItem ? (
