@@ -108,6 +108,7 @@ function createOptions(
     scrollToBottom: vi.fn(),
     sendingAttachment: false,
     sharedBrowserActive: false,
+    sharedBrowserBindingPage: null,
     sharedBrowserRuntimeId: null,
     showCredentialsGate: vi.fn(),
     showStatus: vi.fn(),

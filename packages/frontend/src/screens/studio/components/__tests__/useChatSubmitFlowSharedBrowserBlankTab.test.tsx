@@ -268,6 +268,16 @@ describe("useChatSubmitFlow on the Browser tab with only a blank tab", () => {
     ]);
   });
 
+  it("makes the caller pass the tab a task binds to", () => {
+    // ChatPanel passing this is what lets a task use the blank tab. Leaving it
+    // out must fail to compile, or the Browser tab refuses every task again.
+    const { sharedBrowserBindingPage, ...withoutBindingPage } = createOptions();
+    expect(sharedBrowserBindingPage).toEqual(BLANK_TAB);
+    // @ts-expect-error sharedBrowserBindingPage is required
+    const incomplete: HookOptions = withoutBindingPage;
+    expect(incomplete).not.toHaveProperty("sharedBrowserBindingPage");
+  });
+
   it("leaves a Chat-tab send off the browser even with a blank tab open", async () => {
     const options = createOptions({ sharedBrowserActive: false });
     expect(await submit(options)).toBe(true);

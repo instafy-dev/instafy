@@ -198,7 +198,7 @@ export function useChatSubmitFlow({
   scrollToBottom,
   sendingAttachment,
   sharedBrowserActive: sharedBrowserShown,
-  sharedBrowserBindingPage = null,
+  sharedBrowserBindingPage,
   sharedBrowserRuntimeId,
   showCredentialsGate,
   showStatus,
@@ -314,9 +314,11 @@ export function useChatSubmitFlow({
   /**
    * The live tab a browser task binds to when no real page is open (a browser
    * that just started shows only a blank tab). Only its CDP target goes into
-   * the task metadata; it is never named in the message.
+   * the task metadata; it is never named in the message. Required, so a
+   * caller that stops passing it fails to compile instead of refusing every
+   * task on a blank tab again.
    */
-  sharedBrowserBindingPage?: BrowserSessionPage | null;
+  sharedBrowserBindingPage: BrowserSessionPage | null;
   sharedBrowserRuntimeId: string | null;
   showCredentialsGate: () => void;
   showStatus: ShowStatus;

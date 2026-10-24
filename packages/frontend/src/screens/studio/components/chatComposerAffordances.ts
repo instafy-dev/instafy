@@ -11,7 +11,7 @@ export function resolveChatComposerAffordances({
   runtimeControllerEnabled,
   queueStatusLabel,
   sendingAttachment,
-  sharedBrowserSendBlocked = false,
+  sharedBrowserSendBlocked,
   submissionPending,
   totalQueuedCount,
   voiceHoldActive,
@@ -34,8 +34,9 @@ export function resolveChatComposerAffordances({
   /**
    * A send from the browser's own composer would be refused (its browser is
    * still connecting or has no page), see resolveSharedBrowserSendBlocker.
+   * Required, so a caller cannot drop it without a compile error.
    */
-  sharedBrowserSendBlocked?: boolean;
+  sharedBrowserSendBlocked: boolean;
   submissionPending: boolean;
   totalQueuedCount: number;
   voiceHoldActive: boolean;

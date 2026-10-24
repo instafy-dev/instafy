@@ -325,6 +325,7 @@ describe("a message queued behind a turn a person's Stop cut off", () => {
       runtimeControllerEnabled: true,
       queueStatusLabel: presentation.queueStatusLabel,
       sendingAttachment: false,
+      sharedBrowserSendBlocked: false,
       submissionPending: false,
       totalQueuedCount: presentation.totalQueuedCount,
       voiceHoldActive: false,

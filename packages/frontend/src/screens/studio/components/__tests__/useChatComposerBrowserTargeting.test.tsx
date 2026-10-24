@@ -167,6 +167,22 @@ describe("useChatComposerBrowserTargeting", () => {
     expect(latestResult?.sharedBrowserBindingPage).toBeNull();
   });
 
+  it("offers no page to bind to while the live pages are stale", async () => {
+    // A failed poll keeps the last pages but marks them unread. Their blank
+    // tab may be gone, so a task must not bind to its id.
+    useBrowserSessionPagesMock.mockReturnValue({
+      pages: [{ ...blankBrowserPage, isActive: true }],
+      resolved: false,
+      focusPage: focusPageMock,
+    });
+    await act(async () => {
+      root.render(<Harness browserTransport="shared" />);
+    });
+
+    expect(latestResult?.preferredBrowserPage).toBeNull();
+    expect(latestResult?.sharedBrowserBindingPage).toBeNull();
+  });
+
   it("reads the pages only while the browser view is opening or live", async () => {
     await act(async () => {
       root.render(<Harness browserTransport="shared" />);

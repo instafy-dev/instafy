@@ -35,6 +35,7 @@ function resolveOutOfCreditsSendDisabled(result: HookResult | null) {
     runtimeControllerEnabled: true,
     queueStatusLabel: null,
     sendingAttachment: false,
+    sharedBrowserSendBlocked: false,
     submissionPending: false,
     totalQueuedCount: 0,
     voiceHoldActive: false,
