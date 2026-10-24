@@ -21,10 +21,62 @@ const PACKAGE_POLICIES = new Map([
     "@instafy/cli",
     {
       directory: "packages/instafy-cli",
+      // `instafy bind` runs the bound-sites binder that scripts/copy-bind.mjs copies into dist/bind
+      // (its bin, src and client plus LICENSE; never its tests or examples). Keep this list in step
+      // with that copy: test/package-artifact.test.mjs fails a pull request whose npm pack differs.
       files: [
         "package/LICENSE",
         "package/README.md",
         "package/bin/instafy.js",
+        "package/dist/bind/LICENSE",
+        "package/dist/bind/bin/instafy-bind.mjs",
+        "package/dist/bind/client/bind-client.js",
+        "package/dist/bind/src/apply.mjs",
+        "package/dist/bind/src/bound.mjs",
+        "package/dist/bind/src/budget.mjs",
+        "package/dist/bind/src/check.mjs",
+        "package/dist/bind/src/config.mjs",
+        "package/dist/bind/src/controller.mjs",
+        "package/dist/bind/src/executors/agent.mjs",
+        "package/dist/bind/src/executors/script.mjs",
+        "package/dist/bind/src/handler-kit.mjs",
+        "package/dist/bind/src/init.mjs",
+        "package/dist/bind/src/jobs.mjs",
+        "package/dist/bind/src/net.mjs",
+        "package/dist/bind/src/page-fetch.mjs",
+        "package/dist/bind/src/preview-host.mjs",
+        "package/dist/bind/src/protocol.mjs",
+        "package/dist/bind/src/records-schema.mjs",
+        "package/dist/bind/src/records.mjs",
+        "package/dist/bind/src/save-owner.mjs",
+        "package/dist/bind/src/schema-lite.mjs",
+        "package/dist/bind/src/server.mjs",
+        "package/dist/bind/src/sse.mjs",
+        "package/dist/bind/src/starters/blank/app.js",
+        "package/dist/bind/src/starters/blank/index.html",
+        "package/dist/bind/src/starters/checklist/app.js",
+        "package/dist/bind/src/starters/checklist/bound.json",
+        "package/dist/bind/src/starters/checklist/data.json",
+        "package/dist/bind/src/starters/checklist/index.html",
+        "package/dist/bind/src/starters/compare/app.js",
+        "package/dist/bind/src/starters/compare/bound.json",
+        "package/dist/bind/src/starters/compare/data.json",
+        "package/dist/bind/src/starters/compare/index.html",
+        "package/dist/bind/src/starters/handlers/read_offer.mjs",
+        "package/dist/bind/src/starters/handlers/set_check.mjs",
+        "package/dist/bind/src/starters/ranked/app.js",
+        "package/dist/bind/src/starters/ranked/bound.json",
+        "package/dist/bind/src/starters/ranked/data.json",
+        "package/dist/bind/src/starters/ranked/index.html",
+        "package/dist/bind/src/starters/site.js",
+        "package/dist/bind/src/starters/theme.css",
+        "package/dist/bind/src/starters/timeline/app.js",
+        "package/dist/bind/src/starters/timeline/data.json",
+        "package/dist/bind/src/starters/timeline/index.html",
+        "package/dist/bind/src/static.mjs",
+        "package/dist/bind/src/tokens.mjs",
+        "package/dist/bind/src/try.mjs",
+        "package/dist/bind/src/web.mjs",
         "package/dist/cli.js",
         "package/package.json",
       ],
@@ -53,6 +105,13 @@ const PACKAGE_POLICIES = new Map([
     },
   ],
 ]);
+
+/** The exact tarball paths (each under `package/`) a publishable package may contain. */
+export function packageFileBoundary(name) {
+  const policy = PACKAGE_POLICIES.get(name);
+  if (!policy) fail(`unrecognized publishable package ${JSON.stringify(name)}`);
+  return [...policy.files].sort();
+}
 
 function fail(message) {
   throw new Error(`[changeset-pack] ${message}`);

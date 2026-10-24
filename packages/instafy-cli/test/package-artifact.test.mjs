@@ -11,6 +11,8 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { packageFileBoundary } from "../../../scripts/verify-changeset-pack.mjs";
+
 const packageRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const packageVersion = JSON.parse(
   readFileSync(path.join(packageRoot, "package.json"), "utf8"),
@@ -71,6 +73,13 @@ test("npm artifact installs and runs without workspace dependencies", () => {
     assert.deepEqual(
       packedFiles.filter((filePath) => !filePath.startsWith("dist/bind/")),
       ["LICENSE", "README.md", "bin/instafy.js", "dist/cli.js", "package.json"],
+    );
+    // The release workflow refuses a tarball whose files differ from the recorded boundary in
+    // scripts/verify-changeset-pack.mjs, so a pack change must update that list in the same PR.
+    assert.deepEqual(
+      packedFiles,
+      packageFileBoundary("@instafy/cli").map((filePath) => filePath.replace(/^package\//u, "")),
+      "npm pack matches the release verifier's recorded @instafy/cli file boundary",
     );
     // The bound-sites binder ships inside the CLI (zero dependencies, copied at build time).
     // `instafy bind init <dir> --starter <name>` copies its pages from dist/bind/src/starters.
