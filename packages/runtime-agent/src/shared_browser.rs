@@ -1013,13 +1013,7 @@ impl ServerHandler for SharedBrowserMcpServer {
             .execute_with_failure_latch(&browser_request, || execute_request(&browser_request))
             .await
         {
-            Ok(payload) => {
-                let text = serde_json::to_string_pretty(&payload)
-                    .unwrap_or_else(|_| "Shared Browser returned an unreadable result".to_string());
-                let mut result = CallToolResult::success(vec![Content::text(text)]);
-                result.structured_content = Some(payload);
-                Ok(result)
-            }
+            Ok(payload) => Ok(successful_tool_result(payload)),
             Err(SharedBrowserMcpExecutionFailure::TerminalConsent(code)) => {
                 Ok(terminal_consent_call_result(code))
             }
@@ -1030,6 +1024,17 @@ impl ServerHandler for SharedBrowserMcpServer {
             }
         }
     }
+}
+
+/// A successful call's result. The text is compact JSON: a code-mode model
+/// reads the whole result, text and structured content alike, so pretty
+/// printing only spent its context on whitespace.
+fn successful_tool_result(payload: JsonValue) -> CallToolResult {
+    let text = serde_json::to_string(&payload)
+        .unwrap_or_else(|_| "Shared Browser returned an unreadable result".to_string());
+    let mut result = CallToolResult::success(vec![Content::text(text)]);
+    result.structured_content = Some(payload);
+    result
 }
 
 pub fn is_shared_browser_mcp_command(args: &[OsString]) -> bool {
@@ -1093,7 +1098,7 @@ fn shared_browser_mcp_tools() -> Vec<Tool> {
         Tool::new(
             Cow::Borrowed("snapshot"),
             Cow::Borrowed(
-                "Read the current page title, URL, visible text, and indexed interactive elements.",
+                "Read what a person can see on the page: title, URL, visible text, and indexed interactive elements. Closed menus and drawers are left out until they are opened. `expanded` tells whether a toggle is open, `area` is the part of the page a control sits in, and links on the page's own site are paths.",
             ),
             schema(json!({ "type": "object", "properties": {}, "additionalProperties": false })),
         ),

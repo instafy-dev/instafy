@@ -1469,7 +1469,12 @@ enters inert values manually and starts a fresh observation. It checks that the
 password-style fixture value does not enter tool output or action telemetry.
 It also checks that ordinary non-submitting form buttons use routine approval,
 while genuine submission buttons wait for an explicit one-shot decision before
-the inert form's submission handler runs.
+the inert form's submission handler runs. A synthetic bookkeeping page then
+checks that snapshots list only what a person can see: submenus and an account
+menu collapsed with `max-height: 0` and a drawer moved off-canvas are left out
+of controls and text, opening the account menu or the drawer shows up in the
+click's result, receipts fill the 200-control limit, and the snapshot stays
+within a 7,000-token budget (about 10,800 before this check, about 5,300 now).
 Only fixed-schema results, timing summaries and inert-page screenshots are kept
 under `packages/frontend/test-results/browser-ci/shared-cobrowsing`; the profile
 and raw session files are removed.

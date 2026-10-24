@@ -582,6 +582,25 @@ Playwright only from the image-installed absolute module path and runs from the
 runtime-agent binary directory, never from project `node_modules`. Actions
 return concrete observed page state, including the final URL and title.
 
+A snapshot lists what a person can see. A control or run of text is left out
+when it is not rendered or is transparent, sits under `aria-hidden="true"` or
+`inert`, lies wholly where the page cannot be scrolled to (a closed off-canvas
+drawer), or is clipped to nothing by an `overflow: hidden` or `clip` box it is
+laid out in (a menu collapsed with `max-height: 0`). A scroll container with a
+real size only scrolls, so what it holds still counts. A native checkbox or
+switch drawn by a library stays listed when it is transparent over the styled
+control or operated through a visible label. Collapsed menus therefore no longer
+fill the 200-control limit, and opening one shows up in the click's own result.
+Snapshots and actions build the list with the same function, so indices and the
+`snapshotId` agree. Whether a page is a secret screen is still judged on all of
+its rendered text and every control's name, seen or not, so leaving hidden
+parts out never lifts withholding. Each control carries only its non-empty
+fields; `expanded` reports a toggle's state and `area` the part of the page it
+sits in (`header`, `nav`, `menu`, `dialog`, `tabs`, `search`, `footer` or
+`aside`), and a link on the page's own site is given as its path. The control's
+box stays inside the controller for the visible cursor, and the MCP text result
+is compact JSON beside the same structured content.
+
 A browser that has just started, such as the on-demand browser on a space's own
 machine, shows exactly `about:blank`, and a tab opened in the viewer shows the
 new-tab page (`chrome://newtab/` or `chrome://new-tab-page/`). `status` and
