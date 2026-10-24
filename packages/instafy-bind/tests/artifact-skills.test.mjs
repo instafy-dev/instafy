@@ -73,3 +73,8 @@ test("the bound-sites skill teaches Ask Octo as the clicker's own message, never
   assert.match(flat(SHEET), /`--agent-executor` is the owner's own option, never yours/);
   assert.doesNotMatch(SHEET, /--space <id>|--agent-budget/);
 });
+
+test("the bound-sites skill checks the page against every item the request named before replying", () => {
+  const bound = flat(BOUND);
+  assert.match(bound, /Then `instafy bind check <dir> --expect "<each item asked for>"`: add each item it lists as missing, or name it in the reply\./);
+});

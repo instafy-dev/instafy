@@ -38,6 +38,11 @@ export const SHARED_BROWSER_HOST_POLL_MS = 500;
 export const SHARED_BROWSER_HOST_STOPPING_RETRY_MS = 1_000;
 export const SPACE_MACHINE_COLD_START_TIMEOUT_MS = 180_000;
 export const SPACE_MACHINE_COLD_START_POLL_MS = 2_000;
+/**
+ * One read or start of Instafy's browser that has not answered by then is
+ * given up and polled again, so a hung request cannot outlast the wait.
+ */
+export const SHARED_BROWSER_HOST_REQUEST_TIMEOUT_MS = 10_000;
 /** Starts asked for in one wait; a browser that keeps failing is not retried forever. */
 const SHARED_BROWSER_HOST_MAX_START_REQUESTS = 3;
 
@@ -86,6 +91,46 @@ function isTokenError(error: unknown): boolean {
   return error instanceof Error && error.name === "SharedBrowserHostTokenError";
 }
 
+/** A read or start of Instafy's browser that did not answer in time; polled like a gateway error. */
+export class SharedBrowserHostRequestTimeoutError extends Error {
+  constructor() {
+    super("Instafy's browser did not answer in time.");
+    this.name = "SharedBrowserHostRequestTimeoutError";
+  }
+}
+
+function isRequestTimeout(error: unknown): boolean {
+  return error instanceof SharedBrowserHostRequestTimeoutError;
+}
+
+/**
+ * Runs one request with its own signal, aborted with the caller's and after
+ * `timeoutMs`; a request that ignores its signal still ends then.
+ */
+async function requestWithTimeout<T>(
+  call: (signal: AbortSignal) => Promise<T>,
+  parent: AbortSignal | undefined,
+  timeoutMs: number,
+): Promise<T> {
+  const controller = new AbortController();
+  const abortWithParent = () => controller.abort();
+  if (parent?.aborted) controller.abort();
+  parent?.addEventListener("abort", abortWithParent, { once: true });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new SharedBrowserHostRequestTimeoutError());
+    }, Math.max(0, timeoutMs));
+  });
+  try {
+    return await Promise.race([call(controller.signal), timeout]);
+  } finally {
+    clearTimeout(timer);
+    parent?.removeEventListener("abort", abortWithParent);
+  }
+}
+
 /**
  * Waits until Instafy's browser on the space's machine is ready, starting it
  * when it is idle or has failed and the person may control the browser.
@@ -98,8 +143,9 @@ function isTokenError(error: unknown): boolean {
  * | poisoned                         | error: the machine must restart          |
  *
  * A start refused with `browser_host_stopping` is asked again after a second.
- * Gateway errors (502, 503, 504) and token failures are polled through; the
- * whole wait is capped.
+ * Gateway errors (502, 503, 504), token failures and a read or start that
+ * has not answered in ten seconds are polled through; the whole wait is
+ * capped, and no request outlasts it.
  */
 export async function waitForSharedBrowserHostReady(params: {
   projectId: string;
@@ -111,6 +157,7 @@ export async function waitForSharedBrowserHostReady(params: {
   timeoutMs?: number;
   pollMs?: number;
   stoppingRetryMs?: number;
+  requestTimeoutMs?: number;
   now?: () => number;
   sleep?: Sleep;
 }): Promise<SharedBrowserHostWaitResult> {
@@ -119,12 +166,21 @@ export async function waitForSharedBrowserHostReady(params: {
   const pollMs = params.pollMs ?? SHARED_BROWSER_HOST_POLL_MS;
   const stoppingRetryMs = params.stoppingRetryMs ?? SHARED_BROWSER_HOST_STOPPING_RETRY_MS;
   const deadline = now() + (params.timeoutMs ?? SHARED_BROWSER_HOST_WAIT_TIMEOUT_MS);
-  const request: SharedBrowserHostRequest = {
+  const requestTimeoutMs = params.requestTimeoutMs ?? SHARED_BROWSER_HOST_REQUEST_TIMEOUT_MS;
+  const request = (signal: AbortSignal): SharedBrowserHostRequest => ({
     projectId: params.projectId,
     runtimeId: params.runtimeId,
     browserSessionId: params.browserSessionId,
-    signal: params.signal,
-  };
+    signal,
+  });
+  // Each request ends at its own bound or at the end of the wait, whichever
+  // comes first.
+  const bounded = <T>(call: (request: SharedBrowserHostRequest) => Promise<T>): Promise<T> =>
+    requestWithTimeout(
+      (signal) => call(request(signal)),
+      params.signal,
+      Math.min(requestTimeoutMs, Math.max(0, deadline - now())),
+    );
   let startRequests = 0;
   const cancelled = () => params.signal?.aborted === true;
   const pause = async (ms: number): Promise<boolean> => {
@@ -136,10 +192,10 @@ export async function waitForSharedBrowserHostReady(params: {
   while (!cancelled() && now() < deadline) {
     let snapshot: SharedBrowserHostSnapshot | null;
     try {
-      snapshot = await params.client.fetchHost(request);
+      snapshot = await bounded((value) => params.client.fetchHost(value));
     } catch (error) {
       if (cancelled()) break;
-      if (params.client.isUnavailableError(error) || isTokenError(error)) {
+      if (params.client.isUnavailableError(error) || isTokenError(error) || isRequestTimeout(error)) {
         if (!(await pause(pollMs))) break;
         continue;
       }
@@ -168,7 +224,7 @@ export async function waitForSharedBrowserHostReady(params: {
       }
       startRequests += 1;
       try {
-        const started = await params.client.startHost(request);
+        const started = await bounded((value) => params.client.startHost(value));
         if (cancelled()) break;
         if (started?.state === "ready") {
           return { kind: "ready", snapshot: started };
@@ -189,7 +245,7 @@ export async function waitForSharedBrowserHostReady(params: {
           }
           return { kind: "error", message: SHARED_BROWSER_HOST_COPY.didNotStart };
         }
-        if (!params.client.isUnavailableError(error) && !isTokenError(error)) {
+        if (!params.client.isUnavailableError(error) && !isTokenError(error) && !isRequestTimeout(error)) {
           return { kind: "error", message: error instanceof Error ? error.message : String(error) };
         }
       }

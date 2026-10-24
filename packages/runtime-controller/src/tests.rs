@@ -3701,6 +3701,58 @@ async fn scoped_plan_group_status_is_bound_to_token_run_and_conversation() -> an
                 )
                 .await?;
         }
+        // job_a opened a preview and its card was posted: the grant carries the job it ran
+        // in, and the controller-owned `_instafyPreview` its title and the card. It also
+        // opened a plain tunnel with a title of its own, and a preview that never became
+        // ready: neither posted a card.
+        for (tunnel, metadata) in [
+            (
+                "card",
+                json!({
+                    "localPort": 4173,
+                    "_instafyPreview": {
+                        "title": "Two weeks in the north",
+                        "path": "/",
+                        "messageIds": {"run-of-job-a": Uuid::new_v4()}
+                    },
+                    "_instafyActiveJob": {"jobId": job_a}
+                }),
+            ),
+            (
+                "plain",
+                json!({
+                    "title": "Not a card",
+                    "_instafyActiveJob": {"jobId": job_a}
+                }),
+            ),
+            (
+                "unready",
+                json!({
+                    "_instafyPreview": {"title": "Never ready", "path": "/", "messageIds": {}},
+                    "_instafyActiveJob": {"jobId": job_a}
+                }),
+            ),
+        ] {
+            connection
+                .execute(
+                    "insert into runtime_tunnel_grants
+                       (id, project_id, runtime_id, runtime_lease_id, provider, tunnel_id,
+                        hostname, url, status, expires_at, metadata)
+                     values ($1, $2, $3, $4, 'self_hosted', $5, $6, $7,
+                             'active', now() + interval '10 minutes', $8)",
+                    &[
+                        &Uuid::new_v4(),
+                        &project_id,
+                        &runtime_id,
+                        &runtime_lease_id,
+                        &format!("{tunnel}-{job_a}"),
+                        &format!("{tunnel}-{job_a}.invalid"),
+                        &format!("https://{tunnel}-{job_a}.invalid"),
+                        &PgJson(metadata),
+                    ],
+                )
+                .await?;
+        }
     }
 
     let config = build_app_config(
@@ -3761,6 +3813,12 @@ async fn scoped_plan_group_status_is_bound_to_token_run_and_conversation() -> an
         Some(1)
     );
     assert_eq!(allowed_a_payload["workers"][0]["jobId"], json!(job_a));
+    // The lead's checkpoint names the cards a lane posted from this record: the preview
+    // whose card the controller posted, by its own title, and no other tunnel.
+    assert_eq!(
+        allowed_a_payload["workers"][0]["openedPreviews"],
+        json!([{"title": "Two weeks in the north", "status": "active"}])
+    );
 
     let allowed_legacy_lease_less = app
         .clone()
@@ -24183,6 +24241,30 @@ fn human_recorded_messages_cannot_claim_reserved_controller_notice_identity() {
     assert_eq!(
         crate::conversations::sanitize_client_recorded_message_metadata(trusted.clone(), true),
         trusted
+    );
+}
+
+#[test]
+fn human_recorded_messages_cannot_claim_a_teams_plan() {
+    let forged = json!({
+        "jobId": "2f0c4d2e-0000-4000-8000-000000000001",
+        "multiAgentPlan": {
+            "groupId": "g",
+            "role": "worker",
+            "continuation": { "of": "2f0c4d2e-0000-4000-8000-000000000002" }
+        },
+        "multi_agent_plan": { "rateLimitRetry": { "of": "2f0c4d2e-0000-4000-8000-000000000002" } },
+        "custom": "kept"
+    });
+    let sanitized =
+        crate::conversations::sanitize_client_recorded_message_metadata(forged.clone(), false);
+    assert!(sanitized.get("multiAgentPlan").is_none(), "{sanitized}");
+    assert!(sanitized.get("multi_agent_plan").is_none(), "{sanitized}");
+    assert_eq!(sanitized["custom"], "kept");
+    // the controller's own records keep it
+    assert_eq!(
+        crate::conversations::sanitize_client_recorded_message_metadata(forged.clone(), true),
+        forged
     );
 }
 

@@ -16,6 +16,10 @@ export function MarketingFooter(props: { productName?: string }) {
             <TextLink to="/privacy" size="xs" tone="muted">
               Privacy Policy
             </TextLink>
+            <span className="text-slate-300 dark:text-slate-600">|</span>
+            <TextLink to="/abuse" size="xs" tone="muted">
+              Report abuse
+            </TextLink>
           </div>
           <Text variant="caption">© {new Date().getFullYear()} {productName}. Crafted with care.</Text>
         </div>

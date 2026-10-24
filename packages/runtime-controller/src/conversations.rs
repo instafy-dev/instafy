@@ -1227,6 +1227,13 @@ pub(crate) fn sanitize_client_recorded_message_metadata(
     }
     // Only a dispatch can say a message came from a site (crate::site_intent checks it there).
     crate::site_intent::take_site_intent_claim(&mut metadata);
+    // Only the controller says a message belongs to a team's plan: Studio reads a message's
+    // `multiAgentPlan` for the team card's lanes and for which lane a later run replaced, so a
+    // member's own record must not claim one.
+    if let Some(map) = metadata.as_object_mut() {
+        map.remove("multiAgentPlan");
+        map.remove("multi_agent_plan");
+    }
     let reserved = strip_reserved_controller_notice_claims(&mut metadata);
     if reserved {
         let Some(map) = metadata.as_object_mut() else {

@@ -29,6 +29,8 @@ test("requires release intent for package bytes but not package-only tests", () 
   assert.equal(isReleaseRelevantPath("packages/instafy-bind/src/server.mjs"), true);
   assert.equal(isReleaseRelevantPath("packages/instafy-bind/client/bind-client.js"), true);
   assert.equal(isReleaseRelevantPath("packages/instafy-bind/bin/instafy-bind.mjs"), true);
+  assert.equal(isReleaseRelevantPath("packages/instafy-bind/LICENSE"), true);
+  assert.equal(isReleaseRelevantPath("packages/instafy-bind/README.md"), false);
   assert.equal(isReleaseRelevantPath("packages/instafy-bind/tests/server.test.mjs"), false);
   assert.equal(isReleaseRelevantPath("packages/instafy-bind/examples/hello/index.html"), false);
   assert.equal(isReleaseRelevantPath("packages/instafy-bind-other/src/x.mjs"), false);

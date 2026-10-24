@@ -279,8 +279,22 @@ browser path.
 
 ## Human approval policy
 
-Shared Browser defaults to confirmation, rather than a site denylist, as its
-sensitive-site policy. Before the agent can observe a page, the user who
+How a run's approvals start depends on the runtime, never on the job, the
+caller or the model:
+
+- **On the space's own machine** (a lazy browser host the controller attests
+  for a covered space, see "Browser on the space's own machine" below), every
+  run starts in **routine browsing**. runtime-agent writes that into the run's protected
+  approval state before any Codex or MCP process starts, bound to the run's
+  owner, run, initiating user and page, and the job fails if the write fails.
+  Octo opens, reads and navigates sites without a site prompt; the steps listed
+  under routine browsing below still ask.
+- **Everywhere else** (the boot-time browser session and self-hosted
+  runtimes), a run starts in **Ask** with the per-run site approval described
+  next.
+
+In Ask, Shared Browser defaults to confirmation, rather than a site denylist,
+as its sensitive-site policy. Before the agent can observe a page, the user who
 started the run must approve that exact normalized origin for the current run.
 Cross-origin navigation or controls require a separate origin approval before
 the destination can be read. Origin approval does not authorize an action.
@@ -295,15 +309,24 @@ the page origin has been approved because it changes no remote state. Typing
 authentication, payment, or identity secrets remains blocked outright and is
 not made possible by approval.
 
-The first site prompt also offers **Always allow routine browsing for this turn**
+In Ask, the first site prompt also offers **Always allow routine browsing for this turn**
 when the runtime advertises `approvalModes: ["ask", "routine"]`. This is an
 explicit grant across HTTP(S) sites for the exact current run, initiating user,
 runtime generation and selected page—not permanent site trust, a project-wide
-default, or permission inherited by the next turn. Ordinary navigation, clicks,
-non-sensitive field filling and non-activation keys then proceed without another
-site/action prompt, including an address typed for a site the run has not used
-yet. Steps in a named risk category (below), risky addresses, form submissions,
-and Enter/Space activation still require one-shot confirmation. Secret entry,
+default, or permission inherited by the next turn. A run on the space's own
+machine starts with the same grant, scoped the same way. Under routine browsing,
+ordinary navigation, clicks, non-sensitive field filling and non-activation keys
+proceed without another site/action prompt, including an address typed for a
+site the run has not used yet. Steps in a named risk category (below), risky
+addresses, form submissions, buttons whose label commits a change (such as
+Save, Speichern or Buchen, even when page script runs them without a form), and
+Enter/Space activation still require one-shot confirmation. Menu items, tabs,
+tree items, disclosure and menu openers and navigation items are navigation: a
+commit word in their label (such as Neue Rechnung, Start or Neu) does not make
+them ask. A control of any kind whose label records, finalizes or pays
+(Festschreiben, Buchen, Speichern, Als bezahlt markieren, Mark as paid, Delete)
+is consequential and still asks; a menu item that only names a list
+(Buchungen, Zahlungen) stays navigation. Secret entry,
 fresh-target checks, exact authority, denial and cancellation boundaries are
 unchanged. Stopping or completing the turn ends the grant.
 
@@ -315,7 +338,12 @@ both kinds of controls.
 Routine mode deliberately relaxes universal confirmation. Its consequence
 classifier uses page descriptors and URL text; it cannot prove that arbitrary
 website JavaScript has no side effects or recognize every language/custom control.
-Use **Ask** when reviewing every state-changing interaction is important.
+A plain link whose address has side effects but is not on the risky-address list,
+a control with neither a risky nor a commit word in its label, or a menu item,
+tab or navigation item whose only risky word is a commit word outside the
+consequential list (such as "Neu" or "Weiter" in a menu), can still act without
+a prompt. **Ask** reviews every state-changing interaction; a run on the
+space's own machine cannot be switched to it yet (see "Remaining work").
 
 ### Redaction, step categories and downloads
 
@@ -411,26 +439,50 @@ only while nobody else has that browser open, controls it, runs in it or is
 starting it (see "How Studio opens it" below and
 [Browser Profiles](Browser-Profiles.md)). It never starts, stops or replaces a
 machine for this, and every other card waits for the person's press. The
-continuation is an ordinary Shared turn with consent version `1`: it starts in
-**Ask**, with the per-run origin approval above. Studio never answers a site or
-action prompt for the person, and **Allow routine browsing** stays the person's
-own choice. Under that grant, steps in a named risk category still ask, because
-the browser runtime enforces them.
+continuation is an ordinary Shared turn with consent version `1`. On the space's
+own machine it starts in routine browsing, as every run there does (see "Human
+approval policy" above); elsewhere it starts in **Ask**, with the per-run origin
+approval, and **Allow routine browsing** stays the person's own choice. Studio
+never answers a site or action prompt for the person, and neither Studio nor the
+job metadata chooses the starting mode. Under routine browsing, steps in a named
+risk category still ask, because the browser runtime enforces them.
 
 This is an additive runtime-origin policy choice, not caller-authored job metadata.
-Consent version `1` continues to attest the bounded browser lane and its default
-one-shot policy. The authenticated origin bridge accepts the new `allow_routine`
+Consent version `1` continues to attest the bounded browser lane and its one-shot
+policy for the steps that ask. The authenticated origin bridge accepts the new `allow_routine`
 decision only on an exact pending origin prompt, and the runtime stores it only
 inside that run's protected approval state. Older runtimes do not advertise it
 and reject that decision; older clients retain the existing Ask-only choices.
 No database migration, cookie copy or broader controller/workspace grant is added.
 
-A denial, timeout, stale request, revocation, storage failure, or malformed
-approval protocol is terminal for that browser run. The runtime latches the
-failure, rejects later mutations without opening another prompt, and reports
+A person has two minutes to answer the prompts of one browser step. The
+approval script's default window is 120 seconds and its cap is 300 seconds; the
+origin accepts a request that lives up to the same 300 seconds, and the two must
+move together, or the origin refuses the request and the sheet never shows
+(`shared_browser_tests.rs` checks that they agree). One tool call's prompts share
+one deadline counted from the call's start, so in Ask a site prompt and the step
+prompt after it fit in the same two minutes. The Shared Browser tool's Codex
+timeout is that budget plus 60 seconds for the navigation, settling and snapshot
+that follow the last answer (180 seconds by default), well inside the
+600-second turn cap. `INSTAFY_SHARED_BROWSER_APPROVAL_TIMEOUT_MS` overrides the
+window for tests, from 100 ms to 300 seconds; production never sets it.
+
+A denial, an unanswered prompt, a stale request, revocation, storage failure, or
+malformed approval protocol is terminal for that browser run. The runtime latches
+the failure, rejects later mutations without opening another prompt, and reports
 machine-readable terminal-consent state so the job layer does not invoke its
 normal missing-action retry. The user starts a new turn if they want to try
-again. This keeps “Deny” from becoming a sequence of repeated consent prompts.
+again. This keeps “Deny” from becoming a sequence of repeated consent prompts,
+and an unanswered prompt from becoming a chain of prompts while the person is
+away. What the person reads tells the two apart, with no code: an unanswered
+prompt reads "I'm waiting for your OK to continue in Instafy's browser. I
+haven't done that step yet.", a denial reads "You declined, so I stopped before
+that step.", and every other terminal code reads one plain message. Each speaks
+only about the step that asked, because earlier steps of the same turn may
+already have opened pages or changed something. The code stays in the run's
+`browser/terminal-consent` artifact. The tool result tells
+the model that an unanswered prompt is not a denial and that it must end the
+turn without retrying.
 If the client temporarily loses its network, it retains the exact visible
 request, shows reconnecting state, and retries the bounded poll/decision path;
 the origin's one-use fingerprint and replay checks remain authoritative.
@@ -838,9 +890,19 @@ unless the policy is `"covered"`.
   shows the space's browser, so generic recovery keeps the space's machine up.
   **Start new session** and the runtime-limit takeover are hidden.
 - **Pages while it starts.** The origin answers 503 `browser_host_not_ready`
-  until the browser runs. An open browser keeps polling quietly. A hidden one
-  suspends as before, so an idle browser behind a hidden tab is never polled and
-  never started. Only the open browser view starts it.
+  until the browser runs. An open browser keeps polling quietly, for at most
+  120 s of unbroken `browser_host_not_ready` answers (token and gateway
+  failures, as while the machine itself starts, are not counted). Each open
+  counts its own run, so closing the browser and opening it again starts over.
+  After that the
+  address bar reads "Instafy's browser did not start. Try again." in place of
+  "Connecting to Shared Browser…", and a card waiting on it says the same. A
+  page read that does not answer in 10 s is given up and asked again. A hidden
+  one suspends as before, so an idle browser behind a hidden tab is never polled
+  and never started. Only the open browser view starts it.
+- **Bounded requests.** Each `GET browser/host` and `POST browser/host/start` of
+  the 120 s wait ends after 10 s, or at the end of the wait, and is polled again
+  like a gateway error, so a hung request cannot outlast the wait.
 - **Cold press.** When the space is covered and a press finds nothing to open,
   or the exact pin names the space's own machine while it is stopped or no
   longer listed, Studio first starts that machine through the generic hosted
@@ -851,6 +913,31 @@ unless the policy is `"covered"`.
   first live host. If the machine comes up without `sharedBrowserHost`, Studio
   takes the legacy path at once. A press for Instafy's browser may take up to
   four minutes in all; the browser on this device keeps two.
+- **Press on a card.** A press never waits silently. Once the browser view
+  shows an error, the card says so at once: in that error's words when they are
+  plain (such as "This space's machine is stopping. Try again in a moment."),
+  otherwise "Instafy's browser could not open. See the browser for details,
+  then try again." On the conversation's own machine the press also reads
+  `GET browser/host`, at once when the browser was already open, otherwise
+  after 3 s, then every 3 s: a poisoned browser ends the press with the
+  restart copy, and one that failed again in a new start (a newer
+  `generation` than the one read when the press asked the view to attach
+  again) with "Instafy's browser did not start. Try again." The run that had
+  failed before is not the press's answer. A browser that was already open but
+  shows no page, or whose machine's browser went idle, is stopping or failed
+  (after the view had 10 s to start it), is asked once to attach again, as the
+  person's own Retry does: it reads the host again, starts it when idle, and
+  keeps the last frame meanwhile. A press never attaches again while another
+  run or person holds the browser, an open browser that shows its page and
+  only waits for the conversation to be idle is left as it is, and an
+  automatic start never attaches again.
+- **Viewers reconnect within a bound.** A fatal viewer error with no other
+  viewer to fall back to schedules a reconnect (at most five within a minute,
+  also when a connection succeeds in between) and then shows "Browser session
+  disconnected. Click Retry to reconnect." An error and the socket closing
+  after it count once. A browser that has its connection but waits for its
+  roster to know which viewer this participant may use gives up after 20 s
+  with "The browser did not finish connecting. Try again."
 - **Only the person starts the machine.** An open Studio restored by itself (a
   reload, or a return to a conversation whose browser was left open) never
   wakes the space's machine: it says the machine is not running and starts it
@@ -878,6 +965,14 @@ unless the policy is `"covered"`.
   run works in it. A stopped machine, a machine
   without `sharedBrowserHost` and an uncovered space keep the press. The
   person's own Retry or press inside the browser still may start the machine.
+  Only a draft in the composer holds a card ("Opens by itself once your draft
+  is empty.", shown only on a card that would otherwise open by itself, and
+  only while the draft holds it); a narrow pane or side-by-side view turned off
+  does not, and the browser takes the view as a press does. A card that asks
+  to continue in Instafy's browser while that same browser is already open on
+  the conversation's machine continues there without a press, even within ten
+  minutes of the last automatic start; the declined check, the browser-turn
+  check and every check before sending still apply.
 - **Stale pins.** A pin to a session that is gone moves to the space's own live
   browser when there is one.
 - **Clear data restarts the same machine.** The controller call is unchanged.
@@ -1381,9 +1476,16 @@ Operational invariants:
 
 ## Remaining work
 
-- Evaluate optional risk-based prompt reduction only after deployment evidence;
-  never weaken the universal per-origin and one-shot confirmation baseline for
-  authenticated sessions.
+- Evaluate further risk-based prompt reduction only after deployment evidence;
+  keep one-shot confirmation for the named risky steps, commit buttons,
+  submissions and activation keys in every mode.
+- On the space's own machine, let a person choose Ask for their runs (a
+  downgrade the runtime honours, never an upgrade), show in Studio that a run
+  started in routine browsing, and give the routine start a kill switch of its
+  own; today turning it off means turning off the browser host policy or
+  shipping a new runtime image.
+- Under routine browsing, a plain link whose address has side effects but is
+  not on the risky-address list still opens without a prompt.
 - Prove TURN and forced-relay WebRTC from signed Electron and normal web clients.
 - Turn the shipped CDP frame/relay telemetry into capacity alerts and limits before considering a new direct media path.
 - Close the profile snapshot's sub-30-second hard-kill edge and add per-user private keys for a private tier.

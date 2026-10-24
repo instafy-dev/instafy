@@ -66,12 +66,47 @@ function splitCsv(value: string | undefined): string[] {
     .filter(Boolean);
 }
 
+/** The hosted git service. Other git hosts are named in INSTAFY_GIT_HOSTS. */
+const DEFAULT_HOSTED_GIT_HOST = "git.instafy.dev";
+
+function hostOfUrl(raw: string | null | undefined): string | null {
+  if (!raw?.trim()) return null;
+  try {
+    return new URL(raw.trim()).host.toLowerCase() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The exact git hosts this helper answers for: the hosted git service, the configured controller, the runtime's
+ * Instafy remote (ORIGIN_GIT_REMOTE_URL) and INSTAFY_GIT_HOSTS. Never a whole domain, so Git hands a minted token
+ * only to a host it was configured for.
+ */
+function configuredGitHosts(): string[] {
+  let controllerHost: string | null = null;
+  try {
+    controllerHost = hostOfUrl(resolveControllerUrl({ controllerUrl: null }));
+  } catch {
+    controllerHost = null;
+  }
+  return [
+    DEFAULT_HOSTED_GIT_HOST,
+    controllerHost,
+    hostOfUrl(process.env["ORIGIN_GIT_REMOTE_URL"]),
+    ...splitCsv(process.env["INSTAFY_GIT_HOSTS"]),
+  ].filter((host): host is string => Boolean(host));
+}
+
+/** The local stack's git service names: `git-edge`, `git-shard` and `git-shard-<n>`, with no dots. */
+const LOCAL_STACK_GIT_HOST = /^(?:git-edge|git-shard(?:-[a-z0-9]+)*)$/;
+
 function isAllowedGitHost(rawHost: string | null): boolean {
   if (!rawHost) return false;
   const normalized = normalizeHost(rawHost);
   if (!normalized) return false;
 
-  const allowHosts = splitCsv(process.env["INSTAFY_GIT_HOSTS"]);
+  const allowHosts = configuredGitHosts();
   if (allowHosts.includes(normalized.host) || allowHosts.includes(normalized.hostname)) {
     return true;
   }
@@ -86,12 +121,13 @@ function isAllowedGitHost(rawHost: string | null): boolean {
     return true;
   }
 
-  // Local dev stack defaults to docker-compose service names.
-  if (normalized.hostname === "git-edge" || normalized.hostname.startsWith("git-shard")) {
+  // Local dev stack: docker-compose service names, which are single labels (git-edge, git-shard-0). A name with a
+  // dot is a real DNS host anyone can register, so it never matches here.
+  if (LOCAL_STACK_GIT_HOST.test(normalized.hostname)) {
     return true;
   }
 
-  return normalized.hostname.endsWith(".instafy.dev");
+  return false;
 }
 
 function normalizeRepoName(raw: string): string | null {

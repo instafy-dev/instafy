@@ -3351,6 +3351,163 @@ async fn a_plan_lane_that_hit_a_short_rate_limit_runs_once_more_after_the_wait(
     cleanup
 }
 
+/// Run r11-pacing lost a lane's rate-limit retry: the retry's dispatch deadlocked with a concurrent
+/// dispatch while it ensured its runtime, the failure left the dispatch's transaction aborted, and
+/// the group went on without the lane. Ensuring the runtime now runs in a savepoint, and a re-run
+/// whose dispatch fails on the server's side is tried once more, unless the first was queued.
+#[tokio::test]
+async fn a_lanes_rate_limit_retry_survives_a_failed_statement_while_it_is_queued(
+) -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping plan retry failure test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let space = ManagedSpace::seed(pool, "plan-retry-db-failure").await?;
+    let suffix = space.project_id.simple().to_string();
+    let runtimes_function = format!("test_deadlock_runtimes_{suffix}");
+    let jobs_function = format!("test_deadlock_jobs_once_{suffix}");
+    let jobs_sequence = format!("test_deadlock_jobs_seq_{suffix}");
+    let drop_injections = || {
+        let pool = space.pool.clone();
+        let (runtimes_function, jobs_function, jobs_sequence) = (
+            runtimes_function.clone(),
+            jobs_function.clone(),
+            jobs_sequence.clone(),
+        );
+        async move {
+            pool.get()
+                .await?
+                .batch_execute(&format!(
+                    "drop trigger if exists {runtimes_function} on runtimes;
+                     drop function if exists {runtimes_function}();
+                     drop trigger if exists {jobs_function} on agent_jobs;
+                     drop function if exists {jobs_function}();
+                     drop sequence if exists {jobs_sequence};"
+                ))
+                .await?;
+            anyhow::Ok(())
+        }
+    };
+    let test_result: anyhow::Result<()> = async {
+        const RATE_LIMITED: &str = "rate limit exceeded: The upstream provider rate limit was reached (upstream_rate_limit, 429). Please try again in 7.632s.";
+        let state = build_test_state(space.pool.clone(), space.config("plan-retry-db-failure"));
+        let seed = json!({
+            "type": "multi_agent_plan", "mode": "read_only",
+            "agents": [
+                { "handle": "tokyo", "label": "Tokyo", "prompt": "Research Tokyo lodging.", "scopeSummary": "Tokyo" },
+                { "handle": "osaka", "label": "Osaka", "prompt": "Research Osaka lodging.", "scopeSummary": "Osaka" },
+            ],
+            "lead": { "leadHandle": "octo", "continuationPrompt": "Report the trip.", "expectedReportFormat": "text" },
+        });
+        let plan_for = |group_id: Uuid| json!({
+            "groupId": group_id, "role": "worker", "mode": "read_only",
+            "lead": { "leadHandle": "octo", "continuationPrompt": "Report the trip.", "expectedReportFormat": "text" },
+            "parentRuntimeId": space.hosted_runtime_id,
+        });
+        // One lane stops on a short rate limit while the other still runs; returns the retry.
+        let retry_of_a_rate_limited_lane = || {
+            let space = &space;
+            let state = state.clone();
+            let seed = seed.clone();
+            async move {
+                let group_id = Uuid::new_v4();
+                let (conversation_id, failed, payload) =
+                    insert_finished_plan_lane(space, None, "osaka", plan_for(group_id), seed.clone()).await?;
+                let (_, other, _) =
+                    insert_finished_plan_lane(space, Some(conversation_id), "tokyo", plan_for(group_id), seed).await?;
+                let connection = space.pool.get().await?;
+                connection
+                    .execute(
+                        "update agent_jobs set status = 'leased', outcome = null, completed_at = null where id = $1",
+                        &[&other],
+                    )
+                    .await?;
+                connection
+                    .execute(
+                        "update agent_jobs set status = 'failed', outcome = 'failed', summary = null,
+                             error_message = $2, completed_at = now() where id = $1",
+                        &[&failed, &RATE_LIMITED],
+                    )
+                    .await?;
+                crate::multi_agent_plan::maybe_enqueue_lead_continuation_after_completion(&state, failed, &payload)
+                    .await
+                    .map_err(|error| controller_error("plan job completion", error))?;
+                let retry: Option<Uuid> = connection
+                    .query_opt(
+                        "select id from agent_jobs
+                         where payload #>> '{metadata,multiAgentPlan,rateLimitRetry,of}' = $1",
+                        &[&failed.to_string()],
+                    )
+                    .await?
+                    .map(|row| row.get("id"));
+                anyhow::Ok(retry)
+            }
+        };
+
+        // 1. ensuring the retry's runtime fails every time (the deadlock of r11-pacing): the
+        //    retry is still queued, on the runtime that ran the lane
+        space
+            .pool
+            .get()
+            .await?
+            .batch_execute(&format!(
+                "create function {runtimes_function}() returns trigger language plpgsql as $$
+                 begin
+                     if new.project_id = '{project}'::uuid then
+                         raise exception 'deadlock detected (injected)' using errcode = '40P01';
+                     end if;
+                     return new;
+                 end $$;
+                 create trigger {runtimes_function} before update on runtimes
+                     for each row execute function {runtimes_function}();",
+                project = space.project_id,
+            ))
+            .await?;
+        let retry = retry_of_a_rate_limited_lane().await?;
+        assert!(retry.is_some(), "the retry is queued although ensuring its runtime failed");
+        drop_injections().await?;
+
+        // 2. the retry's dispatch fails once as a whole: it is tried once more and queued once
+        space
+            .pool
+            .get()
+            .await?
+            .batch_execute(&format!(
+                "create sequence {jobs_sequence};
+                 create function {jobs_function}() returns trigger language plpgsql as $$
+                 begin
+                     if new.project_id = '{project}'::uuid
+                        and new.payload #> '{{metadata,multiAgentPlan,rateLimitRetry}}' is not null
+                        and nextval('{jobs_sequence}') = 1 then
+                         raise exception 'deadlock detected (injected once)' using errcode = '40P01';
+                     end if;
+                     return new;
+                 end $$;
+                 create trigger {jobs_function} before insert on agent_jobs
+                     for each row execute function {jobs_function}();",
+                project = space.project_id,
+            ))
+            .await?;
+        let retry = retry_of_a_rate_limited_lane().await?;
+        assert!(retry.is_some(), "the retry is queued on its second try");
+        let tries: i64 = space
+            .pool
+            .get()
+            .await?
+            .query_one(&format!("select last_value from {jobs_sequence}"), &[])
+            .await?
+            .get(0);
+        assert_eq!(tries, 2, "one failed try, one that queued it");
+        Ok(())
+    }
+    .await;
+    let injections = drop_injections().await;
+    let cleanup = space.cleanup().await;
+    test_result?;
+    injections?;
+    cleanup
+}
+
 /// A plan lane whose turn ran out of time continues in a new turn of the same group, on the
 /// runtime that holds its files, with its prompt and its note: at most twice, the second marked
 /// the last. A completion seen twice is continued once. A continuation turn that stops on a short
@@ -3648,6 +3805,244 @@ async fn a_plan_lane_of_a_managed_send_is_not_continued_when_its_org_is_out_of_c
             .await?;
         assert!(enqueue().await?, "its next turn");
         assert_eq!(count().await?, 3);
+        Ok(())
+    }
+    .await;
+    let cleanup = space.cleanup().await;
+    test_result?;
+    cleanup
+}
+
+/// A team whose plan declares a time budget keeps one clock from when the controller accepted the
+/// plan; a plan that declares none has no clock. Every agent of the team carries the clock: its
+/// lanes, a lane's next turn, the lead's checkpoint, and agents the lead starts again. A further
+/// turn is not started once less than a short turn is left, and the lead then reads what the lane
+/// said is left and is told to answer with what is ready. A plan agent still queued then never
+/// starts: the lease passes it over and the sweep settles it as not started, which wakes the lead.
+#[tokio::test]
+async fn a_team_reports_within_its_time_budget() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping team time budget test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let space = ManagedSpace::seed(pool, "team-time-budget").await?;
+    let test_result: anyhow::Result<()> = async {
+        let state = build_test_state(space.pool.clone(), space.config("team-time-budget"));
+        let clock_of = |payload: &serde_json::Value| payload["metadata"]["multiAgentPlan"]["teamClock"].clone();
+        let rfc3339 = |at: chrono::DateTime<chrono::Utc>| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let jobs_of = |conversation_id: Uuid| {
+            let pool = space.pool.clone();
+            async move {
+                let rows = pool
+                    .get()
+                    .await?
+                    .query(
+                        "select id, status, payload, error_message from agent_jobs
+                         where conversation_id = $1 order by created_at asc, id",
+                        &[&conversation_id],
+                    )
+                    .await?;
+                anyhow::Ok(
+                    rows.iter()
+                        .map(|row| {
+                            (
+                                row.get::<_, Uuid>(0),
+                                row.get::<_, String>(1),
+                                row.get::<_, PgJson<serde_json::Value>>(2).0,
+                                row.get::<_, Option<String>>(3),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            }
+        };
+
+        // 1. a plan that declares 12 minutes: its lanes carry a clock from when it was accepted; a
+        // plan that declares none has none
+        let mut budgeted = scout_plan_message(false);
+        budgeted["details"]["timeBudgetMinutes"] = json!(12);
+        for (message, budget) in [(budgeted, Some(720)), (scout_plan_message(false), None)] {
+            let (conversation_id, run_id, root_job, root_payload) = insert_leased_plan_job(
+                &space,
+                space.hosted_runtime_id,
+                None,
+                json!({ "agent": { "handle": "octo" } }),
+            )
+            .await?;
+            let before = chrono::Utc::now() - chrono::Duration::seconds(1);
+            crate::multi_agent_plan::maybe_execute_multi_agent_plan_message(
+                &state, &root_payload, root_job, Some(run_id), &message, "Two scouts.", None, None,
+            )
+            .await
+            .map_err(|error| controller_error("plan a team", error))?;
+            let after = chrono::Utc::now() + chrono::Duration::seconds(1);
+            let lanes: Vec<_> = jobs_of(conversation_id).await?.into_iter().filter(|job| job.0 != root_job).collect();
+            assert_eq!(lanes.len(), 2);
+            for (_, _, payload, _) in &lanes {
+                let clock = clock_of(payload);
+                match budget {
+                    None => assert!(clock.is_null(), "no declared budget, no clock: {clock}"),
+                    Some(seconds) => {
+                        let started = chrono::DateTime::parse_from_rfc3339(clock["startedAt"].as_str().unwrap_or_default())?;
+                        assert!(started >= before && started <= after, "from when the plan was accepted: {clock}");
+                        assert_eq!(clock["budgetSeconds"], seconds);
+                        assert_eq!(clock["deadlineEpoch"], json!(started.timestamp() + seconds));
+                    }
+                }
+            }
+        }
+
+        let lead = json!({ "leadHandle": "octo", "continuationPrompt": "Report the trip.", "expectedReportFormat": "text" });
+        let group_meta = |clock: &serde_json::Value| {
+            json!({
+                "groupId": Uuid::new_v4(), "role": "worker", "mode": "read_only", "lead": lead,
+                "parentRuntimeId": space.hosted_runtime_id,
+                "teamClock": clock,
+            })
+        };
+        let clock_with = |left_minutes: i64| {
+            let deadline = chrono::Utc::now() + chrono::Duration::minutes(left_minutes);
+            json!({
+                "startedAt": rfc3339(deadline - chrono::Duration::seconds(780)),
+                "budgetSeconds": 780,
+                "deadlineAt": rfc3339(deadline),
+                "deadlineEpoch": deadline.timestamp(),
+            })
+        };
+        let seed = json!({
+            "type": "multi_agent_plan", "mode": "read_only",
+            "agents": [{ "handle": "tokyo", "label": "Tokyo", "prompt": "Research Tokyo lodging.", "scopeSummary": "Tokyo" }],
+            "lead": lead,
+        });
+        // a lane that ended its turn asking for another
+        let finished_lane = |clock: serde_json::Value| {
+            let space = &space;
+            let plan = group_meta(&clock);
+            let seed = seed.clone();
+            async move {
+                let (conversation_id, job_id, payload) =
+                    insert_finished_plan_lane(space, None, "tokyo", plan, seed).await?;
+                space
+                    .pool
+                    .get()
+                    .await?
+                    .execute(
+                        "update agent_jobs set artifacts = $2 where id = $1",
+                        &[&job_id, &PgJson(json!([
+                            { "kind": "agent/turn-continuation", "requested": true, "endedBy": "agent", "note": "the Shinjuku hotels" },
+                        ]))],
+                    )
+                    .await?;
+                anyhow::Ok((conversation_id, job_id, payload))
+            }
+        };
+
+        // 2. with time left, a lane's next turn keeps the team's clock, and its lease states the
+        // time left by the controller's clock
+        let roomy = clock_with(10);
+        let (conversation_id, lane_job, lane_payload) = finished_lane(roomy.clone()).await?;
+        crate::multi_agent_plan::maybe_enqueue_lead_continuation_after_completion(&state, lane_job, &lane_payload)
+            .await
+            .map_err(|error| controller_error("lane end with time left", error))?;
+        let jobs = jobs_of(conversation_id).await?;
+        assert_eq!(jobs.len(), 2, "the lane and its next turn: {jobs:?}");
+        let (next_turn, _, next_payload, _) = &jobs[1];
+        assert_eq!(next_payload["metadata"]["multiAgentPlan"]["continuation"]["turn"], 1);
+        assert_eq!(clock_of(next_payload)["deadlineEpoch"], roomy["deadlineEpoch"], "the team's clock");
+        let mut connection = space.pool.get().await?;
+        let transaction = connection.transaction().await?;
+        let group = next_payload["metadata"]["multiAgentPlan"]["groupId"].as_str().unwrap_or_default().to_string();
+        let leased = agent::lease_next_agent_job(
+            &transaction, &space.project_id, Some(&space.hosted_runtime_id), 60, true, false, false, false,
+            None, Some(group.as_str()), false,
+        )
+        .await
+        .map_err(|error| controller_error("lease the next turn", error))?
+        .expect("the next turn is leased");
+        transaction.rollback().await?;
+        drop(connection);
+        assert_eq!(leased.id, *next_turn);
+        let left = clock_of(&leased.payload)["leftSecondsAtLease"].as_i64().expect("time left at lease");
+        assert!((590..=600).contains(&left), "{left}");
+
+        // 3. a lane asks for another turn with a minute of the team's time left: none starts; the
+        // lead reads what it said is left and is told to answer now
+        let late = clock_with(1);
+        let (conversation_id, lane_job, lane_payload) = finished_lane(late.clone()).await?;
+        assert!(
+            crate::multi_agent_plan::maybe_enqueue_lead_continuation_after_completion(&state, lane_job, &lane_payload)
+                .await
+                .map_err(|error| controller_error("lane end", error))?,
+            "the lead checkpoint"
+        );
+        let jobs = jobs_of(conversation_id).await?;
+        assert_eq!(jobs.len(), 2, "the lane and the lead, no further turn: {jobs:?}");
+        let (lead_job, _, lead_payload, _) = jobs[1].clone();
+        assert_eq!(lead_payload["metadata"]["multiAgentPlan"]["role"], "lead_continuation");
+        assert_eq!(clock_of(&lead_payload)["startedAt"], late["startedAt"], "the team's clock");
+        let prompt = lead_payload["prompt_text"].as_str().unwrap_or_default();
+        assert!(prompt.contains("UNFINISHED") && prompt.contains("the Shinjuku hotels"), "{prompt}");
+        assert!(prompt.contains("the team's time budget (13 minutes) is nearly spent"), "{prompt}");
+        assert!(prompt.contains("list what is unfinished or not started"), "{prompt}");
+        assert!(prompt.contains("Do not start more agents"), "{prompt}");
+
+        // 4. the lead starts agents anyway: they keep the team's clock, and with less than a
+        // short turn left they never start; the sweep settles them, which wakes the lead again
+        space
+            .pool
+            .get()
+            .await?
+            .execute(
+                "update agent_jobs set status = 'leased', leased_by_runtime_id = $2, leased_at = now(),
+                     lease_expires_at = now() + interval '5 minutes', lease_attempts = 1
+                 where id = $1",
+                &[&lead_job, &space.hosted_runtime_id],
+            )
+            .await?;
+        crate::multi_agent_plan::maybe_execute_multi_agent_plan_message(
+            &state, &lead_payload, lead_job, None, &scout_plan_message(false), "Two more scouts.", None, None,
+        )
+        .await
+        .map_err(|error| controller_error("the lead plans again", error))?;
+        let again: Vec<_> = jobs_of(conversation_id).await?.into_iter().filter(|job| job.0 != lane_job && job.0 != lead_job).collect();
+        assert_eq!(again.len(), 2, "the lead's new lanes");
+        let new_group = again[0].2["metadata"]["multiAgentPlan"]["groupId"].as_str().unwrap_or_default().to_string();
+        for (_, status, payload, _) in &again {
+            assert_eq!(status, "queued");
+            assert_eq!(clock_of(payload)["startedAt"], late["startedAt"], "the team's clock");
+        }
+        assert_eq!(
+            lease_plan_group_job(&space.pool, space.project_id, space.hosted_runtime_id, false, Uuid::parse_str(&new_group)?).await?,
+            None,
+            "no plan agent starts with less than a short turn left"
+        );
+        // the lead's turn ends; then the sweep settles the lanes that never started
+        space
+            .pool
+            .get()
+            .await?
+            .execute("update agent_jobs set status = 'completed', outcome = 'succeeded', completed_at = now() where id = $1", &[&lead_job])
+            .await?;
+        crate::runtime::settle_plan_agents_out_of_team_time(
+            &state,
+            &mut crate::background_loops::TickConnection::new(&state.pool),
+        )
+        .await?;
+        let jobs = jobs_of(conversation_id).await?;
+        for (id, status, _, error) in jobs.iter().filter(|job| again.iter().any(|lane| lane.0 == job.0)) {
+            assert_eq!(status, "failed", "{id}");
+            assert_eq!(error.as_deref(), Some(crate::runtime::TEAM_TIME_BUDGET_NOT_STARTED_MESSAGE));
+        }
+        let checkpoint = jobs
+            .iter()
+            .find(|job| {
+                job.2["metadata"]["multiAgentPlan"]["role"] == "lead_continuation"
+                    && job.2["metadata"]["multiAgentPlan"]["groupId"] == json!(new_group)
+            })
+            .expect("the lead is woken with the lanes that never started");
+        let prompt = checkpoint.2["prompt_text"].as_str().unwrap_or_default();
+        assert!(prompt.contains(crate::runtime::TEAM_TIME_BUDGET_NOT_STARTED_MESSAGE), "{prompt}");
+        assert!(prompt.contains("has run out") || prompt.contains("is nearly spent"), "{prompt}");
         Ok(())
     }
     .await;
@@ -4037,3 +4432,6 @@ async fn an_ordinary_turns_rate_limit_never_caps_lanes_and_one_space_cannot_pace
     second_cleanup?;
     first_cleanup
 }
+
+#[path = "turn_rate_limit_retry_tests.rs"]
+mod turn_rate_limit_retry_tests;

@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Report abuse · Instafy</title>
+    <meta
+      name="description"
+      content="Sites on instafy.site and other Instafy tunnel and preview addresses are made by Instafy users. Here is how to report one."
+    />
+    <link rel="icon" href="/favicon.ico?v=5" sizes="any" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg?v=5" />
+    <!--
+      The same text as src/screens/AbusePage.tsx, served at /abuse for
+      visitors and checks that do not run JavaScript. A test keeps the two
+      in step.
+    -->
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f8fafc;
+        --text: #0f172a;
+        --secondary: #334155;
+        --muted: #64748b;
+        --rule: #cbd5e1;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #020617;
+          --text: #f1f5f9;
+          --secondary: #cbd5e1;
+          --muted: #94a3b8;
+          --rule: #334155;
+        }
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 16px/1.6 Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      .page {
+        max-width: 48rem;
+        margin: 0 auto;
+        padding: 4rem 1.5rem;
+      }
+      .top {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: space-between;
+        gap: 0.75rem;
+        color: var(--muted);
+        font-size: 0.875rem;
+      }
+      h1 {
+        margin: 2.5rem 0 0;
+        font-size: 2rem;
+        line-height: 1.2;
+        letter-spacing: -0.02em;
+      }
+      h2 {
+        margin: 2.5rem 0 0;
+        font-size: 1.25rem;
+        letter-spacing: -0.01em;
+      }
+      p,
+      li {
+        max-width: 65ch;
+        color: var(--secondary);
+      }
+      .lead {
+        font-size: 1.125rem;
+      }
+      a {
+        color: inherit;
+        font-weight: 600;
+        text-decoration-color: var(--rule);
+        text-underline-offset: 4px;
+      }
+      .top a {
+        font-weight: 500;
+        text-decoration: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <div class="top">
+        <a href="/">Back</a>
+        <span>Last updated: October 23, 2026</span>
+      </div>
+      <main>
+        <header>
+          <h1>Report abuse</h1>
+          <p class="lead">
+            Sites on instafy.site, and on the other addresses that Instafy tunnels and previews use, are made
+            and run by Instafy users, not by Instafy. If one of them is harmful, tell us and we will look into
+            it.
+          </p>
+        </header>
+        <section>
+          <h2>How to report</h2>
+          <p>
+            Email
+            <a href="mailto:contact@instafy.dev?subject=Abuse%20report">contact@instafy.dev</a>
+            with the subject “Abuse report”. For a security issue in Instafy itself, see our
+            <a href="https://github.com/instafy-dev/instafy/security" target="_blank" rel="noreferrer"
+              >security policy</a
+            >.
+          </p>
+        </section>
+        <section>
+          <h2>What to include</h2>
+          <ul>
+            <li>The full address of the page (for example, https://name.instafy.site/page).</li>
+            <li>
+              What is wrong with it (for example, phishing, malware, spam, or content that infringes your
+              rights).
+            </li>
+            <li>When you saw it, and a screenshot if you have one.</li>
+            <li>How we can reach you if we have questions.</li>
+          </ul>
+          <p>Please don’t send passwords or other people’s personal data.</p>
+        </section>
+        <section>
+          <h2>What happens next</h2>
+          <p>
+            We read every report and aim to reply within two business days. When a site breaks our
+            <a href="/terms">Terms of Use</a>, we take it down and may suspend the account that runs it.
+          </p>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

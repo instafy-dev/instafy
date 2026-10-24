@@ -16,6 +16,7 @@ import { COMMAND_NAMES, safeText } from "../src/protocol.mjs";
 import { envNameRefusal } from "../src/executors/script.mjs";
 import { DEFAULT_AGENT_BUDGET_PER_HOUR } from "../src/budget.mjs";
 import { handlerHash, readTried, tryIntent } from "../src/try.mjs";
+import { checkReport } from "../src/check.mjs";
 
 const HELP = `instafy-bind: a website plus a generic backend that turns clicks into typed intents.
 
@@ -30,6 +31,7 @@ Usage:
   instafy-bind confirm <dir> <job|all> [--no]
   instafy-bind doctor [dir]
   instafy-bind try <dir> <intent> [json-params] [--save] [--allow-local]
+  instafy-bind check <dir> --expect "<item>,<item>,…" [--json]
 
 serve      Serve the site (or every subfolder with a bound.json) with the binder endpoints under
            __bind/. Prints share URLs with the viewer token: #k=... for pages that load __bind/client.js,
@@ -55,6 +57,10 @@ init       Write a starter bound.json, index.html and handlers/hello.mjs. --star
            with theme.css and site.js (compare 2-8 options; ranked a top-N; timeline days or steps in time;
            checklist ticks; blank anything else). You design the content in data.json and app.js. Existing
            files are kept; --force overwrites them.
+check      Does the site show every item the request named (each product, stop or entry)? Reads the text of its
+           HTML pages and every value in its data files (data.json, data/**/*.json), and lists the items it does
+           not show; exit 1 when one is missing, 2 when there is nothing to check. Items: --expect, plus an
+           "expect" array in data.json. Run it before telling anyone the page is done.
 command    Push a command (select, highlight, toast, reload) to every open viewer. Uses the
            admin token in .bind/admin-token.
 confirm    Approve (or --no: decline) jobs waiting for confirmation.
@@ -505,6 +511,18 @@ async function main() {
       return postAdmin(rest[0], "confirm", { job: rest[1], ok: !flags.no });
     case "doctor":
       return doctor(rest[0], flags);
+    case "check": {
+      if (!rest[0]) fail('usage: instafy-bind check <dir> --expect "<item>,<item>" [--json]', 64);
+      let report;
+      try {
+        report = checkReport(rest[0], flags.expect ?? [], { json: Boolean(flags.json) });
+      } catch (error) {
+        fail(error.message, 64);
+      }
+      process.stdout.write(`${report.lines.join("\n")}\n`);
+      process.exitCode = report.exit;
+      return;
+    }
     case "try": {
       if (!rest[0] || !rest[1]) fail("usage: instafy-bind try <dir> <intent> [json-params]", 64);
       const result = await tryIntent(rest[0], rest[1], rest[2] ?? "{}", {

@@ -229,6 +229,7 @@ pub(crate) async fn sweep_idle_activity(state: &AppState) -> AnyResult<()> {
     auto_stop_stale_runtimes(state, &mut tick).await?;
     auto_stop_idle_hosted_runtimes(state, &mut tick).await?;
     expire_stale_requeued_jobs(state, &mut tick).await?;
+    settle_plan_agents_out_of_team_time(state, &mut tick).await?;
     auto_recover_stuck_queued_runtimes(state, &mut tick).await?;
     cleanup_terminal_runtime_records(state, &mut tick).await?;
     fail_platform_jobs_stranded_on_private_runtimes(state, &mut tick).await?;
@@ -1217,6 +1218,91 @@ pub(crate) async fn expire_stale_requeued_jobs(
     }
     publish_failed_queued_jobs(state, failed).await;
 
+    Ok(())
+}
+
+/// What a team's plan agent that never started says, as its lead reads it.
+pub(crate) const TEAM_TIME_BUDGET_NOT_STARTED_MESSAGE: &str =
+    "Not started: the team's time budget ran out before this agent could start.";
+const TEAM_TIME_BUDGET_CODE: &str = "team_time_budget";
+
+/// Plan agents still queued once their team has less than a short turn left never start: the lease
+/// passes them over (`multi_agent_plan::team_clock`), however they were queued (a lane that waited
+/// for its upstream or a runtime, a retry, a continuation, the follow-on agent). Settle them as not
+/// started, like work that expired before a runtime took it, so their group's lead checkpoint comes
+/// with that outcome instead of waiting for them. Nothing is written into the conversation: the
+/// lead's report says what was not started.
+pub(crate) async fn settle_plan_agents_out_of_team_time(
+    state: &AppState,
+    tick: &mut TickConnection<'_>,
+) -> AnyResult<()> {
+    let mut transaction = tick
+        .client("failed to acquire connection for the team time budget sweep")
+        .await?
+        .transaction()
+        .await
+        .context("failed to start the team time budget sweep transaction")?;
+    let rows = transaction
+        .query(
+            &format!(
+                "update agent_jobs aj
+                 set status = 'failed',
+                     outcome = 'expired',
+                     error_message = $1,
+                     completed_at = now(),
+                     active_input_ready_runtime_id = null,
+                     active_input_ready_expires_at = null,
+                     active_input_ready_turn_id = null,
+                     updated_at = now()
+                 where aj.status = 'queued'
+                   and coalesce(aj.agent_role, aj.payload #>> '{{metadata,multiAgentPlan,role}}', '') = 'worker'
+                   and {out_of_time}
+                 returning aj.id, aj.project_id, aj.run_id, aj.conversation_id, aj.session_id,
+                           aj.prompt_id, aj.payload, aj.error_message, aj.lease_attempts",
+                out_of_time = crate::multi_agent_plan::team_clock::out_of_time_sql("aj"),
+            ),
+            &[&TEAM_TIME_BUDGET_NOT_STARTED_MESSAGE],
+        )
+        .await
+        .context("failed to settle plan agents out of their team's time")?;
+    if rows.is_empty() {
+        transaction
+            .rollback()
+            .await
+            .context("failed to close an empty team time budget sweep")?;
+        return Ok(());
+    }
+    let settled = settle_expired_queued_jobs(&mut transaction, &rows, "team time budget").await?;
+    let failed = FailedQueuedJobs {
+        settled,
+        conversation_messages: Vec::new(),
+        jobs: rows
+            .iter()
+            .map(|row| {
+                (
+                    row.get("project_id"),
+                    row.get("id"),
+                    row.get("run_id"),
+                    row.get("conversation_id"),
+                )
+            })
+            .collect(),
+        skip_plan_checkpoint_for: std::collections::BTreeSet::new(),
+        kind: TEAM_TIME_BUDGET_CODE.to_string(),
+        outcome: "expired".to_string(),
+        message: TEAM_TIME_BUDGET_NOT_STARTED_MESSAGE.to_string(),
+    };
+    transaction
+        .commit()
+        .await
+        .context("failed to commit the team time budget sweep")?;
+    tick.release();
+    for row in &rows {
+        let job_id: Uuid = row.get("id");
+        let project_id: Uuid = row.get("project_id");
+        info!(%job_id, %project_id, "a plan agent was not started: its team's time budget ran out");
+    }
+    publish_failed_queued_jobs(state, failed).await;
     Ok(())
 }
 

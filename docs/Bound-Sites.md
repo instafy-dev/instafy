@@ -316,7 +316,9 @@ site (an `index.html` and no `bound.json`) gets the client added to its pages.
 - **Viewer token.** `serve` creates a random token per site and prints the share URL with `#k=<token>`. The client
   reads it once, trades it for an `HttpOnly; SameSite=Lax` site cookie (`POST __bind/session`), removes it from the
   address bar and never exposes it to page scripts; EventSource, polling and the page's own fetches ride on the
-  cookie. Pages without the client use the `?k=` cookie handoff above.
+  cookie. On HTTPS the cookie is also `Secure`, and `__Host-` prefixed for a site at the root, so another host under
+  the same parent domain (another tunnel) cannot set or shadow it; the binder checks every cookie of that name a
+  request carries. Pages without the client use the `?k=` cookie handoff above.
 - **What the token guards.** Intents, events, jobs, `__bind/records`, `bound.json`, `data/version.json` and
   `data/records/*`. `handlers/`, `test/`, `tests/` and `node_modules/` are never served. Both rules compare the path
   the way a case-insensitive filesystem (macOS, Windows) reads it, lower case with trailing dots, spaces and

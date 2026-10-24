@@ -942,3 +942,50 @@ fn request_fingerprint_matches_the_node_protocol_field_order() {
         "3016f261e701963ec8b0809b047e1c7b9b36c750b621f25519e90b2bf28a905c"
     );
 }
+
+/// The Shared Browser script gives a person two minutes by default and at
+/// most five. A request the script publishes must reach the person whatever
+/// its lifetime within that range; anything longer is still refused.
+#[tokio::test]
+async fn requests_live_as_long_as_the_runtime_approval_window() {
+    for (lifetime, accepted) in [
+        (120_000, true),
+        (MAX_APPROVAL_LIFETIME_MS, true),
+        (MAX_APPROVAL_LIFETIME_MS + 1, false),
+        (MIN_APPROVAL_LIFETIME_MS - 1, false),
+    ] {
+        let mut fixture = ApprovalFixture::action();
+        let now = unix_time_millis();
+        fixture.request.requested_at_ms = now;
+        fixture.request.expires_at_ms = now + lifetime;
+        fixture.request.request_fingerprint =
+            request_fingerprint(&fixture.request).expect("refingerprint request");
+        fixture.rewrite_request();
+        assert_eq!(
+            validate_pending_request(&fixture.request, now).is_ok(),
+            accepted,
+            "lifetime {lifetime}"
+        );
+        let observed = fixture
+            .bridge
+            .observe_pending(&fixture.claims(&["browser.view"]), fixture.query())
+            .await;
+        if accepted {
+            assert!(
+                observed.expect("pending request").pending.is_some(),
+                "lifetime {lifetime}"
+            );
+            assert!(fixture
+                .bridge
+                .submit_decision(
+                    &fixture.claims(&["browser.control"]),
+                    fixture.decision(ApprovalDecision::AllowOnce),
+                )
+                .await
+                .is_ok());
+            assert_stored_decision(&fixture, "allow_once");
+        } else {
+            assert_unavailable(observed);
+        }
+    }
+}

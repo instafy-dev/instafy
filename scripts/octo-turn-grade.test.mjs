@@ -10,6 +10,7 @@ import {
   EXPECT_KEYS,
   buildRollup,
   casesFileOfRun,
+  pointsToCard,
   caseMetrics,
   creditsQuery,
   datedLinesOf,
@@ -18,6 +19,8 @@ import {
   gradeCase,
   gradeRunDir,
   hasFilePaths,
+  itemsMissingFrom,
+  teamItemsOf,
   jobsQuery,
   jobsSettled,
   loadCases,
@@ -26,6 +29,7 @@ import {
   redactDeep,
   redactText,
   renderReport,
+  renderTiming,
   replyIsQuestionOnly,
   replyStats,
   runLogOf,
@@ -122,7 +126,62 @@ test("a page found only through the space's previews opens, but the missing card
   assert.equal(byId(result, "site_opens").ok, true);
   assert.match(byId(result, "site_opens").detail, /found through the previews/);
   assert.equal(byId(result, "site_shape:tableRows").ok, true);
-  assert.deepEqual(result.mustFailures, ["card_posted"]);
+  // The reply still says "Open it from the card above", which sends the person to nothing.
+  assert.deepEqual(result.mustFailures, ["card_posted", "reply_card_exists"]);
+});
+
+test("a reply that sends the person to a card fails when the turn posted none, in any case", () => {
+  // r10-finish2 taiwan-1: the builder never opened its preview, and the lead's reply still ended with this.
+  const pointer = "The map is ready, but Hualien and Taitung are missing. Open it from the card above.";
+  const noCard = { previewsAvailable: true, previewsListed: 0, cardCount: 0, opened: false };
+  const result = gradeCase(TABLE_CASE, built({ summary: pointer }, noCard));
+  assert.equal(byId(result, "reply_card_exists").ok, false);
+  assert.equal(byId(result, "reply_card_exists").detail, "points to a card; cards posted 0");
+  assert.ok(result.mustFailures.includes("reply_card_exists"));
+  // The same reply with its card passes.
+  assert.equal(byId(gradeCase(TABLE_CASE, built({ summary: pointer })), "reply_card_exists").ok, true);
+  // A reply that says what was not shown, without a card, passes.
+  const honest = "The research is done, but the map was not built: Hualien and Taitung are missing.";
+  assert.equal(byId(gradeCase(TABLE_CASE, built({ summary: honest }, noCard)), "reply_card_exists").ok, true);
+  // A chat answer is held to it too.
+  assert.equal(byId(gradeCase(CHAT_CASE, chatTurn("Here is the phrase. Tap the preview card to hear it.")), "reply_card_exists").ok, false);
+  // Without the browser's card count it is not graded.
+  assert.equal(byId(gradeCase(TABLE_CASE, built({ summary: pointer }, {})), "reply_card_exists"), undefined);
+});
+
+test("a reply that says plainly there is no card does not count as sending the person to one", () => {
+  // r11-fin-complete2 taiwan-1: the builder never opened its preview and the lead said so; the grader read
+  // "no preview card was opened" as a pointer to a card
+  const noCard = { previewsAvailable: true, previewsListed: 0, cardCount: 0, opened: false };
+  for (const honest of [
+    "The itinerary map includes all six cities, but train legs weren't added, and no preview card was opened.",
+    "The page was not previewed, so there is no card to open.",
+    "The preview card wasn't posted this time.",
+    "El mapa está listo, pero sin tarjeta de vista previa.",
+  ]) {
+    assert.equal(pointsToCard(honest), false, honest);
+    assert.equal(byId(gradeCase(TABLE_CASE, built({ summary: honest }, noCard)), "reply_card_exists").ok, true, honest);
+  }
+  // a pointer in another sentence still counts
+  assert.equal(pointsToCard("No sights were found for day 3. Open it from the card above."), true);
+  assert.equal(pointsToCard("Ábrelo desde la tarjeta de arriba."), true);
+});
+
+test("only wording that points at a card counts as sending the person to one", () => {
+  for (const text of [
+    "Open it from the card above.",
+    "Open it from the card.",
+    "Tap the card to open the map.",
+    "Open the preview card in the chat.",
+    "Click the card below.",
+    "Ábrelo desde la tarjeta de arriba.",
+  ]) assert.equal(replyStats(text).pointsToCard, true, text);
+  for (const text of [
+    "The cashback on this card is 2% on groceries.",
+    "Buy a SIM card at the airport.",
+    "A rail card saves a third on most trains.",
+    "Pay by card or cash at the door.",
+  ]) assert.equal(replyStats(text).pointsToCard, false, text);
 });
 
 test("on a server without site previews the card is n/a, and an unseen page still fails (fail closed)", () => {
@@ -693,5 +752,85 @@ test("a continuation turn's rate-limit retry is not another continuation, and a 
 
 test("the jobs query reads the continuation and the agent", () => {
   const q = jobsQuery(PROJECT, SENT);
-  for (const k of ['"planContinuation"', '"agentHandle"']) assert.ok(q.includes(k), k);
+  for (const k of ['"planContinuation"', '"agentHandle"', '"turnRateLimitRetry"']) assert.ok(q.includes(k), k);
+});
+
+test("a lead turn put back in the queue after a short rate limit says so in its timing", () => {
+  const lead = { ...job({ id: "lead" }), agentHandle: "octo", createdAt: at(0), leasedAt: at(45), completedAt: at(400),
+    turnRateLimitRetry: { waitMs: 29010, holdMs: 31250, error: "rate limit exceeded (upstream_rate_limit, 429). Please try again in 29.01s." } };
+  const t = timingOf([lead]);
+  assert.equal(t.jobs[0].requeuedHoldSec, 31.3);
+  assert.match(renderTiming(t).join("\n"), /lead @octo: completed\/succeeded, waited 45 s, ran 355 s, started again after a short rate limit \(held 31\.3 s\)/);
+  assert.equal(timingOf([job({ id: "plain" })]).jobs[0].requeuedHoldSec, null);
+  const twice = { ...lead, turnRateLimitRetry: { ...lead.turnRateLimitRetry, holdMs: 40000, attempts: 2 } };
+  assert.match(renderTiming(timingOf([twice])).join("\n"), /started again 2 times after a short rate limit \(last held 40 s\)/);
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Every item the team researched is on the page (in our team runs a trip map left out two of the six stops the person
+// asked for, and the grader passed the page).
+
+const planMessage = (agents) => ({
+  type: "item.completed",
+  item: { type: "agent_message", text: JSON.stringify({ summary: "Researching in parallel.", files: [], actions: [{ type: "multi_agent_plan", mode: "write_scoped",
+    agents, then: { handle: "build", label: "Builder", prompt: "build" } }] }) },
+});
+const lane = (handle, label) => ({ handle, label, prompt: `Research ${label}`, needsTools: true });
+const TEAM_CASE = {
+  id: "trip-big", kind: "itinerary",
+  expect: { route: "multi_agent_candidate", siteRequired: true },
+  budget: { seconds: 900, inputTokens: 8_000_000, outputTokens: 150_000 },
+};
+const teamTurn = (siteText, { agents = [lane("north", "Northtown"), lane("east", "Eastport and Southbay"), lane("west", "Westvale")], ui = {} } = {}) => ({
+  sentAt: SENT,
+  jobs: [
+    job({ id: "lead", route: "multi_agent_candidate", commands: [planMessage(agents)], paths: [] }),
+    { ...job({ id: "w1", role: "worker", parent: "lead", route: null, paths: [] }), agentHandle: "north", ownedPaths: ["handoff/t/north.json"] },
+    { ...job({ id: "b1", role: "worker", parent: "lead", route: null, commands: BUILD_COMMANDS }), agentHandle: "build", planStage: "then", ownedPaths: ["sites/t/**"] },
+  ],
+  ui: { ...OPENED_UI, siteText, ...ui },
+});
+
+test("a team's items are its lanes' labels, a lane over several stops counting as each, never the builder", () => {
+  const ev = teamTurn("");
+  assert.deepEqual(teamItemsOf(ev.jobs).map((x) => x.name), ["Northtown", "Eastport", "Southbay", "Westvale"]);
+  // the plan message did not survive (a long run log keeps its tail): the lanes' handles stand in
+  const noPlan = ev.jobs.map((j) => (j.id === "lead" ? job({ id: "lead", route: "multi_agent_candidate", commands: [], paths: [] }) : j));
+  assert.deepEqual(teamItemsOf(noPlan), [{ name: "north", fromHandle: true }]);
+});
+
+test("team_items_on_site fails when the page leaves out an item the team researched, and a 'Not found yet' line does not count as showing it", () => {
+  const all = gradeCase(TEAM_CASE, teamTurn("Mon 1 Nov · Northtown\nWed 3 Nov · Eastport\nFri 5 Nov · Southbay\nSun 7 Nov · Westvale"));
+  assert.equal(byId(all, "team_items_on_site").ok, true, byId(all, "team_items_on_site").detail);
+  const short = gradeCase(TEAM_CASE, teamTurn("Not found yet: Eastport, Southbay\nMon 1 Nov · Northtown\nSun 7 Nov · Westvale"));
+  assert.equal(byId(short, "team_items_on_site").ok, false);
+  assert.equal(byId(short, "team_items_on_site").severity, "must");
+  assert.equal(byId(short, "team_items_on_site").detail, "not on the page: Eastport, Southbay (2 of 4 shown)");
+  assert.ok(short.mustFailures.includes("team_items_on_site"));
+  // a page that did not open is site_opens' failure, not this one's
+  const closed = gradeCase(TEAM_CASE, teamTurn(null, { ui: { opened: false, siteText: undefined } }));
+  assert.equal(byId(closed, "team_items_on_site").ok, null);
+  // a case without a page asks nothing
+  assert.equal(byId(gradeCase({ ...TEAM_CASE, expect: { route: "multi_agent_candidate" } }, teamTurn("")), "team_items_on_site"), undefined);
+});
+
+test("a lane labelled with more than its item ('Tokyo Research' for @tokyo) counts as shown when the page names the item", () => {
+  // r11-fin-complete3 japan-1: the page showed Tokyo, Kyoto and Osaka; the lead had labelled its lanes "Tokyo Research"…
+  const agents = [lane("tokyo", "Tokyo Research"), lane("kyoto", "Kyoto Research"), lane("osaka", "Osaka Research")];
+  const items = teamItemsOf(teamTurn("", { agents }).jobs);
+  assert.deepEqual(items, [{ name: "Tokyo Research", core: "tokyo" }, { name: "Kyoto Research", core: "kyoto" }, { name: "Osaka Research", core: "osaka" }]);
+  const shown = gradeCase(TEAM_CASE, teamTurn("Sun 1 Nov · Tokyo\nWed 4 Nov · Kyoto\nSun 8 Nov · Osaka", { agents }));
+  assert.equal(byId(shown, "team_items_on_site").ok, true, byId(shown, "team_items_on_site").detail);
+  const short = gradeCase(TEAM_CASE, teamTurn("Sun 1 Nov · Tokyo\nNot found yet: Osaka\nWed 4 Nov · Kyoto", { agents }));
+  assert.equal(byId(short, "team_items_on_site").detail, "not on the page: Osaka Research (2 of 3 shown)");
+  // a handle that is not part of its label adds nothing ("east" for "Eastport and Southbay"; "north" for "Northtown")
+  assert.deepEqual(teamItemsOf(teamTurn("").jobs).filter((x) => x.core), []);
+});
+
+test("an item counts as shown as whole words in any case and punctuation; a handle also by each of its words", () => {
+  assert.deepEqual(itemsMissingFrom("ASICS Gel Kayano 31 · seen 17 Oct", [{ name: "ASICS Gel-Kayano 31" }]), []);
+  assert.deepEqual(itemsMissingFrom("Hoka Arahi 75", [{ name: "Hoka Arahi 7" }]).map((x) => x.name), ["Hoka Arahi 7"]);
+  assert.deepEqual(itemsMissingFrom("東京 → 京都", [{ name: "京都" }]), []);
+  assert.deepEqual(itemsMissingFrom("Eastport 2 nights\nSouthbay 2 nights", [{ name: "eastport southbay", fromHandle: true }]), []);
+  assert.deepEqual(itemsMissingFrom("Missing: Eastport\nSouthbay", [{ name: "Eastport" }]).map((x) => x.name), ["Eastport"]);
 });

@@ -57,6 +57,13 @@ function isCacheableAsset(pathname) {
   );
 }
 
+// Only the app shell is kept for offline use. A page served as its own file
+// (such as /abuse) is not the shell and must not replace it.
+async function isAppShell(response) {
+  const type = response.headers.get("Content-Type") ?? "";
+  return type.includes("text/html") && (await response.text()).includes('<div id="root">');
+}
+
 async function precacheBuildAssets(cache) {
   try {
     const response = await fetch(APP_SHELL_URL, { cache: "reload" });
@@ -147,8 +154,8 @@ self.addEventListener("fetch", (event) => {
       (async () => {
         try {
           const response = await fetch(request);
-          const cache = await caches.open(STATIC_CACHE_NAME);
-          if (response.ok) {
+          if (response.ok && (await isAppShell(response.clone()))) {
+            const cache = await caches.open(STATIC_CACHE_NAME);
             await cache.put(APP_SHELL_URL, response.clone());
           }
           return response;

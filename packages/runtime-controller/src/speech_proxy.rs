@@ -13,6 +13,7 @@ use tracing::{instrument, warn};
 
 use crate::auth::authenticate_request;
 use crate::bug_reports::{record_system_bug_report, SystemBugReportInput};
+use crate::config::AppConfig;
 use crate::errors::{bad_gateway, bad_request, forbidden, internal_error, ApiError};
 use crate::origins::{is_hop_by_hop_header, resolve_origin_proxy_upstream_endpoint};
 use crate::projects::{
@@ -50,7 +51,7 @@ pub(crate) fn router() -> Router<AppState> {
         )
 }
 
-fn speech_proxy_endpoint_is_allowed(endpoint: &str) -> bool {
+fn speech_proxy_endpoint_is_allowed(config: &AppConfig, endpoint: &str) -> bool {
     let url = match Url::parse(endpoint.trim()) {
         Ok(url) => url,
         Err(_) => return false,
@@ -67,11 +68,7 @@ fn speech_proxy_endpoint_is_allowed(endpoint: &str) -> bool {
     let Some(host) = url.host_str() else {
         return false;
     };
-    let normalized = host.trim().to_ascii_lowercase();
-    normalized == "rt.test"
-        || normalized.ends_with(".rt.test")
-        || normalized == "rt.instafy.dev"
-        || normalized.ends_with(".rt.instafy.dev")
+    config.is_tunnel_host(host)
 }
 
 fn classify_speech_proxy_request(
@@ -183,7 +180,7 @@ async fn proxy_speech_request_inner(
     if base.is_empty() {
         return Err(bad_request("speech proxy base is required"));
     }
-    if !speech_proxy_endpoint_is_allowed(base) {
+    if !speech_proxy_endpoint_is_allowed(&state.config, base) {
         return Err(forbidden(
             "speech proxy only supports Instafy tunnel endpoints",
         ));
@@ -402,17 +399,70 @@ async fn proxy_project_speech_request_path(
 mod tests {
     use super::*;
 
+    fn config_with_tunnel_domain(tunnel_domain: Option<&str>) -> AppConfig {
+        let mut config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "test-origin-key",
+        );
+        config.previews.tunnel_domain = tunnel_domain.map(str::to_string);
+        config
+    }
+
     #[test]
     fn speech_proxy_endpoint_is_allowed_for_instafy_tunnels_only() {
-        assert!(speech_proxy_endpoint_is_allowed("http://abc.rt.test:8443"));
+        let config = config_with_tunnel_domain(Some("instafy.site"));
+        let allowed = |endpoint| speech_proxy_endpoint_is_allowed(&config, endpoint);
+        assert!(allowed("http://abc.rt.test:8443"));
+        assert!(allowed("https://k7m2qa.instafy.site"));
+        assert!(allowed("https://K7M2QA.Instafy.Site./transcribe"));
+        assert!(!allowed("http://127.0.0.1:8796"));
+        assert!(!allowed("https://speech.example.com"));
+        assert!(!allowed("https://evilinstafy.site"));
+        assert!(!allowed("https://instafy.site.example.com"));
+        assert!(!allowed("https://abc.rt.example.com"));
+        assert!(!allowed("https://abc.rt.instafy.dev"));
+        assert!(!allowed("https://user:pass@k7m2qa.instafy.site"));
+        assert!(!allowed("file:///tmp/speech"));
+    }
+
+    #[test]
+    fn speech_proxy_allows_only_local_tunnels_without_a_tunnel_domain() {
+        let config = config_with_tunnel_domain(None);
         assert!(speech_proxy_endpoint_is_allowed(
+            &config,
+            "http://abc.rt.test:8443"
+        ));
+        assert!(!speech_proxy_endpoint_is_allowed(
+            &config,
+            "https://k7m2qa.instafy.site"
+        ));
+        assert!(!speech_proxy_endpoint_is_allowed(
+            &config,
             "https://abc.rt.instafy.dev"
         ));
-        assert!(!speech_proxy_endpoint_is_allowed("http://127.0.0.1:8796"));
-        assert!(!speech_proxy_endpoint_is_allowed(
-            "https://speech.example.com"
-        ));
-        assert!(!speech_proxy_endpoint_is_allowed("file:///tmp/speech"));
+    }
+
+    #[test]
+    fn tunnel_domain_is_read_like_the_preview_domain() {
+        let config = config_with_tunnel_domain(Some("*.instafy.site"));
+        assert!(config.is_tunnel_host("k7m2qa.instafy.site"));
+        assert!(!config.is_tunnel_host("abc.rt.instafy.dev"));
+    }
+
+    #[test]
+    fn a_public_suffix_or_single_label_tunnel_domain_matches_no_tunnel() {
+        for value in ["site", "dev", "co.uk", "*.site", "rt example", "."] {
+            let config = config_with_tunnel_domain(Some(value));
+            assert!(!config.is_tunnel_host("k7m2qa.site"), "{value}");
+            assert!(!config.is_tunnel_host("evil.co.uk"), "{value}");
+            assert!(!config.is_tunnel_host("dev"), "{value}");
+            assert!(
+                !speech_proxy_endpoint_is_allowed(&config, "https://k7m2qa.site"),
+                "{value}"
+            );
+            assert!(config.is_tunnel_host("abc.rt.test"), "{value}");
+        }
     }
 
     #[test]

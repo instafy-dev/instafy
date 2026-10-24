@@ -2927,8 +2927,12 @@ impl TurnClockGuard {
     /// be continued, where to leave the note on what is left (`turn_continuation`).
     fn start(files: Option<&turn_continuation::TurnFiles>) -> Self {
         let started = chrono::Utc::now();
-        let limit = chrono::Duration::from_std(crate::codex::resolve_codex_run_timeout())
-            .unwrap_or_else(|_| chrono::Duration::seconds(600));
+        let limit = chrono::Duration::from_std(
+            files.map_or_else(crate::codex::resolve_codex_run_timeout, |files| {
+                files.limit()
+            }),
+        )
+        .unwrap_or_else(|_| chrono::Duration::seconds(600));
         let format = |at: chrono::DateTime<chrono::Utc>| {
             at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
         };
@@ -6525,8 +6529,10 @@ impl JobProcessor {
             isolated_tool_worker: false,
             // Shortly before the hard limit a team lane's turn is told to save and end (and,
             // when the controller can continue it, to leave a note for its next turn).
-            turn_wrap_up: turn_files.wrap_up(crate::codex::resolve_codex_run_timeout()),
+            turn_wrap_up: turn_files.wrap_up(),
             turn_continue_note: turn_files.continue_note_path(),
+            // A team's turn ends by the team's deadline (`turn_continuation`).
+            run_timeout: Some(turn_files.limit()),
         };
 
         let routing_pre_observation = if should_run_routing_pre_observation_before_main(
@@ -10240,10 +10246,11 @@ fn parse_codex_actions(value: &JsonValue) -> Vec<CodexAction> {
 fn parse_codex_multi_agent_plan_action(
     map: &serde_json::Map<String, JsonValue>,
 ) -> Option<(JsonValue, usize, Option<String>)> {
+    let map = without_null_fields(map);
     let plan_map = map
         .get("plan")
         .and_then(JsonValue::as_object)
-        .unwrap_or(map);
+        .unwrap_or(&map);
 
     let rationale = first_string(plan_map, &["rationale", "reason"])
         .map(str::to_string)
@@ -10451,6 +10458,26 @@ fn parse_codex_multi_agent_plan_action(
         }
         out.insert("runtimeRouting".to_string(), runtime_routing);
     }
+    // How long the team has, when its skill declares it: the controller starts the team's clock
+    // from it (`team_clock` in the runtime controller). A positive number, passed on as given.
+    for (keys, canonical) in [
+        (
+            ["timeBudgetMinutes", "time_budget_minutes"],
+            "timeBudgetMinutes",
+        ),
+        (
+            ["timeBudgetSeconds", "time_budget_seconds"],
+            "timeBudgetSeconds",
+        ),
+    ] {
+        if let Some(value) = keys
+            .iter()
+            .find_map(|key| plan_map.get(*key))
+            .filter(|value| value.as_f64().is_some_and(|n| n.is_finite() && n > 0.0))
+        {
+            out.insert(canonical.to_string(), value.clone());
+        }
+    }
     out.insert(
         "synthesis".to_string(),
         json!({
@@ -10467,6 +10494,36 @@ fn parse_codex_multi_agent_plan_action(
     );
 
     Some((JsonValue::Object(out), agents.len(), rationale))
+}
+
+/// A plan's fields as the controller reads them. The strict plan output schema makes every
+/// optional field required and nullable, so the model writes null for each one it leaves out
+/// (a lane's `readOnlyPaths`, a routing `rationale`, a whole `handoffPaths`). Those nulls are left
+/// out here, at every depth, before the plan is read and sent: the controller treats a missing
+/// field as its default but refuses a null where it expects a value, such as a write scope's path
+/// list. A field holding an object of nothing but nulls (a write scope with every field null) says
+/// no more than a null, so it is left out the same way. A null inside a list is an entry, not a
+/// left-out field, so it stays for the controller to refuse; so does any other value of the wrong
+/// type.
+fn without_null_fields(map: &JsonMap<String, JsonValue>) -> JsonMap<String, JsonValue> {
+    fn only_nulls(value: &JsonValue) -> bool {
+        match value {
+            JsonValue::Null => true,
+            JsonValue::Object(map) => !map.is_empty() && map.values().all(only_nulls),
+            _ => false,
+        }
+    }
+    fn strip(value: &JsonValue) -> JsonValue {
+        match value {
+            JsonValue::Object(map) => JsonValue::Object(without_null_fields(map)),
+            JsonValue::Array(items) => JsonValue::Array(items.iter().map(strip).collect()),
+            other => other.clone(),
+        }
+    }
+    map.iter()
+        .filter(|(_, field)| !only_nulls(field))
+        .map(|(key, field)| (key.clone(), strip(field)))
+        .collect()
 }
 
 fn canonical_runtime_routing_strategy(raw: &str) -> Option<&'static str> {
@@ -13131,12 +13188,28 @@ fn apply_terminal_shared_browser_summary(
     let Some(code) = terminal_consent_failure else {
         return;
     };
-    *summary = if code == "human_input_required" {
-        "Your input is needed in Browser. After control returns to you, fill the highlighted fields directly and choose Done, continue. Your field values are not requested in chat.".to_string()
-    } else {
-        format!("Shared Browser consent ended this run ({code}). No browser action was retried.")
-    };
+    *summary = terminal_shared_browser_summary(code).to_string();
     *fallback_kind = None;
+}
+
+/// What the person reads when a Shared Browser run ended on its approval
+/// lane. The code itself stays in the `browser/terminal-consent` artifact.
+/// Only the step that asked is known not to have run: earlier steps of the
+/// same turn may have opened pages or changed something, so the text speaks
+/// about that step and never about the whole turn.
+fn terminal_shared_browser_summary(code: &str) -> &'static str {
+    match code {
+        "human_input_required" => {
+            "Your input is needed in Browser. After control returns to you, fill the highlighted fields directly and choose Done, continue. Your field values are not requested in chat."
+        }
+        "approval_timeout" => {
+            "I'm waiting for your OK to continue in Instafy's browser. I haven't done that step yet. Send a message when you're ready and I'll ask again."
+        }
+        "approval_denied" => "You declined, so I stopped before that step.",
+        _ => {
+            "Instafy's browser stopped this step to keep it safe, so it wasn't done. Send a message to try again."
+        }
+    }
 }
 
 #[cfg(test)]
@@ -18061,6 +18134,50 @@ mod tests {
     use std::fs;
     use std::time::Duration;
     use tempfile::tempdir;
+
+    #[test]
+    fn a_plans_declared_time_budget_reaches_the_controller() {
+        let plan = |extra: JsonValue| {
+            let mut action = json!({
+                "type": "multi_agent_plan",
+                "mode": "read_only",
+                "rationale": "Independent research per stop",
+                "thresholdReason": "10 days, 3 stops",
+                "agents": [
+                    {"handle": "tokyo", "label": "Tokyo", "prompt": "Research Tokyo."},
+                    {"handle": "kyoto", "label": "Kyoto", "prompt": "Research Kyoto."}
+                ],
+                "lead": {"leadHandle": "octo", "continuationPrompt": "Final reply.", "expectedReportFormat": "2-5 lines."}
+            });
+            for (key, value) in extra.as_object().unwrap() {
+                action[key] = value.clone();
+            }
+            parse_codex_multi_agent_plan_action(action.as_object().unwrap())
+                .expect("a plan")
+                .0
+        };
+        let declared = plan(json!({"timeBudgetMinutes": 12}));
+        assert_eq!(declared["timeBudgetMinutes"], json!(12));
+        assert_eq!(
+            plan(json!({"time_budget_seconds": 600}))["timeBudgetSeconds"],
+            json!(600)
+        );
+        // none declared, a null (a strict schema's left-out field), or not a positive number: no
+        // budget is made up
+        for extra in [
+            json!({}),
+            json!({"timeBudgetMinutes": null}),
+            json!({"timeBudgetMinutes": 0}),
+            json!({"timeBudgetMinutes": "soon"}),
+        ] {
+            let parsed = plan(extra);
+            assert!(
+                parsed.get("timeBudgetMinutes").is_none()
+                    && parsed.get("timeBudgetSeconds").is_none(),
+                "{parsed}"
+            );
+        }
+    }
 
     #[test]
     fn separated_controller_token_cannot_fall_back_as_workspace_token() {
@@ -24032,32 +24149,118 @@ mod tests {
                 7,
             ));
 
+            let expected = match code {
+                "approval_denied" => "You declined, so I stopped before that step.",
+                _ => {
+                    "I'm waiting for your OK to continue in Instafy's browser. I haven't done that step yet. Send a message when you're ready and I'll ask again."
+                }
+            };
             let mut summary = "internal no-final fallback".to_string();
             let mut fallback = Some(CodexFallbackSummaryKind::MissingFinalAssistantMessage);
             apply_terminal_shared_browser_summary(&mut summary, &mut fallback, terminal);
-            assert_eq!(
-                summary,
-                format!(
-                    "Shared Browser consent ended this run ({code}). No browser action was retried."
-                )
-            );
+            assert_eq!(summary, expected);
+            assert!(!summary.contains(code), "the person never reads {code}");
             assert_eq!(fallback, None);
 
             let mut false_success = "Done — the requested browser action succeeded.".to_string();
             let mut no_fallback = None;
             apply_terminal_shared_browser_summary(&mut false_success, &mut no_fallback, terminal);
             assert_eq!(
-                false_success,
-                format!(
-                    "Shared Browser consent ended this run ({code}). No browser action was retried."
-                ),
+                false_success, expected,
                 "terminal consent must never preserve a false success summary"
             );
             assert_eq!(no_fallback, None);
         }
 
+        // Every other terminal code reads the same plain message, without
+        // the code, which stays in the terminal-consent artifact.
+        for code in [
+            "approval_stale",
+            "approval_stale_or_replayed",
+            "approval_authority_revoked",
+            "approval_storage_invalid",
+            "approval_protocol_invalid",
+            "approval_state_invalid",
+            "approval_state_full",
+        ] {
+            let mut summary = "Done.".to_string();
+            let mut fallback = None;
+            apply_terminal_shared_browser_summary(&mut summary, &mut fallback, Some(code));
+            assert_eq!(
+                summary,
+                "Instafy's browser stopped this step to keep it safe, so it wasn't done. Send a message to try again."
+            );
+            assert!(!should_retry_codex_once(Some(code), true));
+        }
+
         assert!(should_retry_codex_once(None, true));
         assert!(!should_retry_codex_once(None, false));
+    }
+
+    /// Under routine browsing a turn opens pages and clicks before the step
+    /// that asks, and the person may have allowed one risky step already. The
+    /// summary of the step that then went unanswered or was declined speaks
+    /// about that step only, never claims the turn changed nothing.
+    #[test]
+    fn terminal_shared_browser_summary_speaks_only_about_the_step_that_asked() {
+        for code in [
+            "approval_timeout",
+            "approval_denied",
+            "approval_stale",
+            "approval_authority_revoked",
+        ] {
+            let mut events = ["navigate", "click"]
+                .into_iter()
+                .map(|tool| {
+                    json!({
+                        "type": "item.completed",
+                        "item": {
+                            "id": format!("call-{tool}"),
+                            "type": "mcp_tool_call",
+                            "server": "instafy_shared_browser",
+                            "tool": tool,
+                            "status": "completed",
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            events.push(json!({
+                "type": "item.completed",
+                "item": {
+                    "id": format!("call-{code}"),
+                    "type": "mcp_tool_call",
+                    "server": "instafy_shared_browser",
+                    "tool": "click",
+                    "status": "failed",
+                    "terminalConsent": {
+                        "state": "blocked",
+                        "terminal": true,
+                        "retryable": false,
+                        "code": code,
+                    }
+                }
+            }));
+            let messages = extract_codex_messages(&events);
+            assert!(has_successful_shared_browser_mcp_message(&messages));
+            let terminal = shared_browser_terminal_consent_failure(&messages);
+            assert_eq!(terminal, Some(code));
+
+            let mut summary = "Opened the invoice and saved it.".to_string();
+            let mut fallback = None;
+            apply_terminal_shared_browser_summary(&mut summary, &mut fallback, terminal);
+            let lowered = summary.to_lowercase();
+            for whole_turn in ["nothing was", "nothing has", "no changes"] {
+                assert!(
+                    !lowered.contains(whole_turn),
+                    "{code}: {summary:?} speaks about the whole turn"
+                );
+            }
+            assert!(
+                lowered.contains("that step") || lowered.contains("this step"),
+                "{code}: {summary:?} does not name the step"
+            );
+            assert!(!summary.contains(code), "the person never reads {code}");
+        }
     }
 
     #[test]
@@ -29469,6 +29672,92 @@ mod tests {
             }
             _ => panic!("expected multi-agent plan action"),
         }
+    }
+
+    #[test]
+    fn a_plan_written_under_the_strict_schema_reaches_the_controller_without_its_nulls() {
+        // The controller's multi_agent_plan tests read this same fixture and check that its own
+        // write-scope validator accepts every lane of `sent`.
+        let fixture: JsonValue =
+            serde_json::from_str(include_str!("strict_plan_fixture.json")).expect("fixture");
+        let actions = parse_codex_actions(&json!({ "actions": [fixture["written"].clone()] }));
+        assert_eq!(actions.len(), 1);
+        let CodexAction::MultiAgentPlan {
+            plan, agent_count, ..
+        } = &actions[0]
+        else {
+            panic!(
+                "expected the plan to reach the controller, got {:?}",
+                actions[0]
+            );
+        };
+        assert_eq!(*agent_count, 3);
+        assert_eq!(plan, &fixture["sent"]);
+
+        // A null left out at every depth, the same way through the legacy `plan` wrapper.
+        let wrapped = json!({ "type": "multi_agent_plan", "plan": fixture["written"].clone() });
+        let (plan, _, _) =
+            parse_codex_multi_agent_plan_action(wrapped.as_object().unwrap()).expect("a plan");
+        assert_eq!(plan, fixture["sent"]);
+
+        // A null entry inside a list is a value, not a left-out field: it stays, for the
+        // controller to refuse.
+        let mut with_null_entry = fixture["written"].clone();
+        with_null_entry["agents"][0]["writeScope"]["ownedPaths"] =
+            json!(["handoff/japan/tokyo.json", null]);
+        let (plan, _, _) =
+            parse_codex_multi_agent_plan_action(with_null_entry.as_object().unwrap())
+                .expect("a plan");
+        assert_eq!(
+            plan["agents"][0]["writeScope"]["ownedPaths"],
+            json!(["handoff/japan/tokyo.json", null])
+        );
+
+        // Only nulls are left out: a value of the wrong type is passed on for the controller to
+        // refuse.
+        let mut wrong_type = fixture["written"].clone();
+        wrong_type["agents"][0]["writeScope"]["ownedPaths"] = json!(5);
+        wrong_type["agents"][1]["writeScope"]["mode"] = json!(1);
+        let (plan, _, _) =
+            parse_codex_multi_agent_plan_action(wrong_type.as_object().unwrap()).expect("a plan");
+        assert_eq!(plan["agents"][0]["writeScope"]["ownedPaths"], json!(5));
+        assert_eq!(plan["agents"][1]["writeScope"]["mode"], json!(1));
+
+        // A write scope with every field null says no more than `"writeScope": null`: in a
+        // read-only plan both leave the lane on the default read-only scope.
+        let read_only_plan = |write_scope: JsonValue| {
+            json!({
+                "type": "multi_agent_plan",
+                "rationale": "Two independent reviews.",
+                "mode": "read_only",
+                "agents": [
+                    { "handle": "alpha", "prompt": "Review the API.", "writeScope": write_scope },
+                    { "handle": "beta", "prompt": "Review the UI.", "writeScope": null }
+                ]
+            })
+        };
+        let all_null_scope = json!({
+            "mode": null,
+            "readOnlyPaths": null,
+            "ownedPaths": null,
+            "ownedPathGlobs": null,
+            "rationale": null
+        });
+        let (all_null, _, _) = parse_codex_multi_agent_plan_action(
+            read_only_plan(all_null_scope).as_object().unwrap(),
+        )
+        .expect("a plan");
+        let (left_out, _, _) = parse_codex_multi_agent_plan_action(
+            read_only_plan(JsonValue::Null).as_object().unwrap(),
+        )
+        .expect("a plan");
+        assert_eq!(all_null, left_out);
+        assert!(all_null["agents"][0].get("writeScope").is_none());
+        // An empty object the model wrote as such is its own value and stays.
+        let (empty, _, _) =
+            parse_codex_multi_agent_plan_action(read_only_plan(json!({})).as_object().unwrap())
+                .expect("a plan");
+        assert_eq!(empty["agents"][0]["writeScope"], json!({}));
     }
 
     #[test]

@@ -4,6 +4,7 @@ import type { SharedBrowserHostSnapshot } from "../../../../services/runtimeCont
 import { resolveBrowserRuntimeSelection } from "../browserSessionRuntimeEnsure";
 import {
   SHARED_BROWSER_HOST_COPY,
+  SHARED_BROWSER_HOST_REQUEST_TIMEOUT_MS,
   shouldStartSpaceMachineForBrowser,
   startSpaceMachineForBrowser,
   waitForSharedBrowserHostReady,
@@ -147,6 +148,52 @@ describe("waitForSharedBrowserHostReady", () => {
     clock.sleep.mockImplementation(async () => { controller.abort(); return false; });
     await expect(waitForSharedBrowserHostReady({ ...base, canControl: true, client: value, signal: controller.signal, ...clock }))
       .resolves.toEqual({ kind: "cancelled" });
+  });
+
+  it("gives up a read that never answers after ten seconds and reads again", async () => {
+    vi.useFakeTimers();
+    try {
+      const hanging = vi.fn<SharedBrowserHostClient["fetchHost"]>()
+        .mockImplementationOnce(() => new Promise(() => {}))
+        .mockResolvedValue(snapshot("ready"));
+      const value: SharedBrowserHostClient = {
+        fetchHost: hanging,
+        startHost: vi.fn(async () => snapshot("starting")),
+        isUnavailableError: () => false,
+        isHostRefusedError: () => false,
+      };
+      let result: unknown;
+      void waitForSharedBrowserHostReady({ ...base, canControl: true, client: value }).then((outcome) => { result = outcome; });
+      await vi.advanceTimersByTimeAsync(SHARED_BROWSER_HOST_REQUEST_TIMEOUT_MS - 100);
+      expect(result).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(700);
+      // The timed-out read was aborted and counted like a gateway error, not as a failure.
+      expect(hanging.mock.calls[0]![0].signal?.aborted).toBe(true);
+      expect(result).toEqual({ kind: "ready", snapshot: snapshot("ready") });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ends at its bound even when every read and start hangs", async () => {
+    vi.useFakeTimers();
+    try {
+      const value: SharedBrowserHostClient = {
+        fetchHost: vi.fn(() => new Promise<never>(() => {})),
+        startHost: vi.fn(() => new Promise<never>(() => {})),
+        isUnavailableError: () => false,
+        isHostRefusedError: () => false,
+      };
+      let result: unknown;
+      void waitForSharedBrowserHostReady({ ...base, canControl: true, client: value, timeoutMs: 30_000 })
+        .then((outcome) => { result = outcome; });
+      await vi.advanceTimersByTimeAsync(29_000);
+      expect(result).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(result).toEqual({ kind: "error", message: SHARED_BROWSER_HOST_COPY.didNotStart });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

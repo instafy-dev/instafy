@@ -1,5 +1,0 @@
----
-"@instafy/cli": patch
----
-
-New `instafy preview check --port <port> [--path <path>] [--phone] [--framed]` looks at a site served on this machine before anyone sees it. It loads the page in a headless Chromium (from `127.0.0.1`, or `[::1]` for a server bound to IPv6 `localhost`) and lists its title, console and page errors, failed requests and a blank page. It writes desktop and phone screenshots (`--out <dir>`) and supports `--json`. `--framed` loads the site in a frame on another origin instead and also reports a site that refuses to be framed. It is local only and downloads nothing: it uses the runtime's trusted Playwright (`INSTAFY_SHARED_BROWSER_PLAYWRIGHT_PATH`, the path the Shared Browser uses) or a global one, and a project's own `node_modules` copy only with `--workspace-playwright`. Instafy's own ports are refused, including ports moved by their settings, plus any listed in `INSTAFY_PREVIEW_DENY_PORTS`. Exit codes: 0 no problems, 1 problems found, 2 nothing is listening, 3 the port is not allowed, 4 no browser, 64 bad options, 70 the check itself failed.

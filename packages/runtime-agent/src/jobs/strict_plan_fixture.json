@@ -1,0 +1,120 @@
+{
+  "about": "A team plan as the model writes it under the strict plan output schema (codex.rs multi_agent_plan_final_output_json_schema: every optional field is required and nullable, so each one left out is written as null), and the plan the runtime sends the controller for it. The runtime test (jobs/mod.rs) checks that parsing `written` gives `sent`; the controller test (multi_agent_plan.rs) checks that the controller's own write-scope validator accepts every lane of `sent` and refuses the lanes of `written`.",
+  "written": {
+    "type": "multi_agent_plan",
+    "rationale": "Three cities, each written to its own handoff file.",
+    "thresholdReason": "Independent research lanes with disjoint outputs.",
+    "mode": "write_scoped",
+    "handoffPaths": null,
+    "agents": [
+      {
+        "handle": "tokyo",
+        "label": "Tokyo",
+        "prompt": "Research Tokyo and write handoff/japan/tokyo.json.",
+        "scopeSummary": "Tokyo",
+        "writeScope": {
+          "mode": "owned",
+          "readOnlyPaths": null,
+          "ownedPaths": ["handoff/japan/tokyo.json"],
+          "ownedPathGlobs": null,
+          "rationale": null
+        }
+      },
+      {
+        "handle": "kyoto",
+        "label": "Kyoto",
+        "prompt": "Research Kyoto and write handoff/japan/kyoto.json.",
+        "scopeSummary": "Kyoto",
+        "writeScope": {
+          "mode": null,
+          "readOnlyPaths": null,
+          "ownedPaths": ["handoff/japan/kyoto.json"],
+          "ownedPathGlobs": null,
+          "rationale": "Kyoto's file only"
+        }
+      },
+      {
+        "handle": "brief",
+        "label": "Brief",
+        "prompt": "Check the brief and report what it asks for.",
+        "scopeSummary": "Brief",
+        "writeScope": {
+          "mode": "read_only",
+          "readOnlyPaths": ["docs/brief.md"],
+          "ownedPaths": null,
+          "ownedPathGlobs": null,
+          "rationale": null
+        }
+      }
+    ],
+    "lead": {
+      "leadHandle": "octo",
+      "continuationPrompt": "Merge the city files into one itinerary.",
+      "expectedReportFormat": "itinerary"
+    },
+    "runtimeRouting": {
+      "strategy": "spread",
+      "desiredSlots": null,
+      "rationale": null
+    },
+    "presentation": {
+      "workerEvidenceVisibility": "surface_on_failure",
+      "leadSummaryVisibility": null,
+      "showThresholdReason": null
+    }
+  },
+  "sent": {
+    "rationale": "Three cities, each written to its own handoff file.",
+    "thresholdReason": "Independent research lanes with disjoint outputs.",
+    "mode": "write_scoped",
+    "agents": [
+      {
+        "handle": "tokyo",
+        "label": "Tokyo",
+        "prompt": "Research Tokyo and write handoff/japan/tokyo.json.",
+        "scopeSummary": "Tokyo",
+        "writeScope": {
+          "mode": "owned",
+          "ownedPaths": ["handoff/japan/tokyo.json"]
+        }
+      },
+      {
+        "handle": "kyoto",
+        "label": "Kyoto",
+        "prompt": "Research Kyoto and write handoff/japan/kyoto.json.",
+        "scopeSummary": "Kyoto",
+        "writeScope": {
+          "ownedPaths": ["handoff/japan/kyoto.json"],
+          "rationale": "Kyoto's file only"
+        }
+      },
+      {
+        "handle": "brief",
+        "label": "Brief",
+        "prompt": "Check the brief and report what it asks for.",
+        "scopeSummary": "Brief",
+        "writeScope": {
+          "mode": "read_only",
+          "readOnlyPaths": ["docs/brief.md"]
+        }
+      }
+    ],
+    "lead": {
+      "leadHandle": "octo",
+      "continuationPrompt": "Merge the city files into one itinerary.",
+      "expectedReportFormat": "itinerary"
+    },
+    "runtimeRouting": {
+      "strategy": "spread",
+      "desiredSlots": 3
+    },
+    "presentation": {
+      "workerEvidenceVisibility": "surface_on_failure"
+    },
+    "synthesis": {
+      "leadHandle": "octo",
+      "prompt": "Merge the city files into one itinerary.",
+      "expectedReportFormat": "itinerary"
+    }
+  }
+}

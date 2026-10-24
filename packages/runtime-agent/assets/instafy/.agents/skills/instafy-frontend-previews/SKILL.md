@@ -141,7 +141,7 @@ A tunneled preview is a **new website origin**. Things that work on your laptop 
 
 - Remote devices can’t reach `localhost`. If the frontend calls `http://127.0.0.1:*` / `localhost`, fix it by using a reachable backend (tunnel the backend too, run it in a hosted runtime) or proxy via same-origin paths (e.g. `/api`).
 - Some backends/auth providers only trust specific website URLs. If sign-in/callbacks fail, the preview URL likely needs to be added to an allowlist (“Redirect URLs”, “Callback URLs”, “Site URL”, etc). Prefer **stable** preview hostnames; if the user wants “auto-fix”, request a management token via `request_secret`.
-- Some dev servers block unknown `Host` headers (example: Vite). If the preview shows “Blocked request…host is not allowed”, add the tunnel suffix to Vite `server.allowedHosts` (e.g. `[".rt.instafy.dev"]` or `[".rt.test"]`).
+- Some dev servers block unknown `Host` headers (example: Vite). If the preview shows “Blocked request…host is not allowed”, add the tunnel domain with a leading dot to Vite `server.allowedHosts`: the host of the URL that `instafy tunnel start` printed, without its first part (for `https://abc123.example.com` that is `".example.com"`; locally `".rt.test"`).
 
 ## Instafy tunnel flow (what this means)
 

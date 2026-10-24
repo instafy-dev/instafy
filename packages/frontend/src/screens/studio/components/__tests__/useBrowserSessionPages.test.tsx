@@ -113,6 +113,7 @@ describe("useBrowserSessionPages", () => {
       browserSessionId: "browser-surface-1",
       preferRuntimeId: "runtime-1",
       includePlaceholder: true,
+      signal: expect.any(AbortSignal),
     });
     expect(latestResult?.pages).toEqual([
       expect.objectContaining({ id: "page-1", canGoBack: true, canGoForward: false }),
@@ -341,6 +342,101 @@ describe("useBrowserSessionPages", () => {
       expect(fetchPagesMock).toHaveBeenCalledTimes(3);
       expect(latestResult?.pages[0]?.id).toBe("page-1");
       expect(onUnavailable).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("says Instafy's browser did not start after two minutes of not-ready answers, and clears once a read succeeds", async () => {
+    vi.useFakeTimers();
+    try {
+      const notReady = () => Object.assign(new Error("browser pages unavailable (503)"), {
+        status: 503,
+        code: "browser_host_not_ready",
+      });
+      fetchPagesMock.mockReset().mockImplementation(async () => { throw notReady(); });
+      const startedAt = Date.now();
+      await renderHook();
+      expect(latestResult?.hostNotReadySinceMs).toBe(startedAt);
+      expect(latestResult?.hostNotReady).toBe(false);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(119_000);
+      });
+      // Still the same unbroken run of answers.
+      expect(latestResult?.hostNotReadySinceMs).toBe(startedAt);
+      expect(latestResult?.hostNotReady).toBe(false);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      expect(latestResult?.hostNotReady).toBe(true);
+      fetchPagesMock.mockResolvedValue([
+        { id: "page-1", url: "https://example.com/", host: "example.com", label: "Example", title: "Example",
+          isActive: true, canGoBack: false, canGoForward: false },
+      ]);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_500);
+      });
+      expect(latestResult?.resolved).toBe(true);
+      expect(latestResult?.hostNotReady).toBe(false);
+      expect(latestResult?.hostNotReadySinceMs).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("starts a new run of not-ready answers when the browser is closed and opened again", async () => {
+    vi.useFakeTimers();
+    try {
+      const notReady = () => Object.assign(new Error("browser pages unavailable (503)"), {
+        status: 503,
+        code: "browser_host_not_ready",
+      });
+      fetchPagesMock.mockReset().mockImplementation(async () => { throw notReady(); });
+      await renderHook();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(121_000);
+      });
+      expect(latestResult?.hostNotReady).toBe(true);
+      // Closed: a hidden session, as ChatPanel passes it.
+      hookSuspendOnUnavailable = true;
+      await renderHook();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10 * 60_000);
+      });
+      // Opened again; its first page read has not answered yet.
+      fetchPagesMock.mockReset().mockImplementation(() => new Promise(() => {}));
+      hookSuspendOnUnavailable = false;
+      await renderHook();
+      expect(latestResult?.resolved).toBe(false);
+      expect(latestResult?.hostNotReady).toBe(false);
+      expect(latestResult?.hostNotReadySinceMs).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives up a page read that never answers after ten seconds and asks again", async () => {
+    vi.useFakeTimers();
+    try {
+      fetchPagesMock.mockReset()
+        .mockImplementationOnce(() => new Promise(() => {}))
+        .mockResolvedValue([
+          { id: "page-2", url: "https://example.com/", host: "example.com", label: "Example", title: "Example",
+            isActive: true, canGoBack: false, canGoForward: false },
+        ]);
+      await renderHook();
+      expect(fetchPagesMock).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(7_500);
+      });
+      // Polls before the bound share the read in flight.
+      expect(fetchPagesMock).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      expect((fetchPagesMock.mock.calls[0]![0] as { signal: AbortSignal }).signal.aborted).toBe(true);
+      expect(fetchPagesMock.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(latestResult?.pages[0]?.id).toBe("page-2");
     } finally {
       vi.useRealTimers();
     }

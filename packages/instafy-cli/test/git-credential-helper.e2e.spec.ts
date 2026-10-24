@@ -126,4 +126,63 @@ describe("instafy git credential helper", () => {
     expect(result.stdout).toBe("");
     expect(sawRequest).toBe(false);
   });
+  it("answers only exact git hosts, never other hosts under the same parent domain", async () => {
+    const projectId = randomUUID();
+    let requests = 0;
+
+    const server = http.createServer((req, res) => {
+      requests += 1;
+      req.resume();
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ projectId, token: "git-token-123", expiresIn: 60, scopes: ["git.read", "git.write"] }));
+    });
+    server.listen(0);
+    const addr = server.address();
+    if (!addr || typeof addr !== "object") throw new Error("failed to bind test server");
+
+    const homeDir = makeTempDir("instafy-cli-home-");
+    const env = {
+      ...process.env,
+      HOME: homeDir,
+      USERPROFILE: homeDir,
+      INSTAFY_SERVER_URL: `http://127.0.0.1:${addr.port}`,
+      INSTAFY_ACCESS_TOKEN: "user-access-token",
+      SUPABASE_ACCESS_TOKEN: "",
+      CONTROLLER_ACCESS_TOKEN: "",
+      INSTAFY_GIT_HOSTS: "git.example.test",
+      ORIGIN_GIT_REMOTE_URL: `https://remote.example.test/${projectId}.git`,
+    };
+
+    try {
+      for (const host of [
+        "other.instafy.dev",
+        "sub.git.instafy.dev",
+        "sub.git.example.test",
+        "instafy.dev",
+        "git-shard.attacker.example",
+        "git-shard-1.example.test",
+        "git-shardz",
+        "git-edge.example.test",
+      ]) {
+        const result = await runCli(["git", "credential", "get"], {
+          env,
+          input: `protocol=https\nhost=${host}\npath=${projectId}.git\n\n`,
+        });
+        expect(result.code, host).toBe(0);
+        expect(result.stdout, host).toBe("");
+      }
+      expect(requests).toBe(0);
+
+      for (const host of ["git.example.test", "remote.example.test", `127.0.0.1:${addr.port}`, "git-shard-0", "git-edge"]) {
+        const result = await runCli(["git", "credential", "get"], {
+          env,
+          input: `protocol=https\nhost=${host}\npath=${projectId}.git\n\n`,
+        });
+        expect(result.stdout, host).toContain("password=git-token-123");
+      }
+      expect(requests).toBe(5);
+    } finally {
+      server.close();
+    }
+  });
 });

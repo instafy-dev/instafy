@@ -3624,7 +3624,7 @@ fn controller_base_url_for_headers(config: &AppConfig, headers: &HeaderMap) -> O
     Some(format!("{scheme}://{host}"))
 }
 
-fn origin_endpoint_is_proxyable(endpoint: &str) -> bool {
+fn origin_endpoint_is_proxyable(config: &AppConfig, endpoint: &str) -> bool {
     let url = match reqwest::Url::parse(endpoint.trim()) {
         Ok(url) => url,
         Err(_) => return false,
@@ -3644,11 +3644,9 @@ fn origin_endpoint_is_proxyable(endpoint: &str) -> bool {
         None => return false,
     };
 
-    host == "rt.instafy.dev"
-        || host.ends_with(".rt.instafy.dev")
-        // Local dev tunnel broker uses `.rt.test` hostnames (typically not resolvable via OS DNS).
-        || host == "rt.test"
-        || host.ends_with(".rt.test")
+    // Tunnel hosts under `TUNNEL_DOMAIN`, and the local broker's `.rt.test`
+    // (typically not resolvable via OS DNS).
+    config.is_tunnel_host(host)
         // Local dev: hosted origin gateway defaults to 127.0.0.1 (host), but docker runtimes cannot
         // reach it directly. Proxy it through the controller instead.
         || host == "127.0.0.1"
@@ -3814,7 +3812,7 @@ fn origin_endpoint_for_client(
     endpoint: &str,
 ) -> String {
     let normalized = endpoint.trim().trim_end_matches('/').to_string();
-    if !origin_endpoint_is_proxyable(&normalized) {
+    if !origin_endpoint_is_proxyable(config, &normalized) {
         return normalized;
     }
 
@@ -4310,7 +4308,7 @@ async fn proxy_origin_browser_ws(
 
     authorize_origin_proxy_token_runtime(&state, &origin, &claims).await?;
 
-    if !origin_endpoint_is_proxyable(&origin.endpoint) {
+    if !origin_endpoint_is_proxyable(&state.config, &origin.endpoint) {
         return Err(forbidden(
             "origin endpoint is not available through controller proxy",
         ));
@@ -4572,7 +4570,7 @@ async fn proxy_origin_request(
     let runtime_binding = authorize_origin_proxy_token_runtime(&state, &origin, &claims).await?;
     ensure_browser_host_route_allowed(&state.config, &canonical_path, &origin.project_id)?;
 
-    if !origin_endpoint_is_proxyable(&origin.endpoint) {
+    if !origin_endpoint_is_proxyable(&state.config, &origin.endpoint) {
         return Err(forbidden(
             "origin endpoint is not available through controller proxy",
         ));
@@ -6376,12 +6374,13 @@ MCowBQYDK2VwAyEAFQAEX0aYqix3VQUBg05FFISGxhx2Ry93VE51GzM5iXA=
     }
 
     #[test]
-    fn origin_endpoint_for_client_rewrites_rt_endpoints_using_forwarded_headers() {
-        let config = crate::tests::build_app_config(
+    fn origin_endpoint_for_client_rewrites_tunnel_endpoints_using_forwarded_headers() {
+        let mut config = crate::tests::build_app_config(
             crate::tests::test_origin_private_key(),
             crate::tests::test_origin_public_key(),
             "test-origin-key",
         );
+        config.previews.tunnel_domain = Some("instafy.site".to_string());
 
         let origin_id = Uuid::new_v4();
         let mut headers = HeaderMap::new();
@@ -6391,17 +6390,65 @@ MCowBQYDK2VwAyEAFQAEX0aYqix3VQUBg05FFISGxhx2Ry93VE51GzM5iXA=
         );
         headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
 
-        let rewritten = origin_endpoint_for_client(
-            &config,
-            &headers,
-            &origin_id,
-            "http://abc123.rt.instafy.dev/",
+        for endpoint in ["http://abc123.instafy.site/", "https://instafy.site"] {
+            assert_eq!(
+                origin_endpoint_for_client(&config, &headers, &origin_id, endpoint),
+                format!("https://controller.instafy.dev/origin/{origin_id}"),
+                "{endpoint}"
+            );
+        }
+        // Only the configured domain is a tunnel domain.
+        for endpoint in [
+            "https://abc123.rt.example.com",
+            "https://abc123.rt.instafy.dev",
+            "https://abc123.evilinstafy.site",
+            "https://instafy.site.example.com",
+        ] {
+            assert_eq!(
+                origin_endpoint_for_client(&config, &headers, &origin_id, endpoint),
+                endpoint,
+                "{endpoint}"
+            );
+        }
+    }
+
+    #[test]
+    fn origin_endpoint_for_client_keeps_public_hosts_without_a_tunnel_domain() {
+        let config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "test-origin-key",
+        );
+        assert!(config.previews.tunnel_domain.is_none());
+
+        let origin_id = Uuid::new_v4();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::HOST,
+            HeaderValue::from_static("controller.instafy.dev"),
         );
 
         assert_eq!(
-            rewritten,
-            format!("https://controller.instafy.dev/origin/{origin_id}")
+            origin_endpoint_for_client(
+                &config,
+                &headers,
+                &origin_id,
+                "https://abc123.instafy.site"
+            ),
+            "https://abc123.instafy.site"
         );
+        assert!(!origin_endpoint_is_proxyable(
+            &config,
+            "https://abc123.instafy.site"
+        ));
+        assert!(!origin_endpoint_is_proxyable(
+            &config,
+            "https://abc123.rt.instafy.dev"
+        ));
+        assert!(origin_endpoint_is_proxyable(
+            &config,
+            "http://abc123.rt.test:8443"
+        ));
     }
 
     #[test]
@@ -6441,16 +6488,13 @@ MCowBQYDK2VwAyEAFQAEX0aYqix3VQUBg05FFISGxhx2Ry93VE51GzM5iXA=
             "test-origin-key",
         );
         config._controller_external_url = Some("https://controller.external.example".to_string());
+        config.previews.tunnel_domain = Some("instafy.site".to_string());
 
         let origin_id = Uuid::new_v4();
         let headers = HeaderMap::new();
 
-        let rewritten = origin_endpoint_for_client(
-            &config,
-            &headers,
-            &origin_id,
-            "http://abc123.rt.instafy.dev",
-        );
+        let rewritten =
+            origin_endpoint_for_client(&config, &headers, &origin_id, "http://abc123.instafy.site");
 
         assert_eq!(
             rewritten,

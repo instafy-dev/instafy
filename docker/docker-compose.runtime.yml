@@ -119,6 +119,13 @@ services:
       PROXY_PINNED_MODEL: ${PROXY_PINNED_MODEL-${MANAGED_AI_MODEL_ID:-}}
       # openai (unset), all or none: see docker-compose.runtime.provider.yml.
       PROXY_PLATFORM_SERVICE_TIER_ENDPOINTS: ${PROXY_PLATFORM_SERVICE_TIER_ENDPOINTS:-}
+      # Where the proxy sends a ChatGPT login's or an API key's requests; empty
+      # is the provider itself. Separate names, because CODEX_PROXY_CHATGPT_ENDPOINT
+      # in docker/.env.local points the runtime at this proxy. Used to put
+      # scripts/fake-rate-limit-upstream.mjs in front of the provider (see
+      # packages/openai-proxy-server/README.md, "Trying a rate limit locally").
+      CODEX_PROXY_CHATGPT_ENDPOINT: ${PROXY_UPSTREAM_CHATGPT_ENDPOINT:-}
+      CODEX_OPENAI_ENDPOINT: ${PROXY_UPSTREAM_OPENAI_ENDPOINT:-}
       CONTROLLER_BASE_URL: ${CONTROLLER_BASE_URL:-http://host.docker.internal:8788}
       CONTROLLER_INTERNAL_TOKEN: ${CONTROLLER_INTERNAL_TOKEN:-}
       PROXY_CREDENTIAL_LEASE_TOKEN: ${PROXY_CREDENTIAL_LEASE_TOKEN:-}

@@ -88,6 +88,7 @@ export function jobsQuery(projectId, sinceIso) {
            payload #> '{metadata,managedAiModelLabel}' as "modelLabel",
            payload #> '{metadata,multiAgentPlan,continuation}' as "planContinuation",
            payload #> '{metadata,multiAgentPlan,rateLimitRetry}' as "planRateLimitRetry",
+           payload #> '{rateLimitRetry}' as "turnRateLimitRetry",
            payload #>> '{metadata,agent,handle}' as "agentHandle"
     from agent_jobs where project_id = '${projectId}' and created_at >= '${sinceIso}') j`;
 }
@@ -164,6 +165,78 @@ export function promptContextOf(job) {
     sections: Object.fromEntries(Object.entries(sections).map(([name, value]) => [name, value?.chars ?? 0])),
     finalOutputMode: meta.finalOutputMode?.mode ?? null,
   };
+}
+
+/** The items a team planned a lane for: each lane's label, a lane for several stops ("Hualien and Taitung") counting
+ *  as each of them, from every plan its lead or checkpoint emitted (the run log's final message). The builder is not an
+ *  item. A one-item label that adds words to its lane's handle ("Tokyo Research" for `tokyo`) keeps the handle's words
+ *  as its `core`: the page names the item when it names the core. When no plan message survived (a long run log keeps
+ *  only its tail), the lanes' handles stand in, marked `fromHandle`. Exported for the tests. */
+export function teamItemsOf(jobs) {
+  const items = [];
+  const add = (name, fromHandle = false, core = null) => {
+    const clean = String(name ?? "").trim();
+    if (clean && !items.some((x) => normItem(x.name) === normItem(clean))) items.push({ name: clean, ...(fromHandle ? { fromHandle } : {}), ...(core ? { core } : {}) });
+  };
+  for (const job of jobs ?? []) {
+    if (job.agentRole === "worker") continue;
+    for (const artifact of artifactsOf(job, "codex/run-log")) {
+      for (const event of artifact.events ?? []) {
+        const text = event?.item?.type === "agent_message" ? event.item.text : null;
+        if (typeof text !== "string" || !text.includes("multi_agent_plan")) continue;
+        let message;
+        try {
+          message = JSON.parse(text);
+        } catch {
+          continue;
+        }
+        for (const action of Array.isArray(message?.actions) ? message.actions : []) {
+          if (action?.type !== "multi_agent_plan") continue;
+          for (const agent of Array.isArray(action.agents) ? action.agents : []) {
+            const label = typeof agent?.label === "string" ? agent.label : "";
+            if (!label || agent?.handle === "build" || /\bbuilder\b/i.test(label)) continue;
+            const parts = label.split(/\s+(?:and|&|\+)\s+|\s*[,/、]\s*/i);
+            // the handle's words, when the label holds all of them and more ("tokyo" in "Tokyo Research")
+            const core = normItem(String(agent?.handle ?? "").replace(/[-_]+/g, " "));
+            const holdsCore = parts.length === 1 && core && normItem(label) !== core && textNamesItem(label, core);
+            for (const part of parts) add(part, false, holdsCore ? core : null);
+          }
+        }
+      }
+    }
+  }
+  if (!items.length) {
+    // a builder owns a folder (`sites/<slug>/**`) where lanes own one file each
+    const builds = (job) => job.planStage === "then" || job.agentHandle === "build" || (Array.isArray(job.ownedPaths) && job.ownedPaths.some((p) => /\*/.test(String(p))));
+    for (const job of jobs ?? []) {
+      if (job.agentRole === "worker" && job.agentHandle && !builds(job)) add(String(job.agentHandle).replace(/[-_]+/g, " "), true);
+    }
+  }
+  return items;
+}
+
+// A line where the page says what it could not show ("Not found yet: Hualien, Taitung") names an item without
+// showing it.
+const MISSING_LINE_RE = /^\s*(not found yet|missing|not on the (map|page)( yet)?|could ?n[o']t (find|add|place)|unavailable)\b/i;
+
+/** Which team items the page's text leaves out. A handle stands for its item when the text names it, or names every
+ *  word of it ("hualien taitung" for a lane over two stops). Exported for the tests. */
+export function itemsMissingFrom(text, items) {
+  const shown = String(text ?? "").split(/\r?\n/).filter((line) => !MISSING_LINE_RE.test(line)).join("\n");
+  return items.filter((item) => !(textNamesItem(shown, item.name)
+    || (item.core && textNamesItem(shown, item.core))
+    || (item.fromHandle && item.name.split(/\s+/).filter((w) => w.length >= 3).every((w) => textNamesItem(shown, w)))));
+}
+
+const normItem = (text) => String(text ?? "").normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+
+/** Does the page's text name the item, as whole words in any case and punctuation (a script without spaces between
+ *  words: as a substring)? */
+export function textNamesItem(text, item) {
+  const want = normItem(item);
+  if (!want) return false;
+  const hay = ` ${normItem(text)} `;
+  return /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(want) ? hay.includes(want) : hay.includes(` ${want} `);
 }
 
 export function usageOf(jobs) {
@@ -290,6 +363,21 @@ const REPLY_UNVERIFIED_RE =
   /unverified|not verified|haven[’']?t verified|aren[’']?t verified|isn[’']?t verified|not (?:yet )?(?:checked|confirmed)|check (?:the |current |live )?(?:prices?|times?|timetables?|availability)|estimate|approximate/i;
 
 const REPLY_ASSUMED_RE = /\bassumed(?:\*\*|_)?\s*:/i;
+// A reply that sends the person to a card: "Open it from the card above", "tap the card", "the preview card". Only
+// wording that points at a card as the place to look: "the cashback on this card" or "a SIM card" is not a pointer.
+const REPLY_CARD_POINTER_RE =
+  /\b(?:from|tap|open|click)\s+(?:it\s+(?:from|in|on)\s+)?(?:the|this|that|its)\s+(?:preview\s+|site\s+|page\s+|map\s+)?card\b|\bcards?\s+(?:above|below|in the chat)\b|\bpreview cards?\b|\b(?:desde|en)\s+la\s+tarjeta\b|\btarjeta\s+de\s+(?:arriba|abajo)\b/i;
+// A sentence that says there is no card ("no preview card was opened", "there is no card to open", "sin tarjeta")
+// tells the person the truth; it does not send them to one.
+const REPLY_NO_CARD_RE =
+  /\b(?:no|not|never|without|none)\b[^.!?\n]{0,40}\b(?:card|tarjeta)s?\b|\b(?:card|tarjeta)s?\b[^.!?\n]{0,40}(?:\bnot\b|\bnever\b|n[’']t\b)|\b(?:wasn|isn|weren|aren|didn|hasn|haven)[’']t\b[^.!?\n]{0,40}\bcards?\b|\b(?:sin|ninguna?)\b[^.!?\n]{0,40}\btarjetas?\b/i;
+
+/** Whether the reply sends the person to a card: a sentence that points at one and does not say there is none. */
+export function pointsToCard(body) {
+  return String(body ?? "")
+    .split(/(?<=[.!?])\s+|\n+/)
+    .some((sentence) => REPLY_CARD_POINTER_RE.test(sentence) && !REPLY_NO_CARD_RE.test(sentence));
+}
 
 /** A reply that mostly asks: more than half its sentences are questions. "Built your checklist: 24 items. Want due
  *  dates?" is a result with an offer, not a question-only reply. */
@@ -377,6 +465,8 @@ export function replyStats(text) {
     questions: body ? (body.match(/[?？](?=\s|$|\*|\))/g) ?? []).length : 0,
     // What a vague ask was built on, stated in one line ("Assumed: 2 adults, mid-range, …").
     assumedLine: REPLY_ASSUMED_RE.test(body),
+    // Sends the person to a card ("Open it from the card above").
+    pointsToCard: pointsToCard(body),
     filePaths: hasFilePaths(body),
     statements: statementsOf(body),
     language: detectLanguage(body).language,
@@ -518,6 +608,10 @@ export function timingOf(jobs) {
       commandSec: timings ? secs(timings.commandMs) : null,
       wrapUpSec: timings?.wrapUp?.atMs != null ? secs(timings.wrapUp.atMs) : null,
       continuation: (artifactsOf(job, "agent/turn-continuation")[0] ?? null)?.endedBy ?? null,
+      // put back in the queue after a short rate limit, up to three times (`turn_rate_limit_retry`):
+      // its wait includes the earlier attempts and the holds; the record keeps the last hold
+      requeuedHoldSec: Number.isFinite(job.turnRateLimitRetry?.holdMs) ? secs(job.turnRateLimitRetry.holdMs) : null,
+      requeuedTimes: job.turnRateLimitRetry ? (Number.isInteger(job.turnRateLimitRetry.attempts) ? job.turnRateLimitRetry.attempts : 1) : 0,
       slowest: [...commands].sort((a, b) => (b.ms ?? 0) - (a.ms ?? 0)).slice(0, 5)
         .map((c) => ({ command: redactText(String(c.command ?? "")).slice(0, 120), sec: secs(c.ms), status: c.status ?? null })),
       steps: steps.filter((t) => t.step !== "total" && t.phase !== "job").sort((a, b) => (b.ms ?? 0) - (a.ms ?? 0)).slice(0, 8)
@@ -593,6 +687,7 @@ export function caseMetrics(evidence) {
     replyStats: replyStats(replyText),
     replySourceLinks: replySourceLinks(replyText),
     siteShape: siteShapeOf(ui),
+    teamItems: teamItemsOf(jobs),
     siteLanguage: typeof ui.siteText === "string" ? detectLanguage(ui.siteText).language : null,
     siteFilePaths: typeof ui.siteText === "string" ? hasFilePaths(ui.siteText) : null,
     credits: creditsOf(evidence, jobs, usage),
@@ -700,6 +795,16 @@ export function gradeCase(caseDef, evidence) {
     check(checks, `site_shape:${key}`, "must", ui.opened === true && m.siteShape[key] >= min,
       `${m.siteShape[key]} ${key}, want >= ${min}${ui.opened ? "" : " (site not opened)"}`);
   }
+  if (expect.siteRequired && m.teamItems.length) {
+    // Every item the team researched (a stop, a product) is on the page the person opens: a builder that loses one
+    // to a slow lookup must not ship a page that quietly leaves it out.
+    const text = typeof ui.siteText === "string" ? ui.siteText : null;
+    const missing = text === null ? [] : itemsMissingFrom(text, m.teamItems).map((item) => item.name);
+    // (not opened, or its text not saved: n/a here; site_opens says so)
+    check(checks, "team_items_on_site", "must", ui.opened === true && text !== null ? missing.length === 0 : null,
+      text === null ? (ui.opened ? "page text not saved" : `site not opened; ${m.teamItems.length} item(s) planned`)
+        : missing.length ? `not on the page: ${missing.join(", ")} (${m.teamItems.length - missing.length} of ${m.teamItems.length} shown)` : `all ${m.teamItems.length} shown`);
+  }
   if (expect.map) {
     // Any map library counts once its container rendered with a size.
     check(checks, "map_ready", "must", Boolean(ui.mapEngine), `engine ${ui.mapEngine ?? "none"} after ${ui.siteReadyMs ?? "?"} ms`);
@@ -733,6 +838,12 @@ export function gradeCase(caseDef, evidence) {
 
   check(checks, "reply_present", "must", m.replyStats.chars > 0, `${m.replyStats.chars} chars`);
   check(checks, "reply_no_internal_urls", "must", !m.replyStats.forbidden, m.replyStats.forbidden ? "localhost/preview/tunnel/p-label in reply" : "clean");
+  // A reply may send the person to a card only when the turn posted one: "Open it from the card above" with no card
+  // sends them to nothing. Not graded when the browser did not look for cards.
+  if (typeof ui.cardCount === "number" && m.replyStats.chars > 0) {
+    check(checks, "reply_card_exists", "must", !m.replyStats.pointsToCard || cards > 0,
+      m.replyStats.pointsToCard ? `points to a card; cards posted ${cards}` : "no card mentioned");
+  }
   if (!expect.allowFilePaths) {
     check(checks, "reply_no_file_paths", "must", !m.replyStats.filePaths, m.replyStats.filePaths ? "a file or folder path in the reply" : "clean");
   }
@@ -958,7 +1069,8 @@ export function renderTiming(timing) {
   const lines = [`- Time: slowest lane ${timing.lanesSec ?? "-"} s (all its turns); ${timing.timedOut} job(s) stopped at the turn limit; ${timing.continuations} continuation(s)`];
   for (const j of timing.jobs) {
     const head = `  - ${j.role}${j.handle ? ` @${j.handle}` : ""}${j.turn ? ` (turn ${j.turn + 1})` : ""}: ${j.status}, waited ${j.queueSec ?? "-"} s, ran ${j.wallSec ?? "-"} s`
-      + `${j.commandSec != null ? `, commands ${j.commandSec} s` : ""}${j.wrapUpSec != null ? `, wrap-up at ${j.wrapUpSec} s` : ""}${j.continuation ? `, asked to continue (${j.continuation})` : ""}`;
+      + `${j.commandSec != null ? `, commands ${j.commandSec} s` : ""}${j.wrapUpSec != null ? `, wrap-up at ${j.wrapUpSec} s` : ""}${j.continuation ? `, asked to continue (${j.continuation})` : ""}`
+      + `${j.requeuedHoldSec != null ? `, started again ${j.requeuedTimes > 1 ? `${j.requeuedTimes} times ` : ""}after a short rate limit (${j.requeuedTimes > 1 ? "last " : ""}held ${j.requeuedHoldSec} s)` : ""}`;
     lines.push(cell(head).replace(/^ {2}- /, "  - "));
     if (j.slowest.length) lines.push(`    - slowest commands: ${cell(j.slowest.map((c) => `${c.command} ${c.sec} s${c.status === "unfinished" ? " (unfinished)" : ""}`).join("; "))}`);
     if (j.steps.length) lines.push(`    - tool steps${j.stepsTotalSec != null ? ` (${j.stepsTotalSec} s in all)` : ""}: ${cell(j.steps.map((t) => `${t.step} ${t.sec} s`).join("; "))}`);

@@ -349,6 +349,8 @@ jobs:
             scripts/lib/localUserTokenSecret.test.mjs \
             scripts/lib/localTunnelBroker.test.mjs \
             scripts/octo-turn-grade.test.mjs \
+            scripts/fake-rate-limit-upstream.test.mjs \
+            scripts/octo-turn-release.test.mjs \
             scripts/lib/localAuthorPseudonymKeys.test.mjs \
             scripts/lib/supabaseImageMirror.test.mjs \
             scripts/mirror-supabase-images.test.mjs \

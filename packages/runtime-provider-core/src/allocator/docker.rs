@@ -863,8 +863,12 @@ impl DockerRuntimeAllocator {
                 envs.push(("RUNTIME_AGENT_IMAGE".to_string(), runtime_image));
             }
             if let Some(env_overrides) = meta.get("env").and_then(|value| value.as_object()) {
+                // What the provider set above (the runtime's ids, its token, the controller and
+                // origin addresses) stays as the provider set it.
+                let provider_set: std::collections::HashSet<String> =
+                    envs.iter().map(|(key, _)| key.clone()).collect();
                 for (key, value) in env_overrides {
-                    if key == "SPACE_ID" || key == "PROJECT_ID" {
+                    if provider_set.contains(key) || is_operator_only_env_key(key) {
                         continue;
                     }
                     if exact_managed_provider
@@ -1121,6 +1125,13 @@ fn first_status_quantity(status: &str) -> Option<u64> {
                 part.parse::<u64>().ok()
             }
         })
+}
+
+/// Environment only the operator who runs the provider may set: where the runtime's model proxy
+/// sends its requests, with the credential it carries (`PROXY_UPSTREAM_*`, read by the compose
+/// file). A runtime request never sets it.
+fn is_operator_only_env_key(key: &str) -> bool {
+    key.starts_with("PROXY_UPSTREAM_")
 }
 
 fn resolve_runtime_agent_image(metadata: &JsonValue) -> Option<String> {
@@ -1760,6 +1771,60 @@ mod tests {
         assert_eq!(
             env_value(&envs, "ORIGIN_INTERNAL_TOKEN"),
             Some("runtime-token")
+        );
+    }
+
+    #[test]
+    fn build_env_keeps_what_the_provider_and_its_operator_set() {
+        let config = ProviderConfig::default_docker();
+        let mut allocator = DockerRuntimeAllocator::new(&config).expect("allocator");
+        allocator.controller_base_url = Some("http://controller.internal:8788".to_string());
+        let envs = allocator
+            .build_env(
+                &sample_request(Some(json!({
+                    "env": {
+                        "PROXY_UPSTREAM_CHATGPT_ENDPOINT": "https://elsewhere.test/backend-api/codex/responses",
+                        "PROXY_UPSTREAM_OPENAI_ENDPOINT": "https://elsewhere.test/v1",
+                        "CONTROLLER_BASE_URL": "https://elsewhere.test",
+                        "RUNTIME_ACCESS_TOKEN": "chosen",
+                        "ORIGIN_INTERNAL_TOKEN": "chosen",
+                        "RUNTIME_ID": "chosen",
+                        "SPACE_ID": "chosen",
+                        "DOCKER_HOST": "tcp://custom-docker.test:2375"
+                    }
+                }))),
+                54332,
+            )
+            .expect("runtime env");
+
+        for key in [
+            "PROXY_UPSTREAM_CHATGPT_ENDPOINT",
+            "PROXY_UPSTREAM_OPENAI_ENDPOINT",
+        ] {
+            assert_eq!(env_value(&envs, key), None, "{key}");
+        }
+        for key in [
+            "CONTROLLER_BASE_URL",
+            "RUNTIME_ACCESS_TOKEN",
+            "ORIGIN_INTERNAL_TOKEN",
+            "RUNTIME_ID",
+            "SPACE_ID",
+        ] {
+            assert_eq!(
+                envs.iter().filter(|(name, _)| name == key).count(),
+                1,
+                "{key} is set once, by the provider"
+            );
+            assert_ne!(env_value(&envs, key), Some("chosen"), "{key}");
+        }
+        assert_eq!(
+            env_value(&envs, "CONTROLLER_BASE_URL"),
+            Some("http://controller.internal:8788")
+        );
+        // other settings a self-hosted runtime request may choose still apply
+        assert_eq!(
+            env_value(&envs, "DOCKER_HOST"),
+            Some("tcp://custom-docker.test:2375")
         );
     }
 

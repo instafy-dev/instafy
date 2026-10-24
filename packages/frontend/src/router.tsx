@@ -14,6 +14,7 @@ import { NewsPage } from "./screens/NewsPage";
 import { NewsPostPage } from "./screens/NewsPostPage";
 import { TermsPage } from "./screens/TermsPage";
 import { PrivacyPage } from "./screens/PrivacyPage";
+import { AbusePage } from "./screens/AbusePage";
 import { RouteErrorPage } from "./screens/RouteErrorPage";
 import { RequireAuth } from "./components/RequireAuth";
 import { EntryLoadingScreen } from "./components/EntryLoadingScreen";
@@ -114,6 +115,7 @@ const CORE_ROUTE_PATHS = new Set([
   "login",
   "terms",
   "privacy",
+  "abuse",
   "invite",
   "cli/login",
   "studio",
@@ -181,6 +183,10 @@ export function createInstafyRouter(
         {
           path: "privacy",
           element: <PrivacyPage />,
+        },
+        {
+          path: "abuse",
+          element: <AbusePage />,
         },
         {
           path: "invite",

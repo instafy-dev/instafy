@@ -94,6 +94,10 @@ use crate::task_usage::{UsageAttempt, UsageCall, UsageCounts, UsageOutcome};
 
 use crate::job_model::DEFAULT_CODEX_MODEL;
 const DEFAULT_CODEX_RUN_TIMEOUT_SECONDS: u64 = 600;
+/// What one Shared Browser call may still do after its last approval answer:
+/// navigation (30 s), settling (8.25 s) and the snapshot, with headroom. The
+/// helper's browser connection runs inside the approval budget.
+const SHARED_BROWSER_TOOL_MARGIN: Duration = Duration::from_secs(60);
 const DEFAULT_CODEX_MAX_RUN_RETRIES: usize = 1;
 const PROXY_STREAM_MAX_RETRIES: u64 = 1;
 const DEFAULT_CODEX_RETRY_BASE_DELAY_MS: u64 = 1500;
@@ -117,21 +121,39 @@ const BROWSER_MODE_DEVELOPER_INSTRUCTIONS: &str = r#"Browser/UI execution run:
 - Use project memory, pinned skills, and loaded learned blocks as the source of task behavior. This prompt only defines run-level invariants.
 - Use the dedicated browser tools configured for this turn when browser execution was requested. Every site and action approval the browser asks for still applies, and ask before a purchase, transfer, record-changing submit, message, permission or credential change, private-data download or destructive step unless the user's current message named it.
 - Keep the visible page open and focused. Report only concrete observed state or exact execution errors."#;
-const SHARED_BROWSER_DEVELOPER_INSTRUCTIONS: &str = r#"Shared Browser transport (managed runtime policy):
+/// The Shared Browser policy, around the one line that says how the run's
+/// approvals start (see `crate::shared_browser::run_approval_start`).
+macro_rules! shared_browser_developer_instructions {
+    ($approval_start:literal) => {
+        concat!(
+            r#"Shared Browser transport (managed runtime policy):
 - A headed browser in the project's isolated hosted runtime is available. Use the dedicated tools from the `instafy_shared_browser` MCP server: `status`, `snapshot`, `navigate`, `click`, `type`, `press`, `scroll`, and `request_human_input`.
 - Take a snapshot and pass both its `snapshotId` and one indexed element to each interaction. If the page or indexed target set changes, take another snapshot instead of retrying a stale target. Arbitrary CSS selectors are not accepted.
-- The browser may start on a blank page. When `status` or `snapshot` reports `blank: true`, call `navigate` with the http(s) address the task names first; that site's approval applies there. A blank page has nothing to read or act on. An `[origin_not_approvable]` error means the same for any other page without an http(s) address.
+- The browser may start on a blank page. When `status` or `snapshot` reports `blank: true`, call `navigate` with the http(s) address the task names first; any approval the browser asks for applies there. A blank page has nothing to read or act on. An `[origin_not_approvable]` error means the same for any other page without an http(s) address.
 - Do not invoke Shared Browser through shell commands or write an ad-hoc Playwright/CDP script. The capability is deliberately exposed only through the bounded MCP server for this turn.
 - The controller automatically emits the visible AI cursor and action-ticker events. Do not bypass it.
 - Never type authentication, payment, or identity secrets. A sign-in, one-time code or consent step is a manual step for the user: pause on it with `request_human_input` on its fields, so the user completes it on the page and then chooses Let AI continue. Never ask for those values in chat.
 - Never open or reveal a screen, dialog or field that shows a credential value such as an API secret, token, key or recovery code, and never ask the user to open one in this browser: the next snapshot would show the value to you. When the user needs one, stop on the screen that lists it, tell them in words which control opens it, and ask them to open that same page in a tab of their own browser to see and copy the value there; do not use `request_human_input` for it. If an observation shows a value anyway, never repeat, store or act on it.
 - For a manual field step, use `request_human_input` with one to eight indices and the fresh snapshotId. It highlights the actual fields and ends this turn. Do not issue any further browser calls; the user explicitly continues after entering values directly, and the next turn must take a fresh snapshot. Never request or repeat those values in chat.
-- By default, the authenticated initiating user approves each site and every navigation, click, type, submission and key press for this run. The user may explicitly grant routine browsing at the first site prompt; the runtime then handles routine actions without repeated prompts, while purchases, transfers, messages, sharing or access changes, key or password changes, downloads or exports, deletions, cancellations and sign-outs, entries that may show a secret, submissions and activation keys still require **Allow once**. Never assume, request through a tool, or synthesize that grant; it is only a user-facing policy choice. Secret-entry restrictions always apply.
-- Snapshots, status, results and errors mask values that look like keys, tokens or codes as `[redacted secret]` or `REDACTED`. Never try to recover a masked value. When a snapshot has `secretScreen: true`, the page text is withheld until a new page loads: stop, do not click anything on that page to reveal or copy the value, and tell the user in words which control on that page shows it, using the control names the snapshot still lists.
+"#,
+            $approval_start,
+            "\n",
+            r#"- Snapshots, status, results and errors mask values that look like keys, tokens or codes as `[redacted secret]` or `REDACTED`. Never try to recover a masked value. When a snapshot has `secretScreen: true`, the page text is withheld until a new page loads: stop, do not click anything on that page to reveal or copy the value, and tell the user in words which control on that page shows it, using the control names the snapshot still lists.
 - An error ending in `[step_refused_secret]`, `[step_refused_sign_in]` or `[step_refused_upload]` is final in every approval mode: revealing or copying a credential, signing in, and choosing files are the user's steps. Do not retry or look for another control that does the same; tell the user which step is theirs, and for a sign-in use `request_human_input` on its fields.
 - Downloads are blocked in this browser. Do not try to download or export files through it.
 - A denial, timeout, stale target, changed page, or replayed approval is final for that attempted action. Do not retry it automatically; report the exact returned error and wait for a new user instruction.
-- Approval is never a model-visible tool. Do not search for, inspect, edit, or simulate runtime approval files."#;
+- Approval is never a model-visible tool. Do not search for, inspect, edit, or simulate runtime approval files."#
+        )
+    };
+}
+/// A run that starts in Ask, on every runtime but an attested browser host.
+const SHARED_BROWSER_DEVELOPER_INSTRUCTIONS: &str = shared_browser_developer_instructions!(
+    r#"- By default, the authenticated initiating user approves each site and every navigation, click, type, submission and key press for this run. The user may explicitly grant routine browsing at the first site prompt; the runtime then handles routine actions without repeated prompts, while purchases, transfers, messages, sharing or access changes, key or password changes, downloads or exports, deletions, cancellations and sign-outs, entries that may show a secret, submissions and activation keys still require **Allow once**. Never assume, request through a tool, or synthesize that grant; it is only a user-facing policy choice. Secret-entry restrictions always apply."#
+);
+/// A run on an attested browser host, which starts in routine browsing.
+const SHARED_BROWSER_ROUTINE_START_DEVELOPER_INSTRUCTIONS: &str = shared_browser_developer_instructions!(
+    r#"- This run starts in routine browsing: opening, reading and navigating http(s) sites, plain links, menus, ordinary clicks, typing that does not submit, and non-activation keys run without prompts. Purchases, transfers, messages, sharing or access changes, key or password changes, downloads or exports, deletions, cancellations and sign-outs, entries that may show a secret, risky addresses, save or confirm buttons, submissions and Enter/Space activation still ask the authenticated initiating user to **Allow once**. The runtime set this mode for the run. Never assume, request through a tool, or synthesize that grant or any wider one. Secret-entry restrictions always apply."#
+);
 const PERSONAL_BROWSER_DEVELOPER_INSTRUCTIONS: &str = r#"Personal Browser transport (managed runtime policy):
 - A private browser embedded in the user's desktop app is available to this runtime. Use it for browser work instead of Playwright, CDP, noVNC, or a hosted browser.
 - Use the dedicated tools from the `instafy_personal_browser` MCP server: `status`, `snapshot`, `navigate`, `click`, `type`, `press`, `scroll`, and `request_human_input`. Do not invoke Personal Browser through shell commands.
@@ -484,7 +506,8 @@ fn multi_agent_plan_final_output_json_schema() -> JsonValue {
                   "agents",
                   "lead",
                   "runtimeRouting",
-                  "presentation"
+                  "presentation",
+                  "timeBudgetMinutes"
                 ],
                 "properties": {
                   "type": { "type": "string" },
@@ -559,6 +582,10 @@ fn multi_agent_plan_final_output_json_schema() -> JsonValue {
                       "leadSummaryVisibility": { "type": ["string", "null"] },
                       "showThresholdReason": { "type": ["boolean", "null"] }
                     }
+                  },
+                  "timeBudgetMinutes": {
+                    "type": ["number", "null"],
+                    "description": "Only when a skill sets one: the minutes the team has to answer. Null otherwise."
                   }
                 }
               }
@@ -703,6 +730,9 @@ pub struct CodexRunOptions {
     /// left is not taken for this one's. A run that has one is not retried here when it times out:
     /// the controller continues it in a new turn instead.
     pub turn_continue_note: Option<PathBuf>,
+    /// The run's hard limit, when it is not the usual one (`resolve_codex_run_timeout`): a team's
+    /// turn ends by the team's deadline.
+    pub run_timeout: Option<Duration>,
 }
 
 /// A turn nearing its hard limit is told so while it still runs (one steering input, as a
@@ -757,6 +787,11 @@ impl CodexRunOptions {
     /// new turn (`turn_continue_note`), which would otherwise redo a whole turn first.
     fn retries_a_timed_out_run(&self, attempt: usize, max_retries: usize) -> bool {
         attempt < max_retries && self.turn_continue_note.is_none()
+    }
+
+    /// The run's hard limit: its own (a team's turn ends by the team's deadline), else the usual.
+    fn hard_limit(&self) -> Duration {
+        self.run_timeout.unwrap_or_else(resolve_codex_run_timeout)
     }
 }
 
@@ -1017,7 +1052,7 @@ impl CodexClient {
             runtime_reuse_is_safe(),
             "Codex thread cleanup is unconfirmed; runtime restart required"
         );
-        let run_timeout = resolve_codex_run_timeout();
+        let run_timeout = options.hard_limit();
         let max_retries = if options.isolated_tool_worker || uses_bounded_proxy_retries(&options) {
             // Codex recovers within the same session, preserving completed tool receipts.
             // Replaying execute_inner would reset that budget and could repeat side effects.
@@ -1383,16 +1418,14 @@ impl CodexClient {
                 }),
             )
         };
-        let mode_developer_instructions = mode_developer_instructions
-            .map(|instructions| {
-                append_shared_browser_developer_instructions(instructions, shared_browser_mode)
-            })
-            .map(|instructions| {
-                append_personal_browser_developer_instructions(instructions, personal_browser_mode)
-            })
-            .map(|instructions| {
-                append_local_browser_developer_instructions(instructions, local_browser_mode)
-            });
+        let mode_developer_instructions = mode_developer_instructions.map(|instructions| {
+            append_browser_developer_instructions_for_turn(
+                instructions,
+                shared_browser_mode,
+                personal_browser_mode,
+                local_browser_mode,
+            )
+        });
         let base_instructions = runtime_base_instructions(
             RuntimeBaseInstructionsLane {
                 mcp: mcp_mode,
@@ -3503,15 +3536,21 @@ fn install_browser_mcp_servers(
                 .into_owned(),
         );
         shared_browser_process_groups = Some(process_groups);
+        let approval_timeout_ms = environment
+            .get(SHARED_BROWSER_APPROVAL_TIMEOUT_MS_ENV)
+            .cloned();
         servers.insert(
             SHARED_BROWSER_MCP_SERVER_NAME.to_string(),
-            browser_mcp_server_config(McpServerTransportConfig::Stdio {
-                command: executable.to_string_lossy().into_owned(),
-                args: vec![SHARED_BROWSER_MCP_COMMAND.to_string()],
-                env: Some(environment),
-                env_vars: Vec::new(),
-                cwd: Some(LegacyAppPathString::from_path(&trusted_cwd)),
-            }),
+            shared_browser_mcp_server_config(
+                McpServerTransportConfig::Stdio {
+                    command: executable.to_string_lossy().into_owned(),
+                    args: vec![SHARED_BROWSER_MCP_COMMAND.to_string()],
+                    env: Some(environment),
+                    env_vars: Vec::new(),
+                    cwd: Some(LegacyAppPathString::from_path(&trusted_cwd)),
+                },
+                approval_timeout_ms.as_deref(),
+            ),
         );
     }
 
@@ -3596,6 +3635,23 @@ fn browser_mcp_server_config(transport: McpServerTransportConfig) -> McpServerCo
         oauth_resource: None,
         tools: HashMap::new(),
     }
+}
+
+/// The Shared Browser's server: the bounded browser settings, with a tool
+/// timeout that outlasts one call's whole approval budget, so a person who
+/// answers late is never cut off by Codex before the browser's own deadline.
+fn shared_browser_mcp_server_config(
+    transport: McpServerTransportConfig,
+    approval_timeout_ms: Option<&str>,
+) -> McpServerConfig {
+    McpServerConfig {
+        tool_timeout_sec: Some(shared_browser_tool_timeout(approval_timeout_ms)),
+        ..browser_mcp_server_config(transport)
+    }
+}
+
+fn shared_browser_tool_timeout(approval_timeout_ms: Option<&str>) -> Duration {
+    crate::shared_browser::approval_wait_budget(approval_timeout_ms) + SHARED_BROWSER_TOOL_MARGIN
 }
 
 fn browser_mcp_enabled_tools() -> Vec<String> {
@@ -3718,11 +3774,41 @@ fn should_refresh_mcp_servers(
     mcp_mode && has_mcp_servers && !personal_browser_mode
 }
 
-fn append_shared_browser_developer_instructions(base: String, enabled: bool) -> String {
+/// The browser policies a turn's mode instructions carry. The Shared Browser
+/// policy follows this process's own approval start, the same decision that
+/// seeds the run's approval state, so the policy the model reads matches the
+/// browser.
+fn append_browser_developer_instructions_for_turn(
+    base: String,
+    shared_browser_mode: bool,
+    personal_browser_mode: bool,
+    local_browser_mode: bool,
+) -> String {
+    let instructions = append_shared_browser_developer_instructions(
+        base,
+        shared_browser_mode,
+        crate::shared_browser::run_approval_start(),
+    );
+    let instructions =
+        append_personal_browser_developer_instructions(instructions, personal_browser_mode);
+    append_local_browser_developer_instructions(instructions, local_browser_mode)
+}
+
+fn append_shared_browser_developer_instructions(
+    base: String,
+    enabled: bool,
+    approval_start: crate::shared_browser::ApprovalStart,
+) -> String {
     if !enabled {
         return base;
     }
-    format!("{base}\n\n{SHARED_BROWSER_DEVELOPER_INSTRUCTIONS}")
+    let policy = match approval_start {
+        crate::shared_browser::ApprovalStart::Ask => SHARED_BROWSER_DEVELOPER_INSTRUCTIONS,
+        crate::shared_browser::ApprovalStart::Routine => {
+            SHARED_BROWSER_ROUTINE_START_DEVELOPER_INSTRUCTIONS
+        }
+    };
+    format!("{base}\n\n{policy}")
 }
 
 fn append_personal_browser_developer_instructions(base: String, enabled: bool) -> String {
@@ -5393,18 +5479,24 @@ mod tests {
         for policy in [
             BROWSER_MODE_DEVELOPER_INSTRUCTIONS,
             SHARED_BROWSER_DEVELOPER_INSTRUCTIONS,
+            SHARED_BROWSER_ROUTINE_START_DEVELOPER_INSTRUCTIONS,
             PERSONAL_BROWSER_DEVELOPER_INSTRUCTIONS,
         ] {
             assert!(!policy.contains("without asking first"), "{policy}");
             assert!(!policy.contains("Studio grants it"), "{policy}");
         }
-        assert!(
-            SHARED_BROWSER_DEVELOPER_INSTRUCTIONS
-                .contains("Never assume, request through a tool, or synthesize that grant")
-        );
+        for policy in [
+            SHARED_BROWSER_DEVELOPER_INSTRUCTIONS,
+            SHARED_BROWSER_ROUTINE_START_DEVELOPER_INSTRUCTIONS,
+        ] {
+            assert!(
+                policy.contains("Never assume, request through a tool, or synthesize that grant")
+            );
+        }
         for instructions in [
             PERSONAL_BROWSER_DEVELOPER_INSTRUCTIONS,
             SHARED_BROWSER_DEVELOPER_INSTRUCTIONS,
+            SHARED_BROWSER_ROUTINE_START_DEVELOPER_INSTRUCTIONS,
         ] {
             assert!(instructions.contains("`secretScreen: true`"));
             assert!(instructions.contains("Never try to recover a masked value"));
@@ -5696,12 +5788,16 @@ mod tests {
 
     #[test]
     fn shared_browser_policy_uses_the_bounded_mcp_server() {
+        use crate::shared_browser::ApprovalStart;
+
         let base = "Browser/UI execution run".to_string();
-        assert_eq!(
-            append_shared_browser_developer_instructions(base.clone(), false),
-            base
-        );
-        let enabled = append_shared_browser_developer_instructions(base, true);
+        for start in [ApprovalStart::Ask, ApprovalStart::Routine] {
+            assert_eq!(
+                append_shared_browser_developer_instructions(base.clone(), false, start),
+                base
+            );
+        }
+        let enabled = append_shared_browser_developer_instructions(base, true, ApprovalStart::Ask);
         assert!(enabled.contains("instafy_shared_browser"));
         assert!(enabled.contains("snapshotId"));
         assert!(enabled.contains("Arbitrary CSS selectors are not accepted"));
@@ -5718,6 +5814,168 @@ mod tests {
         assert!(enabled.contains("never a model-visible tool"));
     }
 
+    /// A run on an attested browser host starts in routine browsing, and its
+    /// policy says so: no "approves each site", and every step that still
+    /// asks is named. Everything else matches the Ask policy line for line.
+    #[test]
+    fn a_routine_start_policy_names_every_step_that_still_asks() {
+        use crate::shared_browser::ApprovalStart;
+
+        let routine = append_shared_browser_developer_instructions(
+            String::new(),
+            true,
+            ApprovalStart::Routine,
+        );
+        assert!(!routine.contains("approves each site"), "{routine}");
+        assert!(!routine.contains("explicitly grant routine browsing"));
+        assert!(routine.contains("This run starts in routine browsing"));
+        for asks in [
+            "Purchases",
+            "transfers",
+            "messages",
+            "sharing or access changes",
+            "key or password changes",
+            "downloads or exports",
+            "deletions, cancellations and sign-outs",
+            "entries that may show a secret",
+            "risky addresses",
+            "save or confirm buttons",
+            "submissions",
+            "Enter/Space activation",
+            "**Allow once**",
+        ] {
+            assert!(routine.contains(asks), "{asks}");
+        }
+        assert!(routine.contains("Never assume, request through a tool, or synthesize that grant"));
+        assert!(routine.contains("Secret-entry restrictions always apply"));
+
+        let ask =
+            append_shared_browser_developer_instructions(String::new(), true, ApprovalStart::Ask);
+        let differing = ask
+            .lines()
+            .zip(routine.lines())
+            .filter(|(ask, routine)| ask != routine)
+            .count();
+        assert_eq!(ask.lines().count(), routine.lines().count());
+        assert_eq!(differing, 1, "only the approval-start line differs");
+        assert!(!ask.contains("that site's approval applies there"));
+        assert!(ask.contains("any approval the browser asks for applies there"));
+    }
+
+    /// The policy a turn carries follows this runtime's own approval start,
+    /// the same decision that seeds the run's approval state: routine browsing
+    /// on an attested browser host, Ask everywhere else.
+    #[test]
+    fn a_turns_shared_browser_policy_follows_the_runtimes_approval_start() {
+        use crate::browser_host::mode::{LazyMode, force_lazy_mode_for_tests};
+        use crate::shared_browser::ApprovalStart;
+
+        let base = "Browser/UI execution run".to_string();
+        {
+            let _boot_time_or_no_browser = force_lazy_mode_for_tests(None);
+            let ask =
+                append_browser_developer_instructions_for_turn(base.clone(), true, false, false);
+            assert_eq!(
+                ask,
+                append_shared_browser_developer_instructions(
+                    base.clone(),
+                    true,
+                    ApprovalStart::Ask
+                )
+            );
+            assert!(
+                ask.contains("By default, the authenticated initiating user approves each site")
+            );
+            assert!(!ask.contains("This run starts in routine browsing"));
+        }
+        for persist in [false, true] {
+            let _host = force_lazy_mode_for_tests(Some(LazyMode { persist }));
+            let routine =
+                append_browser_developer_instructions_for_turn(base.clone(), true, false, false);
+            assert_eq!(
+                routine,
+                append_shared_browser_developer_instructions(
+                    base.clone(),
+                    true,
+                    ApprovalStart::Routine
+                )
+            );
+            assert!(routine.contains("This run starts in routine browsing"));
+            assert!(!routine.contains("approves each site"));
+
+            // The other browser policies ride along unchanged, and a turn
+            // without the Shared Browser reads none of its policy.
+            let personal =
+                append_browser_developer_instructions_for_turn(base.clone(), false, true, false);
+            assert_eq!(
+                personal,
+                append_personal_browser_developer_instructions(base.clone(), true)
+            );
+            let local =
+                append_browser_developer_instructions_for_turn(base.clone(), false, false, true);
+            assert_eq!(
+                local,
+                append_local_browser_developer_instructions(base.clone(), true)
+            );
+            assert!(!local.contains("instafy_shared_browser"));
+        }
+    }
+
+    /// One Shared Browser call can wait for a person through its whole
+    /// approval budget, then still has to navigate and read the page. Codex's
+    /// tool timeout must outlast both, and stay well inside the turn's cap.
+    #[test]
+    fn the_shared_browser_tool_outlasts_its_approval_budget_inside_the_turn() {
+        use crate::shared_browser::{DEFAULT_APPROVAL_WAIT, MAX_APPROVAL_WAIT};
+
+        const NAVIGATION: Duration = Duration::from_secs(30);
+        const SETTLE: Duration = Duration::from_millis(8_250);
+        let turn_cap = Duration::from_secs(DEFAULT_CODEX_RUN_TIMEOUT_SECONDS);
+
+        let shared = shared_browser_mcp_server_config(
+            McpServerTransportConfig::Stdio {
+                command: "/trusted/runtime-agent".to_string(),
+                args: vec![SHARED_BROWSER_MCP_COMMAND.to_string()],
+                env: None,
+                env_vars: Vec::new(),
+                cwd: None,
+            },
+            None,
+        );
+        let timeout = shared
+            .tool_timeout_sec
+            .expect("Shared Browser tool timeout");
+        assert_eq!(timeout, Duration::from_secs(180));
+        assert!(timeout > DEFAULT_APPROVAL_WAIT + NAVIGATION + SETTLE);
+        assert!(
+            timeout * 2 <= turn_cap,
+            "{timeout:?} is not well inside {turn_cap:?}"
+        );
+
+        // The longest window a test may configure still fits in the turn.
+        let longest = shared_browser_tool_timeout(Some("300000"));
+        assert!(longest > MAX_APPROVAL_WAIT + NAVIGATION + SETTLE);
+        assert!(longest < turn_cap);
+        assert_eq!(
+            shared_browser_tool_timeout(Some("5000")),
+            Duration::from_secs(5) + SHARED_BROWSER_TOOL_MARGIN
+        );
+
+        // Everything else about the server is the bounded browser config, and
+        // the Personal Browser keeps its own timeout.
+        let bounded = browser_mcp_server_config(McpServerTransportConfig::Stdio {
+            command: "/trusted/runtime-agent".to_string(),
+            args: vec![SHARED_BROWSER_MCP_COMMAND.to_string()],
+            env: None,
+            env_vars: Vec::new(),
+            cwd: None,
+        });
+        assert_eq!(bounded.tool_timeout_sec, Some(Duration::from_secs(40)));
+        assert_eq!(shared.enabled_tools, bounded.enabled_tools);
+        assert!(shared.required && !shared.supports_parallel_tool_calls);
+        assert_eq!(shared.startup_timeout_sec, bounded.startup_timeout_sec);
+    }
+
     /// A setup can walk the person to the provider's screen that lists a value
     /// it asks for in a card. Both visible browsers stop there and send the
     /// person to their own browser tab for the value itself, pointing at the
@@ -5727,7 +5985,16 @@ mod tests {
     fn interactive_browser_policies_keep_credential_values_out_of_the_browser() {
         const RULE: &str = "- Never open or reveal a screen, dialog or field that shows a credential value such as an API secret, token, key or recovery code, and never ask the user to open one in this browser: the next snapshot would show the value to you. When the user needs one, stop on the screen that lists it, tell them in words which control opens it, and ask them to open that same page in a tab of their own browser to see and copy the value there; do not use `request_human_input` for it. If an observation shows a value anyway, never repeat, store or act on it.\n";
         for policy in [
-            append_shared_browser_developer_instructions(String::new(), true),
+            append_shared_browser_developer_instructions(
+                String::new(),
+                true,
+                crate::shared_browser::ApprovalStart::Ask,
+            ),
+            append_shared_browser_developer_instructions(
+                String::new(),
+                true,
+                crate::shared_browser::ApprovalStart::Routine,
+            ),
             append_personal_browser_developer_instructions(String::new(), true),
         ] {
             assert_eq!(policy.matches(RULE).count(), 1, "{policy}");
@@ -5743,7 +6010,16 @@ mod tests {
     fn interactive_browser_policies_pause_for_sign_in_with_human_input() {
         const RULE: &str = "- Never type authentication, payment, or identity secrets. A sign-in, one-time code or consent step is a manual step for the user: pause on it with `request_human_input` on its fields, so the user completes it on the page and then chooses Let AI continue. Never ask for those values in chat.\n";
         for policy in [
-            append_shared_browser_developer_instructions(String::new(), true),
+            append_shared_browser_developer_instructions(
+                String::new(),
+                true,
+                crate::shared_browser::ApprovalStart::Ask,
+            ),
+            append_shared_browser_developer_instructions(
+                String::new(),
+                true,
+                crate::shared_browser::ApprovalStart::Routine,
+            ),
             append_personal_browser_developer_instructions(String::new(), true),
         ] {
             assert_eq!(policy.matches(RULE).count(), 1, "{policy}");
@@ -6607,6 +6883,17 @@ mod tests {
             action["properties"]["agents"]["items"]["properties"]["writeScope"]["additionalProperties"],
             false
         );
+        // A team's declared time budget fits the strict schema too (nullable, so optional).
+        assert_eq!(
+            action["properties"]["timeBudgetMinutes"]["type"],
+            json!(["number", "null"])
+        );
+        assert!(
+            action["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("timeBudgetMinutes"))
+        );
 
         match previous {
             Some(value) => unsafe {
@@ -6614,6 +6901,18 @@ mod tests {
             },
             None => unsafe { std::env::remove_var("CODEX_DISABLE_FINAL_OUTPUT_JSON_SCHEMA") },
         }
+    }
+
+    #[test]
+    fn a_run_with_its_own_limit_ends_by_it_and_others_by_the_usual_one() {
+        let _env_lock = env_lock();
+        let usual = resolve_codex_run_timeout();
+        assert_eq!(CodexRunOptions::default().hard_limit(), usual);
+        let team_turn = CodexRunOptions {
+            run_timeout: Some(Duration::from_secs(436)),
+            ..CodexRunOptions::default()
+        };
+        assert_eq!(team_turn.hard_limit(), Duration::from_secs(436));
     }
 
     #[test]

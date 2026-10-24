@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { assessRegistryState, verifyPackDirectory, verifyRegistry } from "./verify-changeset-pack.mjs";
+import { assessRegistryState, packageFileBoundary, verifyPackDirectory, verifyRegistry } from "./verify-changeset-pack.mjs";
 
 const temporaryDirectories = [];
 
@@ -14,19 +14,21 @@ test.afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) => fs.rm(directory, { recursive: true, force: true })));
 });
 
-async function createCliPack({ publishConfig = { access: "public" } } = {}) {
+async function createCliPack({ publishConfig = { access: "public" }, extraFiles = [] } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "instafy-changeset-pack-"));
   temporaryDirectories.push(root);
   const source = path.join(root, "source");
   const pack = path.join(root, "pack");
   const packages = path.join(pack, "packages");
-  await fs.mkdir(path.join(source, "bin"), { recursive: true });
-  await fs.mkdir(path.join(source, "dist"), { recursive: true });
   await fs.mkdir(packages, { recursive: true });
-  await fs.writeFile(path.join(source, "LICENSE"), "license\n");
-  await fs.writeFile(path.join(source, "README.md"), "readme\n");
-  await fs.writeFile(path.join(source, "bin", "instafy.js"), "#!/usr/bin/env node\n");
-  await fs.writeFile(path.join(source, "dist", "cli.js"), "export {};\n");
+  // One placeholder per recorded file (the manifest is written below), plus any extra files under test.
+  const packagedFiles = packageFileBoundary("@instafy/cli")
+    .map((filePath) => filePath.replace(/^package\//u, ""))
+    .filter((filePath) => filePath !== "package.json");
+  for (const filePath of [...packagedFiles, ...extraFiles]) {
+    await fs.mkdir(path.dirname(path.join(source, filePath)), { recursive: true });
+    await fs.writeFile(path.join(source, filePath), `${filePath}\n`);
+  }
   await fs.writeFile(
     path.join(source, "package.json"),
     `${JSON.stringify(
@@ -36,7 +38,7 @@ async function createCliPack({ publishConfig = { access: "public" } } = {}) {
         private: false,
         type: "module",
         bin: { instafy: "bin/instafy.js" },
-        files: ["bin", "dist/cli.js", "LICENSE", "README.md"],
+        files: ["bin", "dist/cli.js", "dist/bind", "LICENSE", "README.md"],
         publishConfig,
         repository: {
           type: "git",
@@ -105,6 +107,11 @@ test("rejects extra files outside the exact publish plan", async () => {
   const pack = await createCliPack();
   await fs.writeFile(path.join(pack, "unexpected.txt"), "not part of the release\n");
   await assert.rejects(() => verifyPackDirectory(pack), /missing or unexpected files/u);
+});
+
+test("rejects a tarball file outside the recorded package boundary", async () => {
+  const pack = await createCliPack({ extraFiles: ["dist/bind/tests/server.test.mjs"] });
+  await assert.rejects(() => verifyPackDirectory(pack), /@instafy\/cli tarball file boundary is not exact/u);
 });
 
 test("rejects symlinks before interpreting pack contents", async () => {

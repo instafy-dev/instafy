@@ -66,10 +66,18 @@ starts a card by itself only:
   first, and so does an address Studio cannot compare: localhost, an IPv6 literal, an
   internationalized host, a host written with a fullwidth dot, or an address that does
   not parse;
-- once the tab is visible, once per card, at most once per conversation in ten
-  minutes, and never after the person closed, paused or stopped the browser there;
-- when no one else is using the browser, the composer holds no draft, and side-by-side
-  view is on in a layout wide enough to show the browser beside the chat.
+- once the tab is visible, once per card, at most one start that opens the browser per
+  conversation in ten minutes, and never after the person closed, paused or stopped the
+  browser there. A card that continues in Instafy's browser while it is already open on
+  the conversation's machine opens nothing, so the ten-minute window does not hold it;
+  every other check, and every check before the task goes out, still applies;
+- when no one else is using the browser and the composer holds no draft. The layout
+  never holds a card: in a narrow pane, on a phone, or with side-by-side view off, the
+  browser takes the view by itself, as a press does, and the chat stays one tab away. A
+  draft holds a card that would otherwise open by itself, and only then does the card say
+  "Opens by itself once your draft is empty." A card Studio leaves to a press keeps its
+  own reason, and the draft's reason goes away once the draft is sent or cleared, or a
+  newer card arrives.
 
 Once the browser is ready and before the task goes out, Studio checks again: if someone
 wrote after the card, another run started, a draft appeared, or someone else holds the
@@ -94,10 +102,14 @@ run that took the lane first, counts as sent: the notice stays and the card read
 **Browser opened**. A press, or an opened card, reads **Browser opened** from then on, also
 after a reload, so displaying an old message never runs it again. **Try again** on a failed
 browser run sends the card's task again through the browser, with the card it continues,
-never the notice text. A browser Studio opened by itself grants nothing a press does not:
-Instafy's browser starts in Ask with the per-run site approval, as a press does. In the
-browser on this device, it asks for routine browsing only from a Desktop whose routine is
-the owner tier (approval policy
+never the notice text. A browser Studio opened by itself grants nothing a press does not.
+On the space's own machine, Instafy's browser starts every run in routine browsing, pressed
+or not: Octo opens, reads and navigates sites without a site prompt, while purchases,
+transfers, messages, sharing or access changes, key or password changes, downloads,
+deletions and sign-outs, save or confirm buttons and submissions still ask. The runtime
+decides this, never the card or the job. Elsewhere Instafy's browser starts in Ask with the
+per-run site approval, as a press does. In the browser on this device, it asks for routine
+browsing only from a Desktop whose routine is the owner tier (approval policy
 version 2: reading and plain links free, forms, purchases, messages and credentials still
 ask), and only when the person has not chosen Ask; on an older Desktop it uses Ask, so it
 never requests the earlier routine that submits ordinary forms. A start, pressed or
@@ -216,9 +228,9 @@ Both interactive modes have an **Expand** control, including compact layouts.
 It fills the app viewport; it does not create a different browser, profile or
 OS window. Collapse returns to the docked browser with the same page.
 
-Shared offers **Always allow routine browsing** at the first site prompt for that
-turn. Personal Browser keeps the routine choice in Browser settings. Until the
-person chooses, it is on for a Desktop reporting approval policy version 2 and
+On the space's own machine, Shared starts every turn in routine browsing. Elsewhere it
+offers **Always allow routine browsing** at the first site prompt for that turn. Personal
+Browser keeps the routine choice in Browser settings. Until the person chooses, it is on for a Desktop reporting approval policy version 2 and
 off (Ask) for an older one; a choice either way is kept. On a version 2 Desktop
 the setting reads **Let Octo browse and read without asking for each site**:
 reading, tabs, menus and plain links go ahead, while forms, other buttons and

@@ -13,6 +13,7 @@ and after changing a skill, the routing preflight or the reply rules, or nightly
 | Cases: one of each kind of ask, no particular skill pack needed | `packages/frontend/tests/playwright/bench/octo-turn-cases.json` |
 | Spec and its runner config (no web server, global setup or runtime cleanup reporter) | `packages/frontend/tests/playwright/bench/octo-turn-eval.{spec,config}.ts` |
 | Grader (no model) and its tests | `scripts/octo-turn-grade.mjs`, `scripts/octo-turn-grade.test.mjs` |
+| End of a case (delete the space, wait until it is released) and its tests | `scripts/octo-turn-release.mjs`, `scripts/octo-turn-release.test.mjs` |
 | Output | `tmp/octo-turn/<runId>/{run.json, cases/<id>/{evidence.json,site.png}, grade.json, report.md}` |
 | Rollup across runs (same shape as the `/learn` bench rollup) | `tmp/bench-rollup/octo-turn-rollup.{json,md}` |
 
@@ -27,8 +28,8 @@ and after changing a skill, the routing preflight or the reply rules, or nightly
 - Studio defaults to `http://localhost:5173`. If that port is another checkout's, set `PLAYWRIGHT_EXTERNAL_BASE_URL`
   to this checkout's Studio. Never drive a Studio this checkout did not start.
 - Use only the eval's own config. The default Playwright config removes every `instafy-runtime-*` container on the
-  machine. Never run `stack:down`/`stack:refresh` or kill a controller you did not start. The spec only
-  `docker stop`s the containers of the spaces it made.
+  machine. Never run `stack:down`/`stack:refresh` or kill a controller you did not start. The spec only deletes the
+  spaces it made, and only `docker stop`s a container of one of them that the controller left running.
 - Never print tokens or session JSON. Write the minted user to a file created under `umask 077`, outside the repo.
 
 ## Steps
@@ -36,7 +37,7 @@ and after changing a skill, the routing preflight or the reply rules, or nightly
 1. **Precheck (seconds, no model).** Fix any failure first.
 
    ```bash
-   node --test scripts/octo-turn-grade.test.mjs
+   node --test scripts/octo-turn-grade.test.mjs scripts/octo-turn-release.test.mjs
    node scripts/octo-turn-grade.mjs --check-cases
    ```
 
@@ -46,8 +47,11 @@ and after changing a skill, the routing preflight or the reply rules, or nightly
    `userId`, but not sign in as it.
 
 3. **Run.** Per case: a new space, the prompt sent through the composer, `agent_jobs` polled every 10 s until every
-   job of the turn is terminal and quiet for 20 s, then the page found and measured, the credits read, the space's
-   skills listed and its runtime stopped.
+   job of the turn is terminal and quiet for 20 s (or the case's time runs out), then the page found and measured, the
+   credits read and the space's skills listed. Then the spec deletes the space through the controller, as a person
+   would: that cancels the work still queued or running (a lane, a builder's continuation) and stops and releases the
+   space's runtimes, so nothing of a case wakes up after it was graded. It waits up to 3 minutes until the database
+   shows no open job and no live runtime of the space, and records that in the evidence's `release`.
 
    ```bash
    cd packages/frontend
@@ -63,7 +67,7 @@ and after changing a skill, the routing preflight or the reply rules, or nightly
    | `PLAYWRIGHT_OCTO_EVAL_CASES` | Comma-separated case ids |
    | `PLAYWRIGHT_OCTO_EVAL_CASES_FILE` | Another cases file |
    | `PLAYWRIGHT_OCTO_EVAL_RUN_ID` | Output folder name (default: a timestamp) |
-   | `PLAYWRIGHT_OCTO_EVAL_STOP_RUNTIMES=0` | Leave the runtimes up for a readback |
+   | `PLAYWRIGHT_OCTO_EVAL_STOP_RUNTIMES=0` | Keep each case's space (its runtime and any work still queued) for a readback; delete the spaces afterwards |
    | `OCTO_EVAL_DB_URL` | Database for jobs and credits (default: the local stack) |
 
    The spec grades when it finishes. To regrade saved evidence: `node scripts/octo-turn-grade.mjs tmp/octo-turn/<runId>`
@@ -74,8 +78,10 @@ and after changing a skill, the routing preflight or the reply rules, or nightly
    clear about what is unverified? Write two or three lines per case. For a closer look, sign in as the eval user
    ("Driving the app as a signed-in user" in `AGENTS.md`).
 
-5. **Clean up.** No container of the run is left (`docker ps --format '{{.Names}}' | grep instafy-runtime-`, only
-   the project ids in `run.json`), then `node scripts/mint-test-user.mjs --cleanup <userId>`.
+5. **Clean up.** Every case's evidence has `release.released: true`; for one that does not, check its space in the
+   database (open jobs, runtimes not `stopped`, `offline` or `removed`). No container of the run is left
+   (`docker ps --format '{{.Names}}' | grep instafy-runtime-`, only the project ids in `run.json`), then
+   `node scripts/mint-test-user.mjs --cleanup <userId>`.
 
 6. **Answer** with: cases passed, the failed musts and shoulds that matter, time, tokens and credits, the readback
    lines, and what to change next.
@@ -140,9 +146,11 @@ when no must fails. Its score is the share of graded checks that passed.
 | `card_posted` | must | A "Ready to preview" card; n/a on a server without site previews |
 | `site_opens` | must | A page was found (card or previews) and opened with text and no HTTP error |
 | `site_shape:*` | must | The page has at least the case's counts (a table, a ranking, checkboxes, dated steps) |
+| `team_items_on_site` | must | A team's page names every item it planned a lane for (each lane's label; a lane over several stops counts as each). A line that says what is missing ("Not found yet: …") does not count. When the plan message did not survive in the run log, the lanes' handles stand in |
 | `map_ready` | must | A MapLibre, Mapbox, Leaflet, OpenLayers or Google map rendered with a size |
 | `no_site`, `no_file_changes` | must | Chat cases: no card, no preview listed, no `instafy preview open`; no file changed |
 | `reply_present`, `reply_no_internal_urls`, `reply_no_file_paths` | must | A reply, without localhost, preview or tunnel hosts, and without file or folder paths (links excluded) |
+| `reply_card_exists` | must | A reply that sends the person to a card ("Open it from the card above", "tap the preview card") only when the turn posted one; not graded when the browser did not look for cards |
 | `reply_not_question_only` | must | Pages, and cases that ask for it: no more than half the sentences are questions, so "Built X. Want Y?" passes (a trailing `suggestions` chips block is not counted) |
 | `reply_answers` | must | At least one sentence that is not a question and has six or more words (a CJK character counts as a word). Length does not matter: "Keep it short" is honoured |
 | `reply_assumed`, `reply_language` | must | An `Assumed:` line; the reply reads in the case's language (n/a when too short to tell) |

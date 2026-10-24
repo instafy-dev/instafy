@@ -10,6 +10,8 @@ import { cancelPlanGroup, fetchPlanGroupStatus, type ControllerPlanGroupStatus }
 import type { ChatMessage } from "../types";
 import type { RunRecord } from "../../../types";
 import { extractAgentJobId } from "./chatMessagePresentation";
+import { collectPlanReruns, type PlanRerun } from "./planReruns";
+import { PlanRerunNotice } from "./PlanRerunNotice";
 
 // Supplied by the chat's existing hydrated run feed. Message bodies do not
 // need to subscribe to composer/history providers or start separate polling.
@@ -576,6 +578,12 @@ function collectTeamActivity({
     const groupId = stringField(extractMultiAgentPlanMeta(run)?.groupId);
     if (groupId) groupIds.add(groupId);
   }
+  // A job the controller ran again (a continued turn, a rate-limit retry) is
+  // not the lane's result: its rerun is, from whichever source names it.
+  const reruns = collectPlanReruns([...planRuns, ...(conversationMessages ?? [])]);
+  for (const worker of snapshot?.workers ?? []) {
+    reruns.addStatus(worker.jobId, worker.retriedAs, worker.retriedFor);
+  }
 
   for (const message of conversationMessages ?? []) {
     const planMeta = extractMultiAgentPlanMeta(message);
@@ -698,16 +706,32 @@ function collectTeamActivity({
   };
 
   const workerActivityByHandle = new Map<string, TeamActivity>();
+  // Each lane's first job the controller ran again: the card says so once.
+  const rerunByHandle = new Map<string, PlanRerun>();
+  // A lane seen only through a job that was run again waits for its rerun.
+  const supersededLane = (key: string, jobId: string | null | undefined): boolean => {
+    const rerun = reruns.latest(jobId);
+    if (!key || !rerun) return false;
+    if (!rerunByHandle.has(key)) rerunByHandle.set(key, rerun);
+    if (!workerActivityByHandle.has(key)) {
+      workerActivityByHandle.set(key, {
+        key, status: "queued", jobId: rerun.jobId, summary: "", evidence: "", leaseMetrics: null, toolUpdateCount: 0,
+      });
+    }
+    return true;
+  };
   for (const [handle, messages] of workerMessagesByHandle.entries()) {
-    const activity = buildActivity(handle, messages);
+    const activity = buildActivity(handle, messages.filter((message) => !reruns.isSuperseded(extractAgentJobId(message))));
     if (activity) {
       workerActivityByHandle.set(handle, activity);
     }
+    for (const message of messages) supersededLane(handle, extractAgentJobId(message));
   }
 
   let leadActivity = buildActivity("lead", leadMessages);
   for (const worker of snapshot?.workers ?? []) {
     const key = normalizeHandleKey(worker.handle);
+    if (supersededLane(key, worker.jobId)) continue;
     const evidence = workerActivityByHandle.get(key);
     const status: TeamActivityStatus = worker.status === "leased" ? "working"
       : worker.status === "completed" ? "done"
@@ -729,8 +753,9 @@ function collectTeamActivity({
     const role = stringField(extractMultiAgentPlanMeta(run)?.role).toLowerCase();
     const key = role === "worker" ? extractAgentHandle(run) : "lead";
     if (!key || (role !== "worker" && role !== "lead_continuation")) continue;
-    const evidence = role === "worker" ? workerActivityByHandle.get(key) : leadActivity;
     const jobId = stringField(run.metadata?.jobId ?? run.metadata?.job_id);
+    if (role === "worker" && supersededLane(key, jobId)) continue;
+    const evidence = role === "worker" ? workerActivityByHandle.get(key) : leadActivity;
     const status: TeamActivityStatus = run.status === "in_progress" ? "working"
       : run.status === "awaiting_approval" ? "waiting"
       : run.status === "success" || run.status === "merged" ? "done"
@@ -753,6 +778,7 @@ function collectTeamActivity({
   return {
     workerActivityByHandle,
     workerRunHandles,
+    rerunByHandle,
     leadActivity,
     groupId: [...groupIds][0] ?? null,
   };
@@ -1264,6 +1290,23 @@ export function MultiAgentPlanEntry({
           Cancel group
         </Button>
       ) : null}
+      {plan.agents.map((agent) => {
+        const handleKey = normalizeHandleKey(agent.handle || agent.label);
+        const rerun = teamActivity.rerunByHandle.get(handleKey);
+        if (!rerun) return null;
+        const label = agent.handle || agent.label;
+        return (
+          <PlanRerunNotice
+            key={`rerun-${handleKey}`}
+            subject={label}
+            rerun={rerun}
+            className="basis-full"
+            onOpen={conversationLocalId && onOpenWorkerRunTrace
+              ? (jobId) => onOpenWorkerRunTrace({ jobId, title: `${label} run` })
+              : null}
+          />
+        );
+      })}
     </div>
   );
 }

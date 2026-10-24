@@ -168,6 +168,7 @@ import {
 } from "./ChatPanelOverlays";
 import { ConversationMessageRows } from "./ConversationMessageRows";
 import { MultiAgentRunsContext } from "./MultiAgentPlanEntry";
+import { RunTraceRerunNotice } from "./PlanRerunNotice";
 import { useConversationPreviewThreads } from "./useConversationPreviewThreads";
 import { buildHumanLabelByUserId } from "./chatHumanLabels";
 import {
@@ -391,14 +392,19 @@ import { CHAT_TRANSCRIPT_HEADER_INSET_PX, ChatSpeakerStickyOverlay, ChatTranscri
 import { resolveSharedBrowserControlOwner } from "./sharedBrowserControlOwner";
 import { useSharedBrowserApprovalTransport } from "./useSharedBrowserApprovalTransport";
 import { useChatBrowserHandoff } from "./useChatBrowserHandoff";
-import { useChatBrowserRequest, type BrowserAutoStartOptions } from "./useChatBrowserRequest";
+import {
+  useChatBrowserRequest,
+  type BrowserAutoStartOptions,
+  type SharedBrowserViewError,
+} from "./useChatBrowserRequest";
 import {
   BrowserRequestHostContext,
   browserRequestContinuedKeys,
   type BrowserRequestHost,
 } from "./browserRequest";
 import {
-  browserAutoStartHeldByComposerOrLayout,
+  BROWSER_AUTO_START_COPY,
+  browserAutoStartHeldByDraft,
   browserAutoStartHeldByOther,
   browserAutoStartPlan,
   conversationBrowserHostId,
@@ -406,6 +412,7 @@ import {
   type SharedBrowserPresence,
 } from "./browserAutoStart";
 import { useSharedBrowserHostSnapshot } from "./useSharedBrowserHostSnapshot";
+import { SHARED_BROWSER_HOST_COPY } from "./sharedBrowserHostAttach";
 import { isSkillSetupConversation } from "./skillSetupConversation";
 import { sharedBrowserConversationRunIds } from "./browserHandoffRouting";
 
@@ -1799,6 +1806,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     sharedBrowserCapabilitiesUnsupported,
     sharedBrowserChromePages,
     sharedBrowserChromeResolved,
+    sharedBrowserHostNotReady,
+    sharedBrowserHostNotReadySinceMs,
     sharedBrowserCommandPending,
     sharedBrowserCommandError,
     clearSharedBrowserCommandError,
@@ -1872,6 +1881,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     return {
       pages: sharedBrowserChromePages,
       resolved: sharedBrowserCapabilitiesResolved && sharedBrowserChromeResolved,
+      // Instafy's browser kept answering that it is not running: say so
+      // rather than that it is still connecting.
+      unavailableMessage: sharedBrowserHostNotReady ? SHARED_BROWSER_HOST_COPY.didNotStart : null,
       pendingAction: sharedBrowserCommandPending,
       error: sharedBrowserCommandError,
       controls,
@@ -1907,6 +1919,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     sharedBrowserChromeResolved,
     sharedBrowserCommandError,
     sharedBrowserCommandPending,
+    sharedBrowserHostNotReady,
   ]);
   const handleInsertSlashCommand = useCallback(
     (command: string) => {
@@ -4515,11 +4528,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     }
     return ids;
   }, [activeConversationRuns]);
-  const browserAutoStartBlocked = browserAutoStartHeldByComposerOrLayout({
-    draft: inputValue,
-    wideSurfaces,
-    splitView: surfaces.split,
-  });
+  // Only a draft holds a card: in a narrow pane, or with side-by-side view
+  // off, the browser takes the view by itself as a press does.
+  const browserAutoStartBlocked = browserAutoStartHeldByDraft({ draft: inputValue });
   const browserHeldByOther = browserAutoStartHeldByOther({
     browserRunActive,
     remoteController: sharedBrowserPresence?.remoteController === true,
@@ -4540,6 +4551,20 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     runtimes: runtimeStatuses ?? null,
   });
   const [browserAutoWaiting, setBrowserAutoWaiting] = useState(false);
+  // A press asks the open browser view to attach to its machine again by
+  // bumping this, and the view reports the error it shows so the card can say
+  // why it did not open instead of waiting out its deadline.
+  const [sharedBrowserAttachRequestToken, setSharedBrowserAttachRequestToken] = useState(0);
+  const [sharedBrowserViewError, setSharedBrowserViewError] = useState<SharedBrowserViewError | null>(null);
+  const handleSharedBrowserConnectionErrorChange = useCallback((message: string | null) => {
+    setSharedBrowserViewError((current) => {
+      if (!message) return null;
+      return current?.message === message ? current : { message, atMs: Date.now() };
+    });
+  }, []);
+  const requestSharedBrowserReattach = useCallback(() => {
+    setSharedBrowserAttachRequestToken((current) => current + 1);
+  }, []);
   // An open Studio made by itself never starts the space's machine; that
   // lasts until the browser closes or the person presses a card.
   const [browserAttachOnly, setBrowserAttachOnly] = useState(false);
@@ -4568,9 +4593,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     currentUserId,
     chatClientSessionId,
     activeRunIds: activeConversationRunIds,
-    // A draft the person is typing, a layout that cannot show the browser
-    // beside the chat, or side-by-side view turned off leaves the card to them.
-    blocked: browserAutoStartBlocked ? { reason: null } : null,
+    // A draft the person is typing leaves the card to them, and the card says so.
+    blocked: browserAutoStartBlocked ? { reason: BROWSER_AUTO_START_COPY.draftHeld } : null,
     heldByOther: browserHeldByOther,
     plan: (_request, transport) => browserAutoStartPlan({
       transport,
@@ -4615,6 +4639,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     sharedReady: Boolean(resolvedBrowserRuntimeId && browserHandoffPage),
     sharedRuntimeId: resolvedBrowserRuntimeId,
     sharedUnavailable: sharedBrowserCapabilitiesUnsupported,
+    sharedHost: {
+      runtimeId: conversationBrowserHostRuntimeId,
+      refresh: sharedBrowserHost.refresh,
+      reattach: requestSharedBrowserReattach,
+      heldByOther: browserHeldByOther,
+    },
+    sharedError: browserSessionOpen && browserTransport === "shared" ? sharedBrowserViewError : null,
+    sharedNotReadySinceMs: sharedBrowserHostNotReadySinceMs,
     agentName: typingAgentDisplayName.replace(/^@/, ""),
     activate: (transport, plan) => {
       if (plan?.kind === "attach") {
@@ -5608,6 +5640,18 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     return visibleJobMessages;
   }, [activeConversationId, messages, normalizedJobThread]);
 
+  // A plan job the controller ran again (a continued turn, a rate-limit
+  // retry) ends with a quiet line to the run that stands for it.
+  const jobThreadRerunSources = useMemo(
+    () => (normalizedJobThread ? [...Object.values(runs), ...messages] : []),
+    [messages, normalizedJobThread, runs],
+  );
+  const openJobThreadRerun = useCallback((jobId: string) => {
+    if (!normalizedJobThread) return;
+    requestUrlPush();
+    openJobThreadTab({ conversationId: normalizedJobThread.conversationId, jobId });
+  }, [normalizedJobThread, openJobThreadTab, requestUrlPush]);
+
   const beginHistoryRetry = useStudioChatPerformance({
     projectId: activeProjectId,
     organizationId: activeOrgId,
@@ -5851,6 +5895,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                   </ChatBubbleRow>
                 );
               })}
+              <RunTraceRerunNotice jobId={normalizedJobThread.jobId} sources={jobThreadRerunSources} onOpen={openJobThreadRerun} />
             </ChatColumn>
           </div>
         </div>
@@ -6234,6 +6279,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     preferRuntimeId={preferredBrowserRuntimeId}
                     resumeRuntimeId={requestedSharedBrowserRuntimeId ?? exactBrowserRuntimeId}
                     expandRequestToken={browserSessionExpandRequestToken}
+                    attachRequestToken={sharedBrowserAttachRequestToken}
+                    onConnectionErrorChange={handleSharedBrowserConnectionErrorChange}
                     presentation="docked"
                     fillContainer
                     onBackToChat={handleBackToChat}

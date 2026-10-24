@@ -34,7 +34,7 @@ pub(crate) use access::{
     set_self_hosted_access_attestation, spread_plan_parent_is_private,
 };
 pub(crate) use db::{
-    ensure_runtime_record, mark_runtime_ready, record_runtime_event,
+    db_error_summary, ensure_runtime_record, mark_runtime_ready, record_runtime_event,
     record_runtime_event_with_conversation, touch_runtime_last_seen, RuntimeRecord,
     RUNTIME_LAST_SEEN_TOUCH_INTERVAL_SECONDS,
 };
@@ -53,6 +53,7 @@ pub(crate) use managed::{
 pub(crate) use pre_stop_flush::{authorize_pre_stop_save_grant, PRE_STOP_SAVE_SCOPE};
 pub(crate) use provider::provider_is_self_hosted;
 pub(crate) use register::{runtime_token_subject_is_controller_service, RuntimeRegisterResponse};
+pub(crate) use run_interruptions::{announce_requeued_job_run, mark_interrupted_runs};
 pub(crate) use status::{
     load_runtime_status_response, runtime_supports_agent_and_origin,
     runtime_supports_conversation_state, RuntimeStatusResponse,
@@ -86,7 +87,10 @@ pub(crate) use stop::{
     PERSONAL_BROWSER_DISCONNECTED_ERROR, SHARED_BROWSER_DISCONNECTED_ERROR,
 };
 #[cfg(test)]
-pub(crate) use sweeps::STRANDED_PLATFORM_JOB_GRACE_SECONDS;
+pub(crate) use sweeps::{
+    settle_plan_agents_out_of_team_time, STRANDED_PLATFORM_JOB_GRACE_SECONDS,
+    TEAM_TIME_BUDGET_NOT_STARTED_MESSAGE,
+};
 #[cfg(test)]
 pub(crate) use token::RuntimeTokenResponse;
 

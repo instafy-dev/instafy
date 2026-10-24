@@ -1,7 +1,8 @@
 // Octo turn eval (docs/Octo-Turn-Eval.md): sends each case of a cases file (default: octo-turn-cases.json) to real
 // Octo in a fresh space, waits for its agent_jobs to settle, finds the page Octo built the way a person would (its
 // "Ready to preview" card, else the space's previews), saves the evidence and grades it with
-// scripts/octo-turn-grade.mjs (no model). Real model, real quota: opt-in only, never part of default CI.
+// scripts/octo-turn-grade.mjs (no model), then deletes the case's space through the controller so no work of it
+// outlives the case (scripts/octo-turn-release.mjs). Real model, real quota: opt-in only, never part of default CI.
 //
 //   PLAYWRIGHT_RUN_BENCH=1 PLAYWRIGHT_OCTO_EVAL=1 \
 //   PLAYWRIGHT_OCTO_EVAL_CASES=checklist,negative-translate \
@@ -25,6 +26,7 @@ import {
   redactText,
   validateCases,
 } from "../../../../../scripts/octo-turn-grade.mjs";
+import { finishCase, readSpaceState } from "../../../../../scripts/octo-turn-release.mjs";
 
 const ENABLED = process.env.PLAYWRIGHT_RUN_BENCH === "1" && process.env.PLAYWRIGHT_OCTO_EVAL === "1";
 const STUDIO = (process.env.PLAYWRIGHT_EXTERNAL_BASE_URL || "http://localhost:5173").replace(/\/$/, "");
@@ -33,7 +35,8 @@ const CASES_FILE = process.env.PLAYWRIGHT_OCTO_EVAL_CASES_FILE || DEFAULT_CASES_
 const SITE_TEXT_MAX = 20_000;
 const POLL_MS = 10_000;
 const SETTLE_QUIET_MS = 20_000;
-const STOP_RUNTIMES = process.env.PLAYWRIGHT_OCTO_EVAL_STOP_RUNTIMES !== "0";
+// "0" keeps each case's space (its runtime, and any work still queued) for a readback; delete it afterwards.
+const KEEP_SPACES = process.env.PLAYWRIGHT_OCTO_EVAL_STOP_RUNTIMES === "0";
 // Map libraries by the container they render; any of them counts as a map.
 const MAP_ENGINES: [string, string][] = [
   ["maplibre", ".maplibregl-map"], ["mapbox", ".mapboxgl-map"], ["leaflet", ".leaflet-container"],
@@ -248,8 +251,18 @@ function spaceSkillsOf(containers: string[], projectId: string): string[] | null
   return null;
 }
 
+/** Deletes the space the way a person does: the controller cancels its queued and leased work and stops its runtimes. */
+async function deleteSpace(request: APIRequestContext, accessToken: string, projectId: string): Promise<{ ok: boolean; status: number; error?: string }> {
+  const response = await request.delete(`${CONTROLLER}/projects/${projectId}`, {
+    headers: { authorization: `Bearer ${accessToken}` },
+  });
+  if (response.ok()) return { ok: true, status: response.status() };
+  return { ok: false, status: response.status(), error: redactText(await response.text().catch(() => "")).slice(0, 200) };
+}
+
+/** Last resort for a container the controller did not stop once it released the space. */
 function stopRuntimeContainers(names: string[]): string[] {
-  if (!STOP_RUNTIMES || !names.length) return [];
+  if (!names.length) return [];
   try {
     execFileSync("docker", ["stop", ...names], { encoding: "utf8" });
     return names;
@@ -286,7 +299,7 @@ test.describe("Octo turn eval", () => {
   for (const evalCase of CASES) {
     test(evalCase.id, async ({ page }) => {
       const deadlineMs = (evalCase.budget.seconds + 240) * 1000;
-      test.setTimeout(deadlineMs + 420_000);
+      test.setTimeout(deadlineMs + 600_000);
       const caseDir = path.join(RUN_DIR, "cases", evalCase.id);
       fs.mkdirSync(caseDir, { recursive: true });
       const studioErrors: string[] = [];
@@ -420,9 +433,19 @@ test.describe("Octo turn eval", () => {
         evidence.jobs = collectJobs({ projectId, sinceIso: evidence.sentAt });
         evidence.credits = collectCredits({ projectId, sinceIso: evidence.sentAt });
       } finally {
-        const containers = runtimeContainers(projectId);
-        evidence.spaceSkills = spaceSkillsOf(containers, projectId);
-        evidence.stoppedContainers = stopRuntimeContainers(containers);
+        evidence.spaceSkills = spaceSkillsOf(runtimeContainers(projectId), projectId);
+        writeJson(path.join(caseDir, "evidence.json"), evidence);
+        // A long case can outlive its sign-in; the delete needs a live one.
+        const token = await signIn(page, user!).catch(() => accessToken);
+        const release = await finishCase({
+          keepSpace: KEEP_SPACES,
+          deleteSpace: () => deleteSpace(page.request, token, projectId),
+          readState: () => readSpaceState({ projectId }),
+          listContainers: () => runtimeContainers(projectId),
+          stopContainers: stopRuntimeContainers,
+        });
+        evidence.release = release;
+        evidence.stoppedContainers = release.stoppedContainers;
         writeJson(path.join(caseDir, "evidence.json"), evidence);
       }
       expect(evidence.jobs?.length ?? 0, "the send created no agent job").toBeGreaterThan(0);

@@ -17,6 +17,10 @@ export interface ControllerPlanWorkerStatus {
   summary?: string | null;
   lastMessage?: string | null;
   leaseMetrics?: Record<string, unknown> | null;
+  /** The job the controller ran this one's agent again as (its result stands for this one's). */
+  retriedAs?: string | null;
+  /** Why: "turn_continuation" or "rate_limit". */
+  retriedFor?: string | null;
 }
 
 export interface ControllerPlanGroupStatus {

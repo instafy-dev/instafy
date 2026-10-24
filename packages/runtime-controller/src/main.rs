@@ -120,6 +120,7 @@ mod tests_presence_beat;
 mod tests_runtime_stop_fence;
 mod tokens;
 mod tunnels;
+mod turn_rate_limit_retry;
 mod upstream_pacing;
 mod utils;
 mod workspace;
@@ -181,6 +182,9 @@ async fn main() -> anyhow::Result<()> {
     // A preview domain that overlaps Studio's, the API's or public tunnels'
     // would let any previewed site set cookies they trust.
     previews::check_preview_domain(&config)?;
+    if let Some(warning) = config.previews.tunnel_domain_warning() {
+        tracing::warn!("{warning}");
+    }
     let pool = config.build_pool().await?;
     browser_profile::ensure_browser_profiles_table(&pool)
         .await
