@@ -3,6 +3,7 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 
 const PACKAGES = new Map([
   ["@instafy/cli", "packages/instafy-cli"],
@@ -146,6 +147,11 @@ function verifyGeneratedVersionPullRequest(base, head) {
     const expectedVersion = bumpVersion(baseManifest.version, bump);
     if (headManifest.version !== expectedVersion) {
       fail(`${name} version must be generated as ${expectedVersion}, got ${headManifest.version}`);
+    }
+    // The version pull request merges without code-owner review, so its manifest may differ from
+    // the reviewed base only in the generated version: never in scripts, dependencies, bin or files.
+    if (!isDeepStrictEqual({ ...headManifest, version: baseManifest.version }, baseManifest)) {
+      fail(`${name} package.json may change only its version in the generated version pull request`);
     }
     const changelog = readAt(head, `${directory}/CHANGELOG.md`);
     if (!new RegExp(`^## ${expectedVersion.replaceAll(".", "\\.")}\\s*$`, "mu").test(changelog)) {

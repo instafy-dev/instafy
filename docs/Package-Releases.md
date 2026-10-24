@@ -87,8 +87,12 @@ The Instafy bot opens the version pull request (`chore(release): version npm pac
 `changeset-release/main`) as a draft and refreshes it on every protected-main change while
 changesets are pending. Every day at 06:43 UTC the
 [npm Daily Release](../.github/workflows/npm-release-daily.yml) workflow finds that pull request,
-marks it ready for review and turns on auto-merge, pinned to the head it inspected. The merge
-queue then runs every required check and merges it like any other pull request. If no version
+marks it ready for review and turns on auto-merge (arming requires the head it inspected; a
+later version refresh can merge under the same auto-merge). The merge queue then runs every
+required check and merges it like any other pull request. No one reviews the version pull
+request, so the required Changeset policy check accepts it only if it deletes the pending
+changesets, writes their changelog entries and changes nothing in each released package's
+`package.json` except the generated `version`. If no version
 pull request is open, or it changes no package version, the run does nothing.
 
 Merging the version pull request into protected `main` is the release. The push that merge makes
