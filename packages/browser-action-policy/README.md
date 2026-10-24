@@ -21,9 +21,11 @@ publish it on `globalThis.__instafyBrowserRedaction` and
   cookie dismissals, page numbers and menu or section toggles ("Menü
   ein-/ausklappen", "Toggle navigation", or a hamburger icon on an unnamed
   button). `commit: true` marks an ordinary control whose label or icon commits
-  a change (Save, Speichern, a floppy disk), which the Shared Browser still asks
-  for under routine browsing. Menu items, tabs, tree items, disclosure and menu
-  openers and navigation-area items never carry it.
+  a change (Save, Speichern, Umbuchen, Beleg erfassen, Stornobuchung, a floppy
+  disk), which the Shared Browser still asks for under routine browsing. Menu
+  items, tabs, tree items, disclosure and menu openers and navigation-area items
+  never carry it, and a menu item named for a list ("Buchungen",
+  "Stornobuchung") stays navigation.
   `unnamedControlName(hints)` names a control the page left unnamed from its
   tooltip attribute, image text, icon and position, so a prompt never shows an
   index such as "button 5".

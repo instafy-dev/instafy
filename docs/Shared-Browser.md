@@ -323,10 +323,16 @@ Save, Speichern or Buchen, even when page script runs them without a form), and
 Enter/Space activation still require one-shot confirmation. Menu items, tabs,
 tree items, disclosure and menu openers and navigation items are navigation: a
 commit word in their label (such as Neue Rechnung, Start or Neu) does not make
-them ask. A control of any kind whose label records, finalizes or pays
-(Festschreiben, Buchen, Speichern, Als bezahlt markieren, Mark as paid, Delete)
-is consequential and still asks; a menu item that only names a list
-(Buchungen, Zahlungen) stays navigation. Secret entry,
+them ask. A control of any kind whose label records, rebooks, files, issues,
+finalizes or pays (Festschreiben, Buchen, Umbuchen, Ausbuchen, Abbuchen,
+Stornobuchen, An FinanzOnline übermitteln, Einreichen, Abgeben, Rechnung
+ausstellen, Speichern, Als bezahlt markieren, Mark as paid, Delete) is
+consequential and still asks; a menu item that only names a list (Buchungen,
+Stornobuchung, Zahlungen) stays navigation. Buttons whose label fills in,
+reconciles, closes or voids a record (Beleg erfassen, Abgleichen, Erledigt,
+Fakturieren, Verrechnen, Stornobuchung, Reconcile, Void, Write off, Issue
+refund, File tax return) also ask as commit buttons; "Issue" and "File" count
+only with such an object, so a "File" menu or "Choose file" does not. Secret entry,
 fresh-target checks, exact authority, denial and cancellation boundaries are
 unchanged. Stopping or completing the turn ends the grant.
 
@@ -364,8 +370,8 @@ website JavaScript has no side effects or recognize every language/custom contro
 A plain link whose address has side effects but is not on the risky-address list,
 a control with neither a risky nor a commit word in its label, or a menu item,
 tab or navigation item whose only risky word is a commit word outside the
-consequential list (such as "Neu" or "Weiter" in a menu), can still act without
-a prompt. **Ask** reviews every state-changing interaction; a run on the
+consequential list (such as "Neu", "Weiter", "Erfassen" or "Abgleichen" in a
+menu), can still act without a prompt. **Ask** reviews every state-changing interaction; a run on the
 space's own machine cannot be switched to it yet (see "Remaining work").
 
 ### Redaction, step categories and downloads
@@ -509,9 +515,12 @@ turn without retrying.
 
 A run also stops when Instafy's browser goes away under it. The controller
 exits with code 75 when it cannot connect to the browser over CDP, when the
-run's own tab is gone, or when Playwright reports that the tab or browser
-closed during the command; the runtime judges that by the exit code alone,
-never by error text a page could shape. Two such tool calls in a row latch the
+run's own tab is gone, or when a command fails and the browser then shows the
+connection dropped, the run's tab closed, or the tab is no longer among its
+pages. Playwright reports a closed tab or browser with a plain `Error` whose
+message can quote page markup, so the controller asks the browser and never
+reads the error; any other failure exits 1. The runtime judges that by the exit
+code alone, never by error text a page could shape. Two such tool calls in a row latch the
 terminal code `browser_unavailable` like an approval code: later calls do not
 start the controller, status reports `ready: false`, the tool result tells the
 model to end the turn, and the person reads "Instafy's browser closed or

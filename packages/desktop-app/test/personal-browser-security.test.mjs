@@ -127,6 +127,27 @@ test("routine judges a toggle inside a form by its own names, not the form's sub
   }
 });
 
+// Bookkeeping steps that rebook, reverse, file, issue or record ask in
+// routine, on a button and on a menu item, while a menu item that names a
+// list ("Buchungen", "Stornobuchung") or a "File" menu stays free.
+test("routine asks for bookkeeping write steps and frees menu items that name lists", () => {
+  const page = { pageUrl: "https://app.example.test/buchungen" };
+  const form = { formOwnerIdentity: "doc:form-1", formMethod: "post", formSubmitLabels: "Speichern" };
+  for (const label of ["Umbuchen", "Ausbuchen", "An FinanzOnline übermitteln", "Einreichen", "Rechnung ausstellen"]) {
+    for (const descriptor of [
+      { tag: "button", type: "submit", text: label },
+      { tag: "button", type: "button", text: label, ...form },
+      { tag: "li", role: "menuitem", text: label, areas: "menu" },
+    ]) {
+      assert.equal(personalBrowserActivationRequiresConfirmation(descriptor, "routine", page), true, JSON.stringify(descriptor));
+    }
+  }
+  for (const label of ["Buchungen", "Stornobuchung", "File"]) {
+    const descriptor = { tag: "li", role: "menuitem", text: label, areas: "menu" };
+    assert.equal(personalBrowserActivationRequiresConfirmation(descriptor, "routine", page), false, JSON.stringify(descriptor));
+  }
+});
+
 test("routine asks for every other click, submit, risky address and Enter outside search", () => {
   const page = { pageUrl: "https://example.test/list" };
   for (const descriptor of [

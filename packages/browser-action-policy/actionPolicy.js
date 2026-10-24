@@ -109,7 +109,19 @@
     "importieren", "hochladen", "ja", "starten", "ausführen", "umbenennen", "verschieben", "kopieren",
     "mark", "markieren", "pay\\s+off", "settle", "verbuchen", "ausgleichen",
     "duplicate", "duplizieren", "clone", "klonen", "restore", "wiederherstellen",
+    // Bookkeeping steps that rebook, reverse, file, issue, record, reconcile
+    // or close a record. "Issue" and "file" count only with their object, so
+    // a "File" menu or "Choose file" is not one.
+    "(?:um|aus|ab|rück|zurück|gegen|storno)buchen", "übermitteln", "einreichen", "abgeben", "ausstellen",
+    "erledigt", "abgleichen", "erfassen", "fakturieren", "verrechnen",
+    "reconcile", "void", "write[\\s-]*off",
+    "issue\\s+(?:an?\\s+)?(?:invoices?|refunds?|credit\\s+notes?)",
+    "file\\s+(?:a\\s+|the\\s+)?(?:(?:tax\\s+)?returns?|reports?|tax(?:es)?)",
   ]);
+  // Bookkeeping nouns that name a step on a button ("Stornobuchung" posts a
+  // reversal) but a list on a menu item, tab or navigation entry. They only
+  // mark a button as a commit and leave the free navigation rules alone.
+  const COMMIT_NOUN = words(["stornobuchung"]);
   const REVEAL = words([
     "reveal", "show", "view", "copy", "unhide", "display", "unmask",
     "anzeigen", "einblenden", "kopieren", "zeigen", "ansehen", "aufdecken",
@@ -637,7 +649,7 @@
       tag === "summary" ||
       target.menuOpener === true ||
       areas.some((area) => NAVIGATION_AREAS.includes(area));
-    if (!structural && (COMMIT.test(label) || iconCategory === "commit")) {
+    if (!structural && (COMMIT.test(label) || COMMIT_NOUN.test(label) || iconCategory === "commit")) {
       return { ...ask("change", "control"), commit: true };
     }
     return ask("change", "control");

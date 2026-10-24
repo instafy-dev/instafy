@@ -220,6 +220,25 @@ if (mode.startsWith("long-label-")) {
     policy: { href: "https://example.test/reports/q3", linkSelf: true },
   };
 }
+// "button:<label>": a script-driven button with that label and no form
+// (add "-typeless" for one without a type attribute). "post-form-button:<label>":
+// a type="button" control inside a page-wide POST form whose own submit is
+// "Speichern". "menu-item:<label>": a menu item with that label.
+const labelled = /^(button|post-form-button|menu-item):(.+)$/u.exec(specialMode);
+if (labelled) {
+  const [, kind, label] = labelled;
+  special[specialMode] = kind === "menu-item"
+    ? { description: control(label, { tag: "li", role: "menuitem", inputType: "" }), policy: { areas: "menu" } }
+    : kind === "post-form-button"
+      ? {
+          description: control(label, {
+            formMethod: "post", formAction: "https://example.test/app",
+            formActionText: "form post https://example.test/app Betrag Speichern",
+          }),
+          policy: { formName: "Buchhaltung", formSubmitLabels: "Speichern", formFieldCount: 1 },
+        }
+      : { description: control(label) };
+}
 const descriptionFor = (targetId) => ({
   tag: isFormButton || mode === "localized-button" || mode === "icon-button" ? "button" : "input",
   role: mode === "icon-button" ? "button" : null,
@@ -273,6 +292,14 @@ const bodyTextFor = (currentUrl, targetId) => {
   return "Fixture page";
 };
 let context;
+let browserConnected = true;
+const closedPages = new Set();
+// A closed tab leaves the context's pages, as it does in Chromium.
+const closePage = (targetId) => {
+  closedPages.add(targetId);
+  const index = pages.findIndex((page) => page.targetId === targetId);
+  if (index >= 0) pages.splice(index, 1);
+};
 const makePage = (targetId) => {
   let currentUrl = mode === "blank-page"
     ? "about:blank"
@@ -302,11 +329,15 @@ const makePage = (targetId) => {
       if (mode === "click-error-canary") {
         throw new Error(`element <button data-key="${CANARY}"> is not attached to the DOM`);
       }
-      // The tab closed while the click ran, as Playwright reports it.
+      // The tab or the browser closed while the click ran. Playwright's
+      // client error keeps the plain name "Error".
       if (mode === "page-closed-during-click") {
-        const closed = new Error("Target page, context or browser has been closed");
-        closed.name = "TargetClosedError";
-        throw closed;
+        closePage(targetId);
+        throw new Error("Target page, context or browser has been closed");
+      }
+      if (mode === "browser-closed-during-click") {
+        browserConnected = false;
+        throw new Error("Target page, context or browser has been closed");
       }
       // A page error that only quotes the same words is an ordinary failure.
       if (mode === "page-quotes-closed-message") {
@@ -320,6 +351,7 @@ const makePage = (targetId) => {
   return {
     targetId,
     context: () => context,
+    isClosed: () => closedPages.has(targetId),
     // Page-side helpers identify themselves by their argument.
     evaluate: async (_fn, arg) => {
       if (arg && arg.kind === "page-policy") return signalsFor();
@@ -374,6 +406,7 @@ context = {
 };
 const browser = {
   contexts: () => [context],
+  isConnected: () => browserConnected,
   newBrowserCDPSession: async () => ({
     send: async (method, params) => {
       if (cdpLogPath) fs.appendFileSync(cdpLogPath, `${JSON.stringify({ method, params })}\n`);
@@ -2803,8 +2836,10 @@ async fn approval_codes_still_latch_at_once_during_a_browser_unavailable_streak(
 
 /// The controller tells the runtime the browser is unavailable by its exit
 /// code: when it cannot connect over CDP, when the run's tab is gone, or when
-/// the tab closes under a command. Any other failure exits 1, including a
-/// page error that quotes Playwright's words.
+/// the tab or the browser closes under a command. Playwright's error for that
+/// is a plain "Error", so the controller asks the browser, never the error.
+/// Any other failure exits 1, including a page error that quotes
+/// Playwright's words.
 #[test]
 fn the_controller_reports_an_unreachable_browser_by_its_exit_code() {
     let unavailable = |output: &Output| {
@@ -2836,6 +2871,11 @@ fn the_controller_reports_an_unreachable_browser_by_its_exit_code() {
     for (mode, code, error) in [
         (
             "page-closed-during-click",
+            BROWSER_UNAVAILABLE_EXIT_CODE,
+            "has been closed",
+        ),
+        (
+            "browser-closed-during-click",
             BROWSER_UNAVAILABLE_EXIT_CODE,
             "has been closed",
         ),
@@ -3907,6 +3947,130 @@ fn a_routine_start_still_asks_for_typeless_commit_buttons_submits_and_risky_icon
         assert!(String::from_utf8_lossy(&output.stderr).contains("approval_denied"));
         assert!(
             !fixture.action_log().contains("\"type\":\"click\""),
+            "{mode}"
+        );
+    }
+}
+
+/// Bookkeeping steps that rebook, reverse, file, issue, record, reconcile or
+/// close a record ask under routine browsing. A dogfood harness found them
+/// running without a prompt on a <button> with no type attribute outside any
+/// form and on a type="button" control inside a POST form, where no form
+/// submission check sees them; only their own names tell them apart.
+#[test]
+fn a_routine_start_still_asks_for_bookkeeping_write_steps() {
+    for label in [
+        "Umbuchen",
+        "Ausbuchen",
+        "Abbuchen",
+        "Rückbuchen",
+        "Gegenbuchen",
+        "Stornobuchung",
+        "An FinanzOnline übermitteln",
+        "Einreichen",
+        "UVA abgeben",
+        "Rechnung ausstellen",
+        "Beleg erfassen",
+        "Abgleichen",
+        "Erledigt",
+        "Fakturieren",
+        "Verrechnen",
+        "Reconcile",
+        "Void invoice",
+        "Write off",
+        "Issue refund",
+        "File tax return",
+    ] {
+        for mode in [
+            format!("button:{label}-typeless"),
+            format!("post-form-button:{label}"),
+        ] {
+            let fixture = EmbeddedControllerFixture::new();
+            let snapshot_id = fixture.snapshot_id(&mode);
+            fixture.prepare_routine_start("page-target");
+            let body = json!({"index": 0, "snapshotId": snapshot_id}).to_string();
+            let (output, requests) = fixture.decide_prepared(
+                fixture.command_for(&mode, "page-target", "POST", "/v1/click", Some(&body)),
+                &["deny"],
+            );
+            assert!(!output.status.success(), "{mode} ran without asking");
+            assert_eq!(requests.len(), 1, "{mode}");
+            assert_eq!(requests[0]["kind"], "action", "{mode}");
+            assert_eq!(
+                requests[0]["display"]["label"],
+                format!("Change something: {label}"),
+                "{mode}"
+            );
+            assert!(
+                !fixture.action_log().contains("\"type\":\"click\""),
+                "{mode} clicked"
+            );
+        }
+    }
+}
+
+/// On a menu item the verbs that write a record still ask, while names of
+/// lists ("Buchungen", "Stornobuchung") and the steps that only fill in a
+/// record ("Erfassen", "Abgleichen") stay navigation: the classifier's commit
+/// words never apply to menu items, tabs or navigation entries, and a "File"
+/// menu is not a filing step.
+#[test]
+fn a_routine_start_asks_for_menu_items_that_write_and_frees_menu_items_that_name_lists() {
+    for label in [
+        "Umbuchen",
+        "Stornobuchen",
+        "An FinanzOnline übermitteln",
+        "Einreichen",
+        "Rechnung ausstellen",
+    ] {
+        let mode = format!("menu-item:{label}");
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(&mode);
+        fixture.prepare_routine_start("page-target");
+        let body = json!({"index": 0, "snapshotId": snapshot_id}).to_string();
+        // "100" fails the prompt this click must publish as unanswered.
+        let output = fixture
+            .command_for_with_timeout(
+                &mode,
+                "page-target",
+                "POST",
+                "/v1/click",
+                Some(&body),
+                "100",
+            )
+            .output()
+            .expect("routine click");
+        assert!(!output.status.success(), "{mode} ran without asking");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("approval_timeout_non_retryable"),
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    for mode in [
+        "menu-item:Buchungen",
+        "menu-item:Stornobuchung",
+        "menu-item:Belege erfassen",
+        "menu-item:Abgleichen",
+        "menu-item:File",
+        "button:File",
+        "button:Choose file",
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(mode);
+        fixture.prepare_routine_start("page-target");
+        let body = json!({"index": 0, "snapshotId": snapshot_id}).to_string();
+        let output = fixture
+            .command_for_with_timeout(mode, "page-target", "POST", "/v1/click", Some(&body), "100")
+            .output()
+            .expect("routine click");
+        assert!(
+            output.status.success(),
+            "{mode} asked: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            fixture.action_log().contains("\"type\":\"click\""),
             "{mode}"
         );
     }

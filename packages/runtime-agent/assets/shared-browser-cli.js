@@ -114,12 +114,8 @@ let actionOrdinal = 0;
 // The browser could not be reached over CDP, or the run's page target is gone.
 class BrowserUnavailableError extends Error {}
 
-// Playwright's error when the page, its context or the browser closed while
-// a command ran. Judged by the error's class name only, never its message,
-// which can quote page markup.
-function isBrowserClosedError(error) {
-  return Boolean(error) && error.name === "TargetClosedError";
-}
+// The run's page as resolveExpectedPage last found it.
+let resolvedPage = null;
 
 function validatePlaywrightModulePath(modulePath, trustedRootPath) {
   const configuredModule = String(modulePath || "").trim();
@@ -257,12 +253,41 @@ async function resolveExpectedPage(browser) {
   for (const page of pages) {
     const targetId = await cdpTargetIdForPage(page).catch(() => "");
     if (targetId === EXPECTED_BROWSER_PAGE_ID) {
+      resolvedPage = page;
       return page;
     }
   }
   throw new BrowserUnavailableError(
     `Shared Browser selected page ${EXPECTED_BROWSER_PAGE_ID} is unavailable; select a live browser tab and retry`,
   );
+}
+
+// Whether a failed command failed because Instafy's browser or the run's tab
+// went away: the connection dropped, the page Playwright resolved for this
+// run closed, or the run's page target is no longer among the browser's
+// pages. Playwright's own "closed" error carries the plain name "Error" and a
+// message that can quote page markup, so the browser itself is asked instead.
+// A check that does not finish in time proves nothing.
+async function browserWentAway(browser) {
+  if (!browser.isConnected()) {
+    return true;
+  }
+  if (resolvedPage && resolvedPage.isClosed()) {
+    return true;
+  }
+  let timer;
+  const deadline = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(false), 5_000);
+  });
+  const pageGone = resolveExpectedPage(browser).then(
+    () => false,
+    (error) => error instanceof BrowserUnavailableError,
+  );
+  try {
+    return await Promise.race([pageGone, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // Runs inside the page through Playwright, so it must not use anything from
@@ -1353,11 +1378,13 @@ function assertSafeTypeTarget(description) {
 // arbitrary website JavaScript is side-effect-free. Keep recognized consequential
 // controls, commit buttons, form submissions and activation keys behind
 // one-shot confirmation.
-// English and the German of bookkeeping tools: steps that record, finalize,
-// pay or mark something paid stay consequential even on a menu item, while a
-// menu item that only names a list ("Buchungen") is navigation.
+// English and the German of bookkeeping tools: steps that record, rebook,
+// finalize, file, issue, pay or mark something paid stay consequential even
+// on a menu item, while a menu item that only names a list ("Buchungen",
+// "Stornobuchung") is navigation. The shared classifier's commit words hold
+// the same verbs for buttons.
 const CONSEQUENTIAL_ACTION_PATTERN =
-  /(?<![\p{L}\p{N}])(?:buy|purchase|pay|checkout|place[\s_-]*order|delete|remove|erase|destroy|send|post|publish|submit|authorize|approve|allow|confirm[\s_-]*(?:order|payment|purchase)|transfer|withdraw|book|reserve|sign[\s_-]*(?:contract|document|agreement)|save|finalize|mark[\s_-]*(?:as[\s_-]*)?paid|speichern|buchen|verbuchen|festschreiben|als[\s_-]*bezahlt|bezahlen|überweisen|freigeben|absenden|versenden|löschen|stornieren)(?![\p{L}\p{N}])/iu;
+  /(?<![\p{L}\p{N}])(?:buy|purchase|pay|checkout|place[\s_-]*order|delete|remove|erase|destroy|send|post|publish|submit|authorize|approve|allow|confirm[\s_-]*(?:order|payment|purchase)|transfer|withdraw|book|reserve|sign[\s_-]*(?:contract|document|agreement)|save|finalize|mark[\s_-]*(?:as[\s_-]*)?paid|speichern|buchen|verbuchen|(?:um|aus|ab|rück|zurück|gegen|storno)buchen|übermitteln|einreichen|abgeben|ausstellen|festschreiben|als[\s_-]*bezahlt|bezahlen|überweisen|freigeben|absenden|versenden|löschen|stornieren)(?![\p{L}\p{N}])/iu;
 
 // The control's own names and address, the fields the Desktop Personal
 // Browser's high-impact check reads, plus its id and name attributes. Never
@@ -2022,7 +2049,17 @@ async function main() {
   }
   try {
     await denyDownloads(browser);
-    const result = await execute(browser, method, requestPath, body || {});
+    let result;
+    try {
+      result = await execute(browser, method, requestPath, body || {});
+    } catch (error) {
+      if (!(error instanceof BrowserUnavailableError) && (await browserWentAway(browser))) {
+        // The message is kept, so an approval code in it still ends the run.
+        const reason = error && error.message ? error.message : String(error);
+        throw new BrowserUnavailableError(`Instafy's browser or the run's tab closed: ${reason}`);
+      }
+      throw error;
+    }
     await writeStdout(`${JSON.stringify({ ok: true, ...result }, null, 2)}\n`);
   } finally {
     await browser.close().catch(() => {});
@@ -2041,10 +2078,6 @@ main().then(
       // Keep the fixed message.
     }
     process.stderr.write(`Shared Browser command failed: ${masked}\n`);
-    process.exit(
-      error instanceof BrowserUnavailableError || isBrowserClosedError(error)
-        ? BROWSER_UNAVAILABLE_EXIT_CODE
-        : 1,
-    );
+    process.exit(error instanceof BrowserUnavailableError ? BROWSER_UNAVAILABLE_EXIT_CODE : 1);
   },
 );
