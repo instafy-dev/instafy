@@ -22,8 +22,9 @@ customer-facing release-note text.
 
 Do not manually edit a public package's `version` or `CHANGELOG.md`. The protected-main release
 workflow turns pending changesets into one signed version pull request and keeps it updated as
-additional changes land. Merging that pull request publishes the packages automatically. Changes confined to a package's `test/` directory are exempt because
-that directory is not part of the npm artifact.
+additional changes land. Merging that pull request publishes the packages automatically. Changes
+confined to a package's `test/` directory are exempt because that directory is not part of the npm
+artifact.
 
 ## Version and publication boundary
 
@@ -35,12 +36,13 @@ The release workflow uses four isolated stages:
    pull request. It has no npm authority.
 3. **Pack** builds and tests publishable packages without npm or repository-write credentials and
    uploads immutable tarballs.
-4. **Publish** runs automatically once Pack succeeds; there is no manual approval step. The
-   `npm-release` environment limits it to protected branches and holds the npm OIDC permission
-   that npm trusted publishing is configured for. Publish rechecks that its commit is still current
-   protected `main`, seals package-manager configuration to the canonical npm registry, verifies
-   the downloaded pack, and publishes the same tarballs without rebuilding them. The final receipt
-   proves both exact registry bytes and that `latest` points at the planned version.
+4. **Publish** runs automatically once Pack succeeds; there is no manual approval step. It runs in
+   the `npm-release` environment, which only protected branches can use, and npm trusted
+   publishing accepts OIDC tokens only from this workflow in that environment. Publish rechecks
+   that its commit is still current protected `main`, seals package-manager configuration to the
+   canonical npm registry, verifies the downloaded pack, and publishes the same tarballs without
+   rebuilding them. The final receipt proves both exact registry bytes and that `latest` points at
+   the planned version.
 
 Registry readback can lag a successful upload. Post-publication verification waits up to five
 minutes per package for the exact integrity and `latest` dist-tag to become visible, using only
@@ -63,9 +65,9 @@ Version retains Select's version mode and the existing
 repository-only bot credential in its two original steps; it is not credential-free.
 Its isolated-runner preflight precedes checkout, and a fresh protected-main and
 checkout-SHA check immediately precedes bot authorization. The earlier Select
-check alone cannot authorize a Version job delayed in the queue. Publish
-and npm OIDC routing are unchanged. Pack still requires Select's publish mode and exact immutable plan,
-tests the packages and uploads only verified tarballs; it has no npm OIDC or
+check alone cannot authorize a Version job delayed in the queue. Publish and
+npm OIDC routing are unchanged. Pack still requires Select's publish mode and
+exact immutable plan, tests the packages and uploads only verified tarballs; it has no npm OIDC or
 repository-write authority. This requires separate exact-job runner admission,
 baseline-tool qualification and cold execution/cleanup proof before enabling the switch; see
 [Testing](Testing.md). It does not grant npm publication authority or make the
@@ -95,6 +97,7 @@ repository, workflow filename and `npm-release` environment.
 
 Before publication, keep the version pull request in draft, close it or land a corrected
 changeset; once it merges, publication follows. Published npm versions are immutable. If a bad
-version reaches npm, move the relevant dist-tag back to the last good version, deprecate the bad version, and publish a corrected new
-version. Never reuse or move an immutable release version or tag. Unpublishing is reserved for a
-severe exposure and follows npm's restrictions; it is not a normal rollback mechanism.
+version reaches npm, move the relevant dist-tag back to the last good version, deprecate the bad
+version, and publish a corrected new version. Never reuse or move an immutable release version or
+tag. Unpublishing is reserved for a severe exposure and follows npm's restrictions; it is not a
+normal rollback mechanism.
