@@ -44,6 +44,7 @@ import {
 } from "../BrowserSessionModal";
 import type { SupportedSharedBrowserViewerKind } from "../sharedBrowserViewer";
 import { SHARED_BROWSER_HOST_COPY } from "../sharedBrowserHostAttach";
+import type { SharedBrowserApprovalState } from "../useSharedBrowserApproval";
 
 const projectId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const sessionId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -243,12 +244,12 @@ describe("Shared modal re-attach to the space's own browser", () => {
     container.remove(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
-  async function render(options: { attachRequestToken?: number } = {}) {
+  async function render(options: { attachRequestToken?: number; runApproval?: { runtimeId: string; approval: SharedBrowserApprovalState } | null } = {}) {
     await act(async () => { root.render(<BrowserSessionModal isOpen onOpenChange={vi.fn()} projectId={projectId}
       currentUserId="user-1" preferRuntimeId={null} resumeRuntimeId={null} presentation="docked" fillContainer
       canControlBrowser sharedBrowserCapabilitiesResolved sharedBrowserCapabilitiesAvailable
       sharedBrowserViewerKind="cdp-screencast" sharedBrowserAvailableViewerKinds={["cdp-screencast"]}
-      attachRequestToken={options.attachRequestToken ?? 0} />); });
+      attachRequestToken={options.attachRequestToken ?? 0} runApproval={options.runApproval ?? null} />); });
     await advance(0);
   }
   async function advance(ms: number) { await act(async () => { await vi.advanceTimersByTimeAsync(ms); }); }
@@ -307,6 +308,31 @@ describe("Shared modal re-attach to the space's own browser", () => {
     expect(text()).not.toContain(SHARED_BROWSER_HOST_COPY.restarted);
     await act(async () => { latest().onConnected(); });
     expect(retryButton()).toBeNull();
+  });
+
+  it("shows and answers the running job's prompt while the view itself cannot open", async () => {
+    // Dogfood, Oct 24: the view said Instafy's browser was not available, so
+    // its own poll stopped and the run's prompt expired unseen.
+    mocks.fetchHost.mockResolvedValue(null);
+    const decide = vi.fn(async () => {});
+    const request = {
+      version: 1 as const, approvalId: "11111111-1111-4111-8111-111111111111", kind: "action" as const,
+      ownerId: "owner", runId: "22222222-2222-4222-8222-222222222222", initiatorUserId: "user-1", browserPageId: "page-of-the-job",
+      operation: "click" as const, sourceOrigin: "https://app.example.test", destinationOrigin: "https://app.example.test",
+      destinationFingerprint: "a".repeat(64), snapshotId: null, targetFingerprint: null, payloadFingerprint: null,
+      requestedAtMs: Date.now(), expiresAtMs: Date.now() + 120_000, requestFingerprint: "b".repeat(64),
+      display: { label: "Open menu", destinationOrigin: null },
+    };
+    const approval: SharedBrowserApprovalState = { pending: { runtimeId: hostId, request }, submitting: false, error: null,
+      routineApprovedRunId: null, lastDecision: null, decide };
+    await render({ runApproval: { runtimeId: hostId, approval } });
+    expect(text()).toContain(SHARED_BROWSER_HOST_COPY.notAvailable);
+    expect(document.querySelector('[data-testid="shared-browser-approval-prompt"]')).not.toBeNull();
+    await act(async () => { document.querySelector<HTMLButtonElement>('[data-testid="shared-browser-approval-allow"]')!.click(); });
+    expect(decide).toHaveBeenCalledWith("allow_once");
+    // A lane for another machine never stands in for this view's own.
+    await render({ runApproval: { runtimeId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", approval } });
+    expect(document.querySelector('[data-testid="shared-browser-approval-prompt"]')).toBeNull();
   });
 
   it("writes its copy without em dashes", () => {

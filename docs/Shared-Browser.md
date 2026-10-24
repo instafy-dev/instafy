@@ -490,6 +490,22 @@ If the client temporarily loses its network, it retains the exact visible
 request, shows reconnecting state, and retries the bounded poll/decision path;
 the origin's one-use fingerprint and replay checks remain authoritative.
 
+Studio also shows a pending prompt as a card in the run's own conversation, for
+the person who started the run only (the run's controller-set `initiatingUserId`).
+The card names the step and the site, counts down to the prompt's expiry and
+offers **Deny** and **Allow once** (**Allow site** for a site prompt); routine
+browsing stays a choice of the browser view's sheet. Its poll uses the running
+job's own machine and page (the run's `browserRuntimeId` and `browserPageId`, which
+the prompt is bound to) and its own `browser.view` + `browser.control` grant, never
+the browser view's pages list, host read, picture or grant. So the prompt stays
+visible and answerable while the browser view reconnects, shows an error, is
+hidden behind the Chat tab, collapsed in a narrow pane or was never opened in this
+tab. The browser view's sheet shows the same poll for that machine, so both
+surfaces share one state: an answer in either settles both, and the card then says
+**Allowed**, **Denied** or, after the window, **Expired**. The pending and decision
+endpoints, their scopes and the origin's initiator and page checks are unchanged.
+A teammate polls nothing and sees no card.
+
 The agent controls the page through one runtime-owned, required MCP server:
 
 ```text

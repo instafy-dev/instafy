@@ -91,7 +91,10 @@ import {
 } from "./WebRtcBrowserViewer";
 import { RemoteBrowserMobileKeyboard } from "./RemoteBrowserMobileKeyboard";
 import { SharedBrowserApprovalPrompt } from "./SharedBrowserApprovalPrompt";
-import { useSharedBrowserApproval } from "./useSharedBrowserApproval";
+import {
+  useSharedBrowserApproval,
+  type SharedBrowserApprovalState,
+} from "./useSharedBrowserApproval";
 import {
   dispatchRemoteBrowserVirtualInput,
   type RemoteBrowserVirtualInputMessage,
@@ -435,6 +438,7 @@ export function BrowserSessionModal({
   attachOnly = false,
   openedByPerson = true,
   spaceBusy = false,
+  runApproval = null,
 }: {
   isOpen: boolean;
   onOpenChange: (open: boolean) => void;
@@ -507,6 +511,11 @@ export function BrowserSessionModal({
   openedByPerson?: boolean;
   /** Some run is actively progressing in this space. */
   spaceBusy?: boolean;
+  /**
+   * The approval lane of the conversation's running Instafy's browser job
+   * (see useChatSharedBrowserApproval) and its machine, lowercased.
+   */
+  runApproval?: { runtimeId: string; approval: SharedBrowserApprovalState } | null;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [containerNode, setContainerNode] = useState<HTMLDivElement | null>(null);
@@ -631,27 +640,6 @@ export function BrowserSessionModal({
   humanInputEnabledRef.current = humanInputEnabled;
   webRtcConnectionRef.current = webRtcConnection;
   browserOriginConnectionRef.current = browserOriginConnection;
-  const sharedBrowserApproval = useSharedBrowserApproval({
-    // The signed origin marker/request remains authoritative even if the user
-    // switches conversations or hides the Shared transport. The endpoint is
-    // initiator-scoped, so a writable mounted surface can safely keep polling.
-    active: isOpen && canControlBrowser && !browserDataClearInFlight,
-    projectId: browserOriginConnection?.projectId ?? projectId,
-    browserSessionId,
-    runtimeId: browserOriginConnection?.runtimeId ?? null,
-    browserPageId: sharedBrowserPageId,
-    originEndpoint: browserOriginConnection?.endpoint ?? null,
-    originAccessToken: browserOriginConnection?.accessToken ?? null,
-  });
-  useEffect(() => {
-    onApprovalPendingChange?.(Boolean(sharedBrowserApproval.pending));
-  }, [onApprovalPendingChange, sharedBrowserApproval.pending]);
-  useEffect(
-    () => () => {
-      onApprovalPendingChange?.(false);
-    },
-    [onApprovalPendingChange],
-  );
   const [viewerOverride, setViewerOverride] =
     useState<SupportedSharedBrowserViewerKind | null>(null);
   const [connectAttempt, setConnectAttempt] = useState(0);
@@ -715,6 +703,38 @@ export function BrowserSessionModal({
   }, [selectionScope]);
   const chosenRuntimeId = runtimeChoice?.scope === selectionScope ? runtimeChoice.runtimeId : null;
   const selectedSessionRuntimeId = sessionIdentity?.scope === selectionScope ? sessionIdentity.runtimeId : null;
+  // The conversation's own approval lane, keyed on its running job's machine
+  // and page, stands in for this view's own poll when it is for this view's
+  // machine: the sheet then keeps working while this view reconnects or
+  // failed, and it shares its state with the chat card, so one answer
+  // settles both.
+  const viewRuntimeId = (browserOriginConnection?.runtimeId ?? selectedSessionRuntimeId)?.toLowerCase() ?? null;
+  const runApprovalApplies = Boolean(runApproval) && (!viewRuntimeId || viewRuntimeId === runApproval?.runtimeId);
+  const ownSharedBrowserApproval = useSharedBrowserApproval({
+    // The signed origin marker/request remains authoritative even if the user
+    // switches conversations or hides the Shared transport. The endpoint is
+    // initiator-scoped, so a writable mounted surface can safely keep polling.
+    active: isOpen && canControlBrowser && !browserDataClearInFlight && !runApprovalApplies,
+    projectId: browserOriginConnection?.projectId ?? projectId,
+    browserSessionId,
+    runtimeId: browserOriginConnection?.runtimeId ?? null,
+    browserPageId: sharedBrowserPageId,
+    originEndpoint: browserOriginConnection?.endpoint ?? null,
+    originAccessToken: browserOriginConnection?.accessToken ?? null,
+  });
+  const sharedBrowserApproval =
+    runApprovalApplies && runApproval && canControlBrowser && !browserDataClearInFlight
+      ? runApproval.approval
+      : ownSharedBrowserApproval;
+  useEffect(() => {
+    onApprovalPendingChange?.(Boolean(sharedBrowserApproval.pending));
+  }, [onApprovalPendingChange, sharedBrowserApproval.pending]);
+  useEffect(
+    () => () => {
+      onApprovalPendingChange?.(false);
+    },
+    [onApprovalPendingChange],
+  );
   const sessionResumeUrl = useMemo(() => projectId && selectedSessionRuntimeId
     ? buildSharedBrowserResumeUrl(resolvePublicAppUrl("/studio"), { projectId, runtimeId: selectedSessionRuntimeId })
     : null, [projectId, selectedSessionRuntimeId]);

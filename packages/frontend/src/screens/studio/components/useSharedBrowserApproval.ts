@@ -8,6 +8,12 @@ import {
 const APPROVAL_IDLE_POLL_INTERVAL_MS = 1_500;
 const APPROVAL_PENDING_POLL_INTERVAL_MS = 400;
 
+/** A decision the origin accepted. */
+export type SharedBrowserApprovalSettlement = {
+  approvalId: string;
+  decision: RuntimeSharedBrowserApprovalDecision;
+};
+
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";
 }
@@ -33,6 +39,7 @@ export function useSharedBrowserApproval({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [routineApprovedRunId, setRoutineApprovedRunId] = useState<string | null>(null);
+  const [lastDecision, setLastDecision] = useState<SharedBrowserApprovalSettlement | null>(null);
   const submittingRef = useRef(false);
   const pendingRef = useRef<RuntimeSharedBrowserPendingApproval | null>(null);
   const settledApprovalIdRef = useRef<string | null>(null);
@@ -56,6 +63,7 @@ export function useSharedBrowserApproval({
     setSubmitting(false);
     setError(null);
     setRoutineApprovedRunId(null);
+    setLastDecision(null);
     decisionAbortRef.current?.abort();
     decisionAbortRef.current = null;
   }, [scope]);
@@ -183,6 +191,7 @@ export function useSharedBrowserApproval({
           setRoutineApprovedRunId(current.request.runId);
         }
         settledApprovalIdRef.current = current.request.approvalId;
+        setLastDecision({ approvalId: current.request.approvalId, decision });
         if (pendingRef.current?.request.approvalId === current.request.approvalId) {
           pendingRef.current = null;
           setPending(null);
@@ -211,6 +220,10 @@ export function useSharedBrowserApproval({
     submitting,
     error,
     routineApprovedRunId,
+    /** The last decision accepted here, whichever surface asked for it. */
+    lastDecision,
     decide,
   };
 }
+
+export type SharedBrowserApprovalState = ReturnType<typeof useSharedBrowserApproval>;

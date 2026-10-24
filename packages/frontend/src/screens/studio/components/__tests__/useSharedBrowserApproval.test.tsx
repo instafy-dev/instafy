@@ -72,6 +72,9 @@ function Harness({
       <span data-testid="error">{approval.error ?? "none"}</span>
       <span data-testid="routine-run">{approval.routineApprovedRunId ?? "none"}</span>
       <span data-testid="submitting">{String(approval.submitting)}</span>
+      <span data-testid="last-decision">
+        {approval.lastDecision ? `${approval.lastDecision.approvalId}:${approval.lastDecision.decision}` : "none"}
+      </span>
       <button type="button" onClick={() => void approval.decide("allow_once")}>
         Decide
       </button>
@@ -132,6 +135,34 @@ describe("useSharedBrowserApproval", () => {
     });
     expect(fetchPendingApprovalMock).toHaveBeenCalledTimes(2);
     expect(container.querySelector('[data-testid="pending"]')?.textContent).toBe("none");
+  });
+
+  it("remembers the decision the origin accepted, for every surface that shows the prompt", async () => {
+    fetchPendingApprovalMock.mockResolvedValue(pending);
+    decideApprovalMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+    await act(async () => {
+      root.render(<Harness />);
+      await Promise.resolve();
+    });
+    const lastDecision = () => container.querySelector('[data-testid="last-decision"]')?.textContent;
+    expect(lastDecision()).toBe("none");
+    // A refused decision is not one.
+    await act(async () => {
+      container.querySelector("button")?.click();
+      await Promise.resolve();
+    });
+    expect(lastDecision()).toBe("none");
+    await act(async () => {
+      container.querySelector("button")?.click();
+      await Promise.resolve();
+    });
+    expect(lastDecision()).toBe(`${pending.request.approvalId}:allow_once`);
+    // A new grant starts over.
+    await act(async () => {
+      root.render(<Harness originAccessToken="rotated-token" />);
+      await Promise.resolve();
+    });
+    expect(lastDecision()).toBe("none");
   });
 
   it("does not poll when the approval surface is inactive", async () => {
