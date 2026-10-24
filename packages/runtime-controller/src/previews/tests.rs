@@ -2919,6 +2919,103 @@ async fn a_wake_that_gets_another_tunnel_leaves_the_old_cards_behind() -> anyhow
 }
 
 #[tokio::test]
+async fn a_late_retirement_for_an_older_issue_leaves_the_newer_preview_open() -> anyhow::Result<()>
+{
+    run(|f| {
+        Box::pin(async move {
+            let job = f.job(None).await?;
+            let old_id = f.open(&job).await?;
+            let key = preview_tunnel_key(&job.runtime_id, 4173);
+            f.broker.remint(&key);
+            let next = f.job(Some(&job)).await?;
+            let new_id = f.open(&next).await?;
+            assert_ne!(new_id, old_id);
+            let new_before = f.grant_row(&new_id).await?;
+
+            // An open or a wake that got the older issue of the key before
+            // the broker replaced it, whose retirement only runs now.
+            let mut events = f.state.events.subscribe();
+            retire_previews_superseded_by(&f.state, &f.project, &key, &old_id).await;
+
+            let new = f.grant_row(&new_id).await?;
+            assert_eq!(new.status, "active");
+            assert!(new.metadata[PREVIEW_TUNNEL_METADATA_KEY]
+                .get("closedAt")
+                .is_none());
+            assert_eq!(new.updated_at, new_before.updated_at);
+            assert!(drain_grant_revocations(&mut events).is_empty());
+            let old = f.grant_row(&old_id).await?;
+            assert_eq!(
+                old.metadata[PREVIEW_TUNNEL_METADATA_KEY]["supersededBy"],
+                json!(new_id)
+            );
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_wake_that_lands_after_the_open_closed_its_grant_still_leaves_the_old_cards_behind(
+) -> anyhow::Result<()> {
+    run(|f| {
+        Box::pin(async move {
+            let job = f.job(None).await?;
+            let old_id = f.open(&job).await?;
+            let old_card = f.ready(&job.token, &old_id).await?["messageId"].clone();
+            let stored = f.grant_metadata(&old_id).await?;
+            let key = preview_tunnel_key(&job.runtime_id, 4173);
+            f.broker.remint(&key);
+
+            // An open gets the new tunnel and closes the old grant first.
+            let next = f.job(Some(&job)).await?;
+            let new_id = f.open(&next).await?;
+            assert!(
+                f.grant_row(&old_id).await?.metadata[PREVIEW_TUNNEL_METADATA_KEY]["closedAt"]
+                    .is_string()
+            );
+
+            // A wake claimed before that close reconnects with the old
+            // grant's stored metadata, cards and all, onto the new tunnel.
+            let reopened = request_runtime_tunnel_with_overrides(
+                &f.state,
+                &f.project,
+                Some(&job.runtime_id),
+                Some(&job.lease_id),
+                Some(stored),
+                preview_tunnel_overrides(key.clone()),
+            )
+            .await
+            .map_err(|(status, error)| anyhow::anyhow!("{status}: {}", error.0.message))?;
+            assert_eq!(reopened.tunnel_id, new_id);
+            assert_eq!(
+                f.grant_metadata(&new_id).await?[PREVIEW_TUNNEL_METADATA_KEY]["messageId"],
+                old_card,
+                "the wake copied the old card"
+            );
+
+            // Nothing is left to close, but the old cards are still dropped.
+            retire_previews_superseded_by(&f.state, &f.project, &key, &new_id).await;
+            let new = f.grant_metadata(&new_id).await?;
+            assert!(new[PREVIEW_TUNNEL_METADATA_KEY].get("messageId").is_none());
+            let ids = new[PREVIEW_TUNNEL_METADATA_KEY]["messageIds"]
+                .as_object()
+                .cloned()
+                .unwrap_or_default();
+            assert!(ids.values().all(|id| *id != old_card), "{ids:?}");
+            // The wake also brought the old job's marker back; the next open
+            // writes the preview's own metadata again, and its ready a card.
+            let again = f.job(Some(&job)).await?;
+            assert_eq!(f.open(&again).await?, new_id);
+            let card = f.ready(&again.token, &new_id).await?["messageId"].clone();
+            assert_ne!(card, old_card);
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
 async fn a_broker_revocation_event_stops_only_the_issue_of_the_grant_it_names() -> anyhow::Result<()>
 {
     run(|f| {

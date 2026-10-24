@@ -1624,11 +1624,16 @@ pub(crate) async fn end_preview_of_revoked_grant(
 /// successor as `supersededBy`. The broker already revoked those tunnels and
 /// is not asked again.
 ///
+/// Only grants first recorded before the successor are closed: an open or a
+/// wake that got an older issue of the key (its broker answer came before the
+/// replacement, but its call ran late) must not close the newer preview.
+///
 /// Cards name a preview by its id, so they are not moved: the successor gets
-/// its own card on its first `/ready`. A successor that copied the closed
-/// grant's card ids (a wake reconnects with the preview's stored metadata)
-/// forgets them, so that card is written. Closed grants are skipped, so
-/// running this again changes nothing.
+/// its own card on its first `/ready`. A successor that copied the card ids
+/// of a grant it superseded (a wake reconnects with the preview's stored
+/// metadata, even after another open closed that grant) forgets them, so that
+/// card is written. Closed grants are skipped, so running this again changes
+/// nothing.
 async fn retire_superseded_previews(
     state: &AppState,
     project_id: &Uuid,
@@ -1662,6 +1667,10 @@ async fn retire_superseded_previews(
                and metadata->'_instafyPreview'->>'tunnelKey' = $2
                and tunnel_id <> $3
                and not (metadata->'_instafyPreview' ? 'closedAt')
+               and created_at < (
+                 select successor.created_at from runtime_tunnel_grants successor
+                 where successor.project_id = $1 and successor.tunnel_id = $3
+               )
              returning *",
             &[project_id, &tunnel_key, &successor_tunnel_id],
         )
@@ -1671,9 +1680,22 @@ async fn retire_superseded_previews(
         })?;
     let retired: Vec<RuntimeTunnelGrantRecord> =
         rows.iter().map(runtime_tunnel_grant_from_row).collect();
-    let retired_cards: Vec<String> = retired
+    // Every grant this successor superseded, not only the ones closed just
+    // now: a wake that copied a grant's cards may land after another open
+    // already closed that grant.
+    let superseded = transaction
+        .query(
+            "select metadata from runtime_tunnel_grants
+             where project_id = $1
+               and jsonb_typeof(metadata->'_instafyPreview') = 'object'
+               and metadata->'_instafyPreview'->>'supersededBy' = $2",
+            &[project_id, &successor_tunnel_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load superseded previews: {error}")))?;
+    let retired_cards: Vec<String> = superseded
         .iter()
-        .flat_map(|grant| preview_card_ids(grant.metadata.as_ref()))
+        .flat_map(|row| preview_card_ids(row.get::<_, Option<JsonValue>>("metadata").as_ref()))
         .collect();
     if !retired_cards.is_empty() {
         let successor = transaction
