@@ -1752,6 +1752,94 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(lines).toEqual(["Command", "Web search", "Reasoning"]);
   });
 
+  it("shows a streak chip's update count beside its glyph and in its label and card", async () => {
+    await act(async () => {
+      root.render(
+        <AgentJobThreadPreviewLayout
+          {...createProps({
+            isHybridCompactionActive: true,
+            visibleCompactEvents: [
+              { id: "thinking-1", kind: "thinking", count: 12, previewText: "Comparing March with April" },
+              { id: "click-1", kind: "tool", count: 1 },
+              { id: "thinking-2", kind: "thinking", count: 140 },
+            ],
+            latestCompactEventId: "thinking-2",
+            finalSummaryMessage: createLongSummaryMessage(),
+          })}
+        />,
+      );
+    });
+
+    const [streak, single, long] = Array.from(
+      container.querySelectorAll<HTMLButtonElement>("button.instafy-compact-event-pill"),
+    );
+    const countOf = (chip: Element | undefined) =>
+      chip?.querySelector('[data-testid="agent-thread-compact-event-count"]')?.textContent ?? null;
+
+    expect(countOf(streak)).toBe("12");
+    expect(streak?.getAttribute("aria-label")).toBe("Reasoning, 12 updates");
+    expect(streak?.getAttribute("data-count")).toBe("12");
+    expect(streak?.querySelector("svg")).not.toBeNull();
+    // A streak chip widens for its count; a single step keeps the round chip.
+    expect(streak?.className.split(/\s+/)).toEqual(expect.arrayContaining(["h-6", "min-w-6"]));
+    expect(streak?.className.split(/\s+/)).not.toContain("w-6");
+    expect(countOf(single)).toBeNull();
+    expect(single?.getAttribute("aria-label")).toBe("Tool call");
+    expect(single?.className.split(/\s+/)).toEqual(expect.arrayContaining(["h-6", "w-6"]));
+    // Three digits would crowd the chip.
+    expect(countOf(long)).toBe("99+");
+    expect(long?.getAttribute("aria-label")).toBe("Reasoning, 140 updates");
+
+    await act(async () => {
+      streak?.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    });
+    const card = container.querySelector('[data-testid="agent-thread-compact-event-preview"]');
+    expect(card?.querySelector('[data-testid="agent-thread-compact-event-preview-header"]')?.textContent).toBe(
+      "Reasoning",
+    );
+    expect(card?.textContent).toContain("12 updates");
+    expect(card?.querySelector('[data-testid="agent-thread-compact-event-preview-body"]')?.textContent).toBe(
+      "Comparing March with April",
+    );
+  });
+
+  it("lists folded streaks with their update counts on the overflow chip's card", async () => {
+    await act(async () => {
+      root.render(
+        <AgentJobThreadPreviewLayout
+          {...createProps({
+            isHybridCompactionActive: true,
+            overflowCompactCount: 253,
+            overflowCompactEvents: [
+              { id: "a", kind: "thinking", count: 240 },
+              { id: "b", kind: "tool", count: 1 },
+              { id: "c", kind: "thinking", count: 12 },
+            ],
+            visibleCompactEvents: [{ id: "latest", kind: "tool" }],
+            latestCompactEventId: "latest",
+            finalSummaryMessage: createLongSummaryMessage(),
+          })}
+        />,
+      );
+    });
+
+    const overflowChip = container.querySelector<HTMLButtonElement>(".instafy-compact-overflow-indicator");
+    expect(overflowChip?.getAttribute("aria-label")).toBe("253 earlier run updates");
+    expect(overflowChip?.getAttribute("data-count")).toBe("253");
+
+    await act(async () => {
+      overflowChip?.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    });
+    const card = container.querySelector('[data-testid="agent-thread-compact-event-preview"]');
+    expect(
+      card?.querySelector('[data-testid="agent-thread-compact-event-preview-header"]')?.textContent,
+    ).toBe("253 earlier run updates");
+    const lines = Array.from(
+      card?.querySelectorAll('[data-testid="agent-thread-compact-event-preview-body"] .block.truncate') ?? [],
+    ).map((line) => line.textContent);
+    expect(lines).toEqual(["Reasoning ×240", "Tool call", "Reasoning ×12"]);
+  });
+
   it("collapses the raw failure text behind the quiet details toggle", async () => {
     await act(async () => {
       root.render(

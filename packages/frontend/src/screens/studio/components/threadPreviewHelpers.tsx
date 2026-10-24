@@ -66,9 +66,14 @@ const GENERIC_PROGRESS_LABELS = new Set([
 ]);
 
 export type ThreadCompactEvent = {
+  // The id of the first update in the chip's streak, so the chip keeps its
+  // key while the streak grows.
   id: string;
   kind: ThreadCompactUpdateKind;
   actorHandle?: string | null;
+  // How many consecutive updates of this kind and actor the chip stands for.
+  // Absent means one.
+  count?: number;
   // Short excerpt of what the step did, shown in the rail chip's hover card
   // (#179). Null when the source message carries nothing worth previewing —
   // the chip then keeps its plain title tooltip.

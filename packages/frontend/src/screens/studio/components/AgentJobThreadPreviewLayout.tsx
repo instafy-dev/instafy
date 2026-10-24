@@ -200,17 +200,32 @@ function resolveCompactEventLabel(
     : resolveThreadCompactUpdateHistoryLabel(event.kind);
 }
 
+// How many updates a chip stands for: a streak of one kind from one actor is
+// one chip (useAgentJobThreadPreviewState).
+function resolveCompactEventCount(event: ThreadCompactEvent): number {
+  return typeof event.count === "number" && event.count > 1 ? Math.floor(event.count) : 1;
+}
+
+function formatCompactEventCount(count: number): string {
+  return count > 99 ? "99+" : String(count);
+}
+
 // The hover card previews what the step is/was doing: header = the step's
-// history label plus the actor handle when present, body = the excerpt the
-// assembly derived (#179). No excerpt → no card; the chip keeps its title.
+// history label plus the actor handle and the streak's update count when
+// present, body = the excerpt the assembly derived from the streak's newest
+// update (#179). No excerpt → no card; the chip keeps its title.
 function resolveCompactEventHoverCard(event: ThreadCompactEvent): ThreadRailHoverCardContent | null {
   const previewText = typeof event.previewText === "string" ? event.previewText.trim() : "";
   if (!previewText) {
     return null;
   }
+  const count = resolveCompactEventCount(event);
+  const headerDetail = [normalizeAgentHandle(event.actorHandle), count > 1 ? `${count} updates` : null]
+    .filter(Boolean)
+    .join(" · ");
   return {
     header: resolveThreadCompactUpdateHistoryLabel(event.kind),
-    headerDetail: normalizeAgentHandle(event.actorHandle),
+    headerDetail: headerDetail || null,
     bodyText: previewText,
     mono: Boolean(event.previewMono),
   };
@@ -221,7 +236,7 @@ function resolveCompactEventHoverCard(event: ThreadCompactEvent): ThreadRailHove
 const COMPACT_EVENT_PILL_FOCUS_CLASS =
   "focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-400 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-primary-300/80 dark:focus-visible:ring-offset-slate-950";
 
-function renderCompactEventContent(event: ThreadCompactEvent, ownerBadge: string | null) {
+function renderCompactEventGlyph(event: ThreadCompactEvent, ownerBadge: string | null) {
   const actor = resolveDistinctActorHandle(event.actorHandle, ownerBadge);
   if (actor) {
     return (
@@ -235,6 +250,27 @@ function renderCompactEventContent(event: ThreadCompactEvent, ownerBadge: string
     );
   }
   return renderThreadCompactEventIcon(event.kind);
+}
+
+// A streak chip carries its count beside the glyph; the count ticks up in
+// place while the streak grows.
+function renderCompactEventContent(event: ThreadCompactEvent, ownerBadge: string | null) {
+  const count = resolveCompactEventCount(event);
+  if (count <= 1) {
+    return renderCompactEventGlyph(event, ownerBadge);
+  }
+  return (
+    <>
+      {renderCompactEventGlyph(event, ownerBadge)}
+      <span
+        data-testid="agent-thread-compact-event-count"
+        aria-hidden="true"
+        className="text-xxs font-semibold leading-none tabular-nums"
+      >
+        {formatCompactEventCount(count)}
+      </span>
+    </>
+  );
 }
 
 function normalizeInlineUpdateDedupeKey(content: string, updateType: string): string | null {
@@ -1389,9 +1425,13 @@ export function AgentJobThreadPreviewLayout({
                           overflowCompactEvents.length > 0
                             ? {
                                 header: formatHiddenUpdateLabel(overflowCompactCount, "earlier run update"),
-                                bodyLines: overflowCompactEvents.map((event) =>
-                                  resolveCompactEventLabel(event, ownerBadge, false),
-                                ),
+                                // One line per folded chip; a streak names its
+                                // update count.
+                                bodyLines: overflowCompactEvents.map((event) => {
+                                  const label = resolveCompactEventLabel(event, ownerBadge, false);
+                                  const count = resolveCompactEventCount(event);
+                                  return count > 1 ? `${label} ×${count}` : label;
+                                }),
                               }
                             : null
                         }
@@ -1413,15 +1453,22 @@ export function AgentJobThreadPreviewLayout({
                         isThreadUnresolved &&
                         !showCompactRailWaitingSpinner &&
                         latestCompactEventId === event.id;
+                      const eventCount = resolveCompactEventCount(event);
+                      const eventLabel = eventCount > 1 ? `${badgeLabel}, ${eventCount} updates` : badgeLabel;
+                      // A streak chip widens to fit its count. The next chip
+                      // overlaps its right end (-space-x-2), so the right
+                      // padding keeps the count clear of it.
+                      const pillBoxClass = eventCount > 1 ? "h-6 min-w-6 gap-0.5 pl-1.5 pr-2.5" : "h-6 w-6";
                       return (
                         <ThreadRailChipButton
                           key={`compact-event-${event.id}`}
                           card={resolveCompactEventHoverCard(event)}
-                          ariaLabel={badgeLabel}
-                          title={badgeLabel}
+                          ariaLabel={eventLabel}
+                          title={eventLabel}
+                          dataCount={String(eventCount)}
                           className={`instafy-compact-event-pill ${
                             isLiveEventPill ? "instafy-compact-event-pill-live" : ""
-                          } inline-flex h-6 w-6 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 ${COMPACT_EVENT_PILL_FOCUS_CLASS}`}
+                          } inline-flex ${pillBoxClass} items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 ${COMPACT_EVENT_PILL_FOCUS_CLASS}`}
                         >
                           {renderCompactEventContent(event, ownerBadge)}
                         </ThreadRailChipButton>
