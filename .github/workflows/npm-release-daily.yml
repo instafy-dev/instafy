@@ -144,8 +144,10 @@ jobs:
             summary "Marked version pull request #${PULL_REQUEST} ready for review."
           fi
           if [[ "$ARMED" != "true" ]]; then
-            # Pinned to the inspected head: a newer Version refresh is armed by
-            # the next run instead. The queue still runs every required check.
+            # Arming requires the inspected head. Auto-merge can stay armed
+            # across a later Version refresh, so every head it merges must
+            # still pass the queue's required checks, including the
+            # generated-version policy.
             gh pr merge "$PULL_REQUEST" --repo "$GITHUB_REPOSITORY" --auto --squash \
               --match-head-commit "$HEAD_SHA"
             summary "Armed auto-merge for version pull request #${PULL_REQUEST} at ${HEAD_SHA} through the merge queue."
