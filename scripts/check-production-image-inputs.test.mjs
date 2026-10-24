@@ -376,12 +376,12 @@ test("runtime downloads verify architecture-bound checksums before extraction", 
     "ad1790063beea11a312c801df30d58e147de762f4f77787552376eb7424623e5",
     relativePath,
   );
-  // npm vendors undici 6.27.0 and pnpm's dist vendors 6.28.0 (CVE-2026-19534).
-  assert.equal(argumentDefaults(source).get("UNDICI_VERSION"), "6.28.1");
+  // npm and pnpm's dist vendor older undici copies (CVE-2026-19534, CVE-2026-109869).
+  assert.equal(argumentDefaults(source).get("UNDICI_VERSION"), "6.29.1");
   assertPinnedChecksumArgument(
     source,
     "UNDICI_SHA256",
-    "e18191aac9c0ff43dac7fe9b10b7041a22d07addb7b66a6e8ac14a52a5b69b74",
+    "29c4b8e0b2d86cb8795571c1959012ce057a14ecfd34858335f47c31e770a04f",
     relativePath,
   );
   // Patch EVERY npm installation in the image, not one hardcoded prefix: the

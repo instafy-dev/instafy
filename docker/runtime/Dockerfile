@@ -17,9 +17,9 @@ ARG BRACE_EXPANSION_VERSION=5.0.12
 ARG BRACE_EXPANSION_SHA256=ef8448ec78f20b692f04fa6d01f39b5ab34c66404bea3429f5a39c6c9e0be8b4
 ARG IP_ADDRESS_VERSION=10.3.1
 ARG IP_ADDRESS_SHA256=ad1790063beea11a312c801df30d58e147de762f4f77787552376eb7424623e5
-# npm and pnpm each vendor undici (6.27.0 and 6.28.0); 6.28.1 fixes CVE-2026-19534.
-ARG UNDICI_VERSION=6.28.1
-ARG UNDICI_SHA256=e18191aac9c0ff43dac7fe9b10b7041a22d07addb7b66a6e8ac14a52a5b69b74
+# npm and pnpm each vendor an older undici; 6.29.1 fixes CVE-2026-19534 and CVE-2026-109869.
+ARG UNDICI_VERSION=6.29.1
+ARG UNDICI_SHA256=29c4b8e0b2d86cb8795571c1959012ce057a14ecfd34858335f47c31e770a04f
 # Rathole is used for self-hosted tunnel ingress. The crates.io release currently
 # depends on older `time` versions that fail to compile on newer Rust toolchains,
 # so we install a prebuilt release binary instead of `cargo install`.
