@@ -1,0 +1,152 @@
+name: npm Daily Release
+
+# Releases pending npm package changes once a day without a human step. The
+# npm-release workflow keeps one version pull request open while changesets
+# are pending; this job only marks that pull request ready and arms auto-merge
+# through the merge queue. Merging it is the release: the resulting
+# protected-main push runs npm-release's Select, Pack and Publish unchanged.
+#
+# It never approves, bypasses, pushes, checks out or runs repository code. It
+# only touches the open pull request from this repository's
+# changeset-release/main branch whose author is instafy-bot and whose title is
+# the version pull request's. Run it manually to release sooner.
+#
+# The repository-only instafy-bot credential, not GITHUB_TOKEN, marks the pull
+# request ready and arms auto-merge: GitHub starts no workflow for events made
+# with GITHUB_TOKEN (so the merge's push would not run Publish), and only
+# instafy-bot is exempt from the code-owner review ruleset. Lookups use the
+# read-only GITHUB_TOKEN; the bot credential reaches only the last step.
+
+on:
+  schedule:
+    - cron: "43 6 * * *"
+  workflow_dispatch:
+
+# The same lock npm-release uses on protected main, so this never races a
+# Version refresh of the pull request or a publication in flight.
+concurrency:
+  group: npm-release-main
+  cancel-in-progress: false
+  queue: max
+
+permissions: {}
+
+jobs:
+  arm:
+    name: Arm the pending npm version pull request
+    if: >-
+      ${{ github.repository == 'instafy-dev/instafy'
+          && github.ref == 'refs/heads/main'
+          && github.ref_protected == true
+          && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+
+    steps:
+      - name: Find the pending version pull request
+        id: find
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          summary() { printf '%s\n' "$1" | tee -a "$GITHUB_STEP_SUMMARY"; }
+          finish() { summary "$1"; echo "pending=false" >> "$GITHUB_OUTPUT"; exit 0; }
+          test "$GITHUB_REPOSITORY" = "instafy-dev/instafy"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$GITHUB_REF_PROTECTED" = "true"
+
+          # Only this exact pull request is ever touched.
+          number="$(
+            gh api --method GET "repos/${GITHUB_REPOSITORY}/pulls" \
+              -f state=open -f base=main -f head="${GITHUB_REPOSITORY_OWNER}:changeset-release/main" -f per_page=100 \
+              --jq '[.[] | select(
+                .head.ref == "changeset-release/main"
+                and .head.repo.full_name == "instafy-dev/instafy"
+                and .base.ref == "main"
+                and .user.login == "instafy-bot"
+                and .title == "chore(release): version npm packages"
+              ) | .number] | if length > 1 then error("more than one version pull request") else (.[0] // "") end'
+          )"
+          if [[ -z "$number" ]]; then
+            finish "No version pull request is open; nothing to release."
+          fi
+          [[ "$number" =~ ^[1-9][0-9]*$ ]]
+
+          packages="$(
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${number}/files?per_page=100" \
+              --jq '.[] | select(.filename | test("^packages/[^/]+/package\\.json$")) | .filename'
+          )"
+          if [[ -z "$packages" ]]; then
+            finish "Version pull request #${number} changes no package version; nothing to release."
+          fi
+
+          state="$(
+            gh api graphql -F number="$number" -f query='
+              query($number: Int!) {
+                repository(owner: "instafy-dev", name: "instafy") {
+                  pullRequest(number: $number) {
+                    id isDraft isInMergeQueue headRefOid
+                    autoMergeRequest { enabledAt }
+                    labels(first: 100) { nodes { name } }
+                  }
+                }
+              }' \
+              --jq '.data.repository.pullRequest | [
+                .headRefOid, (.isDraft | tostring), (.isInMergeQueue | tostring),
+                (.autoMergeRequest != null | tostring),
+                (any(.labels.nodes[]; .name == "release-hold") | tostring)
+              ] | join(" ")'
+          )"
+          read -r head draft queued armed held <<< "$state"
+          [[ "$head" =~ ^[0-9a-f]{40}$ ]]
+
+          if [[ "$held" == "true" ]]; then
+            finish "Version pull request #${number} has the release-hold label; leaving it unchanged."
+          fi
+          # The release-freeze ruleset blocks updates to main; wait for it to lift.
+          frozen="$(gh api "repos/${GITHUB_REPOSITORY}/rules/branches/main?per_page=100" --jq 'any(.[]; .type == "update")')"
+          if [[ "$frozen" != "false" ]]; then
+            finish "Protected main is frozen; leaving version pull request #${number} unchanged."
+          fi
+          if [[ "$queued" == "true" || ( "$armed" == "true" && "$draft" == "false" ) ]]; then
+            finish "Version pull request #${number} is already ready and set to merge through the queue."
+          fi
+
+          summary "Version pull request #${number} at ${head} releases: $(tr '\n' ' ' <<< "$packages")"
+          {
+            echo "pending=true"
+            echo "number=${number}"
+            echo "head=${head}"
+            echo "draft=${draft}"
+            echo "armed=${armed}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Mark it ready and arm auto-merge through the merge queue
+        if: ${{ steps.find.outputs.pending == 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.INSTAFY_BOT_TOKEN }}
+          PULL_REQUEST: ${{ steps.find.outputs.number }}
+          HEAD_SHA: ${{ steps.find.outputs.head }}
+          DRAFT: ${{ steps.find.outputs.draft }}
+          ARMED: ${{ steps.find.outputs.armed }}
+        run: |
+          set -euo pipefail
+          summary() { printf '%s\n' "$1" | tee -a "$GITHUB_STEP_SUMMARY"; }
+          test -n "$GH_TOKEN"
+          [[ "$PULL_REQUEST" =~ ^[1-9][0-9]*$ && "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$DRAFT" == "true" ]]; then
+            gh pr ready "$PULL_REQUEST" --repo "$GITHUB_REPOSITORY"
+            summary "Marked version pull request #${PULL_REQUEST} ready for review."
+          fi
+          if [[ "$ARMED" != "true" ]]; then
+            # Pinned to the inspected head: a newer Version refresh is armed by
+            # the next run instead. The queue still runs every required check.
+            gh pr merge "$PULL_REQUEST" --repo "$GITHUB_REPOSITORY" --auto --squash \
+              --match-head-commit "$HEAD_SHA"
+            summary "Armed auto-merge for version pull request #${PULL_REQUEST} at ${HEAD_SHA} through the merge queue."
+          fi
