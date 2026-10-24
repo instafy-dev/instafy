@@ -580,6 +580,19 @@ impl TunnelBroker for PreviewStubBroker {
     }
 }
 
+impl PreviewStubBroker {
+    /// Give `key` a new tunnel id, as the real broker does when it retires the
+    /// key's tunnel (its hostname is under a domain it no longer serves).
+    fn remint(&self, key: &str) -> Uuid {
+        let tunnel_id = Uuid::new_v4();
+        self.tunnels
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), tunnel_id);
+        tunnel_id
+    }
+}
+
 pub(super) struct Job {
     pub(super) token: String,
     pub(super) job_id: Uuid,
@@ -2624,6 +2637,361 @@ async fn the_retention_prune_deletes_sessions_nobody_can_use() -> anyhow::Result
             let mut kept = vec![hashes[2].clone(), hashes[3].clone()];
             kept.sort();
             assert_eq!(left, kept);
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// A grant row as the supersede and broker-revocation tests read it.
+struct GrantRow {
+    status: String,
+    expires_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    metadata: Value,
+}
+
+impl Fixture {
+    async fn grant_row(&self, tunnel_id: &str) -> anyhow::Result<GrantRow> {
+        let row = self
+            .state
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select status, expires_at, updated_at, metadata
+                 from runtime_tunnel_grants where tunnel_id = $1",
+                &[&tunnel_id],
+            )
+            .await?;
+        Ok(GrantRow {
+            status: row.get("status"),
+            expires_at: row.get("expires_at"),
+            updated_at: row.get("updated_at"),
+            metadata: row.get("metadata"),
+        })
+    }
+
+    /// `POST /tunnel-broker/hooks/events` as the broker sends it.
+    async fn broker_event(&self, payload: Value) -> anyhow::Result<StatusCode> {
+        let response = self
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/tunnel-broker/hooks/events")
+                    .header("authorization", format!("Bearer {HOOK_SECRET}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))?,
+            )
+            .await?;
+        Ok(response.status())
+    }
+
+    /// The broker's `tunnel.revoked` event for `tunnel_id` with the expiry the
+    /// broker row had when it was revoked.
+    fn revoked_event(&self, project: Uuid, tunnel_id: &str, expires_at: DateTime<Utc>) -> Value {
+        json!({
+            "kind": "tunnel.revoked",
+            "project_id": project,
+            "data": {
+                "tunnel_id": tunnel_id,
+                "hostname": format!("{tunnel_id}.rt.localhost"),
+                "status": "revoked",
+                "token": "",
+                "expires_at": expires_at.to_rfc3339(),
+                "metadata": { "labels": { "kind": "preview", "visibility": "private" } },
+            },
+        })
+    }
+}
+
+/// The grant revocations published since `events` subscribed, by tunnel id.
+fn drain_grant_revocations(
+    events: &mut tokio::sync::broadcast::Receiver<crate::state::ControllerEvent>,
+) -> Vec<String> {
+    let mut revoked = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if event.kind == "tunnel.grant_revoked" {
+            revoked.push(
+                event.data["tunnelId"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+            );
+        }
+    }
+    revoked
+}
+
+#[test]
+fn a_broker_revocation_is_read_only_with_its_tunnel_and_expiry() {
+    let tunnel_id = Uuid::new_v4();
+    let expires_at = "2026-10-24T20:00:00.123456Z";
+    let read = crate::tunnels::BrokerRevokedTunnel::from_event_data(&json!({
+        "tunnel_id": tunnel_id.simple().to_string(),
+        "expires_at": expires_at,
+    }))
+    .expect("read");
+    assert_eq!(read.tunnel_id, tunnel_id.hyphenated().to_string());
+    assert_eq!(
+        read.expires_at.to_rfc3339(),
+        "2026-10-24T20:00:00.123456+00:00"
+    );
+    for data in [
+        json!({ "tunnel_id": tunnel_id }),
+        json!({ "expires_at": expires_at }),
+        json!({ "tunnel_id": "not-a-tunnel", "expires_at": expires_at }),
+        json!({ "tunnel_id": tunnel_id, "expires_at": "tomorrow" }),
+        json!(null),
+    ] {
+        assert!(
+            crate::tunnels::BrokerRevokedTunnel::from_event_data(&data).is_none(),
+            "{data}"
+        );
+    }
+}
+
+#[test]
+fn a_successor_forgets_only_the_cards_of_the_grant_it_replaced() {
+    let mut metadata = json!({
+        (PREVIEW_TUNNEL_METADATA_KEY): {
+            "messageIds": { "run-a": "card-a", "run-b": "card-b" },
+            "messageId": "card-a",
+            "title": "Site preview",
+        },
+    });
+    assert!(!forget_preview_cards(
+        Some(&mut metadata),
+        &["card-z".to_string()]
+    ));
+    assert!(forget_preview_cards(
+        Some(&mut metadata),
+        &["card-a".to_string()]
+    ));
+    assert_eq!(
+        metadata[PREVIEW_TUNNEL_METADATA_KEY],
+        json!({ "messageIds": { "run-b": "card-b" }, "title": "Site preview" })
+    );
+    assert_eq!(
+        preview_card_ids(Some(&metadata)),
+        vec!["card-b".to_string()]
+    );
+    assert!(!forget_preview_cards(None, &["card-b".to_string()]));
+    assert!(!forget_preview_cards(
+        Some(&mut json!({})),
+        &["card-b".to_string()]
+    ));
+}
+
+#[tokio::test]
+async fn a_reopen_that_gets_another_tunnel_closes_the_grant_it_replaced() -> anyhow::Result<()> {
+    run(|f| {
+        Box::pin(async move {
+            let job = f.job(None).await?;
+            let old_id = f.open(&job).await?;
+            let old_card = f.ready(&job.token, &old_id).await?["messageId"].clone();
+            let (_, label) = f.view(0, &old_id).await?;
+            assert!(f.allowed(&old_id, &label).await?);
+            // Another port of the same runtime and a preview on another
+            // runtime: neither is replaced.
+            let (status, other_port) = f
+                .request(&job.token, "POST", &f.path(""), f.open_body(&job, 4174))
+                .await?;
+            assert_eq!(status, StatusCode::CREATED, "{other_port}");
+            let other_port = other_port["previewId"]
+                .as_str()
+                .context("previewId")?
+                .to_string();
+            let elsewhere_job = f.job(None).await?;
+            let elsewhere = f.open(&elsewhere_job).await?;
+
+            // The broker retires the key's tunnel and mints another one.
+            let key = preview_tunnel_key(&job.runtime_id, 4173);
+            let minted = f.broker.remint(&key);
+            let mut events = f.state.events.subscribe();
+            let next = f.job(Some(&job)).await?;
+            let new_id = f.open(&next).await?;
+            assert_eq!(new_id, minted.to_string());
+            assert_ne!(new_id, old_id);
+
+            let old = f.grant_row(&old_id).await?;
+            assert_eq!(old.status, "revoked");
+            let preview = &old.metadata[PREVIEW_TUNNEL_METADATA_KEY];
+            assert!(preview["closedAt"].is_string(), "{preview}");
+            assert_eq!(preview["supersededBy"], json!(new_id));
+            assert_eq!(f.open_sessions(&old_id).await?, 0);
+            assert!(!f.allowed(&old_id, &label).await?);
+            assert_eq!(drain_grant_revocations(&mut events), vec![old_id.clone()]);
+            let (status, body) = f
+                .request(
+                    &f.tokens[0],
+                    "GET",
+                    &f.path(&format!("/{old_id}")),
+                    Value::Null,
+                )
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["status"], "revoked");
+            assert_eq!(body["restartable"], json!(false));
+
+            // The new grant is the preview now, with a card of its own.
+            let new = f.grant_row(&new_id).await?;
+            assert_eq!(new.status, "active");
+            assert_eq!(
+                new.metadata[PREVIEW_TUNNEL_METADATA_KEY]["messageIds"],
+                json!({})
+            );
+            let new_card = f.ready(&next.token, &new_id).await?["messageId"].clone();
+            assert_ne!(new_card, old_card);
+
+            // Opening again changes nothing more.
+            let closed_at = preview["closedAt"].clone();
+            let again = f.job(Some(&job)).await?;
+            assert_eq!(f.open(&again).await?, new_id);
+            let old_again = f.grant_row(&old_id).await?;
+            assert_eq!(old_again.updated_at, old.updated_at);
+            assert_eq!(
+                old_again.metadata[PREVIEW_TUNNEL_METADATA_KEY]["closedAt"],
+                closed_at
+            );
+            assert!(drain_grant_revocations(&mut events).is_empty());
+
+            for untouched in [&other_port, &elsewhere] {
+                let grant = f.grant_row(untouched).await?;
+                assert_eq!(grant.status, "active", "{untouched}");
+                assert!(grant.metadata[PREVIEW_TUNNEL_METADATA_KEY]
+                    .get("closedAt")
+                    .is_none());
+            }
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_wake_that_gets_another_tunnel_leaves_the_old_cards_behind() -> anyhow::Result<()> {
+    run(|f| {
+        Box::pin(async move {
+            let job = f.job(None).await?;
+            let old_id = f.open(&job).await?;
+            let old_card = f.ready(&job.token, &old_id).await?["messageId"].clone();
+            let key = preview_tunnel_key(&job.runtime_id, 4173);
+            let minted = f.broker.remint(&key);
+
+            // A wake reconnects with the preview's stored metadata, cards and all.
+            let stored = f.grant_metadata(&old_id).await?;
+            let reopened = request_runtime_tunnel_with_overrides(
+                &f.state,
+                &f.project,
+                Some(&job.runtime_id),
+                Some(&job.lease_id),
+                Some(stored),
+                preview_tunnel_overrides(key.clone()),
+            )
+            .await
+            .map_err(|(status, error)| anyhow::anyhow!("{status}: {}", error.0.message))?;
+            assert_eq!(reopened.tunnel_id, minted.to_string());
+            let copied = f.grant_metadata(&reopened.tunnel_id).await?;
+            assert_eq!(
+                copied[PREVIEW_TUNNEL_METADATA_KEY]["messageId"], old_card,
+                "the wake copied the old card"
+            );
+
+            retire_previews_superseded_by(&f.state, &f.project, &key, &reopened.tunnel_id).await;
+            let old = f.grant_row(&old_id).await?;
+            assert_eq!(old.status, "revoked");
+            assert!(old.metadata[PREVIEW_TUNNEL_METADATA_KEY]["closedAt"].is_string());
+            let new = f.grant_metadata(&reopened.tunnel_id).await?;
+            assert_eq!(new[PREVIEW_TUNNEL_METADATA_KEY]["messageIds"], json!({}));
+            assert!(new[PREVIEW_TUNNEL_METADATA_KEY].get("messageId").is_none());
+            // So the new preview's first ready writes its own card.
+            let next = f.job(Some(&job)).await?;
+            assert_eq!(f.open(&next).await?, reopened.tunnel_id);
+            let card = f.ready(&next.token, &reopened.tunnel_id).await?["messageId"].clone();
+            assert_ne!(card, old_card);
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_broker_revocation_event_stops_only_the_issue_of_the_grant_it_names() -> anyhow::Result<()>
+{
+    run(|f| {
+        Box::pin(async move {
+            let job = f.job(None).await?;
+            let preview_id = f.open(&job).await?;
+            let (_, label) = f.view(0, &preview_id).await?;
+            let (status, other) = f
+                .request(&job.token, "POST", &f.path(""), f.open_body(&job, 4174))
+                .await?;
+            assert_eq!(status, StatusCode::CREATED, "{other}");
+            let other = other["previewId"].as_str().context("previewId")?.to_string();
+            let issued = f.grant_row(&preview_id).await?;
+            let other_before = f.grant_row(&other).await?;
+
+            // Unknown tunnels, other projects and events that cannot name
+            // the issue they are about change nothing.
+            let mut events = f.state.events.subscribe();
+            for event in [
+                f.revoked_event(f.project, &Uuid::new_v4().to_string(), issued.expires_at),
+                f.revoked_event(Uuid::new_v4(), &preview_id, issued.expires_at),
+                json!({
+                    "kind": "tunnel.revoked",
+                    "project_id": f.project,
+                    "data": { "tunnel_id": preview_id },
+                }),
+                json!({
+                    "kind": "tunnel.expired",
+                    "project_id": f.project,
+                    "data": { "tunnel_id": preview_id, "expires_at": issued.expires_at.to_rfc3339() },
+                }),
+            ] {
+                assert_eq!(f.broker_event(event).await?, StatusCode::OK);
+            }
+            assert_eq!(f.grant_row(&preview_id).await?.status, "active");
+            assert!(f.allowed(&preview_id, &label).await?);
+            assert!(drain_grant_revocations(&mut events).is_empty());
+
+            // The revocation of this issue stops the grant, as a runtime stop does.
+            let revoked = f.revoked_event(f.project, &preview_id, issued.expires_at);
+            assert_eq!(f.broker_event(revoked.clone()).await?, StatusCode::OK);
+            let stopped = f.grant_row(&preview_id).await?;
+            assert_eq!(stopped.status, "revoked");
+            assert_eq!(f.open_sessions(&preview_id).await?, 0);
+            assert!(!f.allowed(&preview_id, &label).await?);
+            assert!(
+                stopped.metadata[PREVIEW_TUNNEL_METADATA_KEY]
+                    .get("closedAt")
+                    .is_none(),
+                "stopped, not closed: it may be opened again"
+            );
+            assert_eq!(drain_grant_revocations(&mut events), vec![preview_id.clone()]);
+
+            // A duplicate is a no-op.
+            assert_eq!(f.broker_event(revoked.clone()).await?, StatusCode::OK);
+            assert_eq!(f.grant_row(&preview_id).await?.updated_at, stopped.updated_at);
+            assert!(drain_grant_revocations(&mut events).is_empty());
+
+            // Re-opened, the broker refreshes the same tunnel with a later
+            // expiry. The old revocation arriving late leaves it serving.
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            let next = f.job(Some(&job)).await?;
+            assert_eq!(f.open(&next).await?, preview_id);
+            let reopened = f.grant_row(&preview_id).await?;
+            assert_eq!(reopened.status, "active");
+            assert!(reopened.expires_at > issued.expires_at);
+            assert_eq!(f.broker_event(revoked).await?, StatusCode::OK);
+            assert_eq!(f.grant_row(&preview_id).await?.status, "active");
+            assert!(drain_grant_revocations(&mut events).is_empty());
+
+            let other_after = f.grant_row(&other).await?;
+            assert_eq!(other_after.status, "active");
+            assert_eq!(other_after.updated_at, other_before.updated_at);
             Ok(())
         })
     })

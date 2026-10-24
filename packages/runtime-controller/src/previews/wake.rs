@@ -738,6 +738,10 @@ async fn prepare_restart(
         preview_tunnel_overrides(tunnel_key.to_string()),
     )
     .await?;
+    // A broker that replaced this preview's tunnel answers with another one:
+    // this grant then closes (its card shows it ended) and the new one is the
+    // preview from now on.
+    super::retire_previews_superseded_by(state, project_id, tunnel_key, &reopened.tunnel_id).await;
     if reopened.tunnel_id != grant.record.tunnel_id {
         return Err(internal_error(
             "the tunnel broker handed back another tunnel for this preview",
