@@ -71,11 +71,17 @@ import {
 } from "./browserSessionRuntimeEnsure";
 import {
   liveSharedBrowserHostCandidate,
-  SHARED_BROWSER_HOST_COPY,
   shouldStartSpaceMachineForBrowser,
   startSpaceMachineForBrowser,
   waitForSharedBrowserHostReady,
 } from "./sharedBrowserHostAttach";
+import {
+  hostedBrowserViewState,
+  type HostedBrowserErrorKind,
+  type HostedBrowserFailure,
+  type HostedBrowserViewKind,
+  type HostedBrowserViewState,
+} from "./hostedBrowserViewState";
 import {
   SharedBrowserChrome,
   type SharedBrowserChromeProps,
@@ -175,8 +181,12 @@ const FATAL_VIEWER_ERROR_WINDOW_MS = 60_000;
  * viewer this participant may use; then it says so and offers Retry.
  */
 export const SHARED_BROWSER_VIEWER_WAIT_TIMEOUT_MS = 20_000;
-export const SHARED_BROWSER_VIEWER_WAIT_COPY = "The browser did not finish connecting. Try again.";
-export const SHARED_BROWSER_LOST_CONNECTION_COPY = "Browser session disconnected. Click Retry to reconnect.";
+/**
+ * Reasons the view keeps for runtime debug (`data-debug-reason`); the screen
+ * says "Instafy's browser did not open. Try again." for both.
+ */
+export const SHARED_BROWSER_VIEWER_WAIT_REASON = "viewer roster did not arrive in time";
+export const SHARED_BROWSER_LOST_CONNECTION_REASON = "connection lost and its reconnects were used";
 /**
  * How long a browser that had connected may show "Reconnecting…" by itself
  * before it says it lost the connection and offers Retry.
@@ -204,7 +214,12 @@ type BrowserOriginConnection = {
   expiresAtMs: number | null;
 };
 
-const BROWSER_ORIGIN_TOKEN_REFRESH_RETRY_MS = 5_000;
+/**
+ * A grant refresh that failed for a reason other than its origin going away
+ * is asked again after 5 s, then 10, 20, 40 and at most 60 s apart.
+ */
+export const BROWSER_ORIGIN_TOKEN_REFRESH_RETRY_MS = 5_000;
+export const BROWSER_ORIGIN_TOKEN_REFRESH_MAX_RETRY_MS = 60_000;
 /** A re-attach keeps a connection whose grant has at least this long left. */
 const SHARED_BROWSER_CONNECTION_REUSE_MIN_REMAINING_MS = 30_000;
 
@@ -321,25 +336,21 @@ function applyBrowserViewportMode(
 
 function BrowserSessionStatusPill({
   status,
+  view,
   compact = false,
 }: {
   status: BrowserSessionStatus;
+  view: HostedBrowserViewState;
   compact?: boolean;
 }) {
   if (status === "selecting") {
     return <span className={`inline-flex h-7 shrink-0 items-center rounded-full border border-slate-300/80 bg-slate-100/80 text-xxs font-medium text-slate-600 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-300 ${compact ? "px-1.5" : "px-2"}`}
       data-testid="browser-session-status" role="status" aria-live="polite">Choose session</span>;
   }
+  // A neutral label; the card says why in its one sentence.
   const state: BrowserChromeState =
-    status === "connected" ? "ready" : status === "error" ? "unavailable" : "starting";
-  const detail =
-    status === "connected"
-      ? "Shared Browser is connected and ready."
-      : status === "error"
-        ? "Shared Browser is unavailable."
-        : status === "connecting"
-          ? "Connecting to Shared Browser…"
-          : "Preparing Shared Browser…";
+    view.kind === "live" ? "ready" : view.kind === "opening" ? "starting" : "off";
+  const detail = view.kind === "live" ? "Instafy's browser is open." : view.sentence;
   return (
     <BrowserStatusPill
       compact={compact}
@@ -407,7 +418,9 @@ export function BrowserSessionModal({
   hideCollapsedConnectedCard = false,
   expandRequestToken = 0,
   attachRequestToken = 0,
+  autoAttachToken = 0,
   onConnectionErrorChange = null,
+  onViewStateChange = null,
   fillContainer = false,
   toolbarLeading,
   transportActive = true,
@@ -457,8 +470,16 @@ export function BrowserSessionModal({
    * why when it cannot.
    */
   attachRequestToken?: number;
-  /** The error this browser shows, or null; null again once it closes. */
+  /**
+   * Bumped by Studio itself while this browser is off or did not open: an
+   * agent or another viewer started Instafy's browser, or Studio opens it for
+   * a card. It attaches again without a press and never starts the machine.
+   */
+  autoAttachToken?: number;
+  /** The sentence this browser shows when it is not live, or null; null again once it closes. */
   onConnectionErrorChange?: ((error: string | null) => void) | null;
+  /** What this browser shows (off, opening, live, failed, blocked); null once it closes. */
+  onViewStateChange?: ((state: HostedBrowserViewKind | null) => void) | null;
   fillContainer?: boolean;
   toolbarLeading?: ReactNode;
   transportActive?: boolean;
@@ -581,6 +602,16 @@ export function BrowserSessionModal({
       : collaboration.client.state
         ? "none"
         : null;
+  // Who controls the browser as this render sees it, for the debug log of a
+  // new viewer target (a viewer that rebuilds as control changes hands).
+  const controlDebugRef = useRef<Record<string, unknown>>({});
+  controlDebugRef.current = {
+    humanInputEnabled,
+    collaborationSelfOwnsControl: collaborationSelfOwnsControl(collaboration.client),
+    collaborationConnectionStatus: collaboration.client.connectionStatus,
+    controlOwnerKind: controlOwner.kind,
+    serverAgentOwner: serverAgentOwner?.displayName ?? null,
+  };
   const requestedRfbRenderScaleRef = useRef<1 | 2>(
     selectBrowserRfbRenderScale({
       devicePixelRatio: typeof window === "undefined" ? 1 : window.devicePixelRatio,
@@ -611,7 +642,10 @@ export function BrowserSessionModal({
   // Reconnects fatal viewer errors asked for lately (see FATAL_VIEWER_ERROR_WINDOW_MS).
   const fatalViewerErrorsRef = useRef<{ count: number; lastAtMs: number }>({ count: 0, lastAtMs: 0 });
   const [status, setStatus] = useState<BrowserSessionStatus>("idle");
-  const [error, setError] = useState<string | null>(null);
+  // The error on screen and why it happened (see hostedBrowserViewState);
+  // `error` is its raw reason.
+  const [failure, setFailure] = useState<HostedBrowserFailure | null>(null);
+  const error = failure?.reason ?? null;
   const [runtimeLimitDetails, setRuntimeLimitDetails] =
     useState<HostedRuntimeLimitErrorDetails | null>(null);
   const [wsUrl, setWsUrl] = useState<string | null>(null);
@@ -629,11 +663,16 @@ export function BrowserSessionModal({
   const conversationRuntimeIdRef = useRef(conversationRuntimeId);
   const attachOnlyRef = useRef(attachOnly);
   const openedByPersonRef = useRef(openedByPerson);
-  // Set by the person's own actions inside this open (Retry, Clear data):
-  // they may start the space's machine even when the open itself was
-  // automatic (`attachOnly`) or restored. Cleared when the browser closes or
-  // its scope changes.
-  const personRetryRef = useRef(false);
+  // Every connection attempt has its own number (`connectAttempt`). The
+  // attempt the person's own action asked for (Retry, Try again, Clear data, a
+  // press on a card) may start the space's machine even when the open itself
+  // was automatic (`attachOnly`) or restored; that press counts for its own
+  // attempt only, never for a later automatic reconnect. An attempt Studio
+  // asked for by itself (`autoAttachToken`) never starts the machine. Both are
+  // forgotten when the browser closes or its scope changes.
+  const connectAttemptCounterRef = useRef(0);
+  const pressedAttemptRef = useRef<number | null>(null);
+  const studioAttemptRef = useRef<number | null>(null);
   ensureSpaceMachineRef.current = ensureSpaceMachine;
   conversationRuntimeIdRef.current = conversationRuntimeId;
   attachOnlyRef.current = attachOnly;
@@ -645,6 +684,45 @@ export function BrowserSessionModal({
   const [viewerOverride, setViewerOverride] =
     useState<SupportedSharedBrowserViewerKind | null>(null);
   const [connectAttempt, setConnectAttempt] = useState(0);
+  const startAttempt = useCallback((by: "press" | "studio" | null = null) => {
+    connectAttemptCounterRef.current += 1;
+    const attempt = connectAttemptCounterRef.current;
+    if (by === "press") pressedAttemptRef.current = attempt;
+    if (by === "studio") studioAttemptRef.current = attempt;
+    setConnectAttempt(attempt);
+  }, []);
+  // Forgets the connection this view had, and with it everything that used
+  // it: the picture and input sockets, the collaboration socket, the approval
+  // poll and the grant refresh. Every exit that ends in an error, a restart or
+  // a deadline goes through it, so nothing keeps calling an origin the
+  // runtime no longer has.
+  const dropConnection = useCallback(() => {
+    browserOriginConnectionRef.current = null;
+    setBrowserOriginConnection(null);
+    setWsUrl(null);
+    setBrowserInputWsUrl(null);
+    setCollaborationWsUrl(null);
+    setCollaborationConnectionKey(null);
+    setWebRtcConnection(null);
+    webRtcConnectionRef.current = null;
+    webRtcProjectIdRef.current = null;
+  }, []);
+  // Ends the attempt with an error: a reconnect on its way and the attempt
+  // itself stop (a late answer does not bring the wait back), and the
+  // connection is dropped.
+  const fail = useCallback((kind: HostedBrowserErrorKind, reason: string) => {
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    browserConnectionGenerationRef.current += 1;
+    connectAttemptAbortRef.current?.abort();
+    connectAttemptAbortRef.current = null;
+    dropConnection();
+    setStatus("error");
+    setFailure({ kind, reason });
+    runtimeDebugLog("browser-session:failed", { kind, reason });
+  }, [dropConnection]);
   const [hasConnectedOnce, setHasConnectedOnce] = useState(false);
   const [frozenFrameUrl, setFrozenFrameUrl] = useState<string | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
@@ -700,7 +778,8 @@ export function BrowserSessionModal({
     setSessionChooserOpen(false);
     setHostAttach(null);
     pinnedSessionRef.current = null;
-    personRetryRef.current = false;
+    pressedAttemptRef.current = null;
+    studioAttemptRef.current = null;
     connectedHostRef.current = null;
   }, [selectionScope]);
   const chosenRuntimeId = runtimeChoice?.scope === selectionScope ? runtimeChoice.runtimeId : null;
@@ -765,15 +844,15 @@ export function BrowserSessionModal({
     setSessionIdentity({ scope: selectionScope, runtimeId });
     setForcedRuntimeId(null);
     setSessionChooserOpen(false);
-    setConnectAttempt((value) => value + 1);
-  }, [selectionScope, sessionChoices]);
+    startAttempt();
+  }, [selectionScope, sessionChoices, startAttempt]);
   const startNewSession = useCallback(() => {
     if (attachMode || !canControlBrowser || !projectId || !window.confirm("Start a separate Shared Browser session? This does not close another running session. Saved logins are restored only when this space has persistence enabled.")) return;
     setSessionChooserOpen(false);
     setSessionChoices({ scope: selectionScope, candidates: [], loading: false, error: null });
     setForcedRuntimeId(generateUUID());
-    setConnectAttempt((value) => value + 1);
-  }, [attachMode, canControlBrowser, projectId, selectionScope]);
+    startAttempt();
+  }, [attachMode, canControlBrowser, projectId, selectionScope, startAttempt]);
   const permittedSharedBrowserViewerKinds = useMemo(
     () =>
       humanInputEnabled
@@ -884,6 +963,15 @@ export function BrowserSessionModal({
     hasConnectedOnce ||
     (connectedScopeKey ? connectedBrowserSessionScopes.has(connectedScopeKey) : false);
   const displayStatus = !error && status === "connecting" && hasConnectedHint ? "connected" : status;
+  // The one state on screen: one sentence, one button, one pill.
+  const viewState = hostedBrowserViewState({
+    status: displayStatus,
+    failure,
+    hasConnection: browserOriginConnection !== null,
+  });
+  const viewLive = viewState.kind === "live";
+  const viewKindRef = useRef(viewState.kind);
+  viewKindRef.current = viewState.kind;
   const shouldCollapseDocked =
     displayStatus !== "selecting" &&
     (shouldUseDesktopDockedCard || (shouldViewportCollapseDocked && displayStatus !== "connected"));
@@ -922,7 +1010,7 @@ export function BrowserSessionModal({
       ? limitReached
         ? "limit"
         : "error"
-      : displayStatus === "connected"
+      : viewLive
         ? "connected"
       : "connecting"
     : null;
@@ -1015,9 +1103,8 @@ export function BrowserSessionModal({
   }, []);
 
   const retryConnection = useCallback(() => {
-    // Only the person's own actions call this (Retry, Try again, Clear data);
-    // automatic reconnects schedule their own attempt.
-    personRetryRef.current = true;
+    // Only the person's own actions call this (Open browser, Try again, Clear
+    // data); automatic reconnects schedule their own attempt.
     if (reconnectTimerRef.current !== null) {
       window.clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
@@ -1028,7 +1115,7 @@ export function BrowserSessionModal({
     fatalViewerErrorsRef.current = { count: 0, lastAtMs: 0 };
     setRuntimeLimitActionBusy(false);
     setStatus("connecting");
-    setError(null);
+    setFailure(null);
     setRuntimeLimitDetails(null);
     setHasConnectedOnce(false);
     if (connectedScopeKey) {
@@ -1038,13 +1125,13 @@ export function BrowserSessionModal({
     setBrowserInputWsUrl(null);
     setWebRtcConnection(null);
     setViewerOverride(null);
-    setConnectAttempt((value) => value + 1);
+    startAttempt("press");
     runtimeDebugLog("browser-session:retry", {
       projectId,
       preferRuntimeId,
       forcedRuntimeId,
     });
-  }, [connectedScopeKey, forcedRuntimeId, preferRuntimeId, projectId]);
+  }, [connectedScopeKey, forcedRuntimeId, preferRuntimeId, projectId, startAttempt]);
   const scheduleReconnectAttempt = useCallback(
     (reason: "disconnect" | "connect_failure", debugWsUrl: string): boolean => {
       if (browserDataClearInFlightRef.current) {
@@ -1074,13 +1161,13 @@ export function BrowserSessionModal({
         const retryCount = autoRetryCountRef.current;
         const delayMs = Math.min(AUTO_CONNECT_RETRY_BASE_DELAY_MS * retryCount, 5000);
         setStatus("connecting");
-        setError(null);
+        setFailure(null);
         if (reconnectTimerRef.current !== null) {
           window.clearTimeout(reconnectTimerRef.current);
         }
         reconnectTimerRef.current = window.setTimeout(() => {
           reconnectTimerRef.current = null;
-          setConnectAttempt((value) => value + 1);
+          startAttempt();
         }, delayMs);
         runtimeDebugLog("browser-session:retry-scheduled", {
           ...browserSessionWsDebugFields(debugWsUrl),
@@ -1101,6 +1188,7 @@ export function BrowserSessionModal({
       forcedRuntimeId,
       freezeCurrentBrowserFrame,
       projectId,
+      startAttempt,
     ],
   );
   const fallBackFromViewer = useCallback(
@@ -1129,7 +1217,7 @@ export function BrowserSessionModal({
       }
       autoRetryCountRef.current = 0;
       setStatus("connecting");
-      setError(null);
+      setFailure(null);
       setWsUrl(null);
       setBrowserInputWsUrl(null);
       setWebRtcConnection(null);
@@ -1194,19 +1282,11 @@ export function BrowserSessionModal({
       connectedBrowserSessionScopes.delete(connectedScopeKey);
     }
     setStatus("connecting");
-    setError(null);
+    setFailure(null);
     setRuntimeLimitDetails(null);
-    setWsUrl(null);
-    setBrowserInputWsUrl(null);
-    setCollaborationWsUrl(null);
-    setCollaborationConnectionKey(null);
-    setBrowserOriginConnection(null);
-    browserOriginConnectionRef.current = null;
-    setWebRtcConnection(null);
-    webRtcConnectionRef.current = null;
-    webRtcProjectIdRef.current = null;
+    dropConnection();
     runtimeDebugLog("browser-session:reset-start", { projectId });
-  }, [connectedScopeKey, holdBrowserRuntimeClaim, projectId]);
+  }, [connectedScopeKey, dropConnection, holdBrowserRuntimeClaim, projectId]);
   const handleBrowserDataClearSettled = useCallback(
     (succeeded: boolean) => {
       browserDataClearInFlightRef.current = false;
@@ -1263,8 +1343,8 @@ export function BrowserSessionModal({
       retryConnection();
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
-      setStatus("error");
-      setError(
+      fail(
+        "notice",
         message
           ? `Unable to stop the blocking runtime. ${message}`
           : "Unable to stop the blocking runtime.",
@@ -1273,7 +1353,7 @@ export function BrowserSessionModal({
     } finally {
       setRuntimeLimitActionBusy(false);
     }
-  }, [limitDetails.blockerRuntimeId, retryConnection]);
+  }, [fail, limitDetails.blockerRuntimeId, retryConnection]);
 
   useEffect(() => {
     if (!transportActive && fullscreen) {
@@ -1307,21 +1387,17 @@ export function BrowserSessionModal({
       automaticReconnectRef.current = false;
       connectedHostRef.current = null;
       setStatus("idle");
-      setError(null);
+      setFailure(null);
       setRuntimeLimitDetails(null);
       setHasConnectedOnce(false);
       setFrozenFrameUrl(null);
-      setWsUrl(null);
-      setBrowserInputWsUrl(null);
-      setCollaborationWsUrl(null);
-      setCollaborationConnectionKey(null);
-      setBrowserOriginConnection(null);
-      setWebRtcConnection(null);
+      dropConnection();
       setViewerOverride(null);
       setRuntimeLimitActionBusy(false);
       setForcedRuntimeId(null);
       setHostAttach(null);
-      personRetryRef.current = false;
+      pressedAttemptRef.current = null;
+      studioAttemptRef.current = null;
       setDesktopDockedCard(false);
       setFullscreen(false);
       return;
@@ -1332,10 +1408,15 @@ export function BrowserSessionModal({
     }
 
     if (!projectId) {
-      setStatus("error");
-      setError("Space is missing.");
+      fail("failed", "Space is missing.");
       return;
     }
+    // What started this attempt: an automatic reconnect never starts the
+    // machine or its browser; an attempt Studio asked for by itself never
+    // starts the machine; the person's press counts for its own attempt only.
+    const automaticAttempt = automaticReconnectRef.current;
+    const pressed = !automaticAttempt && pressedAttemptRef.current === connectAttempt;
+    const startedByStudio = studioAttemptRef.current === connectAttempt;
     let cancelled = false;
     const connectionGeneration = browserConnectionGenerationRef.current;
     const connectionCancelled = () =>
@@ -1353,16 +1434,9 @@ export function BrowserSessionModal({
       (!forcedRuntimeId || existingConnection.runtimeId === forcedRuntimeId);
     if (!preservingConnection) {
       setStatus("connecting");
-      setError(null);
+      setFailure(null);
       setRuntimeLimitDetails(null);
-      setWsUrl(null);
-      setBrowserInputWsUrl(null);
-      setCollaborationWsUrl(null);
-      setCollaborationConnectionKey(null);
-      setBrowserOriginConnection(null);
-      setWebRtcConnection(null);
-      webRtcConnectionRef.current = null;
-      webRtcProjectIdRef.current = null;
+      dropConnection();
     }
 
     void (async () => {
@@ -1382,8 +1456,7 @@ export function BrowserSessionModal({
       }
       const statusEntries = Array.isArray(statusSnapshot?.runtimes) ? statusSnapshot.runtimes : [];
       if (!statusSnapshot) {
-        setStatus("error");
-        setError("Could not discover Shared sessions. Refresh sessions to retry.");
+        fail("failed", "Could not discover Shared sessions. Refresh sessions to retry.");
         setSessionChooserOpen(sessionControlsVisibleRef.current);
         setSessionChoices({ scope: selectionScope, candidates: [], loading: false, error: "Session discovery is unavailable; no new browser was started." });
         return;
@@ -1407,21 +1480,21 @@ export function BrowserSessionModal({
           entries: statusEntries,
         })) {
           const ensureSpaceMachineForPress = ensureSpaceMachineRef.current;
-          const personRetry = personRetryRef.current;
-          if (attachOnlyRef.current && !personRetry) {
-            // Studio opened this by itself: it never starts a machine.
+          if (automaticAttempt || startedByStudio || (attachOnlyRef.current && !pressed)) {
+            // An automatic reconnect, or Studio by itself: it never starts a
+            // machine. The browser is off until a press opens it.
             releaseBrowserRuntimeClaim();
-            setStatus("error");
-            setError(SHARED_BROWSER_HOST_COPY.machineStopped);
+            fail("off", automaticAttempt
+              ? "space machine not running; a reconnect does not start it"
+              : "space machine not running; Studio opened this by itself");
             return;
           }
           const canStartSpaceMachine = canControlBrowser && Boolean(ensureSpaceMachineForPress);
-          if (canStartSpaceMachine && !openedByPersonRef.current && !personRetry) {
+          if (canStartSpaceMachine && !openedByPersonRef.current && !pressed) {
             // A restored open (a reload or a return to the conversation)
             // never wakes a machine that stopped while nobody was here.
             releaseBrowserRuntimeClaim();
-            setStatus("error");
-            setError(SHARED_BROWSER_HOST_COPY.machineNotRunning);
+            fail("off", "space machine not running; a restored open does not start it");
             return;
           }
           if (canStartSpaceMachine && ensureSpaceMachineForPress) {
@@ -1445,8 +1518,7 @@ export function BrowserSessionModal({
               return;
             }
             if (coldStart.kind === "error") {
-              setStatus("error");
-              setError(coldStart.message);
+              fail(coldStart.errorKind, coldStart.reason);
               return;
             }
             if (coldStart.kind === "attach") {
@@ -1471,14 +1543,13 @@ export function BrowserSessionModal({
             : selection.kind === "new"
               ? "No Shared session is available. Ask a space builder to start one."
               : "Several Shared sessions are running. Choose the session to resume.";
-          setStatus(selection.kind === "choose" ? "selecting" : "error");
-          setError(selection.kind === "choose" ? null : message);
-          setBrowserOriginConnection(null);
-          setCollaborationWsUrl(null);
-          setCollaborationConnectionKey(null);
-          setWsUrl(null);
-          setBrowserInputWsUrl(null);
-          setWebRtcConnection(null);
+          if (selection.kind === "choose") {
+            dropConnection();
+            setStatus("selecting");
+            setFailure(null);
+          } else {
+            fail("notice", message);
+          }
           setSessionChoices({ scope: selectionScope, candidates, loading: false, error: message });
           setSessionChooserOpen(sessionControlsVisibleRef.current);
           return;
@@ -1506,11 +1577,14 @@ export function BrowserSessionModal({
         setHostAttach(null);
       }
 
-      if ((!runtimeId || !originId) && attachOnlyRef.current && !personRetryRef.current) {
-        // Studio opened this by itself: it never ensures a browser runtime.
+      if (
+        (!runtimeId || !originId) &&
+        ((attachOnlyRef.current && !pressed) || ((automaticAttempt || startedByStudio) && !forcedRuntimeId))
+      ) {
+        // Studio opened this by itself, or it reconnects by itself: it never
+        // ensures a browser runtime.
         releaseBrowserRuntimeClaim();
-        setStatus("error");
-        setError(SHARED_BROWSER_HOST_COPY.machineStopped);
+        fail("off", "no browser runtime is running; nothing starts one by itself");
         return;
       }
 
@@ -1686,16 +1760,14 @@ export function BrowserSessionModal({
             return;
           }
           const message = err instanceof Error ? err.message : String(err);
-          setStatus("error");
-          setError(message || "Unable to start a runtime for the browser session.");
+          fail("failed", message || "Unable to start a runtime for the browser session.");
           setRuntimeLimitDetails(hostedRuntimeLimitDetailsFromError(err));
           return;
         }
       }
 
       if (!runtimeId) {
-        setStatus("error");
-        setError("Browser session is unavailable (runtime id missing).");
+        fail("failed", "Browser session is unavailable (runtime id missing).");
         return;
       }
 
@@ -1719,9 +1791,17 @@ export function BrowserSessionModal({
         return;
       }
       if (!originId) {
-        setStatus("error");
-        setError("Browser session is unavailable (runtime origin not ready yet).");
+        fail("failed", "Browser session is unavailable (runtime origin not ready yet).");
         return;
+      }
+      // The machine started again under a new origin: the connection this
+      // view kept names an origin the runtime no longer has, so nothing (the
+      // grant refresh, the collaboration socket, the approval poll) may keep
+      // using it, whatever this attempt ends with.
+      const keptConnection = browserOriginConnectionRef.current;
+      if (keptConnection && keptConnection.runtimeId === runtimeId && keptConnection.originId !== originId) {
+        dropConnection();
+        runtimeDebugLog("browser-session:origin-replaced", { projectId, runtimeId });
       }
 
       onRuntimeIdResolved?.(runtimeId);
@@ -1737,6 +1817,8 @@ export function BrowserSessionModal({
           runtimeId,
           browserSessionId,
           canControl: canControlBrowser,
+          // An automatic reconnect never starts Instafy's browser.
+          mayStart: !automaticAttempt,
           client: controllerClient.browserSessions,
           signal: startupAbortController.signal,
         });
@@ -1749,8 +1831,7 @@ export function BrowserSessionModal({
           result: hostWait.kind,
         });
         if (hostWait.kind === "error") {
-          setStatus("error");
-          setError(hostWait.message);
+          fail(hostWait.errorKind, hostWait.reason);
           return;
         }
         const generation = hostWait.snapshot.generation;
@@ -1758,18 +1839,11 @@ export function BrowserSessionModal({
         const connectedGeneration = connectedHost?.runtimeId === runtimeId ? connectedHost.generation : null;
         if (connectedGeneration && generation && generation !== connectedGeneration && automaticReconnectRef.current) {
           // It started again while this view reconnected by itself: the
-          // pages it showed are gone, so it says so instead of a generic
-          // error, and stops reconnecting until the person asks again.
+          // pages it showed are gone, so the browser this view had is off,
+          // and it stops reconnecting until a press opens the new one.
           connectedHostRef.current = null;
-          if (reconnectTimerRef.current !== null) {
-            window.clearTimeout(reconnectTimerRef.current);
-            reconnectTimerRef.current = null;
-          }
           setFrozenFrameUrl(null);
-          setBrowserOriginConnection(null);
-          browserOriginConnectionRef.current = null;
-          setStatus("error");
-          setError(SHARED_BROWSER_HOST_COPY.restarted);
+          fail("off", "Instafy's browser started again on this space's machine");
           runtimeDebugLog("browser-session:host-restarted", { projectId, runtimeId });
           return;
         }
@@ -1821,14 +1895,12 @@ export function BrowserSessionModal({
         return;
       }
       if (!token) {
-        setStatus("error");
-        setError("Browser session is unavailable (origin token request failed).");
+        fail("failed", "Browser session is unavailable (origin token request failed).");
         return;
       }
       const endpoint = token.endpoint.trim() || originEndpoint;
       if (!endpoint) {
-        setStatus("error");
-        setError("Browser session is unavailable (origin endpoint missing).");
+        fail("failed", "Browser session is unavailable (origin endpoint missing).");
         return;
       }
       const connection: BrowserOriginConnection = {
@@ -1875,6 +1947,8 @@ export function BrowserSessionModal({
     sharedBrowserCapabilitiesResolved,
     holdBrowserRuntimeClaim,
     releaseBrowserRuntimeClaim,
+    dropConnection,
+    fail,
   ]);
 
   useEffect(() => {
@@ -1940,13 +2014,14 @@ export function BrowserSessionModal({
           return "invalid";
         }
       })(),
+      ...controlDebugRef.current,
     });
     // A viewer that keeps its URL does not connect again, so it would never
     // report again: only a new target is "connecting" (a reconnect attempt that
     // got the same cached grant leaves a connected viewer, or its error, alone).
     if (mountedViewerTargetRef.current !== `${activeSharedBrowserViewerKind}\n${url}`) {
       setStatus("connecting");
-      setError(null);
+      setFailure(null);
     }
     setWsUrl(url);
     setBrowserInputWsUrl(inputUrl);
@@ -1979,18 +2054,24 @@ export function BrowserSessionModal({
     sharedBrowserConnectionPageId,
   ]);
 
+  // The grant refresh does not run while the view shows an error (each
+  // error drops the connection anyway).
+  const grantRefreshPaused = status === "error";
+  const scheduleReconnectAttemptRef = useRef(scheduleReconnectAttempt);
+  scheduleReconnectAttemptRef.current = scheduleReconnectAttempt;
   useEffect(() => {
     const connection = browserOriginConnection;
-    if (!isOpen || browserDataClearInFlight || !connection?.expiresAtMs) {
+    if (!isOpen || browserDataClearInFlight || grantRefreshPaused || !connection?.expiresAtMs) {
       return;
     }
 
     let cancelled = false;
     let timerId: number | null = null;
+    let failures = 0;
     const connectionKey = `${connection.projectId}:${connection.runtimeId}:${connection.originId}`;
 
     const refreshToken = async () => {
-      const token = await controllerClient.workspace.origin.requestAccessToken({
+      const result = await controllerClient.workspace.origin.requestAccessTokenResult({
         projectId: connection.projectId,
         protocol: "http",
         scopes: canControlBrowser
@@ -2004,10 +2085,48 @@ export function BrowserSessionModal({
       if (cancelled) {
         return;
       }
-      if (!token) {
-        timerId = window.setTimeout(refreshToken, BROWSER_ORIGIN_TOKEN_REFRESH_RETRY_MS);
+      if (!result.ok) {
+        const grantStatus = result.error.status;
+        runtimeDebugLog("browser-session:grant-refresh-failed", {
+          projectId: connection.projectId,
+          runtimeId: connection.runtimeId,
+          originId: connection.originId,
+          status: grantStatus,
+          code: result.error.code ?? null,
+        });
+        if (grantStatus === 400) {
+          // The controller says this is not the runtime's online origin any
+          // more (its machine started again): stop using it and look the
+          // runtime's current origin up once. That reconnect is automatic, so
+          // it never starts the machine or its browser.
+          dropConnection();
+          if (!scheduleReconnectAttemptRef.current("connect_failure", "")) {
+            fail("failed", "origin grant refused (400); reconnects used");
+          }
+          return;
+        }
+        if (grantStatus === 404) {
+          // The origin is gone: stop, without looking it up again, so nothing
+          // starts the machine.
+          fail("off", "origin grant refused (404); the origin is gone");
+          return;
+        }
+        if (grantStatus === 401 || grantStatus === 403) {
+          fail("failed", `origin grant refused (${grantStatus})`);
+          return;
+        }
+        failures += 1;
+        timerId = window.setTimeout(
+          refreshToken,
+          Math.min(
+            BROWSER_ORIGIN_TOKEN_REFRESH_MAX_RETRY_MS,
+            BROWSER_ORIGIN_TOKEN_REFRESH_RETRY_MS * 2 ** (failures - 1),
+          ),
+        );
         return;
       }
+      failures = 0;
+      const token = result.token;
       const endpoint = token.endpoint.trim() || connection.endpoint;
       const nextConnection: BrowserOriginConnection = {
         ...connection,
@@ -2050,6 +2169,9 @@ export function BrowserSessionModal({
     browserOriginConnection,
     browserSessionId,
     canControlBrowser,
+    dropConnection,
+    fail,
+    grantRefreshPaused,
     isOpen,
   ]);
 
@@ -2084,30 +2206,51 @@ export function BrowserSessionModal({
       return;
     }
     if (sharedBrowserCapabilitiesAvailable && !collaboration.client.state) {
+      // Only a view that has its connection waits for its roster here; one
+      // without it is the attach's (or its error's) to show.
+      if (!browserOriginConnection) {
+        return;
+      }
       if (viewerWaitExpired) {
-        setStatus("error");
-        setError(SHARED_BROWSER_VIEWER_WAIT_COPY);
+        fail("failed", SHARED_BROWSER_VIEWER_WAIT_REASON);
         return;
       }
       setStatus("connecting");
-      setError(null);
+      setFailure(null);
       return;
     }
+    if (sharedBrowserCapabilitiesAvailable && canControlBrowser) {
+      // Its roster is known: the person can ask for control with the
+      // collaboration controls, so the connection stays.
+      setStatus("error");
+      setFailure({
+        kind: "notice",
+        reason: "This runtime's RFB renderer is available only to the current controller. Request control to view and interact with it.",
+      });
+      return;
+    }
+    // The capability read may still answer (it is retried while the machine
+    // starts): the attach goes on once it does, so nothing is cancelled here.
+    dropConnection();
     setStatus("error");
-    setError(
-      !sharedBrowserCapabilitiesAvailable
-        ? sharedBrowserCapabilitiesUnsupported
+    if (!sharedBrowserCapabilitiesAvailable && !sharedBrowserCapabilitiesUnsupported) {
+      setFailure({ kind: "failed", reason: "Unable to connect to this browser session. Retry when the machine is ready." });
+    } else {
+      setFailure({
+        kind: "notice",
+        reason: sharedBrowserCapabilitiesUnsupported
           ? "This Shared Browser viewer requires a newer version of Instafy."
-          : "Unable to connect to this browser session. Retry when the machine is ready."
-        : canControlBrowser
-          ? "This runtime's RFB renderer is available only to the current controller. Request control to view and interact with it."
           : "This Shared Browser runtime does not provide a safe view-only renderer.",
-    );
+      });
+    }
   }, [
     activeSharedBrowserViewerKind,
     browserDataClearInFlight,
+    browserOriginConnection,
     canControlBrowser,
     collaboration.client.state,
+    dropConnection,
+    fail,
     isOpen,
     sharedBrowserCapabilitiesAvailable,
     sharedBrowserCapabilitiesResolved,
@@ -2165,7 +2308,6 @@ export function BrowserSessionModal({
     if (!isOpen || browserDataClearInFlightRef.current) {
       return;
     }
-    personRetryRef.current = true;
     if (reconnectTimerRef.current !== null) {
       window.clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
@@ -2177,10 +2319,46 @@ export function BrowserSessionModal({
     freezeCurrentBrowserFrame();
     setRuntimeLimitDetails(null);
     setStatus("connecting");
-    setError(null);
-    setConnectAttempt((value) => value + 1);
+    setFailure(null);
+    startAttempt("press");
     runtimeDebugLog("browser-session:reattach", { projectId });
-  }, [attachRequestToken, freezeCurrentBrowserFrame, isOpen, projectId]);
+  }, [attachRequestToken, freezeCurrentBrowserFrame, isOpen, projectId, startAttempt]);
+
+  // Studio by itself, while this browser is off or did not open: an agent or
+  // another viewer started Instafy's browser, or Studio opens it for a card.
+  // It attaches again without a press (hands-free) and never starts the
+  // machine; it attaches to whichever run of the browser is there. A request
+  // that comes while an attempt is on its way (an automatic reconnect, say)
+  // waits for it: it acts once that attempt ends off or failed, and is
+  // dropped if it connects.
+  const handledAutoAttachRef = useRef(autoAttachToken);
+  useEffect(() => {
+    if (autoAttachToken === handledAutoAttachRef.current) {
+      return;
+    }
+    if (isOpen && status === "connecting") {
+      return;
+    }
+    handledAutoAttachRef.current = autoAttachToken;
+    const kind = viewKindRef.current;
+    if (!isOpen || browserDataClearInFlightRef.current || (kind !== "off" && kind !== "failed")) {
+      return;
+    }
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    autoRetryCountRef.current = 0;
+    reconnectTimesRef.current = [];
+    automaticReconnectRef.current = false;
+    fatalViewerErrorsRef.current = { count: 0, lastAtMs: 0 };
+    connectedHostRef.current = null;
+    setRuntimeLimitDetails(null);
+    setStatus("connecting");
+    setFailure(null);
+    startAttempt("studio");
+    runtimeDebugLog("browser-session:auto-attach", { projectId, from: kind });
+  }, [autoAttachToken, isOpen, projectId, startAttempt, status]);
 
   // "Reconnecting…" shows no progress and no Retry, so a browser that had
   // connected waits for it by itself only so long.
@@ -2190,26 +2368,25 @@ export function BrowserSessionModal({
   useEffect(() => {
     if (!reconnectingShown) return;
     const timer = window.setTimeout(() => {
-      if (reconnectTimerRef.current !== null) {
-        window.clearTimeout(reconnectTimerRef.current);
-        reconnectTimerRef.current = null;
-      }
       // Abandon the attempt on its way: a late answer must not bring the wait
       // back, and its host wait stops reading and starting the browser.
-      browserConnectionGenerationRef.current += 1;
-      connectAttemptAbortRef.current?.abort();
-      connectAttemptAbortRef.current = null;
-      setStatus("error");
-      setError(SHARED_BROWSER_LOST_CONNECTION_COPY);
+      fail("failed", "reconnect deadline passed");
       runtimeDebugLog("browser-session:reconnect-timeout", { projectId });
     }, SHARED_BROWSER_RECONNECT_TIMEOUT_MS);
     return () => window.clearTimeout(timer);
-  }, [projectId, reconnectingShown]);
+  }, [fail, projectId, reconnectingShown]);
 
+  // The card on a chat message says what this browser says.
+  const shownError = isOpen && error ? viewState.sentence : null;
   useEffect(() => {
-    onConnectionErrorChange?.(isOpen ? error : null);
-  }, [error, isOpen, onConnectionErrorChange]);
+    onConnectionErrorChange?.(shownError);
+  }, [onConnectionErrorChange, shownError]);
   useEffect(() => () => onConnectionErrorChange?.(null), [onConnectionErrorChange]);
+  const reportedViewKind = isOpen ? viewState.kind : null;
+  useEffect(() => {
+    onViewStateChange?.(reportedViewKind);
+  }, [onViewStateChange, reportedViewKind]);
+  useEffect(() => () => onViewStateChange?.(null), [onViewStateChange]);
 
   useEffect(() => {
     if (!isOpen || expandRequestToken <= 0) {
@@ -2360,7 +2537,7 @@ export function BrowserSessionModal({
             window.clearTimeout(reconnectTimerRef.current);
             reconnectTimerRef.current = null;
           }
-          setError(null);
+          setFailure(null);
           setHasConnectedOnce(true);
           setFrozenFrameUrl(null);
           if (connectedScopeKey) {
@@ -2399,12 +2576,7 @@ export function BrowserSessionModal({
           ) {
             return;
           }
-          setStatus("error");
-          setError(
-            connected
-              ? "Browser session disconnected. Click Retry to reconnect."
-              : "Browser session failed to connect. Click Retry to start a fresh session.",
-          );
+          fail("failed", connected ? "RFB viewer disconnected" : "RFB viewer did not connect");
         };
 
         rfb.addEventListener?.("connect", handleConnect);
@@ -2418,8 +2590,7 @@ export function BrowserSessionModal({
           ...browserSessionWsDebugFields(wsUrl),
           message,
         });
-        setStatus("error");
-        setError(message || "Unable to load the browser viewer.");
+        fail("failed", message || "Unable to load the browser viewer.");
       }
     })();
 
@@ -2442,6 +2613,7 @@ export function BrowserSessionModal({
     connectedScopeKey,
     browserDataClearInFlight,
     containerNode,
+    fail,
     forcedRuntimeId,
     fullscreen,
     humanInputEnabled,
@@ -2619,7 +2791,7 @@ export function BrowserSessionModal({
       window.clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
     }
-    setError(null);
+    setFailure(null);
     setHasConnectedOnce(true);
     setFrozenFrameUrl(null);
     if (connectedScopeKey) {
@@ -2655,14 +2827,9 @@ export function BrowserSessionModal({
       ) {
         return;
       }
-      setStatus("error");
-      setError(
-        detail.connected
-          ? "Browser session disconnected. Click Retry to reconnect."
-          : "Browser renderer failed to connect. Click Retry to start a fresh session.",
-      );
+      fail("failed", detail.connected ? "screencast disconnected" : "screencast did not connect");
     },
-    [fallBackFromViewer, forcedRuntimeId, scheduleReconnectAttempt, wsUrl],
+    [fail, fallBackFromViewer, forcedRuntimeId, scheduleReconnectAttempt, wsUrl],
   );
 
   const handleCdpScreencastError = useCallback(
@@ -2691,10 +2858,9 @@ export function BrowserSessionModal({
       if (count <= MAX_AUTO_CONNECT_RETRIES && scheduleReconnectAttempt("connect_failure", wsUrl ?? "")) {
         return;
       }
-      setStatus("error");
-      setError(SHARED_BROWSER_LOST_CONNECTION_COPY);
+      fail("failed", `${SHARED_BROWSER_LOST_CONNECTION_REASON}: ${message}`);
     },
-    [fallBackFromViewer, scheduleReconnectAttempt, wsUrl],
+    [fail, fallBackFromViewer, scheduleReconnectAttempt, wsUrl],
   );
 
   const handleWebRtcConnected = useCallback(() => {
@@ -2707,7 +2873,7 @@ export function BrowserSessionModal({
       window.clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
     }
-    setError(null);
+    setFailure(null);
     setHasConnectedOnce(true);
     setFrozenFrameUrl(null);
     if (connectedScopeKey) {
@@ -2729,14 +2895,9 @@ export function BrowserSessionModal({
       if (fallBackFromViewer(detail.reason)) {
         return;
       }
-      setStatus("error");
-      setError(
-        detail.connected
-          ? "Browser video disconnected. Click Retry to reconnect."
-          : "Browser video failed to connect. Click Retry to start a fresh session.",
-      );
+      fail("failed", detail.connected ? "WebRTC video disconnected" : "WebRTC video did not connect");
     },
-    [fallBackFromViewer, forcedRuntimeId],
+    [fail, fallBackFromViewer, forcedRuntimeId],
   );
 
   const handleWebRtcError = useCallback(
@@ -2748,14 +2909,13 @@ export function BrowserSessionModal({
       if (fallBackFromViewer(message)) {
         return;
       }
-      setStatus("error");
-      setError(message || "Shared Browser video is unavailable.");
+      fail("failed", message || "Shared Browser video is unavailable.");
     },
-    [fallBackFromViewer],
+    [fail, fallBackFromViewer],
   );
 
   const viewportSurfaceClass =
-    displayStatus === "connected" && !error
+    viewLive
       ? "bg-black"
       : "bg-slate-100 dark:bg-slate-950";
   const disconnectedCardClass =
@@ -2811,12 +2971,14 @@ export function BrowserSessionModal({
               </div>
             </div>
           ) : collapsedCardMode === "error" ? (
-            <div className="space-y-3 px-3.5 py-3">
-              <BrowserUnavailableNotice error={error} compact />
+            <div className="space-y-3 px-3.5 py-3" data-view-state={viewState.kind}>
+              <BrowserUnavailableNotice sentence={viewState.sentence ?? ""} reason={error} compact />
               <div className="flex items-center gap-2">
-                <Button onPress={retryConnection} variant="ghost" size="sm" radius="full">
-                  Retry
-                </Button>
+                {viewState.action ? (
+                  <Button onPress={retryConnection} variant="ghost" size="sm" radius="full">
+                    {viewState.action}
+                  </Button>
+                ) : null}
                 <Button onPress={closeBrowserSession} variant="ghost" size="sm" radius="full">
                   Hide
                 </Button>
@@ -2844,12 +3006,9 @@ export function BrowserSessionModal({
                   <Safari className="h-4.5 w-4.5" aria-hidden="true" />
                 </span>
                 <div className="min-w-0">
-                  <Text as="p" variant="bodyStrong" tone="primary">
-                    Browser starting
-                  </Text>
-                  <Text as="p" variant="caption" tone="muted" className="flex items-center gap-1.5">
+                  <Text as="p" variant="bodyStrong" tone="primary" className="flex items-center gap-1.5">
                     <Spinner aria-hidden="true" tone="slate" size="xs" />
-                    <span>Open fullscreen when ready.</span>
+                    <span>{viewState.sentence}</span>
                   </Text>
                 </div>
               </div>
@@ -2942,7 +3101,7 @@ export function BrowserSessionModal({
       onOpenChange={(open) => { setSessionChooserOpen(open && sessionControlsVisible); if (open && sessionControlsVisible) void refreshSessionChoices(); }}
       onChoose={chooseSession}
       onStart={startNewSession}
-      onRefresh={() => { void refreshSessionChoices(); setConnectAttempt((value) => value + 1); }}
+      onRefresh={() => { void refreshSessionChoices(); startAttempt(); }}
       footer={canClearBrowserData ? <div className="mt-1 border-t border-slate-200 pt-1 dark:border-slate-700/50">
         <SharedBrowserDataClearAction
           canClear={canClearBrowserData && !browserDataClearInFlight}
@@ -2965,6 +3124,11 @@ export function BrowserSessionModal({
     </SharedBrowserSessionControl>
   ) : null;
 
+  // Who controls the browser means something only while it is live, or once
+  // its roster is known on a connection (a renderer only the controller may
+  // use asks for control there); "Control syncing…" never stands in for it.
+  const collaborationControlsShown =
+    viewLive || (collaboration.client.state !== null && browserOriginConnection !== null);
   const renderCollaborationControls = (controls: ReactNode) => (
     <SharedBrowserCollaborationControls
       client={collaboration.client}
@@ -3022,7 +3186,7 @@ export function BrowserSessionModal({
             {effectiveAgentControlOwner ? (
               <SharedBrowserControlOwnerPill controlOwner={effectiveAgentControlOwner} />
             ) : (
-              <BrowserSessionStatusPill status={displayStatus} />
+              <BrowserSessionStatusPill status={displayStatus} view={viewState} />
             )}
             {toolbarLeading ? null : (
               <BrowserIdentityBadge className={fillContainer ? "inline-flex" : "hidden sm:inline-flex"} />
@@ -3054,6 +3218,9 @@ export function BrowserSessionModal({
       {!shouldCollapseDocked && fillContainer && sharedBrowserChrome ? (
         <SharedBrowserChrome
           {...sharedBrowserChrome}
+          // Outside live the address field is empty and disabled: the card
+          // says why.
+          resolved={viewLive && sharedBrowserChrome.resolved}
           historyUserId={currentUserId}
           historyActive={isOpen && transportActive}
           controlOwner={effectiveAgentControlOwner ?? controlOwner}
@@ -3062,8 +3229,8 @@ export function BrowserSessionModal({
             <>
               {humanInputIdentityKey ? (
                 <BrowserHumanInputStatus {...browserHumanInputOptions} state={browserHumanInputState}
-                  renderControls={renderCollaborationControls} />
-              ) : renderCollaborationControls(null)}
+                  renderControls={collaborationControlsShown ? renderCollaborationControls : undefined} />
+              ) : collaborationControlsShown ? renderCollaborationControls(null) : null}
               {renderSessionControls(sharedBrowserChrome.compact ? <>
                 {compactNavigation}
                 {!forceViewportFullscreenDocked ? <BrowserExpandButton expanded={fullscreen} showLabel
@@ -3078,7 +3245,7 @@ export function BrowserSessionModal({
           toolbarLeading={toolbarLeading}
           toolbarStatus={
             <span className={sharedBrowserChrome.compact ? "sr-only" : undefined}>
-              <BrowserSessionStatusPill status={displayStatus} />
+              <BrowserSessionStatusPill status={displayStatus} view={viewState} />
             </span>
           }
         />
@@ -3240,7 +3407,7 @@ export function BrowserSessionModal({
               />
             </>
           ) : null}
-          {!shouldCollapseDocked && status === "connecting" && hasConnectedHint && !error ? (
+          {!shouldCollapseDocked && viewLive && status === "connecting" ? (
             <div
               className="pointer-events-none absolute right-3 top-3 rounded-full border border-white/15 bg-slate-950/80 px-2.5 py-1 text-xs font-medium text-white shadow-sm backdrop-blur"
               data-testid="browser-session-reconnecting"
@@ -3250,7 +3417,7 @@ export function BrowserSessionModal({
             </div>
           ) : null}
           {compactCardBody}
-          {!shouldCollapseDocked && displayStatus !== "selecting" && (displayStatus !== "connected" || error) ? (
+          {!shouldCollapseDocked && displayStatus !== "selecting" && !viewLive ? (
             <div
               className={[
                 "pointer-events-none absolute inset-0 flex items-center justify-center p-6",
@@ -3316,36 +3483,35 @@ export function BrowserSessionModal({
                       </div>
                     </div>
                   ) : (
-                    <div className="space-y-3" data-testid="browser-session-error-notice">
-                      <BrowserUnavailableNotice error={error} />
-                      <div className="flex items-center">
-                        <Button
-                          onPress={retryConnection}
-                          variant="secondary"
-                          size="sm"
-                          radius="full"
-                          data-testid="browser-session-error-retry"
-                        >
-                          Retry
-                        </Button>
-                      </div>
+                    <div className="space-y-3" data-testid="browser-session-error-notice" data-view-state={viewState.kind}>
+                      <BrowserUnavailableNotice sentence={viewState.sentence ?? ""} reason={error} />
+                      {viewState.action ? (
+                        <div className="flex items-center">
+                          <Button
+                            onPress={retryConnection}
+                            variant="secondary"
+                            size="sm"
+                            radius="full"
+                            data-testid="browser-session-error-retry"
+                          >
+                            {viewState.action}
+                          </Button>
+                        </div>
+                      ) : null}
                     </div>
                   )
                 ) : (
                   <div
-                    className="flex items-start gap-3"
+                    className="flex items-center gap-3"
                     data-testid="browser-session-loading-notice"
+                    data-view-state={viewState.kind}
                     role="status"
                   >
                     <Spinner aria-hidden="true" tone="slate" size="sm" />
-                    <div className="min-w-0 space-y-1">
-                      <Text as="p" variant="bodyStrong" tone="primary">
-                        Starting Shared Browser
-                      </Text>
-                      <Text as="p" variant="body" tone="secondary" className="leading-snug">
-                        Preparing a secure browser session…
-                      </Text>
-                    </div>
+                    <Text as="p" variant="body" tone="primary" className="min-w-0 leading-snug"
+                      data-testid="browser-session-view-sentence">
+                      {viewState.sentence}
+                    </Text>
                   </div>
                 )}
               </div>

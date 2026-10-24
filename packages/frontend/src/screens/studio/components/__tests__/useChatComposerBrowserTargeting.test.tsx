@@ -47,7 +47,7 @@ describe("useChatComposerBrowserTargeting", () => {
   const requestBrowserSessionExpand = vi.fn();
   const showStatus = vi.fn();
 
-  function Harness({ browserTransport }: { browserTransport: BrowserTransport }) {
+  function Harness({ browserTransport, pagesActive }: { browserTransport: BrowserTransport; pagesActive?: boolean }) {
     latestResult = useChatComposerBrowserTargeting({
       activeConversationId: "conversation-1",
       activeProjectId: "project-1",
@@ -65,6 +65,7 @@ describe("useChatComposerBrowserTargeting", () => {
       requestBrowserSessionExpand,
       resolvedBrowserRuntimeId: "runtime-1",
       showStatus,
+      sharedBrowserPagesActive: pagesActive,
     });
     return null;
   }
@@ -119,6 +120,17 @@ describe("useChatComposerBrowserTargeting", () => {
       await latestResult?.handleSelectBrowserSessionPage("shared-page-1");
     });
     expect(focusPageMock).toHaveBeenCalledWith("shared-page-1");
+  });
+
+  it("reads the pages only while the browser view is opening or live", async () => {
+    await act(async () => {
+      root.render(<Harness browserTransport="shared" />);
+    });
+    expect(useBrowserSessionPagesMock).toHaveBeenLastCalledWith(expect.objectContaining({ enabled: true, pollPages: true }));
+    await act(async () => {
+      root.render(<Harness browserTransport="shared" pagesActive={false} />);
+    });
+    expect(useBrowserSessionPagesMock).toHaveBeenLastCalledWith(expect.objectContaining({ enabled: true, pollPages: false }));
   });
 
   it("clears and blocks Shared page targeting after switching to Personal", async () => {

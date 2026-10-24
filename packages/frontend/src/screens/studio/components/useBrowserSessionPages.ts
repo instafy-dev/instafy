@@ -88,6 +88,14 @@ export function useBrowserSessionPages(params: {
   onUnavailable?: (() => void) | null;
   suspendOnUnavailable?: boolean;
   includePlaceholder?: boolean;
+  /**
+   * Whether the pages are read every 2.5 s. False while the browser view is
+   * off, did not open or cannot open: nothing reads the pages of a browser
+   * that is not running, and the pages are empty. Capabilities stay as they
+   * are, so the attach can go on once the view opens again; a capability read
+   * that failed is asked again only then.
+   */
+  pollPages?: boolean;
 }) {
   const {
     enabled,
@@ -97,6 +105,7 @@ export function useBrowserSessionPages(params: {
     onUnavailable = null,
     suspendOnUnavailable = false,
     includePlaceholder = false,
+    pollPages = true,
   } = params;
   const scopeKey = `${enabled ? "enabled" : "disabled"}\u0000${browserSessionId}\u0000${projectId ?? ""}\u0000${preferRuntimeId ?? ""}\u0000${includePlaceholder ? "placeholders" : "pages"}\u0000${suspendOnUnavailable ? "suspend" : "continue"}`;
   const scopeKeyRef = useRef(scopeKey);
@@ -587,18 +596,32 @@ export function useBrowserSessionPages(params: {
     return () => window.clearTimeout(timer);
   }, [notReady]);
 
+  // A capability read that may succeed later is asked again every 2.5 s,
+  // but not while the pages are not read (the view is off, did not open or
+  // cannot open): nothing waits on them then. Once the view opens again it
+  // asks at once, so its attach does not wait for the next tick.
+  const capabilitiesRetryPausedRef = useRef(false);
   useEffect(() => {
     if (!enabled || !projectId || !capabilitiesRetryable) {
+      capabilitiesRetryPausedRef.current = false;
       return;
+    }
+    if (!pollPages) {
+      capabilitiesRetryPausedRef.current = true;
+      return;
+    }
+    if (capabilitiesRetryPausedRef.current) {
+      capabilitiesRetryPausedRef.current = false;
+      void refreshCapabilities();
     }
     const intervalId = window.setInterval(() => {
       void refreshCapabilities();
     }, BROWSER_SESSION_POLL_INTERVAL_MS);
     return () => window.clearInterval(intervalId);
-  }, [capabilitiesRetryable, enabled, projectId, refreshCapabilities]);
+  }, [capabilitiesRetryable, enabled, pollPages, projectId, refreshCapabilities]);
 
   useEffect(() => {
-    if (!enabled || !projectId) {
+    if (!enabled || !projectId || !pollPages) {
       setPageState({ scopeKey, pages: [], resolved: false });
       preferredActivePageIdRef.current = { scopeKey, pageId: null };
       return;
@@ -628,7 +651,7 @@ export function useBrowserSessionPages(params: {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [enabled, projectId, refresh, scopeIsCurrent, scopeKey]);
+  }, [enabled, pollPages, projectId, refresh, scopeIsCurrent, scopeKey]);
 
   return {
     pages,

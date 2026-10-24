@@ -1171,10 +1171,7 @@ test.describe.serial("Shared Browser disconnected presentation", () => {
       const loading = modal.getByTestId("browser-session-loading-notice");
       await expect(card).toBeVisible();
       await expect(loading).toBeVisible();
-      await expect(loading.getByText("Starting Shared Browser", { exact: true })).toBeVisible();
-      await expect(
-        loading.getByText("Preparing a secure browser session…", { exact: true }),
-      ).toBeVisible();
+      await expect(loading.getByText("Opening Instafy's browser…", { exact: true })).toBeVisible();
 
       const viewportColors = await readElementContrast(viewport);
       const cardColors = await readElementContrast(card);
@@ -1195,11 +1192,11 @@ test.describe.serial("Shared Browser disconnected presentation", () => {
 
       const errorNotice = modal.getByTestId("browser-session-error-notice");
       await expect(errorNotice).toBeVisible({ timeout: 30_000 });
-      await expect(errorNotice.getByText("Browser unavailable", { exact: true })).toBeVisible();
-      await expect(errorNotice.getByText("The browser couldn't connect. Try again in a moment.", { exact: true })).toBeVisible();
-      await expect(errorNotice.getByText(GENERIC_BROWSER_ERROR, { exact: true })).toBeHidden();
-      await errorNotice.getByText("Technical details", { exact: true }).click();
-      await expect(errorNotice.getByText(GENERIC_BROWSER_ERROR, { exact: true })).toBeVisible();
+      // One sentence; the raw reason is kept for runtime debug only.
+      await expect(errorNotice.getByText("Instafy's browser did not open. Try again.", { exact: true })).toBeVisible();
+      await expect(errorNotice.getByText(GENERIC_BROWSER_ERROR, { exact: true })).toHaveCount(0);
+      await expect(errorNotice.getByText("Technical details", { exact: true })).toHaveCount(0);
+      await expect(errorNotice.locator("[data-debug-reason]")).toHaveAttribute("data-debug-reason", GENERIC_BROWSER_ERROR);
       const retryButton = errorNotice.getByTestId("browser-session-error-retry");
       await expect(retryButton).toBeVisible();
       await expect(retryButton).toHaveText("Try again");

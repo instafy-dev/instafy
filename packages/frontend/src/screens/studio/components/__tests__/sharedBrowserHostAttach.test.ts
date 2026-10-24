@@ -85,14 +85,14 @@ describe("waitForSharedBrowserHostReady", () => {
   it.each(["idle", "failed"] as const)("asks a viewer to get a builder when the browser is %s", async (state) => {
     const { value, startHost } = client([snapshot(state)]);
     await expect(waitForSharedBrowserHostReady({ ...base, canControl: false, client: value, ...fakeClock() }))
-      .resolves.toEqual({ kind: "error", message: SHARED_BROWSER_HOST_COPY.askBuilder });
+      .resolves.toEqual({ kind: "error", errorKind: "blocked", reason: SHARED_BROWSER_HOST_COPY.askBuilder });
     expect(startHost).not.toHaveBeenCalled();
   });
 
   it("says a poisoned browser needs the machine to restart, and never starts it", async () => {
     const { value, startHost } = client([snapshot("poisoned")]);
     await expect(waitForSharedBrowserHostReady({ ...base, canControl: true, client: value, ...fakeClock() }))
-      .resolves.toEqual({ kind: "error", message: SHARED_BROWSER_HOST_COPY.poisoned });
+      .resolves.toEqual({ kind: "error", errorKind: "blocked", reason: SHARED_BROWSER_HOST_COPY.poisoned });
     expect(startHost).not.toHaveBeenCalled();
   });
 
@@ -115,20 +115,53 @@ describe("waitForSharedBrowserHostReady", () => {
     expect(clock.sleeps[0]).toBe(1_000);
   });
 
+  it("polls a start refused while the machine is stopping as opening, within the start budget", async () => {
+    const opened = client(
+      [snapshot("idle"), snapshot("idle"), snapshot("ready")],
+      [new Refused("machine_stopping"), snapshot("starting")],
+    );
+    const clock = fakeClock();
+    await expect(waitForSharedBrowserHostReady({ ...base, canControl: true, client: opened.value, ...clock }))
+      .resolves.toMatchObject({ kind: "ready" });
+    expect(opened.startHost).toHaveBeenCalledTimes(2);
+    expect(clock.sleeps[0]).toBe(1_000);
+    // A machine that keeps stopping does not open: three starts, then it says so.
+    const stopping = client([snapshot("idle")], [new Refused("machine_stopping")]);
+    await expect(waitForSharedBrowserHostReady({ ...base, canControl: true, client: stopping.value, ...fakeClock() }))
+      .resolves.toMatchObject({ kind: "error", errorKind: "failed" });
+    expect(stopping.startHost).toHaveBeenCalledTimes(3);
+  });
+
   it.each([
-    ["browser_host_poisoned", SHARED_BROWSER_HOST_COPY.poisoned],
-    ["machine_stopping", SHARED_BROWSER_HOST_COPY.machineStopping],
-    ["something_new", SHARED_BROWSER_HOST_COPY.didNotStart],
-  ])("ends on a start refused with %s", async (code, message) => {
+    ["browser_host_poisoned", { errorKind: "blocked", reason: SHARED_BROWSER_HOST_COPY.poisoned }],
+    ["something_new", { errorKind: "failed", reason: "browser host start refused (something_new)" }],
+  ] as const)("ends on a start refused with %s", async (code, outcome) => {
     const { value } = client([snapshot("idle")], [new Refused(code)]);
     await expect(waitForSharedBrowserHostReady({ ...base, canControl: true, client: value, ...fakeClock() }))
-      .resolves.toEqual({ kind: "error", message });
+      .resolves.toEqual({ kind: "error", ...outcome });
+  });
+
+  it.each([
+    ["idle", "off"],
+    ["failed", "failed"],
+  ] as const)("never starts a %s browser for an automatic reconnect", async (state, errorKind) => {
+    const { value, startHost } = client([snapshot(state)]);
+    await expect(waitForSharedBrowserHostReady({ ...base, canControl: true, mayStart: false, client: value, ...fakeClock() }))
+      .resolves.toMatchObject({ kind: "error", errorKind });
+    expect(startHost).not.toHaveBeenCalled();
+    // A ready browser is still attached to, and a viewer still asks a builder.
+    const ready = client([snapshot("ready")]);
+    await expect(waitForSharedBrowserHostReady({ ...base, canControl: true, mayStart: false, client: ready.value, ...fakeClock() }))
+      .resolves.toMatchObject({ kind: "ready" });
+    const viewer = client([snapshot(state)]);
+    await expect(waitForSharedBrowserHostReady({ ...base, canControl: false, mayStart: false, client: viewer.value, ...fakeClock() }))
+      .resolves.toEqual({ kind: "error", errorKind: "blocked", reason: SHARED_BROWSER_HOST_COPY.askBuilder });
   });
 
   it("does not restart a browser that failed after this wait started it", async () => {
     const { value, startHost } = client([snapshot("failed"), snapshot("starting"), snapshot("failed")]);
     await expect(waitForSharedBrowserHostReady({ ...base, canControl: true, client: value, ...fakeClock() }))
-      .resolves.toEqual({ kind: "error", message: SHARED_BROWSER_HOST_COPY.didNotStart });
+      .resolves.toMatchObject({ kind: "error", errorKind: "failed" });
     expect(startHost).toHaveBeenCalledTimes(1);
   });
 
@@ -136,14 +169,14 @@ describe("waitForSharedBrowserHostReady", () => {
     const { value } = client([snapshot("starting")]);
     const clock = fakeClock();
     await expect(waitForSharedBrowserHostReady({ ...base, canControl: true, client: value, ...clock }))
-      .resolves.toEqual({ kind: "error", message: SHARED_BROWSER_HOST_COPY.didNotStart });
+      .resolves.toEqual({ kind: "error", errorKind: "failed", reason: "browser host wait timed out" });
     expect(clock.now()).toBe(120_000);
   });
 
-  it("reports no host (404) as not available", async () => {
+  it("reports no host (404) as off", async () => {
     const { value } = client([null]);
     await expect(waitForSharedBrowserHostReady({ ...base, canControl: true, client: value, ...fakeClock() }))
-      .resolves.toEqual({ kind: "error", message: SHARED_BROWSER_HOST_COPY.notAvailable });
+      .resolves.toMatchObject({ kind: "error", errorKind: "off" });
   });
 
   it("polls through a 404 from the controller or a proxy, and logs it, until the browser answers", async () => {
@@ -167,7 +200,7 @@ describe("waitForSharedBrowserHostReady", () => {
     const { value } = client([new NotFound(null)]);
     const clock = fakeClock();
     await expect(waitForSharedBrowserHostReady({ ...base, canControl: true, client: value, ...clock }))
-      .resolves.toEqual({ kind: "error", message: SHARED_BROWSER_HOST_COPY.didNotStart });
+      .resolves.toEqual({ kind: "error", errorKind: "failed", reason: "browser host wait timed out" });
     expect(clock.now()).toBe(120_000);
   });
 
@@ -175,13 +208,13 @@ describe("waitForSharedBrowserHostReady", () => {
     const { value, startHost } = client([new NotFound("browser_host_policy_off")]);
     const clock = fakeClock();
     await expect(waitForSharedBrowserHostReady({ ...base, canControl: true, client: value, ...clock }))
-      .resolves.toEqual({ kind: "error", message: SHARED_BROWSER_HOST_COPY.policyOff });
+      .resolves.toEqual({ kind: "error", errorKind: "blocked", reason: SHARED_BROWSER_HOST_COPY.policyOff });
     expect(clock.sleeps).toEqual([]);
     expect(startHost).not.toHaveBeenCalled();
     // The same answer to a start ends the wait too; another 404 there is polled.
     const started = client([snapshot("idle")], [new NotFound("browser_host_policy_off")]);
     await expect(waitForSharedBrowserHostReady({ ...base, canControl: true, client: started.value, ...fakeClock() }))
-      .resolves.toEqual({ kind: "error", message: SHARED_BROWSER_HOST_COPY.policyOff });
+      .resolves.toEqual({ kind: "error", errorKind: "blocked", reason: SHARED_BROWSER_HOST_COPY.policyOff });
     const polled = client([snapshot("idle"), snapshot("ready")], [new NotFound(null)]);
     await expect(waitForSharedBrowserHostReady({ ...base, canControl: true, client: polled.value, ...fakeClock() }))
       .resolves.toMatchObject({ kind: "ready" });
@@ -236,7 +269,7 @@ describe("waitForSharedBrowserHostReady", () => {
       await vi.advanceTimersByTimeAsync(29_000);
       expect(result).toBeUndefined();
       await vi.advanceTimersByTimeAsync(1_500);
-      expect(result).toEqual({ kind: "error", message: SHARED_BROWSER_HOST_COPY.didNotStart });
+      expect(result).toEqual({ kind: "error", errorKind: "failed", reason: "browser host wait timed out" });
     } finally {
       vi.useRealTimers();
     }
@@ -347,12 +380,12 @@ describe("startSpaceMachineForBrowser", () => {
     await expect(startSpaceMachineForBrowser({
       projectId: "project-1", pinnedRuntimeId: null, conversationRuntimeId: null,
       ensureSpaceMachine: async () => false, fetchStatus: statusSequence([]), ...fakeClock(),
-    })).resolves.toEqual({ kind: "error", message: SHARED_BROWSER_HOST_COPY.machineDidNotStart });
+    })).resolves.toMatchObject({ kind: "error", errorKind: "machine" });
     const clock = fakeClock();
     await expect(startSpaceMachineForBrowser({
       projectId: "project-1", pinnedRuntimeId: "space", conversationRuntimeId: null,
       ensureSpaceMachine: async () => true, fetchStatus: statusSequence([entry({ status: "starting" })]), ...clock,
-    })).resolves.toEqual({ kind: "error", message: SHARED_BROWSER_HOST_COPY.machineDidNotStart });
+    })).resolves.toMatchObject({ kind: "error", errorKind: "machine" });
     expect(clock.now()).toBe(180_000);
   });
 });

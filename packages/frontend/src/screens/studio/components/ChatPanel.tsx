@@ -414,7 +414,8 @@ import {
   type SharedBrowserPresence,
 } from "./browserAutoStart";
 import { useSharedBrowserHostSnapshot } from "./useSharedBrowserHostSnapshot";
-import { SHARED_BROWSER_HOST_COPY } from "./sharedBrowserHostAttach";
+import { useSharedBrowserAutoAttach } from "./useSharedBrowserAutoAttach";
+import { hostedBrowserPagesActive, type HostedBrowserViewKind } from "./hostedBrowserViewState";
 import { isSkillSetupConversation } from "./skillSetupConversation";
 import { sharedBrowserConversationRunIds } from "./browserHandoffRouting";
 
@@ -1791,6 +1792,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   // memory avoids duplicate tabs or side-by-side surfaces replacing each other,
   // while remaining stable across transport and network reconnects.
   const sharedBrowserSurfaceSessionId = useMemo(() => generateUUID(), []);
+  // What the open browser view shows (off, opening, live, failed, blocked),
+  // or null while it is closed. Its pages are read only while it is opening
+  // or live; a closed (hidden) one keeps its own rules.
+  const [sharedBrowserViewKind, setSharedBrowserViewKind] = useState<HostedBrowserViewKind | null>(null);
+  const sharedBrowserPagesActive = hostedBrowserPagesActive(sharedBrowserViewKind);
   const {
     browserSessionPages,
     clearPendingBrowserLaunchMode,
@@ -1805,7 +1811,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     sharedBrowserCapabilitiesUnsupported,
     sharedBrowserChromePages,
     sharedBrowserChromeResolved,
-    sharedBrowserHostNotReady,
     sharedBrowserHostNotReadySinceMs,
     sharedBrowserCommandPending,
     sharedBrowserCommandError,
@@ -1833,6 +1838,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     requestBrowserSessionExpand,
     resolvedBrowserRuntimeId,
     showStatus,
+    sharedBrowserPagesActive,
   });
   const browserModeActive = browserSessionOpen && browserVisible;
   // A skill setup's composer answers the setup: its replies stay chat turns
@@ -1880,9 +1886,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     return {
       pages: sharedBrowserChromePages,
       resolved: sharedBrowserCapabilitiesResolved && sharedBrowserChromeResolved,
-      // Instafy's browser kept answering that it is not running: say so
-      // rather than that it is still connecting.
-      unavailableMessage: sharedBrowserHostNotReady ? SHARED_BROWSER_HOST_COPY.didNotStart : null,
       pendingAction: sharedBrowserCommandPending,
       error: sharedBrowserCommandError,
       controls,
@@ -1918,7 +1921,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     sharedBrowserChromeResolved,
     sharedBrowserCommandError,
     sharedBrowserCommandPending,
-    sharedBrowserHostNotReady,
   ]);
   const handleInsertSlashCommand = useCallback(
     (command: string) => {
@@ -4600,12 +4602,31 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   useEffect(() => {
     if (!browserSessionOpen) setBrowserAttachOnly(false);
   }, [browserSessionOpen]);
+  // Instafy's browser on the conversation's machine is open here but off:
+  // a reading taken once it went off, and then the same ten-second reading,
+  // notices an agent or another viewer starting it, and the view attaches
+  // without a press (hands-free).
+  const sharedBrowserViewOff =
+    browserSessionOpen &&
+    browserTransport === "shared" &&
+    sharedBrowserViewKind === "off" &&
+    conversationBrowserHostRuntimeId !== null &&
+    (resolvedBrowserRuntimeId ?? conversationBrowserHostRuntimeId) === conversationBrowserHostRuntimeId;
   const sharedBrowserHost = useSharedBrowserHostSnapshot({
     projectId: activeProjectId ?? null,
     runtimeId: conversationBrowserHostRuntimeId,
     browserSessionId: sharedBrowserSurfaceSessionId,
-    enabled: browserAutoStartAllowed && conversationBrowserHostRuntimeId !== null,
-    poll: browserAutoWaiting,
+    enabled: (browserAutoStartAllowed || sharedBrowserViewOff) && conversationBrowserHostRuntimeId !== null,
+    poll: browserAutoWaiting || sharedBrowserViewOff,
+  });
+  // Studio asks the view to attach again by itself (see autoAttachToken).
+  const {
+    autoAttachToken: sharedBrowserAutoAttachToken,
+    requestAutoAttach: requestSharedBrowserAutoAttach,
+  } = useSharedBrowserAutoAttach({
+    open: browserSessionOpen,
+    off: sharedBrowserViewOff,
+    host: sharedBrowserHost,
   });
   const sharedBrowserHostKey = sharedBrowserHost.snapshot
     ? [
@@ -4680,12 +4701,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     activate: (transport, plan) => {
       if (plan?.kind === "attach") {
         // Studio opens Instafy's browser on the conversation's own machine
-        // by itself: exactly that machine, and never starting it.
+        // by itself: exactly that machine, and never starting it. A view that
+        // is open but off or did not open attaches again by itself too.
         setBrowserTransport("shared");
         setSharedBrowserActivated(true);
         setBrowserAttachOnly(true);
         resumeBrowserSession(plan.runtimeId);
         setBrowserSubtab("browser");
+        if (browserSessionOpen) requestSharedBrowserAutoAttach();
         return;
       }
       // A press is the person's own: the browser may start the machine.
@@ -6318,7 +6341,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     resumeRuntimeId={requestedSharedBrowserRuntimeId ?? exactBrowserRuntimeId}
                     expandRequestToken={browserSessionExpandRequestToken}
                     attachRequestToken={sharedBrowserAttachRequestToken}
+                    autoAttachToken={sharedBrowserAutoAttachToken}
                     onConnectionErrorChange={handleSharedBrowserConnectionErrorChange}
+                    onViewStateChange={setSharedBrowserViewKind}
                     presentation="docked"
                     fillContainer
                     onBackToChat={handleBackToChat}

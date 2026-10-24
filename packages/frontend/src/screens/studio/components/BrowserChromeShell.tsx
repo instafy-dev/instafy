@@ -3,17 +3,19 @@ import { Pause, Play, Xmark } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { Spinner } from "../../../components/Spinner";
 
-export type BrowserChromeState = "ready" | "starting" | "paused" | "unavailable";
+/** `off` is neutral: Instafy's browser is not running. `unavailable` is for the Personal Browser and the site preview. */
+export type BrowserChromeState = "ready" | "starting" | "paused" | "off" | "unavailable";
 
 export const BrowserAddressMenuAnchorContext = createContext<{
   ref: RefObject<HTMLDivElement | null>;
   width: number;
 } | null>(null);
 
-const browserChromeStateLabel: Record<BrowserChromeState, string> = {
+export const BROWSER_CHROME_STATE_LABELS: Record<BrowserChromeState, string> = {
   ready: "Ready",
   starting: "Starting…",
   paused: "Paused",
+  off: "Off",
   unavailable: "Unavailable",
 };
 
@@ -30,7 +32,7 @@ export function BrowserStatusPill({
   compact?: boolean;
   resume?: { onPress: () => void; disabled?: boolean };
 }) {
-  const label = browserChromeStateLabel[state];
+  const label = BROWSER_CHROME_STATE_LABELS[state];
   if (state === "ready") {
     return (
       <span

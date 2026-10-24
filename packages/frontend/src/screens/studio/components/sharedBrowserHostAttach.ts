@@ -7,6 +7,7 @@ import type {
 import type { SharedBrowserHostSnapshot } from "../../../services/runtimeController/browserSession";
 import { runtimeEntryIsDispatchable } from "../../../runtime/utils/runtimeEntry";
 import { runtimeDebugLog } from "../../../runtime/utils/runtimeDebug";
+import type { HostedBrowserErrorKind } from "./hostedBrowserViewState";
 import {
   isManagedInstafyCloudProvider,
   listBrowserRuntimeCandidates,
@@ -22,18 +23,18 @@ import {
  * is ready, and never starts, stops or replaces a machine to do it, except
  * for a person's press when the space's machine is not running (the cold
  * path below).
+ *
+ * The browser view shows one of these sentences at a time (see
+ * hostedBrowserViewState): short, plain, and without em dashes.
  */
 export const SHARED_BROWSER_HOST_COPY = {
+  off: "Instafy's browser is off.",
+  opening: "Opening Instafy's browser…",
+  didNotOpen: "Instafy's browser did not open. Try again.",
+  machineDidNotStart: "This space's machine did not start. Try again.",
   askBuilder: "Ask a space builder to open Instafy's browser.",
   poisoned: "Instafy's browser needs this space's machine to restart before it can open again.",
-  didNotStart: "Instafy's browser did not start. Try again.",
-  machineStopping: "This space's machine is stopping. Try again in a moment.",
-  notAvailable: "Instafy's browser is not available on this space's machine right now. Try again.",
   policyOff: "Instafy's browser is turned off for this space.",
-  restarted: "Instafy's browser restarted on this space's machine. Press Retry to open it again.",
-  machineStopped: "This space's machine stopped. Open the browser to start it.",
-  machineNotRunning: "This space's machine is not running. Press Retry to start it.",
-  machineDidNotStart: "This space's machine did not start. Try again.",
 } as const;
 
 export const SHARED_BROWSER_HOST_WAIT_TIMEOUT_MS = 120_000;
@@ -64,10 +65,25 @@ export interface SharedBrowserHostClient {
   isHostRefusedError: (error: unknown) => boolean;
 }
 
+/**
+ * An error carries the view state it leads to (`errorKind`) and its reason:
+ * for `blocked` the sentence the view shows, otherwise a short technical
+ * reason that only runtime debug shows.
+ */
+export type SharedBrowserHostWaitError = {
+  kind: "error";
+  errorKind: Exclude<HostedBrowserErrorKind, "notice">;
+  reason: string;
+};
+
 export type SharedBrowserHostWaitResult =
   | { kind: "ready"; snapshot: SharedBrowserHostSnapshot }
-  | { kind: "error"; message: string }
+  | SharedBrowserHostWaitError
   | { kind: "cancelled" };
+
+function hostWaitError(errorKind: SharedBrowserHostWaitError["errorKind"], reason: string): SharedBrowserHostWaitError {
+  return { kind: "error", errorKind, reason };
+}
 
 type Sleep = (ms: number, signal?: AbortSignal) => Promise<boolean>;
 
@@ -150,17 +166,20 @@ async function requestWithTimeout<T>(
 /**
  * Waits until Instafy's browser on the space's machine is ready, starting it
  * when it is idle or has failed and the person may control the browser.
+ * With `mayStart: false` (an automatic reconnect) it never starts it: an idle
+ * browser is off, a failed one did not open.
  *
  * | state                            | action                                   |
  * |----------------------------------|------------------------------------------|
  * | ready                            | done                                     |
  * | idle, failed                     | start (control) or ask a builder (view)  |
  * | starting, stopping, unknown      | poll again                               |
- * | poisoned                         | error: the machine must restart          |
- * | no host (the machine's own 404)  | error: not available                     |
- * | policy off (`browser_host_policy_off`) | error: turned off for this space   |
+ * | poisoned                         | blocked: the machine must restart        |
+ * | no host (the machine's own 404)  | off                                      |
+ * | policy off (`browser_host_policy_off`) | blocked: turned off for this space |
  *
- * A start refused with `browser_host_stopping` is asked again after a second.
+ * A start refused with `browser_host_stopping` or `machine_stopping` is asked
+ * again after a second, within the start budget.
  * Gateway errors (502, 503, 504), any other 404 (the controller or something
  * in front of it, logged as `browser-session:host-404`), token failures and a
  * read or start that has not answered in ten seconds are polled through; the
@@ -171,6 +190,8 @@ export async function waitForSharedBrowserHostReady(params: {
   runtimeId: string;
   browserSessionId: string;
   canControl: boolean;
+  /** False for an automatic reconnect: it never starts the browser. */
+  mayStart?: boolean;
   client: SharedBrowserHostClient;
   signal?: AbortSignal;
   timeoutMs?: number;
@@ -214,7 +235,7 @@ export async function waitForSharedBrowserHostReady(params: {
     const code = hostNotFoundCode(error);
     if (code === undefined) return null;
     if (code === POLICY_OFF_CODE) {
-      return { kind: "error", message: SHARED_BROWSER_HOST_COPY.policyOff };
+      return hostWaitError("blocked", SHARED_BROWSER_HOST_COPY.policyOff);
     }
     runtimeDebugLog("browser-session:host-404", { status: 404, code });
     return "poll";
@@ -232,28 +253,33 @@ export async function waitForSharedBrowserHostReady(params: {
         if (!(await pause(pollMs))) break;
         continue;
       }
-      return { kind: "error", message: error instanceof Error ? error.message : String(error) };
+      return hostWaitError("failed", error instanceof Error ? error.message : String(error));
     }
     if (cancelled()) break;
     if (!snapshot) {
-      return { kind: "error", message: SHARED_BROWSER_HOST_COPY.notAvailable };
+      return hostWaitError("off", "no browser host on this machine");
     }
     if (snapshot.state === "ready") {
       return { kind: "ready", snapshot };
     }
     if (snapshot.state === "poisoned") {
-      return { kind: "error", message: SHARED_BROWSER_HOST_COPY.poisoned };
+      return hostWaitError("blocked", SHARED_BROWSER_HOST_COPY.poisoned);
     }
     if (snapshot.state === "idle" || snapshot.state === "failed") {
       if (!params.canControl) {
-        return { kind: "error", message: SHARED_BROWSER_HOST_COPY.askBuilder };
+        return hostWaitError("blocked", SHARED_BROWSER_HOST_COPY.askBuilder);
+      }
+      if (params.mayStart === false) {
+        return snapshot.state === "idle"
+          ? hostWaitError("off", "browser host idle; a reconnect does not start it")
+          : hostWaitError("failed", `browser host failed${snapshot.failure ? ` (${snapshot.failure})` : ""}`);
       }
       // A failure after a start asked for here is this wait's answer.
       if (snapshot.state === "failed" && startRequests > 0) {
-        return { kind: "error", message: SHARED_BROWSER_HOST_COPY.didNotStart };
+        return hostWaitError("failed", `browser host failed after a start${snapshot.failure ? ` (${snapshot.failure})` : ""}`);
       }
       if (startRequests >= SHARED_BROWSER_HOST_MAX_START_REQUESTS) {
-        return { kind: "error", message: SHARED_BROWSER_HOST_COPY.didNotStart };
+        return hostWaitError("failed", "browser host start budget used");
       }
       startRequests += 1;
       try {
@@ -266,22 +292,21 @@ export async function waitForSharedBrowserHostReady(params: {
         if (cancelled()) break;
         if (params.client.isHostRefusedError(error)) {
           const code = (error as { code?: unknown }).code;
-          if (code === "browser_host_stopping") {
+          // A browser or machine that is stopping is still opening: asked
+          // again shortly, within the start budget.
+          if (code === "browser_host_stopping" || code === "machine_stopping") {
             if (!(await pause(stoppingRetryMs))) break;
             continue;
           }
           if (code === "browser_host_poisoned") {
-            return { kind: "error", message: SHARED_BROWSER_HOST_COPY.poisoned };
+            return hostWaitError("blocked", SHARED_BROWSER_HOST_COPY.poisoned);
           }
-          if (code === "machine_stopping") {
-            return { kind: "error", message: SHARED_BROWSER_HOST_COPY.machineStopping };
-          }
-          return { kind: "error", message: SHARED_BROWSER_HOST_COPY.didNotStart };
+          return hostWaitError("failed", `browser host start refused (${typeof code === "string" ? code : "no code"})`);
         }
         const notFound = notFoundOutcome(error);
         if (notFound && notFound !== "poll") return notFound;
         if (!notFound && !params.client.isUnavailableError(error) && !isTokenError(error) && !isRequestTimeout(error)) {
-          return { kind: "error", message: error instanceof Error ? error.message : String(error) };
+          return hostWaitError("failed", error instanceof Error ? error.message : String(error));
         }
       }
     }
@@ -291,7 +316,7 @@ export async function waitForSharedBrowserHostReady(params: {
   if (cancelled()) {
     return { kind: "cancelled" };
   }
-  return { kind: "error", message: SHARED_BROWSER_HOST_COPY.didNotStart };
+  return hostWaitError("failed", "browser host wait timed out");
 }
 
 /**
@@ -338,7 +363,7 @@ export function liveSharedBrowserHostCandidate(
 export type SpaceMachineColdStartResult =
   | { kind: "attach"; candidate: BrowserRuntimeCandidate }
   | { kind: "legacy" }
-  | { kind: "error"; message: string }
+  | { kind: "error"; errorKind: "machine"; reason: string }
   | { kind: "cancelled" };
 
 /**
@@ -375,7 +400,7 @@ export async function startSpaceMachineForBrowser(params: {
     ensured = false;
   }
   if (cancelled()) return { kind: "cancelled" };
-  if (!ensured) return { kind: "error", message: SHARED_BROWSER_HOST_COPY.machineDidNotStart };
+  if (!ensured) return { kind: "error", errorKind: "machine", reason: "space machine ensure failed" };
 
   while (!cancelled() && now() < deadline) {
     const status = await params.fetchStatus({
@@ -412,5 +437,5 @@ export async function startSpaceMachineForBrowser(params: {
     if (!(await sleep(Math.min(pollMs, remaining), params.signal))) break;
   }
   if (cancelled()) return { kind: "cancelled" };
-  return { kind: "error", message: SHARED_BROWSER_HOST_COPY.machineDidNotStart };
+  return { kind: "error", errorKind: "machine", reason: "space machine did not come up in time" };
 }

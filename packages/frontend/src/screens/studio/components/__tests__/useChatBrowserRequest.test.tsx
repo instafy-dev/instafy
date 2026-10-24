@@ -384,7 +384,7 @@ describe("Pressing a card for Instafy's browser on the conversation's machine", 
     // The view started it again, and that new run failed too.
     reading = host({ state: "failed", generation: "gen-2", failure: "chromium_exited" });
     await advance(3_100);
-    expect(attempt.settled()).toMatchObject({ message: SHARED_BROWSER_HOST_COPY.didNotStart });
+    expect(attempt.settled()).toMatchObject({ message: SHARED_BROWSER_HOST_COPY.didNotOpen });
   });
 
   it("waits for the view to start the browser again instead of taking the run that failed before as its answer", async () => {
@@ -422,7 +422,7 @@ describe("Pressing a card for Instafy's browser on the conversation's machine", 
   });
 
   it.each([
-    ["its own plain words", SHARED_BROWSER_HOST_COPY.machineStopping, SHARED_BROWSER_HOST_COPY.machineStopping],
+    ["its own plain words", SHARED_BROWSER_HOST_COPY.off, SHARED_BROWSER_HOST_COPY.off],
     ["plain words in place of a technical one", "Browser session is unavailable (origin token request failed).", BROWSER_REQUEST_COPY.browserFailed],
   ] as const)("fails as soon as the browser view shows an error, with %s", async (_name, viewMessage, cardMessage) => {
     value.open = false; value.sharedRuntimeId = null;
@@ -437,7 +437,7 @@ describe("Pressing a card for Instafy's browser on the conversation's machine", 
   });
 
   it("does not take an error the view showed before the press as its answer", async () => {
-    value.sharedError = { message: SHARED_BROWSER_HOST_COPY.didNotStart, atMs: Date.now() - 1_000 };
+    value.sharedError = { message: SHARED_BROWSER_HOST_COPY.didNotOpen, atMs: Date.now() - 1_000 };
     await render();
     const attempt = await begin();
     await advance(10_000);
@@ -454,7 +454,7 @@ describe("Pressing a card for Instafy's browser on the conversation's machine", 
     await advance(119_000);
     expect(attempt.settled()).toBeUndefined();
     await advance(1_200);
-    expect(attempt.settled()).toMatchObject({ message: SHARED_BROWSER_HOST_COPY.didNotStart });
+    expect(attempt.settled()).toMatchObject({ message: SHARED_BROWSER_HOST_COPY.didNotOpen });
   });
 });
 

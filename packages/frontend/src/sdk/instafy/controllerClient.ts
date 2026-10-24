@@ -91,6 +91,7 @@ import {
   renewWorkspaceLease,
   requestDesktopRuntime,
   requestOriginAccessToken,
+  requestOriginAccessTokenResult,
   requestProjectConversationTitle,
   requestProjectEditorInlineCompletion,
   dispatchControllerProviderResourceRead,
@@ -352,6 +353,8 @@ export const controllerClient = createControllerClient({
       fetchSummary: fetchOriginSummary,
       fetchSummaryResult: fetchOriginSummaryResult,
       requestAccessToken: requestOriginAccessToken,
+      /** The same grant, keeping the controller's status and code on failure. */
+      requestAccessTokenResult: requestOriginAccessTokenResult,
       applyChanges: applyWorkspaceChangesViaOrigin,
     }),
   }),
