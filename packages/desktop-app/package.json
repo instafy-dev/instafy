@@ -40,7 +40,7 @@
     "jsdom": "26.1.0",
     "tsup": "^8.5.1",
     "typescript": "^5.4.5",
-    "undici": "6.28.1"
+    "undici": "6.29.1"
   },
   "build": {
     "appId": "dev.instafy.studio",

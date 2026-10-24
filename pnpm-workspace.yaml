@@ -52,7 +52,7 @@ overrides:
   # unscoped, so it also caps any future vite/tsup that wants rollup >= 4.63.
   rollup: '~4.62.5'
   # undici advisories (5 alerts) — @electron/get pins an old major.
-  '@electron/get>undici': '^7.29.1'
+  '@electron/get>undici': '^7.30.1'
   # ws DoS (1 alert) — realtime-js in the frontend; not loaded at run time.
   '@supabase/realtime-js>ws': '^8.21.3'
   # diff ReDoS (1 alert, ts-node in build tooling).
