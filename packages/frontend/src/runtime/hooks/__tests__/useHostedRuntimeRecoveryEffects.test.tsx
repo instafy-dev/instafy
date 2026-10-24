@@ -399,8 +399,8 @@ describe("useHostedRuntimeRecoveryEffects after a stop", () => {
     expect(isIdlePaused(PROJECT_ID)).toBe(false);
   });
 
-  it.each(["oom_killed", "credits_exhausted"])(
-    "holds a %s stop like an idle pause",
+  it.each(["idle", "oom_killed", "credits_exhausted"])(
+    "holds a stop with reason %s like an idle pause",
     async (reason) => {
       const idle = { preferred: false, hasPendingProjectWork: false };
       await render({ ...idle, stopped: false });
@@ -444,7 +444,7 @@ describe("useHostedRuntimeRecoveryEffects after a stop", () => {
     const idle = { preferred: false, hasPendingProjectWork: false };
     await render({ ...idle, stopped: false });
     await publishStop({ reason: "idle" });
-    // StudioLayout pauses the space when it explains the idle stop.
+    // The stop notice pauses the space too (useRuntimeStopNotice).
     await act(async () => {
       markIdlePaused(PROJECT_ID);
     });
@@ -454,6 +454,33 @@ describe("useHostedRuntimeRecoveryEffects after a stop", () => {
     expect(ensureHostedRuntime).not.toHaveBeenCalled();
     expect(isIdlePaused(PROJECT_ID)).toBe(true);
   });
+
+  it.each([
+    ["fallback", false],
+    ["preferred", true],
+  ])(
+    "holds every idle stop of the same machine by itself (%s runtime)",
+    async (_label, preferred) => {
+      const idle = { preferred, hasPendingProjectWork: false };
+      await render({ ...idle, stopped: false });
+      for (let stop = 1; stop <= 3; stop += 1) {
+        await publishStop({ reason: "idle" });
+        await render({ ...idle, stopped: true });
+        await publishOriginExpired();
+        await render({ ...idle, stopped: true });
+
+        expect(ensureHostedRuntime).toHaveBeenCalledTimes(stop - 1);
+        expect(isIdlePaused(PROJECT_ID)).toBe(true);
+
+        // Writing in the chat lifts the pause and the machine starts again.
+        await act(async () => {
+          clearIdlePaused(PROJECT_ID);
+        });
+        expect(ensureHostedRuntime).toHaveBeenCalledTimes(stop);
+        await render({ ...idle, stopped: false });
+      }
+    },
+  );
 
   it.each([
     ["Stop", () => markManualStop(PROJECT_ID)],

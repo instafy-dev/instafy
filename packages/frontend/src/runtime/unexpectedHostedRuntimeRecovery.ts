@@ -12,17 +12,14 @@ const USER_RUNTIME_STOP_REASONS = new Set([
   "browser_session_runtime_limit_takeover",
 ]);
 
-// Platform stops that a restart would hit again straight away: no credits,
-// or the same memory wall.
-const PLATFORM_HOLD_STOP_REASONS = new Set(["credits_exhausted", "oom_killed"]);
+// Deliberate platform stops: auto-restarting would either undo the pause
+// (idle), immediately die again (credits_exhausted), or run straight back
+// into the same memory wall (oom_killed). The machine wakes via the normal
+// ensure path when the user writes in the chat, sends or presses Start.
+const PLATFORM_HOLD_STOP_REASONS = new Set(["idle", "credits_exhausted", "oom_killed"]);
 
 const MANUAL_RUNTIME_STOP_REASONS = new Set([
   ...USER_RUNTIME_STOP_REASONS,
-  // Deliberate platform stops: auto-restarting would either undo the pause
-  // (idle), immediately die again (credits_exhausted), or run straight back
-  // into the same memory wall (oom_killed). The machine wakes via the normal
-  // ensure path when the user writes in the chat, sends or presses Start.
-  "idle",
   ...PLATFORM_HOLD_STOP_REASONS,
 ]);
 
@@ -69,11 +66,12 @@ export function isPersonRuntimeStopReason(reason: string | null | undefined): bo
 /**
  * The hold a stop puts on its space in a tab that did not make it, so that
  * tab does not start the machine again: a person's stop holds like Stop does
- * in the tab that pressed it, a platform stop like an idle pause. Idle and
- * reclaim stops are held where they are explained, and any other reason
- * leaves recovery to decide. Only platform stops are published to other tabs
- * today; the controller records a person's stop without a runtime.stopped
- * event, so "manual_stop" applies once it sends one.
+ * in the tab that pressed it, a platform stop (idle, credits, memory) like an
+ * idle pause, every time it comes. Reclaim stops are held where they are
+ * handled, and any other reason leaves recovery to decide. Only platform
+ * stops are published to other tabs today; the controller records a person's
+ * stop without a runtime.stopped event, so "manual_stop" applies once it
+ * sends one.
  */
 export function resolveRuntimeStopHold(
   reason: string | null | undefined,

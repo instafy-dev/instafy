@@ -227,10 +227,11 @@ describe("unexpectedHostedRuntimeRecovery", () => {
     ]) {
       expect(resolveRuntimeStopHold(reason)).toBe("manual_stop");
     }
-    expect(resolveRuntimeStopHold("oom_killed")).toBe("idle_pause");
-    expect(resolveRuntimeStopHold("credits_exhausted")).toBe("idle_pause");
-    // Held where they are explained, or left to recovery.
-    for (const reason of ["idle", "runtime_limit_reclaim", "heartbeat_timeout", "", null, undefined]) {
+    for (const reason of ["idle", " Idle ", "oom_killed", "credits_exhausted"]) {
+      expect(resolveRuntimeStopHold(reason)).toBe("idle_pause");
+    }
+    // Held where they are handled, or left to recovery.
+    for (const reason of ["runtime_limit_reclaim", "heartbeat_timeout", "", null, undefined]) {
       expect(resolveRuntimeStopHold(reason)).toBeNull();
     }
   });

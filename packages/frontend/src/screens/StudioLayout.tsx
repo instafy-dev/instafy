@@ -23,11 +23,9 @@ import { useHomeReturn } from "../navigation/useHomeReturn";
 import { useRouteOwnedWorkspaceDrawer } from "./useRouteOwnedWorkspaceDrawer";
 import { ChatLines, Clock, Coins, Cpu, Cube, GitBranch, Globe, Group, Lock, Page, Puzzle, Search, SidebarCollapse, SidebarExpand, User, Xmark } from "iconoir-react";
 import { fetchCreditPolicy } from "../credits/creditService";
-import { markIdlePaused } from "../runtime/idlePauseRegistry";
 import { useComposerIntentWake } from "../runtime/hooks/useComposerIntentWake";
-import { isRuntimeLimitReclaimStopReason } from "../runtime/unexpectedHostedRuntimeRecovery";
+import { useRuntimeStopNotice } from "../runtime/hooks/useRuntimeStopNotice";
 import { useGatedInterval } from "../runtime/pollingGate";
-import { setRuntimeSizePreference } from "../runtime/runtimeSizePreference";
 import { isHostedRuntime, runtimeEntryIsReady } from "../runtime/utils/runtimeEntry";
 import { Button, IconButton } from "../components/Button";
 import { ProjectAccessRecoveryBanner, StudioStartupGate } from "./StudioStartup";
@@ -912,116 +910,21 @@ function StudioLayoutInner() {
     );
   }, [creditIndicatorTone, creditBilling.creditBalance, openPanelTab, showStatus]);
 
-  // Deliberate runtime pauses (idle, credits) get an explained notice instead
-  // of looking like a crash. Auto-restart is suppressed for these reasons in
-  // unexpectedHostedRuntimeRecovery; the machine wakes when the person writes
-  // in the chat, sends or presses Start.
-  const runtimeStopNoticeRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-    const handleStopNotice = (event: Event) => {
-      const custom = event as CustomEvent<{
-        projectId?: string | null;
-        kind?: string | null;
-        data?: Record<string, unknown> | null;
-      }>;
-      if (custom.detail?.kind !== "runtime.stopped") {
-        return;
-      }
-      const projectId =
-        typeof custom.detail?.projectId === "string" ? custom.detail.projectId.trim() : "";
-      if (!projectId || projectId !== activeProjectId) {
-        return;
-      }
-      const reason =
-        custom.detail?.data && typeof custom.detail.data.reason === "string"
-          ? custom.detail.data.reason.trim().toLowerCase()
-          : "";
-      const reclaimed = isRuntimeLimitReclaimStopReason(reason);
-      if (
-        reason !== "idle" &&
-        reason !== "credits_exhausted" &&
-        reason !== "oom_killed" &&
-        !reclaimed
-      ) {
-        return;
-      }
-      const runtimeId =
-        custom.detail?.data && typeof custom.detail.data.runtimeId === "string"
-          ? custom.detail.data.runtimeId
-          : "";
-      const noticeKey = `${runtimeId}:${reason}`;
-      if (runtimeStopNoticeRef.current === noticeKey) {
-        return;
-      }
-      runtimeStopNoticeRef.current = noticeKey;
-      if (reclaimed) {
-        // Whether to hold this machine is the recovery listener's call (it
-        // knows about this tab's queued work); this only explains the stop.
-        showStatus(
-          "This space's cloud runtime was paused so another space in your team could use it. Your files are kept, and it starts again when you write in the chat and a runtime is free.",
-          "info",
-          8000,
-          { id: "runtime-paused-reclaimed", forceVisible: true },
-        );
-      } else if (reason === "idle") {
-        markIdlePaused(projectId);
-        showStatus(
-          "Hosted machine paused after inactivity. Your files and caches are kept, and it wakes when you write in the chat.",
-          "info",
-          8000,
-          { id: "runtime-paused-idle", forceVisible: true },
-        );
-      } else if (reason === "oom_killed") {
-        const oomCount =
-          custom.detail?.data && typeof custom.detail.data.oomCount === "number"
-            ? custom.detail.data.oomCount
-            : 1;
-        showStatus(
-          oomCount >= 2
-            ? "The hosted machine ran out of memory again (4 GB limit). Boost it to 8 GB (2× credits) or connect your own machine for heavy builds."
-            : "The hosted machine ran out of memory (4 GB limit) and stopped. Boost it to 8 GB (2× credits) if this keeps happening.",
-          "error",
-          12000,
-          {
-            id: "runtime-oom-killed",
-            actionLabel: "Boost machine",
-            onAction: () => {
-              setRuntimeSizePreference(projectId, "boost");
-              showStatus(
-                "Boost set (4 CPU · 8 GB · 2× credits). It applies the next time the machine starts.",
-                "success",
-                6000,
-                { id: "runtime-size-change" },
-              );
-            },
-            forceVisible: true,
-          },
-        );
-      } else {
-        showStatus(
-          "Hosted machine paused: this team is out of credits for today. They refill at 00:00 UTC.",
-          "error",
-          10000,
-          {
-            id: "runtime-paused-credits",
-            actionLabel: "Open credits",
-            onAction: () => openPanelTab("credits"),
-            forceVisible: true,
-          },
-        );
-      }
-    };
-    window.addEventListener("instafy:runtime-lifecycle-event", handleStopNotice as EventListener);
-    return () => {
-      window.removeEventListener(
-        "instafy:runtime-lifecycle-event",
-        handleStopNotice as EventListener,
-      );
-    };
-  }, [activeProjectId, openPanelTab, showStatus]);
+  // Whether a hosted machine in this space is up.
+  const hostedRuntimeOnline = useMemo(
+    () =>
+      runtimeStatuses.some(
+        (entry) => Boolean(entry) && isHostedRuntime(entry) && runtimeEntryIsReady(entry),
+      ),
+    [runtimeStatuses],
+  );
+
+  useRuntimeStopNotice({
+    activeProjectId,
+    hostedRuntimeReady: hostedRuntimeOnline,
+    showStatus,
+    openPanelTab,
+  });
 
   // Clicking into or typing in the composer is what starts a held or paused
   // machine. Clicks in the navigation (choosing another space, the Machines
@@ -1034,13 +937,6 @@ function StudioLayoutInner() {
   // at credit exhaustion never comes as a surprise.
   const hostedBurnPerMinuteRef = useRef<{ projectId: string; perMinute: number } | null>(null);
   const runwayWarnedRef = useRef(false);
-  const hostedRuntimeOnline = useMemo(
-    () =>
-      runtimeStatuses.some(
-        (entry) => Boolean(entry) && isHostedRuntime(entry) && runtimeEntryIsReady(entry),
-      ),
-    [runtimeStatuses],
-  );
   useEffect(() => {
     if (!creditsControllerEnabled || !activeProjectId || !hostedRuntimeOnline) {
       return;

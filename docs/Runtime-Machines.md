@@ -117,8 +117,9 @@ window. The in-memory tracker is deliberately NOT consulted (it is refreshed
 by sweep bookkeeping and dies on restart). If `project_user_activity` is not
 migrated yet the sweep skips entirely — fail safe, never stop blind.
 
-Pause semantics: the frontend marks the project idle-paused
-(`runtime/idlePauseRegistry.ts`), which gates auto-ensure — otherwise the
+Pause semantics: on every idle stop, not only the first one a tab sees, the
+frontend marks the project idle-paused (`runtime/idlePauseRegistry.ts`) and
+shows the paused notice. The pause gates auto-ensure. Otherwise the
 state-driven ensure would relaunch the machine seconds after every pause.
 Clicking into or typing in the chat composer (`#studio-chat-input`) clears
 the pause and the machine wakes automatically; Send and an explicit Start
@@ -161,8 +162,9 @@ follow a stop the controller committed, and a failed stop lifts it only when
 the controller refused the request with a 4xx (see "Cleanup after a failed
 release (502)" below).
 
-A platform stop holds every open tab: `credits_exhausted` and `oom_killed`
-arrive as `runtime.stopped` and hold like an idle pause. A Stop, Remove or
+A platform stop holds every open tab, each time it comes: `idle`,
+`credits_exhausted` and `oom_killed` arrive as `runtime.stopped` and hold like
+an idle pause, also a later stop of the same machine. A Stop, Remove or
 takeover made in another tab or device arrives as `runtime.stopped` too, with
 its reason (`user_stop`, `user_remove`, `runtime_limit_takeover` or
 `browser_session_runtime_limit_takeover`), its `runtimeId` and

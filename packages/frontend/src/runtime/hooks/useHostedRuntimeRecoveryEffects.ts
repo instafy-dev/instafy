@@ -376,12 +376,14 @@ export function useHostedRuntimeRecoveryEffects({
           return;
         }
         // A stop this tab did not make. Without a hold it would see no ready
-        // machine and start it again. The platform stops (credits_exhausted,
-        // oom_killed) arrive here today. A Stop, Remove or takeover made in
-        // another tab or device does not yet: the controller records those
-        // without publishing runtime.stopped, so until it does the automatic
-        // starts find such a stop by the turn it put back in the queue, and
-        // a stop of a machine with no turn can still be undone elsewhere.
+        // machine and start it again. The platform stops (idle,
+        // credits_exhausted, oom_killed) arrive here today, each one held,
+        // also a later idle stop of the same machine. A Stop, Remove or
+        // takeover made in another tab or device does not yet: the
+        // controller records those without publishing runtime.stopped, so
+        // until it does the automatic starts find such a stop by the turn it
+        // put back in the queue, and a stop of a machine with no turn can
+        // still be undone elsewhere.
         const hold = resolveRuntimeStopHold(reason);
         if (hold === "manual_stop") {
           // Only the last live hosted machine means "no machine", as in the
