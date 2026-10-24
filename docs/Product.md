@@ -463,6 +463,8 @@ without remounting the browser or composer on a resize.
 Below the desktop navigation breakpoint, Chat, Browser and file view tabs sit directly above
 the composer. They share its measured safe-area/keyboard placement and remain reachable when
 scrolling; a chat with no other views adds no row. Wide layouts keep the view bar at the top.
+The composer view strip joins the input's top toolbar and fits its tab labels instead of stretching across the input. Additional
+views scroll within the available pane width; each tab retains its 44px minimum touch height.
 Conversation-owned screens without a composer retain their header view bar.
 Chat and Browser share one conversation composer and draft. In a single Browser view, AI
 requests use the current browser context; selecting Chat returns to the conversation history.
@@ -853,6 +855,20 @@ The composer exposes three one-shot actions instead of a persistent delivery mod
 `Shift+Enter` always inserts a newline. When no matching agent is active, ordinary `Enter` sends a
 new turn. A queued message's edit action is named **Edit**, reserving **Steer** for genuine active-
 turn input.
+
+Queued messages start collapsed behind **Queued N** in the composer's top toolbar. Opening it
+shows pending message bubbles above the right side of the composer; long queues scroll within
+that overlay without moving the input. The existing Edit, Send now, Remove and drag/keyboard
+reorder controls remain available. These are pending messages, not sent transcript bubbles.
+Stashed drafts remain a separate, private collection.
+
+Editing a queued message requires an empty composer without image attachments; an existing
+draft must be stashed or cleared first. Save and Cancel restore the message's original place
+among the remaining queue entries. While editing, the main composer action and desktop Enter
+save the queue edit; only the explicit **Send now** action dispatches it immediately.
+The controller restores server entries atomically using
+their original ID and position, so an edited message cannot briefly dispatch from the tail.
+If restoration fails, the edit remains available for retry rather than creating a second entry.
 
 ## Scope Guardrails
 - No preview/publish UI.

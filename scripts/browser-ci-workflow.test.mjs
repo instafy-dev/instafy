@@ -238,7 +238,7 @@ test("the required browser UI job includes the real co-browsing protocol fixture
 
 test("the expanded browser UI inventory has a bounded suite budget without relaxing test gates", () => {
   const config = read("packages/frontend/playwright.ci-ui.config.ts");
-  assert.match(config, /^\s+globalTimeout: 360_000,$/m);
+  assert.match(config, /^\s+globalTimeout: 600_000,$/m);
   assert.match(config, /^\s+timeout: 30_000,$/m);
   assert.match(config, /^\s+workers: 1,$/m);
   assert.match(config, /^\s+retries: 0,$/m);

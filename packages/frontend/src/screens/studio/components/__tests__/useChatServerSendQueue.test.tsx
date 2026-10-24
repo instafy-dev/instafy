@@ -9,6 +9,7 @@ const listSendQueueMock = vi.hoisted(() => vi.fn());
 const enqueueSendQueueEntryMock = vi.hoisted(() => vi.fn());
 const cancelSendQueueEntryMock = vi.hoisted(() => vi.fn());
 const dispatchSendQueueEntryNowMock = vi.hoisted(() => vi.fn());
+const restoreSendQueueEntryMock = vi.hoisted(() => vi.fn());
 const reorderSendQueueEntryMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../../../../services/runtimeController/sendQueue", () => ({
@@ -18,6 +19,7 @@ vi.mock("../../../../services/runtimeController/sendQueue", () => ({
   cancelSendQueueEntry: cancelSendQueueEntryMock,
   dispatchSendQueueEntryNow: dispatchSendQueueEntryNowMock,
   reorderSendQueueEntry: reorderSendQueueEntryMock,
+  restoreSendQueueEntry: restoreSendQueueEntryMock,
 }));
 
 import type { ControllerSendQueueEntry } from "../../../../services/runtimeController/sendQueue";
@@ -71,6 +73,7 @@ describe("useChatServerSendQueue", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
+    restoreSendQueueEntryMock.mockReset();
     listSendQueueMock.mockReset();
     listSendQueueMock.mockResolvedValue([]);
     enqueueSendQueueEntryMock.mockReset();
@@ -98,6 +101,35 @@ describe("useChatServerSendQueue", () => {
     });
     return resultRef;
   }
+
+  it("restores an edited server row between its existing neighbours without enqueueing or reordering", async () => {
+    const first = createEntry({ id: "first", queuePosition: 10 });
+    const last = createEntry({ id: "last", queuePosition: 30 });
+    const middle = createEntry({ id: "middle", queuePosition: 20 });
+    listSendQueueMock.mockResolvedValue([first, last]);
+    restoreSendQueueEntryMock.mockResolvedValue({ ok: true, entry: middle });
+    const result = await renderHook("controller-conversation-1");
+    cancelSendQueueEntryMock.mockResolvedValue({ ok: true, entry: { ...middle, updatedAt: "2026-10-23T12:00:00.123456Z" } });
+    await act(async () => result.current?.removeServerSendQueueEntry(middle.id));
+    await act(async () => {
+      expect(await result.current?.restoreServerSendQueueItem(middle.id, { message: "Edited middle", targetAgentHandles: ["octo"] })).toBe(true);
+    });
+    expect(result.current?.serverSendQueueItems.map((entry) => entry.id)).toEqual(["first", "middle", "last"]);
+    expect(restoreSendQueueEntryMock).toHaveBeenCalledWith(expect.objectContaining({ expectedUpdatedAt: "2026-10-23T12:00:00.123456Z" }));
+    expect(enqueueSendQueueEntryMock).not.toHaveBeenCalled();
+    expect(reorderSendQueueEntryMock).not.toHaveBeenCalled();
+  });
+
+  it("does not put an already-dispatched restore retry into the pending queue", async () => {
+    restoreSendQueueEntryMock.mockResolvedValue({ ok: true, entry: null });
+    const result = await renderHook("controller-conversation-1");
+    cancelSendQueueEntryMock.mockResolvedValue({ ok: true, entry: createEntry({ updatedAt: "2026-10-23T12:00:00.123456Z" }) });
+    await act(async () => result.current?.removeServerSendQueueEntry("entry-1"));
+    await act(async () => {
+      expect(await result.current?.restoreServerSendQueueItem("entry-1", { message: "Already sent", targetAgentHandles: ["octo"] })).toBe(true);
+    });
+    expect(result.current?.serverSendQueueItems).toEqual([]);
+  });
 
   it("hydrates the server queue with the initial GET", async () => {
     listSendQueueMock.mockResolvedValue([createEntry()]);

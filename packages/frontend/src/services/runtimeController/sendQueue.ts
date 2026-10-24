@@ -26,6 +26,7 @@ export interface ControllerSendQueueEntry {
   errorMessage: string | null;
   createdAt: string;
   dispatchedAt: string | null;
+  updatedAt?: string;
 }
 
 export interface ControllerSendQueueCancelResult {
@@ -85,6 +86,7 @@ function normalizeSendQueueEntry(value: unknown): ControllerSendQueueEntry | nul
     errorMessage: typeof record.errorMessage === "string" ? record.errorMessage : null,
     createdAt: typeof record.createdAt === "string" ? record.createdAt : new Date().toISOString(),
     dispatchedAt: typeof record.dispatchedAt === "string" ? record.dispatchedAt : null,
+    ...(typeof record.updatedAt === "string" ? { updatedAt: record.updatedAt } : {}),
   };
 }
 
@@ -307,6 +309,46 @@ export async function cancelSendQueueEntry(params: {
     ok: data?.ok === true,
     entry: normalizeSendQueueEntry(data?.entry),
   };
+}
+
+export async function restoreSendQueueEntry(params: {
+  conversationId: string;
+  entryId: string;
+  message: Record<string, unknown>;
+  targetAgentHandles: string[];
+  status: ControllerSendQueueEntryStatus;
+  expectedUpdatedAt: string;
+  accessToken?: string | null;
+}): Promise<ControllerSendQueueCancelResult | null> {
+  if (!runtimeControllerEnabled) {
+    return null;
+  }
+  const requestContext = await resolveControllerRequestContext(params.accessToken ?? null);
+  if (!requestContext.accessToken) {
+    return null;
+  }
+  const response = await fetch(
+    `${requestContext.baseUrl}/conversations/${encodeURIComponent(params.conversationId)}/send-queue/${encodeURIComponent(params.entryId)}/restore`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${requestContext.accessToken}` },
+      body: JSON.stringify({ message: safeJson(params.message) ?? {}, targetAgentHandles: params.targetAgentHandles, status: params.status, expectedUpdatedAt: params.expectedUpdatedAt }),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(await readControllerError(response, "send queue restore failed", requestContext));
+  }
+  const data = (await response.json()) as { ok?: unknown; entry?: unknown } | null;
+  const rawEntry = data?.entry as Record<string, unknown> | null;
+  // A retried restore may already have dispatched. It is successful, but must
+  // not put a completed message back into the visible pending queue.
+  const pending = rawEntry?.status === "queued" || rawEntry?.status === "failed";
+  const completed = rawEntry?.status === "dispatched" || rawEntry?.status === "recorded";
+  const entry = normalizeSendQueueEntry(data?.entry);
+  if (data?.ok !== true || (!pending && !completed) || !entry || entry.id !== params.entryId || entry.conversationId !== params.conversationId) {
+    throw new Error("send queue restore returned an invalid response");
+  }
+  return { ok: true, entry: pending ? entry : null };
 }
 
 export async function dispatchSendQueueEntryNow(params: {

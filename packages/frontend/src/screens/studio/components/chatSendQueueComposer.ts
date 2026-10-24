@@ -2,6 +2,7 @@ import { $getRoot, createEditor } from "lexical";
 import { AssistantMentionNode } from "./chat-input/AssistantMentionNode";
 import { AgentMentionNode } from "./chat-input/AgentMentionNode";
 import { UserMentionNode } from "./chat-input/UserMentionNode";
+import { $applyChatInputText } from "./chat-input/chatInputState";
 import {
   buildBrowserSessionTargetedMessage,
   buildNewBrowserSessionMessage,
@@ -18,6 +19,35 @@ export type QueuedComposer = {
   browserPageTarget: BrowserSessionPageTarget | null;
   browserLaunchMode: "new_page" | null;
 };
+
+function createQueuedComposerEditor() {
+  return createEditor({
+    namespace: "queued-composer-validation",
+    nodes: [AssistantMentionNode, AgentMentionNode, UserMentionNode],
+    onError: (error) => { throw error; },
+  });
+}
+
+/** Null means plain text awaiting hydration, not a different user draft. */
+export function queuedComposerEditorStateMatches(
+  original: { message: string; editorState: string | null },
+  currentEditorState: string | null,
+): boolean {
+  if (original.editorState === currentEditorState) return true;
+  if (!currentEditorState) return false;
+  try {
+    const editor = createQueuedComposerEditor();
+    const current = editor.parseEditorState(currentEditorState).toJSON();
+    if (original.editorState) {
+      return JSON.stringify(editor.parseEditorState(original.editorState).toJSON()) === JSON.stringify(current);
+    }
+    editor.update(() => $applyChatInputText(original.message), { discrete: true });
+    return JSON.stringify(editor.getEditorState().toJSON()) === JSON.stringify(current);
+  } catch {
+    // Unknown or invalid state must never authorize deleting a draft.
+    return false;
+  }
+}
 
 /** Reuse the exact wrappers that were applied when this queue item was created. */
 export function queuedComposerDispatchMessage(composer: {
@@ -49,11 +79,7 @@ function validComposer(value: unknown, dispatchMessage: string): QueuedComposer 
   try {
     // Use the composer's registered node types and text semantics. A sidecar
     // must never replace an authoritative queued prompt with unrelated text.
-    const editor = createEditor({
-      namespace: "queued-composer-validation",
-      nodes: [AssistantMentionNode, AgentMentionNode, UserMentionNode],
-      onError: (error) => { throw error; },
-    });
+    const editor = createQueuedComposerEditor();
     const state = editor.parseEditorState(candidate.editorState);
     if (state.read(() => $getRoot().getTextContent()).trim() !== candidate.message.trim()) return null;
     return candidate;

@@ -3,8 +3,9 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { MutableRefObject } from "react";
+import { $createParagraphNode, $createTextNode, $getRoot, createEditor } from "lexical";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { QueuedChatSendItem } from "../chatSendQueueStorage";
+import type { EditingQueuedChatItem, QueuedChatSendItem } from "../chatSendQueueStorage";
 import { useChatSendQueueActions } from "../useChatSendQueueActions";
 import type { ServerQueuedChatSendItem } from "../useChatServerSendQueue";
 import { buildServerSendQueuePromptBody, mapServerSendQueueEntryToQueuedItem } from "../useChatServerSendQueue";
@@ -21,7 +22,7 @@ function hydratedPickerItem() {
   });
   return mapServerSendQueueEntryToQueuedItem({
     id: "entry-1", conversationId: "controller-conversation-1", status: "queued", queuePosition: 10, targetAgentHandles: ["octo"],
-    message: JSON.parse(JSON.stringify(body)), createdAt: new Date().toISOString(), dispatchedAt: null, errorMessage: null,
+    updatedAt: "2026-10-23T12:00:00.123456Z", message: JSON.parse(JSON.stringify(body)), createdAt: new Date().toISOString(), dispatchedAt: null, errorMessage: null,
   })!;
 }
 
@@ -41,6 +42,7 @@ function createServerItem(
     browserLaunchMode: null,
     metadata: null,
     source: "server",
+    updatedAt: "2026-10-23T12:00:00.123456Z",
     status: "queued",
     errorMessage: null,
     ...overrides,
@@ -61,6 +63,16 @@ function createLocalItem(overrides: Partial<QueuedChatSendItem> = {}): QueuedCha
   };
 }
 
+function plainEditorState(message: string, format = 0): string {
+  const editor = createEditor({ onError: (error) => { throw error; } });
+  editor.update(() => {
+    for (const line of message.split("\n")) {
+      $getRoot().append($createParagraphNode().append($createTextNode(line).setFormat(format)));
+    }
+  }, { discrete: true });
+  return JSON.stringify(editor.getEditorState().toJSON());
+}
+
 function createOptions(overrides: Partial<HookOptions> = {}): HookOptions {
   return {
     activeConversationControllerId: "controller-conversation-1",
@@ -68,7 +80,7 @@ function createOptions(overrides: Partial<HookOptions> = {}): HookOptions {
     chatSendQueue: [],
     dispatchServerSendQueueEntryNow: vi.fn(async () => true),
     editingQueuedItem: null,
-    enqueueServerSendQueueItem: vi.fn(async () => true),
+    restoreServerSendQueueItem: vi.fn(async () => true),
     focusInput: vi.fn(),
     hostedRuntimeEnsuring: false,
     imageAttachmentCount: 0,
@@ -138,6 +150,349 @@ describe("useChatSendQueueActions", () => {
     return resultRef;
   }
 
+  it.each([
+    { draft: "Unsent work", attachments: 0, uploading: false },
+    { draft: "", attachments: 1, uploading: false },
+    { draft: "", attachments: 0, uploading: true },
+  ])("protects the existing composer before editing a queued message: %j", async ({ draft, attachments, uploading }) => {
+    const options = createOptions({
+      serverSendQueueItems: [createServerItem()],
+      latestInputValueRef: { current: draft },
+      imageAttachmentCount: attachments,
+      sendingAttachment: uploading,
+    });
+    const result = await renderHook(options);
+    await act(async () => result.current?.handleEditQueuedMessage("entry-1"));
+    expect(options.removeServerSendQueueEntry).not.toHaveBeenCalled();
+    expect(options.onInputChange).not.toHaveBeenCalled();
+    expect(options.setEditingQueuedItem).not.toHaveBeenCalled();
+    expect(options.showStatus).toHaveBeenCalled();
+  });
+
+  it.each([true, false])("protects text typed while cancellation is pending (restore succeeds: %s)", async (restored) => {
+    let resolveRemoval!: (removed: boolean) => void;
+    const options = createOptions({
+      serverSendQueueItems: [createServerItem()],
+      removeServerSendQueueEntry: vi.fn(() => new Promise<boolean>((resolve) => { resolveRemoval = resolve; })),
+      restoreServerSendQueueItem: vi.fn(async () => restored),
+    });
+    const result = await renderHook(options);
+    let editing!: Promise<void>;
+    await act(async () => { editing = result.current!.handleEditQueuedMessage("entry-1"); });
+    expect(result.current?.queueEditPending).toBe(true);
+    await act(async () => result.current?.handleEditQueuedMessage("entry-1"));
+    expect(options.removeServerSendQueueEntry).toHaveBeenCalledTimes(1);
+    options.latestInputValueRef.current = "Typed during the request";
+    await act(async () => { resolveRemoval(true); await editing; });
+    expect(options.onInputChange).not.toHaveBeenCalled();
+    expect(options.restoreServerSendQueueItem).toHaveBeenCalledWith("entry-1", expect.objectContaining({ composerMessage: "Queued for Octo" }), "queued");
+    expect(options.latestInputValueRef.current).toBe("Typed during the request");
+    if (restored) {
+      const update = vi.mocked(options.setEditingQueuedItem).mock.calls[0][0];
+      expect(typeof update).toBe("function");
+      if (typeof update === "function") expect(update(null)).toBeNull();
+    } else {
+      expect(options.setEditingQueuedItem).toHaveBeenCalledWith(expect.objectContaining({ restoreOnly: true }));
+    }
+  });
+
+  it("does not cancel an entry on an older controller that cannot restore its slot", async () => {
+    const options = createOptions({ serverSendQueueItems: [createServerItem({ updatedAt: undefined })] });
+    const result = await renderHook(options);
+    await act(async () => result.current?.handleEditQueuedMessage("entry-1"));
+    expect(options.removeServerSendQueueEntry).not.toHaveBeenCalled();
+    expect(options.onInputChange).not.toHaveBeenCalled();
+    expect(options.showStatus).toHaveBeenCalledWith(expect.stringContaining("Update the controller"), "info", 5000);
+  });
+
+  it("offers recovery on returning after switching chats during a failed restore", async () => {
+    let finishRemoval!: (removed: boolean) => void;
+    const options = createOptions({
+      serverSendQueueItems: [createServerItem()],
+      removeServerSendQueueEntry: vi.fn(() => new Promise<boolean>((resolve) => { finishRemoval = resolve; })),
+      restoreServerSendQueueItem: vi.fn(async () => false),
+    });
+    const result = await renderHook(options);
+    let edit!: Promise<void>;
+    await act(async () => { edit = result.current!.handleEditQueuedMessage("entry-1"); });
+    await renderHook({ ...options, activeConversationId: "other-conversation" });
+    await act(async () => { finishRemoval(true); await edit; });
+    expect(options.onInputChange).not.toHaveBeenCalled();
+    expect(options.setEditingQueuedItem).not.toHaveBeenCalled();
+    await renderHook(options);
+    expect(options.setEditingQueuedItem).toHaveBeenCalledWith(expect.objectContaining({
+      item: expect.objectContaining({ id: "entry-1" }), restoreOnly: true,
+    }));
+  });
+
+  it("clears recovery if the user returns to the chat before automatic restore succeeds", async () => {
+    let finishRemoval!: (removed: boolean) => void;
+    let finishRestore!: (restored: boolean) => void;
+    let recovery: EditingQueuedChatItem | null = null;
+    const options = createOptions({
+      serverSendQueueItems: [createServerItem()],
+      removeServerSendQueueEntry: vi.fn(() => new Promise<boolean>((resolve) => { finishRemoval = resolve; })),
+      restoreServerSendQueueItem: vi.fn(() => new Promise<boolean>((resolve) => { finishRestore = resolve; })),
+      setEditingQueuedItem: vi.fn((update) => { recovery = typeof update === "function" ? update(recovery) : update; }),
+    });
+    const result = await renderHook(options);
+    let edit!: Promise<void>;
+    await act(async () => { edit = result.current!.handleEditQueuedMessage("entry-1"); });
+    await renderHook({ ...options, activeConversationId: "other-conversation" });
+    await act(async () => { finishRemoval(true); });
+    expect(options.restoreServerSendQueueItem).toHaveBeenCalledTimes(1);
+
+    options.latestInputValueRef.current = "A draft that must stay";
+    await renderHook(options);
+    expect(recovery).toEqual(expect.objectContaining({ restoreOnly: true, item: expect.objectContaining({ id: "entry-1" }) }));
+    await act(async () => { finishRestore(true); await edit; });
+
+    expect(recovery).toBeNull();
+    expect(options.latestInputValueRef.current).toBe("A draft that must stay");
+    expect(options.onInputChange).not.toHaveBeenCalled();
+    expect(options.setPendingBrowserLaunchMode).not.toHaveBeenCalled();
+    const clearRecovery = vi.mocked(options.setEditingQueuedItem).mock.calls.at(-1)![0];
+    expect(typeof clearRecovery).toBe("function");
+    if (typeof clearRecovery === "function") {
+      const unrelated = { item: createLocalItem(), targetAgentHandles: [], restoreOnly: true };
+      const normalEdit = { item: createServerItem(), targetAgentHandles: [] };
+      expect(clearRecovery(unrelated)).toBe(unrelated);
+      expect(clearRecovery(normalEdit)).toBe(normalEdit);
+    }
+    vi.mocked(options.setEditingQueuedItem).mockClear();
+    await renderHook({ ...options, activeConversationId: "other-conversation" });
+    await renderHook(options);
+    expect(options.setEditingQueuedItem).not.toHaveBeenCalled();
+  });
+
+  it("keeps failed automatic restore in its original chat after navigation during the request", async () => {
+    let finishRemoval!: (removed: boolean) => void;
+    let finishRestore!: (restored: boolean) => void;
+    const options = createOptions({
+      serverSendQueueItems: [createServerItem()],
+      removeServerSendQueueEntry: vi.fn(() => new Promise<boolean>((resolve) => { finishRemoval = resolve; })),
+      restoreServerSendQueueItem: vi.fn(() => new Promise<boolean>((resolve) => { finishRestore = resolve; })),
+    });
+    const result = await renderHook(options);
+    let edit!: Promise<void>;
+    await act(async () => { edit = result.current!.handleEditQueuedMessage("entry-1"); });
+    options.latestInputValueRef.current = "Typed during cancellation";
+    await act(async () => { finishRemoval(true); });
+    expect(options.restoreServerSendQueueItem).toHaveBeenCalledTimes(1);
+
+    await renderHook({ ...options, activeConversationId: "other-conversation" });
+    await act(async () => { finishRestore(false); await edit; });
+    expect(options.setEditingQueuedItem).not.toHaveBeenCalled();
+    expect(options.onInputChange).not.toHaveBeenCalled();
+
+    await renderHook(options);
+    expect(options.setEditingQueuedItem).toHaveBeenCalledWith(expect.objectContaining({
+      restoreOnly: true, item: expect.objectContaining({ id: "entry-1" }),
+    }));
+    expect(options.latestInputValueRef.current).toBe("Typed during cancellation");
+  });
+
+  it("does not offer to restore an edit already sent while another chat was open", async () => {
+    let finishSend!: (sent: boolean) => void;
+    const item = createLocalItem();
+    const options = createOptions({
+      chatSendQueue: [item], runtimeReady: false,
+      submitMessage: vi.fn(() => new Promise<boolean>((resolve) => { finishSend = resolve; })),
+    });
+    const initial = await renderHook(options);
+    await act(async () => initial.current?.handleEditQueuedMessage(item.id));
+    const editing = vi.mocked(options.setEditingQueuedItem).mock.calls[0][0];
+    if (typeof editing === "function" || !editing) throw new Error("expected queued edit");
+    const result = await renderHook({ ...options, chatSendQueue: [], editingQueuedItem: editing, inputValue: item.message });
+    let sending!: Promise<void>;
+    await act(async () => { sending = result.current!.handleSendEditedMessageNow(); });
+    await renderHook({ ...options, chatSendQueue: [], activeConversationId: "other-chat" });
+    await act(async () => { finishSend(true); await sending; });
+    vi.mocked(options.setEditingQueuedItem).mockClear();
+    await renderHook({ ...options, chatSendQueue: [] });
+    expect(options.setEditingQueuedItem).not.toHaveBeenCalled();
+  });
+
+  it.each(["cancel", "save"])("restores the middle local item to its original position on %s", async (action) => {
+    const a = createLocalItem({ id: "a", message: "First" });
+    const b = createLocalItem({ id: "b", message: "Middle" });
+    const c = createLocalItem({ id: "c", message: "Third" });
+    const added = createLocalItem({ id: "added", message: "Added during edit" });
+    const options = createOptions({
+      chatSendQueue: [a, c, added],
+      editingQueuedItem: { item: b, targetAgentHandles: ["octo"], originalQueueOrder: ["a", "b", "c"] },
+      inputValue: action === "save" ? "Updated middle" : b.message,
+      latestInputValueRef: { current: action === "save" ? "Updated middle" : b.message },
+    });
+    const result = await renderHook(options);
+    await act(async () => action === "save" ? result.current?.handleRequeueEditedMessage() : result.current?.handleCancelQueuedEdit());
+    const update = vi.mocked(options.setChatSendQueue).mock.calls[0][0];
+    const queue = typeof update === "function" ? update([a, c, added]) : update;
+    expect(queue.map((item) => item.id)).toEqual(["a", "b", "c", "added"]);
+    expect(queue[1].message).toBe(action === "save" ? "Updated middle" : "Middle");
+    expect(queue[1].createdAt).toBe(b.createdAt);
+  });
+
+  it("routes the ordinary composer action to Save queue during an edit", async () => {
+    const first = createLocalItem({ id: "first", message: "First" });
+    const edited = createLocalItem({ id: "edited", message: "Old second" });
+    const options = createOptions({
+      chatSendQueue: [first],
+      editingQueuedItem: { item: edited, targetAgentHandles: ["octo"], originalQueueOrder: ["first", "edited"] },
+      inputValue: "Updated second", latestInputValueRef: { current: "Updated second" },
+    });
+    const result = await renderHook(options);
+    await act(async () => { expect(await result.current?.handleQueuedEditComposerSubmit()).toBe(true); });
+    expect(options.submitMessage).not.toHaveBeenCalled();
+    expect(options.setEditingQueuedItem).toHaveBeenCalledWith(null);
+    const update = vi.mocked(options.setChatSendQueue).mock.calls[0][0];
+    const queue = typeof update === "function" ? update([first]) : update;
+    expect(queue.map((item) => item.message)).toEqual(["First", "Updated second"]);
+  });
+
+  it.each([false, true])("does not intercept independent sends or protected drafts (restore only: %s)", async (restoreOnly) => {
+    const options = createOptions({
+      editingQueuedItem: { item: createLocalItem(), targetAgentHandles: ["octo"], restoreOnly },
+    });
+    const result = await renderHook(options);
+    expect(result.current?.handleQueuedEditComposerSubmit({ message: "Independent task", editorState: null })).toBeNull();
+    if (restoreOnly) expect(result.current?.handleQueuedEditComposerSubmit()).toBeNull();
+    expect(options.setChatSendQueue).not.toHaveBeenCalled();
+  });
+
+  it("does not drop newly added images when saving a queued text edit", async () => {
+    const item = createLocalItem();
+    const options = createOptions({
+      editingQueuedItem: { item, targetAgentHandles: ["octo"] },
+      inputValue: item.message, latestInputValueRef: { current: item.message }, imageAttachmentCount: 1,
+    });
+    const result = await renderHook(options);
+    await act(async () => { expect(await result.current?.handleQueuedEditComposerSubmit()).toBe(false); });
+    expect(options.setChatSendQueue).not.toHaveBeenCalled();
+    expect(options.setEditingQueuedItem).not.toHaveBeenCalledWith(null);
+    expect(options.onInputChange).not.toHaveBeenCalled();
+    expect(options.submitMessage).not.toHaveBeenCalled();
+    await act(async () => result.current?.handleSendEditedMessageNow());
+    expect(options.submitMessage).not.toHaveBeenCalled();
+    await act(async () => result.current?.handleCancelQueuedEdit());
+    expect(options.setChatSendQueue).toHaveBeenCalledTimes(1);
+    expect(options.setEditingQueuedItem).toHaveBeenCalledWith(null);
+    expect(options.onInputChange).not.toHaveBeenCalled();
+  });
+
+  it.each(["Queued locally", "First line\nSecond line"])("clears an unchanged plain draft after Lexical hydration on Cancel: %s", async (message) => {
+    const item = createLocalItem({ message, editorState: null });
+    const options = createOptions({
+      editingQueuedItem: { item, targetAgentHandles: ["octo"] },
+      inputValue: item.message, latestInputValueRef: { current: item.message }, inputEditorState: plainEditorState(message),
+    });
+    const result = await renderHook(options);
+    await act(async () => result.current?.handleCancelQueuedEdit());
+    expect(options.setChatSendQueue).toHaveBeenCalledTimes(1);
+    expect(options.onInputChange).toHaveBeenCalledWith("conversation-local", "", null);
+    expect(options.latestInputValueRef.current).toBe("");
+  });
+
+  it("keeps changed formatting when canceling an edit with unchanged display text", async () => {
+    const item = createLocalItem();
+    const options = createOptions({
+      editingQueuedItem: { item, targetAgentHandles: ["octo"] },
+      inputValue: item.message, latestInputValueRef: { current: item.message }, inputEditorState: plainEditorState(item.message, 1),
+    });
+    const result = await renderHook(options);
+    await act(async () => result.current?.handleCancelQueuedEdit());
+    expect(options.setChatSendQueue).toHaveBeenCalledTimes(1);
+    expect(options.onInputChange).not.toHaveBeenCalled();
+    expect(options.setPendingBrowserLaunchMode).not.toHaveBeenCalled();
+  });
+
+  it("keeps a changed mention identity when canceling an edit with unchanged display text", async () => {
+    const composer = queuedMentionComposer();
+    const item = createLocalItem(composer);
+    const options = createOptions({
+      editingQueuedItem: { item, targetAgentHandles: ["octo"] },
+      inputValue: item.message, latestInputValueRef: { current: item.message },
+      inputEditorState: composer.editorState.replace(QUEUED_MENTION_USER_ID, "aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff"),
+    });
+    const result = await renderHook(options);
+    await act(async () => result.current?.handleCancelQueuedEdit());
+    expect(options.setChatSendQueue).toHaveBeenCalledTimes(1);
+    expect(options.onInputChange).not.toHaveBeenCalled();
+    expect(options.setPendingBrowserLaunchMode).not.toHaveBeenCalled();
+  });
+
+  it("keeps a previously failed server item failed when canceling its edit", async () => {
+    const item = createServerItem({ status: "failed" });
+    const options = createOptions({ editingQueuedItem: { item, targetAgentHandles: ["octo"] } });
+    const result = await renderHook(options);
+    await act(async () => result.current?.handleCancelQueuedEdit());
+    expect(options.restoreServerSendQueueItem).toHaveBeenCalledWith(item.id, expect.objectContaining({ composerMessage: item.message }), "failed");
+  });
+
+  it("preserves the original delivery intent when restoring a server edit", async () => {
+    const item = createServerItem({ intent: "terminal_command" });
+    const options = createOptions({ editingQueuedItem: { item, targetAgentHandles: ["octo"] } });
+    const result = await renderHook(options);
+    await act(async () => result.current?.handleCancelQueuedEdit());
+    expect(options.restoreServerSendQueueItem).toHaveBeenCalledWith(item.id, expect.objectContaining({ intent: "terminal_command" }), "queued");
+  });
+
+  it("keeps edits available when the server cannot save and does not enqueue a fallback", async () => {
+    const item = createServerItem();
+    const options = createOptions({
+      editingQueuedItem: { item, targetAgentHandles: ["octo"] }, inputValue: "Edited text", latestInputValueRef: { current: "Edited text" },
+      restoreServerSendQueueItem: vi.fn(async () => false),
+    });
+    const result = await renderHook(options);
+    await act(async () => result.current?.handleRequeueEditedMessage());
+    expect(options.onInputChange).not.toHaveBeenCalled();
+    expect(options.setEditingQueuedItem).not.toHaveBeenCalledWith(null);
+    expect(options.setChatSendQueue).not.toHaveBeenCalled();
+  });
+
+  it("serializes Save and Cancel and preserves text typed while saving", async () => {
+    let finishRestore!: (restored: boolean) => void;
+    const item = createServerItem();
+    const options = createOptions({
+      editingQueuedItem: { item, targetAgentHandles: ["octo"] }, inputValue: "Saved edit", latestInputValueRef: { current: "Saved edit" },
+      restoreServerSendQueueItem: vi.fn(() => new Promise<boolean>((resolve) => { finishRestore = resolve; })),
+    });
+    const result = await renderHook(options);
+    let saving!: Promise<boolean>;
+    await act(async () => { saving = result.current!.handleRequeueEditedMessage(); });
+    expect(result.current?.queueEditPending).toBe(true);
+    await act(async () => {
+      await result.current?.handleRequeueEditedMessage();
+      await result.current?.handleCancelQueuedEdit();
+      await result.current?.handleSendEditedMessageNow();
+    });
+    expect(options.restoreServerSendQueueItem).toHaveBeenCalledTimes(1);
+    expect(options.submitMessage).not.toHaveBeenCalled();
+    options.latestInputValueRef.current = "New draft typed during Save";
+    await act(async () => { finishRestore(true); await saving; });
+    expect(options.onInputChange).not.toHaveBeenCalled();
+    expect(options.setEditingQueuedItem).toHaveBeenCalledWith(null);
+    expect(result.current?.queueEditPending).toBe(false);
+  });
+
+  it("does not save or send a protected draft while an interrupted edit needs restoring", async () => {
+    const item = createServerItem();
+    const options = createOptions({
+      editingQueuedItem: { item, targetAgentHandles: ["octo"], restoreOnly: true },
+      inputValue: "My protected draft", latestInputValueRef: { current: "My protected draft" },
+    });
+    const result = await renderHook(options);
+    await act(async () => {
+      await result.current?.handleRequeueEditedMessage();
+      await result.current?.handleSendEditedMessageNow();
+    });
+    expect(options.restoreServerSendQueueItem).not.toHaveBeenCalled();
+    expect(options.submitMessage).not.toHaveBeenCalled();
+    await act(async () => result.current?.handleCancelQueuedEdit());
+    expect(options.restoreServerSendQueueItem).toHaveBeenCalledTimes(1);
+    expect(options.onInputChange).not.toHaveBeenCalled();
+  });
+
   it("sends server entries now by interrupting runs and dispatching on the controller", async () => {
     const options = createOptions({
       interruptConversationRuns: vi.fn(async () => ["run-1"]),
@@ -170,9 +525,9 @@ describe("useChatSendQueueActions", () => {
     });
     const resultRef = await renderHook(options);
     await act(async () => resultRef.current?.handleRequeueEditedMessage());
-    expect(options.enqueueServerSendQueueItem).toHaveBeenCalledWith(expect.objectContaining({
+    expect(options.restoreServerSendQueueItem).toHaveBeenCalledWith(item.id, expect.objectContaining({
       metadata: hasMention ? { mentionedUserIds: [newId], preserved: true } : { preserved: true },
-    }));
+    }), "queued");
   });
 
   it.each(["unchanged", "unrelated word", "removed token"])("preserves selected identities across server hydration, Edit, and requeue: %s", async (edit) => {
@@ -189,7 +544,7 @@ describe("useChatSendQueueActions", () => {
     });
     const result = await renderHook(options);
     await act(async () => result.current?.handleRequeueEditedMessage());
-    const payload = vi.mocked(options.enqueueServerSendQueueItem).mock.calls[0][0];
+    const payload = vi.mocked(options.restoreServerSendQueueItem).mock.calls[0][1];
     const body = buildServerSendQueuePromptBody(payload);
     expect(body.promptText).toBe(queuedComposerDispatchMessage({ ...item, message: edited.message }));
     const rehydrated = mapServerSendQueueEntryToQueuedItem({
@@ -215,21 +570,18 @@ describe("useChatSendQueueActions", () => {
     expect(payload?.browserPageTarget).toEqual(item.browserPageTarget);
   });
 
-  it("preserves hydrated nodes when cancel-edit falls back locally and later auto-drains", async () => {
+  it("keeps a failed restore editable instead of creating a duplicate fallback entry", async () => {
     const item = hydratedPickerItem();
     const options = createOptions({
-      editingQueuedItem: { item, targetAgentHandles: ["octo"] }, enqueueServerSendQueueItem: vi.fn(async () => false),
+      editingQueuedItem: { item, targetAgentHandles: ["octo"] }, restoreServerSendQueueItem: vi.fn(async () => false),
+      inputValue: item.message, latestInputValueRef: { current: item.message },
     });
     const result = await renderHook(options);
     await act(async () => result.current?.handleCancelQueuedEdit());
-    const update = vi.mocked(options.setChatSendQueue).mock.calls[0][0];
-    const restored = typeof update === "function" ? update([]) : update;
-    expect(restored[0].editorState).toBe(item.editorState);
-    const draining = createOptions({ chatSendQueue: restored });
-    await renderHook(draining);
-    expect(draining.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
-      editorState: item.editorState, metadata: expect.objectContaining({ mentionedUserIds: [QUEUED_MENTION_USER_ID] }),
-    }), { allowWhileBusy: true });
+    expect(options.setChatSendQueue).not.toHaveBeenCalled();
+    expect(options.setEditingQueuedItem).not.toHaveBeenCalledWith(null);
+    expect(options.onInputChange).not.toHaveBeenCalled();
+    expect(options.showStatus).toHaveBeenCalledWith(expect.stringContaining("try Cancel again"), "error", 5000);
   });
 
   it("keeps the local resend path for localStorage fallback entries", async () => {
@@ -362,6 +714,7 @@ describe("useChatSendQueueActions", () => {
     expect(options.setEditingQueuedItem).toHaveBeenCalledWith({
       item: serverItem,
       targetAgentHandles: ["octo"],
+      originalQueueOrder: [serverItem.id],
     });
     expect(options.onInputChange).toHaveBeenCalledWith(
       "conversation-local",
@@ -401,10 +754,10 @@ describe("useChatSendQueueActions", () => {
     const resultRef = await renderHook(options);
 
     await act(async () => {
-      resultRef.current?.handleCancelQueuedEdit();
+      await resultRef.current?.handleCancelQueuedEdit();
     });
 
-    expect(options.enqueueServerSendQueueItem).toHaveBeenCalledWith({
+    expect(options.restoreServerSendQueueItem).toHaveBeenCalledWith(serverItem.id, {
       message: "Queued for Octo",
       composerMessage: "Queued for Octo",
       editorState: null,
@@ -412,7 +765,7 @@ describe("useChatSendQueueActions", () => {
       browserLaunchMode: null,
       targetAgentHandles: ["octo"],
       metadata: null,
-    });
+    }, "queued");
     expect(options.setChatSendQueue).not.toHaveBeenCalled();
     expect(options.setEditingQueuedItem).toHaveBeenCalledWith(null);
   });

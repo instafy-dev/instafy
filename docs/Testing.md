@@ -1346,8 +1346,11 @@ attempt per test: skips, expected failures, retries, filtered subsets, and zero
 tests fail the lane. Failure traces and a machine-readable result are retained
 under `packages/frontend/test-results/browser-ci/<lane>`.
 
-The serial `browser-ui` lane has a six-minute total budget for hosted
-runners; each test still has a 30-second limit, with no retries or skips allowed.
+The serial `browser-ui` lane has a ten-minute total budget for hosted
+runners. Hosted timings project roughly seven to eight minutes for its 100+
+cases, so the total budget leaves room for startup and teardown. Each test still
+has a 30-second limit, with no retries or skips allowed. The containing workflow job retains
+its 30-minute limit for dependency installation and the co-browsing fixture.
 
 The settings component cases mount production Notifications and segmented controls.
 They cover phone and desktop switch alignment, disclosure, single-channel preference

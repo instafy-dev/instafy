@@ -44,7 +44,7 @@ export function createStyleReviewConfig({ name, port, stubs = {}, optimize = [] 
         if (id.startsWith(prefix)) return stubs[id.slice(prefix.length)];
         // Keep module identities/import resolution in the real frontend tree.
         // Only source contents change, so both versions use identical fixtures.
-        if (baseline && id.startsWith(frontendSrc) && !id.includes("?")) {
+        if (baseline && id.startsWith(frontendSrc) && /\.(?:[jt]sx?|css)$/.test(id)) {
           const relative = path.relative(frontendSrc, id);
           const source = await readFile(path.join(baseline, relative), "utf8");
           return relative === "styles/tailwind.css"

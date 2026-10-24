@@ -33,6 +33,7 @@ const REQUIRED_BROWSER_UI_SPECS = [
   "browser-cursor-overlay.spec.ts",
   "browser-live-proof.spec.ts",
   "conversation-surfaces.spec.ts",
+  "queue-composer.spec.ts",
   "mobile-sidebar-keyboard.spec.ts",
   "mobile-editor-dialogs.spec.ts",
   "mobile-sidebar-safe-area.spec.ts",
@@ -61,9 +62,10 @@ export default defineConfig({
   workers: 1,
   retries: 0,
   timeout: 30_000,
-  // The required inventory runs serially on hosted runners. Bound the
-  // complete lane to six minutes without extending any individual test.
-  globalTimeout: 360_000,
+  // The 100+ required cases run serially; hosted timings project seven to
+  // eight minutes in total. Leave room for startup and teardown while
+  // bounding the complete lane without extending any individual test.
+  globalTimeout: 600_000,
   outputDir: "test-results/browser-ci/browser-ui",
   reporter: [
     ["list"],
