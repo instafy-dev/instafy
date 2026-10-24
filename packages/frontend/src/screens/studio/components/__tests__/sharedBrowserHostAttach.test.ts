@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import type { ControllerRuntimeStatusEntry } from "../../../../services/runtimeController";
 import type { SharedBrowserHostSnapshot } from "../../../../services/runtimeController/browserSession";
 import { resolveBrowserRuntimeSelection } from "../browserSessionRuntimeEnsure";
@@ -23,6 +23,11 @@ class Refused extends Error {
 }
 class Unavailable extends Error {
   constructor(readonly status: number) { super(String(status)); }
+}
+/** A 404 that is not the machine's own answer (see fetchSharedBrowserHost). */
+class NotFound extends Error {
+  readonly status = 404;
+  constructor(readonly code: string | null) { super(`browser host not found (404)${code ? `: ${code}` : ""}`); this.name = "SharedBrowserHostNotFoundError"; }
 }
 
 /** A clock that only moves when the loop sleeps. */
@@ -139,6 +144,47 @@ describe("waitForSharedBrowserHostReady", () => {
     const { value } = client([null]);
     await expect(waitForSharedBrowserHostReady({ ...base, canControl: true, client: value, ...fakeClock() }))
       .resolves.toEqual({ kind: "error", message: SHARED_BROWSER_HOST_COPY.notAvailable });
+  });
+
+  it("polls through a 404 from the controller or a proxy, and logs it, until the browser answers", async () => {
+    // Dogfood, Oct 24: one such 404 during a reconnect read as "not available"
+    // while the browser kept running on the machine.
+    const debug: { __INSTAFY_RUNTIME_DEBUG__: Array<{ message: string; data?: unknown }> } = { __INSTAFY_RUNTIME_DEBUG__: [] };
+    vi.stubGlobal("window", debug);
+    onTestFinished(() => { vi.unstubAllGlobals(); });
+    const { value, fetchHost, startHost } = client([new NotFound(null), new NotFound("not_found"), snapshot("ready")]);
+    const clock = fakeClock();
+    await expect(waitForSharedBrowserHostReady({ ...base, canControl: true, client: value, ...clock }))
+      .resolves.toEqual({ kind: "ready", snapshot: snapshot("ready") });
+    expect(fetchHost).toHaveBeenCalledTimes(3);
+    expect(startHost).not.toHaveBeenCalled();
+    expect(clock.sleeps).toEqual([500, 500]);
+    expect(debug.__INSTAFY_RUNTIME_DEBUG__.filter((entry) => entry.message === "browser-session:host-404").map((entry) => entry.data))
+      .toEqual([{ status: 404, code: null }, { status: 404, code: "not_found" }]);
+  });
+
+  it("keeps a 404 that never ends within its cap", async () => {
+    const { value } = client([new NotFound(null)]);
+    const clock = fakeClock();
+    await expect(waitForSharedBrowserHostReady({ ...base, canControl: true, client: value, ...clock }))
+      .resolves.toEqual({ kind: "error", message: SHARED_BROWSER_HOST_COPY.didNotStart });
+    expect(clock.now()).toBe(120_000);
+  });
+
+  it("ends at once, in plain words, when the space's browser policy is off", async () => {
+    const { value, startHost } = client([new NotFound("browser_host_policy_off")]);
+    const clock = fakeClock();
+    await expect(waitForSharedBrowserHostReady({ ...base, canControl: true, client: value, ...clock }))
+      .resolves.toEqual({ kind: "error", message: SHARED_BROWSER_HOST_COPY.policyOff });
+    expect(clock.sleeps).toEqual([]);
+    expect(startHost).not.toHaveBeenCalled();
+    // The same answer to a start ends the wait too; another 404 there is polled.
+    const started = client([snapshot("idle")], [new NotFound("browser_host_policy_off")]);
+    await expect(waitForSharedBrowserHostReady({ ...base, canControl: true, client: started.value, ...fakeClock() }))
+      .resolves.toEqual({ kind: "error", message: SHARED_BROWSER_HOST_COPY.policyOff });
+    const polled = client([snapshot("idle"), snapshot("ready")], [new NotFound(null)]);
+    await expect(waitForSharedBrowserHostReady({ ...base, canControl: true, client: polled.value, ...fakeClock() }))
+      .resolves.toMatchObject({ kind: "ready" });
   });
 
   it("stops quietly once cancelled", async () => {

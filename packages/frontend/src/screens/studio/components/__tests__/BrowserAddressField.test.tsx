@@ -78,6 +78,45 @@ describe("BrowserAddressField", () => {
     expect(registerOverlay).toHaveBeenCalledOnce();
   });
 
+  it("selects the whole address on the click that focuses it, so typing replaces it", async () => {
+    // Dogfood, Oct 24: typing into Instafy's browser gave "about:blankapp.freefinance.at".
+    await act(async () => root.render(<Fixture key="blank" page={{ url: "about:blank", title: "" }} />));
+    const field = input();
+    await act(async () => {
+      field.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+      field.focus();
+      field.setSelectionRange(5, 5); // where the press placed the caret
+    });
+    const mouseUp = new MouseEvent("mouseup", { bubbles: true, cancelable: true });
+    await act(async () => { field.dispatchEvent(mouseUp); });
+    expect([field.selectionStart, field.selectionEnd]).toEqual([0, "about:blank".length]);
+    expect(mouseUp.defaultPrevented).toBe(true);
+    // The next click inside the focused field places a caret as usual.
+    await act(async () => {
+      field.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+      field.setSelectionRange(3, 3);
+    });
+    const secondUp = new MouseEvent("mouseup", { bubbles: true, cancelable: true });
+    await act(async () => { field.dispatchEvent(secondUp); });
+    expect([field.selectionStart, field.selectionEnd]).toEqual([3, 3]);
+    expect(secondUp.defaultPrevented).toBe(false);
+  });
+
+  it("keeps a range dragged on the focusing click and selects all on keyboard focus", async () => {
+    await act(async () => root.render(<Fixture key="example" page={{ url: "https://example.com/path", title: "Example" }} />));
+    const field = input();
+    await act(async () => {
+      field.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+      field.focus();
+      field.setSelectionRange(8, 15);
+      field.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+    });
+    expect([field.selectionStart, field.selectionEnd]).toEqual([8, 15]);
+    await act(async () => container.querySelector<HTMLButtonElement>("button:last-of-type")!.focus());
+    await act(async () => field.focus());
+    expect([field.selectionStart, field.selectionEnd]).toEqual([0, "https://example.com/path".length]);
+  });
+
   it("shows site icons without a referrer and keeps a globe while loading or after failure", async () => {
     await type("bbc");
     const option = options()[0];

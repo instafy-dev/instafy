@@ -174,6 +174,11 @@ const FATAL_VIEWER_ERROR_WINDOW_MS = 60_000;
 export const SHARED_BROWSER_VIEWER_WAIT_TIMEOUT_MS = 20_000;
 export const SHARED_BROWSER_VIEWER_WAIT_COPY = "The browser did not finish connecting. Try again.";
 export const SHARED_BROWSER_LOST_CONNECTION_COPY = "Browser session disconnected. Click Retry to reconnect.";
+/**
+ * How long a browser that had connected may show "Reconnecting…" by itself
+ * before it says it lost the connection and offers Retry.
+ */
+export const SHARED_BROWSER_RECONNECT_TIMEOUT_MS = 60_000;
 const DOCKED_BROWSER_ASPECT_RATIO = 1280 / 720;
 const connectedBrowserSessionScopes = new Set<string>();
 const BROWSER_SESSION_SAFE_ZONE_SELECTOR = "[data-browser-session-safe-zone='true']";
@@ -197,6 +202,8 @@ type BrowserOriginConnection = {
 };
 
 const BROWSER_ORIGIN_TOKEN_REFRESH_RETRY_MS = 5_000;
+/** A re-attach keeps a connection whose grant has at least this long left. */
+const SHARED_BROWSER_CONNECTION_REUSE_MIN_REMAINING_MS = 30_000;
 
 function eventTargetWithinBrowserSessionSafeZone(target: Node | null): boolean {
   if (!target) {
@@ -582,6 +589,14 @@ export function BrowserSessionModal({
   sharedBrowserViewportOnlyRef.current = sharedBrowserViewportOnly;
   const reconnectTimerRef = useRef<number | null>(null);
   const autoRetryCountRef = useRef(0);
+  // When automatic reconnects were scheduled lately: a connection that comes
+  // up between them does not give the lane a fresh budget.
+  const reconnectTimesRef = useRef<number[]>([]);
+  // The current wait is an automatic reconnect, not a person's Retry or press.
+  const automaticReconnectRef = useRef(false);
+  // Instafy's browser this view connected to: its machine and the host's
+  // `generation`, which is new for every start of the browser.
+  const connectedHostRef = useRef<{ runtimeId: string; generation: string | null } | null>(null);
   // Reconnects fatal viewer errors asked for lately (see FATAL_VIEWER_ERROR_WINDOW_MS).
   const fatalViewerErrorsRef = useRef<{ count: number; lastAtMs: number }>({ count: 0, lastAtMs: 0 });
   const [status, setStatus] = useState<BrowserSessionStatus>("idle");
@@ -696,6 +711,7 @@ export function BrowserSessionModal({
     setHostAttach(null);
     pinnedSessionRef.current = null;
     personRetryRef.current = false;
+    connectedHostRef.current = null;
   }, [selectionScope]);
   const chosenRuntimeId = runtimeChoice?.scope === selectionScope ? runtimeChoice.runtimeId : null;
   const selectedSessionRuntimeId = sessionIdentity?.scope === selectionScope ? sessionIdentity.runtimeId : null;
@@ -750,6 +766,10 @@ export function BrowserSessionModal({
   });
   const sharedBrowserConnectionPageId =
     activeSharedBrowserViewerKind === "rfb" ? null : sharedBrowserPageId;
+  // The viewer this render mounts (its kind and URL), or null when none is.
+  const mountedViewerTargetRef = useRef<string | null>(null);
+  mountedViewerTargetRef.current =
+    activeSharedBrowserViewerKind && wsUrl ? `${activeSharedBrowserViewerKind}\n${wsUrl}` : null;
   const webRtcIceServers =
     sharedBrowserWebRtcCapabilities?.iceServers ?? EMPTY_WEBRTC_ICE_SERVERS;
   const webRtcRelayOnly = sharedBrowserWebRtcCapabilities?.relayOnly ?? false;
@@ -980,6 +1000,8 @@ export function BrowserSessionModal({
       reconnectTimerRef.current = null;
     }
     autoRetryCountRef.current = 0;
+    reconnectTimesRef.current = [];
+    automaticReconnectRef.current = false;
     fatalViewerErrorsRef.current = { count: 0, lastAtMs: 0 };
     setRuntimeLimitActionBusy(false);
     setStatus("connecting");
@@ -1014,7 +1036,16 @@ export function BrowserSessionModal({
       if (reconnectTimerRef.current !== null) {
         return true;
       }
-      if (autoRetryCountRef.current < MAX_AUTO_CONNECT_RETRIES) {
+      const nowMs = Date.now();
+      const recentReconnects = reconnectTimesRef.current.filter(
+        (atMs) => nowMs - atMs < FATAL_VIEWER_ERROR_WINDOW_MS,
+      );
+      if (
+        autoRetryCountRef.current < MAX_AUTO_CONNECT_RETRIES &&
+        recentReconnects.length < MAX_AUTO_CONNECT_RETRIES
+      ) {
+        reconnectTimesRef.current = [...recentReconnects, nowMs];
+        automaticReconnectRef.current = true;
         freezeCurrentBrowserFrame();
         autoRetryCountRef.current += 1;
         const retryCount = autoRetryCountRef.current;
@@ -1249,6 +1280,9 @@ export function BrowserSessionModal({
         reconnectTimerRef.current = null;
       }
       autoRetryCountRef.current = 0;
+      reconnectTimesRef.current = [];
+      automaticReconnectRef.current = false;
+      connectedHostRef.current = null;
       setStatus("idle");
       setError(null);
       setRuntimeLimitDetails(null);
@@ -1695,6 +1729,46 @@ export function BrowserSessionModal({
           setError(hostWait.message);
           return;
         }
+        const generation = hostWait.snapshot.generation;
+        const connectedHost = connectedHostRef.current;
+        const connectedGeneration = connectedHost?.runtimeId === runtimeId ? connectedHost.generation : null;
+        if (connectedGeneration && generation && generation !== connectedGeneration && automaticReconnectRef.current) {
+          // It started again while this view reconnected by itself: the
+          // pages it showed are gone, so it says so instead of a generic
+          // error, and stops reconnecting until the person asks again.
+          connectedHostRef.current = null;
+          if (reconnectTimerRef.current !== null) {
+            window.clearTimeout(reconnectTimerRef.current);
+            reconnectTimerRef.current = null;
+          }
+          setFrozenFrameUrl(null);
+          setBrowserOriginConnection(null);
+          browserOriginConnectionRef.current = null;
+          setStatus("error");
+          setError(SHARED_BROWSER_HOST_COPY.restarted);
+          runtimeDebugLog("browser-session:host-restarted", { projectId, runtimeId });
+          return;
+        }
+        const liveConnection = browserOriginConnectionRef.current;
+        if (
+          connectedGeneration &&
+          generation === connectedGeneration &&
+          preservingConnection &&
+          mountedViewerTargetRef.current !== null &&
+          liveConnection?.runtimeId === runtimeId &&
+          liveConnection.originId === originId &&
+          (liveConnection.expiresAtMs === null ||
+            liveConnection.expiresAtMs - Date.now() > SHARED_BROWSER_CONNECTION_REUSE_MIN_REMAINING_MS)
+        ) {
+          // The same browser, and its viewer is still mounted: the viewer
+          // reconnects by itself, so this keeps the connection, and with it
+          // the last frame, as they are.
+          runtimeDebugLog("browser-session:host-same-generation", { projectId, runtimeId });
+          return;
+        }
+        connectedHostRef.current = { runtimeId, generation };
+      } else {
+        connectedHostRef.current = null;
       }
 
       // Runtime discovery is also what unlocks the versioned capability
@@ -1792,8 +1866,6 @@ export function BrowserSessionModal({
       return;
     }
 
-    setStatus("connecting");
-    setError(null);
     const inputUrl =
       canControlBrowser && activeSharedBrowserViewerKind !== "rfb"
         ? buildBrowserWebSocketUrl({
@@ -1842,6 +1914,13 @@ export function BrowserSessionModal({
         }
       })(),
     });
+    // A viewer that keeps its URL does not connect again, so it would never
+    // report again: only a new target is "connecting" (a reconnect attempt that
+    // got the same cached grant leaves a connected viewer, or its error, alone).
+    if (mountedViewerTargetRef.current !== `${activeSharedBrowserViewerKind}\n${url}`) {
+      setStatus("connecting");
+      setError(null);
+    }
     setWsUrl(url);
     setBrowserInputWsUrl(inputUrl);
 
@@ -2065,6 +2144,8 @@ export function BrowserSessionModal({
       reconnectTimerRef.current = null;
     }
     autoRetryCountRef.current = 0;
+    reconnectTimesRef.current = [];
+    automaticReconnectRef.current = false;
     fatalViewerErrorsRef.current = { count: 0, lastAtMs: 0 };
     freezeCurrentBrowserFrame();
     setRuntimeLimitDetails(null);
@@ -2073,6 +2154,27 @@ export function BrowserSessionModal({
     setConnectAttempt((value) => value + 1);
     runtimeDebugLog("browser-session:reattach", { projectId });
   }, [attachRequestToken, freezeCurrentBrowserFrame, isOpen, projectId]);
+
+  // "Reconnecting…" shows no progress and no Retry, so a browser that had
+  // connected waits for it by itself only so long.
+  const reconnectingShown =
+    isOpen && !browserDataClearInFlight && status === "connecting" && hasConnectedHint && !error &&
+    automaticReconnectRef.current;
+  useEffect(() => {
+    if (!reconnectingShown) return;
+    const timer = window.setTimeout(() => {
+      if (reconnectTimerRef.current !== null) {
+        window.clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      // Abandon the attempt on its way: a late answer must not bring the wait back.
+      browserConnectionGenerationRef.current += 1;
+      setStatus("error");
+      setError(SHARED_BROWSER_LOST_CONNECTION_COPY);
+      runtimeDebugLog("browser-session:reconnect-timeout", { projectId });
+    }, SHARED_BROWSER_RECONNECT_TIMEOUT_MS);
+    return () => window.clearTimeout(timer);
+  }, [projectId, reconnectingShown]);
 
   useEffect(() => {
     onConnectionErrorChange?.(isOpen ? error : null);
@@ -2223,6 +2325,7 @@ export function BrowserSessionModal({
           }
           connected = true;
           autoRetryCountRef.current = 0;
+          automaticReconnectRef.current = false;
           if (reconnectTimerRef.current !== null) {
             window.clearTimeout(reconnectTimerRef.current);
             reconnectTimerRef.current = null;
@@ -2481,6 +2584,7 @@ export function BrowserSessionModal({
       return;
     }
     autoRetryCountRef.current = 0;
+    automaticReconnectRef.current = false;
     if (reconnectTimerRef.current !== null) {
       window.clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
@@ -2568,6 +2672,7 @@ export function BrowserSessionModal({
       return;
     }
     autoRetryCountRef.current = 0;
+    automaticReconnectRef.current = false;
     if (reconnectTimerRef.current !== null) {
       window.clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;

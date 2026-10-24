@@ -22,6 +22,7 @@ import {
   isSharedBrowserHostRefusedError,
   mapSharedBrowserHostPayload,
   readBrowserErrorCode,
+  SharedBrowserHostNotFoundError,
   SharedBrowserHostRefusedError,
   SharedBrowserHostTokenError,
   startSharedBrowserHost,
@@ -582,6 +583,31 @@ describe("Instafy's browser on the space's machine", () => {
     await expect(fetchSharedBrowserHost(request)).rejects.toBeInstanceOf(BrowserSessionCapabilitiesIncompatibleError);
     requestOriginAccessTokenMock.mockResolvedValueOnce(null);
     await expect(fetchSharedBrowserHost(request)).rejects.toBeInstanceOf(SharedBrowserHostTokenError);
+  });
+
+  it("reads only the machine's own 404 as no host: any other 404 says nothing about the browser", async () => {
+    // Dogfood, Oct 24: "not available on this space's machine" while the
+    // browser kept running; the 404 came from somewhere in front of it.
+    const answer = (body: string) => vi.stubGlobal("fetch", vi.fn(async () => new Response(body, { status: 404 })));
+    answer(JSON.stringify({ error: "this machine has no browser host", code: "browser_host_absent" }));
+    await expect(fetchSharedBrowserHost(request)).resolves.toBeNull();
+    answer(JSON.stringify({ error: "this machine has no browser host", code: "not_found" }));
+    await expect(startSharedBrowserHost(request)).resolves.toBeNull();
+    for (const [body, code] of [
+      [JSON.stringify({ message: "origin path not found" }), null],
+      [JSON.stringify({ message: "origin not registered" }), null],
+      [JSON.stringify({ message: "origin path not found", code: "not_found" }), "not_found"],
+      ["<html>Not Found</html>", null],
+      ["", null],
+      [JSON.stringify({ message: "Instafy's browser is off for this space", code: "browser_host_policy_off" }), "browser_host_policy_off"],
+    ] as const) {
+      answer(body);
+      const error = await fetchSharedBrowserHost(request).catch((cause: unknown) => cause);
+      expect(error).toBeInstanceOf(SharedBrowserHostNotFoundError);
+      expect(error).toMatchObject({ name: "SharedBrowserHostNotFoundError", status: 404, code });
+      // Not a gateway error: callers tell it apart on purpose.
+      expect(isBrowserSessionUnavailableError(error)).toBe(false);
+    }
   });
 
   it("starts the host with a browser-control token and exactly the version body", async () => {

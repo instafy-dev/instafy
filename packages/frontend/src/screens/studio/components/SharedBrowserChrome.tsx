@@ -9,7 +9,7 @@ import {
 } from "react";
 import { NavArrowLeft, NavArrowRight, Refresh } from "iconoir-react";
 import { IconButton } from "../../../components/Button";
-import type { BrowserSessionPage } from "./browserSessionPages";
+import { browserSessionPageIsPlaceholder, type BrowserSessionPage } from "./browserSessionPages";
 import { normalizeBrowserAddress } from "./browserAddress";
 import { BrowserAddressField } from "./BrowserAddressField";
 import { BrowserChromeShell } from "./BrowserChromeShell";
@@ -120,10 +120,13 @@ export function SharedBrowserChrome({
     () => pages.find((page) => page.isActive) ?? pages[0] ?? null,
     [pages],
   );
+  // A blank tab has no address to edit: the field shows its placeholder, so
+  // typing there never lands after "about:blank".
+  const activePageAddress = activePage && !browserSessionPageIsPlaceholder(activePage) ? activePage.url : "";
   const addressInputRef = useRef<HTMLInputElement | null>(null);
   const submittedAddressRef = useRef<string | null>(null);
   const errorId = useId();
-  const [addressDraft, setAddressDraft] = useState(activePage?.url ?? "");
+  const [addressDraft, setAddressDraft] = useState(activePageAddress);
   const [addressError, setAddressError] = useState<string | null>(null);
   const displayedError = addressError ?? error;
   const busy = pendingAction !== null;
@@ -133,9 +136,9 @@ export function SharedBrowserChrome({
 
   useEffect(() => {
     if (document.activeElement !== addressInputRef.current) {
-      setAddressDraft(activePage?.url ?? "");
+      setAddressDraft(activePageAddress);
     }
-  }, [activePage?.id, activePage?.url]);
+  }, [activePage?.id, activePageAddress]);
 
   useEffect(() => {
     if (!error) {
@@ -143,9 +146,9 @@ export function SharedBrowserChrome({
     }
     submittedAddressRef.current = null;
     if (document.activeElement !== addressInputRef.current) {
-      setAddressDraft(activePage?.url ?? "");
+      setAddressDraft(activePageAddress);
     }
-  }, [activePage?.url, error]);
+  }, [activePageAddress, error]);
 
   const navigateToAddress = useCallback((nextAddress: string) => {
     if (!activePage || controlsDisabled || !controls.navigate) {
@@ -298,7 +301,7 @@ export function SharedBrowserChrome({
                   }
                   const submittedAddress = submittedAddressRef.current;
                   submittedAddressRef.current = null;
-                  setAddressDraft(submittedAddress ?? activePage?.url ?? "");
+                  setAddressDraft(submittedAddress ?? activePageAddress);
                 }}
                 onValueChange={(value) => {
                   setAddressDraft(value);

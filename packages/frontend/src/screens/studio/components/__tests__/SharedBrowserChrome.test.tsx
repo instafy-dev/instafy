@@ -96,6 +96,24 @@ describe("SharedBrowserChrome", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
+  it("shows a blank tab's address as empty, so a typed address is not appended to about:blank", async () => {
+    const onNavigate = vi.fn();
+    await act(async () => {
+      root.render(<SharedBrowserChrome {...props({ onNavigate, pages: [page({ url: "about:blank", host: "", title: "", label: "New tab" })] })} />);
+    });
+    const address = container.querySelector<HTMLInputElement>('[data-testid="shared-browser-address"]')!;
+    expect(address.value).toBe("");
+    expect(address.placeholder).toBe("Enter an address");
+    await act(async () => {
+      address.focus();
+      setInputValue(address, "app.freefinance.at");
+    });
+    await act(async () => {
+      address.form?.requestSubmit();
+    });
+    expect(onNavigate).toHaveBeenCalledWith("page-1", "https://app.freefinance.at/");
+  });
+
   it("uses the active page for native navigation controls", async () => {
     const onBack = vi.fn();
     const onForward = vi.fn();
