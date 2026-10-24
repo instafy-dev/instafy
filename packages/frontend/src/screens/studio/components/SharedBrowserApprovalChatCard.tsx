@@ -133,10 +133,14 @@ export function SharedBrowserApprovalChatCard({
   const lifetimeMs = Math.max(0, shownRequest.expiresAtMs - shownRequest.requestedAtMs);
   const remainingMs = Math.min(lifetimeMs, shownRequest.expiresAtMs - nowMs);
   const submitting = asking && approval.submitting;
+  // Only the prompt on screen can be answered, and only while it is still the
+  // one waiting: not while a newer one replaces it, nor in the grace after it
+  // went away.
+  const answerable = approval.pending?.request.approvalId === shownRequest.approvalId;
   const pressed = pressedRef.current?.approvalId === shownRequest.approvalId ? pressedRef.current.decision : null;
   const press = (decision: RuntimeSharedBrowserApprovalDecision) => {
     pressedRef.current = { approvalId: shownRequest.approvalId, decision };
-    void approval.decide(decision);
+    void approval.decide(decision, shownRequest.approvalId);
   };
   const copy = SHARED_BROWSER_APPROVAL_CHAT_COPY;
 
@@ -153,7 +157,7 @@ export function SharedBrowserApprovalChatCard({
             label: copy.deny,
             variant: "outline",
             onPress: () => press("deny"),
-            isDisabled: submitting,
+            isDisabled: submitting || !answerable,
             isLoading: submitting && pressed === "deny",
             loadingLabel: copy.saving,
             testId: "chat-browser-approval-deny",
@@ -163,7 +167,7 @@ export function SharedBrowserApprovalChatCard({
             label: isOrigin ? copy.allowSite : copy.allowOnce,
             variant: "primary",
             onPress: () => press(sharedBrowserApprovalAllowDecision(shownRequest.kind)),
-            isDisabled: submitting,
+            isDisabled: submitting || !answerable,
             isLoading: submitting && pressed !== null && pressed !== "deny",
             loadingLabel: copy.saving,
             testId: "chat-browser-approval-allow",

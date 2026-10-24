@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   controllerClient,
   type RuntimeSharedBrowserApprovalDecision,
+  type RuntimeSharedBrowserApprovalRequest,
   type RuntimeSharedBrowserPendingApproval,
 } from "../../../sdk/instafy";
 
@@ -26,6 +27,7 @@ export function useSharedBrowserApproval({
   browserPageId,
   originEndpoint,
   originAccessToken,
+  acceptsRequest,
 }: {
   active: boolean;
   projectId: string | null;
@@ -34,6 +36,8 @@ export function useSharedBrowserApproval({
   browserPageId: string | null;
   originEndpoint: string | null;
   originAccessToken: string | null;
+  /** Which polled prompts a caller may answer here; every prompt when absent. */
+  acceptsRequest?: (request: RuntimeSharedBrowserApprovalRequest) => boolean;
 }) {
   const [pending, setPending] = useState<RuntimeSharedBrowserPendingApproval | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -44,6 +48,8 @@ export function useSharedBrowserApproval({
   const pendingRef = useRef<RuntimeSharedBrowserPendingApproval | null>(null);
   const settledApprovalIdRef = useRef<string | null>(null);
   const decisionAbortRef = useRef<AbortController | null>(null);
+  const acceptsRequestRef = useRef(acceptsRequest);
+  acceptsRequestRef.current = acceptsRequest;
   pendingRef.current = pending;
 
   const identity = JSON.stringify([projectId, browserSessionId, runtimeId, browserPageId]);
@@ -149,13 +155,20 @@ export function useSharedBrowserApproval({
     [],
   );
 
+  /**
+   * Answers the prompt `approvalId` names, the one the surface showed. The
+   * latest poll may already hold another prompt (it updates before the next
+   * render), and that one is never answered by a press for this one.
+   */
   const decide = useCallback(
-    async (decision: RuntimeSharedBrowserApprovalDecision) => {
+    async (decision: RuntimeSharedBrowserApprovalDecision, approvalId: string) => {
       const current = pendingRef.current;
       if (
         !active ||
         submittingRef.current ||
         !current ||
+        current.request.approvalId !== approvalId ||
+        (acceptsRequestRef.current && !acceptsRequestRef.current(current.request)) ||
         !projectId ||
         !runtimeId ||
         !browserPageId ||

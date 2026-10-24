@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   controllerClient,
-  type RuntimeSharedBrowserApprovalDecision,
+  type RuntimeSharedBrowserApprovalRequest,
 } from "../../../sdk/instafy";
 import type { RunRecord } from "../../../types";
 import {
@@ -118,6 +118,15 @@ export function useChatSharedBrowserApproval(params: {
     runtimeId: target?.runtimeId ?? null,
     browserSessionId,
   });
+  // The origin already answers only the person who started the run; this
+  // also keeps another run's prompt out of this conversation. The lane
+  // applies it to its latest poll when a press is answered, as well as to
+  // what is shown here.
+  const forThisRun = useCallback(
+    (request: RuntimeSharedBrowserApprovalRequest) =>
+      target !== null && request.runId === target.runId && request.initiatorUserId === userId,
+    [target, userId],
+  );
   const lane = useSharedBrowserApproval({
     active: Boolean(target && grant),
     projectId,
@@ -126,23 +135,10 @@ export function useChatSharedBrowserApproval(params: {
     browserPageId: target?.browserPageId ?? null,
     originEndpoint: grant?.endpoint ?? null,
     originAccessToken: grant?.accessToken ?? null,
+    acceptsRequest: forThisRun,
   });
-  // The origin already answers only the person who started the run; this
-  // also keeps another run's prompt out of this conversation.
-  const pending =
-    lane.pending &&
-    target &&
-    lane.pending.request.runId === target.runId &&
-    lane.pending.request.initiatorUserId === userId
-      ? lane.pending
-      : null;
-  const laneDecide = lane.decide;
-  const decide = useCallback(
-    async (decision: RuntimeSharedBrowserApprovalDecision) => {
-      if (pending) await laneDecide(decision);
-    },
-    [laneDecide, pending],
-  );
+  const pending = lane.pending && forThisRun(lane.pending.request) ? lane.pending : null;
+  const decide = lane.decide;
   const approval = useMemo<SharedBrowserApprovalState>(() => ({
     pending,
     submitting: pending ? lane.submitting : false,

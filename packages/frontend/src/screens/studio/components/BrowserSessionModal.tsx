@@ -603,6 +603,8 @@ export function BrowserSessionModal({
   const reconnectTimesRef = useRef<number[]>([]);
   // The current wait is an automatic reconnect, not a person's Retry or press.
   const automaticReconnectRef = useRef(false);
+  // The connection attempt on its way, so the reconnect deadline can stop it.
+  const connectAttemptAbortRef = useRef<AbortController | null>(null);
   // Instafy's browser this view connected to: its machine and the host's
   // `generation`, which is new for every start of the browser.
   const connectedHostRef = useRef<{ runtimeId: string; generation: string | null } | null>(null);
@@ -726,6 +728,7 @@ export function BrowserSessionModal({
     runApprovalApplies && runApproval && canControlBrowser && !browserDataClearInFlight
       ? runApproval.approval
       : ownSharedBrowserApproval;
+  const sharedBrowserApprovalRequest = sharedBrowserApproval.pending?.request ?? null;
   useEffect(() => {
     onApprovalPendingChange?.(Boolean(sharedBrowserApproval.pending));
   }, [onApprovalPendingChange, sharedBrowserApproval.pending]);
@@ -1340,6 +1343,7 @@ export function BrowserSessionModal({
       browserDataClearInFlightRef.current ||
       connectionGeneration !== browserConnectionGenerationRef.current;
     const startupAbortController = new AbortController();
+    connectAttemptAbortRef.current = startupAbortController;
     const existingConnection = browserOriginConnectionRef.current;
     const exactRuntimeId = chosenRuntimeId ?? resumeRuntimeId ??
       (pinnedSessionRef.current?.scope === selectionScope ? pinnedSessionRef.current.runtimeId : null);
@@ -1851,6 +1855,9 @@ export function BrowserSessionModal({
     return () => {
       cancelled = true;
       startupAbortController.abort();
+      if (connectAttemptAbortRef.current === startupAbortController) {
+        connectAttemptAbortRef.current = null;
+      }
     };
   }, [
     browserSessionId,
@@ -2187,8 +2194,11 @@ export function BrowserSessionModal({
         window.clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;
       }
-      // Abandon the attempt on its way: a late answer must not bring the wait back.
+      // Abandon the attempt on its way: a late answer must not bring the wait
+      // back, and its host wait stops reading and starting the browser.
       browserConnectionGenerationRef.current += 1;
+      connectAttemptAbortRef.current?.abort();
+      connectAttemptAbortRef.current = null;
       setStatus("error");
       setError(SHARED_BROWSER_LOST_CONNECTION_COPY);
       runtimeDebugLog("browser-session:reconnect-timeout", { projectId });
@@ -3341,15 +3351,16 @@ export function BrowserSessionModal({
               </div>
             </div>
           ) : null}
-          {!shouldCollapseDocked && sharedBrowserApproval.pending ? (
+          {!shouldCollapseDocked && sharedBrowserApprovalRequest ? (
             <SharedBrowserApprovalPrompt
               active={transportActive}
               routineApprovalAvailable={sharedBrowserRoutineApprovalAvailable}
               error={sharedBrowserApproval.error}
               onDecision={(decision) => {
-                void sharedBrowserApproval.decide(decision);
+                // The prompt this sheet shows, not whatever was polled since.
+                void sharedBrowserApproval.decide(decision, sharedBrowserApprovalRequest.approvalId);
               }}
-              request={sharedBrowserApproval.pending.request}
+              request={sharedBrowserApprovalRequest}
               submitting={sharedBrowserApproval.submitting}
             />
           ) : null}

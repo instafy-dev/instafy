@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, useLayoutEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeSharedBrowserApprovalRequest } from "../../../../sdk/instafy";
@@ -35,6 +35,27 @@ function approval(overrides: Partial<SharedBrowserApprovalState> = {}): SharedBr
 
 const withPending = (value: RuntimeSharedBrowserApprovalRequest, overrides: Partial<SharedBrowserApprovalState> = {}) =>
   approval({ pending: { runtimeId: "11111111-1111-4111-8111-111111111111", request: value }, ...overrides });
+
+const isDisabled = (element: HTMLElement | null) =>
+  Boolean(element?.hasAttribute("disabled") || element?.getAttribute("aria-disabled") === "true");
+
+/**
+ * Presses Allow in the commit that hands the card a new prompt, before the
+ * card's effects show it: what a press sees in that window.
+ */
+type Seen = { current: { text: string; disabled: boolean } | null };
+function PressDuringCommit({ container, seen }: { container: HTMLElement; seen: Seen | null }) {
+  useLayoutEffect(() => {
+    if (!seen || seen.current) return;
+    const allow = container.querySelector<HTMLElement>("[data-testid='chat-browser-approval-allow']");
+    seen.current = {
+      text: container.querySelector("[data-testid='chat-browser-approval-card']")?.textContent ?? "",
+      disabled: isDisabled(allow),
+    };
+    allow?.click();
+  });
+  return null;
+}
 
 describe("SharedBrowserApprovalChatCard", () => {
   let container: HTMLDivElement;
@@ -83,9 +104,9 @@ describe("SharedBrowserApprovalChatCard", () => {
     const actionState = withPending(request());
     await render(actionState);
     await act(async () => { byTestId("chat-browser-approval-allow")!.click(); });
-    expect(actionState.decide).toHaveBeenCalledWith("allow_once");
+    expect(actionState.decide).toHaveBeenCalledWith("allow_once", "22222222-2222-4222-8222-222222222222");
     await act(async () => { byTestId("chat-browser-approval-deny")!.click(); });
-    expect(actionState.decide).toHaveBeenCalledWith("deny");
+    expect(actionState.decide).toHaveBeenCalledWith("deny", "22222222-2222-4222-8222-222222222222");
 
     const originState = withPending(request({
       approvalId: "77777777-7777-4777-8777-777777777777", kind: "origin", operation: "approve-origin",
@@ -96,7 +117,45 @@ describe("SharedBrowserApprovalChatCard", () => {
     expect(text()).toContain("Octo paused before reading or acting on example.test.");
     expect(byTestId("chat-browser-approval-allow")?.textContent).toBe(SHARED_BROWSER_APPROVAL_CHAT_COPY.allowSite);
     await act(async () => { byTestId("chat-browser-approval-allow")!.click(); });
-    expect(originState.decide).toHaveBeenCalledWith("allow_origin");
+    expect(originState.decide).toHaveBeenCalledWith("allow_origin", "77777777-7777-4777-8777-777777777777");
+  });
+
+  it("never answers a newer prompt with the buttons of the one on screen", async () => {
+    // A press in the commit that brings prompt Y, while the card still
+    // shows X, answers nothing.
+    const shown = request();
+    const newer = request({ approvalId: "99999999-9999-4999-8999-999999999999", display: { label: "Rechnung löschen", destinationOrigin: null } });
+    const renderWithPress = (state: SharedBrowserApprovalState, seen: Seen | null) => act(async () => {
+      root.render(<>
+        <SharedBrowserApprovalChatCard agentDisplayName="Octo" approval={state} avatar={<span>O</span>} />
+        <PressDuringCommit container={container} seen={seen} />
+      </>);
+    });
+    await renderWithPress(withPending(shown), null);
+    expect(text()).toContain("Menü ein-/ausklappen");
+    const newerState = withPending(newer);
+    const seen: Seen = { current: null };
+    await renderWithPress(newerState, seen);
+    expect(seen.current?.text).toContain("Menü ein-/ausklappen");
+    expect(seen.current?.text).not.toContain("Rechnung löschen");
+    expect(seen.current?.disabled).toBe(true);
+    expect(newerState.decide).not.toHaveBeenCalled();
+    // Once the card shows the newer prompt, its buttons answer that one.
+    expect(text()).toContain("Rechnung löschen");
+    expect(isDisabled(byTestId("chat-browser-approval-allow"))).toBe(false);
+    await act(async () => { byTestId("chat-browser-approval-allow")!.click(); });
+    expect(newerState.decide).toHaveBeenCalledExactlyOnceWith("allow_once", newer.approvalId);
+  });
+
+  it("keeps a prompt that went away on screen without live buttons", async () => {
+    await render(withPending(request()));
+    const gone = approval();
+    await render(gone);
+    expect(byTestId("chat-browser-approval-card")).not.toBeNull();
+    expect(isDisabled(byTestId("chat-browser-approval-allow"))).toBe(true);
+    expect(isDisabled(byTestId("chat-browser-approval-deny"))).toBe(true);
+    await act(async () => { byTestId("chat-browser-approval-allow")!.click(); });
+    expect(gone.decide).not.toHaveBeenCalled();
   });
 
   it("holds its buttons while an answer is saved, and shows what went wrong", async () => {

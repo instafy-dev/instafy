@@ -34,6 +34,7 @@ import {
 const userId = "55555555-5555-4555-8555-555555555555";
 const runtimeId = "11111111-1111-4111-8111-111111111111";
 const runId = "44444444-4444-4444-8444-444444444444";
+const approvalId = "22222222-2222-4222-8222-222222222222";
 
 function run(overrides: Partial<RunRecord> = {}, metadata: Record<string, unknown> = {}): RunRecord {
   return {
@@ -120,8 +121,8 @@ describe("useChatSharedBrowserApproval", () => {
       browserPageId: "page-of-the-job",
     }));
     expect(latest?.target?.runId).toBe(runId);
-    expect(latest?.approval.pending?.request.approvalId).toBe("22222222-2222-4222-8222-222222222222");
-    await act(async () => { await latest!.approval.decide("allow_once"); });
+    expect(latest?.approval.pending?.request.approvalId).toBe(approvalId);
+    await act(async () => { await latest!.approval.decide("allow_once", approvalId); });
     expect(mocks.decideApproval).toHaveBeenCalledWith(expect.objectContaining({
       originAccessToken: "approval-token",
       pending: expect.objectContaining({ runtimeId, request: expect.objectContaining({ approvalId: "22222222-2222-4222-8222-222222222222", runId }) }),
@@ -151,12 +152,39 @@ describe("useChatSharedBrowserApproval", () => {
     await render({ runs: [run()] });
     expect(mocks.fetchPendingApproval).toHaveBeenCalled();
     expect(latest?.approval.pending).toBeNull();
-    await act(async () => { await latest!.approval.decide("allow_once"); });
+    // Not even when asked for it by its own id: the lane holds it from its poll.
+    await act(async () => { await latest!.approval.decide("allow_once", approvalId); });
     mocks.fetchPendingApproval.mockResolvedValue(pendingFor({ initiatorUserId: "66666666-6666-4666-8666-666666666666" }));
     await act(async () => { await vi.advanceTimersByTimeAsync(1_500); });
     expect(latest?.approval.pending).toBeNull();
-    await act(async () => { await latest!.approval.decide("allow_once"); });
+    await act(async () => { await latest!.approval.decide("allow_once", approvalId); });
     expect(mocks.decideApproval).not.toHaveBeenCalled();
+  });
+
+  it("never answers a prompt polled after the one on screen, even another run's", async () => {
+    // A press lands between a poll and the render that would show its answer.
+    await render({ runs: [run()] });
+    expect(latest!.approval.pending?.request.approvalId).toBe(approvalId);
+    const shownDecide = latest!.approval.decide;
+    const otherRuns = pendingFor({ approvalId: "99999999-9999-4999-8999-999999999999", runId: "66666666-6666-4666-8666-666666666666",
+      display: { label: "Delete invoice", destinationOrigin: null } });
+    mocks.fetchPendingApproval.mockResolvedValue(otherRuns);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400);
+      await shownDecide("allow_once", approvalId);
+    });
+    expect(mocks.decideApproval).not.toHaveBeenCalled();
+    expect(latest!.approval.pending).toBeNull();
+    // A newer prompt of this run is answered only by a press for it.
+    const newer = pendingFor({ approvalId: "88888888-8888-4888-8888-888888888888" });
+    mocks.fetchPendingApproval.mockResolvedValue(newer);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+      await shownDecide("allow_once", approvalId);
+    });
+    expect(mocks.decideApproval).not.toHaveBeenCalled();
+    await act(async () => { await latest!.approval.decide("allow_once", newer.request.approvalId); });
+    expect(mocks.decideApproval).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ pending: newer, decision: "allow_once" }));
   });
 
   it("asks for its grant again after a failure, and renews it before it expires", async () => {

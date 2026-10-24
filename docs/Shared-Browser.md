@@ -502,7 +502,10 @@ visible and answerable while the browser view reconnects, shows an error, is
 hidden behind the Chat tab, collapsed in a narrow pane or was never opened in this
 tab. The browser view's sheet shows the same poll for that machine, so both
 surfaces share one state: an answer in either settles both, and the card then says
-**Allowed**, **Denied** or, after the window, **Expired**. The pending and decision
+**Allowed**, **Denied** or, after the window, **Expired**. A press answers only the
+prompt that surface shows: a newer prompt the poll found first, or another run's,
+is never answered by it, and the card's buttons are off while it still shows a
+prompt that is no longer the one waiting. The pending and decision
 endpoints, their scopes and the origin's initiator and page checks are unchanged.
 A teammate polls nothing and sees no card.
 
@@ -963,8 +966,9 @@ unless the policy is `"covered"`.
   five within a minute, also when a connection succeeds in between) and then
   shows "Browser session disconnected. Click Retry to reconnect." An error and
   the socket closing after it count once. **Reconnecting…** by itself lasts at
-  most 60 s; then the browser says it lost the connection and offers Retry, and
-  a late answer of the abandoned attempt does not bring the wait back. A
+  most 60 s; then the browser says it lost the connection and offers Retry. The
+  abandoned attempt is stopped, so it reads and starts nothing more, and its
+  late answer does not bring the wait back. A
   person's Retry or press is not cut short this way. An attempt that ends with
   the same connection (a cached grant) leaves a picture that is already back,
   or the error on screen, as it is. A browser that has its connection but waits

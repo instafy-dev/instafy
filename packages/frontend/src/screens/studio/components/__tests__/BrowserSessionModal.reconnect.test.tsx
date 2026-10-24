@@ -187,9 +187,15 @@ describe("Shared modal reconnects", () => {
     expect(reconnecting()).toBe(false);
     expect(text()).toContain(SHARED_BROWSER_LOST_CONNECTION_COPY);
     expect(retryShown()).toBe(true);
+    // The abandoned attempt's answer arrives late, and would mint a new grant
+    // (a new connection, not the cached one the view already has).
+    const url = latest().wsUrl;
+    mocks.requestAccessToken.mockResolvedValue({ token: "origin-token-2", endpoint: "https://origin.test", expiresIn: 300 });
     await act(async () => { answer?.({ runtimes: [session] }); });
     await advance(5_000);
+    expect(latest().wsUrl).toBe(url);
     expect(reconnecting()).toBe(false);
+    expect(text()).toContain(SHARED_BROWSER_LOST_CONNECTION_COPY);
     expect(retryShown()).toBe(true);
   });
 
@@ -299,6 +305,48 @@ describe("Shared modal re-attach to the space's own browser", () => {
     expect(reconnecting()).toBe(false);
   });
 
+  it("stops reading and starting the browser once an automatic reconnect gives up", async () => {
+    await render();
+    await act(async () => { latest().onConnected(); });
+    // The machine's browser answers with a 404 that is polled through.
+    const notFound = Object.assign(new Error("Instafy's browser not found (404)"), { name: "SharedBrowserHostNotFoundError", status: 404, code: null });
+    mocks.fetchHost.mockRejectedValue(notFound);
+    await act(async () => { latest().onDisconnected({ connected: true, reason: "WebSocket closed (1006)" }); });
+    for (let elapsed = 0; elapsed < SHARED_BROWSER_RECONNECT_TIMEOUT_MS + 500; elapsed += 250) await advance(250);
+    expect(text()).toContain(SHARED_BROWSER_LOST_CONNECTION_COPY);
+    const reads = mocks.fetchHost.mock.calls.length;
+    expect(reads).toBeGreaterThan(2);
+    // Nobody presses Retry. The machine now says its browser is idle.
+    mocks.fetchHost.mockResolvedValue(host("idle", "generation-1"));
+    for (let elapsed = 0; elapsed < 10_000; elapsed += 250) await advance(250);
+    expect(mocks.fetchHost).toHaveBeenCalledTimes(reads);
+    expect(mocks.startHost).not.toHaveBeenCalled();
+    expect(text()).toContain(SHARED_BROWSER_LOST_CONNECTION_COPY);
+  });
+
+  it("opens a browser that started again on a refresh after an automatic reconnect connected", async () => {
+    await render();
+    await act(async () => { latest().onConnected(); });
+    // The picture drops and reconnects by itself to the same browser.
+    await act(async () => { latest().onDisconnected({ connected: true, reason: "WebSocket closed (1006)" }); });
+    await advance(1_000);
+    await act(async () => { latest().onConnected(); });
+    expect(reconnecting()).toBe(false);
+    // Later the browser starts again, and the person refreshes the sessions.
+    mocks.fetchHost.mockResolvedValue(host("ready", "generation-2"));
+    mocks.requestAccessToken.mockResolvedValue({ token: "origin-token-2", endpoint: "https://origin.test", expiresIn: 300 });
+    const url = latest().wsUrl;
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="shared-browser-sessions-toggle"]')!.click());
+    await act(async () => Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => button.getAttribute("aria-label") === "Refresh sessions")!.click());
+    await advance(0);
+    expect(text()).not.toContain(SHARED_BROWSER_HOST_COPY.restarted);
+    expect(latest().wsUrl).not.toBe(url);
+    await act(async () => { latest().onConnected(); });
+    expect(retryButton()).toBeNull();
+    expect(reconnecting()).toBe(false);
+  });
+
   it("just connects when the person's own press finds the browser started again", async () => {
     await render();
     await act(async () => { latest().onConnected(); });
@@ -329,7 +377,7 @@ describe("Shared modal re-attach to the space's own browser", () => {
     expect(text()).toContain(SHARED_BROWSER_HOST_COPY.notAvailable);
     expect(document.querySelector('[data-testid="shared-browser-approval-prompt"]')).not.toBeNull();
     await act(async () => { document.querySelector<HTMLButtonElement>('[data-testid="shared-browser-approval-allow"]')!.click(); });
-    expect(decide).toHaveBeenCalledWith("allow_once");
+    expect(decide).toHaveBeenCalledWith("allow_once", request.approvalId);
     // A lane for another machine never stands in for this view's own.
     await render({ runApproval: { runtimeId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", approval } });
     expect(document.querySelector('[data-testid="shared-browser-approval-prompt"]')).toBeNull();
