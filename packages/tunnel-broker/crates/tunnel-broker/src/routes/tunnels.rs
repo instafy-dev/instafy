@@ -7,7 +7,7 @@ use tunnel_broker_types::{CreateTunnelRequest, LabelMap, TunnelResponse, TunnelS
 use uuid::Uuid;
 
 use crate::{
-    config::BrokerConfig,
+    config::{BrokerConfig, HookConfig},
     db::{self, TunnelInsert, TunnelRecord},
     error::{AppError, AppResult},
     hooks::{check_acl, emit_event, AclRequest, EventPayload},
@@ -29,6 +29,28 @@ fn should_return_existing_tunnel(
     }
 }
 
+/// What an idempotent create does with the tunnel its key already names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reuse {
+    /// Live and on the current domain: hand it back unchanged.
+    Return,
+    /// Expired or revoked but on the current domain: re-issue it in place.
+    Refresh,
+    /// Minted under a domain the broker no longer serves: retire it and mint a new tunnel, so
+    /// an old domain stops being handed out and can be retired.
+    Replace,
+}
+
+fn reuse_existing_tunnel(cfg: &BrokerConfig, existing: &TunnelRecord, now: DateTime<Utc>) -> Reuse {
+    if !cfg.hostname_in_tunnel_domain(&existing.hostname) {
+        Reuse::Replace
+    } else if should_return_existing_tunnel(&existing.status, existing.expires_at, now) {
+        Reuse::Return
+    } else {
+        Reuse::Refresh
+    }
+}
+
 pub async fn create(
     State(state): State<AppState>,
     Json(body): Json<CreateTunnelRequest>,
@@ -42,36 +64,47 @@ pub async fn create(
         .filter(|value| !value.is_empty());
 
     let mut refresh_existing = None;
+    let mut replace_stale = None;
     if let Some(key) = idempotency_key {
         if let Some(existing) =
             db::get_tunnel_by_idempotency_key(state.pool(), body.project_id, key).await?
         {
             ensure_same_visibility(&existing, body.labels.as_ref())?;
-            if should_return_existing_tunnel(&existing.status, existing.expires_at, now) {
-                let ingress = db::get_ingress(state.pool(), existing.ingress_id)
-                    .await?
-                    .ok_or_else(|| AppError::internal("ingress not found for tunnel"))?;
-                db::ensure_tunnel_dns_records(
-                    state.pool(),
-                    state.config(),
-                    &ingress,
-                    &existing.hostname,
-                    state.config().default_ttl_seconds,
-                )
-                .await
-                .map_err(|error| {
-                    AppError::internal(format!(
-                        "failed to refresh dns records for existing tunnel: {error}"
-                    ))
-                })?;
-                let descriptor = existing.into_descriptor(state.config(), &ingress);
-                return Ok(Json(TunnelResponse {
-                    tunnel: descriptor,
-                    credit: None,
-                }));
+            match reuse_existing_tunnel(state.config(), &existing, now) {
+                Reuse::Replace => {
+                    tracing::info!(
+                        tunnel_id = %existing.id,
+                        project_id = %existing.project_id,
+                        "idempotent tunnel hostname is outside the configured tunnel domain; \
+                         replacing it with a new tunnel"
+                    );
+                    replace_stale = Some(existing);
+                }
+                Reuse::Return => {
+                    let ingress = db::get_ingress(state.pool(), existing.ingress_id)
+                        .await?
+                        .ok_or_else(|| AppError::internal("ingress not found for tunnel"))?;
+                    db::ensure_tunnel_dns_records(
+                        state.pool(),
+                        state.config(),
+                        &ingress,
+                        &existing.hostname,
+                        state.config().default_ttl_seconds,
+                    )
+                    .await
+                    .map_err(|error| {
+                        AppError::internal(format!(
+                            "failed to refresh dns records for existing tunnel: {error}"
+                        ))
+                    })?;
+                    let descriptor = existing.into_descriptor(state.config(), &ingress);
+                    return Ok(Json(TunnelResponse {
+                        tunnel: descriptor,
+                        credit: None,
+                    }));
+                }
+                Reuse::Refresh => refresh_existing = Some(existing),
             }
-
-            refresh_existing = Some(existing);
         }
     }
 
@@ -150,8 +183,9 @@ pub async fn create(
         ttl_seconds: state.config().default_ttl_seconds,
     };
 
-    let record = match refresh_existing.as_ref() {
-        Some(existing) => {
+    let mut retired = None;
+    let record = match (refresh_existing.as_ref(), replace_stale.as_ref()) {
+        (Some(existing), _) => {
             db::refresh_tunnel(
                 state.pool(),
                 state.config(),
@@ -168,7 +202,15 @@ pub async fn create(
             )
             .await?
         }
-        None => {
+        (None, Some(stale)) => {
+            let (record, replaced) =
+                db::replace_tunnel(state.pool(), state.config(), &ingress, stale, insert).await?;
+            retired = replaced;
+            // A concurrent replacement with the same key may have won the insert.
+            ensure_same_visibility(&record, body.labels.as_ref())?;
+            record
+        }
+        (None, None) => {
             let record = db::create_tunnel(state.pool(), state.config(), &ingress, insert).await?;
             // A concurrent create with the same key may have won the insert.
             ensure_same_visibility(&record, body.labels.as_ref())?;
@@ -178,6 +220,9 @@ pub async fn create(
     let descriptor = record.into_descriptor(state.config(), &ingress);
 
     if let Some(event) = state.config().event_hook.as_ref() {
+        if let Some(retired) = retired {
+            emit_revoked_event(&state, event, retired).await;
+        }
         emit_event(
             state.http(),
             event,
@@ -252,6 +297,40 @@ pub async fn revoke(
         tunnel: descriptor,
         credit: None,
     }))
+}
+
+/// `tunnel.revoked` for a tunnel retired by a replacement, shaped like the revoke route's.
+async fn emit_revoked_event(state: &AppState, event: &HookConfig, retired: TunnelRecord) {
+    let ingress = match db::get_ingress(state.pool(), retired.ingress_id).await {
+        Ok(Some(ingress)) => ingress,
+        Ok(None) | Err(_) => {
+            tracing::warn!(
+                tunnel_id = %retired.id,
+                "ingress of a replaced tunnel not found; skipping its revoked event"
+            );
+            return;
+        }
+    };
+    let (project_id, org_id, runtime_id, lease_id) = (
+        retired.project_id,
+        retired.org_id,
+        retired.runtime_id,
+        retired.lease_id,
+    );
+    let descriptor = retired.into_descriptor(state.config(), &ingress);
+    emit_event(
+        state.http(),
+        event,
+        &EventPayload {
+            kind: "tunnel.revoked",
+            project_id,
+            org_id,
+            runtime_id,
+            lease_id,
+            data: serde_json::to_value(&descriptor).unwrap_or_default(),
+        },
+    )
+    .await;
 }
 
 fn labels_to_metadata(labels: Option<LabelMap>) -> Option<serde_json::Value> {
@@ -579,5 +658,333 @@ mod tests {
     fn returns_existing_when_no_expiry_is_set() {
         let now = Utc::now();
         assert!(should_return_existing_tunnel("active", None, now));
+    }
+
+    fn row_on(cfg: &BrokerConfig, status: &str, expires_in: Option<i64>) -> TunnelRecord {
+        let base = db::test_tunnel_record();
+        TunnelRecord {
+            hostname: cfg.hostname_for(&base.id),
+            status: status.into(),
+            expires_at: expires_in.map(|seconds| Utc::now() + Duration::seconds(seconds)),
+            ..base
+        }
+    }
+
+    #[test]
+    fn reuse_is_unchanged_while_the_domain_is_unchanged() {
+        let cfg = test_broker_config();
+        let now = Utc::now();
+        assert_eq!(
+            reuse_existing_tunnel(&cfg, &row_on(&cfg, "active", Some(60)), now),
+            Reuse::Return
+        );
+        assert_eq!(
+            reuse_existing_tunnel(&cfg, &row_on(&cfg, "active", None), now),
+            Reuse::Return
+        );
+        assert_eq!(
+            reuse_existing_tunnel(&cfg, &row_on(&cfg, "active", Some(-1)), now),
+            Reuse::Refresh
+        );
+        assert_eq!(
+            reuse_existing_tunnel(&cfg, &row_on(&cfg, "revoked", Some(60)), now),
+            Reuse::Refresh
+        );
+    }
+
+    #[test]
+    fn tunnels_minted_under_another_domain_are_replaced_in_any_status() {
+        let before = test_broker_config();
+        let mut after = test_broker_config();
+        after.tunnel_domain = "usercontent.test".into();
+        let now = Utc::now();
+        for (status, expires_in) in [
+            ("active", Some(60)),
+            ("active", None),
+            ("requested", Some(60)),
+            ("active", Some(-1)),
+            ("revoked", Some(60)),
+        ] {
+            let row = row_on(&before, status, expires_in);
+            assert_eq!(
+                reuse_existing_tunnel(&after, &row, now),
+                Reuse::Replace,
+                "{status} {expires_in:?}"
+            );
+        }
+    }
+
+    /// Runs the create handler against a real, disposable Postgres. CI is database-free, so
+    /// these are ignored there; run them with
+    /// `TUNNEL_BROKER_TEST_DATABASE_URL=postgres://… cargo test -- --ignored`.
+    mod with_postgres {
+        use super::*;
+        use crate::routes::preview_auth::parse_preview_host;
+        use tokio::sync::OnceCell;
+        use tunnel_broker_types::TunnelDescriptor;
+
+        const DATABASE_ENV: &str = "TUNNEL_BROKER_TEST_DATABASE_URL";
+        static MIGRATED: OnceCell<()> = OnceCell::const_new();
+        /// The tests share one ingress, and some expire rows by hand outside the allocation
+        /// lock, which another test's allocation must not observe halfway; run them one at a
+        /// time (each test's own requests still race each other where it means to).
+        static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+        async fn serial() -> tokio::sync::MutexGuard<'static, ()> {
+            SERIAL.lock().await
+        }
+
+        async fn broker(tunnel_domain: &str, preview_domain: &str) -> AppState {
+            let url = std::env::var(DATABASE_ENV)
+                .unwrap_or_else(|_| panic!("{DATABASE_ENV} must name a disposable database"));
+            MIGRATED
+                .get_or_init(|| async {
+                    let pool = db::connect_pool(&url, 1).await.expect("connect");
+                    db::run_migrations(&pool).await.expect("migrate");
+                    pool.close().await;
+                })
+                .await;
+            let mut cfg = test_broker_config();
+            cfg.database_url = url;
+            cfg.tunnel_domain = tunnel_domain.into();
+            cfg.preview.as_mut().unwrap().domain = preview_domain.into();
+            cfg.ingress_ipv4 = Some("127.0.0.1".parse().unwrap());
+            let pool = db::connect_pool(&cfg.database_url, 16)
+                .await
+                .expect("connect");
+            db::ensure_pdns_domain(&pool, &cfg).await.expect("zone");
+            db::ensure_ingress(&pool, &cfg).await.expect("ingress");
+            AppState::new(pool, cfg)
+        }
+
+        fn request(project_id: Uuid, key: &str, labels: Option<LabelMap>) -> CreateTunnelRequest {
+            CreateTunnelRequest {
+                project_id,
+                org_id: None,
+                runtime_id: Some(Uuid::new_v4()),
+                lease_id: Some(Uuid::new_v4()),
+                idempotency_key: Some(key.into()),
+                expires_in_seconds: Some(600),
+                labels,
+            }
+        }
+
+        async fn open(state: &AppState, body: &CreateTunnelRequest) -> TunnelDescriptor {
+            let Json(response) = create(State(state.clone()), Json(body.clone()))
+                .await
+                .expect("create");
+            response.tunnel
+        }
+
+        async fn row(state: &AppState, id: Uuid) -> TunnelRecord {
+            db::get_tunnel(state.pool(), id)
+                .await
+                .unwrap()
+                .expect("row")
+        }
+
+        async fn address_records(state: &AppState, hostname: &str) -> i64 {
+            sqlx::query_scalar(
+                "select count(*) from records where name = $1 and type in ('A','AAAA')",
+            )
+            .bind(hostname)
+            .fetch_one(state.pool())
+            .await
+            .unwrap()
+        }
+
+        async fn assert_retired(state: &AppState, id: Uuid) {
+            let retired = row(state, id).await;
+            assert_eq!(retired.status, "revoked");
+            assert_eq!(retired.token, "");
+            assert_eq!(retired.token_expires_at, None);
+            assert_eq!(retired.idempotency_key, None, "key released");
+            assert_eq!(address_records(state, &retired.hostname).await, 0);
+        }
+
+        async fn key_owner(state: &AppState, project_id: Uuid, key: &str) -> Uuid {
+            db::get_tunnel_by_idempotency_key(state.pool(), project_id, key)
+                .await
+                .unwrap()
+                .expect("key row")
+                .id
+        }
+
+        #[tokio::test]
+        #[ignore = "needs TUNNEL_BROKER_TEST_DATABASE_URL"]
+        async fn an_unchanged_domain_keeps_the_hostname_through_reuse_and_refresh() {
+            let _serial = serial().await;
+            let state = broker("same-a.test", "same-a-preview.test").await;
+            let body = request(Uuid::new_v4(), "tunnel:same", None);
+            let first = open(&state, &body).await;
+            assert_eq!(
+                first.hostname,
+                state.config().hostname_for(&first.tunnel_id)
+            );
+
+            let reused = open(&state, &body).await;
+            assert_eq!(reused.tunnel_id, first.tunnel_id);
+            assert_eq!(reused.hostname, first.hostname);
+
+            sqlx::query(
+                "update tunnels set expires_at = now() - interval '1 second' where id = $1",
+            )
+            .bind(first.tunnel_id)
+            .execute(state.pool())
+            .await
+            .unwrap();
+            let refreshed = open(&state, &body).await;
+            assert_eq!(refreshed.tunnel_id, first.tunnel_id);
+            assert_eq!(refreshed.hostname, first.hostname);
+
+            db::revoke_tunnel(state.pool(), state.config(), first.tunnel_id)
+                .await
+                .unwrap();
+            let reissued = open(&state, &body).await;
+            assert_eq!(reissued.tunnel_id, first.tunnel_id);
+            assert_eq!(reissued.hostname, first.hostname);
+            assert_eq!(address_records(&state, &first.hostname).await, 1);
+        }
+
+        #[tokio::test]
+        #[ignore = "needs TUNNEL_BROKER_TEST_DATABASE_URL"]
+        async fn a_domain_change_replaces_a_live_tunnel() {
+            let _serial = serial().await;
+            let before = broker("live-old.test", "live-old-preview.test").await;
+            let after = broker("live-new.test", "live-new-preview.test").await;
+            let body = request(Uuid::new_v4(), "tunnel:live", None);
+            let old = open(&before, &body).await;
+            assert_eq!(address_records(&before, &old.hostname).await, 1);
+
+            let new = open(&after, &body).await;
+            assert_ne!(new.tunnel_id, old.tunnel_id);
+            assert_eq!(new.hostname, after.config().hostname_for(&new.tunnel_id));
+            assert!(after.config().hostname_in_tunnel_domain(&new.hostname));
+            assert_eq!(new.url, Some(after.config().tunnel_url(&new.hostname)));
+            assert_eq!(new.client.hostname, new.hostname);
+            assert_ne!(new.client.service, old.client.service);
+            assert_eq!(address_records(&after, &new.hostname).await, 1);
+            assert_retired(&after, old.tunnel_id).await;
+            assert_eq!(
+                key_owner(&after, body.project_id, "tunnel:live").await,
+                new.tunnel_id
+            );
+
+            // The replacement is now the key's tunnel, reused like any other.
+            let again = open(&after, &body).await;
+            assert_eq!(again.tunnel_id, new.tunnel_id);
+            assert_eq!(again.hostname, new.hostname);
+        }
+
+        #[tokio::test]
+        #[ignore = "needs TUNNEL_BROKER_TEST_DATABASE_URL"]
+        async fn a_domain_change_replaces_instead_of_refreshing() {
+            let _serial = serial().await;
+            let before = broker("refresh-old.test", "refresh-old-preview.test").await;
+            let after = broker("refresh-new.test", "refresh-new-preview.test").await;
+            for expire in [true, false] {
+                let body = request(Uuid::new_v4(), "tunnel:refresh", None);
+                let old = open(&before, &body).await;
+                if expire {
+                    sqlx::query(
+                        "update tunnels set expires_at = now() - interval '1 second' where id = $1",
+                    )
+                    .bind(old.tunnel_id)
+                    .execute(before.pool())
+                    .await
+                    .unwrap();
+                } else {
+                    db::revoke_tunnel(before.pool(), before.config(), old.tunnel_id)
+                        .await
+                        .unwrap();
+                }
+
+                let new = open(&after, &body).await;
+                assert_ne!(new.tunnel_id, old.tunnel_id, "expire={expire}");
+                assert_eq!(new.hostname, after.config().hostname_for(&new.tunnel_id));
+                assert_retired(&after, old.tunnel_id).await;
+                assert_eq!(
+                    key_owner(&after, body.project_id, "tunnel:refresh").await,
+                    new.tunnel_id
+                );
+            }
+        }
+
+        #[tokio::test]
+        #[ignore = "needs TUNNEL_BROKER_TEST_DATABASE_URL"]
+        async fn a_replaced_private_preview_gets_a_fresh_capability_namespace() {
+            let _serial = serial().await;
+            let before = broker("preview-old.test", "preview-old-content.test").await;
+            // One user-content domain for both name shapes after the change.
+            let after = broker("preview-new.test", "preview-new.test").await;
+            let preview = labels(&[("kind", "preview"), ("visibility", "private")]);
+            let body = request(Uuid::new_v4(), "preview:rt:5173", Some(preview));
+            let old = open(&before, &body).await;
+            assert_eq!(old.url, None);
+
+            let new = open(&after, &body).await;
+            assert_ne!(new.tunnel_id, old.tunnel_id);
+            assert_eq!(new.url, None);
+            assert_eq!(new.hostname, after.config().hostname_for(&new.tunnel_id));
+            assert_eq!(
+                new.metadata,
+                Some(serde_json::json!({"labels": {"kind": "preview", "visibility": "private"}}))
+            );
+            assert_retired(&after, old.tunnel_id).await;
+
+            // Capability hosts name the tunnel, so every capability minted for the old tunnel
+            // names the retired row and none of them reaches the replacement.
+            let domain = &after.config().preview.as_ref().unwrap().domain;
+            let label = "abcdefghijklmnopqrstuvwxyz";
+            let fresh = format!("p-{label}--{}.{domain}", new.tunnel_id.simple());
+            let stale = format!("p-{label}--{}.{domain}", old.tunnel_id.simple());
+            assert_eq!(
+                parse_preview_host(&fresh, domain).unwrap().tunnel_id,
+                new.tunnel_id
+            );
+            assert_eq!(
+                parse_preview_host(&stale, domain).unwrap().tunnel_id,
+                old.tunnel_id
+            );
+            assert!(after.config().hostname_in_tunnel_domain(&new.hostname));
+            assert!(!after.config().hostname_in_tunnel_domain(&fresh));
+        }
+
+        #[tokio::test]
+        #[ignore = "needs TUNNEL_BROKER_TEST_DATABASE_URL"]
+        async fn concurrent_creates_after_a_domain_change_agree_on_one_replacement() {
+            let _serial = serial().await;
+            let before = broker("race-old.test", "race-old-preview.test").await;
+            let after = broker("race-new.test", "race-new-preview.test").await;
+            let body = request(Uuid::new_v4(), "tunnel:race", None);
+            let old = open(&before, &body).await;
+
+            let racers: Vec<_> = (0..8)
+                .map(|_| {
+                    let state = after.clone();
+                    let body = body.clone();
+                    tokio::spawn(async move { open(&state, &body).await })
+                })
+                .collect();
+            let mut ids = Vec::new();
+            for racer in racers {
+                ids.push(racer.await.unwrap().tunnel_id);
+            }
+            let winner = ids[0];
+            assert!(ids.iter().all(|id| *id == winner), "{ids:?}");
+            assert_ne!(winner, old.tunnel_id);
+            assert_retired(&after, old.tunnel_id).await;
+            assert_eq!(
+                key_owner(&after, body.project_id, "tunnel:race").await,
+                winner
+            );
+            let rows: i64 =
+                sqlx::query_scalar("select count(*) from tunnels where project_id = $1")
+                    .bind(body.project_id)
+                    .fetch_one(after.pool())
+                    .await
+                    .unwrap();
+            assert_eq!(rows, 2, "the retired row and one replacement");
+        }
     }
 }
