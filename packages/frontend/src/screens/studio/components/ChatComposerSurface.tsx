@@ -206,6 +206,30 @@ function composerMenuIsOpen(): boolean {
   });
 }
 
+/**
+ * Returns focus after a saved-message panel closes, unless the person has
+ * already put it somewhere else. The task deferral lets React remove the
+ * panel first. By then a click or tap into the editor (or React Aria's own
+ * restoration) may have moved focus, and taking it back would send the next
+ * keystrokes to a button instead of the draft.
+ */
+function restoreFocusAfterSavedMessagePanel(focus: () => void, closedContent: HTMLElement | null) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.setTimeout(() => {
+    const active = document.activeElement;
+    const focusLost =
+      !active ||
+      active === document.body ||
+      !active.isConnected ||
+      Boolean(closedContent?.contains(active));
+    if (focusLost) {
+      focus();
+    }
+  }, 0);
+}
+
 function resolveGoalStatusPillTone(tone: ConversationGoalHealth["tone"]): StatusPillTone {
   if (tone === "blocked") {
     return "danger";
@@ -615,8 +639,11 @@ export function ChatComposerSurface({
           savedMessagePopoverContentRef.current?.contains(document.activeElement));
       savedMessagePopoverHadFocusRef.current = false;
       setOpenSavedMessagePanel(null);
-      if (shouldFocusComposer && typeof window !== "undefined") {
-        window.setTimeout(() => chatInputRef.current?.focus(), 0);
+      if (shouldFocusComposer) {
+        restoreFocusAfterSavedMessagePanel(
+          () => chatInputRef.current?.focus(),
+          savedMessagePopoverContentRef.current,
+        );
       }
     }
   }, [chatInputRef, openSavedMessagePanel, stashTrayProps?.stashes.length]);
@@ -634,8 +661,11 @@ export function ChatComposerSurface({
     if (queueExpandedFromParent) {
       onToggleQueueExpanded?.();
     }
-    if (shouldFocusComposer && typeof window !== "undefined") {
-      window.setTimeout(() => chatInputRef.current?.focus(), 0);
+    if (shouldFocusComposer) {
+      restoreFocusAfterSavedMessagePanel(
+        () => chatInputRef.current?.focus(),
+        savedMessagePopoverContentRef.current,
+      );
     }
   }, [
     chatInputRef,
@@ -700,9 +730,10 @@ export function ChatComposerSurface({
         openSavedMessagePanel === "stash"
           ? stashTrayTriggerRef.current
           : queueTriggerRef.current;
+      const closedContent = savedMessagePopoverContentRef.current;
       handleSavedMessagePopoverOpenChange(false);
-      if (typeof window !== "undefined") {
-        window.setTimeout(() => trigger?.focus(), 0);
+      if (trigger) {
+        restoreFocusAfterSavedMessagePanel(() => trigger.focus(), closedContent);
       }
     },
     [handleSavedMessagePopoverOpenChange, openSavedMessagePanel, queueDragActive],

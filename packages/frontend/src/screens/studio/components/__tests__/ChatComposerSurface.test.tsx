@@ -1643,6 +1643,35 @@ describe("ChatComposerSurface", () => {
     expect(document.activeElement).toBe(stashTrigger);
   });
 
+  it("does not take focus back from a field chosen right after Escape closes the queue", async () => {
+    await act(async () => {
+      root.render(<SavedMessagesHarness />);
+    });
+    const queueTrigger = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-send-queue-agent-summary"]',
+    );
+    await act(async () => {
+      queueTrigger?.click();
+    });
+    const steer = document.body.querySelector<HTMLButtonElement>('[data-testid="chat-send-queue-steer"]');
+    expect(steer).not.toBeNull();
+    const draftField = document.createElement("textarea");
+    document.body.appendChild(draftField);
+    try {
+      await act(async () => {
+        steer?.focus();
+        steer?.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Escape" }));
+        // A click or tap into the draft can land before the deferred return.
+        draftField.focus();
+        await new Promise((resolve) => window.setTimeout(resolve, 0));
+      });
+      expect(queueTrigger?.getAttribute("aria-expanded")).toBe("false");
+      expect(document.activeElement).toBe(draftField);
+    } finally {
+      draftField.remove();
+    }
+  });
+
   it("uses the first Escape to cancel keyboard reordering and the second to close", async () => {
     const onQueueReorder = vi.fn();
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (
