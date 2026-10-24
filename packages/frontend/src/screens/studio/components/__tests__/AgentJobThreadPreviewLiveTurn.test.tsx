@@ -248,6 +248,162 @@ describe("AgentJobThreadPreviewLayout live turn", () => {
     expect(pillRow?.className.split(/\s+/)).not.toContain("flex-wrap");
   });
 
+  function reasoningUpdates(prefix: string, count: number, start: number): ChatMessage[] {
+    return Array.from({ length: count }, (_, index) =>
+      agentUpdate(
+        `${prefix}-${index + 1}`,
+        "reasoning",
+        `**Checking invoice row ${prefix} ${index + 1}**\n\nDetails.`,
+        start + index * 10,
+        { status: "in_progress" },
+      ),
+    );
+  }
+
+  function browserClick(id: string, timestamp: number): ChatMessage {
+    return agentUpdate(id, "mcp_tool_call", "browser/click", timestamp, {
+      status: "in_progress",
+      server: "browser",
+      tool: "click",
+    });
+  }
+
+  // The rail's chips, oldest first, without the waiting spinner or the "+N" chip.
+  const railPills = () => Array.from(container.querySelectorAll("button.instafy-compact-event-pill"));
+  const pillCount = (pill: Element | undefined) =>
+    pill?.querySelector('[data-testid="agent-thread-compact-event-count"]')?.textContent ?? null;
+
+  // Records every chip the rail mounts or drops; production showed one of each
+  // per update once the rail was full, so the whole row slid left each second.
+  function watchRailChildren(): { changes: () => number; stop: () => void } {
+    const row = railPills()[0]?.parentElement?.parentElement;
+    expect(row).toBeInstanceOf(HTMLElement);
+    let count = 0;
+    const observer = new MutationObserver((records) => {
+      count += records.filter((record) => record.type === "childList").length;
+    });
+    observer.observe(row!, { childList: true });
+    return {
+      changes: () => {
+        count += observer.takeRecords().filter((record) => record.type === "childList").length;
+        return count;
+      },
+      stop: () => observer.disconnect(),
+    };
+  }
+
+  it("keeps a streak of reasoning updates as one chip that counts in place", async () => {
+    // A long shared browser turn reasoned about once a second. Each update was
+    // its own "Thinking" chip, and the live ring hopped to the newest one.
+    const streak = reasoningUpdates("streak", 40, base);
+
+    await renderTurn(streak.slice(0, 2));
+    const [chip] = railPills();
+    expect(railPills()).toHaveLength(1);
+    expect(pillCount(chip)).toBe("2");
+    expect(chip?.getAttribute("aria-label")).toBe("Thinking, 2 updates");
+    expect(chip?.classList.contains("instafy-compact-event-pill-live")).toBe(true);
+
+    const watcher = watchRailChildren();
+    for (let length = 3; length <= streak.length; length += 1) {
+      await renderTurn(streak.slice(0, length));
+      // The same element the whole streak: no remount, no new chip, and the
+      // live ring stays where it was.
+      expect(railPills()).toEqual([chip]);
+      expect(pillCount(chip)).toBe(String(length));
+      expect(chip?.classList.contains("instafy-compact-event-pill-live")).toBe(true);
+    }
+    expect(watcher.changes()).toBe(0);
+    watcher.stop();
+    expect(chip?.getAttribute("aria-label")).toBe("Thinking, 40 updates");
+    expect(container.querySelector(".instafy-compact-overflow-indicator")).toBeNull();
+  });
+
+  it("starts a new chip only when the step kind changes", async () => {
+    const firstStreak = reasoningUpdates("first", 3, base);
+    const click = browserClick("click-1", base + 100);
+    const secondStreak = reasoningUpdates("second", 3, base + 200);
+
+    await renderTurn(firstStreak);
+    const [thinkingChip] = railPills();
+
+    await renderTurn([...firstStreak, click]);
+    const [, clickChip] = railPills();
+    expect(railPills()).toEqual([thinkingChip, clickChip]);
+    expect(pillCount(clickChip)).toBeNull();
+    expect(clickChip?.classList.contains("instafy-compact-event-pill-live")).toBe(true);
+    expect(thinkingChip?.classList.contains("instafy-compact-event-pill-live")).toBe(false);
+
+    await renderTurn([...firstStreak, click, ...secondStreak.slice(0, 2)]);
+    const pills = railPills();
+    expect(pills).toHaveLength(3);
+    expect(pills.slice(0, 2)).toEqual([thinkingChip, clickChip]);
+    const secondChip = pills[2];
+
+    await renderTurn([...firstStreak, click, ...secondStreak]);
+    expect(railPills()).toEqual([thinkingChip, clickChip, secondChip]);
+    expect(railPills().map(pillCount)).toEqual(["3", null, "3"]);
+    expect(secondChip?.classList.contains("instafy-compact-event-pill-live")).toBe(true);
+  });
+
+  it("caps mixed kinds and counts the folded updates on the overflow chip", async () => {
+    // 25 chips: streaks of two reasoning updates between single clicks. The
+    // cap keeps the newest 19 chips and folds the oldest 6 into "+N".
+    const updates: ChatMessage[] = [];
+    for (let step = 0; step < 25; step += 1) {
+      const start = base + step * 100;
+      if (step % 2 === 0) {
+        updates.push(...reasoningUpdates(`step-${step}`, 2, start));
+      } else {
+        updates.push(browserClick(`click-${step}`, start));
+      }
+    }
+    await renderTurn(updates);
+
+    expect(railPills()).toHaveLength(19);
+    const overflowChip = container.querySelector<HTMLButtonElement>(".instafy-compact-overflow-indicator");
+    // Folded chips: reasoning ×2, click, reasoning ×2, click, reasoning ×2, click.
+    expect(overflowChip?.getAttribute("aria-label")).toBe("9 earlier run updates");
+    expect(overflowChip?.getAttribute("data-count")).toBe("9");
+
+    await act(async () => {
+      overflowChip?.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    });
+    const card = container.querySelector('[data-testid="agent-thread-compact-event-preview"]');
+    expect(
+      card?.querySelector('[data-testid="agent-thread-compact-event-preview-header"]')?.textContent,
+    ).toBe("9 earlier run updates");
+    expect(
+      Array.from(
+        card?.querySelectorAll('[data-testid="agent-thread-compact-event-preview-body"] .block.truncate') ?? [],
+      ).map((line) => line.textContent),
+    ).toEqual(["Reasoning ×2", "Tool call", "Reasoning ×2", "Tool call", "Reasoning ×2", "Tool call"]);
+    await act(async () => {
+      overflowChip?.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    });
+
+    // The newest streak keeps growing: nothing folds and nothing slides.
+    const before = railPills();
+    const watcher = watchRailChildren();
+    await renderTurn([...updates, ...reasoningUpdates("step-24-more", 5, base + 3_000)]);
+    expect(watcher.changes()).toBe(0);
+    watcher.stop();
+    expect(railPills()).toEqual(before);
+    expect(pillCount(before[before.length - 1])).toBe("7");
+    expect(overflowChip?.getAttribute("aria-label")).toBe("9 earlier run updates");
+
+    // A new kind adds one chip and folds the oldest visible one, a reasoning
+    // streak of two.
+    await renderTurn([
+      ...updates,
+      ...reasoningUpdates("step-24-more", 5, base + 3_000),
+      browserClick("click-25", base + 4_000),
+    ]);
+    expect(railPills()).toHaveLength(19);
+    expect(railPills()[0]).toBe(before[1]);
+    expect(overflowChip?.getAttribute("aria-label")).toBe("11 earlier run updates");
+  });
+
   it("gives up the status line once, at completion, together with the reply", async () => {
     const running = earlierSteps();
     await renderTurn(running);

@@ -600,10 +600,27 @@ export function useAgentJobThreadPreviewState({
         // Enriched at assembly time with a short excerpt so the chip's hover
         // card can show what the step did without resolving the message again.
         const eventPreview = resolveThreadCompactEventPreview(update, kind);
+        const actorHandle = extractMessageAgentHandle(update);
+        // A streak of one kind from one actor is one chip that counts its
+        // updates. A chip per update filled the rail with "Thinking" chips
+        // and, once it was full, slid the whole rail one slot left on every
+        // update. The chip keeps its first update's id, so it stays mounted
+        // and keeps the live ring while the streak grows.
+        const previous = compactEvents[compactEvents.length - 1];
+        if (previous && previous.kind === kind && previous.actorHandle === actorHandle) {
+          compactEvents[compactEvents.length - 1] = {
+            ...previous,
+            count: (previous.count ?? 1) + 1,
+            previewText: eventPreview?.text ?? previous.previewText,
+            previewMono: eventPreview ? eventPreview.mono : previous.previewMono,
+          };
+          continue;
+        }
         compactEvents.push({
           id: update.id,
           kind,
-          actorHandle: extractMessageAgentHandle(update),
+          actorHandle,
+          count: 1,
           previewText: eventPreview?.text ?? null,
           previewMono: eventPreview?.mono ?? false,
         });
@@ -621,11 +638,14 @@ export function useAgentJobThreadPreviewState({
     let nextOverflowCompactEvents: ThreadCompactEvent[] = [];
     if (compactEvents.length > safeIconSlots) {
       const tailSlots = Math.max(1, safeIconSlots - 1);
-      overflowCount = compactEvents.length - tailSlots;
       nextVisibleCompactEvents = compactEvents.slice(-tailSlots);
       // The elided head of the rail: the "+N" chip's hover card lists these
       // steps' history labels so the overflow is inspectable without expanding.
-      nextOverflowCompactEvents = compactEvents.slice(0, overflowCount);
+      nextOverflowCompactEvents = compactEvents.slice(0, compactEvents.length - tailSlots);
+      // The cap counts chips, but "+N earlier run updates" counts the updates
+      // behind them, the same updates the expanded thread lists. It changes
+      // only when a chip folds in, never while the newest streak grows.
+      overflowCount = nextOverflowCompactEvents.reduce((total, event) => total + (event.count ?? 1), 0);
     } else {
       nextVisibleCompactEvents = compactEvents.slice(-safeIconSlots);
     }
@@ -804,10 +824,13 @@ export function useAgentJobThreadPreviewState({
   });
   // One update is one row, waiting spinner or not: the spinner comes and goes
   // with every command, and swapping the row for a rail each time moved the
-  // turn. The row's own sweep carries the live state.
+  // turn. The row's own sweep carries the live state. A chip that stands for
+  // a streak stays on the rail: the row names one update (a command row is
+  // that command's panel), so it cannot carry several.
   const shouldCollapseSingleCompactEvent =
     showCompactIconRail &&
     visibleCompactEvents.length === 1 &&
+    (visibleCompactEvents[0]?.count ?? 1) === 1 &&
     overflowCompactCount === 0;
   const singleCompactEvent = shouldCollapseSingleCompactEvent ? visibleCompactEvents[0] ?? null : null;
   const singleCompactEventLabel = useMemo(() => {
