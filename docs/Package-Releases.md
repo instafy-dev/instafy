@@ -22,7 +22,8 @@ customer-facing release-note text.
 
 Do not manually edit a public package's `version` or `CHANGELOG.md`. The protected-main release
 workflow turns pending changesets into one signed version pull request and keeps it updated as
-additional changes land. Merging that pull request publishes the packages automatically. Changes
+additional changes land. A daily job merges that pull request through the merge queue, which
+publishes the packages automatically. Changes
 confined to a package's `test/` directory are exempt because that directory is not part of the npm
 artifact.
 
@@ -79,24 +80,46 @@ public. Do not claim provenance before that visibility boundary changes.
 
 ## Releasing
 
+Releases go out automatically once a day when package changes are pending. No one needs to click
+anything.
+
+The Instafy bot opens the version pull request (`chore(release): version npm packages`, branch
+`changeset-release/main`) as a draft and refreshes it on every protected-main change while
+changesets are pending. Every day at 06:43 UTC the
+[npm Daily Release](../.github/workflows/npm-release-daily.yml) workflow finds that pull request,
+marks it ready for review and turns on auto-merge, pinned to the head it inspected. The merge
+queue then runs every required check and merges it like any other pull request. If no version
+pull request is open, or it changes no package version, the run does nothing.
+
 Merging the version pull request into protected `main` is the release. The push that merge makes
 runs Select in publish mode, then Pack and Publish, with no further human step. The safeguards are
 protected `main` itself (changes land only through pull requests that pass the required checks
 and the merge queue), the isolated stages above, the exact-bytes pack verification and the
 post-publish registry readback.
 
-The Instafy bot opens the version pull request (`chore(release): version npm packages`, branch
-`changeset-release/main`) as a draft and refreshes it on every protected-main change while
-changesets are pending. To release, check the generated versions and changelogs, mark it ready
-for review and add it to the merge queue like any other pull request.
+To release sooner, run **npm Daily Release** from the Actions tab on `main` (or
+`gh workflow run npm-release-daily.yml --ref main`). It does the same thing as the daily run, and
+running it again is harmless.
+
+The daily job only touches the open pull request from this repository's
+`changeset-release/main` branch that `instafy-bot` authored with the version pull request's
+title. It runs only from protected `main`, checks nothing out, approves nothing and bypasses
+nothing. It looks the pull request up with the read-only workflow token and uses the existing
+repository-only bot credential only to mark it ready and turn on auto-merge. That credential is
+needed for two reasons: GitHub starts no workflows for events made with the workflow token, so a
+merge armed with it would not run Publish, and only `instafy-bot` is exempt from code-owner
+review. It shares npm-release's protected-main lock, so it never races a version refresh or a
+publication.
 
 Before a new package's first release, configure its npm trusted publisher with the exact
 repository, workflow filename and `npm-release` environment.
 
 ## Recovery
 
-Before publication, keep the version pull request in draft, close it or land a corrected
-changeset; once it merges, publication follows. Published npm versions are immutable. If a bad
+To hold a release, add the `release-hold` label to the version pull request and turn off its
+auto-merge (or remove it from the merge queue); the daily job leaves a held pull request alone
+until the label is removed. The `release-freeze` ruleset pauses it too. Before publication you can
+also land a corrected changeset; once the version pull request merges, publication follows. Published npm versions are immutable. If a bad
 version reaches npm, move the relevant dist-tag back to the last good version, deprecate the bad
 version, and publish a corrected new version. Never reuse or move an immutable release version or
 tag. Unpublishing is reserved for a severe exposure and follows npm's restrictions; it is not a

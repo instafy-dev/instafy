@@ -9,6 +9,7 @@ import "./check-merge-queue-ci.test.mjs";
 import "./check-image-build-routing.test.mjs";
 import "./check-image-scan-workflow.test.mjs";
 import "./check-runtime-multiarch-workflow.test.mjs";
+import "./check-npm-release-daily.test.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 const workflowRoot = path.join(repositoryRoot, ".github", "workflows");
