@@ -95,4 +95,15 @@ describe("BrowserChromeShell", () => {
     expect(status?.className.includes("sr-only")).toBe(state === "ready");
     expect(status?.getAttribute("aria-label")).toBe(`${label}: Transport-specific detail.`);
   });
+
+  it("says Off in a neutral tone, without the unavailable mark", async () => {
+    await act(async () => {
+      root.render(<BrowserStatusPill detail="Instafy's browser is off." state="off" />);
+    });
+    const status = container.querySelector('[role="status"]')!;
+    expect(status.textContent).toBe("Off");
+    expect(status.getAttribute("aria-label")).toBe("Off: Instafy's browser is off.");
+    expect(status.className).not.toContain("rose");
+    expect(status.querySelector("svg")).toBeNull();
+  });
 });

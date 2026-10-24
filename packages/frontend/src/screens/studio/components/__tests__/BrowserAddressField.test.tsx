@@ -355,6 +355,16 @@ describe("phone address editor", () => {
     expect(dialog()).not.toBeNull();
   });
 
+  it("shows a disabled phone field with nothing to show as empty, not as a call to type", async () => {
+    desktop = false;
+    await act(async () => root.render(<Fixture key="phone" disabled />));
+    const trigger = container.querySelector<HTMLButtonElement>('[data-testid="test-browser-address-trigger"]')!;
+    expect(trigger.disabled).toBe(true);
+    expect(trigger.textContent).toBe("");
+    await act(async () => root.render(<Fixture key="phone" />));
+    expect(container.querySelector('[data-testid="test-browser-address-trigger"]')!.textContent).toBe("Enter an address");
+  });
+
   it("restores the latest observed page when cancelling or losing control", async () => {
     await open();
     await type("unfinished.example");

@@ -41,6 +41,7 @@ describe("useBrowserSessionPages", () => {
   let hookProjectId: string;
   let hookRuntimeId: string;
   let hookSuspendOnUnavailable: boolean;
+  let hookPollPages: boolean;
   const onUnavailable = vi.fn();
 
   function Harness() {
@@ -52,6 +53,7 @@ describe("useBrowserSessionPages", () => {
       includePlaceholder: true,
       suspendOnUnavailable: hookSuspendOnUnavailable,
       onUnavailable,
+      pollPages: hookPollPages,
     });
     return null;
   }
@@ -65,6 +67,7 @@ describe("useBrowserSessionPages", () => {
     hookProjectId = "project-1";
     hookRuntimeId = "runtime-1";
     hookSuspendOnUnavailable = false;
+    hookPollPages = true;
     onUnavailable.mockReset();
     commandPageMock.mockReset().mockResolvedValue(true);
     focusPageMock.mockReset().mockResolvedValue(true);
@@ -487,6 +490,40 @@ describe("useBrowserSessionPages", () => {
         await vi.advanceTimersByTimeAsync(10_000);
       });
       expect(fetchPagesMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reads no pages while the browser view is off, keeps its capabilities, and reads again once it opens", async () => {
+    // Dogfood, Oct 24: an open browser whose machine had restarted read its
+    // pages every 2.5 s for hours (1441 reads an hour) while it showed an error.
+    vi.useFakeTimers();
+    try {
+      await renderHook();
+      expect(fetchPagesMock).toHaveBeenCalledTimes(1);
+      expect(latestResult?.resolved).toBe(true);
+      const capabilityReads = fetchCapabilitiesMock.mock.calls.length;
+      hookPollPages = false;
+      await renderHook();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60 * 60_000);
+      });
+      expect(fetchPagesMock).toHaveBeenCalledTimes(1);
+      expect(latestResult?.pages).toEqual([]);
+      expect(latestResult?.resolved).toBe(false);
+      // The attach waits on these once the view opens again.
+      expect(latestResult?.capabilitiesResolved).toBe(true);
+      expect(latestResult?.capabilities?.viewportOnly).toBe(true);
+      expect(fetchCapabilitiesMock).toHaveBeenCalledTimes(capabilityReads);
+      hookPollPages = true;
+      await renderHook();
+      expect(fetchPagesMock).toHaveBeenCalledTimes(2);
+      expect(latestResult?.pages[0]?.id).toBe("page-1");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_500);
+      });
+      expect(fetchPagesMock).toHaveBeenCalledTimes(3);
     } finally {
       vi.useRealTimers();
     }

@@ -79,9 +79,11 @@ can be retried. This is a read deadline, not a limit on runtime startup time.
 
 The Studio always owns the address bar, Go/history controls, status, errors, action ticker, and AI cursor. The runtime owns the page and profile.
 
-Connection failures show brief recovery guidance. If the runtime provider is not configured,
-the message explains that browsing needs setup; **Technical details** keeps the original error
-available for troubleshooting without making it the main instruction. Retry remains available.
+Connection failures show one plain sentence and at most one button (see
+[What the browser view shows](#what-the-browser-view-shows)). If the runtime provider is not
+configured, the sentence explains that browsing needs setup. The original error stays out of the
+way: it is in the card's `data-debug-reason` attribute, and under **Technical details** only while
+runtime debug is on (`localStorage["instafy.runtime.debug"] = "1"`).
 
 On narrow screens and split panes, the address bar keeps participant avatars on its
 right. Open the avatars to see the participant list, where a cursor icon marks the
@@ -951,10 +953,12 @@ unless the policy is `"covered"`.
   `{"version": 1}`, then polls every 500 ms until the browser is ready (at most
   120 s). A viewer is told to ask a space builder, and a poisoned browser says
   the space's machine must restart first. A state Studio does not know is
-  polled like `starting`. Only the machine's own 404 (code
+  polled like `starting`, and so is a start refused with `machine_stopping` or
+  `browser_host_stopping` (asked again after a second, within the start
+  budget). Only the machine's own 404 (code
   `browser_host_absent`, or `not_found` with the origin's `{error, code}` body
-  from an origin that predates it) reads as "Instafy's browser is not available
-  on this space's machine right now." Any other 404 on `browser/host` comes from
+  from an origin that predates it) reads as "Instafy's browser is off." Any
+  other 404 on `browser/host` comes from
   the controller or something in front of it and says nothing about the browser:
   it is polled within the same 120 s and logged as `browser-session:host-404`.
   A 404 with the code `browser_host_policy_off` ends the wait with "Instafy's
@@ -964,16 +968,19 @@ unless the policy is `"covered"`.
   shows the space's browser, so generic recovery keeps the space's machine up.
   **Start new session** and the runtime-limit takeover are hidden.
 - **Pages while it starts.** The origin answers 503 `browser_host_not_ready`
-  until the browser runs. An open browser keeps polling quietly, for at most
+  until the browser runs. The composer reads the pages every 2.5 s only while
+  the open browser view is opening or live; while it is off, did not open or
+  cannot open, nothing reads them (capabilities stay, so the attach can go on
+  once the view opens again). While it opens it polls quietly, for at most
   120 s of unbroken `browser_host_not_ready` answers (token and gateway
   failures, as while the machine itself starts, are not counted). Each open
   counts its own run, so closing the browser and opening it again starts over.
-  After that the
-  address bar reads "Instafy's browser did not start. Try again." in place of
-  "Connecting to Shared Browser…", and a card waiting on it says the same. A
-  page read that does not answer in 10 s is given up and asked again. A hidden
-  one suspends as before, so an idle browser behind a hidden tab is never polled
-  and never started. Only the open browser view starts it.
+  After that a card waiting on it says "Instafy's browser did not open. Try
+  again." The address field stays empty and disabled whenever the view is not
+  live; the view's own card says why. A page read that does not answer in 10 s
+  is given up and asked again. A hidden one suspends as before, so an idle
+  browser behind a hidden tab is never polled and never started. Only the open
+  browser view starts it.
 - **Bounded requests.** Each `GET browser/host` and `POST browser/host/start` of
   the 120 s wait ends after 10 s, or at the end of the wait, and is polled again
   like a gateway error, so a hung request cannot outlast the wait.
@@ -988,15 +995,15 @@ unless the policy is `"covered"`.
   takes the legacy path at once. A press for Instafy's browser may take up to
   four minutes in all; the browser on this device keeps two.
 - **Press on a card.** A press never waits silently. Once the browser view
-  shows an error, the card says so at once: in that error's words when they are
-  plain (such as "This space's machine is stopping. Try again in a moment."),
+  shows an error, the card says so at once, in the sentence the view shows
+  when it is one of the view's own (such as "Instafy's browser is off."),
   otherwise "Instafy's browser could not open. See the browser for details,
   then try again." On the conversation's own machine the press also reads
   `GET browser/host`, at once when the browser was already open, otherwise
   after 3 s, then every 3 s: a poisoned browser ends the press with the
   restart copy, and one that failed again in a new start (a newer
   `generation` than the one read when the press asked the view to attach
-  again) with "Instafy's browser did not start. Try again." The run that had
+  again) with "Instafy's browser did not open. Try again." The run that had
   failed before is not the press's answer. A browser that was already open but
   shows no page, or whose machine's browser went idle, is stopping or failed
   (after the view had 10 s to start it), is asked once to attach again, as the
@@ -1008,30 +1015,54 @@ unless the policy is `"covered"`.
 - **Viewers reconnect within a bound.** A fatal viewer error or a closed
   picture with no other viewer to fall back to schedules a reconnect (at most
   five within a minute, also when a connection succeeds in between) and then
-  shows "Browser session disconnected. Click Retry to reconnect." An error and
+  shows "Instafy's browser did not open. Try again." An error and
   the socket closing after it count once. **Reconnecting…** by itself lasts at
-  most 60 s; then the browser says it lost the connection and offers Retry. The
+  most 60 s; then the browser says the same and offers **Try again**. The
   abandoned attempt is stopped, so it reads and starts nothing more, and its
   late answer does not bring the wait back. A
-  person's Retry or press is not cut short this way. An attempt that ends with
+  person's press is not cut short this way. An attempt that ends with
   the same connection (a cached grant) leaves a picture that is already back,
   or the error on screen, as it is. A browser that has its connection but waits
   for its roster to know which viewer this participant may use gives up after
-  20 s with "The browser did not finish connecting. Try again." A capability
-  read that does not answer in 10 s is given up and asked again.
+  20 s the same way. A capability read that does not answer in 10 s is given
+  up and asked again.
 - **The same browser, or a restarted one.** The view remembers the host
   `generation` it connected to. A reconnect that finds the host ready with that
   generation keeps its connection and last frame and only reconnects the
   picture. One that finds a new generation while the view reconnected by
-  itself stops there with "Instafy's browser restarted on this space's machine.
-  Press Retry to open it again.", because the pages it showed are gone. A
-  person's own Retry or press just opens the restarted browser.
-- **Only the person starts the machine.** An open Studio restored by itself (a
-  reload, or a return to a conversation whose browser was left open) never
-  wakes the space's machine: it says the machine is not running and starts it
-  only when the person presses Retry. An open that Studio started by itself
-  (`attachOnly`) never starts a machine either. In both, the person's own
-  Retry or Clear data inside that browser does.
+  itself stops there with "Instafy's browser is off.", because the pages it
+  showed are gone. A person's own **Open browser** or press just opens the
+  restarted browser.
+- **A machine that comes back under a new origin.** Every exit that ends in
+  an error, a restart or a deadline drops the view's connection: the picture
+  and input sockets, the collaboration socket, the approval poll and the grant
+  refresh all stop, so nothing keeps calling an origin the runtime no longer
+  has. A reconnect that reads the runtime with the same id but a new origin
+  drops the old connection at once (`browser-session:origin-replaced`). The
+  grant refresh keeps the controller's status (`requestAccessTokenResult`): a
+  400 (not the runtime's online origin any more) drops the connection and
+  looks the runtime up once through the bounded reconnect; a 404 drops it and
+  stops, with no new look-up, so nothing cold-starts; a 401 or 403 drops it and
+  shows the failed state; any other failure is asked again after 5, 10, 20, 40
+  and then 60 s. No refresh runs while the view shows an error.
+- **Only the person starts the machine.** An automatic reconnect never starts
+  the machine or its browser: an idle browser is off, a stopped machine is
+  off, and the host wait never posts `browser/host/start` for it. An open
+  Studio restored by itself (a reload, or a return to a conversation whose
+  browser was left open) never wakes the space's machine: it says the browser
+  is off and starts the machine only when the person presses **Open browser**.
+  It may still start an idle browser on a running machine, for hands-free
+  browsing. An open that Studio started by itself (`attachOnly`) never starts a
+  machine either. In both, the person's own press or Clear data inside that
+  browser does. A press counts for its own attempt only, never for a later
+  automatic reconnect or Refresh sessions.
+- **Hands-free while off.** While the open view is off on the conversation's
+  machine, Studio reads `GET browser/host` every ten seconds (the same
+  reading a waiting card uses) and, once an agent or another viewer has the
+  browser starting or ready, attaches again without a press. It attaches to
+  each run of the browser (`generation`) once, never starts the machine, and
+  stops reading once the view is no longer off. Studio opening the browser for
+  a card attaches an open view that is off or did not open the same way.
 - **Hands-free.** For Octo's `request_browser` card, Studio opens Instafy's
   browser by itself only on the conversation's own machine, when that machine
   is live, can take work, has an origin and reports `sharedBrowserHost`, and
@@ -1072,6 +1103,31 @@ unless the policy is `"covered"`.
   machine before the controller's recheck. Afterwards Studio starts the same
   runtime id again through the cold path instead of asking for a new browser
   runtime.
+
+### What the browser view shows
+
+The view shows one state at a time, derived from its status and the kind of
+failure it stored with its error (`hostedBrowserViewState`): one sentence,
+at most one button, and a neutral status pill.
+
+| State | Sentence | Button | Pill |
+|---|---|---|---|
+| live | none | none | Ready (screen readers only) |
+| opening | "Opening Instafy's browser…" | none | Starting… |
+| off | "Instafy's browser is off." | Open browser | Off |
+| failed | "Instafy's browser did not open. Try again." | Try again | Off |
+| failed (machine) | "This space's machine did not start. Try again." | Try again | Off |
+| blocked | its own: turned off for this space, ask a space builder, or the machine must restart | none | Off |
+
+Off covers a machine or browser that stopped, a browser that started again
+while the view reconnected, and a machine without its browser. A view is
+live only while it has a connection. Outside live the address field is empty
+and disabled, and the collaboration controls stay hidden unless the roster is
+known on a connection. The view reports its state to ChatPanel
+(`onViewStateChange`), which reads the composer's pages only while it is
+opening or live, and tells a waiting card the same sentence. The status pill
+says **Unavailable** only for the Personal Browser and the site preview. Every
+sentence is short and plain and has no em dashes.
 
 ## CDP screencast
 

@@ -24,3 +24,18 @@ export function runtimeDebugLog(message: string, data?: unknown) {
     // ignore debugging/logging failures
   }
 }
+
+/** Set to "1" in localStorage to show technical details in the runtime and browser surfaces. */
+export const RUNTIME_DEBUG_STORAGE_KEY = "instafy.runtime.debug";
+
+/** Whether runtime debug is on in this browser (see RUNTIME_DEBUG_STORAGE_KEY). */
+export function runtimeDebugEnabled(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  try {
+    return window.localStorage.getItem(RUNTIME_DEBUG_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}

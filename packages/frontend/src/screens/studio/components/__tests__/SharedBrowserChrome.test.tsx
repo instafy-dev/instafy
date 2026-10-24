@@ -114,6 +114,24 @@ describe("SharedBrowserChrome", () => {
     expect(onNavigate).toHaveBeenCalledWith("page-1", "https://app.freefinance.at/");
   });
 
+  it("keeps the address field empty and disabled while the browser is not live", async () => {
+    // Dogfood, Oct 24: the address field said "did not start" while the card
+    // said something else; the browser view says why, the field says nothing.
+    await act(async () => {
+      root.render(<SharedBrowserChrome {...props({ resolved: false })} />);
+    });
+    const address = container.querySelector<HTMLInputElement>('[data-testid="shared-browser-address"]')!;
+    expect(address.value).toBe("");
+    expect(address.placeholder).toBe("");
+    expect(address.disabled).toBe(true);
+    expect(container.textContent).not.toContain("Connecting to Shared Browser");
+    await act(async () => {
+      root.render(<SharedBrowserChrome {...props()} />);
+    });
+    expect(address.value).toBe("https://example.com/");
+    expect(address.placeholder).toBe("Enter an address");
+  });
+
   it("uses the active page for native navigation controls", async () => {
     const onBack = vi.fn();
     const onForward = vi.fn();

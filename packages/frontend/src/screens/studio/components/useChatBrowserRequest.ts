@@ -500,7 +500,7 @@ export function useChatBrowserRequest(options: Options) {
           const notReadySince = current.sharedNotReadySinceMs ?? null;
           if (notReadySince !== null &&
               Date.now() - Math.max(notReadySince, startedAtMs) >= SHARED_BROWSER_HOST_WAIT_TIMEOUT_MS) {
-            throw new Error(SHARED_BROWSER_HOST_COPY.didNotStart);
+            throw new Error(SHARED_BROWSER_HOST_COPY.didNotOpen);
           }
         }
         if (pressed && activated) {
@@ -528,7 +528,7 @@ export function useChatBrowserRequest(options: Options) {
                 // without a reading then, the view's own error says it.
                 if (snapshot.state === "failed" && reattachedFromGeneration !== undefined &&
                     snapshot.generation !== null && snapshot.generation !== reattachedFromGeneration) {
-                  throw new Error(SHARED_BROWSER_HOST_COPY.didNotStart);
+                  throw new Error(SHARED_BROWSER_HOST_COPY.didNotOpen);
                 }
                 // Attach again when the browser was open already and shows no
                 // page, or when its browser went idle, is stopping or failed

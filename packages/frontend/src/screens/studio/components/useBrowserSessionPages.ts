@@ -88,6 +88,14 @@ export function useBrowserSessionPages(params: {
   onUnavailable?: (() => void) | null;
   suspendOnUnavailable?: boolean;
   includePlaceholder?: boolean;
+  /**
+   * Whether the pages are read every 2.5 s. False while the browser view is
+   * off, did not open or cannot open: nothing reads the pages of a browser
+   * that is not running, and the pages are empty. Capabilities stay as they
+   * are (a capability read still retries), so the attach can go on once the
+   * view opens again.
+   */
+  pollPages?: boolean;
 }) {
   const {
     enabled,
@@ -97,6 +105,7 @@ export function useBrowserSessionPages(params: {
     onUnavailable = null,
     suspendOnUnavailable = false,
     includePlaceholder = false,
+    pollPages = true,
   } = params;
   const scopeKey = `${enabled ? "enabled" : "disabled"}\u0000${browserSessionId}\u0000${projectId ?? ""}\u0000${preferRuntimeId ?? ""}\u0000${includePlaceholder ? "placeholders" : "pages"}\u0000${suspendOnUnavailable ? "suspend" : "continue"}`;
   const scopeKeyRef = useRef(scopeKey);
@@ -598,7 +607,7 @@ export function useBrowserSessionPages(params: {
   }, [capabilitiesRetryable, enabled, projectId, refreshCapabilities]);
 
   useEffect(() => {
-    if (!enabled || !projectId) {
+    if (!enabled || !projectId || !pollPages) {
       setPageState({ scopeKey, pages: [], resolved: false });
       preferredActivePageIdRef.current = { scopeKey, pageId: null };
       return;
@@ -628,7 +637,7 @@ export function useBrowserSessionPages(params: {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [enabled, projectId, refresh, scopeIsCurrent, scopeKey]);
+  }, [enabled, pollPages, projectId, refresh, scopeIsCurrent, scopeKey]);
 
   return {
     pages,

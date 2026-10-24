@@ -13,13 +13,18 @@ vi.mock("../../../../sdk/instafy", () => ({ controllerClient: {
   browserSessions: { fetchHost: mocks.fetchHost, startHost: mocks.startHost,
     isUnavailableError: (error: unknown) => Boolean(error && typeof error === "object" && "status" in error),
     isHostRefusedError: (error: unknown) => Boolean(error && typeof error === "object" && "code" in error && !("status" in error)) },
-  workspace: { origin: { requestAccessToken: mocks.requestAccessToken } },
+  workspace: { origin: { requestAccessToken: mocks.requestAccessToken,
+    requestAccessTokenResult: async (params: unknown) => {
+      const token = await mocks.requestAccessToken(params);
+      return token ? { ok: true, token } : { ok: false, error: { status: 0, message: "origin access request failed" } };
+    } } },
 } }));
 vi.mock("../../../../runtime/runtimeMenuShared", () => ({ writeClipboardText: mocks.writeClipboardText }));
 vi.mock("../SharedBrowserProfileStatus", () => ({ SharedBrowserProfileStatus: () => null }));
 import { BrowserSessionModal, CLEAR_SHARED_BROWSER_HOST_DATA_BUSY_NOTE, CLEAR_SHARED_BROWSER_HOST_DATA_CONFIRMATION } from "../BrowserSessionModal";
 import { isBrowserRuntimeClaimActive } from "../../../../runtime/browserRuntimeClaimRegistry";
 import { SHARED_BROWSER_HOST_COPY } from "../sharedBrowserHostAttach";
+import { RUNTIME_DEBUG_STORAGE_KEY } from "../../../../runtime/utils/runtimeDebug";
 import { useChatBrowserSessionState } from "../useChatBrowserSessionState";
 import { useSharedBrowserResume } from "../useSharedBrowserResume";
 
@@ -171,8 +176,14 @@ describe("production Shared modal resume selection", () => {
       currentUserId="user-1" preferRuntimeId={null} resumeRuntimeId={firstId} presentation="docked" canControlBrowser
       sharedBrowserViewerKind={null} sharedBrowserCapabilitiesResolved sharedBrowserCapabilitiesAvailable={false}
       sharedBrowserCapabilitiesUnsupported={unsupported} />));
-    expect(container.textContent).toContain(unsupported ? "requires a newer version" : "Unable to connect to this browser session");
-    if (!unsupported) expect(container.textContent).not.toContain("requires a newer version");
+    if (unsupported) {
+      expect(container.textContent).toContain("requires a newer version");
+    } else {
+      // A capability read that failed says the browser did not open; why is kept for runtime debug.
+      expect(container.textContent).toContain(SHARED_BROWSER_HOST_COPY.didNotOpen);
+      expect(container.querySelector("[data-debug-reason]")?.getAttribute("data-debug-reason")).toContain("Unable to connect to this browser session");
+      expect(container.textContent).not.toContain("requires a newer version");
+    }
   });
   it("does not allocate or silently join when the requested session is missing", async () => {
     mocks.fetchStatus.mockResolvedValue({ runtimes: [entry(firstId)] });
@@ -207,17 +218,28 @@ describe("production Shared modal resume selection", () => {
     expect(document.body.textContent).toContain("no new browser was started");
   });
 
-  it("explains missing browser setup and keeps the original failure in collapsed diagnostics", async () => {
+  it("explains missing browser setup and keeps the original failure for runtime debug", async () => {
     mocks.fetchStatus.mockResolvedValue({ runtimes: [] });
     mocks.ensure.mockRejectedValue(new Error("provider 'test-cloud' is not configured on this controller"));
     await render(null);
     const notice = document.querySelector('[data-testid="browser-session-error-notice"]')!;
     expect(notice.textContent).toContain("Browsing hasn't been set up for this workspace.");
     expect(notice.textContent).toContain("Ask your administrator");
-    const details = notice.querySelector("details")!;
-    expect(details.open).toBe(false);
-    expect(details.querySelector("summary")?.textContent).toBe("Technical details");
-    expect(details.textContent).toContain("provider 'test-cloud' is not configured on this controller");
+    // The raw reason is not on screen, only where runtime debug finds it.
+    expect(notice.querySelector("details")).toBeNull();
+    expect(notice.textContent).not.toContain("is not configured on this controller");
+    expect(notice.querySelector("[data-debug-reason]")?.getAttribute("data-debug-reason"))
+      .toBe("provider 'test-cloud' is not configured on this controller");
+    window.localStorage.setItem(RUNTIME_DEBUG_STORAGE_KEY, "1");
+    try {
+      await render(null);
+      const details = document.querySelector<HTMLDetailsElement>('[data-testid="browser-session-error-notice"] details')!;
+      expect(details.open).toBe(false);
+      expect(details.querySelector("summary")?.textContent).toBe("Technical details");
+      expect(details.textContent).toContain("provider 'test-cloud' is not configured on this controller");
+    } finally {
+      window.localStorage.removeItem(RUNTIME_DEBUG_STORAGE_KEY);
+    }
     const previousCalls = mocks.ensure.mock.calls.length;
     await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="browser-session-error-retry"]')!.click());
     expect(mocks.ensure.mock.calls.length).toBeGreaterThan(previousCalls);
@@ -375,7 +397,7 @@ describe("Shared modal attach mode", () => {
     await settle(1_200);
     expect(mocks.startHost).toHaveBeenCalledTimes(1);
     expect(mocks.fetchHost.mock.calls.length).toBeGreaterThanOrEqual(3);
-    expect(text()).not.toContain(SHARED_BROWSER_HOST_COPY.didNotStart);
+    expect(text()).not.toContain(SHARED_BROWSER_HOST_COPY.didNotOpen);
   });
 
   it("polls a state it does not know instead of failing", async () => {
@@ -412,7 +434,7 @@ describe("Shared modal attach mode", () => {
     expect(mocks.fetchHost.mock.calls.length).toBeGreaterThan(0);
     expect(readsBefore).toBeGreaterThan(0);
     expect(mocks.startHost).toHaveBeenCalledTimes(1);
-    expect(text()).not.toContain(SHARED_BROWSER_HOST_COPY.didNotStart);
+    expect(text()).not.toContain(SHARED_BROWSER_HOST_COPY.didNotOpen);
     // The same token again is not a new press.
     const statusAfter = mocks.fetchStatus.mock.calls.length;
     await render({ attachRequestToken: 1 });
@@ -424,7 +446,7 @@ describe("Shared modal attach mode", () => {
     mocks.fetchStatus.mockResolvedValue(covered(stoppedHost()));
     await render({ attachOnly: true, resumeRuntimeId: hostId });
     await settle();
-    expect(text()).toContain(SHARED_BROWSER_HOST_COPY.machineStopped);
+    expect(text()).toContain(SHARED_BROWSER_HOST_COPY.off);
     expect(ensureSpaceMachine).not.toHaveBeenCalled();
     mocks.fetchStatus.mockReset()
       .mockResolvedValueOnce(covered(stoppedHost()))
@@ -530,7 +552,7 @@ describe("Shared modal attach mode", () => {
     await settle();
     expect(ensureSpaceMachine).toHaveBeenCalledTimes(1);
     expect(mocks.ensure).not.toHaveBeenCalled();
-    expect(text()).not.toContain(SHARED_BROWSER_HOST_COPY.machineStopped);
+    expect(text()).not.toContain(SHARED_BROWSER_HOST_COPY.off);
     expect(onResolved).toHaveBeenLastCalledWith(hostId);
   });
 
@@ -543,7 +565,7 @@ describe("Shared modal attach mode", () => {
     await settle();
     expect(ensureSpaceMachine).not.toHaveBeenCalled();
     expect(mocks.ensure).not.toHaveBeenCalled();
-    expect(text()).toContain(SHARED_BROWSER_HOST_COPY.machineNotRunning);
+    expect(text()).toContain(SHARED_BROWSER_HOST_COPY.off);
     expect(isBrowserRuntimeClaimActive(projectId)).toBe(false);
     mocks.fetchStatus.mockReset()
       .mockResolvedValueOnce(covered(...(pinned ? [stoppedHost()] : [])))
@@ -559,7 +581,7 @@ describe("Shared modal attach mode", () => {
     mocks.fetchStatus.mockResolvedValue(covered(stoppedHost()));
     await render({ attachOnly: true, resumeRuntimeId: hostId });
     await settle();
-    expect(text()).toContain(SHARED_BROWSER_HOST_COPY.machineStopped);
+    expect(text()).toContain(SHARED_BROWSER_HOST_COPY.off);
     expect(ensureSpaceMachine).not.toHaveBeenCalled();
     mocks.fetchStatus.mockReset()
       .mockResolvedValueOnce(covered(stoppedHost()))
@@ -619,7 +641,7 @@ describe("Shared modal attach mode", () => {
       await settle();
       expect(ensureSpaceMachine).not.toHaveBeenCalled();
       expect(mocks.ensure).not.toHaveBeenCalled();
-      expect(text()).toContain(SHARED_BROWSER_HOST_COPY.machineStopped);
+      expect(text()).toContain(SHARED_BROWSER_HOST_COPY.off);
     },
   );
 

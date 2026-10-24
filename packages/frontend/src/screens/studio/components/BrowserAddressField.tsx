@@ -114,7 +114,8 @@ export const BrowserAddressField = forwardRef<HTMLInputElement, BrowserAddressFi
       aria-label="Address" aria-haspopup="dialog" aria-expanded={editing}
       data-testid={`${props.testIdPrefix}-address-trigger`} isDisabled={disabled}
       onPress={() => { originalValue.current = String(value ?? ""); setEditing(true); }}>
-      <span className="truncate">{value || props.placeholder || "Enter an address"}</span>
+      {/* A disabled field never offers to take an address. */}
+      <span className="truncate">{value || props.placeholder || (disabled ? "" : "Enter an address")}</span>
     </Button>
     {editing && editor}
   </>;
