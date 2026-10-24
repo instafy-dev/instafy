@@ -124,6 +124,8 @@ interface HarnessProps {
   lastStop?: { reason: string; atMs: number };
   /** A second hosted machine in the space, stopped, with this reported stop. */
   otherLastStop?: { reason: string; atMs: number };
+  /** A request for a machine is under way (hostedRuntimeEnsuring). */
+  ensuring?: boolean;
   /** The runs this tab knows. */
   runs?: Record<string, RunRecord> | null;
   /** The controller's runs read for the space (GET /runs). */
@@ -150,6 +152,7 @@ describe("useHostedRuntimeRecoveryEffects after a stop", () => {
     launchRequestedAtMs,
     lastStop,
     otherLastStop,
+    ensuring = false,
     runs = null,
     fetchProjectRuns,
     activeProjectId = PROJECT_ID,
@@ -187,7 +190,7 @@ describe("useHostedRuntimeRecoveryEffects after a stop", () => {
       runtimeStatusesResolved: true,
       waitingForPreferredRuntime: preferred && stopped,
       preferredRuntimeEntry: preferred ? entry : null,
-      hostedRuntimeEnsuring: false,
+      hostedRuntimeEnsuring: ensuring,
       hasHostedRuntimeInProgress: false,
       hasLocalRuntime: false,
       hasPendingProjectWork,
@@ -653,6 +656,120 @@ describe("useHostedRuntimeRecoveryEffects after a stop", () => {
       expect(ensureHostedRuntime).toHaveBeenCalledTimes(1);
       expect(isIdlePaused(PROJECT_ID)).toBe(false);
     });
+
+    it.each([
+      ["fallback runtime", "idle", false],
+      ["preferred runtime", "idle", true],
+      ["fallback runtime", "user_stop", false],
+      ["preferred runtime", "user_stop", true],
+    ])(
+      "holds the %s when a status names its %s before its origin expires",
+      async (_label, reason, preferred) => {
+        // A status read (Machines' poll, a refresh on another event) can
+        // show the stop before anything else of it reaches this tab. Every
+        // automatic start reads that status, not only the loss.
+        const idle = { preferred, hasPendingProjectWork: false };
+        const lastStop = { reason, atMs: aMinuteAgo() };
+        await render({ ...idle, stopped: false });
+        await render({ ...idle, stopped: true, lastStop });
+        expect(ensureHostedRuntime).not.toHaveBeenCalled();
+
+        await publishOriginExpired();
+        await render({ ...idle, stopped: true, lastStop });
+        expect(ensureHostedRuntime).not.toHaveBeenCalled();
+        expect(isIdlePaused(PROJECT_ID)).toBe(reason === "idle");
+        expect(isManualStopHeld(PROJECT_ID)).toBe(reason === "user_stop");
+
+        // The person lifts the hold (writing in the chat, Start): the machine
+        // starts, though the status still names the stop.
+        await act(async () => {
+          clearIdlePaused(PROJECT_ID);
+          clearManualStop(PROJECT_ID);
+        });
+        expect(ensureHostedRuntime).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it("starts the machine when the person lifts a stop this tab heard before the status named it", async () => {
+      // The stop's own runtime.stopped held the space, and the person wrote
+      // in the chat before the next status read. That read names the stop it
+      // was, and is not a second one.
+      const idle = { preferred: false, hasPendingProjectWork: false };
+      await render({ ...idle, stopped: false });
+      await publishStop({ reason: "idle" });
+      expect(isIdlePaused(PROJECT_ID)).toBe(true);
+      await act(async () => {
+        clearIdlePaused(PROJECT_ID);
+      });
+
+      await render({ ...idle, stopped: true, lastStop: { reason: "idle", atMs: aMinuteAgo() } });
+      expect(isIdlePaused(PROJECT_ID)).toBe(false);
+      expect(ensureHostedRuntime).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps this tab's own Stop when the status names that stop", async () => {
+      // Stamped again, the hold would drop what this tab's stop request
+      // answers (recordManualStopFlush), as in the listener.
+      const idle = { preferred: false, hasPendingProjectWork: false };
+      await render({ ...idle, stopped: false });
+      const hold = markManualStop(PROJECT_ID);
+      await render({ ...idle, stopped: true, lastStop: { reason: "user_stop", atMs: Date.now() } });
+
+      expect(manualStopHold(PROJECT_ID)).toBe(hold);
+      expect(ensureHostedRuntime).not.toHaveBeenCalled();
+    });
+
+    it("does not hold the space while a request for a machine is under way", async () => {
+      // The person pressed Start, or sent, before the status read that names
+      // the stop came back: that request has lifted the holds already.
+      const idle = { preferred: false, hasPendingProjectWork: false };
+      const lastStop = { reason: "idle", atMs: aMinuteAgo() };
+      await render({ ...idle, stopped: false });
+      await render({ ...idle, stopped: true, ensuring: true, lastStop });
+      expect(isIdlePaused(PROJECT_ID)).toBe(false);
+
+      await render({ ...idle, stopped: true, lastStop });
+      expect(isIdlePaused(PROJECT_ID)).toBe(false);
+      expect(isManualStopHeld(PROJECT_ID)).toBe(false);
+    });
+
+    it("does not hold the space for a person's stop while another hosted machine stays live", async () => {
+      // As in the tab that pressed Stop: one of two machines stopped is not
+      // "no machine here".
+      const busy = { preferred: false, hasPendingProjectWork: false, otherReady: true };
+      const lastStop = { reason: "user_stop", atMs: aMinuteAgo() };
+      await render({ ...busy, stopped: false });
+      await render({ ...busy, stopped: true, lastStop });
+      await publishOriginExpired();
+      await render({ ...busy, stopped: true, lastStop });
+
+      expect(ensureHostedRuntime).not.toHaveBeenCalled();
+      expect(isManualStopHeld(PROJECT_ID)).toBe(false);
+      expect(isIdlePaused(PROJECT_ID)).toBe(false);
+    });
+
+    it.each([
+      ["holds", "has no work", false],
+      ["still recovers", "has work", true],
+    ])(
+      "%s a reclaim the status names where this tab %s",
+      async (_label, _work, hasPendingProjectWork) => {
+        // As the listener holds a reclaim's runtime.stopped: the slot went to
+        // a space that was waiting, and only work of this tab's own takes it
+        // back.
+        const props = { preferred: false, hasPendingProjectWork };
+        await render({ ...props, stopped: false });
+        await publishOriginExpired();
+        await render({
+          ...props,
+          stopped: true,
+          lastStop: { reason: "runtime_limit_reclaim", atMs: aMinuteAgo() },
+        });
+
+        expect(isIdlePaused(PROJECT_ID)).toBe(!hasPendingProjectWork);
+        expect(ensureHostedRuntime).toHaveBeenCalledTimes(hasPendingProjectWork ? 1 : 0);
+      },
+    );
   });
 
   it.each([

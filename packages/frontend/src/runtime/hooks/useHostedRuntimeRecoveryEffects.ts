@@ -53,6 +53,22 @@ interface HostedReadySince {
 }
 
 /**
+ * A hosted machine this tab saw come up: whether the status reads it up, and
+ * whether this tab has read the stop the status reports for it since it last
+ * came up.
+ */
+interface SeenHostedMachine {
+  up: boolean;
+  stopRead: boolean;
+}
+
+/** The hosted machines this tab saw come up in `projectId`, by runtime id. */
+interface SeenHostedMachines {
+  projectId: string | null;
+  machines: Map<string, SeenHostedMachine>;
+}
+
+/**
  * Whether a hold set at `heldAtMs` came after this tab last saw a hosted
  * machine in `projectId` come up, so it stands for a stop of that machine.
  */
@@ -158,6 +174,10 @@ export function useHostedRuntimeRecoveryEffects({
   useEffect(() => {
     runtimeStatusesRef.current = runtimeStatuses;
   }, [runtimeStatuses]);
+  const hostedRuntimeEnsuringRef = useRef(hostedRuntimeEnsuring);
+  useEffect(() => {
+    hostedRuntimeEnsuringRef.current = hostedRuntimeEnsuring;
+  }, [hostedRuntimeEnsuring]);
   // Read again when a read of the runs for an automatic start settles.
   const runsRef = useRef(runs);
   useEffect(() => {
@@ -200,6 +220,16 @@ export function useHostedRuntimeRecoveryEffects({
     }
     hostedReadySinceRef.current = { projectId: activeProjectId, ready: hostedReady, at };
   }, [activeProjectId, hostedReady]);
+  // Kept up to date by the effect after holdForReportedStop below, which
+  // reads each machine's reported stop once.
+  const seenHostedMachinesRef = useRef<SeenHostedMachines>({
+    projectId: null,
+    machines: new Map(),
+  });
+  const seenHostedMachine = useCallback((projectId: string, runtimeId: string) => {
+    const seen = seenHostedMachinesRef.current;
+    return seen.projectId === projectId ? (seen.machines.get(runtimeId) ?? null) : null;
+  }, []);
   const [browserRuntimeClaimEpoch, setBrowserRuntimeClaimEpoch] = useState(0);
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -271,41 +301,79 @@ export function useHostedRuntimeRecoveryEffects({
     [debugLog],
   );
 
-  // The stop the controller reports for the lost machine (lastStopReason:
-  // its newest stop since it came up, with no launch asked for since) holds
-  // the space as that stop's runtime.stopped does in the listener below: a
-  // person's stop like Stop, when it leaves no live hosted machine there, a
-  // platform stop like an idle pause. A tab can miss that event, as while
-  // its event stream reconnects, and then hears of the stop only as the
-  // origin expiring a minute later. True when such a stop held the space. A
-  // controller older than the field reports none, and the loss is recovered
-  // as before.
+  // The stop the controller reports for a hosted machine this tab saw come
+  // up (lastStopReason: its newest stop since it came up, with no launch
+  // asked for since) holds the space as that stop's runtime.stopped does in
+  // the listener below: a person's stop like Stop, when it leaves no live
+  // hosted machine there, a platform stop like an idle pause, and so does a
+  // reclaim of a machine this tab has no work for. A tab can miss that
+  // event, as while its event stream reconnects, and then reads the stop only
+  // in a status, or hears of it only as the origin expiring a minute later.
+  //
+  // The status names the stop until the machine comes up again, also after
+  // the person lifted its hold, so a stop is read once: the first status that
+  // names it sets the hold, unless the tab heard the stop's own
+  // runtime.stopped, a hold set since the machine came up already stands for
+  // it, or a request for a machine is under way. A controller older than the
+  // field reports none, and every automatic start goes on as before.
   const holdForReportedStop = useCallback(
-    (projectId: string, lostRuntimeId: string | null) => {
-      if (!lostRuntimeId) {
-        return false;
+    (projectId: string, entry: ControllerRuntimeStatusEntry, machine: SeenHostedMachine) => {
+      if (machine.stopRead || !entry.lastStopReason) {
+        return;
       }
-      const lost = runtimeStatusesRef.current.find(
-        (entry) => Boolean(entry) && entry.runtimeId === lostRuntimeId,
-      );
-      const hold = reportedRuntimeStopHold(lost);
-      if (hold === null) {
-        return false;
+      machine.stopRead = true;
+      const hold = reportedRuntimeStopHold(entry, {
+        holdReclaim: !hasPendingProjectWorkRef.current,
+      });
+      if (hold === null || holdCoversLoss(projectId) || hostedRuntimeEnsuringRef.current) {
+        return;
       }
       if (hold === "idle_pause") {
         markIdlePaused(projectId);
-      } else if (stopLeavesNoLiveHostedRuntime(runtimeStatusesRef.current, lostRuntimeId)) {
+      } else if (stopLeavesNoLiveHostedRuntime(runtimeStatusesRef.current, entry.runtimeId)) {
         markManualStop(projectId);
       }
-      debugLog("hosted-runtime:unexpected-loss-held-for-reported-stop", {
+      debugLog("hosted-runtime:held-for-reported-stop", {
         projectId,
-        runtimeId: lostRuntimeId,
-        reason: lost?.lastStopReason ?? null,
+        runtimeId: entry.runtimeId,
+        reason: entry.lastStopReason,
       });
-      return true;
     },
-    [debugLog],
+    [debugLog, holdCoversLoss],
   );
+
+  // Reads each status for the machines this tab saw come up in the active
+  // space. Declared before the automatic starts below, the loss included, so
+  // a stop the status reports holds the space before any of them reads the
+  // holds.
+  useEffect(() => {
+    let seen = seenHostedMachinesRef.current;
+    if (seen.projectId !== activeProjectId) {
+      seen = { projectId: activeProjectId, machines: new Map() };
+      seenHostedMachinesRef.current = seen;
+    }
+    if (!activeProjectId) {
+      return;
+    }
+    for (const entry of runtimeStatuses) {
+      if (!entry?.runtimeId || !isHostedRuntime(entry)) {
+        continue;
+      }
+      const machine = seen.machines.get(entry.runtimeId);
+      if (runtimeEntryIsReady(entry)) {
+        // The rising edge, as for hostedReadySinceRef: a status that still
+        // reads the machine up after its stop was heard is not a new start.
+        if (!machine?.up) {
+          seen.machines.set(entry.runtimeId, { up: true, stopRead: false });
+        }
+        continue;
+      }
+      if (machine) {
+        machine.up = false;
+        holdForReportedStop(activeProjectId, entry, machine);
+      }
+    }
+  }, [activeProjectId, holdForReportedStop, runtimeStatuses]);
 
   // Every automatic start below goes through here, after its own gate.
   // ensureHostedRuntime lifts every hold, as only a person's Start, Send,
@@ -389,6 +457,18 @@ export function useHostedRuntimeRecoveryEffects({
         custom.detail?.data && typeof custom.detail.data.reason === "string"
           ? custom.detail.data.reason
           : null;
+      const eventRuntimeId =
+        custom.detail?.data && typeof custom.detail.data.runtimeId === "string"
+          ? custom.detail.data.runtimeId
+          : "";
+      if (kind === "runtime.stopped") {
+        // This tab heard the stop itself, and decides on it here. The status
+        // that names it next is not read as a stop this tab missed.
+        const machine = seenHostedMachine(projectId, eventRuntimeId);
+        if (machine) {
+          machine.stopRead = true;
+        }
+      }
       const reclaimStop =
         kind === "runtime.stopped" && isRuntimeLimitReclaimStopReason(reason);
       const queuedJobCount =
@@ -425,10 +505,7 @@ export function useHostedRuntimeRecoveryEffects({
         if (hold === "manual_stop") {
           // Only the last live hosted machine means "no machine", as in the
           // tab that pressed Stop.
-          const runtimeId =
-            custom.detail?.data && typeof custom.detail.data.runtimeId === "string"
-              ? custom.detail.data.runtimeId
-              : "";
+          //
           // Once the controller reports a person's stop, this tab's own Stop
           // may be the one reported, before its request answers. Its hold is
           // kept as it is: a new one would drop that answer
@@ -440,7 +517,7 @@ export function useHostedRuntimeRecoveryEffects({
             heldSinceHostedReady(hostedReadySinceRef.current, projectId, heldHere.at);
           if (
             !heldForThisStop &&
-            stopLeavesNoLiveHostedRuntime(runtimeStatusesRef.current, runtimeId)
+            stopLeavesNoLiveHostedRuntime(runtimeStatusesRef.current, eventRuntimeId)
           ) {
             markManualStop(projectId);
           }
@@ -470,7 +547,13 @@ export function useHostedRuntimeRecoveryEffects({
         handleRuntimeLifecycleEvent as EventListener,
       );
     };
-  }, [activeProjectId, debugLog, latestReadyHostedRuntimeRef, pendingHostedRuntimeRecoveryRef]);
+  }, [
+    activeProjectId,
+    debugLog,
+    latestReadyHostedRuntimeRef,
+    pendingHostedRuntimeRecoveryRef,
+    seenHostedMachine,
+  ]);
 
   useEffect(() => {
     if (pendingHostedPollTimerRef.current) {
@@ -554,9 +637,6 @@ export function useHostedRuntimeRecoveryEffects({
     if (autoEnsureHostedRef.current) {
       return;
     }
-    if (activeProjectId && holdForReportedStop(activeProjectId, pendingRecovery?.runtimeId ?? null)) {
-      return;
-    }
     debugLog("hosted-runtime:ensure-unexpected-loss-recovery", {
       projectId: activeProjectId,
       runtimeId: pendingRecovery?.runtimeId ?? null,
@@ -576,7 +656,6 @@ export function useHostedRuntimeRecoveryEffects({
     hasHostedRuntimeInProgress,
     hasLocalRuntime,
     holdCoversLoss,
-    holdForReportedStop,
     hostedRuntimeEnsuring,
     pendingHostedRuntimeRecoveryRef,
     projectReadyForRuntime,

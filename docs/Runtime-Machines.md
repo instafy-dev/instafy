@@ -209,15 +209,25 @@ it, then lost, is recovered as before. Every automatic start reads the holds
 once more right before it asks for a machine.
 
 A tab can miss a stop's `runtime.stopped`, for instance while its event
-stream reconnects, and then hears of the stop only as the origin expiring a
-minute later. Before it recovers such a loss it reads the lost machine's
-`lastStopReason` in the runtime status (see "A launch that does not come up"
-below). An idle or other platform stop there holds the space like an idle
-pause, and a person's stop holds it like their Stop (when it leaves no live
-hosted machine), unless a hosted launch was requested after that stop. Each
-hold lifts as it always does: the idle pause on writing in the chat, Send or
-Start, the Stop on Send, Start or Reconnect. A controller from before the
-field reports none, and the loss is recovered as before.
+stream reconnects. It then reads the stop only in a later runtime status (the
+Machines panel's poll, a refresh on another event), or hears of it only as the
+origin expiring a minute later. So every status read checks the machines the
+tab saw come up in the space for the `lastStopReason` the status reports (see
+"A launch that does not come up" below), before any automatic start, the
+loss included, reads the holds. An idle or other platform stop there holds
+the space like an idle pause, and so does a reclaim (`runtime_limit_reclaim`)
+when the tab has no queued message or open turn there; a person's Stop or a
+takeover holds it like their Stop (when it leaves no live hosted machine).
+Each stop is read once, the first time a status names it, since the status
+keeps naming it until the machine comes up again: no hold is set when a hosted
+launch was requested after that stop, when the tab heard the stop's own
+`runtime.stopped`, when a hold set since the machine came up already stands
+for it, or while a request for a machine is under way. Each hold lifts as it
+always does: the idle pause on writing in the chat, Send or Start, the Stop on
+Send, Start or Reconnect. A Remove counts only when a status read lands during
+its release: once released, the removed runtime leaves the status, and its
+loss is recovered as before. A controller from before the field reports none,
+and every automatic start goes on as before.
 
 Every hosted stop is followed, about a minute later, by `origin.expired` for
 the stopped machine's origin. The origin server beats every 20 seconds, and

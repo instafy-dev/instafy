@@ -1,5 +1,9 @@
 import type { ControllerRuntimeStatusEntry } from "../../sdk/instafy";
-import { isPersonRuntimeStopReason, resolveRuntimeStopHold } from "../unexpectedHostedRuntimeRecovery";
+import {
+  isPersonRuntimeStopReason,
+  isRuntimeLimitReclaimStopReason,
+  resolveRuntimeStopHold,
+} from "../unexpectedHostedRuntimeRecovery";
 
 export type RuntimeConnectionState =
   | "connected"
@@ -281,15 +285,19 @@ export function runtimeEntryIsStopping(
  * The hold the stop this hosted runtime's status reports puts on its space,
  * as resolveRuntimeStopHold reads the reason of a runtime.stopped: a person's
  * stop holds like Stop, a platform stop (idle, credits, memory) like an idle
- * pause. The controller reports the runtime's newest stop since it last came
- * up (`lastStopReason`, `lastStoppedAt`), so this is the stop that took the
- * machine away, also where the tab missed its runtime.stopped. Null when the
- * entry reports no such stop (as from controllers older than the field), for
- * any other reason, and when a launch was requested after the stop: someone
- * asked for the machine again since.
+ * pause. A reclaim (the slot handed to another space) holds like an idle
+ * pause only with `holdReclaim`, when the tab has no work of its own there,
+ * as the lifecycle listener holds that stop's runtime.stopped. The controller
+ * reports the runtime's newest stop since it last came up (`lastStopReason`,
+ * `lastStoppedAt`), so this is the stop that took the machine away, also
+ * where the tab missed its runtime.stopped. Null when the entry reports no
+ * such stop (as from controllers older than the field), for any other
+ * reason, and when a launch was requested after the stop: someone asked for
+ * the machine again since.
  */
 export function reportedRuntimeStopHold(
   entry: ControllerRuntimeStatusEntry | null | undefined,
+  options: { holdReclaim?: boolean } = {},
 ): "manual_stop" | "idle_pause" | null {
   if (!entry || entry.isLocal || !isHostedRuntime(entry) || !entry.lastStopReason) {
     return null;
@@ -301,6 +309,9 @@ export function reportedRuntimeStopHold(
   const launchRequestedAtMs = parseIsoTimestamp(entry.launchRequestedAt ?? null);
   if (launchRequestedAtMs !== null && launchRequestedAtMs > stoppedAtMs) {
     return null;
+  }
+  if (options.holdReclaim && isRuntimeLimitReclaimStopReason(entry.lastStopReason)) {
+    return "idle_pause";
   }
   return resolveRuntimeStopHold(entry.lastStopReason);
 }

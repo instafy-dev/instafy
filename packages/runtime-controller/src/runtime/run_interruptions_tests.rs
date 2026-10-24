@@ -815,6 +815,20 @@ async fn the_runtime_status_keeps_an_idle_stops_reason_after_its_release() -> an
             StatusCode::NO_CONTENT,
         )
         .await?;
+        // An earlier life of the runtime: a stop a day ago, then the
+        // registration it came up with an hour ago. Only the newest record of
+        // each kind counts.
+        let connection = turn.pool.get().await?;
+        connection
+            .execute(
+                "insert into runtime_events (runtime_id, project_id, kind, data, created_at)
+                 values ($1, $2, 'stopped', '{\"reason\":\"heartbeat_timeout\"}'::jsonb,
+                         now() - interval '1 day'),
+                        ($1, $2, 'registered', '{}'::jsonb, now() - interval '1 hour')",
+                &[&turn.runtime_id, &turn.project_id],
+            )
+            .await?;
+        drop(connection);
         let running = turn.status_entry().await?;
         assert!(running.get("lastStopReason").is_none(), "{running}");
         assert!(running.get("lastStoppedAt").is_none(), "{running}");

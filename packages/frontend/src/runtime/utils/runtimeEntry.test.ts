@@ -224,6 +224,28 @@ describe("reportedRuntimeStopHold", () => {
     expect(reportedRuntimeStopHold(null)).toBeNull();
   });
 
+  it("holds a reclaim like an idle pause only where the tab has no work there", () => {
+    for (const reason of ["runtime_limit_reclaim", "idle_runtime_limit_reclaim"]) {
+      expect(reportedRuntimeStopHold(stopped({ lastStopReason: reason }), { holdReclaim: true })).toBe(
+        "idle_pause",
+      );
+      expect(reportedRuntimeStopHold(stopped({ lastStopReason: reason }), { holdReclaim: false })).toBeNull();
+    }
+    expect(
+      reportedRuntimeStopHold(stopped({ lastStopReason: "heartbeat_timeout" }), { holdReclaim: true }),
+    ).toBeNull();
+    expect(
+      reportedRuntimeStopHold(
+        stopped({
+          lastStopReason: "runtime_limit_reclaim",
+          status: "requested",
+          launchRequestedAt: "2026-10-24T09:44:02.000Z",
+        }),
+        { holdReclaim: true },
+      ),
+    ).toBeNull();
+  });
+
   it("holds nothing once a launch was asked for after the stop", () => {
     expect(
       reportedRuntimeStopHold(stopped({ status: "requested", launchRequestedAt: "2026-10-24T09:44:02.000Z" })),
