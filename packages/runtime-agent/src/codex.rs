@@ -178,7 +178,7 @@ const STRUCTURED_RUNTIME_DEVELOPER_INSTRUCTIONS: &str = r#"Instafy Studio struct
 - Do not send progress-only assistant messages as the final response.
 - Apply relevant skills silently. If a prompt includes a skill snapshot or compact workspace memory, treat that as already loaded; do not send a separate skill-use announcement.
 - Complete the latest request before replying. Use tool calls when they are needed to observe the workspace or produce concrete results.
-- When runtime metadata marks command execution as required, call the runtime command tool (`exec_command` or `shell`) before the final response. Do not only reason about the command.
+- When runtime metadata marks command execution as required, call the runtime command tool (`exec_command` or `shell`) before the final response. Do not only reason about the command. A tracked worker whose turn contract permits request_user_input may instead return that final action to defer work requiring a human decision; it cannot grant permissions or widen scope.
 - If command tools are unavailable or fail before execution, return the concrete blocker in the required final JSON object.
 - For file-only create/edit/delete requests, inline `files[]` entries with full content are a valid runtime write path and do not require `exec_command` or `shell`.
 - If the request cannot be completed, return the concrete blocker in the required final JSON object."#;
@@ -194,7 +194,7 @@ Complete the user's latest request using the available tools. Do not emit interi
 
 Apply skills silently. When the prompt includes a focused skill snapshot, compact workspace memory, or loaded learned blocks, treat that material as already loaded unless the latest request explicitly asks you to re-read it.
 
-When runtime context marks command execution as required, invoke the available runtime command tool (`exec_command` or `shell`) before answering. If no command tool can be called, say that explicitly in the final JSON `summary`; do not end the turn with reasoning only.
+When runtime context marks command execution as required, invoke the available runtime command tool (`exec_command` or `shell`) before answering. A tracked worker whose turn contract permits request_user_input may instead return that final action to defer work requiring a human decision, without changing permissions or scope. If no command tool can be called, say that explicitly in the final JSON `summary`; do not end the turn with reasoning only.
 
 The final assistant message must be exactly one JSON object matching the required output schema. Put user-facing prose in the JSON `summary` field. Include `files` entries only for concrete workspace files that were created, changed, read as primary evidence, or otherwise need to be surfaced to the user.
 For a read-only file reference, set `change` to `"read"` and set inline content fields to null. These entries display a workspace reference and never request a write.
@@ -404,10 +404,40 @@ fn default_final_output_json_schema() -> JsonValue {
                   "authMethods",
                   "suggestedSecretNames",
                   "suggestedSecrets",
-                  "agentHandles"
+                  "agentHandles",
+                  "questions",
+                  "continuationNote"
                 ],
                 "properties": {
                   "type": { "type": "string" },
+                  "continuationNote": { "type": ["string", "null"] },
+                  "questions": {
+                    "type": ["array", "null"],
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["id", "header", "question", "options", "isOther", "isSecret"],
+                      "properties": {
+                        "id": { "type": "string" },
+                        "header": { "type": "string" },
+                        "question": { "type": "string" },
+                        "isOther": { "type": ["boolean", "null"] },
+                        "isSecret": { "type": ["boolean", "null"] },
+                        "options": {
+                          "type": ["array", "null"],
+                          "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["label", "description"],
+                            "properties": {
+                              "label": { "type": "string" },
+                              "description": { "type": "string" }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
                   "name": { "type": ["string", "null"] },
                   "description": { "type": ["string", "null"] },
                   "valueLabel": { "type": ["string", "null"] },
@@ -560,7 +590,10 @@ fn multi_agent_plan_final_output_json_schema() -> JsonValue {
                     "properties": {
                       "leadHandle": { "type": "string" },
                       "continuationPrompt": { "type": "string" },
-                      "expectedReportFormat": { "type": "string" }
+                      "expectedReportFormat": {
+                        "type": ["string", "null"],
+                        "description": "Only an explicitly user-requested output format. Null otherwise; shared collaboration skill policy supplies the default."
+                      }
                     }
                   },
                   "runtimeRouting": {
@@ -599,31 +632,137 @@ fn multi_agent_plan_final_output_json_schema() -> JsonValue {
 fn routing_preflight_final_output_json_schema() -> JsonValue {
     serde_json::from_str(
         r#"{
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["summary", "route", "reason", "selectedSkills", "confidence", "requiresContextLookup", "requiresCommandExecution", "workspaceFileChangeRequirement", "observationCommands"],
-          "properties": {
-            "summary": { "type": "string" },
-            "route": { "type": "string" },
-            "reason": { "type": "string" },
-            "selectedSkills": {
-              "type": "array",
-              "items": { "type": "string" }
-            },
-            "confidence": { "type": "integer" },
-            "requiresContextLookup": { "type": "boolean" },
-            "requiresCommandExecution": { "type": "boolean" },
-            "workspaceFileChangeRequirement": {
-              "type": "string",
-              "enum": ["none", "conditional", "required"],
-              "description": "none: no file changes requested; conditional: inspect or validate and change files only if warranted, so no change can be correct; required: success requires actual file changes. This describes the completion requirement, not write permission."
-            },
-            "observationCommands": {
-              "type": "array",
-              "items": { "type": "string" }
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "summary",
+    "route",
+    "reason",
+    "selectedSkills",
+    "confidence",
+    "requiresContextLookup",
+    "requiresCommandExecution",
+    "workspaceFileChangeRequirement",
+    "observationCommands",
+    "workerQuestionReply"
+  ],
+  "properties": {
+    "summary": {
+      "type": "string"
+    },
+    "route": {
+      "type": "string"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "selectedSkills": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "confidence": {
+      "type": "integer"
+    },
+    "requiresContextLookup": {
+      "type": "boolean"
+    },
+    "requiresCommandExecution": {
+      "type": "boolean"
+    },
+    "workspaceFileChangeRequirement": {
+      "type": "string",
+      "enum": [
+        "none",
+        "conditional",
+        "required"
+      ],
+      "description": "none: no file changes requested; conditional: inspect or validate and change files only if warranted, so no change can be correct; required: success requires actual file changes. This describes the completion requirement, not write permission."
+    },
+    "observationCommands": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "workerQuestionReply": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "disposition",
+        "answers",
+        "clarification",
+        "remainingRequest"
+      ],
+      "properties": {
+        "disposition": {
+          "type": "string",
+          "enum": [
+            "answer",
+            "clarify",
+            "unrelated"
+          ]
+        },
+        "answers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "requestId",
+              "questionId",
+              "sourceMessageId",
+              "value"
+            ],
+            "properties": {
+              "requestId": {
+                "type": "string"
+              },
+              "questionId": {
+                "type": "string"
+              },
+              "sourceMessageId": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
             }
           }
-        }"#,
+        },
+        "clarification": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "remainingRequest": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "required": [
+            "sourceMessageId",
+            "text"
+          ],
+          "properties": {
+            "sourceMessageId": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}"#,
     )
     .expect("routing preflight final output schema must be valid JSON")
 }
@@ -6853,6 +6992,27 @@ mod tests {
     }
 
     #[test]
+    fn final_output_json_schema_can_encode_deferred_worker_questions() {
+        let schema = default_final_output_json_schema();
+        let action = &schema["properties"]["actions"]["items"];
+        let question = &action["properties"]["questions"]["items"];
+        assert!(
+            action["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("continuationNote"))
+        );
+        assert_eq!(
+            question["properties"]["isSecret"]["type"],
+            json!(["boolean", "null"])
+        );
+        assert_eq!(
+            question["properties"]["options"]["items"]["required"],
+            json!(["label", "description"])
+        );
+    }
+
+    #[test]
     fn final_output_json_schema_supports_multi_agent_plan_actions() {
         let _env_lock = env_lock();
         let previous = std::env::var_os("CODEX_DISABLE_FINAL_OUTPUT_JSON_SCHEMA");
@@ -6882,6 +7042,10 @@ mod tests {
         assert_eq!(
             action["properties"]["agents"]["items"]["properties"]["writeScope"]["additionalProperties"],
             false
+        );
+        assert_eq!(
+            action["properties"]["lead"]["properties"]["expectedReportFormat"]["type"],
+            json!(["string", "null"])
         );
         // A team's declared time budget fits the strict schema too (nullable, so optional).
         assert_eq!(

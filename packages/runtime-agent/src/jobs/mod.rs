@@ -31,6 +31,7 @@ use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use runtime_contracts::{CreditSnapshotPayload, ProxyEnvelopePayload};
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::{Mutex as AsyncMutex, mpsc::UnboundedSender};
@@ -49,6 +50,7 @@ mod routing_recovery;
 mod save_report;
 #[cfg(test)]
 mod scoped_worker_tests;
+pub(crate) mod worker_input_routing;
 
 mod handoff;
 mod isolated_worker;
@@ -73,6 +75,7 @@ mod skill_routing_eval_tests;
 mod skills;
 mod turn_baseline;
 mod turn_continuation;
+pub(crate) mod user_input_request;
 mod workspace_change_detection;
 mod workspace_commit;
 
@@ -112,6 +115,8 @@ const AGENT_CONTEXT_CARD_MAX_CHARS: usize = 1_200;
 const COLLABORATION_SKILL_PLANNING_MAX_CHARS: usize = 3_200;
 const COLLABORATION_SKILL_ROUTING_MAX_CHARS: usize = 1_400;
 const COLLABORATION_SKILL_DELEGATION_MAX_CHARS: usize = 1_600;
+const COLLABORATION_RESULT_POLICY_MAX_CHARS: usize = 1_200;
+const COLLABORATION_SKILL_PATH: &str = ".agents/skills/instafy-agent-collaboration/SKILL.md";
 const ROUTING_PRE_OBSERVATION_OUTPUT_MAX_CHARS: usize = 4_000;
 const ROUTING_PRE_OBSERVATION_TIMEOUT_SECS: u64 = 10;
 const WORKSPACE_LEASE_WRITE_SCOPE: &str = "workspace.lease.write";
@@ -3278,7 +3283,11 @@ fn initial_main_requires_tool_call(
     evidence_requires_tool: bool,
     explicit_tool_execution: bool,
 ) -> bool {
-    evidence_requires_tool && (explicit_tool_execution || !main_owns_ambient_participation(job))
+    // A tracked worker may first return a validated human-decision action. Its
+    // ordinary result still has to satisfy the evidence checks after the turn.
+    evidence_requires_tool
+        && (explicit_tool_execution
+            || (!main_owns_ambient_participation(job) && !is_multi_agent_worker_job(job)))
 }
 
 fn should_run_routing_pre_observation_before_main(
@@ -6167,6 +6176,8 @@ impl JobProcessor {
             .unwrap_or("")
             .trim();
         let prompt_text = user_prompt_text;
+        let pending_worker_input =
+            worker_input_routing::PendingContext::from_payload(&job.payload)?;
         ensure_browser_uses_bounded_lane(job, prompt_text, &workspace_dir)?;
         let auto_sync_after_apply_override =
             resolve_auto_sync_after_apply_override(job.payload.get("metadata"), user_prompt_text);
@@ -6174,6 +6185,10 @@ impl JobProcessor {
         if let Some(command) =
             extract_terminal_command_from_payload(job, user_prompt_text, &workspace_dir)
         {
+            anyhow::ensure!(
+                pending_worker_input.is_none(),
+                "pending worker replies cannot enter an explicit command lane"
+            );
             if explicit_browser_execution {
                 bail!("Browser jobs cannot execute terminal commands");
             }
@@ -6196,6 +6211,15 @@ impl JobProcessor {
         let mcp_request = mcp::parse_mcp_request(prompt_text);
         let learn_request = learn::parse_learn_request(prompt_text);
         let git_sync_request = git_sync::parse_git_sync_request(prompt_text);
+        anyhow::ensure!(
+            pending_worker_input.is_none()
+                || (skills_request.is_none()
+                    && mcp_request.is_none()
+                    && learn_request.is_none()
+                    && git_sync_request.is_none()
+                    && !explicit_browser_execution),
+            "pending worker replies require an ordinary human chat turn"
+        );
 
         if explicit_browser_execution
             && (skills_request.is_some()
@@ -6357,6 +6381,13 @@ impl JobProcessor {
             }
         };
 
+        let mut worker_question_reply = None;
+        anyhow::ensure!(
+            pending_worker_input.is_none()
+                || (skills_kickoff.is_none()
+                    && should_run_agent_routing_preflight_for_execution(job, prompt_text)),
+            "pending worker reply routing cannot be skipped"
+        );
         let routing_preflight = if skills_kickoff.is_none()
             && should_run_agent_routing_preflight_for_execution(job, prompt_text)
         {
@@ -6365,6 +6396,7 @@ impl JobProcessor {
                 &workspace_dir,
                 prompt_text,
                 active_plan_group_id.as_deref(),
+                pending_worker_input.as_ref(),
             );
             let (preflight_prompt, primary_context) =
                 agent_routing_primary_prompt(&preflight_prompt, &job.payload);
@@ -6386,6 +6418,9 @@ impl JobProcessor {
                 .await
             {
                 Ok(output) => {
+                    if let Some(pending) = &pending_worker_input {
+                        worker_question_reply = Some(pending.parse_reply(&output.final_json)?);
+                    }
                     // An invalid completion contract must not fall through to the
                     // legacy direct-route fallback with its requirements erased.
                     parse_workspace_file_change_requirement(&output.final_json)
@@ -6410,6 +6445,28 @@ impl JobProcessor {
             }
         } else {
             None
+        };
+        let remaining_request;
+        let mut worker_reply_receipt = None;
+        let prompt_text = if let Some(reply) = worker_question_reply.as_ref()
+            && reply.disposition != worker_input_routing::Disposition::Unrelated
+        {
+            let preflight = routing_preflight
+                .as_ref()
+                .context("worker reply has no valid routing decision")?;
+            let receipt = crate::controller::ControllerClient::new(&self.config)?
+                .submit_worker_input_reply(registration, job.id, reply)
+                .await?;
+            if reply.disposition == worker_input_routing::Disposition::Clarify
+                || reply.remaining_request.is_none()
+            {
+                return Ok(reply.execution(receipt, agent_routing_preflight_artifact(preflight)));
+            }
+            worker_reply_receipt = Some(receipt);
+            remaining_request = reply.remaining_request.as_ref().unwrap().text.clone();
+            &remaining_request
+        } else {
+            prompt_text
         };
         let routed_job_storage;
         let job = if let Some(preflight) = routing_preflight.as_ref() {
@@ -6631,6 +6688,14 @@ impl JobProcessor {
                     Some(attachments),
                 )
             };
+        if worker_reply_receipt.is_some() {
+            prompt.push_str("\nThe controller accepted this turn's worker answers. Continue only with the remaining user request above; do not restart or answer the waiting worker assignments.\n");
+            enrich_prompt_context_metrics(&mut prompt_context, &prompt);
+        }
+        if let (Some(pending), Some(reply)) = (&pending_worker_input, &worker_question_reply) {
+            pending.append_deferred_context(reply, &mut prompt);
+            enrich_prompt_context_metrics(&mut prompt_context, &prompt);
+        }
         ensure_ambient_participation_prompt_context(job, &mut prompt, &mut prompt_context);
         if provider_thread_not_restorable && let Some(metrics) = prompt_context.as_object_mut() {
             metrics.insert(
@@ -6933,6 +6998,7 @@ impl JobProcessor {
 
         drop(codex_guard);
         let mut outcome = extract_codex_outcome(&output.final_json)?;
+        user_input_request::validate_outcome_scope(job, &outcome)?;
         outcome.read_files = normalize_codex_read_files(&workspace_dir, outcome.read_files);
         let clean_ambient_decline = clean_ambient_participation_decline(
             job,
@@ -6958,7 +7024,7 @@ impl JobProcessor {
         let expects_workspace_file_changes_after_actions =
             workspace_file_changes_still_required(expects_workspace_file_changes, &outcome);
         let final_messages = with_runtime_metadata_vec(
-            build_final_messages_from_actions(&outcome.actions, Some(&workspace_dir)),
+            build_final_messages_from_outcome(&outcome, Some(&workspace_dir)),
             &registration.runtime_id,
         );
         let reported_file_paths = outcome
@@ -7055,6 +7121,9 @@ impl JobProcessor {
             outcome.summary = format!("{base}. See `{}`.", learn::INSTAFY_FILENAME);
         }
         let mut artifacts = skills_kickoff_artifacts(skills_kickoff.as_ref());
+        if let Some(receipt) = &worker_reply_receipt {
+            artifacts.push(json!({"kind":"agent/worker-input-reply","receipt":receipt}));
+        }
         if let Some(refresh) = pre_turn_refresh.as_ref() {
             artifacts.push(refresh.artifact());
         }
@@ -7258,6 +7327,7 @@ impl JobProcessor {
             // Remove only the exact prefix we composed, never marker-like text
             // from a user's request. Every retry receives a fresh snapshot.
             let prompt = without_project_preferences(&prompt, &project_id, &project_preferences)?;
+            let mut retry_needs_collaboration_policy = false;
             let mut retry_prompt = if personal_browser_execution_missing {
                 format!(
                     "{prompt}\n\nIMPORTANT PERSONAL BROWSER RETRY REQUIREMENT:\n\
@@ -7303,8 +7373,10 @@ impl JobProcessor {
                                 scoped_worker_path_observation.as_ref(),
                             )
                         } else if is_multi_agent_lead_continuation_job(job) {
+                            retry_needs_collaboration_policy = true;
                             codex_missing_final_lead_continuation_recovery_prompt(prompt_text)
                         } else if is_explicit_team_planning_job(job) {
+                            retry_needs_collaboration_policy = true;
                             if retry_team_planning_on_provider_thread {
                                 codex_stateful_team_planning_finalization_prompt(prompt_text)
                             } else {
@@ -7376,6 +7448,17 @@ impl JobProcessor {
                 }
             }
             let mut retry_prompt_context = prompt_context.clone();
+            if let (Some(pending), Some(reply)) = (&pending_worker_input, &worker_question_reply) {
+                pending.append_deferred_context(reply, &mut retry_prompt);
+                enrich_prompt_context_metrics(&mut retry_prompt_context, &retry_prompt);
+            }
+            if retry_needs_collaboration_policy {
+                append_collaboration_result_policy_to_recovery(
+                    &mut retry_prompt,
+                    &mut retry_prompt_context,
+                    &workspace_dir,
+                );
+            }
             ensure_ambient_participation_prompt_context(
                 job,
                 &mut retry_prompt,
@@ -7541,6 +7624,7 @@ impl JobProcessor {
             let retry_safety_check_downgrade_warning =
                 extract_safety_check_downgrade_warning(&retry_raw_messages);
             let mut retry_outcome = extract_codex_outcome(&retry_output.final_json)?;
+            user_input_request::validate_outcome_scope(job, &retry_outcome)?;
             retry_outcome.read_files =
                 normalize_codex_read_files(&workspace_dir, retry_outcome.read_files);
             suppress_multi_agent_plan_actions_for_worker(job, &mut retry_outcome);
@@ -7717,6 +7801,9 @@ impl JobProcessor {
             );
 
             let mut retry_artifacts = skills_kickoff_artifacts(skills_kickoff.as_ref());
+            if let Some(receipt) = &worker_reply_receipt {
+                retry_artifacts.push(json!({"kind":"agent/worker-input-reply","receipt":receipt}));
+            }
             if let Some(refresh) = pre_turn_refresh.as_ref() {
                 retry_artifacts.push(refresh.artifact());
             }
@@ -7826,6 +7913,22 @@ impl JobProcessor {
                     &retry_outcome.summary,
                 );
                 let mut finalization_prompt_context = json!({ "promptMode": "finalization" });
+                if let (Some(pending), Some(reply)) =
+                    (&pending_worker_input, &worker_question_reply)
+                {
+                    pending.append_deferred_context(reply, &mut finalization_prompt);
+                    enrich_prompt_context_metrics(
+                        &mut finalization_prompt_context,
+                        &finalization_prompt,
+                    );
+                }
+                if is_explicit_team_planning_job(job) || is_multi_agent_lead_continuation_job(job) {
+                    append_collaboration_result_policy_to_recovery(
+                        &mut finalization_prompt,
+                        &mut finalization_prompt_context,
+                        &workspace_dir,
+                    );
+                }
                 ensure_ambient_participation_prompt_context(
                     job,
                     &mut finalization_prompt,
@@ -7868,6 +7971,7 @@ impl JobProcessor {
 
                 let mut finalization_outcome =
                     extract_codex_outcome(&finalization_output.final_json)?;
+                user_input_request::validate_outcome_scope(job, &finalization_outcome)?;
                 finalization_outcome.files.clear();
                 suppress_multi_agent_plan_actions_for_worker(job, &mut finalization_outcome);
                 suppress_browser_requests_where_unsupported(job, &mut finalization_outcome);
@@ -7926,7 +8030,7 @@ impl JobProcessor {
                 }
             }
             let retry_final_messages = with_runtime_metadata_vec(
-                build_final_messages_from_actions(&retry_outcome.actions, Some(&workspace_dir)),
+                build_final_messages_from_outcome(&retry_outcome, Some(&workspace_dir)),
                 &registration.runtime_id,
             );
             if retry_generic_mcp_tool_execution_missing {
@@ -8176,6 +8280,7 @@ impl JobProcessor {
                 retry_messages,
             );
             save_report::append_not_saved(&mut retry_outcome.summary, &retry_not_saved);
+            user_input_request::append_outcome_artifact(&mut retry_artifacts, &retry_outcome);
             return Ok(JobExecution {
                 summary: retry_outcome.summary,
                 suggested_replies: retry_outcome.suggested_replies,
@@ -8353,6 +8458,7 @@ impl JobProcessor {
             interim_messages,
         );
         save_report::append_not_saved(&mut outcome.summary, &not_saved);
+        user_input_request::append_outcome_artifact(&mut artifacts, &outcome);
         Ok(JobExecution {
             summary: outcome.summary,
             suggested_replies: outcome.suggested_replies,
@@ -8593,9 +8699,9 @@ impl JobProcessor {
                 &mut prompt_section_metrics,
                 "responseContract",
                 "\nScoped read-only worker response contract:\n\
-                - Finish with one concise normal assistant report, not JSON.\n\
+                - Finish with one concise normal assistant report for an ordinary result. A required human decision uses the structured request_user_input action described below.\n\
                 - Keep `files` empty. This worker is read-only.\n\
-                - Do not emit `actions` or `multi_agent_plan`; this job is already one sibling lane inside a lead-authored plan.\n\
+                - Do not emit `multi_agent_plan` or other actions; only the human-decision action below is supported for this existing sibling lane.\n\
                 - For security, robustness, or adversarial-input requests, treat the task as defensive code review only. Report evidence, likely impact, remediation, and test gaps; do not include exploit steps, weaponized payloads, or operational abuse instructions.\n\
                 - Base findings only on the lane request and scoped path observations below. If excerpts are truncated or a requested path is missing, report that as a gap instead of guessing.\n\
                 - Keep the summary compact: findings/evidence, gaps, and what the lead should know.\n",
@@ -8614,6 +8720,12 @@ impl JobProcessor {
                 &mut prompt_section_metrics,
                 "scopedWorkerPathObservations",
                 &observation.section,
+            );
+            append_prompt_section(
+                &mut prompt,
+                &mut prompt_section_metrics,
+                "workerHumanDecisions",
+                user_input_request::WORKER_INPUT_CONTRACT,
             );
             let latest_request_section =
                 format!("\n\nLatest worker lane request:\n{trimmed_prompt}");
@@ -8725,6 +8837,12 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             }
         }
 
+        let result_policy = (lead_continuation_checkpoint || multi_agent_planning_turn)
+            .then(|| load_collaboration_result_policy(workspace_dir))
+            .flatten();
+        if let Some(policy) = result_policy.as_ref() {
+            policy.append_to(&mut prompt, &mut prompt_section_metrics);
+        }
         let mut loaded_learned_blocks: Vec<LoadedLearnedBlock> = Vec::new();
         if lead_continuation_checkpoint {
             append_prompt_section(
@@ -8741,7 +8859,12 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 "\nWorkspace memory snapshot skipped for this scoped multi-agent worker lane. Use the lane prompt, relevant context cards, explicit referenced-file excerpts, and concrete read-only observations from tools/commands when the lane asks you to inspect workspace evidence.\n",
             );
         } else if multi_agent_planning_turn {
-            let collaboration_skill = format_collaboration_skill_snapshot(workspace_dir)
+            let remaining_budget = COLLABORATION_SKILL_PLANNING_MAX_CHARS.saturating_sub(
+                result_policy
+                    .as_ref()
+                    .map_or(0, |policy| policy.render().chars().count()),
+            );
+            let collaboration_skill = format_collaboration_skill_snapshot(workspace_dir, remaining_budget)
                 .unwrap_or_else(|| "\nCollaboration skill snapshot unavailable; use the response contract and latest request to decide whether to emit `multi_agent_plan`.\n".to_string());
             append_prompt_section(
                 &mut prompt,
@@ -8948,13 +9071,13 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 &mut prompt_section_metrics,
                 "responseContract",
                 "\nLead checkpoint response contract:\n\
-                - Return exactly one JSON object: { \"summary\": string, \"files\": [], optional \"suggestions\": [], optional \"actions\": [] }. Do not wrap JSON in Markdown.\n\
-                - Put the final parent-chat answer in `summary`; keep it concise and cite concrete workspace paths or linked references from sibling evidence.\n\
-                - Use sibling outcomes in the latest request as primary evidence. Do not paste full worker transcripts.\n\
-                - If tools are needed, run direct bounded commands against declared handoff paths or exact sibling paths; do not add an extra `bash -lc` wrapper or rediscover the workspace.\n\
-                - Keep `files` empty unless this lead checkpoint is explicitly write-scoped and actually changes files.\n\
-                - Emit follow-up `actions` only when the sibling outcomes show a concrete missing lane or blocked capability that the user needs before a final answer.\n\
-                - Save a compact context card only for durable conclusions, unresolved risks, or routing hints likely to help future follow-ups.\n",
+                - Return one JSON object: { \"summary\": string, \"files\": [], optional \"suggestions\": [], optional \"actions\": [] }. No Markdown fences.\n\
+                - Put the final user-facing answer in `summary`, following the supplied collaboration skill and any explicit user-requested format.\n\
+                - Use sibling outcomes in the latest request as primary evidence.\n\
+                - If tools are needed, run bounded commands at declared handoff or exact sibling paths; do not add an extra `bash -lc` wrapper or rediscover the workspace.\n\
+                - Keep `files` empty unless explicitly write-scoped and this checkpoint actually changes files.\n\
+                - Emit follow-up `actions` only when sibling outcomes show concrete missing work or a blocked capability needed before a final answer.\n\
+                - Save context cards only for durable conclusions, unresolved risks, or routing hints useful for future follow-ups.\n",
             );
             append_prompt_section(
                 &mut prompt,
@@ -8962,7 +9085,6 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 "studioRuntimeInvariants",
                 "\nLead checkpoint invariants:\n\
                 - The controller queues/statuses jobs; the lead decides what to synthesize or ask next.\n\
-                - Parent chat stays lead-centric. Worker evidence belongs behind compact workstream refs unless the user asks to inspect it.\n\
                 - Prepared sources are ordinary visible workspace paths supplied in sibling prompts. Treat declared handoff paths as canonical for the run; do not substitute older similarly named roots or invent hidden coordination directories.\n\
                 - Agent-to-agent follow-ups should target one clear focused lane when durable thread context matters; do not poll every prior worker.\n",
             );
@@ -9071,7 +9193,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             if write_scoped_worker {
                 worker_response_contract.push_str(
                     "\
-                - This worker is write-scoped. You MUST create/edit/delete only the owned paths from the write-scope guardrail.\n\
+                - This worker is write-scoped. When making edits you MUST create/edit/delete only the owned paths from the write-scope guardrail. A necessary human decision may defer required work through request_user_input.\n\
                 - For write-scoped file changes, either use the `apply_patch` tool to make the actual workspace changes or include full post-change file contents in `files[].content` / `files[].contentBase64` so the runtime can write them.\n\
                 - When creating a new file with `apply_patch`, use `*** Add File:` and workspace-relative paths.\n\
                 - Populate `files` with each workspace file you changed, including at least `{ \"path\": string, \"workspacePath\": string }` and a `change` object when reliable.\n",
@@ -9108,7 +9230,6 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 "\nMulti-agent planning response contract:\n\
                 - Return one JSON object only: { \"summary\": string, \"files\": [], \"actions\": [] }.\n\
                 - If the collaboration threshold is crossed, emit exactly one `multi_agent_plan` before inspection/edits; otherwise answer directly.\n\
-                - Keep `summary` one sentence; do not duplicate lane details.\n\
                 - The focused collaboration skill snapshot is already loaded. Apply it silently; do not open or announce skill files.\n\
                 - Prepare any shared inputs before the plan when lanes need them; siblings must start self-contained and may run elsewhere.\n\
                 - Declared coordination inputs under any clear non-hidden workspace path are allowed. Give workers workspace paths/globs, not URLs alone.\n\
@@ -9117,6 +9238,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 - Preparation is structure discovery only: inspect file lists/manifests/configs for scopes, not findings.\n\
                 - Declare exact paths/globs in `multi_agent_plan.handoffPaths`, worker prompts, and `writeScope.readOnlyPaths`; avoid private scratch paths.\n\
                 - `multi_agent_plan` shape: { type, rationale, thresholdReason, mode, handoffPaths?, agents[], lead, runtimeRouting?, presentation? }.\n\
+                - Each agent: { handle, label, prompt, scopeSummary, writeScope? }. Preserve user-supplied task labels in `label`.\n\
                 - Before broad/cross-chat planning, search soft context/cards and prior conversations when overlap is plausible.\n\
                 - Preserve explicit worker counts and exact source locators; keep each durable lane compact, self-contained, and scoped.\n\
                 - Save/update one compact context card for durable team focus, inputs, open questions, or prior thread. Do not create an ownership ledger.\n\
@@ -9129,8 +9251,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 "studioRuntimeInvariants",
                 "\nPlanning invariants:\n\
                 - The controller is only the durable queue/status substrate. The lead agent owns the plan and the later checkpoint decision.\n\
-                - Native helpers belong to their parent turn; top-level Instafy workers have durable jobs/threads. Actual parallel execution depends on the admitted runtime capabilities.\n\
-                - Keep the parent chat lead-centric. Worker evidence should attach to compact workstream refs unless the user asks to inspect it or a lane fails.\n",
+                - Native helpers belong to their parent turn; top-level Instafy workers have durable jobs/threads. Actual parallel execution depends on the admitted runtime capabilities.\n",
             );
         } else {
             full_contract_carries_skill_setup = true;
@@ -9165,7 +9286,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
               - { type: 'request_integration', provider: string, optional description: string, optional requiredScopes: string[], optional capabilities: string[], optional authMethods: string[], optional suggestedSecretNames: string[], optional suggestedSecrets: { name: string, optional description: string }[], optional agentHandles: string[] }\n\
               - { type: 'request_location', optional precision: 'approximate' | 'precise', optional description: string }\n\
               - { type: 'request_browser', task: string, optional browserLocation: 'auto' | 'device' | 'workspace' }\n\
-              - { type: 'multi_agent_plan', rationale: string, thresholdReason: string, mode: 'read_only' | 'write_scoped', optional handoffPaths: string[], agents: [{ handle: string, label: string, prompt: string, scopeSummary: string, optional writeScope: object }, ...the selected durable worker lanes], lead: { leadHandle: string, continuationPrompt: string, expectedReportFormat: string }, optional runtimeRouting: { strategy: 'reuse' | 'spread', optional desiredSlots: number, optional rationale: string }, optional presentation: { optional workerEvidenceVisibility: 'hidden' | 'compact' | 'expanded' | 'surface_on_failure', optional leadSummaryVisibility: 'hidden' | 'compact', optional showThresholdReason: boolean } }\n\
+              - { type: 'multi_agent_plan', rationale: string, thresholdReason: string, mode: 'read_only' | 'write_scoped', optional handoffPaths: string[], agents: [{ handle: string, label: string, prompt: string, scopeSummary: string, optional writeScope: object }, ...the selected durable worker lanes], lead: { leadHandle: string, continuationPrompt: string, optional expectedReportFormat: string only for an explicit user-requested format }, optional runtimeRouting: { strategy: 'reuse' | 'spread', optional desiredSlots: number, optional rationale: string }, optional presentation: { optional workerEvidenceVisibility: 'hidden' | 'compact' | 'expanded' | 'surface_on_failure', optional leadSummaryVisibility: 'hidden' | 'compact', optional showThresholdReason: boolean } }\n\
               - { type: 'goal_update', status: 'active' | 'paused' | 'completed' | 'blocked' | 'canceled', optional objective: string, optional progressSummary: string, optional doneWhen: string, optional stopWhen: string, optional operation: 'clear' }\n\
               - Emit `goal_update` when the latest user request explicitly asks to create, set, start, update, pause, resume, complete, block, cancel, or clear a conversation goal, or when an active conversation goal is included and this turn has concrete evidence that the goal changed. Use status `active` with `objective` to create or update a goal. Do not infer goals from ordinary questions or small one-off requests.\n\
               - A request to create/start a goal also authorizes starting the work now. Do not respond with only a goal-created acknowledgement or a suggestion to start later.\n\
@@ -9257,6 +9378,15 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 &mut prompt_section_metrics,
                 "browserChoice",
                 BROWSER_CHOICE_CONTRACT,
+            );
+        }
+
+        if multi_agent_worker {
+            append_prompt_section(
+                &mut prompt,
+                &mut prompt_section_metrics,
+                "workerHumanDecisions",
+                user_input_request::WORKER_INPUT_CONTRACT,
             );
         }
 
@@ -9536,6 +9666,7 @@ struct CodexSuggestedSecret {
 #[derive(Debug, Clone)]
 enum CodexAction {
     RequestBrowser(browser_request::BrowserRequest),
+    RequestUserInput(user_input_request::WorkerInputRequest),
     MultiAgentPlan {
         plan: JsonValue,
         agent_count: usize,
@@ -9614,15 +9745,18 @@ fn outcome_defers_workspace_file_changes(outcome: &CodexOutcome) -> bool {
             CodexAction::MultiAgentPlan { .. }
                 | CodexAction::CoordinationRequired { .. }
                 | CodexAction::RequestBrowser(_)
+                | CodexAction::RequestUserInput(_)
         )
     })
 }
 
 fn outcome_defers_command_execution(outcome: &CodexOutcome) -> bool {
-    outcome
-        .actions
-        .iter()
-        .any(|action| matches!(action, CodexAction::RequestBrowser(_)))
+    outcome.actions.iter().any(|action| {
+        matches!(
+            action,
+            CodexAction::RequestBrowser(_) | CodexAction::RequestUserInput(_)
+        )
+    })
 }
 
 // Recording actual edits is independent of requiring edits for success. Both
@@ -9815,7 +9949,7 @@ fn parse_line_range(value: &JsonValue) -> Option<LineRange> {
 const DEFAULT_CODEX_OUTCOME_SUMMARY: &str = "Codex automation completed the request.";
 
 fn extract_codex_outcome(value: &JsonValue) -> Result<CodexOutcome> {
-    let summary = value
+    let mut summary = value
         .get("summary")
         .and_then(JsonValue::as_str)
         .map(normalize_codex_outcome_summary_text)
@@ -9842,7 +9976,13 @@ fn extract_codex_outcome(value: &JsonValue) -> Result<CodexOutcome> {
     }
 
     let suggested_replies = parse_codex_suggestions(value);
-    let actions = parse_codex_actions(value);
+    let mut actions = parse_codex_actions(value);
+    if let Some(request) = user_input_request::parse_action(value)? {
+        if summary.trim().is_empty() || summary == DEFAULT_CODEX_OUTCOME_SUMMARY {
+            summary = "Your input is needed before this work can continue.".to_string();
+        }
+        actions.push(CodexAction::RequestUserInput(request));
+    }
 
     Ok(CodexOutcome {
         summary,
@@ -10354,7 +10494,10 @@ fn parse_codex_multi_agent_plan_action(
 
         let mut agent_out = JsonMap::new();
         agent_out.insert("handle".to_string(), JsonValue::String(handle));
-        if let Some(label) = first_string(agent, &["label", "title", "lane"]) {
+        if let Some(label) = first_string(
+            agent,
+            &["label", "title", "lane", "taskLabel", "task_label"],
+        ) {
             agent_out.insert("label".to_string(), JsonValue::String(label.to_string()));
         }
         agent_out.insert("prompt".to_string(), JsonValue::String(prompt));
@@ -10496,20 +10639,17 @@ fn parse_codex_multi_agent_plan_action(
             out.insert(canonical.to_string(), value.clone());
         }
     }
-    out.insert(
-        "synthesis".to_string(),
-        json!({
-            "leadHandle": lead.get("leadHandle").cloned().unwrap_or_else(|| json!("octo")),
-            "prompt": lead
-                .get("continuationPrompt")
-                .cloned()
-                .unwrap_or_else(|| json!("Review sibling results and decide the next coordination step.")),
-            "expectedReportFormat": lead
-                .get("expectedReportFormat")
-                .cloned()
-                .unwrap_or_else(|| json!("concise report with findings, evidence, risks, and next steps")),
-        }),
-    );
+    let mut synthesis = json!({
+        "leadHandle": lead.get("leadHandle").cloned().unwrap_or_else(|| json!("octo")),
+        "prompt": lead
+            .get("continuationPrompt")
+            .cloned()
+            .unwrap_or_else(|| json!("Review sibling results and decide the next coordination step.")),
+    });
+    if let Some(format) = lead.get("expectedReportFormat") {
+        synthesis["expectedReportFormat"] = format.clone();
+    }
+    out.insert("synthesis".to_string(), synthesis);
 
     Some((JsonValue::Object(out), agents.len(), rationale))
 }
@@ -10883,6 +11023,8 @@ fn unique_codex_plan_agent_handle(
         "label",
         "title",
         "lane",
+        "taskLabel",
+        "task_label",
         "scopeSummary",
         "scope",
         "name",
@@ -11026,14 +11168,16 @@ fn parse_codex_multi_agent_lead(plan_map: &serde_json::Map<String, JsonValue>) -
                 plan_map,
                 &["expectedReportFormat", "expected_report_format"],
             )
-        })
-        .unwrap_or("concise report with findings, evidence, risks, and next steps");
+        });
 
-    json!({
+    let mut lead = json!({
         "leadHandle": lead_handle,
         "continuationPrompt": continuation_prompt,
-        "expectedReportFormat": expected_report_format,
-    })
+    });
+    if let Some(format) = expected_report_format {
+        lead["expectedReportFormat"] = json!(format);
+    }
+    lead
 }
 
 fn first_string<'a>(map: &'a serde_json::Map<String, JsonValue>, keys: &[&str]) -> Option<&'a str> {
@@ -11145,6 +11289,7 @@ fn ensure_onboarding_suggestions(suggested_replies: &mut Vec<String>, actions: &
             CodexAction::RequestSecret { .. } => {}
             CodexAction::RequestLocation { .. } => {}
             CodexAction::RequestBrowser(_) => {}
+            CodexAction::RequestUserInput(_) => {}
         }
     }
 }
@@ -11437,6 +11582,25 @@ fn stream_settled_cards(
 /// `None` means no derivation: the tests pass it, and so would any caller that
 /// has no workspace, and a card then behaves exactly as it did before, which is
 /// to say it falls back to its own wording.
+fn build_final_messages_from_outcome(
+    outcome: &CodexOutcome,
+    workspace_dir: Option<&Path>,
+) -> Vec<JobMessage> {
+    let mut messages = build_final_messages_from_actions(&outcome.actions, workspace_dir);
+    // A plan's rationale is internal routing evidence. Its message carries the
+    // assistant's user-facing summary once, even if the turn emits several plans.
+    if !outcome.summary.trim().is_empty()
+        && outcome.summary != DEFAULT_CODEX_OUTCOME_SUMMARY
+        && classify_internal_codex_fallback_summary(&outcome.summary).is_none()
+        && let Some(message) = messages
+            .iter_mut()
+            .find(|message| message.message_type.as_deref() == Some("multi_agent_plan"))
+    {
+        message.content = outcome.summary.clone();
+    }
+    messages
+}
+
 fn build_final_messages_from_actions(
     actions: &[CodexAction],
     workspace_dir: Option<&Path>,
@@ -11451,6 +11615,8 @@ fn build_final_messages_from_actions(
 
     for action in actions {
         match action {
+            // The controller creates the authoritative card after registration.
+            CodexAction::RequestUserInput(_) => {}
             CodexAction::RequestBrowser(request) => {
                 if !emitted_browser_request {
                     out.push(request.message());
@@ -11458,19 +11624,17 @@ fn build_final_messages_from_actions(
                 }
             }
             CodexAction::MultiAgentPlan {
-                plan,
-                agent_count,
-                rationale,
+                plan, agent_count, ..
             } => {
                 let metadata = json!({
                     "messageType": "multi_agent_plan",
                     "details": plan,
                 });
-                let content = rationale.clone().unwrap_or_else(|| {
-                    format!(
-                        "I’m splitting this into {agent_count} focused top-level agents and will synthesize their findings after they finish."
-                    )
-                });
+                let content = if *agent_count == 1 {
+                    "I’ll start this task.".to_string()
+                } else {
+                    format!("I’ll start these {agent_count} tasks.")
+                };
                 out.push(JobMessage {
                     content,
                     message_type: Some("multi_agent_plan".to_string()),
@@ -12568,14 +12732,16 @@ fn codex_missing_final_scoped_worker_observation_recovery_prompt(
         Pre-collected lane observations:\n\
         {observations}\n\
         Response rules:\n\
-        - Finish with one concise normal assistant report, not JSON.\n\
+        - Finish with one concise normal assistant report for ordinary results; a necessary human decision uses the structured action below.\n\
         - Put findings/evidence first, then assumptions/gaps.\n\
         - Preserve concrete source locators from the observations, including filenames, hunk headers, URLs, and line references when present.\n\
         - Keep this read-only; do not create, edit, move, delete, or return workspace file changes.\n\
         - Do not mention internal retry, fallback, or recovery mechanics.\n\
         \n\
+        {worker_input_contract}\n\
         Latest worker lane request:\n{}",
-        prompt_text.trim()
+        prompt_text.trim(),
+        worker_input_contract = user_input_request::WORKER_INPUT_CONTRACT
     )
 }
 
@@ -13724,11 +13890,11 @@ async fn execute_preobserved_scoped_worker_direct(
     runtime_id: Uuid,
     proxy_config: &DirectWorkerProxyConfig,
 ) -> Result<JobExecution> {
-    let system_prompt = "You are a read-only Instafy worker lane. Produce one concise evidence report from the supplied scoped observations. Do not edit files, do not emit actions, and do not wrap the answer in JSON.";
+    let system_prompt = "You are a read-only Instafy worker lane. Produce one concise evidence report from the supplied scoped observations. Do not edit files. For an ordinary report, use plain text. For a necessary human decision, return one JSON object with summary, files: [], and a request_user_input action.";
     let request = json!({
         "model": proxy_config.model.as_str(),
         "stream": false,
-        "instructions": system_prompt,
+        "instructions": format!("{system_prompt}{}", user_input_request::WORKER_INPUT_CONTRACT),
         "tool_choice": "none",
         "tools": [],
         "reasoning_effort": proxy_config.reasoning_effort,
@@ -13755,7 +13921,7 @@ async fn execute_preobserved_scoped_worker_direct(
         &request,
     )
     .await?;
-    let summary = extract_direct_worker_summary(&response_json)
+    let response_text = extract_direct_worker_summary(&response_json)
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .ok_or_else(|| {
@@ -13765,6 +13931,28 @@ async fn execute_preobserved_scoped_worker_direct(
             )
         })?;
 
+    let (summary, input_request) = if response_text.trim_start().starts_with('{')
+        || response_text.trim_start().starts_with("```json")
+    {
+        let plan = parse_model_json_object(&response_text)
+            .context("read-only worker returned malformed structured output")?;
+        let request = user_input_request::parse_action(&plan)?;
+        let summary = plan
+            .get("summary")
+            .and_then(JsonValue::as_str)
+            .filter(|summary| !summary.trim().is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                if request.is_some() {
+                    "Your input is needed before this work can continue.".to_string()
+                } else {
+                    response_text.clone()
+                }
+            });
+        (summary, request)
+    } else {
+        (response_text, None)
+    };
     let mut artifacts = vec![
         json!({
             "kind": "ai/scoped-worker-direct",
@@ -13780,6 +13968,10 @@ async fn execute_preobserved_scoped_worker_direct(
     ];
     if !prompt_context.is_null() {
         artifacts.push(build_codex_prompt_context_artifact(prompt_context, None));
+    }
+
+    if let Some(request) = input_request {
+        artifacts.push(request.artifact());
     }
 
     Ok(JobExecution {
@@ -13847,13 +14039,13 @@ async fn execute_write_scoped_worker_direct(
         .map(|path| path.display_path.as_str())
         .collect::<Vec<_>>()
         .join(", ");
-    let system_prompt = "You are a write-scoped Instafy worker lane. Return only one JSON object with shape {\"summary\": string, \"files\": [{\"path\": string, \"content\": string}]}. Every file path must be inside the allowed owned paths/globs. Do not include markdown fences.";
+    let system_prompt = "You are a write-scoped Instafy worker lane. Return only one JSON object with shape {\"summary\": string, \"files\": [{\"path\": string, \"content\": string}], \"actions\": []}. Every file path must be inside the allowed owned paths/globs. Do not include markdown fences.";
     let worker_input =
         format!("Allowed owned paths/globs: {allowed_paths}\n\nWorker task:\n{prompt}");
     let request = json!({
         "model": proxy_config.model.as_str(),
         "stream": false,
-        "instructions": system_prompt,
+        "instructions": format!("{system_prompt}{}", user_input_request::WORKER_INPUT_CONTRACT),
         "tool_choice": "none",
         "tools": [],
         "reasoning_effort": proxy_config.reasoning_effort,
@@ -13891,12 +14083,17 @@ async fn execute_write_scoped_worker_direct(
         })?;
     let plan = parse_model_json_object(&response_text)
         .with_context(|| "write-scoped worker did not return a valid JSON object")?;
+    let input_request = user_input_request::parse_action(&plan)?;
     let summary = plan
         .get("summary")
         .and_then(JsonValue::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or("Write-scoped worker completed owned file changes.")
+        .unwrap_or(if input_request.is_some() {
+            "Your input is needed before this work can continue."
+        } else {
+            "Write-scoped worker completed owned file changes."
+        })
         .to_string();
     let files = plan
         .get("files")
@@ -13935,7 +14132,7 @@ async fn execute_write_scoped_worker_direct(
         }));
         written.push(descriptor);
     }
-    if applied_files.is_empty() {
+    if applied_files.is_empty() && input_request.is_none() {
         bail!("write-scoped worker returned no owned file changes");
     }
 
@@ -13961,6 +14158,9 @@ async fn execute_write_scoped_worker_direct(
     ];
     if !prompt_context.is_null() {
         artifacts.push(build_codex_prompt_context_artifact(prompt_context, None));
+    }
+    if let Some(request) = input_request {
+        artifacts.push(request.artifact());
     }
 
     Ok((
@@ -14156,8 +14356,70 @@ fn format_collaboration_delegation_snapshot(workspace_dir: &Path) -> Option<Stri
     ))
 }
 
-fn format_collaboration_skill_snapshot(workspace_dir: &Path) -> Option<String> {
-    let path = ".agents/skills/instafy-agent-collaboration/SKILL.md";
+struct CollaborationResultPolicy {
+    section: String,
+    truncated: bool,
+}
+
+impl CollaborationResultPolicy {
+    fn render(&self) -> String {
+        format!(
+            "\nCurrent collaboration skill policy from `{COLLABORATION_SKILL_PATH}`:\n{}\n",
+            self.section
+        )
+    }
+
+    fn append_to(&self, prompt: &mut String, metrics: &mut JsonMap<String, JsonValue>) {
+        append_prompt_section(prompt, metrics, "collaborationResultPolicy", &self.render());
+        let provenance = &mut metrics["collaborationResultPolicy"];
+        provenance["source"] = json!(COLLABORATION_SKILL_PATH);
+        provenance["section"] = json!("User-facing results");
+        provenance["sha256"] = json!(format!("{:x}", Sha256::digest(self.section.as_bytes())));
+        provenance["truncated"] = json!(self.truncated);
+    }
+}
+
+fn load_collaboration_result_policy(workspace_dir: &Path) -> Option<CollaborationResultPolicy> {
+    let content = read_workspace_file_utf8(workspace_dir, COLLABORATION_SKILL_PATH)?;
+    let section = extract_markdown_h2_section(&content, "User-facing results")?;
+    let truncated = section.chars().count() > COLLABORATION_RESULT_POLICY_MAX_CHARS;
+    Some(CollaborationResultPolicy {
+        section: section
+            .chars()
+            .take(COLLABORATION_RESULT_POLICY_MAX_CHARS)
+            .collect(),
+        truncated,
+    })
+}
+
+// Compact recovery prompts do not carry the primary prompt's skill excerpt.
+// Reload the same workspace source; diagnostics retain provenance, never source text.
+fn append_collaboration_result_policy_to_recovery(
+    prompt: &mut String,
+    context: &mut JsonValue,
+    workspace_dir: &Path,
+) {
+    if let Some(sections) = context
+        .get_mut("promptSections")
+        .and_then(JsonValue::as_object_mut)
+    {
+        sections.remove("collaborationResultPolicy");
+    }
+    let Some(policy) = load_collaboration_result_policy(workspace_dir) else {
+        return;
+    };
+    if !context.is_object() {
+        *context = json!({});
+    }
+    if !context["promptSections"].is_object() {
+        context["promptSections"] = json!({});
+    }
+    policy.append_to(prompt, context["promptSections"].as_object_mut().unwrap());
+    enrich_prompt_context_metrics(context, prompt);
+}
+
+fn format_collaboration_skill_snapshot(workspace_dir: &Path, max_chars: usize) -> Option<String> {
+    let path = COLLABORATION_SKILL_PATH;
     let content = read_workspace_file_utf8(workspace_dir, path)?;
     let mut excerpt = String::new();
     for heading in [
@@ -14173,13 +14435,13 @@ fn format_collaboration_skill_snapshot(workspace_dir: &Path) -> Option<String> {
         }
     }
     if excerpt.trim().is_empty() {
+        if extract_markdown_h2_section(&content, "User-facing results").is_some() {
+            return None;
+        }
         excerpt = content;
     }
-    let truncated = excerpt.chars().count() > COLLABORATION_SKILL_PLANNING_MAX_CHARS;
-    let snippet = excerpt
-        .chars()
-        .take(COLLABORATION_SKILL_PLANNING_MAX_CHARS)
-        .collect::<String>();
+    let truncated = excerpt.chars().count() > max_chars;
+    let snippet = excerpt.chars().take(max_chars).collect::<String>();
     let mut out = String::from("\nFocused collaboration skill snapshot:\n");
     let _ = writeln!(
         out,
@@ -14195,18 +14457,18 @@ fn format_collaboration_skill_snapshot(workspace_dir: &Path) -> Option<String> {
     Some(out)
 }
 
-fn format_collaboration_routing_preflight_snapshot(workspace_dir: &Path) -> Option<String> {
+fn format_collaboration_routing_preflight_snapshot(
+    workspace_dir: &Path,
+    max_chars: usize,
+) -> Option<String> {
     let path = ".agents/skills/instafy-agent-collaboration/SKILL.md";
     let content = read_workspace_file_utf8(workspace_dir, path)?;
     let mut excerpt = extract_markdown_h2_section(&content, "Routing preflight")
         .or_else(|| extract_markdown_h2_section(&content, "Skill-authored workstreams"))
         .unwrap_or(content);
     excerpt = strip_markdown_fenced_blocks(&excerpt);
-    let truncated = excerpt.chars().count() > COLLABORATION_SKILL_ROUTING_MAX_CHARS;
-    let snippet = excerpt
-        .chars()
-        .take(COLLABORATION_SKILL_ROUTING_MAX_CHARS)
-        .collect::<String>();
+    let truncated = excerpt.chars().count() > max_chars;
+    let snippet = excerpt.chars().take(max_chars).collect::<String>();
     let mut out = String::from("\nFocused collaboration routing skill snapshot:\n");
     let _ = writeln!(
         out,
@@ -14275,8 +14537,9 @@ fn build_agent_routing_preflight_prompt(
     workspace_dir: &Path,
     prompt_text: &str,
     active_plan_group_id: Option<&str>,
+    pending: Option<&worker_input_routing::PendingContext>,
 ) -> String {
-    let skill_snapshot = format_collaboration_routing_preflight_snapshot(workspace_dir)
+    let skill_snapshot = format_collaboration_routing_preflight_snapshot(workspace_dir, if pending.is_some() { 3200 } else { COLLABORATION_SKILL_ROUTING_MAX_CHARS })
         .unwrap_or_else(|| {
             "\nFocused collaboration routing skill snapshot unavailable. Prefer `direct`; use `multi_agent_candidate` only for durable Instafy workstreams, not merely generic parallel work.\n".to_string()
         });
@@ -14287,7 +14550,7 @@ fn build_agent_routing_preflight_prompt(
             )
         })
         .unwrap_or_default();
-    format!(
+    let mut prompt = format!(
         "\nInstafy routing preflight.\n\
         Decide only how the latest user request should enter the runtime. Do not answer the user request. Do not inspect files or run tools.\n\
         Routes:\n\
@@ -14303,8 +14566,12 @@ fn build_agent_routing_preflight_prompt(
         {plan_group_guidance}\
         {skill_snapshot}\n\
         Latest user request:\n```text\n{prompt_text}\n```\n\
-        Return exactly one JSON object with fields `summary`, `route`, `reason`, `selectedSkills`, `confidence` (0-100), `requiresContextLookup`, `requiresCommandExecution`, `workspaceFileChangeRequirement`, and `observationCommands`."
-    )
+        Return exactly one JSON object with fields `summary`, `route`, `reason`, `selectedSkills`, `confidence` (0-100), `requiresContextLookup`, `requiresCommandExecution`, `workspaceFileChangeRequirement`, `observationCommands`, and nullable `workerQuestionReply`."
+    );
+    if let Some(pending) = pending {
+        pending.append_prompt(&mut prompt);
+    }
+    prompt
 }
 
 /// The routing preflight uses the normal stateless history budget.
@@ -22043,7 +22310,11 @@ mod tests {
             } else {
                 job.payload["metadata"]["multiAgentPlan"] = json!({"role":role});
             }
-            assert!(initial_main_requires_tool_call(&job, true, false), "{role}");
+            assert_eq!(
+                initial_main_requires_tool_call(&job, true, false),
+                role != "worker",
+                "{role}"
+            );
             assert!(
                 !clean_ambient_participation_decline(
                     &job,
@@ -22858,6 +23129,7 @@ mod tests {
             tmp.path(),
             "Which lanes are still running right now?",
             Some("8beaf901-8c46-49d9-a08b-c8e0043d5dc2"),
+            None,
         );
         assert!(prompt.contains("instafy agents status 8beaf901-8c46-49d9-a08b-c8e0043d5dc2"));
         assert!(prompt.contains("LIVE team/lane/workstream progress"));
@@ -22865,6 +23137,7 @@ mod tests {
         let without = build_agent_routing_preflight_prompt(
             tmp.path(),
             "Which lanes are still running right now?",
+            None,
             None,
         );
         assert!(!without.contains("instafy agents status"));
@@ -22888,6 +23161,7 @@ mod tests {
         let prompt = build_agent_routing_preflight_prompt(
             tmp.path(),
             "Create exactly 2 durable Instafy worker jobs to review AGENTS.md.",
+            None,
             None,
         );
 
@@ -27480,7 +27754,8 @@ mod tests {
     #[test]
     fn ordinary_routing_prompt_preserves_old_evidence_without_metadata_or_role_authority() {
         let tmp = tempdir().expect("temp dir");
-        let base = build_agent_routing_preflight_prompt(tmp.path(), "Use the agreed target.", None);
+        let base =
+            build_agent_routing_preflight_prompt(tmp.path(), "Use the agreed target.", None, None);
         let mut history: Vec<JsonValue> = (0..12)
             .map(|index| {
                 json!({
@@ -27552,6 +27827,104 @@ mod tests {
         assert!(job_requests_cross_chat_context_lookup(&routed));
         assert!(context_recovery_requires_command(&routed, prompt, &[]));
         assert!(format_context_recovery_lookup_section(&routed, prompt).is_some());
+    }
+
+    #[test]
+    fn collaboration_skill_snapshot_keeps_bundled_policy_and_execution_within_budget() {
+        let tmp = tempdir().expect("temp dir");
+        learn::ensure_project_memory_scaffold(tmp.path());
+        let content = fs::read_to_string(tmp.path().join(COLLABORATION_SKILL_PATH)).unwrap();
+        let policy = load_collaboration_result_policy(tmp.path()).expect("bundled policy");
+        assert!(!policy.truncated);
+        let policy_chars = policy.render().chars().count();
+        let snapshot = format_collaboration_skill_snapshot(
+            tmp.path(),
+            COLLABORATION_SKILL_PLANNING_MAX_CHARS - policy_chars,
+        )
+        .expect("bundled planning guidance");
+        let execution = extract_markdown_h2_section(&content, "Execution model").unwrap();
+        assert!(snapshot.contains(&execution));
+        assert!(!snapshot.contains(&policy.section));
+        let snippet = snapshot
+            .split_once("```markdown\n")
+            .unwrap()
+            .1
+            .strip_suffix("\n```\n")
+            .unwrap();
+        assert!(
+            snippet.chars().count() + policy_chars <= COLLABORATION_SKILL_PLANNING_MAX_CHARS + 4
+        );
+    }
+
+    #[test]
+    fn planning_and_checkpoint_use_the_same_current_workspace_policy() {
+        let tmp = tempdir().expect("temp dir");
+        let path = tmp.path().join(COLLABORATION_SKILL_PATH);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let policy = "## User-facing results\nUse the project's chosen presentation.\n";
+        fs::write(
+            &path,
+            format!("{policy}\n## Execution model\nKeep assigned scopes.\n"),
+        )
+        .unwrap();
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        let build = |metadata: JsonValue| {
+            let mut job = test_lease_job(Some("feature"), json!({"metadata": metadata}));
+            job.project_id = Some(project_id);
+            processor
+                .build_prompt_with_text(
+                    &project_id,
+                    &job,
+                    tmp.path(),
+                    "Complete the assigned task.",
+                    true,
+                    None,
+                    &[],
+                    None,
+                    None,
+                )
+                .expect("prompt")
+        };
+        let (planning, _, planning_metrics) =
+            build(json!({"agentCollaboration": {"mode": "team_plan", "requested": true}}));
+        let (checkpoint, _, checkpoint_metrics) =
+            build(json!({"multiAgentPlan": {"role": "lead_continuation", "groupId": "group-1"}}));
+        for prompt in [&planning, &checkpoint] {
+            assert_eq!(prompt.matches(policy.trim()).count(), 1);
+        }
+        let provenance = &planning_metrics["promptSections"]["collaborationResultPolicy"];
+        assert_eq!(
+            provenance,
+            &checkpoint_metrics["promptSections"]["collaborationResultPolicy"]
+        );
+        assert_eq!(provenance["source"], COLLABORATION_SKILL_PATH);
+        assert_eq!(provenance["section"], "User-facing results");
+        assert_eq!(provenance["sha256"].as_str().unwrap().len(), 64);
+
+        let updated = policy.replace("chosen presentation", "updated presentation");
+        fs::write(&path, &updated).unwrap();
+        let (checkpoint, _, updated_metrics) =
+            build(json!({"multiAgentPlan": {"role": "lead_continuation", "groupId": "group-1"}}));
+        assert!(checkpoint.contains(updated.trim()));
+        assert!(!checkpoint.contains(policy.trim()));
+        assert_ne!(
+            provenance["sha256"],
+            updated_metrics["promptSections"]["collaborationResultPolicy"]["sha256"]
+        );
+        let mut recovery =
+            codex_missing_final_lead_continuation_recovery_prompt("Finish the task.");
+        let mut recovery_metrics = json!({});
+        append_collaboration_result_policy_to_recovery(
+            &mut recovery,
+            &mut recovery_metrics,
+            tmp.path(),
+        );
+        assert!(recovery.contains(updated.trim()));
+        assert_eq!(
+            recovery_metrics["promptSections"]["collaborationResultPolicy"],
+            updated_metrics["promptSections"]["collaborationResultPolicy"]
+        );
     }
 
     #[test]
@@ -29732,6 +30105,51 @@ mod tests {
     }
 
     #[test]
+    fn multi_agent_plan_report_format_is_optional_and_preserves_explicit_formats() {
+        let base = json!({
+            "type": "multi_agent_plan",
+            "mode": "read_only",
+            "agents": [
+                {"handle": "draft", "label": "Draft", "prompt": "Write a draft."},
+                {"handle": "review", "label": "Review", "prompt": "Review the brief."}
+            ]
+        });
+        for (fields, expected) in [
+            (json!({}), None),
+            (json!({"lead": {"expectedReportFormat": null}}), None),
+            (json!({"lead": {"expectedReportFormat": " "}}), None),
+            (
+                json!({"expectedReportFormat": "One sentence and links."}),
+                Some("One sentence and links."),
+            ),
+            (
+                json!({"synthesis": {"expectedReportFormat": "Detailed findings, evidence, risks and tests."}}),
+                Some("Detailed findings, evidence, risks and tests."),
+            ),
+            (
+                json!({"expectedReportFormat": "Fallback", "lead": {"expectedReportFormat": "Severity-ranked findings with evidence."}}),
+                Some("Severity-ranked findings with evidence."),
+            ),
+        ] {
+            let mut action = base.as_object().unwrap().clone();
+            action.extend(fields.as_object().unwrap().clone());
+            let (plan, _, _) = parse_codex_multi_agent_plan_action(&action).expect("valid plan");
+            assert_eq!(
+                plan["lead"]
+                    .get("expectedReportFormat")
+                    .and_then(JsonValue::as_str),
+                expected
+            );
+            assert_eq!(
+                plan["synthesis"]
+                    .get("expectedReportFormat")
+                    .and_then(JsonValue::as_str),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn parse_codex_actions_supports_multi_agent_plan() {
         let payload = json!({
             "actions": [
@@ -30355,6 +30773,102 @@ mod tests {
             false,
             &plain_outcome
         ));
+    }
+
+    #[test]
+    fn final_plan_messages_preserve_the_user_summary_once_and_keep_rationale_internal() {
+        let plan = |handle: &str| {
+            json!({
+                "type": "multi_agent_plan",
+                "mode": "read_only",
+                "rationale": "Internal routing reason.",
+                "agents": [{"handle": handle, "prompt": "Review this task."}]
+            })
+        };
+        let summary = "I can prepare the garden poem; the moon poem still needs your sky word.";
+        let outcome = extract_codex_outcome(&json!({
+            "summary": summary,
+            "actions": [
+                {"type": "request_location", "precision": "approximate", "description": "Choose a location for the poem."},
+                plan("garden"),
+                plan("moon")
+            ]
+        })).expect("outcome");
+        let messages = build_final_messages_from_outcome(&outcome, None);
+        assert_eq!(messages.len(), 3);
+        let original_card = build_final_messages_from_actions(&outcome.actions[..1], None);
+        assert_eq!(messages[0].content, original_card[0].content);
+        assert_eq!(messages[0].metadata, original_card[0].metadata);
+        assert_eq!(messages[1].content, summary);
+        assert_eq!(messages[2].content, "I’ll start this task.");
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.content == summary)
+                .count(),
+            1
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|message| !message.content.contains("Internal routing reason"))
+        );
+        for message in &messages[1..] {
+            assert_eq!(
+                message.metadata.as_ref().unwrap()["details"]["rationale"],
+                "Internal routing reason."
+            );
+        }
+    }
+
+    #[test]
+    fn final_plan_messages_without_a_useful_summary_use_plain_kickoff_copy() {
+        for summary in [
+            JsonValue::Null,
+            json!(""),
+            json!("  "),
+            json!(DEFAULT_CODEX_OUTCOME_SUMMARY),
+        ] {
+            let outcome = extract_codex_outcome(&json!({
+                "summary": summary,
+                "actions": [{
+                    "type": "multi_agent_plan",
+                    "rationale": "The routing threshold was crossed.",
+                    "mode": "read_only",
+                    "agents": [
+                        {"handle": "garden", "prompt": "Review garden."},
+                        {"handle": "moon", "prompt": "Review moon."}
+                    ]
+                }]
+            }))
+            .expect("outcome");
+            let messages = build_final_messages_from_outcome(&outcome, None);
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].content, "I’ll start these 2 tasks.");
+        }
+    }
+
+    #[test]
+    fn multi_agent_plan_preserves_task_label_aliases_and_existing_label_precedence() {
+        for labels in [
+            json!({"taskLabel": "Garden poem"}),
+            json!({"task_label": "Garden poem"}),
+            json!({"label": "Garden poem", "taskLabel": "Other"}),
+            json!({"title": "Garden poem", "taskLabel": "Other"}),
+            json!({"lane": "Garden poem", "taskLabel": "Other"}),
+            json!({"taskLabel": "Garden poem", "task_label": "Other"}),
+        ] {
+            let mut agent = labels.as_object().unwrap().clone();
+            agent.insert("prompt".to_string(), json!("Write the garden poem."));
+            let actions = parse_codex_actions(&json!({
+                "actions": [{"type": "multi_agent_plan", "mode": "read_only", "agents": [agent]}]
+            }));
+            let CodexAction::MultiAgentPlan { plan, .. } = &actions[0] else {
+                panic!("plan action");
+            };
+            assert_eq!(plan["agents"][0]["label"], "Garden poem");
+            assert_eq!(plan["agents"][0]["handle"], "garden-poem");
+        }
     }
 
     #[test]

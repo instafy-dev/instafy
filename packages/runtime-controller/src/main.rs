@@ -122,6 +122,7 @@ mod tokens;
 mod tunnels;
 mod turn_rate_limit_retry;
 mod upstream_pacing;
+mod user_input_requests;
 mod utils;
 mod workspace;
 
@@ -548,6 +549,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(message_search::router())
         .merge(message_stashes::router())
         .merge(send_intents::router())
+        .merge(user_input_requests::router())
         .merge(send_queue::router())
         .merge(notifications::router())
         .merge(notification_platform::router())

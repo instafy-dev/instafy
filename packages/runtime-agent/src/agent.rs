@@ -1630,8 +1630,31 @@ impl RuntimeAgent {
         client: &ControllerClient,
         registration: &Registration,
         job: &LeaseJob,
-        execution: JobExecution,
+        mut execution: JobExecution,
     ) {
+        let registration_result = async {
+            if let Some((index, request)) =
+                crate::jobs::user_input_request::from_artifacts(job, &execution.artifacts)?
+            {
+                let registered = client
+                    .register_worker_input_request(registration, job.id, &request)
+                    .await?;
+                execution.artifacts[index]["requestId"] = serde_json::json!(registered.request_id);
+            }
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(error) = registration_result {
+            warn!(?error, job_id = %job.id, "worker input handoff failed; job was not completed");
+            if let Err(report_error) = client.fail_job_with_artifacts(
+                registration, job.id,
+                "Could not register this worker's question in the owning chat. The worker did not complete.",
+                &execution.artifacts, execution.proxy_metadata(),
+            ).await {
+                warn!(?report_error, job_id = %job.id, "failed to report worker input handoff failure");
+            }
+            return;
+        }
         if !execution.messages_streamed {
             for (index, message) in execution.messages.iter().enumerate() {
                 if let Err(error) = client

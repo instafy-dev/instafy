@@ -56,6 +56,8 @@ type UseChatVoiceComposerControllerOptions = {
   imageAttachmentCount: number;
   inputValue: string;
   invokeSubmitMessage: SubmitMessageFn;
+  /** Structured worker replies are reviewed and explicitly sent from the composer. */
+  manualSubmitOnly?: boolean;
   isAssistantTyping: boolean;
   latestInputValueRef: MutableRefObject<string>;
   messages: ChatMessage[];
@@ -73,6 +75,7 @@ export function useChatVoiceComposerController({
   imageAttachmentCount,
   inputValue,
   invokeSubmitMessage,
+  manualSubmitOnly = false,
   isAssistantTyping,
   latestInputValueRef,
   messages,
@@ -358,7 +361,7 @@ export function useChatVoiceComposerController({
       voiceConversationTurnRef.current = {
         attemptId,
         autoSubmit:
-          latestInputValueRef.current.trim().length === 0 &&
+          !manualSubmitOnly && latestInputValueRef.current.trim().length === 0 &&
           imageAttachmentCount === 0,
         submitted: false,
       };
@@ -404,6 +407,7 @@ export function useChatVoiceComposerController({
       clearContinuousPauseMessage,
       imageAttachmentCount,
       latestInputValueRef,
+      manualSubmitOnly,
       startVoiceInput,
       stopVoiceInput,
       touchLikeInput,
@@ -506,10 +510,16 @@ export function useChatVoiceComposerController({
   ]);
 
   useEffect(() => {
+    if (manualSubmitOnly && continuousConversationActive) {
+      pauseContinuousSession("Review your worker reply, then send it from the composer.");
+    }
+  }, [manualSubmitOnly, continuousConversationActive, pauseContinuousSession]);
+
+  useEffect(() => {
     const transcript = voiceInputTranscript.trim();
     const activeTurn = voiceConversationTurnRef.current;
     if (
-      !activeTurn?.autoSubmit ||
+      manualSubmitOnly || !activeTurn?.autoSubmit ||
       activeTurn.submitted ||
       voiceAutoSubmittingRef.current ||
       voiceHoldActive ||
@@ -580,6 +590,7 @@ export function useChatVoiceComposerController({
     invokeSubmitMessage,
     latestAssistantMessage?.id,
     latestInputValueRef,
+    manualSubmitOnly,
     markContinuousAwaitingAssistantReply,
     onInputChange,
     pauseContinuousSession,

@@ -51,7 +51,7 @@ type MultiAgentPlanView = {
   presentation: MultiAgentPlanPresentation;
 };
 
-type TeamActivityStatus = "queued" | "working" | "waiting" | "done" | "failed" | "canceled";
+type TeamActivityStatus = "queued" | "working" | "waiting" | "waiting_input" | "done" | "failed" | "canceled";
 
 type TeamActivity = {
   key: string;
@@ -149,7 +149,7 @@ function parseMultiAgentPlan(details: Record<string, unknown> | null): MultiAgen
     .filter(isRecord)
     .map((agent): MultiAgentPlanAgent | null => {
       const handle = normalizePlanHandle(agent.handle);
-      const label = stringField(agent.label) || handle || "Agent";
+      const label = stringField(agent.label) || stringField(agent.title) || handle || "Task";
       const scopeSummary =
         stringField(agent.scopeSummary) || stringField(agent.scope_summary) || stringField(agent.scope);
       const writeScope = isRecord(agent.writeScope)
@@ -472,8 +472,8 @@ function formatTeamRuntimeSummary({
 }): TeamRuntimeSummary | null {
   const rows = plan.agents
     .map((agent) => {
-      const label = agent.handle || agent.label;
-      const handleKey = normalizeHandleKey(label);
+      const label = agent.label;
+      const handleKey = normalizeHandleKey(agent.handle || label);
       const activity = workerActivityByHandle.get(handleKey) ?? null;
       const metrics = activity?.leaseMetrics ?? null;
       if (!metrics?.leasedByRuntimeId) {
@@ -534,6 +534,7 @@ function formatWorkerReferenceText({
 }): string {
   return [
     label,
+    agent.handle ? `agent: ${agent.handle}` : null,
     `status: ${statusLabel(status)}`,
     activity?.jobId ? `job: ${activity.jobId}` : null,
     agent.scopeSummary ? `scope: ${agent.scopeSummary}` : null,
@@ -734,6 +735,7 @@ function collectTeamActivity({
     if (supersededLane(key, worker.jobId)) continue;
     const evidence = workerActivityByHandle.get(key);
     const status: TeamActivityStatus = worker.status === "leased" ? "working"
+      : worker.status === "awaiting_input" ? "waiting_input"
       : worker.status === "completed" ? "done"
       : worker.status === "canceled" || worker.status === "cancelled" ? "canceled"
       : worker.status === "failed" || worker.status === "expired" ? "failed" : "queued";
@@ -756,11 +758,18 @@ function collectTeamActivity({
     const jobId = stringField(run.metadata?.jobId ?? run.metadata?.job_id);
     if (role === "worker" && supersededLane(key, jobId)) continue;
     const evidence = role === "worker" ? workerActivityByHandle.get(key) : leadActivity;
-    const status: TeamActivityStatus = run.status === "in_progress" ? "working"
+    const inputRequest = isRecord(run.metadata?.userInputRequest) ? run.metadata.userInputRequest : null;
+    const awaitingInput = inputRequest?.status === "pending" || inputRequest?.status === "answered";
+    // A completed provider turn may still be waiting for the person's answer.
+    // Cancellation/failure always wins over a late or stale request marker.
+    const status: TeamActivityStatus = run.status === "canceled" ? "canceled"
+      : run.status === "failed" ? "failed"
+      : awaitingInput ? "waiting_input"
+      : inputRequest?.status === "expired" && (run.status === "success" || run.status === "merged") ? "failed"
+      : run.status === "in_progress" ? "working"
       : run.status === "awaiting_approval" ? "waiting"
       : run.status === "success" || run.status === "merged" ? "done"
-      : run.status === "failed" ? "failed"
-      : run.status === "canceled" ? "canceled" : "queued";
+      : "queued";
     const activity: TeamActivity = {
       key, status, jobId: jobId || evidence?.jobId || "",
       summary: evidence?.summary || summarizeEvidence(run.lastMessage ?? ""),
@@ -796,6 +805,8 @@ function statusLabel(status: TeamActivityStatus): string {
       return "canceled";
     case "waiting":
       return "waiting for approval";
+    case "waiting_input":
+      return "waiting for input";
     case "queued":
     default:
       return "queued";
@@ -814,6 +825,7 @@ function statusChipClassName(status: TeamActivityStatus, interactive: boolean): 
     case "failed":
       return `bg-rose-50 text-rose-700 ring-rose-200 dark:bg-rose-500/10 dark:text-rose-200 dark:ring-rose-400/25 ${interactionClassName}`;
     case "waiting":
+    case "waiting_input":
       return `bg-amber-50 text-amber-700 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-200 dark:ring-amber-400/25 ${interactionClassName}`;
     case "queued":
     default:
@@ -858,13 +870,15 @@ function formatTeamStatusSummary({
   const queued = statuses.filter((status) => status === "queued").length;
   const canceled = statuses.filter((status) => status === "canceled").length;
   const waiting = statuses.filter((status) => status === "waiting").length;
-  if (canceled || waiting) {
+  const waitingInput = statuses.filter((status) => status === "waiting_input").length;
+  if (canceled || waiting || waitingInput) {
     return [
       leadStatus === "done" ? "Lead ready" : leadStatus === "working" ? "Lead active" : null,
       failed ? `${failed} need attention` : null,
       working ? `${working} active` : null,
       queued ? `${queued} queued` : null,
       waiting ? `${waiting} waiting for approval` : null,
+      waitingInput ? `${waitingInput} waiting for input` : null,
       `${done}/${plan.agents.length} done`,
       canceled ? `${canceled} canceled` : null,
     ].filter(Boolean).join(" · ");
@@ -963,9 +977,9 @@ export function MultiAgentPlanEntry({
   const hasActiveWorkers = plan.agents.some((agent) => {
     const handleKey = normalizeHandleKey(agent.handle || agent.label);
     const status = teamActivity.workerActivityByHandle.get(handleKey)?.status ?? "queued";
-    return status === "queued" || status === "working" || status === "waiting";
+    return status === "queued" || status === "working" || status === "waiting" || status === "waiting_input";
   });
-  const showCancelGroup = Boolean(groupId) && (hasActiveWorkers || leadStatus === "working" || leadStatus === "waiting");
+  const showCancelGroup = Boolean(groupId) && (hasActiveWorkers || leadStatus === "working" || leadStatus === "waiting" || leadStatus === "waiting_input");
   const handleCancelGroup = () => {
     if (!groupId || cancelGroupPending) {
       return;
@@ -1098,7 +1112,8 @@ export function MultiAgentPlanEntry({
         const canShowEvidence = plan.presentation.workerEvidenceVisibility !== "hidden";
         const canOpenRunTrace = Boolean(conversationLocalId && activity?.jobId && onOpenWorkerRunTrace);
         const isInteractive = canShowEvidence || canOpenRunTrace;
-        const label = agent.handle || agent.label;
+        const label = agent.label;
+        const taskIdentity = agent.handle && agent.handle !== label ? `${label} (${agent.handle})` : label;
         const evidenceText = activity?.evidence ?? "";
         const compactEvidenceDetail = summarizeEvidenceDetail(evidenceText);
         const hasMoreEvidence = compactEvidenceDetail.endsWith("…");
@@ -1108,8 +1123,8 @@ export function MultiAgentPlanEntry({
           activity?.toolUpdateCount ?? 0,
         );
         const actionLabel = canOpenRunTrace
-          ? `Open run trace for ${label}; status ${statusLabel(status)}`
-          : `${isExpanded ? "Hide" : "Show"} details for ${label}; status ${statusLabel(status)}`;
+          ? `Open run trace for ${taskIdentity}; status ${statusLabel(status)}`
+          : `${isExpanded ? "Hide" : "Show"} details for ${taskIdentity}; status ${statusLabel(status)}`;
         const referenceText = formatWorkerReferenceText({
           label,
           status,
@@ -1118,7 +1133,7 @@ export function MultiAgentPlanEntry({
           leaseMetricsLabel,
         });
         return (
-          <Fragment key={`${label}-${agent.scopeSummary}`}>
+          <Fragment key={handleKey || label}>
             <span
               className="group/agent-chip relative inline-flex min-w-0 max-w-full items-center"
               data-agent-write-mode={agent.writeMode}
@@ -1142,7 +1157,7 @@ export function MultiAgentPlanEntry({
                 disabled={!isInteractive}
                 aria-expanded={canOpenRunTrace || !canShowEvidence ? undefined : isExpanded}
                 aria-label={actionLabel}
-                title={[agent.scopeSummary, leaseMetricsLabel?.title].filter(Boolean).join("\n") || actionLabel}
+                title={[taskIdentity, agent.scopeSummary, leaseMetricsLabel?.title].filter(Boolean).join("\n")}
                 data-testid="multi-agent-evidence-row"
                 data-agent-handle={agent.handle}
               >
@@ -1294,7 +1309,7 @@ export function MultiAgentPlanEntry({
         const handleKey = normalizeHandleKey(agent.handle || agent.label);
         const rerun = teamActivity.rerunByHandle.get(handleKey);
         if (!rerun) return null;
-        const label = agent.handle || agent.label;
+        const label = agent.label;
         return (
           <PlanRerunNotice
             key={`rerun-${handleKey}`}

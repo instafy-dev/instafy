@@ -67,6 +67,7 @@ pub(crate) struct ProjectWorkCancellation {
     /// The runs of those jobs, and open runs no live job owned.
     pub(crate) canceled_run_ids: Vec<Uuid>,
     pub(crate) canceled_send_queue_entries: u64,
+    pub(crate) expired_user_input_requests: u64,
     pub(crate) paused_automations: u64,
     /// Orgs a managed-AI refund was written for, each owed a
     /// `credits.updated` once the transaction commits.
@@ -78,6 +79,7 @@ impl ProjectWorkCancellation {
         self.canceled_job_ids.is_empty()
             && self.canceled_run_ids.is_empty()
             && self.canceled_send_queue_entries == 0
+            && self.expired_user_input_requests == 0
             && self.paused_automations == 0
             && self.refunded_org_ids.is_empty()
     }
@@ -230,6 +232,18 @@ pub(crate) async fn cancel_project_work_in_transaction(
         work.canceled_run_ids.extend(canceled.run_ids);
     }
 
+    // Completed workers release their lease while awaiting a human. They no
+    // longer appear among live jobs, but a deleted space must not resume them.
+    work.expired_user_input_requests = crate::user_input_requests::expire_requests(
+        transaction,
+        project_id,
+        None,
+        None,
+        SPACE_DELETED_REASON,
+    )
+    .await?
+    .len() as u64;
+
     // Runs still open with no live job behind them would otherwise show as
     // live work forever.
     let open_run_ids: Vec<Uuid> = transaction
@@ -298,6 +312,7 @@ pub(crate) async fn publish_project_work_cancellation(
         canceled_jobs = work.canceled_job_ids.len(),
         canceled_runs = work.canceled_run_ids.len(),
         canceled_send_queue_entries = work.canceled_send_queue_entries,
+        expired_user_input_requests = work.expired_user_input_requests,
         paused_automations = work.paused_automations,
         refunded_orgs = work.refunded_org_ids.len(),
         "canceled the work of a deleted space"

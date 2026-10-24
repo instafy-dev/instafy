@@ -63,6 +63,22 @@ describe("ChatInput", () => {
     expect(container.querySelector('[data-testid="chat-input"]')).not.toBeNull();
   });
 
+  it("announces the selected reply recipient without resetting the draft", async () => {
+    const renderInput = async (ariaLabel?: string) => act(async () => {
+      root.render(<ChatInput value="aurora" editorState={null} placeholder="Your reply…"
+        ariaLabel={ariaLabel} agentHandles={[]} onChange={vi.fn()} onKeyDown={vi.fn()} />);
+    });
+    await renderInput();
+    expect(container.querySelector('[data-testid="chat-input"]')?.getAttribute("aria-label")).toBe("Ask Octo");
+    await renderInput("Reply to Moon poem");
+    const input = container.querySelector('[data-testid="chat-input"]');
+    expect(input?.getAttribute("aria-label")).toBe("Reply to Moon poem");
+    expect(input?.textContent).toBe("aurora");
+    await renderInput();
+    expect(input?.getAttribute("aria-label")).toBe("Ask Octo");
+    expect(input?.textContent).toBe("aurora");
+  });
+
   it("clears visible editor text when the controlled draft resets", async () => {
     const onChange = vi.fn();
     const onKeyDown = vi.fn();

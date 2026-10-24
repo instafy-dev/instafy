@@ -114,6 +114,80 @@ behavior. Studio distinguishes queued, working, waiting for approval, and cancel
 terminal rows reload from persisted runs, with a bounded group-status lookup for older cards.
 Historical cards with no recoverable group identity cannot use that fallback.
 
+### Worker questions and human replies
+
+Tracked worker assignments can return a structured `request_user_input` action with 1–3
+questions and a bounded `continuationNote`. This ends the current turn and releases its
+execution slot while keeping its assignment unfinished. The controller persists a question
+message in the owning conversation, bound to the exact job, plan group and original human
+requester. The original requester can select Reply on that message and answer through the
+usual composer, whose recipient indicator makes the routing explicit. Multiple questions
+are answered one at a time in that composer; the complete set is submitted together.
+Replies accept text; attachments remain in the composer until removed or sent as an ordinary
+chat message. Replies are task information, never tool approvals or credential entry. Use
+the existing credential flow for secrets.
+Workstream chips show the plan's task label, retaining the agent handle as identity and as
+the fallback for older plans without labels.
+
+An ordinary single-recipient chat turn can also answer pending worker questions naturally.
+The controller supplies the existing routing preflight with a bounded set of questions owned
+by that human in the same chat. The collaboration skill decides whether the message answers
+them, needs clarification, or is unrelated. Explicit recipient/reply selections, control
+commands, browser requests, delegated turns, and fanout to multiple top-level chat agents
+retain their existing routes. Worker count is separate from this top-level recipient limit.
+
+Natural answers identify request and question IDs and quote exact text from a controller-bound
+human message. One message can answer several workers. The controller validates all selected
+requests before saving any answer, reuses the original human message, and continues each
+existing assignment with its original scope and connection. It rejects stale targets,
+unrelated sources and conflicting replays. A request containing several questions requires
+the complete answer set; missing answers prompt clarification rather than partial writes.
+
+Ambiguous answers produce a normal chat question before any worker resumes. The next eligible
+reply can clarify the target while retaining the earlier answer: after “concise” and “Which
+task?”, “Meeting note” selects the task without becoming its answer. Unrelated messages leave
+worker questions pending. Routing diagnostics and provider usage remain part of the ordinary
+job accounting; natural reply matching is a model decision, not a domain-specific keyword rule.
+The explicit Reply option remains available to choose a question directly.
+
+Planning and lead checkpoints load the same User-facing results section from the workspace's
+collaboration skill. That skill owns presentation guidance; runtime/controller contracts retain
+output schemas, permissions and evidence requirements. Plans leave `expectedReportFormat`
+absent or null unless the user requested a particular format. Explicit formats in existing
+plans remain supported. Handoffs carry deliverables, completion checks and unresolved work
+rather than another copy of presentation policy.
+
+Prompt diagnostics identify the skill source and content hash, allowing runs to verify which
+version each stage used. The workspace remains authoritative: later checkpoints use the current
+skill if it changes, without persisting a second copy in plan state. Material failures and
+incomplete work remain in checkpoint evidence and must still be explained.
+
+The controller saves the answer before scheduling a continuation of the same assignment,
+with its existing write scope, agent and connection. It restores provider history only from
+that source job; absent history falls back to the saved assignment, note and answer. Duplicate
+answers and restart recovery reuse the same continuation. Temporary dispatch failures use
+bounded delayed recovery; repeated failure expires visibly. An answer received before job
+completion waits for that completion. Studio distinguishes waiting for input, answer saved,
+and worker queued. Other workers can continue during the wait.
+
+This is a durable new worker turn, not resumption of an in-memory native tool call. Native
+child helpers still negotiate upward, and parent–worker discussion uses linked agent chats;
+only an explicit decision for the human creates a human question message. This does not enable
+unrestricted nested worker plans. The parent's final checkpoint waits for unresolved questions.
+
+Stopping the group or chat, invalidating the source lease, or deleting the space expires its
+pending questions. Existing team deadlines and automatic continuation limits still apply;
+human wait does not silently extend the team's time budget. A question whose budget or
+original connection is no longer usable expires visibly and needs a fresh user request.
+Apply the complete ordered worker-input migration set, from
+`20261024120000_agent_user_input_requests.sql` through
+`20261024120022_validate_agent_user_input_requests_answer_message_id_fkey.sql`, before deploying
+this controller/runtime and frontend combination. The intermediate migrations add and validate
+the conversation, run, prompt, runtime and message references separately to bound live-table
+locks; do not roll out after only the table-creation step. The five constraint-addition steps
+use the reviewed, content-hash-bound lock exceptions described in `supabase/MIGRATIONS.md` and
+require reviewer approval. Older runtimes do not emit these actions.
+
 The controller settles a planning job when it dispatches or refuses its plan. The originating
 runtime may subsequently submit its fenced, one-time usage and artifact receipt without
 changing that terminal result, posting another answer, or scheduling another continuation.

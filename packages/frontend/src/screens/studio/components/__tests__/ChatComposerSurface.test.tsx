@@ -2048,6 +2048,18 @@ describe("ChatComposerSurface", () => {
     expect(onSendButtonPress).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps a worker reply in the usual composer and distinguishes Next from sending", async () => {
+    await act(async () => renderLayout({
+      replyContext: <div>Replying to Garden poem</div>, sendActionLabel: "Next question",
+      showVoicePrimaryAction: false,
+    }));
+    expect(container.querySelector('[data-testid="chat-composer-overlay"]')?.textContent).toContain("Replying to Garden poem");
+    expect(container.querySelector('[data-testid="chat-send-button"]')?.getAttribute("aria-label")).toBe("Next question");
+    expect(container.querySelector('[data-testid="chat-primary-action-status"]')?.textContent).toBe("Enter: Next question.");
+    await act(async () => renderLayout({ sendActionLabel: "Send answer", showVoicePrimaryAction: false }));
+    expect(container.querySelector('[data-testid="chat-send-button"]')?.getAttribute("aria-label")).toBe("Send answer");
+  });
+
   it("makes active Steer mode visible and announces the Enter behavior", async () => {
     const renderSurface = (primaryActionMode: "send" | "steer") =>
       root.render(

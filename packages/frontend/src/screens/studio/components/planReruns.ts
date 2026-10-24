@@ -1,5 +1,5 @@
 // A plan agent the controller started again in its group (a turn that ran out
-// of time, or a run stopped by a short provider rate limit) is one lane, not a
+// of time, a short provider rate limit, or a worker awaiting a human answer) is one lane, not a
 // failure and a second lane: the new job's result stands for the old one's.
 // The new job names the job it reruns in `metadata.multiAgentPlan.<reason>.of`;
 // the controller's group status names it the other way, as `retriedAs`.
@@ -7,7 +7,7 @@
 export type PlanRerun = {
   /** The job that ran the agent again. */
   jobId: string;
-  /** Why: "turn_continuation", "rate_limit", or any other reason the controller names. */
+  /** Why: "turn_continuation", "rate_limit", "user_input", or another controller reason. */
   reason: string;
 };
 
@@ -25,6 +25,7 @@ function stringField(value: unknown): string {
 const RERUN_KEYS: ReadonlyArray<readonly [string, string]> = [
   ["rateLimitRetry", "rate_limit"],
   ["continuation", "turn_continuation"],
+  ["userInputContinuation", "user_input"],
 ];
 
 /** The job a plan job ran again, and why, from its `multiAgentPlan` metadata. */
@@ -108,6 +109,8 @@ export function describePlanRerun(reason: string): string {
       return "ran out of turn time and continued in a new turn";
     case "rate_limit":
       return "stopped on a short rate limit and ran again";
+    case "user_input":
+      return "continued after an answer";
     default:
       return "continued in a new run";
   }

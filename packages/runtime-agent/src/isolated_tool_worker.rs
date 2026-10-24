@@ -713,10 +713,12 @@ pub async fn run_cli(request: IsolatedToolWorkerRequest) -> Result<()> {
                 usage_observer: Some(usage.call(UsagePhase::Main)),
                 project_id: Some(request.project_id),
                 job_id: Some(request.job_id),
-                disable_final_output_json_schema: true,
-                allow_plain_text_final_fallback: true,
-                plain_text_write_mode: true,
-                require_first_tool_call: true,
+                // Final actions can defer a human decision. Evidence gates in the
+                // parent still require real commands/edits for ordinary results.
+                disable_final_output_json_schema: false,
+                allow_plain_text_final_fallback: false,
+                plain_text_write_mode: false,
+                require_first_tool_call: false,
                 reasoning_effort: request.reasoning_effort.clone(),
                 cancel_signal: Some(cancel.clone()),
                 ..Default::default()

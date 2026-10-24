@@ -28907,6 +28907,93 @@ async fn load_conversation_history_for_agent_drops_dispatch_alerts_and_labels_fa
 }
 
 #[tokio::test]
+async fn answered_worker_history_uses_exact_source_even_when_same_agent_has_newer_work(
+) -> anyhow::Result<()> {
+    let (mut client, connection_handle) = connect_test_db().await?.ok_or_else(|| {
+        anyhow::anyhow!("TEST_DATABASE_URL required for worker continuation regression")
+    })?;
+    create_provider_state_test_tables(&client).await?;
+    let project = Uuid::new_v4();
+    let conversation = Uuid::new_v4();
+    let credential = Uuid::new_v4();
+    let agent = Uuid::new_v4();
+    let (_, source, expected) = insert_provider_state_fixture(
+        &client,
+        &project,
+        &conversation,
+        Some(&credential),
+        json!({"id":agent,"handle":"octo"}),
+        "question-source",
+    )
+    .await?;
+    let (_, _, newer) = insert_provider_state_fixture(
+        &client,
+        &project,
+        &conversation,
+        Some(&credential),
+        json!({"id":agent,"handle":"octo"}),
+        "unrelated-newer-assignment",
+    )
+    .await?;
+    let tx = client.transaction().await?;
+    let ordinary = crate::dispatch::load_previous_provider_conversation_state(
+        &tx,
+        &project,
+        &conversation,
+        Some(&credential),
+        Some(&agent),
+        Some("octo"),
+    )
+    .await
+    .expect("ordinary history");
+    assert_eq!(ordinary, Some(newer));
+    let exact = crate::dispatch::load_provider_conversation_state_for_job(
+        &tx,
+        &project,
+        &conversation,
+        Some(&credential),
+        Some(&agent),
+        Some("octo"),
+        Some(&source),
+    )
+    .await
+    .expect("exact source history");
+    assert_eq!(exact, Some(expected));
+    tx.execute(
+        "update agent_jobs set proxy_metadata='{}' where id=$1",
+        &[&source],
+    )
+    .await?;
+    assert!(crate::dispatch::load_provider_conversation_state_for_job(
+        &tx,
+        &project,
+        &conversation,
+        Some(&credential),
+        Some(&agent),
+        Some("octo"),
+        Some(&source)
+    )
+    .await
+    .expect("missing source state")
+    .is_none());
+    assert!(crate::dispatch::load_provider_conversation_state_for_job(
+        &tx,
+        &project,
+        &Uuid::new_v4(),
+        Some(&credential),
+        Some(&agent),
+        Some("octo"),
+        Some(&source)
+    )
+    .await
+    .expect("wrong chat")
+    .is_none());
+    tx.rollback().await?;
+    connection_handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn load_previous_provider_conversation_state_stays_within_agent_scope() -> anyhow::Result<()>
 {
     let Some((mut client, connection_handle)) = connect_test_db().await? else {

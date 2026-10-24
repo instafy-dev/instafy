@@ -985,6 +985,7 @@ pub(crate) async fn process_dispatch_prompt_timed(
 ) -> Result<DispatchPromptResponse, (StatusCode, Json<ApiError>)> {
     let started = Instant::now();
     crate::task_usage::strip_authoring_claims(&mut request.metadata);
+    crate::user_input_requests::routing::strip_claims(&mut request.metadata);
     // "Via a site" is the controller's to say: a client's claim is checked
     // against the previews this sender can see below, and refused otherwise.
     let site_intent_claim = crate::site_intent::take_site_intent_claim(&mut request.metadata);
@@ -1673,6 +1674,32 @@ pub(crate) async fn process_dispatch_prompt_timed(
         )
     };
 
+    // A natural reply can resolve pending worker questions only for one ordinary
+    // human turn. Never race several independently routed agents or reinterpret
+    // an explicitly addressed, browser, automation or controller-owned turn.
+    if should_route_worker_input(
+        &request,
+        context,
+        conversation.thread_kind.as_deref(),
+        agent_runs.len(),
+        strict_browser_runtime_id.is_some(),
+    ) {
+        if let Some(message) = user_message.as_ref() {
+            if let Some(snapshot) = crate::user_input_requests::routing::snapshot(
+                &transaction,
+                context,
+                project.id,
+                conversation.id,
+                message.id,
+            )
+            .await?
+            {
+                ensure_object(&mut request.metadata)
+                    .insert("workerInputRouting".to_string(), snapshot);
+            }
+        }
+    }
+
     let mut runtime_metadata_map = JsonMap::new();
     runtime_metadata_map.insert(
         "source".to_string(),
@@ -2256,15 +2283,28 @@ pub(crate) async fn process_dispatch_prompt_timed(
                 );
             }
         }
+        let input_source_job =
+            crate::multi_agent_plan::user_input::continuation_source_for_dispatch(
+                &transaction,
+                context,
+                project.id,
+                request.conversation_id,
+                &agent_request.metadata,
+                target.agent_id,
+                target.credential_id,
+                &target.handle,
+            )
+            .await?;
         let provider_conversation_state = if supports_provider_state {
             if let Some(conversation_id) = request.conversation_id {
-                load_previous_provider_conversation_state(
+                load_provider_conversation_state_for_job(
                     &transaction,
                     &project.id,
                     &conversation_id,
                     target.credential_id.as_ref(),
                     target.agent_id.as_ref(),
                     Some(target.handle.as_str()),
+                    input_source_job.as_ref(),
                 )
                 .await?
             } else {
@@ -3478,6 +3518,60 @@ fn prompt_contains_explicit_octo_mention(prompt: &str) -> bool {
         .filter(|(_, ch)| *ch == '@')
         .filter_map(|(index, _)| parse_agent_mention_at(prompt, index))
         .any(|(handle, _)| handle == "octo")
+}
+
+fn should_route_worker_input(
+    request: &DispatchPromptNormalized,
+    context: &RequestContext,
+    conversation_thread_kind: Option<&str>,
+    agent_count: usize,
+    strict_browser_target: bool,
+) -> bool {
+    let collaboration = request
+        .metadata
+        .get("agentCollaboration")
+        .or_else(|| request.metadata.get("agent_collaboration"));
+    let decided_team_route = collaboration.is_some_and(|value| {
+        let requested = value
+            .get("requested")
+            .or_else(|| value.get("multiAgent"))
+            .or_else(|| value.get("multi_agent"))
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(false);
+        let mode = value
+            .get("mode")
+            .or_else(|| value.get("kind"))
+            .and_then(JsonValue::as_str)
+            .map(|value| value.trim().to_ascii_lowercase().replace('-', "_"));
+        requested
+            || matches!(
+                mode.as_deref(),
+                Some("thread" | "team_plan" | "multi_agent")
+            )
+    });
+    agent_count == 1
+        && context.user_id.is_some()
+        && !context.is_service_role
+        && context.scoped_claims.is_none()
+        && request.intent == DEFAULT_PROMPT_INTENT
+        && request.execution_mode == EXECUTION_MODE_APPLY
+        && request.thread_kind.is_none()
+        && conversation_thread_kind.is_none()
+        && request.plan_seed.is_none()
+        && request.tool_limits.is_none()
+        && request.repo.is_none()
+        && request.requested_preview != Some(true)
+        && !strict_browser_target
+        && !request.prompt_text.trim_start().starts_with('/')
+        && !request
+            .prompt_text
+            .split_whitespace()
+            .any(|word| word.starts_with('@'))
+        && !has_explicit_agent_mentions(&request.metadata)
+        && !metadata_marks_special_dispatch(&request.metadata)
+        && request.metadata.get("agentRoutingPreflight").is_none()
+        && !decided_team_route
+        && crate::group_participation::extract_target_message_id(Some(&request.metadata)).is_none()
 }
 
 fn metadata_marks_special_dispatch(metadata: &JsonValue) -> bool {
@@ -5084,6 +5178,30 @@ pub(crate) async fn load_previous_provider_conversation_state(
     agent_id: Option<&Uuid>,
     agent_handle: Option<&str>,
 ) -> Result<Option<JsonValue>, (StatusCode, Json<ApiError>)> {
+    load_provider_conversation_state_for_job(
+        transaction,
+        project_id,
+        conversation_id,
+        credential_id,
+        agent_id,
+        agent_handle,
+        None,
+    )
+    .await
+}
+
+/// A human-answer continuation binds history to its exact source job. If that
+/// job has no saved provider state, use its explicit continuation note; never
+/// adopt a newer, unrelated assignment using the same agent profile.
+pub(crate) async fn load_provider_conversation_state_for_job(
+    transaction: &Transaction<'_>,
+    project_id: &Uuid,
+    conversation_id: &Uuid,
+    credential_id: Option<&Uuid>,
+    agent_id: Option<&Uuid>,
+    agent_handle: Option<&str>,
+    source_job_id: Option<&Uuid>,
+) -> Result<Option<JsonValue>, (StatusCode, Json<ApiError>)> {
     let normalized_handle = agent_handle
         .map(|value| value.trim().trim_start_matches('@').to_ascii_lowercase())
         .filter(|value| !value.is_empty());
@@ -5099,6 +5217,7 @@ pub(crate) async fn load_previous_provider_conversation_state(
                and j.project_id = r.project_id
                and j.conversation_id = r.conversation_id
              where r.project_id = $1 and r.conversation_id = $2
+               and ($6::uuid is null or j.id=$6)
                and j.proxy_metadata->'conversation' is not null
                and j.proxy_metadata->'conversation' <> 'null'::jsonb
                and (r.metadata->>'jobId' is null
@@ -5126,6 +5245,7 @@ pub(crate) async fn load_previous_provider_conversation_state(
                 &credential_id,
                 &agent_id,
                 &normalized_handle,
+                &source_job_id,
             ],
         )
         .await
@@ -5446,6 +5566,85 @@ mod security_tests;
 mod tests {
     use super::*;
     use serde_json::{json, Value as JsonValue};
+
+    #[test]
+    fn natural_worker_replies_only_attach_to_one_ordinary_human_turn() {
+        let context = RequestContext {
+            user_id: Some(Uuid::new_v4()),
+            is_service_role: false,
+            scoped_claims: None,
+        };
+        let make = |text: &str, metadata: JsonValue| {
+            normalize_dispatch_request(
+                serde_json::from_value(
+                    json!({"projectId":Uuid::new_v4(),"promptText":text,"metadata":metadata}),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        let ordinary = make(
+            "Use the same tone for both",
+            json!({"agentSelection":{"active":["octo"],"mentions":[]}}),
+        );
+        assert!(should_route_worker_input(
+            &ordinary, &context, None, 1, false
+        ));
+        assert!(!should_route_worker_input(
+            &ordinary, &context, None, 2, false
+        ));
+        assert!(!should_route_worker_input(
+            &ordinary, &context, None, 1, true
+        ));
+        assert!(!should_route_worker_input(
+            &ordinary,
+            &context,
+            Some("automation"),
+            1,
+            false
+        ));
+        for metadata in [
+            json!({"agentSelection":{"mentions":["reviewer"]}}),
+            json!({"replyTo":{"messageId":Uuid::new_v4()}}),
+            json!({"multiAgentPlan":{"role":"worker"}}),
+            json!({"multiAgentPlan":{"role":"lead_continuation"}}),
+            json!({"agentRoutingPreflight":{"route":"direct"}}),
+            json!({"agentCollaboration":{"mode":"thread"}}),
+            json!({"agentCollaboration":{"mode":"team_plan"}}),
+            json!({"agent_collaboration":{"kind":"multi-agent"}}),
+            json!({"agentCollaboration":{"requested":true}}),
+            json!({"automation":{}}),
+            json!({"command":{}}),
+        ] {
+            assert!(
+                !should_route_worker_input(
+                    &make("Phone", metadata.clone()),
+                    &context,
+                    None,
+                    1,
+                    false
+                ),
+                "{metadata}"
+            );
+        }
+        for text in ["@reviewer Phone", "/stop"] {
+            assert!(!should_route_worker_input(
+                &make(text, json!({})),
+                &context,
+                None,
+                1,
+                false
+            ));
+        }
+        let service = RequestContext {
+            user_id: context.user_id,
+            is_service_role: true,
+            scoped_claims: None,
+        };
+        assert!(!should_route_worker_input(
+            &ordinary, &service, None, 1, false
+        ));
+    }
 
     #[test]
     fn server_timing_lists_only_the_phases_that_ran() {

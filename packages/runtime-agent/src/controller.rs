@@ -16,6 +16,7 @@ use origin_http_server::config::{
 
 use crate::agent_tokens::AgentTokenVerifier;
 use crate::config::Config;
+use crate::jobs::user_input_request::WorkerInputRequest;
 use crate::resources::ResourceSampler;
 use runtime_contracts::ProxyEnvelopePayload;
 
@@ -126,6 +127,13 @@ pub struct Registration {
     pub agent_token_issued_at: Option<String>,
     pub agent_token_expires_at: Option<String>,
     pub agent_token_ttl: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RegisteredWorkerInputRequest {
+    pub request_id: Uuid,
+    pub status: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -823,6 +831,114 @@ impl ControllerClient {
         serde_json::from_str::<AgentJobInputPollResponse>(&text)
             .map(|response| response.commands)
             .with_context(|| format!("failed to parse active-turn input poll response: {text}"))
+    }
+
+    pub(crate) async fn register_worker_input_request(
+        &self,
+        registration: &Registration,
+        job_id: Uuid,
+        request: &WorkerInputRequest,
+    ) -> Result<RegisteredWorkerInputRequest> {
+        let url = self
+            .base_url
+            .join(&format!("/agent/jobs/{job_id}/user-input-requests"))?;
+        // No automatic retry: an uncertain result must not create a second question.
+        // The controller owns registration idempotency and card publication.
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(self.bearer_for_agent(registration))
+            .json(&json!({
+                "runtimeId": registration.runtime_id,
+                "questions": request.questions,
+                "continuationNote": request.continuation_note,
+            }))
+            .send()
+            .await
+            .context("worker user-input registration failed")?;
+        let status = response.status();
+        anyhow::ensure!(
+            status.is_success(),
+            "worker user-input registration rejected: status={status}"
+        );
+        let registered = response
+            .json::<RegisteredWorkerInputRequest>()
+            .await
+            .context("invalid worker user-input registration response")?;
+        anyhow::ensure!(
+            matches!(registered.status.as_str(), "pending" | "answered"),
+            "worker user-input registration returned a non-active request"
+        );
+        Ok(registered)
+    }
+
+    pub(crate) async fn submit_worker_input_reply(
+        &self,
+        registration: &Registration,
+        job_id: Uuid,
+        reply: &crate::jobs::worker_input_routing::Reply,
+    ) -> Result<serde_json::Value> {
+        let url = self
+            .base_url
+            .join(&format!("/agent/jobs/{job_id}/user-input-replies"))?;
+        let mut body = serde_json::to_value(reply)?;
+        body["runtimeId"] = json!(registration.runtime_id);
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(self.bearer_for_agent(registration))
+            .json(&body)
+            .send()
+            .await
+            .context("worker answer routing failed")?;
+        let status = response.status();
+        if !status.is_success() {
+            let reason = response
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|body| {
+                    body.get("message")
+                        .and_then(serde_json::Value::as_str)
+                        .map(|value| truncate_agent_payload_text(value, 500))
+                })
+                .unwrap_or_else(|| "controller rejected the worker reply".to_string());
+            return Err(anyhow!(
+                "worker answer routing rejected: status={status}: {reason}"
+            ));
+        }
+        let receipt: serde_json::Value = response
+            .json()
+            .await
+            .context("invalid worker reply receipt")?;
+        anyhow::ensure!(
+            receipt.get("ok").and_then(serde_json::Value::as_bool) == Some(true)
+                && receipt.get("disposition") == body.get("disposition"),
+            "worker reply was not accepted"
+        );
+        if reply.disposition == crate::jobs::worker_input_routing::Disposition::Answer {
+            let accepted: Vec<Uuid> = serde_json::from_value(
+                receipt
+                    .get("requestIds")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            )
+            .context("worker reply receipt has no request IDs")?;
+            let expected = reply
+                .answers
+                .iter()
+                .map(|answer| answer.request_id)
+                .collect::<std::collections::HashSet<_>>();
+            anyhow::ensure!(
+                accepted.len() == expected.len()
+                    && accepted
+                        .into_iter()
+                        .collect::<std::collections::HashSet<_>>()
+                        == expected,
+                "worker reply receipt did not accept every requested answer"
+            );
+        }
+        Ok(receipt)
     }
 
     pub async fn clear_job_input_readiness(

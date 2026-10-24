@@ -480,7 +480,7 @@ mod tests {
         let lead = super::super::SkillMultiAgentLead {
             lead_handle: "octo".into(),
             continuation_prompt: "Report.".into(),
-            expected_report_format: "text".into(),
+            expected_report_format: Some("text".into()),
         };
         let final_prompt = super::super::build_lead_continuation_prompt("g", &workers, &lead, &[]);
         assert_eq!(final_prompt.matches(&note).count(), 1, "{final_prompt}");

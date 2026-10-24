@@ -230,6 +230,7 @@ pub(crate) async fn sweep_idle_activity(state: &AppState) -> AnyResult<()> {
     auto_stop_idle_hosted_runtimes(state, &mut tick).await?;
     expire_stale_requeued_jobs(state, &mut tick).await?;
     settle_plan_agents_out_of_team_time(state, &mut tick).await?;
+    recover_worker_input_requests(state, &mut tick).await?;
     auto_recover_stuck_queued_runtimes(state, &mut tick).await?;
     cleanup_terminal_runtime_records(state, &mut tick).await?;
     fail_platform_jobs_stranded_on_private_runtimes(state, &mut tick).await?;
@@ -240,6 +241,32 @@ pub(crate) async fn sweep_idle_activity(state: &AppState) -> AnyResult<()> {
     tick.release();
     super::gone_space_runtimes::maybe_release_runtimes_of_gone_spaces(state).await;
 
+    Ok(())
+}
+
+/// Recover saved answers after a restart, and expire unanswered requests when
+/// their existing team deadline passes. Idle ticks share their usual connection.
+async fn recover_worker_input_requests(
+    state: &AppState,
+    tick: &mut TickConnection<'_>,
+) -> AnyResult<()> {
+    let rows=tick.client("worker input recovery connection").await?.query(
+        "select q.job_id from agent_user_input_requests q join agent_jobs j on j.id=q.job_id
+         where j.status='completed' and ((q.status='answered' and (q.resume_after is null or q.resume_after<=now())) or
+           (q.status in ('pending','answered') and jsonb_typeof(j.payload #> '{metadata,multiAgentPlan,teamClock,deadlineEpoch}')='number'
+             and (j.payload #>> '{metadata,multiAgentPlan,teamClock,deadlineEpoch}')::numeric
+                 < extract(epoch from now())+180))
+         order by q.updated_at limit 32", &[]).await.context("load recoverable worker questions")?;
+    if !rows.is_empty() {
+        let ids = rows
+            .iter()
+            .map(|r| r.get("job_id"))
+            .collect::<Vec<uuid::Uuid>>();
+        tick.release();
+        crate::multi_agent_plan::checkpoint_plan_groups_for_jobs(state, &ids)
+            .await
+            .map_err(|(_, Json(e))| anyhow::anyhow!("worker input recovery: {}", e.message))?;
+    }
     Ok(())
 }
 

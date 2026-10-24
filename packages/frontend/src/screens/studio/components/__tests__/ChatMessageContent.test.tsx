@@ -2207,7 +2207,7 @@ describe("ChatMessageContent", () => {
     expect(container.textContent).toContain("I'm splitting this into workstreams.");
     expect(statusStrip?.getAttribute("aria-label")).toBe("Lead ready · 1/2 lanes");
     expect(container.textContent).not.toContain("Explicit team workflow");
-    expect(container.textContent).toContain("@front");
+    expect(container.textContent).toContain("Frontend review");
     expect(container.textContent).not.toContain("Auth/session UI");
     expect(container.textContent).toContain("@octo");
     expect(container.textContent).not.toContain("Lead: @octo");
@@ -2224,7 +2224,7 @@ describe("ChatMessageContent", () => {
       '[data-testid="multi-agent-evidence-row"][data-agent-handle="@front"]',
     ) as HTMLButtonElement | null;
     expect(frontRow).not.toBeNull();
-    expect(frontRow?.getAttribute("aria-label")).toBe("Show details for @front; status done");
+    expect(frontRow?.getAttribute("aria-label")).toBe("Show details for Frontend review (@front); status done");
     expect(frontRow?.textContent).not.toContain("done");
     expect(frontRow?.textContent).not.toContain("read-only");
     expect(frontRow?.textContent).not.toContain("read only");
