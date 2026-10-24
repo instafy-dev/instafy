@@ -223,6 +223,35 @@ impl BrokerConfig {
         format!("{}.{}", tunnel_id.simple(), self.tunnel_domain)
     }
 
+    /// Whether a stored tunnel hostname is still one this broker would serve: exactly one DNS
+    /// label under the current `TUNNEL_DOMAIN`, the shape [`Self::hostname_for`] mints, and not
+    /// a `p-` label reserved for capability hosts when `PREVIEW_DOMAIN` is the same domain. A
+    /// hostname minted under a domain the operator has since changed fails this check.
+    pub fn hostname_in_tunnel_domain(&self, hostname: &str) -> bool {
+        let domain = normalize_domain(&self.tunnel_domain);
+        let host = normalize_domain(hostname);
+        let Some(label) = host
+            .strip_suffix(domain.as_str())
+            .and_then(|rest| rest.strip_suffix('.'))
+        else {
+            return false;
+        };
+        let valid_label = !domain.is_empty()
+            && !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+        let capability_label = label.starts_with("p-")
+            && self
+                .preview
+                .as_ref()
+                .is_some_and(|preview| preview.domain == domain);
+        valid_label && !capability_label
+    }
+
     pub fn ingress_url(&self) -> String {
         format!("{}:{}", self.ingress_host, self.ingress_port)
     }
@@ -431,6 +460,54 @@ mod tests {
             assert!(!cfg.private_previews_enabled(), "{token:?}");
             assert!(cfg.ready_preview_auth_hook().is_none());
         }
+    }
+
+    #[test]
+    fn minted_hostnames_belong_to_the_current_tunnel_domain() {
+        let mut cfg = test_broker_config();
+        let id = Uuid::new_v4();
+        let minted = cfg.hostname_for(&id);
+        assert!(cfg.hostname_in_tunnel_domain(&minted));
+        // Hostnames are case-insensitive and may carry the root dot.
+        assert!(cfg.hostname_in_tunnel_domain(&format!("{}.", minted.to_ascii_uppercase())));
+        cfg.tunnel_domain = " RT.test. ".into();
+        assert!(cfg.hostname_in_tunnel_domain(&minted));
+
+        cfg.tunnel_domain = "usercontent.test".into();
+        assert!(!cfg.hostname_in_tunnel_domain(&minted), "old domain");
+        assert!(cfg.hostname_in_tunnel_domain(&cfg.hostname_for(&id)));
+        for not_one_label in [
+            "usercontent.test".to_string(),
+            ".usercontent.test".to_string(),
+            format!("a.{}.usercontent.test", id.simple()),
+            format!("{}.xusercontent.test", id.simple()),
+            format!("{}usercontent.test", id.simple()),
+            format!("-{}.usercontent.test", id.simple()),
+            format!("{}_x.usercontent.test", id.simple()),
+            format!("{}.usercontent.test", "a".repeat(64)),
+        ] {
+            assert!(
+                !cfg.hostname_in_tunnel_domain(&not_one_label),
+                "{not_one_label}"
+            );
+        }
+    }
+
+    #[test]
+    fn capability_labels_are_not_tunnel_hostnames_on_a_shared_domain() {
+        let mut cfg = test_broker_config();
+        cfg.tunnel_domain = "usercontent.test".into();
+        let squatter = "p-ok.usercontent.test";
+        assert!(
+            cfg.hostname_in_tunnel_domain(squatter),
+            "separate preview domain"
+        );
+        cfg.preview.as_mut().unwrap().domain = "usercontent.test".into();
+        assert!(
+            !cfg.hostname_in_tunnel_domain(squatter),
+            "shared preview domain"
+        );
+        assert!(cfg.hostname_in_tunnel_domain(&cfg.hostname_for(&Uuid::new_v4())));
     }
 
     #[test]

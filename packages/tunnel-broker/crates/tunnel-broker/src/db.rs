@@ -552,10 +552,100 @@ pub async fn create_tunnel(
     pool: &DbPool,
     cfg: &BrokerConfig,
     ingress: &IngressRecord,
-    mut new: TunnelInsert,
+    new: TunnelInsert,
 ) -> Result<TunnelRecord> {
     let mut tx = pool.begin().await?;
-    let domain_id = ensure_pdns_domain_row(&mut tx, &cfg.tunnel_domain).await?;
+    let record = insert_tunnel(&mut tx, cfg, ingress, new).await?;
+    tx.commit().await?;
+    Ok(record)
+}
+
+/// Retires `stale` and creates `new` under the same idempotency key, in one transaction.
+///
+/// The stale row is revoked, its credential scrubbed, its address records removed from
+/// whichever zone holds them, and its idempotency key released, so it can never be reused or
+/// refreshed again; `new` then takes the key through the ordinary insert. The retirement only
+/// applies while `stale` still holds the key: a concurrent replacement that already moved it
+/// leaves nothing to retire, and the insert then resolves to the row that replacement created.
+/// Returns the resolved row and the retired one, if this call retired it.
+pub async fn replace_tunnel(
+    pool: &DbPool,
+    cfg: &BrokerConfig,
+    ingress: &IngressRecord,
+    stale: &TunnelRecord,
+    new: TunnelInsert,
+) -> Result<(TunnelRecord, Option<TunnelRecord>)> {
+    let key = stale
+        .idempotency_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("only an idempotent tunnel can be replaced"))?;
+    let mut tx = pool.begin().await?;
+    // Take the locks a create or refresh takes, in their order (zone row, the ingress
+    // allocation lock, then the expired rows its sweep revokes), before touching the stale
+    // row, so a replacement never waits on them while holding a tunnel row one of those
+    // writers wants. The sweep also locks expired rows in the order the ingress sidecar's
+    // sweep does, so an expired stale row is taken there rather than ahead of the rest. The
+    // insert re-takes all of them freely.
+    ensure_pdns_domain_row(&mut tx, &cfg.tunnel_domain).await?;
+    lock_ingress_allocations(&mut tx, ingress.id).await?;
+    revoke_expired_on_ingress(&mut tx, ingress.id).await?;
+    let retired = sqlx::query_as::<_, TunnelRecord>(
+        r#"
+        UPDATE tunnels
+        SET status = 'revoked',
+            token = '',
+            token_expires_at = NULL,
+            idempotency_key = NULL,
+            updated_at = NOW()
+        WHERE id = $1
+          AND project_id = $2
+          AND idempotency_key = $3
+        RETURNING *
+        "#,
+    )
+    .bind(stale.id)
+    .bind(stale.project_id)
+    .bind(key)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    if let Some(retired) = &retired {
+        delete_address_records(&mut tx, std::slice::from_ref(&retired.hostname)).await?;
+        if retired.ingress_id != ingress.id {
+            notify_ingress_refresh(&mut tx, cfg, retired.ingress_id).await?;
+        }
+    }
+
+    let record = insert_tunnel(&mut tx, cfg, ingress, new).await?;
+    tx.commit().await?;
+    Ok((record, retired))
+}
+
+/// Drops a tunnel's `A`/`AAAA` records by name, whatever zone they were written under, so
+/// retiring a tunnel minted before a `TUNNEL_DOMAIN` change still clears its old records.
+async fn delete_address_records(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    hostnames: &[String],
+) -> Result<()> {
+    if hostnames.is_empty() {
+        return Ok(());
+    }
+    sqlx::query("DELETE FROM records WHERE name = ANY($1) AND type IN ('A','AAAA')")
+        .bind(hostnames)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+async fn insert_tunnel(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    cfg: &BrokerConfig,
+    ingress: &IngressRecord,
+    mut new: TunnelInsert,
+) -> Result<TunnelRecord> {
+    let domain_id = ensure_pdns_domain_row(tx, &cfg.tunnel_domain).await?;
 
     let idempotency_key = new
         .idempotency_key
@@ -564,8 +654,7 @@ pub async fn create_tunnel(
         .filter(|value| !value.is_empty());
 
     if new.rathole_service.is_none() || new.rathole_port.is_none() {
-        let (service, port) =
-            allocate_rathole_binding(&mut tx, cfg, new.ingress_id, new.id).await?;
+        let (service, port) = allocate_rathole_binding(tx, cfg, new.ingress_id, new.id).await?;
         new.rathole_service = Some(service);
         new.rathole_port = Some(port);
     }
@@ -598,7 +687,7 @@ pub async fn create_tunnel(
         .bind(&new.url)
         .bind(new.expires_at)
         .bind(new.metadata)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?;
 
         match inserted {
@@ -609,7 +698,7 @@ pub async fn create_tunnel(
                 )
                 .bind(new.project_id)
                 .bind(key)
-                .fetch_optional(&mut *tx)
+                .fetch_optional(&mut **tx)
                 .await?;
                 existing
             }
@@ -641,7 +730,7 @@ pub async fn create_tunnel(
             .bind(&new.url)
             .bind(new.expires_at)
             .bind(new.metadata)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut **tx)
             .await?,
         )
     };
@@ -652,20 +741,12 @@ pub async fn create_tunnel(
     // If the broker returns an existing tunnel on idempotency-key reuse, this
     // self-heals missing DNS records instead of returning a stale hostname.
     if let Some(ipv4) = &ingress.ipv4 {
-        replace_record(
-            &mut tx,
-            domain_id,
-            &record.hostname,
-            "A",
-            ipv4,
-            new.ttl_seconds,
-        )
-        .await?;
+        replace_record(tx, domain_id, &record.hostname, "A", ipv4, new.ttl_seconds).await?;
     }
 
     if let Some(ipv6) = &ingress.ipv6 {
         replace_record(
-            &mut tx,
+            tx,
             domain_id,
             &record.hostname,
             "AAAA",
@@ -675,8 +756,7 @@ pub async fn create_tunnel(
         .await?;
     }
 
-    notify_ingress_refresh(&mut tx, cfg, ingress.id).await?;
-    tx.commit().await?;
+    notify_ingress_refresh(tx, cfg, ingress.id).await?;
     Ok(record)
 }
 
@@ -813,32 +893,8 @@ async fn allocate_rathole_binding(
     ingress_id: Uuid,
     tunnel_id: Uuid,
 ) -> Result<(String, i32)> {
-    let bytes = ingress_id.as_bytes();
-    let lock_key_1 = i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-    let lock_key_2 = i32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
-    sqlx::query("select pg_advisory_xact_lock($1, $2)")
-        .bind(lock_key_1)
-        .bind(lock_key_2)
-        .execute(&mut **tx)
-        .await?;
-
-    // Revoke any expired tunnels so their ports can be reused.
-    sqlx::query(
-        r#"
-        update tunnels
-        set status = 'revoked',
-            token = '',
-            token_expires_at = null,
-            updated_at = now()
-        where ingress_id = $1
-          and status != 'revoked'
-          and expires_at is not null
-          and expires_at <= now()
-        "#,
-    )
-    .bind(ingress_id)
-    .execute(&mut **tx)
-    .await?;
+    lock_ingress_allocations(tx, ingress_id).await?;
+    revoke_expired_on_ingress(tx, ingress_id).await?;
 
     let start = cfg.rathole_port_range_start.max(1024);
     let end = cfg.rathole_port_range_end.max(start);
@@ -864,6 +920,48 @@ async fn allocate_rathole_binding(
 
     let service = format!("tunnel_{}", tunnel_id.simple());
     Ok((service, port))
+}
+
+/// Revokes the ingress's expired tunnels so their ports can be reused. Callers hold the
+/// allocation lock.
+async fn revoke_expired_on_ingress(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ingress_id: Uuid,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        update tunnels
+        set status = 'revoked',
+            token = '',
+            token_expires_at = null,
+            updated_at = now()
+        where ingress_id = $1
+          and status != 'revoked'
+          and expires_at is not null
+          and expires_at <= now()
+        "#,
+    )
+    .bind(ingress_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Serializes port allocation on one ingress for the rest of the transaction. A transaction
+/// that already holds it takes it again without waiting, so callers may take it early.
+async fn lock_ingress_allocations(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ingress_id: Uuid,
+) -> Result<()> {
+    let bytes = ingress_id.as_bytes();
+    let lock_key_1 = i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let lock_key_2 = i32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+    sqlx::query("select pg_advisory_xact_lock($1, $2)")
+        .bind(lock_key_1)
+        .bind(lock_key_2)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 
 /// The lowest port in `start..=end` that `used` (sorted ascending) does not
@@ -914,14 +1012,7 @@ pub async fn revoke_tunnel(
     .await?;
 
     if let Some(tunnel) = &record {
-        let domain_id = ensure_pdns_domain_row(&mut tx, &cfg.tunnel_domain).await?;
-        sqlx::query(
-            "DELETE FROM records WHERE domain_id = $1 AND name = $2 AND type IN ('A','AAAA')",
-        )
-        .bind(domain_id)
-        .bind(&tunnel.hostname)
-        .execute(&mut *tx)
-        .await?;
+        delete_address_records(&mut tx, std::slice::from_ref(&tunnel.hostname)).await?;
         notify_ingress_refresh(&mut tx, cfg, tunnel.ingress_id).await?;
     }
 
@@ -932,7 +1023,7 @@ pub async fn revoke_tunnel(
 /// Marks expired tunnels as revoked and expires their DNS records.
 /// Returns the number of tunnels revoked.
 #[allow(dead_code)]
-pub async fn revoke_expired_tunnels(pool: &DbPool, cfg: &BrokerConfig) -> Result<u64> {
+pub async fn revoke_expired_tunnels(pool: &DbPool, _cfg: &BrokerConfig) -> Result<u64> {
     let mut tx = pool.begin().await?;
 
     #[derive(Debug, FromRow)]
@@ -957,17 +1048,8 @@ pub async fn revoke_expired_tunnels(pool: &DbPool, cfg: &BrokerConfig) -> Result
     .await?;
 
     let revoked_count = revoked.len() as u64;
-    if !revoked.is_empty() {
-        let domain_id = ensure_pdns_domain_row(&mut tx, &cfg.tunnel_domain).await?;
-        let hostnames: Vec<String> = revoked.into_iter().map(|row| row.hostname).collect();
-        sqlx::query(
-            "DELETE FROM records WHERE domain_id = $1 AND name = ANY($2) AND type IN ('A','AAAA')",
-        )
-        .bind(domain_id)
-        .bind(&hostnames)
-        .execute(&mut *tx)
-        .await?;
-    }
+    let hostnames: Vec<String> = revoked.into_iter().map(|row| row.hostname).collect();
+    delete_address_records(&mut tx, &hostnames).await?;
 
     tx.commit().await?;
     Ok(revoked_count)
@@ -976,7 +1058,7 @@ pub async fn revoke_expired_tunnels(pool: &DbPool, cfg: &BrokerConfig) -> Result
 #[allow(dead_code)]
 pub async fn revoke_expired_tunnels_for_ingress(
     pool: &DbPool,
-    cfg: &BrokerConfig,
+    _cfg: &BrokerConfig,
     ingress_id: Uuid,
 ) -> Result<Vec<TunnelRecord>> {
     let mut tx = pool.begin().await?;
@@ -999,20 +1081,11 @@ pub async fn revoke_expired_tunnels_for_ingress(
     .fetch_all(&mut *tx)
     .await?;
 
-    if !revoked.is_empty() {
-        let domain_id = ensure_pdns_domain_row(&mut tx, &cfg.tunnel_domain).await?;
-        let hostnames: Vec<String> = revoked
-            .iter()
-            .map(|record| record.hostname.clone())
-            .collect();
-        sqlx::query(
-            "DELETE FROM records WHERE domain_id = $1 AND name = ANY($2) AND type IN ('A','AAAA')",
-        )
-        .bind(domain_id)
-        .bind(&hostnames)
-        .execute(&mut *tx)
-        .await?;
-    }
+    let hostnames: Vec<String> = revoked
+        .iter()
+        .map(|record| record.hostname.clone())
+        .collect();
+    delete_address_records(&mut tx, &hostnames).await?;
 
     tx.commit().await?;
     Ok(revoked)
