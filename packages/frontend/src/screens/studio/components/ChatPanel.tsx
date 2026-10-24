@@ -414,7 +414,8 @@ import {
   type SharedBrowserPresence,
 } from "./browserAutoStart";
 import { useSharedBrowserHostSnapshot } from "./useSharedBrowserHostSnapshot";
-import { hostedBrowserStartedByOther, type HostedBrowserViewKind } from "./hostedBrowserViewState";
+import { useSharedBrowserAutoAttach } from "./useSharedBrowserAutoAttach";
+import { hostedBrowserPagesActive, type HostedBrowserViewKind } from "./hostedBrowserViewState";
 import { isSkillSetupConversation } from "./skillSetupConversation";
 import { sharedBrowserConversationRunIds } from "./browserHandoffRouting";
 
@@ -1795,8 +1796,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   // or null while it is closed. Its pages are read only while it is opening
   // or live; a closed (hidden) one keeps its own rules.
   const [sharedBrowserViewKind, setSharedBrowserViewKind] = useState<HostedBrowserViewKind | null>(null);
-  const sharedBrowserPagesActive =
-    sharedBrowserViewKind === null || sharedBrowserViewKind === "opening" || sharedBrowserViewKind === "live";
+  const sharedBrowserPagesActive = hostedBrowserPagesActive(sharedBrowserViewKind);
   const {
     browserSessionPages,
     clearPendingBrowserLaunchMode,
@@ -4603,8 +4603,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     if (!browserSessionOpen) setBrowserAttachOnly(false);
   }, [browserSessionOpen]);
   // Instafy's browser on the conversation's machine is open here but off:
-  // the same ten-second reading notices an agent or another viewer starting
-  // it, and the view attaches without a press (hands-free).
+  // a reading taken once it went off, and then the same ten-second reading,
+  // notices an agent or another viewer starting it, and the view attaches
+  // without a press (hands-free).
   const sharedBrowserViewOff =
     browserSessionOpen &&
     browserTransport === "shared" &&
@@ -4619,23 +4620,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     poll: browserAutoWaiting || sharedBrowserViewOff,
   });
   // Studio asks the view to attach again by itself (see autoAttachToken).
-  const [sharedBrowserAutoAttachToken, setSharedBrowserAutoAttachToken] = useState(0);
-  const requestSharedBrowserAutoAttach = useCallback(() => {
-    setSharedBrowserAutoAttachToken((current) => current + 1);
-  }, []);
-  // The run of the browser (its generation) the view last attached to by
-  // itself, so a view that goes off again does not keep trying it.
-  const sharedBrowserAutoAttachedGenerationRef = useRef<string | null | undefined>(undefined);
-  useEffect(() => {
-    if (!browserSessionOpen) sharedBrowserAutoAttachedGenerationRef.current = undefined;
-  }, [browserSessionOpen]);
-  const sharedBrowserHostSnapshot = sharedBrowserHost.snapshot;
-  useEffect(() => {
-    if (!sharedBrowserViewOff) return;
-    if (!hostedBrowserStartedByOther(sharedBrowserHostSnapshot, sharedBrowserAutoAttachedGenerationRef.current)) return;
-    sharedBrowserAutoAttachedGenerationRef.current = sharedBrowserHostSnapshot?.generation ?? null;
-    requestSharedBrowserAutoAttach();
-  }, [requestSharedBrowserAutoAttach, sharedBrowserHostSnapshot, sharedBrowserViewOff]);
+  const {
+    autoAttachToken: sharedBrowserAutoAttachToken,
+    requestAutoAttach: requestSharedBrowserAutoAttach,
+  } = useSharedBrowserAutoAttach({
+    open: browserSessionOpen,
+    off: sharedBrowserViewOff,
+    host: sharedBrowserHost,
+  });
   const sharedBrowserHostKey = sharedBrowserHost.snapshot
     ? [
       sharedBrowserHost.snapshot.state,

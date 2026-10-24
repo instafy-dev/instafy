@@ -92,8 +92,8 @@ export function useBrowserSessionPages(params: {
    * Whether the pages are read every 2.5 s. False while the browser view is
    * off, did not open or cannot open: nothing reads the pages of a browser
    * that is not running, and the pages are empty. Capabilities stay as they
-   * are (a capability read still retries), so the attach can go on once the
-   * view opens again.
+   * are, so the attach can go on once the view opens again; a capability read
+   * that failed is asked again only then.
    */
   pollPages?: boolean;
 }) {
@@ -596,15 +596,29 @@ export function useBrowserSessionPages(params: {
     return () => window.clearTimeout(timer);
   }, [notReady]);
 
+  // A capability read that may succeed later is asked again every 2.5 s,
+  // but not while the pages are not read (the view is off, did not open or
+  // cannot open): nothing waits on them then. Once the view opens again it
+  // asks at once, so its attach does not wait for the next tick.
+  const capabilitiesRetryPausedRef = useRef(false);
   useEffect(() => {
     if (!enabled || !projectId || !capabilitiesRetryable) {
+      capabilitiesRetryPausedRef.current = false;
       return;
+    }
+    if (!pollPages) {
+      capabilitiesRetryPausedRef.current = true;
+      return;
+    }
+    if (capabilitiesRetryPausedRef.current) {
+      capabilitiesRetryPausedRef.current = false;
+      void refreshCapabilities();
     }
     const intervalId = window.setInterval(() => {
       void refreshCapabilities();
     }, BROWSER_SESSION_POLL_INTERVAL_MS);
     return () => window.clearInterval(intervalId);
-  }, [capabilitiesRetryable, enabled, projectId, refreshCapabilities]);
+  }, [capabilitiesRetryable, enabled, pollPages, projectId, refreshCapabilities]);
 
   useEffect(() => {
     if (!enabled || !projectId || !pollPages) {

@@ -529,6 +529,39 @@ describe("useBrowserSessionPages", () => {
     }
   });
 
+  it("asks a failed capability read again only while the browser view is opening or live", async () => {
+    // A restored open on a stopped machine: every grant fails, so the read
+    // stays retryable. While the view is off it asked every 2.5 s, 1440 times
+    // an hour.
+    vi.useFakeTimers();
+    try {
+      fetchCapabilitiesMock.mockReset().mockResolvedValue(null);
+      await renderHook();
+      expect(fetchCapabilitiesMock).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_500);
+      });
+      expect(fetchCapabilitiesMock).toHaveBeenCalledTimes(2);
+      hookPollPages = false;
+      await renderHook();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60 * 60_000);
+      });
+      expect(fetchCapabilitiesMock).toHaveBeenCalledTimes(2);
+      expect(latestResult?.capabilitiesResolved).toBe(true);
+      // The view opens again: it asks at once, then every 2.5 s.
+      hookPollPages = true;
+      await renderHook();
+      expect(fetchCapabilitiesMock).toHaveBeenCalledTimes(3);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_500);
+      });
+      expect(fetchCapabilitiesMock).toHaveBeenCalledTimes(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("resumes polling when a hidden unavailable session is reopened", async () => {
     hookSuspendOnUnavailable = true;
     fetchPagesMock.mockRejectedValueOnce(

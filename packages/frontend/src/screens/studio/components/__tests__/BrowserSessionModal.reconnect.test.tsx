@@ -674,6 +674,29 @@ describe("Shared modal after the space's machine restarts", () => {
     expect(text()).toContain(SHARED_BROWSER_HOST_COPY.off);
   });
 
+  it("uses a press once: Refresh sessions after a grant 404 turned the view off does not start the machine again", async () => {
+    mocks.fetchStatus.mockResolvedValue(covered(stoppedEntry()));
+    await render({ attachOnly: true, resumeRuntimeId: hostId });
+    // The person's press starts the machine and opens its browser.
+    mocks.fetchStatus.mockReset().mockResolvedValueOnce(covered(stoppedEntry())).mockResolvedValue(covered(hostEntry("origin-old")));
+    await render({ attachOnly: true, resumeRuntimeId: hostId, attachRequestToken: 1 });
+    await advance(1_000);
+    expect(ensureSpaceMachine).toHaveBeenCalledTimes(1);
+    await act(async () => { latest().onConnected(); });
+    // The machine stops; the next grant refresh answers 404, and the view is
+    // off without an automatic reconnect.
+    mocks.fetchStatus.mockResolvedValue(covered(stoppedEntry()));
+    oldOriginStatus = 404;
+    await advance(272_000);
+    expect(text()).toContain(SHARED_BROWSER_HOST_COPY.off);
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="shared-browser-sessions-toggle"]')!.click());
+    await act(async () => Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => button.getAttribute("aria-label") === "Refresh sessions")!.click());
+    await advance(5_000);
+    expect(ensureSpaceMachine).toHaveBeenCalledTimes(1);
+    expect(text()).toContain(SHARED_BROWSER_HOST_COPY.off);
+  });
+
   it("shows one sentence, a neutral Off, an empty address and no control state when the browser is off (R4)", async () => {
     await connect();
     mocks.fetchStatus.mockResolvedValue(covered(hostEntry("origin-new")));
@@ -741,5 +764,44 @@ describe("Shared modal after the space's machine restarts", () => {
     await advance(5_000);
     expect(ensureSpaceMachine).not.toHaveBeenCalled();
     expect(text()).toContain(SHARED_BROWSER_HOST_COPY.off);
+  });
+
+  /** The view reconnects by itself, its status read taking 3 s. */
+  async function reconnectSlowly() {
+    mocks.fetchStatus.mockImplementation(() =>
+      new Promise((resolve) => setTimeout(() => resolve(covered(hostEntry("origin-old"))), 3_000)));
+    await act(async () => { latest().onDisconnected({ connected: true, reason: "WebSocket closed (1006)" }); });
+    await advance(2_000);
+    expect(document.querySelector('[data-testid="browser-session-reconnecting"]')).not.toBeNull();
+  }
+
+  it("acts on Studio's request that comes while the view reconnects by itself, once that attempt ends off", async () => {
+    await connect();
+    // The browser went idle, so the automatic reconnect will end off.
+    mocks.fetchHost.mockResolvedValue(host("idle", null));
+    mocks.startHost.mockImplementation(async () => {
+      mocks.fetchHost.mockResolvedValue(host("ready", "generation-2"));
+      return host("starting", "generation-2");
+    });
+    await reconnectSlowly();
+    // Studio opens the browser for an agent's card meanwhile.
+    await render({ autoAttachToken: 1 });
+    await advance(10_000);
+    expect(mocks.startHost).toHaveBeenCalledTimes(1);
+    expect(ensureSpaceMachine).not.toHaveBeenCalled();
+    expect(text()).not.toContain(SHARED_BROWSER_HOST_COPY.off);
+  });
+
+  it("drops Studio's request that comes while the view reconnects by itself when that attempt connects", async () => {
+    await connect();
+    await reconnectSlowly();
+    await render({ autoAttachToken: 1 });
+    await advance(5_000);
+    await act(async () => { latest().onConnected(); });
+    expect(retryButton()).toBeNull();
+    const reads = mocks.fetchStatus.mock.calls.length;
+    await advance(10_000);
+    expect(mocks.fetchStatus.mock.calls.length).toBe(reads);
+    expect(mocks.startHost).not.toHaveBeenCalled();
   });
 });

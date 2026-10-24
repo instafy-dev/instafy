@@ -970,8 +970,10 @@ unless the policy is `"covered"`.
 - **Pages while it starts.** The origin answers 503 `browser_host_not_ready`
   until the browser runs. The composer reads the pages every 2.5 s only while
   the open browser view is opening or live; while it is off, did not open or
-  cannot open, nothing reads them (capabilities stay, so the attach can go on
-  once the view opens again). While it opens it polls quietly, for at most
+  cannot open, nothing reads them. Capabilities stay, so the attach can go on
+  once the view opens again; a capability read that failed is not asked again
+  while the view is off, and is asked at once when it opens. While it opens it
+  polls quietly, for at most
   120 s of unbroken `browser_host_not_ready` answers (token and gateway
   failures, as while the machine itself starts, are not counted). Each open
   counts its own run, so closing the browser and opening it again starts over.
@@ -1057,12 +1059,16 @@ unless the policy is `"covered"`.
   browser does. A press counts for its own attempt only, never for a later
   automatic reconnect or Refresh sessions.
 - **Hands-free while off.** While the open view is off on the conversation's
-  machine, Studio reads `GET browser/host` every ten seconds (the same
-  reading a waiting card uses) and, once an agent or another viewer has the
-  browser starting or ready, attaches again without a press. It attaches to
+  machine, Studio reads `GET browser/host` at once and then every ten seconds
+  (the same reading a waiting card uses) and, once an agent or another viewer
+  has the browser starting or ready, attaches again without a press. Only a
+  reading asked for after the view went off counts: an older one may show a
+  run that has ended, or one from before the machine restarted. It attaches to
   each run of the browser (`generation`) once, never starts the machine, and
   stops reading once the view is no longer off. Studio opening the browser for
-  a card attaches an open view that is off or did not open the same way.
+  a card attaches an open view that is off or did not open the same way; when
+  it asks while the view is still reconnecting by itself, the request waits
+  for that attempt and acts once it ends off or failed.
 - **Hands-free.** For Octo's `request_browser` card, Studio opens Instafy's
   browser by itself only on the conversation's own machine, when that machine
   is live, can take work, has an origin and reports `sharedBrowserHost`, and

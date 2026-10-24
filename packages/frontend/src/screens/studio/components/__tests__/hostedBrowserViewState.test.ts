@@ -4,6 +4,8 @@ import { BROWSER_CHROME_STATE_LABELS } from "../BrowserChromeShell";
 import {
   HOSTED_BROWSER_SETUP_COPY,
   HOSTED_BROWSER_VIEW_ACTION,
+  hostedBrowserAttachWhileOff,
+  hostedBrowserPagesActive,
   hostedBrowserStartedByOther,
   hostedBrowserViewState,
   type HostedBrowserFailure,
@@ -91,5 +93,45 @@ describe("hostedBrowserStartedByOther", () => {
   it("attaches to each run of the browser once", () => {
     expect(hostedBrowserStartedByOther(snapshot({ agentRunActive: true }), "gen-1")).toBe(false);
     expect(hostedBrowserStartedByOther(snapshot({ agentRunActive: true, generation: "gen-2" }), "gen-1")).toBe(true);
+  });
+});
+
+describe("hostedBrowserAttachWhileOff", () => {
+  const offAt = 1_000_000;
+  const input = (overrides: Partial<Parameters<typeof hostedBrowserAttachWhileOff>[0]> = {}) => ({
+    off: true, snapshot: snapshot({ agentRunActive: true }), fetchedAtMs: offAt, offSinceMs: offAt,
+    attachedGeneration: undefined, ...overrides,
+  });
+
+  it("attaches on a reading asked for since the view went off", () => {
+    expect(hostedBrowserAttachWhileOff(input())).toBe(true);
+    expect(hostedBrowserAttachWhileOff(input({ fetchedAtMs: offAt + 10_000 }))).toBe(true);
+  });
+
+  it("never attaches on a reading from before the view went off, or without one", () => {
+    // It may show a run that has ended, or one from before the machine restarted.
+    expect(hostedBrowserAttachWhileOff(input({ fetchedAtMs: offAt - 1 }))).toBe(false);
+    expect(hostedBrowserAttachWhileOff(input({ fetchedAtMs: null }))).toBe(false);
+    expect(hostedBrowserAttachWhileOff(input({ offSinceMs: null }))).toBe(false);
+  });
+
+  it("attaches only while off, to a browser someone else runs, once per run", () => {
+    expect(hostedBrowserAttachWhileOff(input({ off: false }))).toBe(false);
+    expect(hostedBrowserAttachWhileOff(input({ snapshot: snapshot() }))).toBe(false);
+    expect(hostedBrowserAttachWhileOff(input({ attachedGeneration: "gen-1" }))).toBe(false);
+    expect(hostedBrowserAttachWhileOff(input({ attachedGeneration: "gen-0" }))).toBe(true);
+  });
+});
+
+describe("hostedBrowserPagesActive", () => {
+  it.each([
+    [null, true],
+    ["opening", true],
+    ["live", true],
+    ["off", false],
+    ["failed", false],
+    ["blocked", false],
+  ] as const)("reads the pages for a view that is %s: %s", (kind, expected) => {
+    expect(hostedBrowserPagesActive(kind)).toBe(expected);
   });
 });

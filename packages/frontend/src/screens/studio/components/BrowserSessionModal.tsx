@@ -2327,10 +2327,16 @@ export function BrowserSessionModal({
   // Studio by itself, while this browser is off or did not open: an agent or
   // another viewer started Instafy's browser, or Studio opens it for a card.
   // It attaches again without a press (hands-free) and never starts the
-  // machine; it attaches to whichever run of the browser is there.
+  // machine; it attaches to whichever run of the browser is there. A request
+  // that comes while an attempt is on its way (an automatic reconnect, say)
+  // waits for it: it acts once that attempt ends off or failed, and is
+  // dropped if it connects.
   const handledAutoAttachRef = useRef(autoAttachToken);
   useEffect(() => {
     if (autoAttachToken === handledAutoAttachRef.current) {
+      return;
+    }
+    if (isOpen && status === "connecting") {
       return;
     }
     handledAutoAttachRef.current = autoAttachToken;
@@ -2352,7 +2358,7 @@ export function BrowserSessionModal({
     setFailure(null);
     startAttempt("studio");
     runtimeDebugLog("browser-session:auto-attach", { projectId, from: kind });
-  }, [autoAttachToken, isOpen, projectId, startAttempt]);
+  }, [autoAttachToken, isOpen, projectId, startAttempt, status]);
 
   // "Reconnecting…" shows no progress and no Retry, so a browser that had
   // connected waits for it by itself only so long.

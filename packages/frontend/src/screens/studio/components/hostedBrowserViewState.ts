@@ -103,3 +103,31 @@ export function hostedBrowserStartedByOther(
   if (!snapshot.agentRunActive && !snapshot.othersPresent && !snapshot.controlledByOther) return false;
   return attachedGeneration === undefined || snapshot.generation !== attachedGeneration;
 }
+
+/**
+ * Whether the view attaches without a press while it is off. Only a reading
+ * asked for since the view went off counts (`fetchedAtMs` at or after
+ * `offSinceMs`): an older one may show a run of the browser that has ended,
+ * or one from before the machine restarted, and attaching on it would start
+ * an idle browser nobody asked for.
+ */
+export function hostedBrowserAttachWhileOff(input: {
+  off: boolean;
+  snapshot: SharedBrowserHostSnapshot | null;
+  fetchedAtMs: number | null;
+  offSinceMs: number | null;
+  attachedGeneration: string | null | undefined;
+}): boolean {
+  const { off, snapshot, fetchedAtMs, offSinceMs, attachedGeneration } = input;
+  if (!off || offSinceMs === null || fetchedAtMs === null || fetchedAtMs < offSinceMs) return false;
+  return hostedBrowserStartedByOther(snapshot, attachedGeneration);
+}
+
+/**
+ * Whether the composer reads the browser's pages: while its view is closed
+ * (null, which keeps its own rules), opening or live. Nothing reads the pages
+ * of a browser that is off, did not open or cannot open.
+ */
+export function hostedBrowserPagesActive(kind: HostedBrowserViewKind | null): boolean {
+  return kind === null || kind === "opening" || kind === "live";
+}
