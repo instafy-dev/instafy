@@ -154,7 +154,9 @@ type Options = {
 export const BROWSER_REQUEST_HANDOFF_DEADLINE_MS = 120_000;
 /**
  * How long a press for Instafy's browser may take: it can also start the
- * space's machine first (up to three minutes) and then its browser.
+ * space's machine first and then its browser. The browser view waits longer
+ * for a slow machine (SPACE_MACHINE_COLD_START_TIMEOUT_MS); a card that gives
+ * up first offers its button again while the view keeps waiting.
  */
 export const BROWSER_REQUEST_PRESS_DEADLINE_MS = 240_000;
 /**

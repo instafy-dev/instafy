@@ -4619,7 +4619,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     enabled: (browserAutoStartAllowed || sharedBrowserViewOff) && conversationBrowserHostRuntimeId !== null,
     poll: browserAutoWaiting || sharedBrowserViewOff,
   });
-  // Studio asks the view to attach again by itself (see autoAttachToken).
+  // Studio asks the view to attach again by itself (see autoAttachToken),
+  // also once when the machine a press gave up on comes up a little later.
   const {
     autoAttachToken: sharedBrowserAutoAttachToken,
     requestAutoAttach: requestSharedBrowserAutoAttach,
@@ -4627,6 +4628,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     open: browserSessionOpen,
     off: sharedBrowserViewOff,
     host: sharedBrowserHost,
+    // Only while Instafy's browser is the one shown.
+    view: browserTransport === "shared" ? { kind: sharedBrowserViewKind, error: sharedBrowserViewError } : undefined,
+    hostRuntimeId: conversationBrowserHostRuntimeId,
   });
   const sharedBrowserHostKey = sharedBrowserHost.snapshot
     ? [

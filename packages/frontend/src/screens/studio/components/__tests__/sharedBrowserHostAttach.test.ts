@@ -1,11 +1,14 @@
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import type { ControllerRuntimeStatusEntry } from "../../../../services/runtimeController";
 import type { SharedBrowserHostSnapshot } from "../../../../services/runtimeController/browserSession";
+import { runtimeEntryIsBooting } from "../../../../runtime/utils/runtimeEntry";
 import { resolveBrowserRuntimeSelection } from "../browserSessionRuntimeEnsure";
 import {
   SHARED_BROWSER_HOST_COPY,
   SHARED_BROWSER_HOST_REQUEST_TIMEOUT_MS,
+  SPACE_MACHINE_COLD_START_TIMEOUT_MS,
   shouldStartSpaceMachineForBrowser,
+  spaceMachineLaunchOnItsWay,
   startSpaceMachineForBrowser,
   waitForSharedBrowserHostReady,
   type SharedBrowserHostClient,
@@ -30,7 +33,7 @@ class NotFound extends Error {
   constructor(readonly code: string | null) { super(`browser host not found (404)${code ? `: ${code}` : ""}`); this.name = "SharedBrowserHostNotFoundError"; }
 }
 
-/** A clock that only moves when the loop sleeps. */
+/** A clock that only moves when the loop sleeps, or when a test moves it (`advance`). */
 function fakeClock() {
   let nowMs = 0;
   const sleeps: number[] = [];
@@ -38,6 +41,16 @@ function fakeClock() {
     now: () => nowMs,
     sleep: vi.fn(async (ms: number) => { sleeps.push(ms); nowMs += ms; return true; }),
     sleeps,
+  };
+}
+function movableClock() {
+  const clock = fakeClock();
+  let movedMs = 0;
+  return {
+    now: () => clock.now() + movedMs,
+    sleep: clock.sleep,
+    sleeps: clock.sleeps,
+    advance: (ms: number) => { movedMs += ms; },
   };
 }
 
@@ -376,17 +389,133 @@ describe("startSpaceMachineForBrowser", () => {
     })).resolves.toMatchObject({ kind: "attach", candidate: { runtimeId: "space-machine" } });
   });
 
-  it("fails when the machine does not start or does not come up within three minutes", async () => {
-    await expect(startSpaceMachineForBrowser({
-      projectId: "project-1", pinnedRuntimeId: null, conversationRuntimeId: null,
-      ensureSpaceMachine: async () => false, fetchStatus: statusSequence([]), ...fakeClock(),
-    })).resolves.toMatchObject({ kind: "error", errorKind: "machine" });
+  /** The space's machine after a press, while its launch comes up: a reused row, never seen on this launch. */
+  const launching = (overrides: Partial<ControllerRuntimeStatusEntry> = {}) => entry({
+    status: "requested", health: "offline", origin: null, lastSeenAt: null,
+    createdAt: "2026-09-02T08:00:00.000Z", launchRequestedAt: "2026-10-24T17:48:31.000Z", ...overrides,
+  });
+  const stopped = () => entry({ status: "stopped", health: "offline", origin: null, lastSeenAt: null });
+  const coldStart = (overrides: Partial<Parameters<typeof startSpaceMachineForBrowser>[0]>) => startSpaceMachineForBrowser({
+    projectId: "project-1", pinnedRuntimeId: null, conversationRuntimeId: "space",
+    ensureSpaceMachine: async () => true, fetchStatus: statusSequence([]), ...overrides,
+  });
+
+  it("waits out a slow first launch on a new node and attaches when it comes up (dogfood, Oct 24)", async () => {
+    // The press at t=0: the ensure answered after 53 s, and the machine came
+    // up at 4 min 49 s. The wait used to give up at three minutes.
+    const clock = movableClock();
+    const fetchStatus = vi.fn(async () => ({
+      runtimes: [clock.now() >= 289_000 ? host() : launching()], preferredRuntimeId: null,
+    }));
+    const onSlow = vi.fn();
+    await expect(coldStart({
+      ensureSpaceMachine: async () => { clock.advance(53_000); return true; },
+      fetchStatus, onSlow, now: clock.now, sleep: clock.sleep,
+    })).resolves.toMatchObject({ kind: "attach", candidate: { runtimeId: "space", mode: "lazy" } });
+    expect(clock.now()).toBeGreaterThanOrEqual(289_000);
+    expect(clock.now()).toBeLessThan(300_000);
+    expect(onSlow).toHaveBeenCalledTimes(1);
+    // runtimeEntryIsBooting reads the reused row's old createdAt as a stale boot.
+    expect(runtimeEntryIsBooting(launching(), { nowMs: Date.parse("2026-10-24T17:49:20.000Z") })).toBe(false);
+    expect(spaceMachineLaunchOnItsWay(launching())).toBe(true);
+  });
+
+  it("reads every 2 s for the first minute after the press, then every 10 s, and says it is slow once", async () => {
     const clock = fakeClock();
-    await expect(startSpaceMachineForBrowser({
-      projectId: "project-1", pinnedRuntimeId: "space", conversationRuntimeId: null,
-      ensureSpaceMachine: async () => true, fetchStatus: statusSequence([entry({ status: "starting" })]), ...clock,
-    })).resolves.toMatchObject({ kind: "error", errorKind: "machine" });
-    expect(clock.now()).toBe(180_000);
+    const onSlow = vi.fn();
+    const slowAtMs: number[] = [];
+    onSlow.mockImplementation(() => { slowAtMs.push(clock.now()); });
+    const fetchStatus = vi.fn(async () => ({
+      runtimes: [clock.now() >= 100_000 ? host() : launching()], preferredRuntimeId: null,
+    }));
+    await expect(coldStart({ fetchStatus, onSlow, ...clock })).resolves.toMatchObject({ kind: "attach" });
+    expect(clock.sleeps).toEqual([...Array<number>(30).fill(2_000), ...Array<number>(4).fill(10_000)]);
+    expect(slowAtMs).toEqual([60_000]);
+    expect(fetchStatus).toHaveBeenCalledTimes(35);
+  });
+
+  it("keeps waiting when the ensure did not answer while the launch is on its way", async () => {
+    // Both 45 s attempts timed out behind the controller's launch lock.
+    const clock = movableClock();
+    const ensureSpaceMachine = vi.fn(async () => { clock.advance(90_000); return false; });
+    const fetchStatus = statusSequence([launching()], [launching()], [host()]);
+    await expect(coldStart({ ensureSpaceMachine, fetchStatus, now: clock.now, sleep: clock.sleep }))
+      .resolves.toMatchObject({ kind: "attach", candidate: { runtimeId: "space" } });
+    expect(ensureSpaceMachine).toHaveBeenCalledTimes(1);
+    expect(fetchStatus).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([
+    ["the machine is stopped", () => statusSequence([stopped()])],
+    ["no machine is listed", () => statusSequence([])],
+    ["the status read fails", () => vi.fn(async () => null)],
+  ])("fails at once when the ensure did not answer and %s", async (_name, makeStatus) => {
+    // A credits or capacity refusal leaves no launch.
+    const clock = fakeClock();
+    const fetchStatus = makeStatus();
+    await expect(coldStart({ ensureSpaceMachine: async () => false, fetchStatus, ...clock }))
+      .resolves.toEqual({ kind: "error", errorKind: "machine", reason: "space machine ensure failed" });
+    expect(fetchStatus).toHaveBeenCalledTimes(1);
+    expect(clock.sleeps).toEqual([]);
+  });
+
+  it.each([
+    ["stopped without a launch", stopped()],
+    ["stopped by a person", launching({ stopReason: "user_stop", stopRequestedAt: "2026-10-24T17:50:00.000Z" })],
+    ["gone", null],
+  ])("ends the wait on two reads in a row that show it %s", async (_name, ended) => {
+    const clock = fakeClock();
+    const endedRead = ended ? [ended] : [];
+    // One such read, as while the controller replaces a stalled launch, is ridden out.
+    const fetchStatus = statusSequence([launching()], endedRead, [launching({ launchRequestedAt: "2026-10-24T17:53:40.000Z" })], endedRead, endedRead, [host()]);
+    await expect(coldStart({ fetchStatus, ...clock }))
+      .resolves.toEqual({ kind: "error", errorKind: "machine", reason: "space machine start ended" });
+    expect(fetchStatus).toHaveBeenCalledTimes(5);
+    expect(clock.now()).toBe(8_000);
+  });
+
+  it("counts a status read that fails as neither on its way nor ended", async () => {
+    const clock = fakeClock();
+    const answers: Array<ControllerRuntimeStatusEntry[] | null> = [[launching()], [stopped()], null, null, [launching()], [host()]];
+    const fetchStatus = vi.fn(async () => {
+      const next = answers.shift()!;
+      return next ? { runtimes: next, preferredRuntimeId: null } : null;
+    });
+    await expect(coldStart({ fetchStatus, ...clock })).resolves.toMatchObject({ kind: "attach" });
+  });
+
+  it("gives up at ten minutes from the press on a launch that never comes up", async () => {
+    const clock = fakeClock();
+    const onSlow = vi.fn();
+    await expect(coldStart({ pinnedRuntimeId: "space", fetchStatus: statusSequence([launching()]), onSlow, ...clock }))
+      .resolves.toEqual({ kind: "error", errorKind: "machine", reason: "space machine did not come up in time" });
+    expect(clock.now()).toBe(SPACE_MACHINE_COLD_START_TIMEOUT_MS);
+    expect(SPACE_MACHINE_COLD_START_TIMEOUT_MS).toBe(10 * 60_000);
+    expect(onSlow).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("spaceMachineLaunchOnItsWay", () => {
+  const launch = (overrides: Partial<ControllerRuntimeStatusEntry> = {}) => entry({
+    status: "requested", health: "offline", origin: null, lastSeenAt: null,
+    createdAt: "2026-09-02T08:00:00.000Z", launchRequestedAt: "2026-10-24T17:48:31.000Z", ...overrides,
+  });
+
+  it("is a launch of the space's own machine that was asked for and not stopped since", () => {
+    expect(spaceMachineLaunchOnItsWay(launch())).toBe(true);
+    expect(spaceMachineLaunchOnItsWay(launch({ status: "launching" }))).toBe(true);
+    // A platform stop's mark on the lease is still a launch that stalled.
+    expect(spaceMachineLaunchOnItsWay(launch({ stopReason: "idle", stopRequestedAt: "2026-10-24T17:50:00.000Z" }))).toBe(true);
+  });
+
+  it("is not one without a requested launch, once seen, after a person's stop, or on another machine", () => {
+    expect(spaceMachineLaunchOnItsWay(launch({ launchRequestedAt: undefined }))).toBe(false);
+    expect(spaceMachineLaunchOnItsWay(launch({ status: "stopped" }))).toBe(false);
+    expect(spaceMachineLaunchOnItsWay(launch({ lastSeenAt: "2026-10-24T17:53:15.000Z" }))).toBe(false);
+    expect(spaceMachineLaunchOnItsWay(launch({ stopReason: "user_stop", stopRequestedAt: "2026-10-24T17:50:00.000Z" }))).toBe(false);
+    expect(spaceMachineLaunchOnItsWay(launch({ displayName: "Browser session" }))).toBe(false);
+    expect(spaceMachineLaunchOnItsWay(launch({ isPrivateSelfHosted: true }))).toBe(false);
+    expect(spaceMachineLaunchOnItsWay(null)).toBe(false);
   });
 });
 
