@@ -446,6 +446,11 @@ export function synthesizeAgentJobThreadMessages(
 
   const output: ChatMessage[] = [];
   const insertedThreads = new Set<string>();
+  // A run thread draws every action card of its job inline. A card that sits
+  // before the thread's first step (one posted while that step's command is
+  // still running) already has its own row in the transcript, so the thread
+  // leaves it out rather than drawing it a second time.
+  const cardsShownBeforeThread = new Set<string>();
 
   collapsedVisible.forEach((message) => {
     if (isWorkerInputQuestion(message)) {
@@ -472,6 +477,9 @@ export function synthesizeAgentJobThreadMessages(
       return;
     }
     if (message.id !== startMessageId && !insertedThreads.has(jobId)) {
+      if (THREAD_ACTION_CARD_TYPES.has((getMessageType(message) ?? "").trim().toLowerCase())) {
+        cardsShownBeforeThread.add(message.id);
+      }
       output.push(message);
       return;
     }
@@ -480,8 +488,9 @@ export function synthesizeAgentJobThreadMessages(
     }
 
     insertedThreads.add(jobId);
-    const threadMessages = threadMessagesByJobId.get(jobId) ?? [message];
-    const startedAt = threadMessages.reduce((minTimestamp, candidate) => {
+    const jobMessages = threadMessagesByJobId.get(jobId) ?? [message];
+    const threadMessages = jobMessages.filter((candidate) => !cardsShownBeforeThread.has(candidate.id));
+    const startedAt = jobMessages.reduce((minTimestamp, candidate) => {
       if (typeof candidate.timestamp !== "number") {
         return minTimestamp;
       }
