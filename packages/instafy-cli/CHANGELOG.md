@@ -1,5 +1,15 @@
 # @instafy/cli
 
+## 0.3.0
+
+### Minor Changes
+
+- f6bef26: `instafy preview open` gains `--start`. With `--serve-cmd "<command>"`, when nothing answers on the port it starts the site in the background, in its own session so it keeps running after the command (or Octo turn) that started it ends, without Instafy credentials in its environment (the same rule as `instafy bind serve --detach`), with its output appended to `.instafy/agent/logs/preview-<port>.log`, and waits up to 60 seconds for the port before it posts the card. When the port already answers, nothing is started. It exits 2 with the log's path when the command exits first or the port does not answer in time. `--json` adds `startedPid` (null when nothing was started) and `logFile`. The help and output now say that Open starts a restartable site again when the process that started it exits, or the space sleeps.
+
+### Patch Changes
+
+- b41b44e: `instafy preview list` now says what it shows: each row's status is the preview's (`preview active`), not whether the site answers, and rows carry `restartable` (also in `--json`) when the server sends it. The text output says that `instafy preview check` checks a site, and that a preview whose machine stopped or restarted is not listed: its card reads Stopped, and Open on a restartable card starts the site again. The bundled `instafy-frontend-previews` skill says the same, says that rerunning `instafy preview open` in a later turn posts that turn's card rather than refreshing an earlier one, and asks Octo to report what each command returned; an unedited earlier bundled copy is upgraded.
+
 ## 0.2.4
 
 ### Patch Changes
