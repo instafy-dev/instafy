@@ -46,7 +46,8 @@ pub(crate) const ACTIVE_JOB_TUNNEL_SOURCE: &str = "instafy-cli";
 pub(crate) const PREVIEW_TUNNEL_METADATA_KEY: &str = "_instafyPreview";
 /// Grant metadata keys only the controller writes. Clients and the broker
 /// can neither set nor drop them through the generic tunnel routes: the
-/// active job marker decides which job may manage a grant, and the preview
+/// active job marker records that an agent job made a grant and on which
+/// runtime generation, which decides whether agent jobs may stop it, and the preview
 /// object decides what a preview is, where its viewers land and which card a
 /// run gets. Every other metadata name stays free for clients.
 pub(crate) const CONTROLLER_OWNED_METADATA_KEYS: [&str; 2] =
@@ -2684,6 +2685,10 @@ fn ensure_active_job_requested_binding(
     Ok(())
 }
 
+/// Any live agent job may stop a tunnel that an agent job started on its own
+/// runtime generation, not only the job that started it: every turn is a new
+/// job, and preview close follows the same rule. A tunnel the runtime machine
+/// or a person started carries no marker and stays out of a job's reach.
 fn ensure_active_job_tunnel_ownership(
     metadata: Option<&JsonValue>,
     binding: &ActiveJobTunnelBinding,
@@ -2692,19 +2697,22 @@ fn ensure_active_job_tunnel_ownership(
         .and_then(JsonValue::as_object)
         .and_then(|metadata| metadata.get(ACTIVE_JOB_TUNNEL_METADATA_KEY))
         .and_then(JsonValue::as_object)
-        .ok_or_else(|| unauthorized("job token cannot revoke a tunnel it did not create"))?;
-    let marker_job_id = marker
-        .get("jobId")
-        .and_then(JsonValue::as_str)
-        .and_then(|value| Uuid::parse_str(value.trim()).ok());
-    let marker_run_id = marker
-        .get("runId")
-        .and_then(JsonValue::as_str)
-        .and_then(|value| Uuid::parse_str(value.trim()).ok());
-    if marker_job_id != Some(binding.job_id) || marker_run_id != Some(binding.run_id) {
-        return Err(unauthorized(
-            "job token cannot revoke a tunnel created by another job",
-        ));
+        .ok_or_else(|| forbidden("job token can only stop tunnels an agent job started"))?;
+    let marker_uuid = |key: &str| {
+        marker
+            .get(key)
+            .and_then(JsonValue::as_str)
+            .and_then(|value| Uuid::parse_str(value.trim()).ok())
+    };
+    if marker_uuid("runtimeId") != Some(binding.runtime_id) {
+        return Err(forbidden("tunnel belongs to another runtime"));
+    }
+    if let (Some(marker_lease_id), Some(binding_lease_id)) =
+        (marker_uuid("runtimeLeaseId"), binding.runtime_lease_id)
+    {
+        if marker_lease_id != binding_lease_id {
+            return Err(forbidden("tunnel belongs to another runtime generation"));
+        }
     }
     Ok(())
 }
@@ -3743,39 +3751,72 @@ mod tests {
     }
 
     #[test]
-    fn active_job_revoke_requires_the_exact_persisted_job_and_run() {
+    fn any_agent_job_on_the_runtime_generation_may_stop_an_agent_job_tunnel() {
         let binding = ActiveJobTunnelBinding {
             job_id: Uuid::new_v4(),
             run_id: Uuid::new_v4(),
             runtime_id: Uuid::new_v4(),
             runtime_lease_id: Some(Uuid::new_v4()),
         };
-        let metadata = json!({
-            (ACTIVE_JOB_TUNNEL_METADATA_KEY): {
-                "jobId": binding.job_id,
-                "runId": binding.run_id,
-                "runtimeId": binding.runtime_id,
-                "runtimeLeaseId": binding.runtime_lease_id,
-            }
-        });
-        assert!(ensure_active_job_tunnel_ownership(Some(&metadata), &binding).is_ok());
-        assert!(ensure_active_job_tunnel_ownership(None, &binding).is_err());
+        let marker = |job_id: Uuid, run_id: Uuid, runtime_id: Uuid, lease_id: Option<Uuid>| {
+            json!({
+                (ACTIVE_JOB_TUNNEL_METADATA_KEY): {
+                    "jobId": job_id,
+                    "runId": run_id,
+                    "runtimeId": runtime_id,
+                    "runtimeLeaseId": lease_id,
+                }
+            })
+        };
+        let refused = |metadata: Option<&JsonValue>| {
+            ensure_active_job_tunnel_ownership(metadata, &binding)
+                .expect_err("must be refused")
+                .0
+        };
 
-        let sibling_metadata = json!({
-            (ACTIVE_JOB_TUNNEL_METADATA_KEY): {
-                "jobId": Uuid::new_v4(),
-                "runId": binding.run_id,
-            }
-        });
-        assert!(ensure_active_job_tunnel_ownership(Some(&sibling_metadata), &binding).is_err());
+        let own = marker(
+            binding.job_id,
+            binding.run_id,
+            binding.runtime_id,
+            binding.runtime_lease_id,
+        );
+        assert!(ensure_active_job_tunnel_ownership(Some(&own), &binding).is_ok());
+        // A later turn is a new job and run on the same runtime generation.
+        let earlier_turn = marker(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            binding.runtime_id,
+            binding.runtime_lease_id,
+        );
+        assert!(ensure_active_job_tunnel_ownership(Some(&earlier_turn), &binding).is_ok());
+        // A job tunnel started before the lease was recorded.
+        let unleased = marker(Uuid::new_v4(), Uuid::new_v4(), binding.runtime_id, None);
+        assert!(ensure_active_job_tunnel_ownership(Some(&unleased), &binding).is_ok());
 
-        let other_run_metadata = json!({
-            (ACTIVE_JOB_TUNNEL_METADATA_KEY): {
-                "jobId": binding.job_id,
-                "runId": Uuid::new_v4(),
-            }
+        // No marker: the runtime machine or a person started it.
+        assert_eq!(refused(None), StatusCode::FORBIDDEN);
+        assert_eq!(
+            refused(Some(&json!({ "purpose": "web" }))),
+            StatusCode::FORBIDDEN
+        );
+        let other_runtime = marker(
+            binding.job_id,
+            binding.run_id,
+            Uuid::new_v4(),
+            binding.runtime_lease_id,
+        );
+        assert_eq!(refused(Some(&other_runtime)), StatusCode::FORBIDDEN);
+        let no_runtime = json!({
+            (ACTIVE_JOB_TUNNEL_METADATA_KEY): { "jobId": binding.job_id, "runId": binding.run_id }
         });
-        assert!(ensure_active_job_tunnel_ownership(Some(&other_run_metadata), &binding).is_err());
+        assert_eq!(refused(Some(&no_runtime)), StatusCode::FORBIDDEN);
+        let other_generation = marker(
+            binding.job_id,
+            binding.run_id,
+            binding.runtime_id,
+            Some(Uuid::new_v4()),
+        );
+        assert_eq!(refused(Some(&other_generation)), StatusCode::FORBIDDEN);
     }
 
     #[test]
