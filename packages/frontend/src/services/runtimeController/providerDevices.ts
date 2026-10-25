@@ -39,6 +39,11 @@ interface HeartbeatProviderDeviceParams {
   owned?: boolean | null;
   /** Publishes the device's tools, replacing its catalog. Absent: it stays as it is. */
   catalog?: ControllerProviderDeviceCatalog | null;
+  /**
+   * What the device says of its own state now, plain text of at most 1,200 characters, which
+   * its granted turns read as the device's words. Each heartbeat replaces it: absent clears it.
+   */
+  context?: string | null;
 }
 
 /** A device's tools as MCP `tools/list` returns them, with MCP `initialize` instructions. */
@@ -151,6 +156,7 @@ export async function heartbeatControllerProviderDevice(
       metadata: params.metadata ?? {},
       owned: params.owned ?? undefined,
       catalog: params.catalog ?? undefined,
+      context: params.context ?? undefined,
     },
     fallbackError: "Unable to heartbeat provider device",
   });

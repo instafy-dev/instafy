@@ -118,9 +118,10 @@ describe("providerDevices", () => {
     // Ownership and the catalog stay as they are unless the caller says.
     expect("owned" in body).toBe(false);
     expect("catalog" in body).toBe(false);
+    expect("context" in body).toBe(false);
   });
 
-  it("takes the device as the caller's own and publishes its catalog", async () => {
+  it("takes the device as the caller's own and publishes its catalog and state", async () => {
     const catalog = {
       instructions: "Ask before moving.",
       tools: [
@@ -131,6 +132,7 @@ describe("providerDevices", () => {
         },
       ],
     };
+    const context = "lid: closed\nbattery: 81 %";
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       text: vi.fn().mockResolvedValue("{}"),
@@ -145,9 +147,10 @@ describe("providerDevices", () => {
       deviceId: "kit-1",
       owned: true,
       catalog,
+      context,
     });
 
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(JSON.parse(String(init.body))).toMatchObject({ owned: true, catalog });
+    expect(JSON.parse(String(init.body))).toMatchObject({ owned: true, catalog, context });
   });
 });
