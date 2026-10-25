@@ -11,6 +11,7 @@ import {
 
 import { KNOSH_PROVIDER_FAMILY } from "../../provider/family.mjs";
 import { postProbe, type RobotBridgeEvent } from "../robot/bridgeClient";
+import { getKnoshRuntimeAdapter } from "../robot/knoshRuntimeAdapter";
 import { KNOSH_NATIVE_CAPABILITY_RUNTIME } from "../robot/nativeRobotRuntime";
 import {
   findContractSkill,
@@ -253,6 +254,12 @@ export function KnoshSkillRequestBridge() {
   useEffect(() => {
     const projectId = activeProjectId?.trim() ?? "";
     if (!projectId) {
+      return;
+    }
+    // Only a client with a Knosh runtime (the phone's BLE bridge or Desktop's)
+    // can run a claimed skill. Anywhere else resolveSelection answers null, so
+    // the loop could only read the space's integrations every 10 s forever.
+    if (!getKnoshRuntimeAdapter()) {
       return;
     }
 
