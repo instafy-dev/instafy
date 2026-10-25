@@ -28,6 +28,8 @@ const CONNECTION_TYPE_MAX_LEN: usize = 64;
 const DEVICE_PRESENCE_ONLINE_TTL_SECONDS: i64 = 30;
 pub(crate) const CATALOG_MAX_TOOLS: usize = 64;
 const CATALOG_MAX_BYTES: usize = 64 * 1024;
+/// The most characters a device's `context` may have.
+const CONTEXT_MAX_CHARS: usize = 1_200;
 pub(crate) const DEVICE_OWNED_BY_ANOTHER: &str = "This device belongs to another person.";
 
 /// The person a device row `d` answers to: its owner, while they may still
@@ -88,6 +90,12 @@ struct ProviderDeviceHeartbeatBody {
     /// Replaces the device's tool catalog ([`DeviceCatalog`]), where device
     /// grants are on for the caller. Absent: it stays as it is.
     catalog: Option<JsonValue>,
+    /// What the device says of its own state now, plain text of at most
+    /// 1,200 characters, where device grants are on for the caller: its
+    /// granted turns read it as the device's words (`device_grants.rs`). Like
+    /// the status, each heartbeat replaces it, so absent clears it. It is not
+    /// part of the catalog, so changing it changes no grant.
+    context: Option<String>,
 }
 
 /// A device's tools as MCP `tools/list` returns them, with the MCP
@@ -247,9 +255,10 @@ async fn record_provider_device_heartbeat(
     let status = normalize_device_status(body.status.as_deref());
     let connection_type = normalize_connection_type(body.connection_type.as_deref());
     let metadata = normalize_metadata(body.metadata);
-    // A device is taken, and its catalog published, only from the own session
-    // of a person device grants are on for. With DEVICE_GRANTS_ENABLED off
-    // both are ignored, and no device has an owner to answer to.
+    // A device is taken, and its catalog and context published, only from the
+    // own session of a person device grants are on for. With
+    // DEVICE_GRANTS_ENABLED off all three are ignored, and no device has an
+    // owner to answer to.
     let owners_enforced = state.config.device_grants_enabled;
     let caller = require_user_session(&context).ok();
     let grants_on = caller.is_some_and(|caller| state.config.device_grants_allow(caller));
@@ -257,6 +266,7 @@ async fn record_provider_device_heartbeat(
         Some(catalog) if grants_on => Some(normalize_catalog(catalog)?),
         _ => None,
     };
+    let device_context = normalize_context(body.context.filter(|_| grants_on))?;
     let owner_on_insert = caller.filter(|_| grants_on && body.owned == Some(true));
 
     let mut connection = state
@@ -290,10 +300,11 @@ async fn record_provider_device_heartbeat(
                 metadata,
                 owner_user_id,
                 catalog,
+                context,
                 created_at,
                 updated_at,
                 last_seen_at
-             ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11::jsonb,
+             ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11::jsonb, $14,
                        now(), now(), now())
              on conflict (project_id, provider_id, device_id)
              do update set
@@ -305,6 +316,7 @@ async fn record_provider_device_heartbeat(
                 metadata = excluded.metadata,
                 owner_user_id = coalesce(excluded.owner_user_id, d.owner_user_id),
                 catalog = coalesce(excluded.catalog, d.catalog),
+                context = excluded.context,
                 updated_at = now(),
                 last_seen_at = now()
               where not $13
@@ -331,6 +343,7 @@ async fn record_provider_device_heartbeat(
                 &catalog.as_ref().map(PgJson),
                 &caller,
                 &owners_enforced,
+                &device_context,
             ],
         )
         .await
@@ -543,6 +556,35 @@ fn normalize_catalog(value: JsonValue) -> Result<JsonValue, (StatusCode, Json<Ap
     Ok(value)
 }
 
+/// A device's `context` as it is stored: trimmed, `None` when empty, and
+/// refused unless it is plain text (no control character but a line break or
+/// a tab) of at most [`CONTEXT_MAX_CHARS`] characters.
+fn normalize_context(
+    value: Option<String>,
+) -> Result<Option<String>, (StatusCode, Json<ApiError>)> {
+    let Some(text) = value
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    else {
+        return Ok(None);
+    };
+    if text.chars().count() > CONTEXT_MAX_CHARS {
+        return Err(bad_request(format!(
+            "context must be at most {CONTEXT_MAX_CHARS} characters"
+        )));
+    }
+    if text
+        .chars()
+        .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\t'))
+    {
+        return Err(bad_request(
+            "context must be plain text: no control characters but line breaks and tabs",
+        ));
+    }
+    Ok(Some(text.to_string()))
+}
+
 fn normalize_metadata(value: Option<JsonValue>) -> JsonValue {
     value
         .filter(|entry| entry.is_object())
@@ -666,6 +708,30 @@ mod tests {
         ] {
             let error = normalize_catalog(bad.clone()).expect_err("refused");
             assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[test]
+    fn a_context_is_plain_text_of_at_most_its_cap() {
+        assert_eq!(normalize_context(None).unwrap(), None);
+        assert_eq!(normalize_context(Some(" \n\t ".to_string())).unwrap(), None);
+        assert_eq!(
+            normalize_context(Some("  status: idle\n\tpart_deg 0..20  ".to_string())).unwrap(),
+            Some("status: idle\n\tpart_deg 0..20".to_string())
+        );
+        let at_cap = "é".repeat(CONTEXT_MAX_CHARS);
+        assert_eq!(
+            normalize_context(Some(at_cap.clone())).unwrap(),
+            Some(at_cap)
+        );
+        for refused in [
+            "x".repeat(CONTEXT_MAX_CHARS + 1),
+            "status: idle\r\n".repeat(2),
+            "bell \u{7}".to_string(),
+            "escape \u{1b}[31m".to_string(),
+        ] {
+            let (status, _) = normalize_context(Some(refused.clone())).unwrap_err();
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{refused:?}");
         }
     }
 
