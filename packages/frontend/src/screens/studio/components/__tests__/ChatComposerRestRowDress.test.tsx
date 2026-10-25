@@ -49,6 +49,7 @@ function affordancesFor(inputValue: string) {
     runtimeControllerEnabled: false,
     queueStatusLabel: null,
     sendingAttachment: false,
+    sharedBrowserSendBlocked: false,
     submissionPending: false,
     totalQueuedCount: 0,
     voiceHoldActive: false,

@@ -1,5 +1,5 @@
 import type { SharedBrowserHostSnapshot } from "../../../services/runtimeController/browserSession";
-import { SHARED_BROWSER_HOST_COPY } from "./sharedBrowserHostAttach";
+import { SHARED_BROWSER_HOST_COPY, SPACE_MACHINE_LATE_READY_WINDOW_MS } from "./sharedBrowserHostAttach";
 
 /**
  * Why the browser view stopped, stored with each error it shows:
@@ -51,6 +51,7 @@ const PROVIDER_NOT_CONFIGURED = /provider\s+['"][^'"]+['"]\s+is not configured/i
  * |----------------------------------|----------|----------------------------------|--------------|
  * | connected, with a connection     | live     | none                             | none         |
  * | idle, selecting, connecting      | opening  | "Opening Instafy's browser…"     | none         |
+ * | the same, machine start slow     | opening  | "Still starting this space's…"   | none         |
  * | error `off`                      | off      | "Instafy's browser is off."      | Open browser |
  * | error `failed`                   | failed   | "... did not open. Try again."   | Try again    |
  * | error `machine`                  | failed   | "This space's machine did not…"  | Try again    |
@@ -61,6 +62,8 @@ export function hostedBrowserViewState(input: {
   status: "idle" | "selecting" | "connecting" | "connected" | "error";
   failure: HostedBrowserFailure | null;
   hasConnection: boolean;
+  /** A press's start of the space's machine has taken over a minute so far. */
+  machineStartSlow?: boolean;
 }): HostedBrowserViewState {
   const { failure } = input;
   if (input.status === "error" || failure) {
@@ -86,7 +89,11 @@ export function hostedBrowserViewState(input: {
   if (input.status === "connected" && input.hasConnection) {
     return { kind: "live", sentence: null, action: null };
   }
-  return { kind: "opening", sentence: SHARED_BROWSER_HOST_COPY.opening, action: null };
+  return {
+    kind: "opening",
+    sentence: input.machineStartSlow ? SHARED_BROWSER_HOST_COPY.stillStartingMachine : SHARED_BROWSER_HOST_COPY.opening,
+    action: null,
+  };
 }
 
 /**
@@ -121,6 +128,29 @@ export function hostedBrowserAttachWhileOff(input: {
   const { off, snapshot, fetchedAtMs, offSinceMs, attachedGeneration } = input;
   if (!off || offSinceMs === null || fetchedAtMs === null || fetchedAtMs < offSinceMs) return false;
   return hostedBrowserStartedByOther(snapshot, attachedGeneration);
+}
+
+/**
+ * After a press gave up on the space's machine (the view failed with "This
+ * space's machine did not start. Try again."): whether Studio attaches by
+ * itself now that the conversation's machine is a live host
+ * (`hostRuntimeId`, from conversationBrowserHostId). It does so once per
+ * failure (`attachedForAtMs` is the failure it last attached for), and only
+ * within SPACE_MACHINE_LATE_READY_WINDOW_MS of it. That attach is Studio's
+ * own, so it may start the browser but never a machine, and it never ends
+ * with this sentence again: this cannot loop.
+ */
+export function hostedBrowserAttachAfterLateMachine(input: {
+  kind: HostedBrowserViewKind | null;
+  error: { message: string; atMs: number } | null;
+  hostRuntimeId: string | null;
+  nowMs: number;
+  attachedForAtMs: number | null;
+}): boolean {
+  const { kind, error, hostRuntimeId, nowMs, attachedForAtMs } = input;
+  if (kind !== "failed" || error?.message !== SHARED_BROWSER_HOST_COPY.machineDidNotStart) return false;
+  if (hostRuntimeId === null || error.atMs === attachedForAtMs) return false;
+  return nowMs - error.atMs <= SPACE_MACHINE_LATE_READY_WINDOW_MS;
 }
 
 /**

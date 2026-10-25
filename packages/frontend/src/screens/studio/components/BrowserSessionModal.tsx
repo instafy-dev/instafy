@@ -646,6 +646,10 @@ export function BrowserSessionModal({
   // `error` is its raw reason.
   const [failure, setFailure] = useState<HostedBrowserFailure | null>(null);
   const error = failure?.reason ?? null;
+  // A press's start of the space's machine has taken over a minute: the view
+  // says the machine is still starting. The machine coming up, and each
+  // attempt, error and connection, clears it.
+  const [machineStartSlow, setMachineStartSlow] = useState(false);
   const [runtimeLimitDetails, setRuntimeLimitDetails] =
     useState<HostedRuntimeLimitErrorDetails | null>(null);
   const [wsUrl, setWsUrl] = useState<string | null>(null);
@@ -689,6 +693,7 @@ export function BrowserSessionModal({
     const attempt = connectAttemptCounterRef.current;
     if (by === "press") pressedAttemptRef.current = attempt;
     if (by === "studio") studioAttemptRef.current = attempt;
+    setMachineStartSlow(false);
     setConnectAttempt(attempt);
   }, []);
   // Forgets the connection this view had, and with it everything that used
@@ -721,6 +726,7 @@ export function BrowserSessionModal({
     dropConnection();
     setStatus("error");
     setFailure({ kind, reason });
+    setMachineStartSlow(false);
     runtimeDebugLog("browser-session:failed", { kind, reason });
   }, [dropConnection]);
   const [hasConnectedOnce, setHasConnectedOnce] = useState(false);
@@ -968,6 +974,7 @@ export function BrowserSessionModal({
     status: displayStatus,
     failure,
     hasConnection: browserOriginConnection !== null,
+    machineStartSlow,
   });
   const viewLive = viewState.kind === "live";
   const viewKindRef = useRef(viewState.kind);
@@ -1388,6 +1395,7 @@ export function BrowserSessionModal({
       connectedHostRef.current = null;
       setStatus("idle");
       setFailure(null);
+      setMachineStartSlow(false);
       setRuntimeLimitDetails(null);
       setHasConnectedOnce(false);
       setFrozenFrameUrl(null);
@@ -1512,6 +1520,9 @@ export function BrowserSessionModal({
               conversationRuntimeId: conversationRuntimeIdRef.current?.trim() || null,
               ensureSpaceMachine: ensureSpaceMachineForPress,
               fetchStatus: controllerClient.runtimes.fetchStatus,
+              onSlow: () => {
+                if (!connectionCancelled()) setMachineStartSlow(true);
+              },
               signal: startupAbortController.signal,
             });
             if (connectionCancelled() || coldStart.kind === "cancelled") {
@@ -1521,6 +1532,8 @@ export function BrowserSessionModal({
               fail(coldStart.errorKind, coldStart.reason);
               return;
             }
+            // The machine is up: what is left is opening its browser.
+            setMachineStartSlow(false);
             if (coldStart.kind === "attach") {
               selection = { kind: "selected", candidate: coldStart.candidate };
               setSessionChoices({
@@ -1930,6 +1943,8 @@ export function BrowserSessionModal({
       if (connectAttemptAbortRef.current === startupAbortController) {
         connectAttemptAbortRef.current = null;
       }
+      // A start this attempt waited on is not the next attempt's.
+      setMachineStartSlow(false);
     };
   }, [
     browserSessionId,
@@ -2538,6 +2553,7 @@ export function BrowserSessionModal({
             reconnectTimerRef.current = null;
           }
           setFailure(null);
+          setMachineStartSlow(false);
           setHasConnectedOnce(true);
           setFrozenFrameUrl(null);
           if (connectedScopeKey) {
@@ -2792,6 +2808,7 @@ export function BrowserSessionModal({
       reconnectTimerRef.current = null;
     }
     setFailure(null);
+    setMachineStartSlow(false);
     setHasConnectedOnce(true);
     setFrozenFrameUrl(null);
     if (connectedScopeKey) {
@@ -2874,6 +2891,7 @@ export function BrowserSessionModal({
       reconnectTimerRef.current = null;
     }
     setFailure(null);
+    setMachineStartSlow(false);
     setHasConnectedOnce(true);
     setFrozenFrameUrl(null);
     if (connectedScopeKey) {

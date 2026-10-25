@@ -45,8 +45,12 @@ There is no Team runtime mode. Adding one later requires host-local consent, sep
 
 On wide screens, the Chat composer remains a workspace conversation while a browser
 or file is open beside it. Showing a browser does not restrict ordinary file and coding
-requests to browser tools. In a single Browser view, a browser task needs a live page;
-if no page is available, the composer keeps the message instead of submitting an invalid browser job.
+requests to browser tools. In a single Browser view, a browser task needs a live tab.
+A browser that just started (or came back with its machine) shows only a blank tab; the task
+is bound to that tab by its CDP target id, and the blank tab is never named in the message.
+Until the browser has connected and has a tab, Send stays off and the composer's status says
+why ("Instafy's browser is still connecting." or "Instafy's browser has no page open yet.");
+a message sent with Enter is kept instead of submitting an invalid browser job.
 Unsent text drafts survive same-tab reloads in session storage, scoped to the account and
 space. They are not sent to other participants or restored on another device; attachments
 and file contents are not included.
@@ -582,6 +586,34 @@ Playwright only from the image-installed absolute module path and runs from the
 runtime-agent binary directory, never from project `node_modules`. Actions
 return concrete observed page state, including the final URL and title.
 
+A snapshot lists what a person can see. A control or run of text is left out
+when it is not rendered or is transparent, sits under `aria-hidden="true"` or
+`inert`, lies wholly where the page cannot be scrolled to (a closed off-canvas
+drawer), or is clipped to nothing by an `overflow: hidden` or `clip` box it is
+laid out in (a menu collapsed with `max-height: 0`). A scroll container with a
+real size only scrolls, so what it holds still counts. An open modal dialog or
+popover, or a fullscreen element, is drawn over the page, so no box around it
+clips it. A native checkbox or switch drawn by a library stays listed when it is
+transparent over the styled control or operated through a visible label.
+Collapsed menus therefore no longer fill the 200-control limit, and opening one
+shows up in the click's own result: after an action the controller waits, at
+most a second, for running transitions and animations that end, so a menu that
+opens with a transition is observed where it lands. `omittedControls` counts
+the controls left out, so a list cut short by a closed menu, or by a box the
+page scrolls itself, does not read as the whole page.
+Snapshots and actions build the list with the same function, so indices and the
+`snapshotId` agree. Whether a page is a secret screen is still judged on all of
+its rendered text and every control's name, seen or not, so leaving hidden
+parts out never lifts withholding. Each control carries only its non-empty
+fields; `expanded` reports a toggle's state and `area` the part of the page it
+sits in (`header`, `nav`, `menu`, `dialog`, `tabs`, `search`, `footer` or
+`aside`), and a link on the page's own site is given as its path. `navigate`
+takes that path too and resolves it against the current page's site; a path
+that names another host is refused, and a blank page needs a full address. The
+text reads a closed select's chosen option as a word of its own. The control's
+box stays inside the controller for the visible cursor, and the MCP text result
+is compact JSON beside the same structured content.
+
 A browser that has just started, such as the on-demand browser on a space's own
 machine, shows exactly `about:blank`, and a tab opened in the viewer shows the
 new-tab page (`chrome://newtab/` or `chrome://new-tab-page/`). `status` and
@@ -989,13 +1021,42 @@ unless the policy is `"covered"`.
 - **Cold press.** When the space is covered and a press finds nothing to open,
   or the exact pin names the space's own machine while it is stopped or no
   longer listed, Studio first starts that machine through the generic hosted
-  ensure. It then polls status every 2 s, for at most 180 s, until the machine
-  can take work. It waits on the pinned machine or the conversation's machine
-  only when that is the space's own Instafy Cloud machine, never a Desktop,
-  self-hosted or separate browser session machine; otherwise it waits for the
-  first live host. If the machine comes up without `sharedBrowserHost`, Studio
-  takes the legacy path at once. A press for Instafy's browser may take up to
-  four minutes in all; the browser on this device keeps two.
+  ensure. It then reads status until the machine can take work: every 2 s for
+  the first minute after the press, then every 10 s, for at most ten minutes
+  from the press (the controller gives up on a launch that never comes up after
+  15 minutes). A first launch on a new node can take minutes while it pulls
+  the image. A minute after the press, also while the ensure has not answered
+  yet, the view says "Still starting this space's machine…"; its pill and its
+  lack of a button stay as they were. Once the machine is up, the view says
+  "Opening Instafy's browser…" again while that browser starts. It waits on the pinned
+  machine or the conversation's machine only when that is the space's own
+  Instafy Cloud machine, never a Desktop, self-hosted or separate browser
+  session machine; otherwise it waits for the first live host. It waits only
+  while that machine's launch is on its way: a booting status, never seen on
+  this launch, a `launchRequestedAt`, and no person's stop since. A launch the
+  controller replaced keeps its runtime id with a new `launchRequestedAt`, so
+  the wait goes on. The ensure's two 45 s attempts can both time out behind the
+  controller's launch lock while the launch goes on, so an ensure that did not
+  answer is followed by one status read: when the launch is on its way, the
+  wait goes on; otherwise (a credits or capacity refusal leaves no launch) the
+  view says "This space's machine did not start. Try again." at once. Once a
+  launch is known, two status reads in a row that show none on its way
+  (stopped or offline without a launch, a person's stop, or the machine gone)
+  end the wait with the same sentence; one such read, as while a launch is
+  replaced, is ridden out, and a status read that fails counts as neither. If
+  the machine comes up without `sharedBrowserHost`, Studio takes the legacy
+  path at once. A press on a card still waits at most four minutes before it
+  offers its button again; the view keeps waiting meanwhile. The browser on
+  this device keeps two.
+- **A machine that comes up after the press gave up.** When the view says
+  "This space's machine did not start. Try again." and, within five minutes of
+  that, a runtime status refresh (registration or health) shows the
+  conversation's machine as a live host, Studio asks the view once to attach
+  by itself, as for a card. That attempt is Studio's own: it may start the
+  browser on the machine but never a machine, and it never ends with that
+  sentence again, so it cannot repeat. It reads nothing by itself, and it does
+  nothing while the view is off, cannot open, is closed, or shows the browser
+  on this device.
 - **Press on a card.** A press never waits silently. Once the browser view
   shows an error, the card says so at once, in the sentence the view shows
   when it is one of the view's own (such as "Instafy's browser is off."),
@@ -1042,11 +1103,13 @@ unless the policy is `"covered"`.
   has. A reconnect that reads the runtime with the same id but a new origin
   drops the old connection at once (`browser-session:origin-replaced`). The
   grant refresh keeps the controller's status (`requestAccessTokenResult`): a
-  400 (not the runtime's online origin any more) drops the connection and
-  looks the runtime up once through the bounded reconnect; a 404 drops it and
-  stops, with no new look-up, so nothing cold-starts; a 401 or 403 drops it and
-  shows the failed state; any other failure is asked again after 5, 10, 20, 40
-  and then 60 s. No refresh runs while the view shows an error.
+  400 (not the runtime's online origin any more, with the code
+  `browser_origin_replaced` from controllers that send it) drops the
+  connection and looks the runtime up once through the bounded reconnect; a
+  404 drops it and stops, with no new look-up, so nothing cold-starts; a 401
+  or 403 drops it and shows the failed state; any other failure is asked
+  again after 5, 10, 20, 40 and then 60 s. No refresh runs while the view
+  shows an error.
 - **Only the person starts the machine.** An automatic reconnect never starts
   the machine or its browser: an idle browser is off, a stopped machine is
   off, and the host wait never posts `browser/host/start` for it. An open
@@ -1120,6 +1183,7 @@ at most one button, and a neutral status pill.
 |---|---|---|---|
 | live | none | none | Ready (screen readers only) |
 | opening | "Opening Instafy's browser…" | none | Starting… |
+| opening, after a minute of a press starting the space's machine | "Still starting this space's machine…" | none | Starting… |
 | off | "Instafy's browser is off." | Open browser | Off |
 | failed | "Instafy's browser did not open. Try again." | Try again | Off |
 | failed (machine) | "This space's machine did not start. Try again." | Try again | Off |

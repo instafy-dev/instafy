@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import { resolveChatComposerAffordances } from "../chatComposerAffordances";
 
-function resolveAffordances(overrides: Partial<Parameters<typeof resolveChatComposerAffordances>[0]> = {}) {
-  return resolveChatComposerAffordances({
+type AffordanceInput = Parameters<typeof resolveChatComposerAffordances>[0];
+
+function affordanceInput(overrides: Partial<AffordanceInput> = {}): AffordanceInput {
+  return {
     composerGhostSuggestionRemainder: null,
     credentialsReady: true,
     activeConversationControllerId: "controller-1",
@@ -16,6 +18,7 @@ function resolveAffordances(overrides: Partial<Parameters<typeof resolveChatComp
     runtimeControllerEnabled: true,
     queueStatusLabel: null,
     sendingAttachment: false,
+    sharedBrowserSendBlocked: false,
     submissionPending: false,
     totalQueuedCount: 0,
     voiceHoldActive: false,
@@ -23,7 +26,11 @@ function resolveAffordances(overrides: Partial<Parameters<typeof resolveChatComp
     voiceInputStarting: false,
     voiceInputTranscribing: false,
     ...overrides,
-  });
+  };
+}
+
+function resolveAffordances(overrides: Partial<AffordanceInput> = {}) {
+  return resolveChatComposerAffordances(affordanceInput(overrides));
 }
 
 describe("resolveChatComposerAffordances", () => {
@@ -108,5 +115,24 @@ describe("resolveChatComposerAffordances", () => {
 
   it("disables Send while participation and submit preflight are in flight", () => {
     expect(resolveAffordances({ submissionPending: true }).sendButtonDisabled).toBe(true);
+  });
+
+  it("disables Send while a send from the browser's composer would be refused", () => {
+    const blocked = resolveAffordances({ inputValue: "Open example.com", sharedBrowserSendBlocked: true });
+    expect(blocked.sendButtonDisabled).toBe(true);
+    expect(blocked.sendButtonVariant).toBe("ghost");
+    const ready = resolveAffordances({ inputValue: "Open example.com", sharedBrowserSendBlocked: false });
+    expect(ready.sendButtonDisabled).toBe(false);
+    expect(ready.sendButtonVariant).toBe("primary");
+  });
+
+  it("makes every caller say whether the browser would refuse a send", () => {
+    // Leaving the browser's blocker out must fail to compile, or Send would
+    // stay on while the browser is still connecting.
+    const { sharedBrowserSendBlocked, ...withoutBlocker } = affordanceInput();
+    expect(sharedBrowserSendBlocked).toBe(false);
+    // @ts-expect-error sharedBrowserSendBlocked is required
+    const incomplete: AffordanceInput = withoutBlocker;
+    expect(incomplete).not.toHaveProperty("sharedBrowserSendBlocked");
   });
 });

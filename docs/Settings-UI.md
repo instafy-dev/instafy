@@ -55,6 +55,9 @@ determines the winner. Arbitrary layout classes remain supported.
   and Requested beside the corresponding person. The compact Give control action
   sits in the first requester's row; its accessible label retains the complete
   recipient name. Keep other controls in the footer and preserve request order.
+  The composer's stash and queue triggers use this same toolbar preset: quiet
+  when closed, with the secondary surface when expanded. The stash count badge
+  stays circular; the trigger does not supply its own border, palette or size.
 - `Input` and both native/styled `Select` share medium defaults and control size tokens.
   `Field label` plus matching `htmlFor`/control `id` also labels app-rendered selects;
   explicit ARIA labels remain authoritative. `Checkbox` owns its interaction target
@@ -76,6 +79,11 @@ determines the winner. Arbitrary layout classes remain supported.
   Like action buttons, segment sizing follows the primary pointer rather than the viewport:
   fine pointers keep compact 28px (`xs`) or 36px (`sm`) options at any width; coarse pointers
   get at least 44px targets. The group's surrounding padding adds 8px to its total height.
+- Conversation view navigation uses the shared tab presentation presets, not radio
+  controls. The `contained` preset owns 12px corners, 14px labels, 12px horizontal
+  padding, a 44px minimum height and selected/hover/focus styling for composer
+  tabs. The `underline` preset retains the header treatment. Tab owners keep
+  panel selection, keyboard navigation, scrolling and close behavior.
 
 The local component reference at `/tests/fixtures/component-system/index.html` runs against
 the Vite dev server. It mounts production components with inert local state and no backend

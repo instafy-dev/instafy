@@ -5,7 +5,11 @@ import type {
   SharedBrowserHostPolicy,
 } from "../../../services/runtimeController";
 import type { SharedBrowserHostSnapshot } from "../../../services/runtimeController/browserSession";
-import { runtimeEntryIsDispatchable } from "../../../runtime/utils/runtimeEntry";
+import {
+  runtimeEntryIsDispatchable,
+  runtimeEntryIsStopping,
+  stalledLaunchDeadlineMs,
+} from "../../../runtime/utils/runtimeEntry";
 import { runtimeDebugLog } from "../../../runtime/utils/runtimeDebug";
 import type { HostedBrowserErrorKind } from "./hostedBrowserViewState";
 import {
@@ -30,6 +34,7 @@ import {
 export const SHARED_BROWSER_HOST_COPY = {
   off: "Instafy's browser is off.",
   opening: "Opening Instafy's browser…",
+  stillStartingMachine: "Still starting this space's machine…",
   didNotOpen: "Instafy's browser did not open. Try again.",
   machineDidNotStart: "This space's machine did not start. Try again.",
   askBuilder: "Ask a space builder to open Instafy's browser.",
@@ -40,8 +45,22 @@ export const SHARED_BROWSER_HOST_COPY = {
 export const SHARED_BROWSER_HOST_WAIT_TIMEOUT_MS = 120_000;
 export const SHARED_BROWSER_HOST_POLL_MS = 500;
 export const SHARED_BROWSER_HOST_STOPPING_RETRY_MS = 1_000;
-export const SPACE_MACHINE_COLD_START_TIMEOUT_MS = 180_000;
+/**
+ * How long a press waits for the space's machine to start, from the press.
+ * A first launch on a fresh node can take minutes while it pulls the image
+ * (dogfood, Oct 24: 4 min 44 s). It stays under the controller's 15-minute
+ * sweep of a launch that never came up.
+ */
+export const SPACE_MACHINE_COLD_START_TIMEOUT_MS = 10 * 60_000;
 export const SPACE_MACHINE_COLD_START_POLL_MS = 2_000;
+/** After this long the view says the machine is still starting, and status is read less often. */
+export const SPACE_MACHINE_COLD_START_SLOW_AFTER_MS = 60_000;
+export const SPACE_MACHINE_COLD_START_SLOW_POLL_MS = 10_000;
+/**
+ * How long after a press gave up on the space's machine Studio still attaches
+ * by itself once that machine comes up (see hostedBrowserAttachAfterLateMachine).
+ */
+export const SPACE_MACHINE_LATE_READY_WINDOW_MS = 5 * 60_000;
 /**
  * One read or start of Instafy's browser that has not answered by then is
  * given up and polled again, so a hung request cannot outlast the wait.
@@ -353,6 +372,22 @@ export function runtimeEntryIsSpaceMachine(
     !runtimeEntryLooksLikeBrowserSession(entry);
 }
 
+/**
+ * The space's own machine has a launch on its way: it is in a booting status,
+ * has not been seen on this launch, and its lease says when the launch was
+ * asked for (`launchRequestedAt`), with no person's stop newer than that.
+ * A launch the controller replaced keeps the runtime id with a new
+ * `launchRequestedAt`, so it still counts. Unlike runtimeEntryIsBooting, it
+ * does not read a reused runtime's old `createdAt` as a stale boot.
+ */
+export function spaceMachineLaunchOnItsWay(
+  entry: ControllerRuntimeStatusEntry | null | undefined,
+): boolean {
+  return runtimeEntryIsSpaceMachine(entry) &&
+    stalledLaunchDeadlineMs(entry) !== null &&
+    !runtimeEntryIsStopping(entry, null);
+}
+
 /** A live lazy host to resume in place of a stale pin, when there is one. */
 export function liveSharedBrowserHostCandidate(
   entries: readonly ControllerRuntimeStatusEntry[],
@@ -375,6 +410,25 @@ export type SpaceMachineColdStartResult =
  * (an image or lease that is not attested for it) goes back to the legacy
  * path at once; registration writes status and capabilities together, so
  * there is nothing to wait for.
+ *
+ * It waits while the target's launch is on its way
+ * (spaceMachineLaunchOnItsWay; with no listed target, a launch of any of the
+ * space's machines). It reads status every 2 s for the first minute after the
+ * press, then every 10 s, for at most ten minutes, and calls `onSlow` once
+ * when that first minute has passed: by a timer while the ensure has not
+ * answered (it can take 90 s), then by the loop's own clock.
+ *
+ * - An ensure that did not answer still waits when one status read shows the
+ *   launch on its way: both of its 45 s attempts can time out behind the
+ *   controller's launch lock while the launch goes on. A refusal (credits,
+ *   capacity) leaves no launch, so it fails at once.
+ * - Once a launch is known, two reads in a row that show none on its way
+ *   (stopped or offline without one, a person's stop, or the machine gone)
+ *   end the wait. Two ride out the brief stop of a launch the controller
+ *   replaces. A status read that fails counts as neither.
+ *
+ * Every controller that reports `sharedBrowserHostPolicy`, which the cold
+ * path needs, also reports `launchRequestedAt`.
  */
 export async function startSpaceMachineForBrowser(params: {
   projectId: string;
@@ -382,6 +436,8 @@ export async function startSpaceMachineForBrowser(params: {
   conversationRuntimeId: string | null;
   ensureSpaceMachine: () => Promise<boolean>;
   fetchStatus: (params: FetchRuntimeStatusParams) => Promise<FetchRuntimeStatusResult | null>;
+  /** Called once when the machine has not come up within the first minute. */
+  onSlow?: () => void;
   signal?: AbortSignal;
   timeoutMs?: number;
   pollMs?: number;
@@ -391,37 +447,52 @@ export async function startSpaceMachineForBrowser(params: {
   const now = params.now ?? Date.now;
   const sleep = params.sleep ?? sleepUnlessAborted;
   const pollMs = params.pollMs ?? SPACE_MACHINE_COLD_START_POLL_MS;
-  const deadline = now() + (params.timeoutMs ?? SPACE_MACHINE_COLD_START_TIMEOUT_MS);
+  const pressedAtMs = now();
+  const deadline = pressedAtMs + (params.timeoutMs ?? SPACE_MACHINE_COLD_START_TIMEOUT_MS);
   const cancelled = () => params.signal?.aborted === true;
+  let slowReported = false;
+  const reportSlow = () => {
+    if (slowReported || cancelled()) return;
+    slowReported = true;
+    params.onSlow?.();
+  };
+  const slowTimer = globalThis.setTimeout(reportSlow, SPACE_MACHINE_COLD_START_SLOW_AFTER_MS);
   let ensured = false;
   try {
     ensured = await params.ensureSpaceMachine();
   } catch {
     ensured = false;
+  } finally {
+    globalThis.clearTimeout(slowTimer);
   }
   if (cancelled()) return { kind: "cancelled" };
-  if (!ensured) return { kind: "error", errorKind: "machine", reason: "space machine ensure failed" };
 
-  while (!cancelled() && now() < deadline) {
+  // Whether a launch is known: the ensure answered, or a read showed one.
+  let launchKnown = ensured;
+  let endedReads = 0;
+  while (!cancelled()) {
     const status = await params.fetchStatus({
       projectId: params.projectId,
       signal: params.signal,
       quietOnAbort: true,
     }).catch(() => null);
     if (cancelled()) break;
-    const entries = Array.isArray(status?.runtimes) ? status.runtimes : [];
+    const read = Array.isArray(status?.runtimes);
+    const entries = read ? status!.runtimes : [];
     const listedSpaceMachine = (runtimeId: string | null) => {
       const entry = runtimeId ? entries.find((item) => item.runtimeId === runtimeId) : undefined;
       return runtimeEntryIsSpaceMachine(entry) ? entry : null;
     };
+    const named = listedSpaceMachine(params.pinnedRuntimeId) ?? listedSpaceMachine(params.conversationRuntimeId);
     const target =
-      listedSpaceMachine(params.pinnedRuntimeId) ??
-      listedSpaceMachine(params.conversationRuntimeId) ??
+      named ??
       entries.find((entry) =>
         runtimeEntryIsSpaceMachine(entry) &&
         runtimeEntryIsLazyBrowserHost(entry) &&
         runtimeEntryIsDispatchable(entry)) ??
       null;
+    // Dispatchable but without an origin yet: it is still coming up.
+    let comingUp = false;
     if (target && runtimeEntryIsDispatchable(target)) {
       if (!runtimeEntryIsLazyBrowserHost(target)) {
         return { kind: "legacy" };
@@ -430,11 +501,26 @@ export async function startSpaceMachineForBrowser(params: {
       if (candidate?.mode === "lazy") {
         return { kind: "attach", candidate };
       }
-      // Dispatchable but without an origin yet: poll on.
+      comingUp = true;
     }
+    if (comingUp || (named ? spaceMachineLaunchOnItsWay(named) : entries.some(spaceMachineLaunchOnItsWay))) {
+      launchKnown = true;
+      endedReads = 0;
+    } else if (!launchKnown) {
+      // The ensure did not answer and nothing is launching.
+      return { kind: "error", errorKind: "machine", reason: "space machine ensure failed" };
+    } else if (read) {
+      endedReads += 1;
+      if (endedReads >= 2) {
+        return { kind: "error", errorKind: "machine", reason: "space machine start ended" };
+      }
+    }
+    const elapsed = now() - pressedAtMs;
+    const slow = elapsed >= SPACE_MACHINE_COLD_START_SLOW_AFTER_MS;
+    if (slow) reportSlow();
     const remaining = deadline - now();
     if (remaining <= 0) break;
-    if (!(await sleep(Math.min(pollMs, remaining), params.signal))) break;
+    if (!(await sleep(Math.min(slow ? SPACE_MACHINE_COLD_START_SLOW_POLL_MS : pollMs, remaining), params.signal))) break;
   }
   if (cancelled()) return { kind: "cancelled" };
   return { kind: "error", errorKind: "machine", reason: "space machine did not come up in time" };

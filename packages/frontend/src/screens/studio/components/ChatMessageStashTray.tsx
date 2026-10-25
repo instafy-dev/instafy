@@ -44,18 +44,17 @@ export function ChatMessageStashTrigger({
 
   const countLabel = count > 99 ? "99+" : String(count);
   return (
-    <IconButton
+    <Button
       type="button"
       aria-label={`Stashed drafts (${count})`}
       title={`Stashed drafts (${count})`}
       aria-controls={CHAT_MESSAGE_STASH_PANEL_ID}
       aria-expanded={expanded}
       ref={triggerRef}
-      variant="outline"
-      size="sm"
-      radius="full"
+      variant={expanded ? "secondary" : "ghost"}
+      preset="toolbar"
       onPress={() => onExpandedChange(!expanded)}
-      className="relative h-9 w-9 flex-none border-slate-200/70 bg-white/80 text-slate-600 dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-raised-control)] dark:text-slate-300"
+      className="relative flex-none"
       data-testid="chat-message-stashes-summary"
     >
       <Bookmark aria-hidden="true" className="h-4 w-4" data-testid="chat-message-stashes-icon" />
@@ -65,7 +64,7 @@ export function ChatMessageStashTrigger({
       >
         {countLabel}
       </span>
-    </IconButton>
+    </Button>
   );
 }
 

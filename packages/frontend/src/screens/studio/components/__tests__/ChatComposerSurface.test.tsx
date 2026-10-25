@@ -2048,16 +2048,44 @@ describe("ChatComposerSurface", () => {
     expect(onSendButtonPress).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps a worker reply in the usual composer and distinguishes Next from sending", async () => {
-    await act(async () => renderLayout({
-      replyContext: <div>Replying to Garden poem</div>, sendActionLabel: "Next question",
+  it.each([false, true])("switches from a blocked browser send to worker answers and back (touch=%s)", async (touchLikeInput) => {
+    const blockedStatus = "Instafy's browser is still connecting.";
+    const onSendButtonPress = vi.fn();
+    const renderAction = (overrides: Partial<ComponentProps<typeof ChatComposerSurface>>) => renderLayout({
+      touchLikeInput,
       showVoicePrimaryAction: false,
+      onSendButtonPress,
+      ...overrides,
+    });
+    await act(async () => renderAction({ primaryActionBlockedStatus: blockedStatus, sendButtonDisabled: true }));
+    const status = () => container.querySelector('[data-testid="chat-primary-action-status"]')?.textContent;
+    const button = () => container.querySelector<HTMLButtonElement>('[data-testid="chat-send-button"]');
+    expect(status()).toBe(blockedStatus);
+    expect(button()?.disabled).toBe(true);
+
+    // Answering a worker is controller-bound; the browser's readiness does not
+    // block this action. The caller removes that unrelated blocker during Reply.
+    await act(async () => renderAction({
+      replyContext: <div>Replying to Garden poem</div>,
+      sendActionLabel: "Next question",
+      primaryActionBlockedStatus: null,
+      sendButtonDisabled: false,
     }));
     expect(container.querySelector('[data-testid="chat-composer-overlay"]')?.textContent).toContain("Replying to Garden poem");
-    expect(container.querySelector('[data-testid="chat-send-button"]')?.getAttribute("aria-label")).toBe("Next question");
-    expect(container.querySelector('[data-testid="chat-primary-action-status"]')?.textContent).toBe("Enter: Next question.");
-    await act(async () => renderLayout({ sendActionLabel: "Send answer", showVoicePrimaryAction: false }));
-    expect(container.querySelector('[data-testid="chat-send-button"]')?.getAttribute("aria-label")).toBe("Send answer");
+    expect(button()?.getAttribute("aria-label")).toBe("Next question");
+    expect(status()).toBe(touchLikeInput ? "Enter adds a new line. Next question." : "Enter: Next question.");
+    expect(button()?.disabled).toBe(false);
+    await act(async () => { button()?.click(); });
+    expect(onSendButtonPress).toHaveBeenCalledTimes(1);
+
+    await act(async () => renderAction({ sendActionLabel: "Send answer", primaryActionBlockedStatus: null }));
+    expect(button()?.getAttribute("aria-label")).toBe("Send answer");
+    expect(status()).toBe(touchLikeInput ? "Enter adds a new line. Send answer." : "Enter: Send answer.");
+
+    await act(async () => renderAction({ primaryActionBlockedStatus: blockedStatus, sendButtonDisabled: true }));
+    expect(button()?.getAttribute("aria-label")).toBe("Send message");
+    expect(button()?.disabled).toBe(true);
+    expect(status()).toBe(blockedStatus);
   });
 
   it("makes active Steer mode visible and announces the Enter behavior", async () => {
@@ -2125,6 +2153,37 @@ describe("ChatComposerSurface", () => {
     const sendButton = container.querySelector<HTMLButtonElement>('[data-testid="chat-send-button"]');
     expect(sendButton?.getAttribute("aria-label")).toBe("Steer current reply");
     expect(actionStatus?.textContent).toBe("Enter adds a new line. The send button steers the current reply.");
+  });
+
+  it("says why a send would be refused instead of announcing that Enter sends", async () => {
+    const blockedStatus = "Instafy's browser is still connecting.";
+    const renderSurface = (overrides: Partial<ComponentProps<typeof ChatComposerSurface>> = {}) =>
+      root.render(
+        <ChatComposerSurface
+          {...createProps({
+            showVoicePrimaryAction: false,
+            sendButtonDisabled: true,
+            primaryActionBlockedStatus: blockedStatus,
+            ...overrides,
+          })}
+        />,
+      );
+
+    await act(async () => renderSurface());
+    const actionStatus = container.querySelector('[data-testid="chat-primary-action-status"]');
+    const sendButton = container.querySelector<HTMLButtonElement>('[data-testid="chat-send-button"]');
+    expect(actionStatus?.textContent).toBe(blockedStatus);
+    expect(sendButton?.disabled).toBe(true);
+
+    await act(async () => renderSurface({ primaryActionMode: "steer" }));
+    expect(actionStatus?.textContent).toBe(blockedStatus);
+
+    await act(async () => renderSurface({ touchLikeInput: true }));
+    expect(actionStatus?.textContent).toBe(blockedStatus);
+
+    await act(async () => renderSurface({ primaryActionBlockedStatus: null, sendButtonDisabled: false }));
+    expect(actionStatus?.textContent).toBe("Enter sends the message.");
+    expect(container.querySelector<HTMLButtonElement>('[data-testid="chat-send-button"]')?.disabled).toBe(false);
   });
 
   it("previews Queue and Stash from desktop modifiers, then restores Steer on release", async () => {

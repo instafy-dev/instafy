@@ -290,11 +290,313 @@ async function browserWentAway(browser) {
   }
 }
 
+// Runs inside the page, joined into the page functions by withShownRule, so it
+// must not use anything from this file's scope. It decides what a person can
+// see. An element or a run of text is left out when it is not rendered or is
+// transparent (checkVisibility with opacity and visibility), when it is under
+// aria-hidden="true" or inert, when it lies wholly where the page cannot be
+// scrolled to (a closed off-canvas drawer), or when a box it is laid out in
+// clips it to nothing with overflow hidden or clip (a menu collapsed with
+// max-height: 0). A scroll container with a real size only scrolls, so what it
+// holds can be brought into its box and counts as reachable there. An open
+// modal dialog or popover is drawn over the page, so no box around it clips it.
+function shownRuleInPage() {
+  // Less than half a pixel either way is nothing a person can see or click.
+  const MIN_SIZE = 0.5;
+  const VISIBILITY = {
+    checkOpacity: true,
+    opacityProperty: true,
+    checkVisibilityCSS: true,
+    visibilityProperty: true,
+  };
+  const styles = new Map();
+  const boxes = new Map();
+  const styleOf = (element) => {
+    let style = styles.get(element);
+    if (!style) {
+      style = element.ownerDocument.defaultView.getComputedStyle(element);
+      styles.set(element, style);
+    }
+    return style;
+  };
+  // The padding box, where overflow clips: the border box less its borders.
+  const boxOf = (element) => {
+    let box = boxes.get(element);
+    if (!box) {
+      const rect = element.getBoundingClientRect();
+      const style = styleOf(element);
+      const border = (value) => Number.parseFloat(value) || 0;
+      const left = rect.left + border(style.borderLeftWidth);
+      const top = rect.top + border(style.borderTopWidth);
+      const right = Math.max(left, rect.right - border(style.borderRightWidth));
+      const bottom = Math.max(top, rect.bottom - border(style.borderBottomWidth));
+      box = { left, top, right, bottom, width: right - left, height: bottom - top };
+      boxes.set(element, box);
+    }
+    return box;
+  };
+  const isElement = (node) => Boolean(node) && node.nodeType === 1;
+  // The parent where the node renders: a slotted node's slot, a shadow
+  // root's host, otherwise its DOM parent.
+  const flatParent = (node) =>
+    node.assignedSlot || node.parentElement || (node.parentNode && node.parentNode.host) || null;
+  const hiddenFromPeople = (element) =>
+    String(element.getAttribute("aria-hidden") || "").trim().toLowerCase() === "true" ||
+    element.hasAttribute("inert");
+  const rendered = (element, options = VISIBILITY) =>
+    typeof element.checkVisibility === "function"
+      ? element.checkVisibility(options)
+      : styleOf(element).display !== "none" && styleOf(element).visibility === "visible";
+  const overflowAxis = (overflow, size) => {
+    const scrolls = overflow === "auto" || overflow === "scroll" || overflow === "overlay";
+    if (overflow === "hidden" || overflow === "clip" || (scrolls && size < MIN_SIZE)) return "clip";
+    return scrolls ? "scroll" : "";
+  };
+  const topLayer = new Map();
+  // An open modal dialog or popover, or a fullscreen element, is drawn in the
+  // top layer: over the viewport, whatever the boxes around it clip.
+  const inTopLayer = (element) => {
+    if (!topLayer.has(element)) {
+      let found = false;
+      for (const state of [":modal", ":popover-open", ":fullscreen"]) {
+        try {
+          found = found || element.matches(state);
+        } catch (_) {
+          // A browser without this state draws nothing of that kind there.
+        }
+      }
+      topLayer.set(element, found);
+    }
+    return topLayer.get(element);
+  };
+  // Whether `rect`, laid out with `position` inside `from`, can be seen once
+  // the page and its scroll containers are scrolled to it. Only the boxes that
+  // contain it clip it: an absolutely positioned box escapes static ones, a
+  // fixed one escapes all but a transformed or contained box, and nothing
+  // outside a top-layer box clips what is in it.
+  const reachable = (rect, from, startPosition, doc) => {
+    if (!(rect.width >= MIN_SIZE && rect.height >= MIN_SIZE)) return false;
+    let { left, top, right, bottom } = rect;
+    let position = startPosition;
+    for (
+      let node = from;
+      isElement(node) && node !== doc.body && node !== doc.documentElement;
+      node = flatParent(node)
+    ) {
+      const style = styleOf(node);
+      if (style.display === "contents") continue;
+      const holdsFixed =
+        style.transform !== "none" ||
+        style.perspective !== "none" ||
+        style.filter !== "none" ||
+        (style.backdropFilter || "none") !== "none" ||
+        /\b(?:layout|paint|strict|content)\b/.test(style.contain || "") ||
+        /\b(?:transform|perspective|filter)\b/.test(style.willChange || "") ||
+        (style.containerType || "normal") !== "normal";
+      const holds =
+        position === "fixed"
+          ? holdsFixed
+          : position === "absolute"
+            ? holdsFixed || style.position !== "static"
+            : true;
+      if (holds) {
+        position = style.position;
+        const box = boxOf(node);
+        const x = overflowAxis(style.overflowX, box.width);
+        const y = overflowAxis(style.overflowY, box.height);
+        if (x === "clip") {
+          left = Math.max(left, box.left);
+          right = Math.min(right, box.right);
+        } else if (x === "scroll") {
+          left = box.left;
+          right = box.right;
+        }
+        if (y === "clip") {
+          top = Math.max(top, box.top);
+          bottom = Math.min(bottom, box.bottom);
+        } else if (y === "scroll") {
+          top = box.top;
+          bottom = box.bottom;
+        }
+        if (right - left < MIN_SIZE || bottom - top < MIN_SIZE) return false;
+      }
+      if (inTopLayer(node)) {
+        position = "fixed";
+        break;
+      }
+    }
+    const view = doc.defaultView;
+    const width = view.innerWidth;
+    const height = view.innerHeight;
+    const across = Math.min(right, width) - Math.max(left, 0);
+    if (position === "fixed") {
+      return across >= MIN_SIZE && Math.min(bottom, height) - Math.max(top, 0) >= MIN_SIZE;
+    }
+    // The page scrolls from its start, so nothing above it, or before it in
+    // the writing direction, can be scrolled to.
+    if (bottom + view.scrollY < MIN_SIZE) return false;
+    const root = styleOf(doc.documentElement);
+    if (root.direction === "rtl" ? left + view.scrollX > width - MIN_SIZE : right + view.scrollX < MIN_SIZE) {
+      return false;
+    }
+    // A page that hides sideways overflow cannot be scrolled sideways. The
+    // body's overflow is the page's when the root leaves its own visible.
+    const body = doc.body ? styleOf(doc.body) : null;
+    const pageOverflowX =
+      root.overflowX === "visible" && root.overflowY === "visible" && body ? body.overflowX : root.overflowX;
+    return !((pageOverflowX === "hidden" || pageOverflowX === "clip") && across < MIN_SIZE);
+  };
+  // The nearest box at or above `element`: a display: contents element (a
+  // slot, for one) has none of its own.
+  const boxed = (element) => {
+    let node = element;
+    while (isElement(node) && styleOf(node).display === "contents") node = flatParent(node);
+    return isElement(node) ? node : null;
+  };
+  const renderedText = new Map();
+  // Whether text laid out in `element` is rendered and opaque. Cached, since
+  // a page has many runs of text per element.
+  const textRendered = (element) => {
+    const box = boxed(element);
+    if (!box) return true;
+    if (!renderedText.has(box)) renderedText.set(box, rendered(box));
+    return renderedText.get(box);
+  };
+  const elementShown = (element) => {
+    for (let node = element; isElement(node); node = flatParent(node)) {
+      if (hiddenFromPeople(node)) return false;
+    }
+    const doc = element.ownerDocument;
+    const rect = element.getBoundingClientRect();
+    // A control drawn in the top layer itself is judged against the viewport.
+    const drawnOnTop = inTopLayer(element);
+    const from = drawnOnTop ? null : flatParent(element);
+    const position = drawnOnTop ? "fixed" : styleOf(element).position;
+    if (rendered(element) && reachable(rect, from, position, doc)) return true;
+    // A native control that something else draws is still what a person
+    // operates: checkbox and switch libraries lay it transparent over the
+    // styled one, and a visually hidden one is operated through its label.
+    // Only one Playwright can act on (rendered, visible, with a box) counts.
+    if (
+      !["INPUT", "SELECT", "TEXTAREA"].includes(element.tagName) ||
+      !rendered(element, { checkVisibilityCSS: true, visibilityProperty: true }) ||
+      !(rect.width > 0 && rect.height > 0)
+    ) {
+      return false;
+    }
+    const parent = boxed(flatParent(element));
+    if ((!parent || rendered(parent)) && reachable(rect, from, position, doc)) return true;
+    return Array.from(element.labels || []).some((label) => elementShown(label));
+  };
+  return { styleOf, isElement, flatParent, hiddenFromPeople, reachable, textRendered, elementShown };
+}
+
+// Runs inside the page (see withShownRule). The text a person can see, in
+// reading order, judged by the same rule as the controls. Block boundaries
+// become line breaks and table cells tabs, as in innerText; a closed select
+// shows its chosen option as a word of its own. Field values are never read,
+// and open shadow roots are read where they render.
+function shownTextInPage(rule, request) {
+  const doc = document;
+  if (!doc.body) return "";
+  const limit = Number.isSafeInteger(request && request.limit) ? request.limit : 60_000;
+  const skipped = new Set([
+    "SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "TEXTAREA", "INPUT", "IFRAME", "FRAME",
+    "OBJECT", "EMBED", "VIDEO", "AUDIO", "CANVAS",
+  ]);
+  const blockLevel = (display) =>
+    display !== "table-cell" && /^(?:block|flex|grid|list-item|table|flow-root|-webkit-box)/.test(display);
+  const range = doc.createRange();
+  const lines = [];
+  let line = "";
+  let size = 0;
+  const flush = () => {
+    const finished = line.replace(/\s+$/, "");
+    if (finished.trim()) {
+      lines.push(finished);
+      size += finished.length + 1;
+    }
+    line = "";
+  };
+  const add = (value, preserve) => {
+    const next = preserve || (line.trim() && !/\s$/.test(line)) ? value : value.replace(/^ +/, "");
+    line += next;
+  };
+  const space = () => {
+    if (line && !/\s$/.test(line)) line += " ";
+  };
+  const text = (node) => {
+    const parent = rule.flatParent(node);
+    const raw = node.nodeValue || "";
+    if (!rule.isElement(parent) || !raw) return;
+    const style = rule.styleOf(parent);
+    if (style.visibility !== "visible") return;
+    if (!raw.trim()) {
+      space();
+      return;
+    }
+    if (!rule.textRendered(parent)) return;
+    range.selectNodeContents(node);
+    if (!rule.reachable(range.getBoundingClientRect(), parent, "static", doc)) return;
+    const preserve = /^(?:pre|pre-wrap|break-spaces)$/.test(style.whiteSpace);
+    const pieces = preserve || style.whiteSpace === "pre-line" ? raw.split("\n") : [raw];
+    pieces.forEach((piece, index) => {
+      if (index > 0) flush();
+      add(preserve ? piece : piece.replace(/\s+/g, " "), preserve);
+    });
+  };
+  const select = (element) => {
+    const options = Array.from(element.options || []);
+    const chosen = element.multiple || element.size > 1 ? options : Array.from(element.selectedOptions || []);
+    const value = chosen
+      .map((option) => String(option.label || option.text || "").replace(/\s+/g, " ").trim())
+      .filter(Boolean)
+      .join(", ");
+    if (value && rule.elementShown(element)) {
+      space();
+      add(value, false);
+      space();
+    }
+  };
+  const walk = (node, depth) => {
+    if (size + line.length >= limit || depth > 512) return;
+    if (node.nodeType === 3) {
+      text(node);
+      return;
+    }
+    if (!rule.isElement(node) || skipped.has(node.tagName)) return;
+    const style = rule.styleOf(node);
+    // Hidden and transparent subtrees stay unseen whatever their contents say.
+    if (style.display === "none" || rule.hiddenFromPeople(node) || Number.parseFloat(style.opacity) === 0) {
+      return;
+    }
+    const block = blockLevel(style.display) || node.tagName === "BR";
+    if (block) flush();
+    if (style.display === "table-cell" && line.trim()) line = `${line.replace(/ +$/, "")}\t`;
+    if (node.tagName === "SELECT") {
+      select(node);
+    } else if (style.contentVisibility !== "hidden") {
+      const children = node.shadowRoot
+        ? node.shadowRoot.childNodes
+        : node.tagName === "SLOT"
+          ? node.assignedNodes({ flatten: true })
+          : node.childNodes;
+      for (const child of children) walk(child, depth + 1);
+    }
+    if (block) flush();
+  };
+  walk(doc.body, 0);
+  flush();
+  return lines.join("\n");
+}
+
 // Runs inside the page through Playwright, so it must not use anything from
 // this file's scope. It reads attributes and structure around the element,
 // never field values; `policy` holds the structural facts the step classifier
-// needs, the same ones the Desktop Personal Browser collects.
-function describeInPage(element, sources) {
+// needs, the same ones the Desktop Personal Browser collects. A control a
+// person cannot see is reported only as `shown: false` with its name, which
+// the secret-screen check still reads.
+function describeInPage(rule, element, sources) {
   const bounded = (value, max = 2_000) =>
     typeof value === "string"
       ? value.replace(/\s+/g, " ").trim().slice(0, max)
@@ -313,6 +615,34 @@ function describeInPage(element, sources) {
       .map((id) => element.ownerDocument?.getElementById(id)?.textContent || "")
       .join(" "),
   );
+  let shown = true;
+  try {
+    shown = rule.elementShown(element);
+  } catch (_) {
+    // A control the rule cannot judge stays listed when it is rendered.
+    try {
+      shown = element.checkVisibility({ checkVisibilityCSS: true, visibilityProperty: true }) !== false;
+    } catch (_) {
+      shown = true;
+    }
+  }
+  if (!shown) {
+    const image = element.querySelector("img[alt]");
+    return {
+      shown: false,
+      name: bounded(
+        [
+          element.getAttribute("aria-label"), ariaLabelledByText, labels,
+          element.getAttribute("placeholder"), element.getAttribute("title"),
+          element.textContent, element.getAttribute("name"),
+          element.getAttribute("data-bs-original-title"), element.getAttribute("data-original-title"),
+          element.getAttribute("data-tippy-content"), element.getAttribute("data-tooltip"),
+          image ? image.getAttribute("alt") : "",
+        ].filter((value) => typeof value === "string" && value.trim()).join(" "),
+        4_000,
+      ),
+    };
+  }
   const form =
     "form" in element && element.form
       ? element.form
@@ -599,7 +929,56 @@ function describeInPage(element, sources) {
     nameHints = null;
   }
 
+  // Whether a toggle is open, and the part of the page the control sits in,
+  // for reading the page; neither feeds the step policy.
+  let expanded = null;
+  let area = "";
+  try {
+    const state = bounded(element.getAttribute("aria-expanded"), 16).toLowerCase();
+    if (state === "true" || state === "false") {
+      expanded = state === "true";
+    } else if (element.tagName === "SUMMARY" && element.parentElement?.tagName === "DETAILS") {
+      expanded = element.parentElement.open === true;
+    }
+    const sectioned = (node) =>
+      Boolean(node.parentElement?.closest(
+        "article, aside, main, nav, section, [role='article'], [role='complementary'], [role='main'], [role='navigation'], [role='region']",
+      ));
+    for (
+      let node = rule.flatParent(element), depth = 0;
+      rule.isElement(node) && depth < 64 && !area;
+      node = rule.flatParent(node), depth += 1
+    ) {
+      const tag = node.tagName;
+      const role = bounded(node.getAttribute("role"), 64).toLowerCase();
+      if (tag === "MAIN" || role === "main") break;
+      if (tag === "DIALOG" || role === "dialog" || role === "alertdialog" || node.getAttribute("aria-modal") === "true") {
+        area = "dialog";
+      } else if (role === "menu" || role === "menubar") {
+        area = "menu";
+      } else if (role === "tablist") {
+        area = "tabs";
+      } else if (tag === "NAV" || role === "navigation") {
+        area = "nav";
+      } else if (tag === "SEARCH" || role === "search") {
+        area = "search";
+      } else if (role === "banner" || (tag === "HEADER" && !sectioned(node))) {
+        area = "header";
+      } else if (role === "contentinfo" || (tag === "FOOTER" && !sectioned(node))) {
+        area = "footer";
+      } else if (tag === "ASIDE" || role === "complementary") {
+        area = "aside";
+      }
+    }
+  } catch (_) {
+    expanded = null;
+    area = "";
+  }
+
   return {
+    shown: true,
+    expanded,
+    area,
     tag: bounded(element.tagName.toLowerCase(), 64),
     role: bounded(element.getAttribute("role"), 128),
     idAttribute: bounded(element.getAttribute("id")),
@@ -653,11 +1032,31 @@ function stableNameHints(description) {
   return { tooltip: hints.tooltip, image: hints.image, hasImage: hints.hasImage };
 }
 
-async function describeElement(locator, index) {
-  const box = await locator.boundingBox().catch(() => null);
+// Page functions run inside the page: Playwright sends their source, so they
+// cannot use anything from this file's scope. The two that judge what a
+// person can see get the rule's source joined in front, so controls and text
+// are judged by one copy of it. Only this file's own functions are joined.
+function withShownRule(pageFunction) {
+  return new Function("...args", `return (${pageFunction})((${shownRuleInPage})(), ...args);`);
+}
+const DESCRIBE_IN_PAGE = withShownRule(describeInPage);
+const SHOWN_TEXT_IN_PAGE = withShownRule(shownTextInPage);
+const AREA_NAMES = new Set(["dialog", "menu", "tabs", "nav", "search", "header", "footer", "aside"]);
+
+// `hiddenNames` collects one name, empty when it has none, for each control a
+// person cannot see; they are left out of the observation but still count for
+// the secret-screen check, and their number tells the model some are left out.
+async function describeElement(locator, index, hiddenNames) {
   const attributes = await locator
-    .evaluate(describeInPage, PAGE_POLICY_SOURCES)
+    .evaluate(DESCRIBE_IN_PAGE, PAGE_POLICY_SOURCES)
     .catch(() => null);
+  if (attributes && attributes.shown === false) {
+    if (hiddenNames) {
+      hiddenNames.push(typeof attributes.name === "string" ? attributes.name.slice(0, 4_000) : "");
+    }
+    return null;
+  }
+  const box = await locator.boundingBox().catch(() => null);
   if (!attributes || !box) {
     return null;
   }
@@ -710,6 +1109,8 @@ async function describeElement(locator, index) {
     formActionText: attributes.formActionText,
     policy,
     nameHints,
+    expanded: typeof attributes.expanded === "boolean" ? attributes.expanded : null,
+    area: AREA_NAMES.has(attributes.area) ? attributes.area : "",
     box: {
       x: Math.round(box.x),
       y: Math.round(box.y),
@@ -844,7 +1245,9 @@ function controlLabel(description) {
   return maskedDisplayText(label);
 }
 
-async function collectInteractiveElements(page) {
+// The controls a person can see, in document order. Snapshots and actions
+// both index this list, so an index means the same control in both.
+async function collectInteractiveElements(page, hiddenNames = null) {
   const matches = page.locator(INTERACTIVE_SELECTOR);
   const count = Math.min(await matches.count(), MAX_INTERACTIVE_ELEMENTS * 3);
   const elements = [];
@@ -853,10 +1256,9 @@ async function collectInteractiveElements(page) {
     if (!locator) {
       continue;
     }
-    if (!(await locator.isVisible().catch(() => false))) {
-      continue;
-    }
-    const description = await describeElement(locator, elements.length);
+    // The shown rule in describeInPage covers what Playwright's isVisible
+    // checks (rendered, visibility visible, a box with a size).
+    const description = await describeElement(locator, elements.length, hiddenNames);
     if (!description) {
       continue;
     }
@@ -934,17 +1336,39 @@ function targetFingerprint(description) {
     .digest("hex");
 }
 
+// What the model reads about one control. Empty fields are left out to keep
+// the observation small; the box stays internal, where the visible cursor
+// uses it.
 function publicElementDescription(description) {
-  return {
-    index: description.index,
-    label: description.label,
-    tag: description.tag,
-    role: description.role,
-    href: description.href,
-    inputType: description.inputType,
-    autocomplete: description.autocomplete,
-    box: description.box,
-  };
+  const entry = { index: description.index, label: description.label, tag: description.tag };
+  for (const field of ["role", "href", "inputType", "autocomplete", "area"]) {
+    if (typeof description[field] === "string" && description[field]) {
+      entry[field] = description[field];
+    }
+  }
+  if (typeof description.expanded === "boolean") {
+    entry.expanded = description.expanded;
+  }
+  return entry;
+}
+
+// A masked link on the page's own site, as its path. Masking keeps the scheme
+// and host, so the path is a suffix of what would be shown in full.
+function sameSitePath(pageOrigin, href) {
+  if (!pageOrigin || typeof href !== "string" || !href.startsWith(pageOrigin)) {
+    return href;
+  }
+  const rest = href.slice(pageOrigin.length);
+  return /^[/?#]/.test(rest) ? rest : href;
+}
+
+function pageOriginOf(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.origin : null;
+  } catch (_) {
+    return null;
+  }
 }
 
 // Runs inside the page. Every check returns a boolean; no field value, code
@@ -1160,16 +1584,23 @@ async function withholdDocument(page) {
   return marked === true;
 }
 
-// The model-facing view of the page. Text, title, address, control names and
-// link targets are masked on every site and in every approval mode; a secret
-// screen withholds the text and stays withheld until a new page loads.
+// The model-facing view of the page: what a person can see of it. Text,
+// title, address, control names and link targets are masked on every site and
+// in every approval mode; a secret screen withholds the text and stays
+// withheld until a new page loads. Whether a page is a secret screen is still
+// judged on all of its rendered text and every control's name, seen or not.
 async function snapshot(page, { withhold = false } = {}) {
-  const interactive = await collectInteractiveElements(page);
+  const hiddenNames = [];
+  const interactive = await collectInteractiveElements(page, hiddenNames);
   const rawUrl = page.url();
-  const visibleText = await page
+  const renderedText = await page
     .locator("body")
     .innerText({ timeout: 5_000 })
     .catch(() => "");
+  const shownText = await page
+    .evaluate(SHOWN_TEXT_IN_PAGE, { kind: "shown-text", limit: MAX_VISIBLE_TEXT_CHARS * 5 })
+    .catch(() => null);
+  const visibleText = typeof shownText === "string" ? shownText : renderedText;
   const title = await page.title().catch(() => "");
   let signals = await pageSecretSignals(page);
   if (signals === null) {
@@ -1183,15 +1614,23 @@ async function snapshot(page, { withhold = false } = {}) {
   const carried = await carriedWithholding(page);
   const marked = await documentWithheld(page);
   const checkFailed = signals === null;
-  const observe = (forceWithhold) =>
+  const shownNames = interactive.map(({ description }) => description.label);
+  const observeText = (text, names, forceWithhold) =>
     redaction.redactPageObservation({
       url: rawUrl,
       title,
-      text: String(visibleText || "").slice(0, MAX_VISIBLE_TEXT_CHARS * 5),
-      names: interactive.map(({ description }) => description.label),
+      text: String(text || "").slice(0, MAX_VISIBLE_TEXT_CHARS * 5),
+      names,
       signals,
       withhold: forceWithhold,
     });
+  // The shown page, withheld whenever the whole rendered page would be.
+  const observe = (forceWithhold) => {
+    const shown = observeText(visibleText, shownNames, forceWithhold);
+    if (shown.secretScreen) return shown;
+    const whole = observeText(renderedText, [...shownNames, ...hiddenNames], forceWithhold);
+    return whole.secretScreen ? observeText(visibleText, shownNames, true) : shown;
+  };
   let view;
   let detected = false;
   try {
@@ -1207,10 +1646,11 @@ async function snapshot(page, { withhold = false } = {}) {
   if (detected) {
     await withholdDocument(page);
   }
+  const pageOrigin = pageOriginOf(rawUrl);
   const maskLink = (href) => {
     if (!href) return href;
     const masked = redaction.redactUrl(href).text;
-    return view.secretScreen ? strictlyMasked(masked) : masked;
+    return sameSitePath(pageOrigin, view.secretScreen ? strictlyMasked(masked) : masked);
   };
   return {
     snapshotId: snapshotFingerprint(rawUrl, interactive),
@@ -1232,6 +1672,9 @@ async function snapshot(page, { withhold = false } = {}) {
           : description.autocomplete,
       }),
     ),
+    // How many controls were left out because a person cannot see them yet,
+    // so a cut list does not read as the whole page.
+    ...(hiddenNames.length ? { omittedControls: hiddenNames.length } : {}),
   };
 }
 
@@ -1430,9 +1873,36 @@ function isFormSubmissionControl(description) {
   );
 }
 
+// Runs inside the page through Playwright, so it must not use anything from
+// this file's scope. Waits, at most `timeoutMs`, for the running animations
+// and transitions that end, such as a menu opening or a drawer sliding in.
+// Endless ones, such as a spinner, are not waited for.
+function animationsSettledInPage(request) {
+  const timeoutMs = Math.min(Math.max(Number(request && request.timeoutMs) || 0, 0), 2_000);
+  const running = typeof document.getAnimations === "function"
+    ? document.getAnimations().filter((animation) => {
+        try {
+          return animation.playState === "running" &&
+            Number.isFinite(animation.effect.getComputedTiming().endTime);
+        } catch (_) {
+          return false;
+        }
+      })
+    : [];
+  if (!running.length) return true;
+  return Promise.race([
+    Promise.all(running.map((animation) => animation.finished.catch(() => null))).then(() => true),
+    new Promise((resolve) => setTimeout(() => resolve(false), timeoutMs)),
+  ]);
+}
+
 async function settleAfterAction(page) {
   await page.waitForLoadState("domcontentloaded", { timeout: 8_000 }).catch(() => {});
   await page.waitForTimeout(250).catch(() => {});
+  // A menu or drawer that opens with a transition is observed where it lands.
+  await page
+    .evaluate(animationsSettledInPage, { kind: "animations-settled", timeoutMs: 1_000 })
+    .catch(() => {});
 }
 
 function resolvedTargetDestination(description, currentUrl) {
@@ -1506,11 +1976,29 @@ async function viewport(page) {
   return { viewportW: size.width ?? null, viewportH: size.height ?? null };
 }
 
-function validateNavigationUrl(raw) {
+// Only the form of a path is checked before the page is known.
+const PATH_FORM_ORIGIN = "https://path.invalid";
+
+// A navigation address: a full URL, or a path on the page's own site such as
+// a snapshot link's href, resolved against `pageOrigin`. A path cannot leave
+// that site, and a page without an http(s) origin takes full addresses only.
+function validateNavigationUrl(raw, pageOrigin = PATH_FORM_ORIGIN) {
   if (typeof raw !== "string" || !raw.trim() || raw.length > MAX_URL_CHARS) {
     throw new Error("Shared Browser navigation requires a bounded URL string");
   }
-  const url = new URL(raw.trim());
+  const value = raw.trim();
+  let url;
+  if (value.startsWith("/")) {
+    if (!pageOrigin) {
+      throw new Error("Shared Browser navigation needs a full address on a page without a site");
+    }
+    url = new URL(value, pageOrigin);
+    if (url.origin !== pageOrigin) {
+      throw new Error("Shared Browser navigation path must stay on the page's site");
+    }
+  } else {
+    url = new URL(value);
+  }
   if (
     (url.protocol !== "http:" && url.protocol !== "https:") ||
     !url.hostname ||
@@ -1721,8 +2209,8 @@ async function execute(browser, method, requestPath, body) {
   }
 
   if (method === "POST" && requestPath === "/v1/navigate") {
-    const url = validateNavigationUrl(body.url);
     const sourceOrigin = approvalProtocol.normalizedOrigin(page.url());
+    const url = validateNavigationUrl(body.url, sourceOrigin);
     // Risky addresses (sign-out, exports, files, one-time links, action
     // addresses) are judged by the address alone and ask even under routine
     // browsing. Under routine browsing, an address for a site the run has not
@@ -1747,7 +2235,7 @@ async function execute(browser, method, requestPath, body) {
     if (sourceOrigin) {
       assertSameOrigin(page.url(), sourceOrigin);
     }
-    const revalidatedUrl = validateNavigationUrl(body.url);
+    const revalidatedUrl = validateNavigationUrl(body.url, sourceOrigin);
     // An address the agent opens itself is not the page a credential step
     // opened.
     approvalProtocol.clearWithholdNextDocument();

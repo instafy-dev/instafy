@@ -56,6 +56,7 @@ import {
   resolvePromptAgentSelection,
 } from "../../../conversations/assistantMentions";
 import { parseInviteCommandRequest } from "../../../conversations/inviteCommand";
+import { parseTerminalCommandRequest } from "../../../conversations/terminalCommand";
 import { resolveGroupParticipationReplyTargets } from "../../../conversations/groupParticipation";
 import { getChatClientSessionId } from "../../../conversations/chatClientIdentity";
 import { generateUUID } from "../../../utils/uuid";
@@ -245,6 +246,10 @@ import {
   type BrowserSessionPageTarget,
 } from "./browserSessionPages";
 import { resolveChatComposerAffordances } from "./chatComposerAffordances";
+import {
+  resolveSharedBrowserSendBlocker,
+  SHARED_BROWSER_SEND_BLOCKER_STATUS,
+} from "./sharedBrowserSubmitRouting";
 import { useChatInvitePromptHandlers } from "./useChatInvitePromptHandlers";
 import { useChatComposerAttachments } from "./useChatComposerAttachments";
 import { useChatComposerPreviewTab } from "./useChatComposerPreviewTab";
@@ -415,7 +420,7 @@ import {
   type SharedBrowserPresence,
 } from "./browserAutoStart";
 import { useSharedBrowserHostSnapshot } from "./useSharedBrowserHostSnapshot";
-import { useSharedBrowserAutoAttach } from "./useSharedBrowserAutoAttach";
+import { sharedBrowserLateAttachInputs, useSharedBrowserAutoAttach } from "./useSharedBrowserAutoAttach";
 import { hostedBrowserPagesActive, type HostedBrowserViewKind } from "./hostedBrowserViewState";
 import { isSkillSetupConversation } from "./skillSetupConversation";
 import { sharedBrowserConversationRunIds } from "./browserHandoffRouting";
@@ -1807,6 +1812,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     handleSelectBrowserSessionPage,
     pendingBrowserLaunchMode,
     preferredBrowserPage,
+    sharedBrowserBindingPage,
     sharedBrowserCapabilities,
     sharedBrowserCapabilitiesResolved,
     sharedBrowserCapabilitiesUnsupported,
@@ -4526,6 +4532,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     sendingAttachment,
     sharedBrowserActive:
       browserTransport === "shared" && browserComposerActive,
+    sharedBrowserBindingPage,
     sharedBrowserRuntimeId: resolvedBrowserRuntimeId,
     showCredentialsGate: showChatCredentialsGate,
     showStatus,
@@ -4657,7 +4664,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     enabled: (browserAutoStartAllowed || sharedBrowserViewOff) && conversationBrowserHostRuntimeId !== null,
     poll: browserAutoWaiting || sharedBrowserViewOff,
   });
-  // Studio asks the view to attach again by itself (see autoAttachToken).
+  // Studio asks the view to attach again by itself (see autoAttachToken),
+  // also once when the machine a press gave up on comes up a little later.
   const {
     autoAttachToken: sharedBrowserAutoAttachToken,
     requestAutoAttach: requestSharedBrowserAutoAttach,
@@ -4665,6 +4673,12 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     open: browserSessionOpen,
     off: sharedBrowserViewOff,
     host: sharedBrowserHost,
+    ...sharedBrowserLateAttachInputs({
+      transport: browserTransport,
+      kind: sharedBrowserViewKind,
+      error: sharedBrowserViewError,
+      hostRuntimeId: conversationBrowserHostRuntimeId,
+    }),
   });
   const sharedBrowserHostKey = sharedBrowserHost.snapshot
     ? [
@@ -5615,6 +5629,35 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     submitMessage,
   });
 
+  // A send from the browser's own composer that the submit flow would refuse
+  // (no browser runtime yet, or no tab at all) disables Send and says why
+  // instead of "Enter sends the message." A restored stash carries its own
+  // runtime and page, so it is left to the submit flow.
+  const sharedBrowserSendBlocker = useMemo(
+    () =>
+      resolveSharedBrowserSendBlocker({
+        active:
+          browserTransport === "shared" &&
+          browserComposerActive &&
+          pendingBrowserLaunchMode !== "new_page" &&
+          !restoredMessageStash,
+        messageRequiresAi: inputRequiresAi && !deferAiGatesForAmbientParticipation,
+        pageAvailable: Boolean(sharedBrowserBindingPage),
+        resolvedRuntimeId: resolvedBrowserRuntimeId,
+        terminalRequest: parseTerminalCommandRequest(inputValue),
+      }),
+    [
+      browserComposerActive,
+      browserTransport,
+      deferAiGatesForAmbientParticipation,
+      inputRequiresAi,
+      inputValue,
+      pendingBrowserLaunchMode,
+      resolvedBrowserRuntimeId,
+      restoredMessageStash,
+      sharedBrowserBindingPage,
+    ],
+  );
   const {
     composerActionIconClass,
     composerGhostActionClass,
@@ -5636,6 +5679,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     runtimeControllerEnabled,
     queueStatusLabel,
     sendingAttachment,
+    sharedBrowserSendBlocked: sharedBrowserSendBlocker !== null,
     submissionPending,
     totalQueuedCount,
     voiceHoldActive,
@@ -6717,6 +6761,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         sendActionLabel={workerQuestionReply.active
           ? workerQuestionReply.active.index < workerQuestionReply.active.request.questions.length - 1 ? "Next question" : "Send answer"
           : undefined}
+        primaryActionBlockedStatus={
+          !workerQuestionReply.active && sharedBrowserSendBlocker
+            ? SHARED_BROWSER_SEND_BLOCKER_STATUS[sharedBrowserSendBlocker]
+            : null
+        }
         onSendButtonPress={handleSendButtonPress}
         composerGhostActionClass={composerGhostActionClass}
         composerPrimaryActionClass={composerPrimaryActionClass}
