@@ -52,6 +52,10 @@ pub struct TunnelRecord {
     pub updated_at: DateTime<Utc>,
     pub expires_at: Option<DateTime<Utc>>,
     pub metadata: Option<serde_json::Value>,
+    /// When the ingress sidecar last probed this tunnel's site ([`record_tunnel_listening`]).
+    pub listening_checked_at: Option<DateTime<Utc>>,
+    /// The HTTP status that probe got back, or `None` when nothing answered.
+    pub listening_status: Option<i32>,
 }
 
 /// An active public tunnel row for handler tests.
@@ -78,6 +82,8 @@ pub(crate) fn test_tunnel_record() -> TunnelRecord {
         updated_at: now,
         expires_at: None,
         metadata: None,
+        listening_checked_at: None,
+        listening_status: None,
     }
 }
 
@@ -817,6 +823,8 @@ pub async fn refresh_tunnel(
             url = $10,
             expires_at = $11,
             metadata = COALESCE($12, metadata),
+            listening_checked_at = NULL,
+            listening_status = NULL,
             updated_at = NOW()
         WHERE id = $13
         RETURNING *
@@ -1170,6 +1178,69 @@ pub async fn list_active_rathole_bindings_for_ingress(
         .fetch_all(pool)
         .await?;
     Ok(bindings)
+}
+
+/// What the ingress sidecar saw when it probed one of its bindings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ListeningObservation {
+    pub tunnel_id: Uuid,
+    /// The rathole port that was dialled; a binding that moved since is left alone.
+    pub rathole_port: i32,
+    /// The HTTP status that came back, or `None` when nothing answered.
+    pub status: Option<u16>,
+}
+
+/// Records what the ingress sidecar saw on its own live tunnels. A tunnel whose site answered
+/// is `active` from then on, until a refresh re-issues it; that is the only place the broker
+/// marks a tunnel active. Rows on another ingress, revoked rows and rows whose rathole port
+/// changed since the probe are left alone. Returns the ids that just became active.
+pub async fn record_tunnel_listening(
+    pool: &DbPool,
+    ingress_id: Uuid,
+    observations: &[ListeningObservation],
+) -> Result<Vec<Uuid>> {
+    if observations.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ids: Vec<Uuid> = observations.iter().map(|seen| seen.tunnel_id).collect();
+    let ports: Vec<i32> = observations.iter().map(|seen| seen.rathole_port).collect();
+    let statuses: Vec<Option<i32>> = observations
+        .iter()
+        .map(|seen| seen.status.map(i32::from))
+        .collect();
+    let promoted: Vec<(Uuid, bool)> = sqlx::query_as(
+        r#"
+        update tunnels t
+        set listening_checked_at = now(),
+            listening_status = seen.status,
+            status = case when seen.promote then 'active' else t.status end,
+            updated_at = case when seen.promote then now() else t.updated_at end
+        from (
+            select observed.id,
+                   observed.port,
+                   observed.status,
+                   observed.status is not null
+                       and live.status in ('requested', 'refreshing') as promote
+            from unnest($2::uuid[], $3::int4[], $4::int4[]) as observed(id, port, status)
+            join tunnels live on live.id = observed.id
+        ) as seen
+        where t.id = seen.id
+          and t.ingress_id = $1
+          and t.rathole_port = seen.port
+          and t.status <> 'revoked'
+        returning t.id, seen.promote
+        "#,
+    )
+    .bind(ingress_id)
+    .bind(&ids)
+    .bind(&ports)
+    .bind(&statuses)
+    .fetch_all(pool)
+    .await?;
+    Ok(promoted
+        .into_iter()
+        .filter_map(|(id, promoted)| promoted.then_some(id))
+        .collect())
 }
 
 fn status_to_str(status: &TunnelStatus) -> &'static str {

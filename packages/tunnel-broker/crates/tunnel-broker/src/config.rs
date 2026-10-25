@@ -38,8 +38,13 @@ pub struct BrokerConfig {
     pub preview_auth_hook: Option<HookConfig>,
     /// Upper bound for `labels.kind == "preview"` tunnels, which outlive the token TTL cap.
     pub preview_max_ttl_seconds: i64,
-    /// Host the broker dials to probe a binding's rathole port.
+    /// Host the broker dials to probe a binding's rathole port, and the host the ingress
+    /// sidecar dials to record whether each of its tunnels answers.
     pub rathole_upstream_host: String,
+    /// How often the ingress sidecar re-renders its config and re-probes its tunnels
+    /// (`RATHOLE_CONFIG_REFRESH_SECONDS`, default 10, at least 1). A broker on another node
+    /// trusts what the sidecar recorded for three of these; see [`Self::listening_max_age`].
+    pub rathole_config_refresh_seconds: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +64,7 @@ pub struct PreviewConfig {
 }
 
 pub const DEFAULT_PREVIEW_MAX_TTL_SECONDS: i64 = 43_200;
+pub const DEFAULT_RATHOLE_CONFIG_REFRESH_SECONDS: u64 = 10;
 
 impl BrokerConfig {
     pub fn from_env() -> Result<Self> {
@@ -164,6 +170,11 @@ impl BrokerConfig {
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "rathole".to_string());
+        let rathole_config_refresh_seconds = env::var("RATHOLE_CONFIG_REFRESH_SECONDS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .unwrap_or(DEFAULT_RATHOLE_CONFIG_REFRESH_SECONDS)
+            .max(1);
 
         Ok(Self {
             database_url,
@@ -192,6 +203,7 @@ impl BrokerConfig {
             preview_auth_hook,
             preview_max_ttl_seconds,
             rathole_upstream_host,
+            rathole_config_refresh_seconds,
         })
     }
 
@@ -209,6 +221,13 @@ impl BrokerConfig {
                 .as_deref()
                 .is_some_and(|token| !token.trim().is_empty())
         })
+    }
+
+    /// How long a listening fact the ingress sidecar recorded still answers a probe: three
+    /// sidecar rounds, so one slow or missed round does not flip a live site to down.
+    pub fn listening_max_age(&self) -> chrono::Duration {
+        let refresh = self.rathole_config_refresh_seconds.clamp(1, 86_400) as i64;
+        chrono::Duration::seconds(refresh * 3)
     }
 
     /// The ingress row this broker registers (`ensure_ingress`); ids derive from host and port.
@@ -313,6 +332,7 @@ pub(crate) fn test_broker_config() -> BrokerConfig {
         }),
         preview_max_ttl_seconds: DEFAULT_PREVIEW_MAX_TTL_SECONDS,
         rathole_upstream_host: "rathole".into(),
+        rathole_config_refresh_seconds: DEFAULT_RATHOLE_CONFIG_REFRESH_SECONDS,
     }
 }
 
@@ -548,6 +568,7 @@ mod tests {
             preview_auth_hook: None,
             preview_max_ttl_seconds: DEFAULT_PREVIEW_MAX_TTL_SECONDS,
             rathole_upstream_host: "rathole".into(),
+            rathole_config_refresh_seconds: DEFAULT_RATHOLE_CONFIG_REFRESH_SECONDS,
         };
 
         let id = Uuid::nil();

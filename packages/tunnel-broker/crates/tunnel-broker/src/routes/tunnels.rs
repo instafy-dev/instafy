@@ -838,6 +838,22 @@ mod tests {
             assert_eq!(reused.tunnel_id, first.tunnel_id);
             assert_eq!(reused.hostname, first.hostname);
 
+            // The site answered at the ingress sidecar's last round.
+            let live = row(&state, first.tunnel_id).await;
+            let active = db::record_tunnel_listening(
+                state.pool(),
+                live.ingress_id,
+                &[db::ListeningObservation {
+                    tunnel_id: live.id,
+                    rathole_port: live.rathole_port.expect("bound"),
+                    status: Some(200),
+                }],
+            )
+            .await
+            .unwrap();
+            assert_eq!(active, vec![live.id]);
+            assert_eq!(row(&state, live.id).await.status, "active");
+
             sqlx::query(
                 "update tunnels set expires_at = now() - interval '1 second' where id = $1",
             )
@@ -848,6 +864,11 @@ mod tests {
             let refreshed = open(&state, &body).await;
             assert_eq!(refreshed.tunnel_id, first.tunnel_id);
             assert_eq!(refreshed.hostname, first.hostname);
+            // A re-issue may move the binding, so nothing recorded before it still holds.
+            let reissued_row = row(&state, first.tunnel_id).await;
+            assert_eq!(reissued_row.status, "requested");
+            assert_eq!(reissued_row.listening_checked_at, None);
+            assert_eq!(reissued_row.listening_status, None);
 
             db::revoke_tunnel(state.pool(), state.config(), first.tunnel_id)
                 .await

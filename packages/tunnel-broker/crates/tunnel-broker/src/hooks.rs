@@ -118,18 +118,98 @@ fn acl_decision(status: StatusCode, body: &[u8]) -> Result<bool> {
     );
 }
 
+/// Events are fire-and-forget: one attempt, never retried, never failing the caller. A
+/// delivery the hook did not accept is logged, so a wrong URL or token shows up in the logs.
 pub async fn emit_event(client: &Client, cfg: &HookConfig, payload: &EventPayload<'_>) {
-    let _ = client
+    if let Err(error) = deliver_event(client, cfg, payload).await {
+        tracing::warn!(
+            kind = payload.kind,
+            project_id = %payload.project_id,
+            error = %error,
+            "event hook delivery failed"
+        );
+    }
+}
+
+/// One delivery attempt. A transport error and any non-2xx answer are an `Err`.
+async fn deliver_event(
+    client: &Client,
+    cfg: &HookConfig,
+    payload: &EventPayload<'_>,
+) -> Result<()> {
+    let status = client
         .post(&cfg.url)
         .bearer_auth(cfg.token.as_deref().unwrap_or_default())
         .json(payload)
         .send()
-        .await;
+        .await
+        .map_err(|error| anyhow::anyhow!("event hook unreachable: {}", error.without_url()))?
+        .status();
+    if !status.is_success() {
+        anyhow::bail!("event hook returned {status}");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// A hook that answers one request with `status_line`.
+    async fn hook_answering(status_line: &'static str) -> HookConfig {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = socket.read(&mut buf).await;
+            let reply = format!("{status_line}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let _ = socket.write_all(reply.as_bytes()).await;
+        });
+        HookConfig {
+            url: format!("http://{addr}/tunnel-broker/hooks/events"),
+            token: Some("hook-token".into()),
+        }
+    }
+
+    fn event() -> EventPayload<'static> {
+        EventPayload {
+            kind: "tunnel.created",
+            project_id: Uuid::new_v4(),
+            org_id: None,
+            runtime_id: None,
+            lease_id: None,
+            data: serde_json::json!({}),
+        }
+    }
+
+    #[tokio::test]
+    async fn event_delivery_reports_what_the_hook_did_not_accept() {
+        let client = Client::new();
+        let accepted = hook_answering("HTTP/1.1 204 No Content").await;
+        assert!(deliver_event(&client, &accepted, &event()).await.is_ok());
+
+        let rejected = hook_answering("HTTP/1.1 401 Unauthorized").await;
+        let error = deliver_event(&client, &rejected, &event())
+            .await
+            .expect_err("a 401 is not a delivery");
+        assert!(error.to_string().contains("401"), "{error}");
+
+        let failing = hook_answering("HTTP/1.1 500 Internal Server Error").await;
+        assert!(deliver_event(&client, &failing, &event()).await.is_err());
+
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let unreachable = HookConfig {
+            url: format!("http://{}/hooks/events", closed.local_addr().unwrap()),
+            token: Some("hook-token".into()),
+        };
+        drop(closed);
+        let error = deliver_event(&client, &unreachable, &event())
+            .await
+            .expect_err("nothing listening");
+        assert!(error.to_string().contains("unreachable"), "{error}");
+    }
 
     #[test]
     fn acl_allows_only_an_explicit_allowed_true() {
