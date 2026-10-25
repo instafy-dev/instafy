@@ -1,5 +1,6 @@
 //! Showing a site that runs in the space: which bundled skills the router picks for it, and the
-//! skill hints a restored provider thread gets, which loads no workspace memory snapshot.
+//! skill hints a restored provider thread or a direct workspace-change turn gets, neither of which loads a
+//! workspace memory snapshot.
 
 use super::tests::{test_job_processor, test_lease_job};
 use super::*;
@@ -68,7 +69,7 @@ fn every_bundled_workflow_skill_description_fits_a_hint_line() {
     {
         let description = context.metadata.description.as_deref().unwrap_or("");
         assert!(
-            description.chars().count() <= RESTORED_SKILL_HINT_MAX_DESCRIPTION_CHARS,
+            description.chars().count() <= SKILL_HINT_MAX_DESCRIPTION_CHARS,
             "{}: {} characters",
             context.id,
             description.chars().count()
@@ -79,9 +80,12 @@ fn every_bundled_workflow_skill_description_fits_a_hint_line() {
 #[test]
 fn restored_skill_hints_name_strong_matches_only_within_their_cap() {
     let tmp = scaffolded_space();
-    let hints =
-        format_restored_skill_hints(tmp.path(), "show the server on port 8000 as a preview")
-            .expect("a preview request gets hints");
+    let hints = format_skill_hints(
+        tmp.path(),
+        "show the server on port 8000 as a preview",
+        RESTORED_SKILL_HINTS_LEAD,
+    )
+    .expect("a preview request gets hints");
     assert!(hints.skills.iter().any(|id| id == PREVIEWS), "{hints:?}");
     assert!(
         hints
@@ -90,11 +94,11 @@ fn restored_skill_hints_name_strong_matches_only_within_their_cap() {
         "{}",
         hints.text
     );
-    assert!(hints.text.len() <= RESTORED_SKILL_HINTS_MAX_BYTES);
-    assert!(hints.skills.len() <= RESTORED_SKILL_HINT_MAX_SKILLS);
+    assert!(hints.text.len() <= SKILL_HINTS_MAX_BYTES);
+    assert!(hints.skills.len() <= SKILL_HINT_MAX_SKILLS);
     // Body prose alone (skills without keywords route on it) is below the threshold.
     assert_eq!(
-        format_restored_skill_hints(tmp.path(), "rename the variable"),
+        format_skill_hints(tmp.path(), "rename the variable", RESTORED_SKILL_HINTS_LEAD),
         None
     );
 }
@@ -182,4 +186,60 @@ fn restored_skill_hints_stay_off_weak_matches_memoryless_and_browser_turns() {
         json!({"metadata": {"browserTransport": "shared"}}),
     );
     assert!(!prompt.contains("Skills that match this request"));
+}
+
+fn direct_write_prompt(tmp: &Path, request: &str, metadata: JsonValue) -> (String, JsonValue) {
+    let processor = test_job_processor(tmp);
+    let project_id = Uuid::new_v4();
+    let mut job = test_lease_job(Some("feature"), json!({ "metadata": metadata }));
+    job.project_id = Some(project_id);
+    let (prompt, _, metrics) = processor
+        .build_prompt_with_text(&project_id, &job, tmp, request, true, None, &[], None, None)
+        .expect("prompt should build");
+    assert!(prompt.contains("Direct workspace-change response contract"));
+    assert!(
+        prompt.contains("Workspace memory snapshot skipped for this direct workspace-change run")
+    );
+    (prompt, metrics)
+}
+
+/// "Make a page and show me a preview" is a file change, so the routing preflight sends it to the direct
+/// workspace-change lane, which loads no workspace memory snapshot. It is told which skills match, the
+/// same way as a restored thread, so the preview skill is not lost on the turn that builds the site.
+#[test]
+fn a_direct_workspace_change_turn_is_told_which_skills_match_the_request() {
+    let tmp = scaffolded_space();
+    let write = json!({"runtimeExpectations": {"workspaceFileChanges": true}});
+    let (prompt, metrics) = direct_write_prompt(
+        tmp.path(),
+        "make a tiny hello page and show me a preview",
+        write.clone(),
+    );
+    assert!(
+        prompt.contains(
+            "Skills that match this request (no workspace memory is loaded for this run;"
+        )
+    );
+    assert!(prompt.contains(".agents/skills/instafy-frontend-previews/SKILL.md"));
+    assert!(
+        prompt.find("Skills that match this request") < prompt.find("Latest user request:"),
+        "the hints come before the request"
+    );
+    assert!(
+        metrics["directWriteSkillHints"]
+            .as_array()
+            .expect("hinted skills in metrics")
+            .iter()
+            .any(|id| id == PREVIEWS)
+    );
+    assert!(metrics.get("restoredSkillHints").is_none());
+
+    // A plain edit names nothing.
+    let (prompt, metrics) = direct_write_prompt(
+        tmp.path(),
+        "Create notes/hello.txt with exactly: hello world",
+        write,
+    );
+    assert!(!prompt.contains("Skills that match this request"));
+    assert!(metrics.get("directWriteSkillHints").is_none());
 }

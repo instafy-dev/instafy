@@ -581,7 +581,8 @@ fn broad_contextual_instruction_suppression_reason(
         // reasoning-exhausted missing-final turns. Turns 2+ are already suppressed via the
         // restored-thread arm above; this extends the trim to attempt 1, matching the
         // recovery retry — accepting that the broad catalog is never seeded into these
-        // conversations. Instafy-curated context (INSTAFY.md snapshots, context cards,
+        // conversations (the prompt names only the few workflow skills that match the
+        // request strongly; see `format_skill_hints`). Instafy-curated context (INSTAFY.md snapshots, context cards,
         // pinned skill snapshots) is unaffected.
         return Some("focused_direct_workspace_write");
     }
@@ -1753,30 +1754,35 @@ fn select_learned_block_candidates(
         .collect()
 }
 
-/// Workflow skills a restored-thread turn names for its request: only a match
-/// at least as strong as one declared keyword or phrase, so body prose alone
-/// (which every skill without `routing_keywords` routes on) adds nothing.
-const RESTORED_SKILL_HINT_MIN_SCORE: usize = 4;
-const RESTORED_SKILL_HINT_MAX_SKILLS: usize = 3;
-const RESTORED_SKILL_HINT_MAX_DESCRIPTION_CHARS: usize = 300;
-const RESTORED_SKILL_HINTS_MAX_BYTES: usize = 1_536;
+/// Workflow skills a turn without a workspace memory snapshot names for its
+/// request: only a match at least as strong as one declared keyword or phrase,
+/// so body prose alone (which every skill without `routing_keywords` routes on)
+/// adds nothing.
+const SKILL_HINT_MIN_SCORE: usize = 4;
+const SKILL_HINT_MAX_SKILLS: usize = 3;
+const SKILL_HINT_MAX_DESCRIPTION_CHARS: usize = 300;
+const SKILL_HINTS_MAX_BYTES: usize = 1_536;
+/// How the hints open on a restored provider thread, which carries the
+/// instructions of the turn it began on.
+const RESTORED_SKILL_HINTS_LEAD: &str = "\nSkills that match this request (this thread may predate them; read the file before acting unless already read in this conversation):\n";
+/// How the hints open on a direct workspace-change turn, which skips the
+/// workspace memory snapshot.
+const DIRECT_WRITE_SKILL_HINTS_LEAD: &str = "\nSkills that match this request (no workspace memory is loaded for this run; read the file before acting unless already read in this conversation):\n";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RestoredSkillHints {
+struct SkillHints {
     text: String,
     /// The hinted skills' directory names, for run metrics.
     skills: Vec<String>,
 }
 
-/// A restored provider thread gets no workspace memory snapshot, so the skills
-/// that match a request made later in the thread are never named to it. This
-/// lists, by the same selection as the snapshot, at most three workflow skills
-/// that match the request strongly, each with its description and the file to
-/// read, within a fixed byte cap. None when nothing matches that well.
-fn format_restored_skill_hints(
-    workspace_dir: &Path,
-    prompt_text: &str,
-) -> Option<RestoredSkillHints> {
+/// A restored provider thread and a direct workspace-change turn get no
+/// workspace memory snapshot, so the skills that match their request are never
+/// named to them. This lists, by the same selection as the snapshot, at most
+/// three workflow skills that match the request strongly, each with its
+/// description and the file to read, after `lead`, within a fixed byte cap.
+/// None when nothing matches that well.
+fn format_skill_hints(workspace_dir: &Path, prompt_text: &str, lead: &str) -> Option<SkillHints> {
     let contexts = build_top_level_context_nodes(workspace_dir);
     if contexts.is_empty() {
         return None;
@@ -1788,7 +1794,7 @@ fn format_restored_skill_hints(
     let mut matched: Vec<SelectedContextNode> =
         select_recursive_context_nodes(&contexts, prompt_text)
             .into_iter()
-            .filter(|node| node.score >= RESTORED_SKILL_HINT_MIN_SCORE)
+            .filter(|node| node.score >= SKILL_HINT_MIN_SCORE)
             .filter(|node| {
                 by_id.get(node.id.as_str()).is_some_and(|context| {
                     context.metadata.context_kind.as_deref() == Some("workflow")
@@ -1797,11 +1803,9 @@ fn format_restored_skill_hints(
             .collect();
     matched.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
 
-    let mut text = String::from(
-        "\nSkills that match this request (this thread may predate them; read the file before acting unless already read in this conversation):\n",
-    );
+    let mut text = String::from(lead);
     let mut skills = Vec::new();
-    for node in matched.into_iter().take(RESTORED_SKILL_HINT_MAX_SKILLS) {
+    for node in matched.into_iter().take(SKILL_HINT_MAX_SKILLS) {
         let Some(context) = by_id.get(node.id.as_str()) else {
             continue;
         };
@@ -1816,7 +1820,7 @@ fn format_restored_skill_hints(
             .as_deref()
             .unwrap_or("")
             .chars()
-            .take(RESTORED_SKILL_HINT_MAX_DESCRIPTION_CHARS)
+            .take(SKILL_HINT_MAX_DESCRIPTION_CHARS)
             .collect();
         let relative = context
             .path
@@ -1826,7 +1830,7 @@ fn format_restored_skill_hints(
             "- `{name}`: {description} (read `{}` before acting unless already read in this conversation)\n",
             relative.display()
         );
-        if text.len() + line.len() > RESTORED_SKILL_HINTS_MAX_BYTES {
+        if text.len() + line.len() > SKILL_HINTS_MAX_BYTES {
             break;
         }
         text.push_str(&line);
@@ -1835,7 +1839,7 @@ fn format_restored_skill_hints(
     if skills.is_empty() {
         return None;
     }
-    Some(RestoredSkillHints { text, skills })
+    Some(SkillHints { text, skills })
 }
 
 #[cfg(test)]
@@ -8932,7 +8936,14 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             policy.append_to(&mut prompt, &mut prompt_section_metrics);
         }
         let mut loaded_learned_blocks: Vec<LoadedLearnedBlock> = Vec::new();
-        let mut restored_skill_hints: Vec<String> = Vec::new();
+        // The skills named to a turn that loads no workspace memory snapshot, and
+        // the run-metrics key they are recorded under.
+        let mut skill_hints: Option<(&'static str, Vec<String>)> = None;
+        // Neither a Personal nor a Shared Browser thread can run the shell, so
+        // naming a skill file to read gives it nothing.
+        let skill_hints_apply = include_workspace_memory
+            && !crate::personal_browser::payload_requests_personal_browser(&job.payload)
+            && !crate::shared_browser::payload_requests_shared_browser(&job.payload);
         if lead_continuation_checkpoint {
             append_prompt_section(
                 &mut prompt,
@@ -8968,6 +8979,23 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 "workspaceMemory",
                 "\nWorkspace memory snapshot skipped for this direct workspace-change run. Use the latest request, explicit file/path context, referenced-file excerpts, and concrete tools only when needed. If the user supplied exact target paths and exact contents, apply them directly with `apply_patch` instead of doing broad discovery.\n",
             );
+            // A change request often also asks for what a skill covers (show the
+            // result, keep it running); name the skills that match it strongly.
+            if skill_hints_apply
+                && let Some(hints) = format_skill_hints(
+                    workspace_dir,
+                    request_for_selection,
+                    DIRECT_WRITE_SKILL_HINTS_LEAD,
+                )
+            {
+                append_prompt_section(
+                    &mut prompt,
+                    &mut prompt_section_metrics,
+                    "directWriteSkillHints",
+                    &hints.text,
+                );
+                skill_hints = Some(("directWriteSkillHints", hints.skills));
+            }
         } else if cross_chat_context_lookup {
             append_prompt_section(
                 &mut prompt,
@@ -8997,13 +9025,13 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 "\nWorkspace memory snapshot omitted because the restored provider thread already carries the prior workspace instructions. Use tools only when the latest request needs fresh workspace evidence.\n",
             );
             // The restored thread carries the instructions of the turn it began
-            // on, not the skills that match this request; name those (a browser
-            // thread cannot run the shell, so it gets none).
-            if include_workspace_memory
-                && !crate::personal_browser::payload_requests_personal_browser(&job.payload)
-                && !crate::shared_browser::payload_requests_shared_browser(&job.payload)
-                && let Some(hints) =
-                    format_restored_skill_hints(workspace_dir, request_for_selection)
+            // on, not the skills that match this request; name those.
+            if skill_hints_apply
+                && let Some(hints) = format_skill_hints(
+                    workspace_dir,
+                    request_for_selection,
+                    RESTORED_SKILL_HINTS_LEAD,
+                )
             {
                 append_prompt_section(
                     &mut prompt,
@@ -9011,7 +9039,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                     "restoredSkillHints",
                     &hints.text,
                 );
-                restored_skill_hints = hints.skills;
+                skill_hints = Some(("restoredSkillHints", hints.skills));
             }
         } else {
             append_prompt_section(
@@ -9680,11 +9708,8 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 "promptSections".to_string(),
                 JsonValue::Object(prompt_section_metrics.clone()),
             );
-            if !restored_skill_hints.is_empty() {
-                metrics.insert(
-                    "restoredSkillHints".to_string(),
-                    json!(restored_skill_hints),
-                );
+            if let Some((key, skills)) = skill_hints.as_ref() {
+                metrics.insert((*key).to_string(), json!(skills));
             }
             if multi_agent_planning_turn {
                 metrics.insert(
@@ -9715,7 +9740,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             },
             estimated_prompt_tokens = estimate_prompt_token_count(&prompt),
             prompt_sections = %JsonValue::Object(prompt_section_metrics),
-            restored_skill_hints = ?restored_skill_hints,
+            skill_hints = ?skill_hints,
             "built Studio Codex prompt"
         );
 

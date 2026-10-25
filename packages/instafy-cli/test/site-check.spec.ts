@@ -514,9 +514,13 @@ describe("preview check: the previews skill tells the agent to run it", () => {
     const text = fs.readFileSync(skill, "utf8");
     const check = text.indexOf("instafy preview check --port <port>");
     expect(check).toBeGreaterThan(-1);
-    // before the site is shown in Studio, and before any step that exposes the port
+    // before the site is shown in Studio, and before any step that exposes the port publicly
     expect(check).toBeLessThan(text.indexOf("instafy preview open --port"));
-    expect(check).toBeLessThan(text.indexOf("Expose the preview port"));
+    const tunnel = text.indexOf("instafy tunnel start");
+    expect(tunnel).toBeGreaterThan(-1);
+    expect(check).toBeLessThan(tunnel);
+    // the person is pointed to the card only after the check
+    expect(text).toMatch(/open it from the card once `instafy preview check` passes/);
     expect(text).toMatch(/exit 4[^\n]*70[^\n]*nothing was checked/i);
   });
 });
