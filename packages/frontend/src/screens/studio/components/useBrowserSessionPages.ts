@@ -7,8 +7,11 @@ import {
 } from "../../../sdk/instafy";
 import type { BrowserSessionPage } from "./browserSessionPages";
 import { SHARED_BROWSER_HOST_WAIT_TIMEOUT_MS } from "./sharedBrowserHostAttach";
+import { useAdaptivePoll } from "../../../runtime/pollingGate";
 
 const BROWSER_SESSION_POLL_INTERVAL_MS = 2500;
+/** Nothing running and the browser not shown, or the person away for three minutes. */
+export const BROWSER_SESSION_QUIET_POLL_INTERVAL_MS = 15_000;
 /** A page read that has not answered by then is given up, so the next poll can ask again. */
 export const BROWSER_SESSION_PAGES_REQUEST_TIMEOUT_MS = 10_000;
 /** A capability read that has not answered by then is given up and asked again. */
@@ -96,6 +99,10 @@ export function useBrowserSessionPages(params: {
    * that failed is asked again only then.
    */
   pollPages?: boolean;
+  /** A run is active, the agent or another person controls, or others are here. Defaults to true. */
+  pollFast?: boolean;
+  /** The browser surface is on screen. Defaults to true. */
+  surfaceVisible?: boolean;
 }) {
   const {
     enabled,
@@ -106,6 +113,8 @@ export function useBrowserSessionPages(params: {
     suspendOnUnavailable = false,
     includePlaceholder = false,
     pollPages = true,
+    pollFast = true,
+    surfaceVisible = true,
   } = params;
   const scopeKey = `${enabled ? "enabled" : "disabled"}\u0000${browserSessionId}\u0000${projectId ?? ""}\u0000${preferRuntimeId ?? ""}\u0000${includePlaceholder ? "placeholders" : "pages"}\u0000${suspendOnUnavailable ? "suspend" : "continue"}`;
   const scopeKeyRef = useRef(scopeKey);
@@ -624,34 +633,29 @@ export function useBrowserSessionPages(params: {
     if (!enabled || !projectId || !pollPages) {
       setPageState({ scopeKey, pages: [], resolved: false });
       preferredActivePageIdRef.current = { scopeKey, pageId: null };
-      return;
     }
+  }, [enabled, pollPages, projectId, scopeKey]);
 
-    let cancelled = false;
-    const run = async () => {
-      try {
-        await refresh();
-      } catch {
-        if (!cancelled && scopeIsCurrent(scopeKey)) {
-          setPageState((current) => ({
-            scopeKey,
-            pages: current.scopeKey === scopeKey ? current.pages : [],
-            resolved: false,
-          }));
-        }
+  const pollPagesOnce = useCallback(async () => {
+    try {
+      await refresh();
+    } catch {
+      if (scopeIsCurrent(scopeKey)) {
+        setPageState((current) => ({
+          scopeKey,
+          pages: current.scopeKey === scopeKey ? current.pages : [],
+          resolved: false,
+        }));
       }
-    };
-
-    void run();
-    const intervalId = window.setInterval(() => {
-      void run();
-    }, BROWSER_SESSION_POLL_INTERVAL_MS);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(intervalId);
-    };
-  }, [enabled, pollPages, projectId, refresh, scopeIsCurrent, scopeKey]);
+    }
+  }, [refresh, scopeIsCurrent, scopeKey]);
+  useAdaptivePoll(pollPagesOnce, {
+    enabled: enabled && Boolean(projectId) && pollPages,
+    fast: pollFast,
+    fastMs: BROWSER_SESSION_POLL_INTERVAL_MS,
+    slowMs: surfaceVisible ? BROWSER_SESSION_POLL_INTERVAL_MS : BROWSER_SESSION_QUIET_POLL_INTERVAL_MS,
+    slowIdleMs: BROWSER_SESSION_QUIET_POLL_INTERVAL_MS,
+  });
 
   return {
     pages,

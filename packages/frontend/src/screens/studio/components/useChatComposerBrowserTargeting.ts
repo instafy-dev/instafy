@@ -33,6 +33,10 @@ type UseChatComposerBrowserTargetingOptions = {
    * hidden one): only then are its pages read.
    */
   sharedBrowserPagesActive?: boolean;
+  /** A run is active, someone else controls, or others are in the browser. */
+  sharedBrowserPagesPollFast?: boolean;
+  /** The browser surface is on screen. */
+  sharedBrowserSurfaceVisible?: boolean;
 };
 
 export function useChatComposerBrowserTargeting({
@@ -53,6 +57,8 @@ export function useChatComposerBrowserTargeting({
   resolvedBrowserRuntimeId,
   showStatus,
   sharedBrowserPagesActive = true,
+  sharedBrowserPagesPollFast = true,
+  sharedBrowserSurfaceVisible = true,
 }: UseChatComposerBrowserTargetingOptions) {
   const sharedBrowserTargetingEnabled = browserTransport === "shared";
   const inferredBrowserSessionPages = useMemo(() => resolveBrowserSessionPages(messages), [messages]);
@@ -88,6 +94,8 @@ export function useChatComposerBrowserTargeting({
     suspendOnUnavailable: hasHiddenBrowserSession,
     includePlaceholder: true,
     pollPages: sharedBrowserPagesActive,
+    pollFast: sharedBrowserPagesPollFast,
+    surfaceVisible: sharedBrowserSurfaceVisible,
   });
   const targetableLiveBrowserSessionPages = useMemo(
     () => liveBrowserSessionPages.filter((page) => !browserSessionPageIsPlaceholder(page)),

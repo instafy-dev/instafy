@@ -212,4 +212,71 @@ export function useGatedInterval(
   }, [activeMs, enabled, idleMs, runOnWake, wakeAfterMs]);
 }
 
+/**
+ * The next delay for a poll that is fast only while something is happening
+ * (a run, an agent in control, a pending prompt): `fastMs` while `fast` and
+ * the tab is visible (input or not, since someone may be watching), `slowMs`
+ * while the gate is active, `slowIdleMs` while it is idle, and null (no
+ * timer) while the document is hidden.
+ */
+export function adaptivePollDelay(fast: boolean, fastMs: number, slowMs: number, slowIdleMs = slowMs): number | null {
+  const state = pollingGateState();
+  if (state === "hidden") return null;
+  if (fast) return fastMs;
+  return state === "idle" ? slowIdleMs : slowMs;
+}
+
+export interface AdaptivePollOptions {
+  enabled: boolean;
+  fast: boolean;
+  fastMs: number;
+  slowMs: number;
+  slowIdleMs?: number;
+}
+
+/**
+ * Runs `callback` at once when enabled (and whenever `callback` changes),
+ * then one {@link adaptivePollDelay} after each run. A gate transition
+ * re-arms the timer against that due time, so coming back reads at once only
+ * when a read is due and quick visibility flips cost nothing extra. A change
+ * of `fast` reads at once: speeding up reads now, and slowing down still
+ * takes one trailing read before the slow cadence. `fast` is not part of any
+ * scope, so a change never resets the caller's state.
+ */
+export function useAdaptivePoll(callback: () => unknown, { enabled, fast, fastMs, slowMs, slowIdleMs = slowMs }: AdaptivePollOptions): void {
+  const fastRef = useRef(fast);
+  const kickRef = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    if (typeof window === "undefined" || !enabled) return;
+    let timer: number | null = null;
+    let cancelled = false;
+    let lastRunAt = 0;
+    const clear = () => { if (timer !== null) window.clearTimeout(timer); timer = null; };
+    const schedule = () => {
+      clear();
+      if (cancelled) return;
+      const delay = adaptivePollDelay(fastRef.current, fastMs, slowMs, slowIdleMs);
+      if (delay === null) return;
+      const wait = lastRunAt + delay - Date.now();
+      if (wait <= 0) tick();
+      else timer = window.setTimeout(tick, wait);
+    };
+    const tick = () => {
+      clear();
+      lastRunAt = Date.now();
+      try { void Promise.resolve(callback()).catch(() => {}); } catch { /* the next tick retries */ }
+      schedule();
+    };
+    kickRef.current = () => { if (!cancelled) tick(); };
+    const unsubscribe = subscribePollingGate(schedule);
+    tick();
+    return () => { cancelled = true; clear(); unsubscribe(); kickRef.current = null; };
+  }, [callback, enabled, fastMs, slowIdleMs, slowMs]);
+  useEffect(() => {
+    if (fastRef.current === fast) return;
+    fastRef.current = fast;
+    kickRef.current?.();
+  }, [fast]);
+}
+
 installPollingGate();
