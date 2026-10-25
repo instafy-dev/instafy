@@ -968,12 +968,15 @@ pub(crate) async fn process_dispatch_prompt(
     context: &RequestContext,
     request: DispatchPromptNormalized,
 ) -> Result<DispatchPromptResponse, (StatusCode, Json<ApiError>)> {
-    process_dispatch_prompt_timed(
+    // Dispatch can be nested beneath completion, recovery and worker-answer
+    // checkpoints. Heap-own its state so each caller does not embed the full
+    // dispatch future in its own stack frame; keep execution inline and scoped.
+    Box::pin(process_dispatch_prompt_timed(
         state,
         context,
         request,
         &mut DispatchPhaseTimings::default(),
-    )
+    ))
     .await
 }
 
