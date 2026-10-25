@@ -1017,13 +1017,42 @@ unless the policy is `"covered"`.
 - **Cold press.** When the space is covered and a press finds nothing to open,
   or the exact pin names the space's own machine while it is stopped or no
   longer listed, Studio first starts that machine through the generic hosted
-  ensure. It then polls status every 2 s, for at most 180 s, until the machine
-  can take work. It waits on the pinned machine or the conversation's machine
-  only when that is the space's own Instafy Cloud machine, never a Desktop,
-  self-hosted or separate browser session machine; otherwise it waits for the
-  first live host. If the machine comes up without `sharedBrowserHost`, Studio
-  takes the legacy path at once. A press for Instafy's browser may take up to
-  four minutes in all; the browser on this device keeps two.
+  ensure. It then reads status until the machine can take work: every 2 s for
+  the first minute after the press, then every 10 s, for at most ten minutes
+  from the press (the controller gives up on a launch that never comes up after
+  15 minutes). A first launch on a new node can take minutes while it pulls
+  the image. A minute after the press, also while the ensure has not answered
+  yet, the view says "Still starting this space's machine…"; its pill and its
+  lack of a button stay as they were. Once the machine is up, the view says
+  "Opening Instafy's browser…" again while that browser starts. It waits on the pinned
+  machine or the conversation's machine only when that is the space's own
+  Instafy Cloud machine, never a Desktop, self-hosted or separate browser
+  session machine; otherwise it waits for the first live host. It waits only
+  while that machine's launch is on its way: a booting status, never seen on
+  this launch, a `launchRequestedAt`, and no person's stop since. A launch the
+  controller replaced keeps its runtime id with a new `launchRequestedAt`, so
+  the wait goes on. The ensure's two 45 s attempts can both time out behind the
+  controller's launch lock while the launch goes on, so an ensure that did not
+  answer is followed by one status read: when the launch is on its way, the
+  wait goes on; otherwise (a credits or capacity refusal leaves no launch) the
+  view says "This space's machine did not start. Try again." at once. Once a
+  launch is known, two status reads in a row that show none on its way
+  (stopped or offline without a launch, a person's stop, or the machine gone)
+  end the wait with the same sentence; one such read, as while a launch is
+  replaced, is ridden out, and a status read that fails counts as neither. If
+  the machine comes up without `sharedBrowserHost`, Studio takes the legacy
+  path at once. A press on a card still waits at most four minutes before it
+  offers its button again; the view keeps waiting meanwhile. The browser on
+  this device keeps two.
+- **A machine that comes up after the press gave up.** When the view says
+  "This space's machine did not start. Try again." and, within five minutes of
+  that, a runtime status refresh (registration or health) shows the
+  conversation's machine as a live host, Studio asks the view once to attach
+  by itself, as for a card. That attempt is Studio's own: it may start the
+  browser on the machine but never a machine, and it never ends with that
+  sentence again, so it cannot repeat. It reads nothing by itself, and it does
+  nothing while the view is off, cannot open, is closed, or shows the browser
+  on this device.
 - **Press on a card.** A press never waits silently. Once the browser view
   shows an error, the card says so at once, in the sentence the view shows
   when it is one of the view's own (such as "Instafy's browser is off."),
@@ -1148,6 +1177,7 @@ at most one button, and a neutral status pill.
 |---|---|---|---|
 | live | none | none | Ready (screen readers only) |
 | opening | "Opening Instafy's browser…" | none | Starting… |
+| opening, after a minute of a press starting the space's machine | "Still starting this space's machine…" | none | Starting… |
 | off | "Instafy's browser is off." | Open browser | Off |
 | failed | "Instafy's browser did not open. Try again." | Try again | Off |
 | failed (machine) | "This space's machine did not start. Try again." | Try again | Off |

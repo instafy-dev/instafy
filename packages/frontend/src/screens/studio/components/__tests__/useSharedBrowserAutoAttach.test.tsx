@@ -6,7 +6,10 @@ import type { SharedBrowserHostSnapshot } from "../../../../services/runtimeCont
 
 vi.mock("../../../../sdk/instafy", () => ({ controllerClient: { browserSessions: { fetchHost: vi.fn() } } }));
 
-import { useSharedBrowserAutoAttach } from "../useSharedBrowserAutoAttach";
+import type { HostedBrowserViewKind } from "../hostedBrowserViewState";
+import { SHARED_BROWSER_HOST_COPY, SPACE_MACHINE_LATE_READY_WINDOW_MS } from "../sharedBrowserHostAttach";
+import { sharedBrowserLateAttachInputs, useSharedBrowserAutoAttach } from "../useSharedBrowserAutoAttach";
+import type { BrowserTransport } from "../usePersonalBrowserBridge";
 import { SHARED_BROWSER_HOST_SNAPSHOT_POLL_MS, useSharedBrowserHostSnapshot } from "../useSharedBrowserHostSnapshot";
 
 function snapshot(overrides: Partial<SharedBrowserHostSnapshot> = {}): SharedBrowserHostSnapshot {
@@ -27,7 +30,11 @@ describe("useSharedBrowserAutoAttach", () => {
     attach: ReturnType<typeof useSharedBrowserAutoAttach>;
   } | null = null;
 
-  function Harness({ open, off, writer }: { open: boolean; off: boolean; writer: boolean }) {
+  type View = { kind: HostedBrowserViewKind | null; error: { message: string; atMs: number } | null };
+  /** As ChatPanel wires it when `transport` is set, else with `view` and `hostRuntimeId` as given. */
+  function Harness({ open, off, writer, view, hostRuntimeId, transport }: {
+    open: boolean; off: boolean; writer: boolean; view?: View; hostRuntimeId?: string | null; transport?: BrowserTransport;
+  }) {
     const host = useSharedBrowserHostSnapshot({
       projectId: "project-1",
       runtimeId: "host-1",
@@ -36,13 +43,28 @@ describe("useSharedBrowserAutoAttach", () => {
       poll: off,
       fetchHost,
     });
-    const attach = useSharedBrowserAutoAttach({ open, off, host });
+    const attach = useSharedBrowserAutoAttach({
+      open,
+      off,
+      host,
+      ...(transport
+        ? sharedBrowserLateAttachInputs({
+          transport,
+          kind: view?.kind ?? null,
+          error: view?.error ?? null,
+          hostRuntimeId: hostRuntimeId ?? null,
+        })
+        : { view, hostRuntimeId }),
+    });
     latest = { host, attach };
     return null;
   }
-  async function render(props: { open?: boolean; off: boolean; writer?: boolean }) {
+  async function render(props: {
+    open?: boolean; off: boolean; writer?: boolean; view?: View; hostRuntimeId?: string | null; transport?: BrowserTransport;
+  }) {
     await act(async () => {
-      root.render(<Harness open={props.open ?? true} off={props.off} writer={props.writer ?? true} />);
+      root.render(<Harness open={props.open ?? true} off={props.off} writer={props.writer ?? true}
+        view={props.view} hostRuntimeId={props.hostRuntimeId} transport={props.transport} />);
     });
     await advance(0);
   }
@@ -140,6 +162,67 @@ describe("useSharedBrowserAutoAttach", () => {
     expect(token()).toBe(3);
   });
 
+  describe("after a press gave up on the space's machine", () => {
+    const machineFailed = (atMs: number): View => ({
+      kind: "failed", error: { message: SHARED_BROWSER_HOST_COPY.machineDidNotStart, atMs },
+    });
+
+    it("attaches exactly once when that machine becomes a live host within five minutes", async () => {
+      const failedAt = Date.now();
+      await render({ off: false, view: machineFailed(failedAt), hostRuntimeId: null });
+      expect(token()).toBe(0);
+      // A runtime status refresh shows the machine up four minutes later.
+      vi.setSystemTime(failedAt + 4 * 60_000);
+      await render({ off: false, view: machineFailed(failedAt), hostRuntimeId: "host-1" });
+      expect(token()).toBe(1);
+      await render({ off: false, view: machineFailed(failedAt), hostRuntimeId: "host-1" });
+      await render({ off: false, view: machineFailed(failedAt), hostRuntimeId: null });
+      await render({ off: false, view: machineFailed(failedAt), hostRuntimeId: "host-1" });
+      expect(token()).toBe(1);
+      // Studio's attempt never ends with the machine's sentence again.
+      await render({ off: false, view: { kind: "opening", error: null }, hostRuntimeId: "host-1" });
+      await render({ off: false, view: { kind: "failed", error: { message: SHARED_BROWSER_HOST_COPY.didNotOpen, atMs: Date.now() } }, hostRuntimeId: "host-1" });
+      expect(token()).toBe(1);
+      // No reading of its own: it rides runtime status refreshes.
+      expect(fetchHost).not.toHaveBeenCalled();
+    });
+
+    it("attaches at once when the machine is already a live host as the view fails", async () => {
+      await render({ off: false, view: machineFailed(Date.now()), hostRuntimeId: "host-1" });
+      expect(token()).toBe(1);
+    });
+
+    it("never attaches once the window has passed", async () => {
+      const failedAt = Date.now();
+      await render({ off: false, view: machineFailed(failedAt), hostRuntimeId: null });
+      vi.setSystemTime(failedAt + SPACE_MACHINE_LATE_READY_WINDOW_MS + 1_000);
+      await render({ off: false, view: machineFailed(failedAt), hostRuntimeId: "host-1" });
+      expect(token()).toBe(0);
+    });
+
+    it("attaches once through ChatPanel's inputs, and only while Instafy's browser is shown", async () => {
+      const failedAt = Date.now();
+      await render({ off: false, transport: "personal", view: machineFailed(failedAt), hostRuntimeId: "host-1" });
+      expect(token()).toBe(0);
+      await render({ off: false, transport: "shared", view: machineFailed(failedAt), hostRuntimeId: null });
+      expect(token()).toBe(0);
+      vi.setSystemTime(failedAt + 2 * 60_000);
+      await render({ off: false, transport: "shared", view: machineFailed(failedAt), hostRuntimeId: "host-1" });
+      expect(token()).toBe(1);
+      await render({ off: false, transport: "shared", view: machineFailed(failedAt), hostRuntimeId: "host-1" });
+      expect(token()).toBe(1);
+    });
+
+    it("never attaches while the view is off, blocked or closed", async () => {
+      const error = { message: SHARED_BROWSER_HOST_COPY.machineDidNotStart, atMs: Date.now() };
+      await render({ off: false, view: { kind: "blocked", error }, hostRuntimeId: "host-1" });
+      await render({ off: false, view: { kind: "off", error }, hostRuntimeId: "host-1" });
+      await render({ open: false, off: false, view: machineFailed(error.atMs), hostRuntimeId: "host-1" });
+      await render({ off: false, view: undefined, hostRuntimeId: "host-1" });
+      expect(token()).toBe(0);
+    });
+  });
+
   it("reads nothing and asks nothing while the view is not off", async () => {
     fetchHost.mockResolvedValue(snapshot({ state: "ready", generation: "generation-1", agentRunActive: true }));
     await render({ off: false });
@@ -147,5 +230,21 @@ describe("useSharedBrowserAutoAttach", () => {
     expect(fetchHost).not.toHaveBeenCalled();
     await act(async () => { await latest!.host.refresh({ force: true }); });
     expect(token()).toBe(0);
+  });
+});
+
+describe("sharedBrowserLateAttachInputs", () => {
+  const error = { message: SHARED_BROWSER_HOST_COPY.machineDidNotStart, atMs: 1 };
+
+  it("hands on what Instafy's browser view shows and the conversation's live host", () => {
+    expect(sharedBrowserLateAttachInputs({ transport: "shared", kind: "failed", error, hostRuntimeId: "host-1" }))
+      .toEqual({ view: { kind: "failed", error }, hostRuntimeId: "host-1" });
+    expect(sharedBrowserLateAttachInputs({ transport: "shared", kind: null, error: null, hostRuntimeId: null }))
+      .toEqual({ view: { kind: null, error: null }, hostRuntimeId: null });
+  });
+
+  it("hands on nothing while the browser on this device is the one shown", () => {
+    expect(sharedBrowserLateAttachInputs({ transport: "personal", kind: "failed", error, hostRuntimeId: "host-1" }))
+      .toEqual({ view: undefined, hostRuntimeId: null });
   });
 });

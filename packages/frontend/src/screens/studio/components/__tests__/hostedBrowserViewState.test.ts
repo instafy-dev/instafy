@@ -4,13 +4,14 @@ import { BROWSER_CHROME_STATE_LABELS } from "../BrowserChromeShell";
 import {
   HOSTED_BROWSER_SETUP_COPY,
   HOSTED_BROWSER_VIEW_ACTION,
+  hostedBrowserAttachAfterLateMachine,
   hostedBrowserAttachWhileOff,
   hostedBrowserPagesActive,
   hostedBrowserStartedByOther,
   hostedBrowserViewState,
   type HostedBrowserFailure,
 } from "../hostedBrowserViewState";
-import { SHARED_BROWSER_HOST_COPY } from "../sharedBrowserHostAttach";
+import { SHARED_BROWSER_HOST_COPY, SPACE_MACHINE_LATE_READY_WINDOW_MS } from "../sharedBrowserHostAttach";
 
 type Status = Parameters<typeof hostedBrowserViewState>[0]["status"];
 
@@ -44,6 +45,19 @@ describe("hostedBrowserViewState", () => {
       { kind: "failed", sentence: HOSTED_BROWSER_SETUP_COPY, action: "Try again" }],
   ] as const)("%s", (_name, state, expected) => {
     expect(state).toEqual(expected);
+  });
+
+  it("says the space's machine is still starting once its start has taken over a minute, and only while opening", () => {
+    const slow = (status: Status, failure: HostedBrowserFailure | null = null, hasConnection = false) =>
+      hostedBrowserViewState({ status, failure, hasConnection, machineStartSlow: true });
+    expect(slow("connecting")).toEqual({ kind: "opening", sentence: "Still starting this space's machine…", action: null });
+    expect(slow("idle")).toEqual({ kind: "opening", sentence: SHARED_BROWSER_HOST_COPY.stillStartingMachine, action: null });
+    // The pill and the action follow the kind, which does not change.
+    expect(slow("connected", null, true)).toEqual({ kind: "live", sentence: null, action: null });
+    expect(slow("error", { kind: "machine", reason: "space machine did not come up in time" })).toEqual(
+      { kind: "failed", sentence: SHARED_BROWSER_HOST_COPY.machineDidNotStart, action: "Try again" });
+    expect(hostedBrowserViewState({ status: "connecting", failure: null, hasConnection: false, machineStartSlow: false }).sentence)
+      .toBe(SHARED_BROWSER_HOST_COPY.opening);
   });
 
   it("never shows a raw reason as its sentence unless the reason is a sentence of its own", () => {
@@ -120,6 +134,35 @@ describe("hostedBrowserAttachWhileOff", () => {
     expect(hostedBrowserAttachWhileOff(input({ snapshot: snapshot() }))).toBe(false);
     expect(hostedBrowserAttachWhileOff(input({ attachedGeneration: "gen-1" }))).toBe(false);
     expect(hostedBrowserAttachWhileOff(input({ attachedGeneration: "gen-0" }))).toBe(true);
+  });
+});
+
+describe("hostedBrowserAttachAfterLateMachine", () => {
+  const failedAt = 1_000_000;
+  const input = (overrides: Partial<Parameters<typeof hostedBrowserAttachAfterLateMachine>[0]> = {}) => ({
+    kind: "failed" as const, error: { message: SHARED_BROWSER_HOST_COPY.machineDidNotStart, atMs: failedAt },
+    hostRuntimeId: "space", nowMs: failedAt + 60_000, attachedForAtMs: null, ...overrides,
+  });
+
+  it("attaches once the machine a press gave up on is a live host, within five minutes of the failure", () => {
+    expect(hostedBrowserAttachAfterLateMachine(input())).toBe(true);
+    expect(hostedBrowserAttachAfterLateMachine(input({ nowMs: failedAt + SPACE_MACHINE_LATE_READY_WINDOW_MS }))).toBe(true);
+    expect(SPACE_MACHINE_LATE_READY_WINDOW_MS).toBe(5 * 60_000);
+  });
+
+  it("never attaches after the window, twice for one failure, or before the machine is a live host", () => {
+    expect(hostedBrowserAttachAfterLateMachine(input({ nowMs: failedAt + SPACE_MACHINE_LATE_READY_WINDOW_MS + 1 }))).toBe(false);
+    expect(hostedBrowserAttachAfterLateMachine(input({ attachedForAtMs: failedAt }))).toBe(false);
+    expect(hostedBrowserAttachAfterLateMachine(input({ attachedForAtMs: failedAt - 1 }))).toBe(true);
+    expect(hostedBrowserAttachAfterLateMachine(input({ hostRuntimeId: null }))).toBe(false);
+  });
+
+  it("only follows the machine's own failure, never a view that is off, blocked or failed otherwise", () => {
+    for (const kind of ["off", "blocked", "opening", "live", null] as const) {
+      expect(hostedBrowserAttachAfterLateMachine(input({ kind }))).toBe(false);
+    }
+    expect(hostedBrowserAttachAfterLateMachine(input({ error: { message: SHARED_BROWSER_HOST_COPY.didNotOpen, atMs: failedAt } }))).toBe(false);
+    expect(hostedBrowserAttachAfterLateMachine(input({ error: null }))).toBe(false);
   });
 });
 

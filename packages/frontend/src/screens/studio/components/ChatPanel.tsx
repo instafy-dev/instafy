@@ -414,7 +414,7 @@ import {
   type SharedBrowserPresence,
 } from "./browserAutoStart";
 import { useSharedBrowserHostSnapshot } from "./useSharedBrowserHostSnapshot";
-import { useSharedBrowserAutoAttach } from "./useSharedBrowserAutoAttach";
+import { sharedBrowserLateAttachInputs, useSharedBrowserAutoAttach } from "./useSharedBrowserAutoAttach";
 import { hostedBrowserPagesActive, type HostedBrowserViewKind } from "./hostedBrowserViewState";
 import { isSkillSetupConversation } from "./skillSetupConversation";
 import { sharedBrowserConversationRunIds } from "./browserHandoffRouting";
@@ -4619,7 +4619,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     enabled: (browserAutoStartAllowed || sharedBrowserViewOff) && conversationBrowserHostRuntimeId !== null,
     poll: browserAutoWaiting || sharedBrowserViewOff,
   });
-  // Studio asks the view to attach again by itself (see autoAttachToken).
+  // Studio asks the view to attach again by itself (see autoAttachToken),
+  // also once when the machine a press gave up on comes up a little later.
   const {
     autoAttachToken: sharedBrowserAutoAttachToken,
     requestAutoAttach: requestSharedBrowserAutoAttach,
@@ -4627,6 +4628,12 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     open: browserSessionOpen,
     off: sharedBrowserViewOff,
     host: sharedBrowserHost,
+    ...sharedBrowserLateAttachInputs({
+      transport: browserTransport,
+      kind: sharedBrowserViewKind,
+      error: sharedBrowserViewError,
+      hostRuntimeId: conversationBrowserHostRuntimeId,
+    }),
   });
   const sharedBrowserHostKey = sharedBrowserHost.snapshot
     ? [
