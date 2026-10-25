@@ -100,6 +100,7 @@ struct AgentSecretInventoryItem {
 struct AgentSecretsResponse {
     env: JsonValue,
     inventory: Vec<AgentSecretInventoryItem>,
+    runtime_settings: runtime_contracts::multi_agent::AgentRuntimeSettings,
 }
 
 pub(crate) fn router() -> Router<AppState> {
@@ -1335,6 +1336,16 @@ async fn agent_secrets(
         return Err(unauthorized("job lease is no longer active"));
     }
 
+    // Resolve execution policy only after exact live-job authorization. Neither
+    // prompt metadata nor granted environment variables can set this value.
+    let settings = crate::multi_agent_settings::load(&transaction, &project_id).await?;
+    let runtime_settings = runtime_contracts::multi_agent::AgentRuntimeSettings {
+        max_native_subagents: settings
+            .max_native_subagents
+            .try_into()
+            .map_err(internal_error)?,
+    };
+
     let payload: JsonValue = row.get::<_, PgJson<JsonValue>>("payload").0;
     let credential_id: Option<Uuid> = row.get("credential_id");
     let intent: Option<String> = row.get("intent");
@@ -1361,6 +1372,7 @@ async fn agent_secrets(
         return Ok(Json(AgentSecretsResponse {
             env: JsonValue::Object(env),
             inventory: Vec::new(),
+            runtime_settings,
         }));
     }
 
@@ -1528,6 +1540,7 @@ async fn agent_secrets(
     Ok(Json(AgentSecretsResponse {
         env: JsonValue::Object(env),
         inventory,
+        runtime_settings,
     }))
 }
 

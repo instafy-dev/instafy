@@ -13,6 +13,7 @@ use anyhow::{Context, Result, bail};
 use codex_core::config::{Config, ManagedFeatures};
 use codex_features::{FEATURES, Feature};
 use codex_protocol::openai_models::{ModelInfo, ModelsResponse};
+use runtime_contracts::multi_agent::NativeSubagentLimit;
 
 /// The largest context window Instafy bills for. Upstream's catalog lets some
 /// models grow to 872k tokens on request; runtime turns never do.
@@ -194,6 +195,19 @@ pub(crate) fn apply_runtime_codex_policy(config: &mut Config, bounded_browser: b
     }
 
     apply_feature_policy(&mut config.features, bounded_browser)
+}
+
+/// Pin the controller's child capacity after local configuration has loaded. V2
+/// counts the parent as well; V1 counts only children. This changes no tool or
+/// permission gate, so browser and isolated-worker turns remain unable to spawn.
+pub(crate) fn apply_native_subagent_limit(config: &mut Config, limit: Option<NativeSubagentLimit>) {
+    // Standalone embedded callers have no controller lease and retain their
+    // operator config. Every leased job supplies a validated value, including
+    // the default for legacy controllers or the minimum when its settings fetch fails.
+    let Some(limit) = limit else { return };
+    let children = limit.get() as usize;
+    config.agent_max_threads = Some(children);
+    config.multi_agent_v2.max_concurrent_threads_per_session = children + 1;
 }
 
 /// Applies the catalog part of the policy to every model the run could select,
@@ -1013,6 +1027,46 @@ mod tests {
                 .any(|tool| tool == "clock")
         );
         assert!(!config.features.enabled(Feature::SleepTool));
+    }
+
+    #[tokio::test]
+    async fn native_subagent_limit_overrides_local_capacity_without_enabling_agents() {
+        let (_home, mut config) = load_config(
+            "gpt-6-luna", None,
+            "[agents]\nmax_threads = 40\n[features.multi_agent_v2]\nenabled = true\nmax_concurrent_threads_per_session = 41\n",
+        ).await;
+        apply_native_subagent_limit(&mut config, None);
+        assert_eq!(config.agent_max_threads, Some(40));
+        assert_eq!(config.multi_agent_v2.max_concurrent_threads_per_session, 41);
+        apply_runtime_codex_policy(&mut config, false).unwrap();
+        apply_native_subagent_limit(
+            &mut config,
+            Some(NativeSubagentLimit::try_from(10).unwrap()),
+        );
+        assert_eq!(config.agent_max_threads, Some(10));
+        assert_eq!(config.multi_agent_v2.max_concurrent_threads_per_session, 11);
+
+        // The next job with a legacy controller must restore the default, even
+        // when the previous job or a workspace config requested a larger limit.
+        apply_native_subagent_limit(&mut config, Some(NativeSubagentLimit::default()));
+        assert_eq!(config.agent_max_threads, Some(3));
+        assert_eq!(config.multi_agent_v2.max_concurrent_threads_per_session, 4);
+
+        apply_runtime_codex_policy(&mut config, true).unwrap();
+        let restricted_features = config.features.clone();
+        apply_native_subagent_limit(
+            &mut config,
+            Some(NativeSubagentLimit::try_from(64).unwrap()),
+        );
+        assert!(!config.agents_enabled);
+        for feature in [Feature::Collab, Feature::MultiAgentV2, Feature::ShellTool] {
+            assert_eq!(
+                config.features.enabled(feature),
+                restricted_features.enabled(feature)
+            );
+        }
+        assert_eq!(config.agent_max_threads, Some(64));
+        assert_eq!(config.multi_agent_v2.max_concurrent_threads_per_session, 65);
     }
 
     #[tokio::test]

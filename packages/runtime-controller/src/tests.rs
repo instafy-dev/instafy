@@ -1943,7 +1943,8 @@ async fn create_runtime_spread_scope_tables(client: &tokio_postgres::Client) -> 
             CREATE TEMP TABLE project_multi_agent_settings (
                 project_id uuid PRIMARY KEY,
                 max_agents_per_plan integer NOT NULL DEFAULT 64,
-                max_concurrent_agents integer NOT NULL DEFAULT 8
+                max_concurrent_agents integer NOT NULL DEFAULT 8,
+                max_native_subagents integer NOT NULL DEFAULT 3
             );
             CREATE TEMP TABLE runtimes (
                 id uuid PRIMARY KEY,
@@ -14328,7 +14329,8 @@ async fn lease_next_agent_job_scopes_grouped_runtime_spread_to_plan_runtimes() -
             CREATE TEMP TABLE project_multi_agent_settings (
                 project_id uuid PRIMARY KEY,
                 max_agents_per_plan integer NOT NULL DEFAULT 64,
-                max_concurrent_agents integer NOT NULL DEFAULT 8
+                max_concurrent_agents integer NOT NULL DEFAULT 8,
+                max_native_subagents integer NOT NULL DEFAULT 3
             );
             CREATE TEMP TABLE runtimes (
                 id uuid PRIMARY KEY,

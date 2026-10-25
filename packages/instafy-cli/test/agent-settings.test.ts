@@ -72,3 +72,53 @@ describe("interactive multi-agent settings", () => {
     expect(prompt).not.toHaveBeenCalled();
   });
 });
+
+
+describe("native helper settings", () => {
+  const nativeSettings = {
+    ...settings,
+    maxNativeSubagents: 3,
+    limits: { ...settings.limits, maxNativeSubagents: { min: 1, max: 64, default: 3 } },
+  };
+
+  it("patches only the native limit and displays its separate scope", async () => {
+    request.mockResolvedValueOnce(nativeSettings).mockResolvedValueOnce({ ...nativeSettings, maxNativeSubagents: 10 });
+    await agentSettings({ project: "space-id", maxNativeSubagents: "10" });
+    expect(request).toHaveBeenLastCalledWith(expect.objectContaining({ method: "PATCH", jsonBody: { maxNativeSubagents: 10 } }));
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("native helpers per parent (excluding the parent): 10"));
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("tracked workers across this space: 8"));
+  });
+
+  it("edits the advertised native limit with controller-provided bounds", async () => {
+    request.mockResolvedValue({ ...nativeSettings, limits: { ...nativeSettings.limits, maxNativeSubagents: { min: 1, max: 16, default: 3 } } });
+    prompt.mockResolvedValueOnce("64").mockResolvedValueOnce("8").mockResolvedValueOnce("10");
+    await agentSettings({ project: "space-id", interactive: true });
+    expect(prompt.mock.calls.map(([options]) => options.defaultValue)).toEqual(["64", "8", "3"]);
+    expect(prompt.mock.calls[2][0].validate!("17")).toBe("Enter a whole number from 1 to 16.");
+    expect(request).toHaveBeenLastCalledWith(expect.objectContaining({ method: "PATCH", jsonBody: { maxNativeSubagents: 10 } }));
+  });
+
+  it("cancels the entire interactive edit at the native setting", async () => {
+    request.mockResolvedValue(nativeSettings);
+    prompt.mockResolvedValueOnce("100").mockResolvedValueOnce("12").mockResolvedValueOnce(Symbol("cancel"));
+    await expect(agentSettings({ project: "space-id", interactive: true })).rejects.toThrow("No settings were changed");
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    settings,
+    { ...settings, maxNativeSubagents: 3 },
+    { ...settings, limits: nativeSettings.limits },
+  ])("rejects an unadvertised native flag without sending any partial patch", async (response) => {
+    request.mockResolvedValue(response);
+    await expect(agentSettings({ project: "space-id", maxConcurrentAgents: "12", maxNativeSubagents: "10" })).rejects.toThrow("does not support --max-native-subagents");
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledWith(expect.objectContaining({ method: "GET" }));
+  });
+
+  it("rejects a native value beyond the controller's limit before patching", async () => {
+    request.mockResolvedValue(nativeSettings);
+    await expect(agentSettings({ project: "space-id", maxNativeSubagents: "65" })).rejects.toThrow("between 1 and 64");
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+});

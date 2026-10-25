@@ -184,6 +184,41 @@ async fn agent_secrets_only_releases_to_current_runtime_owning_live_job() -> any
             let (status, body) = request_secrets(&app, &token, json!({ "job_id": job_id, "touch": false })).await?;
             anyhow::ensure!(status == StatusCode::OK, "strict={strict_mode}: {status}: {body}");
             anyhow::ensure!(body["env"]["SECURITY_TEST_SECRET"] == "private-secret-marker");
+            assert_eq!(body["runtimeSettings"], json!({"maxNativeSubagents": 3}));
+
+            // Every parent path receives current controller policy, independently of
+            // agent identity, client-supplied metadata, and requested settings.
+            pool.get().await?.execute(
+                "insert into project_multi_agent_settings (project_id, max_native_subagents) values ($1, 10)",
+                &[&project_id],
+            ).await?;
+            for agent in [
+                json!({"agent": {"handle": "secrets-test-agent"}}),
+                json!({"agent": {"handle": "secrets-test-agent"}, "multiAgentPlan": {"role": "lead"}}),
+                json!({}),
+            ] {
+                let mut metadata = agent;
+                metadata["multiAgentSettings"] = json!({"maxNativeSubagents": 64});
+                metadata["runtimeSettings"] = json!({"maxNativeSubagents": 64});
+                pool.get().await?.execute(
+                    "update agent_jobs set payload = $2 where id = $1",
+                    &[&job_id, &json!({"metadata": metadata, "runtimeSettings": {"maxNativeSubagents": 64}})],
+                ).await?;
+                let (status, body) = request_secrets(&app, &token, json!({
+                    "job_id": job_id, "touch": false,
+                    "runtimeSettings": {"maxNativeSubagents": 64}
+                })).await?;
+                assert_eq!(status, StatusCode::OK, "{body}");
+                assert_eq!(body["runtimeSettings"], json!({"maxNativeSubagents": 10}));
+            }
+            {
+                let connection = pool.get().await?;
+                connection.execute("delete from project_multi_agent_settings where project_id = $1", &[&project_id]).await?;
+                connection.execute(
+                    "update agent_jobs set payload = $2 where id = $1",
+                    &[&job_id, &json!({"metadata": {"agent": {"handle": "secrets-test-agent"}}})],
+                ).await?;
+            }
 
             for (case, owner, expiry, job_status, runtime_status, expected) in [
                 ("unowned", None, Some(Utc::now() + Duration::minutes(10)), "leased", "ready", StatusCode::UNAUTHORIZED),

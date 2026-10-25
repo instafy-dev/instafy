@@ -6,7 +6,7 @@ use axum::{
 };
 use runtime_contracts::multi_agent::{
     MultiAgentSettings, DEFAULT_MAX_AGENTS_PER_PLAN, DEFAULT_MAX_CONCURRENT_AGENTS,
-    MAX_AGENTS_PER_PLAN, MAX_CONCURRENT_AGENTS,
+    DEFAULT_MAX_NATIVE_SUBAGENTS, MAX_AGENTS_PER_PLAN, MAX_CONCURRENT_AGENTS, MAX_NATIVE_SUBAGENTS,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -47,13 +47,14 @@ pub(crate) async fn load(
     project_id: &Uuid,
 ) -> Result<MultiAgentSettings, (StatusCode, Json<ApiError>)> {
     let row = transaction.query_opt(
-        "select max_agents_per_plan, max_concurrent_agents from project_multi_agent_settings where project_id = $1",
+        "select max_agents_per_plan, max_concurrent_agents, max_native_subagents from project_multi_agent_settings where project_id = $1",
         &[project_id],
     ).await.map_err(|e| internal_error(format!("failed to load team settings: {e}")))?;
     let settings = row
         .map(|row| MultiAgentSettings {
             max_agents_per_plan: row.get::<_, i32>("max_agents_per_plan") as u32,
             max_concurrent_agents: row.get::<_, i32>("max_concurrent_agents") as u32,
+            max_native_subagents: row.get::<_, i32>("max_native_subagents") as u32,
         })
         .unwrap_or_default();
     settings.validate().map_err(internal_error)
@@ -99,10 +100,12 @@ fn response(settings: MultiAgentSettings, can_manage: bool) -> Value {
     json!({
         "maxAgentsPerPlan": settings.max_agents_per_plan,
         "maxConcurrentAgents": settings.max_concurrent_agents,
+        "maxNativeSubagents": settings.max_native_subagents,
         "canManage": can_manage,
         "limits": {
             "maxAgentsPerPlan": { "min": 1, "max": MAX_AGENTS_PER_PLAN, "default": DEFAULT_MAX_AGENTS_PER_PLAN },
-            "maxConcurrentAgents": { "min": 1, "max": MAX_CONCURRENT_AGENTS, "default": DEFAULT_MAX_CONCURRENT_AGENTS }
+            "maxConcurrentAgents": { "min": 1, "max": MAX_CONCURRENT_AGENTS, "default": DEFAULT_MAX_CONCURRENT_AGENTS },
+            "maxNativeSubagents": { "min": 1, "max": MAX_NATIVE_SUBAGENTS, "default": DEFAULT_MAX_NATIVE_SUBAGENTS }
         }
     })
 }
@@ -140,6 +143,8 @@ struct SettingsPatch {
     max_agents_per_plan: Option<u32>,
     #[serde(default, deserialize_with = "present_integer")]
     max_concurrent_agents: Option<u32>,
+    #[serde(default, deserialize_with = "present_integer")]
+    max_native_subagents: Option<u32>,
 }
 
 fn present_integer<'de, D: serde::Deserializer<'de>>(
@@ -153,9 +158,12 @@ impl SettingsPatch {
         self,
         current: MultiAgentSettings,
     ) -> Result<MultiAgentSettings, (StatusCode, Json<ApiError>)> {
-        if self.max_agents_per_plan.is_none() && self.max_concurrent_agents.is_none() {
+        if self.max_agents_per_plan.is_none()
+            && self.max_concurrent_agents.is_none()
+            && self.max_native_subagents.is_none()
+        {
             return Err(bad_request(
-                "Provide maxAgentsPerPlan or maxConcurrentAgents",
+                "Provide maxAgentsPerPlan, maxConcurrentAgents or maxNativeSubagents",
             ));
         }
         MultiAgentSettings {
@@ -165,6 +173,9 @@ impl SettingsPatch {
             max_concurrent_agents: self
                 .max_concurrent_agents
                 .unwrap_or(current.max_concurrent_agents),
+            max_native_subagents: self
+                .max_native_subagents
+                .unwrap_or(current.max_native_subagents),
         }
         .validate()
         .map_err(bad_request)
@@ -202,11 +213,12 @@ async fn update(
     lock_capacity(&transaction, &project_id).await?;
     let settings = patch.apply(load(&transaction, &project_id).await?)?;
     transaction.execute(
-        "insert into project_multi_agent_settings (project_id, max_agents_per_plan, max_concurrent_agents, updated_by)
-         values ($1, $2, $3, $4) on conflict (project_id) do update set
+        "insert into project_multi_agent_settings (project_id, max_agents_per_plan, max_concurrent_agents, max_native_subagents, updated_by)
+         values ($1, $2, $3, $4, $5) on conflict (project_id) do update set
          max_agents_per_plan = excluded.max_agents_per_plan, max_concurrent_agents = excluded.max_concurrent_agents,
+         max_native_subagents = excluded.max_native_subagents,
          updated_by = excluded.updated_by, updated_at = now()",
-        &[&project_id, &(settings.max_agents_per_plan as i32), &(settings.max_concurrent_agents as i32), &context.user_id],
+        &[&project_id, &(settings.max_agents_per_plan as i32), &(settings.max_concurrent_agents as i32), &(settings.max_native_subagents as i32), &context.user_id],
     ).await.map_err(|e| internal_error(format!("failed to save team settings: {e}")))?;
     transaction
         .commit()
@@ -227,7 +239,22 @@ mod tests {
             patch.apply(MultiAgentSettings::default()).unwrap(),
             MultiAgentSettings {
                 max_agents_per_plan: 64,
-                max_concurrent_agents: 2
+                max_concurrent_agents: 2,
+                max_native_subagents: 3,
+            }
+        );
+        let patch: SettingsPatch =
+            serde_json::from_value(json!({"maxNativeSubagents": 10})).unwrap();
+        let current = MultiAgentSettings {
+            max_agents_per_plan: 128,
+            max_concurrent_agents: 2,
+            max_native_subagents: 3,
+        };
+        assert_eq!(
+            patch.apply(current).unwrap(),
+            MultiAgentSettings {
+                max_native_subagents: 10,
+                ..current
             }
         );
         for value in [
@@ -235,6 +262,8 @@ mod tests {
             json!({"maxAgentsPerPlan":0}),
             json!({"maxAgentsPerPlan":257}),
             json!({"maxConcurrentAgents":65}),
+            json!({"maxNativeSubagents":0}),
+            json!({"maxNativeSubagents":65}),
         ] {
             assert!(serde_json::from_value::<SettingsPatch>(value)
                 .unwrap()
@@ -246,6 +275,10 @@ mod tests {
             json!({"maxAgentsPerPlan":1.5}),
             json!({"maxConcurrentAgents":-1}),
             json!({"maxConcurrentAgents":"4"}),
+            json!({"maxNativeSubagents":null}),
+            json!({"maxNativeSubagents":-1}),
+            json!({"maxNativeSubagents":1.5}),
+            json!({"maxNativeSubagents":"10"}),
             json!({"other":4}),
         ] {
             assert!(serde_json::from_value::<SettingsPatch>(value).is_err());

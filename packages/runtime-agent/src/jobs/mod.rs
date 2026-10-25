@@ -11,7 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::active_turn_input::ActiveTurnInputReceiver;
 use crate::codex::{
     CodexClient, CodexFallbackSummaryKind, CodexFinalOutputSchema, CodexRunOptions, CodexRunOutput,
-    classify_internal_codex_fallback_summary, provider_thread_restorable_on_this_runtime,
+    ScopedWorkerExecution, classify_internal_codex_fallback_summary,
+    provider_thread_restorable_on_this_runtime,
 };
 use crate::config::Config;
 use crate::controller::{LeaseJob, Registration};
@@ -6063,6 +6064,28 @@ impl JobProcessor {
         }
     }
 
+    fn routing_preflight_options(
+        &self,
+        job: &LeaseJob,
+        task_usage: &TaskUsage,
+        cancel_signal: Option<JobCancelSignal>,
+    ) -> CodexRunOptions {
+        CodexRunOptions {
+            usage_observer: Some(task_usage.call(UsagePhase::Routing)),
+            job_id: Some(job.id),
+            disable_shell_tool: true,
+            final_output_schema: CodexFinalOutputSchema::RoutingPreflight,
+            suppress_contextual_instructions: true,
+            routing_scoped_worker_execution: Some(if self.isolated_workers.enabled {
+                ScopedWorkerExecution::IsolatedTools
+            } else {
+                ScopedWorkerExecution::FileGeneration
+            }),
+            cancel_signal,
+            ..CodexRunOptions::default()
+        }
+    }
+
     pub async fn run_apply_job(
         &self,
         registration: &Registration,
@@ -6493,17 +6516,8 @@ impl JobProcessor {
             let (preflight_prompt, primary_context) =
                 agent_routing_primary_prompt(&preflight_prompt, &job.payload);
             tracing::info!(job_id = %job.id, context = %primary_context, "routing preflight history projection");
-            let preflight_options = CodexRunOptions {
-                usage_observer: Some(task_usage.call(UsagePhase::Routing)),
-                job_id: Some(job.id),
-                disable_shell_tool: true,
-                disable_final_output_json_schema: false,
-                final_output_schema: CodexFinalOutputSchema::RoutingPreflight,
-                suppress_contextual_instructions: true,
-                persist_conversation_thread: false,
-                cancel_signal: cancel_signal.clone(),
-                ..CodexRunOptions::default()
-            };
+            let preflight_options =
+                self.routing_preflight_options(job, task_usage, cancel_signal.clone());
             let _codex_guard = CODEX_EXECUTION_LOCK.lock().await;
             match codex
                 .execute_with_options(&preflight_prompt, None, preflight_options)
@@ -6694,6 +6708,7 @@ impl JobProcessor {
             active_turn_input,
             input_images: Vec::new(),
             isolated_tool_worker: false,
+            routing_scoped_worker_execution: None,
             // Shortly before the hard limit a team lane's turn is told to save and end (and,
             // when the controller can continue it, to leave a note for its next turn).
             turn_wrap_up: turn_files.wrap_up(),
@@ -20760,6 +20775,45 @@ mod tests {
     }
 
     #[test]
+    fn routing_capabilities_are_runtime_owned_and_preserve_explicit_team_routes() {
+        let tmp = tempdir().unwrap();
+        let mut processor = test_job_processor(tmp.path());
+        let job = test_lease_job(
+            Some("feature"),
+            json!({
+                "prompt_text": "Use one durable worker to run the required validation.",
+                "metadata": {
+                    "agentCollaboration": {"mode": "team_plan"},
+                    "runtimeExecutionCapabilities": {"isolatedToolsEnabled": true}
+                }
+            }),
+        );
+        let usage = TaskUsage::default();
+        for (enabled, expected) in [
+            (false, ScopedWorkerExecution::FileGeneration),
+            (true, ScopedWorkerExecution::IsolatedTools),
+        ] {
+            processor.isolated_workers.enabled = enabled;
+            let options = processor.routing_preflight_options(&job, &usage, None);
+            assert_eq!(options.routing_scoped_worker_execution, Some(expected));
+            assert_eq!(options.job_id, Some(job.id));
+            assert!(options.disable_shell_tool);
+            assert_eq!(
+                options.final_output_schema,
+                CodexFinalOutputSchema::RoutingPreflight
+            );
+            assert!(!options.persist_conversation_thread);
+            // Capability context does not override an explicitly selected durable route,
+            // even when those workers cannot execute all requested operations.
+            assert!(is_explicit_team_planning_job(&job));
+            assert!(!should_run_agent_routing_preflight_for_execution(
+                &job,
+                job.payload["prompt_text"].as_str().unwrap()
+            ));
+        }
+    }
+
+    #[test]
     fn routing_preflight_runs_for_future_team_work_requests() {
         let job = test_lease_job(
             Some("feature"),
@@ -23280,6 +23334,31 @@ mod tests {
             None,
         );
         assert!(!without.contains("instafy agents status"));
+    }
+
+    #[test]
+    fn packaged_routing_policy_fits_both_preflight_budgets() {
+        let tmp = tempdir().unwrap();
+        learn::ensure_project_memory_scaffold(tmp.path());
+        let content = read_workspace_file_utf8(tmp.path(), COLLABORATION_SKILL_PATH).unwrap();
+        let section = extract_markdown_h2_section(&content, "Routing preflight").unwrap();
+        let ordinary = section
+            .split("### Pending worker replies")
+            .next()
+            .unwrap()
+            .trim_end();
+        assert!(ordinary.chars().count() <= COLLABORATION_SKILL_ROUTING_MAX_CHARS);
+        let ordinary_snapshot = format_collaboration_routing_preflight_snapshot(
+            tmp.path(),
+            COLLABORATION_SKILL_ROUTING_MAX_CHARS,
+        )
+        .unwrap();
+        assert!(ordinary_snapshot.contains(ordinary));
+        // Adding capability guidance must not truncate the pending-question contract.
+        assert!(section.trim_end().chars().count() <= 3200);
+        let pending_snapshot =
+            format_collaboration_routing_preflight_snapshot(tmp.path(), 3200).unwrap();
+        assert!(pending_snapshot.contains(section.trim_end()));
     }
 
     #[test]

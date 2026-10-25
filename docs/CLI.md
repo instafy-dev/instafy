@@ -165,23 +165,32 @@ Inspect or change the linked space's shared multi-agent limits:
 instafy agents settings
 instafy agents settings --interactive
 instafy agents settings --max-agents-per-plan 64 --max-concurrent-agents 8
+instafy agents settings --max-native-subagents 10
 instafy agents settings --space <spaceId> --json
 ```
 
 The maximum agents per plan defaults to **64** (range **1–256**). The concurrent limit defaults
 to **8** (range **1–64**) and counts running team workers across all plans in the space. Lead
 and root jobs are excluded. A plan can contain more workers than can run simultaneously; the
-remaining workers wait for capacity. These controls apply to Instafy's team-worker jobs, not
-native provider subagents inside a single job. Runtime capacity and workspace permissions still
-apply and can reduce parallelism further.
+remaining workers wait for capacity. These two controls apply to Instafy's tracked team-worker jobs.
+
+The native helper limit is separate: `--max-native-subagents` defaults to **3** (range **1–64**)
+and counts helper children per parent agent, excluding the parent itself. For example, `10`
+allows up to ten native helpers for a parent, without changing the space's shared tracked-worker
+limit. This setting controls capacity; it does not enable unavailable tools or expand workspace
+permissions. Runtime capacity can reduce parallelism further.
 
 These settings are stored by the controller for everyone in the space, rather than in local CLI
 configuration. Reading requires space access; changes require permission to manage the space.
 Runtime job tokens cannot change the settings. A setting flag updates only that field.
-`--interactive` edits both values in a terminal and cannot be combined with setting flags or
-`--json`; canceling before it finishes leaves both values unchanged. Lowering the concurrent
+`--interactive` edits the settings supported by the controller in a terminal and cannot be
+combined with setting flags or `--json`; canceling before it finishes leaves all values unchanged.
+Older controllers continue to support reading and changing their two tracked-worker settings.
+The native-helper flag requires a controller that advertises that setting; the CLI explains when
+an upgrade is needed and sends no partial update. Lowering the concurrent
 limit prevents additional workers from starting until capacity is available; it does not cancel
-already running jobs. The per-plan limit applies when a new plan is accepted.
+already running jobs. The per-plan limit applies when a new plan is accepted. The native helper limit applies when a
+new parent job or turn loads its execution settings; it does not resize an already running parent.
 
 Inspect available agents and their compact scoped context cards:
 

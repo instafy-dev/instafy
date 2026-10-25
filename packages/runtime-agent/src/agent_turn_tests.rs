@@ -13,6 +13,8 @@ struct StandIn {
     completions: Arc<AtomicUsize>,
     handoff_rejected: Arc<AtomicBool>,
     requests: Arc<Mutex<Vec<serde_json::Value>>>,
+    runtime_settings: Arc<Mutex<AgentRuntimeSettings>>,
+    secrets_fetches: Arc<AtomicUsize>,
 }
 
 async fn heartbeat(State(stand_in): State<StandIn>) -> axum::response::Response {
@@ -25,8 +27,11 @@ async fn heartbeat(State(stand_in): State<StandIn>) -> axum::response::Response 
     }
 }
 
-async fn secrets() -> Json<serde_json::Value> {
-    Json(json!({ "env": {}, "inventory": [] }))
+async fn secrets(State(stand_in): State<StandIn>) -> Json<serde_json::Value> {
+    stand_in.secrets_fetches.fetch_add(1, Ordering::SeqCst);
+    Json(
+        json!({ "env": {}, "inventory": [], "runtimeSettings": *stand_in.runtime_settings.lock() }),
+    )
 }
 
 async fn complete(
@@ -174,6 +179,72 @@ impl Harness {
             lease_attempts: 1,
         }
     }
+}
+
+/// Exercise the real leased-job entry point, including the trusted settings fetch
+/// and executor scope, on the production worker-stack size. This local management
+/// command completes without any model endpoint or credentials in the fixture.
+#[test]
+fn controller_settings_scope_runs_a_full_job_on_the_production_worker_stack() {
+    const WORKER_STACK: usize = 16 * 1024 * 1024;
+    std::thread::Builder::new()
+        .stack_size(WORKER_STACK)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(2)
+                .thread_stack_size(WORKER_STACK)
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let harness = Harness::start().await;
+                    harness
+                        .stand_in
+                        .runtime_settings
+                        .lock()
+                        .max_native_subagents =
+                        runtime_contracts::multi_agent::NativeSubagentLimit::try_from(10).unwrap();
+                    let executor = Arc::new(AgentExecutor::new(harness.config.clone()));
+                    let mut job = harness.job();
+                    job.payload = json!({
+                        "prompt_text": "/mcp list",
+                        "metadata": {"execution_mode": "apply"}
+                    });
+                    let client = harness.client.clone();
+                    let registration = harness.registration.clone();
+                    tokio::spawn(async move {
+                        RuntimeAgent::handle_job(
+                            client,
+                            executor,
+                            &registration,
+                            job,
+                            0,
+                            Arc::new(Mutex::new(HashSet::new())),
+                        )
+                        .await
+                    })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                    assert!(harness.stand_in.secrets_fetches.load(Ordering::SeqCst) >= 1);
+                    let requests = harness.stand_in.requests.lock();
+                    let completions: Vec<_> = requests
+                        .iter()
+                        .filter(|request| request["endpoint"] == "complete")
+                        .collect();
+                    assert_eq!(completions.len(), 1);
+                    assert_eq!(completions[0]["body"]["outcome"], "succeeded");
+                    assert!(
+                        completions[0]["body"]["summary"]
+                            .as_str()
+                            .is_some_and(|text| !text.is_empty())
+                    );
+                    assert_eq!(crate::job_runtime_settings::current(), None);
+                });
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[tokio::test]
