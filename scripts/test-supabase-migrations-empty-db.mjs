@@ -90,17 +90,23 @@ const REQUIRED_PUBLIC_RELATIONS = [
 // origin_instances, while a stop releases origin_instances before its event.
 // Delivering a notification updates notification_delivery_jobs and then its
 // notification_delivery_attempts row, while leasing a job whose lease expired
-// updates the attempt first. A migration that holds a conflicting lock on two
-// of the tables until it commits can therefore deadlock a live request, or a
-// chain of requests that each hold one of the tables while they wait for the
-// next, whichever table it locks first. After the lane boundary a change to
-// two of them is split into migrations that commit separately, or, when one
-// statement locks both, goes in as a reviewed exception. The list comes
-// from a code audit of the controller's transactions, so it is best effort;
-// MIGRATIONS.md describes the backstop for a table it misses. Worker answer
-// transactions lock agent_user_input_requests before checking their source job
-// and updating its run; job invalidation locks agent_jobs before its trigger
-// expires questions and updates their run and message presentation.
+// updates the attempt first. Completion and cancel update agent_jobs and
+// agent_job_inputs, and a steer locks agent_jobs and inserts the message and
+// its agent_job_inputs row, before they cancel the job's open
+// project_provider_requests rows; completion and cancel then update the run,
+// while the expired-job sweep fails the run, records its activity_events row
+// and refunds the ledger before it cancels them. A migration that holds a
+// conflicting lock on two of the tables until it commits can therefore
+// deadlock a live request, or a chain of requests that each hold one of the
+// tables while they wait for the next, whichever table it locks first. After
+// the lane boundary a change to two of them is split into migrations that
+// commit separately, or, when one statement locks both, goes in as a reviewed
+// exception. The list comes from a code audit of the controller's
+// transactions, so it is best effort; MIGRATIONS.md describes the backstop for
+// a table it misses. Worker answer transactions lock agent_user_input_requests
+// before checking their source job and updating its run; job invalidation
+// locks agent_jobs before its trigger expires questions and updates their run
+// and message presentation.
 const BOTH_ORDER_TABLES = [
   "agent_jobs",
   "org_credit_ledger",
@@ -125,6 +131,7 @@ const BOTH_ORDER_TABLES = [
   "notification_delivery_attempts",
   "user_agents",
   "agent_user_input_requests",
+  "project_provider_requests",
 ];
 // The tables of BOTH_ORDER_TABLES that a migration after the lane boundary
 // created, by the version of that migration. Every other table of the list
@@ -139,6 +146,7 @@ const BOTH_ORDER_TABLES_CREATED_BY = new Map([
   ["notification_recipients", 20260906120000n],
   ["notification_delivery_jobs", 20260906120000n],
   ["notification_delivery_attempts", 20260906120000n],
+  ["project_provider_requests", 20261026120000n],
 ]);
 // Migrations already on main that the rules below reject only because tables
 // after the first three joined the list after them. History is append-only,

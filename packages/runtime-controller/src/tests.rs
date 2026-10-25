@@ -24,6 +24,7 @@ use crate::origins::{
     resolve_origin_for_protocol, upsert_workspace_origin, AccessTokenRequest, CommitReceiptBody,
     LeaseAcquireOutcome, OriginMode, OriginPresenceStatus, OriginRegisterBody,
 };
+use crate::projects::ensure_project_scoped_write_access;
 use crate::rate_limit::RateLimiter;
 use crate::tokens::{decode_scoped_token, mint_scoped_token, ScopedTokenRequest};
 use crate::tunnels::{
@@ -32937,7 +32938,7 @@ fn controller_error(context: &str, error: (StatusCode, axum::Json<ApiError>)) ->
 }
 
 #[tokio::test]
-async fn provider_dispatch_authorizes_job_tokens_with_provider_call_scope() -> anyhow::Result<()> {
+async fn provider_dispatch_takes_a_person_but_no_scoped_token() -> anyhow::Result<()> {
     let Some(pool) = setup_origin_test_pool().await? else {
         eprintln!("skipping provider dispatch scope test: TEST_DATABASE_URL not set");
         return Ok(());
@@ -33027,12 +33028,10 @@ async fn provider_dispatch_authorizes_job_tokens_with_provider_call_scope() -> a
         .map_err(|error| controller_error("mint scoped token", error))?
         .token)
     };
-    // An explicitly scoped token reserved for a future bounded provider grant.
-    // Ordinary job-token minting deliberately withholds provider.call.
-    let job_token = mint(vec!["prompt.execute", "provider.call"], project_id)?;
-    // A job token that predates (or was stripped of) provider.call.
+    // The scope once reserved for model-made provider calls reaches no device:
+    // no scoped token dispatches a provider request, whatever its scopes.
+    let provider_call_token = mint(vec!["prompt.execute", "provider.call"], project_id)?;
     let scopeless_job_token = mint(vec!["prompt.execute", "fs.write"], project_id)?;
-    // provider.call for a different project must not cross project boundaries.
     let cross_project_token = mint(vec!["prompt.execute", "provider.call"], other_project_id)?;
     let user_token = crate::auth::issue_controller_token(&config, &owner_id)
         .map_err(|error| controller_error("mint controller user token", error))?
@@ -33046,9 +33045,14 @@ async fn provider_dispatch_authorizes_job_tokens_with_provider_call_scope() -> a
         "arguments": { "quality": "low" },
         "timeoutMs": 5000,
     });
-    let dispatch_tool_call = |token: String, body: serde_json::Value| {
+    let resource_read_body = json!({
+        "providerId": provider_id,
+        "uri": "camera://front/latest",
+        "timeoutMs": 5000,
+    });
+    let dispatch = |route: &'static str, token: String, body: serde_json::Value| {
         let app = app.clone();
-        let uri = format!("/projects/{project_id}/provider-tools/call");
+        let uri = format!("/projects/{project_id}/{route}");
         async move {
             app.oneshot(
                 Request::builder()
@@ -33063,17 +33067,19 @@ async fn provider_dispatch_authorizes_job_tokens_with_provider_call_scope() -> a
         }
     };
 
-    // A job token without provider.call keeps getting 403 even though the
-    // subject user owns the project: scoped tokens are capabilities, not
-    // memberships.
-    let denied_missing_scope =
-        dispatch_tool_call(scopeless_job_token, tool_call_body.clone()).await?;
-    assert_eq!(denied_missing_scope.status(), StatusCode::FORBIDDEN);
-
-    // provider.call scoped to another project is rejected by project match.
-    let denied_cross_project =
-        dispatch_tool_call(cross_project_token, tool_call_body.clone()).await?;
-    assert_eq!(denied_cross_project.status(), StatusCode::FORBIDDEN);
+    for token in [
+        provider_call_token,
+        scopeless_job_token,
+        cross_project_token,
+    ] {
+        for (route, body) in [
+            ("provider-tools/call", tool_call_body.clone()),
+            ("provider-resources/read", resource_read_body.clone()),
+        ] {
+            let denied = dispatch(route, token.clone(), body).await?;
+            assert_eq!(denied.status(), StatusCode::FORBIDDEN, "{route}");
+        }
+    }
 
     {
         let connection = pool.get().await?;
@@ -33090,9 +33096,9 @@ async fn provider_dispatch_authorizes_job_tokens_with_provider_call_scope() -> a
         );
     }
 
-    // Background "device" that completes the next pending request over SQL so
-    // the dispatch long-poll resolves without standing up the device routes.
-    let spawn_completer = |response: serde_json::Value| {
+    // A person's own session dispatches the tool call end to end, answered by
+    // a background "device" that completes the pending request over SQL.
+    let completer = {
         let pool = pool.clone();
         tokio::spawn(async move {
             for _ in 0..200u32 {
@@ -33113,7 +33119,10 @@ async fn provider_dispatch_authorizes_job_tokens_with_provider_call_scope() -> a
                                  limit 1
                           )
                       returning id",
-                        &[&project_id, &PgJson(&response)],
+                        &[
+                            &project_id,
+                            &PgJson(&json!({ "ok": true, "result": "snapshot-42" })),
+                        ],
                     )
                     .await
                 else {
@@ -33125,64 +33134,35 @@ async fn provider_dispatch_authorizes_job_tokens_with_provider_call_scope() -> a
             }
         })
     };
-
-    // A job token carrying provider.call for the right project dispatches the
-    // tool call end to end.
-    let completer = spawn_completer(json!({ "ok": true, "result": "snapshot-42" }));
-    let allowed_job_token = dispatch_tool_call(job_token.clone(), tool_call_body.clone()).await?;
-    assert_eq!(allowed_job_token.status(), StatusCode::OK);
+    let allowed = dispatch(
+        "provider-tools/call",
+        user_token.clone(),
+        tool_call_body.clone(),
+    )
+    .await?;
+    assert_eq!(allowed.status(), StatusCode::OK);
     let allowed_payload: serde_json::Value =
-        serde_json::from_slice(&to_bytes(allowed_job_token.into_body(), usize::MAX).await?)?;
-    assert_eq!(allowed_payload["ok"], json!(true));
+        serde_json::from_slice(&to_bytes(allowed.into_body(), usize::MAX).await?)?;
     assert_eq!(allowed_payload["result"], json!("snapshot-42"));
     completer.await?;
     {
         let connection = pool.get().await?;
         let row = connection
             .query_one(
-                "select status, requested_by, tool_name from project_provider_requests
+                "select requested_by, job_id from project_provider_requests
                   where project_id = $1
                   order by created_at desc
                   limit 1",
                 &[&project_id],
             )
             .await?;
-        assert_eq!(row.get::<_, String>("status"), "completed");
         assert_eq!(row.get::<_, Option<Uuid>>("requested_by"), Some(owner_id));
-        assert_eq!(
-            row.get::<_, Option<String>>("tool_name").as_deref(),
-            Some("camera.snapshot")
-        );
+        assert_eq!(row.get::<_, Option<Uuid>>("job_id"), None);
     }
-
-    // The resource-read dispatch route accepts the same job token.
-    let completer = spawn_completer(json!({ "ok": true, "exists": true, "text": "hello" }));
-    let resource_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/projects/{project_id}/provider-resources/read"))
-                .header("authorization", format!("Bearer {job_token}"))
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&json!({
-                    "providerId": provider_id,
-                    "uri": "camera://front/latest",
-                    "timeoutMs": 5000,
-                }))?))?,
-        )
-        .await
-        .map_err(|error| anyhow::anyhow!("resource dispatch failed: {error}"))?;
-    assert_eq!(resource_response.status(), StatusCode::OK);
-    let resource_payload: serde_json::Value =
-        serde_json::from_slice(&to_bytes(resource_response.into_body(), usize::MAX).await?)?;
-    assert_eq!(resource_payload["ok"], json!(true));
-    assert_eq!(resource_payload["text"], json!("hello"));
-    completer.await?;
 
     // User-session dispatch still works, and an unanswered request drains
     // through the pending -> expired path instead of hanging.
-    let unanswered = dispatch_tool_call(user_token, tool_call_body).await?;
+    let unanswered = dispatch("provider-tools/call", user_token, tool_call_body).await?;
     assert_eq!(unanswered.status(), StatusCode::OK);
     let unanswered_payload: serde_json::Value =
         serde_json::from_slice(&to_bytes(unanswered.into_body(), usize::MAX).await?)?;

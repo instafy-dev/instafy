@@ -906,11 +906,20 @@ pub(crate) async fn apply_steer_send_intent(
         .map_err(|error| internal_error(format!("failed to enqueue active-turn input: {error}")))?;
     let command = stored_job_input(&command_row);
     let persisted_message = map_conversation_message_row(&message_row);
+    // The turn goes on with the steered words in place of what it was doing,
+    // so a device call it is waiting on is no longer wanted.
+    let steered_requests = crate::provider_requests::cancel_open_provider_requests_for_jobs(
+        &transaction,
+        &[target.id],
+        true,
+    )
+    .await?;
 
     transaction
         .commit()
         .await
         .map_err(|error| internal_error(format!("failed to commit steer send intent: {error}")))?;
+    crate::provider_requests::publish_canceled_provider_requests(state, &steered_requests);
 
     publish_conversation_message_event(&state.events, &persisted_message);
     crate::notifications::enqueue_message_push_notifications(

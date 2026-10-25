@@ -1644,8 +1644,11 @@ maintained outside the public repository.
 ## Provider Requests
 
 `pnpm test:controller provider_request` runs the provider request queue's database tests: held
-dispatches on a small pool, the claim window, late answers and a request's age. They
-act as the device through the controller's routes, with no hardware.
+dispatches on a small pool, the claim window, late answers, a request's age, device targeting, a
+job's requests being its requester's alone, and a job's open requests being
+canceled when a person interrupts it, its runtime reports it failed, a person steers it, its plan
+group is canceled or its space is deleted, and when a device claims one whose job has ended. They
+act as the device and the runtime through the controller's routes, with no hardware and no model.
 
 ## Local Tri-Client Camera Smoke
 - Run: `pnpm test:camera:tri-client:smoke`

@@ -14,13 +14,12 @@ use tokio_postgres::types::Json as PgJson;
 use tokio_postgres::{error::SqlState, GenericClient, Row};
 use uuid::Uuid;
 
-use crate::auth::{authenticate_request, RequestContext};
+use crate::auth::{authenticate_request, require_user_session, RequestContext};
 use crate::projects::load_project_record;
-use crate::state::ControllerEvent;
+use crate::state::{publish_controller_event_to_user, ControllerEvent, EventHub};
 use crate::{
-    bad_request, ensure_project_access, ensure_project_scoped_write_access,
-    ensure_project_write_access, internal_error, not_found, publish_controller_event, unauthorized,
-    ApiError, AppState,
+    bad_request, ensure_project_access, ensure_project_write_access, forbidden, internal_error,
+    not_found, publish_controller_event, unauthorized, ApiError, AppState,
 };
 
 const PROVIDER_ID_MAX_LEN: usize = 128;
@@ -33,17 +32,13 @@ const REQUEST_STATUS_CLAIMED: &str = "claimed";
 const REQUEST_STATUS_COMPLETED: &str = "completed";
 const REQUEST_STATUS_FAILED: &str = "failed";
 const REQUEST_STATUS_EXPIRED: &str = "expired";
+const REQUEST_STATUS_CANCELED: &str = "canceled";
 const REQUEST_KIND_TOOL_CALL: &str = "tool_call";
 const REQUEST_KIND_RESOURCE_READ: &str = "resource_read";
 const PROVIDER_REQUEST_CREATED_EVENT: &str = "provider.request.created";
 const PROVIDER_REQUEST_UPDATED_EVENT: &str = "provider.request.updated";
 const WAIT_TIMEOUT_ERROR: &str = "Timed out waiting for the provider device to respond.";
 const EXPIRED_BEFORE_CLAIM_ERROR: &str = "The provider request expired before a device claimed it.";
-/// Scope carried by the per-job controller token that authorizes workspace
-/// shells to dispatch provider tool calls / resource reads. The device-side
-/// routes (list/claim/complete) keep their user-session checks: the phone
-/// authenticates with a real session, not a job token.
-pub(crate) const PROVIDER_CALL_SCOPE: &str = "provider.call";
 const DEFAULT_WAIT_TIMEOUT_MS: u64 = 45_000;
 const MAX_WAIT_TIMEOUT_MS: u64 = 120_000;
 const MIN_WAIT_TIMEOUT_MS: u64 = 5_000;
@@ -51,12 +46,22 @@ const MIN_WAIT_TIMEOUT_MS: u64 = 5_000;
 /// row only then, or after this long when no event arrives (another node
 /// without the shared event bus, or a lagged subscriber).
 const WAIT_FALLBACK_POLL_INTERVAL_MS: u64 = 1_000;
+/// How long a call a steer canceled waits for its runtime to take the new
+/// words, at most.
+const STEERED_WORDS_WAIT: Duration = Duration::from_secs(3);
+
+/// The `cancel_reason` of a request a steer canceled: a person's words went
+/// into its job, which goes on without it. Every other cancel leaves none.
+const CANCEL_REASON_STEERED: &str = "steered";
+const CANCELED_ERROR: &str = "The provider request was canceled.";
+const STEERED_ERROR: &str = "The provider request was canceled because its turn was steered.";
 
 macro_rules! request_columns {
     () => {
         "id, project_id, provider_id, request_kind, tool_name, resource_uri, arguments,
-         status, requested_by, claimed_by_device_id, claimed_by_device_label, response, error,
-         created_at, claimed_at, completed_at, updated_at, expires_at,
+         status, cancel_reason, requested_by, target_device_id, job_id, claimed_by_device_id,
+         claimed_by_device_label, response, error, created_at, claimed_at, completed_at,
+         updated_at, expires_at,
          greatest(0, floor(extract(epoch from (now() - created_at)) * 1000))::bigint as age_ms"
     };
 }
@@ -85,6 +90,9 @@ struct ListProviderRequestsQuery {
     #[serde(default, deserialize_with = "deserialize_status_query_filters")]
     statuses: Vec<String>,
     limit: Option<i64>,
+    /// Only requests this device may act on: those targeted at it or at no
+    /// device, and not claimed by another device.
+    device_id: Option<String>,
 }
 
 fn deserialize_status_query_filters<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
@@ -146,8 +154,18 @@ struct ProviderRequestPayload {
     resource_uri: Option<String>,
     arguments: JsonValue,
     status: String,
+    /// `steered` on a request a steer canceled; absent on any other.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cancel_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     requested_by: Option<String>,
+    /// The only device that may claim the request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_device_id: Option<String>,
+    /// The agent job the request belongs to. Its open requests are canceled
+    /// when it ends.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    job_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     claimed_by_device_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -171,7 +189,7 @@ struct ProviderRequestPayload {
 }
 
 #[derive(Debug, Clone)]
-struct ProviderRequestRecord {
+pub(crate) struct ProviderRequestRecord {
     id: Uuid,
     project_id: Uuid,
     provider_id: String,
@@ -180,7 +198,10 @@ struct ProviderRequestRecord {
     resource_uri: Option<String>,
     arguments: JsonValue,
     status: String,
+    cancel_reason: Option<String>,
     requested_by: Option<Uuid>,
+    target_device_id: Option<String>,
+    job_id: Option<Uuid>,
     claimed_by_device_id: Option<String>,
     claimed_by_device_label: Option<String>,
     response: Option<JsonValue>,
@@ -191,6 +212,19 @@ struct ProviderRequestRecord {
     updated_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
     age_ms: i64,
+}
+
+impl ProviderRequestRecord {
+    /// A request an agent job made carries one person's call and its result,
+    /// so only its requester sees it, from their own session: no other
+    /// member, service or job. Every other request keeps the project's rules.
+    fn is_private_to_requester(&self) -> bool {
+        self.job_id.is_some()
+    }
+
+    fn is_visible_to(&self, reader: Option<Uuid>) -> bool {
+        !self.is_private_to_requester() || (reader.is_some() && reader == self.requested_by)
+    }
 }
 
 pub(crate) fn router() -> Router<AppState> {
@@ -310,18 +344,15 @@ async fn dispatch_and_wait(
             .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
 
         let project = load_project_record(&transaction, &project_id).await?;
-        // If a future bounded grant explicitly carries provider.call, still
-        // bind it to this project. Ordinary model jobs currently receive no
-        // such scope; user-session and service-role callers keep the
-        // membership write check.
-        ensure_project_scoped_write_access(
-            &transaction,
-            &project,
-            context,
-            None,
-            &[PROVIDER_CALL_SCOPE],
-        )
-        .await?;
+        // A person's own session or the service role dispatches with project
+        // write access. No scoped token reaches a device, whatever its scopes:
+        // a job token goes to the model's shell.
+        if context.scoped_claims.is_some() {
+            return Err(forbidden(
+                "a scoped token cannot dispatch a provider request",
+            ));
+        }
+        ensure_project_write_access(&transaction, &project, context, None).await?;
         ensure_provider_is_attached(&transaction, &project_id, insert.provider_id.as_str()).await?;
 
         let queued = insert_provider_request(&transaction, &insert, timeout_ms).await?;
@@ -352,6 +383,12 @@ async fn list_provider_requests(
     let provider_id = normalize_provider_id(query.provider_id.as_str())?;
     let statuses = normalize_status_filters(query.statuses);
     let limit = query.limit.unwrap_or(10).clamp(1, 20);
+    let device_id = query
+        .device_id
+        .as_deref()
+        .map(|value| normalize_named_identifier(value, "device id", DEVICE_ID_MAX_LEN))
+        .transpose()?;
+    let reader = require_user_session(&context).ok();
 
     let mut connection = state
         .pool
@@ -369,7 +406,8 @@ async fn list_provider_requests(
 
     // Pending and claimed rows are listed only while a device may still claim
     // them. Once a request's window has closed, a device must not start it
-    // again, and old rows must not fill the page ahead of new ones.
+    // again, and old rows must not fill the page ahead of new ones. A job's
+    // request is listed only to its requester.
     let rows = transaction
         .query(
             concat!(
@@ -380,6 +418,10 @@ async fn list_provider_requests(
                    and provider_id = $2
                    and status = any($3)
                    and (status not in ($5, $6) or expires_at > now())
+                   and ($7::text is null
+                        or (coalesce(target_device_id, $7) = $7
+                            and coalesce(claimed_by_device_id, $7) = $7))
+                   and (job_id is null or requested_by = $8)
                  order by created_at asc
                  limit $4"
             ),
@@ -390,6 +432,8 @@ async fn list_provider_requests(
                 &(limit as i64),
                 &REQUEST_STATUS_PENDING,
                 &REQUEST_STATUS_CLAIMED,
+                &device_id,
+                &reader,
             ],
         )
         .await
@@ -441,8 +485,16 @@ async fn claim_provider_request(
     ensure_provider_is_attached(&transaction, &project_id, provider_id.as_str()).await?;
 
     let request = load_provider_request_for_update(&transaction, &project_id, &request_id).await?;
+    ensure_request_visible(&context, &request)?;
     if request.provider_id != provider_id {
         return Err(bad_request("provider id does not match this request"));
+    }
+    if request
+        .target_device_id
+        .as_deref()
+        .is_some_and(|target| target != device_id)
+    {
+        return Err(forbidden("provider request is for another device"));
     }
     let claimed_by_this_device =
         request.claimed_by_device_id.as_deref() == Some(device_id.as_str());
@@ -453,6 +505,20 @@ async fn claim_provider_request(
     }
     if request.status != REQUEST_STATUS_PENDING && request.status != REQUEST_STATUS_CLAIMED {
         return Err(bad_request("provider request is no longer pending"));
+    }
+    // A job's request runs only while its job does: one whose job has ended
+    // is canceled with the job's other open requests, as the job's end would
+    // have done.
+    if let Some(job_id) = request.job_id {
+        if !job_is_leased(&transaction, &job_id).await? {
+            let canceled =
+                cancel_open_provider_requests_for_jobs(&transaction, &[job_id], false).await?;
+            transaction.commit().await.map_err(|error| {
+                internal_error(format!("failed to commit provider request cancel: {error}"))
+            })?;
+            publish_canceled_provider_requests(&state, &canceled);
+            return Err(bad_request("provider request's job has ended"));
+        }
     }
 
     // Pending, or claimed by this device. Either way the device would start
@@ -555,10 +621,15 @@ async fn complete_provider_request(
     ensure_provider_is_attached(&transaction, &project_id, provider_id.as_str()).await?;
 
     let request = load_provider_request_for_update(&transaction, &project_id, &request_id).await?;
+    ensure_request_visible(&context, &request)?;
     if request.provider_id != provider_id {
         return Err(bad_request("provider id does not match this request"));
     }
-    if request.status == REQUEST_STATUS_COMPLETED || request.status == REQUEST_STATUS_FAILED {
+    // A canceled request takes no answer: the device learns how it ended.
+    if matches!(
+        request.status.as_str(),
+        REQUEST_STATUS_COMPLETED | REQUEST_STATUS_FAILED | REQUEST_STATUS_CANCELED
+    ) {
         transaction.commit().await.map_err(|error| {
             internal_error(format!(
                 "failed to commit provider request completion: {error}"
@@ -642,6 +713,92 @@ async fn complete_provider_request(
     publish_provider_request_event(&state, PROVIDER_REQUEST_UPDATED_EVENT, &completed);
 
     Ok(Json(provider_request_to_payload(&completed)))
+}
+
+/// Answers a request [`ProviderRequestRecord::is_visible_to`] hides from
+/// `context` as one that does not exist.
+fn ensure_request_visible(
+    context: &RequestContext,
+    request: &ProviderRequestRecord,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    if request.is_visible_to(require_user_session(context).ok()) {
+        Ok(())
+    } else {
+        Err(not_found("provider request not found"))
+    }
+}
+
+async fn job_is_leased(
+    transaction: &tokio_postgres::Transaction<'_>,
+    job_id: &Uuid,
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    Ok(transaction
+        .query_opt(
+            "select 1 from agent_jobs where id = $1 and status = 'leased'",
+            &[job_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load the request's job: {error}")))?
+        .is_some())
+}
+
+/// Cancels, inside the caller's transaction, the pending and claimed
+/// requests of jobs that have just ended, or whose turn was `steered`.
+/// Publish the result with [`publish_canceled_provider_requests`] once that
+/// transaction commits.
+pub(crate) async fn cancel_open_provider_requests_for_jobs(
+    transaction: &tokio_postgres::Transaction<'_>,
+    job_ids: &[Uuid],
+    steered: bool,
+) -> Result<Vec<ProviderRequestRecord>, (StatusCode, Json<ApiError>)> {
+    if job_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (reason, error) = if steered {
+        (Some(CANCEL_REASON_STEERED), STEERED_ERROR)
+    } else {
+        (None, CANCELED_ERROR)
+    };
+    let rows = transaction
+        .query(
+            concat!(
+                "update project_provider_requests
+                    set status = $2,
+                        cancel_reason = $3,
+                        error = $4,
+                        completed_at = now(),
+                        updated_at = now()
+                  where job_id is not null
+                    and job_id = any($1)
+                    and status in ($5, $6)
+              returning ",
+                request_columns!()
+            ),
+            &[
+                &job_ids,
+                &REQUEST_STATUS_CANCELED,
+                &reason,
+                &error,
+                &REQUEST_STATUS_PENDING,
+                &REQUEST_STATUS_CLAIMED,
+            ],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to cancel the provider requests of ended jobs: {error}"
+            ))
+        })?;
+    Ok(rows.iter().map(map_provider_request_row).collect())
+}
+
+pub(crate) fn publish_canceled_provider_requests(
+    state: &AppState,
+    requests: &[ProviderRequestRecord],
+) {
+    for request in requests {
+        publish_provider_request_event(state, PROVIDER_REQUEST_UPDATED_EVENT, request);
+    }
 }
 
 struct ProviderRequestInsert {
@@ -732,8 +889,17 @@ async fn wait_for_provider_request_terminal_state(
         };
         if matches!(
             request.status.as_str(),
-            REQUEST_STATUS_COMPLETED | REQUEST_STATUS_FAILED | REQUEST_STATUS_EXPIRED
+            REQUEST_STATUS_COMPLETED
+                | REQUEST_STATUS_FAILED
+                | REQUEST_STATUS_EXPIRED
+                | REQUEST_STATUS_CANCELED
         ) {
+            if let (Some(job_id), true) = (
+                request.job_id,
+                request.cancel_reason.as_deref() == Some(CANCEL_REASON_STEERED),
+            ) {
+                wait_for_steered_words(state, &mut events, job_id, deadline).await?;
+            }
             return Ok(request);
         }
 
@@ -763,6 +929,50 @@ async fn wait_for_provider_request_terminal_state(
         let wake_at = deadline.min(now + Duration::from_millis(WAIT_FALLBACK_POLL_INTERVAL_MS));
         wait_for_event(&mut events, wake_at, |event| {
             is_update_of(event, request_id)
+        })
+        .await;
+    }
+}
+
+/// A steer cancels its job's open requests in the transaction that records
+/// the person's new words for the job. Answering such a call at once lets the
+/// turn take its next step before its runtime has given it those words, and
+/// finish the old plan without them. So the answer waits until the runtime
+/// took or refused them, for at most [`STEERED_WORDS_WAIT`] and never past the
+/// call's own deadline.
+async fn wait_for_steered_words(
+    state: &AppState,
+    events: &mut broadcast::Receiver<ControllerEvent>,
+    job_id: Uuid,
+    deadline: Instant,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    let until = deadline.min(Instant::now() + STEERED_WORDS_WAIT);
+    let job = job_id.to_string();
+    loop {
+        let waiting: bool = {
+            let connection =
+                state.pool.get().await.map_err(|error| {
+                    internal_error(format!("failed to get connection: {error}"))
+                })?;
+            connection
+                .query_one(
+                    "select exists (
+                         select 1 from agent_job_inputs
+                          where job_id = $1 and status in ('pending', 'delivering'))",
+                    &[&job_id],
+                )
+                .await
+                .map_err(|error| internal_error(format!("failed to read a job's inputs: {error}")))?
+                .get(0)
+        };
+        let now = Instant::now();
+        if !waiting || now >= until {
+            return Ok(());
+        }
+        let wake_at = until.min(now + Duration::from_millis(100));
+        wait_for_event(events, wake_at, |event| {
+            event.kind == "agent.jobInput"
+                && event.data.get("jobId").and_then(JsonValue::as_str) == Some(job.as_str())
         })
         .await;
     }
@@ -950,6 +1160,24 @@ async fn ensure_provider_is_attached(
     Ok(())
 }
 
+/// Whether any device can still act on a request whose dispatch answered
+/// without the device's reply. `never_claimed`: it ended, expired or
+/// canceled, before any device claimed it, and only a pending request can be
+/// claimed, so nothing will run it. `unknown`: a device claimed it and may
+/// have run it, or may still.
+fn no_device_reply(request: &ProviderRequestRecord) -> &'static str {
+    let ended_unclaimed = request.claimed_at.is_none()
+        && matches!(
+            request.status.as_str(),
+            REQUEST_STATUS_EXPIRED | REQUEST_STATUS_CANCELED
+        );
+    if ended_unclaimed {
+        "never_claimed"
+    } else {
+        "unknown"
+    }
+}
+
 fn dispatch_fallback_error(request: &ProviderRequestRecord, missing_reply: &str) -> String {
     if request.status == REQUEST_STATUS_CLAIMED {
         return format!(
@@ -971,6 +1199,7 @@ fn build_tool_dispatch_response(request: &ProviderRequestRecord) -> JsonValue {
       "providerId": request.provider_id,
       "name": request.tool_name.clone().unwrap_or_default(),
       "error": dispatch_fallback_error(request, "Provider request did not return a tool response."),
+      "noDeviceReply": no_device_reply(request),
     })
 }
 
@@ -984,26 +1213,51 @@ fn build_resource_dispatch_response(request: &ProviderRequestRecord) -> JsonValu
       "uri": request.resource_uri.clone().unwrap_or_default(),
       "exists": false,
       "error": dispatch_fallback_error(request, "Provider request did not return a resource response."),
+      "noDeviceReply": no_device_reply(request),
     })
 }
 
 fn publish_provider_request_event(state: &AppState, kind: &str, request: &ProviderRequestRecord) {
-    publish_controller_event(
-        &state.events,
-        kind,
-        Some(request.project_id),
-        None,
-        None,
-        Some(request.id),
-        json!({
-          "requestId": request.id,
-          "providerId": request.provider_id,
-          "requestKind": request.request_kind,
-          "toolName": request.tool_name,
-          "resourceUri": request.resource_uri,
-          "status": request.status,
-        }),
-    );
+    publish_provider_request_event_to_hub(&state.events, kind, request);
+}
+
+/// A request's event goes to the project's streams, except that a job's
+/// request ([`ProviderRequestRecord::is_private_to_requester`]) goes only to
+/// its requester's, and one without a requester to nobody's.
+fn publish_provider_request_event_to_hub(
+    hub: &EventHub,
+    kind: &str,
+    request: &ProviderRequestRecord,
+) {
+    let data = json!({
+      "requestId": request.id,
+      "providerId": request.provider_id,
+      "requestKind": request.request_kind,
+      "toolName": request.tool_name,
+      "resourceUri": request.resource_uri,
+      "status": request.status,
+      "cancelReason": request.cancel_reason,
+      "targetDeviceId": request.target_device_id,
+    });
+    if request.is_private_to_requester() {
+        publish_controller_event_to_user(
+            hub,
+            kind,
+            Some(request.project_id),
+            request.requested_by.unwrap_or_else(Uuid::nil),
+            data,
+        );
+    } else {
+        publish_controller_event(
+            hub,
+            kind,
+            Some(request.project_id),
+            None,
+            None,
+            Some(request.id),
+            data,
+        );
+    }
 }
 
 fn provider_request_to_payload(record: &ProviderRequestRecord) -> ProviderRequestPayload {
@@ -1016,7 +1270,10 @@ fn provider_request_to_payload(record: &ProviderRequestRecord) -> ProviderReques
         resource_uri: record.resource_uri.clone(),
         arguments: record.arguments.clone(),
         status: record.status.clone(),
+        cancel_reason: record.cancel_reason.clone(),
         requested_by: record.requested_by.map(|value| value.to_string()),
+        target_device_id: record.target_device_id.clone(),
+        job_id: record.job_id.map(|value| value.to_string()),
         claimed_by_device_id: record.claimed_by_device_id.clone(),
         claimed_by_device_label: record.claimed_by_device_label.clone(),
         response: record.response.clone(),
@@ -1040,7 +1297,10 @@ fn map_provider_request_row(row: &Row) -> ProviderRequestRecord {
         resource_uri: row.get("resource_uri"),
         arguments: row.get("arguments"),
         status: row.get("status"),
+        cancel_reason: row.get("cancel_reason"),
         requested_by: row.get("requested_by"),
+        target_device_id: row.get("target_device_id"),
+        job_id: row.get("job_id"),
         claimed_by_device_id: row.get("claimed_by_device_id"),
         claimed_by_device_label: row.get("claimed_by_device_label"),
         response: row.get("response"),
@@ -1121,6 +1381,7 @@ fn normalize_status_filters(values: Vec<String>) -> Vec<String> {
                     | REQUEST_STATUS_COMPLETED
                     | REQUEST_STATUS_FAILED
                     | REQUEST_STATUS_EXPIRED
+                    | REQUEST_STATUS_CANCELED
             )
         })
         .collect::<Vec<_>>();
@@ -1177,7 +1438,10 @@ mod tests {
             resource_uri: Some("device://status".to_string()),
             arguments: json!({}),
             status: status.to_string(),
+            cancel_reason: None,
             requested_by: None,
+            target_device_id: None,
+            job_id: None,
             claimed_by_device_id: None,
             claimed_by_device_label: None,
             response: None,
@@ -1191,17 +1455,21 @@ mod tests {
         }
     }
 
-    /// A reply that is not the device's own says what became of the request.
-    /// The device's own reply comes back as it gave it.
+    /// A reply that is not the device's own says what became of the request
+    /// and whether a device may still act on it. The device's own reply comes
+    /// back as it gave it.
     #[test]
     fn a_reply_without_the_devices_says_whether_a_device_may_still_act() {
         let claimed_at = Some(Utc.with_ymd_and_hms(2026, 10, 12, 12, 0, 28).unwrap());
         let timeout = "Timed out waiting for the provider device to respond.";
+        let canceled = "The provider request was canceled.";
         let claimed_timeout = "Timed out waiting for the provider device to respond. \
                                The device claimed the request and may still complete it.";
-        for (status, claimed_at, stored_error, error) in [
-            ("expired", None, Some(timeout), timeout),
-            ("claimed", claimed_at, None, claimed_timeout),
+        for (status, claimed_at, stored_error, error, no_device_reply) in [
+            ("expired", None, Some(timeout), timeout, "never_claimed"),
+            ("claimed", claimed_at, None, claimed_timeout, "unknown"),
+            ("canceled", None, Some(canceled), canceled, "never_claimed"),
+            ("canceled", claimed_at, Some(canceled), canceled, "unknown"),
         ] {
             let request = unanswered_request(status, claimed_at, stored_error);
             for response in [
@@ -1210,6 +1478,11 @@ mod tests {
             ] {
                 assert_eq!(response["ok"], json!(false), "{status}");
                 assert_eq!(response["error"], json!(error), "{status}");
+                assert_eq!(
+                    response["noDeviceReply"],
+                    json!(no_device_reply),
+                    "{status}"
+                );
             }
         }
 

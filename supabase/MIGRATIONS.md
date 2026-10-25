@@ -34,9 +34,9 @@ Live requests write `agent_jobs`, `org_credit_ledger`, `org_credit_balances`, `r
 `prompts`, `conversations`, `conversation_messages`, `runtimes`, `notification_events`,
 `notification_recipients`, `notification_delivery_jobs`, `agent_job_inputs`, `activity_events`,
 `runtime_events`, `conversation_participants`, `runtime_leases`, `automations`, `bug_reports`,
-`bug_report_messages`, `origin_instances`, `notification_delivery_attempts`, `user_agents` and
-`agent_user_input_requests`
-in one transaction, each of them in both orders with another of them. Dispatch records a new
+`bug_report_messages`, `origin_instances`, `notification_delivery_attempts`, `user_agents`,
+`agent_user_input_requests` and `project_provider_requests` in one transaction, each of them in
+both orders with another of them. Dispatch records a new
 conversation's `activity_events` row, inserts the prompt, the run and the user's message, which
 updates its conversation and whose insert trigger writes the three notification tables, ensures
 the runtime in `runtimes` with a `runtime_events` row for a new one, then burns credits and
@@ -65,12 +65,16 @@ event. Delivering a notification updates `notification_delivery_jobs` and then i
 `notification_delivery_attempts` row, while leasing a job whose lease expired updates the
 attempt first. A worker answer locks `agent_user_input_requests` before checking its source
 job and updating its run; job invalidation locks `agent_jobs` before its trigger expires
-questions and updates their run and message presentation. Every insert into the ledger locks
-the ledger and then runs a trigger that
-writes and locks the org's balance row, while a credit burn locks that balance row for its
-daily refill before it writes the ledger. Around those writes the same requests read and lock
-other tables, also in both orders: a refill locks the balance row and then inserts into the
-ledger, whose foreign-key check row-locks the organization; credit status reads
+questions and updates their run and message presentation. Completion and cancel update
+`agent_jobs` and `agent_job_inputs`, and a steer locks `agent_jobs` and inserts the message and
+its `agent_job_inputs` row, before they cancel the job's open `project_provider_requests` rows;
+completion and cancel then update the run, while the expired-job sweep fails the run, records
+its `activity_events` row and refunds the ledger before it cancels them. Every insert into the
+ledger locks the ledger and then runs a trigger that writes and locks the org's balance row,
+while a credit burn locks that balance row for its daily refill before it writes the ledger.
+Around those writes the same requests read and lock other tables, also in both orders: a
+refill locks the balance row and then inserts into the ledger, whose foreign-key check
+row-locks the organization; credit status reads
 `org_subscriptions` after that balance lock; completion updates `agent_jobs` and then reads
 `projects`. A migration that holds, on two tables, locks that such a request waits on can
 deadlock it: the migration waits for the request on one table while the request waits for the

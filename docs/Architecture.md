@@ -91,7 +91,22 @@ answers through `/projects/:id/provider-requests` (list, claim, complete).
   claimed requests after it. Every copy of a request carries `ageMs`, its age on the database
   clock, which a device trusts over its own clock.
 - When the wait ends, only an unclaimed request expires. A claimed one stays claimed, and its
-  device's later answer is still recorded.
+  device's later answer is still recorded. A reply that is not the device's own carries
+  `noDeviceReply`: `never_claimed` when the request ended before any device claimed it, so
+  nothing will run it, or `unknown` when a device claimed it and may have run it.
+- A person's own session or the service role dispatches, with project write access. No scoped
+  token dispatches, whatever its scopes.
+- A request may name one device (`targetDeviceId`) and belong to an agent job (`jobId`). No
+  route sets either yet, and no request body can. Only the device a request names may claim it
+  (403 for any other). `?deviceId=` lists only what that device may act on: requests targeted at
+  it or at no device, and not claimed by another.
+- A job's request is its requester's alone: other callers do not see it in listings or events,
+  and claim or complete it as not found. When the job ends (its runtime's report, a cancel, a
+  stop, an expiry sweep, a deleted space) or is steered, its open requests are canceled in the
+  same transaction. Those a steer canceled carry `cancelReason` `steered`: a person's words went
+  into the job, which goes on. A steered call answers once the runtime took the new words, at
+  most 3 s later. A claim of a request whose job has ended cancels the job's open requests
+  instead.
 
 ## Canonical Workspace Modes
 There are two supported canonical filesystem modes:

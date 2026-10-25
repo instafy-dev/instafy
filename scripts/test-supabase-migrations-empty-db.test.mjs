@@ -148,6 +148,7 @@ const EXISTING_RELATIONS = [
   ["16425", "notification_delivery_attempts"],
   ["16426", "user_agents"],
   ["16427", "agent_user_input_requests"],
+  ["16428", "project_provider_requests"],
 ];
 
 // A probe row names a relation by its oid. A test names it by table, or by oid
@@ -831,7 +832,7 @@ test("runtimes, the notification tables, job inputs, activity and runtime events
 });
 
 test("participants, leases, automations, support reports, origins, attempts, agents and worker questions pair with the list", () => {
-  assert.deepEqual(BOTH_ORDER_TABLES.slice(14), [
+  assert.deepEqual(BOTH_ORDER_TABLES.slice(14, 23), [
     "conversation_participants",
     "runtime_leases",
     "automations",
@@ -842,7 +843,6 @@ test("participants, leases, automations, support reports, origins, attempts, age
     "user_agents",
     "agent_user_input_requests",
   ]);
-  assert.equal(BOTH_ORDER_TABLE_PAIRS.length, 253);
   // Each migration below holds only SHARE or SHARE ROW EXCLUSIVE on the first
   // table, which the rule for other tables allowed. Raced in both orders
   // against a live request that writes the two tables in the other order,
@@ -955,6 +955,38 @@ test("participants, leases, automations, support reports, origins, attempts, age
     ),
     [],
   );
+});
+
+test("provider requests pair with the list", () => {
+  assert.deepEqual(BOTH_ORDER_TABLES.slice(23), ["project_provider_requests"]);
+  assert.equal(BOTH_ORDER_TABLE_PAIRS.length, 276);
+  // Completion and cancel update the job and its inputs before they cancel the
+  // job's open requests, and the run after them, while the expired-job sweep
+  // fails the run, records its activity and refunds the ledger before them.
+  // Each migration below holds only SHARE or SHARE ROW EXCLUSIVE on the
+  // requests, which the rule for other tables allowed.
+  for (const [rows, expected] of [
+    // alter table project_provider_requests add constraint hyp_job
+    //   foreign key (job_id) references agent_jobs(id) not valid;
+    [
+      ["project_provider_requests ShareRowExclusiveLock", "agent_jobs ShareRowExclusiveLock"],
+      [["agent_jobs", "project_provider_requests"]],
+    ],
+    // create index on project_provider_requests (created_at);
+    // alter table runs add column y text;
+    [
+      ["project_provider_requests ShareLock", "runs AccessExclusiveLock"],
+      [["runs", "project_provider_requests"]],
+    ],
+    // create index on project_provider_requests (created_at);
+    // alter table org_credit_ledger add column y text;
+    [
+      ["project_provider_requests ShareLock", "org_credit_ledger AccessExclusiveLock"],
+      [["org_credit_ledger", "project_provider_requests"]],
+    ],
+  ]) {
+    assert.deepEqual(bothOrderLockViolations(probeOutput(...rows)), expected, rows.join(", "));
+  }
 });
 
 test("migrations on main that only the longer list rejects are checked against the first three", () => {

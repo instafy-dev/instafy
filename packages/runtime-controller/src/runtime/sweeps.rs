@@ -604,12 +604,14 @@ pub(crate) async fn refund_managed_ai_reserve_for_expired_job(
 pub(super) struct SettledExpiredJobs {
     pub(super) job_input_state_updates: Vec<crate::send_intents::JobInputStateUpdate>,
     pub(super) refunded_org_ids: std::collections::BTreeSet<Uuid>,
+    pub(super) canceled_provider_requests: Vec<crate::provider_requests::ProviderRequestRecord>,
 }
 
 /// Finish jobs a sweep has just moved from `queued` to `failed` without a
-/// runtime ever running them: reject their unacknowledged inputs, fail their
+/// runtime running them now: reject their unacknowledged inputs, fail their
 /// runs (without this a run stays "in_progress" forever and Home lists it as
-/// live work), and give back a managed-AI reserve no model ever used.
+/// live work), cancel the open provider requests an earlier lease left, and
+/// give back a managed-AI reserve no model ever used.
 ///
 /// `rows` must carry `id, project_id, run_id, conversation_id, payload,
 /// error_message, lease_attempts` from the failing `update ... returning`, and
@@ -690,9 +692,24 @@ pub(super) async fn settle_expired_queued_jobs(
             refunded_org_ids.insert(org_id);
         }
     }
+    let job_ids: Vec<Uuid> = rows.iter().map(|row| row.get("id")).collect();
+    let canceled_provider_requests =
+        crate::provider_requests::cancel_open_provider_requests_for_jobs(
+            transaction,
+            &job_ids,
+            false,
+        )
+        .await
+        .map_err(|(status, Json(error))| {
+            anyhow::anyhow!(
+                "failed to cancel the provider requests of expired {kind} jobs ({status}): {}",
+                error.message
+            )
+        })?;
     Ok(SettledExpiredJobs {
         job_input_state_updates,
         refunded_org_ids,
+        canceled_provider_requests,
     })
 }
 
@@ -805,6 +822,10 @@ pub(super) async fn publish_failed_queued_jobs(state: &AppState, failed: FailedQ
         &failed.settled.job_input_state_updates,
     );
     publish_credits_updated_for_orgs(state, failed.settled.refunded_org_ids).await;
+    crate::provider_requests::publish_canceled_provider_requests(
+        state,
+        &failed.settled.canceled_provider_requests,
+    );
     for message_row in &failed.conversation_messages {
         crate::conversations::publish_conversation_message_event(&state.events, message_row);
         crate::notifications::enqueue_message_push_notifications(

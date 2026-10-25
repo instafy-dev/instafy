@@ -20,6 +20,7 @@ use crate::dispatch::{
     process_dispatch_prompt, process_dispatch_prompt_timed, DispatchPhaseTimings,
     DispatchPromptNormalized, DispatchPromptRequest, DispatchPromptResponse,
 };
+use crate::provider_requests::ProviderRequestRecord;
 use crate::workspace::{endpoint_matches_local, runtime_is_recent, status_is_viable};
 use crate::{
     bad_request, ensure_project_access, ensure_project_write_access, internal_error, not_found,
@@ -1896,6 +1897,7 @@ pub(crate) struct JobCancellationSet {
     pub(crate) pairs: Vec<(Uuid, Uuid)>,
     pub(crate) notice: ConversationMessageRow,
     pub(crate) job_input_state_updates: Vec<crate::send_intents::JobInputStateUpdate>,
+    pub(crate) provider_requests: Vec<ProviderRequestRecord>,
 }
 
 pub(crate) async fn cancel_jobs_within_transaction(
@@ -1933,6 +1935,7 @@ pub(crate) async fn cancel_jobs_with_notice(
         run_ids,
         pairs,
         job_input_state_updates,
+        provider_requests,
     } = cancel_jobs_and_runs(transaction, jobs, reason).await?;
 
     let interruption_notice =
@@ -1954,6 +1957,7 @@ pub(crate) async fn cancel_jobs_with_notice(
         pairs,
         notice,
         job_input_state_updates,
+        provider_requests,
     })
 }
 
@@ -1963,12 +1967,15 @@ pub(crate) struct CanceledJobs {
     pub(crate) run_ids: Vec<Uuid>,
     pub(crate) pairs: Vec<(Uuid, Uuid)>,
     pub(crate) job_input_state_updates: Vec<crate::send_intents::JobInputStateUpdate>,
+    /// The jobs' pending and claimed provider requests, canceled; publish
+    /// them once the transaction commits.
+    pub(crate) provider_requests: Vec<ProviderRequestRecord>,
 }
 
-/// Cancel `jobs` and their runs with `reason` as the summary, and reject the
-/// inputs the jobs never acknowledged, without writing a notice. The update
-/// has no status guard: pass only jobs the caller locked while they were
-/// still queued or leased.
+/// Cancel `jobs` and their runs with `reason` as the summary, reject the
+/// inputs the jobs never acknowledged, and cancel their open provider
+/// requests, without writing a notice. The update has no status guard: pass
+/// only jobs the caller locked while they were still queued or leased.
 pub(crate) async fn cancel_jobs_and_runs(
     transaction: &tokio_postgres::Transaction<'_>,
     jobs: &[(Uuid, Option<Uuid>)],
@@ -2016,6 +2023,12 @@ pub(crate) async fn cancel_jobs_and_runs(
             .await?,
         );
     }
+    let provider_requests = crate::provider_requests::cancel_open_provider_requests_for_jobs(
+        transaction,
+        &job_ids,
+        false,
+    )
+    .await?;
 
     if !run_ids.is_empty() {
         transaction
@@ -2037,6 +2050,7 @@ pub(crate) async fn cancel_jobs_and_runs(
         run_ids,
         pairs,
         job_input_state_updates,
+        provider_requests,
     })
 }
 
@@ -2069,6 +2083,10 @@ where
     crate::send_intents::publish_job_input_state_updates(
         state,
         &cancellation.job_input_state_updates,
+    );
+    crate::provider_requests::publish_canceled_provider_requests(
+        state,
+        &cancellation.provider_requests,
     );
 
     canceled_run_ids

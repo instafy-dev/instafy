@@ -1,8 +1,9 @@
 //! Canceling the work of a deleted space.
 //!
 //! Deleting a space cancels, in the transaction that marks it deleted, its
-//! queued and leased agent jobs with their runs, any other open run, its
-//! queued send-queue entries, and pauses its active automations. Work that
+//! queued and leased agent jobs with their runs and open provider requests,
+//! any other open run, its queued send-queue entries, and pauses its active
+//! automations. Work that
 //! reaches the space after that commit (a dispatch that raced the delete, or
 //! a job a runtime stop requeued) is canceled the same way by
 //! [`cancel_deleted_project_work`]: after each stop of the space's runtimes,

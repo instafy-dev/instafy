@@ -1837,11 +1837,9 @@ fn attach_controller_tokens(
 
 fn job_controller_token_scopes(job: &AgentJob) -> Vec<String> {
     let mut scopes = vec!["prompt.execute".to_string()];
-    // Fail closed on model-controlled provider execution. A project-level
-    // `provider.call` scope is too broad until a grant also binds the exact
-    // approved tool/resource ids, target device, run, runtime generation and
-    // live lease. Human sessions may keep using the provider request routes;
-    // ordinary model jobs receive no provider authority.
+    // Fail closed on model-controlled provider execution: this token goes to
+    // the model's shell, so it carries no provider authority, and the
+    // provider dispatch routes take no scoped token.
     // Writable runtime jobs use this short-lived, project/runtime/run-bound
     // token to acquire a workspace lease and delegate an origin fs.write token
     // after Codex produces file changes. Every normalized read-only signal is
@@ -3283,6 +3281,15 @@ pub(crate) async fn agent_complete(
     let job_input_state_updates =
         crate::send_intents::reject_unclaimed_inputs_for_completed_job(&transaction, &job_uuid)
             .await?;
+    // Whatever the outcome, the turn that waited for the job's device
+    // requests is over, and a device still holding one should stop.
+    let canceled_provider_requests =
+        crate::provider_requests::cancel_open_provider_requests_for_jobs(
+            &transaction,
+            &[job_uuid],
+            false,
+        )
+        .await?;
 
     let project_id: Uuid = row.get("project_id");
     let run_id: Option<Uuid> = row.get("run_id");
@@ -3317,6 +3324,10 @@ pub(crate) async fn agent_complete(
             })?;
             drop(connection);
             crate::send_intents::publish_job_input_state_updates(&state, &job_input_state_updates);
+            crate::provider_requests::publish_canceled_provider_requests(
+                &state,
+                &canceled_provider_requests,
+            );
             requeued.publish(&state).await;
             return Ok(Json(AgentCompleteResponseBody { ok: true }));
         }
@@ -3625,6 +3636,10 @@ pub(crate) async fn agent_complete(
     // The turn is closed and its reply stored: publish both now. Billing and
     // bookkeeping follow in CompletionSettlement and change nothing shown.
     crate::send_intents::publish_job_input_state_updates(&state, &job_input_state_updates);
+    crate::provider_requests::publish_canceled_provider_requests(
+        &state,
+        &canceled_provider_requests,
+    );
     if let Some(message) = token_usage_message.as_ref() {
         publish_conversation_message_event(&state.events, message);
         crate::notifications::enqueue_message_push_notifications(state.clone(), message.clone());

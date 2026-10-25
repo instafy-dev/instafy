@@ -444,7 +444,7 @@ async fn post_agent_message(
     Ok(response.status())
 }
 
-async fn post_agent_complete(
+pub(crate) async fn post_agent_complete(
     fixture: &ReservedManagedAiPrompt,
     body: serde_json::Value,
 ) -> anyhow::Result<StatusCode> {
