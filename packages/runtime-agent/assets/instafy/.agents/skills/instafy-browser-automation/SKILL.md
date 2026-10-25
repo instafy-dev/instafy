@@ -1,6 +1,6 @@
 ---
 name: instafy-browser-automation
-description: Open Instafy's browser whenever a web page would help: look things up, check or verify pages, walk the person through a site. Personal, Shared and read-only observation.
+description: Open Instafy's browser whenever a web page would help: look things up, check or verify pages, walk the person through a site. Personal, Shared and read-only observation. Not for sites running in this space (shown with a Studio preview).
 context_kind: workflow
 context_parent: instafy-skill-router
 routing_keywords: browser, playwright, page, click, screenshot, visible session, live browser, open url, read title, website, web page, look up, walk me through, docs, pricing, portal, sign in
@@ -23,6 +23,10 @@ Use these terms consistently:
 - `owner-local browser` = a fresh headless Chromium process for credential-free, read-only public-page observation on an opted-in self-hosted runtime
 
 For interactive Personal or Shared Browser work, default to `page` first. Do not escalate from `page` to `isolated session` or `runtime-backed session` unless the user explicitly asks for isolation or the task clearly requires incompatible account state. Owner-local observation always uses a fresh one-URL context.
+
+## What Instafy's browser can reach
+
+Public web addresses only: its safety policy blocks this space's own addresses (localhost, 127.0.0.1, 0.0.0.0, private addresses) and non-web ports. Do not work around it, and never open it or emit `request_browser` for such an address: show that site with a Studio preview card (`instafy preview open`). After "destination denied", do not retry, re-approve or request the browser again.
 
 ## When to use this skill
 

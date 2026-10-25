@@ -23,6 +23,10 @@ pub const GIT_CANONICAL_CONFLICTS_RELATIVE_PATH: &str =
     ".agents/skills/instafy-git-canonical-conflicts/SKILL.md";
 pub const RUNTIME_FLAVORS_RELATIVE_PATH: &str = ".agents/skills/instafy-runtime-flavors/SKILL.md";
 pub const SECRETS_RELATIVE_PATH: &str = ".agents/skills/instafy-secrets/SKILL.md";
+pub const FRONTEND_PREVIEWS_HOST_MESSAGES_RELATIVE_PATH: &str =
+    ".agents/skills/instafy-frontend-previews/references/studio-host-messages.md";
+pub const FRONTEND_PREVIEWS_TUNNELS_RELATIVE_PATH: &str =
+    ".agents/skills/instafy-frontend-previews/references/tunnels.md";
 pub const FRONTEND_PREVIEWS_RELATIVE_PATH: &str =
     ".agents/skills/instafy-frontend-previews/SKILL.md";
 pub const INTEGRATION_ONBOARDING_RELATIVE_PATH: &str =
@@ -120,10 +124,12 @@ const FRONTEND_PREVIEWS_TEMPLATE: &str = include_str!(concat!(
 // host only after someone reported a blocked page, v5 the one from before
 // sites in a preview asked Studio for the person's location, v6 the one
 // from before it told sites how to be presented and followed, v7 the one
-// from before the card could start a sleeping site again, and v8 the one that
-// named a fixed tunnel domain for Vite's allowed hosts. A workspace still holding an
-// unedited earlier bundled copy of this skill, browser automation or skill
-// import compat is upgraded; an edited one is kept.
+// from before the card could start a sleeping site again, v8 the one that
+// named a fixed tunnel domain for Vite's allowed hosts, and v9 the one from
+// before `instafy preview open --start` kept a site running after the turn (and
+// before the location, Present and tunnel material moved to references/). A
+// workspace still holding an unedited earlier bundled copy of this skill,
+// browser automation or skill import compat is upgraded; an edited one is kept.
 const LEGACY_FRONTEND_PREVIEWS_TEMPLATES: &[&str] = &[
     include_str!("legacy/frontend-previews-v1.md"),
     include_str!("legacy/frontend-previews-v2.md"),
@@ -133,7 +139,20 @@ const LEGACY_FRONTEND_PREVIEWS_TEMPLATES: &[&str] = &[
     include_str!("legacy/frontend-previews-v6.md"),
     include_str!("legacy/frontend-previews-v7.md"),
     include_str!("legacy/frontend-previews-v8.md"),
+    include_str!("legacy/frontend-previews-v9.md"),
 ];
+/// What a previewed site asks Studio for (the person's location, Present and
+/// Follow), read only when a site needs it.
+const FRONTEND_PREVIEWS_HOST_MESSAGES_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/instafy/.agents/skills/instafy-frontend-previews/references/studio-host-messages.md"
+));
+/// Public tunnels for a preview, read only after the person agreed to a public link.
+const FRONTEND_PREVIEWS_TUNNELS_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/instafy/.agents/skills/instafy-frontend-previews/references/tunnels.md"
+));
+const LEGACY_FRONTEND_PREVIEWS_REFERENCE_TEMPLATES: &[&str] = &[];
 const INTEGRATION_ONBOARDING_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-integration-onboarding/SKILL.md"
@@ -240,6 +259,8 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     include_str!("legacy/browser-automation-v1.md"),
     include_str!("legacy/browser-automation-v2.md"),
     include_str!("legacy/browser-automation-v3.md"),
+    // From before it said what Instafy's browser can reach.
+    include_str!("legacy/browser-automation-v4.md"),
 ];
 const LEGACY_SKILL_IMPORT_COMPAT_TEMPLATES: &[&str] = &[
     include_str!("legacy/skill-import-compat-v1.md"),
@@ -347,6 +368,10 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
     let runtime_flavors_path = workspace_dir.join(RUNTIME_FLAVORS_RELATIVE_PATH);
     let secrets_path = workspace_dir.join(SECRETS_RELATIVE_PATH);
     let frontend_previews_path = workspace_dir.join(FRONTEND_PREVIEWS_RELATIVE_PATH);
+    let frontend_previews_host_messages_path =
+        workspace_dir.join(FRONTEND_PREVIEWS_HOST_MESSAGES_RELATIVE_PATH);
+    let frontend_previews_tunnels_path =
+        workspace_dir.join(FRONTEND_PREVIEWS_TUNNELS_RELATIVE_PATH);
     let integration_onboarding_path = workspace_dir.join(INTEGRATION_ONBOARDING_RELATIVE_PATH);
     let byoc_ai_credentials_path = workspace_dir.join(BYOC_AI_CREDENTIALS_RELATIVE_PATH);
     let collaboration_path = workspace_dir.join(COLLABORATION_RELATIVE_PATH);
@@ -448,6 +473,25 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
         FRONTEND_PREVIEWS_TEMPLATE,
     ) {
         wrote_any = true;
+    }
+    for (path, template) in [
+        (
+            &frontend_previews_host_messages_path,
+            FRONTEND_PREVIEWS_HOST_MESSAGES_TEMPLATE,
+        ),
+        (
+            &frontend_previews_tunnels_path,
+            FRONTEND_PREVIEWS_TUNNELS_TEMPLATE,
+        ),
+    ] {
+        if upgrade_bundled_skill(
+            workspace_dir,
+            path,
+            LEGACY_FRONTEND_PREVIEWS_REFERENCE_TEMPLATES,
+            template,
+        ) {
+            wrote_any = true;
+        }
     }
 
     if upgrade_bundled_skill(
@@ -718,6 +762,8 @@ fn maybe_commit_project_memory_scaffold(workspace_dir: &Path, _wrote_any: bool) 
         RUNTIME_FLAVORS_RELATIVE_PATH,
         SECRETS_RELATIVE_PATH,
         FRONTEND_PREVIEWS_RELATIVE_PATH,
+        FRONTEND_PREVIEWS_HOST_MESSAGES_RELATIVE_PATH,
+        FRONTEND_PREVIEWS_TUNNELS_RELATIVE_PATH,
         INTEGRATION_ONBOARDING_RELATIVE_PATH,
         BYOC_AI_CREDENTIALS_RELATIVE_PATH,
         COLLABORATION_RELATIVE_PATH,
@@ -2026,11 +2072,13 @@ mod tests {
     /// The bundled frontend-previews skill shows a running site with
     /// `instafy preview open` and keeps the local URL and consent-gated tunnel
     /// as the fallback when previews are not available. It allows the preview
-    /// host on a dev server that checks `Host` before anyone opens the card, and
-    /// tells a site in a preview to ask Studio for the person's location, and
-    /// how to be presented and followed: without the person's own position or
-    /// secrets, and treating another person's view as untrusted. It says when
-    /// the card can start the site again after a sleep. An unedited v3 to v7 copy is upgraded to it; an edited one is kept.
+    /// host on a dev server that checks `Host` before anyone opens the card,
+    /// starts a site with `--start` so it outlives the turn without its
+    /// credentials, and says Instafy's browser cannot open the space's own
+    /// addresses. What a site asks Studio for (the person's location, Present
+    /// and Follow) and the tunnel details live in `references/`, which the
+    /// scaffold writes too. An unedited v3 to v9 copy is upgraded; an edited
+    /// one is kept.
     #[test]
     fn scaffold_upgrades_frontend_previews_to_studio_preview_cards() {
         for needle in [
@@ -2044,6 +2092,18 @@ mod tests {
             "Allow the preview host before the person opens the card.",
             "before you tell the person to open the card",
             "answers only on [::1]",
+            "`restartable`",
+            "--serve-cmd \"<command>\"",
+            "Keep it running after your turn",
+            "--start",
+            "safety policy blocks this space's own addresses",
+            "instafy preview check --port <port>",
+            "references/studio-host-messages.md",
+            "references/tunnels.md",
+        ] {
+            assert!(FRONTEND_PREVIEWS_TEMPLATE.contains(needle), "{needle}");
+        }
+        for needle in [
             "type: \"location-request\"",
             "instafy_host=studio",
             "type: \"layout\"}` message arrives from `parent`",
@@ -2057,19 +2117,34 @@ mod tests {
             "Applying a view only changes what is shown.",
             "never fetches or opens a URL taken from it",
             "Show `from.name` as text only.",
-            "`restartable`",
-            "--serve-cmd \"<command>\"",
-            "the host of the URL that `instafy tunnel start` printed",
         ] {
-            assert!(FRONTEND_PREVIEWS_TEMPLATE.contains(needle), "{needle}");
+            assert!(
+                FRONTEND_PREVIEWS_HOST_MESSAGES_TEMPLATE.contains(needle),
+                "{needle}"
+            );
         }
-        assert!(!FRONTEND_PREVIEWS_TEMPLATE.contains("rt.instafy.dev"));
+        assert!(
+            FRONTEND_PREVIEWS_TUNNELS_TEMPLATE
+                .contains("the host of the URL that `instafy tunnel start` printed")
+        );
+        for template in [
+            FRONTEND_PREVIEWS_TEMPLATE,
+            FRONTEND_PREVIEWS_HOST_MESSAGES_TEMPLATE,
+            FRONTEND_PREVIEWS_TUNNELS_TEMPLATE,
+        ] {
+            assert!(!template.contains("rt.instafy.dev"));
+            // The whole skill fits in a workspace memory snapshot.
+            assert!(template.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
+        }
+        // A site started by hand with these keeps the turn's credentials.
+        assert!(!FRONTEND_PREVIEWS_TEMPLATE.contains("setsid <command>"));
         let v3 = include_str!("legacy/frontend-previews-v3.md");
         let v4 = include_str!("legacy/frontend-previews-v4.md");
         let v5 = include_str!("legacy/frontend-previews-v5.md");
         let v6 = include_str!("legacy/frontend-previews-v6.md");
         let v7 = include_str!("legacy/frontend-previews-v7.md");
-        let previous = include_str!("legacy/frontend-previews-v8.md");
+        let v8 = include_str!("legacy/frontend-previews-v8.md");
+        let previous = include_str!("legacy/frontend-previews-v9.md");
         assert!(!v3.contains("instafy preview open"));
         assert!(v4.contains("instafy preview open"));
         assert!(!v4.contains("Allow the preview host before the person opens the card."));
@@ -2079,14 +2154,37 @@ mod tests {
         assert!(!v6.contains("layout-ack"));
         assert!(v7.contains("layout-ack"));
         assert!(!v7.contains("--serve-cmd"));
+        assert!(v8.contains("--serve-cmd"));
+        assert!(v8.contains(".rt.instafy.dev"));
         assert!(previous.contains("--serve-cmd"));
-        assert!(previous.contains(".rt.instafy.dev"));
-        assert!(FRONTEND_PREVIEWS_TEMPLATE.contains("instafy preview check --port <port>"));
+        assert!(!previous.contains("--start"));
+        assert!(!previous.contains(".rt.instafy.dev"));
 
         let workspace = tempdir().expect("workspace tempdir");
         ensure_project_memory_scaffold(workspace.path());
         let skill = workspace.path().join(FRONTEND_PREVIEWS_RELATIVE_PATH);
-        for old in [v3, v4, v5, v6, v7, previous] {
+        for (relative, template) in [
+            (
+                FRONTEND_PREVIEWS_HOST_MESSAGES_RELATIVE_PATH,
+                FRONTEND_PREVIEWS_HOST_MESSAGES_TEMPLATE,
+            ),
+            (
+                FRONTEND_PREVIEWS_TUNNELS_RELATIVE_PATH,
+                FRONTEND_PREVIEWS_TUNNELS_TEMPLATE,
+            ),
+        ] {
+            let reference = workspace.path().join(relative);
+            assert_eq!(fs::read_to_string(&reference).unwrap(), template);
+            // Written again when absent; an edited one is kept.
+            fs::remove_file(&reference).unwrap();
+            ensure_project_memory_scaffold(workspace.path());
+            assert_eq!(fs::read_to_string(&reference).unwrap(), template);
+            let edited = format!("{template}\nOur tunnels use port 3000.\n");
+            fs::write(&reference, &edited).unwrap();
+            ensure_project_memory_scaffold(workspace.path());
+            assert_eq!(fs::read_to_string(&reference).unwrap(), edited);
+        }
+        for old in [v3, v4, v5, v6, v7, v8, previous] {
             fs::write(&skill, old).unwrap();
             ensure_project_memory_scaffold(workspace.path());
             assert_eq!(
@@ -2099,6 +2197,44 @@ mod tests {
         fs::write(&skill, &customized).unwrap();
         ensure_project_memory_scaffold(workspace.path());
         assert_eq!(fs::read_to_string(&skill).unwrap(), customized);
+    }
+
+    /// The bundled browser skill says, near its top, that Instafy's browser
+    /// cannot open the space's own addresses and that such a site is shown
+    /// with a preview card; v4 is the copy from before. An unedited v4 is
+    /// upgraded (see `scaffold_upgrades_bundled_browser_guidance_and_preserves_edits`).
+    #[test]
+    fn browser_automation_says_what_instafys_browser_can_reach() {
+        let section = "## What Instafy's browser can reach";
+        let at = BROWSER_AUTOMATION_TEMPLATE
+            .find(section)
+            .expect("reach section");
+        assert!(at < 12_000, "within the first 12 KB a snapshot loads");
+        for needle in [
+            "safety policy blocks this space's own addresses",
+            "instafy preview open",
+            "do not retry, re-approve or request the browser again",
+        ] {
+            assert!(BROWSER_AUTOMATION_TEMPLATE.contains(needle), "{needle}");
+        }
+        assert!(
+            BROWSER_AUTOMATION_TEMPLATE
+                .contains("Not for sites running in this space (shown with a Studio preview).")
+        );
+        let v4 = LEGACY_BROWSER_AUTOMATION_TEMPLATES
+            .last()
+            .expect("legacy browser copies");
+        assert!(!v4.contains(section));
+
+        let workspace = tempdir().expect("workspace tempdir");
+        ensure_project_memory_scaffold(workspace.path());
+        let skill = workspace.path().join(BROWSER_AUTOMATION_RELATIVE_PATH);
+        fs::write(&skill, v4).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(
+            fs::read_to_string(&skill).unwrap(),
+            BROWSER_AUTOMATION_TEMPLATE
+        );
     }
 
     #[cfg(unix)]

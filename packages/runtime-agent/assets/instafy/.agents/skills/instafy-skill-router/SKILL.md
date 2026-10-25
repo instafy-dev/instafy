@@ -41,8 +41,12 @@ Do not load learned blocks “just in case”. Only load what clearly applies.
 
 Use these mappings unless a project-specific skill overrides them.
 
-- **Anything a web page would help with** (look something up, check or verify a page, show a site's screens, guided clicks, sign-in)
-  - Use `instafy-browser-automation` and open the browser without asking in chat first; its site and action prompts still apply.
+- **A site or server running in this space** (a dev server, a static file server, "show me a preview", localhost, 127.0.0.1, any port here)
+  - Use `instafy-frontend-previews`: show it to people with a private Studio preview card (`instafy preview open ... --serve-cmd "<command>" --start`, which also keeps it running after the turn) and check it yourself with `instafy preview check`.
+  - Not Instafy's browser: its safety policy blocks this space's own addresses (localhost, 127.0.0.1, 0.0.0.0, private addresses) and non-web ports.
+
+- **Anything a public web page would help with** (look something up, check or verify a public page, show a site's screens, guided clicks, sign-in)
+  - Use `instafy-browser-automation` and open the browser without asking in chat first; its site and action prompts still apply. Not for a site running in this space (above).
   - Use the exposed Personal or Shared Browser tools. If neither is exposed, follow the skill's `request_browser` handoff so Studio can open or resume the appropriate browser.
 
 - **Public page text / element counts / computed CSS / screenshot verification**
@@ -56,7 +60,7 @@ Use these mappings unless a project-specific skill overrides them.
 
 - **Shareable preview URL / mobile-friendly link / “can you show me a demo link”**
   - Use `instafy-frontend-previews` (tunnel preview mode).
-  - Ask for consent before creating a public URL. Opening Instafy's browser to check the preview needs none.
+  - Ask for consent before creating a public URL. Check the site yourself with `instafy preview check`; Instafy's browser can open only its public tunnel URL, never the space's own address.
 
 - **Missing env vars / API keys / OAuth client setup / dashboards**
   - Use `instafy-integration-onboarding` for the step-by-step plan.
@@ -110,6 +114,7 @@ Use these mappings unless a project-specific skill overrides them.
 
 ## Ambiguous cases
 
+- If the person asks to "open it in the browser" for a site running in this space: say in one line that the browser's safety policy blocks the space's own addresses, point to the preview card (open one with `instafy-frontend-previews` if there is none), and offer a public link only after they agree to one.
 - If the user asks “use a browser” but they actually want a shareable link:
   - Ask one short clarification: “Do you want a shareable public preview link, or a live browser walkthrough here?”
 - For current information (news, prices, releases, status pages):

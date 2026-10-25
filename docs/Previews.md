@@ -13,7 +13,10 @@ Instafy's browser cannot show a space's own sites: its safety policy blocks the 
 
 1. Octo starts a site in the space's machine (any server on any port) and runs
    `instafy preview open --port <port> --title <title> [--path <path>]`. The `instafy-frontend-previews` skill tells it
-   when. `instafy preview check --port <port>` takes a local headless look first.
+   when. `instafy preview check --port <port>` takes a local headless look first. A turn on a restored provider thread
+   and a direct workspace-change turn (such as "make a page and show me a preview") load no workspace memory snapshot,
+   so their prompt names the workflow skills that match the request strongly (at most three,
+   with the file to read), and the browser rule on every turn that can ask for Instafy's browser says that it opens public addresses only.
 2. The CLI checks that something is listening, asks the controller for a preview, starts a rathole client for it and
    tells the controller it is ready. It never prints a URL. Its JSON output has ids, the port, the path, a status and
    `viewerHostSuffix` (for a dev server's allowed-hosts list).
@@ -369,8 +372,8 @@ got a position outlives a passing `unavailable` or `timeout` from the browser.
 A site that wants to work both inside Studio and on its own checks for `?instafy_host=studio` or the layout
 message and uses this path there, and `navigator.geolocation` elsewhere. Studio adds the query only to the frame's
 first address, so after the site moves to another page only the layout message (sent on every load) says it; a site
-can keep the flag in `sessionStorage`. The `instafy-frontend-previews` skill tells
-Octo this.
+can keep the flag in `sessionStorage`. The `instafy-frontend-previews` skill (its
+`references/studio-host-messages.md`) tells Octo this.
 
 ### Limits of this version
 
