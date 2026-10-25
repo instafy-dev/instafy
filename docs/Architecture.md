@@ -78,6 +78,21 @@ deploying the controller that reads these columns.
   Studio modal before writing provider state into the project.
 - The remaining host gap is generic provider-context injection into provider `initialize`; the binding record, approval flow, and one real caller exist now.
 
+## Provider Request Queue
+
+`POST /projects/:id/provider-tools/call` and `/provider-resources/read` queue a request for the
+device a provider is attached on and hold the call open (`timeoutMs`, 5-120 s) until the device
+answers through `/projects/:id/provider-requests` (list, claim, complete).
+
+- A held-open dispatch holds no database connection while it waits. It wakes on the request's
+  `provider.request.updated` event and rereads the row at least once a second.
+- Each request has `expiresAt`, set on the database clock when it is queued. A device may claim a
+  request, or claim one it holds again, only before then, and listings stop offering pending and
+  claimed requests after it. Every copy of a request carries `ageMs`, its age on the database
+  clock, which a device trusts over its own clock.
+- When the wait ends, only an unclaimed request expires. A claimed one stays claimed, and its
+  device's later answer is still recorded.
+
 ## Canonical Workspace Modes
 There are two supported canonical filesystem modes:
 

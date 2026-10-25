@@ -1,5 +1,5 @@
 use std::str::FromStr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -8,13 +8,15 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value as JsonValue};
-use tokio::time::sleep;
+use tokio::sync::broadcast::{self, error::RecvError};
+use tokio::time::{sleep_until, timeout_at, Instant};
 use tokio_postgres::types::Json as PgJson;
-use tokio_postgres::{error::SqlState, Row};
+use tokio_postgres::{error::SqlState, GenericClient, Row};
 use uuid::Uuid;
 
-use crate::auth::authenticate_request;
+use crate::auth::{authenticate_request, RequestContext};
 use crate::projects::load_project_record;
+use crate::state::ControllerEvent;
 use crate::{
     bad_request, ensure_project_access, ensure_project_scoped_write_access,
     ensure_project_write_access, internal_error, not_found, publish_controller_event, unauthorized,
@@ -33,6 +35,10 @@ const REQUEST_STATUS_FAILED: &str = "failed";
 const REQUEST_STATUS_EXPIRED: &str = "expired";
 const REQUEST_KIND_TOOL_CALL: &str = "tool_call";
 const REQUEST_KIND_RESOURCE_READ: &str = "resource_read";
+const PROVIDER_REQUEST_CREATED_EVENT: &str = "provider.request.created";
+const PROVIDER_REQUEST_UPDATED_EVENT: &str = "provider.request.updated";
+const WAIT_TIMEOUT_ERROR: &str = "Timed out waiting for the provider device to respond.";
+const EXPIRED_BEFORE_CLAIM_ERROR: &str = "The provider request expired before a device claimed it.";
 /// Scope carried by the per-job controller token that authorizes workspace
 /// shells to dispatch provider tool calls / resource reads. The device-side
 /// routes (list/claim/complete) keep their user-session checks: the phone
@@ -41,7 +47,19 @@ pub(crate) const PROVIDER_CALL_SCOPE: &str = "provider.call";
 const DEFAULT_WAIT_TIMEOUT_MS: u64 = 45_000;
 const MAX_WAIT_TIMEOUT_MS: u64 = 120_000;
 const MIN_WAIT_TIMEOUT_MS: u64 = 5_000;
-const WAIT_POLL_INTERVAL_MS: u64 = 350;
+/// A waiting dispatch wakes on the request's own update event and reads the
+/// row only then, or after this long when no event arrives (another node
+/// without the shared event bus, or a lagged subscriber).
+const WAIT_FALLBACK_POLL_INTERVAL_MS: u64 = 1_000;
+
+macro_rules! request_columns {
+    () => {
+        "id, project_id, provider_id, request_kind, tool_name, resource_uri, arguments,
+         status, requested_by, claimed_by_device_id, claimed_by_device_label, response, error,
+         created_at, claimed_at, completed_at, updated_at, expires_at,
+         greatest(0, floor(extract(epoch from (now() - created_at)) * 1000))::bigint as age_ms"
+    };
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -144,6 +162,12 @@ struct ProviderRequestPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     completed_at: Option<String>,
     updated_at: String,
+    /// No device may claim the request, or claim it again, after this time.
+    expires_at: String,
+    /// Milliseconds since the request was created, on the database clock,
+    /// when this copy of it was read. A device judges freshness by this rather
+    /// than by its own clock.
+    age_ms: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +189,8 @@ struct ProviderRequestRecord {
     claimed_at: Option<DateTime<Utc>>,
     completed_at: Option<DateTime<Utc>>,
     updated_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    age_ms: i64,
 }
 
 pub(crate) fn router() -> Router<AppState> {
@@ -207,65 +233,22 @@ async fn dispatch_provider_tool_call(
     let tool_name = normalize_named_identifier(body.name.as_str(), "tool name", TOOL_NAME_MAX_LEN)?;
     let timeout_ms = normalize_wait_timeout_ms(body.timeout_ms);
 
-    let mut connection = state
-        .pool
-        .get()
-        .await
-        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
-    let transaction = connection
-        .transaction()
-        .await
-        .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
-
-    let project = load_project_record(&transaction, &project_id).await?;
-    // If a future bounded grant explicitly carries provider.call, still bind
-    // it to this project. Ordinary model jobs currently receive no such scope;
-    // user-session and service-role callers keep the membership write check.
-    ensure_project_scoped_write_access(
-        &transaction,
-        &project,
+    let request = dispatch_and_wait(
+        &state,
         &context,
-        None,
-        &[PROVIDER_CALL_SCOPE],
-    )
-    .await?;
-    ensure_provider_is_attached(&transaction, &project_id, provider_id.as_str()).await?;
-
-    let request_id = Uuid::new_v4();
-    insert_provider_request(
-        &transaction,
         ProviderRequestInsert {
-            id: request_id,
+            id: Uuid::new_v4(),
             project_id,
-            provider_id: provider_id.clone(),
-            request_kind: REQUEST_KIND_TOOL_CALL.to_string(),
-            tool_name: Some(tool_name.clone()),
+            provider_id,
+            request_kind: REQUEST_KIND_TOOL_CALL,
+            tool_name: Some(tool_name),
             resource_uri: None,
             arguments: body.arguments.unwrap_or_else(|| json!({})),
             requested_by: context.user_id,
         },
+        timeout_ms,
     )
     .await?;
-
-    transaction.commit().await.map_err(|error| {
-        internal_error(format!("failed to commit provider tool dispatch: {error}"))
-    })?;
-
-    publish_provider_request_event(
-        &state,
-        "provider.request.created",
-        project_id,
-        request_id,
-        provider_id.as_str(),
-        REQUEST_KIND_TOOL_CALL,
-        Some(tool_name.as_str()),
-        None,
-        REQUEST_STATUS_PENDING,
-    );
-
-    let request =
-        wait_for_provider_request_terminal_state(&state, project_id, request_id, timeout_ms)
-            .await?;
     Ok(Json(build_tool_dispatch_response(&request)))
 }
 
@@ -286,66 +269,72 @@ async fn dispatch_provider_resource_read(
         normalize_named_identifier(body.uri.as_str(), "resource uri", RESOURCE_URI_MAX_LEN)?;
     let timeout_ms = normalize_wait_timeout_ms(body.timeout_ms);
 
-    let mut connection = state
-        .pool
-        .get()
-        .await
-        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
-    let transaction = connection
-        .transaction()
-        .await
-        .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
-
-    let project = load_project_record(&transaction, &project_id).await?;
-    // Same scoped-token authorization as dispatch_provider_tool_call.
-    ensure_project_scoped_write_access(
-        &transaction,
-        &project,
+    let request = dispatch_and_wait(
+        &state,
         &context,
-        None,
-        &[PROVIDER_CALL_SCOPE],
-    )
-    .await?;
-    ensure_provider_is_attached(&transaction, &project_id, provider_id.as_str()).await?;
-
-    let request_id = Uuid::new_v4();
-    insert_provider_request(
-        &transaction,
         ProviderRequestInsert {
-            id: request_id,
+            id: Uuid::new_v4(),
             project_id,
-            provider_id: provider_id.clone(),
-            request_kind: REQUEST_KIND_RESOURCE_READ.to_string(),
+            provider_id,
+            request_kind: REQUEST_KIND_RESOURCE_READ,
             tool_name: None,
-            resource_uri: Some(resource_uri.clone()),
+            resource_uri: Some(resource_uri),
             arguments: json!({}),
             requested_by: context.user_id,
         },
+        timeout_ms,
     )
     .await?;
-
-    transaction.commit().await.map_err(|error| {
-        internal_error(format!(
-            "failed to commit provider resource dispatch: {error}"
-        ))
-    })?;
-
-    publish_provider_request_event(
-        &state,
-        "provider.request.created",
-        project_id,
-        request_id,
-        provider_id.as_str(),
-        REQUEST_KIND_RESOURCE_READ,
-        None,
-        Some(resource_uri.as_str()),
-        REQUEST_STATUS_PENDING,
-    );
-
-    let request =
-        wait_for_provider_request_terminal_state(&state, project_id, request_id, timeout_ms)
-            .await?;
     Ok(Json(build_resource_dispatch_response(&request)))
+}
+
+/// Queues one request, then waits for a device to settle it. The pooled
+/// connection that queued it goes back to the pool before the wait, so a
+/// held-open dispatch holds no connection while it waits.
+async fn dispatch_and_wait(
+    state: &AppState,
+    context: &RequestContext,
+    insert: ProviderRequestInsert,
+    timeout_ms: u64,
+) -> Result<ProviderRequestRecord, (StatusCode, Json<ApiError>)> {
+    let project_id = insert.project_id;
+    let queued = {
+        let mut connection = state
+            .pool
+            .get()
+            .await
+            .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
+        let transaction = connection
+            .transaction()
+            .await
+            .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
+
+        let project = load_project_record(&transaction, &project_id).await?;
+        // If a future bounded grant explicitly carries provider.call, still
+        // bind it to this project. Ordinary model jobs currently receive no
+        // such scope; user-session and service-role callers keep the
+        // membership write check.
+        ensure_project_scoped_write_access(
+            &transaction,
+            &project,
+            context,
+            None,
+            &[PROVIDER_CALL_SCOPE],
+        )
+        .await?;
+        ensure_provider_is_attached(&transaction, &project_id, insert.provider_id.as_str()).await?;
+
+        let queued = insert_provider_request(&transaction, &insert, timeout_ms).await?;
+        transaction.commit().await.map_err(|error| {
+            internal_error(format!(
+                "failed to commit provider request dispatch: {error}"
+            ))
+        })?;
+        queued
+    };
+
+    publish_provider_request_event(state, PROVIDER_REQUEST_CREATED_EVENT, &queued);
+    wait_for_provider_request_terminal_state(state, project_id, queued.id, timeout_ms).await
 }
 
 async fn list_provider_requests(
@@ -378,18 +367,30 @@ async fn list_provider_requests(
     ensure_project_access(&transaction, &project, &context, None).await?;
     ensure_provider_is_attached(&transaction, &project_id, provider_id.as_str()).await?;
 
+    // Pending and claimed rows are listed only while a device may still claim
+    // them. Once a request's window has closed, a device must not start it
+    // again, and old rows must not fill the page ahead of new ones.
     let rows = transaction
         .query(
-            "select id, project_id, provider_id, request_kind, tool_name, resource_uri, arguments,
-                    status, requested_by, claimed_by_device_id, claimed_by_device_label, response,
-                    error, created_at, claimed_at, completed_at, updated_at
-               from project_provider_requests
-              where project_id = $1
-                and provider_id = $2
-                and status = any($3)
-              order by created_at asc
-              limit $4",
-            &[&project_id, &provider_id, &statuses, &(limit as i64)],
+            concat!(
+                "select ",
+                request_columns!(),
+                " from project_provider_requests
+                 where project_id = $1
+                   and provider_id = $2
+                   and status = any($3)
+                   and (status not in ($5, $6) or expires_at > now())
+                 order by created_at asc
+                 limit $4"
+            ),
+            &[
+                &project_id,
+                &provider_id,
+                &statuses,
+                &(limit as i64),
+                &REQUEST_STATUS_PENDING,
+                &REQUEST_STATUS_CLAIMED,
+            ],
         )
         .await
         .map_err(|error| internal_error(format!("failed to list provider requests: {error}")))?;
@@ -443,33 +444,63 @@ async fn claim_provider_request(
     if request.provider_id != provider_id {
         return Err(bad_request("provider id does not match this request"));
     }
-    if request.status == REQUEST_STATUS_CLAIMED {
-        if request.claimed_by_device_id.as_deref() == Some(device_id.as_str()) {
-            transaction.commit().await.map_err(|error| {
-                internal_error(format!("failed to commit provider request claim: {error}"))
-            })?;
-            return Ok(Json(provider_request_to_payload(&request)));
-        }
+    let claimed_by_this_device =
+        request.claimed_by_device_id.as_deref() == Some(device_id.as_str());
+    if request.status == REQUEST_STATUS_CLAIMED && !claimed_by_this_device {
         return Err(bad_request(
             "provider request has already been claimed by another device",
         ));
     }
-    if request.status != REQUEST_STATUS_PENDING {
+    if request.status != REQUEST_STATUS_PENDING && request.status != REQUEST_STATUS_CLAIMED {
         return Err(bad_request("provider request is no longer pending"));
+    }
+
+    // Pending, or claimed by this device. Either way the device would start
+    // it, so it must still be inside its window.
+    if request.expires_at <= database_now(&transaction).await? {
+        if request.status == REQUEST_STATUS_CLAIMED {
+            return Err(bad_request(
+                "provider request can no longer be claimed; the device that claimed it may still complete it",
+            ));
+        }
+        let expired = expire_pending_provider_request(
+            &transaction,
+            &project_id,
+            &request_id,
+            EXPIRED_BEFORE_CLAIM_ERROR,
+        )
+        .await?;
+        transaction.commit().await.map_err(|error| {
+            internal_error(format!("failed to commit provider request expiry: {error}"))
+        })?;
+        if let Some(expired) = expired {
+            publish_provider_request_event(&state, PROVIDER_REQUEST_UPDATED_EVENT, &expired);
+        }
+        return Err(bad_request(
+            "provider request expired before it was claimed",
+        ));
+    }
+
+    if request.status == REQUEST_STATUS_CLAIMED {
+        transaction.commit().await.map_err(|error| {
+            internal_error(format!("failed to commit provider request claim: {error}"))
+        })?;
+        return Ok(Json(provider_request_to_payload(&request)));
     }
 
     let row = transaction
         .query_one(
-            "update project_provider_requests
-                set status = $3,
-                    claimed_by_device_id = $4,
-                    claimed_by_device_label = $5,
-                    claimed_at = now(),
-                    updated_at = now()
-              where id = $1 and project_id = $2
-          returning id, project_id, provider_id, request_kind, tool_name, resource_uri, arguments,
-                    status, requested_by, claimed_by_device_id, claimed_by_device_label, response,
-                    error, created_at, claimed_at, completed_at, updated_at",
+            concat!(
+                "update project_provider_requests
+                    set status = $3,
+                        claimed_by_device_id = $4,
+                        claimed_by_device_label = $5,
+                        claimed_at = now(),
+                        updated_at = now()
+                  where id = $1 and project_id = $2
+              returning ",
+                request_columns!()
+            ),
             &[
                 &request_id,
                 &project_id,
@@ -486,17 +517,7 @@ async fn claim_provider_request(
     })?;
 
     let claimed = map_provider_request_row(&row);
-    publish_provider_request_event(
-        &state,
-        "provider.request.updated",
-        project_id,
-        request_id,
-        provider_id.as_str(),
-        claimed.request_kind.as_str(),
-        claimed.tool_name.as_deref(),
-        claimed.resource_uri.as_deref(),
-        claimed.status.as_str(),
-    );
+    publish_provider_request_event(&state, PROVIDER_REQUEST_UPDATED_EVENT, &claimed);
 
     Ok(Json(provider_request_to_payload(&claimed)))
 }
@@ -545,10 +566,21 @@ async fn complete_provider_request(
         })?;
         return Ok(Json(provider_request_to_payload(&request)));
     }
-    if request.status != REQUEST_STATUS_CLAIMED {
-        return Err(bad_request(
-            "provider request must be claimed before completion",
-        ));
+    match request.status.as_str() {
+        REQUEST_STATUS_CLAIMED => {}
+        // An older controller expired claimed requests when its wait ran out.
+        // The device that took one may still report how it went.
+        REQUEST_STATUS_EXPIRED if request.claimed_at.is_some() => {}
+        REQUEST_STATUS_EXPIRED => {
+            return Err(bad_request(
+                "provider request expired before any device claimed it",
+            ));
+        }
+        _ => {
+            return Err(bad_request(
+                "provider request must be claimed before completion",
+            ));
+        }
     }
     if request.claimed_by_device_id.as_deref() != Some(device_id.as_str()) {
         return Err(bad_request(
@@ -573,18 +605,22 @@ async fn complete_provider_request(
         REQUEST_STATUS_FAILED
     };
 
+    // A completion after the window closed is still the device's answer, so
+    // it is recorded: the dispatch may have stopped waiting, but the action
+    // ran.
     let row = transaction
         .query_one(
-            "update project_provider_requests
-                set status = $3,
-                    response = $4::jsonb,
-                    error = $5,
-                    completed_at = now(),
-                    updated_at = now()
-              where id = $1 and project_id = $2
-          returning id, project_id, provider_id, request_kind, tool_name, resource_uri, arguments,
-                    status, requested_by, claimed_by_device_id, claimed_by_device_label, response,
-                    error, created_at, claimed_at, completed_at, updated_at",
+            concat!(
+                "update project_provider_requests
+                    set status = $3,
+                        response = $4::jsonb,
+                        error = $5,
+                        completed_at = now(),
+                        updated_at = now()
+                  where id = $1 and project_id = $2
+              returning ",
+                request_columns!()
+            ),
             &[
                 &request_id,
                 &project_id,
@@ -603,17 +639,7 @@ async fn complete_provider_request(
     })?;
 
     let completed = map_provider_request_row(&row);
-    publish_provider_request_event(
-        &state,
-        "provider.request.updated",
-        project_id,
-        request_id,
-        provider_id.as_str(),
-        completed.request_kind.as_str(),
-        completed.tool_name.as_deref(),
-        completed.resource_uri.as_deref(),
-        completed.status.as_str(),
-    );
+    publish_provider_request_event(&state, PROVIDER_REQUEST_UPDATED_EVENT, &completed);
 
     Ok(Json(provider_request_to_payload(&completed)))
 }
@@ -622,30 +648,42 @@ struct ProviderRequestInsert {
     id: Uuid,
     project_id: Uuid,
     provider_id: String,
-    request_kind: String,
+    request_kind: &'static str,
     tool_name: Option<String>,
     resource_uri: Option<String>,
     arguments: JsonValue,
     requested_by: Option<Uuid>,
 }
 
+/// Inserts a pending request whose window closes `timeout_ms` from now on the
+/// database clock, the clock every later claim is judged by.
 async fn insert_provider_request(
     transaction: &tokio_postgres::Transaction<'_>,
-    input: ProviderRequestInsert,
-) -> Result<(), (StatusCode, Json<ApiError>)> {
-    transaction
-        .execute(
-            "insert into project_provider_requests (
-                id,
-                project_id,
-                provider_id,
-                request_kind,
-                tool_name,
-                resource_uri,
-                arguments,
-                status,
-                requested_by
-             ) values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)",
+    input: &ProviderRequestInsert,
+    timeout_ms: u64,
+) -> Result<ProviderRequestRecord, (StatusCode, Json<ApiError>)> {
+    let timeout_ms = i64::try_from(timeout_ms).unwrap_or(i64::MAX);
+    let row = transaction
+        .query_one(
+            concat!(
+                "insert into project_provider_requests (
+                    id,
+                    project_id,
+                    provider_id,
+                    request_kind,
+                    tool_name,
+                    resource_uri,
+                    arguments,
+                    status,
+                    requested_by,
+                    expires_at
+                 ) values (
+                    $1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9,
+                    now() + $10::bigint * interval '1 millisecond'
+                 )
+                 returning ",
+                request_columns!()
+            ),
             &[
                 &input.id,
                 &input.project_id,
@@ -656,13 +694,23 @@ async fn insert_provider_request(
                 &PgJson(&input.arguments),
                 &REQUEST_STATUS_PENDING,
                 &input.requested_by,
+                &timeout_ms,
             ],
         )
         .await
         .map_err(|error| internal_error(format!("failed to insert provider request: {error}")))?;
-    Ok(())
+    Ok(map_provider_request_row(&row))
 }
 
+/// Waits until a device settles the request or `timeout_ms` passes, holding
+/// a pooled connection only while it reads the row. It wakes on the
+/// request's own update event, and reads the row at least every
+/// `WAIT_FALLBACK_POLL_INTERVAL_MS` in case that event never reaches this
+/// node.
+///
+/// At the deadline only a request no device has claimed is expired. A
+/// claimed one is left claimed: the device may still be running it, and its
+/// answer is recorded when it comes.
 async fn wait_for_provider_request_terminal_state(
     state: &AppState,
     project_id: Uuid,
@@ -670,86 +718,151 @@ async fn wait_for_provider_request_terminal_state(
     timeout_ms: u64,
 ) -> Result<ProviderRequestRecord, (StatusCode, Json<ApiError>)> {
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-    let connection = state
-        .pool
-        .get()
-        .await
-        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
+    // Subscribed before the first read, so an update that lands between a
+    // read and the wait that follows it still wakes the wait.
+    let mut events = state.events.subscribe();
 
     loop {
-        let row = connection
-            .query_opt(
-                "select id, project_id, provider_id, request_kind, tool_name, resource_uri, arguments,
-                        status, requested_by, claimed_by_device_id, claimed_by_device_label, response,
-                        error, created_at, claimed_at, completed_at, updated_at
-                   from project_provider_requests
-                  where id = $1 and project_id = $2",
-                &[&request_id, &project_id],
-            )
-            .await
-            .map_err(|error| internal_error(format!("failed to load provider request: {error}")))?;
-        let request = row
-            .as_ref()
-            .map(map_provider_request_row)
-            .ok_or_else(|| not_found("provider request not found"))?;
+        let request = {
+            let connection =
+                state.pool.get().await.map_err(|error| {
+                    internal_error(format!("failed to get connection: {error}"))
+                })?;
+            load_provider_request(&*connection, &project_id, &request_id).await?
+        };
         if matches!(
             request.status.as_str(),
             REQUEST_STATUS_COMPLETED | REQUEST_STATUS_FAILED | REQUEST_STATUS_EXPIRED
         ) {
             return Ok(request);
         }
-        if Instant::now() >= deadline {
-            let timeout_message = "Timed out waiting for the provider device to respond.";
-            let _ = connection
-                .execute(
-                    "update project_provider_requests
-                        set status = $3,
-                            error = $4,
-                            completed_at = now(),
-                            updated_at = now()
-                      where id = $1
-                        and project_id = $2
-                        and status in ($5, $6)",
-                    &[
-                        &request_id,
-                        &project_id,
-                        &REQUEST_STATUS_EXPIRED,
-                        &timeout_message,
-                        &REQUEST_STATUS_PENDING,
-                        &REQUEST_STATUS_CLAIMED,
-                    ],
-                )
-                .await;
-            let timed_out = connection
-                .query_opt(
-                    "select id, project_id, provider_id, request_kind, tool_name, resource_uri, arguments,
-                            status, requested_by, claimed_by_device_id, claimed_by_device_label, response,
-                            error, created_at, claimed_at, completed_at, updated_at
-                       from project_provider_requests
-                      where id = $1 and project_id = $2",
-                    &[&request_id, &project_id],
-                )
-                .await
-                .map_err(|error| internal_error(format!("failed to reload provider request: {error}")))?;
-            let request = timed_out
-                .as_ref()
-                .map(map_provider_request_row)
-                .ok_or_else(|| not_found("provider request not found"))?;
-            publish_provider_request_event(
-                state,
-                "provider.request.updated",
-                project_id,
-                request_id,
-                request.provider_id.as_str(),
-                request.request_kind.as_str(),
-                request.tool_name.as_deref(),
-                request.resource_uri.as_deref(),
-                request.status.as_str(),
-            );
-            return Ok(request);
+
+        let now = Instant::now();
+        if now >= deadline {
+            let connection =
+                state.pool.get().await.map_err(|error| {
+                    internal_error(format!("failed to get connection: {error}"))
+                })?;
+            let expired = expire_pending_provider_request(
+                &*connection,
+                &project_id,
+                &request_id,
+                WAIT_TIMEOUT_ERROR,
+            )
+            .await?;
+            return match expired {
+                Some(expired) => {
+                    publish_provider_request_event(state, PROVIDER_REQUEST_UPDATED_EVENT, &expired);
+                    Ok(expired)
+                }
+                // Claimed, or settled since the last read.
+                None => load_provider_request(&*connection, &project_id, &request_id).await,
+            };
         }
-        sleep(Duration::from_millis(WAIT_POLL_INTERVAL_MS)).await;
+
+        let wake_at = deadline.min(now + Duration::from_millis(WAIT_FALLBACK_POLL_INTERVAL_MS));
+        wait_for_event(&mut events, wake_at, |event| {
+            is_update_of(event, request_id)
+        })
+        .await;
     }
+}
+
+fn is_update_of(event: &ControllerEvent, request_id: Uuid) -> bool {
+    event.kind == PROVIDER_REQUEST_UPDATED_EVENT
+        && event
+            .data
+            .get("requestId")
+            .and_then(JsonValue::as_str)
+            .and_then(|id| Uuid::parse_str(id).ok())
+            == Some(request_id)
+}
+
+/// Returns when an event `wanted` picks arrives, when events were missed, or
+/// at `wake_at`, whichever comes first.
+async fn wait_for_event(
+    events: &mut broadcast::Receiver<ControllerEvent>,
+    wake_at: Instant,
+    wanted: impl Fn(&ControllerEvent) -> bool,
+) {
+    loop {
+        match timeout_at(wake_at, events.recv()).await {
+            Err(_elapsed) => return,
+            Ok(Ok(event)) if wanted(&event) => return,
+            Ok(Ok(_)) => {}
+            Ok(Err(RecvError::Lagged(_))) => return,
+            Ok(Err(RecvError::Closed)) => {
+                sleep_until(wake_at).await;
+                return;
+            }
+        }
+    }
+}
+
+async fn load_provider_request<C: GenericClient + Sync>(
+    client: &C,
+    project_id: &Uuid,
+    request_id: &Uuid,
+) -> Result<ProviderRequestRecord, (StatusCode, Json<ApiError>)> {
+    let row = client
+        .query_opt(
+            concat!(
+                "select ",
+                request_columns!(),
+                " from project_provider_requests where id = $1 and project_id = $2"
+            ),
+            &[request_id, project_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load provider request: {error}")))?;
+    row.as_ref()
+        .map(map_provider_request_row)
+        .ok_or_else(|| not_found("provider request not found"))
+}
+
+/// Marks the request expired if it is still pending, and returns it if this
+/// call did.
+async fn expire_pending_provider_request<C: GenericClient + Sync>(
+    client: &C,
+    project_id: &Uuid,
+    request_id: &Uuid,
+    error: &str,
+) -> Result<Option<ProviderRequestRecord>, (StatusCode, Json<ApiError>)> {
+    let row = client
+        .query_opt(
+            concat!(
+                "update project_provider_requests
+                    set status = $3,
+                        error = $4,
+                        completed_at = now(),
+                        updated_at = now()
+                  where id = $1
+                    and project_id = $2
+                    and status = $5
+              returning ",
+                request_columns!()
+            ),
+            &[
+                request_id,
+                project_id,
+                &REQUEST_STATUS_EXPIRED,
+                &error,
+                &REQUEST_STATUS_PENDING,
+            ],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to expire provider request: {error}")))?;
+    Ok(row.as_ref().map(map_provider_request_row))
+}
+
+async fn database_now(
+    transaction: &tokio_postgres::Transaction<'_>,
+) -> Result<DateTime<Utc>, (StatusCode, Json<ApiError>)> {
+    transaction
+        .query_one("select now()", &[])
+        .await
+        .map(|row| row.get(0))
+        .map_err(|error| internal_error(format!("failed to read the database clock: {error}")))
 }
 
 async fn load_provider_request_for_update(
@@ -759,12 +872,13 @@ async fn load_provider_request_for_update(
 ) -> Result<ProviderRequestRecord, (StatusCode, Json<ApiError>)> {
     let row = transaction
         .query_opt(
-            "select id, project_id, provider_id, request_kind, tool_name, resource_uri, arguments,
-                    status, requested_by, claimed_by_device_id, claimed_by_device_label, response,
-                    error, created_at, claimed_at, completed_at, updated_at
-               from project_provider_requests
-              where id = $1 and project_id = $2
-              for update",
+            concat!(
+                "select ",
+                request_columns!(),
+                " from project_provider_requests
+                 where id = $1 and project_id = $2
+                 for update"
+            ),
             &[request_id, project_id],
         )
         .await
@@ -836,6 +950,18 @@ async fn ensure_provider_is_attached(
     Ok(())
 }
 
+fn dispatch_fallback_error(request: &ProviderRequestRecord, missing_reply: &str) -> String {
+    if request.status == REQUEST_STATUS_CLAIMED {
+        return format!(
+            "{WAIT_TIMEOUT_ERROR} The device claimed the request and may still complete it."
+        );
+    }
+    request
+        .error
+        .clone()
+        .unwrap_or_else(|| missing_reply.to_string())
+}
+
 fn build_tool_dispatch_response(request: &ProviderRequestRecord) -> JsonValue {
     if let Some(response) = request.response.clone() {
         return response;
@@ -844,7 +970,7 @@ fn build_tool_dispatch_response(request: &ProviderRequestRecord) -> JsonValue {
       "ok": false,
       "providerId": request.provider_id,
       "name": request.tool_name.clone().unwrap_or_default(),
-      "error": request.error.clone().unwrap_or_else(|| "Provider request did not return a tool response.".to_string()),
+      "error": dispatch_fallback_error(request, "Provider request did not return a tool response."),
     })
 }
 
@@ -857,35 +983,25 @@ fn build_resource_dispatch_response(request: &ProviderRequestRecord) -> JsonValu
       "providerId": request.provider_id,
       "uri": request.resource_uri.clone().unwrap_or_default(),
       "exists": false,
-      "error": request.error.clone().unwrap_or_else(|| "Provider request did not return a resource response.".to_string()),
+      "error": dispatch_fallback_error(request, "Provider request did not return a resource response."),
     })
 }
 
-fn publish_provider_request_event(
-    state: &AppState,
-    kind: &str,
-    project_id: Uuid,
-    request_id: Uuid,
-    provider_id: &str,
-    request_kind: &str,
-    tool_name: Option<&str>,
-    resource_uri: Option<&str>,
-    status: &str,
-) {
+fn publish_provider_request_event(state: &AppState, kind: &str, request: &ProviderRequestRecord) {
     publish_controller_event(
         &state.events,
         kind,
-        Some(project_id),
+        Some(request.project_id),
         None,
         None,
-        Some(request_id),
+        Some(request.id),
         json!({
-          "requestId": request_id,
-          "providerId": provider_id,
-          "requestKind": request_kind,
-          "toolName": tool_name,
-          "resourceUri": resource_uri,
-          "status": status,
+          "requestId": request.id,
+          "providerId": request.provider_id,
+          "requestKind": request.request_kind,
+          "toolName": request.tool_name,
+          "resourceUri": request.resource_uri,
+          "status": request.status,
         }),
     );
 }
@@ -909,6 +1025,8 @@ fn provider_request_to_payload(record: &ProviderRequestRecord) -> ProviderReques
         claimed_at: record.claimed_at.map(|value| value.to_rfc3339()),
         completed_at: record.completed_at.map(|value| value.to_rfc3339()),
         updated_at: record.updated_at.to_rfc3339(),
+        expires_at: record.expires_at.to_rfc3339(),
+        age_ms: record.age_ms,
     }
 }
 
@@ -931,6 +1049,8 @@ fn map_provider_request_row(row: &Row) -> ProviderRequestRecord {
         claimed_at: row.get("claimed_at"),
         completed_at: row.get("completed_at"),
         updated_at: row.get("updated_at"),
+        expires_at: row.get("expires_at"),
+        age_ms: row.get("age_ms"),
     }
 }
 
@@ -1026,10 +1146,132 @@ fn normalize_completion_response(value: JsonValue) -> JsonValue {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use axum::extract::Query;
     use axum::http::Uri;
+    use chrono::{TimeZone, Utc};
+    use serde_json::json;
+    use tokio::time::Instant;
+    use uuid::Uuid;
 
-    use super::{normalize_provider_id, normalize_status_filters, ListProviderRequestsQuery};
+    use super::{
+        build_resource_dispatch_response, build_tool_dispatch_response, is_update_of,
+        normalize_provider_id, normalize_status_filters, wait_for_event, ListProviderRequestsQuery,
+        ProviderRequestRecord, PROVIDER_REQUEST_UPDATED_EVENT,
+    };
+    use crate::state::{publish_controller_event_to_user, EventHub};
+
+    fn unanswered_request(
+        status: &str,
+        claimed_at: Option<chrono::DateTime<Utc>>,
+        error: Option<&str>,
+    ) -> ProviderRequestRecord {
+        let created_at = Utc.with_ymd_and_hms(2026, 10, 12, 12, 0, 0).unwrap();
+        ProviderRequestRecord {
+            id: Uuid::nil(),
+            project_id: Uuid::nil(),
+            provider_id: "device-provider".to_string(),
+            request_kind: "tool_call".to_string(),
+            tool_name: Some("device.move".to_string()),
+            resource_uri: Some("device://status".to_string()),
+            arguments: json!({}),
+            status: status.to_string(),
+            requested_by: None,
+            claimed_by_device_id: None,
+            claimed_by_device_label: None,
+            response: None,
+            error: error.map(str::to_string),
+            created_at,
+            claimed_at,
+            completed_at: None,
+            updated_at: created_at,
+            expires_at: created_at,
+            age_ms: 0,
+        }
+    }
+
+    /// A reply that is not the device's own says what became of the request.
+    /// The device's own reply comes back as it gave it.
+    #[test]
+    fn a_reply_without_the_devices_says_whether_a_device_may_still_act() {
+        let claimed_at = Some(Utc.with_ymd_and_hms(2026, 10, 12, 12, 0, 28).unwrap());
+        let timeout = "Timed out waiting for the provider device to respond.";
+        let claimed_timeout = "Timed out waiting for the provider device to respond. \
+                               The device claimed the request and may still complete it.";
+        for (status, claimed_at, stored_error, error) in [
+            ("expired", None, Some(timeout), timeout),
+            ("claimed", claimed_at, None, claimed_timeout),
+        ] {
+            let request = unanswered_request(status, claimed_at, stored_error);
+            for response in [
+                build_tool_dispatch_response(&request),
+                build_resource_dispatch_response(&request),
+            ] {
+                assert_eq!(response["ok"], json!(false), "{status}");
+                assert_eq!(response["error"], json!(error), "{status}");
+            }
+        }
+
+        let mut answered = unanswered_request("completed", None, None);
+        answered.response = Some(json!({ "ok": true, "name": "device.move" }));
+        assert_eq!(
+            build_tool_dispatch_response(&answered),
+            json!({ "ok": true, "name": "device.move" })
+        );
+    }
+
+    fn publish_update(hub: &EventHub, request_id: Uuid) {
+        publish_controller_event_to_user(
+            hub,
+            PROVIDER_REQUEST_UPDATED_EVENT,
+            Some(Uuid::nil()),
+            Uuid::nil(),
+            json!({ "requestId": request_id, "status": "completed" }),
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_waiting_dispatch_wakes_on_its_own_update() {
+        let hub = EventHub::new();
+        let mut events = hub.subscribe();
+        let request_id = Uuid::new_v4();
+        let start = Instant::now();
+
+        let publisher = {
+            let hub = hub.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                publish_update(&hub, Uuid::new_v4());
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                publish_update(&hub, request_id);
+            })
+        };
+
+        wait_for_event(&mut events, start + Duration::from_secs(5), |event| {
+            is_update_of(event, request_id)
+        })
+        .await;
+        publisher.await.expect("publisher");
+
+        assert_eq!(start.elapsed(), Duration::from_millis(200));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_waiting_dispatch_rereads_by_its_wake_time_without_an_event() {
+        let hub = EventHub::new();
+        let mut events = hub.subscribe();
+        let start = Instant::now();
+        publish_update(&hub, Uuid::new_v4());
+        let request_id = Uuid::new_v4();
+
+        wait_for_event(&mut events, start + Duration::from_secs(1), |event| {
+            is_update_of(event, request_id)
+        })
+        .await;
+
+        assert_eq!(start.elapsed(), Duration::from_secs(1));
+    }
 
     #[test]
     fn provider_id_accepts_instance_separator() {

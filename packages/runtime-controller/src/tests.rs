@@ -2216,6 +2216,35 @@ pub(crate) async fn require_origin_test_pool_with_max_size(
         })
 }
 
+/// Sends one request to `app` with `authorization` as its header, and returns
+/// the status and the JSON body, which is null when the body is empty or not
+/// JSON.
+pub(crate) async fn call_router(
+    app: &Router,
+    authorization: Option<&str>,
+    method: &str,
+    uri: String,
+    body: Option<serde_json::Value>,
+) -> anyhow::Result<(StatusCode, serde_json::Value)> {
+    let mut request = Request::builder().method(method).uri(uri);
+    if let Some(authorization) = authorization {
+        request = request.header(axum::http::header::AUTHORIZATION, authorization);
+    }
+    let request = match body {
+        Some(body) => request
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))?,
+        None => request.body(Body::empty())?,
+    };
+    let response = app.clone().oneshot(request).await?;
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await?;
+    Ok((
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    ))
+}
+
 /// Rows a shared-database test creates, deleted by [`with_shared_db_fixture`]
 /// however the test ends. Deleting an organization or a project cascades to
 /// its runtimes, leases, runtime events and tunnel grants.

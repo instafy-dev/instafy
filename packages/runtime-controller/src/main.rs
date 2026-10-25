@@ -117,6 +117,8 @@ mod tests_platform_job_record;
 #[cfg(test)]
 mod tests_presence_beat;
 #[cfg(test)]
+mod tests_provider_request_lifecycle;
+#[cfg(test)]
 mod tests_runtime_stop_fence;
 mod tokens;
 mod tunnels;

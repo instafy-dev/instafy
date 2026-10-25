@@ -1641,6 +1641,12 @@ selected mobile clients, and use `scripts/android-debug-ota-proof.mjs` before tr
 evidence. Hosted smoke accounts, production endpoints, and release sign-off orchestration are
 maintained outside the public repository.
 
+## Provider Requests
+
+`pnpm test:controller provider_request` runs the provider request queue's database tests: held
+dispatches on a small pool, the claim window, late answers and a request's age. They
+act as the device through the controller's routes, with no hardware.
+
 ## Local Tri-Client Camera Smoke
 - Run: `pnpm test:camera:tri-client:smoke`
 - Requires:
