@@ -6,13 +6,11 @@ import { useEffect, useRef } from "react";
 import {
   integrationIsAttached,
   providerRequestTargetsCurrentDevice,
-  startGatedInterval,
   useActiveProjectId,
 } from "@instafy/frontend/feature-api/runtime-bridge";
 
 import { KNOSH_PROVIDER_FAMILY } from "../../provider/family.mjs";
 import { postProbe, type RobotBridgeEvent } from "../robot/bridgeClient";
-import { getKnoshRuntimeAdapter } from "../robot/knoshRuntimeAdapter";
 import { KNOSH_NATIVE_CAPABILITY_RUNTIME } from "../robot/nativeRobotRuntime";
 import {
   findContractSkill,
@@ -34,13 +32,7 @@ function loadControllerFeatureApi(): Promise<ControllerFeatureApi> {
 }
 
 const IDLE_DELAY_MS = 2_500;
-// No Knosh integration is attached, or this client resolves no device for it
-// (only the phone's BLE bridge does). That changes only when someone attaches
-// or connects one, so look again every 30 s while the user is active, every
-// 5 min once idle and never while the tab is hidden; a return looks at once
-// when the last look is 30 s old.
-const GATED_ACTIVE_DELAY_MS = 30_000;
-const GATED_IDLE_DELAY_MS = 300_000;
+const GATED_DELAY_MS = 10_000;
 const BUSY_DELAY_MS = 2_000;
 const HANDLED_DELAY_MS = 500;
 const DEFAULT_DELAY_MS = 4_000;
@@ -263,18 +255,9 @@ export function KnoshSkillRequestBridge() {
     if (!projectId) {
       return;
     }
-    // Without a Knosh runtime adapter (no BLE bridge here at all)
-    // resolveSelection always answers null, so the loop could only read the
-    // space's integrations forever. Where one exists (the phone's, Desktop's or
-    // a Chromium tab's Web Bluetooth) it runs, and waits on the polling gate
-    // while it has nothing it could claim.
-    if (!getKnoshRuntimeAdapter()) {
-      return;
-    }
 
     let cancelled = false;
     let timerId: number | null = null;
-    let gatedWait: { stop: () => void } | null = null;
 
     const schedule = (delayMs: number) => {
       if (cancelled) {
@@ -285,21 +268,6 @@ export function KnoshSkillRequestBridge() {
       }, delayMs);
     };
 
-    const waitGated = () => {
-      if (cancelled) {
-        return;
-      }
-      gatedWait = startGatedInterval(
-        () => {
-          gatedWait?.stop();
-          gatedWait = null;
-          void tick();
-        },
-        GATED_ACTIVE_DELAY_MS,
-        { idleMs: GATED_IDLE_DELAY_MS },
-      );
-    };
-
     const tick = async () => {
       if (cancelled || busyRef.current) {
         schedule(BUSY_DELAY_MS);
@@ -308,7 +276,6 @@ export function KnoshSkillRequestBridge() {
 
       busyRef.current = true;
       let nextDelayMs = DEFAULT_DELAY_MS;
-      let gated = false;
 
       try {
         const {
@@ -326,7 +293,7 @@ export function KnoshSkillRequestBridge() {
             )
           : null;
         if (!integration || !integrationIsAttached(integration)) {
-          gated = true;
+          nextDelayMs = GATED_DELAY_MS;
           return;
         }
 
@@ -340,7 +307,7 @@ export function KnoshSkillRequestBridge() {
         ).catch(() => null);
         const deviceId = selection?.transportTarget.trim() ?? "";
         if (!selection || !deviceId) {
-          gated = true;
+          nextDelayMs = GATED_DELAY_MS;
           return;
         }
 
@@ -378,11 +345,7 @@ export function KnoshSkillRequestBridge() {
         nextDelayMs = HANDLED_DELAY_MS;
       } finally {
         busyRef.current = false;
-        if (gated) {
-          waitGated();
-        } else {
-          schedule(nextDelayMs);
-        }
+        schedule(nextDelayMs);
       }
     };
 
@@ -390,7 +353,6 @@ export function KnoshSkillRequestBridge() {
 
     return () => {
       cancelled = true;
-      gatedWait?.stop();
       if (timerId !== null) {
         window.clearTimeout(timerId);
       }
