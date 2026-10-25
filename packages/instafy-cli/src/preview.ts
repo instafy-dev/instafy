@@ -75,7 +75,10 @@ export type PreviewSummary = {
   title: string;
   port: number;
   path: string;
+  // Whether the preview is open (the tunnel grant's status), not whether the site answers.
   status: string;
+  // Whether Open in Studio starts the site again, when the server says.
+  restartable?: boolean;
 };
 
 export type PreviewOpenResult = PreviewSummary & {
@@ -1140,6 +1143,7 @@ function toPreviewSummary(raw: unknown): PreviewSummary | null {
     port: numberField(record, "port", "localPort") ?? 0,
     path: stringField(record, "path") ?? "/",
     status: stringField(record, "status") ?? "unknown",
+    ...(typeof record["restartable"] === "boolean" ? { restartable: record["restartable"] } : {}),
   };
 }
 
@@ -1234,13 +1238,24 @@ export function printPreviewList(previews: PreviewSummary[], json: boolean) {
     console.log(JSON.stringify(previews, null, 2));
     return;
   }
+  // A machine that stops or restarts revokes its previews: they leave this list, and their cards read Stopped.
+  const stoppedNote =
+    "A preview whose machine stopped or restarted is not listed; its card reads Stopped, and Open on a restartable card starts the site again.";
   if (previews.length === 0) {
-    console.log(kleur.yellow("No previews found."));
+    console.log(kleur.yellow("No open previews."));
+    console.log(kleur.gray(stoppedNote));
     return;
   }
   for (const preview of previews) {
+    const restart =
+      preview.restartable === undefined ? "" : preview.restartable ? " · restartable" : " · not restartable";
     console.log(
-      `${preview.previewId} · ${preview.title || "(untitled)"} · port=${preview.port}${preview.path === "/" ? "" : ` · path=${preview.path}`} · ${preview.status}`,
+      `${preview.previewId} · ${preview.title || "(untitled)"} · port=${preview.port}${preview.path === "/" ? "" : ` · path=${preview.path}`} · preview ${preview.status}${restart}`,
     );
   }
+  console.log(
+    kleur.gray(
+      `This lists open previews; it does not check whether a site answers (${kleur.cyan("instafy preview check --port <port>")} does). ${stoppedNote}`,
+    ),
+  );
 }

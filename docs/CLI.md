@@ -595,8 +595,11 @@ Exit codes:
 - The server makes its own port decision as well; the local rules only refuse earlier.
 - Inside an agent job, the CLI uses the job's own token and sends it only to
   `CONTROLLER_BASE_URL`; a different `--server-url` is refused.
-- `list` shows the space's previews from the server. `close` stops the local client and asks the
-  server to close the preview; the server then also revokes its open viewers.
+- `list` shows the space's open previews from the server. Its `status` is the preview's (`active`
+  while it is open), not whether the site answers: `check` does that. `--json` rows carry `restartable`
+  when the server sends it. A preview whose machine stopped or restarted is not listed; its card reads
+  Stopped, and **Open** on a restartable card starts the site again. `close` stops the local client and
+  asks the server to close the preview; the server then also revokes its open viewers.
 
 ### Check a site: `check`
 

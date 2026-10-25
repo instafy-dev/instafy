@@ -127,7 +127,8 @@ const FRONTEND_PREVIEWS_TEMPLATE: &str = include_str!(concat!(
 // from before the card could start a sleeping site again, v8 the one that
 // named a fixed tunnel domain for Vite's allowed hosts, and v9 the one from
 // before `instafy preview open --start` kept a site running after the turn (and
-// before the location, Present and tunnel material moved to references/). A
+// before the location, Present and tunnel material moved to references/), and
+// v10 the one that said rerunning `instafy preview open` refreshes the card. A
 // workspace still holding an unedited earlier bundled copy of this skill,
 // browser automation or skill import compat is upgraded; an edited one is kept.
 const LEGACY_FRONTEND_PREVIEWS_TEMPLATES: &[&str] = &[
@@ -140,6 +141,7 @@ const LEGACY_FRONTEND_PREVIEWS_TEMPLATES: &[&str] = &[
     include_str!("legacy/frontend-previews-v7.md"),
     include_str!("legacy/frontend-previews-v8.md"),
     include_str!("legacy/frontend-previews-v9.md"),
+    include_str!("legacy/frontend-previews-v10.md"),
 ];
 /// What a previewed site asks Studio for (the person's location, Present and
 /// Follow), read only when a site needs it.
@@ -2077,7 +2079,7 @@ mod tests {
     /// credentials, and says Instafy's browser cannot open the space's own
     /// addresses. What a site asks Studio for (the person's location, Present
     /// and Follow) and the tunnel details live in `references/`, which the
-    /// scaffold writes too. An unedited v3 to v9 copy is upgraded; an edited
+    /// scaffold writes too. An unedited v3 to v10 copy is upgraded; an edited
     /// one is kept.
     #[test]
     fn scaffold_upgrades_frontend_previews_to_studio_preview_cards() {
@@ -2100,6 +2102,12 @@ mod tests {
             "instafy preview check --port <port>",
             "references/studio-host-messages.md",
             "references/tunnels.md",
+            "Only `status: live` from an `instafy preview open` you ran this turn shows the site is up",
+            "an earlier card keeps showing its own state",
+            "their cards read Stopped and `instafy preview list` no longer lists them",
+            "Open on a `restartable` card starts the site again with no turn",
+            "its status says the preview is open, not that the site answers",
+            "Report what each command returned",
         ] {
             assert!(FRONTEND_PREVIEWS_TEMPLATE.contains(needle), "{needle}");
         }
@@ -2144,7 +2152,8 @@ mod tests {
         let v6 = include_str!("legacy/frontend-previews-v6.md");
         let v7 = include_str!("legacy/frontend-previews-v7.md");
         let v8 = include_str!("legacy/frontend-previews-v8.md");
-        let previous = include_str!("legacy/frontend-previews-v9.md");
+        let v9 = include_str!("legacy/frontend-previews-v9.md");
+        let previous = include_str!("legacy/frontend-previews-v10.md");
         assert!(!v3.contains("instafy preview open"));
         assert!(v4.contains("instafy preview open"));
         assert!(!v4.contains("Allow the preview host before the person opens the card."));
@@ -2156,9 +2165,16 @@ mod tests {
         assert!(!v7.contains("--serve-cmd"));
         assert!(v8.contains("--serve-cmd"));
         assert!(v8.contains(".rt.instafy.dev"));
-        assert!(previous.contains("--serve-cmd"));
-        assert!(!previous.contains("--start"));
-        assert!(!previous.contains(".rt.instafy.dev"));
+        assert!(v9.contains("--serve-cmd"));
+        assert!(!v9.contains("--start"));
+        assert!(!v9.contains(".rt.instafy.dev"));
+        assert!(previous.contains("--start"));
+        assert!(previous.contains("refreshes the card"));
+        // Octo reports what a command returned: a rerun posts this turn's
+        // card, it never refreshes an earlier one, and `instafy preview list`
+        // does not say whether a site answers.
+        assert!(!FRONTEND_PREVIEWS_TEMPLATE.contains("refreshes the card"));
+        assert!(!FRONTEND_PREVIEWS_TEMPLATE.contains("reuses the preview and its card"));
 
         let workspace = tempdir().expect("workspace tempdir");
         ensure_project_memory_scaffold(workspace.path());
@@ -2184,7 +2200,7 @@ mod tests {
             ensure_project_memory_scaffold(workspace.path());
             assert_eq!(fs::read_to_string(&reference).unwrap(), edited);
         }
-        for old in [v3, v4, v5, v6, v7, v8, previous] {
+        for old in [v3, v4, v5, v6, v7, v8, v9, previous] {
             fs::write(&skill, old).unwrap();
             ensure_project_memory_scaffold(workspace.path());
             assert_eq!(

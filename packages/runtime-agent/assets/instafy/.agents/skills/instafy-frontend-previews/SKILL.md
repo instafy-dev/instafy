@@ -22,10 +22,10 @@ Use this whenever a site or server runs in this space (or should) and someone sh
    `instafy preview open --port <port> --title "<short name>" --serve-cmd "<command>" --start --json`
    (add `--path /<page>` for a sub-page). The command serves the site on 127.0.0.1 or 0.0.0.0 at that port. See "Keep it running after your turn" for what `--start` does.
    - It posts the card in this conversation and prints no URL. Tell the person to open it from the card once `instafy preview check` passes (step 2). Do not paste a preview, tunnel or localhost URL for it.
-   - Running it again for the same port reuses the preview and its card. `instafy preview list` shows previews; `instafy preview close <previewId>` closes one.
+   - Running it again for the same port keeps the same preview. In the same turn it reuses that turn's card; in a later turn it posts a new card, and an earlier card keeps showing its own state. `instafy preview list` lists open previews; `instafy preview close <previewId>` closes one.
 2. Check it: `instafy preview check --port <port>`. Fix what it lists, then run the same `instafy preview open` again.
 3. Allow the preview host before the person opens the card. Dev servers that check the `Host` header (Vite dev and `vite preview`, webpack-dev-server, Angular) show "Blocked request" to everyone who opens the card, and you cannot see that page yourself. The first time you open a preview for such a server, add `viewerHostSuffix` from the JSON, with a leading dot and without `:port`, to its allowed hosts (Vite: `server.allowedHosts` and `preview.allowedHosts`; webpack-dev-server and Angular: `allowedHosts`), stop the server by its `startedPid` (below), and run the same `instafy preview open` again before you tell the person to open the card. Static file servers need nothing.
-4. Read `status`: `live` means the card works. `not_responding`: check the server is up on that port, then run `instafy preview open` again. `unknown`: tell the person to open the card.
+4. Read `status`: `live` means the card works. `not_responding`: check the server is up on that port, then run `instafy preview open` again. `unknown`: tell the person to open the card. Only `status: live` from an `instafy preview open` you ran this turn shows the site is up: never say a preview is live, restarted or refreshed from anything else.
 5. Read `restartable`. `true` means opening the card starts the site again after it stops or the space sleeps, with no turn: it reruns the recorded command. `false`: `restartNote` says why; run it again with `--serve-cmd "<command>"`.
 6. If it fails:
    - Exit `2`: nothing answers on 127.0.0.1 at that port, the site answers with a server error, or the command `--start` ran exited or stayed silent (the message names its log: read it, fix the cause, run it again). If the message says the site answers only on [::1], do not start a second one; bind it to 127.0.0.1 or 0.0.0.0, restart it, run it again.
@@ -41,7 +41,8 @@ Every process your turn starts is killed with its terminal's process group when 
 - Start a site that must outlive the turn with `instafy preview open --port <port> --title "<name>" --serve-cmd "<command>" --start --json`, run from the site's folder. It starts the command in its own session without Instafy credentials, logs to `.instafy/agent/logs`, waits for the port, posts the card, and returns `startedPid` and `logFile` (`startedPid` is null when the port already answered and nothing was started).
 - `--serve-cmd` is one command and its arguments: no shell syntax, and no secret on the line (the site reads secrets from an env file). A command that needs shell syntax (environment assignments, `cd`, a pipeline) goes in a script file in the site's folder, passed as `--serve-cmd "sh ./serve.sh"`.
 - Do not start a site that must outlive the turn with `&`, `nohup` or `setsid` by hand: it keeps this turn's credentials.
-- In a later turn, check the port first (`curl -fsS http://127.0.0.1:<port>/ > /dev/null`). If it is not running, rerun the same command; it reuses the card. Do not start a second server on another port for the same site.
+- In a later turn, check the port first (`curl -fsS http://127.0.0.1:<port>/ > /dev/null`). If it is not running, rerun the same command; it keeps the preview and posts this turn's card. Do not start a second server on another port for the same site.
+- When the space's machine stops or restarts, its sites stop: their cards read Stopped and `instafy preview list` no longer lists them. That is expected. Open on a `restartable` card starts the site again with no turn, so tell the person to press it; or rerun the same `instafy preview open ... --start` and read its `status`.
 - When a start fails, read `logFile` before trying again.
 - Stop a site by its `startedPid`: it leads its own process group, so `kill -- -<startedPid>` stops it and its children. Never stop one by a name pattern.
 - If the site has a `bound.json`, `instafy bind serve --detach` already does this.
@@ -67,11 +68,11 @@ Only when the person wants a shareable, public or phone link, or previews are no
 ## "I can't reach the preview" (preview doctor)
 
 - Does the port answer (`curl -fsS http://127.0.0.1:<port>/`)? If not, read the site's log and run the same `instafy preview open ... --start` again.
-- `instafy preview list` shows each preview's status; `instafy preview open` for the same port restarts its client and refreshes the card.
+- `instafy preview list` lists open previews: its status says the preview is open, not that the site answers, and a stopped preview is not listed. Rerunning the same `instafy preview open ... --start` starts the site when needed and posts this turn's card; read its `status`.
 - Run `instafy preview check --port <port>` for page errors (framework config, base paths, env vars).
 - For a tunnel, see `references/tunnels.md`.
 
-Report what you found and what you restarted.
+Report what each command returned (exit code, `status`), not what you expect a card to show.
 
 ## Cleanup
 
