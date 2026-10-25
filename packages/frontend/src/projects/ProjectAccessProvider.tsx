@@ -20,7 +20,7 @@ import { getStudioVisitKey } from "../navigation/studioVisit";
 import { controllerClient } from "../sdk/instafy";
 import { useWorkspaceStore } from "../store";
 import { isUUID } from "../utils/uuid";
-import { startGatedInterval, type GatedInterval } from "../runtime/pollingGate";
+import { POLLING_WAKE_MIN_GAP_MS, startGatedInterval, type GatedInterval } from "../runtime/pollingGate";
 import { useProjectState } from "./ProjectStateProvider";
 import { useAuth } from "../providers/AuthProvider";
 import { clearProjectState } from "../workspace/projectClear";
@@ -950,6 +950,8 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
     let periodicRefresh: GatedInterval | null = null;
     // A retry that came due while the tab was hidden runs when it is visible.
     let retryDeferred = false;
+    // When the last check started, anchored like the periodic check's timer.
+    let lastCheckStartedAt = Date.now();
 
     // The store can hold another space while the URL still names a blocked
     // one. This tab is not showing that other space, and checking it would
@@ -991,6 +993,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
         retryTimer = null;
       }
       retryDeferred = false;
+      lastCheckStartedAt = Date.now();
       periodicRefresh?.markRun();
       refreshInFlight = true;
       const abortController = new AbortController();
@@ -1073,10 +1076,11 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
       }
     };
 
-    // Coming back to the tab joins a check already under way (the polling
-    // gate's wake may have started one) instead of queueing a second.
+    // Coming back to the tab re-checks on the same terms as the polling
+    // gate's wake, which a return also triggers: only once the last check is
+    // 30 s old, and never as a second check behind one already under way.
     const handleFocus = () => {
-      if (!refreshInFlight) {
+      if (!refreshInFlight && Date.now() - lastCheckStartedAt >= POLLING_WAKE_MIN_GAP_MS) {
         void refreshCapabilities();
       }
     };

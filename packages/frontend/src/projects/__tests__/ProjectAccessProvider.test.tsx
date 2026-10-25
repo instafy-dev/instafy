@@ -5,6 +5,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const PROJECT_ID = "11111111-1111-4111-8111-111111111111";
+// Every stream reconnect re-checks the open space at once.
+const STREAM_RECONNECTED_EVENT = "instafy:controller-stream-reconnected";
 
 const mocks = vi.hoisted(() => ({
   createControllerProject: vi.fn(),
@@ -247,7 +249,7 @@ describe("ProjectAccessProvider capability refresh", () => {
       })
       .mockResolvedValueOnce(summaryFor("viewer"));
     await act(async () => root.render(<ProjectAccessProvider><AccessProbe /></ProjectAccessProvider>));
-    await act(async () => window.dispatchEvent(new Event("focus")));
+    await act(async () => window.dispatchEvent(new Event(STREAM_RECONNECTED_EVENT)));
     expect(staleSignal?.aborted).toBe(false);
 
     await act(async () => window.dispatchEvent(new CustomEvent(PROJECT_ACCESS_REFRESH_EVENT, {
@@ -285,6 +287,26 @@ describe("ProjectAccessProvider capability refresh", () => {
       }
       // Only the return at 34.5 s found the last check stale.
       expect(mocks.getSummaryResult.mock.calls.length - initial).toBe(1);
+    });
+
+    // A real tab return is a visibility change and a window focus.
+    it("re-checks on a return with a window focus only once the last check is 30 s old", async () => {
+      await act(async () => root.render(<ProjectAccessProvider><AccessProbe /></ProjectAccessProvider>));
+      const initial = mocks.getSummaryResult.mock.calls.length;
+      for (let flip = 0; flip < 14; flip += 1) {
+        await act(async () => setVisibility("hidden"));
+        await act(async () => vi.advanceTimersByTimeAsync(2_300));
+        await act(async () => {
+          setVisibility("visible");
+          window.dispatchEvent(new Event("focus"));
+        });
+        await act(async () => vi.advanceTimersByTimeAsync(2_300));
+      }
+      expect(mocks.getSummaryResult.mock.calls.length - initial).toBe(1);
+      // A focus once the last check is 30 s old still re-checks at once.
+      await act(async () => vi.advanceTimersByTimeAsync(30_000));
+      await act(async () => window.dispatchEvent(new Event("focus")));
+      expect(mocks.getSummaryResult.mock.calls.length - initial).toBe(2);
     });
 
     it("checks once a minute while active and backs off once idle", async () => {
@@ -553,7 +575,7 @@ describe("ProjectAccessProvider capability refresh", () => {
     });
 
     await act(async () => {
-      window.dispatchEvent(new Event("focus"));
+      window.dispatchEvent(new Event(STREAM_RECONNECTED_EVENT));
     });
     await vi.waitFor(() => expect(mocks.getSummaryResult).toHaveBeenCalledTimes(2));
 
@@ -682,12 +704,12 @@ describe("ProjectAccessProvider capability refresh", () => {
     mocks.getSummaryResult.mockResolvedValue({ summary: null, notFound: true, forbidden: false, unauthorized: false });
     markProjectDeletedHere(PROJECT_ID);
     try {
-      // The controller's notice can beat the DELETE response, and the
-      // confirm dialog closing focuses the window.
+      // The controller's notice can beat the DELETE response, and another
+      // check (a stream reconnect, say) can run before the response too.
       await act(async () => window.dispatchEvent(new CustomEvent(PROJECT_ACCESS_REFRESH_EVENT, {
         detail: { projectId: null, deletedProjectId: PROJECT_ID },
       })));
-      await act(async () => window.dispatchEvent(new Event("focus")));
+      await act(async () => window.dispatchEvent(new Event(STREAM_RECONNECTED_EVENT)));
 
       expect(mocks.getSummaryResult).toHaveBeenCalledTimes(2);
       expect(mocks.removeProject).not.toHaveBeenCalled();
@@ -795,7 +817,7 @@ describe("ProjectAccessProvider capability refresh", () => {
 
     // The delete failed after all: the next check finds the space gone and
     // says so, since the controller announced it, and forgets its tabs.
-    await act(async () => window.dispatchEvent(new Event("focus")));
+    await act(async () => window.dispatchEvent(new Event(STREAM_RECONNECTED_EVENT)));
     expect(probe?.getAttribute("data-blocked")).toBe("true");
     expect(probe?.getAttribute("data-deleted")).toBe("true");
     expect(mocks.removeProject).toHaveBeenLastCalledWith(PROJECT_ID, { openFallback: false, forgetSavedTabs: true });

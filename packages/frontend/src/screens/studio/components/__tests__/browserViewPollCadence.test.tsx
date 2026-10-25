@@ -227,6 +227,25 @@ describe("browser view poll cadence", () => {
     expect(woke).toEqual([1, 1, 1]);
   });
 
+  it("a run starting or ending in a hidden tab reads nothing until the tab is visible again", async () => {
+    await act(async () => root.render(<><Actions agentActive={false} /><Approval runActive={false} /></>));
+    await advance(1_000);
+    setVisibility("hidden");
+    await advance(1_000);
+    mocks.fetchActions.mockClear();
+    mocks.fetchPendingApproval.mockClear();
+    const reads = () => [mocks.fetchActions, mocks.fetchPendingApproval].map((m) => m.mock.calls.length);
+    await act(async () => root.render(<><Actions agentActive /><Approval runActive /></>));
+    await advance(5_000);
+    await act(async () => root.render(<><Actions agentActive={false} /><Approval runActive={false} /></>));
+    await advance(5_000);
+    expect(reads()).toEqual([0, 0]);
+    // The return reads both at once, which also covers the run's trailing read.
+    setVisibility("visible");
+    await advance(100);
+    expect(reads()).toEqual([1, 1]);
+  });
+
   it("pages while the browser surface is not on screen and nothing runs: every 15 s", async () => {
     await act(async () => root.render(<Pages pollFast={false} surfaceVisible={false} />));
     await advance(60_000, 500);

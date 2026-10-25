@@ -174,8 +174,16 @@ export function useNotificationCenter({ userId, accessToken, navigate }: { userI
     if (!userId || !accessToken) return;
     let stopped = false;
     let presenting = false;
+    // A push that lands while a pass is presenting may postdate the page that
+    // pass read, so it runs one full pass right after. A timer check that
+    // lands then adds nothing and is dropped.
+    let refreshAfter = false;
     const poll = async (options?: { check?: boolean }) => {
-      if (stopped || presenting) return;
+      if (stopped) return;
+      if (presenting) {
+        if (!options?.check) refreshAfter = true;
+        return;
+      }
       presenting = true;
       try {
       await refresh(options?.check ? { ifUnreadChanged: true } : undefined);
@@ -243,7 +251,13 @@ export function useNotificationCenter({ userId, accessToken, navigate }: { userI
         // duplicates without advancing server seen/read state.
         if (!foreground && presented) void controllerClient.notifications.updateState({ id: item.id, action: "seen", accessToken, expectedUserId: userId, isCurrent: current }).catch(() => {});
       }
-      } finally { presenting = false; }
+      } finally {
+        presenting = false;
+        if (refreshAfter && !stopped) {
+          refreshAfter = false;
+          void poll();
+        }
+      }
     };
     pollRef.current = poll;
     void poll();

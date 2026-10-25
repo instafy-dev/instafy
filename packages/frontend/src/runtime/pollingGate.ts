@@ -240,8 +240,9 @@ export interface AdaptivePollOptions {
  * re-arms the timer against that due time, so coming back reads at once only
  * when a read is due and quick visibility flips cost nothing extra. A change
  * of `fast` reads at once: speeding up reads now, and slowing down still
- * takes one trailing read before the slow cadence. `fast` is not part of any
- * scope, so a change never resets the caller's state.
+ * takes one trailing read before the slow cadence. While the document is
+ * hidden that read waits for the return, which then reads at once. `fast` is
+ * not part of any scope, so a change never resets the caller's state.
  */
 export function useAdaptivePoll(callback: () => unknown, { enabled, fast, fastMs, slowMs, slowIdleMs = slowMs }: AdaptivePollOptions): void {
   const fastRef = useRef(fast);
@@ -267,7 +268,12 @@ export function useAdaptivePoll(callback: () => unknown, { enabled, fast, fastMs
       try { void Promise.resolve(callback()).catch(() => {}); } catch { /* the next tick retries */ }
       schedule();
     };
-    kickRef.current = () => { if (!cancelled) tick(); };
+    kickRef.current = () => {
+      if (cancelled) return;
+      // Hidden: owe the read to the return instead of reading now.
+      if (pollingGateState() === "hidden") { lastRunAt = 0; return; }
+      tick();
+    };
     const unsubscribe = subscribePollingGate(schedule);
     tick();
     return () => { cancelled = true; clear(); unsubscribe(); kickRef.current = null; };

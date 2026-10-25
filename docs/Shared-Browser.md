@@ -568,7 +568,8 @@ action log every second and the pending prompt 1.5 s after each answer (every
 three minutes. A run starting, or the agent taking control, reads both at once;
 a run ending takes one more read of the action log, so a human-input request
 written at the end of the turn still shows. Nothing is read while the tab is
-hidden, and coming back reads whatever is due at once.
+hidden, not even the read a run starting or ending asks for; coming back makes
+that read at once, along with whatever else is due.
 
 The agent controls the page through one runtime-owned, required MCP server:
 

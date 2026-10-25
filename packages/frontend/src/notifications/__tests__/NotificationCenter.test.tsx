@@ -215,6 +215,18 @@ describe("notification center", () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(1); });
       expect(mocks.list).toHaveBeenCalledTimes(settled + 1);
     });
+    it("runs a push that lands during a timer check right after that check", async () => {
+      let resolveCheck: ((value: ReturnType<typeof page>) => void) | undefined;
+      mocks.list.mockImplementationOnce(() => new Promise(resolve => { resolveCheck = resolve; }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      expect(mocks.list.mock.calls.slice(2).map(([args]) => args.view)).toEqual(["unread"]);
+      mocks.list.mockResolvedValue(page([event(), event(B)]));
+      await act(async () => window.dispatchEvent(new Event(RECEIVED)));
+      // The check answers with the page from before the push.
+      await act(async () => { resolveCheck?.(page()); await vi.advanceTimersByTimeAsync(0); });
+      expect(mocks.list.mock.calls.slice(3).map(([args]) => args.view)).toEqual(["all", "unread"]);
+      expect(container.querySelector('[data-testid="count"]')?.textContent).toBe("2");
+    });
     // Measurement A: the tab flipped hidden and back every 4.6 s with no focus
     // event, and each flip re-read both notification views (28 per 64 s).
     it("does not re-read on every quick visibility flip or window focus", async () => {

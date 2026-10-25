@@ -5,7 +5,7 @@ import {
   type RuntimeSharedBrowserApprovalRequest,
   type RuntimeSharedBrowserPendingApproval,
 } from "../../../sdk/instafy";
-import { adaptivePollDelay, subscribePollingGate } from "../../../runtime/pollingGate";
+import { adaptivePollDelay, pollingGateState, subscribePollingGate } from "../../../runtime/pollingGate";
 
 const APPROVAL_IDLE_POLL_INTERVAL_MS = 1_500;
 const APPROVAL_PENDING_POLL_INTERVAL_MS = 400;
@@ -158,6 +158,11 @@ export function useSharedBrowserApproval({
     };
     const kick = () => {
       if (cancelled || inFlight) return;
+      // Hidden: owe the read to the return instead of reading now.
+      if (pollingGateState() === "hidden") {
+        lastSettledAt = 0;
+        return;
+      }
       if (timerId !== null) window.clearTimeout(timerId);
       void poll();
     };
