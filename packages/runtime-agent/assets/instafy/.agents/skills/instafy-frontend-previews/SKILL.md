@@ -1,182 +1,78 @@
 ---
 name: instafy-frontend-previews
-description: Runbook for frontend preview, tunneling, and browser assist flows.
+description: Show a site or server running in this space (localhost, a dev server) to people as a private Studio preview card (instafy preview open), check it yourself (instafy preview check), keep it running after your turn, or share a public link with consent. Not for Instafy's browser.
+context_kind: workflow
+context_parent: instafy-skill-router
+routing_keywords: preview, previews, preview card, localhost, 127.0.0.1, 0.0.0.0, on port, which port, port number, dev server, local server, web server, running site, running server, static site, landing page, tunnel, shareable link, demo link, förhandsvisning, vista previa, プレビュー
 ---
 
-# Frontend previews (Studio preview card, dev server, tunnel) · Runbook
+# Previews: show a site running in this space
 
-Goal: when a user asks to build or iterate on a frontend, keep a live preview running and show it in Studio with a private preview card. Share a public URL only when the person wants one. The assistant should decide *how* to run the preview based on the repo (Vite/Next/etc), and use runtime self-checks so the experience “just works”.
+Use this whenever a site or server runs in this space (or should) and someone should see it: on any port, for any kind of site. `instafy preview` is a CLI command group, not a tool; run it in the shell. `instafy preview --help` lists its commands.
 
-## Show a running site in Studio (do this first)
+## What can see what
 
-Use this whenever a site runs in the space and the person should see it, on any port and for any kind of site.
+- **People in Studio** see the site through a private "Ready to preview" card: `instafy preview open`. Only space members can open it; nothing becomes public.
+- **You** look at it with `instafy preview check --port <port>`: it loads the page in a headless browser here, lists console errors, failed requests and a blank page, and writes desktop and phone screenshots. Exit 4 (no browser here) or 70 (the check itself failed) means nothing was checked; say so.
+- **Instafy's browser** opens public web addresses only: its safety policy blocks this space's own addresses (localhost, 127.0.0.1, 0.0.0.0, private addresses) and non-web ports. Do not try to work around it. Never send it, or a `request_browser` task, to such an address, and after "destination denied" do not retry, re-approve or request the browser again: open a preview card instead, and say why in one line. Only a public tunnel URL (below, with consent) can be opened there.
 
-1. Start the site (see below) on 127.0.0.1 or 0.0.0.0 and check it before you show it: `instafy preview check --port <port>` (see “Default behavior”).
-2. Run `instafy preview open --port <port> --title "<short name>" --json` (add `--path /<page>` to open a sub-page).
-   - It posts a "Ready to preview" card in this conversation. Only space members can open it, and nothing becomes public.
-   - It prints no URL. Tell the person to open it from the card. Do not paste a preview, tunnel or localhost URL for it.
-   - Running it again for the same port reuses the preview and its card. `instafy preview list` shows the previews; `instafy preview close <previewId>` closes one.
-   - The card can start the site again after the space sleeps when `restartable` in the JSON is `true`: it reruns the command that serves the port, with no turn. So start the site from the space's files with one plain command (not from a temporary folder). When `restartable` is `false`, `restartNote` says why; if the site runs from a script or a pipeline, run it again with `--serve-cmd "<command>"` from the site's folder: one command and its arguments, no shell syntax, and no secret on the line (read secrets from an env file).
-3. Allow the preview host before the person opens the card. Dev servers that check the `Host` header (Vite dev and `vite preview`, webpack-dev-server, Angular) show "Blocked request" to everyone who opens the card, and you cannot see that page yourself. So the first time you open a preview for such a server, add the `viewerHostSuffix` from the JSON, with a leading dot and without any `:port`, to its allowed hosts (for Vite, `server.allowedHosts` and `preview.allowedHosts`; webpack-dev-server and Angular have an `allowedHosts` option too). Restart the server on the same port and run the same `instafy preview open` again before you tell the person to open the card. Static servers such as `python -m http.server` need nothing.
-4. Read `status` in the JSON: `live` means the card works. `not_responding` means the preview could not reach the site: check the server is up on that port, then run `instafy preview open` again. `unknown` means the server did not say; tell the person to open the card.
-5. If it fails:
-   - Exit `2`: nothing answers on 127.0.0.1 at that port, or the site answers with a server error. Start or fix the server, then run it again. If the message says the site answers only on [::1], it is running: do not start a second one; bind it to 127.0.0.1 or 0.0.0.0 (for Vite, `--host 127.0.0.1`), restart it, then run it again.
-   - Exit `3`: the port is not allowed. Serve the site on another port from 1024 to 65535.
-   - Exit `5` ("Previews are not available on this server"), or `instafy preview` is not a command here: previews are off. Use the flow below instead: post the local URL, and create a public tunnel only when the person asks for a shareable link, after the consent gate.
-   - Exit `1` (any other error): run it once more. If it fails again, tell the person the error in one line and post the local URL instead. Do not create a public tunnel unless they ask for one.
-6. If the person still reports "Blocked request" or "host is not allowed" on the card's page, do step 3 for that server.
+## Show it (do this first)
 
-### A site that uses the person's location
+1. From the site's folder inside the workspace (not a temporary folder), start it and show it in one command:
+   `instafy preview open --port <port> --title "<short name>" --serve-cmd "<command>" --start --json`
+   (add `--path /<page>` for a sub-page). The command serves the site on 127.0.0.1 or 0.0.0.0 at that port. See "Keep it running after your turn" for what `--start` does.
+   - It posts the card in this conversation and prints no URL. Tell the person to open it from the card. Do not paste a preview, tunnel or localhost URL for it.
+   - Running it again for the same port reuses the preview and its card. `instafy preview list` shows previews; `instafy preview close <previewId>` closes one.
+2. Check it: `instafy preview check --port <port>`. Fix what it lists, then run the same `instafy preview open` again.
+3. Allow the preview host before the person opens the card. Dev servers that check the `Host` header (Vite dev and `vite preview`, webpack-dev-server, Angular) show "Blocked request" to everyone who opens the card, and you cannot see that page yourself. The first time you open a preview for such a server, add `viewerHostSuffix` from the JSON, with a leading dot and without `:port`, to its allowed hosts (Vite: `server.allowedHosts` and `preview.allowedHosts`; webpack-dev-server and Angular: `allowedHosts`), stop the server by its `startedPid` (below), and run the same `instafy preview open` again before you tell the person to open the card. Static file servers need nothing.
+4. Read `status`: `live` means the card works. `not_responding`: check the server is up on that port, then run `instafy preview open` again. `unknown`: tell the person to open the card.
+5. Read `restartable`. `true` means opening the card starts the site again after it stops or the space sleeps, with no turn: it reruns the recorded command. `false`: `restartNote` says why; run it again with `--serve-cmd "<command>"`.
+6. If it fails:
+   - Exit `2`: nothing answers on 127.0.0.1 at that port, the site answers with a server error, or the command `--start` ran exited or stayed silent (the message names its log: read it, fix the cause, run it again). If the message says the site answers only on [::1], do not start a second one; bind it to 127.0.0.1 or 0.0.0.0, restart it, run it again.
+   - Exit `3`: the port is not allowed. Serve on another port from 1024 to 65535.
+   - Exit `5` ("Previews are not available on this server"), or `instafy preview` is not a command here: previews are off. Post the local URL; create a public tunnel only when the person asks for a shareable link, after consent.
+   - Exit `1` (any other error): run it once more. If it fails again, give the error in one line and post the local URL. No public tunnel unless asked.
+7. If the person reports "Blocked request" or "host is not allowed" on the card's page, do step 3 for that server.
 
-Inside a Studio preview the page cannot call `navigator.geolocation`; the browser refuses it. When the page's URL has `instafy_host=studio`, or a `{source: "instafy-host", type: "layout"}` message arrives from `parent`, ask Studio instead (Studio adds the query only to the first page, and sends the message on every page load, so keep the flag in `sessionStorage`): `parent.postMessage({source: "<your site's short name>", v: 1, type: "location-request", payload: {id: "<short id>", watch: false}}, "*")`, and read `{source: "instafy-host", type: "location", payload: {id, coords}}` or `type: "location-error"` (`payload.code`: `denied`, `unavailable`, `timeout`, `stopped` or `hidden`) from `message` events whose `event.source` is `parent`. Use `watch: true` to follow the person, and send `type: "location-stop"` with the same id to end it. Elsewhere, use `navigator.geolocation` as usual. Studio asks the person once and shows them which sites got their location, so do not add a consent dialog of your own. Show a short note for each error code; `stopped` means the person turned location off for this site in Studio's 📍 menu, and only they can turn it back on there. Do not put the person's position in a URL, a public page or a file you commit.
+## Keep it running after your turn
 
-### Let people present it and follow along
+Every process your turn starts is killed with its terminal's process group when the turn ends. A server started in the foreground or with `&` is gone by the next message, and the card goes dark.
 
-In Studio a member can **Present** a preview and the others **Follow** it live, each in their own copy of the site. Studio offers Present only for a page that says it can share its view. When you build a site people will look at together (a map, a plan, a list to decide on), add this to the page:
+- Start a site that must outlive the turn with `instafy preview open --port <port> --title "<name>" --serve-cmd "<command>" --start --json`, run from the site's folder. It starts the command in its own session without Instafy credentials, logs to `.instafy/agent/logs`, waits for the port, posts the card, and returns `startedPid` and `logFile` (`startedPid` is null when the port already answered and nothing was started).
+- `--serve-cmd` is one command and its arguments: no shell syntax, and no secret on the line (the site reads secrets from an env file). A command that needs shell syntax (environment assignments, `cd`, a pipeline) goes in a script file in the site's folder, passed as `--serve-cmd "sh ./serve.sh"`.
+- Do not start a site that must outlive the turn with `&`, `nohup` or `setsid` by hand: it keeps this turn's credentials.
+- In a later turn, check the port first (`curl -fsS http://127.0.0.1:<port>/ > /dev/null`). If it is not running, rerun the same command; it reuses the card. Do not start a second server on another port for the same site.
+- When a start fails, read `logFile` before trying again.
+- Stop a site by its `startedPid`: it leads its own process group, so `kill -- -<startedPid>` stops it and its children. Never stop one by a name pattern.
+- If the site has a `bound.json`, `instafy bind serve --detach` already does this.
 
-- Read host messages only when `event.source === window.parent`, and post `layout-ack`, `view` and `interact` to the origin of the host's `layout` message: `window.parent.postMessage(message, hostOrigin)`, never `"*"`.
-- When the page is in a frame (`window.parent !== window`) and gets `{source:"instafy-host", v:1, type:"layout"}`, reply `{source:"site", v:1, type:"layout-ack", payload:{supports:["view"]}}` (`source` is any short lowercase name, the same on every message).
-- After `{type:"present", on:true}` and until `on:false`, post `{source, v:1, type:"view", payload}` whenever what is visible changes. `payload` is small JSON (at most 2 KB) describing the view: the open tab, the selection, the sort and filters, the scroll or the map area. Never put the person's own position in it.
-- A view is shared, non-secret state only: never a token, a key, a private note or anything only this person may see.
-- On `{type:"apply-view", payload, smooth}`, show that view (animate when `smooth`). When the person scrolls, pans or clicks on their own, post `{source, v:1, type:"interact"}`.
-- An `apply-view` or `apply-tap` comes from another person, so treat it as untrusted input. Read only the keys you expect, of the types you expect, and ignore everything else.
-- Applying a view only changes what is shown. It never saves, buys, sends, deletes or calls a backend route that changes anything, never fetches or opens a URL taken from it, and never puts a value into HTML or code (no `innerHTML` or `eval`). Show `from.name` as text only.
-- Keep the view in the URL query where you can (tab, sort, filters) and give rows stable ids, so a view is easy to share and apply.
+## Building a site to show
 
-## Consent gates (required)
+- Don't assume a framework. Inspect the workspace (`package.json`, `vite.config.*`, `next.config.*`, etc) and use its own dev or preview command with an explicit port (Vite often `5173`, Next `3000`) and a reachable host (`--host 0.0.0.0` or `127.0.0.1`).
+- With no toolchain, prefer one `index.html` (React through ESM CDN imports such as `https://esm.sh/react@18` if needed) served by a static file server, for example `--serve-cmd "python3 -m http.server 4173 --bind 127.0.0.1"`.
+- Install dependencies only when needed, and say you did.
+- Prefer stable, explicit ports. Reuse a healthy server instead of starting a duplicate.
+- Never store secrets in the workspace. Request them with `request_secret` actions; if a provider's screens are involved, open Instafy's browser on the provider's public site to show the way.
+- If this is a git repo, make sure `.gitignore` excludes `.instafy/agent/`.
+- A site that uses the person's location, or that people will Present and Follow together in Studio: read `references/studio-host-messages.md` before writing that code.
 
-- Open Instafy's browser on your own to check the preview or a provider's screens.
-- Never auto-create a public tunnel URL. Ask for explicit consent first.
-- If the task needs provider dashboards/login (OAuth callbacks, API tokens, DNS, Cloudflare, etc), open the browser and show the person the way; they sign in themselves, and they open any secret value in a tab of their own browser, not in Instafy's. If they close it, give the manual checklist.
+## Public links (tunnel mode, consent first)
 
-## Mode selection (decide before acting)
+Only when the person wants a shareable, public or phone link, or previews are not available:
 
-Pick one of these modes and state it briefly in chat:
+- Never auto-create a public tunnel URL. Ask for explicit consent first. Say that anyone with the link can open it. If they decline, stop at the card or the local URL.
+- Then `instafy tunnel start --port <port> --json` (parse `url`, `tunnelId`, `localPort`, `pid`), and post the URL as a normal link. `instafy tunnel list`, `instafy tunnel logs <tunnelId> --follow` and `instafy tunnel stop <tunnelId>` manage it.
+- A tunneled site is a new website origin: backends on localhost, auth callback allowlists and Host-checking dev servers need changes. Read `references/tunnels.md` for those, the controller API flow and what to do when tunnels are unavailable.
 
-- **Studio preview mode** (default): show the running site with `instafy preview open` (above).
-- **Tunnel preview mode**: user wants a shareable/mobile/public URL.
-- **Live browser assist mode**: env/secret/callback setup is missing or user asks for guided dashboard clicks.
-- **Hybrid mode**: tunnel preview + live browser assist when troubleshooting auth/CORS/callback failures.
+## "I can't reach the preview" (preview doctor)
 
-## Default behavior (what we want)
-
-When the user asks for a landing page / website / React UI:
-- Create or update the page.
-- Ensure a preview server is running (don’t just tell the user to run it).
-- Check it before you show it: `instafy preview check --port <port>` loads the page in a headless browser and lists console errors, failed requests and a blank page, and writes desktop and phone screenshots to open. Fix what it lists and check again. Exit 4 (no browser here) or 70 (the check itself failed) means nothing was checked; say so instead of calling the page checked.
-- Show it with `instafy preview open` and tell the person to open it from the card.
-- Expose the preview port via a public Instafy tunnel only when the person wants a shareable link, and ask consent first.
-- When there is a public tunnel, post its URL as a normal clickable link.
-- If the user reports it’s down, run “preview doctor” and fix it.
-
-## Fast path (recommended): one-page React landing page without a toolchain
-
-If the workspace doesn’t already have a frontend toolchain, prefer a **single-file React page** + a lightweight dev server. This avoids installs and avoids origin auth.
-
-1) Create `index.html` in the workspace root using React via ESM CDN imports (e.g. `https://esm.sh/react@18` + `react-dom@18/client`). Keep it one page.
-2) Start a simple dev server on a fixed port (recommend `4173`):
-   - `python -m http.server 4173 --bind 127.0.0.1`
-3) Show it:
-   - `instafy preview open --port 4173 --title "<short name>" --json`, then tell the person to open it from the card.
-4) If that fails, follow “If it fails” above. When it ends with the local URL (exit `5`, the command is missing, or exit `1` twice), post:
-   - `Local URL: http://127.0.0.1:4173`
-   - and, when the person asked for a shareable link and agreed to a public one, `instafy tunnel start --port 4173 --json` (parse `url`, `tunnelId`, `localPort`, `pid`) and `Preview URL: <tunnel url>`.
-
-If `instafy` is not available or tunnel issuance fails, still post the local URL and explain that tunnels require a configured tunnel broker / CLI login.
-
-## Principles
-
-- The assistant may start background processes (dev servers, tunnels). Reuse healthy processes when possible and avoid duplicate launches.
-- Don’t assume a framework. Inspect the workspace (`package.json`, `vite.config.*`, `next.config.*`, etc) and decide.
-- Prefer stable, explicit ports. Avoid “random port picked” unless unavoidable.
-- Never store secrets in the workspace. Use the controller secret manager and request secrets via `request_secret` actions.
-- If secrets/env are missing, request them and open the browser to show the person where they are found.
-
-## Operational state
-
-- Use controller/CLI state as the source of truth for tunnel status (`instafy tunnel list` or `GET /projects/:project_id/tunnels`).
-- Keep preview server logs under `.instafy/agent/logs/` when possible.
-- If this is a git repo, ensure `.gitignore` excludes `.instafy/agent/`.
-- For guided setup, reuse the same runtime/browser profile when possible so login state persists during the session.
-
-## Starting a preview (high-level algorithm)
-
-0. Reuse what’s already running:
-   - Check whether the local preview port already responds; reuse it instead of starting a duplicate server.
-   - If you already have an active tunnel for the same project + local port, reuse it.
-1. Detect frontend type:
-   - Vite: `vite.config.*` or `package.json` scripts include `vite`.
-   - Next.js: `next.config.*` or `package.json` scripts include `next`.
-   - CRA / other: infer from dependencies + scripts.
-   - No toolchain: use the “Fast path” above (React CDN + `python -m http.server`).
-2. Install deps if needed (`pnpm install` / `npm install`) and record that you did it.
-3. Start the dev server (background):
-   - Must bind to a reachable interface for tunneling: prefer `--host 0.0.0.0`.
-   - Use an explicit port (Vite often `5173`, Next `3000`).
-   - Write logs to `.instafy/agent/logs/…`.
-4. Show it in Studio with `instafy preview open --port <port> --title "<short name>" --json` (see “Show a running site in Studio”). If that works, stop here unless the person wants a public link.
-5. Ask consent before a public URL (only when the person wants a shareable link, or previews are not available):
-   - Explain this will create a public URL.
-   - If the user declines, stop at the Studio preview or the local preview URL.
-6. Expose the port publicly:
-   - Request a tunnel for `localPort=<port>` with purpose `"preview"` (see “Instafy tunnel flow” below).
-7. Verify end-to-end:
-   - Check process is alive.
-   - Check `curl -fsS http://127.0.0.1:<port>` responds.
-   - Check the public URL responds (HTML, not a 502/404).
-8. Post the preview URL in chat. If the client supports it, suggest opening in a new tab (and provide a QR if available).
-
-## Missing env/secret onboarding flow
-
-If preview or app setup requires env/secrets/providers:
-
-1. Detect the exact missing item (name + why it is needed).
-2. Open the browser and walk the person there, click by click, pausing whenever they must sign in, enter a code or approve.
-3. If they close or pause the browser: provide a short manual checklist with exact field names and expected values.
-4. Verify the setup with one concrete check (for example, callback succeeds or token test call returns 200).
-
-## When the preview is tunneled (backend + login caveats)
-
-A tunneled preview is a **new website origin**. Things that work on your laptop can break elsewhere until a few settings are updated.
-
-- Remote devices can’t reach `localhost`. If the frontend calls `http://127.0.0.1:*` / `localhost`, fix it by using a reachable backend (tunnel the backend too, run it in a hosted runtime) or proxy via same-origin paths (e.g. `/api`).
-- Some backends/auth providers only trust specific website URLs. If sign-in/callbacks fail, the preview URL likely needs to be added to an allowlist (“Redirect URLs”, “Callback URLs”, “Site URL”, etc). Prefer **stable** preview hostnames; if the user wants “auto-fix”, request a management token via `request_secret`.
-- Some dev servers block unknown `Host` headers (example: Vite). If the preview shows “Blocked request…host is not allowed”, add the tunnel domain with a leading dot to Vite `server.allowedHosts`: the host of the URL that `instafy tunnel start` printed, without its first part (for `https://abc123.example.com` that is `".example.com"`; locally `".rt.test"`).
-
-## Instafy tunnel flow (what this means)
-
-Instafy tunnels are **controller-managed grants**:
-- You request a tunnel grant from the controller (optionally specifying `localPort` + `purpose`).
-- The response includes a `publicUrl`/`hostname` plus credentials for a local client (self-hosted tunnels use `rathole`).
-- You run the tunnel client locally to forward `127.0.0.1:<port>` to that public URL.
-
-Two common ways to do this:
-
-1) **Via Instafy CLI** (preferred when available on the machine running the dev server):
-- `instafy tunnel start --port <port> --json` (best for parsing/storing state)
-- `instafy tunnel list` / `instafy tunnel logs <tunnelId> --follow` / `instafy tunnel stop <tunnelId>`
-
-2) **Via controller API + rathole** (advanced):
-- Request: `POST /projects/<projectId>/tunnels/request` with controller configured for self-hosted tunnels (`TUNNEL_BROKER_BASE_URL`, `TUNNEL_BROKER_TOKEN`).
-  - Include `metadata.localPort=<port>` and `metadata.purpose="preview"` (or pass `localPort`/`purpose` fields if supported by your client).
-- Start rathole with the returned credentials (`server`/`token`/`serviceName`) so it forwards `127.0.0.1:<port>`.
-- Revoke: `POST /projects/<projectId>/tunnels/<tunnelId>/revoke` when stopping.
-
-If tunnel issuance is unavailable (controller returns 503 / “tunnel broker is not configured”), fall back to a local URL and tell the user how to enable tunnels.
-
-## If the user says “I can’t reach the preview”
-
-Run a quick “preview doctor”:
-
-- Confirm dev server PID is still alive; if not, restart it.
-- Confirm the port is listening (`lsof -i :<port>` or equivalent).
-- Confirm local URL works (`curl http://127.0.0.1:<port>`).
-- For a Studio preview, `instafy preview list` shows its status; run `instafy preview open` again for the same port to restart its client and refresh the card.
-- Confirm tunnel process is alive (if applicable) and re-request tunnel if expired.
-- If the public URL is up but page is blank, check for client-side errors (framework/HMR config, base paths, env vars).
+- Does the port answer (`curl -fsS http://127.0.0.1:<port>/`)? If not, read the site's log and run the same `instafy preview open ... --start` again.
+- `instafy preview list` shows each preview's status; `instafy preview open` for the same port restarts its client and refreshes the card.
+- Run `instafy preview check --port <port>` for page errors (framework config, base paths, env vars).
+- For a tunnel, see `references/tunnels.md`.
 
 Report what you found and what you restarted.
 
 ## Cleanup
 
-When asked to stop previews (or on shutdown), gracefully stop preview server/tunnel processes, close Studio previews (`instafy preview close <previewId>`) and revoke tunnel grants.
+When asked to stop previews: stop the site by its `startedPid` (never by a name pattern), close the card's preview (`instafy preview close <previewId>`) and stop any tunnel.

@@ -59,6 +59,8 @@ mod isolated_worker_tests;
 mod isolated_workspace;
 mod learn;
 mod mcp;
+#[cfg(test)]
+mod preview_routing_tests;
 mod project_preferences;
 #[cfg(test)]
 mod project_preferences_auth_tests;
@@ -1751,6 +1753,91 @@ fn select_learned_block_candidates(
         .collect()
 }
 
+/// Workflow skills a restored-thread turn names for its request: only a match
+/// at least as strong as one declared keyword or phrase, so body prose alone
+/// (which every skill without `routing_keywords` routes on) adds nothing.
+const RESTORED_SKILL_HINT_MIN_SCORE: usize = 4;
+const RESTORED_SKILL_HINT_MAX_SKILLS: usize = 3;
+const RESTORED_SKILL_HINT_MAX_DESCRIPTION_CHARS: usize = 300;
+const RESTORED_SKILL_HINTS_MAX_BYTES: usize = 1_536;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RestoredSkillHints {
+    text: String,
+    /// The hinted skills' directory names, for run metrics.
+    skills: Vec<String>,
+}
+
+/// A restored provider thread gets no workspace memory snapshot, so the skills
+/// that match a request made later in the thread are never named to it. This
+/// lists, by the same selection as the snapshot, at most three workflow skills
+/// that match the request strongly, each with its description and the file to
+/// read, within a fixed byte cap. None when nothing matches that well.
+fn format_restored_skill_hints(
+    workspace_dir: &Path,
+    prompt_text: &str,
+) -> Option<RestoredSkillHints> {
+    let contexts = build_top_level_context_nodes(workspace_dir);
+    if contexts.is_empty() {
+        return None;
+    }
+    let by_id: HashMap<&str, &ContextNode> = contexts
+        .iter()
+        .map(|context| (context.id.as_str(), context))
+        .collect();
+    let mut matched: Vec<SelectedContextNode> =
+        select_recursive_context_nodes(&contexts, prompt_text)
+            .into_iter()
+            .filter(|node| node.score >= RESTORED_SKILL_HINT_MIN_SCORE)
+            .filter(|node| {
+                by_id.get(node.id.as_str()).is_some_and(|context| {
+                    context.metadata.context_kind.as_deref() == Some("workflow")
+                })
+            })
+            .collect();
+    matched.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
+
+    let mut text = String::from(
+        "\nSkills that match this request (this thread may predate them; read the file before acting unless already read in this conversation):\n",
+    );
+    let mut skills = Vec::new();
+    for node in matched.into_iter().take(RESTORED_SKILL_HINT_MAX_SKILLS) {
+        let Some(context) = by_id.get(node.id.as_str()) else {
+            continue;
+        };
+        let name = context
+            .metadata
+            .name
+            .as_deref()
+            .unwrap_or(context.id.as_str());
+        let description: String = context
+            .metadata
+            .description
+            .as_deref()
+            .unwrap_or("")
+            .chars()
+            .take(RESTORED_SKILL_HINT_MAX_DESCRIPTION_CHARS)
+            .collect();
+        let relative = context
+            .path
+            .strip_prefix(workspace_dir)
+            .unwrap_or(context.path.as_path());
+        let line = format!(
+            "- `{name}`: {description} (read `{}` before acting unless already read in this conversation)\n",
+            relative.display()
+        );
+        if text.len() + line.len() > RESTORED_SKILL_HINTS_MAX_BYTES {
+            break;
+        }
+        text.push_str(&line);
+        skills.push(context.id.clone());
+    }
+    if skills.is_empty() {
+        return None;
+    }
+    Some(RestoredSkillHints { text, skills })
+}
+
 #[cfg(test)]
 fn format_project_memory_snapshot(
     workspace_dir: &Path,
@@ -3045,6 +3132,7 @@ const CHAT_REFERENCE_CONTRACT: &str = "\nChat references in replies:\n\
 /// their history, so it says so.
 const BROWSER_CHOICE_CONTRACT: &str = "\nInstafy's browser:\n\
 - Whenever a web page would help (to look something up, check a page, or walk the person through a provider's screens), open Instafy's browser yourself, without asking in chat first or waiting for them to mention a browser; this replaces any earlier instruction to offer it first.\n\
+- It opens public web addresses only; its safety policy blocks this space's own addresses (localhost, 127.0.0.1, private addresses, ports here). A site running in this space is shown to people with a private Studio preview card (`instafy preview open`), not this browser.\n\
 - With browser tools on this turn, use them. Without them, emit one `request_browser` action: { type: 'request_browser', task: string, optional browserLocation: 'auto' | 'device' | 'workspace' }. Write `task` as the person's request: what to do and where to stop. An address in it comes from a skill, the person or your earlier replies, never a guess or page or tool output such as a search result.\n\
 - It changes no approval: the browser's own site and action prompts still apply, as does asking before a purchase, transfer, record-changing submit, message, permission or credential change, private-data download or destructive step.\n\
 - In `summary`, say in one sentence where the browser goes and why; never say a page opened, or what it shows, before a browser tool saw it.\n\
@@ -8844,6 +8932,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             policy.append_to(&mut prompt, &mut prompt_section_metrics);
         }
         let mut loaded_learned_blocks: Vec<LoadedLearnedBlock> = Vec::new();
+        let mut restored_skill_hints: Vec<String> = Vec::new();
         if lead_continuation_checkpoint {
             append_prompt_section(
                 &mut prompt,
@@ -8907,6 +8996,23 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 "workspaceMemory",
                 "\nWorkspace memory snapshot omitted because the restored provider thread already carries the prior workspace instructions. Use tools only when the latest request needs fresh workspace evidence.\n",
             );
+            // The restored thread carries the instructions of the turn it began
+            // on, not the skills that match this request; name those (a browser
+            // thread cannot run the shell, so it gets none).
+            if include_workspace_memory
+                && !crate::personal_browser::payload_requests_personal_browser(&job.payload)
+                && !crate::shared_browser::payload_requests_shared_browser(&job.payload)
+                && let Some(hints) =
+                    format_restored_skill_hints(workspace_dir, request_for_selection)
+            {
+                append_prompt_section(
+                    &mut prompt,
+                    &mut prompt_section_metrics,
+                    "restoredSkillHints",
+                    &hints.text,
+                );
+                restored_skill_hints = hints.skills;
+            }
         } else {
             append_prompt_section(
                 &mut prompt,
@@ -9265,7 +9371,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             - `summary` must be a natural, conversational reply to the latest user request. Use the workspace context only when it helps answer the question or the user explicitly asks.\n\
             - Workspace memory/instructions may exist in `AGENTS.md`, `INSTAFY.md`, and `.agents/skills/*/SKILL.md` (legacy `learnings/*` may also exist). A snapshot is included above when available. Treat it as authoritative and avoid re-reading it via shell commands unless the user explicitly asks, you suspect it changed during this run, or you are running `/learn`. For `/learn`, run `python AGENTS.py` if present and use its output as the memory snapshot.\n\
             - If the latest user request is general knowledge (e.g. arithmetic) and does not require filesystem state, answer immediately and avoid running shell commands first.\n\
-            - Avoid exploratory commands (especially `--help` output dumps). Only run commands that are needed to complete the task or to resolve a concrete error.\n\
+            - Avoid exploratory commands (especially `--help` output dumps). Only run commands that are needed to complete the task or to resolve a concrete error. When an Instafy capability you need seems missing, `instafy <group> --help` counts as needed.\n\
             - When the user asks about metadata the prompt doesn’t include (e.g. token usage), do not guess; retrieve it via the Instafy CLI (`instafy history ...` first, `instafy api get` as advanced fallback), not raw HTTP (curl/wget).\n\
             - Do not call controller APIs with curl/wget; use `instafy history` / `instafy api get` so auth works consistently and the command is logged.\n\
             - If you propose next steps, include up to three concise strings in `suggestions` (e.g. module ideas, integrations, deployment follow-ups). Each suggestion should be a short user message that can be sent as-is when clicked. Omit the field if you have nothing meaningful to suggest.\n\
@@ -9574,6 +9680,12 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 "promptSections".to_string(),
                 JsonValue::Object(prompt_section_metrics.clone()),
             );
+            if !restored_skill_hints.is_empty() {
+                metrics.insert(
+                    "restoredSkillHints".to_string(),
+                    json!(restored_skill_hints),
+                );
+            }
             if multi_agent_planning_turn {
                 metrics.insert(
                     "selectedSkills".to_string(),
@@ -9603,6 +9715,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             },
             estimated_prompt_tokens = estimate_prompt_token_count(&prompt),
             prompt_sections = %JsonValue::Object(prompt_section_metrics),
+            restored_skill_hints = ?restored_skill_hints,
             "built Studio Codex prompt"
         );
 
@@ -22583,10 +22696,11 @@ mod tests {
         // The browser rule rides on every interactive turn since Oct 19 (owner
         // decision: Octo opens the browser on its own), and a restored thread
         // loads no skill that could carry it. It is measured on its own and
-        // the rest keeps main's budget.
+        // the rest keeps main's budget. Since Oct 25 it also says the browser
+        // opens public addresses only and a site in the space is a preview card.
         let browser_choice = estimate_prompt_token_count(BROWSER_CHOICE_CONTRACT);
         assert!(
-            browser_choice <= 380,
+            browser_choice <= 450,
             "browser rule grew to {browser_choice} tokens"
         );
         assert_eq!(prompt_text.matches(BROWSER_CHOICE_CONTRACT).count(), 1);

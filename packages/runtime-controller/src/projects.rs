@@ -876,6 +876,14 @@ const FRONTEND_PREVIEWS_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../runtime-agent/assets/instafy/.agents/skills/instafy-frontend-previews/SKILL.md"
 ));
+const FRONTEND_PREVIEWS_HOST_MESSAGES_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../runtime-agent/assets/instafy/.agents/skills/instafy-frontend-previews/references/studio-host-messages.md"
+));
+const FRONTEND_PREVIEWS_TUNNELS_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../runtime-agent/assets/instafy/.agents/skills/instafy-frontend-previews/references/tunnels.md"
+));
 const INTEGRATION_ONBOARDING_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../runtime-agent/assets/instafy/.agents/skills/instafy-integration-onboarding/SKILL.md"
@@ -959,7 +967,7 @@ const PROJECT_MEMORY_ASSETS_ROOT_ENV: &str = "INSTAFY_PROJECT_MEMORY_ASSETS_ROOT
 /// Every file the runtime bundles under `assets/instafy`. In a git-canonical
 /// space with history the runtime commits none of them, so this bootstrap is
 /// what brings each one to `main`.
-const PROJECT_MEMORY_TEMPLATE_FILES: [ProjectMemoryTemplateFile; 29] = [
+const PROJECT_MEMORY_TEMPLATE_FILES: [ProjectMemoryTemplateFile; 31] = [
     ProjectMemoryTemplateFile {
         path: "INSTAFY.md",
         asset_relative_path: "INSTAFY.md",
@@ -1009,6 +1017,17 @@ const PROJECT_MEMORY_TEMPLATE_FILES: [ProjectMemoryTemplateFile; 29] = [
         path: ".agents/skills/instafy-frontend-previews/SKILL.md",
         asset_relative_path: ".agents/skills/instafy-frontend-previews/SKILL.md",
         fallback_content: FRONTEND_PREVIEWS_TEMPLATE,
+    },
+    ProjectMemoryTemplateFile {
+        path: ".agents/skills/instafy-frontend-previews/references/studio-host-messages.md",
+        asset_relative_path:
+            ".agents/skills/instafy-frontend-previews/references/studio-host-messages.md",
+        fallback_content: FRONTEND_PREVIEWS_HOST_MESSAGES_TEMPLATE,
+    },
+    ProjectMemoryTemplateFile {
+        path: ".agents/skills/instafy-frontend-previews/references/tunnels.md",
+        asset_relative_path: ".agents/skills/instafy-frontend-previews/references/tunnels.md",
+        fallback_content: FRONTEND_PREVIEWS_TUNNELS_TEMPLATE,
     },
     ProjectMemoryTemplateFile {
         path: ".agents/skills/instafy-integration-onboarding/SKILL.md",
@@ -6910,6 +6929,48 @@ mod project_memory_bootstrap_tests {
                 template.path
             );
         }
+    }
+
+    /// A skill's `references/` files reach a space like its SKILL.md: the
+    /// skill tells the agent to read them, so a missing one is written.
+    #[test]
+    fn missing_frontend_preview_references_are_written_and_current_ones_left_alone() {
+        let paths = [
+            ".agents/skills/instafy-frontend-previews/SKILL.md",
+            ".agents/skills/instafy-frontend-previews/references/studio-host-messages.md",
+            ".agents/skills/instafy-frontend-previews/references/tunnels.md",
+        ];
+        let template = |path: &str| {
+            let template = PROJECT_MEMORY_TEMPLATE_FILES
+                .iter()
+                .find(|template| template.path == path)
+                .unwrap_or_else(|| panic!("{path} is a managed default"));
+            load_project_memory_template_content(template)
+        };
+        let writes = plan_project_memory_writes(&snapshot_with(&[])).expect("plan");
+        for path in paths {
+            let write = writes
+                .iter()
+                .find(|write| write.path == path)
+                .unwrap_or_else(|| panic!("{path} written"));
+            assert_eq!(write.content, template(path));
+        }
+        let skill = template(paths[0]);
+        for reference in &paths[1..] {
+            let name = reference.rsplit('/').next().unwrap();
+            assert!(skill.contains(&format!("references/{name}")), "{name}");
+        }
+
+        let texts: Vec<String> = paths.iter().map(|path| template(path)).collect();
+        let current: Vec<(&str, &str)> = paths
+            .iter()
+            .copied()
+            .zip(texts.iter().map(String::as_str))
+            .collect();
+        let writes = plan_project_memory_writes(&snapshot_with(&current)).expect("plan");
+        assert!(writes
+            .iter()
+            .all(|write| !paths.contains(&write.path.as_str())));
     }
 
     #[test]
