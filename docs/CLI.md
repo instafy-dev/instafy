@@ -479,6 +479,10 @@ instafy tunnel stop <tunnelId>
 - For self-hosted tunnels, the server returns `provider=self_hosted` when configured with:
   - `TUNNEL_BROKER_BASE_URL`
   - `TUNNEL_BROKER_TOKEN`
+- The controller's tunnel list (`GET /projects/:project_id/tunnels`) says `issuing` for a new tunnel until
+  its site has answered through it once. Each list asks the tunnel broker about tunnels still `issuing`, at
+  most every 10 s per tunnel, and lists the tunnel as `active` once it answers. A tunnel past its expiry is
+  listed as `expired`.
 
 The CLI/runtime uses `rathole` (outbound-only) to connect to the broker. The CLI will:
 

@@ -2027,6 +2027,97 @@ async fn an_issuing_preview_becomes_active_when_ready_sees_its_site() -> anyhow:
 }
 
 #[tokio::test]
+async fn listing_tunnels_makes_an_issuing_public_tunnel_active_once_its_site_answers(
+) -> anyhow::Result<()> {
+    use std::sync::atomic::Ordering;
+    run(|f| {
+        Box::pin(async move {
+            *f.broker.assignment_status.lock().unwrap() = Some("issuing".to_string());
+            let job = f.job(None).await?;
+            let (status, tunnel) = f
+                .request(
+                    &job.token,
+                    "POST",
+                    &format!("/projects/{}/tunnels/request", f.project),
+                    json!({
+                        "runtimeId": job.runtime_id,
+                        "runtimeLeaseId": job.lease_id,
+                        "purpose": "web",
+                        "localPort": 5000,
+                        "metadata": { "source": "instafy-cli", "localPort": 5000 },
+                    }),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{tunnel}");
+            let tunnel_id = tunnel["tunnelId"].as_str().context("tunnelId")?.to_string();
+            assert_eq!(f.grant_status(&tunnel_id).await?, "issuing");
+            let list_path = format!("/projects/{}/tunnels", f.project);
+            let listed = |f: Arc<Fixture>, id: String| {
+                let path = list_path.clone();
+                async move {
+                    let (status, list) = f.request(&f.tokens[0], "GET", &path, Value::Null).await?;
+                    assert_eq!(status, StatusCode::OK, "{list}");
+                    let grant = list["grants"]
+                        .as_array()
+                        .and_then(|grants| {
+                            grants.iter().find(|grant| grant["tunnelId"] == json!(id))
+                        })
+                        .cloned()
+                        .context("listed grant")?;
+                    anyhow::Ok(grant["status"].as_str().context("status")?.to_string())
+                }
+            };
+            crate::tunnels::forget_issuing_tunnel_probes();
+
+            // The client has not connected yet: nothing answers, so it stays issuing.
+            f.broker.silent_probes.store(1, Ordering::SeqCst);
+            let probes = f.broker.probes.load(Ordering::SeqCst);
+            assert_eq!(listed(f.clone(), tunnel_id.clone()).await?, "issuing");
+            assert_eq!(f.broker.probes.load(Ordering::SeqCst) - probes, 1);
+            assert_eq!(f.grant_status(&tunnel_id).await?, "issuing");
+            // A listing polled right after does not ask again.
+            assert_eq!(listed(f.clone(), tunnel_id.clone()).await?, "issuing");
+            assert_eq!(f.broker.probes.load(Ordering::SeqCst) - probes, 1);
+
+            // Once the site answers through the tunnel, the grant says so.
+            crate::tunnels::forget_issuing_tunnel_probes();
+            let mut events = f.state.events.subscribe();
+            assert_eq!(listed(f.clone(), tunnel_id.clone()).await?, "active");
+            assert_eq!(f.grant_status(&tunnel_id).await?, "active");
+            active_event(&mut events, &tunnel_id)?;
+            // An active grant is not probed again.
+            crate::tunnels::forget_issuing_tunnel_probes();
+            let probes = f.broker.probes.load(Ordering::SeqCst);
+            assert_eq!(listed(f.clone(), tunnel_id.clone()).await?, "active");
+            assert_eq!(f.broker.probes.load(Ordering::SeqCst), probes);
+
+            // A preview proves itself on its own routes; the listing leaves it be.
+            let preview_id = f.open(&job).await?;
+            assert_eq!(f.grant_status(&preview_id).await?, "issuing");
+            crate::tunnels::forget_issuing_tunnel_probes();
+            let probes = f.broker.probes.load(Ordering::SeqCst);
+            assert_eq!(listed(f.clone(), preview_id.clone()).await?, "issuing");
+            assert_eq!(f.broker.probes.load(Ordering::SeqCst), probes);
+
+            // A grant past its expiry is listed as expired, not as still running.
+            f.state
+                .pool
+                .get()
+                .await?
+                .execute(
+                    "update runtime_tunnel_grants set expires_at = now() - interval '1 minute'
+                     where tunnel_id = $1",
+                    &[&tunnel_id],
+                )
+                .await?;
+            assert_eq!(listed(f.clone(), tunnel_id.clone()).await?, "expired");
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
 async fn an_issuing_preview_becomes_active_on_a_read_only_once_its_site_answers(
 ) -> anyhow::Result<()> {
     use std::sync::atomic::Ordering;
