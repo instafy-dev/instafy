@@ -15,6 +15,7 @@ use tunnel_broker::db::{
 };
 use tunnel_broker::hooks::{emit_event, EventPayload};
 use tunnel_broker::ingress::{render_rathole_server_config, render_traefik_dynamic_config};
+use tunnel_broker::listening::probe_and_record;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -36,11 +37,7 @@ async fn main() -> Result<()> {
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
 
-    let refresh_seconds = env::var("RATHOLE_CONFIG_REFRESH_SECONDS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(10)
-        .max(1);
+    let refresh_seconds = cfg.rathole_config_refresh_seconds;
 
     let reload_command = env::var("RATHOLE_RELOAD_COMMAND")
         .ok()
@@ -242,6 +239,16 @@ async fn sync_once(
                 .with_context(|| format!("failed to write traefik config to {}", path.display()))?;
             info!(path = %path.display(), "traefik dynamic config updated");
         }
+    }
+
+    // This process sits beside rathole, so it is the one that can tell whether each tunnel's
+    // site answers; the broker API may run elsewhere and answers probes from this record.
+    match probe_and_record(pool, &cfg.rathole_upstream_host, ingress.id, &bindings).await {
+        Ok(active) if !active.is_empty() => {
+            info!(tunnels = active.len(), "tunnels answered and are active");
+        }
+        Ok(_) => {}
+        Err(error) => warn!(?error, "failed to record which tunnels answer"),
     }
 
     Ok(())

@@ -224,6 +224,7 @@ mod tests {
             preview_auth_hook: None,
             preview_max_ttl_seconds: 43_200,
             rathole_upstream_host: "rathole".into(),
+            rathole_config_refresh_seconds: 10,
         }
     }
 
