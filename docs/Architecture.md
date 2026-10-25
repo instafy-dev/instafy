@@ -107,6 +107,10 @@ answers through `/projects/:id/provider-requests` (list, claim, complete).
   into the job, which goes on. A steered call answers once the runtime took the new words, at
   most 3 s later. A claim of a request whose job has ended cancels the job's open requests
   instead.
+- In the app, `controllerClient.providerRequests.subscribe` streams a space's
+  `provider.request.created` and `.updated` events on one `/events` stream, with the stream's
+  usual reconnect and refusal backoff. It also asks for `events.resync` and hands it on as
+  `onResync`, so a device reads its requests again after the stream dropped events.
 
 ## Canonical Workspace Modes
 There are two supported canonical filesystem modes:

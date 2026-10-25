@@ -109,6 +109,7 @@ import {
   runAutomationNowInController,
   runtimeControllerEnabled,
   sendControllerConversationMessage,
+  subscribeToControllerProviderRequests,
   setDefaultCredential,
   setRuntimePreference,
   startDeviceAuth,
@@ -305,6 +306,7 @@ export const controllerClient = createControllerClient({
     list: listControllerProviderRequests,
     claim: claimControllerProviderRequest,
     complete: completeControllerProviderRequest,
+    subscribe: subscribeToControllerProviderRequests,
   }),
   providerDevices: Object.freeze({
     list: listControllerProviderDevices,

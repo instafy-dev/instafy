@@ -1561,4 +1561,136 @@ describe("runtime controller run event streaming", () => {
     await flushAsyncWork();
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it("streams a space's provider request events with the session's credential", async () => {
+    const { subscribeToControllerProviderRequests } = await import(
+      "../runtimeController/providerRequests"
+    );
+    const projectId = "11111111-1111-4111-8111-111111111111";
+    const send = (request: StreamingRequest, event: unknown) =>
+      request.write(`data: ${JSON.stringify(event)}\n\n`);
+    const onRequest = vi.fn();
+    const onResync = vi.fn();
+    const onOpen = vi.fn();
+    const unsubscribe = subscribeToControllerProviderRequests({
+      projectId,
+      providerId: "device:kit",
+      quietErrors: true,
+      onRequest,
+      onResync,
+      onOpen,
+    });
+
+    await vi.waitFor(() => expect(onOpen).toHaveBeenCalledOnce());
+    expect(streamingRequests).toHaveLength(1);
+    const request = streamingRequests[0];
+    const url = new URL(request.url);
+    expect(url.origin + url.pathname).toBe("https://controller.example.test/events");
+    expect([...new Set(url.searchParams.keys())]).toEqual(["projectId", "kinds[]"]);
+    expect(url.searchParams.get("projectId")).toBe(projectId);
+    // The stream asks for the controller's resync hint too, which a stream
+    // filtered to other kinds would not get.
+    expect(url.searchParams.getAll("kinds[]")).toEqual([
+      "provider.request.created",
+      "provider.request.updated",
+      "events.resync",
+    ]);
+    expect(request.url).not.toContain("test-access-token");
+    expect(new Headers(request.init.headers).get("authorization")).toBe(
+      "Bearer test-access-token",
+    );
+
+    send(request, {
+      kind: "provider.request.created",
+      project_id: projectId,
+      timestamp: "2026-10-14T05:00:00Z",
+      data: {
+        requestId: "req-1",
+        providerId: "device:kit",
+        requestKind: "tool_call",
+        toolName: "device.part.move",
+        resourceUri: null,
+        status: "pending",
+        cancelReason: null,
+        targetDeviceId: "device-1",
+      },
+    });
+    // Another provider's request, and an event of another kind, are not
+    // handed on.
+    send(request, {
+      kind: "provider.request.updated",
+      project_id: projectId,
+      data: { requestId: "req-2", providerId: "device:other", status: "claimed" },
+    });
+    send(request, { kind: "run.progress", project_id: projectId, data: {} });
+    send(request, { kind: "events.resync", project_id: projectId, data: { reason: "lagged" } });
+    send(request, {
+      kind: "provider.request.updated",
+      project_id: projectId,
+      data: {
+        requestId: "req-1",
+        providerId: "device:kit",
+        status: "canceled",
+        cancelReason: "steered",
+      },
+    });
+
+    await vi.waitFor(() => expect(onRequest).toHaveBeenCalledTimes(2));
+    expect(onRequest).toHaveBeenNthCalledWith(1, {
+      kind: "created",
+      requestId: "req-1",
+      projectId,
+      providerId: "device:kit",
+      requestKind: "tool_call",
+      toolName: "device.part.move",
+      resourceUri: null,
+      status: "pending",
+      cancelReason: null,
+      targetDeviceId: "device-1",
+      timestamp: "2026-10-14T05:00:00Z",
+    });
+    expect(onRequest.mock.calls[1][0]).toMatchObject({
+      kind: "updated",
+      requestId: "req-1",
+      status: "canceled",
+      cancelReason: "steered",
+      targetDeviceId: null,
+    });
+    expect(onResync).toHaveBeenCalledOnce();
+
+    unsubscribe();
+    expect((request.init.signal as AbortSignal).aborted).toBe(true);
+  });
+
+  it("hands a refused provider request stream to onError and onAccessDenied", async () => {
+    fetchMock.mockImplementationOnce((input: RequestInfo | URL) =>
+      Promise.resolve({
+        body: null,
+        headers: new Headers({ "content-type": "application/json" }),
+        ok: false,
+        status: 403,
+        statusText: "Forbidden",
+        text: async () => JSON.stringify({ message: "Forbidden" }),
+        url: String(input),
+      } as Response),
+    );
+    const { subscribeToControllerProviderRequests } = await import(
+      "../runtimeController/providerRequests"
+    );
+    const onError = vi.fn();
+    const onAccessDenied = vi.fn();
+    const unsubscribe = subscribeToControllerProviderRequests({
+      projectId: "11111111-1111-4111-8111-111111111111",
+      quietErrors: true,
+      onRequest: vi.fn(),
+      onError,
+      onAccessDenied,
+    });
+
+    await vi.waitFor(() =>
+      expect(onAccessDenied).toHaveBeenCalledWith({ status: 403, message: "Forbidden" }),
+    );
+    expect(onError).toHaveBeenCalledWith("Forbidden");
+    unsubscribe();
+  });
 });

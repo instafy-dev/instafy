@@ -17,6 +17,7 @@ describe("instafy sdk controller client", () => {
     expect(typeof controllerClient.projects.bootstrapMemory).toBe("function");
     expect(typeof controllerClient.conversations.sendMessage).toBe("function");
     expect(typeof controllerClient.conversations.resolveParticipation).toBe("function");
+    expect(typeof controllerClient.providerRequests.subscribe).toBe("function");
     expect(typeof controllerClient.runtimes.stopIfIdle).toBe("function");
     expect(typeof controllerClient.runtimes.setPreference).toBe("function");
     expect(typeof controllerClient.workspace.git.fetchStatus).toBe("function");

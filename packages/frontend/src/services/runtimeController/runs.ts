@@ -578,18 +578,6 @@ export class ServerSentEventParser {
 export function subscribeToRunsFromController(
   params: SubscribeControllerRunsParams,
 ): () => void {
-  if (!runtimeControllerEnabled) {
-    return () => {};
-  }
-
-  if (
-    typeof window === "undefined" ||
-    typeof fetch === "undefined" ||
-    typeof AbortController === "undefined"
-  ) {
-    return () => {};
-  }
-
   const baseSearch = new URLSearchParams();
   if (params.projectId !== undefined && params.projectId !== null) {
     baseSearch.set("projectId", params.projectId);
@@ -609,6 +597,68 @@ export function subscribeToRunsFromController(
     baseSearch.append("kinds[]", kind);
   });
 
+  return openControllerEventStream({
+    search: baseSearch,
+    projectId: params.projectId,
+    accessToken: params.accessToken,
+    quietErrors: params.quietErrors,
+    onEvent: (event) =>
+      handleControllerEvent(
+        event,
+        params.onRun,
+        params.onRunPatch,
+        params.onEvent,
+      ),
+    onAccessDenied: params.onAccessDenied,
+    onError: params.onError,
+    onRefused: params.onRefused,
+    onOpen: params.onOpen,
+  });
+}
+
+export interface ControllerEventStreamParams {
+  /**
+   * The `/events` query: `projectId`, and any of `sessionId`, `runId`,
+   * `conversationId` and `kinds[]`. The controller checks the caller's access
+   * to every event before it sends it.
+   */
+  search: URLSearchParams;
+  /** The space the stream is for, reported as not found on a 404. */
+  projectId?: string;
+  accessToken?: string | null;
+  quietErrors?: boolean;
+  /** Each event the stream carries, parsed. */
+  onEvent: (event: ControllerEventPayload) => void;
+  onAccessDenied?: (denial: ControllerStreamAccessDenied) => void;
+  onError?: (message: string) => void;
+  /** As `SubscribeControllerRunsParams.onRefused`. */
+  onRefused?: (message: string) => void;
+  onOpen?: () => void;
+}
+
+/**
+ * Opens the controller's event stream with the credential the app's own
+ * consumers use (the signed-in session, or `accessToken`), reconnects after a
+ * dropped stream, waits out a refusal (429) on its backoff, stops for good on
+ * a credential the controller refuses, and hands each event to `onEvent`.
+ * Returns the unsubscribe.
+ */
+export function openControllerEventStream(
+  params: ControllerEventStreamParams,
+): () => void {
+  if (!runtimeControllerEnabled) {
+    return () => {};
+  }
+
+  if (
+    typeof window === "undefined" ||
+    typeof fetch === "undefined" ||
+    typeof AbortController === "undefined"
+  ) {
+    return () => {};
+  }
+
+  const baseSearch = new URLSearchParams(params.search);
   const quietErrors = Boolean(params.quietErrors);
 
   let currentController: AbortController | null = null;
@@ -788,12 +838,7 @@ export function subscribeToRunsFromController(
           }
           try {
             const parsed = JSON.parse(event.data) as ControllerEventPayload;
-            handleControllerEvent(
-              parsed,
-              params.onRun,
-              params.onRunPatch,
-              params.onEvent,
-            );
+            params.onEvent(parsed);
           } catch (parseError) {
             const message =
               parseError instanceof Error
