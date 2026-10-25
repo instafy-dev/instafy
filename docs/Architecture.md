@@ -181,16 +181,21 @@ answer anyone else 404.
   runtime when it names one. A granted turn resumes no provider thread, and its history holds only
   what its person typed (and said, with voice) and the replies of their granted turns.
 - The lease gives each grant's tools and one grant token for the job (`device_grant.call`), which
-  only `provider-tools/call` takes. Each call is checked in order: the job is still leased by the
-  token's runtime at its generation, exactly one of its grants is of the call's provider and names
-  the tool, that grant still holds, and the turn has calls left (120 to the device in all, and each
-  tool's `callsPerTool` when the grant sets one). The request is stamped with the grant's person,
-  device and job.
+  only `provider-tools/call` and message search take. Each call is checked in order: the job is
+  still leased by the token's runtime at its generation, exactly one of its grants is of the call's
+  provider and names the tool, that grant still holds, and the turn has calls left (120 to the
+  device in all, and each tool's `callsPerTool` when the grant sets one). The request is stamped
+  with the grant's person, device and job.
 - A heartbeat from a person grants are on for may also carry `context`: what the device says of
   its own state now, plain text (no control character but line breaks and tabs) of at most 1,200
   characters. Each heartbeat replaces it, so one without clears it. A grant's instructions are
   the catalog's, then this report, labelled as the device's own with its age and quoted line by
   line. It pins nothing and adds no tool.
+- With the grant token and `projectId`, message search checks the token's job as a call's first
+  step does, and that one of its grants still holds, in a transaction of its own. It then searches
+  as the turn's person, in the turn's space, and only their own words (`metadata.trigger`
+  `person`, and `device_voice` where a grant takes voice): no private conversation outside the
+  turn's thread tree. The broker serves it as `instafy.messages.search`.
 - In a grant's conversation only its person's own messages start turns (anyone else's is
   recorded), and the team plans those turns started go on without the grant. Only they steer a
   granted turn (`grant_not_held`). Any member may stop one. A stop there that cancels a job, and

@@ -3,19 +3,20 @@
 
 #![cfg(unix)]
 
+use std::collections::BTreeMap;
 use std::os::unix::process::CommandExt;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::post;
+use axum::routing::{get, post};
 use runtime_agent::mcp_process_groups::REGISTRY_ENV;
 use runtime_agent::provider_mcp::{
-    CONTROLLER_URL_ENV, GRANTS_ENV, MCP_COMMAND, PROJECT_ID_ENV, TOKEN_ENV,
+    CONTROLLER_URL_ENV, GRANTS_ENV, MCP_COMMAND, MESSAGE_SEARCH_TOOL, PROJECT_ID_ENV, TOKEN_ENV,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
@@ -65,6 +66,29 @@ async fn provider_tool_call(
     .into_response()
 }
 
+async fn search_messages(
+    State(controller): State<Arc<Controller>>,
+    headers: HeaderMap,
+    Query(query): Query<BTreeMap<String, String>>,
+) -> axum::response::Response {
+    controller
+        .calls
+        .lock()
+        .unwrap()
+        .push((bearer(&headers), "search".to_string(), json!(query)));
+    axum::Json(json!({
+        "matches": [{
+            "conversationTitle": "Kitchen",
+            "createdAt": "2026-10-14T12:00:00Z",
+            "role": "user",
+            "snippet": "the red cup is on the left",
+        }],
+        "nextCursor": null,
+        "hasMore": false,
+    }))
+    .into_response()
+}
+
 async fn start_controller() -> (Arc<Controller>, String, tokio::task::JoinHandle<()>) {
     let controller = Arc::new(Controller::default());
     let app = Router::new()
@@ -72,6 +96,7 @@ async fn start_controller() -> (Arc<Controller>, String, tokio::task::JoinHandle
             "/projects/:project_id/provider-tools/call",
             post(provider_tool_call),
         )
+        .route("/search/messages", get(search_messages))
         .with_state(controller.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -247,7 +272,8 @@ async fn the_broker_serves_its_grants_tools_and_sends_each_call_with_the_turns_t
         [
             "example.state.read",
             "example.part.move",
-            "example.lamp.dim"
+            "example.lamp.dim",
+            MESSAGE_SEARCH_TOOL
         ]
     );
     assert_eq!(tools[1]["description"], json!("Moves the device's part."));
@@ -255,6 +281,7 @@ async fn the_broker_serves_its_grants_tools_and_sends_each_call_with_the_turns_t
         tools[1]["inputSchema"],
         grants()[0]["tools"][1]["inputSchema"]
     );
+    assert_eq!(tools[3]["inputSchema"]["required"], json!(["query"]));
 
     let read = broker.call("example.state.read", json!({})).await;
     assert_eq!(read["result"]["isError"], json!(false), "{read}");
@@ -277,6 +304,19 @@ async fn the_broker_serves_its_grants_tools_and_sends_each_call_with_the_turns_t
         json!("grant_tool_not_allowed")
     );
 
+    // The broker sends at most its own cap of matches, whatever the turn asks.
+    let found = broker
+        .call(
+            MESSAGE_SEARCH_TOOL,
+            json!({ "query": "red cup", "limit": 30 }),
+        )
+        .await;
+    assert_eq!(
+        found["result"]["structuredContent"]["matches"][0]["conversationTitle"],
+        json!("Kitchen"),
+        "{found}"
+    );
+
     // Nothing else is served: an ungranted tool, or one two grants both name.
     for (name, arguments) in [
         ("example.part.erase", json!({})),
@@ -287,7 +327,7 @@ async fn the_broker_serves_its_grants_tools_and_sends_each_call_with_the_turns_t
     }
 
     let calls = controller.calls.lock().unwrap().clone();
-    assert_eq!(calls.len(), 3, "{calls:?}");
+    assert_eq!(calls.len(), 4, "{calls:?}");
     for call in &calls {
         assert_eq!(call.0, Some(format!("Bearer {GRANT_TOKEN}")));
     }
@@ -303,6 +343,11 @@ async fn the_broker_serves_its_grants_tools_and_sends_each_call_with_the_turns_t
     );
     assert_eq!(calls[1].2["providerId"], json!("example-lamp"));
     assert_eq!(calls[1].2["name"], json!("example.lamp.dim"));
+    assert_eq!(calls[3].1, "search");
+    assert_eq!(
+        calls[3].2,
+        json!({ "q": "red cup", "limit": "8", "projectId": project_id.to_string() })
+    );
 
     drop(broker);
     server.abort();

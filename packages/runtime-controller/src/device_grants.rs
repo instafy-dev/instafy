@@ -16,11 +16,12 @@
 //!   device published them, their instructions followed by what the device
 //!   last said of its state, as its words ([`grant_instructions`]), and one
 //!   grant token ([`mint_grant_token`]): a broker-only credential with its own
-//!   scope ([`GRANT_SCOPE`]) that `provider-tools/call` takes
-//!   ([`authorize_grant_call`]) and no other route does. The job's controller
-//!   token never carries it. A grant binds nobody else once its person may no
-//!   longer write to the space or its device or agent changed or went
-//!   ([`grant_in_force`]).
+//!   scope ([`GRANT_SCOPE`]) that only `provider-tools/call`
+//!   ([`authorize_grant_call`]) and message search take, the search as the
+//!   turn's person and of their own words only ([`authorize_grant_search`]).
+//!   The job's controller token never carries it. A grant binds nobody else
+//!   once its person may no longer write to the space or its device or agent
+//!   changed or went ([`grant_in_force`]).
 //! - A stop that cancels a granted turn or any job in the conversation a
 //!   grant names, and any interrupt of that conversation, one with no turn
 //!   running included, moves the grant's `not_before` to the stop and cancels
@@ -55,7 +56,9 @@ use tokio_postgres::error::SqlState;
 use tokio_postgres::{Row, Transaction};
 use uuid::Uuid;
 
-use crate::active_job_auth::{authorize_active_job, ActiveJobProjectAccess};
+use crate::active_job_auth::{
+    authorize_active_job, ActiveJobAuthorization, ActiveJobProjectAccess,
+};
 use crate::agent::JobDelivery;
 use crate::auth::{authenticate_request, require_user_session, RequestContext};
 use crate::config::AppConfig;
@@ -73,7 +76,8 @@ use crate::{
 };
 use runtime_contracts::AccessTokenClaims;
 
-/// The one scope of a grant token. Only `provider-tools/call` takes it.
+/// The one scope of a grant token. Only `provider-tools/call` and message
+/// search take it.
 pub(crate) const GRANT_SCOPE: &str = "device_grant.call";
 /// A granted turn starts within this long of its message, a queued one's
 /// time in the queue included, or not at all.
@@ -725,35 +729,14 @@ pub(crate) async fn authorize_grant_call(
     provider_id: &str,
     tool_name: &str,
 ) -> Result<GrantCall, (StatusCode, Json<ApiError>)> {
-    let job = authorize_active_job(
+    let (job, job_row) = granted_job(
         transaction,
         state,
         claims,
-        GRANT_SCOPE,
+        project_id,
         ActiveJobProjectAccess::Write,
     )
     .await?;
-    job.ensure_project_id(project_id)?;
-    let token_runtime_id = claims
-        .runtime_id
-        .as_deref()
-        .and_then(|value| Uuid::from_str(value).ok());
-    let job_row = transaction
-        .query_opt(
-            "select grant_ids, trigger_user_id, trigger_received_at from agent_jobs
-              where id = $1 and status = 'leased' and leased_by_runtime_id = $2
-              for share",
-            &[&job.job_id, &token_runtime_id],
-        )
-        .await
-        .map_err(|error| internal_error(format!("failed to load the grant token's job: {error}")))?
-        .ok_or_else(|| unauthorized("job token is no longer active"))?;
-    if !state.config.device_grants_allow(job.subject_user_id) {
-        return Err(refused(
-            GRANT_NOT_HELD,
-            "this turn holds no such device grant",
-        ));
-    }
 
     let grant_ids: Vec<Uuid> = job_row
         .get::<_, Option<Vec<Uuid>>>("grant_ids")
@@ -822,6 +805,102 @@ pub(crate) async fn authorize_grant_call(
         device_id: grant.device_id,
         job_id: job.job_id,
     })
+}
+
+/// Step 1 of [`authorize_grant_call`] and [`authorize_grant_search`]: the
+/// token's job is still leased by the runtime it names, under that runtime's
+/// live lease and generation, and grants are on for its person. Returns the
+/// job and its `grant_ids`, `trigger_user_id` and `trigger_received_at`,
+/// locked until `transaction` ends.
+async fn granted_job(
+    transaction: &Transaction<'_>,
+    state: &AppState,
+    claims: &AccessTokenClaims,
+    project_id: &Uuid,
+    access: ActiveJobProjectAccess,
+) -> Result<(ActiveJobAuthorization, Row), (StatusCode, Json<ApiError>)> {
+    let job = authorize_active_job(transaction, state, claims, GRANT_SCOPE, access).await?;
+    job.ensure_project_id(project_id)?;
+    let token_runtime_id = claims
+        .runtime_id
+        .as_deref()
+        .and_then(|value| Uuid::from_str(value).ok());
+    let job_row = transaction
+        .query_opt(
+            "select grant_ids, trigger_user_id, trigger_received_at from agent_jobs
+              where id = $1 and status = 'leased' and leased_by_runtime_id = $2
+              for share",
+            &[&job.job_id, &token_runtime_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load the grant token's job: {error}")))?
+        .ok_or_else(|| unauthorized("job token is no longer active"))?;
+    if !state.config.device_grants_allow(job.subject_user_id) {
+        return Err(refused(
+            GRANT_NOT_HELD,
+            "this turn holds no such device grant",
+        ));
+    }
+    Ok((job, job_row))
+}
+
+/// Whose words a grant token's message search reads (`message_search.rs`),
+/// and in which thread tree: the job's person's, of the kinds its grants that
+/// still hold for it take, and the job's own tree, the only private
+/// conversations it reads. Refused as a call is at step 1, and as the lease
+/// refuses each grant ([`leased_grants`]) when none still holds. Checked in a
+/// transaction of its own, so a stop never waits for a search.
+pub(crate) async fn authorize_grant_search(
+    state: &AppState,
+    claims: &AccessTokenClaims,
+    project_id: Option<Uuid>,
+) -> Result<(GrantedHistory, Uuid), (StatusCode, Json<ApiError>)> {
+    let project_id =
+        project_id.ok_or_else(|| bad_request("projectId is required with a grant token"))?;
+    let mut connection = state
+        .pool
+        .get()
+        .await
+        .map_err(|_| internal_error("message search unavailable"))?;
+    let transaction = connection
+        .transaction()
+        .await
+        .map_err(|_| internal_error("message search unavailable"))?;
+    let (job, job_row) = granted_job(
+        &transaction,
+        state,
+        claims,
+        &project_id,
+        ActiveJobProjectAccess::Read,
+    )
+    .await?;
+    let grants = leased_grants(
+        &transaction,
+        &job_row
+            .get::<_, Option<Vec<Uuid>>>("grant_ids")
+            .unwrap_or_default(),
+        job_row.get("trigger_user_id"),
+        job_row.get("trigger_received_at"),
+    )
+    .await?;
+    transaction
+        .commit()
+        .await
+        .map_err(|_| internal_error("message search unavailable"))?;
+    let person = job.subject_user_id;
+    let live: Vec<&LeasedGrant> = grants
+        .iter()
+        .filter(|grant| grant.refused.is_none() && grant.person == person)
+        .collect();
+    if live.is_empty() {
+        let code = grants
+            .iter()
+            .find_map(|grant| grant.refused)
+            .unwrap_or(GRANT_NOT_HELD);
+        return Err(refused(code, refusal_message(code)));
+    }
+    let voice = live.iter().any(|grant| grant.voice);
+    Ok((GrantedHistory { person, voice }, job.root_conversation_id))
 }
 
 fn refusal_message(code: &str) -> &'static str {

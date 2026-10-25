@@ -480,6 +480,7 @@ where
         .merge(crate::provider_requests::router())
         .merge(crate::provider_devices::router())
         .merge(crate::device_grants::router(&state.config))
+        .merge(crate::message_search::router())
         .with_state(state.clone());
     let body_pool = pool.clone();
     let result = with_shared_db_fixture(fixture, async move {

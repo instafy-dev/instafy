@@ -3,7 +3,9 @@
 //! model's tool calls, and the real `provider-mcp` broker calls a stub controller.
 
 use super::*;
-use axum::extract::Path as AxumPath;
+use axum::extract::{Path as AxumPath, Query};
+use axum::routing::get;
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::os::unix::fs::PermissionsExt;
 use std::pin::Pin;
@@ -179,6 +181,24 @@ async fn provider_tool_call(
     Json(json!({ "ok": true, "outcome": "succeeded", "state": "idle" }))
 }
 
+async fn search_messages(
+    State(controller): State<Arc<Controller>>,
+    headers: HeaderMap,
+    Query(query): Query<BTreeMap<String, String>>,
+) -> Json<Value> {
+    controller
+        .calls
+        .lock()
+        .unwrap()
+        .push((bearer(&headers), "search".to_string(), json!(query)));
+    Json(json!({ "matches": [{
+        "conversationTitle": "Kitchen",
+        "createdAt": "2026-10-14T12:00:00Z",
+        "role": "user",
+        "snippet": "the red cup is on the left",
+    }], "nextCursor": null, "hasMore": false }))
+}
+
 /// The scripted model.
 struct Provider {
     requests: StdMutex<Vec<Value>>,
@@ -187,7 +207,7 @@ struct Provider {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Script {
-    /// Call the device's state tool, then answer.
+    /// Call the device's state tool, then the message search, then answer.
     Answer,
     /// Call the device's state tool, then end the turn on a progress note with no answer, on
     /// every run of the request.
@@ -284,11 +304,23 @@ async fn provider_request(
     }
     match index {
         1 => tool_call("call_state", "example_state_read", json!({})),
-        _ => {
+        2 => {
             let output = call_output(&body, "call_state").unwrap_or_default();
             assert!(
                 output.contains("idle"),
                 "the state reached the model: {output}"
+            );
+            tool_call(
+                "call_search",
+                "instafy_messages_search",
+                json!({ "query": "red cup" }),
+            )
+        }
+        _ => {
+            let output = call_output(&body, "call_search").unwrap_or_default();
+            assert!(
+                output.contains("the red cup is on the left"),
+                "the search reached the model: {output}"
             );
             let answer = json!({ "summary": SUMMARY, "code": "", "files": [], "actions": [] });
             response(json!({
@@ -372,6 +404,7 @@ impl Rig {
                 "/projects/:project_id/provider-tools/call",
                 post(provider_tool_call),
             )
+            .route("/search/messages", get(search_messages))
             .with_state(controller.clone());
         let (shutdown, rx) = oneshot::channel();
         tasks.push(tokio::spawn(async move {
@@ -515,9 +548,9 @@ async fn a_granted_turn() -> Result<()> {
         .context("granted turn")?;
     assert_eq!(execution.summary, SUMMARY);
 
-    // Two model requests: no routing preflight ran before the turn.
+    // Three model requests: no routing preflight ran before the turn.
     let requests = rig.provider.requests.lock().unwrap().clone();
-    assert_eq!(requests.len(), 2, "one request per step of the script");
+    assert_eq!(requests.len(), 3, "one request per step of the script");
     // The model saw the broker's tools directly, described by the device's catalog, and no
     // shell, patch, image, web or other server's tool.
     let tools = requests[0]["tools"].as_array().context("tools")?;
@@ -549,7 +582,14 @@ async fn a_granted_turn() -> Result<()> {
         .filter_map(|tool| tool["name"].as_str())
         .collect();
     device_tools.sort_unstable();
-    assert_eq!(device_tools, ["example_part_move", "example_state_read"]);
+    assert_eq!(
+        device_tools,
+        [
+            "example_part_move",
+            "example_state_read",
+            "instafy_messages_search"
+        ]
+    );
     let first = requests[0].to_string();
     // Nothing from the workspace reaches a granted turn.
     assert!(!first.contains("Project preferences snapshot"));
@@ -560,7 +600,7 @@ async fn a_granted_turn() -> Result<()> {
 
     // The broker called the controller with the grant's token, once per model call.
     let calls = rig.controller.calls.lock().unwrap().clone();
-    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls.len(), 2, "{calls:?}");
     let expected_bearer = Some(format!("Bearer {GRANT_TOKEN}"));
     assert!(calls.iter().all(|(auth, _, _)| *auth == expected_bearer));
 

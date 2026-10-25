@@ -1,4 +1,8 @@
 //! Interactive message search. Authorization is part of the database query, before LIMIT.
+//!
+//! A granted turn's broker searches too, with its grant token
+//! (`device_grants.rs`): as the turn's person, in the turn's space, and only
+//! their own words ([`GRANTED_MATCHES`]).
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
@@ -145,7 +149,8 @@ fn decode_cursor(raw: &str, key: &str) -> Result<SearchCursor, (StatusCode, Json
 }
 
 // Keep this predicate aligned with ensure_project_access and ensure_conversation_access.
-// Unlike a runtime capability, search requires an interactive user and grants no sandbox-session bypass.
+// Unlike a runtime capability, search requires an interactive user, or a granted turn searching
+// as its person (GRANTED_MATCHES), and grants no sandbox-session bypass.
 const AUTHORIZED_MATCHES: &str = r#"
   from conversation_messages m
   join conversations c on c.id = m.conversation_id and c.project_id = m.project_id
@@ -167,13 +172,34 @@ const AUTHORIZED_MATCHES: &str = r#"
     and ($7::timestamptz is null or (m.created_at, m.id) < ($7, $8::uuid))
 "#;
 
+/// What a grant token's search reads beyond what its person may: only what
+/// they typed, and said where the grant takes voice, as the controller stamped
+/// it (`$14` the trigger key, `$15` its kinds, as a granted turn's history
+/// reads them), and of private conversations only the turn's own thread tree
+/// (`$13`), since others read the turn's reply.
+const GRANTED_MATCHES: &str = r#"
+    and m.role = 'user' and m.created_by = $1 and m.metadata ->> $14 = any($15)
+    and (c.visibility <> 'private' or coalesce(c.root_conversation_id, c.id) = $13)
+"#;
+
 async fn search_messages(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(params): Query<SearchQuery>,
 ) -> Result<Json<SearchPage>, (StatusCode, Json<ApiError>)> {
     let context = authenticate_request(&state.config, &headers).await?;
-    let user_id = require_user_session(&context)?;
+    // A grant token searches as its turn's person, in the turn's space only
+    // (`projectId`, which it must name).
+    let granted = match crate::device_grants::grant_token_of(&context) {
+        Some(claims) => Some(
+            crate::device_grants::authorize_grant_search(&state, claims, params.project_id).await?,
+        ),
+        None => None,
+    };
+    let user_id = match &granted {
+        Some((history, _)) => history.person,
+        None => require_user_session(&context)?,
+    };
     let query = validate_query(&params)?;
     let key = search_key(user_id, &params, query);
     let cursor = params
@@ -209,26 +235,37 @@ async fn search_messages(
       substring(m.content from greatest(1, strpos(lower(m.content), lower($10)) - 90) for $11) as snippet,
       strpos(lower(m.content), lower($10)) > 91 as leading,
       char_length(m.content) >= greatest(1, strpos(lower(m.content), lower($10)) - 90) + $11 as trailing
-      {AUTHORIZED_MATCHES} order by m.created_at desc, m.id desc limit $9"#
+      {AUTHORIZED_MATCHES} {granted_matches} order by m.created_at desc, m.id desc limit $9"#,
+        granted_matches = if granted.is_some() {
+            GRANTED_MATCHES
+        } else {
+            ""
+        },
     );
+    let kinds = granted.as_ref().map(|(history, _)| history.kinds());
+    let mut values: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = vec![
+        &user_id,
+        &pattern,
+        &lifecycle_key,
+        &params.project_id,
+        &params.org_id,
+        &params.personal,
+        &cursor_at,
+        &cursor_id,
+        &fetch_limit,
+        &query,
+        &SNIPPET_CHARS,
+        &LIFECYCLE_WHITESPACE,
+    ];
+    if let (Some((_, root_conversation_id)), Some(kinds)) = (&granted, &kinds) {
+        values.extend([
+            root_conversation_id as &(dyn tokio_postgres::types::ToSql + Sync),
+            &crate::job_trigger::MESSAGE_TRIGGER_KEY,
+            kinds,
+        ]);
+    }
     let rows = transaction
-        .query(
-            &sql,
-            &[
-                &user_id,
-                &pattern,
-                &lifecycle_key,
-                &params.project_id,
-                &params.org_id,
-                &params.personal,
-                &cursor_at,
-                &cursor_id,
-                &fetch_limit,
-                &query,
-                &SNIPPET_CHARS,
-                &LIFECYCLE_WHITESPACE,
-            ],
-        )
+        .query(&sql, &values)
         .await
         .map_err(|_| internal_error("message search unavailable; narrow the query or retry"))?;
     let has_more = rows.len() as i64 > limit;

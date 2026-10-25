@@ -2,9 +2,9 @@
 
 // Device grants on the migrated database: who gets a grant, the lease's grant
 // token and its checks, stops, steers, the conversation a grant names, a
-// granted turn's history and what its device reports, on the space and
-// harness of `tests_job_trigger_and_delivery.rs`. Requires `TEST_DATABASE_URL`
-// like the tests in `tests.rs`.
+// granted turn's history and message search, and what its device reports, on
+// the space and harness of `tests_job_trigger_and_delivery.rs`. Requires
+// `TEST_DATABASE_URL` like the tests in `tests.rs`.
 
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
@@ -147,6 +147,13 @@ impl Harness {
             )
             .await?
             .get(0))
+    }
+
+    /// A search of the space with `token`, for `params` (`q=...`).
+    async fn search(&self, token: &str, params: &str) -> anyhow::Result<(StatusCode, JsonValue)> {
+        let project = self.space.project_id;
+        let path = format!("/search/messages?projectId={project}&{params}");
+        self.call("GET", path, Some(token), None).await
     }
 
     /// The owner's agent gets the device's read and move tools in the log, on
@@ -588,7 +595,8 @@ async fn without_the_flag_grants_exist_for_nobody() -> anyhow::Result<()> {
         );
         assert_eq!(leased["grants"][0]["tools"], json!([]), "{leased}");
 
-        // A grant token minted by hand is refused, and queues nothing.
+        // A grant token minted by hand is refused, and queues nothing. It
+        // searches nothing either, while the person's own search is as before.
         let token = harness
             .hand_minted_grant_token(harness.run_of(job.id).await?)
             .await?;
@@ -596,6 +604,12 @@ async fn without_the_flag_grants_exist_for_nobody() -> anyhow::Result<()> {
         assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
         assert_eq!(body["code"], json!("grant_not_held"));
         assert!(harness.requests_of(job.id).await?.is_empty());
+        let (status, body) = harness.search(&token, "q=the%20door").await?;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["code"], json!("grant_not_held"));
+        let (status, page) = harness.search(&owner, "q=the%20door").await?;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert_ne!(page["matches"], json!([]), "{page}");
 
         // A member stops the turn, with their own words in its notice.
         let (status, body) = harness
@@ -2021,7 +2035,10 @@ async fn a_grant_binds_others_only_while_its_person_may_still_use_it() -> anyhow
 /// they typed, and said where the grant takes voice, and the replies of their
 /// granted turns, but no other member's message, nothing a resend or an
 /// automation recorded in their name, no ordinary turn's reply, no notice of
-/// no run and no progress update.
+/// no run and no progress update. Its message search, with its grant token,
+/// reads the same words of theirs in the whole space, but no assistant's
+/// message, even one recorded in their name, and of private conversations only
+/// its own thread tree. It ends with the grant.
 #[tokio::test]
 async fn a_granted_turn_reads_only_its_persons_words() -> anyhow::Result<()> {
     with_grants("device-grants-history", |harness| async move {
@@ -2049,6 +2066,18 @@ async fn a_granted_turn_reads_only_its_persons_words() -> anyhow::Result<()> {
         });
         let progress = json!({ "source": "agent", "kind": "update", "outcome": "in_progress" });
         let notice = json!({ "source": "controller", "kind": "run_cancellation" });
+        // A private conversation, and a private thread of the log.
+        let (other, private_chat, own_thread) = (space.other_chat, Uuid::new_v4(), Uuid::new_v4());
+        for (conversation, root) in [(private_chat, None), (own_thread, Some(log))] {
+            sql(
+                &harness.pool,
+                "insert into conversations (
+                     id, project_id, created_by, metadata, visibility, root_conversation_id
+                 ) values ($1, $2, $3, '{}'::jsonb, 'private', $4)",
+                &[&conversation, &space.project_id, &space.owner, &root],
+            )
+            .await?;
+        }
         // Messages as the controller recorded and stamped them
         // (`job_trigger.rs`): conversation, role, author, run, words, metadata.
         #[rustfmt::skip]
@@ -2062,6 +2091,10 @@ async fn a_granted_turn_reads_only_its_persons_words() -> anyhow::Result<()> {
             (log, "assistant", None, granted, "the red cup, the granted turn says", json!({})),
             (log, "assistant", None, granted, "tool call of the granted turn", progress),
             (log, "assistant", None, None, "a notice of no run", notice),
+            (other, "user", owner, None, "the red cup is in the kitchen", stamp("person")),
+            (other, "assistant", owner, None, "the red cup, an assistant says", stamp("person")),
+            (private_chat, "user", owner, None, "the red cup is a secret", stamp("person")),
+            (own_thread, "user", owner, None, "the red cup is in this thread", stamp("person")),
         ];
         for (conversation, role, author, run, content, metadata) in corpus {
             sql(
@@ -2083,8 +2116,23 @@ async fn a_granted_turn_reads_only_its_persons_words() -> anyhow::Result<()> {
             .await?;
         }
 
+        let snippets = |page: &JsonValue| -> Vec<String> {
+            page["matches"]
+                .as_array()
+                .expect("matches")
+                .iter()
+                .map(|found| found["snippet"].as_str().unwrap_or_default().to_string())
+                .collect()
+        };
+        // The owner's own search reads all of it.
+        let (status, page) = harness
+            .search(&harness.token(space.owner), "q=red%20cup")
+            .await?;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert_eq!(snippets(&page).len(), 11, "{page}");
+
         let job = harness.send(space.owner, space.log, typed()).await?;
-        let (leased, _) = harness.lease_granted(job.id).await?;
+        let (leased, token) = harness.lease_granted(job.id).await?;
         let history = |leased: &JsonValue| -> Vec<String> {
             leased["payload"]["conversation_history"]
                 .as_array()
@@ -2119,12 +2167,33 @@ async fn a_granted_turn_reads_only_its_persons_words() -> anyhow::Result<()> {
             );
         }
         assert!(leased["payload"].get("skill_setup_openers").is_none());
+        let (status, page) = harness.search(&token, "q=red%20cup").await?;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert_eq!(
+            snippets(&page),
+            [
+                "the red cup is in this thread",
+                "the red cup is in the kitchen",
+                "the red cup is on the left"
+            ],
+            "{page}"
+        );
+        // Its other filters narrow it as they do the person's own search, and
+        // it searches only the turn's space.
+        let narrowed = format!("q=red%20cup&orgId={}", Uuid::new_v4());
+        let (status, page) = harness.search(&token, &narrowed).await?;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert_eq!(snippets(&page), Vec::<String>::new(), "{page}");
+        let (status, body) = harness
+            .call("GET", "/search/messages?q=red%20cup", Some(&token), None)
+            .await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 
         // A grant that takes voice reads what the device heard too.
         harness.end_turns().await?;
-        harness.grant(json!({ "voice": true })).await?;
+        let grant = harness.grant(json!({ "voice": true })).await?;
         let job = harness.send(space.owner, space.log, typed()).await?;
-        let (leased, _) = harness.lease_granted(job.id).await?;
+        let (leased, token) = harness.lease_granted(job.id).await?;
         let seen = history(&leased);
         assert!(
             seen.iter()
@@ -2137,6 +2206,24 @@ async fn a_granted_turn_reads_only_its_persons_words() -> anyhow::Result<()> {
                 .any(|content| content == "the red cup, an automation says"),
             "{seen:?}"
         );
+        let (status, page) = harness.search(&token, "q=red%20cup").await?;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert_eq!(
+            snippets(&page),
+            [
+                "the red cup is in this thread",
+                "the red cup is in the kitchen",
+                "the red cup, the device heard",
+                "the red cup is on the left"
+            ],
+            "{page}"
+        );
+
+        let (status, body) = harness.revoke(space.owner, grant).await?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, body) = harness.search(&token, "q=red%20cup").await?;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["code"], json!("grant_revoked"), "{body}");
         Ok(())
     })
     .await
