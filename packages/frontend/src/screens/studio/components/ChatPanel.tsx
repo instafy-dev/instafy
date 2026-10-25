@@ -56,6 +56,7 @@ import {
   resolvePromptAgentSelection,
 } from "../../../conversations/assistantMentions";
 import { parseInviteCommandRequest } from "../../../conversations/inviteCommand";
+import { parseTerminalCommandRequest } from "../../../conversations/terminalCommand";
 import { resolveGroupParticipationReplyTargets } from "../../../conversations/groupParticipation";
 import { getChatClientSessionId } from "../../../conversations/chatClientIdentity";
 import { generateUUID } from "../../../utils/uuid";
@@ -245,6 +246,10 @@ import {
   type BrowserSessionPageTarget,
 } from "./browserSessionPages";
 import { resolveChatComposerAffordances } from "./chatComposerAffordances";
+import {
+  resolveSharedBrowserSendBlocker,
+  SHARED_BROWSER_SEND_BLOCKER_STATUS,
+} from "./sharedBrowserSubmitRouting";
 import { useChatInvitePromptHandlers } from "./useChatInvitePromptHandlers";
 import { useChatComposerAttachments } from "./useChatComposerAttachments";
 import { useChatComposerPreviewTab } from "./useChatComposerPreviewTab";
@@ -1806,6 +1811,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     handleSelectBrowserSessionPage,
     pendingBrowserLaunchMode,
     preferredBrowserPage,
+    sharedBrowserBindingPage,
     sharedBrowserCapabilities,
     sharedBrowserCapabilitiesResolved,
     sharedBrowserCapabilitiesUnsupported,
@@ -4488,6 +4494,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     sendingAttachment,
     sharedBrowserActive:
       browserTransport === "shared" && browserComposerActive,
+    sharedBrowserBindingPage,
     sharedBrowserRuntimeId: resolvedBrowserRuntimeId,
     showCredentialsGate: showChatCredentialsGate,
     showStatus,
@@ -5584,6 +5591,35 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     submitMessage,
   });
 
+  // A send from the browser's own composer that the submit flow would refuse
+  // (no browser runtime yet, or no tab at all) disables Send and says why
+  // instead of "Enter sends the message." A restored stash carries its own
+  // runtime and page, so it is left to the submit flow.
+  const sharedBrowserSendBlocker = useMemo(
+    () =>
+      resolveSharedBrowserSendBlocker({
+        active:
+          browserTransport === "shared" &&
+          browserComposerActive &&
+          pendingBrowserLaunchMode !== "new_page" &&
+          !restoredMessageStash,
+        messageRequiresAi: inputRequiresAi && !deferAiGatesForAmbientParticipation,
+        pageAvailable: Boolean(sharedBrowserBindingPage),
+        resolvedRuntimeId: resolvedBrowserRuntimeId,
+        terminalRequest: parseTerminalCommandRequest(inputValue),
+      }),
+    [
+      browserComposerActive,
+      browserTransport,
+      deferAiGatesForAmbientParticipation,
+      inputRequiresAi,
+      inputValue,
+      pendingBrowserLaunchMode,
+      resolvedBrowserRuntimeId,
+      restoredMessageStash,
+      sharedBrowserBindingPage,
+    ],
+  );
   const {
     composerActionIconClass,
     composerGhostActionClass,
@@ -5605,6 +5641,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     runtimeControllerEnabled,
     queueStatusLabel,
     sendingAttachment,
+    sharedBrowserSendBlocked: sharedBrowserSendBlocker !== null,
     submissionPending,
     totalQueuedCount,
     voiceHoldActive,
@@ -6666,6 +6703,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         sendButtonDisabled={projectWriteDisabled || sendButtonDisabled}
         sendButtonVariant={sendButtonVariant}
         primaryActionMode={composerPrimaryActionMode}
+        primaryActionBlockedStatus={
+          sharedBrowserSendBlocker ? SHARED_BROWSER_SEND_BLOCKER_STATUS[sharedBrowserSendBlocker] : null
+        }
         onSendButtonPress={handleSendButtonPress}
         composerGhostActionClass={composerGhostActionClass}
         composerPrimaryActionClass={composerPrimaryActionClass}

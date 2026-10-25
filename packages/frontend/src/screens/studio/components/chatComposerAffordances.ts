@@ -11,6 +11,7 @@ export function resolveChatComposerAffordances({
   runtimeControllerEnabled,
   queueStatusLabel,
   sendingAttachment,
+  sharedBrowserSendBlocked,
   submissionPending,
   totalQueuedCount,
   voiceHoldActive,
@@ -30,6 +31,12 @@ export function resolveChatComposerAffordances({
   runtimeControllerEnabled: boolean;
   queueStatusLabel: string | null;
   sendingAttachment: boolean;
+  /**
+   * A send from the browser's own composer would be refused (its browser is
+   * still connecting or has no page), see resolveSharedBrowserSendBlocker.
+   * Required, so a caller cannot drop it without a compile error.
+   */
+  sharedBrowserSendBlocked: boolean;
   submissionPending: boolean;
   totalQueuedCount: number;
   voiceHoldActive: boolean;
@@ -69,7 +76,8 @@ export function resolveChatComposerAffordances({
     voiceInputTranscribing ||
     voiceHoldActive ||
     (synchronouslyGateAiIntent && !credentialsReady) ||
-    (synchronouslyGateAiIntent && outOfCredits);
+    (synchronouslyGateAiIntent && outOfCredits) ||
+    sharedBrowserSendBlocked;
   const sendButtonVariant: "primary" | "ghost" =
     composerHasSendPayload && !sendButtonDisabled ? "primary" : "ghost";
   // The composer owns the surface. Ghost controls only tone the glyph,

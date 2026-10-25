@@ -130,6 +130,7 @@ function submitOptions(overrides: Partial<SubmitOptions>): SubmitOptions {
     scrollToBottom: vi.fn(),
     sendingAttachment: false,
     sharedBrowserActive: false,
+    sharedBrowserBindingPage: null,
     sharedBrowserRuntimeId: "shared-runtime",
     showCredentialsGate: vi.fn(),
     showStatus: vi.fn(),

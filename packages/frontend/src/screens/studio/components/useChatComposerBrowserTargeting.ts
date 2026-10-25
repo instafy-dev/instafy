@@ -113,6 +113,23 @@ export function useChatComposerBrowserTargeting({
       targetableLiveBrowserSessionPages,
     ],
   );
+  // The live tab a browser task runs in, blank or not. A browser that just
+  // started (or came back with its machine) shows only a blank tab. The agent
+  // can still drive it, so a task binds to it, while only a real page
+  // (preferredBrowserPage) is ever named in the message.
+  const sharedBrowserBindingPage = useMemo<BrowserSessionPage | null>(
+    () =>
+      preferredBrowserPage ??
+      (sharedBrowserTargetingEnabled && liveBrowserSessionPagesResolved
+        ? resolvePreferredBrowserSessionPage(liveBrowserSessionPages)
+        : null),
+    [
+      liveBrowserSessionPages,
+      liveBrowserSessionPagesResolved,
+      preferredBrowserPage,
+      sharedBrowserTargetingEnabled,
+    ],
+  );
   const handleSelectBrowserSessionPage = useCallback(
     async (pageId: string) => {
       if (!sharedBrowserTargetingEnabled) {
@@ -222,6 +239,7 @@ export function useChatComposerBrowserTargeting({
     handleSelectBrowserSessionPage,
     pendingBrowserLaunchMode: effectivePendingBrowserLaunchMode,
     preferredBrowserPage,
+    sharedBrowserBindingPage,
     sharedBrowserCapabilities,
     sharedBrowserCapabilitiesResolved,
     sharedBrowserCapabilitiesUnsupported,

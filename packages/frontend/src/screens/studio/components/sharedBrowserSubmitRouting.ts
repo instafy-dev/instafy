@@ -56,6 +56,38 @@ export function resolveSharedBrowserSubmitRouting(input: {
   };
 }
 
+/** Why a send from the browser's own composer would be refused right now. */
+export type SharedBrowserSendBlocker = "connecting" | "no_page";
+
+/** What the composer says instead of "Enter sends the message." */
+export const SHARED_BROWSER_SEND_BLOCKER_STATUS: Record<SharedBrowserSendBlocker, string> = {
+  connecting: "Instafy's browser is still connecting.",
+  no_page: "Instafy's browser has no page open yet.",
+};
+
+/**
+ * The first two checks useChatSubmitFlow makes before a browser task goes
+ * out (a resolved browser runtime, then a page to bind to), read from the
+ * composer's current draft so its hint and Send state match what a send would
+ * do. Null when a send would pass both.
+ */
+export function resolveSharedBrowserSendBlocker(input: {
+  active: boolean;
+  messageRequiresAi: boolean;
+  pageAvailable: boolean;
+  resolvedRuntimeId: string | null;
+  terminalRequest: unknown;
+}): SharedBrowserSendBlocker | null {
+  const routing = resolveSharedBrowserSubmitRouting(input);
+  if (routing.kind === "blocked") {
+    return "connecting";
+  }
+  if (routing.kind === "shared" && !input.pageAvailable) {
+    return "no_page";
+  }
+  return null;
+}
+
 export function buildSharedBrowserSubmitMetadata(input: {
   baseMetadata: Record<string, unknown> | null;
   browserPageTarget: BrowserSessionPageTarget | null;

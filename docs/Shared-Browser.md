@@ -45,8 +45,12 @@ There is no Team runtime mode. Adding one later requires host-local consent, sep
 
 On wide screens, the Chat composer remains a workspace conversation while a browser
 or file is open beside it. Showing a browser does not restrict ordinary file and coding
-requests to browser tools. In a single Browser view, a browser task needs a live page;
-if no page is available, the composer keeps the message instead of submitting an invalid browser job.
+requests to browser tools. In a single Browser view, a browser task needs a live tab.
+A browser that just started (or came back with its machine) shows only a blank tab; the task
+is bound to that tab by its CDP target id, and the blank tab is never named in the message.
+Until the browser has connected and has a tab, Send stays off and the composer's status says
+why ("Instafy's browser is still connecting." or "Instafy's browser has no page open yet.");
+a message sent with Enter is kept instead of submitting an invalid browser job.
 Unsent text drafts survive same-tab reloads in session storage, scoped to the account and
 space. They are not sent to other participants or restored on another device; attachments
 and file contents are not included.

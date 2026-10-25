@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   buildSharedBrowserSubmitMetadata,
+  resolveSharedBrowserSendBlocker,
   resolveSharedBrowserSubmitRouting,
+  SHARED_BROWSER_SEND_BLOCKER_STATUS,
   withPersonalBrowserRuntimeExpectations,
 } from "../sharedBrowserSubmitRouting";
 
@@ -100,5 +102,39 @@ describe("Shared Browser submit routing", () => {
         browserExecution: true,
       },
     });
+  });
+});
+
+describe("Shared Browser send blocker", () => {
+  const ready = {
+    active: true,
+    messageRequiresAi: true,
+    pageAvailable: true,
+    resolvedRuntimeId: "shared-runtime-1",
+    terminalRequest: null,
+  };
+
+  it("lets a send through once the browser runtime and a tab, even a blank one, are there", () => {
+    expect(resolveSharedBrowserSendBlocker(ready)).toBeNull();
+  });
+
+  it("says the browser is still connecting while its runtime is unresolved", () => {
+    expect(resolveSharedBrowserSendBlocker({ ...ready, resolvedRuntimeId: " " })).toBe("connecting");
+    expect(resolveSharedBrowserSendBlocker({ ...ready, resolvedRuntimeId: null, pageAvailable: false })).toBe(
+      "connecting",
+    );
+    expect(SHARED_BROWSER_SEND_BLOCKER_STATUS.connecting).toBe("Instafy's browser is still connecting.");
+  });
+
+  it("says the browser has no page while it has no tab to bind to", () => {
+    expect(resolveSharedBrowserSendBlocker({ ...ready, pageAvailable: false })).toBe("no_page");
+    expect(SHARED_BROWSER_SEND_BLOCKER_STATUS.no_page).toBe("Instafy's browser has no page open yet.");
+  });
+
+  it("never blocks a send that does not go to the browser", () => {
+    const unready = { ...ready, resolvedRuntimeId: null, pageAvailable: false };
+    expect(resolveSharedBrowserSendBlocker({ ...unready, active: false })).toBeNull();
+    expect(resolveSharedBrowserSendBlocker({ ...unready, messageRequiresAi: false })).toBeNull();
+    expect(resolveSharedBrowserSendBlocker({ ...unready, terminalRequest: { command: "pwd" } })).toBeNull();
   });
 });

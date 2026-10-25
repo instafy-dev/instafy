@@ -125,6 +125,7 @@ function createOptions(overrides: Partial<HookOptions> = {}): HookOptions {
     scrollToBottom: vi.fn(),
     sendingAttachment: false,
     sharedBrowserActive: false,
+    sharedBrowserBindingPage: null,
     sharedBrowserRuntimeId: null,
     showCredentialsGate: vi.fn(),
     showStatus: vi.fn(),

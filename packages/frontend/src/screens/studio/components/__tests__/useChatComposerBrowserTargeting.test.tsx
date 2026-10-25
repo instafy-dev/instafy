@@ -122,6 +122,67 @@ describe("useChatComposerBrowserTargeting", () => {
     expect(focusPageMock).toHaveBeenCalledWith("shared-page-1");
   });
 
+  it("binds a task to the blank tab of a browser that just started, without targeting it", async () => {
+    const restartedBlankTab = { ...blankBrowserPage, isActive: true };
+    useBrowserSessionPagesMock.mockReturnValue({
+      pages: [restartedBlankTab],
+      resolved: true,
+      focusPage: focusPageMock,
+    });
+    await act(async () => {
+      root.render(<Harness browserTransport="shared" />);
+    });
+
+    // The browser bar still lists the blank tab, but nothing names it.
+    expect(latestResult?.sharedBrowserChromePages).toEqual([restartedBlankTab]);
+    expect(latestResult?.browserSessionPages).toEqual([]);
+    expect(latestResult?.preferredBrowserPage).toBeNull();
+    expect(latestResult?.sharedBrowserBindingPage).toEqual(restartedBlankTab);
+  });
+
+  it("binds a task to the real page over an active blank tab", async () => {
+    useBrowserSessionPagesMock.mockReturnValue({
+      pages: [{ ...blankBrowserPage, isActive: true }, { ...browserPages[0], isActive: false }],
+      resolved: true,
+      focusPage: focusPageMock,
+    });
+    await act(async () => {
+      root.render(<Harness browserTransport="shared" />);
+    });
+
+    expect(latestResult?.preferredBrowserPage?.id).toBe("shared-page-1");
+    expect(latestResult?.sharedBrowserBindingPage?.id).toBe("shared-page-1");
+  });
+
+  it("offers no page to bind to before the live pages are read", async () => {
+    useBrowserSessionPagesMock.mockReturnValue({
+      pages: [],
+      resolved: false,
+      focusPage: focusPageMock,
+    });
+    await act(async () => {
+      root.render(<Harness browserTransport="shared" />);
+    });
+
+    expect(latestResult?.sharedBrowserBindingPage).toBeNull();
+  });
+
+  it("offers no page to bind to while the live pages are stale", async () => {
+    // A failed poll keeps the last pages but marks them unread. Their blank
+    // tab may be gone, so a task must not bind to its id.
+    useBrowserSessionPagesMock.mockReturnValue({
+      pages: [{ ...blankBrowserPage, isActive: true }],
+      resolved: false,
+      focusPage: focusPageMock,
+    });
+    await act(async () => {
+      root.render(<Harness browserTransport="shared" />);
+    });
+
+    expect(latestResult?.preferredBrowserPage).toBeNull();
+    expect(latestResult?.sharedBrowserBindingPage).toBeNull();
+  });
+
   it("reads the pages only while the browser view is opening or live", async () => {
     await act(async () => {
       root.render(<Harness browserTransport="shared" />);
@@ -155,6 +216,7 @@ describe("useChatComposerBrowserTargeting", () => {
       ...browserPages,
     ]);
     expect(latestResult?.preferredBrowserPage).toBeNull();
+    expect(latestResult?.sharedBrowserBindingPage).toBeNull();
     expect(latestResult?.pendingBrowserLaunchMode).toBeNull();
     expect(latestResult?.showBrowserSessionPageStrip).toBe(false);
 
