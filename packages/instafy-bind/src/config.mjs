@@ -3,6 +3,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { credentialFreeEnv } from "./detached-env.mjs";
 
 export const DEFAULT_CONTROLLER_URL = "http://127.0.0.1:8788";
 
@@ -145,7 +146,6 @@ export function agentUsesOwnerConversation(config) {
 
 /** Credential names the binder itself reads as the owner's login (above). */
 const BINDER_LOGIN_ENV = ["INSTAFY_ACCESS_TOKEN", "SUPABASE_ACCESS_TOKEN"];
-const CREDENTIAL_ENV_RE = /(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE|(^|_)KEY$|_KEY_|API_?KEY)/;
 
 /**
  * Why --agent-executor is refused here, or null. It treats a click from this machine's loopback as the owner's own,
@@ -158,23 +158,12 @@ export function agentExecutorRefusal(env = process.env) {
 }
 
 /**
- * The environment of a binder started with `serve --detach`. It outlives the Octo turn that started it and every
- * process in a runtime can read its /proc/<pid>/environ, so it keeps no credential it does not need: no runtime job
- * token or other CONTROLLER_* secret, no SUPABASE_* service values, no credential-like names (space secrets) except
- * names passed with --allow-env, and the owner's login only with `keepLogin` (--agent-executor, the one mode that
+ * The environment of a binder started with `serve --detach`: `credentialFreeEnv` (no runtime job token or other
+ * CONTROLLER_* secret, no SUPABASE_* service values, no credential-like names such as space secrets), except names
+ * passed with --allow-env, and the owner's login only with `keepLogin` (--agent-executor, the one mode that
  * dispatches Octo turns itself). Everything else (PATH, HOME, the space and conversation ids, plain settings a
  * handler may declare in `env`) is kept.
  */
 export function detachedBinderEnv(env = process.env, allowEnv = [], { keepLogin = false } = {}) {
-  const out = {};
-  for (const [name, value] of Object.entries(env)) {
-    if (value === undefined) continue;
-    const keep =
-      (keepLogin && BINDER_LOGIN_ENV.includes(name)) ||
-      allowEnv.includes(name) ||
-      name === "CONTROLLER_BASE_URL" ||
-      (!/^(CONTROLLER|SUPABASE)_/.test(name) && !CREDENTIAL_ENV_RE.test(name));
-    if (keep) out[name] = value;
-  }
-  return out;
+  return credentialFreeEnv(env, [...allowEnv, ...(keepLogin ? BINDER_LOGIN_ENV : [])]);
 }

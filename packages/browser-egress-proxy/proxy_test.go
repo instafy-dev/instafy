@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -257,6 +258,62 @@ func TestPrivateDestinationIsDeniedBeforeDial(t *testing.T) {
 	proxy.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://metadata.test/", nil))
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("expected forbidden, got %d", response.Code)
+	}
+}
+
+func TestDeniedDestinationSaysWhyAndWhatToDoWithoutEchoingTheHost(t *testing.T) {
+	t.Parallel()
+
+	proxy := newEgressProxy(testPolicy(fakeResolver{addresses: []netip.Addr{
+		netip.MustParseAddr("169.254.169.254"),
+	}}))
+	proxy.dial = func(context.Context, string, string) (net.Conn, error) {
+		t.Fatal("denied destination must not be dialed")
+		return nil, errors.New("unreachable")
+	}
+	for _, tc := range []struct {
+		url    string
+		reason string
+		host   string
+	}{
+		{url: "http://127.0.0.9:8000/", reason: "prohibited IP", host: "127.0.0.9"},
+		{url: "http://10.1.2.3/", reason: "prohibited IP", host: "10.1.2.3"},
+		{url: "http://site.localhost:8000/", reason: "local or metadata hostname", host: "site.localhost"},
+		{url: "http://site.example.test:8000/", reason: "port is not allowed", host: "site.example.test"},
+		{url: "http://metadata.test/", reason: "DNS returned prohibited IP", host: "metadata.test"},
+	} {
+		response := httptest.NewRecorder()
+		proxy.ServeHTTP(response, httptest.NewRequest(http.MethodGet, tc.url, nil))
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("%s: expected forbidden, got %d", tc.url, response.Code)
+		}
+		body := response.Body.String()
+		// The fixed text names localhost and 127.0.0.1 itself, so the hosts above are others.
+		if !strings.HasPrefix(body, "destination denied ("+tc.reason+"): ") {
+			t.Errorf("%s: expected the reason %q first, got %q", tc.url, tc.reason, body)
+		}
+		if !strings.Contains(body, "Studio preview") || !strings.Contains(body, "instafy preview open") {
+			t.Errorf("%s: expected the way to see a site running in the space, got %q", tc.url, body)
+		}
+		if strings.Contains(body, tc.host) {
+			t.Errorf("%s: the body must not echo the requested host, got %q", tc.url, body)
+		}
+	}
+}
+
+func TestDeniedDestinationNamesOnlyKnownReasons(t *testing.T) {
+	t.Parallel()
+
+	unknown := fmt.Errorf("%w: invalid hostname character", errDestinationDenied)
+	if body := deniedDestinationBody(unknown); !strings.HasPrefix(body, "destination denied: Instafy's browser") {
+		t.Fatalf("an unlisted reason must not be shown, got %q", body)
+	}
+	echo := fmt.Errorf("%w: evil.example.com", errDestinationDenied)
+	if body := deniedDestinationBody(echo); strings.Contains(body, "evil.example.com") {
+		t.Fatalf("free text after a denial must never be echoed, got %q", body)
+	}
+	if body := deniedDestinationBody(fmt.Errorf("%w: invalid port", errDestinationDenied)); !strings.HasPrefix(body, "destination denied (invalid port): ") {
+		t.Fatalf("expected the listed reason, got %q", body)
 	}
 }
 

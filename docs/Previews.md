@@ -6,6 +6,8 @@ self-hosted deployments stay off until an operator sets the variables below. Hos
 
 A site preview shows a site running in a space's machine inside Studio, to the space's members only. Nothing becomes
 public, and no consent question is asked. A public link is still `instafy tunnel`, which Octo uses only when asked.
+Instafy's browser cannot show a space's own sites: its safety policy blocks the space's own addresses (localhost,
+127.0.0.1, private addresses) and non-web ports, so a site running in the space is seen through a preview.
 
 ## How it works
 
@@ -30,6 +32,14 @@ public, and no consent question is asked. A public link is still `instafy tunnel
    view-only member's viewing keeps nothing up. Each person's viewing does this for at most 4 hours a day per space.
 7. A site `instafy preview open` knew how to start can be started again from the card or the pane after the machine
    slept (see [Waking a stopped site](#waking-a-stopped-site)).
+8. `instafy preview open --serve-cmd "<command>" --start` also starts the site when nothing answers on the port: the
+   command as argv (never a shell) from its directory in the workspace, in its own session so it outlives the process
+   that started it, without terminal input, with its output appended to `.instafy/agent/logs/preview-<port>.log`, and
+   with the environment stripped of credentials by the same rule as `instafy bind serve --detach` (no `CONTROLLER_*`
+   value except `CONTROLLER_BASE_URL`, no `SUPABASE_*` value, no credential-like name). It waits up to 60 s for the
+   port, the same as a wake, and exits 2 with the log's path when the command exits first or the port stays silent
+   (then the command is stopped). `--json` adds `startedPid` (null when the port already answered and nothing was
+   started) and `logFile`.
 
 ```
 runtime   instafy preview open --port N --title T
