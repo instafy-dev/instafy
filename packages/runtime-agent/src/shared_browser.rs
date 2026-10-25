@@ -64,6 +64,9 @@ const ALLOWED_SHARED_BROWSER_NODE_BINARIES: [&str; 2] = [
 ];
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
 const MAX_URL_CHARS: usize = 4_096;
+/// The stand-in site a navigation path is checked against before the page,
+/// which the controller resolves it against, is known.
+const NAVIGATION_PATH_FORM_ORIGIN: &str = "https://path.invalid/";
 const MAX_TEXT_CHARS: usize = 16_384;
 const MAX_TARGET_INDEX: u64 = 199;
 const SNAPSHOT_ID_CHARS: usize = 64;
@@ -1013,13 +1016,7 @@ impl ServerHandler for SharedBrowserMcpServer {
             .execute_with_failure_latch(&browser_request, || execute_request(&browser_request))
             .await
         {
-            Ok(payload) => {
-                let text = serde_json::to_string_pretty(&payload)
-                    .unwrap_or_else(|_| "Shared Browser returned an unreadable result".to_string());
-                let mut result = CallToolResult::success(vec![Content::text(text)]);
-                result.structured_content = Some(payload);
-                Ok(result)
-            }
+            Ok(payload) => Ok(successful_tool_result(payload)),
             Err(SharedBrowserMcpExecutionFailure::TerminalConsent(code)) => {
                 Ok(terminal_consent_call_result(code))
             }
@@ -1030,6 +1027,17 @@ impl ServerHandler for SharedBrowserMcpServer {
             }
         }
     }
+}
+
+/// A successful call's result. The text is compact JSON: a code-mode model
+/// reads the whole result, text and structured content alike, so pretty
+/// printing only spent its context on whitespace.
+fn successful_tool_result(payload: JsonValue) -> CallToolResult {
+    let text = serde_json::to_string(&payload)
+        .unwrap_or_else(|_| "Shared Browser returned an unreadable result".to_string());
+    let mut result = CallToolResult::success(vec![Content::text(text)]);
+    result.structured_content = Some(payload);
+    result
 }
 
 pub fn is_shared_browser_mcp_command(args: &[OsString]) -> bool {
@@ -1093,13 +1101,15 @@ fn shared_browser_mcp_tools() -> Vec<Tool> {
         Tool::new(
             Cow::Borrowed("snapshot"),
             Cow::Borrowed(
-                "Read the current page title, URL, visible text, and indexed interactive elements.",
+                "Read what a person can see on the page: title, URL, visible text, and indexed interactive elements. Controls a person cannot see yet, such as those in closed menus and drawers, are left out; `omittedControls` counts them, and opening a menu or scrolling may reveal them. `expanded` tells whether a toggle is open, `area` is the part of the page a control sits in, and links on the page's own site are paths.",
             ),
             schema(json!({ "type": "object", "properties": {}, "additionalProperties": false })),
         ),
         Tool::new(
             Cow::Borrowed("navigate"),
-            Cow::Borrowed("Navigate the visible page to a credential-free HTTP(S) URL."),
+            Cow::Borrowed(
+                "Navigate the visible page to a credential-free HTTP(S) URL, or to a path on the current page's site such as a snapshot link's href.",
+            ),
             schema(json!({
                 "type": "object",
                 "properties": { "url": { "type": "string", "minLength": 1, "maxLength": MAX_URL_CHARS } },
@@ -1296,8 +1306,23 @@ fn validate_request_body(path: &str, body: &JsonValue) -> Result<()> {
                 .map(str::trim)
                 .filter(|value| !value.is_empty() && value.chars().count() <= MAX_URL_CHARS)
                 .context("Shared Browser navigate requires a bounded URL string")?;
-            let url = reqwest::Url::parse(raw)
-                .context("Shared Browser navigation requires an absolute URL")?;
+            // A path is on the current page's site, such as a snapshot link's
+            // href. The controller resolves it against the page; here only its
+            // form is checked, and it must not name another host.
+            let url = if raw.starts_with('/') {
+                let base = reqwest::Url::parse(NAVIGATION_PATH_FORM_ORIGIN)
+                    .context("Shared Browser navigation path base is invalid")?;
+                let url = base
+                    .join(raw)
+                    .context("Shared Browser navigation path is invalid")?;
+                if url.origin() != base.origin() {
+                    bail!("Shared Browser navigation path must stay on the page's site");
+                }
+                url
+            } else {
+                reqwest::Url::parse(raw)
+                    .context("Shared Browser navigation requires a full URL or a path")?
+            };
             if !matches!(url.scheme(), "http" | "https")
                 || url.host_str().is_none()
                 || !url.username().is_empty()

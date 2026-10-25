@@ -1469,7 +1469,20 @@ enters inert values manually and starts a fresh observation. It checks that the
 password-style fixture value does not enter tool output or action telemetry.
 It also checks that ordinary non-submitting form buttons use routine approval,
 while genuine submission buttons wait for an explicit one-shot decision before
-the inert form's submission handler runs.
+the inert form's submission handler runs. A synthetic bookkeeping page then
+checks that snapshots list only what a person can see: submenus and an account
+menu collapsed with `max-height: 0` and a drawer moved off-canvas are left out
+of controls and text and counted in `omittedControls`, opening the account menu
+or the drawer shows up in the click's result, every control after the header
+and the open drawer section is the next receipt row's up to the 200-control
+limit, a link path navigates on the page's own site, and the snapshot stays
+within a 7,000-token budget (about 10,800 before this check, about 5,300 now).
+Pages for single rules check that controls under `aria-hidden` or `inert` are
+left out, that library-drawn and visually hidden checkboxes stay listed, that a
+dropdown escapes a static clipping bar but not a positioned one, that an open
+popover and a modal dialog inside small clipping boxes are listed with their
+text, that a closed select reads apart from the label beside it, and that a
+click's result shows a menu with a 900 ms opening transition fully open.
 Only fixed-schema results, timing summaries and inert-page screenshots are kept
 under `packages/frontend/test-results/browser-ci/shared-cobrowsing`; the profile
 and raw session files are removed.

@@ -66,6 +66,166 @@ const fixtureHtml = `<!doctype html><html lang="en"><meta charset="utf-8">
 <script>document.getElementById('details').onclick=()=>{const output=document.getElementById('count');output.textContent=String(Number(output.textContent)+1)};</script>
 </html>`;
 
+// A bookkeeping app's shell with inert data: a header with a main-menu toggle
+// and an account menu behind an avatar, a left menu of twelve sections and a
+// receipts table that alone fills the snapshot's 200-control limit. Collapsed
+// parts stay in the layout the way such apps hide them: submenus and the
+// account menu with max-height: 0 and overflow: hidden, the closed drawer
+// moved off-canvas with a transform. Toggles open the region they control.
+const ERP_SECTIONS = [
+  ["Übersicht", ["Dashboard", "Aufgaben", "Termine", "Mitteilungen", "Schnellerfassung"]],
+  ["Belege", ["Offene Belege", "Alle Belege", "Beleg hochladen", "E-Mail-Eingang", "Belegarchiv", "Zuordnungsregeln", "Papierkorb"]],
+  ["Ausgangsrechnungen", ["Neue Rechnung", "Rechnungen", "Angebote", "Lieferscheine", "Gutschriften", "Mahnungen", "Wiederkehrende Rechnungen", "Artikel", "Vorlagen", "Zahlungserinnerungen"]],
+  ["Eingangsrechnungen", ["Erfassen", "Offene Posten", "Freigaben", "Zahlungsvorschlag", "Lieferanten", "Kostenstellen"]],
+  ["Bank", ["Bankkonten", "Kontoumsätze", "Abgleich", "Bankregeln", "Zahlungsaufträge", "SEPA-Export", "Kontoverbindung hinzufügen"]],
+  ["Kassa", ["Kassabuch", "Kassabericht", "Registrierkasse", "Tagesabschluss", "Kassenprüfung"]],
+  ["Buchhaltung", ["Buchungsjournal", "Neue Buchung", "Offene Buchungen", "Kontenplan", "Saldenliste", "Kontoblatt", "Umbuchungen", "Abschlussbuchungen", "Periodenabgrenzung", "Steuercodes", "Belegnummernkreise", "Import"]],
+  ["Anlagen", ["Anlagenverzeichnis", "Neue Anlage", "AfA-Vorschau", "Abgänge", "Anlagengruppen"]],
+  ["Personal", ["Mitarbeiter", "Reisekosten", "Diäten", "Kilometergeld", "Lohnverrechnung", "Arbeitszeiten"]],
+  ["Auswertungen", ["Einnahmen-Ausgaben-Rechnung", "Bilanz", "GuV", "UVA", "Umsatzsteuererklärung", "Liquiditätsvorschau", "Kostenstellenauswertung", "Offene Posten Liste", "Zeitvergleich", "Export für Steuerberater", "Berichte planen"]],
+  ["Stammdaten", ["Kunden", "Lieferanten", "Artikel", "Projekte", "Kostenstellen", "Zahlungsbedingungen", "Textbausteine", "Kategorien"]],
+  ["Einstellungen", ["Unternehmen", "Benutzer", "Rollen", "Abonnement", "Integrationen", "Schnittstellen", "Nummernkreise", "Layout", "Datenexport", "Protokoll"]],
+];
+const ERP_ACCOUNT = ["Mein Profil", "Unternehmen wechseln", "Benutzerverwaltung", "Abonnement & Rechnungen", "Sicherheit", "Benachrichtigungen", "Sprache: Deutsch", "Hilfe & Support", "Neuigkeiten", "Abmelden"];
+const ERP_SUPPLIERS = ["Bürobedarf Muster GmbH", "Strom & Gas AG", "Telekom Beispiel", "Tankstelle Nord", "Software Abo Ltd", "Hotel Am Platz", "Bahn Tickets", "Versandhandel XY", "Druckerei Blau", "Kanzlei Grün"];
+const erpSlug = (text) => text.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+
+// drawer "open": the drawer shows and only the Belege submenu is expanded.
+// drawer "closed": the drawer is off-canvas with every submenu expanded.
+// Fifty receipt rows fill the control limit; eight keep clicks quick.
+function erpFixtureHtml(drawer, rowCount) {
+  const open = (shown) => (shown ? " data-open" : "");
+  const sections = ERP_SECTIONS.map(([title, items], index) => {
+    const expanded = drawer === "closed" || index === 1;
+    return `<li><button type="button" class="section-toggle" aria-expanded="${expanded}" aria-controls="sub-${index}"><span aria-hidden="true">▸</span>${title}</button>
+      <ul id="sub-${index}" class="submenu"${open(expanded)}>${items.map((item) => `<li><a href="/app/${erpSlug(title)}/${erpSlug(item)}">${item}</a></li>`).join("")}</ul></li>`;
+  }).join("");
+  const rows = Array.from({ length: rowCount }, (_, index) => {
+    const number = `BEL-2026-${1200 + index}`;
+    const amount = (((index * 37.13) % 900) + 12.5).toFixed(2).replace(".", ",");
+    return `<tr><td><input type="checkbox" aria-label="Beleg ${number} auswählen"></td><td><a href="/app/belege/${number}">${number}</a></td>
+      <td>${String((index % 28) + 1).padStart(2, "0")}.10.2026</td><td>${ERP_SUPPLIERS[index % ERP_SUPPLIERS.length]}</td><td>€ ${amount}</td>
+      <td>${index % 3 === 0 ? "Zugeordnet" : "Offen"}</td><td><button type="button">Bearbeiten</button> <button type="button">Zuordnen</button>
+      <button type="button" aria-label="Weitere Aktionen"><span aria-hidden="true">⋯</span></button></td></tr>`;
+  }).join("");
+  return `<!doctype html><html lang="de"><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:">
+<title>Belege - Beispiel Buchhaltung</title>
+<style>
+body{margin:0;font:14px/1.4 system-ui,sans-serif}
+header{position:fixed;top:0;left:0;right:0;height:52px;display:flex;align-items:center;gap:12px;padding:0 16px;background:#0b3d62;color:#fff;z-index:5}
+header a,header button{color:#fff;background:none;border:0;font:inherit}header .spacer{flex:1}
+.avatar img{width:32px;height:32px;border-radius:50%;background:#ccc}
+#account-menu{position:fixed;top:52px;right:12px;width:260px;background:#fff;border:1px solid #ccc;z-index:6;display:flex;flex-direction:column}
+#account-menu a{padding:8px 12px;color:#111}
+#account-menu:not([data-open]),.submenu:not([data-open]){max-height:0;overflow:hidden}
+#main-nav{position:fixed;top:52px;bottom:0;left:0;width:260px;overflow:auto;background:#f4f6f8;z-index:4}
+#main-nav:not([data-open]){transform:translateX(-100%)}
+#main-nav ul{list-style:none;margin:0;padding:0}.section-toggle{display:block;width:100%;text-align:left;padding:8px 12px;background:none;border:0;font:inherit}
+.submenu a{display:block;padding:4px 28px}
+main{margin:60px 0 0 ${drawer === "open" ? 276 : 16}px;padding:8px 16px}table{border-collapse:collapse;width:100%}td,th{padding:4px 6px;text-align:left}
+</style>
+<header><a href="/app">Beispiel Buchhaltung</a>
+<button type="button" aria-label="Hauptmenü" aria-expanded="${drawer === "open"}" aria-controls="main-nav">☰</button>
+<input type="search" placeholder="Suchen" aria-label="Suche"><span class="spacer"></span><a href="/hilfe">Hilfe</a>
+<button type="button" class="avatar" aria-haspopup="menu" aria-expanded="false" aria-controls="account-menu"><img alt="Kundenavatar" src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></button></header>
+<div id="account-menu" role="menu" aria-label="Benutzerkonto"><div>Muster Beispiel<br><small>buchhaltung@example.test</small></div>
+${ERP_ACCOUNT.map((item) => `<a role="menuitem" href="/app/account/${erpSlug(item)}">${item}</a>`).join("")}</div>
+<nav id="main-nav" aria-label="Hauptmenü"${open(drawer === "open")}><ul>${sections}</ul></nav>
+<main><h1>Offene Belege</h1><p>Belege, die noch keiner Buchung zugeordnet sind.</p>
+<table><thead><tr><th></th><th>Nummer</th><th>Datum</th><th>Lieferant</th><th>Betrag</th><th>Status</th><th>Aktionen</th></tr></thead><tbody>${rows}</tbody></table></main>
+<script>for (const toggle of document.querySelectorAll("[aria-controls]")) toggle.addEventListener("click", () => {
+  const region = document.getElementById(toggle.getAttribute("aria-controls"));
+  const opened = !region.hasAttribute("data-open");
+  region.toggleAttribute("data-open", opened);
+  toggle.setAttribute("aria-expanded", String(opened));
+});</script>
+</html>`;
+}
+
+// Pages for single rules of what a person can see, on the bookkeeping site.
+// "visible": an open popover drawn in a corner, far from the small clipping
+// box it sits in; controls under aria-hidden and inert; two native checkboxes
+// a library draws (transparent over the styled box, and visually hidden
+// behind a label); a dropdown that escapes a static clipping bar and one
+// clipped by a positioned bar; a fixed link in a collapsed transformed box;
+// and a closed select beside a label. "dialog": a modal dialog opened inside
+// a small clipping, transformed box. "transition": a submenu that opens with a
+// 900 ms transition.
+const RULE_TRANSITION_ITEMS = Array.from({ length: 12 }, (_, index) => `Beleg ${index + 1}`);
+function ruleFixtureHtml(name) {
+  const page = (title, style, body, script) => `<!doctype html><html lang="en"><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'">
+<title>${title}</title><style>body{margin:0;padding:16px;font:14px/1.4 system-ui,sans-serif}${style}</style>
+${body}<script>${script}</script></html>`;
+  if (name === "visible") {
+    return page("Visibility rules", `
+.mui{position:relative;display:inline-flex;padding:9px}.mui input{position:absolute;inset:0;width:100%;height:100%;margin:0;padding:0;opacity:0;z-index:1}
+.mui span{display:block;width:18px;height:18px;border:2px solid #555}
+.visually-hidden{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.bar{height:32px;overflow:hidden}.drop{position:absolute;top:40px;left:0}section{position:relative;margin-bottom:80px}
+#actions{inset:auto;right:16px;bottom:16px;margin:0}`, `
+<h1>Visibility rules</h1>
+<div style="height:30px;overflow:hidden;contain:paint"><button type="button">Actions</button><div popover id="actions"><button type="button">Send invoice</button><button type="button">Archive</button></div></div>
+<div aria-hidden="true"><button type="button">Hidden from assistive tech</button> Aria hidden text</div>
+<div inert><button type="button">Inert action</button> Inert text</div>
+<p><label class="mui"><input type="checkbox" aria-label="Mark as paid"><span></span></label></p>
+<p><input type="checkbox" id="reviewed" class="visually-hidden"><label for="reviewed">Mark as reviewed</label></p>
+<section><div class="bar"><button type="button">Filter</button><div class="drop"><a href="/rules/filter">Open filter item</a></div></div></section>
+<section><div class="bar" style="position:relative"><button type="button">Sort</button><div class="drop"><a href="/rules/sort">Clipped sort item</a></div></div></section>
+<div style="max-height:0;overflow:hidden;transform:translateZ(0)"><div style="position:fixed;top:0;left:0"><a href="/rules/fixed">Collapsed fixed item</a></div></div>
+<p><select aria-label="Plan"><option>Alpha</option><option selected>Beta</option></select><label>Name <input aria-label="Name"></label></p>`,
+    `document.getElementById("actions").showPopover();`);
+  }
+  if (name === "dialog") {
+    return page("Receipts", "", `<h1>Receipts</h1><button type="button">Delete receipt</button>
+<div style="width:40px;height:40px;overflow:hidden;transform:translateZ(0)"><dialog id="confirm"><p>Delete this receipt permanently?</p><button type="button">Confirm delete</button><button type="button">Cancel</button></dialog></div>`,
+    `document.getElementById("confirm").showModal();`);
+  }
+  if (name === "transition") {
+    return page("Menu", `#belege-sub{max-height:0;overflow:hidden;transition:max-height 900ms linear}#belege-sub[data-open]{max-height:336px}#belege-sub a{display:block;height:28px}`,
+      `<button type="button" aria-expanded="false" aria-controls="belege-sub">Belege öffnen</button>
+<div id="belege-sub">${RULE_TRANSITION_ITEMS.map((item, index) => `<a href="/rules/belege/${index + 1}">${item}</a>`).join("")}</div>`,
+      `const toggle = document.querySelector("[aria-controls]"); toggle.addEventListener("click", () => {
+  const region = document.getElementById("belege-sub"); region.toggleAttribute("data-open");
+  toggle.setAttribute("aria-expanded", String(region.hasAttribute("data-open")));
+});`);
+  }
+  return null;
+}
+
+async function listenErpFixture() {
+  const server = createServer((request, response) => {
+    const url = new URL(request.url, "http://fixture.invalid");
+    const rulePage = url.pathname.startsWith("/rules/") ? ruleFixtureHtml(url.pathname.slice("/rules/".length)) : null;
+    if (rulePage) {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+      response.end(rulePage);
+      return;
+    }
+    const drawer = { "/erp/drawer-open": "open", "/erp/drawer-closed": "closed" }[url.pathname];
+    const rowCount = { "": 50, "?rows=8": 8 }[url.search];
+    if (!drawer || rowCount === undefined) {
+      response.writeHead(404).end();
+      return;
+    }
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+    response.end(erpFixtureHtml(drawer, rowCount));
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  return { server, origin: `http://127.0.0.1:${server.address().port}` };
+}
+
+// Codex's own estimate of a text's tokens: its UTF-8 bytes over four.
+const approximateTokens = (value) => Math.ceil(Buffer.byteLength(JSON.stringify(value), "utf8") / 4);
+// Before snapshots kept to what a person sees, the drawer-open page cost about
+// 10,800 tokens: every collapsed menu link, and a box and every empty field
+// per control. Now it measures about 5,300.
+const ERP_SNAPSHOT_TOKEN_BUDGET = 7_000;
+
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function listenFixture() {
@@ -550,6 +710,102 @@ export async function runSharedBrowserCobrowsingFixture() {
     assert.equal(downloads.sessionDenyAfterReconnect, "downloaded", "The download control did not download; the proof cannot tell blocks apart");
     assert.equal(downloads.profileBlockAfterReconnect, "blocked", "The profile download block did not survive a reconnect and viewer click");
 
+    // A snapshot lists what a person sees: collapsed submenus, the closed
+    // account menu and the off-canvas drawer stay out until they are opened,
+    // and opening one shows up in the click's own result.
+    const erpSite = await listenErpFixture();
+    servers.push(erpSite.server);
+    allowedOrigins.add(erpSite.origin);
+    freshTurn();
+    const labels = (observed) => observed.interactiveElements.map((entry) => entry.label);
+    const toggle = (observed, title) => observed.interactiveElements.find((entry) => entry.tag === "button" && entry.label.endsWith(title));
+    const linksTo = (observed, pattern) => observed.interactiveElements.filter((entry) => pattern.test(entry.href || "")).map((entry) => entry.label);
+    const navLinks = (observed) => linksTo(observed, /\/app\/(?!belege\/BEL-|account\/)[^/]+\//);
+    const accountLinks = (observed) => linksTo(observed, /\/app\/account\//);
+    const avatarOf = (observed) => observed.interactiveElements.find((entry) => entry.label.startsWith("Kundenavatar"));
+    let erp = (await successfulTool("POST", "/v1/navigate", { url: `${erpSite.origin}/erp/drawer-open` }, "allow_routine")).payload;
+    assert.deepEqual(navLinks(erp), ERP_SECTIONS[1][1], "Only the expanded submenu's links may be listed");
+    assert.deepEqual(accountLinks(erp), [], "The collapsed account menu's links were listed");
+    for (const hidden of ["Buchungsjournal", "Kontenplan", "Mein Profil", "Abmelden"]) {
+      assert.ok(!labels(erp).includes(hidden), `The collapsed ${hidden} was listed`);
+      assert.ok(!erp.visibleText.includes(hidden), `The collapsed ${hidden} was read as text`);
+    }
+    assert.equal(toggle(erp, "Belege").expanded, true);
+    assert.equal(toggle(erp, "Buchhaltung").expanded, false);
+    assert.equal(avatarOf(erp).expanded, false);
+    assert.equal(avatarOf(erp).area, "header");
+    // The receipts fill the 200-control limit instead of hidden menu links:
+    // after the header and the open section of the drawer, every control is
+    // the next receipt row's, in order.
+    assert.equal(erp.interactiveElements.length, 200);
+    const shellControls = erp.interactiveElements.filter((entry) => entry.area);
+    assert.equal(shellControls.length, 5 + ERP_SECTIONS.length + ERP_SECTIONS[1][1].length,
+      `The header and drawer took ${shellControls.length} controls`);
+    const receiptRow = (index) => {
+      const number = `BEL-2026-${1200 + index}`;
+      return [`Beleg ${number} auswählen`, number, "Bearbeiten", "Zuordnen", "Weitere Aktionen"];
+    };
+    const receiptControls = Array.from({ length: 50 }, (_, index) => receiptRow(index)).flat()
+      .slice(0, 200 - shellControls.length);
+    assert.deepEqual(erp.interactiveElements.filter((entry) => !entry.area).map((entry) => entry.label), receiptControls,
+      "Controls other than the receipts' took the limit");
+    // The count of controls left out: the closed account menu and the
+    // collapsed sections' links.
+    assert.equal(erp.omittedControls,
+      ERP_ACCOUNT.length + ERP_SECTIONS.flatMap(([, items]) => items).length - ERP_SECTIONS[1][1].length);
+    for (const entry of erp.interactiveElements) {
+      assert.equal("box" in entry, false, "A control's box reached the model");
+      assert.ok(Object.values(entry).every((value) => value !== "" && value !== null), `Empty field in ${JSON.stringify(entry)}`);
+      if (entry.href) assert.match(entry.href, /^\//, "A same-site link kept its origin");
+    }
+    const erpSnapshotTokens = approximateTokens(erp);
+    assert.ok(erpSnapshotTokens <= ERP_SNAPSHOT_TOKEN_BUDGET,
+      `The drawer-open snapshot costs about ${erpSnapshotTokens} tokens, over ${ERP_SNAPSHOT_TOKEN_BUDGET}`);
+
+    // A link path from a snapshot navigates on the page's own site.
+    erp = (await successfulTool("POST", "/v1/navigate", { url: "/erp/drawer-open?rows=8" })).payload;
+    assert.equal(erp.url, `${erpSite.origin}/erp/drawer-open?rows=8`);
+    assert.deepEqual(accountLinks(erp), [], "The collapsed account menu's links were listed");
+    erp = (await successfulTool("POST", "/v1/click", target(erp, avatarOf(erp).label))).payload;
+    assert.deepEqual(accountLinks(erp), ERP_ACCOUNT, "The opened account menu must be listed in the click's result");
+    assert.ok(erp.interactiveElements.filter((entry) => accountLinks(erp).includes(entry.label)).every((entry) => entry.area === "menu"));
+    assert.equal(avatarOf(erp).expanded, true);
+    assert.ok(erp.visibleText.includes("Abmelden"), "The opened account menu's text was not read");
+
+    erp = (await successfulTool("POST", "/v1/navigate", { url: `${erpSite.origin}/erp/drawer-closed?rows=8` })).payload;
+    assert.deepEqual(navLinks(erp), [], "The off-canvas drawer's links were listed");
+    assert.ok(!erp.visibleText.includes("Buchungsjournal"), "The off-canvas drawer was read as text");
+    assert.equal(toggle(erp, "Hauptmenü").expanded, false);
+    erp = (await successfulTool("POST", "/v1/click", target(erp, "Hauptmenü"))).payload;
+    assert.deepEqual(navLinks(erp), ERP_SECTIONS.flatMap(([, items]) => items), "The opened drawer's links must be listed in the click's result");
+    assert.ok(erp.visibleText.includes("Buchungsjournal"), "The opened drawer's text was not read");
+
+    // Single rules, each in real Chromium.
+    let rules = (await successfulTool("POST", "/v1/navigate", { url: "/rules/visible" })).payload;
+    for (const hidden of ["Hidden from assistive tech", "Inert action", "Clipped sort item", "Collapsed fixed item"]) {
+      assert.ok(!labels(rules).includes(hidden), `${hidden} was listed`);
+    }
+    for (const shown of ["Mark as paid", "Mark as reviewed", "Filter", "Open filter item", "Sort", "Actions", "Send invoice", "Archive"]) {
+      assert.ok(labels(rules).includes(shown), `${shown} was not listed`);
+    }
+    assert.equal(rules.omittedControls, 4);
+    for (const hidden of ["Aria hidden text", "Inert text"]) {
+      assert.ok(!rules.visibleText.includes(hidden), `${hidden} was read as text`);
+    }
+    assert.ok(rules.visibleText.includes("Beta Name"), `A select's option ran into its neighbour: ${JSON.stringify(rules.visibleText)}`);
+    // A modal dialog renders over the page whatever the box it sits in clips.
+    rules = (await successfulTool("POST", "/v1/navigate", { url: "/rules/dialog" })).payload;
+    for (const shown of ["Confirm delete", "Cancel"]) {
+      assert.equal(rules.interactiveElements.find((entry) => entry.label === shown)?.area, "dialog", `${shown} was not listed`);
+    }
+    assert.ok(rules.visibleText.includes("Delete this receipt permanently?"), "The open dialog's text was not read");
+    // A click's result shows a menu where its opening transition lands.
+    rules = (await successfulTool("POST", "/v1/navigate", { url: "/rules/transition" })).payload;
+    assert.deepEqual(linksTo(rules, /\/rules\/belege\//), []);
+    rules = (await successfulTool("POST", "/v1/click", target(rules, "Belege öffnen"))).payload;
+    assert.deepEqual(linksTo(rules, /\/rules\/belege\//), RULE_TRANSITION_ITEMS, "The click's result showed the menu half open");
+    assert.equal(observedApprovals.length, 2 + expectedSubmissions + 2, "Routine snapshots, menus and drawers repeated a prompt");
+
     const result = {
       status: "passed", fixtureVersion: 1, browserVersion: context.browser()?.version() ?? "unknown",
       platform: process.platform, architecture: process.arch, nodeVersion: process.version,
@@ -562,8 +818,14 @@ export async function runSharedBrowserCobrowsingFixture() {
         routineNonSubmittingFormButtons: true, formSubmissionControlsRequireConfirmation: true,
         pageSecretsMasked: true, downloadLinkAsksWithCategory: true, approvedAgentDownloadDenied: true,
         profileDownloadBlockSurvivesReconnect: true,
+        collapsedMenusLeftOut: true, offCanvasDrawerLeftOut: true, openedRegionsListedAfterClick: true,
+        compactSnapshotWithinBudget: true, receiptsFillTheLimit: true, omittedControlsCounted: true,
+        linkPathNavigation: true, ariaHiddenAndInertLeftOut: true, libraryDrawnCheckboxesListed: true,
+        clipsFollowContainingBoxes: true, topLayerListed: true, transitionsSettleBeforeResult: true,
+        selectReadsAsAWord: true,
       },
       measurements,
+      erpSnapshotTokens,
       downloads,
       limitations: [
         "Synthetic loopback pages, one headless browser, five samples per operation and page size; no latency SLA.",
