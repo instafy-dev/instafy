@@ -18,6 +18,7 @@ export * from "./agents";
 export * from "./secrets";
 export * from "./integrations";
 export * from "./providerDevices";
+export * from "./deviceGrants";
 export * from "./providerRequests";
 export * from "./notifications";
 export * from "./automations";

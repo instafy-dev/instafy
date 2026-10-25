@@ -136,14 +136,22 @@ describe("provider request records", () => {
     }
   });
 
-  it("keep the server's age and target from a claim, and nothing that is not one", async () => {
+  it("keep the server's ages and target from a claim, and nothing that is not one", async () => {
     vi.stubGlobal(
       "fetch",
       vi
         .fn()
-        .mockResolvedValueOnce(jsonResponse({ ...canceledRecord, status: "claimed", ageMs: 840 }))
         .mockResolvedValueOnce(
-          jsonResponse({ ...canceledRecord, status: "claimed", jobId: null, ageMs: "old" }),
+          jsonResponse({ ...canceledRecord, status: "claimed", ageMs: 840, triggerAgeMs: 21_500 }),
+        )
+        .mockResolvedValueOnce(
+          jsonResponse({
+            ...canceledRecord,
+            status: "claimed",
+            jobId: null,
+            ageMs: "old",
+            triggerAgeMs: "old",
+          }),
         ),
     );
 
@@ -152,7 +160,8 @@ describe("provider request records", () => {
       targetDeviceId: "device-1",
       jobId: "job-1",
       ageMs: 840,
+      triggerAgeMs: 21_500,
     });
-    expect(await claim()).toMatchObject({ jobId: null, ageMs: null });
+    expect(await claim()).toMatchObject({ jobId: null, ageMs: null, triggerAgeMs: null });
   });
 });

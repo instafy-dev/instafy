@@ -62,6 +62,12 @@ export interface ControllerProviderRequestRecord {
   expiresAt?: string | null;
   /** Milliseconds since the request was created, on the controller's clock, when it was read. */
   ageMs?: number | null;
+  /**
+   * For a request an agent job made: milliseconds since the controller received
+   * what started the job (a queued message's time in the queue included), on
+   * its clock, when the request was read. A device judges how old the ask is by it.
+   */
+  triggerAgeMs?: number | null;
 }
 
 interface DispatchProviderToolCallParams {
@@ -157,6 +163,10 @@ function normalizeRequestRecord(value: unknown): ControllerProviderRequestRecord
     expiresAt: typeof record.expiresAt === "string" ? record.expiresAt : null,
     ageMs:
       typeof record.ageMs === "number" && Number.isFinite(record.ageMs) ? record.ageMs : null,
+    triggerAgeMs:
+      typeof record.triggerAgeMs === "number" && Number.isFinite(record.triggerAgeMs)
+        ? record.triggerAgeMs
+        : null,
   };
 }
 

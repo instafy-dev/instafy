@@ -101,6 +101,9 @@ import {
   listControllerProviderRequests,
   claimControllerProviderRequest,
   completeControllerProviderRequest,
+  listControllerDeviceGrants,
+  createControllerDeviceGrant,
+  revokeControllerDeviceGrant,
   revertWorkspaceGitCommitFromController,
   revertWorkspaceGitPathsFromController,
   revokeProjectSecret,
@@ -311,6 +314,11 @@ export const controllerClient = createControllerClient({
   providerDevices: Object.freeze({
     list: listControllerProviderDevices,
     heartbeat: heartbeatControllerProviderDevice,
+  }),
+  deviceGrants: Object.freeze({
+    list: listControllerDeviceGrants,
+    create: createControllerDeviceGrant,
+    revoke: revokeControllerDeviceGrant,
   }),
   workspace: Object.freeze({
     files: Object.freeze({

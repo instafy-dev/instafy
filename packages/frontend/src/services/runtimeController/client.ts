@@ -18,6 +18,8 @@ export interface ControllerJsonRequestOptions {
   headers?: HeadersInit;
   fallbackError: string;
   allowEmptyResponse?: boolean;
+  /** A 404 is an answer too: success, with no value. */
+  allowNotFound?: boolean;
 }
 
 export type ControllerJsonRequestSuccess<T> = {
@@ -103,6 +105,14 @@ export async function controllerJsonRequest<T>(
       headers,
       body,
     });
+
+    if (options.allowNotFound && response.status === 404) {
+      return {
+        success: true,
+        value: undefined as T,
+        response,
+      };
+    }
 
     if (!response.ok) {
       return {
