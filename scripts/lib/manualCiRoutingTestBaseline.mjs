@@ -37,8 +37,8 @@ export const MANUAL_CI_JOBS = [
 export const MANUAL_CI_BASELINES = {
   // The reviewed Build baseline additionally selects proxy_retry_budget and
   // filtered read-reference integration tests, builds the Codex code-mode host and
-  // runs proxy_retry_budget per model, plus the inert native_compaction and
-  // native_images selectors;
+  // runs proxy_retry_budget per model, plus the inert native_compaction,
+  // native_images and granted_turns selectors;
   // check-rust-ci binds their exact argv.
   // Reviewed additions: the CLI lane runs the git wrapper suite, and the
   // provider lane runs the provider core and service unit tests, and the
@@ -47,7 +47,7 @@ export const MANUAL_CI_BASELINES = {
   // tests aggregate gains a tunnel broker lane (complete tunnel-broker suite),
   // and the CLI lane runs the bound-sites binder suites (packages/instafy-bind
   // and `instafy bind`).
-  "build.yml": { sha256: "a9976b1d880f0b4e44181e28b201cfa3ee721b62074f907e34780b513fe7ad38" },
+  "build.yml": { sha256: "dd8be99140566936d87fd2f298b322e5656086125cbfb4f1fd248091847c0270" },
   "browser-e2e.yml": { sha256: "5a227820568dfe71f344bd816f77fe41c4d1d8980041937792de09ab956c121b" },
   // The reviewed Auth and Controller DB baselines additionally trigger on the
   // GHCR image-mirror helper (and its lock/test for Auth, the serial-pull helper

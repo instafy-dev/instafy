@@ -65,14 +65,14 @@ function route(key, github, enabled = '') {
 // Keep them in this existing CI test entrypoint so no workflow command changes.
 const cancellationWorkflows = [
   // Build includes the reviewed proxy_retry_budget and read-reference selectors, the
-  // code-mode host build, per-model proxy_retry_budget runs, inert native compaction
-  // and native chat image selectors, and provider unit tests, independently bound by check-rust-ci, and the CLI git
+  // code-mode host build, per-model proxy_retry_budget runs, inert native compaction,
+  // native chat image and granted turn selectors, and provider unit tests, independently bound by check-rust-ci, and the CLI git
   // wrapper, preview check and bound-sites binder suites bound below, and the local author pseudonym key
   // test in the contracts lane, and the tunnel broker test lane in the Rust tests
   // aggregate, also bound by check-rust-ci; other commands and authority are exact.
   // Both hashes are taken after reversing the main-only cache change exactly.
   { file: 'build.yml', text: source, keys: ['javascript', 'rust', 'rust-tests'],
-    previousHash: 'e63e1cb040bad04496b098d402b135ba754e1e33f4cd59fc2c5a766a1eeb2df5' },
+    previousHash: '64e8e18eb02b9e90b61cbd7e213d82093f3e4060d4b52744da89cadaf3530efe' },
   { file: 'browser-e2e.yml', text: withoutManualCiRouting('browser-e2e.yml', fs.readFileSync(path.join(root, '.github/workflows/browser-e2e.yml'), 'utf8')),
     keys: ['shared-profile'], previousHash: '71980384b6c935e2fbe90e48cd7526e8bbded8721611cea427ee0f9bd5da1115' },
 ];

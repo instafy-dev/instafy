@@ -1804,6 +1804,7 @@ jobs:
           cargo test --manifest-path packages/runtime-agent/Cargo.toml --test proxy_integration codex_read_reference_ -- --test-threads=1
           cargo test --manifest-path packages/runtime-agent/Cargo.toml --test proxy_integration native_compaction:: -- --test-threads=1
           cargo test --manifest-path packages/runtime-agent/Cargo.toml --test proxy_integration native_images:: -- --test-threads=1
+          cargo test --manifest-path packages/runtime-agent/Cargo.toml --test proxy_integration granted_turns:: -- --test-threads=1
 
   rust-test-proxy:
     name: Rust test OpenAI proxy
