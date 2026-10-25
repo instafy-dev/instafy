@@ -122,6 +122,57 @@ describe("chatMessagePresentation", () => {
     ).toEqual(["thinking", "status", "final"]);
   });
 
+  it("shows a card posted before the run's first visible step once, in the transcript and not again in the thread", () => {
+    const card = createMessage({
+      id: "card",
+      content: "Ready to preview",
+      timestamp: 150,
+      messageType: "action_request",
+      metadata: {
+        jobId: "job-1",
+        messageType: "action_request",
+        details: { messageType: "action_request", details: { testId: "preview-ready-card" } },
+      },
+    });
+    const messages: ChatMessage[] = [
+      createMessage({
+        id: "patch",
+        content: "Applying changes to workspace...",
+        timestamp: 50,
+        messageType: "file_change",
+        metadata: { jobId: "job-1", messageType: "file_change" },
+      }),
+      createMessage({
+        id: "command-started",
+        content: "instafy preview open",
+        timestamp: 100,
+        messageType: "command_execution",
+        metadata: { jobId: "job-1", messageType: "command_execution", details: { itemId: "item-1" } },
+      }),
+      // The card is posted while the command that opens it is still running.
+      card,
+      createMessage({
+        id: "command-done",
+        content: "instafy preview open",
+        timestamp: 200,
+        messageType: "command_execution",
+        metadata: { jobId: "job-1", messageType: "command_execution", details: { itemId: "item-1" } },
+      }),
+      createMessage({ id: "final", content: "Your site is ready.", timestamp: 300, metadata: { jobId: "job-1" } }),
+    ];
+
+    const collapsedAll = collapseLifecycleMessages(messages);
+    const collapsedVisible = collapsedAll.filter((message) => shouldDisplayChatMessage(message));
+    const synthesized = synthesizeAgentJobThreadMessages(collapsedAll, collapsedVisible);
+
+    expect(synthesized.map((message) => message.id)).toEqual(["card", "agent-job-thread:job-1"]);
+    const thread = synthesized[1]!;
+    const nested = (thread.metadata as Record<string, unknown>).threadMessages as ChatMessage[];
+    expect(nested.map((message) => message.id)).toEqual(["patch", "command-done", "final"]);
+    // The run still starts when its first update did.
+    expect(thread.timestamp).toBe(50);
+  });
+
   it("lists the replies a synthesized job thread row presents, newest first, for read acknowledgement", () => {
     const collapsedAll: ChatMessage[] = [
       createMessage({ id: "command", content: "ls", messageType: "command_execution", metadata: { jobId: "job-1", messageType: "command_execution" } }),
