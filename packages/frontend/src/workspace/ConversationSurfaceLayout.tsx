@@ -3,8 +3,8 @@ import { ChatBubble, NavArrowLeft, NavArrowRight, ViewColumns3 } from "iconoir-r
 import { IconButton } from "../components/Button";
 import { ResizablePanels } from "../components/ResizablePanels";
 import { HorizontalTabStrip } from "../components/tabs/HorizontalTabStrip";
-import { TabLabel, TabCloseButton, TAB_FOCUS_CLASS } from "../components/tabs/TabPresentation";
-import { DARK_DIVIDER_BORDER_CLASS, DARK_PANEL_BG_CLASS, DARK_RAIL_HOVER_CLASS } from "../theme/darkSurfaces";
+import { TabLabel, TabCloseButton, tabItemStyles, tabTriggerStyles } from "../components/tabs/TabPresentation";
+import { DARK_DIVIDER_BORDER_CLASS, DARK_PANEL_BG_CLASS } from "../theme/darkSurfaces";
 
 export type ConversationSurface = {
   id: string;
@@ -37,6 +37,7 @@ export function ConversationSurfaceTabs({
   chatPanelId, chatActions, resources, activeId, resourceId, split, wide, ratio, onSelect, onSplitChange, presentation = "header",
 }: ConversationSurfaceTabsProps) {
   const besideComposer = presentation === "composer";
+  const tabPreset = besideComposer ? "contained" : "underline";
   const tabs = useRef(new Map<string, HTMLButtonElement>());
   const restoreFocus = useRef(false);
   const views: ConversationSurface[] = split ? resources : [
@@ -69,7 +70,7 @@ export function ConversationSurfaceTabs({
           )}
         >
           {views.map((view, index) => (
-            <div key={view.id} data-tab-id={view.id} className={`flex shrink-0 items-center ${besideComposer ? `rounded-xl ${selected === view.id ? "bg-white dark:bg-slate-700" : ""}` : ""} ${selected === view.id ? "text-slate-900 dark:text-slate-100" : "text-slate-500 dark:text-slate-400"}`}>
+            <div key={view.id} data-tab-id={view.id} className={tabItemStyles(tabPreset, selected === view.id)}>
               <button
                 ref={node => { if (node) tabs.current.set(view.id, node); else tabs.current.delete(view.id); }}
                 type="button" role="tab" aria-controls={view.panelId}
@@ -77,7 +78,7 @@ export function ConversationSurfaceTabs({
                 aria-label={[view.label, view.dirty ? "unsaved changes" : null, view.attention ? view.attentionLabel ?? "approval needed" : null].filter(Boolean).join(", ")}
                 title={view.title ?? view.label}
                 data-testid={`conversation-subtab-${view.id}`}
-                className={`relative flex min-h-11 max-w-52 items-center gap-1.5 px-3 ${besideComposer ? "flex-1 justify-center rounded-xl text-sm aria-selected:font-medium aria-selected:text-primary-700 dark:aria-selected:text-primary-300 forced-colors:aria-selected:outline forced-colors:aria-selected:outline-solid forced-colors:aria-selected:outline-[Highlight]" : "text-xs hover:bg-slate-100/80 after:pointer-events-none after:absolute after:inset-x-3 after:bottom-0 after:h-[1.5px] after:rounded-full aria-selected:after:bg-primary-600 dark:aria-selected:after:bg-primary-400 forced-colors:aria-selected:after:bg-[Highlight]"} ${DARK_RAIL_HOVER_CLASS} ${TAB_FOCUS_CLASS} ${besideComposer ? "" : "pointer-coarse:max-w-40"}`}
+                className={tabTriggerStyles(tabPreset)}
                 onClick={() => onSelect(view.id)}
                 onKeyDown={event => {
                   if (event.key === "Delete" && view.onClose) { event.preventDefault(); close(view); return; }
