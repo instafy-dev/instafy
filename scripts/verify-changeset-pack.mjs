@@ -37,6 +37,7 @@ const PACKAGE_POLICIES = new Map([
         "package/dist/bind/src/check.mjs",
         "package/dist/bind/src/config.mjs",
         "package/dist/bind/src/controller.mjs",
+        "package/dist/bind/src/detached-env.mjs",
         "package/dist/bind/src/executors/agent.mjs",
         "package/dist/bind/src/executors/script.mjs",
         "package/dist/bind/src/handler-kit.mjs",

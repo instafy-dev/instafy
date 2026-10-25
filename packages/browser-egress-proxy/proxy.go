@@ -189,9 +189,45 @@ func (proxy *egressProxy) dialResolvedTarget(
 	return nil, lastErr
 }
 
+// deniedDestinationGuidance follows every "destination denied" answer. People read it in the
+// browser and the agent reads it in page text, so it says what to do instead.
+const deniedDestinationGuidance = "Instafy's browser opens public websites on standard web ports only. " +
+	"Its safety policy blocks this space's own addresses (localhost, 127.0.0.1), private addresses and other ports. " +
+	"To see a site running in this space, open it as a Studio preview (ask Octo, or run instafy preview open)."
+
+// deniedDestinationReasons are the denial reasons a page may name. A reason is shown only when it
+// is exactly one of these fixed strings, so nothing from the request (such as the host) is echoed.
+var deniedDestinationReasons = []string{
+	"prohibited IP",
+	"DNS returned prohibited IP",
+	"local or metadata hostname",
+	"port is not allowed",
+	"hostname must be fully qualified",
+	"invalid host",
+	"invalid port",
+}
+
+// deniedDestinationReason is the fixed reason of a denial, or "" when it has none from the list.
+func deniedDestinationReason(err error) string {
+	message := err.Error()
+	for _, reason := range deniedDestinationReasons {
+		if strings.HasSuffix(message, errDestinationDenied.Error()+": "+reason) {
+			return reason
+		}
+	}
+	return ""
+}
+
+func deniedDestinationBody(err error) string {
+	if reason := deniedDestinationReason(err); reason != "" {
+		return "destination denied (" + reason + "): " + deniedDestinationGuidance
+	}
+	return "destination denied: " + deniedDestinationGuidance
+}
+
 func writeResolutionError(response http.ResponseWriter, err error) {
 	if errors.Is(err, errDestinationDenied) {
-		http.Error(response, "destination denied", http.StatusForbidden)
+		http.Error(response, deniedDestinationBody(err), http.StatusForbidden)
 		return
 	}
 	http.Error(response, "destination resolution failed", http.StatusBadGateway)

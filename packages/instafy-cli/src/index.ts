@@ -2256,7 +2256,11 @@ previewOpenCommand
   .option("--rathole-bin <path>", "Path to rathole binary (or set RATHOLE_BIN)")
   .option(
     "--serve-cmd <command>",
-    "How to start the site again after the space sleeps, run from the current directory (one command, no shell); default: read from the process listening on the port",
+    "How to start the site again when the process that started it exits, or the space sleeps, run from the current directory (one command, no shell); default: read from the process listening on the port",
+  )
+  .option(
+    "--start",
+    "Start --serve-cmd in the background, in its own session, without Instafy credentials, logging to .instafy/agent/logs, and wait for the port (nothing is started when the port already answers)",
   )
   .option("--json", "Output JSON")
   .action(async (opts) => {
@@ -2271,6 +2275,7 @@ previewOpenCommand
         path: opts.path,
         ratholeBin: opts.ratholeBin,
         serveCmd: opts.serveCmd,
+        start: Boolean(opts.start),
       });
       printPreviewOpen(result, Boolean(opts.json));
     } catch (error) {

@@ -1,8 +1,10 @@
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import kleur from "kleur";
 import { resolveRatholeBinaryForCli } from "./runtime.js";
+import { loadCredentialFreeEnv } from "./bind.js";
 import { fetchWithControllerAuth } from "./controller-fetch.js";
 import { extractControllerErrorMessage, formatAuthRejectedError } from "./errors.js";
 import {
@@ -45,11 +47,17 @@ export type PreviewOpenOptions = {
   title?: string;
   path?: string;
   ratholeBin?: string;
-  // How to start the site again after the space sleeps, when it cannot be read from the process on the port
-  // (`--serve-cmd "<command>"`). One command and its arguments, run from the current directory, never a shell.
+  // How to start the site again when the process that started it exits, or the space sleeps, when it cannot be read
+  // from the process on the port (`--serve-cmd "<command>"`). One command and its arguments, run from the current
+  // directory, never a shell.
   serveCmd?: string;
   // The directory `serveCmd` runs from (default: the current directory).
   cwd?: string;
+  // `--start`: when nothing answers on the port, start `serveCmd` in the background, in its own session, without
+  // Instafy credentials, logging to .instafy/agent/logs, and wait for the port.
+  start?: boolean;
+  // How long `start` waits for the port (default 60 s, as a wake does).
+  startTimeoutMs?: number;
 };
 
 export type PreviewListOptions = {
@@ -78,10 +86,15 @@ export type PreviewOpenResult = PreviewSummary & {
   // Everything after `p-<label>--<id>.` in the host viewers reach the site under, or null when the
   // server does not say. A dev server that checks the Host header must allow this suffix.
   viewerHostSuffix: string | null;
-  // Open in Studio can start the site again after the space sleeps (a start command was recorded).
+  // Open in Studio can start the site again when the process that started it exits, or the space sleeps (a start
+  // command was recorded).
   restartable: boolean;
   // Why it is not restartable, when it is not.
   restartNote?: string;
+  // With `--start` only: the pid of the site this command started, or null when the port already answered and
+  // nothing was started; and that site's log file (null when nothing was started).
+  startedPid?: number | null;
+  logFile?: string | null;
 };
 
 // How the site was started, as the controller records it: argv (never a shell) and the directory relative to the
@@ -757,8 +770,8 @@ export function parseExplicitServeCommand(raw: string): string[] {
 }
 
 /**
- * How to start the site again after the space sleeps: `--serve-cmd` from the current directory, else the argv and
- * directory of the process listening on the port. `note` says why there is none.
+ * How to start the site again when the process that started it exits, or the space sleeps: `--serve-cmd` from the
+ * current directory, else the argv and directory of the process listening on the port. `note` says why there is none.
  */
 export function resolvePreviewServe(params: {
   port: number;
@@ -809,6 +822,87 @@ export function resolvePreviewServe(params: {
     );
   }
   return { serve: { argv: found.argv, cwd } };
+}
+
+// How long `--start` waits for the site's port, the same as a wake.
+const START_PORT_WAIT_MS = 60_000;
+const START_POLL_MS = 300;
+const START_PROBE_TIMEOUT_MS = 2_000;
+// Where `--start` writes the site's output, under the space's workspace.
+const START_LOGS_DIR = path.join(".instafy", "agent", "logs");
+
+/** `file` as the person would type it from the current directory: relative when inside it, else absolute. */
+function displayPath(file: string, cwd = process.cwd()): string {
+  const relative = path.relative(cwd, file);
+  return relative && !relative.startsWith("..") && !path.isAbsolute(relative) ? relative : file;
+}
+
+/**
+ * `--start`: runs the recorded start command (argv, never a shell) from its directory under the workspace, in its
+ * own session (so it outlives the process that started it, and a terminal's process-group kill), with no terminal
+ * input, its output appended to .instafy/agent/logs/preview-<port>.log, and the environment stripped of credentials
+ * by the same rule as `instafy bind serve --detach`. Waits until the port answers on 127.0.0.1. Fails with exit 2
+ * when the command exits first or the port does not answer in time (then the command is stopped).
+ */
+export async function startPreviewSite(params: {
+  port: number;
+  sitePath: string;
+  serve: PreviewServe;
+  root: string;
+  env?: NodeJS.ProcessEnv;
+  timeoutMs?: number;
+}): Promise<{ pid: number; logFile: string }> {
+  const { port, sitePath, serve, root } = params;
+  const credentialFreeEnv = await loadCredentialFreeEnv();
+  const env = credentialFreeEnv(params.env ?? process.env);
+  const cwd = path.join(root, serve.cwd);
+  const logFile = path.join(root, START_LOGS_DIR, `preview-${port}.log`);
+  fs.mkdirSync(path.dirname(logFile), { recursive: true });
+  const fd = fs.openSync(logFile, "a", 0o600);
+  let exit: string | null = null;
+  let spawnError: string | null = null;
+  let pid: number | undefined;
+  try {
+    fs.writeSync(fd, `\n[instafy preview open --start] ${new Date().toISOString()} ${JSON.stringify(serve.argv)} in ${serve.cwd}\n`);
+    const child = spawn(serve.argv[0]!, serve.argv.slice(1), {
+      cwd,
+      env,
+      detached: true,
+      stdio: ["ignore", fd, fd],
+    });
+    child.on("error", (error) => {
+      spawnError = (error as NodeJS.ErrnoException).code ?? error.message;
+    });
+    child.on("exit", (code, signal) => {
+      exit = signal ? `signal ${signal}` : `exit status ${code}`;
+    });
+    child.unref();
+    pid = child.pid;
+  } finally {
+    fs.closeSync(fd);
+  }
+  // A command that cannot be run (ENOENT, EACCES) reports it on the next turn of the event loop.
+  await new Promise((resolve) => setImmediate(resolve));
+  const shownLog = displayPath(logFile);
+  const fail = (why: string) =>
+    new PreviewCommandError(`The site ${why} and did not answer on 127.0.0.1:${port}; log: ${shownLog}`, PREVIEW_EXIT_NOT_LISTENING);
+  const deadline = Date.now() + (params.timeoutMs ?? START_PORT_WAIT_MS);
+  for (;;) {
+    if (spawnError || pid === undefined) throw fail(`could not be started (${spawnError ?? "no process"})`);
+    if (exit) throw fail(`started with --serve-cmd exited (${exit})`);
+    const probe = await probeLocalSite(port, sitePath, START_PROBE_TIMEOUT_MS, RATHOLE_LOCAL_HOSTS);
+    if (probe.listening) return { pid, logFile };
+    if (exit) throw fail(`started with --serve-cmd exited (${exit})`);
+    if (Date.now() >= deadline) {
+      try {
+        process.kill(-pid, "SIGTERM");
+      } catch {
+        // already gone
+      }
+      throw fail(`started with --serve-cmd was stopped after ${Math.round((params.timeoutMs ?? START_PORT_WAIT_MS) / 1000)} s`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, START_POLL_MS));
+  }
 }
 
 // Asks the server for the preview and starts (or reuses) its rathole client, then records it. Runs under the state lock.
@@ -958,7 +1052,32 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
   // Progress goes to stderr so `--json` output stays parseable.
   const log = (message: string) => console.error(kleur.cyan(message));
 
-  const probe = await probeLocalSite(port, sitePath, undefined, RATHOLE_LOCAL_HOSTS);
+  // With --start and --serve-cmd, the command is checked (one command, from inside the workspace, no secret) before
+  // anything runs.
+  const explicitServe =
+    opts.start && opts.serveCmd?.trim()
+      ? resolvePreviewServe({ port, serveCmd: opts.serveCmd, projectId, cwd: opts.cwd }).serve
+      : null;
+
+  let probe = await probeLocalSite(port, sitePath, undefined, RATHOLE_LOCAL_HOSTS);
+  let started: { pid: number; logFile: string } | null = null;
+  // --start starts the site only when nothing at all holds the port: a site that answers (even with an error),
+  // takes the connection without answering, or answers only on [::1] is running already.
+  if (!probe.listening && opts.start && probe.status === null && !probe.timedOut) {
+    const ipv6 = await probeLocalSite(port, sitePath, undefined, ["::1"]);
+    if (ipv6.status === null && !ipv6.timedOut) {
+      if (!explicitServe) {
+        throw new PreviewCommandError(
+          `Nothing answers on 127.0.0.1:${port}, and --start needs --serve-cmd "<command>" to start the site.`,
+          PREVIEW_EXIT_NOT_LISTENING,
+        );
+      }
+      const root = resolveWorkspaceRoot(process.env, projectId)!;
+      started = await startPreviewSite({ port, sitePath, serve: explicitServe, root, timeoutMs: opts.startTimeoutMs });
+      log(`Started the site (pid ${started.pid}); log: ${displayPath(started.logFile)}`);
+      probe = await probeLocalSite(port, sitePath, undefined, RATHOLE_LOCAL_HOSTS);
+    }
+  }
   if (!probe.listening) {
     throw await notListeningError(port, sitePath, probe);
   }
@@ -1006,6 +1125,7 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
     viewerHostSuffix: parseViewerHostSuffix(grant["viewerHostSuffix"]) ?? null,
     restartable,
     ...(restartable ? {} : { restartNote: restartNote ?? "the server did not record a start command" }),
+    ...(opts.start ? { startedPid: started?.pid ?? null, logFile: started?.logFile ?? null } : {}),
   };
 }
 
@@ -1082,10 +1202,19 @@ export function printPreviewOpen(result: PreviewOpenResult, json: boolean) {
         ? kleur.yellow("Not responding yet")
         : kleur.yellow("Preview opened (the server did not report whether the site answers)");
   console.log(`${label}: ${result.title} (port ${result.port}). Open it from the card in the conversation.`);
+  if (result.startedPid) {
+    console.log(kleur.gray(`Started the site in the background (pid ${result.startedPid}); log: ${displayPath(result.logFile ?? "")}`));
+  } else if (result.startedPid === null) {
+    console.log(kleur.gray("The site was already running; nothing was started."));
+  }
   if (result.restartable) {
-    console.log(kleur.gray("Open starts the site again after the space sleeps."));
+    console.log(kleur.gray("Open starts the site again when the process that started it exits, or the space sleeps."));
   } else {
-    console.log(kleur.yellow(`After the space sleeps, Open cannot start the site by itself: ${result.restartNote}.`));
+    console.log(
+      kleur.yellow(
+        `When the process that started it exits, or the space sleeps, Open cannot start the site by itself: ${result.restartNote}.`,
+      ),
+    );
   }
   console.log(kleur.gray(`previewId=${result.previewId}`));
   if (result.httpStatus !== null && result.httpStatus >= 400) {

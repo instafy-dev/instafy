@@ -1258,7 +1258,11 @@ dials a selected validated IP directly. This pins DNS resolution to the outbound
 connection and fails closed on mixed public/private DNS answers. It denies
 loopback, RFC 1918/private, link-local and metadata, multicast, unspecified,
 IPv4-mapped private, CGNAT, benchmark, NAT64-bypass, documentation, and reserved
-destinations. The listener is loopback-only; request/response headers, resolver
+destinations. A denied request gets `403` with a fixed body for the person and the
+agent reading the page: `destination denied`, the reason when it is one of a fixed
+list (such as `prohibited IP` or `port is not allowed`, never the requested host),
+and that a site running in the space is seen as a Studio preview
+(`instafy preview open`). The listener is loopback-only; request/response headers, resolver
 and dial timeouts, tunnel idle time, allowed ports, and concurrent connections
 are bounded. Defaults are:
 

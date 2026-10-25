@@ -4,7 +4,7 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const BIN_REL = path.join("bin", "instafy-bind.mjs");
 
@@ -23,6 +23,35 @@ export function resolveBindBin(env: NodeJS.ProcessEnv = process.env): string | n
     if (fs.existsSync(candidate)) return candidate;
   }
   return null;
+}
+
+/** The bundled binder's root (dist/bind, else the monorepo sibling), never one named by the environment. */
+function bundledBindRoot(): string | null {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  for (const candidate of [path.join(here, "bind"), path.resolve(here, "..", "..", "instafy-bind")]) {
+    if (fs.existsSync(path.join(candidate, BIN_REL))) return candidate;
+  }
+  return null;
+}
+
+export type CredentialFreeEnv = (env: NodeJS.ProcessEnv, keep?: string[]) => Record<string, string>;
+
+/**
+ * The binder's `credentialFreeEnv` (src/detached-env.mjs): the one rule for the environment of a process that
+ * outlives the command that started it, shared with `instafy bind serve --detach`. Throws when the bundled binder is
+ * missing, so a caller fails closed instead of passing its own environment through.
+ */
+export async function loadCredentialFreeEnv(): Promise<CredentialFreeEnv> {
+  const root = bundledBindRoot();
+  const file = root ? path.join(root, "src", "detached-env.mjs") : null;
+  if (!file || !fs.existsSync(file)) {
+    throw new Error("the bundled binder (dist/bind) was not found, so a site cannot be started without credentials; rebuild the CLI");
+  }
+  const module = (await import(pathToFileURL(file).href)) as { credentialFreeEnv?: unknown };
+  if (typeof module.credentialFreeEnv !== "function") {
+    throw new Error(`${file} does not export credentialFreeEnv; rebuild the CLI`);
+  }
+  return module.credentialFreeEnv as CredentialFreeEnv;
 }
 
 /** Run `instafy-bind <args...>` and resolve with its exit code. Signals are forwarded so Ctrl-C stops the binder cleanly. */
