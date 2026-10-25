@@ -11,11 +11,12 @@ use tokio_postgres::types::Json as PgJson;
 use tokio_postgres::Row;
 use uuid::Uuid;
 
-use crate::auth::authenticate_request;
+use crate::auth::{authenticate_request, require_user_session};
 use crate::projects::load_project_record;
+use crate::provider_requests::TOOL_NAME_MAX_LEN;
 use crate::{
-    bad_request, ensure_project_access, ensure_project_write_access, internal_error, unauthorized,
-    ApiError, AppState,
+    bad_request, ensure_project_access, ensure_project_write_access, forbidden, internal_error,
+    unauthorized, ApiError, AppState,
 };
 
 const PROVIDER_ID_MAX_LEN: usize = 128;
@@ -25,6 +26,36 @@ const DEVICE_LABEL_MAX_LEN: usize = 256;
 const DEVICE_STATUS_MAX_LEN: usize = 64;
 const CONNECTION_TYPE_MAX_LEN: usize = 64;
 const DEVICE_PRESENCE_ONLINE_TTL_SECONDS: i64 = 30;
+const CATALOG_MAX_TOOLS: usize = 64;
+const CATALOG_MAX_BYTES: usize = 64 * 1024;
+pub(crate) const DEVICE_OWNED_BY_ANOTHER: &str = "This device belongs to another person.";
+
+/// The person a device row `d` answers to: its owner, while they may still
+/// write to its space as [`ensure_project_write_access`] decides for their own
+/// session (the space's owner, or a builder, admin or owner of the space or of
+/// its team). An owner who left the space, lost write access or deleted their
+/// account owns nothing, so the device is anyone's to use or take again. A SQL
+/// expression, null for a device with no owner.
+macro_rules! live_owner {
+    () => {
+        "(case when d.owner_user_id is not null and exists (
+             select 1 from projects owned_space
+              where owned_space.id = d.project_id
+                and (owned_space.owner_user_id = d.owner_user_id
+                     or exists (
+                         select 1 from project_memberships owner_role
+                          where owner_role.project_id = owned_space.id
+                            and owner_role.user_id = d.owner_user_id
+                            and lower(owner_role.role) in ('builder', 'admin', 'owner'))
+                     or exists (
+                         select 1 from org_memberships owner_team_role
+                          where owner_team_role.org_id = owned_space.org_id
+                            and owner_team_role.user_id = d.owner_user_id
+                            and lower(owner_team_role.role) in ('builder', 'admin', 'owner'))))
+           then d.owner_user_id end)"
+    };
+}
+pub(crate) use live_owner;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,6 +68,28 @@ struct ProviderDeviceHeartbeatBody {
     status: Option<String>,
     connection_type: Option<String>,
     metadata: Option<JsonValue>,
+    /// `true`: the device becomes the caller's, if it is nobody else's and
+    /// device grants are on for them. Otherwise its owner stays as it is.
+    owned: Option<bool>,
+    /// Replaces the device's tool catalog ([`DeviceCatalog`]), where device
+    /// grants are on for the caller. Absent: it stays as it is.
+    catalog: Option<JsonValue>,
+}
+
+/// A device's tools as MCP `tools/list` returns them, with the MCP
+/// `initialize` instructions they come with. The controller checks what a
+/// granted turn's broker serves a tool by, its name and input schema, bounds
+/// the catalog's size and keeps it as the device sent it.
+#[derive(Deserialize)]
+struct DeviceCatalog {
+    tools: Vec<DeviceCatalogTool>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceCatalogTool {
+    name: String,
+    input_schema: JsonValue,
 }
 
 #[derive(Debug, Deserialize)]
@@ -180,6 +233,17 @@ async fn record_provider_device_heartbeat(
     let status = normalize_device_status(body.status.as_deref());
     let connection_type = normalize_connection_type(body.connection_type.as_deref());
     let metadata = normalize_metadata(body.metadata);
+    // A device is taken, and its catalog published, only from the own session
+    // of a person device grants are on for. With DEVICE_GRANTS_ENABLED off
+    // both are ignored, and no device has an owner to answer to.
+    let owners_enforced = state.config.device_grants_enabled;
+    let caller = require_user_session(&context).ok();
+    let grants_on = caller.is_some_and(|caller| state.config.device_grants_allow(caller));
+    let catalog = match body.catalog {
+        Some(catalog) if grants_on => Some(normalize_catalog(catalog)?),
+        _ => None,
+    };
+    let owner_on_insert = caller.filter(|_| grants_on && body.owned == Some(true));
 
     let mut connection = state
         .pool
@@ -195,9 +259,12 @@ async fn record_provider_device_heartbeat(
     ensure_project_write_access(&transaction, &project, &context, None).await?;
     ensure_provider_is_attached(&transaction, &project_id, provider_id.as_str()).await?;
 
+    // The owner rule is part of the upsert, so two first registrations cannot
+    // both take a device: an owned row is updated only for its live owner.
     let row = transaction
-        .query_one(
-            "insert into project_provider_devices (
+        .query_opt(
+            concat!(
+                "insert into project_provider_devices as d (
                 project_id,
                 provider_id,
                 provider_family_id,
@@ -207,10 +274,13 @@ async fn record_provider_device_heartbeat(
                 status,
                 connection_type,
                 metadata,
+                owner_user_id,
+                catalog,
                 created_at,
                 updated_at,
                 last_seen_at
-             ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, now(), now(), now())
+             ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11::jsonb,
+                       now(), now(), now())
              on conflict (project_id, provider_id, device_id)
              do update set
                 provider_family_id = excluded.provider_family_id,
@@ -219,10 +289,20 @@ async fn record_provider_device_heartbeat(
                 status = excluded.status,
                 connection_type = excluded.connection_type,
                 metadata = excluded.metadata,
+                owner_user_id = coalesce(excluded.owner_user_id, d.owner_user_id),
+                catalog = coalesce(excluded.catalog, d.catalog),
                 updated_at = now(),
                 last_seen_at = now()
+              where not $13
+                 or ",
+                live_owner!(),
+                " is null
+                 or ",
+                live_owner!(),
+                " = $12
              returning project_id, provider_id, provider_family_id, device_id, device_label,
-                       platform, status, connection_type, metadata, created_at, updated_at, last_seen_at",
+                       platform, status, connection_type, metadata, created_at, updated_at, last_seen_at"
+            ),
             &[
                 &project_id,
                 &provider_id,
@@ -233,10 +313,15 @@ async fn record_provider_device_heartbeat(
                 &status,
                 &connection_type,
                 &PgJson(&metadata),
+                &owner_on_insert,
+                &catalog.as_ref().map(PgJson),
+                &caller,
+                &owners_enforced,
             ],
         )
         .await
-        .map_err(|error| internal_error(format!("failed to record provider device heartbeat: {error}")))?;
+        .map_err(|error| internal_error(format!("failed to record provider device heartbeat: {error}")))?
+        .ok_or_else(|| forbidden(DEVICE_OWNED_BY_ANOTHER))?;
 
     transaction.commit().await.map_err(|error| {
         internal_error(format!(
@@ -410,6 +495,40 @@ fn normalize_connection_type(value: Option<&str>) -> String {
         .collect::<String>()
 }
 
+/// A device's catalog as it is stored, once it has the MCP shape
+/// ([`DeviceCatalog`]) and fits the limits: at most 64 tools with distinct
+/// names, each input schema a JSON Schema object, and 64 KiB in all.
+fn normalize_catalog(value: JsonValue) -> Result<JsonValue, (StatusCode, Json<ApiError>)> {
+    let invalid = |reason: &str| bad_request(format!("catalog {reason}"));
+    let size = serde_json::to_vec(&value).map_or(usize::MAX, |bytes| bytes.len());
+    if size > CATALOG_MAX_BYTES {
+        return Err(invalid("is too large"));
+    }
+    let catalog: DeviceCatalog = serde_json::from_value(value.clone())
+        .map_err(|error| invalid(&format!("is not an MCP tools/list catalog: {error}")))?;
+    if catalog.tools.len() > CATALOG_MAX_TOOLS {
+        return Err(invalid("has too many tools"));
+    }
+    let mut names = std::collections::HashSet::new();
+    for tool in &catalog.tools {
+        let name_ok = !tool.name.is_empty()
+            && tool.name.len() <= TOOL_NAME_MAX_LEN
+            && tool
+                .name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/'));
+        if !name_ok || !names.insert(tool.name.as_str()) {
+            return Err(invalid(
+                "tool names must be distinct, of letters, digits, _ - . and /",
+            ));
+        }
+        if tool.input_schema.get("type").and_then(JsonValue::as_str) != Some("object") {
+            return Err(invalid("tool input schemas must be JSON Schema objects"));
+        }
+    }
+    Ok(value)
+}
+
 fn normalize_metadata(value: Option<JsonValue>) -> JsonValue {
     value
         .filter(|entry| entry.is_object())
@@ -483,6 +602,57 @@ mod tests {
 
         assert_eq!(provider_presence_status(online_seen, now), "online");
         assert_eq!(provider_presence_status(offline_seen, now), "offline");
+    }
+
+    #[test]
+    fn a_catalog_must_have_the_mcp_shape_and_fit_its_limits() {
+        let tool = |extra: JsonValue| {
+            let mut tool = serde_json::json!({
+                "name": "device.look",
+                "inputSchema": { "type": "object", "properties": {} },
+            });
+            for (key, value) in extra.as_object().expect("object") {
+                tool[key] = value.clone();
+            }
+            tool
+        };
+        let catalog = |tools: Vec<JsonValue>| serde_json::json!({ "tools": tools });
+        let good = serde_json::json!({
+            "instructions": "Use the device only when asked to.",
+            "tools": [tool(serde_json::json!({ "title": "Look", "description": "Looks." }))],
+        });
+        assert_eq!(normalize_catalog(good.clone()).ok(), Some(good));
+
+        let many = (0..65)
+            .map(|n| tool(serde_json::json!({ "name": format!("device.t{n}") })))
+            .collect();
+        for bad in [
+            serde_json::json!({ "tools": "device.look" }),
+            catalog(vec![
+                tool(serde_json::json!({})),
+                tool(serde_json::json!({})),
+            ]),
+            catalog(vec![tool(serde_json::json!({ "name": "device look" }))]),
+            catalog(vec![tool(serde_json::json!({ "name": "" }))]),
+            catalog(vec![tool(
+                serde_json::json!({ "inputSchema": { "type": "string" } }),
+            )]),
+            catalog(many),
+            // 64 KiB in all.
+            catalog(
+                (0..40)
+                    .map(|n| {
+                        tool(serde_json::json!({
+                            "name": format!("device.t{n}"),
+                            "description": "d".repeat(2_000),
+                        }))
+                    })
+                    .collect(),
+            ),
+        ] {
+            let error = normalize_catalog(bad.clone()).expect_err("refused");
+            assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        }
     }
 
     #[test]

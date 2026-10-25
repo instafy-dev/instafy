@@ -35,6 +35,21 @@ interface HeartbeatProviderDeviceParams {
   status?: string | null;
   connectionType?: string | null;
   metadata?: Record<string, unknown> | null;
+  /** `true`: the device becomes the caller's own, if it is nobody else's. */
+  owned?: boolean | null;
+  /** Publishes the device's tools, replacing its catalog. Absent: it stays as it is. */
+  catalog?: ControllerProviderDeviceCatalog | null;
+}
+
+/** A device's tools as MCP `tools/list` returns them, with MCP `initialize` instructions. */
+export interface ControllerProviderDeviceCatalog {
+  instructions?: string;
+  tools: Array<{
+    name: string;
+    title?: string;
+    description?: string;
+    inputSchema: Record<string, unknown>;
+  }>;
 }
 
 function normalizeRecord(value: unknown): Record<string, unknown> | null {
@@ -134,6 +149,8 @@ export async function heartbeatControllerProviderDevice(
       status: params.status ?? undefined,
       connectionType: params.connectionType ?? undefined,
       metadata: params.metadata ?? {},
+      owned: params.owned ?? undefined,
+      catalog: params.catalog ?? undefined,
     },
     fallbackError: "Unable to heartbeat provider device",
   });

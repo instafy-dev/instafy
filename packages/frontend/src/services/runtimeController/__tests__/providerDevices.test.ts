@@ -113,5 +113,41 @@ describe("providerDevices", () => {
       updatedAt: "2026-04-02T10:00:05.000Z",
       lastSeenAt: "2026-04-02T10:00:05.000Z",
     });
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+    // Ownership and the catalog stay as they are unless the caller says.
+    expect("owned" in body).toBe(false);
+    expect("catalog" in body).toBe(false);
+  });
+
+  it("takes the device as the caller's own and publishes its catalog", async () => {
+    const catalog = {
+      instructions: "Ask before moving.",
+      tools: [
+        {
+          name: "kit.part.move",
+          description: "Moves the part.",
+          inputSchema: { type: "object", properties: {} },
+        },
+      ],
+    };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      text: vi.fn().mockResolvedValue("{}"),
+      headers: new Headers(),
+      status: 200,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await heartbeatControllerProviderDevice({
+      projectId: "project-1",
+      providerId: "kit",
+      deviceId: "kit-1",
+      owned: true,
+      catalog,
+    });
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(init.body))).toMatchObject({ owned: true, catalog });
   });
 });

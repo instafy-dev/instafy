@@ -107,6 +107,17 @@ answers through `/projects/:id/provider-requests` (list, claim, complete).
   into the job, which goes on. A steered call answers once the runtime took the new words, at
   most 3 s later. A claim of a request whose job has ended cancels the job's open requests
   instead.
+- A device may have an owner. A heartbeat (`POST /projects/:id/provider-devices/heartbeat`) with
+  `owned: true` from a person's own session makes the device theirs, if it is nobody else's. An
+  owned device answers only to its owner: only their session heartbeats it, lists its requests
+  (`deviceId`) or claims and completes requests as it, and it takes only their requests. Ownership
+  ends only when the owner may no longer write to the space (they left it, lost write access or
+  deleted their account): then anyone in the space may use the device under the space's rules, or
+  take it. A heartbeat may also carry the device's tool `catalog` in MCP `tools/list` shape with
+  its `initialize` instructions (at most 64 tools with distinct names, each input schema a JSON
+  Schema object, 64 KiB in all); one without keeps the stored catalog. Only a person device grants
+  are on for (`DEVICE_GRANTS_ENABLED`, below) takes a device or publishes a catalog. With the flag
+  off both are ignored, and no device has an owner to answer to.
 - In the app, `controllerClient.providerRequests.subscribe` streams a space's
   `provider.request.created` and `.updated` events on one `/events` stream, with the stream's
   usual reconnect and refusal backoff. It also asks for `events.resync` and hands it on as

@@ -1,11 +1,12 @@
 #![cfg(test)]
 
-// What started an agent job and how it may be delivered, on the migrated
-// database: the message routes, the send queue and automations record its
-// trigger from the caller's own credential, a message says what made it only
-// where device grants are on for its sender, and the lease, a runtime stop and
-// the idle sweep honour its delivery options. Requires `TEST_DATABASE_URL`
-// like the tests in `tests.rs`.
+// What started an agent job and how it may be delivered, and a provider
+// device's owner, on the migrated database: the message routes, the send queue
+// and automations record a job's trigger from the caller's own credential, a
+// message says what made it only where device grants are on for its sender,
+// the lease, a runtime stop and the idle sweep honour a job's delivery
+// options, and an owned device answers only to its owner. Requires
+// `TEST_DATABASE_URL` like the tests in `tests.rs`.
 
 use axum::http::StatusCode;
 use axum::Router;
@@ -26,6 +27,7 @@ use crate::AppState;
 
 pub(crate) const PROVIDER_ID: &str = "device:delivery-test";
 pub(crate) const DEVICE_ID: &str = "device-1";
+pub(crate) const OTHER_DEVICE_ID: &str = "device-2";
 
 /// An org whose space has an owner and another member, each with an agent
 /// called `helper`, and two self-hosted machines of the owner's.
@@ -125,6 +127,13 @@ impl Space {
             capabilities.as_object_mut().expect("capabilities"),
             self.owner,
         );
+        connection
+            .execute(
+                "insert into project_integrations (id, project_id, provider, status, connection_type)
+                 values ($1, $2, $3, 'attached', 'device')",
+                &[&Uuid::new_v4(), &self.project_id, &PROVIDER_ID],
+            )
+            .await?;
         for runtime in [self.runtime, self.other_machine] {
             connection
                 .execute(
@@ -450,6 +459,8 @@ where
         .merge(crate::send_intents::router())
         .merge(crate::agent::router())
         .merge(crate::automations::router())
+        .merge(crate::provider_requests::router())
+        .merge(crate::provider_devices::router())
         .with_state(state.clone());
     let body_pool = pool.clone();
     let result = with_shared_db_fixture(fixture, async move {
@@ -815,12 +826,16 @@ async fn a_queued_message_is_received_when_queued_or_when_its_person_sends_it_no
 
 /// With device grants off, a job still records whose cause it was and when,
 /// but no message gains a trigger key, and a client's is dropped from the
-/// messages a client writes.
+/// messages a client writes. Nobody takes a device or publishes its catalog,
+/// and no device has an owner to answer to: one owned from when grants were
+/// on keeps the project's rules.
 #[tokio::test]
-async fn without_the_flag_no_message_says_what_made_it() -> anyhow::Result<()> {
-    with_space("job-trigger-flag-off", false, |harness| async move {
+async fn without_the_flag_no_message_says_what_made_it_and_no_device_has_an_owner(
+) -> anyhow::Result<()> {
+    with_space("grants-flag-off", false, |harness| async move {
         let space = &harness.space;
         let owner = harness.token(space.owner);
+        let member = harness.token(space.member);
 
         let job = harness.send(space.owner, space.log, typed()).await?;
         assert_eq!(job.trigger.user_id, Some(space.owner));
@@ -854,6 +869,38 @@ async fn without_the_flag_no_message_says_what_made_it() -> anyhow::Result<()> {
             .await?
             .get(0);
         assert_eq!(stamped, 0);
+
+        let (status, body) = harness.heartbeat(&member, DEVICE_ID, json!({})).await?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, body) = harness
+            .heartbeat(
+                &owner,
+                DEVICE_ID,
+                json!({ "owned": true, "catalog": catalog(&["device.look"]) }),
+            )
+            .await?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(harness.device(DEVICE_ID).await?, (None, None));
+        // A heartbeat answers as before, with no owner or catalog in it.
+        for key in ["ownerUserId", "catalog", "catalogHash", "owned"] {
+            assert!(body.get(key).is_none(), "{key}: {body}");
+        }
+
+        harness.own_device(catalog(&["device.look"])).await?;
+        let (status, _) = harness.heartbeat(&member, DEVICE_ID, json!({})).await?;
+        assert_eq!(status, StatusCode::OK);
+        let members = harness.request(space.member, None, None).await?;
+        let (status, listed) = harness.listed(&member, Some(DEVICE_ID)).await?;
+        assert_eq!((status, listed), (StatusCode::OK, vec![members]));
+        assert_eq!(
+            harness.act(&member, members, "claim", DEVICE_ID).await?,
+            StatusCode::OK
+        );
+        assert_eq!(
+            harness.device(DEVICE_ID).await?.0,
+            Some(space.owner),
+            "nothing changed its owner"
+        );
         Ok(())
     })
     .await
@@ -1100,6 +1147,361 @@ async fn a_job_is_delivered_only_as_its_options_allow() -> anyhow::Result<()> {
         assert_eq!(stop_runtime(&harness, space.runtime).await?, vec![plain.id]);
         let row = delivery_row(&harness, plain.id).await?;
         assert_eq!(row.get::<_, Option<Uuid>>("target_runtime_id"), None);
+        Ok(())
+    })
+    .await
+}
+
+/// A catalog in MCP tools/list shape with `names`.
+pub(crate) fn catalog(names: &[&str]) -> JsonValue {
+    json!({
+        "instructions": "Use the device only when asked to.",
+        "tools": names
+            .iter()
+            .map(|name| json!({
+                "name": name,
+                "description": format!("Does {name}."),
+                "inputSchema": { "type": "object", "properties": {} },
+            }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+impl Harness {
+    pub(crate) async fn heartbeat(
+        &self,
+        token: &str,
+        device_id: &str,
+        extra: JsonValue,
+    ) -> anyhow::Result<(StatusCode, JsonValue)> {
+        let mut body = json!({ "providerId": PROVIDER_ID, "deviceId": device_id });
+        for (key, value) in extra.as_object().expect("object") {
+            body[key] = value.clone();
+        }
+        self.call(
+            "POST",
+            format!(
+                "/projects/{}/provider-devices/heartbeat",
+                self.space.project_id
+            ),
+            Some(token),
+            Some(body),
+        )
+        .await
+    }
+
+    /// The device's stored owner and catalog.
+    async fn device(&self, device_id: &str) -> anyhow::Result<(Option<Uuid>, Option<JsonValue>)> {
+        let row = self
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select owner_user_id, catalog from project_provider_devices
+                  where project_id = $1 and provider_id = $2 and device_id = $3",
+                &[&self.space.project_id, &PROVIDER_ID, &device_id],
+            )
+            .await?;
+        Ok((row.get(0), row.get(1)))
+    }
+
+    /// Makes `DEVICE_ID` the space owner's, with `catalog`, as when device
+    /// grants were on for them.
+    pub(crate) async fn own_device(&self, catalog: JsonValue) -> anyhow::Result<()> {
+        sql(
+            &self.pool,
+            "update project_provider_devices set owner_user_id = $3, catalog = $4
+              where project_id = $1 and provider_id = $2 and device_id = $5",
+            &[
+                &self.space.project_id,
+                &PROVIDER_ID,
+                &self.space.owner,
+                &catalog,
+                &DEVICE_ID,
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// A pending request `requested_by` made, for `target` or any device,
+    /// and for `job` if a job made it.
+    pub(crate) async fn request(
+        &self,
+        requested_by: Uuid,
+        target: Option<&str>,
+        job: Option<Uuid>,
+    ) -> anyhow::Result<Uuid> {
+        let request = Uuid::new_v4();
+        sql(
+            &self.pool,
+            "insert into project_provider_requests (
+                 id, project_id, provider_id, request_kind, tool_name, arguments, status,
+                 requested_by, target_device_id, job_id, expires_at
+             ) values ($1, $2, $3, 'tool_call', 'device.move', '{}'::jsonb, 'pending',
+                 $4, $5, $6, now() + interval '30 seconds')",
+            &[
+                &request,
+                &self.space.project_id,
+                &PROVIDER_ID,
+                &requested_by,
+                &target,
+                &job,
+            ],
+        )
+        .await?;
+        Ok(request)
+    }
+
+    /// The pending requests `token`'s holder lists, as `device_id` if given.
+    async fn listed(
+        &self,
+        token: &str,
+        device_id: Option<&str>,
+    ) -> anyhow::Result<(StatusCode, Vec<Uuid>)> {
+        let device = device_id
+            .map(|device| format!("&deviceId={device}"))
+            .unwrap_or_default();
+        let (status, body) = self
+            .call(
+                "GET",
+                format!(
+                    "/projects/{}/provider-requests?providerId={PROVIDER_ID}&limit=20{device}",
+                    self.space.project_id
+                ),
+                Some(token),
+                None,
+            )
+            .await?;
+        let ids = body
+            .as_array()
+            .map(|requests| {
+                requests
+                    .iter()
+                    .filter_map(|request| request["id"].as_str())
+                    .filter_map(|id| Uuid::parse_str(id).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok((status, ids))
+    }
+
+    pub(crate) async fn act(
+        &self,
+        token: &str,
+        request: Uuid,
+        action: &str,
+        device_id: &str,
+    ) -> anyhow::Result<StatusCode> {
+        let body = match action {
+            "complete" => json!({
+                "providerId": PROVIDER_ID,
+                "deviceId": device_id,
+                "response": { "ok": true },
+            }),
+            _ => json!({ "providerId": PROVIDER_ID, "deviceId": device_id }),
+        };
+        let path = format!(
+            "/projects/{}/provider-requests/{request}/{action}",
+            self.space.project_id,
+        );
+        let (status, _) = self.call("POST", path, Some(token), Some(body)).await?;
+        Ok(status)
+    }
+}
+
+/// A device its owner registered from their own session is theirs alone: only
+/// they heartbeat it, write its catalog, list its requests, and claim and
+/// complete requests as it, and it takes only their requests. A device without
+/// an owner keeps the project's rules.
+#[tokio::test]
+async fn an_owned_device_answers_only_to_its_owner() -> anyhow::Result<()> {
+    with_space("device-owner", true, |harness| async move {
+        let space = &harness.space;
+        let owner = harness.token(space.owner);
+        let member = harness.token(space.member);
+
+        // The owner registers the device with its catalog.
+        let looks = catalog(&["device.look", "device.move"]);
+        let (status, device) = harness
+            .heartbeat(
+                &owner,
+                DEVICE_ID,
+                json!({ "owned": true, "catalog": looks }),
+            )
+            .await?;
+        assert_eq!(status, StatusCode::OK, "{device}");
+        assert_eq!(
+            harness.device(DEVICE_ID).await?,
+            (Some(space.owner), Some(looks.clone()))
+        );
+
+        // Nobody else heartbeats it, takes it or rewrites its catalog.
+        for extra in [
+            json!({}),
+            json!({ "owned": true }),
+            json!({ "catalog": catalog(&["device.erase"]) }),
+        ] {
+            let (status, body) = harness.heartbeat(&member, DEVICE_ID, extra.clone()).await?;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{extra}: {body}");
+        }
+        // A heartbeat without a catalog keeps it; a new one replaces it.
+        harness.heartbeat(&owner, DEVICE_ID, json!({})).await?;
+        assert_eq!(
+            harness.device(DEVICE_ID).await?,
+            (Some(space.owner), Some(looks))
+        );
+        let look = catalog(&["device.look"]);
+        harness
+            .heartbeat(&owner, DEVICE_ID, json!({ "catalog": look }))
+            .await?;
+        assert_eq!(harness.device(DEVICE_ID).await?.1, Some(look));
+        // A catalog must have the MCP shape and fit its limits
+        // (provider_devices.rs).
+        let (status, body) = harness
+            .heartbeat(
+                &owner,
+                DEVICE_ID,
+                json!({ "catalog": { "tools": [{ "name": "device look" }] } }),
+            )
+            .await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        let owners_own = harness.request(space.owner, Some(DEVICE_ID), None).await?;
+        let owners_any = harness.request(space.owner, None, None).await?;
+        let members_any = harness.request(space.member, None, None).await?;
+        // A request of a running job of the owner's.
+        let running = harness.send(space.owner, space.log, typed()).await?;
+        sql(
+            &harness.pool,
+            "update agent_jobs set status = 'leased' where id = $1",
+            &[&running.id],
+        )
+        .await?;
+        let owners_job = harness.request(space.owner, None, Some(running.id)).await?;
+
+        // The owned device lists only for its owner, and only their requests.
+        let (status, _) = harness.listed(&member, Some(DEVICE_ID)).await?;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, listed) = harness.listed(&owner, Some(DEVICE_ID)).await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(listed, vec![owners_own, owners_any, owners_job]);
+        let (_, listed) = harness.listed(&member, Some(OTHER_DEVICE_ID)).await?;
+        assert_eq!(listed, vec![owners_any, members_any]);
+
+        // Nobody else acts as the owned device, even on the owner's own
+        // request, and it acts on nobody else's request.
+        for request in [owners_own, owners_any, members_any] {
+            for action in ["claim", "complete"] {
+                assert_eq!(
+                    harness.act(&member, request, action, DEVICE_ID).await?,
+                    StatusCode::FORBIDDEN,
+                    "{action} {request}"
+                );
+            }
+        }
+        assert_eq!(
+            harness.act(&owner, members_any, "claim", DEVICE_ID).await?,
+            StatusCode::FORBIDDEN
+        );
+        // A device without an owner keeps the project's rules.
+        assert_eq!(
+            harness
+                .act(&member, owners_any, "claim", OTHER_DEVICE_ID)
+                .await?,
+            StatusCode::OK
+        );
+
+        // The owner claims and completes their request as the device.
+        assert_eq!(
+            harness.act(&owner, owners_own, "claim", DEVICE_ID).await?,
+            StatusCode::OK
+        );
+        assert_eq!(
+            harness
+                .act(&member, owners_own, "complete", DEVICE_ID)
+                .await?,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            harness
+                .act(&owner, owners_own, "complete", DEVICE_ID)
+                .await?,
+            StatusCode::OK
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// A device whose owner may no longer write to its space, because they lost
+/// write access or left the space, is nobody's: the space's other people use
+/// it under the space's rules, and may take it.
+#[tokio::test]
+async fn a_device_whose_owner_lost_the_space_is_nobodys() -> anyhow::Result<()> {
+    with_space("device-owner-left", true, |harness| async move {
+        let space = &harness.space;
+        let owner = harness.token(space.owner);
+        let member = harness.token(space.member);
+        for device in [DEVICE_ID, OTHER_DEVICE_ID] {
+            let (status, body) = harness
+                .heartbeat(&member, device, json!({ "owned": true }))
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let (status, _) = harness.heartbeat(&owner, device, json!({})).await?;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{device}");
+        }
+
+        for (device, project_change, team_change) in [
+            (
+                DEVICE_ID,
+                "update project_memberships set role = 'viewer'
+                  where project_id = $1 and user_id = $2",
+                "update org_memberships set role = 'viewer' where org_id = $1 and user_id = $2",
+            ),
+            (
+                OTHER_DEVICE_ID,
+                "delete from project_memberships where project_id = $1 and user_id = $2",
+                "delete from org_memberships where org_id = $1 and user_id = $2",
+            ),
+        ] {
+            let connection = harness.pool.get().await?;
+            connection
+                .execute(project_change, &[&space.project_id, &space.member])
+                .await?;
+            connection
+                .execute(team_change, &[&space.org_id, &space.member])
+                .await?;
+            drop(connection);
+            // Its stored owner can no longer heartbeat it, and nobody else is
+            // told it is theirs.
+            let (status, _) = harness.heartbeat(&member, device, json!({})).await?;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{device}");
+            let (status, body) = harness.heartbeat(&owner, device, json!({})).await?;
+            assert_eq!(status, StatusCode::OK, "{device}: {body}");
+            let request = harness.request(space.owner, Some(device), None).await?;
+            let (status, listed) = harness.listed(&owner, Some(device)).await?;
+            assert_eq!(
+                (status, listed),
+                (StatusCode::OK, vec![request]),
+                "{device}"
+            );
+            assert_eq!(
+                harness.act(&owner, request, "claim", device).await?,
+                StatusCode::OK,
+                "{device}"
+            );
+            // And the space's owner may take it.
+            let (status, _) = harness
+                .heartbeat(&owner, device, json!({ "owned": true }))
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{device}");
+            assert_eq!(
+                harness.device(device).await?.0,
+                Some(space.owner),
+                "{device}"
+            );
+        }
         Ok(())
     })
     .await

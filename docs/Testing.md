@@ -1650,6 +1650,9 @@ canceled when a person interrupts it, its runtime reports it failed, a person st
 group is canceled or its space is deleted, and when a device claims one whose job has ended. They
 act as the device and the runtime through the controller's routes, with no hardware and no model.
 
+`pnpm test:controller tests_job_trigger_and_delivery` runs what started a job, its delivery
+options and an owned device's rules, with `DEVICE_GRANTS_ENABLED` on and off.
+
 ## Local Tri-Client Camera Smoke
 - Run: `pnpm test:camera:tri-client:smoke`
 - Requires:

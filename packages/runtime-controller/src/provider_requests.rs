@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 use crate::auth::{authenticate_request, require_user_session, RequestContext};
 use crate::projects::load_project_record;
+use crate::provider_devices::DEVICE_OWNED_BY_ANOTHER;
 use crate::state::{publish_controller_event_to_user, ControllerEvent, EventHub};
 use crate::{
     bad_request, ensure_project_access, ensure_project_write_access, forbidden, internal_error,
@@ -23,7 +24,7 @@ use crate::{
 };
 
 const PROVIDER_ID_MAX_LEN: usize = 128;
-const TOOL_NAME_MAX_LEN: usize = 256;
+pub(crate) const TOOL_NAME_MAX_LEN: usize = 256;
 const RESOURCE_URI_MAX_LEN: usize = 512;
 pub(crate) const DEVICE_ID_MAX_LEN: usize = 256;
 const DEVICE_LABEL_MAX_LEN: usize = 256;
@@ -403,6 +404,17 @@ async fn list_provider_requests(
     let project = load_project_record(&transaction, &project_id).await?;
     ensure_project_access(&transaction, &project, &context, None).await?;
     ensure_provider_is_attached(&transaction, &project_id, provider_id.as_str()).await?;
+    // An owned device's requests are listed only to its owner, and it acts
+    // only on theirs.
+    let owner = match device_id.as_deref() {
+        Some(device_id) => {
+            device_owner(&state, &transaction, &project_id, &provider_id, device_id).await?
+        }
+        None => None,
+    };
+    if owner.is_some_and(|owner| reader != Some(owner)) {
+        return Err(forbidden(DEVICE_OWNED_BY_ANOTHER));
+    }
 
     // Pending and claimed rows are listed only while a device may still claim
     // them. Once a request's window has closed, a device must not start it
@@ -422,6 +434,7 @@ async fn list_provider_requests(
                         or (coalesce(target_device_id, $7) = $7
                             and coalesce(claimed_by_device_id, $7) = $7))
                    and (job_id is null or requested_by = $8)
+                   and ($9::uuid is null or requested_by = $9)
                  order by created_at asc
                  limit $4"
             ),
@@ -434,6 +447,7 @@ async fn list_provider_requests(
                 &REQUEST_STATUS_CLAIMED,
                 &device_id,
                 &reader,
+                &owner,
             ],
         )
         .await
@@ -485,7 +499,7 @@ async fn claim_provider_request(
     ensure_provider_is_attached(&transaction, &project_id, provider_id.as_str()).await?;
 
     let request = load_provider_request_for_update(&transaction, &project_id, &request_id).await?;
-    ensure_request_visible(&context, &request)?;
+    ensure_device_may_act(&state, &transaction, &context, &request, &device_id).await?;
     if request.provider_id != provider_id {
         return Err(bad_request("provider id does not match this request"));
     }
@@ -621,7 +635,7 @@ async fn complete_provider_request(
     ensure_provider_is_attached(&transaction, &project_id, provider_id.as_str()).await?;
 
     let request = load_provider_request_for_update(&transaction, &project_id, &request_id).await?;
-    ensure_request_visible(&context, &request)?;
+    ensure_device_may_act(&state, &transaction, &context, &request, &device_id).await?;
     if request.provider_id != provider_id {
         return Err(bad_request("provider id does not match this request"));
     }
@@ -726,6 +740,66 @@ fn ensure_request_visible(
     } else {
         Err(not_found("provider request not found"))
     }
+}
+
+/// The person `device_id` belongs to, if the device has a live owner
+/// ([`crate::provider_devices::live_owner`]). With `DEVICE_GRANTS_ENABLED`
+/// off no device has one, and nothing is read.
+async fn device_owner<C: GenericClient + Sync>(
+    state: &AppState,
+    client: &C,
+    project_id: &Uuid,
+    provider_id: &str,
+    device_id: &str,
+) -> Result<Option<Uuid>, (StatusCode, Json<ApiError>)> {
+    if !state.config.device_grants_enabled {
+        return Ok(None);
+    }
+    let row = client
+        .query_opt(
+            concat!(
+                "select ",
+                crate::provider_devices::live_owner!(),
+                " from project_provider_devices d
+                  where d.project_id = $1 and d.provider_id = $2 and d.device_id = $3"
+            ),
+            &[project_id, &provider_id, &device_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load provider device: {error}")))?;
+    Ok(row.and_then(|row| row.get(0)))
+}
+
+/// Whether `device_id`, acting with `context`, may claim or complete
+/// `request`: the request must be visible to the caller, and an owned device
+/// acts only from its owner's own session, and only on its owner's requests.
+async fn ensure_device_may_act(
+    state: &AppState,
+    transaction: &tokio_postgres::Transaction<'_>,
+    context: &RequestContext,
+    request: &ProviderRequestRecord,
+    device_id: &str,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    ensure_request_visible(context, request)?;
+    let owner = device_owner(
+        state,
+        transaction,
+        &request.project_id,
+        &request.provider_id,
+        device_id,
+    )
+    .await?;
+    if let Some(owner) = owner {
+        if require_user_session(context).ok() != Some(owner) {
+            return Err(forbidden(DEVICE_OWNED_BY_ANOTHER));
+        }
+        if request.requested_by != Some(owner) {
+            return Err(forbidden(
+                "This device takes only its owner's provider requests.",
+            ));
+        }
+    }
+    Ok(())
 }
 
 async fn job_is_leased(
