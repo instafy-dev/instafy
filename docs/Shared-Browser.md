@@ -559,6 +559,18 @@ prompt that is no longer the one waiting. The pending and decision
 endpoints, their scopes and the origin's initiator and page checks are unchanged.
 A teammate polls nothing and sees no card.
 
+Prompts are raised only inside a run, and only the agent writes the action log,
+so the browser view reads both fast only while work can produce them. While a
+run is active in the space or the agent controls the browser, it reads the
+action log every second and the pending prompt 1.5 s after each answer (every
+400 ms while a prompt is shown). With neither, it reads the action log every
+10 s and the prompt every 15 s, 30 s each once nobody has touched the tab for
+three minutes. A run starting, or the agent taking control, reads both at once;
+a run ending takes one more read of the action log, so a human-input request
+written at the end of the turn still shows. Nothing is read while the tab is
+hidden, not even the read a run starting or ending asks for; coming back makes
+that read at once, along with whatever else is due.
+
 The agent controls the page through one runtime-owned, required MCP server:
 
 ```text
@@ -1002,7 +1014,10 @@ unless the policy is `"covered"`.
 - **Pages while it starts.** The origin answers 503 `browser_host_not_ready`
   until the browser runs. The composer reads the pages every 2.5 s only while
   the open browser view is opening or live; while it is off, did not open or
-  cannot open, nothing reads them. Capabilities stay, so the attach can go on
+  cannot open, nothing reads them. Even then the 2.5 s cadence holds only while
+  a run is active, someone else is in the browser or controls it, or the view
+  is on screen and the person has used the tab in the last three minutes;
+  otherwise the pages are read every 15 s, and never while the tab is hidden. Capabilities stay, so the attach can go on
   once the view opens again; a capability read that failed is not asked again
   while the view is off, and is asked at once when it opens. While it opens it
   polls quietly, for at most

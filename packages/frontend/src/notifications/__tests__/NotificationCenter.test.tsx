@@ -10,6 +10,9 @@ vi.mock("../assistantMessageNotifications", () => ({ areMessageNotificationsEnab
 vi.mock("../webPushRegistration", () => ({ hasActiveWebPushSubscription: async () => mocks.subscription }));
 import { useNotificationCenter } from "../useNotificationCenter";
 import { CONVERSATION_REPLY_NOTIFIED_EVENT, registerOpenConversation, resetOpenConversationsForTests } from "../openConversations";
+import { NOTIFICATION_FEED_CHANGED_EVENT } from "../notificationFeedEvents";
+// A push (Web Push, native or a local acknowledgement): refresh everything now.
+const RECEIVED = "instafy:notification-received";
 const A = "11111111-1111-4111-8111-111111111111";
 const B = "22222222-2222-4222-8222-222222222222";
 const event = (id = A) => ({ id, eventName: "support.reply", version: 1, category: "support", resourceId: id, resourceType: "support_report", occurredAt: "2026-09-06T12:00:00Z", title: "Instafy", body: "Support replied to your report.", url: `/studio?supportReportId=${id}`, readAt: null as string | null, seenAt: null, archivedAt: null });
@@ -125,7 +128,7 @@ describe("notification center", () => {
   it("clears account data immediately and ignores delayed responses, including token changes", async () => {
     let complete: ((value: ReturnType<typeof page>) => void) | undefined;
     mocks.list.mockImplementation(({ accessToken }) => accessToken === `token-${A}` ? new Promise(resolve => { complete = resolve; }) : Promise.resolve(page([])));
-    await act(async () => window.dispatchEvent(new Event("focus")));
+    await act(async () => window.dispatchEvent(new Event(RECEIVED)));
     await act(async () => root.render(<Harness userId={A} token="refreshed-token" />));
     await act(async () => complete?.(page([event()])));
     expect(container.querySelector('[data-testid="count"]')?.textContent).toBe("0");
@@ -135,7 +138,7 @@ describe("notification center", () => {
   it("leaves foreground presentation to Web Push while that channel is active", async () => {
     mocks.foreground = true; mocks.subscription = true;
     await act(async () => {
-      window.dispatchEvent(new Event("focus"));
+      window.dispatchEvent(new Event(RECEIVED));
       // The transport modules are loaded lazily; React act alone does not wait
       // for a cold dynamic import to finish on the CI runner.
       await vi.dynamicImportSettled();
@@ -144,13 +147,13 @@ describe("notification center", () => {
     expect(mocks.state).not.toHaveBeenCalledWith(expect.objectContaining({ action: "seen" }));
   });
 
-  it("presents from the unread page refresh already fetched (2 list calls per tick, not 3)", async () => {
+  it("presents from the unread page a refresh already fetched (2 list calls, not 3)", async () => {
     expect(mocks.list).toHaveBeenCalledTimes(2);
     expect(mocks.list.mock.calls.map(([args]) => args.view)).toEqual(["all", "unread"]);
     mocks.foreground = true;
     mocks.list.mockClear();
     await act(async () => {
-      window.dispatchEvent(new Event("focus"));
+      window.dispatchEvent(new Event(RECEIVED));
       await vi.dynamicImportSettled();
     });
     expect(mocks.list.mock.calls.map(([args]) => args.view)).toEqual(["all", "unread"]);
@@ -173,37 +176,77 @@ describe("notification center", () => {
       expect(mocks.list).toHaveBeenCalledTimes(2);
     });
     afterEach(() => { setVisibility("visible"); vi.useRealTimers(); });
-    it("advances 20 s while active and polls once", async () => {
-      await act(async () => { await vi.advanceTimersByTimeAsync(19_999); });
-      expect(mocks.list).toHaveBeenCalledTimes(2);
-      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
-      expect(mocks.list).toHaveBeenCalledTimes(4);
-      expect(mocks.list.mock.calls.slice(2).map(([args]) => args.view)).toEqual(["all", "unread"]);
+    it("checks only the newest unread page every 30 s and refreshes the rest only when it changed", async () => {
+      const changed = vi.fn();
+      window.addEventListener(NOTIFICATION_FEED_CHANGED_EVENT, changed);
+      try {
+        await act(async () => { await vi.advanceTimersByTimeAsync(29_999); });
+        expect(mocks.list).toHaveBeenCalledTimes(2);
+        await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+        expect(mocks.list.mock.calls.slice(2).map(([args]) => args.view)).toEqual(["unread"]);
+        expect(changed).not.toHaveBeenCalled();
+        mocks.list.mockResolvedValue(page([event(), event(B)]));
+        window.dispatchEvent(new Event("pointerdown"));
+        await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+        // The changed check reuses its unread page for the full refresh.
+        expect(mocks.list.mock.calls.slice(3).map(([args]) => args.view)).toEqual(["unread", "all"]);
+        expect(container.querySelector('[data-testid="count"]')?.textContent).toBe("2");
+        expect(changed).toHaveBeenCalledTimes(1);
+      } finally {
+        window.removeEventListener(NOTIFICATION_FEED_CHANGED_EVENT, changed);
+      }
     });
-    it("does not poll while the document is hidden and polls once when it is visible again", async () => {
+    it("does not poll while the document is hidden and checks once when it is visible again", async () => {
       await act(async () => setVisibility("hidden"));
       await act(async () => { await vi.advanceTimersByTimeAsync(120_000); });
       expect(mocks.list).toHaveBeenCalledTimes(2);
       await act(async () => setVisibility("visible"));
-      expect(mocks.list).toHaveBeenCalledTimes(4);
+      expect(mocks.list).toHaveBeenCalledTimes(3);
+      expect(mocks.list.mock.calls.at(-1)?.[0].view).toBe("unread");
     });
-    it("backs off to 120 s after three minutes without input", async () => {
+    it("backs off to 5 min after three minutes without input", async () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
       await act(async () => window.dispatchEvent(new Event("pointerdown")));
       await act(async () => { await vi.advanceTimersByTimeAsync(180_000); });
       const settled = mocks.list.mock.calls.length;
-      expect(settled).toBe(2 + 9 * 2);
-      await act(async () => { await vi.advanceTimersByTimeAsync(115_000); });
+      expect(settled).toBe(2 + 6);
+      await act(async () => { await vi.advanceTimersByTimeAsync(294_999); });
       expect(mocks.list).toHaveBeenCalledTimes(settled);
-      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
-      expect(mocks.list).toHaveBeenCalledTimes(settled + 2);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(mocks.list).toHaveBeenCalledTimes(settled + 1);
+    });
+    it("runs a push that lands during a timer check right after that check", async () => {
+      let resolveCheck: ((value: ReturnType<typeof page>) => void) | undefined;
+      mocks.list.mockImplementationOnce(() => new Promise(resolve => { resolveCheck = resolve; }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      expect(mocks.list.mock.calls.slice(2).map(([args]) => args.view)).toEqual(["unread"]);
+      mocks.list.mockResolvedValue(page([event(), event(B)]));
+      await act(async () => window.dispatchEvent(new Event(RECEIVED)));
+      // The check answers with the page from before the push.
+      await act(async () => { resolveCheck?.(page()); await vi.advanceTimersByTimeAsync(0); });
+      expect(mocks.list.mock.calls.slice(3).map(([args]) => args.view)).toEqual(["all", "unread"]);
+      expect(container.querySelector('[data-testid="count"]')?.textContent).toBe("2");
+    });
+    // Measurement A: the tab flipped hidden and back every 4.6 s with no focus
+    // event, and each flip re-read both notification views (28 per 64 s).
+    it("does not re-read on every quick visibility flip or window focus", async () => {
+      for (let flip = 0; flip < 14; flip += 1) {
+        await act(async () => setVisibility("hidden"));
+        await act(async () => { await vi.advanceTimersByTimeAsync(2_300); });
+        await act(async () => setVisibility("visible"));
+        await act(async () => window.dispatchEvent(new Event("focus")));
+        await act(async () => { await vi.advanceTimersByTimeAsync(2_300); });
+      }
+      // One check at 30 s and one on the return at 62.1 s.
+      expect(mocks.list).toHaveBeenCalledTimes(4);
+      expect(mocks.list.mock.calls.slice(2).map(([args]) => args.view)).toEqual(["unread", "unread"]);
     });
   });
 
   it("acknowledges a queued foreground toast only on actual presentation", async () => {
     mocks.foreground = true;
     await act(async () => {
-      window.dispatchEvent(new Event("focus"));
+      window.dispatchEvent(new Event(RECEIVED));
       await vi.dynamicImportSettled();
     });
     expect(mocks.show).toHaveBeenCalled();
@@ -235,7 +278,7 @@ describe("notification center", () => {
       mocks.foreground = true;
       mocks.list.mockResolvedValue(page([reply(C, OPEN), reply(D, ELSEWHERE)]));
       await act(async () => {
-        window.dispatchEvent(new Event("focus"));
+        window.dispatchEvent(new Event(RECEIVED));
         await vi.dynamicImportSettled();
       });
       expect(announced).toEqual([[OPEN, ELSEWHERE]]);
@@ -243,7 +286,7 @@ describe("notification center", () => {
       expect(mocks.show).toHaveBeenCalledWith("There is a new reply in your conversation.", "info", 10_000, expect.objectContaining({ id: `notification:${A}:${D}` }));
       expect(mocks.state).toHaveBeenCalledWith(expect.objectContaining({ id: C, action: "seen", expectedUserId: A }));
       await act(async () => {
-        window.dispatchEvent(new Event("focus"));
+        window.dispatchEvent(new Event(RECEIVED));
         await vi.dynamicImportSettled();
       });
       expect(announced).toHaveLength(1);
@@ -252,7 +295,7 @@ describe("notification center", () => {
       const E = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
       mocks.list.mockResolvedValue(page([reply(E, OPEN)]));
       await act(async () => {
-        window.dispatchEvent(new Event("focus"));
+        window.dispatchEvent(new Event(RECEIVED));
         await vi.dynamicImportSettled();
       });
       expect(announced).toEqual([[OPEN, ELSEWHERE], [OPEN]]);

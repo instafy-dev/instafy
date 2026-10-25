@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ControllerBugReportSummary } from "../../../../services/runtimeController/bugReports";
 import { NOTIFICATION_RECEIVED_EVENT } from "../../../../notifications/notificationPresentation";
+import { NOTIFICATION_FEED_CHANGED_EVENT } from "../../../../notifications/notificationFeedEvents";
 
 const mocks = vi.hoisted(() => ({
   claimResolutionAlerts: vi.fn(),
@@ -161,7 +162,7 @@ describe("useStudioBugReportController support notifications", () => {
       container.querySelector('[data-testid="mock-support-inbox"]')?.getAttribute("data-report-id"),
     ).toBe(REPORT_ID);
 
-    await act(async () => vi.advanceTimersByTime(20_000));
+    await act(async () => window.dispatchEvent(new Event(NOTIFICATION_FEED_CHANGED_EVENT)));
     await flushAsyncEffects();
     expect(mocks.listReports).toHaveBeenCalledTimes(2);
     expect(mocks.claimResolutionAlerts).toHaveBeenCalledTimes(1);
@@ -305,7 +306,7 @@ describe("useStudioBugReportController support notifications", () => {
     mocks.listReports.mockResolvedValueOnce({ ...page(1, 0), reports: [unreadReport()] }).mockRejectedValueOnce(new Error("offline")).mockResolvedValue(page(0, 0));
     await act(async () => root.render(<Harness userId="user-a" />));
     await flushAsyncEffects();
-    await act(async () => window.dispatchEvent(new Event("focus")));
+    await act(async () => window.dispatchEvent(new Event(NOTIFICATION_FEED_CHANGED_EVENT)));
     await flushAsyncEffects();
     expect(container.querySelector('[data-testid="support-unread-reports"]')?.textContent).toContain(REPORT_ID);
     expect(container.querySelector('[data-testid="support-error"]')?.textContent).toContain("couldn’t be loaded");
@@ -355,25 +356,55 @@ describe("useStudioBugReportController support notifications", () => {
     });
     afterEach(() => setVisibility("visible"));
 
-    it("backs off to 120 s after 3 min without input", async () => {
+    it("falls back to one read every 5 min while active and every 15 min once idle", async () => {
       await act(async () => root.render(<Harness userId="user-a" />));
       await flushAsyncEffects();
-      await advance(5_000);
-      await act(async () => window.dispatchEvent(new Event("pointerdown")));
-      await advance(180_000);
-      expect(mocks.listReports).toHaveBeenCalledTimes(1 + 9);
-      await advance(115_000);
-      expect(mocks.listReports).toHaveBeenCalledTimes(10);
-      await advance(5_000);
-      expect(mocks.listReports).toHaveBeenCalledTimes(11);
+      await advance(299_999);
+      expect(mocks.listReports).toHaveBeenCalledTimes(1);
+      // Three minutes without input already moved the next read to 15 min.
+      await advance(1);
+      expect(mocks.listReports).toHaveBeenCalledTimes(1);
+      await advance(600_000);
+      expect(mocks.listReports).toHaveBeenCalledTimes(2);
+      // Someone keeps using the tab: one read 5 min after the last.
+      for (let step = 0; step < 3; step += 1) {
+        await act(async () => window.dispatchEvent(new Event("pointerdown")));
+        await advance(99_999);
+      }
+      expect(mocks.listReports).toHaveBeenCalledTimes(2);
+      await advance(3);
+      expect(mocks.listReports).toHaveBeenCalledTimes(3);
     });
 
-    it("stops polling while hidden and refreshes once when the tab is visible again", async () => {
+    it("refreshes when the notification feed changes instead of on a fast timer", async () => {
+      await act(async () => root.render(<Harness userId="user-a" />));
+      await flushAsyncEffects();
+      await advance(60_000);
+      expect(mocks.listReports).toHaveBeenCalledTimes(1);
+      await act(async () => window.dispatchEvent(new Event(NOTIFICATION_FEED_CHANGED_EVENT)));
+      await flushAsyncEffects();
+      expect(mocks.listReports).toHaveBeenCalledTimes(2);
+    });
+
+    it("leaves a quick visibility or focus return to the notification feed", async () => {
+      await act(async () => root.render(<Harness userId="user-a" />));
+      await flushAsyncEffects();
+      for (let flip = 0; flip < 14; flip += 1) {
+        await act(async () => setVisibility("hidden"));
+        await advance(2_300);
+        await act(async () => setVisibility("visible"));
+        await act(async () => window.dispatchEvent(new Event("focus")));
+        await advance(2_300);
+      }
+      expect(mocks.listReports).toHaveBeenCalledTimes(1);
+    });
+
+    it("stops polling while hidden and refreshes once when the tab comes back after a due read", async () => {
       await act(async () => root.render(<Harness userId="user-a" />));
       await flushAsyncEffects();
       expect(mocks.listReports).toHaveBeenCalledTimes(1);
       await act(async () => setVisibility("hidden"));
-      await advance(120_000);
+      await advance(900_000);
       expect(mocks.listReports).toHaveBeenCalledTimes(1);
       await act(async () => setVisibility("visible"));
       await flushAsyncEffects();

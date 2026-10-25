@@ -802,6 +802,8 @@ export function BrowserSessionModal({
     // switches conversations or hides the Shared transport. The endpoint is
     // initiator-scoped, so a writable mounted surface can safely keep polling.
     active: isOpen && canControlBrowser && !browserDataClearInFlight && !runApprovalApplies,
+    // Prompts are raised only inside a run; with none, a slow safety read.
+    runActive: spaceBusy || effectiveAgentControlOwner !== null,
     projectId: browserOriginConnection?.projectId ?? projectId,
     browserSessionId,
     runtimeId: browserOriginConnection?.runtimeId ?? null,
@@ -997,6 +999,8 @@ export function BrowserSessionModal({
     preferRuntimeId: forcedRuntimeId ?? preferRuntimeId,
     pageId: sharedBrowserPageId,
     transportActive,
+    // Only the agent writes the log: tail it every second only while it may.
+    agentActive: spaceBusy || effectiveAgentControlOwner !== null,
   });
   const browserHumanInputOptions = {
     identityKey: `${humanInputIdentityKey ?? ""}:${browserSessionId}:${forcedRuntimeId ?? preferRuntimeId}:${sharedBrowserPageId}`,

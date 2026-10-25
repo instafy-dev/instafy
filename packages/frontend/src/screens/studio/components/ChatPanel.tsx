@@ -1803,6 +1803,17 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   // or live; a closed (hidden) one keeps its own rules.
   const [sharedBrowserViewKind, setSharedBrowserViewKind] = useState<HostedBrowserViewKind | null>(null);
   const sharedBrowserPagesActive = hostedBrowserPagesActive(sharedBrowserViewKind);
+  // Who else is in the browser view (from the view's collaboration socket).
+  // Its page list and the automatic-open decision below both read it.
+  const [sharedBrowserPresence, setSharedBrowserPresence] = useState<SharedBrowserPresence | null>(null);
+  // Work is running in the space. The browser view polls fast only then, and
+  // Clear data's confirmation says that clearing restarts the machine.
+  const spaceRunActive = useMemo(() => {
+    const now = Date.now();
+    return Object.values(runs ?? {}).some((run) =>
+      (!run.projectId || run.projectId === (activeProjectId ?? null)) &&
+      isRunActivelyProgressing(run, now));
+  }, [activeProjectId, runs]);
   const {
     browserSessionPages,
     clearPendingBrowserLaunchMode,
@@ -1846,6 +1857,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     resolvedBrowserRuntimeId,
     showStatus,
     sharedBrowserPagesActive,
+    sharedBrowserPagesPollFast:
+      spaceRunActive ||
+      sharedBrowserPresence?.remoteController === true ||
+      sharedBrowserPresence?.othersPresent === true,
+    sharedBrowserSurfaceVisible: browserVisible,
   });
   const browserModeActive = browserSessionOpen && browserVisible;
   // A skill setup's composer answers the setup: its replies stay chat turns
@@ -4569,8 +4585,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   // conversation's own machine in a covered space, by itself for its
   // request_browser cards (useChatBrowserRequest and browserAutoStartPlan say
   // when); any other hosted browser waits for a press. These are what that
-  // decision reads.
-  const [sharedBrowserPresence, setSharedBrowserPresence] = useState<SharedBrowserPresence | null>(null);
+  // decision reads, together with sharedBrowserPresence above.
   // Turns in the browser on this device run on this device's runtime, which
   // Instafy AI does not reach.
   const personalTurnsAllowed = credentialRequirements.hasDefaultCredential || !credentialRequirements.managedAi?.enabled;
@@ -4580,14 +4595,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       (!run.projectId || run.projectId === (activeProjectId ?? null)) &&
       isRunActivelyProgressing(run, now) &&
       (run.metadata?.browserTransport === "shared" || run.metadata?.browserTransport === "desktop-personal"));
-  }, [activeProjectId, runs]);
-  // Clear data in Instafy's browser on the space's own machine restarts that
-  // machine; its confirmation says so when work is running in the space.
-  const spaceRunActive = useMemo(() => {
-    const now = Date.now();
-    return Object.values(runs ?? {}).some((run) =>
-      (!run.projectId || run.projectId === (activeProjectId ?? null)) &&
-      isRunActivelyProgressing(run, now));
   }, [activeProjectId, runs]);
   // A press that opens Instafy's browser while the space's machine is not
   // running starts it through the generic hosted ensure.

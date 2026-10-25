@@ -5,9 +5,14 @@ import {
   type RuntimeSharedBrowserApprovalRequest,
   type RuntimeSharedBrowserPendingApproval,
 } from "../../../sdk/instafy";
+import { adaptivePollDelay, pollingGateState, subscribePollingGate } from "../../../runtime/pollingGate";
 
 const APPROVAL_IDLE_POLL_INTERVAL_MS = 1_500;
 const APPROVAL_PENDING_POLL_INTERVAL_MS = 400;
+// Every prompt carries a runId and is raised only inside a run, so with no
+// run in the space the lane only keeps a slow safety read.
+export const APPROVAL_QUIET_POLL_INTERVAL_MS = 15_000;
+export const APPROVAL_QUIET_IDLE_POLL_INTERVAL_MS = 30_000;
 
 /** A decision the origin accepted. */
 export type SharedBrowserApprovalSettlement = {
@@ -28,6 +33,7 @@ export function useSharedBrowserApproval({
   originEndpoint,
   originAccessToken,
   acceptsRequest,
+  runActive = true,
 }: {
   active: boolean;
   projectId: string | null;
@@ -38,6 +44,8 @@ export function useSharedBrowserApproval({
   originAccessToken: string | null;
   /** Which polled prompts a caller may answer here; every prompt when absent. */
   acceptsRequest?: (request: RuntimeSharedBrowserApprovalRequest) => boolean;
+  /** A run that may raise a prompt is active: poll every 1.5 s. Defaults to true. */
+  runActive?: boolean;
 }) {
   const [pending, setPending] = useState<RuntimeSharedBrowserPendingApproval | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -51,6 +59,8 @@ export function useSharedBrowserApproval({
   const acceptsRequestRef = useRef(acceptsRequest);
   acceptsRequestRef.current = acceptsRequest;
   pendingRef.current = pending;
+  const runActiveRef = useRef(runActive);
+  const kickPollRef = useRef<(() => void) | null>(null);
 
   const identity = JSON.stringify([projectId, browserSessionId, runtimeId, browserPageId]);
   // A decision belongs to one mounted, authenticated browser surface. The token
@@ -90,7 +100,30 @@ export function useSharedBrowserApproval({
     let cancelled = false;
     let timerId: number | null = null;
     let pollAbort: AbortController | null = null;
+    let inFlight = false;
+    let lastSettledAt = Date.now();
+    // The next read is due one delay after the last answer: 400 ms while a
+    // prompt is shown, 1.5 s while a run may raise one, otherwise a slow
+    // safety read; none while hidden. Coming back reads at once if it is due.
+    const schedule = () => {
+      if (timerId !== null) window.clearTimeout(timerId);
+      timerId = null;
+      if (cancelled || inFlight || scopeRef.current !== scope) return;
+      const delay = adaptivePollDelay(
+        Boolean(pendingRef.current) || runActiveRef.current,
+        pendingRef.current ? APPROVAL_PENDING_POLL_INTERVAL_MS : APPROVAL_IDLE_POLL_INTERVAL_MS,
+        APPROVAL_QUIET_POLL_INTERVAL_MS,
+        APPROVAL_QUIET_IDLE_POLL_INTERVAL_MS,
+      );
+      if (delay === null) return;
+      const wait = lastSettledAt + delay - Date.now();
+      if (wait <= 0) void poll();
+      else timerId = window.setTimeout(poll, wait);
+    };
     const poll = async () => {
+      timerId = null;
+      if (inFlight) return;
+      inFlight = true;
       pollAbort = new AbortController();
       try {
         const next = await controllerClient.browserSessions.fetchPendingApproval({
@@ -118,20 +151,29 @@ export function useSharedBrowserApproval({
           setError("Approval connection interrupted. Reconnecting…");
         }
       } finally {
-        if (!cancelled && scopeRef.current === scope) {
-          timerId = window.setTimeout(
-            poll,
-            pendingRef.current
-              ? APPROVAL_PENDING_POLL_INTERVAL_MS
-              : APPROVAL_IDLE_POLL_INTERVAL_MS,
-          );
-        }
+        inFlight = false;
+        lastSettledAt = Date.now();
+        schedule();
       }
     };
+    const kick = () => {
+      if (cancelled || inFlight) return;
+      // Hidden: owe the read to the return instead of reading now.
+      if (pollingGateState() === "hidden") {
+        lastSettledAt = 0;
+        return;
+      }
+      if (timerId !== null) window.clearTimeout(timerId);
+      void poll();
+    };
+    kickPollRef.current = kick;
+    const unsubscribe = subscribePollingGate(schedule);
     void poll();
 
     return () => {
       cancelled = true;
+      unsubscribe();
+      if (kickPollRef.current === kick) kickPollRef.current = null;
       pollAbort?.abort();
       if (timerId !== null) {
         window.clearTimeout(timerId);
@@ -147,6 +189,12 @@ export function useSharedBrowserApproval({
     runtimeId,
     scope,
   ]);
+
+  useEffect(() => {
+    if (runActiveRef.current === runActive) return;
+    runActiveRef.current = runActive;
+    if (runActive) kickPollRef.current?.();
+  }, [runActive]);
 
   useEffect(
     () => () => {

@@ -18,13 +18,17 @@ import { requestMotionAccessIfNeeded } from "./motionPermission";
 import { controllerClient } from "../../../sdk/instafy";
 import { buildHomeSupportReports, type HomeSupportReport } from "../homeSupportReports";
 import { NOTIFICATION_RECEIVED_EVENT } from "../../../notifications/notificationPresentation";
+import { NOTIFICATION_FEED_CHANGED_EVENT } from "../../../notifications/notificationFeedEvents";
 import { getStoredShakeReportEnabled, setStoredShakeReportEnabled } from "./shakeReportPreference";
 import { NATIVE_SHAKE_REPORT_EVENT, useShakeToReport } from "./useShakeToReport";
 import { useGatedInterval } from "../../../runtime/pollingGate";
 
 const SHAKE_SCREENSHOT_TIMEOUT_MS = 3_000;
-const SUPPORT_POLL_ACTIVE_MS = 20_000;
-const SUPPORT_POLL_IDLE_MS = 120_000;
+// Support replies and resolutions arrive as notifications, so the
+// notification center's check and pushes refresh the reports at once. This
+// timer is only the fallback.
+export const SUPPORT_POLL_ACTIVE_MS = 300_000;
+export const SUPPORT_POLL_IDLE_MS = 900_000;
 const EMPTY_SUPPORT_REPORTS: HomeSupportReport[] = [];
 
 // A render-time warning must not re-render Studio and produce the same warning
@@ -224,19 +228,23 @@ export function useStudioBugReportController({
     refreshWhenVisible();
     supportPollRef.current = refreshWhenVisible;
     const refreshReadState = () => { void refreshSupportNotifications(false); };
-    window.addEventListener("focus", refreshWhenVisible);
     window.addEventListener(NOTIFICATION_RECEIVED_EVENT, refreshReadState);
+    window.addEventListener(NOTIFICATION_FEED_CHANGED_EVENT, refreshWhenVisible);
     return () => {
       supportPollRef.current = null;
-      window.removeEventListener("focus", refreshWhenVisible);
       window.removeEventListener(NOTIFICATION_RECEIVED_EVENT, refreshReadState);
+      window.removeEventListener(NOTIFICATION_FEED_CHANGED_EVENT, refreshWhenVisible);
       supportPollGenerationRef.current += 1;
     };
   }, [currentUserId, refreshSupportNotifications]);
-  // Every 20 s while active, every 2 min once idle, off while hidden. The gate
-  // also runs one refresh when the tab becomes visible again, which replaces
-  // the old visibilitychange listener.
-  useGatedInterval(() => supportPollRef.current?.(), SUPPORT_POLL_ACTIVE_MS, { idleMs: SUPPORT_POLL_IDLE_MS });
+  // Fallback every 5 min while active, every 15 min once idle, off while
+  // hidden. A return reads it only when the last read is 5 min old or more;
+  // a quicker one is left to the notification center's check, which
+  // announces a changed feed.
+  useGatedInterval(() => supportPollRef.current?.(), SUPPORT_POLL_ACTIVE_MS, {
+    idleMs: SUPPORT_POLL_IDLE_MS,
+    wakeAfterMs: SUPPORT_POLL_ACTIVE_MS,
+  });
 
   useEffect(() => {
     const resolutionToastUsers = resolutionToastUsersRef.current;

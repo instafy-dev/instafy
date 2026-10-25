@@ -11,3 +11,7 @@ export {
   integrationIsAttached,
   providerRequestTargetsCurrentDevice,
 } from "../extensions/providerRequestClaimSupport";
+
+// A bridge with nothing to claim waits on the shared polling gate: slow while
+// the user is idle and paused while the tab is hidden.
+export { startGatedInterval } from "../runtime/pollingGate";

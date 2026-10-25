@@ -41,6 +41,7 @@ vi.mock("../useShakeToReport", () => ({
 import { Status } from "../../../../status/Status";
 import { StatusProvider } from "../../../../status/StatusProvider";
 import { useStudioBugReportController } from "../useStudioBugReportController";
+import { NOTIFICATION_FEED_CHANGED_EVENT } from "../../../../notifications/notificationFeedEvents";
 
 function page(unreadCount: number, unnotifiedResolutionCount: number) {
   return {
@@ -128,7 +129,7 @@ describe("support resolution alerts with the real status queue", () => {
     await render("user-a");
     expect(document.body.textContent).toContain("Your Instafy support report was resolved.");
 
-    await act(async () => window.dispatchEvent(new Event("focus")));
+    await act(async () => window.dispatchEvent(new Event(NOTIFICATION_FEED_CHANGED_EVENT)));
     await flushAsyncEffects();
     expect(mocks.claimResolutionAlerts).toHaveBeenNthCalledWith(1, "user-a");
     expect(mocks.claimResolutionAlerts).toHaveBeenNthCalledWith(2, "user-a");

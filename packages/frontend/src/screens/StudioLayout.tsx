@@ -9,7 +9,6 @@ import { buildHomeFeed } from "./studio/homeFeed";
 import { getHomeNotificationTarget } from "./studio/homeNotifications";
 import { processNotificationClickDestination } from "../notifications/notificationClickDestination";
 import { useNotificationCenter } from "../notifications/useNotificationCenter";
-import { NOTIFICATION_RECEIVED_EVENT } from "../notifications/notificationPresentation";
 import { UUID_PATTERN, parseNotificationClickUrl } from "../notifications/notificationContract";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
@@ -25,7 +24,6 @@ import { ChatLines, Clock, Coins, Cpu, Cube, GitBranch, Globe, Group, Lock, Page
 import { fetchCreditPolicy } from "../credits/creditService";
 import { useComposerIntentWake } from "../runtime/hooks/useComposerIntentWake";
 import { useRuntimeStopNotice } from "../runtime/hooks/useRuntimeStopNotice";
-import { useGatedInterval } from "../runtime/pollingGate";
 import { isHostedRuntime, runtimeEntryIsReady } from "../runtime/utils/runtimeEntry";
 import { Button, IconButton } from "../components/Button";
 import { ProjectAccessRecoveryBanner, StudioStartupGate } from "./StudioStartup";
@@ -113,7 +111,6 @@ import {
   CONTROLLER_AUTH_ERROR_EVENT,
   controllerClient,
   type ControllerAuthErrorDetail,
-  type NotificationInboxItem,
 } from "../sdk/instafy";
 import { useBuildLogs } from "../debug/useBuildLogs";
 import { BuildLogOverlay } from "./studio/components/BuildLogOverlay";
@@ -123,6 +120,7 @@ import { type SubmitPromptResult } from "../prompts/usePromptActions";
 import { usePromptBootstrap } from "./studio/hooks/usePromptBootstrap";
 import { useProjectMemoryBootstrap } from "./useProjectMemoryBootstrap";
 import { useSpacesPanelForMissingProject } from "./useSpacesPanelForMissingProject";
+import { useHomeAttentionInbox } from "./useHomeAttentionInbox";
 import { NO_SPACE_OPEN_NAME } from "../projects/spaceName";
 import { useCreatePrivateConversation } from "./studio/hooks/useCreatePrivateConversation";
 import { useConversations } from "../conversations/ConversationsProvider";
@@ -185,8 +183,6 @@ const topbarLocations: Record<TopbarLocation, { title: string; icon: ReactNode }
   chat: { title: "Chat", icon: <ChatLines className="text-[16px]" aria-hidden="true" /> },
 };
 
-const HOME_ATTENTION_POLL_ACTIVE_MS = 20_000;
-const HOME_ATTENTION_POLL_IDLE_MS = 120_000;
 type SourceControlOpenDetail = {
   projectId?: string | null;
   previewPath?: string | null;
@@ -421,9 +417,6 @@ function StudioLayoutInner() {
     }),
     [currentUserId, openPanelTab, requestHistoryPush, showDesktopRuntimeHelp, showStatus],
   );
-  const [homeAttentionInboxItems, setHomeAttentionInboxItems] = useState<NotificationInboxItem[]>([]);
-  const homeAttentionRequestRef = useRef<Promise<NotificationInboxItem[]> | null>(null);
-  const homeAttentionEpochRef = useRef(0);
   const isChatSurfaceVisible =
     activeWorkspaceTab?.kind === "conversation" ||
     activeWorkspaceTab?.kind === "jobThread" ||
@@ -568,55 +561,10 @@ function StudioLayoutInner() {
     setPreferredFilesMobileView("tree");
   }, [activeProjectId]);
 
-  useEffect(() => {
-    homeAttentionEpochRef.current += 1;
-    homeAttentionRequestRef.current = null;
-    setHomeAttentionInboxItems([]);
-  }, [currentUserId]);
-
-  const refreshHomeAttentionCount = useCallback(async (
-    options?: { force?: boolean },
-  ): Promise<NotificationInboxItem[]> => {
-    if (!currentUserId) {
-      setHomeAttentionInboxItems([]);
-      return [];
-    }
-    if (options?.force) {
-      homeAttentionEpochRef.current += 1;
-      homeAttentionRequestRef.current = null;
-    }
-    if (homeAttentionRequestRef.current) {
-      return homeAttentionRequestRef.current;
-    }
-
-    const epoch = homeAttentionEpochRef.current;
-    const inflight = (async (): Promise<NotificationInboxItem[]> => {
-      try {
-        const result = await controllerClient.notifications.listInbox({ limit: 50 });
-        if (epoch !== homeAttentionEpochRef.current || !result.success) {
-          return [];
-        }
-
-        // Visibility is presentation state, not acknowledgement. Keep the
-        // complete server inbox so a reply hidden in the active chat can
-        // surface as soon as the user switches to another conversation.
-        const items = result.items ?? [];
-        setHomeAttentionInboxItems(items);
-        return items;
-      } catch {
-        return [];
-      }
-    })();
-
-    homeAttentionRequestRef.current = inflight;
-    try {
-      return await inflight;
-    } finally {
-      if (homeAttentionRequestRef.current === inflight) {
-        homeAttentionRequestRef.current = null;
-      }
-    }
-  }, [currentUserId]);
+  const { items: homeAttentionInboxItems, refresh: refreshHomeAttentionCount } = useHomeAttentionInbox({
+    currentUserId,
+    visibleConversationControllerId,
+  });
 
   const visibleHomeAttentionInboxItems = useMemo(
     () => excludeVisibleConversationInboxItems(homeAttentionInboxItems, visibleConversationControllerId),
@@ -649,38 +597,6 @@ function StudioLayoutInner() {
     }
     return { homeAttentionByProject: byProject, homeAttentionByOrg: byOrg };
   }, [homeAttentionFeed.needs]);
-
-  useEffect(() => {
-    if (typeof window === "undefined" || !currentUserId) {
-      return;
-    }
-    // Conversation switches must not wait for the periodic poll: the reply in
-    // the chat we just left may have landed since the previous refresh.
-    void refreshHomeAttentionCount({ force: true });
-  }, [currentUserId, refreshHomeAttentionCount, visibleConversationControllerId]);
-
-  useEffect(() => {
-    if (typeof window === "undefined" || !currentUserId) {
-      return;
-    }
-    // A pushed notification or a local acknowledgement changes the inbox
-    // now, so refresh past any request that was already in flight.
-    const receive = () => {
-      void refreshHomeAttentionCount({ force: true });
-    };
-    window.addEventListener(NOTIFICATION_RECEIVED_EVENT, receive);
-    return () => {
-      window.removeEventListener(NOTIFICATION_RECEIVED_EVENT, receive);
-    };
-  }, [currentUserId, refreshHomeAttentionCount]);
-
-  // Every 20 s while the user is active, every 2 min once idle, never while
-  // hidden; the gate runs it once more when the user comes back.
-  useGatedInterval(() => {
-    if (currentUserId) {
-      void refreshHomeAttentionCount();
-    }
-  }, HOME_ATTENTION_POLL_ACTIVE_MS, { idleMs: HOME_ATTENTION_POLL_IDLE_MS });
 
   useEffect(() => {
     // While the open space is blocked, or none is open, the title names none.
