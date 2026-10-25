@@ -1637,6 +1637,80 @@ async fn preview_grant_revocation_ends_its_sessions() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn a_later_job_on_the_runtime_stops_a_tunnel_an_earlier_job_started() -> anyhow::Result<()> {
+    run(|f| {
+        Box::pin(async move {
+            let request_path = format!("/projects/{}/tunnels/request", f.project);
+            // Each purpose is its own broker tunnel.
+            let start = |token: String, job: &Job, purpose: &str, port: u16| {
+                let f = f.clone();
+                let path = request_path.clone();
+                let body = json!({
+                    "runtimeId": job.runtime_id,
+                    "runtimeLeaseId": job.lease_id,
+                    "purpose": purpose,
+                    "localPort": port,
+                    "metadata": { "source": "instafy-cli", "localPort": port },
+                });
+                async move {
+                    let (status, tunnel) = f.request(&token, "POST", &path, body).await?;
+                    assert_eq!(status, StatusCode::OK, "{tunnel}");
+                    anyhow::Ok(tunnel["tunnelId"].as_str().context("tunnelId")?.to_string())
+                }
+            };
+            let revoke = |token: String, tunnel_id: String| {
+                let f = f.clone();
+                async move {
+                    let path = format!("/projects/{}/tunnels/{tunnel_id}/revoke", f.project);
+                    let (status, _) = f.request(&token, "POST", &path, json!({})).await?;
+                    anyhow::Ok(status)
+                }
+            };
+
+            let first_turn = f.job(None).await?;
+            let tunnel_id = start(first_turn.token.clone(), &first_turn, "web", 5000).await?;
+            // The runtime's own tunnel carries no agent job marker.
+            let machine = f.machine_token(&first_turn, f.users[0])?;
+            let machine_tunnel = start(machine, &first_turn, "api", 5001).await?;
+            assert_ne!(machine_tunnel, tunnel_id);
+
+            // The next turn is a new job and run on the same runtime.
+            let later_turn = f.job(Some(&first_turn)).await?;
+            assert_ne!(later_turn.job_id, first_turn.job_id);
+            assert_ne!(later_turn.run_id, first_turn.run_id);
+            let other_runtime = f.job(None).await?;
+
+            assert_eq!(
+                revoke(other_runtime.token.clone(), tunnel_id.clone()).await?,
+                StatusCode::UNAUTHORIZED,
+                "a job on another runtime"
+            );
+            assert_eq!(
+                revoke(f.tokens[2].clone(), tunnel_id.clone()).await?,
+                StatusCode::FORBIDDEN,
+                "a read-only member"
+            );
+            assert_eq!(
+                revoke(later_turn.token.clone(), machine_tunnel.clone()).await?,
+                StatusCode::FORBIDDEN,
+                "a tunnel no agent job started"
+            );
+            assert_ne!(f.grant_status(&tunnel_id).await?, "revoked");
+            assert_ne!(f.grant_status(&machine_tunnel).await?, "revoked");
+
+            assert_eq!(
+                revoke(later_turn.token.clone(), tunnel_id.clone()).await?,
+                StatusCode::OK,
+                "a later turn on the same runtime"
+            );
+            assert_eq!(f.grant_status(&tunnel_id).await?, "revoked");
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
 async fn a_session_is_not_stored_for_a_preview_revoked_after_the_open_check() -> anyhow::Result<()>
 {
     run(|f| {

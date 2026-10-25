@@ -476,6 +476,11 @@ instafy tunnel logs <tunnelId> --follow
 instafy tunnel stop <tunnelId>
 ```
 
+- Inside an agent run, `instafy tunnel stop` uses the run's job token. It stops any tunnel an agent job
+  started on the same runtime generation, including one an earlier turn started, the same rule
+  `instafy preview close` follows. A tunnel a person or the runtime itself started is refused with
+  `403`; a member stops it with their own sign-in.
+
 - For self-hosted tunnels, the server returns `provider=self_hosted` when configured with:
   - `TUNNEL_BROKER_BASE_URL`
   - `TUNNEL_BROKER_TOKEN`
