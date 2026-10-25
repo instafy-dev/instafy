@@ -493,6 +493,8 @@ struct PreviewStubBroker {
     probe_status: StdMutex<Option<u16>>,
     /// The broker cannot be asked: every probe errors.
     probe_fails: std::sync::atomic::AtomicBool,
+    /// A probe of this tunnel never answers.
+    probe_hangs_for: StdMutex<Option<String>>,
 }
 
 #[async_trait]
@@ -554,9 +556,13 @@ impl TunnelBroker for PreviewStubBroker {
             })
     }
 
-    async fn probe_tunnel(&self, _tunnel_id: &str, _path: &str) -> anyhow::Result<TunnelProbe> {
+    async fn probe_tunnel(&self, tunnel_id: &str, _path: &str) -> anyhow::Result<TunnelProbe> {
         use std::sync::atomic::Ordering;
         self.probes.fetch_add(1, Ordering::SeqCst);
+        let hangs = self.probe_hangs_for.lock().unwrap().as_deref() == Some(tunnel_id);
+        if hangs {
+            std::future::pending::<()>().await;
+        }
         if self.probe_fails.load(Ordering::SeqCst) {
             anyhow::bail!("the broker is unreachable");
         }
@@ -2111,6 +2117,60 @@ async fn listing_tunnels_makes_an_issuing_public_tunnel_active_once_its_site_ans
                 )
                 .await?;
             assert_eq!(listed(f.clone(), tunnel_id.clone()).await?, "expired");
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_tunnel_probe_that_never_answers_does_not_hold_back_the_others() -> anyhow::Result<()> {
+    run(|f| {
+        Box::pin(async move {
+            *f.broker.assignment_status.lock().unwrap() = Some("issuing".to_string());
+            let job = f.job(None).await?;
+            let start = |purpose: &'static str, port: u16| {
+                let f = f.clone();
+                let token = job.token.clone();
+                let body = json!({
+                    "runtimeId": job.runtime_id,
+                    "runtimeLeaseId": job.lease_id,
+                    "purpose": purpose,
+                    "localPort": port,
+                    "metadata": { "source": "instafy-cli", "localPort": port },
+                });
+                async move {
+                    let path = format!("/projects/{}/tunnels/request", f.project);
+                    let (status, tunnel) = f.request(&token, "POST", &path, body).await?;
+                    assert_eq!(status, StatusCode::OK, "{tunnel}");
+                    anyhow::Ok(tunnel["tunnelId"].as_str().context("tunnelId")?.to_string())
+                }
+            };
+            let stuck = start("web", 5000).await?;
+            let answering = start("api", 5001).await?;
+            assert_ne!(stuck, answering);
+            *f.broker.probe_hangs_for.lock().unwrap() = Some(stuck.clone());
+            crate::tunnels::forget_issuing_tunnel_probes();
+
+            let started = std::time::Instant::now();
+            let path = format!("/projects/{}/tunnels", f.project);
+            let (status, list) = f.request(&f.tokens[0], "GET", &path, Value::Null).await?;
+            assert_eq!(status, StatusCode::OK, "{list}");
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "the listing waited on the stuck probe"
+            );
+            let listed = |id: &str| {
+                list["grants"]
+                    .as_array()
+                    .and_then(|grants| grants.iter().find(|grant| grant["tunnelId"] == json!(id)))
+                    .and_then(|grant| grant["status"].as_str())
+                    .map(str::to_string)
+            };
+            assert_eq!(listed(&stuck).as_deref(), Some("issuing"));
+            assert_eq!(listed(&answering).as_deref(), Some("active"));
+            assert_eq!(f.grant_status(&stuck).await?, "issuing");
+            assert_eq!(f.grant_status(&answering).await?, "active");
             Ok(())
         })
     })

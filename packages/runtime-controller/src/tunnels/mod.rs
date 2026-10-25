@@ -1790,20 +1790,25 @@ async fn promote_listening_tunnels(state: &AppState, grants: &mut [RuntimeTunnel
     if due.is_empty() {
         return;
     }
+    // Each probe has its own deadline, so one that hangs does not throw away
+    // the answers the others already brought back.
     let probes = due.iter().map(|&index| {
         let broker = broker.clone();
         let tunnel_id = grants[index].tunnel_id.clone();
-        async move { broker.probe_tunnel(&tunnel_id, "/").await }
+        async move {
+            tokio::time::timeout(
+                ISSUING_TUNNEL_PROBE_WAIT,
+                broker.probe_tunnel(&tunnel_id, "/"),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                Err(anyhow::anyhow!(
+                    "tunnel broker probe did not answer in time"
+                ))
+            })
+        }
     });
-    let Ok(probes) = tokio::time::timeout(
-        ISSUING_TUNNEL_PROBE_WAIT,
-        futures_util::future::join_all(probes),
-    )
-    .await
-    else {
-        warn!("tunnel broker probes did not answer in time");
-        return;
-    };
+    let probes = futures_util::future::join_all(probes).await;
     for (index, probe) in due.into_iter().zip(probes) {
         match probe {
             Ok(health) if probe_saw_site(Some(&health)) => {
