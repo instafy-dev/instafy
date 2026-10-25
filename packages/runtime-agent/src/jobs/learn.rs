@@ -2103,7 +2103,7 @@ mod tests {
             "references/studio-host-messages.md",
             "references/tunnels.md",
             "Only `status: live` from an `instafy preview open` you ran this turn shows the site is up",
-            "an earlier card keeps showing its own state",
+            "It never refreshes an earlier card.",
             "their cards read Stopped and `instafy preview list` no longer lists them",
             "Open on a `restartable` card starts the site again with no turn",
             "its status says the preview is open, not that the site answers",
