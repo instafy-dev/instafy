@@ -94,12 +94,12 @@ answers through `/projects/:id/provider-requests` (list, claim, complete).
   device's later answer is still recorded. A reply that is not the device's own carries
   `noDeviceReply`: `never_claimed` when the request ended before any device claimed it, so
   nothing will run it, or `unknown` when a device claimed it and may have run it.
-- A person's own session or the service role dispatches, with project write access. No scoped
-  token dispatches, whatever its scopes.
-- A request may name one device (`targetDeviceId`) and belong to an agent job (`jobId`). No
-  route sets either yet, and no request body can. Only the device a request names may claim it
-  (403 for any other). `?deviceId=` lists only what that device may act on: requests targeted at
-  it or at no device, and not claimed by another.
+- A person's own session or the service role dispatches, with project write access. The only
+  scoped token that dispatches is a device grant's (below), and only a tool call.
+- A request may name one device (`targetDeviceId`) and belong to an agent job (`jobId`). Only a
+  device grant's call sets them (below), never a request body. Only the device a request names
+  may claim it (403 for any other). `?deviceId=` lists only what that device may act on: requests
+  targeted at it or at no device, and not claimed by another.
 - A job's request is its requester's alone: other callers do not see it in listings or events,
   and claim or complete it as not found. When the job ends (its runtime's report, a cancel, a
   stop, an expiry sweep, a deleted space) or is steered, its open requests are canceled in the
@@ -159,6 +159,46 @@ alone enforces `start_by` and `strict_pin`. The idle poll's one-read check count
 from the polling runtime. The idle sweep fails a queued job that can no longer start
 (`run_once_interrupted`, `start_by_passed`), tells its conversation why and cancels its open
 provider requests.
+
+## Device Grants
+
+A device grant is a person's revocable consent that one of their agents may call named tools of
+one of their own devices in turns that person starts in one conversation (`agent_device_grants`).
+It exists only where device grants are on for that person (`DEVICE_GRANTS_ENABLED`, above); for
+anyone else nothing below happens. With the flag off its routes do not exist, and with it on they
+answer anyone else 404.
+
+- `GET`/`POST /projects/:id/device-grants` and `DELETE .../:grantId` list, make and revoke the
+  caller's grants. A grant names their own agent, their own owned device and tools its catalog
+  publishes, a conversation they started, and may name a runtime of the space (a private one only
+  if it is theirs). It pins the catalog: a device whose catalog or owner changes gives its turns
+  nothing until it is granted again (`changed`). Granting a device to the same agent again
+  replaces the grant.
+- Dispatch gives a grant only to a plain one-agent turn in its conversation that its person's own
+  message started (`person`, or `device_voice` from the granted device when the grant takes
+  voice), received after the grant's `not_before` and less than a minute ago. Such a job holds it
+  in `grant_ids` and is delivered at most once, within that minute, strictly on the grant's
+  runtime when it names one. A granted turn resumes no provider thread, and its history holds only
+  what its person typed (and said, with voice) and the replies of their granted turns.
+- The lease gives each grant's tools and one grant token for the job (`device_grant.call`), which
+  only `provider-tools/call` takes. Each call is checked in order: the job is still leased by the
+  token's runtime at its generation, exactly one of its grants is of the call's provider and names
+  the tool, that grant still holds, and the turn has calls left (120 to the device in all, and each
+  tool's `callsPerTool` when the grant sets one). The request is stamped with the grant's person,
+  device and job.
+- In a grant's conversation only its person's own messages start turns (anyone else's is
+  recorded), and the team plans those turns started go on without the grant. Only they steer a
+  granted turn (`grant_not_held`). Any member may stop one. A stop there that cancels a job, and
+  any interrupt of the conversation, one with no turn running included, moves the grant's
+  `not_before` to the stop and cancels every turn's calls asked before it. A stop that finds
+  nothing left to cancel (its jobs already ended, its plan group already stopped) moves nothing.
+  Its notices and canceled turns say only its cancel reason; the stopper's own words stay only on
+  the plan worker questions it ends (`expired_reason`), which no granted turn reads. A device's
+  own stop is an interrupt of its grant's conversation, so it always pauses the grant.
+- A grant binds anyone but its person only while it is in force: its person may still write to the
+  space and owns the device with the granted catalog, and its agent exists. Once they leave the
+  space, lose write access or delete their account, its conversation starts anyone's turns again.
+  Only its person revokes it; nobody else needs to.
 
 ## Canonical Workspace Modes
 There are two supported canonical filesystem modes:

@@ -1017,6 +1017,7 @@ async fn execute_automation_once(
             )),
             stamps_trigger: false,
             delivery: Default::default(),
+            grant_ids: Vec::new(),
         },
     )
     .await;

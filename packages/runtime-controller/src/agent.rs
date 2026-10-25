@@ -223,6 +223,14 @@ pub(crate) struct AgentJob {
     workspace_token_expires_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     workspace_token_scopes: Option<Vec<String>>,
+    /// The device grants the job holds (`device_grants.rs`). Empty for every
+    /// other job.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    grants: Vec<crate::device_grants::LeasedGrant>,
+    /// The broker-only token its device calls are made with, when it holds
+    /// a grant it may use.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    grant_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1842,13 +1850,27 @@ fn attach_controller_tokens(
             job.workspace_token_scopes = Some(scopes);
         }
     }
+    for job in jobs.iter_mut().filter(|job| !job.grants.is_empty()) {
+        let subject = extract_controller_subject_user_id(job);
+        job.grant_token = crate::device_grants::mint_grant_token(
+            config,
+            runtime_id,
+            runtime_lease_id,
+            runtime_generation,
+            job.project_id,
+            job.run_id,
+            subject,
+            &mut job.grants,
+        );
+    }
 }
 
 fn job_controller_token_scopes(job: &AgentJob) -> Vec<String> {
     let mut scopes = vec!["prompt.execute".to_string()];
     // Fail closed on model-controlled provider execution: this token goes to
-    // the model's shell, so it carries no provider authority, and the
-    // provider dispatch routes take no scoped token.
+    // the model's shell, so it carries no provider authority. A granted job's
+    // device calls use the separate grant token the lease mints for its
+    // broker alone (`device_grants.rs`).
     // Writable runtime jobs use this short-lived, project/runtime/run-bound
     // token to acquire a workspace lease and delegate an origin fs.write token
     // after Codex produces file changes. Every normalized read-only signal is
@@ -3216,7 +3238,8 @@ pub(crate) async fn agent_complete(
 	                               created_at,
 	                               leased_at,
                                completed_at,
-	                               lease_attempts",
+	                               lease_attempts,
+                               grant_ids",
                     &[
                         &job_uuid,
                         &project_id,
@@ -3255,7 +3278,8 @@ pub(crate) async fn agent_complete(
 	                               created_at,
 	                               leased_at,
                                completed_at,
-	                               lease_attempts",
+	                               lease_attempts,
+                               grant_ids",
                     &[
                         &job_uuid,
                         &project_id,
@@ -3472,7 +3496,13 @@ pub(crate) async fn agent_complete(
     let suggested_replies = extract_ui_suggested_replies(&proxy_metadata);
 
     if let Some(run_uuid) = run_id {
-        let conversation_state = extract_provider_conversation_state(&proxy_metadata);
+        // A granted turn's provider thread is never resumed (dispatch.rs), so
+        // none is kept for it.
+        let granted = row
+            .get::<_, Option<Vec<Uuid>>>("grant_ids")
+            .is_some_and(|grant_ids| !grant_ids.is_empty());
+        let conversation_state =
+            extract_provider_conversation_state(&proxy_metadata).filter(|_| !granted);
         if let Err(error) = persist_run_completion_metadata(
             &transaction,
             &run_uuid,
@@ -4497,13 +4527,15 @@ pub(crate) async fn enqueue_agent_job_record(
                  trigger_received_at,
                  at_most_once,
                  start_by,
-                 strict_pin
+                 strict_pin,
+                 grant_ids
              ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11,
                  (select parent.id from agent_jobs parent
                   where parent.id = $12 and parent.project_id = $1),
                  $13, $14, $15,
                  case when $16 then coalesce($17, now()) end,
-                 $18, coalesce($17, now()) + $19::int * interval '1 second', $20)
+                 $18, coalesce($17, now()) + $19::int * interval '1 second', $20,
+                 nullif($21::uuid[], '{}'))
              returning id",
             &[
                 &project.id,
@@ -4526,6 +4558,7 @@ pub(crate) async fn enqueue_agent_job_record(
                 &request.delivery.at_most_once,
                 &request.delivery.start_within_s,
                 &request.delivery.strict_pin,
+                &request.grant_ids,
             ],
         )
         .await
@@ -4880,6 +4913,32 @@ pub(crate) async fn lease_next_agent_job(
     let run_id: Option<Uuid> = row.get("run_id");
     let credential_id: Option<Uuid> = row.try_get("credential_id").unwrap_or(None);
     let mut payload: JsonValue = row.get("payload");
+    // A granted turn's grants, its person, and when they asked (job_trigger.rs).
+    let grant_ids: Vec<Uuid> = row
+        .try_get::<_, Option<Vec<Uuid>>>("grant_ids")
+        .unwrap_or(None)
+        .unwrap_or_default();
+    let grants = if grant_ids.is_empty() {
+        Vec::new()
+    } else {
+        crate::device_grants::leased_grants(
+            transaction,
+            &grant_ids,
+            row.try_get("trigger_user_id").unwrap_or(None),
+            row.try_get("trigger_received_at").unwrap_or(None),
+        )
+        .await?
+    };
+    // Whose words a granted turn's history keeps: what its person typed, and
+    // said where one of its grants takes voice. One without a person keeps
+    // nobody's.
+    let granted_history = (!grant_ids.is_empty()).then(|| crate::device_grants::GrantedHistory {
+        person: row
+            .try_get::<_, Option<Uuid>>("trigger_user_id")
+            .unwrap_or(None)
+            .unwrap_or_else(Uuid::nil),
+        voice: grants.iter().any(|grant| grant.voice),
+    });
     // A team's job: the time its team has left, by the controller's clock.
     if let Some(leased_at) = row.get::<_, Option<chrono::DateTime<chrono::Utc>>>("leased_at") {
         crate::multi_agent_plan::team_clock::stamp_left_at_lease(&mut payload, leased_at);
@@ -4936,6 +4995,7 @@ pub(crate) async fn lease_next_agent_job(
             &conversation_uuid,
             agent_scope_id.as_ref(),
             agent_scope_handle.as_deref(),
+            granted_history.as_ref(),
             AGENT_CONVERSATION_HISTORY_LIMIT,
         )
         .await?;
@@ -4953,12 +5013,18 @@ pub(crate) async fn lease_next_agent_job(
             payload = JsonValue::Object(map);
         }
 
-        let skill_setup_openers = load_skill_setup_openers_for_agent(
-            transaction,
-            &conversation_uuid,
-            AGENT_SKILL_SETUP_OPENER_LIMIT,
-        )
-        .await?;
+        // Anyone's `/skills` message opens a setup, so a granted turn reads
+        // none.
+        let skill_setup_openers = if granted_history.is_some() {
+            Vec::new()
+        } else {
+            load_skill_setup_openers_for_agent(
+                transaction,
+                &conversation_uuid,
+                AGENT_SKILL_SETUP_OPENER_LIMIT,
+            )
+            .await?
+        };
         if !skill_setup_openers.is_empty() {
             if let JsonValue::Object(ref mut map) = payload {
                 map.insert(
@@ -5023,16 +5089,26 @@ pub(crate) async fn lease_next_agent_job(
         workspace_token: None,
         workspace_token_expires_at: None,
         workspace_token_scopes: None,
+        grants,
+        grant_token: None,
     };
 
     Ok(Some(job))
 }
 
+/// The conversation's latest `limit` messages as an agent's job reads them. A
+/// granted turn's (`granted`) keeps only what its person typed, and said
+/// where its grant takes voice, as the controller stamped those messages
+/// (`job_trigger.rs`), and the replies and notices of that person's granted
+/// turns: nobody else's words reach a turn that acts with their device, nor
+/// a resend, an automation's or an agent's message recorded in their name
+/// (`device_grants.rs`).
 pub(crate) async fn load_conversation_history_for_agent(
     transaction: &tokio_postgres::Transaction<'_>,
     conversation_id: &Uuid,
     agent_id: Option<&Uuid>,
     agent_handle: Option<&str>,
+    granted: Option<&crate::device_grants::GrantedHistory>,
     limit: i64,
 ) -> Result<Vec<JsonValue>, (StatusCode, Json<ApiError>)> {
     let clamped_limit = limit.clamp(1, 200);
@@ -5044,9 +5120,33 @@ pub(crate) async fn load_conversation_history_for_agent(
     // itinerary it referred to. The same progress rows that
     // `should_include_message_in_agent_history` drops are therefore left out
     // before the limit; that filter still runs on what remains.
+    // A granted turn's rows: its person's own words, and their granted turns'
+    // replies and notices.
+    let granted_kinds = granted.map(|granted| granted.kinds());
+    let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+        vec![conversation_id, &clamped_limit];
+    let granted_clause = match (granted, granted_kinds.as_ref()) {
+        (Some(granted), Some(kinds)) => {
+            params.extend([
+                &granted.person as &(dyn tokio_postgres::types::ToSql + Sync),
+                &crate::job_trigger::MESSAGE_TRIGGER_KEY,
+                kinds,
+            ]);
+            "and case when lower(role) = 'user' then
+                   created_by = $3 and metadata ->> $4 = any($5)
+                 else exists (
+                   select 1 from agent_jobs granted_job
+                    where granted_job.run_id = conversation_messages.run_id
+                      and granted_job.grant_ids is not null
+                      and granted_job.trigger_user_id = $3)
+                 end"
+        }
+        _ => "",
+    };
     let rows = transaction
         .query(
-            "select id, role, content, metadata, created_at
+            &format!(
+                "select id, role, content, metadata, created_at
              from conversation_messages
              where conversation_id = $1
                and not (
@@ -5063,9 +5163,11 @@ pub(crate) async fn load_conversation_history_for_agent(
                    )
                  )
                )
+               {granted_clause}
              order by created_at desc
-             limit $2",
-            &[conversation_id, &clamped_limit],
+             limit $2"
+            ),
+            &params,
         )
         .await
         .map_err(|error| internal_error(format!("failed to load conversation history: {error}")))?;
@@ -7749,6 +7851,8 @@ mod tests {
             workspace_token: None,
             workspace_token_expires_at: None,
             workspace_token_scopes: None,
+            grants: Vec::new(),
+            grant_token: None,
         };
 
         assert_eq!(
@@ -7865,6 +7969,8 @@ mod tests {
             workspace_token: None,
             workspace_token_expires_at: None,
             workspace_token_scopes: None,
+            grants: Vec::new(),
+            grant_token: None,
         };
 
         assert_eq!(extract_controller_subject_user_id(&job), Some(user_id));
@@ -7913,6 +8019,8 @@ mod tests {
             workspace_token: None,
             workspace_token_expires_at: None,
             workspace_token_scopes: None,
+            grants: Vec::new(),
+            grant_token: None,
         };
 
         assert_eq!(extract_controller_subject_user_id(&job), None);
@@ -7973,6 +8081,8 @@ mod tests {
             workspace_token: None,
             workspace_token_expires_at: None,
             workspace_token_scopes: None,
+            grants: Vec::new(),
+            grant_token: None,
         };
 
         let mut legacy_jobs = vec![build_job()];
@@ -8315,6 +8425,8 @@ mod tests {
             workspace_token: None,
             workspace_token_expires_at: None,
             workspace_token_scopes: None,
+            grants: Vec::new(),
+            grant_token: None,
         }];
 
         attach_controller_tokens(

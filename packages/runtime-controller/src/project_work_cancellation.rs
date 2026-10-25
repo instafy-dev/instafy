@@ -99,6 +99,7 @@ struct LiveJob {
 /// delete, `transaction` already holds the space's row, and a holder of one
 /// of those locks may itself be waiting for that row.
 pub(crate) async fn cancel_project_work_in_transaction(
+    config: &crate::config::AppConfig,
     transaction: &mut tokio_postgres::Transaction<'_>,
     project_id: Uuid,
 ) -> Result<ProjectWorkCancellation, (StatusCode, Json<ApiError>)> {
@@ -208,6 +209,7 @@ pub(crate) async fn cancel_project_work_in_transaction(
         details.insert("stopRequested".into(), json!(true));
         details.insert("suppressedPlanGroupIds".into(), json!(groups));
         let canceled = conversations::cancel_jobs_with_notice(
+            config,
             transaction,
             &project_id,
             &conversation_id,
@@ -360,7 +362,7 @@ pub(crate) async fn cancel_deleted_project_work(
     if !deleted {
         return Ok(ProjectWorkCancellation::default());
     }
-    let work = cancel_project_work_in_transaction(&mut transaction, project_id)
+    let work = cancel_project_work_in_transaction(&state.config, &mut transaction, project_id)
         .await
         .map_err(|(status, Json(error))| {
             anyhow::anyhow!(

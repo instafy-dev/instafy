@@ -64,7 +64,8 @@ pub(crate) async fn stop_conversation_jobs(
         .await
         .map_err(|error| crate::internal_error(format!("failed to start transaction: {error}")))?;
     let (response, cancellation) =
-        stop_jobs_in_transaction(&transaction, &context, conversation_id, &ids).await?;
+        stop_jobs_in_transaction(&state.config, &transaction, &context, conversation_id, &ids)
+            .await?;
     transaction
         .commit()
         .await
@@ -79,7 +80,6 @@ pub(crate) async fn stop_conversation_jobs(
             conversation.project_id,
             conversation.id,
             &cancellation,
-            "Stopped",
         )
         .await;
     }
@@ -90,6 +90,7 @@ pub(crate) async fn stop_conversation_jobs(
 }
 
 async fn stop_jobs_in_transaction(
+    config: &crate::config::AppConfig,
     transaction: &tokio_postgres::Transaction<'_>,
     context: &RequestContext,
     conversation_id: Uuid,
@@ -237,6 +238,7 @@ async fn stop_jobs_in_transaction(
     details.insert("agentHandles".into(), json!(handles));
     details.insert("suppressedPlanGroupIds".into(), json!(suppressed_groups));
     let cancellation = conversations::cancel_jobs_with_notice(
+        config,
         transaction,
         &conversation.project_id,
         &conversation_id,
@@ -324,16 +326,22 @@ mod tests {
         }
         let queue_id = Uuid::new_v4();
         tx.execute("insert into conversation_send_queue (id,project_id,conversation_id,user_id,request) values ($1,$2,$3,$4,'{}')", &[&queue_id,&project,&conversation,&owner]).await?;
+        let config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "conversation-stop",
+        );
         let context = |user_id| RequestContext {
             user_id: Some(user_id),
             is_service_role: false,
             scoped_claims: None,
         };
         for user in [viewer, builder] {
-            let error = stop_jobs_in_transaction(&tx, &context(user), conversation, &[jobs[0]])
-                .await
-                .err()
-                .expect("viewer/private nonparticipant denied");
+            let error =
+                stop_jobs_in_transaction(&config, &tx, &context(user), conversation, &[jobs[0]])
+                    .await
+                    .err()
+                    .expect("viewer/private nonparticipant denied");
             assert_eq!(error.0, StatusCode::FORBIDDEN);
         }
         let service = RequestContext {
@@ -342,7 +350,7 @@ mod tests {
             scoped_claims: None,
         };
         assert_eq!(
-            stop_jobs_in_transaction(&tx, &service, conversation, &[jobs[0]])
+            stop_jobs_in_transaction(&config, &tx, &service, conversation, &[jobs[0]])
                 .await
                 .err()
                 .unwrap()
@@ -351,11 +359,17 @@ mod tests {
         );
         for foreign in [jobs[2], Uuid::new_v4()] {
             assert_eq!(
-                stop_jobs_in_transaction(&tx, &context(owner), conversation, &[jobs[0], foreign])
-                    .await
-                    .err()
-                    .unwrap()
-                    .0,
+                stop_jobs_in_transaction(
+                    &config,
+                    &tx,
+                    &context(owner),
+                    conversation,
+                    &[jobs[0], foreign]
+                )
+                .await
+                .err()
+                .unwrap()
+                .0,
                 StatusCode::BAD_REQUEST
             );
         }
@@ -365,10 +379,15 @@ mod tests {
                 .get::<_, String>(0),
             "leased"
         );
-        let (response, cancellation) =
-            stop_jobs_in_transaction(&tx, &context(owner), conversation, &[jobs[0], jobs[3]])
-                .await
-                .map_err(api_error)?;
+        let (response, cancellation) = stop_jobs_in_transaction(
+            &config,
+            &tx,
+            &context(owner),
+            conversation,
+            &[jobs[0], jobs[3]],
+        )
+        .await
+        .map_err(api_error)?;
         assert_eq!(response.canceled_job_ids, vec![jobs[0]]);
         assert_eq!(response.canceled_run_ids, vec![runs[0]]);
         assert_eq!(response.already_finished_job_ids, vec![jobs[3]]);
@@ -391,7 +410,7 @@ mod tests {
         .await
         .map_err(api_error)?);
         let (repeat, cancellation) =
-            stop_jobs_in_transaction(&tx, &context(owner), conversation, &[jobs[0]])
+            stop_jobs_in_transaction(&config, &tx, &context(owner), conversation, &[jobs[0]])
                 .await
                 .map_err(api_error)?;
         assert!(repeat.canceled_job_ids.is_empty());
@@ -418,7 +437,7 @@ mod tests {
             "leased"
         );
         let (response, _) =
-            stop_jobs_in_transaction(&tx, &context(owner), conversation, &[jobs[1]])
+            stop_jobs_in_transaction(&config, &tx, &context(owner), conversation, &[jobs[1]])
                 .await
                 .map_err(api_error)?;
         assert_eq!(response.canceled_job_ids, vec![jobs[1]]);
@@ -454,10 +473,15 @@ mod tests {
             )
             .await?
             .get::<_, bool>(0));
-        let (batch, _) =
-            stop_jobs_in_transaction(&tx, &context(owner), conversation, &[jobs[4], jobs[5]])
-                .await
-                .map_err(api_error)?;
+        let (batch, _) = stop_jobs_in_transaction(
+            &config,
+            &tx,
+            &context(owner),
+            conversation,
+            &[jobs[4], jobs[5]],
+        )
+        .await
+        .map_err(api_error)?;
         assert_eq!(batch.canceled_job_ids.len(), 2);
         assert_eq!(batch.canceled_run_ids.len(), 2);
         assert!(batch.already_finished_job_ids.is_empty());

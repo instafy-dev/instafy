@@ -28803,6 +28803,7 @@ async fn load_conversation_history_for_agent_limit_skips_progress_rows() -> anyh
         &conversation_id,
         None,
         None,
+        None,
         80,
     )
     .await
@@ -28927,6 +28928,7 @@ async fn load_conversation_history_for_agent_drops_dispatch_alerts_and_labels_fa
     let history = crate::agent::load_conversation_history_for_agent(
         &transaction,
         &conversation_id,
+        None,
         None,
         None,
         80,

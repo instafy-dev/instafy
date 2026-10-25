@@ -63,7 +63,11 @@ macro_rules! request_columns {
          status, cancel_reason, requested_by, target_device_id, job_id, claimed_by_device_id,
          claimed_by_device_label, response, error, created_at, claimed_at, completed_at,
          updated_at, expires_at,
-         greatest(0, floor(extract(epoch from (now() - created_at)) * 1000))::bigint as age_ms"
+         greatest(0, floor(extract(epoch from (now() - created_at)) * 1000))::bigint as age_ms,
+         (select greatest(0, floor(extract(epoch from (now() - request_job.trigger_received_at))
+                  * 1000))::bigint
+            from agent_jobs request_job
+           where request_job.id = project_provider_requests.job_id) as trigger_age_ms"
     };
 }
 
@@ -187,6 +191,12 @@ struct ProviderRequestPayload {
     /// when this copy of it was read. A device judges freshness by this rather
     /// than by its own clock.
     age_ms: i64,
+    /// For a request an agent job made: milliseconds since the controller
+    /// received what started the job (its person's message, a queued one's
+    /// time in the queue included), on the database clock, when this copy was
+    /// read. A device judges how old the ask is by this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trigger_age_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -213,6 +223,7 @@ pub(crate) struct ProviderRequestRecord {
     updated_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
     age_ms: i64,
+    trigger_age_ms: Option<i64>,
 }
 
 impl ProviderRequestRecord {
@@ -280,6 +291,8 @@ async fn dispatch_provider_tool_call(
             resource_uri: None,
             arguments: body.arguments.unwrap_or_else(|| json!({})),
             requested_by: context.user_id,
+            target_device_id: None,
+            job_id: None,
         },
         timeout_ms,
     )
@@ -316,6 +329,8 @@ async fn dispatch_provider_resource_read(
             resource_uri: Some(resource_uri),
             arguments: json!({}),
             requested_by: context.user_id,
+            target_device_id: None,
+            job_id: None,
         },
         timeout_ms,
     )
@@ -329,7 +344,7 @@ async fn dispatch_provider_resource_read(
 async fn dispatch_and_wait(
     state: &AppState,
     context: &RequestContext,
-    insert: ProviderRequestInsert,
+    mut insert: ProviderRequestInsert,
     timeout_ms: u64,
 ) -> Result<ProviderRequestRecord, (StatusCode, Json<ApiError>)> {
     let project_id = insert.project_id;
@@ -346,14 +361,33 @@ async fn dispatch_and_wait(
 
         let project = load_project_record(&transaction, &project_id).await?;
         // A person's own session or the service role dispatches with project
-        // write access. No scoped token reaches a device, whatever its scopes:
-        // a job token goes to the model's shell.
-        if context.scoped_claims.is_some() {
+        // write access. A scoped token calls only under a device grant, which
+        // binds the call to its job, its person, its device and its tools,
+        // and stamps the request from them (device_grants.rs). No other scoped
+        // token reaches a device: a job token goes to the model's shell.
+        if let Some(claims) = crate::device_grants::grant_token_of(context) {
+            let Some(tool_name) = insert.tool_name.as_deref() else {
+                return Err(forbidden("a device grant covers tool calls only"));
+            };
+            let call = crate::device_grants::authorize_grant_call(
+                &transaction,
+                state,
+                claims,
+                &project_id,
+                insert.provider_id.as_str(),
+                tool_name,
+            )
+            .await?;
+            insert.requested_by = Some(call.person);
+            insert.target_device_id = Some(call.device_id);
+            insert.job_id = Some(call.job_id);
+        } else if context.scoped_claims.is_some() {
             return Err(forbidden(
                 "a scoped token cannot dispatch a provider request",
             ));
+        } else {
+            ensure_project_write_access(&transaction, &project, context, None).await?;
         }
-        ensure_project_write_access(&transaction, &project, context, None).await?;
         ensure_provider_is_attached(&transaction, &project_id, insert.provider_id.as_str()).await?;
 
         let queued = insert_provider_request(&transaction, &insert, timeout_ms).await?;
@@ -828,6 +862,57 @@ pub(crate) async fn cancel_open_provider_requests_for_jobs(
     if job_ids.is_empty() {
         return Ok(Vec::new());
     }
+    cancel_open_provider_requests(
+        transaction,
+        "job_id is not null and job_id = any($1)",
+        &job_ids,
+        steered,
+    )
+    .await
+}
+
+/// Cancels, inside the caller's transaction, the pending and claimed
+/// requests that jobs holding one of `grant_ids` made to its device and may
+/// no longer make: the grant is revoked, or the job was asked for before the
+/// grant's `not_before`. Every such job's, not only a stopped one's. Call it
+/// once the grants are written.
+pub(crate) async fn cancel_open_provider_requests_of_grants(
+    transaction: &tokio_postgres::Transaction<'_>,
+    grant_ids: &[Uuid],
+) -> Result<Vec<ProviderRequestRecord>, (StatusCode, Json<ApiError>)> {
+    if grant_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    cancel_open_provider_requests(
+        transaction,
+        "job_id is not null
+         and (project_id, provider_id, target_device_id) in (
+               select project_id, provider_id, device_id
+                 from agent_device_grants where id = any($1))
+         and exists (
+               select 1 from agent_jobs j
+                 join agent_device_grants g on g.id = any(j.grant_ids)
+                where j.id = project_provider_requests.job_id
+                  and g.id = any($1)
+                  and g.provider_id = project_provider_requests.provider_id
+                  and g.device_id = project_provider_requests.target_device_id
+                  and (g.revoked_at is not null
+                       or j.trigger_received_at is null
+                       or j.trigger_received_at < g.not_before))",
+        &grant_ids,
+        false,
+    )
+    .await
+}
+
+/// Cancels the pending and claimed requests `filter` selects by its key
+/// (`$1`), as `steered` says or with no reason.
+async fn cancel_open_provider_requests(
+    transaction: &tokio_postgres::Transaction<'_>,
+    filter: &'static str,
+    key: &(dyn tokio_postgres::types::ToSql + Sync),
+    steered: bool,
+) -> Result<Vec<ProviderRequestRecord>, (StatusCode, Json<ApiError>)> {
     let (reason, error) = if steered {
         (Some(CANCEL_REASON_STEERED), STEERED_ERROR)
     } else {
@@ -835,21 +920,25 @@ pub(crate) async fn cancel_open_provider_requests_for_jobs(
     };
     let rows = transaction
         .query(
-            concat!(
-                "update project_provider_requests
-                    set status = $2,
-                        cancel_reason = $3,
-                        error = $4,
-                        completed_at = now(),
-                        updated_at = now()
-                  where job_id is not null
-                    and job_id = any($1)
-                    and status in ($5, $6)
-              returning ",
-                request_columns!()
+            &format!(
+                concat!(
+                    "update project_provider_requests
+                        set status = $2,
+                            cancel_reason = $3,
+                            error = $4,
+                            completed_at = now(),
+                            updated_at = now()
+                      where status in ($5, $6)
+                        and (",
+                    "{filter}",
+                    ")
+                  returning ",
+                    request_columns!()
+                ),
+                filter = filter
             ),
             &[
-                &job_ids,
+                key,
                 &REQUEST_STATUS_CANCELED,
                 &reason,
                 &error,
@@ -858,11 +947,7 @@ pub(crate) async fn cancel_open_provider_requests_for_jobs(
             ],
         )
         .await
-        .map_err(|error| {
-            internal_error(format!(
-                "failed to cancel the provider requests of ended jobs: {error}"
-            ))
-        })?;
+        .map_err(|error| internal_error(format!("failed to cancel provider requests: {error}")))?;
     Ok(rows.iter().map(map_provider_request_row).collect())
 }
 
@@ -884,6 +969,10 @@ struct ProviderRequestInsert {
     resource_uri: Option<String>,
     arguments: JsonValue,
     requested_by: Option<Uuid>,
+    /// The only device that may claim it, and the job a granted call was made
+    /// in. Set from the grant token's job, never from a request body.
+    target_device_id: Option<String>,
+    job_id: Option<Uuid>,
 }
 
 /// Inserts a pending request whose window closes `timeout_ms` from now on the
@@ -907,10 +996,12 @@ async fn insert_provider_request(
                     arguments,
                     status,
                     requested_by,
-                    expires_at
+                    expires_at,
+                    target_device_id,
+                    job_id
                  ) values (
                     $1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9,
-                    now() + $10::bigint * interval '1 millisecond'
+                    now() + $10::bigint * interval '1 millisecond', $11, $12
                  )
                  returning ",
                 request_columns!()
@@ -926,6 +1017,8 @@ async fn insert_provider_request(
                 &REQUEST_STATUS_PENDING,
                 &input.requested_by,
                 &timeout_ms,
+                &input.target_device_id,
+                &input.job_id,
             ],
         )
         .await
@@ -1171,7 +1264,7 @@ async fn load_provider_request_for_update(
     Ok(map_provider_request_row(&row))
 }
 
-async fn ensure_provider_is_attached(
+pub(crate) async fn ensure_provider_is_attached(
     transaction: &tokio_postgres::Transaction<'_>,
     project_id: &Uuid,
     provider_id: &str,
@@ -1358,6 +1451,7 @@ fn provider_request_to_payload(record: &ProviderRequestRecord) -> ProviderReques
         updated_at: record.updated_at.to_rfc3339(),
         expires_at: record.expires_at.to_rfc3339(),
         age_ms: record.age_ms,
+        trigger_age_ms: record.trigger_age_ms,
     }
 }
 
@@ -1385,6 +1479,7 @@ fn map_provider_request_row(row: &Row) -> ProviderRequestRecord {
         updated_at: row.get("updated_at"),
         expires_at: row.get("expires_at"),
         age_ms: row.get("age_ms"),
+        trigger_age_ms: row.get("trigger_age_ms"),
     }
 }
 
@@ -1402,7 +1497,7 @@ fn normalize_wait_timeout_ms(value: Option<u64>) -> u64 {
         .clamp(MIN_WAIT_TIMEOUT_MS, MAX_WAIT_TIMEOUT_MS)
 }
 
-fn normalize_provider_id(raw: &str) -> Result<String, (StatusCode, Json<ApiError>)> {
+pub(crate) fn normalize_provider_id(raw: &str) -> Result<String, (StatusCode, Json<ApiError>)> {
     let normalized = raw.trim().to_ascii_lowercase();
     if normalized.is_empty() {
         return Err(bad_request("providerId is required"));
@@ -1419,7 +1514,7 @@ fn normalize_provider_id(raw: &str) -> Result<String, (StatusCode, Json<ApiError
     Ok(normalized)
 }
 
-fn normalize_named_identifier(
+pub(crate) fn normalize_named_identifier(
     raw: &str,
     field: &str,
     max_len: usize,
@@ -1526,6 +1621,7 @@ mod tests {
             updated_at: created_at,
             expires_at: created_at,
             age_ms: 0,
+            trigger_age_ms: None,
         }
     }
 

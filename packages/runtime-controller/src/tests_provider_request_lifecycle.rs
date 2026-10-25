@@ -884,6 +884,7 @@ async fn a_job_that_ends_cancels_its_open_device_requests() -> anyhow::Result<()
                 let mut connection = fixture.space.pool.get().await?;
                 let mut transaction = connection.transaction().await?;
                 let work = crate::project_work_cancellation::cancel_project_work_in_transaction(
+                    &fixture.space.state.config,
                     &mut transaction,
                     fixture.space.project_id,
                 )

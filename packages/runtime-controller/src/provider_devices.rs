@@ -26,7 +26,7 @@ const DEVICE_LABEL_MAX_LEN: usize = 256;
 const DEVICE_STATUS_MAX_LEN: usize = 64;
 const CONNECTION_TYPE_MAX_LEN: usize = 64;
 const DEVICE_PRESENCE_ONLINE_TTL_SECONDS: i64 = 30;
-const CATALOG_MAX_TOOLS: usize = 64;
+pub(crate) const CATALOG_MAX_TOOLS: usize = 64;
 const CATALOG_MAX_BYTES: usize = 64 * 1024;
 pub(crate) const DEVICE_OWNED_BY_ANOTHER: &str = "This device belongs to another person.";
 
@@ -56,6 +56,20 @@ macro_rules! live_owner {
     };
 }
 pub(crate) use live_owner;
+
+/// The SQL for the hash of the catalog in `$column`: the SHA-256 of its
+/// `jsonb` text, which changes whenever the catalog does. A device grant pins
+/// it (`device_grants.rs`).
+macro_rules! catalog_hash {
+    ($column:literal) => {
+        concat!(
+            "encode(sha256(convert_to(",
+            $column,
+            "::text, 'UTF8')), 'hex')"
+        )
+    };
+}
+pub(crate) use catalog_hash;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

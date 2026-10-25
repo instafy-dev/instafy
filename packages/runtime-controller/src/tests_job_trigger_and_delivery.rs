@@ -5,8 +5,9 @@
 // and automations record a job's trigger from the caller's own credential, a
 // message says what made it only where device grants are on for its sender,
 // the lease, a runtime stop and the idle sweep honour a job's delivery
-// options, and an owned device answers only to its owner. Requires
-// `TEST_DATABASE_URL` like the tests in `tests.rs`.
+// options, and an owned device answers only to its owner. Its space and
+// harness serve `tests_device_grants.rs` too. Requires `TEST_DATABASE_URL`
+// like the tests in `tests.rs`.
 
 use axum::http::StatusCode;
 use axum::Router;
@@ -29,15 +30,22 @@ pub(crate) const PROVIDER_ID: &str = "device:delivery-test";
 pub(crate) const DEVICE_ID: &str = "device-1";
 pub(crate) const OTHER_DEVICE_ID: &str = "device-2";
 
-/// An org whose space has an owner and another member, each with an agent
-/// called `helper`, and two self-hosted machines of the owner's.
+/// An org whose space has an owner, another member and a guest, each with an
+/// agent called `helper`, two conversations the owner started, and two
+/// self-hosted machines of the owner's.
 pub(crate) struct Space {
     pub(crate) org_id: Uuid,
     pub(crate) project_id: Uuid,
     pub(crate) owner: Uuid,
     pub(crate) member: Uuid,
+    /// A member of the space only, not of its org.
+    pub(crate) guest: Uuid,
+    pub(crate) owner_agent: Uuid,
+    pub(crate) member_agent: Uuid,
     /// A conversation everyone in the space reads.
     pub(crate) log: Uuid,
+    /// Another conversation everyone reads.
+    pub(crate) other_chat: Uuid,
     pub(crate) runtime: Uuid,
     pub(crate) other_machine: Uuid,
 }
@@ -49,14 +57,18 @@ impl Space {
             project_id: Uuid::new_v4(),
             owner: Uuid::new_v4(),
             member: Uuid::new_v4(),
+            guest: Uuid::new_v4(),
+            owner_agent: Uuid::new_v4(),
+            member_agent: Uuid::new_v4(),
             log: Uuid::new_v4(),
+            other_chat: Uuid::new_v4(),
             runtime: Uuid::new_v4(),
             other_machine: Uuid::new_v4(),
         }
     }
 
     async fn seed(&self, pool: &PgPool, label: &str) -> anyhow::Result<()> {
-        for user in [self.owner, self.member] {
+        for user in [self.owner, self.member, self.guest] {
             ensure_test_user(pool, &user).await?;
         }
         let connection = pool.get().await?;
@@ -83,8 +95,8 @@ impl Space {
         connection
             .execute(
                 "insert into project_memberships (project_id, user_id, role)
-                 values ($1, $2, 'builder')",
-                &[&self.project_id, &self.member],
+                 values ($1, $2, 'builder'), ($1, $3, 'builder')",
+                &[&self.project_id, &self.member, &self.guest],
             )
             .await?;
         connection
@@ -94,7 +106,11 @@ impl Space {
                 &[&self.org_id, &self.project_id],
             )
             .await?;
-        for user in [self.owner, self.member] {
+        for (user, agent) in [
+            (self.owner, self.owner_agent),
+            (self.member, self.member_agent),
+            (self.guest, Uuid::new_v4()),
+        ] {
             let credential_id = Uuid::new_v4();
             connection
                 .execute(
@@ -111,17 +127,19 @@ impl Space {
                          id, user_id, credential_id, provider, handle, display_name,
                          description, avatar_seed
                      ) values ($1, $2, $3, 'openai', 'helper', 'Helper', 'Helps', 'helper')",
-                    &[&Uuid::new_v4(), &user, &credential_id],
+                    &[&agent, &user, &credential_id],
                 )
                 .await?;
         }
-        connection
-            .execute(
-                "insert into conversations (id, project_id, created_by, metadata, visibility)
-                 values ($1, $2, $3, '{}'::jsonb, 'public')",
-                &[&self.log, &self.project_id, &self.owner],
-            )
-            .await?;
+        for conversation in [self.log, self.other_chat] {
+            connection
+                .execute(
+                    "insert into conversations (id, project_id, created_by, metadata, visibility)
+                     values ($1, $2, $3, '{}'::jsonb, 'public')",
+                    &[&conversation, &self.project_id, &self.owner],
+                )
+                .await?;
+        }
         let mut capabilities = json!({ "agent": true, "origin": true });
         crate::runtime::set_self_hosted_access_attestation(
             capabilities.as_object_mut().expect("capabilities"),
@@ -153,7 +171,7 @@ impl Space {
 fn config(label: &str, space: &Space, grants: bool) -> AppConfig {
     let mut config = build_app_config(test_origin_private_key(), test_origin_public_key(), label);
     config.device_grants_enabled = grants;
-    config.device_grants_user_ids = vec![space.owner, space.member];
+    config.device_grants_user_ids = vec![space.owner, space.member, space.guest];
     config.runtime_providers = vec![RuntimeProviderConfig {
         id: "instafy-cloud".to_string(),
         display_name: "Instafy Cloud".to_string(),
@@ -446,7 +464,7 @@ where
 {
     let pool = require_origin_test_pool(label).await?;
     let space = Space::new();
-    let users = vec![space.owner, space.member];
+    let users = vec![space.owner, space.member, space.guest];
     let fixture = SharedDbFixture {
         organizations: vec![space.org_id],
         projects: vec![space.project_id],
@@ -461,6 +479,7 @@ where
         .merge(crate::automations::router())
         .merge(crate::provider_requests::router())
         .merge(crate::provider_devices::router())
+        .merge(crate::device_grants::router(&state.config))
         .with_state(state.clone());
     let body_pool = pool.clone();
     let result = with_shared_db_fixture(fixture, async move {

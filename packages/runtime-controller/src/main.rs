@@ -40,6 +40,7 @@ mod db_pool_headers;
 mod desktop_updates;
 mod dev;
 mod device_auth;
+mod device_grants;
 mod diagnostics;
 mod dispatch;
 mod edge_downloads;
@@ -103,6 +104,8 @@ mod tests_chat_attachment_policies;
 mod tests_completion_reply_first;
 #[cfg(test)]
 mod tests_deleted_space_fence;
+#[cfg(test)]
+mod tests_device_grants;
 #[cfg(test)]
 mod tests_hosted_runtime_billing;
 #[cfg(test)]
@@ -537,6 +540,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(integrations::router())
         .merge(providers::router())
         .merge(provider_devices::router())
+        .merge(device_grants::router(&config))
         .merge(provider_requests::router())
         .merge(agent::router())
         .merge(agent_contexts::router())
