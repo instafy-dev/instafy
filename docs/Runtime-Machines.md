@@ -208,6 +208,27 @@ older hold does not count: a machine started from another tab or device after
 it, then lost, is recovered as before. Every automatic start reads the holds
 once more right before it asks for a machine.
 
+A tab can miss a stop's `runtime.stopped`, for instance while its event
+stream reconnects. It then reads the stop only in a later runtime status (the
+Machines panel's poll, a refresh on another event), or hears of it only as the
+origin expiring a minute later. So every status read checks the machines the
+tab saw come up in the space for the `lastStopReason` the status reports (see
+"A launch that does not come up" below), before any automatic start, the
+loss included, reads the holds. An idle or other platform stop there holds
+the space like an idle pause, and so does a reclaim (`runtime_limit_reclaim`)
+when the tab has no queued message or open turn there; a person's Stop or a
+takeover holds it like their Stop (when it leaves no live hosted machine).
+Each stop is read once, the first time a status names it, since the status
+keeps naming it until the machine comes up again: no hold is set when a hosted
+launch was requested after that stop, when the tab heard the stop's own
+`runtime.stopped`, when a hold set since the machine came up already stands
+for it, or while a request for a machine is under way. Each hold lifts as it
+always does: the idle pause on writing in the chat, Send or Start, the Stop on
+Send, Start or Reconnect. A Remove counts only when a status read lands during
+its release: once released, the removed runtime leaves the status, and its
+loss is recovered as before. A controller from before the field reports none,
+and every automatic start goes on as before.
+
 Every hosted stop is followed, about a minute later, by `origin.expired` for
 the stopped machine's origin. The origin server beats every 20 seconds, and
 once its last heartbeat is 60 seconds old, three beats, the origin presence
@@ -372,6 +393,17 @@ release is acknowledged (the runtime is then `stopped`) or the next launch
 replaces the lease. A launch quarantined after a failed provider call is not a
 stop and carries neither, and a controller from before these fields sends
 neither.
+
+Those two go with the quarantine, so the entry also names the runtime's newest
+stop since it last came up, for as long as it has not come up again:
+`lastStopReason`, the same bounded token, and `lastStoppedAt`. While the
+quarantine lasts they are `stopReason` and `stopRequestedAt`; after the
+release they are the reason and time of the stop's `stopped` record. The
+runtime's next registration clears them, and so does a status that reads it
+`ready`, `running` or `draining`. They are read from `runtime_events` (the
+newest `stopped` record against the newest `registered` one), so a stop older
+than the 14-day event retention still counts: `stopped` records are never
+pruned. A controller from before these fields sends neither.
 
 The Studio takes such a runtime for a stop when it knows of one newer than
 that launch: this tab's own Stop or Remove, a turn a person's stop put back in

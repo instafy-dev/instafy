@@ -4136,6 +4136,27 @@ fn ensure_browser_host_route_allowed(
     Ok(())
 }
 
+/// The code of the 400 a browser grant answers when it names an origin that
+/// is no longer its runtime's online one: the runtime came back under a new
+/// origin, so the client looks the runtime up again instead of retrying.
+const BROWSER_ORIGIN_REPLACED_CODE: &str = "browser_origin_replaced";
+
+/// Refuses a browser grant for `requested`, the origin the client holds, when
+/// it is not `online`, its runtime's online origin now. A grant that names no
+/// origin takes the online one.
+fn ensure_requested_origin_is_online(
+    requested: Option<Uuid>,
+    online: Uuid,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    if requested.is_some_and(|origin_id| origin_id != online) {
+        let (status, Json(mut error)) =
+            bad_request("origin is not the online origin for preferred runtime");
+        error.code = Some(BROWSER_ORIGIN_REPLACED_CODE.to_string());
+        return Err((status, Json(error)));
+    }
+    Ok(())
+}
+
 fn origin_proxy_request_body_limit(method: &Method, path: &str) -> usize {
     match (method, path.trim().trim_start_matches('/')) {
         (&Method::POST, "browser/webrtc/offer") => ORIGIN_PROXY_WEBRTC_BODY_BYTES,
@@ -5960,6 +5981,28 @@ MCowBQYDK2VwAyEAFQAEX0aYqix3VQUBg05FFISGxhx2Ry93VE51GzM5iXA=
 
         config.hosted_browser_host = crate::config::HostedBrowserHostPolicy::All;
         assert!(ensure_browser_host_route_allowed(&config, &start, &outside).is_ok());
+    }
+
+    #[test]
+    fn a_browser_grant_for_a_replaced_origin_says_so() {
+        let online = Uuid::new_v4();
+        assert!(ensure_requested_origin_is_online(None, online).is_ok());
+        assert!(ensure_requested_origin_is_online(Some(online), online).is_ok());
+
+        // The runtime came back under a new origin: the same 400 and message
+        // as before, now with a code of its own.
+        let replaced = ensure_requested_origin_is_online(Some(Uuid::new_v4()), online)
+            .expect_err("an origin the runtime no longer has");
+        assert_eq!(replaced.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            replaced.1 .0.message,
+            "origin is not the online origin for preferred runtime"
+        );
+        assert_eq!(
+            replaced.1 .0.code.as_deref(),
+            Some("browser_origin_replaced")
+        );
+        assert!(replaced.1 .0.details.is_none());
     }
 
     #[test]
@@ -8206,11 +8249,7 @@ pub(crate) async fn post_access_token(
                 "no online origin available for requested browser runtime",
             ));
         };
-        if requested_origin_id.is_some_and(|origin_id| origin_id != resolved.origin.id) {
-            return Err(bad_request(
-                "origin is not the online origin for preferred runtime",
-            ));
-        }
+        ensure_requested_origin_is_online(requested_origin_id, resolved.origin.id)?;
         (resolved.origin, Some(runtime_uuid))
     } else if let Some(origin_uuid) = requested_origin_id {
         let origin = load_origin_by_id(&state.pool, &origin_uuid)

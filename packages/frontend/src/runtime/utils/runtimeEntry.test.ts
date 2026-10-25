@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ControllerRuntimeStatusEntry } from "../../sdk/instafy";
 import {
   latestHostedLaunchRequestedAtMs,
+  reportedRuntimeStopHold,
   resolveStalledHostedLaunch,
   runtimeEntryIsBooting,
   runtimeEntryIsStaleBooting,
@@ -180,6 +181,80 @@ describe("a stop's release", () => {
     expect(runtimeEntryIsStopping(releasing({ isLocal: true }), stopAtMs)).toBe(false);
     expect(runtimeEntryIsStopping(releasing({ provider: "self-hosted" }), stopAtMs)).toBe(false);
     expect(runtimeEntryIsStopping(null, stopAtMs)).toBe(false);
+  });
+});
+
+describe("reportedRuntimeStopHold", () => {
+  // An idle stop as the status reports it once its release is done: stopped,
+  // its lease gone, its stop still named.
+  const stoppedAt = "2026-10-24T09:43:41.000Z";
+  const stopped = (overrides: Partial<ControllerRuntimeStatusEntry> = {}) =>
+    createEntry({
+      status: "stopped",
+      launchRequestedAt: null,
+      lastStopReason: "idle",
+      lastStoppedAt: stoppedAt,
+      ...overrides,
+    });
+
+  it("holds a platform stop like an idle pause and a person's stop like Stop", () => {
+    for (const reason of ["idle", "credits_exhausted", "oom_killed"]) {
+      expect(reportedRuntimeStopHold(stopped({ lastStopReason: reason }))).toBe("idle_pause");
+    }
+    for (const reason of ["user_stop", "user_remove", "runtime_limit_takeover"]) {
+      expect(reportedRuntimeStopHold(stopped({ lastStopReason: reason }))).toBe("manual_stop");
+    }
+    // While the stop's release runs, the runtime reads requested on the
+    // launch it stopped, which is older than the stop.
+    expect(
+      reportedRuntimeStopHold(
+        stopped({ status: "requested", launchRequestedAt: "2026-10-24T09:05:30.000Z" }),
+      ),
+    ).toBe("idle_pause");
+  });
+
+  it("holds nothing for any other stop, or without the field", () => {
+    for (const reason of ["heartbeat_timeout", "launch_timeout", "runtime_limit_reclaim", "other", "", null]) {
+      expect(reportedRuntimeStopHold(stopped({ lastStopReason: reason }))).toBeNull();
+    }
+    // A controller older than the field.
+    expect(reportedRuntimeStopHold(createEntry({ status: "stopped" }))).toBeNull();
+    expect(reportedRuntimeStopHold(stopped({ lastStoppedAt: null }))).toBeNull();
+    expect(reportedRuntimeStopHold(stopped({ lastStoppedAt: "not a time" }))).toBeNull();
+    expect(reportedRuntimeStopHold(null)).toBeNull();
+  });
+
+  it("holds a reclaim like an idle pause only where the tab has no work there", () => {
+    for (const reason of ["runtime_limit_reclaim", "idle_runtime_limit_reclaim"]) {
+      expect(reportedRuntimeStopHold(stopped({ lastStopReason: reason }), { holdReclaim: true })).toBe(
+        "idle_pause",
+      );
+      expect(reportedRuntimeStopHold(stopped({ lastStopReason: reason }), { holdReclaim: false })).toBeNull();
+    }
+    expect(
+      reportedRuntimeStopHold(stopped({ lastStopReason: "heartbeat_timeout" }), { holdReclaim: true }),
+    ).toBeNull();
+    expect(
+      reportedRuntimeStopHold(
+        stopped({
+          lastStopReason: "runtime_limit_reclaim",
+          status: "requested",
+          launchRequestedAt: "2026-10-24T09:44:02.000Z",
+        }),
+        { holdReclaim: true },
+      ),
+    ).toBeNull();
+  });
+
+  it("holds nothing once a launch was asked for after the stop", () => {
+    expect(
+      reportedRuntimeStopHold(stopped({ status: "requested", launchRequestedAt: "2026-10-24T09:44:02.000Z" })),
+    ).toBeNull();
+  });
+
+  it("only applies to a hosted runtime", () => {
+    expect(reportedRuntimeStopHold(stopped({ isLocal: true }))).toBeNull();
+    expect(reportedRuntimeStopHold(stopped({ provider: "self-hosted" }))).toBeNull();
   });
 });
 
