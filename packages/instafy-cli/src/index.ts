@@ -2285,7 +2285,7 @@ previewOpenCommand
 
 const previewListCommand = previewCommand
   .command("list")
-  .description("List this space's previews");
+  .description("List this space's open previews (it does not check the sites: `instafy preview check` does)");
 
 addSpaceOption(previewListCommand, "Space UUID (defaults to .instafy/space.json or SPACE_ID)");
 addServerUrlOptions(previewListCommand);

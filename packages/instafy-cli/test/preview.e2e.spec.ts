@@ -213,6 +213,7 @@ async function startMockController(options: {
             path: "/",
             runtimeId: "runtime-1",
             status: "active",
+            restartable: true,
             messageId: "message-1",
             createdAt: new Date().toISOString(),
           },
@@ -966,6 +967,20 @@ describe("instafy preview", () => {
     expect(other.captures).toHaveLength(0);
   }, 30000);
 
+  it("says where a stopped preview went when none is open", async () => {
+    const projectId = randomUUID();
+    const controller = await startMockController({ projectId, listStatus: 200, listBody: [] });
+    const home = makeHome();
+
+    const listed = await execCli(
+      ["preview", "list", "--space", projectId, "--server-url", controller.url, "--access-token", "test-token"],
+      home,
+    );
+    expect(listed.code, listed.stderr).toBe(0);
+    expect(listed.stdout).toContain("No open previews.");
+    expect(listed.stdout).toContain("its card reads Stopped, and Open on a restartable card starts the site again");
+  }, 30000);
+
   it("lists previews from the server and closes one", async () => {
     const projectId = randomUUID();
     const rathole = makeStubRathole();
@@ -983,8 +998,18 @@ describe("instafy preview", () => {
     );
     expect(listed.code, listed.stderr).toBe(0);
     expect(JSON.parse(listed.stdout)).toEqual([
-      { previewId: "preview-1", title: "Site preview", port: 4173, path: "/", status: "active" },
+      { previewId: "preview-1", title: "Site preview", port: 4173, path: "/", status: "active", restartable: true },
     ]);
+
+    // The text form says the preview is open, not that its site answers, and where a stopped one went.
+    const text = await execCli(
+      ["preview", "list", "--space", projectId, "--server-url", controller.url, "--access-token", "test-token"],
+      home,
+    );
+    expect(text.code, text.stderr).toBe(0);
+    expect(text.stdout).toContain("preview-1 · Site preview · port=4173 · preview active · restartable");
+    expect(text.stdout).toContain("it does not check whether a site answers");
+    expect(text.stdout).toContain("A preview whose machine stopped or restarted is not listed");
 
     const closed = await execCli(
       ["preview", "close", "preview-1", "--server-url", controller.url, "--access-token", "test-token", "--json"],
