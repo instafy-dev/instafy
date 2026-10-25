@@ -45,7 +45,7 @@ use crate::tunnels::{
     authorize_active_job_tunnel, authorize_live_runtime_machine_tunnel,
     ensure_private_runtime_access, ensure_project_authorized, ensure_project_write_authorized,
     ensure_runtime_tunnel_generation_is_live, load_runtime_tunnel_grant_by_tunnel_id,
-    mark_issuing_tunnel_active, parse_required_uuid, publish_grant_revoked,
+    mark_issuing_tunnel_active, parse_required_uuid, probe_saw_site, publish_grant_revoked,
     request_runtime_tunnel_with_overrides, resolve_canonical_tunnel_runtime_id,
     revoke_tunnel_record, runtime_tunnel_grant_from_row, tunnel_status_is_active,
     RuntimeTunnelGenerationState, RuntimeTunnelGrantRecord, TunnelProbe, TunnelRequestOverrides,
@@ -1342,13 +1342,6 @@ async fn probe_preview(
         cache.insert(tunnel_id, (Instant::now(), health.clone()));
     }
     health
-}
-
-/// Whether a probe saw the site answer through the tunnel, not the broker's
-/// 502 to 504 for a site that is down behind it (Studio reads those as not
-/// responding too).
-fn probe_saw_site(health: Option<&TunnelProbe>) -> bool {
-    health.is_some_and(|probe| probe.listening && !matches!(probe.status, Some(502..=504)))
 }
 
 /// A preview whose probe saw the site is serving: an issuing grant becomes

@@ -964,7 +964,7 @@ async fn get_project_tunnel_grants(
     ensure_project_authorized(&state, &project_id, &auth).await?;
 
     let grants = fetch_runtime_tunnel_grants(&state.pool, &project_id).await?;
-    let mut visible_grants = Vec::with_capacity(grants.len());
+    let mut visible_grants: Vec<RuntimeTunnelGrantRecord> = Vec::with_capacity(grants.len());
     for grant in grants {
         if let Some(runtime_id) = resolve_canonical_tunnel_runtime_id(
             &state,
@@ -982,11 +982,17 @@ async fn get_project_tunnel_grants(
         }
         visible_grants.push(grant);
     }
+    promote_listening_tunnels(&state, &mut visible_grants).await;
+    let now = Utc::now();
     let payload = TunnelGrantListResponse {
         project_id,
         grants: visible_grants
             .iter()
-            .map(|grant| tunnel_response_from_record(grant, None))
+            .map(|grant| {
+                let mut response = tunnel_response_from_record(grant, None);
+                response.status = listed_tunnel_status(grant, now);
+                response
+            })
             .collect(),
     };
 
@@ -1718,6 +1724,124 @@ async fn update_tunnel_status_record(
         crate::previews::revoke_preview_sessions_for_tunnel(pool, &updated.tunnel_id).await;
     }
     Ok(updated)
+}
+
+/// Whether a probe saw the site answer through the tunnel, not the broker's
+/// 502 to 504 for a site that is down behind it (Studio reads those as not
+/// responding too).
+pub(crate) fn probe_saw_site(health: Option<&TunnelProbe>) -> bool {
+    health.is_some_and(|probe| probe.listening && !matches!(probe.status, Some(502..=504)))
+}
+
+/// How often a tunnel listing asks the broker again about one grant that is
+/// still issuing; listings are polled, the probe need not be.
+const ISSUING_TUNNEL_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+/// A listing asks about at most this many issuing grants, all at once, and
+/// waits at most this long for the answers.
+const ISSUING_TUNNEL_PROBES_PER_LISTING: usize = 8;
+const ISSUING_TUNNEL_PROBE_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+static ISSUING_TUNNEL_PROBED_AT: once_cell::sync::Lazy<
+    std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Whether this node may probe `tunnel_id` now; claims the slot if so.
+fn claim_issuing_tunnel_probe(tunnel_id: &str) -> bool {
+    let Ok(mut probed_at) = ISSUING_TUNNEL_PROBED_AT.lock() else {
+        return false;
+    };
+    probed_at.retain(|_, at| at.elapsed() < ISSUING_TUNNEL_PROBE_INTERVAL);
+    if probed_at.contains_key(tunnel_id) {
+        return false;
+    }
+    probed_at.insert(tunnel_id.to_string(), std::time::Instant::now());
+    true
+}
+
+#[cfg(test)]
+pub(crate) fn forget_issuing_tunnel_probes() {
+    if let Ok(mut probed_at) = ISSUING_TUNNEL_PROBED_AT.lock() {
+        probed_at.clear();
+    }
+}
+
+/// The listing's proof for grants that are not previews. Previews prove they
+/// serve on their own routes; a public tunnel an agent or the runtime started
+/// has no such route, so without this it would say "issuing" for its whole
+/// life. Each issuing, unexpired grant is probed through the broker (at most
+/// every [`ISSUING_TUNNEL_PROBE_INTERVAL`]) and becomes active once its site
+/// answers. A broker that cannot be asked changes nothing.
+async fn promote_listening_tunnels(state: &AppState, grants: &mut [RuntimeTunnelGrantRecord]) {
+    let Some(broker) = state.tunnel_broker.clone() else {
+        return;
+    };
+    let now = Utc::now();
+    let due: Vec<usize> = grants
+        .iter()
+        .enumerate()
+        .filter(|(_, grant)| {
+            grant.status.trim().eq_ignore_ascii_case("issuing")
+                && grant.expires_at > now
+                && !crate::previews::grant_metadata_is_preview(grant.metadata.as_ref())
+        })
+        .filter(|(_, grant)| claim_issuing_tunnel_probe(&grant.tunnel_id))
+        .map(|(index, _)| index)
+        .take(ISSUING_TUNNEL_PROBES_PER_LISTING)
+        .collect();
+    if due.is_empty() {
+        return;
+    }
+    // Each probe has its own deadline, so one that hangs does not throw away
+    // the answers the others already brought back.
+    let probes = due.iter().map(|&index| {
+        let broker = broker.clone();
+        let tunnel_id = grants[index].tunnel_id.clone();
+        async move {
+            tokio::time::timeout(
+                ISSUING_TUNNEL_PROBE_WAIT,
+                broker.probe_tunnel(&tunnel_id, "/"),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                Err(anyhow::anyhow!(
+                    "tunnel broker probe did not answer in time"
+                ))
+            })
+        }
+    });
+    let probes = futures_util::future::join_all(probes).await;
+    for (index, probe) in due.into_iter().zip(probes) {
+        match probe {
+            Ok(health) if probe_saw_site(Some(&health)) => {
+                match mark_issuing_tunnel_active(state, &grants[index]).await {
+                    Ok(Some(updated)) => grants[index] = updated,
+                    Ok(None) => {}
+                    Err((_, Json(error))) => warn!(
+                        tunnel_id = %grants[index].tunnel_id,
+                        error = %error.message,
+                        "could not record the tunnel as active"
+                    ),
+                }
+            }
+            Ok(_) => {}
+            Err(error) => warn!(
+                tunnel_id = %grants[index].tunnel_id,
+                ?error,
+                "tunnel probe failed"
+            ),
+        }
+    }
+}
+
+/// The status a listing shows. A grant past its `expires_at` no longer counts
+/// anywhere (every limit and gate checks `expires_at`), so an issuing or
+/// active one is listed as expired rather than as still running.
+fn listed_tunnel_status(grant: &RuntimeTunnelGrantRecord, now: DateTime<Utc>) -> String {
+    let status = grant.status.trim().to_ascii_lowercase();
+    if grant.expires_at <= now && matches!(status.as_str(), "issuing" | "active") {
+        return "expired".to_string();
+    }
+    grant.status.clone()
 }
 
 /// The broker reports a new tunnel as issuing, and nothing else tells the
