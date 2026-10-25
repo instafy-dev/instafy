@@ -20,6 +20,7 @@ import { getStudioVisitKey } from "../navigation/studioVisit";
 import { controllerClient } from "../sdk/instafy";
 import { useWorkspaceStore } from "../store";
 import { isUUID } from "../utils/uuid";
+import { startGatedInterval, type GatedInterval } from "../runtime/pollingGate";
 import { useProjectState } from "./ProjectStateProvider";
 import { useAuth } from "../providers/AuthProvider";
 import { clearProjectState } from "../workspace/projectClear";
@@ -67,7 +68,11 @@ function readUrlProjectId(): string | null {
 }
 
 const PROJECT_SUMMARY_RETRY_BACKOFF_MS = 5_000;
-const PROJECT_CAPABILITY_REFRESH_INTERVAL_MS = 60_000;
+// The space's event stream announces access and name changes
+// (project.access_changed) and a reconnect re-checks, so this is a fallback:
+// once a minute while the user is active, every 6 min once idle, never while
+// hidden, and on a return only when the last check is 30 s old or more.
+export const PROJECT_CAPABILITY_REFRESH_INTERVAL_MS = 60_000;
 
 export interface ProjectAccessContextValue {
   projectInitialized: boolean;
@@ -942,6 +947,9 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
     // The controller said the open space was deleted, so removing it also
     // drops its saved tabs. A failed access check alone never does.
     let targetDeleted = false;
+    let periodicRefresh: GatedInterval | null = null;
+    // A retry that came due while the tab was hidden runs when it is visible.
+    let retryDeferred = false;
 
     // The store can hold another space while the URL still names a blocked
     // one. This tab is not showing that other space, and checking it would
@@ -964,6 +972,8 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
         retryTimer = null;
         if (document.visibilityState !== "hidden") {
           void refreshCapabilities();
+        } else {
+          retryDeferred = true;
         }
       }, delayMs);
     };
@@ -980,6 +990,8 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
         window.clearTimeout(retryTimer);
         retryTimer = null;
       }
+      retryDeferred = false;
+      periodicRefresh?.markRun();
       refreshInFlight = true;
       const abortController = new AbortController();
       requestController = abortController;
@@ -1061,11 +1073,15 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
       }
     };
 
+    // Coming back to the tab joins a check already under way (the polling
+    // gate's wake may have started one) instead of queueing a second.
     const handleFocus = () => {
-      void refreshCapabilities();
+      if (!refreshInFlight) {
+        void refreshCapabilities();
+      }
     };
     const handleVisibilityChange = () => {
-      if (document.visibilityState === "visible") {
+      if (document.visibilityState === "visible" && retryDeferred) {
         void refreshCapabilities();
       }
     };
@@ -1141,8 +1157,8 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
     const handleStreamReconnected = () => {
       void refreshCapabilities();
     };
-    const intervalId = window.setInterval(() => {
-      if (document.visibilityState !== "hidden") {
+    periodicRefresh = startGatedInterval(() => {
+      if (!refreshInFlight) {
         void refreshCapabilities();
       }
     }, PROJECT_CAPABILITY_REFRESH_INTERVAL_MS);
@@ -1174,7 +1190,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
       requestController?.abort();
-      window.clearInterval(intervalId);
+      periodicRefresh?.stop();
       if (retryTimer !== null) {
         window.clearTimeout(retryTimer);
       }

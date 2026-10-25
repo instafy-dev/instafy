@@ -159,6 +159,23 @@ describe("useCredits timers", () => {
     expect(mocks.fetchCreditLedger).not.toHaveBeenCalled();
   });
 
+  // Measurement A: a visibility flip every 4.6 s refetched the status on each
+  // flip (14 per 64 s). Changes come from credits.updated; the fallback
+  // stays once a minute, also across returns.
+  it("refetches the status on a return only once a minute has passed", async () => {
+    await render();
+    expect(mocks.fetchCreditSnapshot).toHaveBeenCalledTimes(1);
+    for (let flip = 0; flip < 28; flip += 1) {
+      await act(async () => setVisibility("hidden"));
+      await advance(2_300);
+      await act(async () => setVisibility("visible"));
+      await advance(2_300);
+    }
+    // Over 128.8 s: the returns at 62.1 s and 126.5 s, the first visible
+    // moments a minute after the previous fetch.
+    expect(mocks.fetchCreditSnapshot).toHaveBeenCalledTimes(3);
+  });
+
   it("refreshes the status every 15 s while the Credits panel is open and the user is active, never while idle", async () => {
     mocks.activePanel = "credits";
     await render();
@@ -174,7 +191,8 @@ describe("useCredits timers", () => {
 
     await advance(POLLING_IDLE_AFTER_MS);
     const atIdle = mocks.fetchCreditSnapshot.mock.calls.length;
-    await advance(200_000);
+    // Up to 415 s: the slow status tick is due 5 min after its 120 s run.
+    await advance(190_000);
     expect(mocks.fetchCreditSnapshot).toHaveBeenCalledTimes(atIdle);
 
     await act(async () => touch());

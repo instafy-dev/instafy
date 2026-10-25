@@ -27,9 +27,12 @@ import { CREDITS_UPDATED_EVENT } from "./creditsEvents";
 export { CREDITS_UPDATED_EVENT } from "./creditsEvents";
 
 // Every tab keeps one status refresh per minute while the user is active,
-// one per five minutes once idle and none while hidden. The Credits panel
-// adds a faster loop only while it is open and the user is active.
-const STATUS_ACTIVE_MS = 60_000;
+// one per five minutes once idle and none while hidden. Coming back refreshes
+// only once a minute has passed: credits.updated on the space's event stream
+// carries every change, and a hidden tab catches up on it by itself. The
+// Credits panel adds a faster loop only while it is open and the user is
+// active.
+export const STATUS_ACTIVE_MS = 60_000;
 const STATUS_IDLE_MS = 300_000;
 const PANEL_STATUS_ACTIVE_MS = 15_000;
 const LEDGER_FALLBACK_ACTIVE_MS = 60_000;
@@ -203,7 +206,7 @@ export function CreditsProvider({ children }: { children: ReactNode }) {
       void refreshRef.current({ force: true, notifyOnError: false });
     },
     STATUS_ACTIVE_MS,
-    { idleMs: STATUS_IDLE_MS }
+    { idleMs: STATUS_IDLE_MS, wakeAfterMs: STATUS_ACTIVE_MS }
   );
 
   // While the Credits panel is open the balance refreshes every 15 s, but

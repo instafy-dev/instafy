@@ -259,6 +259,56 @@ describe("ProjectAccessProvider capability refresh", () => {
     expect(container.querySelector('[data-testid="access-probe"]')?.getAttribute("data-role")).toBe("viewer");
   });
 
+  describe("periodic access checks", () => {
+    function setVisibility(state: "visible" | "hidden") {
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => state });
+      document.dispatchEvent(new Event("visibilitychange"));
+    }
+    beforeEach(() => {
+      vi.useFakeTimers();
+      setVisibility("visible");
+      window.dispatchEvent(new Event("pointerdown"));
+      mocks.getSummaryResult.mockResolvedValue(summaryFor("admin"));
+    });
+    afterEach(() => setVisibility("visible"));
+
+    // Measurement A: a visibility flip every 4.6 s re-read the space on each
+    // flip (14 per 64 s).
+    it("re-checks on a return only once the last check is 30 s old", async () => {
+      await act(async () => root.render(<ProjectAccessProvider><AccessProbe /></ProjectAccessProvider>));
+      const initial = mocks.getSummaryResult.mock.calls.length;
+      for (let flip = 0; flip < 14; flip += 1) {
+        await act(async () => setVisibility("hidden"));
+        await act(async () => vi.advanceTimersByTimeAsync(2_300));
+        await act(async () => setVisibility("visible"));
+        await act(async () => vi.advanceTimersByTimeAsync(2_300));
+      }
+      // Only the return at 34.5 s found the last check stale.
+      expect(mocks.getSummaryResult.mock.calls.length - initial).toBe(1);
+    });
+
+    it("checks once a minute while active and backs off once idle", async () => {
+      await act(async () => root.render(<ProjectAccessProvider><AccessProbe /></ProjectAccessProvider>));
+      const initial = mocks.getSummaryResult.mock.calls.length;
+      await act(async () => vi.advanceTimersByTimeAsync(600_000));
+      // 60 s and 120 s while active; idle from 180 s moves the next to 480 s.
+      expect(mocks.getSummaryResult.mock.calls.length - initial).toBe(3);
+    });
+
+    it("lets a window focus join the check a wake already started", async () => {
+      await act(async () => root.render(<ProjectAccessProvider><AccessProbe /></ProjectAccessProvider>));
+      const initial = mocks.getSummaryResult.mock.calls.length;
+      await act(async () => vi.advanceTimersByTimeAsync(40_000));
+      await act(async () => setVisibility("hidden"));
+      await act(async () => {
+        setVisibility("visible");
+        window.dispatchEvent(new Event("focus"));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(mocks.getSummaryResult.mock.calls.length - initial).toBe(1);
+    });
+  });
+
   it.each(["unavailable", "rejected"])("recovers from an initial %s lookup without keeping the full-screen loader or granting access", async (failure) => {
     vi.useFakeTimers();
     vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");

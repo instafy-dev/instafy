@@ -4,14 +4,23 @@ import { useStatus } from "../status/useStatus";
 import type { NotificationPage, NotificationPreferences, ProductNotification } from "./notificationContract";
 import { claimNotificationPresentation, NOTIFICATION_RECEIVED_EVENT } from "./notificationPresentation";
 import { NOTIFICATION_PREFERENCES_CHANGED_EVENT } from "./notificationPreferencesEvents";
+import { NOTIFICATION_FEED_CHANGED_EVENT } from "./notificationFeedEvents";
 import { areMessageNotificationsEnabled, isAppInForeground, notifyAssistantMessage } from "./assistantMessageNotifications";
 import { useGatedInterval } from "../runtime/pollingGate";
 import { announceConversationReplies, isConversationOpen } from "./openConversations";
 
-const POLL_ACTIVE_MS = 20_000;
-const POLL_IDLE_MS = 120_000;
+// A timer tick reads only the newest unread page and refreshes the rest only
+// when that page or the unread total changed. Web Push, native push and the
+// open space's event stream deliver the urgent cases sooner.
+const POLL_ACTIVE_MS = 30_000;
+const POLL_IDLE_MS = 300_000;
 
 const EMPTY_PAGE: NotificationPage = { items: [], nextCursor: null, unreadCount: 0, asOf: "" };
+
+/** Everything a tick compares: the unread total and the newest unread rows' states. */
+function unreadSignature(page: NotificationPage): string {
+  return `${page.unreadCount}|${page.items.map(item => `${item.id}:${item.seenAt ?? ""}:${item.readAt ?? ""}:${item.archivedAt ?? ""}`).join(",")}`;
+}
 
 /** The conversation a `conversation.reply` notification points at, from its canonical Studio URL. */
 export function replyConversationId(item: ProductNotification): string | null {
@@ -48,7 +57,9 @@ export function useNotificationCenter({ userId, accessToken, navigate }: { userI
   const depth = useRef({ session, value: 1 });
   if (depth.current.session !== session) depth.current = { session, value: 1 };
   const oldest = useRef<{ session: typeof session; at: string; id: string } | null>(null);
-  const inFlight = useRef<{ session: typeof session; promise: Promise<void> } | null>(null);
+  const inFlight = useRef<{ session: typeof session; promise: Promise<void>; check: boolean } | null>(null);
+  // The newest unread page as of the last complete refresh, for timer checks.
+  const unreadSeen = useRef<{ session: typeof session; signature: string } | null>(null);
   const preferencesRef = useRef<{ session: typeof session; value: NotificationPreferences } | null>(null);
   // The newest unread page from the last refresh, so presentation does not
   // request it a second time on every tick.
@@ -56,18 +67,27 @@ export function useNotificationCenter({ userId, accessToken, navigate }: { userI
   const toastIds = useRef(new Set<string>());
   // Reply notifications already announced to the open chat, per session.
   const announced = useRef<{ session: typeof session; ids: Set<string> } | null>(null);
-  const pollRef = useRef<(() => Promise<void>) | null>(null);
+  const pollRef = useRef<((options?: { check?: boolean }) => Promise<void>) | null>(null);
   const { showStatus, hideStatus } = useStatus();
 
-  const refresh = useCallback((options?: { force?: boolean }): Promise<void> => {
+  const refresh = useCallback((options?: { force?: boolean; ifUnreadChanged?: boolean }): Promise<void> => {
     if (!userId || !accessToken || !current()) return Promise.resolve();
+    const check = Boolean(options?.ifUnreadChanged && !options.force);
     if (options?.force) { requests.current += 1; inFlight.current = null; }
-    if (inFlight.current?.session === session) return inFlight.current.promise;
+    // A check joins any request in flight; a full refresh replaces a check.
+    if (inFlight.current?.session === session && (check || !inFlight.current.check)) return inFlight.current.promise;
     const generation = ++requests.current;
     const valid = () => current() && generation === requests.current;
-    patch({ loading: true });
+    if (!check) patch({ loading: true });
     const promise = (async () => {
       try {
+        let firstUnread: NotificationPage | undefined;
+        if (check) {
+          firstUnread = await controllerClient.notifications.list({ view: "unread", accessToken });
+          if (!valid()) return;
+          latestUnread.current = { session, items: firstUnread.items };
+          if (unreadSeen.current?.session === session && unreadSeen.current.signature === unreadSignature(firstUnread)) return;
+        }
         // Refresh the loaded range, including read state, rather than discarding
         // older pages while somebody is reading Home.
         let before: string | undefined;
@@ -95,24 +115,36 @@ export function useNotificationCenter({ userId, accessToken, navigate }: { userI
         // whichever notification page happens to be open.
         let unreadCursor: string | undefined;
         let unread: NotificationPage;
+        let signature = "";
         do {
-          unread = await controllerClient.notifications.list({ view: "unread", before: unreadCursor, accessToken });
+          unread = !unreadCursor && firstUnread ? firstUnread : await controllerClient.notifications.list({ view: "unread", before: unreadCursor, accessToken });
           if (!valid()) return;
-          if (!unreadCursor) latestUnread.current = { session, items: unread.items };
+          if (!unreadCursor) {
+            latestUnread.current = { session, items: unread.items };
+            signature = unreadSignature(unread);
+          }
           unread.items.forEach(item => items.set(item.id, item));
           if (!unread.nextCursor || unread.nextCursor === unreadCursor) break;
           unreadCursor = unread.nextCursor;
         } while (valid());
-        if (valid()) patch({ page: { ...next, items: [...items.values()].sort((a, b) => b.occurredAt.localeCompare(a.occurredAt)), unreadCount: unread!.unreadCount }, error: null });
+        if (valid()) {
+          patch({ page: { ...next, items: [...items.values()].sort((a, b) => b.occurredAt.localeCompare(a.occurredAt)), unreadCount: unread!.unreadCount }, error: null });
+          unreadSeen.current = { session, signature };
+          if (check) window.dispatchEvent(new CustomEvent(NOTIFICATION_FEED_CHANGED_EVENT, { detail: { userId } }));
+        }
       } catch (caught) {
         const message = caught instanceof Error ? caught.message : "Unable to load notifications.";
-        if (valid()) patch({ error: message === "Unable to load notifications (404)" ? "Notifications are unavailable on this server." : message });
+        if (valid()) {
+          // The next check refreshes everything, which also clears this error.
+          unreadSeen.current = null;
+          patch({ error: message === "Unable to load notifications (404)" ? "Notifications are unavailable on this server." : message });
+        }
       } finally {
-        if (valid()) patch({ loading: false });
+        if (valid() && !check) patch({ loading: false });
         if (valid()) inFlight.current = null;
       }
     })();
-    inFlight.current = { session, promise };
+    inFlight.current = { session, promise, check };
     return promise;
   }, [accessToken, current, patch, session, userId]);
 
@@ -142,11 +174,11 @@ export function useNotificationCenter({ userId, accessToken, navigate }: { userI
     if (!userId || !accessToken) return;
     let stopped = false;
     let presenting = false;
-    const poll = async () => {
+    const poll = async (options?: { check?: boolean }) => {
       if (stopped || presenting) return;
       presenting = true;
       try {
-      await refresh();
+      await refresh(options?.check ? { ifUnreadChanged: true } : undefined);
       if (!current() || stopped) return;
       // Presentation is independent of Home's paging and never marks a row
       // read. It reuses the unread page refresh() just fetched.
@@ -216,13 +248,14 @@ export function useNotificationCenter({ userId, accessToken, navigate }: { userI
     pollRef.current = poll;
     void poll();
     const receive = () => void poll();
-    window.addEventListener("focus", receive);
     window.addEventListener(NOTIFICATION_RECEIVED_EVENT, receive);
-    return () => { stopped = true; pollRef.current = null; window.removeEventListener("focus", receive); window.removeEventListener(NOTIFICATION_RECEIVED_EVENT, receive); };
+    return () => { stopped = true; pollRef.current = null; window.removeEventListener(NOTIFICATION_RECEIVED_EVENT, receive); };
   }, [accessToken, current, navigate, refresh, session, showStatus, userId]);
-  // Every 20 s while the user is active, every 2 min once idle, never while
-  // hidden; focus and NOTIFICATION_RECEIVED_EVENT stay the wake path.
-  useGatedInterval(() => void pollRef.current?.(), POLL_ACTIVE_MS, { idleMs: POLL_IDLE_MS });
+  // A check every 30 s while the user is active, every 5 min once idle, never
+  // while hidden, and once when the user comes back (window focus counts as
+  // input) unless the last check was under 30 s ago. A push
+  // (NOTIFICATION_RECEIVED_EVENT) refreshes everything at once.
+  useGatedInterval(() => void pollRef.current?.({ check: true }), POLL_ACTIVE_MS, { idleMs: POLL_IDLE_MS });
 
   const markRead = useCallback(async (items: ProductNotification[]): Promise<boolean> => {
     if (!userId || !accessToken || !current()) return false;

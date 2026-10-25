@@ -14,7 +14,8 @@ report.
 
 Support activity remains visible until the user opens the report and its current conversation has
 loaded. An unread count and blue dot appear on the profile control and Support menu item. Studio
-checks again on startup, every 20 seconds while active, and when the app regains focus.
+checks again on startup, at once when a push arrives or the notification center finds its unread
+feed changed, and otherwise every 5 minutes while active (15 once idle, never while hidden).
 Customer-visible support replies and real resolution transitions also create durable entries in
 the [notification center](Notifications.md), with account preferences controlling Web Push, iOS
 APNs, and local presentation. Updated Studio uses this platform for transient alerts and disables

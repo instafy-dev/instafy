@@ -9,6 +9,8 @@ import {
   POLLING_IDLE_AFTER_MS,
   pollingCadence,
   pollingGateState,
+  POLLING_WAKE_MIN_GAP_MS,
+  startGatedInterval,
   subscribePollingGate,
   useGatedInterval,
 } from "../pollingGate";
@@ -91,8 +93,10 @@ describe("polling gate", () => {
     let container: HTMLDivElement;
     const callback = vi.fn();
 
-    function Harness({ runOnWake, enabled }: { runOnWake?: boolean; enabled?: boolean }) {
-      useGatedInterval(callback, 20_000, { idleMs: 120_000, runOnWake, enabled });
+    function Harness({ runOnWake, enabled, activeMs = 20_000, idleMs = 120_000, wakeAfterMs }: {
+      runOnWake?: boolean; enabled?: boolean; activeMs?: number; idleMs?: number; wakeAfterMs?: number;
+    }) {
+      useGatedInterval(callback, activeMs, { idleMs, runOnWake, enabled, wakeAfterMs });
       return null;
     }
 
@@ -182,12 +186,87 @@ describe("polling gate", () => {
       expect(callback).toHaveBeenCalledTimes(1);
     });
 
+    // Measurement A: something flipped the tab hidden and back every 4.6 s, and
+    // every flip ran every owner's wake. A run that is not yet stale is not
+    // repeated, and a flip no longer restarts (or doubles) the cadence.
+    it("runs a wake only when the last run is stale and keeps the cadence through quick flips", async () => {
+      await act(async () => root.render(createElement(Harness, { activeMs: 60_000, idleMs: 300_000 })));
+      for (let flip = 0; flip < 14; flip += 1) {
+        await act(async () => setVisibility("hidden"));
+        await advance(2_300);
+        await act(async () => setVisibility("visible"));
+        await advance(2_300);
+      }
+      // Over 64.4 s only the flip at 34.5 s found the last run (mount) older
+      // than the 30 s wake gap; it ran once and moved the next tick to 94.5 s.
+      // Before, each of the 14 flips ran it.
+      expect(callback).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps a short cadence through quick flips without wake runs before it is due", async () => {
+      await act(async () => root.render(createElement(Harness)));
+      for (let flip = 0; flip < 14; flip += 1) {
+        await act(async () => setVisibility("hidden"));
+        await advance(2_300);
+        await act(async () => setVisibility("visible"));
+        await advance(2_300);
+      }
+      // Due at 20 s, 41.4 s (the first visible moment after 40.2 s, 20 s
+      // after the last run) and 62.4 s.
+      expect(callback).toHaveBeenCalledTimes(3);
+    });
+
+    it("runs at once on wake once the last run is older than the wake gap", async () => {
+      await act(async () => root.render(createElement(Harness, { activeMs: 60_000, idleMs: 300_000 })));
+      await advance(POLLING_WAKE_MIN_GAP_MS - 1_000);
+      await act(async () => setVisibility("hidden"));
+      await act(async () => setVisibility("visible"));
+      expect(callback).not.toHaveBeenCalled();
+      await advance(1_000);
+      await act(async () => setVisibility("hidden"));
+      await act(async () => setVisibility("visible"));
+      expect(callback).toHaveBeenCalledTimes(1);
+      // The run re-anchors the cadence.
+      await advance(59_999);
+      expect(callback).toHaveBeenCalledTimes(1);
+      await advance(1);
+      expect(callback).toHaveBeenCalledTimes(2);
+    });
+
+    it("honours a longer wake gap so a slow fallback wakes only when a tick is due", async () => {
+      await act(async () => root.render(createElement(Harness, { activeMs: 120_000, idleMs: 600_000, wakeAfterMs: 120_000 })));
+      await advance(100_000);
+      await act(async () => setVisibility("hidden"));
+      await act(async () => setVisibility("visible"));
+      expect(callback).not.toHaveBeenCalled();
+      await advance(20_000);
+      expect(callback).toHaveBeenCalledTimes(1);
+    });
+
     it("stops the timer on unmount", async () => {
       await act(async () => root.render(createElement(Harness)));
       await act(async () => root.unmount());
       root = createRoot(container);
       await advance(60_000);
       expect(callback).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("startGatedInterval", () => {
+    it("re-anchors on markRun and stops cleanly", () => {
+      const callback = vi.fn();
+      const interval = startGatedInterval(callback, 60_000);
+      vi.advanceTimersByTime(50_000);
+      interval.markRun();
+      vi.advanceTimersByTime(59_999);
+      expect(callback).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1);
+      expect(callback).toHaveBeenCalledTimes(1);
+      interval.stop();
+      vi.advanceTimersByTime(600_000);
+      setVisibility("hidden");
+      setVisibility("visible");
+      expect(callback).toHaveBeenCalledTimes(1);
     });
   });
 });
