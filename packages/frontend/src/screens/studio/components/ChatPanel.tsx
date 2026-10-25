@@ -342,6 +342,7 @@ import {
   resolveHumanChatIdentity,
 } from "./chatHumanIdentity";
 import { ChatComposerSurface } from "./ChatComposerSurface";
+import { useWorkerQuestionReply, WorkerQuestionReplyContext, WorkerQuestionReplyStrip } from "./WorkerQuestionReply";
 import type { ControllerMessageStash } from "../../../services/runtimeController/messageStashes";
 import {
   createConversationClientSendId,
@@ -2177,6 +2178,30 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   );
   const [goalDetailsCollapseToken, setGoalDetailsCollapseToken] = useState(0);
 
+  const workerQuestionReply = useWorkerQuestionReply({
+    scope: `${activeProjectId ?? ""}:${activeConversationId ?? ""}`,
+    readDraft: () => latestInputValueRef.current ?? "",
+    writeDraft: text => {
+      latestInputValueRef.current = text;
+      onInputChange(activeConversationId, text, null);
+    },
+    focusComposer: () => {
+      chatInputRef.current?.focus();
+      chatInputRef.current?.focusAfterValueSync();
+    },
+    hasAttachments: imageAttachments.length > 0,
+    canSelect: () => {
+      if (editingQueuedItem || queueEditPending) {
+        showStatus("Finish or cancel the queued message edit before replying to a worker.");
+        return false;
+      }
+      // A worker reply has its own recipient. Keep a restored stash saved and
+      // discard only the ordinary composer's implicit routing metadata.
+      setRestoredMessageStash(null);
+      pendingReplyContextRef.current = null;
+      return true;
+    },
+  });
   const submitMessageRef = useRef<SubmitMessageFn>(async () => false);
   const queuedEditSubmitRef = useRef<(override?: Parameters<SubmitMessageFn>[0]) => Promise<boolean> | null>(() => null);
   const composerPrimaryActionRef = useRef<{
@@ -2322,6 +2347,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
   const invokeComposerPrimaryAction = useCallback<SubmitMessageFn>(
     async (override, options) => {
+      if (workerQuestionReply.active) {
+        if (!ensureProjectWriteAccess()) return false;
+        return workerQuestionReply.submit(override?.message ?? latestInputValueRef.current ?? "", options?.intent);
+      }
       const primaryAction = composerPrimaryActionRef.current;
       return await invokeSubmitMessage(override, {
         ...options,
@@ -2329,7 +2358,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         expectedActiveJobId: primaryAction.expectedActiveJobId,
       });
     },
-    [invokeSubmitMessage],
+    [ensureProjectWriteAccess, invokeSubmitMessage, workerQuestionReply],
   );
 
   const submitGoalCommand = useCallback(
@@ -2365,7 +2394,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    await invokeSubmitMessage();
+    await invokeComposerPrimaryAction();
   };
 
   const normalizedJobThread = useMemo((): ChatPanelJobThread | null => {
@@ -2446,6 +2475,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     imageAttachmentCount: imageAttachments.length,
     inputValue,
     invokeSubmitMessage: invokeComposerPrimaryAction,
+    manualSubmitOnly: Boolean(workerQuestionReply.active),
     isAssistantTyping,
     latestInputValueRef,
     messages,
@@ -2559,6 +2589,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     event.preventDefault();
     event.stopPropagation();
     event.nativeEvent.stopImmediatePropagation?.();
+    if (workerQuestionReply.active) {
+      if (enterAction === "stash") void workerQuestionReply.submit(latestInputValueRef.current ?? "", "stash");
+      else void invokeComposerPrimaryAction(undefined, { intent: enterAction });
+      return;
+    }
     if (editingQueuedItem && !editingQueuedItem.restoreOnly) {
       void invokeSubmitMessage(undefined, { intent: "queue" });
       return;
@@ -3022,7 +3057,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   // True steering is an exact-job CAS. If older run metadata cannot identify
   // that job unambiguously, fall back to ordinary Send/Queue behavior rather
   // than risk steering a replacement run on the same agent lane.
-  const composerPrimaryActionMode = requireExpectedJobForSteer(
+  const composerPrimaryActionMode = workerQuestionReply.active ? "send" : requireExpectedJobForSteer(
     candidateComposerPrimaryActionMode,
     expectedActiveJobId,
   );
@@ -3733,6 +3768,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
   const handleSelectionReplyAction = useCallback(
     (action: MessageSelectionReplyAction) => {
+      if (workerQuestionReply.busy) return;
+      workerQuestionReply.cancel();
       if (!selectedMessage || !messageMenu?.selectedText) {
         showStatus("Select text in a message first.", "info", 2500);
         closeMessageMenu();
@@ -3779,6 +3816,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       invokeSubmitMessage,
       messageMenu?.selectedText,
       onInputChange,
+      workerQuestionReply,
       selectedMessage,
       showStatus,
     ],
@@ -6451,6 +6489,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
   return (
     <MultiAgentRunsContext.Provider value={multiAgentRunContext}>
+    <WorkerQuestionReplyContext.Provider value={normalizedJobThread ? null : workerQuestionReply.host}>
     <ChatRunStopNoticeProvider value={runStopNoticeContext}>
     <RunFailureRetryProvider value={runFailureRetryContextValue}>
     <ConversationFileContext.Provider value={openSurfaceFile}>
@@ -6514,6 +6553,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
       <ChatComposerSurface
         composerRunStopController={runStop}
+        replyContext={<WorkerQuestionReplyStrip reply={workerQuestionReply} />}
         viewNavigation={hasComposerViewNavigation ? conversationWorkspace ? <ConversationWorkspaceViews placement="composer" /> : <ConversationSurfaceTabs
           presentation="composer" chatPanelId={chatPanelId} resources={resourceTabs}
           activeId={activeSurfaceId} resourceId={resourceId} split={false} wide={false} ratio={surfaces.ratio}
@@ -6574,7 +6614,13 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           reorderDisabled:
             serverQueueReordering ||
             (serverSendQueueItems.length > 0 && chatSendQueue.length > 0),
-          onEditQueuedMessage: handleEditQueuedMessage,
+          onEditQueuedMessage: (...args) => {
+            if (workerQuestionReply.active) {
+              showStatus("Finish or cancel your worker reply before editing a queued message.");
+              return;
+            }
+            return handleEditQueuedMessage(...args);
+          },
           onCancelQueuedEdit: handleCancelQueuedEdit,
           onRequeueEditedMessage: handleRequeueEditedMessage,
           onSendEditedMessageNow: handleSendEditedMessageNow,
@@ -6583,7 +6629,13 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           stashes: messageStashes,
           restoredStashId: restoredMessageStash?.id ?? null,
           busy: messageStashMutating,
-          onRestore: handleRestoreMessageStash,
+          onRestore: (...args) => {
+            if (workerQuestionReply.active) {
+              showStatus("Finish or cancel your worker reply before restoring a saved message.");
+              return;
+            }
+            return handleRestoreMessageStash(...args);
+          },
           onDelete: (stashId) => {
             if (ensureProjectWriteAccess()) {
               void handleDeleteMessageStash(stashId);
@@ -6606,13 +6658,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           draftKey: `${activeProjectId ?? "no-project"}:${activeConversationId ?? "no-conversation"}`,
           value: inputValue,
           editorState: inputEditorState,
-          ghostSuggestionRemainder: composerGhostSuggestion?.remainder ?? null,
+          ghostSuggestionRemainder: workerQuestionReply.active ? null : composerGhostSuggestion?.remainder ?? null,
           recordingIndicatorActive: false,
           recordingIndicatorLabel,
           agentHandles: mentionableAgentHandles,
           agentProfiles: availableAgents,
           mentionableUsers,
-          placeholder: chatInputPlaceholder,
+          placeholder: workerQuestionReply.active ? "Your reply…" : chatInputPlaceholder,
+          ariaLabel: workerQuestionReply.active ? `Reply to ${workerQuestionReply.active.label}` : undefined,
           onChange: handleChatInputChange,
           onKeyDown: handleInputKeyDown,
           onPaste: handleComposerPaste,
@@ -6657,13 +6710,13 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
             void handleStashDraft();
           },
           queueDisabled:
-            submissionPending ||
+            Boolean(workerQuestionReply.active) || submissionPending ||
             !inputValue.trim() ||
             imageAttachments.length > 0 ||
             !activeConversationId ||
             !activeConversationEntry?.controllerId,
           stashDisabled:
-            messageStashMutating ||
+            Boolean(workerQuestionReply.active) || messageStashMutating ||
             submissionPending ||
             !inputValue.trim() ||
             imageAttachments.length > 0 ||
@@ -6700,11 +6753,18 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
             handleChatVoiceTap();
           },
         }}
-        sendButtonDisabled={projectWriteDisabled || sendButtonDisabled}
+        sendButtonDisabled={projectWriteDisabled || (workerQuestionReply.active
+          ? workerQuestionReply.busy || !inputValue.trim() || sendingAttachment || voiceInputStarting || voiceInputListening || voiceInputTranscribing || voiceHoldActive
+          : sendButtonDisabled)}
         sendButtonVariant={sendButtonVariant}
         primaryActionMode={composerPrimaryActionMode}
+        sendActionLabel={workerQuestionReply.active
+          ? workerQuestionReply.active.index < workerQuestionReply.active.request.questions.length - 1 ? "Next question" : "Send answer"
+          : undefined}
         primaryActionBlockedStatus={
-          sharedBrowserSendBlocker ? SHARED_BROWSER_SEND_BLOCKER_STATUS[sharedBrowserSendBlocker] : null
+          !workerQuestionReply.active && sharedBrowserSendBlocker
+            ? SHARED_BROWSER_SEND_BLOCKER_STATUS[sharedBrowserSendBlocker]
+            : null
         }
         onSendButtonPress={handleSendButtonPress}
         composerGhostActionClass={composerGhostActionClass}
@@ -6796,6 +6856,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     </ConversationFileContext.Provider>
     </RunFailureRetryProvider>
     </ChatRunStopNoticeProvider>
+    </WorkerQuestionReplyContext.Provider>
     </MultiAgentRunsContext.Provider>
       );
   }

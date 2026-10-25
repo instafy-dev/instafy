@@ -25,6 +25,7 @@ function run(handle: string, status: RunRecord["status"], role = "worker", paren
 describe("multi-agent lifecycle from persisted runs", () => {
   let root: Root;
   let container: HTMLDivElement;
+  const openRun = vi.fn();
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement("div"); document.body.append(container); root = createRoot(container);
@@ -34,15 +35,51 @@ describe("multi-agent lifecycle from persisted runs", () => {
     await act(async () => root.unmount()); container.remove();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
-  async function render(runs: RunRecord[], messages: ChatMessage[] = [], planMessage = plan, scopeKey = "viewer-project-conversation") {
+  async function render(runs: RunRecord[], messages: ChatMessage[] = [], planMessage = plan, scopeKey = "viewer-project-conversation", planDetails: Record<string, unknown> = details) {
     await act(async () => root.render(
       <MultiAgentRunsContext.Provider value={{ runs: Object.fromEntries(runs.map(value => [value.id, value])), scopeKey }}>
-        <MultiAgentPlanEntry details={details} planMessage={planMessage} conversationMessages={messages}
-          conversationLocalId="local" onOpenWorkerRunTrace={() => undefined} />
+        <MultiAgentPlanEntry details={planDetails} planMessage={planMessage} conversationMessages={messages}
+          conversationLocalId="local" onOpenWorkerRunTrace={openRun} />
       </MultiAgentRunsContext.Provider>,
     ));
   }
   const status = (handle: string) => container.querySelector(`[data-agent-handle="@${handle}"]`)?.getAttribute("aria-label");
+
+  it("shows task labels while preserving worker identity and the exact run behind each chip", async () => {
+    const completed = run("poet09", "success");
+    completed.metadata = { ...completed.metadata, leaseMetrics: { leasedByRuntimeId: "runtime-nine", agentHandle: "poet09" } };
+    await render([completed, run("poet10", "queued")], [], plan, undefined, {
+      ...details, agents: [
+        { handle: "poet09", label: "Refrain poem", title: "Ignored alias", scopeSummary: "poems/refrain.txt" },
+        { handle: "poet10", title: "Moon poem" },
+      ],
+    });
+    const refrain = container.querySelector<HTMLButtonElement>('[data-agent-handle="@poet09"]')!;
+    const moon = container.querySelector<HTMLButtonElement>('[data-agent-handle="@poet10"]')!;
+    expect(refrain.textContent).toBe("Refrain poem");
+    expect(moon.textContent).toBe("Moon poem");
+    expect(refrain.title).toContain("Refrain poem (@poet09)");
+    expect(refrain.title).toContain("poems/refrain.txt");
+    expect(status("poet09")).toBe("Open run trace for Refrain poem (@poet09); status done");
+    expect(status("poet10")).toBe("Open run trace for Moon poem (@poet10); status queued");
+    expect(container.querySelector('[data-testid="multi-agent-team-chip"]')?.getAttribute("title")).toContain("Refrain poem · runtime runtime-");
+    await act(async () => { refrain.click(); moon.click(); });
+    expect(openRun.mock.calls).toEqual([
+      [{ jobId: "parent-job-poet09-job", title: "Refrain poem run" }],
+      [{ jobId: "parent-job-poet10-job", title: "Moon poem run" }],
+    ]);
+  });
+
+  it("keeps same-named tasks separate and falls back to handles for older plans", async () => {
+    await render([run("poet09", "success"), run("poet10", "queued")], [], plan, undefined, {
+      ...details, agents: [{ handle: "poet09", label: "Review" }, { handle: "poet10", label: "Review" }],
+    });
+    expect(status("poet09")).toContain("Review (@poet09); status done");
+    expect(status("poet10")).toContain("Review (@poet10); status queued");
+    await render([run("poet09", "success"), run("poet10", "queued")]);
+    expect(container.querySelector('[data-agent-handle="@poet09"]')?.textContent).toBe("@poet09");
+    expect(status("poet10")).toBe("Open run trace for @poet10; status queued");
+  });
 
   it("hydrates a never-leased canceled worker and hides cancellation after the lead ends", async () => {
     const persisted = [run("poet09", "success"), run("poet10", "canceled"), run("octo", "success", "lead_continuation")];
@@ -73,6 +110,40 @@ describe("multi-agent lifecycle from persisted runs", () => {
     expect(status("poet09")).toContain("status active");
     expect(status("poet10")).toContain("status waiting for approval");
     expect(container.querySelector('[data-testid="multi-agent-inline-status"]')?.getAttribute("aria-label")).toContain("1 waiting for approval");
+  });
+
+  it.each(["pending", "answered"])("keeps a %s question waiting for input after the provider turn succeeds", async (statusValue) => {
+    const waiting = run("poet10", "success");
+    waiting.metadata = { ...waiting.metadata, userInputRequest: { requestId: "request-ten", status: statusValue } };
+    await render([run("poet09", "success"), waiting]);
+    expect(status("poet10")).toContain("status waiting for input");
+    expect(container.querySelector('[data-testid="multi-agent-inline-status"]')?.getAttribute("aria-label")).toContain("1 waiting for input");
+    expect(container.querySelector('[data-testid="multi-agent-cancel-group"]')).not.toBeNull();
+  });
+
+  it("keeps cancellation and failure authoritative and does not call an expired assignment done", async () => {
+    const waiting = run("poet10", "canceled");
+    waiting.metadata = { ...waiting.metadata, userInputRequest: { requestId: "request-ten", status: "pending" } };
+    await render([run("poet09", "success"), waiting]);
+    expect(status("poet10")).toContain("status canceled");
+    await render([run("poet09", "success"), { ...waiting, status: "failed" }]);
+    expect(status("poet10")).toContain("status failed");
+    for (const requestStatus of ["resumed", "expired"]) {
+      await render([run("poet09", "success"), { ...waiting, status: "success", metadata: {
+        ...waiting.metadata, userInputRequest: { requestId: "request-ten", status: requestStatus },
+      } }]);
+      expect(status("poet10")).toContain(requestStatus === "expired" ? "status failed" : "status done");
+    }
+  });
+
+  it("hydrates a worker waiting for human input without labelling it an approval", async () => {
+    controller.fetchPlanGroupStatus.mockResolvedValue({ groupId: "old-group", workers: [
+      { jobId: "job-nine", handle: "poet09", status: "completed" },
+      { jobId: "job-ten", handle: "poet10", status: "awaiting_input" },
+    ] });
+    await render([], [], { ...plan, metadata: { ...plan.metadata, multiAgentPlan: { groupId: "old-group" } } });
+    expect(status("poet10")).toContain("status waiting for input");
+    expect(container.textContent).not.toContain("approval");
   });
 
   it("uses a persisted group identity when a parent has more than one dispatched plan", async () => {
@@ -154,7 +225,7 @@ describe("multi-agent lifecycle from persisted runs", () => {
       value.createdAt = "2026-10-15T08:00:00Z";
       return value;
     };
-    const continuation = (status: RunRecord["status"], key: "continuation" | "rateLimitRetry" = "continuation") => {
+    const continuation = (status: RunRecord["status"], key: "continuation" | "rateLimitRetry" | "userInputContinuation" = "continuation") => {
       const value = run("poet10", status);
       value.id = "poet10-next-run";
       value.createdAt = "2026-10-15T08:10:00Z";
@@ -193,6 +264,15 @@ describe("multi-agent lifecycle from persisted runs", () => {
       expect(status("poet10")).toContain("status done");
       expect(container.querySelector('[data-testid="multi-agent-inline-status"]')?.getAttribute("aria-label")).toContain("2/2 lanes done");
       expect(notice()?.getAttribute("data-rerun-reason")).toBe("turn_continuation");
+    });
+
+    it("follows the resumed worker lane instead of keeping its earlier question waiting", async () => {
+      const paused = run("poet10", "success");
+      paused.metadata = { ...paused.metadata, userInputRequest: { requestId: "request-ten", status: "answered" } };
+      await render([continuation("in_progress", "userInputContinuation"), run("poet09", "success"), paused]);
+      expect(status("poet10")).toContain("status active");
+      expect(notice()?.textContent).toContain("@poet10 continued after an answer.");
+      expect(notice()?.getAttribute("data-rerun-reason")).toBe("user_input");
     });
 
     it("does not let the stopped run's error decide a lane whose continuation has not posted yet", async () => {

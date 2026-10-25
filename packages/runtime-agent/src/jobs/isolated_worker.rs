@@ -119,7 +119,7 @@ impl JobProcessor {
             .await?;
         annotate_prompt_context_final_output_mode(
             &mut prompt_context,
-            RuntimeFinalOutputMode::PlainTextWrite,
+            RuntimeFinalOutputMode::StrictStructured,
         );
         // Serialize the short copy/apply phases only; model calls and commands overlap.
         let snapshot = {
@@ -134,7 +134,7 @@ impl JobProcessor {
             .await
             .context("snapshot task failed")??
         };
-        prompt.push_str("\nExecution environment: you have a private source snapshot. Use real tools for observations and commands; edit files on disk and finish with a concise plain-text report. Only your declared owned paths may change. Do not start background daemons or additional agents. Git metadata, dependencies, caches and secret files were excluded. If the task requires unavailable inputs or capabilities, explain the limitation; do not claim it was executed. Use relative project paths; the original project directory is not accessible.\n");
+        prompt.push_str("\nExecution environment: you have a private source snapshot. Use real tools for observations and commands; edit files on disk and finish with the scoped worker JSON response contract. For a necessary human decision, return the request_user_input action before attempting blocked edits or commands. Only your declared owned paths may change. Do not start background daemons or additional agents. Git metadata, dependencies, caches and secret files were excluded. If the task requires unavailable inputs or capabilities, explain the limitation; do not claim it was executed. Use relative project paths; the original project directory is not accessible.\n");
         let proxy = job
             .proxy
             .as_ref()
@@ -227,20 +227,15 @@ impl JobProcessor {
                 classify_internal_codex_fallback_summary(&outcome.summary).is_none(),
                 "isolated worker did not produce a completed final response"
             );
-            anyhow::ensure!(
-                !runtime_job_expectations(&job.payload).command_execution
-                    || isolated_worker_observed_command(&output.events),
-                "isolated worker did not execute the required native command"
-            );
             let changes = snapshot.collect_changes(|path| {
                 isolated_worker_owns_path(&owned, &read_only, &workspace_dir, path)
             })?;
-            if runtime_job_expectations(&job.payload).workspace_file_changes {
-                anyhow::ensure!(
-                    !changes.is_empty(),
-                    "isolated worker produced no required file changes"
-                );
-            }
+            validate_worker_evidence(
+                job,
+                &outcome,
+                isolated_worker_observed_command(&output.events),
+                !changes.is_empty(),
+            )?;
             // Verify publication authority before touching source files. Token
             // verification failures remain inside the usage-preserving result.
             let workspace_token = self.verified_workspace_token(registration, job).await?;
@@ -251,6 +246,7 @@ impl JobProcessor {
             ensure_worker_running(&cancel)?;
             let files = isolated_change_descriptors(&changes);
             let mut execution_artifacts = artifacts.clone();
+            user_input_request::append_outcome_artifact(&mut execution_artifacts, &outcome);
             execution_artifacts.push(
                 json!({"kind":"apply/files", "files":files.iter().map(|file| json!({
                 "path":file.path, "workspacePath":file.workspace_path,
@@ -322,6 +318,29 @@ impl JobProcessor {
         .await;
         publication.map_err(|error| worker_failure(error, artifacts))
     }
+}
+
+pub(super) fn validate_worker_evidence(
+    job: &LeaseJob,
+    outcome: &CodexOutcome,
+    observed_command: bool,
+    changed_files: bool,
+) -> Result<()> {
+    user_input_request::validate_outcome_scope(job, outcome)?;
+    let requirements = runtime_job_expectations(&job.payload);
+    let deferred_for_input = outcome
+        .actions
+        .iter()
+        .any(|action| matches!(action, CodexAction::RequestUserInput(_)));
+    anyhow::ensure!(
+        !requirements.command_execution || deferred_for_input || observed_command,
+        "isolated worker did not execute the required native command"
+    );
+    anyhow::ensure!(
+        !requirements.workspace_file_changes || deferred_for_input || changed_files,
+        "isolated worker produced no required file changes"
+    );
+    Ok(())
 }
 
 fn ensure_worker_running(cancel: &JobCancelSignal) -> Result<()> {

@@ -164,3 +164,106 @@ async fn scoped_worker_compact_request_transmits_selected_effort_and_records_it(
     assert_eq!(request["tool_choice"], "none");
     assert_eq!(result.artifacts[0]["metadata"]["reasoningEffort"], "high");
 }
+
+#[tokio::test]
+async fn direct_workers_defer_questions_without_forcing_files_or_tool_calls() {
+    use axum::{extract::State, routing::post};
+    async fn completion(State(output): State<Arc<Mutex<JsonValue>>>) -> axum::Json<JsonValue> {
+        axum::Json(json!({"choices":[{"message":{"content":output.lock().to_string()}}]}))
+    }
+    let question = json!({"summary":"Which tone should I use?", "files":[], "actions":[{
+        "type":"request_user_input", "questions":[{"id":"tone", "header":"Tone", "question":"Which tone?"}],
+        "continuationNote":"No files changed. Write poem.txt after the tone choice."}]});
+    let output = Arc::new(Mutex::new(question));
+    let router = axum::Router::new()
+        .route("/v1/chat/completions", post(completion))
+        .with_state(output.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let config = DirectWorkerProxyConfig {
+        chat_completions_endpoint: format!("http://{address}/v1/chat/completions"),
+        api_key: "inert-scoped-test-token".into(),
+        model: "test-model".into(),
+        reasoning_effort: ReasoningEffort::Low,
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let job = test_lease_job(
+        Some("feature"),
+        json!({"metadata":{
+        "multiAgentPlan":{"role":"worker", "groupId":"test"},
+        "writeScope":{"mode":"owned", "ownedPaths":["poem.txt"]}}}),
+    );
+    let scopes = direct_owned_write_scopes(temp.path(), &job).unwrap();
+    let (execution, written) = execute_write_scoped_worker_direct(
+        temp.path(),
+        "Write a poem.",
+        &JsonValue::Null,
+        &scopes,
+        Uuid::new_v4(),
+        &config,
+    )
+    .await
+    .unwrap();
+    assert!(written.is_empty());
+    assert!(!temp.path().join("poem.txt").exists());
+    assert!(
+        user_input_request::from_artifacts(&job, &execution.artifacts)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        execution.final_messages.is_empty(),
+        "only the controller publishes the input card"
+    );
+
+    fs::write(temp.path().join("source.txt"), "complete file").unwrap();
+    let read_job = read_only_worker(&["source.txt"]);
+    let observation = build_scoped_worker_path_observation(temp.path(), &read_job).unwrap();
+    let execution = execute_preobserved_scoped_worker_direct(
+        "Review.",
+        &JsonValue::Null,
+        &observation,
+        Uuid::new_v4(),
+        &config,
+    )
+    .await
+    .unwrap();
+    assert_eq!(execution.summary, "Which tone should I use?");
+    assert!(
+        user_input_request::from_artifacts(&read_job, &execution.artifacts)
+            .unwrap()
+            .is_some()
+    );
+
+    output.lock()["actions"][0]["questions"] = json!([]);
+    output.lock()["files"] = json!([{"path":"poem.txt", "content":"must not be written"}]);
+    assert!(
+        execute_write_scoped_worker_direct(
+            temp.path(),
+            "Write.",
+            &JsonValue::Null,
+            &scopes,
+            Uuid::new_v4(),
+            &config
+        )
+        .await
+        .is_err()
+    );
+    assert!(!temp.path().join("poem.txt").exists());
+    *output.lock() = json!({"summary":"Done", "files":[]});
+    assert!(
+        execute_write_scoped_worker_direct(
+            temp.path(),
+            "Write.",
+            &JsonValue::Null,
+            &scopes,
+            Uuid::new_v4(),
+            &config
+        )
+        .await
+        .is_err(),
+        "ordinary completion still requires writes"
+    );
+    server.abort();
+}

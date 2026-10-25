@@ -11,6 +11,8 @@ struct StandIn {
     lease_lost: Arc<AtomicBool>,
     heartbeats: Arc<AtomicUsize>,
     completions: Arc<AtomicUsize>,
+    handoff_rejected: Arc<AtomicBool>,
+    requests: Arc<Mutex<Vec<serde_json::Value>>>,
 }
 
 async fn heartbeat(State(stand_in): State<StandIn>) -> axum::response::Response {
@@ -27,9 +29,36 @@ async fn secrets() -> Json<serde_json::Value> {
     Json(json!({ "env": {}, "inventory": [] }))
 }
 
-async fn complete(State(stand_in): State<StandIn>) -> Json<serde_json::Value> {
+async fn complete(
+    State(stand_in): State<StandIn>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    stand_in
+        .requests
+        .lock()
+        .push(json!({"endpoint":"complete", "body":body}));
     stand_in.completions.fetch_add(1, Ordering::SeqCst);
     Json(json!({ "ok": true }))
+}
+
+async fn user_input_request(
+    State(stand_in): State<StandIn>,
+    Json(body): Json<serde_json::Value>,
+) -> (AxumStatusCode, Json<serde_json::Value>) {
+    stand_in
+        .requests
+        .lock()
+        .push(json!({"endpoint":"input", "body":body}));
+    if stand_in.handoff_rejected.load(Ordering::SeqCst) {
+        return (
+            AxumStatusCode::CONFLICT,
+            Json(json!({"error":"lease no longer held"})),
+        );
+    }
+    (
+        AxumStatusCode::OK,
+        Json(json!({"requestId":"ef235459-986c-43a3-8333-e005e2bd0390", "status":"pending"})),
+    )
 }
 
 struct Harness {
@@ -54,6 +83,10 @@ impl Harness {
             .route("/agent/heartbeat", post(heartbeat))
             .route("/agent/secrets", post(secrets))
             .route("/agent/complete", post(complete))
+            .route(
+                "/agent/jobs/:job_id/user-input-requests",
+                post(user_input_request),
+            )
             .with_state(stand_in.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url: reqwest::Url = format!("http://{}", listener.local_addr().unwrap())
@@ -203,4 +236,94 @@ async fn the_job_loop_records_whether_a_turn_was_interrupted() {
         1,
         "the lost job is not completed"
     );
+}
+
+fn question_execution() -> JobExecution {
+    JobExecution {
+        summary: "Your choice is needed.".into(),
+        suggested_replies: Vec::new(),
+        provider: "test".into(),
+        artifacts: vec![json!({"kind":"agent/user-input-request",
+            "questions":[{"id":"tone", "header":"Tone", "question":"Which tone?"}],
+            "continuationNote":"Write the owned poem after the decision."})],
+        credit_snapshot: None,
+        provider_conversation_state: None,
+        messages: Vec::new(),
+        messages_streamed: false,
+        final_messages: Vec::new(),
+    }
+}
+
+#[tokio::test]
+async fn worker_question_registers_before_completion_and_keeps_controller_identity() {
+    let harness = Harness::start().await;
+    let mut job = harness.job();
+    job.payload = json!({"metadata":{"multiAgentPlan":{"role":"worker", "groupId":"group"}}});
+    RuntimeAgent::complete_job(
+        &harness.client,
+        &harness.registration,
+        &job,
+        question_execution(),
+    )
+    .await;
+    let requests = harness.stand_in.requests.lock();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["endpoint"], "input");
+    assert_eq!(
+        requests[0]["body"]["runtimeId"],
+        harness.registration.runtime_id.to_string()
+    );
+    assert_eq!(requests[1]["endpoint"], "complete");
+    assert_eq!(requests[1]["body"]["outcome"], "succeeded");
+    assert_eq!(
+        requests[1]["body"]["artifacts"][0]["requestId"],
+        "ef235459-986c-43a3-8333-e005e2bd0390"
+    );
+}
+
+#[tokio::test]
+async fn rejected_worker_question_fails_once_without_reporting_completion() {
+    let harness = Harness::start().await;
+    harness
+        .stand_in
+        .handoff_rejected
+        .store(true, Ordering::SeqCst);
+    let mut job = harness.job();
+    job.payload = json!({"metadata":{"multiAgentPlan":{"role":"worker", "groupId":"group"}}});
+    RuntimeAgent::complete_job(
+        &harness.client,
+        &harness.registration,
+        &job,
+        question_execution(),
+    )
+    .await;
+    let requests = harness.stand_in.requests.lock();
+    assert_eq!(
+        requests.len(),
+        2,
+        "registration failure must not silently retry"
+    );
+    assert_eq!(requests[0]["endpoint"], "input");
+    assert_eq!(requests[1]["body"]["outcome"], "failed");
+    assert!(
+        requests[1]["body"]["artifacts"][0]
+            .get("requestId")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn untracked_job_cannot_publish_a_worker_question() {
+    let harness = Harness::start().await;
+    RuntimeAgent::complete_job(
+        &harness.client,
+        &harness.registration,
+        &harness.job(),
+        question_execution(),
+    )
+    .await;
+    let requests = harness.stand_in.requests.lock();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["endpoint"], "complete");
+    assert_eq!(requests[0]["body"]["outcome"], "failed");
 }

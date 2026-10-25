@@ -397,7 +397,8 @@ async fn queued_rerun_of(
              where project_id = $1
                and $2 in (
                      payload #>> '{metadata,multiAgentPlan,continuation,of}',
-                     payload #>> '{metadata,multiAgentPlan,rateLimitRetry,of}'
+                     payload #>> '{metadata,multiAgentPlan,rateLimitRetry,of}',
+                     payload #>> '{metadata,multiAgentPlan,userInputContinuation,of}'
                    )
              limit 1",
             &[&project_id, &job_id.to_string()],

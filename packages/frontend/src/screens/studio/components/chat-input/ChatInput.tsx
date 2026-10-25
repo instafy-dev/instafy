@@ -46,6 +46,7 @@ type ChatInputProps = {
   value: string;
   editorState: string | null;
   placeholder: string;
+  ariaLabel?: string;
   ghostSuggestionRemainder?: string | null;
   agentHandles: string[];
   agentProfiles?: MentionAgentProfile[];
@@ -80,6 +81,7 @@ function ChatInputEditor(
     editorState,
     draftKey,
     placeholder,
+    ariaLabel = "Ask Octo",
     ghostSuggestionRemainder,
     agentHandles,
     agentProfiles,
@@ -314,7 +316,7 @@ function ChatInputEditor(
             {...placeholderProps}
             id="studio-chat-input"
             data-testid="chat-input"
-            aria-label="Ask Octo"
+            aria-label={ariaLabel}
             role="textbox"
             aria-multiline="true"
             aria-readonly={readOnly}
@@ -363,6 +365,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     editorState,
     draftKey,
     placeholder,
+    ariaLabel,
     ghostSuggestionRemainder,
     agentHandles,
     agentProfiles,
@@ -408,6 +411,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
         editorState={editorState}
         draftKey={draftKey}
         placeholder={placeholder}
+        ariaLabel={ariaLabel}
         ghostSuggestionRemainder={ghostSuggestionRemainder}
         agentHandles={agentHandles}
         agentProfiles={agentProfiles}

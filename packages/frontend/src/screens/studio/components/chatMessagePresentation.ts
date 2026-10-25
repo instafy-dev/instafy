@@ -1,6 +1,7 @@
 import { resolveLocalCapabilityArtifact } from "../../../capabilities/localCapabilityArtifactRegistry";
 import type { RunRecord } from "../../../types";
 import type { ChatMessage } from "../types";
+import { isUUID } from "../../../utils/uuid";
 import { isRecoverableRuntimeStartAlert as runtimeStartAlertIsRecoverable } from "./runtimeAlertPresentation";
 import { normalizeAssistantStatusText } from "./assistantStatusHeuristics";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
@@ -73,6 +74,12 @@ function shouldHideMultiAgentWorkerMessage(message: ChatMessage): boolean {
     return false;
   }
   return true;
+}
+
+function isWorkerInputQuestion(message: ChatMessage): boolean {
+  const requestId = extractMessageDetails(message.metadata)?.userInputRequestId;
+  return message.role === "assistant" && getMessageType(message) === "action_request"
+    && typeof requestId === "string" && isUUID(requestId);
 }
 
 function isMultiAgentPlanMessage(message: ChatMessage): boolean {
@@ -223,7 +230,7 @@ export function shouldDisplayChatMessage(message: ChatMessage): boolean {
   if (shouldHideByPresentationMetadata(message)) {
     return false;
   }
-  if (shouldHideMultiAgentWorkerMessage(message)) {
+  if (shouldHideMultiAgentWorkerMessage(message) && !isWorkerInputQuestion(message)) {
     return false;
   }
   if (message.role === "assistant" && isGenericProgressLabel(message.content)) {
@@ -394,6 +401,7 @@ export function synthesizeAgentJobThreadMessages(
 
   const threadStartMessageIdByJobId = new Map<string, string>();
   collapsedVisible.forEach((message) => {
+    if (isWorkerInputQuestion(message)) return;
     const jobId = extractAgentJobId(message);
     if (!jobId) {
       return;
@@ -418,6 +426,9 @@ export function synthesizeAgentJobThreadMessages(
   const threadMessagesByJobId = new Map<string, ChatMessage[]>();
 
   collapsedAll.forEach((message) => {
+    // The owning chat carries this question directly, even before any worker
+    // role metadata arrives. Do not duplicate it inside a synthesized trace.
+    if (isWorkerInputQuestion(message)) return;
     const jobId = extractAgentJobId(message);
     if (!jobId) {
       return;
@@ -437,6 +448,10 @@ export function synthesizeAgentJobThreadMessages(
   const insertedThreads = new Set<string>();
 
   collapsedVisible.forEach((message) => {
+    if (isWorkerInputQuestion(message)) {
+      output.push(message);
+      return;
+    }
     const jobId = extractAgentJobId(message);
     if (!jobId) {
       output.push(message);

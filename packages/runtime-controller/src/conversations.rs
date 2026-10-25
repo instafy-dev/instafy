@@ -1222,6 +1222,7 @@ pub(crate) fn sanitize_client_recorded_message_metadata(
     trusted_service_role: bool,
 ) -> JsonValue {
     crate::task_usage::strip_authoring_claims(&mut metadata);
+    crate::user_input_requests::routing::strip_claims(&mut metadata);
     if trusted_service_role {
         return metadata;
     }
@@ -1772,6 +1773,24 @@ pub(crate) async fn interrupt_conversation_runs(
     ensure_project_write_access(&transaction, &project, &context, conversation.session_id).await?;
     ensure_conversation_access(&transaction, &conversation, &context).await?;
 
+    // A completed worker can still await its human answer. Stop its group
+    // under the same lock used by answer redispatch, before touching jobs.
+    let groups = transaction.query(
+        "select distinct group_id::text as group_id from agent_user_input_requests where project_id=$1 and conversation_id=$2 and status in ('pending','answered')
+         union select coalesce(plan_group_id::text,payload #>> '{metadata,multiAgentPlan,groupId}',payload #>> '{metadata,multi_agent_plan,group_id}')
+         from agent_jobs where project_id=$1 and (conversation_id=$2 or payload->>'conversation_id'=$2::text) and status in ('queued','leased')",
+        &[&conversation.project_id,&conversation.id],
+    ).await.map_err(|error| internal_error(format!("load stopped worker question groups: {error}")))?;
+    let mut group_ids: Vec<Uuid> = groups
+        .iter()
+        .filter_map(|row| row.get::<_, Option<String>>(0))
+        .filter_map(|group| Uuid::parse_str(&group).ok())
+        .collect();
+    group_ids.sort();
+    for group_id in &group_ids {
+        crate::multi_agent_plan::lock_plan_group_checkpoint(&transaction, &group_id.to_string())
+            .await?;
+    }
     let conversation_raw = conversation.id.to_string();
     let rows = transaction
         .query(
@@ -1783,7 +1802,7 @@ pub(crate) async fn interrupt_conversation_runs(
                      or payload->>'conversation_id' = $3
                    )
                and status in ('queued','leased')
-             order by created_at desc",
+             order by id for update",
             &[
                 &conversation.project_id,
                 &conversation.id,
@@ -1793,7 +1812,17 @@ pub(crate) async fn interrupt_conversation_runs(
         .await
         .map_err(|error| internal_error(format!("failed to load active agent jobs: {error}")))?;
 
-    if rows.is_empty() {
+    // Job invalidation also locks its question; keep job-before-question order.
+    let expired_questions = crate::user_input_requests::expire_requests(
+        &transaction,
+        conversation.project_id,
+        Some(conversation.id),
+        None,
+        reason,
+    )
+    .await?;
+
+    if rows.is_empty() && expired_questions.is_empty() {
         transaction.commit().await.map_err(|error| {
             internal_error(format!(
                 "failed to finalize interruption transaction: {error}"
@@ -1811,13 +1840,21 @@ pub(crate) async fn interrupt_conversation_runs(
         .map(|row| (row.get("id"), row.get("run_id")))
         .collect();
 
-    let cancellation = cancel_jobs_within_transaction(
+    let mut notice = build_interruption_notice(
+        reason,
+        &jobs.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        &jobs.iter().filter_map(|(_, id)| *id).collect::<Vec<_>>(),
+    );
+    notice.metadata["details"]["stopRequested"] = json!(true);
+    notice.metadata["details"]["suppressedPlanGroupIds"] = json!(group_ids);
+    let cancellation = cancel_jobs_with_notice(
         &transaction,
         &conversation.project_id,
         &conversation.id,
         conversation.session_id,
         &jobs,
         reason,
+        Some(notice),
     )
     .await?;
 
@@ -1837,6 +1874,10 @@ pub(crate) async fn interrupt_conversation_runs(
     )
     .await;
 
+    drop(connection);
+    for request_id in expired_questions {
+        crate::user_input_requests::publish_request_run_event(&state, request_id).await;
+    }
     crate::send_queue::spawn_send_queue_drain(state.clone(), conversation.id);
     crate::multi_agent_plan::spawn_plan_group_checkpoints_after_cancellation(
         state.clone(),
@@ -2353,6 +2394,23 @@ pub(crate) async fn cancel_plan_group_jobs(
     )
     .await?
     {
+        let expired_questions = crate::user_input_requests::expire_requests(
+            &transaction,
+            conversation.project_id,
+            Some(conversation.id),
+            Some(group_id),
+            &reason,
+        )
+        .await?;
+
+        transaction
+            .commit()
+            .await
+            .map_err(|error| internal_error(format!("commit stopped questions: {error}")))?;
+        drop(connection);
+        for request_id in expired_questions {
+            crate::user_input_requests::publish_request_run_event(&state, request_id).await;
+        }
         return Ok(Json(ConversationInterruptResponse {
             ok: true,
             canceled_run_ids: Vec::new(),
@@ -2376,6 +2434,16 @@ pub(crate) async fn cancel_plan_group_jobs(
         )
         .await
         .map_err(|error| internal_error(format!("failed to lock canceled group jobs: {error}")))?;
+    // Keep the same job-before-question order as failure/requeue invalidation.
+    let expired_questions = crate::user_input_requests::expire_requests(
+        &transaction,
+        conversation.project_id,
+        Some(conversation.id),
+        Some(group_id),
+        &reason,
+    )
+    .await?;
+
     let jobs: Vec<(Uuid, Option<Uuid>)> = rows
         .iter()
         .map(|row| (row.get("id"), row.get("run_id")))
@@ -2413,6 +2481,10 @@ pub(crate) async fn cancel_plan_group_jobs(
     )
     .await;
 
+    drop(connection);
+    for request_id in expired_questions {
+        crate::user_input_requests::publish_request_run_event(&state, request_id).await;
+    }
     crate::send_queue::spawn_send_queue_drain(state.clone(), conversation.id);
 
     Ok(Json(ConversationInterruptResponse {

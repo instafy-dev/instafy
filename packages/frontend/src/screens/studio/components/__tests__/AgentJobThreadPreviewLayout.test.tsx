@@ -2846,7 +2846,9 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(container.querySelector('[data-testid="multi-agent-inline-status"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="multi-agent-plan-card"]')).toBeNull();
     expect(container.textContent).toContain("I'm splitting this into workstreams.");
-    expect(container.textContent).toContain("@front");
+    expect(container.textContent).toContain("Frontend");
+    expect(container.querySelector('[data-agent-handle="@front"]')?.getAttribute("aria-label"))
+      .toBe("Show details for Frontend (@front); status queued");
     expect(container.textContent).toContain("@octo");
     expect(container.textContent).not.toContain("Auth/session UI and client state.");
     expect(container.textContent).not.toContain("Lead: @octo");

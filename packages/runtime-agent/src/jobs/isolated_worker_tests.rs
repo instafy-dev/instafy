@@ -94,3 +94,34 @@ async fn opted_in_scoped_jobs_cannot_fall_back_to_the_unrestricted_native_lane()
         "rejection must precede workspace preparation and model execution"
     );
 }
+
+#[test]
+fn isolated_worker_evidence_is_required_unless_a_valid_human_decision_defers_it() {
+    let job = worker();
+    let completed = extract_codex_outcome(&json!({"summary":"Done", "files":[]})).unwrap();
+    assert!(isolated_worker::validate_worker_evidence(&job, &completed, false, false).is_err());
+    assert!(isolated_worker::validate_worker_evidence(&job, &completed, true, false).is_err());
+    assert!(isolated_worker::validate_worker_evidence(&job, &completed, false, true).is_err());
+    assert!(isolated_worker::validate_worker_evidence(&job, &completed, true, true).is_ok());
+    let unsupported = extract_codex_outcome(
+        &json!({"actions":[{"type":"request_browser", "task":"Do the work"}]}),
+    )
+    .unwrap();
+    assert!(isolated_worker::validate_worker_evidence(&job, &unsupported, false, false).is_err());
+    let question = json!({"actions":[{"type":"request_user_input",
+        "questions":[{"id":"format", "header":"Format", "question":"Which format should I use?"}],
+        "continuationNote":"Wait for the format before writing docs/result.txt."}]});
+    let deferred = extract_codex_outcome(&question).unwrap();
+    assert!(isolated_worker::validate_worker_evidence(&job, &deferred, false, false).is_ok());
+    let mut untracked = job.clone();
+    untracked.payload["metadata"]
+        .as_object_mut()
+        .unwrap()
+        .remove("multiAgentPlan");
+    assert!(
+        isolated_worker::validate_worker_evidence(&untracked, &deferred, false, false).is_err()
+    );
+    let mut malformed = question;
+    malformed["actions"][0]["questions"] = json!([]);
+    assert!(extract_codex_outcome(&malformed).is_err());
+}

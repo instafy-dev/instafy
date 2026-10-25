@@ -147,6 +147,7 @@ const EXISTING_RELATIONS = [
   ["16424", "origin_instances"],
   ["16425", "notification_delivery_attempts"],
   ["16426", "user_agents"],
+  ["16427", "agent_user_input_requests"],
 ];
 
 // A probe row names a relation by its oid. A test names it by table, or by oid
@@ -829,7 +830,7 @@ test("runtimes, the notification tables, job inputs, activity and runtime events
   );
 });
 
-test("participants, leases, automations, support reports, origins, attempts and agents pair with the list", () => {
+test("participants, leases, automations, support reports, origins, attempts, agents and worker questions pair with the list", () => {
   assert.deepEqual(BOTH_ORDER_TABLES.slice(14), [
     "conversation_participants",
     "runtime_leases",
@@ -839,8 +840,9 @@ test("participants, leases, automations, support reports, origins, attempts and 
     "origin_instances",
     "notification_delivery_attempts",
     "user_agents",
+    "agent_user_input_requests",
   ]);
-  assert.equal(BOTH_ORDER_TABLE_PAIRS.length, 231);
+  assert.equal(BOTH_ORDER_TABLE_PAIRS.length, 253);
   // Each migration below holds only SHARE or SHARE ROW EXCLUSIVE on the first
   // table, which the rule for other tables allowed. Raced in both orders
   // against a live request that writes the two tables in the other order,
@@ -935,6 +937,15 @@ test("participants, leases, automations, support reports, origins, attempts and 
   ]) {
     assert.deepEqual(bothOrderLockViolations(probeOutput(...rows)), expected, rows.join(", "));
   }
+  // Answers lock the question before its source job; job invalidation expires
+  // the question from a trigger after locking the job. Future migrations must
+  // split unrelated work on these tables even when it would only take SHARE.
+  assert.deepEqual(
+    bothOrderLockViolations(probeOutput(
+      "agent_jobs ShareLock", "agent_user_input_requests ShareRowExclusiveLock",
+    )),
+    [["agent_jobs", "agent_user_input_requests"]],
+  );
   // Against the first three tables alone, these are other tables, where SHARE
   // is allowed.
   assert.deepEqual(

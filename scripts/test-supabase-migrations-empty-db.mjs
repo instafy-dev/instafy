@@ -97,7 +97,10 @@ const REQUIRED_PUBLIC_RELATIONS = [
 // two of them is split into migrations that commit separately, or, when one
 // statement locks both, goes in as a reviewed exception. The list comes
 // from a code audit of the controller's transactions, so it is best effort;
-// MIGRATIONS.md describes the backstop for a table it misses.
+// MIGRATIONS.md describes the backstop for a table it misses. Worker answer
+// transactions lock agent_user_input_requests before checking their source job
+// and updating its run; job invalidation locks agent_jobs before its trigger
+// expires questions and updates their run and message presentation.
 const BOTH_ORDER_TABLES = [
   "agent_jobs",
   "org_credit_ledger",
@@ -121,12 +124,14 @@ const BOTH_ORDER_TABLES = [
   "origin_instances",
   "notification_delivery_attempts",
   "user_agents",
+  "agent_user_input_requests",
 ];
 // The tables of BOTH_ORDER_TABLES that a migration after the lane boundary
 // created, by the version of that migration. Every other table of the list
 // existed by the lane boundary. A table is expected among the public tables
 // before every migration after the one that created it.
 const BOTH_ORDER_TABLES_CREATED_BY = new Map([
+  ["agent_user_input_requests", 20261024120000n],
   ["agent_job_inputs", 20260816213318n],
   ["activity_events", 20260902200000n],
   ["bug_report_messages", 20260905120000n],
@@ -158,7 +163,31 @@ const FIRST_THREE_TABLES_ONLY = new Set([
 // in its SET clause or names it in its body. MIGRATIONS.md describes the
 // route and why it is safe enough, and a reviewer adds each entry.
 const REVIEWED_LOCK_EXCEPTIONS = new Map([
-  // [20261001120000n, { sha256: "<64 lowercase hex digits>", pairs: [["agent_jobs", "runtime_leases"]], reason: "agent_jobs.lease_id references runtime_leases, added NOT VALID" }],
+  [20261024120002n, {
+    sha256: "5c7151ca3f4207954581ac97b4825ffbe0de9d689b427ecd50a71de7a4e21a5b",
+    pairs: [["conversations", "agent_user_input_requests"]],
+    reason: "agent_user_input_requests references conversations; constraints added NOT VALID",
+  }],
+  [20261024120006n, {
+    sha256: "ca047a01e1339091cdbf72464467fc99453ed5df36586f35a8fbe66b0cdf2b60",
+    pairs: [["runs", "agent_user_input_requests"]],
+    reason: "agent_user_input_requests references runs; constraints added NOT VALID",
+  }],
+  [20261024120010n, {
+    sha256: "2a7296147fe04abb8f382b4c35e0a151841dfb2050752a7b09d4e31205518669",
+    pairs: [["prompts", "agent_user_input_requests"]],
+    reason: "agent_user_input_requests references prompts; constraints added NOT VALID",
+  }],
+  [20261024120014n, {
+    sha256: "fafece0fee689d7c79fd693a210a960bb8c25b397a5c367a70e23e467459a44d",
+    pairs: [["runtimes", "agent_user_input_requests"]],
+    reason: "agent_user_input_requests references runtimes; constraints added NOT VALID",
+  }],
+  [20261024120018n, {
+    sha256: "75b149e35f2f83cced97a859a2196230bd5775aacce4543b4bdf70c4ab034aef",
+    pairs: [["conversation_messages", "agent_user_input_requests"]],
+    reason: "agent_user_input_requests references conversation_messages; constraints added NOT VALID",
+  }],
 ]);
 
 function tablePairs(tables) {

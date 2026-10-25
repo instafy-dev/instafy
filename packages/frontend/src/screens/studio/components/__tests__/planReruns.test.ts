@@ -5,12 +5,24 @@ describe("plan reruns", () => {
   it("reads the job a plan job ran again, preferring the retry when a continuation was retried", () => {
     expect(readRerunOf({ continuation: { of: " job-1 ", turn: 1 } })).toEqual({ of: "job-1", reason: "turn_continuation" });
     expect(readRerunOf({ rateLimitRetry: { of: "job-1" } })).toEqual({ of: "job-1", reason: "rate_limit" });
+    expect(readRerunOf({ userInputContinuation: { of: "job-1" } })).toEqual({ of: "job-1", reason: "user_input" });
     // The retry of turn 2 copies turn 2's continuation entry (which names turn 1).
     expect(readRerunOf({ continuation: { of: "job-1" }, rateLimitRetry: { of: "job-2" } }))
       .toEqual({ of: "job-2", reason: "rate_limit" });
     expect(readRerunOf({ continuation: { turn: 1 } })).toBeNull();
     expect(readRerunOf({ groupId: "group", parentJobId: "job-0" })).toBeNull();
     expect(readRerunOf(null)).toBeNull();
+  });
+
+  it("follows a human answer continuation and a provider retry as one worker lane", () => {
+    const reruns = collectPlanReruns([
+      { metadata: { jobId: "after-answer", multiAgentPlan: { userInputContinuation: { of: "asking" } } } },
+      { metadata: { jobId: "after-retry", multiAgentPlan: { userInputContinuation: { of: "asking" }, rateLimitRetry: { of: "after-answer" } } } },
+    ]);
+    expect(reruns.latest("asking")).toEqual({ jobId: "after-retry", reason: "user_input" });
+    expect(reruns.latest("after-answer")).toEqual({ jobId: "after-retry", reason: "rate_limit" });
+    expect(reruns.isSuperseded("earlier")).toBe(false);
+    expect(describePlanRerun("user_input")).toBe("continued after an answer");
   });
 
   it("follows a lane through its continuations and keeps the reason it first ran again", () => {

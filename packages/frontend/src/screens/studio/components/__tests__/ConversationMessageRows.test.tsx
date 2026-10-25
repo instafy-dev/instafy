@@ -8,6 +8,7 @@ import type { ChatMessage } from "../../types";
 import { ConversationMessageRows } from "../ConversationMessageRows";
 import { RunFailureRetryProvider } from "../RunFailureNotice";
 import { ControllerNoticeActionsProvider } from "../ControllerNoticeActions";
+import { collapseLifecycleMessages, shouldDisplayChatMessage, synthesizeAgentJobThreadMessages } from "../chatMessagePresentation";
 import {
   CHAT_SPEAKER_MARKER_SELECTOR,
   readStickyChatSpeakerMarker,
@@ -19,6 +20,9 @@ const workspaceTabsMocks = vi.hoisted(() => ({
   openJobThreadTab: vi.fn(),
   requestUrlPush: vi.fn(),
 }));
+
+const userInputRequests = vi.hoisted(() => ({ getUserInputRequest: vi.fn(), answerUserInputRequest: vi.fn() }));
+vi.mock("../../../../services/runtimeController/userInputRequests", () => userInputRequests);
 
 // A thread preview card reads its linked thread from this list.
 const conversationsMocks = vi.hoisted(() => ({
@@ -126,6 +130,8 @@ describe("ConversationMessageRows", () => {
     workspaceTabsMocks.openConversationTab.mockReset();
     workspaceTabsMocks.openJobThreadTab.mockReset();
     workspaceTabsMocks.requestUrlPush.mockReset();
+    userInputRequests.getUserInputRequest.mockReset();
+    userInputRequests.answerUserInputRequest.mockReset();
     conversationsMocks.conversations = [];
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -413,6 +419,42 @@ describe("ConversationMessageRows", () => {
     expect(rowOf(container.querySelector('[data-testid="generic-action-card"]'))).toBe("generic-card");
     expect(container.querySelector('[data-testid="generic-action-card"] button')).toBeNull();
     expect(rowOf(container.querySelector('[data-testid="other-action-go"]'))).toBe("other-card");
+  });
+
+  it.each([false, true])("keeps the UUID-bound worker question visible once in the owning chat with worker role known=%s", async (knownRole) => {
+    const requestId = "11111111-1111-4111-8111-111111111111";
+    const messageId = "33333333-3333-4333-8333-333333333333";
+    userInputRequests.getUserInputRequest.mockResolvedValue({ requestId, messageId, status: "pending", canAnswer: true, agentHandle: "@poet",
+      questions: [{ id: "tone", header: "Tone", question: "Which tone?" }] });
+    const worker = { jobId: "worker-job", ...(knownRole ? { multiAgentPlan: { role: "worker", parentJobId: "parent-job", groupId: "group" } } : {}) };
+    const question = (id: string, reference: unknown) => createMessage({
+      id, timestamp: 2, messageType: "action_request", metadata: { ...worker, messageType: "action_request", details: {
+        messageType: "action_request", details: { userInputRequestId: reference, title: "Untrusted question text",
+          actions: [{ id: "wrong", label: "Wrong target", event: "instafy:send-prompt", testId: "wrong-target" }] },
+      } },
+    });
+    const messages = [
+      createMessage({ id: "worker-tool", timestamp: 1, content: "Working on the poem", messageType: "command_execution",
+        metadata: { ...worker, messageType: "command_execution" } }),
+      question(messageId, requestId),
+    ];
+    const all = collapseLifecycleMessages(messages);
+    const rows = synthesizeAgentJobThreadMessages(all, all.filter(shouldDisplayChatMessage));
+    expect(rows.filter(row => row.id === messageId)).toHaveLength(1);
+    const nested = rows.flatMap(row => row.metadata?.threadMessages as ChatMessage[] ?? []);
+    expect(nested.map(row => row.id)).not.toContain(messageId);
+    await renderSpeakerBoundaryMessages([...rows, { ...question("invalid-question", "../jobs/other"), metadata: {
+      messageType: "action_request", details: { userInputRequestId: "../jobs/other", actions: [{ id: "wrong", label: "Wrong target", event: "instafy:send-prompt", testId: "wrong-target" }] },
+    } }]);
+    const card = container.querySelector('[data-testid="user-input-request-message"]');
+    expect(card?.closest("[data-chat-scroll-message-id]")?.getAttribute("data-chat-scroll-message-id")).toBe(messageId);
+    expect(card?.textContent).toContain("Which tone?");
+    expect(container.querySelectorAll('[data-testid="user-input-request-message"]')).toHaveLength(1);
+    expect(container.textContent).toContain("This question is unavailable.");
+    expect(container.textContent).not.toContain("Untrusted question text");
+    expect(container.querySelector('[data-testid="wrong-target"]')).toBeNull();
+    expect(userInputRequests.getUserInputRequest).toHaveBeenCalledExactlyOnceWith(requestId, messageId, expect.any(AbortSignal));
+    expect(userInputRequests.answerUserInputRequest).not.toHaveBeenCalled();
   });
 
   it("renders normal chat messages without decorative corner notches", async () => {
@@ -1684,7 +1726,7 @@ describe("ConversationMessageRows", () => {
     expect(teamChip?.getAttribute("aria-label")).toContain("1 runtime for 1 leased lane");
     expect(container.querySelector('[data-testid="multi-agent-open-run"]')).toBeNull();
     expect(container.querySelector('[data-testid="multi-agent-runtime-metrics"]')).toBeNull();
-    expect(evidenceRow?.getAttribute("aria-label")).toBe("Open run trace for @runtime; status done");
+    expect(evidenceRow?.getAttribute("aria-label")).toBe("Open run trace for Runtime/tool boundaries (@runtime); status done");
     expect(evidenceRow?.getAttribute("aria-expanded")).toBeNull();
     expect(evidenceRow?.getAttribute("title")).toContain("Runtime: 11111111-1111-4111-8111-111111111111");
     expect(evidenceRow?.getAttribute("title")).toContain("Tool updates: 1");
@@ -1734,7 +1776,7 @@ describe("ConversationMessageRows", () => {
     expect(workspaceTabsMocks.openJobThreadTab).toHaveBeenCalledWith({
       conversationId: "conversation-local",
       jobId: "worker-job-1",
-      title: "@runtime run",
+      title: "Runtime/tool boundaries run",
     });
     expect(evidenceRow?.getAttribute("aria-expanded")).toBeNull();
     expect(container.querySelector('[data-testid="multi-agent-evidence-detail"]')?.textContent).toContain(
@@ -1932,8 +1974,8 @@ describe("ConversationMessageRows", () => {
     const teamRuntimeSummary = document.body.querySelector('[data-testid="multi-agent-team-runtime-summary"]');
     expect(teamRuntimeSummary?.textContent).toContain("2 runtimes across 2 leased lanes");
     expect(teamRuntimeSummary?.textContent).not.toContain("Runtime spread:");
-    expect(teamRuntimeSummary?.textContent).toContain("@alpha · runtime aaaaaaaa · wait 100ms · ran 4.3s");
-    expect(teamRuntimeSummary?.textContent).toContain("@beta · runtime bbbbbbbb · wait 1.4s · ran 980ms");
+    expect(teamRuntimeSummary?.textContent).toContain("Alpha · runtime aaaaaaaa · wait 100ms · ran 4.3s");
+    expect(teamRuntimeSummary?.textContent).toContain("Beta · runtime bbbbbbbb · wait 1.4s · ran 980ms");
     expect(teamMenu?.textContent).toContain("Copy runtime summary");
   });
 

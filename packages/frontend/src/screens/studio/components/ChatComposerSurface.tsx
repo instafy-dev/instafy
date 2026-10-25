@@ -87,6 +87,8 @@ type ChatComposerSurfaceProps = {
   composerOverlayRef: RefObject<HTMLDivElement | null>;
   composerAutoHidden: boolean;
   aboveComposer?: ReactNode;
+  /** Explicit reply recipient, inside the usual composer. */
+  replyContext?: ReactNode;
   /** Compact conversation views stay in the measured overlay above the input. */
   viewNavigation?: ReactNode;
   /**
@@ -148,6 +150,7 @@ type ChatComposerSurfaceProps = {
   sendButtonDisabled: boolean;
   sendButtonVariant: ComponentProps<typeof IconButton>["variant"];
   primaryActionMode?: "send" | "steer";
+  sendActionLabel?: string;
   /**
    * Why a send or steer would be refused right now (the browser's composer
    * whose browser is still connecting). Announced in place of the Enter hint.
@@ -265,6 +268,7 @@ export function ChatComposerSurface({
   composerOverlayRef,
   composerAutoHidden,
   aboveComposer,
+  replyContext,
   viewNavigation,
   touchLikeInput = false,
   compactBrowserViewport,
@@ -310,6 +314,7 @@ export function ChatComposerSurface({
   sendButtonDisabled,
   sendButtonVariant,
   primaryActionMode = "send",
+  sendActionLabel,
   primaryActionBlockedStatus = null,
   onSendButtonPress,
   composerGhostActionClass: ghostActionClass,
@@ -489,7 +494,7 @@ export function ChatComposerSurface({
         ? "Stash draft (Command or Ctrl plus Shift plus Enter)"
         : primaryActionMode === "steer"
           ? touchLikeInput ? "Steer current reply" : "Steer current reply (Enter)"
-          : "Send message";
+          : sendActionLabel ?? "Send message";
   // On touch, Enter adds a line (the mobile convention, see enterBehavior.ts);
   // the hint said "Enter sends the message" and people waited for a send that
   // never came.
@@ -504,10 +509,10 @@ export function ChatComposerSurface({
           : touchLikeInput
             ? primaryActionMode === "steer"
               ? "Enter adds a new line. The send button steers the current reply."
-              : "Enter adds a new line. The send button sends the message."
+              : sendActionLabel ? `Enter adds a new line. ${sendActionLabel}.` : "Enter adds a new line. The send button sends the message."
             : primaryActionMode === "steer"
               ? "Enter steers the current reply."
-              : "Enter sends the message.";
+              : sendActionLabel ? `Enter: ${sendActionLabel}.` : "Enter sends the message.";
   // Hold-to-talk must keep the same microphone DOM node from press through
   // release. The richer active strip is reserved for tap/continuous modes;
   // hold mode communicates activity on the stable button itself.
@@ -1147,6 +1152,7 @@ export function ChatComposerSurface({
           }}
         >
           <div className={draftExpanded ? "flex h-full min-h-0 flex-col gap-2" : "space-y-2"}>
+            {replyContext}
             {showActiveGoal && !draftExpanded ? (
               <div
                 className={`pointer-events-auto flex min-w-0 flex-col gap-2 rounded-2xl border border-slate-200/70 bg-white/95 px-3 py-2 text-sm shadow-sm dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel-strong)] ${
