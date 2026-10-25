@@ -875,6 +875,9 @@ pub struct CodexRunOptions {
     /// The run's hard limit, when it is not the usual one (`resolve_codex_run_timeout`): a team's
     /// turn ends by the team's deadline.
     pub run_timeout: Option<Duration>,
+    /// The run is never replayed from the start, because its job runs at most once: what it
+    /// did must not happen again.
+    pub run_once: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1272,13 +1275,7 @@ impl CodexClient {
         // Capture before callback-free runs move to a fresh task. Neither the cached
         // CodexClient nor a restored rollout may retain a previous job's policy.
         let runtime_settings = crate::job_runtime_settings::current();
-        let max_retries = if options.isolated_tool_worker || uses_bounded_proxy_retries(&options) {
-            // Codex recovers within the same session, preserving completed tool receipts.
-            // Replaying execute_inner would reset that budget and could repeat side effects.
-            0
-        } else {
-            resolve_codex_max_run_retries()
-        };
+        let max_retries = max_run_replays(&options);
         let retry_base_delay = resolve_codex_retry_base_delay();
         let usage_observer = options
             .usage_observer
@@ -5376,6 +5373,18 @@ pub(crate) fn resolve_codex_run_timeout() -> Duration {
         .unwrap_or_else(|| Duration::from_secs(DEFAULT_CODEX_RUN_TIMEOUT_SECONDS))
 }
 
+/// How many times a failed run is replayed from the start. An isolated tool worker, and a run
+/// behind the proxy, recover within the same session, which keeps completed tool receipts; a
+/// replay would reset that budget and could repeat side effects. A run-once run is never
+/// replayed, whatever the proxy setting: a replay would repeat what it already did.
+fn max_run_replays(options: &CodexRunOptions) -> usize {
+    if options.isolated_tool_worker || options.run_once || uses_bounded_proxy_retries(options) {
+        0
+    } else {
+        resolve_codex_max_run_retries()
+    }
+}
+
 fn resolve_codex_max_run_retries() -> usize {
     optional_env("CODEX_MAX_RUN_RETRIES")
         .and_then(|value| value.parse::<usize>().ok())
@@ -7945,6 +7954,33 @@ mod tests {
         assert!(!uses_bounded_proxy_retries(&CodexRunOptions::default()));
         if let Some(previous) = previous {
             unsafe { std::env::set_var("OPENAI_BASE_URL", previous) };
+        }
+    }
+
+    #[test]
+    fn a_run_once_run_is_never_replayed_with_or_without_the_proxy() {
+        let _env_lock = env_lock();
+        let previous_base_url = std::env::var_os("OPENAI_BASE_URL");
+        let previous_retries = std::env::var_os("CODEX_MAX_RUN_RETRIES");
+        unsafe { std::env::set_var("CODEX_MAX_RUN_RETRIES", "2") };
+        let run_once = CodexRunOptions {
+            run_once: true,
+            ..Default::default()
+        };
+        unsafe { std::env::remove_var("OPENAI_BASE_URL") };
+        assert_eq!(max_run_replays(&CodexRunOptions::default()), 2);
+        assert_eq!(max_run_replays(&run_once), 0);
+        unsafe { std::env::set_var("OPENAI_BASE_URL", "http://127.0.0.1:8789/v1") };
+        assert_eq!(max_run_replays(&CodexRunOptions::default()), 0);
+        assert_eq!(max_run_replays(&run_once), 0);
+        for (key, previous) in [
+            ("OPENAI_BASE_URL", previous_base_url),
+            ("CODEX_MAX_RUN_RETRIES", previous_retries),
+        ] {
+            match previous {
+                Some(value) => unsafe { std::env::set_var(key, value) },
+                None => unsafe { std::env::remove_var(key) },
+            }
         }
     }
 

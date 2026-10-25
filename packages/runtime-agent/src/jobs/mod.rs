@@ -6715,6 +6715,7 @@ impl JobProcessor {
             turn_continue_note: turn_files.continue_note_path(),
             // A team's turn ends by the team's deadline (`turn_continuation`).
             run_timeout: Some(turn_files.limit()),
+            run_once: job.runs_at_most_once(),
         };
 
         let routing_pre_observation = if should_run_routing_pre_observation_before_main(
@@ -7355,10 +7356,25 @@ impl JobProcessor {
         // only on it is never kept over the retry's.
         let first_ran_command =
             routing_evidence::ran_program_beyond_literal_output(&interim_messages, true);
-        if should_retry_codex_once(
-            first_shared_browser_terminal_consent_failure,
-            recovery_retry_required,
-        ) {
+        // A run-once turn is never retried: a retry, and the finalization pass after it, would
+        // start again from the person's request and repeat what the turn did. One that ended
+        // without its answer fails.
+        let run_once = codex_run_options.run_once;
+        if run_once && codex_fallback_summary_kind.is_some() {
+            return Err(JobFailureWithArtifacts {
+                message: "The turn ended without an answer. It was not run again, because it may \
+                          already have acted."
+                    .into(),
+                artifacts,
+            }
+            .into());
+        }
+        if !run_once
+            && should_retry_codex_once(
+                first_shared_browser_terminal_consent_failure,
+                recovery_retry_required,
+            )
+        {
             let retry_reason = if personal_browser_execution_missing {
                 "missing_personal_browser_execution"
             } else if shared_browser_execution_missing {

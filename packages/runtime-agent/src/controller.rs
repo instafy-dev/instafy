@@ -206,6 +206,12 @@ impl LeaseJob {
     pub fn resumes_an_interrupted_attempt(&self) -> bool {
         self.lease_attempts > 1
     }
+
+    /// The controller hands this job out once (`payload.delivery.atMostOnce`), so its turn runs
+    /// once too: what it already did must not happen again.
+    pub fn runs_at_most_once(&self) -> bool {
+        self.payload["delivery"]["atMostOnce"].as_bool() == Some(true)
+    }
 }
 
 #[derive(Debug, Deserialize)]

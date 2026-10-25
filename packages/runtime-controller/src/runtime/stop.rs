@@ -2419,7 +2419,8 @@ pub(super) async fn resolve_jobs_for_unavailable_runtime(
                  active_input_ready_expires_at = null,
                  active_input_ready_turn_id = null,
                  heartbeat_at = null,
-                 target_runtime_id = null,
+                 -- A strictly pinned job waits for its own runtime.
+                 target_runtime_id = case when strict_pin then target_runtime_id end,
                  payload = payload || jsonb_build_object(
                      'requeuedAt', to_jsonb(now()),
                      'requeuedReason', $3::text

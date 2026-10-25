@@ -1357,10 +1357,12 @@ struct LeasingRuntime {
 ///   [`runtime::RUNTIME_LAST_SEEN_TOUCH_INTERVAL_SECONDS`], so
 ///   [`runtime::touch_runtime_last_seen`] would not write it;
 /// - no queued job of the project can be this runtime's. The lease query takes
-///   only the project's queued jobs, and of those only one that targets this
-///   runtime, targets none, or carries runtime routing metadata (a spread job
-///   may run on a runtime it does not target). This read counts every such
-///   job, whatever the lease query's other filters would say about it.
+///   only the project's queued jobs that their delivery options still let
+///   start ([`JobDelivery`]), and of those only one that targets this runtime,
+///   or, unless strictly pinned, targets none or carries runtime routing
+///   metadata (a spread job may run on a runtime it does not target). This
+///   read counts every such job, whatever the lease query's other filters
+///   would say about it.
 ///
 /// Anything else, a failed check or a failed read included, takes the leasing
 /// transaction. Every lease and every refusal therefore still happens under
@@ -1392,11 +1394,18 @@ async fn idle_lease_poll_finds_no_work(
                         from agent_jobs aj
                         where aj.project_id = r.project_id
                           and aj.status = 'queued'
+                          and not (aj.at_most_once and aj.lease_attempts > 0)
+                          and (aj.start_by is null or aj.start_by > now())
                           and (
-                              aj.target_runtime_id is null
-                              or aj.target_runtime_id = r.id
-                              or aj.payload #> '{metadata,runtimeRouting}' is not null
-                              or aj.payload #> '{metadata,runtime_routing}' is not null
+                              aj.target_runtime_id = r.id
+                              or (
+                                  not aj.strict_pin
+                                  and (
+                                      aj.target_runtime_id is null
+                                      or aj.payload #> '{metadata,runtimeRouting}' is not null
+                                      or aj.payload #> '{metadata,runtime_routing}' is not null
+                                  )
+                              )
                           )
                     ) as has_queued_work
              from runtimes r
@@ -4417,6 +4426,23 @@ fn extract_job_hierarchy_from_payload(
     (parent_job_id, plan_group_id, agent_role)
 }
 
+/// How a job may be delivered to a runtime (`agent_jobs.at_most_once`,
+/// `start_by`, `strict_pin`). Any job may set them, and only controller code
+/// does; the default delivers a job as before. A queued job that can no
+/// longer start is failed by the idle sweep (runtime/sweeps.rs).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct JobDelivery {
+    /// The lease hands it out once, and never again after that lease ends.
+    pub(crate) at_most_once: bool,
+    /// No lease later than this long after its cause was received (its
+    /// trigger's `received_at`, a queued message's time in the queue
+    /// included), or after it is queued when it has none, on the database
+    /// clock.
+    pub(crate) start_within_s: Option<i32>,
+    /// Only its target runtime leases it, and nothing moves it to another.
+    pub(crate) strict_pin: bool,
+}
+
 pub(crate) async fn enqueue_agent_job_record(
     transaction: &tokio_postgres::Transaction<'_>,
     project: &ProjectRecord,
@@ -4468,12 +4494,16 @@ pub(crate) async fn enqueue_agent_job_record(
                  plan_group_id,
                  agent_role,
                  trigger_user_id,
-                 trigger_received_at
+                 trigger_received_at,
+                 at_most_once,
+                 start_by,
+                 strict_pin
              ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11,
                  (select parent.id from agent_jobs parent
                   where parent.id = $12 and parent.project_id = $1),
                  $13, $14, $15,
-                 case when $16 then coalesce($17, now()) end)
+                 case when $16 then coalesce($17, now()) end,
+                 $18, coalesce($17, now()) + $19::int * interval '1 second', $20)
              returning id",
             &[
                 &project.id,
@@ -4493,6 +4523,9 @@ pub(crate) async fn enqueue_agent_job_record(
                 &trigger.and_then(|trigger| trigger.user_id),
                 &trigger.is_some(),
                 &trigger.and_then(|trigger| trigger.received_at),
+                &request.delivery.at_most_once,
+                &request.delivery.start_within_s,
+                &request.delivery.strict_pin,
             ],
         )
         .await
@@ -4542,6 +4575,7 @@ pub(crate) async fn lease_next_agent_job(
                        aj.conversation_id,
                        aj.priority,
                        aj.created_at,
+                       aj.strict_pin,
                        aj.payload #>> '{user_id}' as job_user_id,
                        lower(replace(coalesce(
                            aj.payload #>> '{metadata,runtimeRouting,strategy}',
@@ -4582,6 +4616,10 @@ pub(crate) async fn lease_next_agent_job(
                 from agent_jobs aj
                 where aj.project_id = $1
                   and status = 'queued'
+                  -- Delivered at most once: never again after a lease of it
+                  -- ended. And never after its deadline.
+                  and not (aj.at_most_once and aj.lease_attempts > 0)
+                  and (aj.start_by is null or aj.start_by > statement_timestamp())
                   and ($11::bool or coalesce(aj.agent_role, aj.payload #>> '{metadata,multiAgentPlan,role}', '') <> 'worker')
                   -- A plan agent waits while its AI upstream is paced
                   -- (`upstream_pacing`).
@@ -4634,7 +4672,8 @@ pub(crate) async fn lease_next_agent_job(
                   and (
                         target_runtime_id = $2
                         or (
-                            browser_transport not in ('desktop-personal', 'shared')
+                            not strict_pin
+                            and browser_transport not in ('desktop-personal', 'shared')
                             and
                             (
                                 target_runtime_id is null
@@ -4927,6 +4966,15 @@ pub(crate) async fn lease_next_agent_job(
                     JsonValue::Array(skill_setup_openers),
                 );
             }
+        }
+    }
+
+    // A job delivered at most once runs its turn once too. The controller
+    // alone enforces `start_by` and `strict_pin`, so the runtime is not sent
+    // them.
+    if row.get::<_, bool>("at_most_once") {
+        if let JsonValue::Object(ref mut map) = payload {
+            map.insert("delivery".to_string(), json!({ "atMostOnce": true }));
         }
     }
 

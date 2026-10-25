@@ -131,6 +131,24 @@ body: whose cause it was and when the controller received it, on the database cl
   grants are off unless `DEVICE_GRANTS_ENABLED` is on, and then on for every user under
   `DEV_MODE` and otherwise only for `DEVICE_GRANTS_USER_IDS`.
 
+## Agent Job Delivery
+
+Controller code may give any job delivery options, never a request body; a job without them is
+delivered as before (`agent_jobs.at_most_once`, `start_by`, `strict_pin`).
+
+- `at_most_once`: the lease hands the job out once, never again after that lease ends (a runtime
+  stop or a lapsed lease), and the runtime neither replays nor retries its turn: one that ends
+  without its answer fails, saying it was not run again. A short rate limit does not requeue it.
+- `start_by`: no lease after this time, a set time after its trigger was received.
+- `strict_pin`: only its target runtime leases it, even under a spread plan's rules; a runtime
+  stop and an unready runtime's dispatch alert leave it pinned, as they do a browser turn.
+
+The lease tells the runtime only `at_most_once`, as `payload.delivery.atMostOnce`; the controller
+alone enforces `start_by` and `strict_pin`. The idle poll's one-read check counts no job they keep
+from the polling runtime. The idle sweep fails a queued job that can no longer start
+(`run_once_interrupted`, `start_by_passed`), tells its conversation why and cancels its open
+provider requests.
+
 ## Canonical Workspace Modes
 There are two supported canonical filesystem modes:
 

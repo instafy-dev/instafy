@@ -13542,7 +13542,10 @@ async fn lease_next_agent_job_leases_queued_work() -> anyhow::Result<()> {
                 active_input_ready_expires_at timestamptz,
                 active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
-                updated_at timestamptz NOT NULL DEFAULT now()
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                at_most_once boolean NOT NULL DEFAULT false,
+                start_by timestamptz,
+                strict_pin boolean NOT NULL DEFAULT false
             );",
         )
         .await?;
@@ -13640,7 +13643,10 @@ async fn lease_next_agent_job_can_filter_for_read_only_batches() -> anyhow::Resu
                 active_input_ready_expires_at timestamptz,
                 active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
-                updated_at timestamptz NOT NULL DEFAULT now()
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                at_most_once boolean NOT NULL DEFAULT false,
+                start_by timestamptz,
+                strict_pin boolean NOT NULL DEFAULT false
             );",
         )
         .await?;
@@ -13749,7 +13755,10 @@ async fn lease_next_agent_job_scopes_read_only_batch_to_same_team_group() -> any
                 active_input_ready_expires_at timestamptz,
                 active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
-                updated_at timestamptz NOT NULL DEFAULT now()
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                at_most_once boolean NOT NULL DEFAULT false,
+                start_by timestamptz,
+                strict_pin boolean NOT NULL DEFAULT false
             );",
         )
         .await?;
@@ -13857,7 +13866,10 @@ async fn lease_next_agent_job_can_lease_runtime_spread_jobs_when_preference_pinn
                 active_input_ready_expires_at timestamptz,
                 active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
-                updated_at timestamptz NOT NULL DEFAULT now()
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                at_most_once boolean NOT NULL DEFAULT false,
+                start_by timestamptz,
+                strict_pin boolean NOT NULL DEFAULT false
             );",
         )
         .await?;
@@ -13963,7 +13975,10 @@ async fn lease_next_agent_job_isolates_personal_browser_runtimes_and_jobs() -> a
                 active_input_ready_expires_at timestamptz,
                 active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
-                updated_at timestamptz NOT NULL DEFAULT now()
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                at_most_once boolean NOT NULL DEFAULT false,
+                start_by timestamptz,
+                strict_pin boolean NOT NULL DEFAULT false
             );",
         )
         .await?;
@@ -14251,7 +14266,10 @@ async fn lease_next_agent_job_never_spreads_shared_browser_work_off_target() -> 
                 active_input_ready_expires_at timestamptz,
                 active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
-                updated_at timestamptz NOT NULL DEFAULT now()
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                at_most_once boolean NOT NULL DEFAULT false,
+                start_by timestamptz,
+                strict_pin boolean NOT NULL DEFAULT false
             );",
         )
         .await?;
@@ -14360,7 +14378,10 @@ async fn lease_next_agent_job_scopes_grouped_runtime_spread_to_plan_runtimes() -
                 active_input_ready_expires_at timestamptz,
                 active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
-                updated_at timestamptz NOT NULL DEFAULT now()
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                at_most_once boolean NOT NULL DEFAULT false,
+                start_by timestamptz,
+                strict_pin boolean NOT NULL DEFAULT false
             );
             ALTER TABLE agent_jobs ADD COLUMN agent_role text;
             CREATE TEMP TABLE upstream_pacing (
@@ -14527,7 +14548,10 @@ async fn lease_next_agent_job_yields_spread_group_to_unused_group_runtime() -> a
                 active_input_ready_expires_at timestamptz,
                 active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
-                updated_at timestamptz NOT NULL DEFAULT now()
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                at_most_once boolean NOT NULL DEFAULT false,
+                start_by timestamptz,
+                strict_pin boolean NOT NULL DEFAULT false
             );",
         )
         .await?;
@@ -14699,7 +14723,10 @@ async fn lease_next_agent_job_batches_exact_write_scoped_siblings() -> anyhow::R
                 active_input_ready_expires_at timestamptz,
                 active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
-                updated_at timestamptz NOT NULL DEFAULT now()
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                at_most_once boolean NOT NULL DEFAULT false,
+                start_by timestamptz,
+                strict_pin boolean NOT NULL DEFAULT false
             );",
         )
         .await?;
@@ -14839,7 +14866,10 @@ async fn lease_next_agent_job_excludes_runtime_spread_jobs_from_secondary_batch_
                 active_input_ready_expires_at timestamptz,
                 active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
-                updated_at timestamptz NOT NULL DEFAULT now()
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                at_most_once boolean NOT NULL DEFAULT false,
+                start_by timestamptz,
+                strict_pin boolean NOT NULL DEFAULT false
             );",
         )
         .await?;
@@ -14922,7 +14952,10 @@ async fn lease_next_agent_job_skips_runtime_spread_when_runtime_is_busy() -> any
                 active_input_ready_expires_at timestamptz,
                 active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
-                updated_at timestamptz NOT NULL DEFAULT now()
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                at_most_once boolean NOT NULL DEFAULT false,
+                start_by timestamptz,
+                strict_pin boolean NOT NULL DEFAULT false
             );",
         )
         .await?;
@@ -24883,7 +24916,10 @@ async fn create_runtime_tables(client: &mut tokio_postgres::Client) -> anyhow::R
                 active_input_ready_expires_at timestamptz,
                 active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
-                updated_at timestamptz NOT NULL DEFAULT now()
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                at_most_once boolean NOT NULL DEFAULT false,
+                start_by timestamptz,
+                strict_pin boolean NOT NULL DEFAULT false
             );
             CREATE TEMP TABLE agent_job_inputs (
                 id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

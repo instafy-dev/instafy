@@ -1,9 +1,11 @@
 #![cfg(test)]
 
-// What started an agent job, on the migrated database: the message routes,
-// the send queue and automations record it from the caller's own credential,
-// and a message says what made it only where device grants are on for its
-// sender. Requires `TEST_DATABASE_URL` like the tests in `tests.rs`.
+// What started an agent job and how it may be delivered, on the migrated
+// database: the message routes, the send queue and automations record its
+// trigger from the caller's own credential, a message says what made it only
+// where device grants are on for its sender, and the lease, a runtime stop and
+// the idle sweep honour its delivery options. Requires `TEST_DATABASE_URL`
+// like the tests in `tests.rs`.
 
 use axum::http::StatusCode;
 use axum::Router;
@@ -12,6 +14,7 @@ use serde_json::{json, Value as JsonValue};
 use tokio_postgres::types::Json as PgJson;
 use uuid::Uuid;
 
+use crate::agent::JobDelivery;
 use crate::auth::RequestContext;
 use crate::config::{AppConfig, PgPool, RuntimeProviderConfig};
 use crate::dispatch::{self, DispatchPromptNormalized, DispatchPromptRequest};
@@ -21,10 +24,11 @@ use crate::tests::{
 };
 use crate::AppState;
 
+pub(crate) const PROVIDER_ID: &str = "device:delivery-test";
 pub(crate) const DEVICE_ID: &str = "device-1";
 
 /// An org whose space has an owner and another member, each with an agent
-/// called `helper`, and a self-hosted machine of the owner's.
+/// called `helper`, and two self-hosted machines of the owner's.
 pub(crate) struct Space {
     pub(crate) org_id: Uuid,
     pub(crate) project_id: Uuid,
@@ -33,6 +37,7 @@ pub(crate) struct Space {
     /// A conversation everyone in the space reads.
     pub(crate) log: Uuid,
     pub(crate) runtime: Uuid,
+    pub(crate) other_machine: Uuid,
 }
 
 impl Space {
@@ -44,6 +49,7 @@ impl Space {
             member: Uuid::new_v4(),
             log: Uuid::new_v4(),
             runtime: Uuid::new_v4(),
+            other_machine: Uuid::new_v4(),
         }
     }
 
@@ -119,14 +125,17 @@ impl Space {
             capabilities.as_object_mut().expect("capabilities"),
             self.owner,
         );
-        connection
-            .execute(
-                "insert into runtimes (
-                     id, project_id, provider, status, idle_ttl_seconds, last_seen_at, capabilities
-                 ) values ($1, $2, 'self-hosted', 'ready', 600, now(), $3)",
-                &[&self.runtime, &self.project_id, &PgJson(capabilities)],
-            )
-            .await?;
+        for runtime in [self.runtime, self.other_machine] {
+            connection
+                .execute(
+                    "insert into runtimes (
+                         id, project_id, provider, status, idle_ttl_seconds, last_seen_at,
+                         capabilities
+                     ) values ($1, $2, 'self-hosted', 'ready', 600, now(), $3)",
+                    &[&runtime, &self.project_id, &PgJson(capabilities.clone())],
+                )
+                .await?;
+        }
         Ok(())
     }
 }
@@ -378,6 +387,7 @@ pub(crate) fn typed_with(extra: JsonValue) -> JsonValue {
 }
 
 pub(crate) struct SentJob {
+    pub(crate) id: Uuid,
     trigger: Trigger,
 }
 
@@ -396,7 +406,8 @@ pub(crate) async fn job_of_run(pool: &PgPool, run_id: Uuid) -> anyhow::Result<Se
         .get()
         .await?
         .query_one(
-            "select j.trigger_user_id, j.trigger_received_at, m.metadata ->> 'trigger' as kind,
+            "select j.id, j.trigger_user_id, j.trigger_received_at,
+                    m.metadata ->> 'trigger' as kind,
                     coalesce(m.metadata ? 'trigger', false) as stamped
                from agent_jobs j
                left join lateral (
@@ -409,6 +420,7 @@ pub(crate) async fn job_of_run(pool: &PgPool, run_id: Uuid) -> anyhow::Result<Se
         )
         .await?;
     Ok(SentJob {
+        id: row.get("id"),
         trigger: Trigger {
             kind: row.get("kind"),
             stamped: row.get("stamped"),
@@ -842,6 +854,252 @@ async fn without_the_flag_no_message_says_what_made_it() -> anyhow::Result<()> {
             .await?
             .get(0);
         assert_eq!(stamped, 0);
+        Ok(())
+    })
+    .await
+}
+
+/// The job's delivery columns, its target runtime, status and error.
+pub(crate) async fn delivery_row(
+    harness: &Harness,
+    job: Uuid,
+) -> anyhow::Result<tokio_postgres::Row> {
+    Ok(harness
+        .pool
+        .get()
+        .await?
+        .query_one(
+            "select status, target_runtime_id, at_most_once, start_by, strict_pin,
+                    error_message, now() as now
+               from agent_jobs where id = $1",
+            &[&job],
+        )
+        .await?)
+}
+
+/// A request of `job` that `DEVICE_ID` has claimed.
+async fn claimed_request_of(harness: &Harness, job: Uuid) -> anyhow::Result<Uuid> {
+    let request = Uuid::new_v4();
+    sql(
+        &harness.pool,
+        "insert into project_provider_requests (
+             id, project_id, provider_id, request_kind, tool_name, arguments, status,
+             requested_by, job_id, claimed_by_device_id, claimed_at, expires_at
+         ) values ($1, $2, $3, 'tool_call', 'device.move', '{}'::jsonb, 'claimed',
+             $4, $5, $6, now(), now() + interval '30 seconds')",
+        &[
+            &request,
+            &harness.space.project_id,
+            &PROVIDER_ID,
+            &harness.space.owner,
+            &job,
+            &DEVICE_ID,
+        ],
+    )
+    .await?;
+    Ok(request)
+}
+
+/// Stops `runtime` as its runtime stop would, then brings it back, and gives
+/// the jobs the stop requeued.
+async fn stop_runtime(harness: &Harness, runtime: Uuid) -> anyhow::Result<Vec<Uuid>> {
+    let mut connection = harness.pool.get().await?;
+    let transaction = connection.transaction().await?;
+    let details = crate::runtime::fetch_runtime_for_update(&transaction, &runtime)
+        .await
+        .map_err(|(status, error)| anyhow::anyhow!("runtime: {status} {}", error.message))?;
+    let outcome = crate::runtime::perform_runtime_stop(
+        &transaction,
+        &details,
+        crate::runtime::StopOptions {
+            source: "test",
+            reason: Some("unit_test".to_string()),
+            skip_if_active_jobs: false,
+            require_idle_timeout: false,
+            allow_cleanup_pending_release: false,
+            expected_identity: None,
+        },
+    )
+    .await
+    .map_err(|(status, error)| anyhow::anyhow!("stop: {status} {}", error.message))?;
+    transaction.commit().await?;
+    connection
+        .execute(
+            "update runtimes set status = 'ready', last_seen_at = now() where id = $1",
+            &[&runtime],
+        )
+        .await?;
+    Ok(outcome.requeued_jobs)
+}
+
+/// A job queued with delivery options is leased only as they allow: at most
+/// once, only by its deadline, and only by the runtime it is pinned to, which
+/// it keeps through a runtime stop and an unready runtime's alert. Its lease
+/// tells its runtime that it runs once. The idle sweep fails what can no
+/// longer start, and cancels its open device requests. A job without options
+/// is delivered as before.
+#[tokio::test]
+async fn a_job_is_delivered_only_as_its_options_allow() -> anyhow::Result<()> {
+    with_space("job-delivery", false, |harness| async move {
+        let space = &harness.space;
+        let strict = JobDelivery {
+            at_most_once: true,
+            start_within_s: Some(60),
+            strict_pin: true,
+        };
+        let on_machine = |delivery: JobDelivery| -> anyhow::Result<DispatchPromptNormalized> {
+            let mut request = normalized(space, space.log)?;
+            request.runtime_id = Some(space.runtime);
+            request.prefer_runtime = true;
+            request.delivery = delivery;
+            Ok(request)
+        };
+
+        let job = dispatch_directly(&harness, user(space.owner), on_machine(strict)?).await?;
+        let row = delivery_row(&harness, job.id).await?;
+        assert_eq!(
+            row.get::<_, Option<Uuid>>("target_runtime_id"),
+            Some(space.runtime)
+        );
+        assert!(row.get::<_, bool>("at_most_once") && row.get::<_, bool>("strict_pin"));
+        let start_by: DateTime<Utc> = row
+            .get::<_, Option<DateTime<Utc>>>("start_by")
+            .expect("start_by");
+        let now: DateTime<Utc> = row.get("now");
+        assert!(
+            (start_by - now - chrono::Duration::seconds(60))
+                .num_seconds()
+                .abs()
+                <= 5,
+            "{now} + 60 s ~ {start_by}"
+        );
+
+        // Not even a spread job's rule lets another runtime take it.
+        sql(
+            &harness.pool,
+            "update agent_jobs
+                set payload = jsonb_set(payload, '{metadata,runtimeRouting}',
+                                        '{\"strategy\": \"spread\"}')
+              where id = $1",
+            &[&job.id],
+        )
+        .await?;
+        assert_eq!(harness.lease(space.other_machine).await?, JsonValue::Null);
+        let leased = harness.lease(space.runtime).await?;
+        assert_eq!(leased["id"], json!(job.id));
+        // The runtime gets only what it acts on; the controller enforces the
+        // deadline and the pin itself.
+        assert_eq!(leased["payload"]["delivery"], json!({ "atMostOnce": true }));
+
+        // Its runtime stops while it runs, holding a device's call: it is
+        // requeued still pinned, but never leased again. The sweep fails it
+        // and cancels the call.
+        let request = claimed_request_of(&harness, job.id).await?;
+        assert_eq!(stop_runtime(&harness, space.runtime).await?, vec![job.id]);
+        let row = delivery_row(&harness, job.id).await?;
+        assert_eq!(row.get::<_, String>("status"), "queued");
+        assert_eq!(
+            row.get::<_, Option<Uuid>>("target_runtime_id"),
+            Some(space.runtime)
+        );
+        assert_eq!(harness.lease(space.runtime).await?, JsonValue::Null);
+        crate::runtime::sweep_idle_activity(&harness.state).await?;
+        let row = delivery_row(&harness, job.id).await?;
+        assert_eq!(row.get::<_, String>("status"), "failed");
+        assert!(
+            row.get::<_, Option<String>>("error_message")
+                .is_some_and(|error| error.contains("may run only once")),
+            "{:?}",
+            row.get::<_, Option<String>>("error_message")
+        );
+        let canceled = harness
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select status, cancel_reason from project_provider_requests where id = $1",
+                &[&request],
+            )
+            .await?;
+        assert_eq!(
+            (
+                canceled.get::<_, String>(0),
+                canceled.get::<_, Option<String>>(1)
+            ),
+            ("canceled".to_string(), None)
+        );
+
+        // A job past its deadline is never leased, and the sweep fails it.
+        let late = dispatch_directly(&harness, user(space.owner), on_machine(strict)?).await?;
+        sql(
+            &harness.pool,
+            "update agent_jobs set start_by = now() - interval '1 second' where id = $1",
+            &[&late.id],
+        )
+        .await?;
+        assert_eq!(harness.lease(space.runtime).await?, JsonValue::Null);
+        crate::runtime::sweep_idle_activity(&harness.state).await?;
+        let row = delivery_row(&harness, late.id).await?;
+        assert_eq!(row.get::<_, String>("status"), "failed");
+        assert!(row
+            .get::<_, Option<String>>("error_message")
+            .is_some_and(|error| error.contains("start by a set time")));
+
+        // Dispatched while its runtime is not ready, a strictly pinned job
+        // stays pinned where any other is unpinned for another runtime.
+        sql(
+            &harness.pool,
+            "update runtimes set last_seen_at = now() - interval '1 hour' where id = $1",
+            &[&space.runtime],
+        )
+        .await?;
+        for (delivery, target) in [
+            (strict, Some(space.runtime)),
+            (JobDelivery::default(), None),
+        ] {
+            let job = dispatch_directly(&harness, user(space.owner), on_machine(delivery)?).await?;
+            let row = delivery_row(&harness, job.id).await?;
+            assert_eq!(
+                row.get::<_, Option<Uuid>>("target_runtime_id"),
+                target,
+                "{delivery:?}"
+            );
+        }
+
+        // A deadline and a pin are the controller's alone: a job with only
+        // those leases with no delivery for its runtime.
+        sql(
+            &harness.pool,
+            "update runtimes set last_seen_at = now() where id = $1",
+            &[&space.runtime],
+        )
+        .await?;
+        harness.end_turns().await?;
+        let pinned = JobDelivery {
+            start_within_s: Some(60),
+            strict_pin: true,
+            ..JobDelivery::default()
+        };
+        let pinned = dispatch_directly(&harness, user(space.owner), on_machine(pinned)?).await?;
+        let leased = harness.lease(space.runtime).await?;
+        assert_eq!(leased["id"], json!(pinned.id));
+        assert!(leased["payload"].get("delivery").is_none(), "{leased}");
+
+        // Without options a job is leased as before: a stop unpins it, and
+        // its lease carries no delivery.
+        harness.end_turns().await?;
+        let plain = dispatch_directly(
+            &harness,
+            user(space.owner),
+            on_machine(JobDelivery::default())?,
+        )
+        .await?;
+        let leased = harness.lease(space.runtime).await?;
+        assert_eq!(leased["id"], json!(plain.id));
+        assert!(leased["payload"].get("delivery").is_none(), "{leased}");
+        assert_eq!(stop_runtime(&harness, space.runtime).await?, vec![plain.id]);
+        let row = delivery_row(&harness, plain.id).await?;
+        assert_eq!(row.get::<_, Option<Uuid>>("target_runtime_id"), None);
         Ok(())
     })
     .await

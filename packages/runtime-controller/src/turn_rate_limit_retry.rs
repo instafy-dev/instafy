@@ -25,8 +25,9 @@
 //!   of `attempts`, so the rate limit after the last one fails it. One re-run was not enough when
 //!   four teams started at once on an upstream that takes two requests per 30 s: the re-run landed
 //!   in a window the other teams' lanes had used up (run r11-pacing).
-//! - Not a team's lane or follow-on agent (its group retries it), not a terminal command, and not
-//!   a turn bound to a person's own or a shared browser, which a stop does not move either.
+//! - Not a team's lane or follow-on agent (its group retries it), not a terminal command, not a
+//!   turn bound to a person's own or a shared browser, which a stop does not move either, and not
+//!   a job delivered at most once (`agent::JobDelivery`), which no lease hands out again.
 //!
 //! The hold is the stated wait plus a jitter fixed per job, as for lanes, and never ends before
 //! the cooldown the pacing (`upstream_pacing`) holds the job's upstream in, which the attempt's
@@ -66,6 +67,8 @@ pub(crate) struct EndedTurn<'a> {
     pub(crate) agent_role: Option<&'a str>,
     /// It ran a command, MCP tool or file change, replied visibly, or started a job.
     pub(crate) acted: bool,
+    /// Its job is delivered at most once.
+    pub(crate) at_most_once: bool,
 }
 
 /// How many times the job already went back to the queue after a short rate limit. A record
@@ -81,7 +84,11 @@ pub(crate) fn reruns_so_far(payload: &JsonValue) -> u64 {
 
 /// The wait the turn's failure states when the turn goes back to the queue (see the module).
 pub(crate) fn retry_wait(turn: &EndedTurn<'_>) -> Option<Duration> {
-    if turn.status != "failed" || turn.acted || reruns_so_far(turn.payload) >= MAX_RERUNS {
+    if turn.status != "failed"
+        || turn.acted
+        || turn.at_most_once
+        || reruns_so_far(turn.payload) >= MAX_RERUNS
+    {
         return None;
     }
     let plan_role = turn
@@ -150,7 +157,7 @@ pub(crate) async fn maybe_requeue(
     }
     let row = transaction
         .query_one(
-            "select aj.status, aj.intent, aj.agent_role,
+            "select aj.status, aj.intent, aj.agent_role, aj.at_most_once,
                     exists (
                         select 1 from conversation_messages m
                         where m.project_id = aj.project_id
@@ -183,6 +190,7 @@ pub(crate) async fn maybe_requeue(
         intent: intent.as_deref(),
         agent_role: agent_role.as_deref(),
         acted: row.get::<_, bool>("used_a_tool") || row.get::<_, bool>("started_a_job") || replied,
+        at_most_once: row.get("at_most_once"),
     };
     let Some(wait) = retry_wait(&turn) else {
         return Ok(None);
@@ -300,6 +308,7 @@ mod tests {
             intent: Some("feature"),
             agent_role: None,
             acted: false,
+            at_most_once: false,
         }
     }
 
@@ -394,6 +403,10 @@ mod tests {
         let mut terminal = turn(&payload, RATE_LIMITED);
         terminal.intent = Some("terminal_command");
         assert_eq!(retry_wait(&terminal), None, "a terminal command");
+
+        let mut once = turn(&payload, RATE_LIMITED);
+        once.at_most_once = true;
+        assert_eq!(retry_wait(&once), None, "a job delivered at most once");
 
         for transport in ["desktop-personal", "shared", "desktop_personal"] {
             let browser = json!({"metadata": {"browserTransport": transport}});

@@ -230,6 +230,9 @@ pub(crate) struct DispatchPromptNormalized {
     /// ([`crate::job_trigger::stamp_message`]). Dispatch sets it for a sender
     /// device grants are on for.
     pub(crate) stamps_trigger: bool,
+    /// How its jobs may be delivered to a runtime. Set only by controller
+    /// code; the default delivers them as before.
+    pub(crate) delivery: agent::JobDelivery,
 }
 
 fn normalize_agent_handle(raw: &str) -> Option<String> {
@@ -1877,6 +1880,9 @@ pub(crate) async fn process_dispatch_prompt_timed(
             .any(|(_, target)| target.credential_id.is_none());
     let uses_managed_ai = platform_lane_ai_dispatch && !context.is_service_role;
 
+    // A strictly pinned job stays on its runtime, as a browser turn does.
+    let strict_runtime_id =
+        strict_browser_runtime_id.or(runtime_id.filter(|_| request.delivery.strict_pin));
     // The runtime alert below unpins this dispatch's queued jobs from its
     // runtime when that runtime is not dispatch-ready, and another runtime
     // then takes them. Set to that runtime when the alert will.
@@ -1885,7 +1891,7 @@ pub(crate) async fn process_dispatch_prompt_timed(
             &transaction,
             &project.id,
             runtime_record.as_ref(),
-            strict_browser_runtime_id,
+            strict_runtime_id,
         )
         .await?
         .then_some(runtime_id),
@@ -2612,7 +2618,7 @@ pub(crate) async fn process_dispatch_prompt_timed(
         let mut retargeted_job_ids: Vec<Uuid> = unpinned_job_ids.clone();
         let mut cleared_runtime_preference = false;
         let mut reconnect_metadata: Option<JsonValue> = None;
-        if should_retarget_unavailable_runtime(reason, strict_browser_runtime_id) {
+        if should_retarget_unavailable_runtime(reason, strict_runtime_id) {
             if let Some(target_runtime_id) = runtime_id {
                 for job_id in &job_ids {
                     match connection
@@ -3109,6 +3115,7 @@ pub(crate) fn normalize_dispatch_request(
         allow_internal_review: false,
         trigger: None,
         stamps_trigger: false,
+        delivery: agent::JobDelivery::default(),
     })
 }
 
@@ -4248,12 +4255,11 @@ fn validate_shared_browser_runtime_routing(
     Ok(())
 }
 
-fn should_retarget_unavailable_runtime(
-    reason: &str,
-    strict_browser_runtime_id: Option<Uuid>,
-) -> bool {
-    matches!(reason, "runtime_not_ready" | "runtime_unavailable")
-        && strict_browser_runtime_id.is_none()
+/// Whether an unready runtime's alert unpins the dispatch's jobs from it: not
+/// when they are strictly pinned there (a browser turn, or a job delivered
+/// with `strict_pin`).
+fn should_retarget_unavailable_runtime(reason: &str, strict_runtime_id: Option<Uuid>) -> bool {
+    matches!(reason, "runtime_not_ready" | "runtime_unavailable") && strict_runtime_id.is_none()
 }
 
 /// Why the dispatch's runtime `record` cannot run its queued jobs now, as the
@@ -4325,7 +4331,7 @@ async fn dispatch_unpins_jobs_from_its_runtime(
     transaction: &Transaction<'_>,
     project_id: &Uuid,
     runtime_record: Option<&runtime::RuntimeRecord>,
-    strict_browser_runtime_id: Option<Uuid>,
+    strict_runtime_id: Option<Uuid>,
 ) -> Result<bool, (StatusCode, Json<ApiError>)> {
     let reason = match runtime_record {
         Some(record) => {
@@ -4341,7 +4347,7 @@ async fn dispatch_unpins_jobs_from_its_runtime(
     };
     Ok(should_retarget_unavailable_runtime(
         reason,
-        strict_browser_runtime_id,
+        strict_runtime_id,
     ))
 }
 

@@ -1016,6 +1016,7 @@ async fn execute_automation_once(
                 Some(record.user_id),
             )),
             stamps_trigger: false,
+            delivery: Default::default(),
         },
     )
     .await;

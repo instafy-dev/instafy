@@ -235,6 +235,7 @@ pub(crate) async fn sweep_idle_activity(state: &AppState) -> AnyResult<()> {
     auto_recover_stuck_queued_runtimes(state, &mut tick).await?;
     cleanup_terminal_runtime_records(state, &mut tick).await?;
     fail_platform_jobs_stranded_on_private_runtimes(state, &mut tick).await?;
+    fail_jobs_that_can_no_longer_start(state, &mut tick).await?;
     // Last: each of its stops may wait out a provider release.
     stop_runtimes_of_deleted_projects(state, &mut tick).await?;
     // Runtimes the providers still run for spaces the database no longer
@@ -1176,6 +1177,92 @@ async fn fail_stranded_platform_jobs(
         .await
         .context("failed to commit failing stranded platform jobs")?;
     Ok(Some(failed))
+}
+
+const START_BY_PASSED_CODE: &str = "start_by_passed";
+const START_BY_PASSED_MESSAGE: &str = "This turn did not run: it had to start by a set time, and no runtime started it in time. Send it again if you still want it.";
+const RUN_ONCE_INTERRUPTED_CODE: &str = "run_once_interrupted";
+const RUN_ONCE_INTERRUPTED_MESSAGE: &str = "This turn stopped and will not run again: it may run only once, and its runtime stopped while it ran. Send it again if you still want it.";
+
+/// Fails the queued jobs the lease will never hand out by their delivery
+/// options ([`crate::agent::JobDelivery`]): an at-most-once job a lease of
+/// which ended, as `run_once_interrupted`, and a job past its `start_by`, as
+/// `start_by_passed`. Their open provider requests are canceled with them. A
+/// tick with nothing to fail runs one update, on the tick's connection.
+async fn fail_jobs_that_can_no_longer_start(
+    state: &AppState,
+    tick: &mut TickConnection<'_>,
+) -> AnyResult<()> {
+    let mut transaction = tick
+        .client("failed to acquire connection for jobs that can no longer start")
+        .await?
+        .transaction()
+        .await
+        .context("failed to start failing jobs that can no longer start")?;
+    let rows = transaction
+        .query(
+            "update agent_jobs
+             set status = 'failed',
+                 outcome = 'failed',
+                 error_message = case when at_most_once and lease_attempts > 0
+                                      then $1 else $2 end,
+                 completed_at = now(),
+                 active_input_ready_runtime_id = null,
+                 active_input_ready_expires_at = null,
+                 active_input_ready_turn_id = null,
+                 updated_at = now()
+             where status = 'queued'
+               and ((at_most_once and lease_attempts > 0) or start_by <= now())
+             returning id, project_id, run_id, conversation_id, session_id, prompt_id,
+                       payload, error_message, lease_attempts",
+            &[&RUN_ONCE_INTERRUPTED_MESSAGE, &START_BY_PASSED_MESSAGE],
+        )
+        .await
+        .context("failed to fail jobs that can no longer start")?;
+    if rows.is_empty() {
+        transaction
+            .rollback()
+            .await
+            .context("failed to close an empty failing of jobs that can no longer start")?;
+        return Ok(());
+    }
+    let (interrupted, late): (Vec<_>, Vec<_>) = rows.into_iter().partition(|row| {
+        row.get::<_, Option<String>>("error_message").as_deref()
+            == Some(RUN_ONCE_INTERRUPTED_MESSAGE)
+    });
+    let mut failed = Vec::new();
+    for (rows, code, message) in [
+        (
+            interrupted,
+            RUN_ONCE_INTERRUPTED_CODE,
+            RUN_ONCE_INTERRUPTED_MESSAGE,
+        ),
+        (late, START_BY_PASSED_CODE, START_BY_PASSED_MESSAGE),
+    ] {
+        if !rows.is_empty() {
+            failed.push(
+                settle_failed_queued_jobs_with_message(
+                    &mut transaction,
+                    &rows,
+                    "undeliverable",
+                    code,
+                    "failed",
+                    message,
+                )
+                .await?,
+            );
+        }
+    }
+    transaction
+        .commit()
+        .await
+        .context("failed to commit failing jobs that can no longer start")?;
+    // Publishing reads runs and credits on connections of its own.
+    tick.release();
+    for failed in failed {
+        publish_failed_queued_jobs(state, failed).await;
+    }
+    Ok(())
 }
 
 /// Jobs requeued by a runtime stop expire if nothing resumes them promptly.
