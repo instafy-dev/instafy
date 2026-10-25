@@ -42,6 +42,8 @@ use uuid::Uuid;
 mod browser_request;
 mod card_text;
 mod chat_attachments;
+#[cfg(test)]
+mod granted_turn_tests;
 pub(crate) use chat_attachments::TurnAttachments;
 mod conversation_context;
 mod git_sync;
@@ -156,6 +158,9 @@ pub struct JobProcessor {
     local_origin_sync: Mutex<Option<LocalOriginSync>>,
     isolated_workers: isolated_worker::IsolatedWorkerSettings,
     isolated_apply: AsyncMutex<()>,
+    /// The executable that serves a granted turn's `provider-mcp`: this runtime-agent's own
+    /// unless a test names another.
+    provider_mcp_program: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3305,6 +3310,48 @@ fn append_prompt_section(
     prompt.push_str(text);
 }
 
+/// A granted turn's prompt: its conversation as the controller gives a granted turn, its
+/// person's own words and the granted turns' replies, and the request. Nothing from the
+/// workspace, whose files any member may have written, reaches a turn that acts with a person's
+/// device; its developer instructions say what it has instead.
+fn granted_turn_prompt(
+    job: &LeaseJob,
+    request: &str,
+    provider_conversation_state: Option<&JsonValue>,
+) -> (String, JsonValue) {
+    let mut conversation = build_prompt_conversation_context(
+        job.payload.get("conversation_history"),
+        provider_conversation_state,
+    );
+    let mut sections = JsonMap::new();
+    let mut prompt = String::new();
+    for (name, text) in [
+        (
+            "responseContract",
+            "Return one JSON object only: { \"summary\": string, \"files\": [] }. Put your reply to the person in `summary`, and keep `files` empty.\n".to_string(),
+        ),
+        (
+            "conversationContext",
+            format!(
+                "\n{}:\n{}",
+                conversation.section_label, conversation.section_text
+            ),
+        ),
+        (
+            "latestUserRequest",
+            format!("\n\nLatest user request:\n{}", request.trim()),
+        ),
+    ] {
+        append_prompt_section(&mut prompt, &mut sections, name, &text);
+    }
+    if let Some(metrics) = conversation.metrics.as_object_mut() {
+        metrics.insert("promptMode".to_string(), json!("granted"));
+        metrics.insert("promptSections".to_string(), JsonValue::Object(sections));
+    }
+    enrich_prompt_context_metrics(&mut conversation.metrics, &prompt);
+    (prompt, conversation.metrics)
+}
+
 // Preference text remains project-supplied data in the user prompt. This helper
 // records only bounded delivery metadata, never preference content in metrics.
 fn with_project_preferences(
@@ -3672,25 +3719,35 @@ fn should_run_agent_routing_preflight(job: &LeaseJob, prompt_text: &str) -> bool
     !matches!(existing_mode.as_deref(), Some("thread" | "team_plan"))
 }
 
-fn should_run_agent_routing_preflight_for_execution(job: &LeaseJob, prompt_text: &str) -> bool {
-    !crate::personal_browser::payload_requests_personal_browser(&job.payload)
-        && !crate::shared_browser::payload_requests_shared_browser(&job.payload)
-        && should_run_agent_routing_preflight(job, prompt_text)
+/// A job whose turn's only tools are one trusted broker's: a Personal or Shared Browser turn, or
+/// a granted turn. Its metadata never gives it a routing preflight, a command or file
+/// obligation, a command lane or a path around its broker's checks.
+fn is_bounded_job(job: &LeaseJob) -> bool {
+    crate::personal_browser::payload_requests_personal_browser(&job.payload)
+        || crate::shared_browser::payload_requests_shared_browser(&job.payload)
+        || !job.grants.is_empty()
 }
 
-fn ensure_browser_uses_bounded_lane(
+fn should_run_agent_routing_preflight_for_execution(job: &LeaseJob, prompt_text: &str) -> bool {
+    !is_bounded_job(job) && should_run_agent_routing_preflight(job, prompt_text)
+}
+
+fn ensure_bounded_job_uses_bounded_lane(
     job: &LeaseJob,
     prompt_text: &str,
     workspace_dir: &Path,
 ) -> Result<()> {
-    let personal = crate::personal_browser::payload_requests_personal_browser(&job.payload);
-    let shared = crate::shared_browser::payload_requests_shared_browser(&job.payload);
-    if !personal && !shared {
+    let transport = if crate::personal_browser::payload_requests_personal_browser(&job.payload) {
+        "Personal Browser"
+    } else if crate::shared_browser::payload_requests_shared_browser(&job.payload) {
+        "Shared Browser"
+    } else if !job.grants.is_empty() {
+        "Granted"
+    } else {
         return Ok(());
-    }
-    let transport = if personal { "Personal" } else { "Shared" };
+    };
     if extract_terminal_command_from_payload(job, prompt_text, workspace_dir).is_some() {
-        bail!("{transport} Browser jobs cannot execute terminal commands");
+        bail!("{transport} jobs cannot execute terminal commands");
     }
     let unsafe_lane = if git_sync::parse_git_sync_request(prompt_text).is_some() {
         Some("git-sync")
@@ -3704,7 +3761,7 @@ fn ensure_browser_uses_bounded_lane(
         None
     };
     if let Some(lane) = unsafe_lane {
-        bail!("{transport} Browser jobs cannot enter the {lane} command lane");
+        bail!("{transport} jobs cannot enter the {lane} command lane");
     }
     Ok(())
 }
@@ -4073,20 +4130,17 @@ fn ordinary_routing_evidence_job(job: &LeaseJob, expectations: RuntimeJobExpecta
         && !is_multi_agent_lead_continuation_job(job)
         && !is_explicit_team_planning_job(job)
         && !expectations.generic_mcp_tool_execution
-        && !crate::personal_browser::payload_requests_personal_browser(&job.payload)
-        && !crate::shared_browser::payload_requests_shared_browser(&job.payload)
+        && !is_bounded_job(job)
 }
 
 fn routing_evidence_requirements(
     job: &LeaseJob,
     expectations: RuntimeJobExpectations,
 ) -> RoutingEvidenceRequirements {
-    // Bounded browser lanes have their own instrumented evidence and disable
-    // shell tools. Stale ordinary routing metadata must not reintroduce a CLI
+    // Bounded turns have no shell, and browser ones their own instrumented
+    // evidence. Stale ordinary routing metadata must not reintroduce a CLI
     // obligation that those lanes cannot fulfill.
-    if crate::personal_browser::payload_requests_personal_browser(&job.payload)
-        || crate::shared_browser::payload_requests_shared_browser(&job.payload)
-    {
+    if is_bounded_job(job) {
         return RoutingEvidenceRequirements::default();
     }
     RoutingEvidenceRequirements {
@@ -4786,7 +4840,39 @@ impl JobProcessor {
             local_origin_sync: Mutex::new(None),
             isolated_workers: isolated_worker::IsolatedWorkerSettings::from_env(),
             isolated_apply: AsyncMutex::new(()),
+            provider_mcp_program: None,
         }
+    }
+
+    /// Serves granted turns' `provider-mcp` from `program` rather than this executable. A test
+    /// harness, which is not runtime-agent, names the real binary here.
+    pub fn with_provider_mcp_program(mut self, program: PathBuf) -> Self {
+        self.provider_mcp_program = Some(program);
+        self
+    }
+
+    /// The granted turn of a job that holds device grants (`provider_mcp`); `None` for every
+    /// other job. A job that holds grants it may not use fails here, and runs as nothing else.
+    fn granted_turn(
+        &self,
+        job: &LeaseJob,
+        project_id: Uuid,
+    ) -> Result<Option<crate::provider_mcp::GrantedTurn>> {
+        if job.grants.is_empty() {
+            return Ok(None);
+        }
+        let broker_program = match self.provider_mcp_program.clone() {
+            Some(program) => program,
+            None => std::env::current_exe()
+                .context("failed to locate runtime-agent to serve provider-mcp")?,
+        };
+        crate::provider_mcp::GrantedTurn::of_job(
+            job,
+            project_id,
+            self.config.controller_base_url.clone(),
+            broker_program,
+        )
+        .context("this turn's device grants are unavailable")
     }
 
     /// Publish (or clear, with None) the locally hosted origin's identity and
@@ -4911,7 +4997,10 @@ impl JobProcessor {
         registration: &Registration,
         job: &LeaseJob,
     ) -> bool {
-        if self.isolated_workers.enabled {
+        // A bounded job runs only where its broker is checked, whatever else it claims to be.
+        if is_bounded_job(job) {
+            false
+        } else if self.isolated_workers.enabled {
             self.can_run_isolated_scoped_worker(registration, job)
         } else {
             self.can_run_parallel_direct_write_scoped_worker(registration, job)
@@ -6178,10 +6267,13 @@ impl JobProcessor {
         let workspace_token = self.verified_workspace_token(registration, job).await?;
 
         let project_id = self.project_id_for_job(job)?;
+        let granted = self.granted_turn(job, project_id)?;
+        let granted_execution = granted.is_some();
         let workspace_dir = self.prepare_workspace_dir(&project_id)?;
         // Bring the checkout up to date before anything writes into it. The
-        // `/sync` lane publishes on its own.
+        // `/sync` lane publishes on its own, and a granted turn has no workspace.
         let pre_turn_refresh = if commit_to_workspace
+            && !granted_execution
             && git_sync::parse_git_sync_request(
                 job.payload
                     .get("prompt_text")
@@ -6210,6 +6302,11 @@ impl JobProcessor {
             crate::shared_browser::payload_requests_shared_browser(&job.payload);
         if explicit_shared_browser_execution && explicit_personal_browser_execution {
             bail!("A browser turn cannot request Shared Browser and Personal Browser together");
+        }
+        if granted_execution
+            && (explicit_shared_browser_execution || explicit_personal_browser_execution)
+        {
+            bail!("A granted turn cannot also be a browser turn");
         }
         if explicit_shared_browser_execution {
             crate::shared_browser::consent_version_from_payload(&job.payload)?;
@@ -6269,11 +6366,11 @@ impl JobProcessor {
         } else {
             None
         };
-        let explicit_browser_execution =
-            explicit_personal_browser_execution || explicit_shared_browser_execution;
-        if !explicit_browser_execution
-            && let Err(error) = mcp::sync_managed_mcp_servers(&workspace_dir)
-        {
+        // Browser and granted turns have one trusted MCP server and no command lanes.
+        let bounded_execution = explicit_personal_browser_execution
+            || explicit_shared_browser_execution
+            || granted_execution;
+        if !bounded_execution && let Err(error) = mcp::sync_managed_mcp_servers(&workspace_dir) {
             warn!(
                 job_id = %job.id,
                 project_id = %project_id,
@@ -6293,7 +6390,7 @@ impl JobProcessor {
         let prompt_text = user_prompt_text;
         let pending_worker_input =
             worker_input_routing::PendingContext::from_payload(&job.payload)?;
-        ensure_browser_uses_bounded_lane(job, prompt_text, &workspace_dir)?;
+        ensure_bounded_job_uses_bounded_lane(job, prompt_text, &workspace_dir)?;
         let auto_sync_after_apply_override =
             resolve_auto_sync_after_apply_override(job.payload.get("metadata"), user_prompt_text);
 
@@ -6304,8 +6401,8 @@ impl JobProcessor {
                 pending_worker_input.is_none(),
                 "pending worker replies cannot enter an explicit command lane"
             );
-            if explicit_browser_execution {
-                bail!("Browser jobs cannot execute terminal commands");
+            if bounded_execution {
+                bail!("Browser and granted jobs cannot execute terminal commands");
             }
             return self
                 .run_terminal_command_job(
@@ -6332,18 +6429,18 @@ impl JobProcessor {
                     && mcp_request.is_none()
                     && learn_request.is_none()
                     && git_sync_request.is_none()
-                    && !explicit_browser_execution),
+                    && !bounded_execution),
             "pending worker replies require an ordinary human chat turn"
         );
 
-        if explicit_browser_execution
+        if bounded_execution
             && (skills_request.is_some()
                 || mcp_request.is_some()
                 || learn_request.is_some()
                 || git_sync_request.is_some())
         {
             bail!(
-                "Browser jobs cannot enter terminal, skills, MCP-management, learning, or git-sync command lanes"
+                "Browser and granted jobs cannot enter terminal, skills, MCP-management, learning, or git-sync command lanes"
             );
         }
 
@@ -6597,11 +6694,8 @@ impl JobProcessor {
         let scoped_worker_path_observation = read_only_workspace
             .then(|| build_scoped_worker_path_observation(&workspace_dir, job))
             .flatten();
-        let runtime_expectations = runtime_job_expectations_for_execution(
-            &job.payload,
-            explicit_personal_browser_execution,
-            explicit_shared_browser_execution,
-        );
+        let runtime_expectations =
+            runtime_job_expectations_for_execution(&job.payload, bounded_execution);
         let scoped_worker_has_precollected_observations = is_multi_agent_worker_job(job)
             && scoped_worker_path_observation
                 .as_ref()
@@ -6613,9 +6707,10 @@ impl JobProcessor {
             && runtime_expectations.workspace_file_changes
             && !read_only_workspace;
         let expects_generic_mcp_tool_execution = runtime_expectations.generic_mcp_tool_execution;
-        let browser_mode = runtime_is_browser_session
-            || explicit_shared_browser_execution
-            || explicit_personal_browser_execution;
+        let browser_mode = !granted_execution
+            && (runtime_is_browser_session
+                || explicit_shared_browser_execution
+                || explicit_personal_browser_execution);
         let persist_codex_conversation_thread =
             should_persist_codex_conversation_thread_for_execution(
                 &job.payload,
@@ -6647,14 +6742,18 @@ impl JobProcessor {
             direct_write_broad_context_suppression_eligible(runtime_expectations, browser_mode),
         );
         // A skill kickoff's carried SKILL.md text names terms the person never
-        // asked about; cards are matched on its instructions alone.
-        let project_context_cards = self
-            .load_relevant_project_context_cards(
+        // asked about; cards are matched on its instructions alone. Any member
+        // may write a card, and nobody else's words reach a granted turn.
+        let project_context_cards = if granted_execution {
+            Vec::new()
+        } else {
+            self.load_relevant_project_context_cards(
                 job,
                 project_id,
                 skills::request_outside_carried_skill_files(prompt_text),
             )
-            .await;
+            .await
+        };
         let final_output_mode = final_output_mode_for_runtime_job(
             job,
             read_only_scoped_worker_preobserved,
@@ -6666,7 +6765,7 @@ impl JobProcessor {
             expects_workspace_file_changes,
             final_output_mode,
         );
-        let final_output_schema = if is_explicit_team_planning_job(job) {
+        let final_output_schema = if is_explicit_team_planning_job(job) && !granted_execution {
             CodexFinalOutputSchema::MultiAgentPlan
         } else {
             CodexFinalOutputSchema::Default
@@ -6674,10 +6773,11 @@ impl JobProcessor {
         let evidence_requirements = routing_evidence_requirements(job, runtime_expectations);
         let mut codex_run_options = CodexRunOptions {
             usage_observer: Some(task_usage.call(UsagePhase::Main)),
-            project_id: Some(project_id),
+            // The project's shared defaults, which any member may write, never reach a granted
+            // turn.
+            project_id: (!granted_execution).then_some(project_id),
             job_id: Some(job.id),
-            disable_shell_tool: explicit_personal_browser_execution
-                || explicit_shared_browser_execution,
+            disable_shell_tool: bounded_execution,
             disable_final_output_json_schema: final_output_mode.disable_final_output_json_schema(),
             final_output_schema,
             // Browser-mode is a runtime capability (VNC + headed Chromium via CDP), not inferred
@@ -6715,6 +6815,7 @@ impl JobProcessor {
             turn_continue_note: turn_files.continue_note_path(),
             // A team's turn ends by the team's deadline (`turn_continuation`).
             run_timeout: Some(turn_files.limit()),
+            granted,
             run_once: job.runs_at_most_once(),
         };
 
@@ -6758,8 +6859,7 @@ impl JobProcessor {
         // cannot open them, and a worker may finish in a direct lane without
         // Codex, so its images stay on `view_image`.
         let native_image_limit = if crate::codex::native_chat_images_enabled()
-            && !explicit_personal_browser_execution
-            && !explicit_shared_browser_execution
+            && !bounded_execution
             && !is_multi_agent_worker_job(job)
         {
             NATIVE_IMAGE_INPUTS_MAX
@@ -6772,6 +6872,13 @@ impl JobProcessor {
             if expects_generic_mcp_tool_execution {
                 let (prompt, metrics) =
                     self.build_mcp_task_prompt(&project_id, prompt_text, &project_preferences)?;
+                (prompt, Vec::new(), metrics, None)
+            } else if granted_execution {
+                let (prompt, metrics) = granted_turn_prompt(
+                    job,
+                    prompt_text,
+                    provider_conversation_state_for_run.as_ref(),
+                );
                 (prompt, Vec::new(), metrics, None)
             } else {
                 let (prompt, loaded_learned_blocks, prompt_context, attachments, input_images) =
@@ -6969,8 +7076,11 @@ impl JobProcessor {
         let _client_timezone_guard =
             ClientTimezoneGuard::from_metadata(job.payload.get("metadata"));
         let _turn_clock_guard = TurnClockGuard::start(Some(turn_files));
-        let native_prompt =
-            without_project_preferences(&prompt, &project_id, &project_preferences)?;
+        let native_prompt = if granted_execution {
+            prompt.as_str()
+        } else {
+            without_project_preferences(&prompt, &project_id, &project_preferences)?
+        };
         let output_result = if streaming_context.is_some() {
             let mut event_handler = |event: &JsonValue| -> Result<()> {
                 if let Some(ctx) = streaming_context.as_mut() {
@@ -10000,12 +10110,12 @@ fn suppress_multi_agent_plan_actions_for_worker(job: &LeaseJob, outcome: &mut Co
 /// Drops `request_browser` where Studio must never act on it. A Personal or
 /// Shared Browser turn already holds the browser, and Studio sends its
 /// continuation from the page that asked, so a card from that turn would open
-/// the browser again: after a pause or a denied action that is a loop. Workers,
-/// lead checkpoints and planning turns act on work handed to them; a browser
-/// belongs to the turn the person is talking to.
+/// the browser again: after a pause or a denied action that is a loop. A
+/// granted turn's only tools are its broker's. Workers, lead checkpoints and
+/// planning turns act on work handed to them; a browser belongs to the turn the
+/// person is talking to.
 fn suppress_browser_requests_where_unsupported(job: &LeaseJob, outcome: &mut CodexOutcome) {
-    let unsupported = crate::personal_browser::payload_requests_personal_browser(&job.payload)
-        || crate::shared_browser::payload_requests_shared_browser(&job.payload)
+    let unsupported = is_bounded_job(job)
         || is_multi_agent_worker_job(job)
         || is_multi_agent_lead_continuation_job(job)
         || is_explicit_team_planning_job(job);
@@ -10019,7 +10129,7 @@ fn suppress_browser_requests_where_unsupported(job: &LeaseJob, outcome: &mut Cod
     if outcome.actions.len() != before {
         tracing::warn!(
             job_id = %job.id,
-            "suppressed request_browser action emitted by a browser, worker or planning turn"
+            "suppressed request_browser action emitted by a browser, granted, worker or planning turn"
         );
     }
 }
@@ -13376,12 +13486,12 @@ fn runtime_job_expectations(payload: &JsonValue) -> RuntimeJobExpectations {
     overrides.into_expectations()
 }
 
+/// A bounded turn writes no files and runs no commands, whatever its metadata says.
 fn runtime_job_expectations_for_execution(
     payload: &JsonValue,
-    explicit_personal_browser_execution: bool,
-    explicit_shared_browser_execution: bool,
+    bounded_execution: bool,
 ) -> RuntimeJobExpectations {
-    if explicit_personal_browser_execution || explicit_shared_browser_execution {
+    if bounded_execution {
         RuntimeJobExpectations::default()
     } else {
         runtime_job_expectations(payload)
@@ -13840,7 +13950,11 @@ fn final_output_mode_for_runtime_job(
     read_only_scoped_worker_preobserved: bool,
     runtime_expectations: RuntimeJobExpectations,
 ) -> RuntimeFinalOutputMode {
-    if metadata_requests_plain_text_report(job.payload.get("metadata")) {
+    // A granted turn answers in the final JSON its developer instructions ask for, whatever else
+    // its metadata asks, such as web chat's Summarize or Explain more on a selection.
+    if !job.grants.is_empty() {
+        RuntimeFinalOutputMode::StrictStructured
+    } else if metadata_requests_plain_text_report(job.payload.get("metadata")) {
         RuntimeFinalOutputMode::PlainTextReport
     } else if read_only_scoped_worker_preobserved && is_multi_agent_worker_job(job) {
         RuntimeFinalOutputMode::PlainTextReport
@@ -18965,6 +19079,8 @@ mod tests {
             workspace_token_scopes: None,
             workspace_token_expires_at: None,
             lease_attempts: 1,
+            grants: Vec::new(),
+            grant_token: None,
         }
     }
 
@@ -20956,7 +21072,7 @@ mod tests {
                     }),
                 );
                 assert!(
-                    ensure_browser_uses_bounded_lane(&job, prompt, workspace.path()).is_err(),
+                    ensure_bounded_job_uses_bounded_lane(&job, prompt, workspace.path()).is_err(),
                     "unsafe {transport} Browser lane unexpectedly accepted {prompt}"
                 );
             }
@@ -20971,7 +21087,7 @@ mod tests {
                 }),
             );
             assert!(
-                ensure_browser_uses_bounded_lane(
+                ensure_bounded_job_uses_bounded_lane(
                     &browser_job,
                     "Open example.com and report the title.",
                     workspace.path(),
@@ -27094,8 +27210,7 @@ mod tests {
         let no_write_guess =
             test_agent_routing_preflight(AgentRoutingPreflightRoute::Direct, false, false);
         let expects_changes = |job: &LeaseJob| {
-            runtime_job_expectations_for_execution(&job.payload, false, false)
-                .workspace_file_changes
+            runtime_job_expectations_for_execution(&job.payload, false).workspace_file_changes
         };
         // The job the controller leases for a chat message: the Studio grants
         // write access and sends no file-change expectation of its own, and
@@ -27492,15 +27607,11 @@ mod tests {
         });
 
         assert_eq!(
-            runtime_job_expectations_for_execution(&payload, false, true),
+            runtime_job_expectations_for_execution(&payload, true),
             RuntimeJobExpectations::default()
         );
         assert_eq!(
-            runtime_job_expectations_for_execution(&payload, true, false),
-            RuntimeJobExpectations::default()
-        );
-        assert_eq!(
-            runtime_job_expectations_for_execution(&payload, false, false),
+            runtime_job_expectations_for_execution(&payload, false),
             RuntimeJobExpectations {
                 workspace_file_changes: true,
                 command_execution: true,

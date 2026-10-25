@@ -113,6 +113,17 @@ impl ShutdownSignal {
     }
 }
 
+/// How often a running job heartbeats, in seconds, so that a cancel, which it learns of only from
+/// its heartbeat, stops it within about that long: every second for a job that holds device
+/// grants, and every `heartbeat_seconds / 6`, 5 to 15 s, for any other.
+fn heartbeat_interval_seconds(heartbeat_seconds: u32, job: &LeaseJob) -> u64 {
+    if job.grants.is_empty() {
+        u64::from((heartbeat_seconds / 6).clamp(5, 15))
+    } else {
+        1
+    }
+}
+
 struct HeartbeatTask {
     stop_signal: ShutdownSignal,
     handle: JoinHandle<()>,
@@ -130,10 +141,10 @@ impl HeartbeatTask {
         let stop_listener = stop_signal.clone();
         let lease_lost_signal = lease_lost_signal.clone();
         let handle = tokio::spawn(async move {
-            // `interval_seconds` is already derived from the controller heartbeat lease (clamped in
-            // the caller). Keep heartbeats frequent enough to detect lease loss promptly and keep
-            // the controller-side runtime `last_seen_at` fresh (important for stale-runtime sweeps).
-            let interval_duration = Duration::from_secs(interval_seconds.max(5));
+            // `interval_seconds` comes from `heartbeat_interval_seconds`. Keep heartbeats frequent
+            // enough to detect lease loss promptly and keep the controller-side runtime
+            // `last_seen_at` fresh (important for stale-runtime sweeps).
+            let interval_duration = Duration::from_secs(interval_seconds.max(1));
             let mut ticker = interval(interval_duration);
             ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
@@ -1341,12 +1352,11 @@ impl RuntimeAgent {
             // Keep the heartbeat loop alive even if the initial heartbeat fails (network hiccup,
             // controller restart, etc). Otherwise the job can lose its lease and get requeued while
             // the runtime is still executing a long-running command.
-            let interval_secs = (heartbeat_seconds / 6).clamp(5, 15) as u64;
             periodic_heartbeat = Some(HeartbeatTask::spawn(
                 client.clone(),
                 registration.clone(),
                 job.id,
-                interval_secs,
+                heartbeat_interval_seconds(heartbeat_seconds, &job),
                 Some(lease_lost_signal.clone()),
             ));
 
@@ -2924,6 +2934,8 @@ mod tests {
             workspace_token_scopes: None,
             workspace_token_expires_at: None,
             lease_attempts: 1,
+            grants: Vec::new(),
+            grant_token: None,
         }
     }
 }

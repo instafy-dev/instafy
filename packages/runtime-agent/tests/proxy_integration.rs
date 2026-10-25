@@ -38,6 +38,9 @@ static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 #[path = "proxy_integration/evidence_retry.rs"]
 mod evidence_retry;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "proxy_integration/granted_turns.rs"]
+mod granted_turns;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "proxy_integration/isolated_tool_workers.rs"]
 mod isolated_tool_workers;
 #[path = "proxy_integration/native_compaction.rs"]
@@ -1064,6 +1067,8 @@ async fn read_reference_proxy_case(case: ReadReferenceCase) -> Result<()> {
         workspace_token_scopes: None,
         workspace_token_expires_at: None,
         lease_attempts: 1,
+        grants: Vec::new(),
+        grant_token: None,
     };
     let registration = registration_for_live(Uuid::new_v4());
     // Where a write turn records how its folder began, until its job ends.
@@ -1438,6 +1443,8 @@ async fn codex_embedded_via_proxy_creates_file_inner() -> Result<()> {
         workspace_token_scopes: None,
         workspace_token_expires_at: None,
         lease_attempts: 1,
+        grants: Vec::new(),
+        grant_token: None,
     };
 
     let execution = tokio::time::timeout(
@@ -1736,6 +1743,8 @@ async fn codex_embedded_retries_after_stream_error_inner() -> Result<()> {
         workspace_token_scopes: None,
         workspace_token_expires_at: None,
         lease_attempts: 1,
+        grants: Vec::new(),
+        grant_token: None,
     };
 
     let execution = tokio::time::timeout(
@@ -1928,6 +1937,8 @@ async fn codex_proxy_live_creates_file() -> Result<()> {
         workspace_token_scopes: None,
         workspace_token_expires_at: None,
         lease_attempts: 1,
+        grants: Vec::new(),
+        grant_token: None,
     };
 
     let execution = tokio::time::timeout(
@@ -2163,6 +2174,8 @@ async fn codex_proxy_live_browser_prompt_simulation() -> Result<()> {
         workspace_token_scopes: None,
         workspace_token_expires_at: None,
         lease_attempts: 1,
+        grants: Vec::new(),
+        grant_token: None,
     };
 
     let execution = tokio::time::timeout(

@@ -1653,7 +1653,10 @@ act as the device and the runtime through the controller's routes, with no hardw
 `pnpm test:controller tests_job_trigger_and_delivery` runs what started a job, its delivery
 options and an owned device's rules, with `DEVICE_GRANTS_ENABLED` on and off.
 
-`pnpm test:controller device_grants` runs device grants with the flag on and off.
+`pnpm test:controller device_grants` runs device grants with the flag on and off. The runtime
+half runs without a model key: `cargo test --manifest-path packages/runtime-agent/Cargo.toml
+--test provider_mcp` (the broker) and `--test proxy_integration granted_turns:: --
+--test-threads=1` (a granted turn through the real proxy and a scripted model).
 
 ## Local Tri-Client Camera Smoke
 - Run: `pnpm test:camera:tri-client:smoke`

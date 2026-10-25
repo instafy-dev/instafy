@@ -193,3 +193,18 @@ async fn periodic_task_shutdown_cancels_in_flight_secrets_without_applying_late_
     assert!(std::env::var_os(&controller.secret_key).is_none());
     assert!(controller.requests.try_recv().is_err());
 }
+
+#[test]
+fn a_granted_job_heartbeats_every_second_and_others_as_before() {
+    let job = |grants: serde_json::Value| {
+        serde_json::from_value::<LeaseJob>(
+            json!({ "id": Uuid::new_v4(), "payload": {}, "grants": grants }),
+        )
+        .expect("a leased job")
+    };
+    let refused = json!([{ "providerId": "device:test", "refused": "grant_paused" }]);
+    assert_eq!(heartbeat_interval_seconds(60, &job(refused)), 1);
+    assert_eq!(heartbeat_interval_seconds(60, &job(json!([]))), 10);
+    assert_eq!(heartbeat_interval_seconds(12, &job(json!([]))), 5);
+    assert_eq!(heartbeat_interval_seconds(300, &job(json!([]))), 15);
+}

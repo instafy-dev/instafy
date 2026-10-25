@@ -199,6 +199,11 @@ answer anyone else 404.
   space and owns the device with the granted catalog, and its agent exists. Once they leave the
   space, lose write access or delete their account, its conversation starts anyone's turns again.
   Only its person revokes it; nobody else needs to.
+- runtime-agent runs a job holding grants as a bounded turn whose only tool server is
+  `runtime-agent provider-mcp`: the granted tools, called with the job's grant token, which only
+  the broker's environment holds. It has no workspace, shell, web search or project defaults,
+  answers in strict JSON, heartbeats every second, and ends only once the broker's process group
+  is gone.
 
 ## Canonical Workspace Modes
 There are two supported canonical filesystem modes:

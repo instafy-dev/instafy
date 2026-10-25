@@ -172,6 +172,10 @@ const LOCAL_BROWSER_DEVELOPER_INSTRUCTIONS: &str = r#"Owner-local browser observ
 - Use that tool for read-only public-page verification. Collect related observations and the screenshot in one call when practical.
 - This capability has no saved login state and cannot click, type, run arbitrary JavaScript, or access non-HTTP(S) URLs. Do not work around those boundaries with ad-hoc Playwright, Chromium, or CDP shell commands.
 - Report the returned final URL and exact observation values. Treat an error as final unless the user changes the request."#;
+const GRANTED_TURN_DEVELOPER_INSTRUCTIONS: &str = r#"Granted device turn:
+- The person who asked lets you use tools of their own device in this turn. Your only tools are those of the `instafy_provider` MCP server. Its own instructions say what the device's tools do.
+- There is no workspace, shell, web search or other tool in this turn.
+- Put your reply to the person in the final JSON object's `summary`."#;
 const MCP_MODE_DEVELOPER_INSTRUCTIONS: &str = "MCP-focused run: complete the task via real MCP function calls, not shell emulation. Your first executable action should be an MCP tool call from the discovered MCP tool inventory in this run. Never execute MCP tool names through shell commands.";
 const STRUCTURED_RUNTIME_DEVELOPER_INSTRUCTIONS: &str = r#"Instafy Studio structured execution run:
 - Treat this as a background automation job, not an interactive chat turn.
@@ -878,6 +882,9 @@ pub struct CodexRunOptions {
     /// The run is never replayed from the start, because its job runs at most once: what it
     /// did must not happen again.
     pub run_once: bool,
+    /// A granted turn: its one MCP server is its grants' broker (`provider_mcp`), and it has no
+    /// workspace, shell, web search, apps or memory.
+    pub granted: Option<crate::provider_mcp::GrantedTurn>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -968,6 +975,12 @@ pub struct TurnWrapUp {
 pub(crate) const TURN_WRAP_UP_EVENT_TYPE: &str = "runtime.turn_wrap_up";
 
 impl CodexRunOptions {
+    /// Whether this run keeps the conversation's separate browser thread. A granted turn is
+    /// never a browser turn, on any runtime.
+    fn browser_mode(&self) -> bool {
+        self.expect_browser_session && self.granted.is_none()
+    }
+
     /// Whether this run continues the provider thread its state names. That thread already
     /// holds what an earlier attempt at the same turn sent to it. Each run resumes a thread
     /// only from its rollout on this runtime's disk; for a thread it cannot restore, it
@@ -976,7 +989,7 @@ impl CodexRunOptions {
         self.persist_conversation_thread
             && provider_thread_restorable_on_this_runtime(
                 self.provider_conversation_state.as_ref(),
-                self.expect_browser_session,
+                self.browser_mode(),
             )
     }
 
@@ -1020,15 +1033,15 @@ pub(crate) fn native_chat_images_enabled() -> bool {
     bool_from_env("INSTAFY_NATIVE_CHAT_IMAGES").unwrap_or(true)
 }
 
-/// Whether a run may send attached images as image input. A bounded browser turn selects no
-/// execution environment and has no image tools, and a model without image input would reject
-/// or drop them.
+/// Whether a run may send attached images as image input. A bounded turn selects no execution
+/// environment and has no image tools, and a model without image input would reject or drop
+/// them.
 fn native_image_inputs_allowed(
     enabled: bool,
-    bounded_browser_mode: bool,
+    bounded: bool,
     input_modalities: &[InputModality],
 ) -> bool {
-    enabled && !bounded_browser_mode && input_modalities.contains(&InputModality::Image)
+    enabled && !bounded && input_modalities.contains(&InputModality::Image)
 }
 
 /// Follows a prompt that marks images `[Image #N]` when the run cannot send them, so the model
@@ -1490,14 +1503,23 @@ impl CodexClient {
         runtime_settings: Option<runtime_contracts::multi_agent::AgentRuntimeSettings>,
     ) -> Result<CodexRunOutput> {
         let turn_started = std::time::Instant::now();
-        let browser_mode = options.expect_browser_session;
+        let granted_mode = options.granted.is_some();
+        if granted_mode && (options.personal_browser || options.shared_browser) {
+            return Err(anyhow!(
+                "a granted turn cannot also be a Personal or Shared Browser turn"
+            ));
+        }
+        let browser_mode = options.browser_mode();
         let personal_browser_mode =
             options.personal_browser && personal_browser_capability_is_present();
         let shared_browser_mode = shared_browser_mode_for_turn(
             options.shared_browser,
             crate::browser_host::shared_browser_capability_is_present(),
         )?;
-        let local_browser_config = if options.personal_browser || options.shared_browser {
+        let local_browser_config = if options.personal_browser
+            || options.shared_browser
+            || granted_mode
+        {
             None
         } else {
             match crate::local_browser::process_config() {
@@ -1509,8 +1531,11 @@ impl CodexClient {
             }
         };
         let local_browser_mode = local_browser_config.is_some();
-        let generic_mcp_mode = options.expect_mcp_tools;
-        let mcp_mode = generic_mcp_mode || personal_browser_mode || shared_browser_mode;
+        let generic_mcp_mode = options.expect_mcp_tools && !granted_mode;
+        let mcp_mode =
+            generic_mcp_mode || personal_browser_mode || shared_browser_mode || granted_mode;
+        // A turn whose only tools are one trusted broker's: a browser turn's, or a granted turn's.
+        let bounded = granted_mode || personal_browser_mode || shared_browser_mode;
         let cancel_signal = options.cancel_signal.clone();
         if cancel_signal
             .as_ref()
@@ -1519,6 +1544,7 @@ impl CodexClient {
             return Err(anyhow!("lease lost"));
         }
         tracing::info!(
+            bounded,
             browser_mode,
             personal_browser_mode,
             shared_browser_mode,
@@ -1616,7 +1642,9 @@ impl CodexClient {
 
         let plain_text_final_mode =
             options.disable_final_output_json_schema && options.allow_plain_text_final_fallback;
-        let mode_developer_instructions = if generic_mcp_mode {
+        let mode_developer_instructions = if granted_mode {
+            Some(GRANTED_TURN_DEVELOPER_INSTRUCTIONS.to_string())
+        } else if generic_mcp_mode {
             Some(
                 optional_env("CODEX_MCP_MODE_DEVELOPER_INSTRUCTIONS")
                     .unwrap_or_else(|| MCP_MODE_DEVELOPER_INSTRUCTIONS.to_string()),
@@ -1837,14 +1865,20 @@ impl CodexClient {
             }
         }
         scope_runtime_model_shell_environment(&mut config.permissions.shell_environment_policy);
-        let mut shared_browser_process_groups = install_browser_mcp_servers(
-            &mut config,
-            options.personal_browser,
-            shared_browser_mode,
-            options.shared_browser_page_id.as_deref(),
-            local_browser_config.as_ref(),
-            self.workspace_dir(),
-        )?;
+        let mut shared_browser_process_groups = None;
+        let mut provider_process_groups = None;
+        if let Some(turn) = options.granted.as_ref() {
+            provider_process_groups = Some(install_provider_mcp_server(&mut config, turn)?);
+        } else {
+            shared_browser_process_groups = install_browser_mcp_servers(
+                &mut config,
+                options.personal_browser,
+                shared_browser_mode,
+                options.shared_browser_page_id.as_deref(),
+                local_browser_config.as_ref(),
+                self.workspace_dir(),
+            )?;
+        }
         scope_browser_capabilities_from_shell_environment(
             &mut config.permissions.shell_environment_policy,
         );
@@ -1876,10 +1910,7 @@ impl CodexClient {
         }
         // The loaded config is complete now (provider, MCP servers, model id). Pin billing,
         // instructions and features before anything reads it.
-        crate::codex_policy::apply_runtime_codex_policy(
-            &mut config,
-            personal_browser_mode || shared_browser_mode,
-        )?;
+        crate::codex_policy::apply_runtime_codex_policy(&mut config, bounded)?;
         crate::codex_policy::apply_native_subagent_limit(
             &mut config,
             runtime_settings.map(|settings| settings.max_native_subagents),
@@ -1899,10 +1930,7 @@ impl CodexClient {
                 ))
                 .map_err(|error| anyhow!(error))?;
         }
-        apply_bounded_browser_security_overrides(
-            &mut config,
-            personal_browser_mode || shared_browser_mode,
-        )?;
+        apply_bounded_security_overrides(&mut config, bounded)?;
         if config.personality.is_some() {
             tracing::info!("disabled Codex personality for runtime-agent background run");
             config.personality = None;
@@ -1925,7 +1953,7 @@ impl CodexClient {
         );
         config.model_reasoning_effort = Some(effort);
         let routing_execution = RoutingExecutionConfig::capture(&config, &options);
-        if options.disable_shell_tool {
+        if options.disable_shell_tool || granted_mode {
             // For browser-session jobs we want MCP-first behavior and to avoid shell-script fallbacks.
             // Disable both shell modes (legacy shell + unified exec) and freeform patching.
             let _ = config.features.disable(Feature::ShellTool);
@@ -1975,10 +2003,9 @@ impl CodexClient {
         if let Some(routing_execution) = routing_execution {
             routing_execution.append_to(&mut config, &model_info);
         }
-        let bounded_browser_mode = personal_browser_mode || shared_browser_mode;
         let input_images: &[PathBuf] = if native_image_inputs_allowed(
             native_chat_images_enabled(),
-            bounded_browser_mode,
+            bounded,
             &model_info.input_modalities,
         ) {
             &options.input_images
@@ -1989,7 +2016,7 @@ impl CodexClient {
             // Counts only: attachment paths and names stay out of the logs.
             tracing::info!(
                 attached_images = options.input_images.len(),
-                bounded_browser_mode,
+                bounded,
                 "attached images are not sent as image input for this run"
             );
         }
@@ -2221,9 +2248,11 @@ impl CodexClient {
             collect_events(&mut aggregator, &config_event, &mut events, on_event, turn_started)?;
         }
 
+        // A granted turn's broker carries its grant token in its environment; like the
+        // Personal Browser bearer, they are never serialized into a refresh.
         if should_refresh_mcp_servers(
             mcp_mode,
-            personal_browser_mode,
+            personal_browser_mode || granted_mode,
             !config.mcp_servers.is_empty(),
         ) {
             conversation
@@ -2284,13 +2313,13 @@ impl CodexClient {
 
         let request = TurnInputRequest::user_input(items)
             .with_thread_settings(ThreadSettingsOverrides {
-                    // Browser-bound turns deliberately select no execution
+                    // Bounded turns deliberately select no execution
                     // environment. MCP tools do not require one, while every
                     // filesystem, image, patch, and shell tool does. Ordinary
                     // runtime turns still need the explicit local selection.
                     environments: Some(turn_environment_selections(
                         default_cwd.clone(),
-                        bounded_browser_mode,
+                        bounded,
                     )),
                     profile_workspace_roots: None,
                     approval_policy: Some(approval_policy),
@@ -2606,6 +2635,15 @@ impl CodexClient {
             })
         }
         .await;
+
+        if let Some(process_groups) = provider_process_groups.take() {
+            // The turn is over: its broker, which holds the grant token, must be gone before
+            // the job's result is reported. Codex only signals its MCP processes at shutdown.
+            process_groups
+                .terminate_and_confirm()
+                .await
+                .context("the granted turn's broker could not be confirmed gone")?;
+        }
 
         if options.shared_browser {
             let Some(shutdown_confirmation) = cancel_signal.as_ref() else {
@@ -3474,7 +3512,7 @@ fn parse_json_stream(input: &str) -> Result<JsonValue> {
 
 fn uses_bounded_proxy_retries(options: &CodexRunOptions) -> bool {
     optional_env("OPENAI_BASE_URL").is_some()
-        && !options.expect_browser_session
+        && !options.browser_mode()
         && !options.personal_browser
         && !options.shared_browser
 }
@@ -3818,6 +3856,57 @@ fn install_browser_mcp_servers(
     Ok(shared_browser_process_groups)
 }
 
+/// Makes the grants' broker a granted turn's only MCP server, replacing the project's own, and
+/// returns the registry its process group records itself in.
+fn install_provider_mcp_server(
+    config: &mut Config,
+    turn: &crate::provider_mcp::GrantedTurn,
+) -> Result<crate::mcp_process_groups::McpProcessGroupRegistry> {
+    let process_groups = crate::mcp_process_groups::McpProcessGroupRegistry::create()?;
+    let trusted_cwd = turn
+        .broker_program
+        .parent()
+        .context("the provider broker's executable has no parent directory")?;
+    let servers = HashMap::from([(
+        crate::provider_mcp::MCP_SERVER_NAME.to_string(),
+        provider_mcp_server_config(
+            &turn.broker_program,
+            trusted_cwd,
+            turn.broker_environment(&process_groups.registration_dir()),
+            turn.enabled_tools(),
+        ),
+    )]);
+    config
+        .mcp_servers
+        .set(servers)
+        .context("failed to install the provider broker as the turn's MCP server")?;
+    Ok(process_groups)
+}
+
+fn provider_mcp_server_config(
+    program: &Path,
+    cwd: &Path,
+    environment: HashMap<String, String>,
+    enabled_tools: Vec<String>,
+) -> McpServerConfig {
+    McpServerConfig {
+        // The device's tools are in the model's first tool list, never behind a tool search
+        // that would cost every turn another model round trip before the device can act.
+        omit_tools_from: Some(vec![
+            codex_protocol::config_types::ToolExposureSurface::Deferred,
+        ]),
+        tool_timeout_sec: Some(crate::provider_mcp::TOOL_TIMEOUT),
+        enabled_tools: Some(enabled_tools),
+        ..browser_mcp_server_config(McpServerTransportConfig::Stdio {
+            command: program.to_string_lossy().into_owned(),
+            args: vec![crate::provider_mcp::MCP_COMMAND.to_string()],
+            env: Some(environment),
+            env_vars: Vec::new(),
+            cwd: Some(LegacyAppPathString::from_path(cwd)),
+        })
+    }
+}
+
 fn local_browser_mcp_server_config(transport: McpServerTransportConfig) -> McpServerConfig {
     McpServerConfig {
         transport,
@@ -4054,8 +4143,8 @@ fn append_local_browser_developer_instructions(base: String, enabled: bool) -> S
     format!("{base}\n\n{LOCAL_BROWSER_DEVELOPER_INSTRUCTIONS}")
 }
 
-/// The non-feature half of the bounded browser lane; `codex_policy` turns its features off.
-fn apply_bounded_browser_security_overrides(config: &mut Config, enabled: bool) -> Result<()> {
+/// The non-feature half of a bounded turn; `codex_policy` turns its features off.
+fn apply_bounded_security_overrides(config: &mut Config, enabled: bool) -> Result<()> {
     if !enabled {
         return Ok(());
     }
@@ -4063,7 +4152,7 @@ fn apply_bounded_browser_security_overrides(config: &mut Config, enabled: bool) 
     config
         .web_search_mode
         .set(WebSearchMode::Disabled)
-        .context("failed to disable web search for bounded browser turn")?;
+        .context("failed to disable web search for a bounded turn")?;
     config.experimental_request_user_input_enabled = false;
     config.include_skill_instructions = false;
     config.include_apps_instructions = false;
@@ -4072,9 +4161,9 @@ fn apply_bounded_browser_security_overrides(config: &mut Config, enabled: bool) 
 
 fn turn_environment_selections(
     default_cwd: AbsolutePathBuf,
-    bounded_browser_mode: bool,
+    bounded: bool,
 ) -> TurnEnvironmentSelections {
-    let environments = if bounded_browser_mode {
+    let environments = if bounded {
         Vec::new()
     } else {
         vec![TurnEnvironmentSelection {
@@ -6627,6 +6716,100 @@ mod tests {
         );
     }
 
+    fn granted_turn() -> crate::provider_mcp::GrantedTurn {
+        use crate::provider_mcp::tests::{granted_turn, leased_grant};
+        granted_turn(vec![leased_grant()], "grant-token-secret")
+            .expect("grants the broker serves")
+            .expect("a granted turn")
+    }
+
+    #[tokio::test]
+    async fn a_granted_turn_offers_only_its_broker_with_exactly_its_tools() {
+        let home = tempfile::tempdir().expect("codex home");
+        fs::write(
+            home.path().join("config.toml"),
+            "[mcp_servers.project]\ncommand = \"npx\"\nargs = [\"project-server\"]\n",
+        )
+        .expect("config.toml");
+        let mut config = load_runtime_codex_config(
+            home.path(),
+            Vec::new(),
+            ConfigOverrides {
+                cwd: Some(home.path().to_path_buf()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("config");
+        assert!(config.mcp_servers.contains_key("project"));
+
+        let turn = granted_turn();
+        let process_groups = install_provider_mcp_server(&mut config, &turn).expect("install");
+        let names: Vec<&String> = config.mcp_servers.keys().collect();
+        assert_eq!(names, [crate::provider_mcp::MCP_SERVER_NAME]);
+        let server = &config.mcp_servers[crate::provider_mcp::MCP_SERVER_NAME];
+        assert!(server.enabled && server.required && !server.supports_parallel_tool_calls);
+        assert_eq!(server.tool_timeout_sec, Some(Duration::from_secs(20)));
+        assert_eq!(server.startup_timeout_sec, Some(Duration::from_secs(10)));
+        assert_eq!(
+            server.enabled_tools.as_deref(),
+            Some(
+                &[
+                    "example.state.read".to_string(),
+                    "example.part.move".to_string(),
+                ][..]
+            )
+        );
+        let McpServerTransportConfig::Stdio {
+            command,
+            args,
+            env,
+            env_vars,
+            ..
+        } = &server.transport
+        else {
+            panic!("the provider broker runs over stdio");
+        };
+        assert_eq!(command, "/trusted/runtime-agent");
+        assert_eq!(args, &["provider-mcp"]);
+        assert!(env_vars.is_empty());
+        let env = env.as_ref().expect("broker environment");
+        // The grant token is in the broker's environment and nowhere else.
+        assert_eq!(env[crate::provider_mcp::TOKEN_ENV], "grant-token-secret");
+        assert!(std::env::vars().all(|(_, value)| !value.contains("grant-token-secret")));
+        assert_eq!(
+            env[crate::mcp_process_groups::REGISTRY_ENV],
+            process_groups.registration_dir().to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn a_granted_turn_is_never_a_browser_turn() {
+        let granted = CodexRunOptions {
+            expect_browser_session: true,
+            granted: Some(granted_turn()),
+            ..Default::default()
+        };
+        assert!(!granted.browser_mode());
+        let browser = CodexRunOptions {
+            expect_browser_session: true,
+            ..Default::default()
+        };
+        assert!(browser.browser_mode());
+    }
+
+    #[test]
+    fn granted_turn_instructions_name_the_broker_and_no_other_tool() {
+        assert!(GRANTED_TURN_DEVELOPER_INSTRUCTIONS.contains(crate::provider_mcp::MCP_SERVER_NAME));
+        assert!(
+            GRANTED_TURN_DEVELOPER_INSTRUCTIONS
+                .contains("There is no workspace, shell, web search or other tool")
+        );
+        // Only some models have code mode, and the tool list shows it when they do: the
+        // instructions promise it to none.
+        assert!(!GRANTED_TURN_DEVELOPER_INSTRUCTIONS.contains("code mode"));
+    }
+
     #[test]
     fn bounded_browser_contract_rejects_any_additional_project_mcp_server() {
         let server = || {
@@ -7950,6 +8133,12 @@ mod tests {
         ] {
             assert!(!uses_bounded_proxy_retries(&options));
         }
+        // A granted turn on a browser runtime is not a browser turn.
+        assert!(uses_bounded_proxy_retries(&CodexRunOptions {
+            expect_browser_session: true,
+            granted: Some(granted_turn()),
+            ..Default::default()
+        }));
         unsafe { std::env::remove_var("OPENAI_BASE_URL") };
         assert!(!uses_bounded_proxy_retries(&CodexRunOptions::default()));
         if let Some(previous) = previous {
