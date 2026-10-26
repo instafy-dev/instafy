@@ -54,7 +54,8 @@ Use these mappings unless a project-specific skill overrides them.
 
 - **A fact from the web for an answer or a page** (prices, opening hours, timetables, addresses, places or products to compare, "with sources")
   - Use `instafy-web-research`: which sources to read, how many, cross-checking, citing, and the link-only sites.
-  - Combine with `instafy-browser-automation` when the reads go through Instafy's browser; one card may carry up to 6 related reads.
+  - Read public pages that need no JavaScript or sign-in with `instafy web read <url…> --json` (no browser card); its `provenance` is what to cite.
+  - Combine with `instafy-browser-automation` when the reads go through Instafy's browser (a page `instafy web read` reports as `needs_browser`, an aggregator, a page the person wants to see); one card may carry up to 6 related reads.
 
 - **Public page text / element counts / computed CSS / screenshot verification**
   - Use `instafy-browser-automation`.
@@ -132,5 +133,5 @@ Use these mappings unless a project-specific skill overrides them.
 - If the user asks “use a browser” but they actually want a shareable link:
   - Ask one short clarification: “Do you want a shareable public preview link, or a live browser walkthrough here?”
 - For current information (news, prices, releases, status pages):
-  - Read it with `instafy-browser-automation`, choosing and citing sources with `instafy-web-research`.
+  - Read it with `instafy web read` or `instafy-browser-automation`, choosing and citing sources with `instafy-web-research`.
   - Answer from memory only when no page can be read, and then say no live browsing was used.
