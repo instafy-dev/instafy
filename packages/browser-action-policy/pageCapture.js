@@ -191,6 +191,12 @@
     const withhold = Boolean(options && options.withhold) || !page || !page.signals;
     const rawText = typeof page?.text === "string" ? page.text : "";
     const limit = MAX_SENT_PAGE_TEXT_CHARS;
+    // The text is masked within a window of the limit plus the margin. When
+    // the page has more than that, the window's last characters may hold part
+    // of a key that no mask recognises. A mask can make the text before them
+    // shorter or longer, so the margin is dropped from the masked text itself,
+    // never at a fixed offset of the raw text.
+    const windowCut = rawText.length > limit + SENT_PAGE_MASK_MARGIN_CHARS;
     let maskedUrl = "";
     try {
       maskedUrl = redaction.redactUrl(String(page?.url || "")).text.slice(0, MAX_SENT_PAGE_URL_CHARS);
@@ -203,12 +209,16 @@
         withhold,
       });
       if (view.secretScreen) return withheldResult(view.url.slice(0, MAX_SENT_PAGE_URL_CHARS));
+      const keep = Math.max(
+        0,
+        Math.min(limit, windowCut ? view.text.length - SENT_PAGE_MASK_MARGIN_CHARS : view.text.length),
+      );
       return {
         url: view.url.slice(0, MAX_SENT_PAGE_URL_CHARS),
         title: view.title,
-        text: view.text.slice(0, limit),
+        text: view.text.slice(0, keep),
         secretScreen: false,
-        truncated: rawText.length > limit || view.text.length > limit,
+        truncated: rawText.length > limit || view.text.length > keep,
       };
     } catch (_) {
       // A page that could not be masked is never sent.

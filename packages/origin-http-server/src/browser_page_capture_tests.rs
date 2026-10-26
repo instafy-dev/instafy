@@ -144,6 +144,11 @@ fn page_with(url: &'static str, title: &'static str, text: &'static str) -> Eval
     Arc::new(move |expression| run_in_page(expression, url, title, text))
 }
 
+/// No credential step of the agent's run is waiting for the page it opens.
+fn nothing_carried() -> CarriedWithholding {
+    CarriedWithholding::Nothing
+}
+
 // Key-shaped samples are assembled from parts, so none is committed whole.
 const KEY: &str = concat!("sk", "-proj-", "AbCdEfGhIjKlMnOp", "QrStUvWxYz0123456789");
 const RANDOM_VALUE: &str = concat!("abc123DEF456", "ghi789JKL012mno345");
@@ -160,7 +165,9 @@ async fn a_sent_page_is_masked_in_an_isolated_world_before_it_leaves_the_host() 
         evaluate: page_with("https://shop.example/orders/42", "Order 42", text),
     })
     .await;
-    let page = capture_page(&url, &policy_script()).await.expect("capture");
+    let page = capture_page(&url, &policy_script(), nothing_carried)
+        .await
+        .expect("capture");
 
     assert!(!page.secret_screen);
     assert!(
@@ -215,7 +222,9 @@ async fn a_secret_screen_or_a_withheld_page_sends_no_text() {
         ),
     })
     .await;
-    let page = capture_page(&url, &policy_script()).await.expect("capture");
+    let page = capture_page(&url, &policy_script(), nothing_carried)
+        .await
+        .expect("capture");
     assert!(page.secret_screen);
     assert_eq!((page.title.as_str(), page.text.as_str()), ("", ""));
 
@@ -232,7 +241,9 @@ async fn a_secret_screen_or_a_withheld_page_sends_no_text() {
             ),
         })
         .await;
-        let page = capture_page(&url, &policy_script()).await.expect("capture");
+        let page = capture_page(&url, &policy_script(), nothing_carried)
+            .await
+            .expect("capture");
         assert!(page.secret_screen, "{withheld:?}");
         assert_eq!(page.text, "");
         let expression = seen.lock().unwrap()[3]["params"]["expression"]
@@ -247,6 +258,41 @@ async fn a_secret_screen_or_a_withheld_page_sends_no_text() {
 }
 
 #[tokio::test]
+async fn the_page_a_credential_step_opened_sends_no_text() {
+    // The agent's run recorded a key change on document LOADER0, so the page
+    // it opened (LOADER1 here) stays withheld until the controller marks it;
+    // the step's own page is judged as usual.
+    for (carried, withheld) in [
+        (CarriedWithholding::After("LOADER0".to_string()), true),
+        (CarriedWithholding::Unknown, true),
+        (CarriedWithholding::After("LOADER1".to_string()), false),
+        (CarriedWithholding::Nothing, false),
+    ] {
+        let (url, _) = serve_fake_page(FakePage {
+            withheld: Some(false),
+            loader_after: "LOADER1",
+            evaluate: page_with(
+                "https://console.example/tokens/new",
+                "Your new token",
+                "Copy it now.",
+            ),
+        })
+        .await;
+        let record = carried.clone();
+        let page = capture_page(&url, &policy_script(), move || record.clone())
+            .await
+            .expect("capture");
+        assert_eq!(page.secret_screen, withheld, "{carried:?}");
+        if withheld {
+            assert_eq!((page.title.as_str(), page.text.as_str()), ("", ""));
+            assert_eq!(page.url, "https://console.example/tokens/new");
+        } else {
+            assert_eq!(page.text, "Copy it now.");
+        }
+    }
+}
+
+#[tokio::test]
 async fn a_page_that_changes_while_it_is_read_is_refused() {
     let (url, _) = serve_fake_page(FakePage {
         withheld: Some(false),
@@ -254,7 +300,9 @@ async fn a_page_that_changes_while_it_is_read_is_refused() {
         evaluate: page_with("https://example.test/", "Page", "Text"),
     })
     .await;
-    let error = capture_page(&url, &policy_script()).await.unwrap_err();
+    let error = capture_page(&url, &policy_script(), nothing_carried)
+        .await
+        .unwrap_err();
     assert!(matches!(error, OriginError::Conflict(_)), "{error:?}");
 }
 
@@ -266,7 +314,9 @@ async fn only_a_web_page_is_sent() {
         evaluate: page_with("chrome://newtab/", "New Tab", ""),
     })
     .await;
-    let error = capture_page(&url, &policy_script()).await.unwrap_err();
+    let error = capture_page(&url, &policy_script(), nothing_carried)
+        .await
+        .unwrap_err();
     assert!(matches!(error, OriginError::Conflict(_)), "{error:?}");
 }
 
@@ -289,7 +339,9 @@ async fn a_page_cannot_answer_for_the_reader() {
             evaluate: Arc::new(move |_| fixed.clone()),
         })
         .await;
-        let error = capture_page(&url, "/* reader */").await.unwrap_err();
+        let error = capture_page(&url, "/* reader */", nothing_carried)
+            .await
+            .unwrap_err();
         assert!(
             matches!(error, OriginError::Unavailable(_)),
             "{answer}: {error:?}"

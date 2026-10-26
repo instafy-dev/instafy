@@ -109,9 +109,10 @@ by itself and keeps no way to read it again.
 - The copy is a `text/markdown` attachment named `page-<host>.md`, recorded as
   `kind: "file"` and uploaded like any other. It starts with where it came from:
   the address, the title, when it was read and which browser read it. Then it
-  says the text is the page's, not the person's words, instructions or consent,
-  and the page's text follows inside an `untrusted_page_content` block that the
-  page cannot close.
+  says the title and text are the page's, not the person's words, instructions
+  or consent, and the page's text follows inside an `untrusted_page_content`
+  block. The block's name is taken out of the page's text however it is
+  spelled, so the page cannot close the block or open another.
 - A page that seemed to show a password or key is not attached, and the composer
   says so. Only `http` and `https` pages are sent, at most five per message.
 - The tray lists a staged page by its title and host; it can be removed until the

@@ -222,6 +222,35 @@ struct FingerprintedApprovalRequest<'a> {
     expires_at_ms: u64,
 }
 
+/// The Shared Browser controller's run-scoped record of the document a
+/// credential step ran on (`shared-browser-approval.js`,
+/// `withholdNextDocument`).
+const WITHHOLD_NEXT_FILE: &str = "withhold-next.json";
+const WITHHOLD_NEXT_MAX_BYTES: u64 = 4 * 1024;
+
+/// Whether the agent's run carries a withheld page forward (see
+/// [`BrowserApprovalBridge::carried_withholding`]).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum CarriedWithholding {
+    /// No record: no step is waiting for the page it opens.
+    Nothing,
+    /// Every document other than this one (a main-frame loader id) is withheld.
+    After(String),
+    /// The record could not be read safely, so every document is withheld.
+    Unknown,
+}
+
+impl CarriedWithholding {
+    /// Whether the document with this loader id is withheld.
+    pub(crate) fn withholds(&self, loader_id: &str) -> bool {
+        match self {
+            Self::Nothing => false,
+            Self::After(document) => document != loader_id,
+            Self::Unknown => true,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct BrowserApprovalBridge {
     marker_path: Arc<PathBuf>,
@@ -484,6 +513,46 @@ impl BrowserApprovalBridge {
             ));
         }
         Ok(Some(marker))
+    }
+
+    /// What the agent's run recorded in `withhold-next.json`: a key change or
+    /// "may show a secret" step ran on a document, so the next other document
+    /// stays withheld until the agent's controller marks it. Read-only; the
+    /// record is the controller's to clear.
+    pub(crate) fn carried_withholding(&self) -> CarriedWithholding {
+        let dir = match open_protected_directory(&self.approval_dir, true) {
+            Ok(Some(dir)) => dir,
+            Ok(None) => return CarriedWithholding::Nothing,
+            Err(_) => return CarriedWithholding::Unknown,
+        };
+        let bytes = match read_protected_child(
+            &dir,
+            OsStr::new(WITHHOLD_NEXT_FILE),
+            WITHHOLD_NEXT_MAX_BYTES,
+        ) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return CarriedWithholding::Nothing,
+            Err(_) => return CarriedWithholding::Unknown,
+        };
+        let after = serde_json::from_slice::<serde_json::Value>(&bytes)
+            .ok()
+            .and_then(|record| {
+                record
+                    .get("afterDocument")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+            .filter(|document| {
+                !document.is_empty()
+                    && document.len() <= 128
+                    && document
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            });
+        match after {
+            Some(document) => CarriedWithholding::After(document),
+            None => CarriedWithholding::Unknown,
+        }
     }
 
     fn open_required_approval_dir(&self) -> Result<Dir, OriginError> {

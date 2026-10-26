@@ -6,7 +6,8 @@
 //! reach, with the same redaction rules as an agent snapshot
 //! (`@instafy/browser-action-policy`, `pageCapture.js` and `redaction.js`).
 //! Only the masked address, title and text leave the host. A secret screen,
-//! a page the browser already withholds from the agent, or a page that could
+//! a page the browser already withholds from the agent (marked on the page, or
+//! opened by a credential step the agent's run recorded), or a page that could
 //! not be checked answers without any text.
 //!
 //! Each request reads one page once. Nothing is kept, no listener stays on
@@ -28,6 +29,7 @@ use tokio_tungstenite::tungstenite::Message as TungMessage;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 use crate::browser::{fetch_browser_cdp_targets, BrowserTargetPathParams};
+use crate::browser_approval::CarriedWithholding;
 use crate::browser_host::BrowserHostReady;
 use crate::error::OriginError;
 use crate::routes::AppState;
@@ -211,7 +213,13 @@ fn parse_captured_page(value: &JsonValue) -> Result<CapturedPage, OriginError> {
     }
 }
 
-async fn capture_page(websocket_url: &str, script: &str) -> Result<CapturedPage, OriginError> {
+/// `carried` reads the agent's run record of a page a credential step opens;
+/// it is read after the page, like the controller's own snapshots do.
+async fn capture_page(
+    websocket_url: &str,
+    script: &str,
+    carried: impl Fn() -> CarriedWithholding,
+) -> Result<CapturedPage, OriginError> {
     let mut session = CdpSession::connect(websocket_url).await?;
     let result = async {
         let (frame_id, loader_before) = main_frame_identity(
@@ -275,6 +283,17 @@ async fn capture_page(websocket_url: &str, script: &str) -> Result<CapturedPage,
                 "the page changed while it was being read; try again",
             ));
         }
+        // The page a credential step opened stays withheld until the agent's
+        // controller marks it, as the agent's own next snapshot would.
+        if !page.secret_screen && carried().withholds(&loader_before) {
+            return Ok(CapturedPage {
+                url: page.url,
+                title: String::new(),
+                text: String::new(),
+                secret_screen: true,
+                truncated: false,
+            });
+        }
         Ok(page)
     }
     .await;
@@ -311,9 +330,14 @@ pub(crate) async fn handle_browser_page_capture(
         .ok_or_else(|| OriginError::unavailable("browser page CDP endpoint is unavailable"))?
         .to_string();
 
-    let page = timeout(CAPTURE_TIMEOUT, capture_page(&websocket_url, &script))
-        .await
-        .map_err(|_| OriginError::unavailable("reading the page timed out"))??;
+    let approvals = state.browser_collaboration.approval_bridge().clone();
+    let carried = move || approvals.carried_withholding();
+    let page = timeout(
+        CAPTURE_TIMEOUT,
+        capture_page(&websocket_url, &script, carried),
+    )
+    .await
+    .map_err(|_| OriginError::unavailable("reading the page timed out"))??;
     let response = BrowserPageCaptureResponse {
         page_id: page_id.to_string(),
         url: page.url,

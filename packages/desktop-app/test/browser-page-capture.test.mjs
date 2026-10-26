@@ -65,6 +65,38 @@ test("a page that shows a credential sends no title or text", () => {
   assert.equal(withheld.text, "");
 });
 
+test("a key cut at the reading window never reaches the sent text, however masking moved it", () => {
+  const redaction = require("@instafy/browser-action-policy/redaction");
+  const { maskSentPage, MAX_SENT_PAGE_TEXT_CHARS, SENT_PAGE_MASK_MARGIN_CHARS } =
+    require("@instafy/browser-action-policy/pageCapture");
+  const window = MAX_SENT_PAGE_TEXT_CHARS + SENT_PAGE_MASK_MARGIN_CHARS;
+  // Many keys early on: each mask is shorter than its key, so the masked text
+  // is thousands of characters shorter than the raw text.
+  const early = Array.from({ length: 120 }, () => `Hook ${KEY}\n`).join("");
+  // The window ends inside a key: only a part of it, too short for any mask.
+  const cutKey = KEY.slice(0, 19);
+  const filler = "word ".repeat(Math.ceil(window / 5));
+  const head = (early + filler).slice(0, window - cutKey.length);
+  const text = `${head}${KEY} and more after the window`;
+  assert.equal(text.slice(0, window).endsWith(cutKey), true);
+  const page = maskSentPage(
+    redaction,
+    {
+      url: "https://notes.example/",
+      title: "Notes",
+      text,
+      signals: { credentialContext: false, secretField: false, secretCode: false, maskedNearReveal: false },
+    },
+    { withhold: false },
+  );
+  assert.equal(page.secretScreen, false);
+  assert.equal(page.truncated, true);
+  assert.ok(page.text.length <= MAX_SENT_PAGE_TEXT_CHARS);
+  assert.ok(page.text.length > 40_000, "most of the page is still sent");
+  assert.ok(!page.text.includes(cutKey.slice(0, 12)), "no part of the cut key is sent");
+  assert.ok(!page.text.includes(KEY));
+});
+
 test("only http and https pages are read", () => {
   assert.deepEqual(capture("<p>Hi</p>", { url: "file:///etc/hosts" }), { unsupported: true });
 });

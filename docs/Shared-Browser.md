@@ -1319,8 +1319,11 @@ reads that page once for the person who pressed it:
   characters, cut after masking) leave the machine, with `readAt` and
   `Cache-Control: no-store`.
 - A secret screen, a page the agent's controller marked withheld (read in the
-  page's own world, failing closed) or a page whose checks failed answers with
-  `secretScreen: true` and no title or text. A tab with no web page, or a page
+  page's own world, failing closed), the page a credential step of the agent's
+  run opened before the controller marked it (`withhold-next.json` in the
+  approval directory, read only; an unreadable record withholds every page) or
+  a page whose checks failed answers with `secretScreen: true` and no title or
+  text. A tab with no web page, or a page
   that loaded during the read, answers 409.
 - runtime-agent supplies the reader (`set_browser_page_capture_script`). An origin
   without it, or one that predates the route, answers 404, and Studio says this
