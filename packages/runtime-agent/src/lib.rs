@@ -28,5 +28,6 @@ pub mod process_hardening;
 mod required_execution;
 pub mod resources;
 pub mod shared_browser;
+pub mod skill_packs;
 pub mod task_usage;
 pub mod tunnels;

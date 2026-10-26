@@ -69,6 +69,7 @@ mod project_preferences_tests;
 #[cfg(test)]
 mod read_reference_tests;
 pub(crate) mod rolling_saves;
+mod runtime_pack_files;
 mod site_intent;
 mod skill_declaration;
 mod skill_routing;

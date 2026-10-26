@@ -355,6 +355,9 @@ pub fn ensure_project_memory_scaffold(workspace_dir: &Path) {
 /// Writes and upgrades the bundled Instafy files in `workspace_dir`, unless
 /// `scope` leaves them to the controller (see [`ScaffoldScope`]).
 pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldScope) {
+    // The runtime's own skill pack files are never committed, so every space gets them on every
+    // turn, a canonical checkout with history included (see `runtime_pack_files`).
+    keep_runtime_pack_files_current(workspace_dir);
     if scope == ScaffoldScope::Canonical && holds_canonical_history(workspace_dir) {
         return;
     }
@@ -744,6 +747,30 @@ pub fn parse_learn_request(prompt_text: &str) -> Option<LearnRequest> {
     None
 }
 
+/// Writes, updates or removes this space's copies of the skill packs installed with the runtime.
+#[cfg(not(test))]
+fn keep_runtime_pack_files_current(workspace_dir: &Path) {
+    super::runtime_pack_files::keep_current(
+        workspace_dir,
+        crate::skill_packs::installed_packs(),
+        crate::skill_packs::node_on_path(),
+    );
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The packs a test's runtime has installed (none unless a test sets them).
+    pub(super) static TEST_RUNTIME_PACKS: std::cell::RefCell<Vec<crate::skill_packs::InstalledPack>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn keep_runtime_pack_files_current(workspace_dir: &Path) {
+    TEST_RUNTIME_PACKS.with(|packs| {
+        super::runtime_pack_files::keep_current(workspace_dir, &packs.borrow(), Some((22, 11, 0)))
+    });
+}
+
 fn maybe_commit_project_memory_scaffold(workspace_dir: &Path, _wrote_any: bool) {
     if !workspace_dir.join(".instafy").join(".git").exists()
         || holds_canonical_history(workspace_dir)
@@ -912,6 +939,22 @@ pub(super) fn commit_test_checkout(
         git(&["add", "--", path]);
     }
     git(&["commit", "--quiet", "--no-gpg-sign", "-m", subject]);
+}
+
+/// Test support: commits everything in the folder's `.instafy` repository, as a save would.
+#[cfg(test)]
+pub(super) fn commit_test_checkout_all(workspace_dir: &Path, subject: &str) {
+    for args in [
+        &["add", "-A"][..],
+        &["commit", "--quiet", "--no-gpg-sign", "-m", subject][..],
+    ] {
+        let output = run_git(workspace_dir, args).expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 /// Test support: the folder's `git status`, untracked files listed one by one.
@@ -1795,6 +1838,33 @@ mod tests {
             git_stdout_trimmed(folder, &["rev-list", "--count", "HEAD"]).as_deref(),
             Some("1")
         );
+    }
+
+    #[test]
+    fn runtime_pack_files_reach_a_canonical_checkout_with_history_and_stay_unsaved() {
+        let packs = tempdir().expect("packs");
+        let dir = crate::skill_packs::tests::make_pack(packs.path(), "demo", true);
+        let pack = crate::skill_packs::load_pack(&dir).expect("pack");
+        TEST_RUNTIME_PACKS.with(|packs| *packs.borrow_mut() = vec![pack]);
+        let workspace = tempdir().expect("workspace");
+        let folder = workspace.path();
+        commit_test_checkout(
+            folder,
+            "Add the team's notes",
+            "someone@example.com",
+            &[(INSTAFY_FILENAME, INSTAFY_TEMPLATE)],
+        );
+
+        ensure_project_memory_scaffold_in(folder, ScaffoldScope::Canonical);
+        TEST_RUNTIME_PACKS.with(|packs| packs.borrow_mut().clear());
+
+        assert!(folder.join(".agents/skills/demo/SKILL.md").is_file());
+        assert!(folder.join(".agents/skills/demo/scripts/run.mjs").is_file());
+        assert!(
+            !folder.join(BOUND_SITES_RELATIVE_PATH).exists(),
+            "the rest stays the controller's"
+        );
+        assert_eq!(test_checkout_status(folder), "", "nothing left unsaved");
     }
 
     #[test]
