@@ -156,8 +156,9 @@ const SHARED_BROWSER_ROUTINE_START_DEVELOPER_INSTRUCTIONS: &str = shared_browser
 );
 const PERSONAL_BROWSER_DEVELOPER_INSTRUCTIONS: &str = r#"Personal Browser transport (managed runtime policy):
 - A private browser embedded in the user's desktop app is available to this runtime. Use it for browser work instead of Playwright, CDP, noVNC, or a hosted browser.
-- Use the dedicated tools from the `instafy_personal_browser` MCP server: `status`, `snapshot`, `navigate`, `click`, `type`, `press`, `scroll`, and `request_human_input`. Do not invoke Personal Browser through shell commands.
-- The broker currently controls one visible page. Reuse it and navigate sequentially; do not invent tab/window endpoints or silently switch to a hosted/shared browser.
+- Use the dedicated tools from the `instafy_personal_browser` MCP server: `status`, `snapshot`, `navigate`, `click`, `type`, `press`, `scroll`, `request_human_input`, `list_tabs`, `open_tab`, `select_tab`, and `close_tab`. Do not invoke Personal Browser through shell commands.
+- Every page tool acts on the tab on screen. `open_tab` opens one public http(s) page in a new visible tab and shows it; at most three of your tabs can be open, and each new tab asks the user for its own site approval. `select_tab` shows another tab, and `close_tab` closes one you opened; the user's own tab cannot be closed. Snapshot again after switching. Reuse a tab with `navigate` when that is enough, close tabs you no longer need, and never silently switch to a hosted/shared browser.
+- `private_address_blocked` and `agent_tab_limit` are final for that step: agent tabs open public web pages only. Ask the user to open a local or private address in their own tab.
 - Get interactive element indices from `snapshot`, then use one fresh index for exactly one click/type/press action. Snapshot again before every subsequent indexed action and after navigation, scrolling, or DOM changes. Arbitrary CSS selectors are not accepted.
 - The Personal Browser capability is deliberately unavailable to shell tools and subprocesses. Never try to discover, print, persist, or reconstruct it.
 - Never type authentication, payment, or identity secrets. A sign-in, one-time code or consent step is a manual step for the user: pause on it with `request_human_input` on its fields, so the user completes it on the page and then chooses Let AI continue. Never ask for those values in chat.
@@ -260,6 +261,11 @@ const BROWSER_MCP_TOOL_NAMES: [&str; 8] = [
     "press",
     "scroll",
 ];
+/// Tab tools the Desktop Personal Browser serves on top of the page tools: the
+/// agent opens at most three visible tabs of its own, and every page tool acts
+/// on the tab on screen. The hosted Shared Browser does not offer them here.
+const PERSONAL_BROWSER_TAB_TOOL_NAMES: [&str; 4] =
+    ["list_tabs", "open_tab", "select_tab", "close_tab"];
 const CODEX_REQUIRED_TOOL_COMMAND_ONCE: &str = "command_once";
 const MISSING_FINAL_ASSISTANT_MESSAGE_SUMMARY: &str =
     "Codex automation completed, but no final assistant message was returned.";
@@ -3733,7 +3739,7 @@ fn install_browser_mcp_servers(
             .context("refusing the Personal Browser turn")?;
         servers.insert(
             PERSONAL_BROWSER_MCP_SERVER_NAME.to_string(),
-            browser_mcp_server_config(McpServerTransportConfig::StreamableHttp {
+            personal_browser_mcp_server_config(McpServerTransportConfig::StreamableHttp {
                 url,
                 bearer_token_env_var: None,
                 http_headers: Some(HashMap::from([
@@ -3869,6 +3875,17 @@ fn browser_mcp_server_config(transport: McpServerTransportConfig) -> McpServerCo
     }
 }
 
+/// The Personal Browser's server: the bounded browser settings, with the tab
+/// tools its desktop host adds.
+fn personal_browser_mcp_server_config(transport: McpServerTransportConfig) -> McpServerConfig {
+    McpServerConfig {
+        enabled_tools: Some(bounded_browser_enabled_tools(
+            PERSONAL_BROWSER_MCP_SERVER_NAME,
+        )),
+        ..browser_mcp_server_config(transport)
+    }
+}
+
 /// The Shared Browser's server: the bounded browser settings, with a tool
 /// timeout that outlasts one call's whole approval budget, so a person who
 /// answers late is never cut off by Codex before the browser's own deadline.
@@ -3893,6 +3910,19 @@ fn browser_mcp_enabled_tools() -> Vec<String> {
         .collect()
 }
 
+/// The exact tool allowlist of one bounded browser server.
+fn bounded_browser_enabled_tools(server_name: &str) -> Vec<String> {
+    let mut tools = browser_mcp_enabled_tools();
+    if server_name == PERSONAL_BROWSER_MCP_SERVER_NAME {
+        tools.extend(
+            PERSONAL_BROWSER_TAB_TOOL_NAMES
+                .into_iter()
+                .map(str::to_string),
+        );
+    }
+    tools
+}
+
 fn validate_bounded_browser_mcp_server_set(
     servers: &HashMap<String, McpServerConfig>,
     expected_server_name: &str,
@@ -3910,7 +3940,7 @@ fn validate_bounded_browser_mcp_server_set(
             "bounded browser MCP server must be enabled, required, and serial"
         ));
     }
-    if server.enabled_tools.as_ref() != Some(&browser_mcp_enabled_tools()) {
+    if server.enabled_tools.as_ref() != Some(&bounded_browser_enabled_tools(expected_server_name)) {
         return Err(anyhow!(
             "bounded browser MCP server does not match the exact browser tool allowlist"
         ));
@@ -3944,7 +3974,7 @@ fn validate_bounded_browser_mcp_server_set(
 /// package cannot advertise a broader tool set without also changing the
 /// production configuration checked on every Personal Browser launch.
 pub fn personal_browser_capability_contract() -> Result<JsonValue> {
-    let server = browser_mcp_server_config(McpServerTransportConfig::StreamableHttp {
+    let server = personal_browser_mcp_server_config(McpServerTransportConfig::StreamableHttp {
         url: "http://127.0.0.1/contract-only".to_string(),
         bearer_token_env_var: None,
         http_headers: None,
@@ -3970,7 +4000,7 @@ pub fn personal_browser_capability_contract() -> Result<JsonValue> {
             "name": PERSONAL_BROWSER_MCP_SERVER_NAME,
             "required": true,
             "supportsParallelToolCalls": false,
-            "enabledTools": BROWSER_MCP_TOOL_NAMES,
+            "enabledTools": bounded_browser_enabled_tools(PERSONAL_BROWSER_MCP_SERVER_NAME),
         }],
         "projectMcpServersAllowed": false,
         "localExecutionEnvironmentCount": environment_count,
@@ -6609,7 +6639,8 @@ mod tests {
                     "required": true,
                     "supportsParallelToolCalls": false,
                     "enabledTools": [
-                        "request_human_input", "status", "snapshot", "navigate", "click", "type", "press", "scroll"
+                        "request_human_input", "status", "snapshot", "navigate", "click", "type", "press", "scroll",
+                        "list_tabs", "open_tab", "select_tab", "close_tab"
                     ],
                 }],
                 "projectMcpServersAllowed": false,
@@ -6642,8 +6673,43 @@ mod tests {
     }
 
     #[test]
+    fn only_the_personal_browser_server_offers_the_tab_tools() {
+        let transport = || McpServerTransportConfig::StreamableHttp {
+            url: "http://127.0.0.1/contract-only".to_string(),
+            bearer_token_env_var: None,
+            http_headers: None,
+            env_http_headers: None,
+            http_headers_helper: None,
+        };
+        let personal = personal_browser_mcp_server_config(transport());
+        let tools = personal.enabled_tools.clone().expect("personal allowlist");
+        for tool in PERSONAL_BROWSER_TAB_TOOL_NAMES {
+            assert!(tools.iter().any(|name| name == tool), "{tool}");
+        }
+        let shared = shared_browser_mcp_server_config(transport(), None);
+        let shared_tools = shared.enabled_tools.clone().expect("shared allowlist");
+        assert!(
+            shared_tools
+                .iter()
+                .all(|name| !PERSONAL_BROWSER_TAB_TOOL_NAMES.contains(&name.as_str()))
+        );
+
+        // Each server must carry exactly its own allowlist.
+        let swapped = HashMap::from([(PERSONAL_BROWSER_MCP_SERVER_NAME.to_string(), shared)]);
+        assert!(
+            validate_bounded_browser_mcp_server_set(&swapped, PERSONAL_BROWSER_MCP_SERVER_NAME)
+                .is_err()
+        );
+        let widened = HashMap::from([(SHARED_BROWSER_MCP_SERVER_NAME.to_string(), personal)]);
+        assert!(
+            validate_bounded_browser_mcp_server_set(&widened, SHARED_BROWSER_MCP_SERVER_NAME)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn bounded_browser_contract_rejects_an_http_header_helper() {
-        let server = browser_mcp_server_config(McpServerTransportConfig::StreamableHttp {
+        let server = personal_browser_mcp_server_config(McpServerTransportConfig::StreamableHttp {
             url: "http://127.0.0.1/contract-only".to_string(),
             bearer_token_env_var: None,
             http_headers: None,

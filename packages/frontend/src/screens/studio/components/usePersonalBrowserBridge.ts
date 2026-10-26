@@ -765,6 +765,16 @@ export function usePersonalBrowserBridge({
     () => invoke((bridge, ownerId) => bridge.personalBrowserReload?.({ ownerId })),
     [invoke],
   );
+  /** Shows another tab. Desktop refuses it while Octo has control. */
+  const selectTab = useCallback(
+    (tabId: string) => invoke((bridge, ownerId) => bridge.personalBrowserSelectTab?.({ ownerId, tabId })),
+    [invoke],
+  );
+  /** Closes a tab Octo opened. Desktop refuses it while Octo has control. */
+  const closeTab = useCallback(
+    (tabId: string) => invoke((bridge, ownerId) => bridge.personalBrowserCloseTab?.({ ownerId, tabId })),
+    [invoke],
+  );
   /**
    * Send page to Octo: reads the page on screen once, masked by Desktop. Only
    * a press calls it; nothing reads the page on its own. Null when this
@@ -989,6 +999,7 @@ export function usePersonalBrowserBridge({
     clearNavigationError,
     clearData,
     close,
+    closeTab,
     goBack,
     goForward,
     navigate,
@@ -1005,6 +1016,7 @@ export function usePersonalBrowserBridge({
      */
     pendingHandoff: ownedPendingHandoff,
     reload,
+    selectTab,
     recovering,
     retryAgentControl,
     retryOpen,

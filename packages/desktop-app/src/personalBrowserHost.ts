@@ -68,6 +68,10 @@ import {
   normalizePersonalBrowserScroll,
   normalizePersonalBrowserText,
   normalizePersonalBrowserUrl,
+  checkPersonalBrowserAgentTabUrl,
+  personalBrowserAgentTabHopIsPublic,
+  requirePersonalBrowserTabId,
+  MAX_PERSONAL_BROWSER_AGENT_TABS,
   personalBrowserTargetSecurityFingerprint,
   personalBrowserActivationTargetsMatch,
   personalBrowserActivationRequiresConfirmation,
@@ -90,6 +94,19 @@ export type PersonalBrowserSentPage = SentPageView & {
   readAt: string;
 };
 
+/**
+ * One tab of the Personal Browser. The first tab is the person's own; the
+ * agent can open up to MAX_PERSONAL_BROWSER_AGENT_TABS more while the person
+ * has resumed control. Every tab is a visible page in the same profile.
+ */
+export type PersonalBrowserTabStatus = {
+  tabId: string;
+  openedBy: "person" | "agent";
+  active: boolean;
+  url: string;
+  title?: string;
+};
+
 export type PersonalBrowserStatus = {
   supported: boolean;
   enabled: boolean;
@@ -110,6 +127,10 @@ export type PersonalBrowserStatus = {
   approvalPolicyVersion: number;
   sharing?: boolean;
   tabControlActive?: boolean;
+  /** Every open tab, in order; the active one is on screen. */
+  tabs: PersonalBrowserTabStatus[];
+  activeTabId: string;
+  maxAgentTabs: number;
   ownerId?: string;
   projectId?: string;
   runtimeId?: string;
@@ -171,6 +192,60 @@ type PersonalBrowserSnapshotState = {
   documentToken: string;
   targets: Map<number, PersonalBrowserResolvedTarget>;
 };
+
+/**
+ * A tab and the agent's state that belongs to it. Site, navigation and typing
+ * approvals, the latest snapshot and the withheld pages are bound to the tab
+ * they were given in: an approval in one tab never covers another.
+ */
+type PersonalBrowserTab = {
+  id: string;
+  openedBy: "person" | "agent";
+  view: WebContentsView | null;
+  approvedOrigins: Set<string>;
+  pendingOriginApprovals: Map<string, Promise<boolean>>;
+  // Addresses (origin and path) an approved step is about to open.
+  approvedNavigations: Map<string, number>;
+  pendingNavigationApprovals: Map<string, Promise<boolean>>;
+  // One typing approval covers a form, or a field outside forms, per page.
+  typingApprovals: Set<string>;
+  // A navigation the page started after an agent step and the owner denied;
+  // the agent's next operation in that control epoch reports it.
+  deniedPageNavigationEpoch: number | null;
+  latestAgentSnapshot: PersonalBrowserSnapshotState | null;
+  // A document stays withheld from the agent until a new page loads once it
+  // was a secret screen or a credential step ran on it.
+  withheldDocumentTokens: Set<string>;
+  // Set by a credential step that may open another page: the next new
+  // document is withheld too.
+  withholdNextDocumentAfter: string | null;
+};
+
+function createPersonalBrowserTab(id: string, openedBy: PersonalBrowserTab["openedBy"]): PersonalBrowserTab {
+  return {
+    id,
+    openedBy,
+    view: null,
+    approvedOrigins: new Set(),
+    pendingOriginApprovals: new Map(),
+    approvedNavigations: new Map(),
+    pendingNavigationApprovals: new Map(),
+    typingApprovals: new Set(),
+    deniedPageNavigationEpoch: null,
+    latestAgentSnapshot: null,
+    withheldDocumentTokens: new Set(),
+    withholdNextDocumentAfter: null,
+  };
+}
+
+function resetTabApprovals(tab: PersonalBrowserTab) {
+  tab.deniedPageNavigationEpoch = null;
+  tab.approvedOrigins.clear();
+  tab.pendingOriginApprovals.clear();
+  tab.approvedNavigations.clear();
+  tab.pendingNavigationApprovals.clear();
+  tab.typingApprovals.clear();
+}
 
 const configuredPersonalBrowserSessions = new WeakSet<Session>();
 // Studio can briefly remount ChatPanel while reconciling a conversation or
@@ -324,7 +399,9 @@ export class PersonalBrowserHost {
   private readonly inputShield: PersonalBrowserInputShield;
   private takeoverRequestId: string | undefined;
   private ownerWindow: BrowserWindow | null = null;
-  private view: WebContentsView | null = null;
+  private nextTabNumber = 1;
+  private tabs: PersonalBrowserTab[] = [];
+  private activeTab: PersonalBrowserTab = this.addTab("person");
   private humanInputRequest: PersonalBrowserHumanInputRequest | null = null;
   private currentState: PersonalBrowserState = "closed";
   private currentVisible = false;
@@ -342,27 +419,10 @@ export class PersonalBrowserHost {
   private approvalMode: PersonalBrowserApprovalMode = "ask";
   private humanNavigationInFlight = false;
   private humanNavigationEpoch = 0;
-  private approvedOrigins = new Set<string>();
-  private pendingOriginApprovals = new Map<string, Promise<boolean>>();
   // The card's hosts for a routine run, shown in its start dialog.
   private runKnownHosts: string[] = [];
-  // Addresses (origin and path) an approved step is about to open.
-  private approvedNavigations = new Map<string, number>();
-  private pendingNavigationApprovals = new Map<string, Promise<boolean>>();
-  // One typing approval covers a form, or a field outside forms, per page.
-  private typingApprovals = new Set<string>();
   private handoffResume: PersonalBrowserHandoffResume | null = null;
-  // A navigation the page started after an agent step and the owner denied;
-  // the agent's next operation in that control epoch reports it.
-  private deniedPageNavigationEpoch: number | null = null;
   private controlEpoch = 0;
-  private latestAgentSnapshot: PersonalBrowserSnapshotState | null = null;
-  // A document stays withheld from the agent until a new page loads once it
-  // was a secret screen or a credential step ran on it.
-  private withheldDocumentTokens = new Set<string>();
-  // Set by a credential step that may open another page: the next new
-  // document is withheld too.
-  private withholdNextDocumentAfter: string | null = null;
   private lastEmittedStatus = "";
   private releaseCloseTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly tabCapture = new BrowserTabCapture(() => {
@@ -401,6 +461,33 @@ export class PersonalBrowserHost {
     this.syncInputShield();
     this.emitStatus();
   });
+
+  // The page on screen and the agent's state for it. Every agent operation
+  // acts on the active tab, which is always the one the person sees.
+  private get view() { return this.activeTab.view; }
+  private set view(value: WebContentsView | null) { this.activeTab.view = value; }
+  private get approvedOrigins() { return this.activeTab.approvedOrigins; }
+  private get pendingOriginApprovals() { return this.activeTab.pendingOriginApprovals; }
+  private get approvedNavigations() { return this.activeTab.approvedNavigations; }
+  private get pendingNavigationApprovals() { return this.activeTab.pendingNavigationApprovals; }
+  private get typingApprovals() { return this.activeTab.typingApprovals; }
+  private get withheldDocumentTokens() { return this.activeTab.withheldDocumentTokens; }
+  private get deniedPageNavigationEpoch() { return this.activeTab.deniedPageNavigationEpoch; }
+  private set deniedPageNavigationEpoch(value: number | null) { this.activeTab.deniedPageNavigationEpoch = value; }
+  private get latestAgentSnapshot() { return this.activeTab.latestAgentSnapshot; }
+  private set latestAgentSnapshot(value: PersonalBrowserSnapshotState | null) { this.activeTab.latestAgentSnapshot = value; }
+  private get withholdNextDocumentAfter() { return this.activeTab.withholdNextDocumentAfter; }
+  private set withholdNextDocumentAfter(value: string | null) { this.activeTab.withholdNextDocumentAfter = value; }
+
+  private addTab(openedBy: PersonalBrowserTab["openedBy"]): PersonalBrowserTab {
+    const tab = createPersonalBrowserTab(`tab-${this.nextTabNumber++}`, openedBy);
+    this.tabs.push(tab);
+    return tab;
+  }
+
+  private agentTabCount(): number {
+    return this.tabs.filter((tab) => tab.openedBy === "agent").length;
+  }
 
   startTabShare(ownerId: string) {
     if (!this.currentVisible) throw new Error("Open your browser before sharing this tab.");
@@ -472,13 +559,19 @@ export class PersonalBrowserHost {
     if (this.ownerWindow === window) {
       return;
     }
-    if (this.view && this.ownerWindow && !this.ownerWindow.isDestroyed()) {
-      this.ownerWindow.contentView.removeChildView(this.view);
+    for (const tab of this.tabs) {
+      if (tab.view && this.ownerWindow && !this.ownerWindow.isDestroyed()) {
+        this.ownerWindow.contentView.removeChildView(tab.view);
+      }
     }
     this.ownerWindow = window;
+    // The active tab goes on top of the others.
+    for (const tab of [...this.tabs.filter((entry) => entry !== this.activeTab), this.activeTab]) {
+      if (!tab.view) continue;
+      window.contentView.addChildView(tab.view);
+      tab.view.setBounds(this.fitBoundsToOwner(this.currentBounds));
+    }
     if (this.view) {
-      window.contentView.addChildView(this.view);
-      this.view.setBounds(this.fitBoundsToOwner(this.currentBounds));
       this.inputShield.attach(window.contentView, this.view.webContents);
       this.applyVisibility();
     }
@@ -489,8 +582,10 @@ export class PersonalBrowserHost {
     if (this.ownerWindow !== window) {
       return;
     }
-    if (this.view && !window.isDestroyed()) {
-      window.contentView.removeChildView(this.view);
+    for (const tab of this.tabs) {
+      if (tab.view && !window.isDestroyed()) {
+        window.contentView.removeChildView(tab.view);
+      }
     }
     this.ownerWindow = null;
     void this.close();
@@ -518,6 +613,9 @@ export class PersonalBrowserHost {
       approvalPolicyVersion: PERSONAL_BROWSER_APPROVAL_POLICY_VERSION,
       sharing: this.tabCapture.active,
       tabControlActive: this.tabCapture.controlActive,
+      tabs: this.tabs.map((tab) => this.tabStatus(tab)),
+      activeTabId: this.activeTab.id,
+      maxAgentTabs: MAX_PERSONAL_BROWSER_AGENT_TABS,
       ...(this.currentOwnerId ? { ownerId: this.currentOwnerId } : {}),
       ...(this.currentProjectId ? { projectId: this.currentProjectId } : {}),
       ...(this.currentRuntimeId ? { runtimeId: this.currentRuntimeId } : {}),
@@ -620,7 +718,8 @@ export class PersonalBrowserHost {
       this.currentVisible = bounds.visible;
     }
     if (this.view) {
-      this.view.setBounds(this.fitBoundsToOwner(bounds));
+      const fitted = this.fitBoundsToOwner(bounds);
+      for (const tab of this.tabs) tab.view?.setBounds(fitted);
       this.applyVisibility();
     }
     this.emitStatus();
@@ -861,12 +960,7 @@ export class PersonalBrowserHost {
     // Pause, Escape, Clear data, close and an owner or identity change all
     // pass through here, and each cancels a handoff's kept mode.
     this.handoffResume = null;
-    this.deniedPageNavigationEpoch = null;
-    this.approvedOrigins.clear();
-    this.pendingOriginApprovals.clear();
-    this.approvedNavigations.clear();
-    this.pendingNavigationApprovals.clear();
-    this.typingApprovals.clear();
+    for (const tab of this.tabs) resetTabApprovals(tab);
   }
 
   isControlEpoch(epoch: number): boolean {
@@ -940,6 +1034,92 @@ export class PersonalBrowserHost {
 
   isOwnedBy(ownerId: string): boolean {
     return this.currentOwnerId === ownerId;
+  }
+
+  private tabStatus(tab: PersonalBrowserTab): PersonalBrowserTabStatus {
+    const contents = tab.view?.webContents;
+    const live = contents && !contents.isDestroyed() ? contents : null;
+    const title = live?.getTitle().trim() || undefined;
+    return {
+      tabId: tab.id,
+      openedBy: tab.openedBy,
+      active: tab === this.activeTab,
+      url: live?.getURL() || "about:blank",
+      ...(title ? { title } : {}),
+    };
+  }
+
+  private findTab(tabId: string): PersonalBrowserTab | null {
+    return this.tabs.find((tab) => tab.id === tabId) ?? null;
+  }
+
+  /**
+   * Puts one tab on screen. Sharing is scoped to the page on screen, so it
+   * ends; every snapshot ends too, so the next indexed step observes the tab
+   * now shown.
+   */
+  private activateTab(tab: PersonalBrowserTab) {
+    if (tab === this.activeTab) {
+      return;
+    }
+    this.tabCapture.stop();
+    this.invalidateAgentSnapshot();
+    this.activeTab = tab;
+    const owner = this.ownerWindow;
+    if (tab.view && owner && !owner.isDestroyed()) {
+      owner.contentView.addChildView(tab.view);
+      tab.view.setBounds(this.fitBoundsToOwner(this.currentBounds));
+      this.inputShield.attach(owner.contentView, tab.view.webContents);
+    }
+    this.applyVisibility();
+    this.emitStatus();
+  }
+
+  private removeTab(tab: PersonalBrowserTab) {
+    if (tab.openedBy !== "agent") {
+      throw new Error("Only a tab the agent opened can be closed on its own.");
+    }
+    if (tab === this.activeTab) {
+      this.activateTab(this.tabs.find((entry) => entry.openedBy === "person") ?? this.tabs[0]!);
+    }
+    this.tabs = this.tabs.filter((entry) => entry !== tab);
+    resetTabApprovals(tab);
+    tab.latestAgentSnapshot = null;
+    this.destroyTabView(tab);
+    this.emitStatus();
+  }
+
+  private closeAgentTabs() {
+    for (const tab of this.tabs.filter((entry) => entry.openedBy === "agent")) {
+      this.removeTab(tab);
+    }
+  }
+
+  /** The person shows another tab. Agent control must be paused first. */
+  selectTab(ownerId: string, tabId: unknown): PersonalBrowserStatus {
+    if (!this.isOwnedBy(ownerId)) {
+      return this.getStatus();
+    }
+    this.assertHumanInputAvailable();
+    const tab = this.findTab(requirePersonalBrowserTabId(tabId));
+    if (!tab) {
+      throw new Error("That tab is no longer open.");
+    }
+    this.activateTab(tab);
+    return this.getStatus();
+  }
+
+  /** The person closes a tab the agent opened. Agent control must be paused first. */
+  closeTab(ownerId: string, tabId: unknown): PersonalBrowserStatus {
+    if (!this.isOwnedBy(ownerId)) {
+      return this.getStatus();
+    }
+    this.assertHumanInputAvailable();
+    const tab = this.findTab(requirePersonalBrowserTabId(tabId));
+    if (tab) {
+      this.removeTab(tab);
+    }
+    return this.getStatus();
   }
 
   /**
@@ -1022,6 +1202,8 @@ export class PersonalBrowserHost {
   async clearData(): Promise<PersonalBrowserStatus> {
     this.humanInputRequest = null;
     this.tabCapture.stop();
+    // Agent tabs hold pages of the profile being cleared.
+    this.closeAgentTabs();
     const contents = this.requireWebContents();
     this.setAgentControlState(false);
     this.controlEpoch += 1;
@@ -1072,6 +1254,14 @@ export class PersonalBrowserHost {
   }
 
   private createView(partition: string) {
+    this.createTabView(partition, this.activeTab);
+  }
+
+  /**
+   * Builds the page of one tab. Its events update that tab's own state; the
+   * browser's state, error and status follow only the tab on screen.
+   */
+  private createTabView(partition: string, tab: PersonalBrowserTab): WebContentsView {
     const view = new WebContentsView({
       webPreferences: {
         partition,
@@ -1087,6 +1277,7 @@ export class PersonalBrowserHost {
         spellcheck: true,
       },
     });
+    const isActive = () => this.activeTab === tab;
     this.configureSession(view.webContents.session);
     view.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
     view.webContents.on("will-attach-webview", (event) => event.preventDefault());
@@ -1097,24 +1288,26 @@ export class PersonalBrowserHost {
         event.preventDefault();
       }
     });
-    view.webContents.on("will-navigate", (event, url) => this.guardPageNavigation(event, url));
-    view.webContents.on("will-redirect", (event, url) => this.guardPageNavigation(event, url));
+    view.webContents.on("will-navigate", (event, url) => this.guardTabNavigation(tab, event, url));
+    view.webContents.on("will-redirect", (event, url) => this.guardTabNavigation(tab, event, url));
     view.webContents.on("did-navigate", (_event, url) => {
-      if (this.tabCapture.controlActive) {
+      if (isActive() && this.tabCapture.controlActive) {
         this.markTeammateActivity(this.currentPartition, url);
       }
       // An approval for a navigation that never happened ends with the page.
-      this.approvedNavigations.clear();
-      this.humanInputRequest = null;
-      this.invalidateAgentSnapshot();
+      tab.approvedNavigations.clear();
+      if (isActive()) this.humanInputRequest = null;
+      tab.latestAgentSnapshot = null;
       this.emitStatus();
     });
     view.webContents.on("did-navigate-in-page", () => {
-      this.humanInputRequest = null;
-      // Same-document navigation keeps the DOM alive; remove cosmetic guidance
-      // while invalidating the observation that selected those fields.
-      void clearPersonalBrowserHumanInput(view.webContents).catch(() => undefined);
-      this.invalidateAgentSnapshot();
+      tab.latestAgentSnapshot = null;
+      if (isActive()) {
+        this.humanInputRequest = null;
+        // Same-document navigation keeps the DOM alive; remove cosmetic guidance
+        // while invalidating the observation that selected those fields.
+        void clearPersonalBrowserHumanInput(view.webContents).catch(() => undefined);
+      }
       this.emitStatus();
     });
     view.webContents.on("page-title-updated", () => this.emitStatus());
@@ -1122,13 +1315,15 @@ export class PersonalBrowserHost {
       this.emitStatus();
     });
     view.webContents.on("did-finish-load", () => {
-      this.invalidateAgentSnapshot();
-      this.currentState = "ready";
-      this.currentError = null;
+      tab.latestAgentSnapshot = null;
+      if (isActive()) {
+        this.currentState = "ready";
+        this.currentError = null;
+      }
       this.emitStatus();
     });
     view.webContents.on("did-fail-load", (_event, errorCode, errorDescription) => {
-      if (errorCode === -3) {
+      if (errorCode === -3 || !isActive()) {
         return;
       }
       this.currentState = "error";
@@ -1136,17 +1331,25 @@ export class PersonalBrowserHost {
       this.emitStatus();
     });
     view.webContents.on("render-process-gone", (_event, details) => {
+      tab.latestAgentSnapshot = null;
+      if (!isActive()) {
+        this.emitStatus();
+        return;
+      }
       this.currentState = "error";
       this.currentError = `Browser renderer stopped (${details.reason}).`;
       this.setAgentControlState(false);
       this.invalidateAgentSnapshot();
       this.emitStatus();
     });
-    this.view = view;
+    tab.view = view;
     this.ownerWindow!.contentView.addChildView(view);
     view.setBounds(this.fitBoundsToOwner(this.currentBounds));
-    this.inputShield.attach(this.ownerWindow!.contentView, view.webContents);
+    if (isActive()) {
+      this.inputShield.attach(this.ownerWindow!.contentView, view.webContents);
+    }
     this.applyVisibility();
+    return view;
   }
 
   private configureSession(session: Session) {
@@ -1161,9 +1364,20 @@ export class PersonalBrowserHost {
   }
 
   private closeView() {
-    const view = this.view;
-    this.view = null;
+    const tabs = this.tabs;
+    // A fresh person's tab replaces every tab, the agent's included.
+    this.tabs = [];
+    this.nextTabNumber = 1;
+    this.activeTab = this.addTab("person");
     this.inputShield.destroy();
+    for (const tab of tabs) this.destroyTabView(tab);
+    if (tabs.some((tab) => tab.view) && this.ownerWindow && !this.ownerWindow.isDestroyed()) {
+      this.ownerWindow.webContents.focus();
+    }
+  }
+
+  private destroyTabView(tab: PersonalBrowserTab) {
+    const view = tab.view;
     if (!view) {
       return;
     }
@@ -1172,9 +1386,6 @@ export class PersonalBrowserHost {
     }
     if (!view.webContents.isDestroyed()) {
       view.webContents.close({ waitForBeforeUnload: false });
-    }
-    if (this.ownerWindow && !this.ownerWindow.isDestroyed()) {
-      this.ownerWindow.webContents.focus();
     }
   }
 
@@ -1231,6 +1442,10 @@ export class PersonalBrowserHost {
   }
 
   private applyVisibility() {
+    // Only the active tab is on screen; the agent acts on no other.
+    for (const tab of this.tabs) {
+      if (tab !== this.activeTab) tab.view?.setVisible(false);
+    }
     this.view?.setVisible(this.currentVisible && !this.currentOccluded);
     this.syncInputShield();
     if ((!this.currentVisible || this.currentOccluded) && this.ownerWindow && !this.ownerWindow.isDestroyed()) {
@@ -1381,6 +1596,46 @@ export class PersonalBrowserHost {
     }
   }
 
+  private guardTabNavigation(tab: PersonalBrowserTab, event: Event, rawUrl: string) {
+    const agentActing = this.agentControlEnabled || this.activeControlOperations > 0;
+    // A page in a tab the agent opened stays on public addresses while the
+    // agent has control, also when the page or a redirect moves it.
+    if (tab.openedBy === "agent" && agentActing && !personalBrowserAgentTabHopIsPublic(rawUrl)) {
+      event.preventDefault();
+      return;
+    }
+    if (tab === this.activeTab) {
+      this.guardPageNavigation(event, rawUrl);
+      return;
+    }
+    let targetUrl: string;
+    try {
+      targetUrl = normalizePersonalBrowserUrl(rawUrl);
+    } catch {
+      event.preventDefault();
+      return;
+    }
+    if (!agentActing) {
+      return;
+    }
+    // A tab that is not on screen never asks the person anything. While the
+    // agent has control, a navigation its page starts that would ask (a
+    // risky address, or a site not yet allowed in that tab) is stopped.
+    const targetOrigin = getPersonalBrowserOrigin(targetUrl);
+    let currentOrigin: string | null = null;
+    try {
+      currentOrigin = getPersonalBrowserOrigin(tab.view?.webContents.getURL() || "about:blank");
+    } catch {
+      currentOrigin = null;
+    }
+    if (
+      classifyAddress(targetUrl) ||
+      (targetOrigin && targetOrigin !== currentOrigin && !this.siteSkipsPrompt(targetOrigin) && !tab.approvedOrigins.has(targetOrigin))
+    ) {
+      event.preventDefault();
+    }
+  }
+
   private guardPageNavigation(event: Event, rawUrl: string) {
     let targetUrl: string;
     try {
@@ -1401,6 +1656,7 @@ export class PersonalBrowserHost {
     // A risky address asks in every mode, also when the page or a redirect
     // opens it, unless an approved step is opening exactly that address.
     const risky = classifyAddress(targetUrl);
+    const pageContents = this.getWebContents();
     if (risky && !this.consumeApprovedNavigation(targetUrl)) {
       event.preventDefault();
       const epoch = this.controlEpoch;
@@ -1414,9 +1670,9 @@ export class PersonalBrowserHost {
           this.recordDeniedPageNavigation(epoch);
           return;
         }
-        if (epoch !== this.controlEpoch || !this.getWebContents()) return;
+        if (epoch !== this.controlEpoch || !pageContents || this.getWebContents() !== pageContents) return;
         this.approveNavigation(targetUrl);
-        void this.requireWebContents().loadURL(targetUrl).catch((error) => {
+        void pageContents.loadURL(targetUrl).catch((error) => {
           this.logger("warn", "[instafy-desktop] personal-browser-approved-navigation-failed", {
             message: error instanceof Error ? error.message : String(error),
           });
@@ -1431,8 +1687,8 @@ export class PersonalBrowserHost {
     const originEpoch = this.controlEpoch;
     void this.requestOriginApproval(targetOrigin).then((approved) => {
       if (!approved) this.recordDeniedPageNavigation(originEpoch);
-      if (approved && this.getWebContents()) {
-        void this.requireWebContents().loadURL(targetUrl).catch((error) => {
+      if (approved && pageContents && this.getWebContents() === pageContents) {
+        void pageContents.loadURL(targetUrl).catch((error) => {
           this.logger("warn", "[instafy-desktop] personal-browser-approved-navigation-failed", {
             message: error instanceof Error ? error.message : String(error),
           });
@@ -1530,14 +1786,18 @@ export class PersonalBrowserHost {
   }
 
   private requestNavigationApproval(url: string, category: string): Promise<boolean> {
-    const pending = this.pendingNavigationApprovals.get(url);
+    // The approval belongs to the tab on screen when it was asked for.
+    const tab = this.activeTab;
+    const pending = tab.pendingNavigationApprovals.get(url);
     if (pending) return pending;
-    const approval = this.confirmAgentNavigation(url, category).finally(() => {
-      if (this.pendingNavigationApprovals.get(url) === approval) {
-        this.pendingNavigationApprovals.delete(url);
-      }
-    });
-    this.pendingNavigationApprovals.set(url, approval);
+    const approval = this.confirmAgentNavigation(url, category)
+      .then((approved) => approved && this.activeTab === tab)
+      .finally(() => {
+        if (tab.pendingNavigationApprovals.get(url) === approval) {
+          tab.pendingNavigationApprovals.delete(url);
+        }
+      });
+    tab.pendingNavigationApprovals.set(url, approval);
     return approval;
   }
 
@@ -1556,27 +1816,30 @@ export class PersonalBrowserHost {
   }
 
   private async requestOriginApproval(origin: string): Promise<boolean> {
-    if (this.siteSkipsPrompt(origin) || this.approvedOrigins.has(origin)) {
+    // A site is allowed in the tab on screen when the person was asked, and
+    // only in that tab.
+    const tab = this.activeTab;
+    if (this.siteSkipsPrompt(origin) || tab.approvedOrigins.has(origin)) {
       return true;
     }
-    const pending = this.pendingOriginApprovals.get(origin);
+    const pending = tab.pendingOriginApprovals.get(origin);
     if (pending) {
       return pending;
     }
     const epoch = this.controlEpoch;
     const approval = this.promptForOriginApproval(origin).then((approved) => {
-      if (!approved || epoch !== this.controlEpoch) {
+      if (!approved || epoch !== this.controlEpoch || !this.tabs.includes(tab)) {
         return false;
       }
-      this.approvedOrigins.add(origin);
-      return true;
+      tab.approvedOrigins.add(origin);
+      return this.activeTab === tab;
     });
     const finalizedApproval = approval.finally(() => {
-      if (this.pendingOriginApprovals.get(origin) === finalizedApproval) {
-        this.pendingOriginApprovals.delete(origin);
+      if (tab.pendingOriginApprovals.get(origin) === finalizedApproval) {
+        tab.pendingOriginApprovals.delete(origin);
       }
     });
-    this.pendingOriginApprovals.set(origin, finalizedApproval);
+    tab.pendingOriginApprovals.set(origin, finalizedApproval);
     return finalizedApproval;
   }
 
@@ -1594,7 +1857,7 @@ export class PersonalBrowserHost {
       title: "Allow agent browser access?",
       message: `Allow the agent to use ${host}?`,
       detail:
-        `${teammateNote}This lets the current project read and interact with this site in your Personal Browser for this session. Password, verification-code, and payment fields remain blocked.`,
+        `${teammateNote}This lets the current project read and interact with this site in this tab of your Personal Browser for this session. Password, verification-code, and payment fields remain blocked.`,
       buttons: ["Deny", "Allow for this session"],
       defaultId: 0,
       cancelId: 0,
@@ -1687,6 +1950,10 @@ export class PersonalBrowserHost {
   }
 
   private getBrokerStatus(): PersonalBrowserStatus {
+    return { ...this.getPageBrokerStatus(), tabs: this.agentTabList() };
+  }
+
+  private getPageBrokerStatus(): PersonalBrowserStatus {
     const status = this.getStatus();
     let originApproved = false;
     if (this.agentControlEnabled) {
@@ -1719,7 +1986,7 @@ export class PersonalBrowserHost {
   }
 
   private invalidateAgentSnapshot() {
-    this.latestAgentSnapshot = null;
+    for (const tab of this.tabs) tab.latestAgentSnapshot = null;
   }
 
   private clearHumanInputGuidance() {
@@ -2039,31 +2306,43 @@ export class PersonalBrowserHost {
       );
     }
 
+    if (operation === "list_tabs") {
+      return { tabs: this.agentTabList(), activeTabId: this.activeTab.id, maxAgentTabs: MAX_PERSONAL_BROWSER_AGENT_TABS };
+    }
+
+    if ((operation === "open_tab" || operation === "select_tab" || operation === "close_tab") && this.activeControlOperations > 1) {
+      // Changing the tab on screen never races another step's approval.
+      throw new PersonalBrowserControlError(409, "browser_busy", "Another browser step is still running. Wait for it, then change tabs.");
+    }
+
+    if (operation === "open_tab") {
+      return this.openAgentTab(payloadRecord(rawPayload), operationEpoch);
+    }
+
+    if (operation === "select_tab" || operation === "close_tab") {
+      const payload = payloadRecord(rawPayload);
+      const tab = this.requireAgentVisibleTab(payload.tabId);
+      if (operation === "close_tab") {
+        if (tab.openedBy !== "agent") {
+          throw new PersonalBrowserControlError(403, "tab_not_agent_owned", "Only tabs the agent opened can be closed. The person's own tab stays open.");
+        }
+        this.removeTab(tab);
+        return { closed: tab.id, status: this.getBrokerStatus() };
+      }
+      if (tab !== this.activeTab && this.tabCapture.active) {
+        throw new PersonalBrowserControlError(409, "tab_share_active", "The person is sharing the tab on screen. Another tab can be shown once sharing stops.");
+      }
+      this.activateTab(tab);
+      return { status: this.getBrokerStatus() };
+    }
+
     if (operation === "navigate") {
       const payload = payloadRecord(rawPayload);
       const url = normalizePersonalBrowserUrl(payload.url);
-      const origin = getPersonalBrowserOrigin(url);
-      const originWasApproved = Boolean(origin && this.approvedOrigins.has(origin));
-      if (origin && !(await this.requestOriginApproval(origin))) {
-        throw new PersonalBrowserControlError(403, "origin_not_approved", "The user denied navigation to this origin.");
+      if (this.activeTab.openedBy === "agent" && url !== "about:blank") {
+        await this.requirePublicAgentTabUrl(url, operationEpoch);
       }
-      // Risky addresses (sign-out, downloads and exports, action links with
-      // an id or one-time token) ask in every mode. In Ask mode the first
-      // visit is covered by the origin prompt; once an origin is approved,
-      // every explicit URL needs a one-shot decision so a state-changing
-      // same-origin GET cannot bypass confirmation.
-      const risky = classifyAddress(url);
-      const navigationNeedsConfirmation = Boolean(risky) || (this.approvalMode === "ask" && originWasApproved);
-      if (navigationNeedsConfirmation && !(await this.confirmAgentNavigation(url, risky?.category))) {
-        throw new PersonalBrowserControlError(403, "navigation_denied", "The user denied browser navigation.");
-      }
-      this.assertControlEpoch(operationEpoch);
-      if (risky) this.approveNavigation(url);
-      this.invalidateAgentSnapshot();
-      // An address the agent opens itself is not the page a credential step opened.
-      this.withholdNextDocumentAfter = null;
-      await contents.loadURL(url);
-      return { status: this.getBrokerStatus() };
+      return this.navigateActiveTab(url, operationEpoch);
     }
 
     await this.requireCurrentOriginApproval();
@@ -2405,6 +2684,132 @@ export class PersonalBrowserHost {
       );
     }
     return { pressed: key };
+  }
+
+  private async navigateActiveTab(url: string, operationEpoch: number): Promise<Record<string, unknown>> {
+    const contents = this.requireWebContents();
+    const origin = getPersonalBrowserOrigin(url);
+    const originWasApproved = Boolean(origin && this.approvedOrigins.has(origin));
+    if (origin && !(await this.requestOriginApproval(origin))) {
+      throw new PersonalBrowserControlError(403, "origin_not_approved", "The user denied navigation to this origin.");
+    }
+    // Risky addresses (sign-out, downloads and exports, action links with
+    // an id or one-time token) ask in every mode. In Ask mode the first
+    // visit is covered by the origin prompt; once an origin is approved,
+    // every explicit URL needs a one-shot decision so a state-changing
+    // same-origin GET cannot bypass confirmation.
+    const risky = classifyAddress(url);
+    const navigationNeedsConfirmation = Boolean(risky) || (this.approvalMode === "ask" && originWasApproved);
+    if (navigationNeedsConfirmation && !(await this.confirmAgentNavigation(url, risky?.category))) {
+      throw new PersonalBrowserControlError(403, "navigation_denied", "The user denied browser navigation.");
+    }
+    this.assertControlEpoch(operationEpoch);
+    if (this.getWebContents() !== contents) {
+      throw new PersonalBrowserControlError(409, "page_changed", "The tab on screen changed while awaiting approval.");
+    }
+    if (risky) this.approveNavigation(url);
+    this.invalidateAgentSnapshot();
+    // An address the agent opens itself is not the page a credential step opened.
+    this.withholdNextDocumentAfter = null;
+    await contents.loadURL(url);
+    return { status: this.getBrokerStatus() };
+  }
+
+  private async requirePublicAgentTabUrl(url: string, operationEpoch: number) {
+    const check = await checkPersonalBrowserAgentTabUrl(url);
+    this.assertControlEpoch(operationEpoch);
+    if (!check.ok) {
+      throw new PersonalBrowserControlError(
+        403,
+        "private_address_blocked",
+        `Agent tabs open public web pages only: ${check.reason}. Ask the person to open this address in their own tab.`,
+      );
+    }
+  }
+
+  /**
+   * open_tab: a new tab, on screen at once, that loads one public address.
+   * The new tab starts with no site approvals of its own; in Ask mode the
+   * person allows its site for that tab. A tab the person denied, or that a
+   * Pause ended before it loaded anything, closes again.
+   */
+  private async openAgentTab(payload: Record<string, unknown>, operationEpoch: number): Promise<Record<string, unknown>> {
+    const url = normalizePersonalBrowserUrl(payload.url);
+    if (url === "about:blank") {
+      throw new PersonalBrowserControlError(400, "invalid_url", "open_tab needs an absolute http(s) address.");
+    }
+    const assertCanOpen = () => {
+      if (this.tabCapture.active) {
+        throw new PersonalBrowserControlError(409, "tab_share_active", "The person is sharing the tab on screen. Agent tabs open once sharing stops.");
+      }
+      if (this.agentTabCount() >= MAX_PERSONAL_BROWSER_AGENT_TABS) {
+        throw new PersonalBrowserControlError(
+          409,
+          "agent_tab_limit",
+          `At most ${MAX_PERSONAL_BROWSER_AGENT_TABS} agent tabs can be open. Close one with close_tab, or reuse one with select_tab and navigate.`,
+        );
+      }
+    };
+    assertCanOpen();
+    await this.requirePublicAgentTabUrl(url, operationEpoch);
+    assertCanOpen();
+    const partition = this.currentPartition;
+    if (!partition || !this.ownerWindow || this.ownerWindow.isDestroyed()) {
+      throw new PersonalBrowserControlError(409, "browser_not_ready", "Personal Browser is not ready.");
+    }
+    const previous = this.activeTab;
+    const tab = this.addTab("agent");
+    this.createTabView(partition, tab);
+    this.activateTab(tab);
+    try {
+      const result = await this.navigateActiveTab(url, operationEpoch);
+      return { tab: this.agentTabList().find((entry) => entry.tabId === tab.id), ...result };
+    } catch (error) {
+      const contents = tab.view?.webContents;
+      const loadedNothing = !contents || contents.isDestroyed() || !contents.getURL() || contents.getURL() === "about:blank";
+      if (this.tabs.includes(tab) && loadedNothing) {
+        if (this.activeTab === tab && this.tabs.includes(previous)) this.activateTab(previous);
+        this.removeTab(tab);
+      }
+      throw error;
+    }
+  }
+
+  private requireAgentVisibleTab(value: unknown): PersonalBrowserTab {
+    let tabId: string;
+    try {
+      tabId = requirePersonalBrowserTabId(value);
+    } catch (error) {
+      throw new PersonalBrowserControlError(400, "invalid_tab_id", error instanceof Error ? error.message : "Invalid tabId.");
+    }
+    const tab = this.findTab(tabId);
+    if (!tab) {
+      throw new PersonalBrowserControlError(404, "tab_not_found", "That tab is no longer open. Call list_tabs.");
+    }
+    return tab;
+  }
+
+  /**
+   * The tabs as the agent sees them. A tab's address and title show only
+   * when its site is allowed in that tab, masked like a status address.
+   */
+  private agentTabList(): Array<Omit<PersonalBrowserTabStatus, "url" | "title"> & { url: string; title?: string }> {
+    return this.tabs.map((tab) => {
+      const { url, title, ...rest } = this.tabStatus(tab);
+      try {
+        const origin = getPersonalBrowserOrigin(url);
+        const allowed = origin !== null && this.agentControlEnabled &&
+          (this.siteSkipsPrompt(origin) || tab.approvedOrigins.has(origin));
+        if (!allowed) return { ...rest, url: "" };
+        return {
+          ...rest,
+          url: redactUrl(url).text,
+          ...(title ? { title: redactText(title, { credentialContext: hasCredentialWord(title) }).text } : {}),
+        };
+      } catch {
+        return { ...rest, url: "" };
+      }
+    });
   }
 
   private assertControlEpoch(epoch: number) {

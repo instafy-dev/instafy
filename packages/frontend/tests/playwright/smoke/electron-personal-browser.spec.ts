@@ -34,6 +34,9 @@ type PersonalBrowserStatus = {
   ownerId?: string;
   projectId?: string;
   url: string;
+  tabs?: Array<{ tabId: string; openedBy: "person" | "agent"; active: boolean; url: string }>;
+  activeTabId?: string;
+  maxAgentTabs?: number;
 };
 
 type PersonalBrowserBridge = {
@@ -66,6 +69,8 @@ type PersonalBrowserBridge = {
     ownerId: string;
   }) => Promise<PersonalBrowserStatus>;
   personalBrowserClose: (options: { ownerId: string }) => Promise<PersonalBrowserStatus>;
+  personalBrowserSelectTab: (options: { ownerId: string; tabId: string }) => Promise<PersonalBrowserStatus>;
+  personalBrowserCloseTab: (options: { ownerId: string; tabId: string }) => Promise<PersonalBrowserStatus>;
   personalBrowserClearData: (options: { ownerId: string }) => Promise<PersonalBrowserStatus>;
 };
 
@@ -719,6 +724,43 @@ test.describe("Electron Personal Browser", () => {
     await expectNoLogin();
     await openProfile(OTHER_PROFILE_USER_ID);
     await expectLogin("b");
+  });
+
+  test("reports the person's tab and keeps tab changes the person's own while the agent has control", async () => {
+    const targetUrl = `${fixtureOrigin}/target`;
+    const ownerId = "tabs-owner";
+    const page = await launchDesktop(true);
+    const result = await page.evaluate(async ({ projectId, profileUserId, ownerId, targetUrl }) => {
+      const desktop = (window as Window & { instafyDesktop?: PersonalBrowserBridge }).instafyDesktop!;
+      const outcome = async (run: () => Promise<PersonalBrowserStatus>) => {
+        try {
+          return { status: await run() };
+        } catch (caught) {
+          return { error: caught instanceof Error ? caught.message : String(caught) };
+        }
+      };
+      const opened = await desktop.personalBrowserOpen({
+        projectId,
+        controllerUrl: window.location.origin,
+        controllerAccessToken: (window as PersonalBrowserFixtureWindow).__INSTAFY_TEST_SESSION__().access_token,
+        profileUserId,
+        ownerId,
+        url: targetUrl,
+      });
+      await desktop.personalBrowserSetBounds({ x: 20, y: 80, width: 640, height: 420, visible: true, ownerId });
+      const shownWhilePaused = await outcome(() => desktop.personalBrowserSelectTab({ ownerId, tabId: opened.activeTabId! }));
+      const closeOwnTab = await outcome(() => desktop.personalBrowserCloseTab({ ownerId, tabId: opened.activeTabId! }));
+      await desktop.personalBrowserSetAgentControlEnabled({ enabled: true, ownerId });
+      const shownWhileResumed = await outcome(() => desktop.personalBrowserSelectTab({ ownerId, tabId: opened.activeTabId! }));
+      await desktop.personalBrowserSetAgentControlEnabled({ enabled: false, ownerId });
+      return { opened, shownWhilePaused, closeOwnTab, shownWhileResumed };
+    }, { projectId: PROJECT_ID, profileUserId: PROFILE_USER_ID, ownerId, targetUrl });
+
+    expect(result.opened.maxAgentTabs).toBe(3);
+    expect(result.opened.tabs).toEqual([{ tabId: result.opened.activeTabId, openedBy: "person", active: true, url: targetUrl, title: "Personal Browser fixture" }]);
+    expect(result.shownWhilePaused.status?.activeTabId).toBe(result.opened.activeTabId);
+    expect(result.closeOwnTab.error).toContain("agent opened");
+    expect(result.shownWhileResumed.error).toContain("Pause");
   });
 
   test("revokes ownership and control when the Studio renderer reloads", async () => {

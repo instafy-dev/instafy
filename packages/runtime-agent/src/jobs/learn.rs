@@ -296,6 +296,8 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     include_str!("legacy/browser-automation-v5.md"),
     // From before it pointed pages without JavaScript to `instafy web read`.
     include_str!("legacy/browser-automation-v6.md"),
+    // From before the Personal Browser opened agent tabs.
+    include_str!("legacy/browser-automation-v7.md"),
 ];
 const LEGACY_SKILL_IMPORT_COMPAT_TEMPLATES: &[&str] = &[
     include_str!("legacy/skill-import-compat-v1.md"),
@@ -2437,6 +2439,33 @@ mod tests {
     /// cannot open the space's own addresses and that such a site is shown
     /// with a preview card; v4 is the copy from before. An unedited v4 is
     /// upgraded (see `scaffold_upgrades_bundled_browser_guidance_and_preserves_edits`).
+    #[test]
+    fn browser_automation_names_the_personal_browser_tab_tools() {
+        for needle in [
+            "`open_tab`",
+            "`select_tab`",
+            "`close_tab`",
+            "at most three of your tabs",
+            "public pages only",
+        ] {
+            assert!(BROWSER_AUTOMATION_TEMPLATE.contains(needle), "{needle}");
+        }
+        assert!(!BROWSER_AUTOMATION_TEMPLATE.contains("The broker controls one visible page."));
+        let v7 = include_str!("legacy/browser-automation-v7.md");
+        assert!(LEGACY_BROWSER_AUTOMATION_TEMPLATES.contains(&v7));
+        assert!(v7.contains("The broker controls one visible page."));
+
+        let workspace = tempdir().expect("workspace tempdir");
+        ensure_project_memory_scaffold(workspace.path());
+        let skill = workspace.path().join(BROWSER_AUTOMATION_RELATIVE_PATH);
+        fs::write(&skill, v7).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(
+            fs::read_to_string(&skill).unwrap(),
+            BROWSER_AUTOMATION_TEMPLATE
+        );
+    }
+
     #[test]
     fn browser_automation_says_what_instafys_browser_can_reach() {
         let section = "## What Instafy's browser can reach";

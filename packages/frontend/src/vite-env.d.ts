@@ -350,6 +350,10 @@ type InstafyDesktopPersonalBrowserStatus = {
   takeoverRequestId?: string;
   sharing?: boolean;
   tabControlActive?: boolean;
+  /** Every open tab. Tabs Octo opened carry openedBy "agent"; absent on older Desktops. */
+  tabs?: Array<{ tabId: string; openedBy: "person" | "agent"; active: boolean; url: string; title?: string }>;
+  activeTabId?: string;
+  maxAgentTabs?: number;
   ownerId?: string;
   projectId?: string;
   runtimeId?: string;
@@ -467,6 +471,8 @@ interface Window {
       url: string;
       ownerId: string;
     }) => Promise<InstafyDesktopPersonalBrowserStatus>;
+    personalBrowserSelectTab?: (options: { ownerId: string; tabId: string }) => Promise<InstafyDesktopPersonalBrowserStatus>;
+    personalBrowserCloseTab?: (options: { ownerId: string; tabId: string }) => Promise<InstafyDesktopPersonalBrowserStatus>;
     /**
      * Send page to Octo: the page on screen, read once and masked by Desktop.
      * Older Desktops do not have it.
