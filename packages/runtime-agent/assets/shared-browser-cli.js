@@ -152,7 +152,9 @@ function linkOnlySitesFrom(data) {
     for (const raw of patterns) {
       const pattern = String(raw || "").trim().toLowerCase().replace(/\.$/, "").replace(/^\*\./, "");
       if (!new RegExp(`^${label}(?:\\.${label})*(?:\\.\\*)?$`).test(pattern)) continue;
-      const escaped = pattern.replace(/\.\*$/, "").replace(/\./g, "\\.");
+      // Escape every regex metacharacter, not only dots: the check above
+      // already admits only labels and dots, this keeps it safe on its own.
+      const escaped = pattern.replace(/\.\*$/, "").replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
       matchers.push(pattern.endsWith(".*")
         ? new RegExp(`(?:^|\\.)${escaped}\\.[a-z]{2,3}(?:\\.[a-z]{2,3})?$`)
         : new RegExp(`(?:^|\\.)${escaped}$`));
