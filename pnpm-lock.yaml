@@ -33,6 +33,12 @@ importers:
       '@changesets/cli':
         specifier: 3.0.0
         version: 3.0.0
+      '@instafy/bind':
+        specifier: workspace:*
+        version: link:packages/instafy-bind
+      '@instafy/browser-action-policy':
+        specifier: workspace:*
+        version: link:packages/browser-action-policy
       '@instafy/provider-client':
         specifier: workspace:*
         version: link:packages/provider-client

@@ -43,6 +43,7 @@ import { getInstafyProfileConfigPath, listInstafyProfileNames, readInstafyProfil
 import { runInstafyGit, runInstafyGitSync } from "./git-wrapper.js";
 import { runBind } from "./bind.js";
 import { registerPreviewCheckCommand } from "./site-check.js";
+import { registerWebCommand } from "./web-read.js";
 import { historyConversations, historyMessages, historyRuns } from "./history.js";
 import {
   grantHardwareBinding,
@@ -2239,6 +2240,8 @@ const previewCommand = program
 
 failWithGroupHelp(previewCommand);
 registerPreviewCheckCommand(previewCommand);
+
+failWithGroupHelp(registerWebCommand(program));
 
 const previewOpenCommand = previewCommand
   .command("open")
