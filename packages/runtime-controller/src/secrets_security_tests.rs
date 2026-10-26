@@ -208,7 +208,8 @@ async fn agent_secrets_only_releases_to_current_runtime_owning_live_job() -> any
                     "job_id": job_id, "touch": false,
                     "runtimeSettings": {"maxNativeSubagents": 64}
                 })).await?;
-                assert_eq!(status, StatusCode::OK, "{body}");
+                // The response carries secret values, so it never goes into a failure message.
+                assert!(status == StatusCode::OK, "strict={strict_mode}: secrets request was not accepted");
                 assert_eq!(body["runtimeSettings"], json!({"maxNativeSubagents": 10}));
             }
             {
