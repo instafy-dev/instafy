@@ -75,10 +75,12 @@ describe("agents command", () => {
     const settings = {
       maxAgentsPerPlan: 64,
       maxConcurrentAgents: 8,
+      maxNativeSubagents: 3,
       canManage: true,
       limits: {
         maxAgentsPerPlan: { min: 1, max: 256, default: 64 },
         maxConcurrentAgents: { min: 1, max: 64, default: 8 },
+        maxNativeSubagents: { min: 1, max: 64, default: 3 },
       },
     };
     const { server, captured } = startMockController((req) => ({
@@ -100,6 +102,12 @@ describe("agents command", () => {
       expect(JSON.parse(update.stdout)).toMatchObject({ maxAgentsPerPlan: 64, maxConcurrentAgents: 12 });
       expect(captured).toHaveLength(3);
       expect(captured[2]).toMatchObject({ method: "PATCH", url: `/projects/${projectId}/multi-agent-settings`, auth: "Bearer settings-token", body: { maxConcurrentAgents: 12 } });
+
+      const nativeUpdate = await execCli([...args, "--max-native-subagents", "10", "--json"]);
+      expect(nativeUpdate.code, nativeUpdate.stderr).toBe(0);
+      expect(JSON.parse(nativeUpdate.stdout)).toMatchObject({ maxNativeSubagents: 10, maxConcurrentAgents: 8 });
+      expect(captured).toHaveLength(5);
+      expect(captured[4]).toMatchObject({ method: "PATCH", body: { maxNativeSubagents: 10 } });
     } finally {
       server.close();
     }

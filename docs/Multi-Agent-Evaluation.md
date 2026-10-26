@@ -17,6 +17,14 @@ delegation-choice excerpt even when broader workspace memory is omitted or the p
 thread is restored. Tool availability, permissions and capacity remain runtime constraints;
 skill-selection metadata does not grant capabilities.
 
+Routing preflight receives runtime-owned facts from the resolved parent configuration and
+model, before the classifier disables its own tools. These distinguish the normal parent
+from concurrent scoped file-generation workers, which cannot execute commands. The skill
+uses those facts when selecting a route for command-dependent subtasks. Native helper
+availability and capacity still come from the parent's actual exposed tools; exact file
+ownership alone does not make a scoped worker capable of running a command. Experimental
+isolated tools remain opt-in and require controller admission.
+
 Use direct work when coordination would add more cost than benefit. Exposed native subagent
 tools can support bounded independent subtasks within the same parent job. Use top-level
 Instafy worker plans when separate job tracking, independent worker context or personas, a
@@ -30,8 +38,19 @@ do not acquire separate controller worker leases or independently enforced owned
 asking helpers to use separate files is coordination, not isolation. The parent remains
 responsible for waiting for helpers and integrating their results. Native capacity comes
 from the pinned Codex configuration and exposed tool surface, independently of the space's
-top-level team settings. Bounded browser turns and experimental isolated tool workers disable
-native subdelegation.
+top-level team settings. Space managers can set **Concurrent helpers per task** in space
+settings or use `instafy agents settings --max-native-subagents 10`. The default is three
+helpers, with a supported range of 1–64; the parent is excluded from this number. Each parent
+job has its own native helper budget, not a shared space-wide pool. The controller sends the
+setting through the authorized job configuration, and the runtime applies it to the resolved
+Codex configuration. New jobs, including later chat turns, receive the current value; running
+jobs keep their existing limit. A successful response from an older controller without this
+setting keeps the default of three. If fetching the job's settings fails, the runtime clears
+the previous job's secrets and settings and conservatively limits native helpers to one; a
+failed fetch cannot expand a space's configured limit. This setting does not enable native tools where they are
+otherwise disabled. Bounded browser turns and experimental isolated tool workers disable
+native subdelegation. Apply `20261025170000_project_native_subagent_settings.sql` before
+starting the updated controller.
 
 The `ai/task-usage` diagnostic artifact explicitly covers `root_turns_only`; it must not be
 presented as the combined cost of a parent and its native helpers. Child requests use the same
@@ -82,6 +101,16 @@ lead to reconcile them with actual inspection evidence, close material gaps with
 read-only tools or scoped follow-up work, and disclose remaining limitations. Job completion
 alone does not establish a complete review. This can cost more than excerpt-only synthesis;
 quality, latency and returned usage must be evaluated separately.
+
+An early failure checkpoint and the group's final checkpoint run in order. Once all workers
+are terminal, the final checkpoint waits for any queued or running early checkpoint to end,
+then reads the current worker outcomes. Completion and cancellation callbacks, with idle
+recovery after an interrupted handoff, can wake that final checkpoint. The existing group
+lock, once-only final dispatch and explicit Stop behavior still apply.
+Apply `20261025145800_agent_jobs_early_checkpoint_recovery_idx.sql` before enabling the
+updated controller so idle recovery uses the partial early-checkpoint index rather than
+scanning ordinary job history. The recovery query still checks historical early checkpoints
+for a final result; it is not a constant-cost queue.
 
 Profile selection and settings propagation are separate checks. A planner can still create an
 ephemeral worker when a request names a saved profile. Verify the controller-stamped profile ID

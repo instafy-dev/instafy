@@ -167,6 +167,10 @@ test("npm artifact installs and runs without workspace dependencies", () => {
     assert.match(installedHelp, /support/);
     assert.match(installedHelp, /recommendations/);
     assert.match(
+      run(process.execPath, [installedCli, "agents", "settings", "--help"], installDirectory),
+      /--max-native-subagents <n>/,
+    );
+    assert.match(
       run(process.execPath, [installedCli, "recommendations", "submit", "--help"], installDirectory),
       /--file <path>/,
     );

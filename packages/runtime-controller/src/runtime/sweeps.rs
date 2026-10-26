@@ -231,6 +231,7 @@ pub(crate) async fn sweep_idle_activity(state: &AppState) -> AnyResult<()> {
     expire_stale_requeued_jobs(state, &mut tick).await?;
     settle_plan_agents_out_of_team_time(state, &mut tick).await?;
     recover_worker_input_requests(state, &mut tick).await?;
+    recover_deferred_plan_checkpoints(state, &mut tick).await?;
     auto_recover_stuck_queued_runtimes(state, &mut tick).await?;
     cleanup_terminal_runtime_records(state, &mut tick).await?;
     fail_platform_jobs_stranded_on_private_runtimes(state, &mut tick).await?;
@@ -266,6 +267,85 @@ async fn recover_worker_input_requests(
         crate::multi_agent_plan::checkpoint_plan_groups_for_jobs(state, &ids)
             .await
             .map_err(|(_, Json(e))| anyhow::anyhow!("worker input recovery: {}", e.message))?;
+    }
+    Ok(())
+}
+
+/// Completion commits before its settlement queues the next lead. Recover that
+/// handoff after a restart, including early leads failed or canceled elsewhere.
+/// The group lock rechecks every candidate; this query grants no dispatch rights.
+pub(crate) async fn recover_deferred_plan_checkpoints(
+    state: &AppState,
+    tick: &mut TickConnection<'_>,
+) -> AnyResult<()> {
+    let rows = tick
+        .client("deferred plan checkpoint recovery connection")
+        .await?
+        .query(
+            "select early.id from agent_jobs early
+             join projects p on p.id = early.project_id and p.status <> 'deleted'
+             cross join lateral (
+                 select coalesce(early.plan_group_id::text,
+                     early.payload #>> '{metadata,multiAgentPlan,groupId}') as id
+             ) g
+             where early.status in ('completed','failed','canceled','cancelled','expired')
+               and coalesce(early.agent_role, early.payload #>> '{metadata,multiAgentPlan,role}')
+                   in ('lead_continuation','synthesis')
+               and early.payload #>> '{metadata,multiAgentPlan,checkpointKind}' = 'early_failure'
+               and g.id is not null
+               and exists (
+                   select 1 from agent_jobs worker
+                   where worker.project_id = early.project_id
+                     and worker.conversation_id = early.conversation_id
+                     and (worker.plan_group_id = early.plan_group_id
+                         or ((worker.plan_group_id is null or early.plan_group_id is null)
+                             and coalesce(worker.plan_group_id::text,
+                                 worker.payload #>> '{metadata,multiAgentPlan,groupId}') = g.id))
+                     and coalesce(worker.agent_role, worker.payload #>> '{metadata,multiAgentPlan,role}') = 'worker'
+               )
+               and not exists (
+                   select 1 from agent_jobs sibling
+                   where sibling.project_id = early.project_id
+                     and sibling.conversation_id = early.conversation_id
+                     and (sibling.plan_group_id = early.plan_group_id
+                         or ((sibling.plan_group_id is null or early.plan_group_id is null)
+                             and coalesce(sibling.plan_group_id::text,
+                                 sibling.payload #>> '{metadata,multiAgentPlan,groupId}') = g.id))
+                     and (sibling.status in ('queued','leased')
+                         or (coalesce(sibling.agent_role, sibling.payload #>> '{metadata,multiAgentPlan,role}')
+                                 in ('lead_continuation','synthesis')
+                             and coalesce(sibling.payload #>> '{metadata,multiAgentPlan,checkpointKind}', '') <> 'early_failure'))
+               )
+               and not exists (
+                   select 1 from agent_user_input_requests q
+                   where q.project_id = early.project_id
+                     and (q.group_id = early.plan_group_id
+                         or (early.plan_group_id is null and q.group_id::text = g.id))
+                     and q.status in ('pending','answered')
+               )
+               and not exists (
+                   select 1 from conversation_messages m
+                   where m.project_id = early.project_id and m.conversation_id = early.conversation_id
+                     and m.created_by is null and m.metadata->>'source' = 'controller'
+                     and ((m.metadata->>'kind' = 'run_cancellation'
+                           and m.metadata #> '{details,stopRequested}' = 'true'::jsonb
+                           and m.metadata #> '{details,suppressedPlanGroupIds}' @> jsonb_build_array(g.id))
+                         or (m.metadata->>'kind' = 'managed_ai_hosted_runtime_required'
+                             and m.metadata #>> '{multiAgentPlan,groupId}' = g.id))
+               )
+             order by early.completed_at, early.id limit 32",
+            &[],
+        )
+        .await
+        .context("load deferred plan checkpoints")?;
+    if !rows.is_empty() {
+        let ids = rows.iter().map(|row| row.get("id")).collect::<Vec<Uuid>>();
+        tick.release();
+        crate::multi_agent_plan::checkpoint_plan_groups_for_jobs(state, &ids)
+            .await
+            .map_err(|(_, Json(error))| {
+                anyhow::anyhow!("deferred plan checkpoint: {}", error.message)
+            })?;
     }
     Ok(())
 }

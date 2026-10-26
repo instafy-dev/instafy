@@ -16,13 +16,20 @@ export type AgentListOptions = AgentCommonOptions;
 export type AgentSettingsOptions = AgentCommonOptions & {
   maxAgentsPerPlan?: string;
   maxConcurrentAgents?: string;
+  maxNativeSubagents?: string;
   interactive?: boolean;
 };
 
-type AgentSettingKey = "maxAgentsPerPlan" | "maxConcurrentAgents";
+type TrackedAgentSettingKey = "maxAgentsPerPlan" | "maxConcurrentAgents";
+type AgentSettingKey = TrackedAgentSettingKey | "maxNativeSubagents";
+type AgentSettingBounds = { min: number; max: number; default: number };
 
-type ControllerAgentSettings = Record<AgentSettingKey, number> & {
-  limits: Record<AgentSettingKey, { min: number; max: number; default: number }>;
+type ControllerAgentSettings = Record<TrackedAgentSettingKey, number> & {
+  // Older controllers expose only the two tracked-worker settings.
+  maxNativeSubagents?: number;
+  limits: Record<TrackedAgentSettingKey, AgentSettingBounds> & {
+    maxNativeSubagents?: AgentSettingBounds;
+  };
   canManage: boolean;
 };
 
@@ -260,8 +267,9 @@ export async function agentsList(options: AgentListOptions): Promise<void> {
 }
 
 const agentSettingFields = [
-  { key: "maxAgentsPerPlan", flag: "--max-agents-per-plan", label: "Maximum agents per plan" },
-  { key: "maxConcurrentAgents", flag: "--max-concurrent-agents", label: "Maximum concurrent team workers across this space" },
+  { key: "maxAgentsPerPlan", flag: "--max-agents-per-plan", label: "Maximum tracked workers per plan" },
+  { key: "maxConcurrentAgents", flag: "--max-concurrent-agents", label: "Maximum concurrent tracked workers across this space" },
+  { key: "maxNativeSubagents", flag: "--max-native-subagents", label: "Maximum native helpers per parent (excluding the parent)" },
 ] as const;
 
 function parseAgentSetting(value: string, label: string): number {
@@ -283,7 +291,7 @@ export async function agentSettings(options: AgentSettingsOptions): Promise<void
       throw new Error("Use --interactive without --json or setting flags.");
     }
     if (!process.stdin.isTTY || !process.stdout.isTTY || process.env.CI === "true") {
-      throw new Error("--interactive requires a terminal. Use --max-agents-per-plan or --max-concurrent-agents instead.");
+      throw new Error("--interactive requires a terminal. Use --max-agents-per-plan, --max-concurrent-agents, or --max-native-subagents instead.");
     }
   }
 
@@ -301,9 +309,10 @@ export async function agentSettings(options: AgentSettingsOptions): Promise<void
 
   if (options.interactive) {
     const { isCancel, text } = await import("@clack/prompts");
-    console.log("These settings are shared by everyone in this space. Runtime capacity can limit concurrency further; lead and root jobs are excluded.");
+    console.log("These settings are shared by everyone in this space. Tracked worker concurrency excludes lead/root jobs. Runtime capacity can limit concurrency further.");
     for (const field of agentSettingFields) {
       const bounds = settings.limits[field.key];
+      if (settings[field.key] === undefined || !bounds) continue;
       const entered = await text({
         message: `${field.label} (${bounds.min}–${bounds.max}; default ${bounds.default})`,
         placeholder: String(settings[field.key]),
@@ -327,8 +336,12 @@ export async function agentSettings(options: AgentSettingsOptions): Promise<void
 
   for (const field of agentSettingFields) {
     const value = patch[field.key];
+    if (value === undefined) continue;
     const bounds = settings.limits[field.key];
-    if (value !== undefined && (value < bounds.min || value > bounds.max)) {
+    if (settings[field.key] === undefined || !bounds) {
+      throw new Error(`This controller does not support ${field.flag}. Update the controller before changing this setting.`);
+    }
+    if (value < bounds.min || value > bounds.max) {
       throw new Error(`${field.flag} must be between ${bounds.min} and ${bounds.max}.`);
     }
   }
@@ -347,9 +360,10 @@ export async function agentSettings(options: AgentSettingsOptions): Promise<void
   console.log(kleur.bold(`Multi-agent settings for space ${projectId}`));
   for (const field of agentSettingFields) {
     const bounds = settings.limits[field.key];
+    if (settings[field.key] === undefined || !bounds) continue;
     console.log(`${field.label}: ${settings[field.key]} (range ${bounds.min}–${bounds.max}; default ${bounds.default})`);
   }
-  console.log("Shared across this space. Lead/root jobs are excluded from the concurrent worker limit; runtime capacity can limit concurrency further.");
+  console.log("Settings are shared across this space. Tracked worker concurrency excludes lead/root jobs; native helpers are counted per parent. Runtime capacity and permissions can limit concurrency further.");
   if (!settings.canManage) console.log("Read-only: your role cannot change these settings.");
 }
 

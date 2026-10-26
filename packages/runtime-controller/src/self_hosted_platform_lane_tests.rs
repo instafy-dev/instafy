@@ -8,6 +8,9 @@
 
 use super::*;
 
+#[path = "multi_agent_plan/checkpoint_order_tests.rs"]
+mod checkpoint_order_tests;
+
 const SELF_HOSTED_REFUSAL: &str =
     "Instafy AI runs on Instafy-hosted runtimes. Connect your own AI to use this runtime.";
 const SELF_HOSTED_REFUSAL_CODE: &str = "managed_ai_hosted_runtime_required";
@@ -3287,7 +3290,7 @@ async fn a_plan_lane_that_hit_a_short_rate_limit_runs_once_more_after_the_wait(
         let lead = all.iter().find(|(_, payload, _, _)| role(payload) == "lead_continuation").expect("the lead");
         assert_eq!(lead.1["metadata"]["multiAgentPlan"]["checkpointKind"], "early_failure");
 
-        // 5. Kyoto ends; the failed original's completion is seen last: the final checkpoint
+        // 5. Kyoto ends, but the early lead must finish before the final checkpoint.
         space
             .pool
             .get()
@@ -3297,7 +3300,12 @@ async fn a_plan_lane_that_hit_a_short_rate_limit_runs_once_more_after_the_wait(
                 &[&kyoto],
             )
             .await?;
-        assert!(enqueue(tokyo, tokyo_payload).await?, "the final checkpoint");
+        assert!(!enqueue(tokyo, tokyo_payload).await?, "the early lead is still queued");
+        space.pool.get().await?.execute(
+            "update agent_jobs set status='completed', completed_at=now() where id=$1",
+            &[&lead.0],
+        ).await?;
+        assert!(enqueue(lead.0, lead.1.clone()).await?, "the early lead wakes the final checkpoint");
         let all = jobs(conversation_id).await?;
         assert_eq!(all.len(), 5, "{all:?}");
         assert_eq!(all.iter().filter(|(_, payload, _, _)| role(payload) == "lead_continuation").count(), 2);

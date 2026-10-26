@@ -715,21 +715,28 @@ fn extract_multi_agent_plan_payload(payload: &JsonValue) -> Option<JsonValue> {
         .cloned()
 }
 
-/// The job's plan metadata, when it is a worker of a multi-agent plan, whose
-/// completion may wake its lead.
 fn plan_worker_metadata(job_payload: &JsonValue) -> Option<&JsonMap<String, JsonValue>> {
-    job_payload
-        .get("metadata")
-        .and_then(JsonValue::as_object)
-        .and_then(|metadata| metadata.get("multiAgentPlan"))
-        .and_then(JsonValue::as_object)
-        .filter(|plan_meta| plan_meta.get("role").and_then(JsonValue::as_str) == Some("worker"))
+    checkpoint_source_metadata(job_payload)
+        .filter(|plan| plan.get("role").and_then(JsonValue::as_str) == Some("worker"))
 }
 
-/// Whether the job is a multi-agent plan's worker, whose completion may
-/// queue its lead's continuation.
-pub(crate) fn job_payload_is_plan_worker(job_payload: &JsonValue) -> bool {
-    plan_worker_metadata(job_payload).is_some()
+/// Workers and early lead checkpoints can unblock the group's final checkpoint.
+/// A final lead cannot wake another final lead.
+fn checkpoint_source_metadata(job_payload: &JsonValue) -> Option<&JsonMap<String, JsonValue>> {
+    let plan = job_payload
+        .get("metadata")?
+        .get("multiAgentPlan")?
+        .as_object()?;
+    let role = plan.get("role").and_then(JsonValue::as_str);
+    (role == Some("worker")
+        || (matches!(role, Some("lead_continuation" | "synthesis"))
+            && plan.get("checkpointKind").and_then(JsonValue::as_str)
+                == Some(EARLY_FAILURE_CHECKPOINT_KIND)))
+    .then_some(plan)
+}
+
+pub(crate) fn job_payload_can_wake_plan_checkpoint(job_payload: &JsonValue) -> bool {
+    checkpoint_source_metadata(job_payload).is_some()
 }
 
 pub(crate) async fn maybe_enqueue_lead_continuation_after_completion(
@@ -737,7 +744,7 @@ pub(crate) async fn maybe_enqueue_lead_continuation_after_completion(
     completed_job_id: Uuid,
     completed_job_payload: &JsonValue,
 ) -> Result<bool, (StatusCode, Json<ApiError>)> {
-    let Some(plan_meta) = plan_worker_metadata(completed_job_payload) else {
+    let Some(plan_meta) = checkpoint_source_metadata(completed_job_payload) else {
         return Ok(false);
     };
 
@@ -765,7 +772,7 @@ pub(crate) async fn maybe_enqueue_lead_continuation_after_completion(
         completed_job_id,
         completed_job_payload,
         plan_meta,
-        true,
+        plan_meta.get("role").and_then(JsonValue::as_str) == Some("worker"),
     )
     .await
 }
@@ -896,7 +903,10 @@ async fn checkpoint_plan_group(
         .iter()
         .all(|worker| is_terminal_job_status(worker.status.as_str()));
 
-    let dispatched = if all_terminal {
+    // The early lead may still be acting on its earlier snapshot. Its terminal
+    // callback (or recovery sweep) will read the group again. Do not let the
+    // final lead overtake it and then publish an older answer last.
+    let dispatched = if all_terminal && !snapshot.has_active_early_checkpoint {
         dispatch_lead_checkpoint(
             state,
             project_id,
@@ -989,10 +999,11 @@ pub(crate) async fn plan_group_was_stopped(
 /// Cancellation is terminal too: canceling the last running lane must still
 /// fire the final lead checkpoint the plan promised. Called (best-effort) by
 /// the cancel endpoints after their transaction commits.
-pub(crate) fn spawn_plan_group_checkpoints_after_cancellation(state: AppState, job_ids: Vec<Uuid>) {
-    if job_ids.is_empty() {
-        return;
-    }
+pub(crate) fn spawn_plan_group_checkpoints_after_cancellation(
+    state: AppState,
+    conversation_id: Uuid,
+    job_ids: Vec<Uuid>,
+) {
     tokio::spawn(async move {
         if let Err((status, Json(api_error))) =
             checkpoint_plan_groups_for_jobs(&state, &job_ids).await
@@ -1003,14 +1014,17 @@ pub(crate) fn spawn_plan_group_checkpoints_after_cancellation(state: AppState, j
                 "failed to checkpoint plan groups after cancellation"
             );
         }
+        // A worker or early lead may have just unblocked the final checkpoint.
+        // Queue that before allowing the next ordinary send to take its place.
+        crate::send_queue::spawn_send_queue_drain(state, conversation_id);
     });
 }
 
-/// Run the final lead checkpoint of each plan group with a worker among
-/// `job_ids`, jobs that just ended without reporting a completion (canceled,
+/// Run the final lead checkpoint of each plan group with a worker or early lead
+/// among `job_ids`, jobs that just ended without reporting a completion (canceled,
 /// or failed by a controller sweep before any runtime ran them). It fires once
-/// the group has no live worker left; jobs that are not a plan's workers are
-/// skipped. It is `checkpoint_plan_group`'s checkpoint, so a group's lead is
+/// the group has no live worker or early lead left; other jobs are skipped.
+/// It is `checkpoint_plan_group`'s checkpoint, so a group's final lead is
 /// dispatched at most once however many of its workers end, together or
 /// across calls.
 pub(crate) async fn checkpoint_plan_groups_for_jobs(
@@ -1037,17 +1051,9 @@ pub(crate) async fn checkpoint_plan_groups_for_jobs(
     let mut seen_groups = HashSet::new();
     for row in rows {
         let payload = row.get::<_, PgJson<JsonValue>>("payload").0;
-        let Some(plan_meta) = payload
-            .get("metadata")
-            .and_then(JsonValue::as_object)
-            .and_then(|metadata| metadata.get("multiAgentPlan"))
-            .and_then(JsonValue::as_object)
-        else {
+        let Some(plan_meta) = checkpoint_source_metadata(&payload) else {
             continue;
         };
-        if plan_meta.get("role").and_then(JsonValue::as_str) != Some("worker") {
-            continue;
-        }
         let Some(group_id) = plan_meta
             .get("groupId")
             .and_then(JsonValue::as_str)
@@ -1100,6 +1106,7 @@ pub(crate) struct PlanGroupSnapshot {
     pub(crate) workers: Vec<SiblingJobSnapshot>,
     pub(crate) has_lead_continuation: bool,
     pub(crate) has_early_checkpoint: bool,
+    has_active_early_checkpoint: bool,
     pub(crate) conversation_id: Option<Uuid>,
 }
 
@@ -1194,6 +1201,7 @@ where
     let mut continued: Vec<Uuid> = Vec::new();
     let mut has_lead_continuation = false;
     let mut has_early_checkpoint = false;
+    let mut has_active_early_checkpoint = false;
     let mut observed_conversation_id: Option<Uuid> = None;
     for row in rows {
         let payload = row.get::<_, PgJson<JsonValue>>("payload").0;
@@ -1217,6 +1225,8 @@ where
                 .and_then(JsonValue::as_str);
             if checkpoint_kind == Some(EARLY_FAILURE_CHECKPOINT_KIND) {
                 has_early_checkpoint = true;
+                has_active_early_checkpoint |=
+                    !is_terminal_job_status(row.get::<_, String>("status").as_str());
             } else {
                 has_lead_continuation = true;
             }
@@ -1305,6 +1315,7 @@ where
         workers,
         has_lead_continuation,
         has_early_checkpoint,
+        has_active_early_checkpoint,
         conversation_id: conversation_id.or(observed_conversation_id),
     })
 }
@@ -3084,6 +3095,7 @@ mod tests {
             runtime_contracts::multi_agent::MultiAgentSettings {
                 max_agents_per_plan: 9,
                 max_concurrent_agents: 2,
+                max_native_subagents: 3,
             },
         )
         .unwrap_err();
