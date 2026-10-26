@@ -185,6 +185,11 @@ test("Personal Browser exposes only its bounded operations as authenticated MCP 
     });
     assert.equal(initialized.statusCode, 200);
     assert.equal(initialized.body.result.serverInfo.name, "instafy-personal-browser");
+    // The agent learns that Desktop's address refusals are final, in every tab.
+    assert.match(
+      initialized.body.result.instructions,
+      /never a link-only site: link_only_site, link_only_list_unavailable and private_address_blocked are final for that step/,
+    );
 
     const listed = await requestJson(`${credentials.controlUrl}/mcp`, {
       method: "POST",
@@ -196,6 +201,11 @@ test("Personal Browser exposes only its bounded operations as authenticated MCP 
       ["request_human_input", "status", "snapshot", "navigate", "click", "type", "press", "scroll",
         "list_tabs", "open_tab", "select_tab", "close_tab"],
     );
+    for (const name of ["navigate", "open_tab"]) {
+      const tool = listed.body.result.tools.find((candidate) => candidate.name === name);
+      assert.match(tool.description, /public/);
+      assert.match(tool.description, /link-only site/);
+    }
     // Tab tools take a public address or a tab id, never a selector or script.
     for (const name of ["select_tab", "close_tab"]) {
       const tool = listed.body.result.tools.find((candidate) => candidate.name === name);

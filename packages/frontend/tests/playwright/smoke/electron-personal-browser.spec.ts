@@ -79,14 +79,22 @@ type PersonalBrowserFixtureWindow = typeof window & {
   __INSTAFY_TEST_SESSION__: () => { access_token: string };
 };
 
-// Host names the fixture server saw for the request guard's pages.
+// Host names and paths the fixture server saw for the request guard's pages.
 const guardRequestHosts: string[] = [];
+const guardRequests: string[] = [];
 
 function fixtureHandler(request: import("node:http").IncomingMessage, response: import("node:http").ServerResponse) {
   response.setHeader("Cache-Control", "no-store");
   if (request.url?.startsWith("/guard/")) {
     const [hostName = "", port = ""] = String(request.headers.host ?? "").split(":");
     guardRequestHosts.push(hostName);
+    guardRequests.push(`${hostName}${request.url}`);
+    if (request.url === "/guard/data") {
+      response.setHeader("Access-Control-Allow-Origin", "*");
+      response.setHeader("Content-Type", "text/plain; charset=utf-8");
+      response.end("private data");
+      return;
+    }
     if (request.url === "/guard/to-link-only") {
       response.statusCode = 302;
       response.setHeader("Location", `http://www.booking.com:${port}/guard/page`);
@@ -805,6 +813,7 @@ test.describe("Electron Personal Browser", () => {
     });
     const proxyOrigin = `http://127.0.0.1:${await listen(proxyServer)}`;
     guardRequestHosts.length = 0;
+    guardRequests.length = 0;
     const guardApp = await electron.launch({
       executablePath: DESKTOP_APP_REQUIRE("electron"),
       args: [path.join(DESKTOP_APP_DIR, "test", "fixtures", "personal-browser-request-guard-app.cjs")],
@@ -819,6 +828,8 @@ test.describe("Electron Personal Browser", () => {
         }).__instafyRequestGuardScenario(options),
         { origin: fixtureOrigin, proxy: proxyOrigin },
       ) as Record<"rebound" | "linkOnly" | "viaProxy" | "viaProxyToLinkOnly" | "person", Outcome> & {
+        fetched: string;
+        personFetched: string;
         stopped: Array<{ resourceType: string; code: string }>;
       };
       // DNS rebinding: the name passed the check made before the request and
@@ -833,15 +844,27 @@ test.describe("Electron Personal Browser", () => {
       expect(results.viaProxyToLinkOnly.result).toBe("ERR_BLOCKED_BY_CLIENT");
       // The person's own tab, in the same session, loads the same page.
       expect(results.person).toEqual({ result: "loaded", text: "guarded fixture page" });
+      // A page already open in the agent's tab gets nothing back from a
+      // private address when its script fetches the rebinding name again;
+      // the person's tab gets the answer as before.
+      expect(results.fetched).toBe("blocked");
+      expect(results.personFetched).toBe("private data");
       expect(results.stopped).toEqual([
         { resourceType: "mainFrame", code: "private_address_blocked" },
         { resourceType: "mainFrame", code: "link_only_site" },
         { resourceType: "mainFrame", code: "link_only_site" },
+        { resourceType: "xhr", code: "private_address_blocked" },
       ]);
       expect(guardRequestHosts).not.toContain("www.booking.com");
       expect(proxiedHosts).not.toContain("www.booking.com");
       expect(proxiedHosts).toEqual(["page.guard.test", "hop.guard.test"]);
-      expect(guardRequestHosts.filter((host) => host === "rebound.guard.test")).toHaveLength(2);
+      // Only the requests reached the server; the agent's tab got no response.
+      expect(guardRequests.filter((entry) => entry.startsWith("rebound.guard.test"))).toEqual([
+        "rebound.guard.test/guard/page",
+        "rebound.guard.test/guard/page",
+        "rebound.guard.test/guard/data",
+        "rebound.guard.test/guard/data",
+      ]);
     } finally {
       await guardApp.close();
       await new Promise<void>((resolve) => proxyServer.close(() => resolve()));

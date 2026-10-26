@@ -61,6 +61,19 @@ globalThis.__instafyRequestGuardScenario = async ({ origin, proxy }) => {
     const result = await load(window, url);
     return { result, text: await visibleText(window) };
   };
+  // A page already open that fetches a rebinding name again: what its script
+  // gets back, or "blocked".
+  const fetched = async (window, url) => {
+    const script = `fetch(${JSON.stringify(url)}).then((r) => r.text()).then(` +
+      "(text) => { document.body.dataset.fetched = text; }, () => { document.body.dataset.fetched = 'blocked'; });";
+    await load(window, `data:text/html,${encodeURIComponent(`<!doctype html><body><script>${script}</script></body>`)}`);
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const value = await window.webContents.executeJavaScript("document.body.dataset.fetched || ''");
+      if (value) return value;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    return "no answer";
+  };
 
   const direct = await guarded(null);
   const viaProxy = await guarded(`http=${new URL(proxy).host}`);
@@ -73,6 +86,8 @@ globalThis.__instafyRequestGuardScenario = async ({ origin, proxy }) => {
     viaProxy: await outcome(proxiedAgentTab, `http://page.guard.test:${port}/guard/page`),
     viaProxyToLinkOnly: await outcome(proxiedAgentTab, `http://hop.guard.test:${port}/guard/to-link-only`),
     person: await outcome(personTab, `http://rebound.guard.test:${port}/guard/page`),
+    fetched: await fetched(agentTab, `http://rebound.guard.test:${port}/guard/data`),
+    personFetched: await fetched(personTab, `http://rebound.guard.test:${port}/guard/data`),
     stopped,
   };
   for (const window of BrowserWindow.getAllWindows()) window.destroy();

@@ -1415,8 +1415,9 @@ export class PersonalBrowserHost {
     session.on("will-download", (event) => event.preventDefault());
     // While the agent holds control, every page and frame request of a tab it
     // drives, each redirect hop included, stays off link-only sites and on
-    // public addresses, before it connects and again by the address it
-    // connected to. The person's own browsing is not filtered.
+    // public addresses before it connects, and every response there, the
+    // page's own requests included, must come from a public address. The
+    // person's own browsing is not filtered.
     installPersonalBrowserRequestGuard(session, {
       drivenTab: (webContentsId) => this.drivenTabForContents(webContentsId),
       onStopped: (tab, resourceType, stopped) => {

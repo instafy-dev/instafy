@@ -475,14 +475,18 @@ only in the visible browser, so the rules are the ones a person sees:
   private one for the connection (DNS rebinding). Every response reports the
   address Chromium connected to (`ip` in the `webRequest.onHeadersReceived`
   details; Electron's typings list it only for `onBeforeRedirect`, so the
-  Personal Browser Electron smoke checks that it is there). A page or frame
-  response of a driven tab from an address that is not public is cancelled
-  before it renders, so nothing from it is shown, read or followed, and the
-  agent gets `private_address_blocked`. The request itself has reached that
+  Personal Browser Electron smoke checks that it is there). Any response in a
+  driven tab from an address that is not public is cancelled before the page
+  renders or receives it: a page or frame load (the agent gets
+  `private_address_blocked`), and the page's own requests too (scripts,
+  images, `fetch`), so a page that is already open cannot read a private
+  address through a name that changes its answer later. Nothing from such a
+  response is shown, read or followed, but the request itself has reached that
   address by then. A response from the HTTP cache made no connection and
   reports no address, so the check before the request stands. Through a proxy
   the address is the proxy's own, and the proxy resolved the name, so again
-  only the check before the request applies.
+  only the check before the request applies. A service worker's own requests
+  belong to no tab and are not checked.
 - **Never a link-only site.** Sites whose terms or robots.txt bar AI agents
   (the `instafy-web-research` skill's `references/link-only-sites.json`:
   Booking.com, Airbnb, Amazon, Google search and Maps and others) are never read

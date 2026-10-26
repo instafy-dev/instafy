@@ -87,7 +87,9 @@ class FakeContents {
       if (before.cancel) this.blocked(url);
       const host = new URL(url).hostname.replace(/^\[|\]$/g, "");
       const ip = CONNECTED[host] ?? DNS[host]?.[0] ?? host;
-      const response = await new Promise((resolve) => this.session.headersReceived({ ...request, ip }, resolve));
+      const response = this.session.headersReceived
+        ? await new Promise((resolve) => this.session.headersReceived({ ...request, ip }, resolve))
+        : {};
       if (response.cancel) this.blocked(url);
     }
     this.url = url;
@@ -717,8 +719,17 @@ test("a page or frame whose server answers from a private address is stopped whe
     // A response from the HTTP cache made no connection: the check before the request stands.
     assert.deepEqual(plain(await headersReceived(contents, { resourceType: "mainFrame", url: "https://news.example.test/" })), {});
   }
-  // The page's own resources are not filtered here.
-  assert.deepEqual(plain(await headersReceived(agentContents, { resourceType: "image", url: "https://rebound.example.test/a.png", ip: "10.0.0.5" })), {});
+  // The page's own requests too: a page already open that fetches the
+  // rebinding name again gets nothing from the private address.
+  for (const resourceType of ["xhr", "script", "image", "webSocket", "other"]) {
+    assert.deepEqual(plain(await headersReceived(agentContents, { resourceType, url: "https://rebound.example.test/data", ip: "10.0.0.5" })), { cancel: true }, resourceType);
+    assert.deepEqual(plain(await headersReceived(agentContents, { resourceType, url: "https://news.example.test/data", ip: "93.184.216.36" })), {}, resourceType);
+  }
+  // A request no tab makes is not a tab's, and once paused nothing is held back.
+  assert.deepEqual(plain(await headersReceived(agentContents, { webContentsId: undefined, resourceType: "xhr", url: "https://rebound.example.test/", ip: "10.0.0.5" })), {});
+  host.pauseAgentControl();
+  assert.deepEqual(plain(await headersReceived(agentContents, { resourceType: "xhr", url: "https://rebound.example.test/data", ip: "10.0.0.5" })), {});
+  assert.deepEqual(plain(await headersReceived(personView.webContents, { resourceType: "mainFrame", url: "https://rebound.example.test/", ip: "10.0.0.5" })), {});
 });
 
 test("navigate and open_tab report a page Desktop stopped because its server was at a private address", async () => {
