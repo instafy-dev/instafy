@@ -152,7 +152,8 @@ describe("PersonalBrowserSurface", () => {
     await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
     expect(document.querySelector('[data-testid="browser-reading-row"]')).toBeNull();
 
-    await act(async () => root.render(<PersonalBrowserSurface active agentWorking model={model} transportSelector={null} />));
+    const onPauseAgentControl = vi.fn();
+    await act(async () => root.render(<PersonalBrowserSurface active agentWorking model={model} onPauseAgentControl={onPauseAgentControl} transportSelector={null} />));
     const row = document.querySelector('[data-testid="browser-reading-row"]')!;
     expect([...row.querySelectorAll('[data-testid="browser-reading-page"]')].map((item) => item.textContent))
       .toEqual(["example.com· Example Domain"]);
@@ -161,6 +162,8 @@ describe("PersonalBrowserSurface", () => {
     // The same revocation as the toolbar's Take over and Pause: one broker for every tab.
     expect(model.setAgentControlEnabled).toHaveBeenCalledTimes(1);
     expect(model.setAgentControlEnabled).toHaveBeenCalledWith(false);
+    // Like the toolbar's Pause, Octo does not reopen the browser by itself afterwards.
+    expect(onPauseAgentControl).toHaveBeenCalledTimes(1);
 
     // Once control is off, the row is gone.
     model.status = { ...model.status!, agentControlEnabled: false, humanControlReady: true };

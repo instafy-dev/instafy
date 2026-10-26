@@ -437,7 +437,8 @@ appears in the existing browser toolbar; no extra takeover header is added.
 While a resumed turn works, a compact **Octo is reading** row under the toolbar
 lists the pages it is reading (host and title, as text) with one **Take over**
 button: the same Pause as the dialog, which revokes the broker and so every
-tab at once. A host with several tabs reports them as `tabs` in its status
+tab at once. Like the toolbar's Pause, every Take over also stops Octo from
+reopening the browser by itself in that conversation. A host with several tabs reports them as `tabs` in its status
 (`id`, `url`, `title`, `active`, optional `openedBy: "agent"`); the row lists
 the agent's tabs and the tab on screen. A one-page host leaves `tabs` out, and
 its page is the one listed. The row never shows another owner's status.

@@ -10,7 +10,7 @@ test.use({ hasTouch: true });
 for (const { width, dark } of [{ width: 390, dark: false }, { width: 390, dark: true }, { width: 1100, dark: false }]) {
   test(`agent tabs are badged, listed and taken over in one press at ${width}px in ${dark ? "dark" : "light"} mode`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width, height: 844 });
-    await page.emulateMedia({ colorScheme: dark ? "light" : "dark" });
+    await page.emulateMedia({ colorScheme: dark ? "dark" : "light" });
     const deps = await resolveViteReactDependencies(page);
     const fixturePath = "/__browser-agent-tabs__";
     await page.route(`**${fixturePath}/main.js`, (route) => route.fulfill({ contentType: "application/javascript", body: `

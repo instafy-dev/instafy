@@ -158,7 +158,7 @@ export function PersonalBrowserSurface({
   humanInputIdentityKey?: string;
   historyUserId?: string | null;
   onContinueAfterHumanInput?: (message: string, approvalMode: "ask" | "routine") => Promise<boolean>;
-  /** The person paused agent control with the toolbar button. */
+  /** The person paused agent control: the toolbar button or any Take over. */
   onPauseAgentControl?: () => void;
   /** Send page to Octo; absent when this person cannot add attachments here. */
   onSendPage?: () => void;
@@ -328,6 +328,9 @@ export function PersonalBrowserSurface({
     canContinue: active && ownsNativeStatus && Boolean(onContinueAfterHumanInput),
     takeoverRequestId: ownsNativeStatus ? model.status?.takeoverRequestId : undefined,
     onTakeOver: async () => {
+      // Every take-over is a Pause: Octo does not reopen the browser by
+      // itself afterwards, as after the toolbar's Pause.
+      onPauseAgentControl?.();
       const status = await model.setAgentControlEnabled(false);
       return status?.agentControlEnabled === false;
     },
