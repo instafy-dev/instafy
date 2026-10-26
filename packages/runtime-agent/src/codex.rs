@@ -9988,6 +9988,11 @@ fn isolated_tool_worker_permissions(workspace: &Path) -> Result<PermissionProfil
         )?,
         path_entry(std::env::current_exe()?, FileSystemAccessMode::Read)?,
     ];
+    // The project's skill-pack folder, when the parent named one (`isolated_tool_worker::prepare_cli`
+    // sets or clears it from the request alone): pack caches and service health outlast the turn.
+    if let Some(cache) = optional_env_path(crate::skill_packs::SKILL_PACK_CACHE_DIR_ENV) {
+        entries.push(path_entry(cache, FileSystemAccessMode::Write)?);
+    }
     let host = crate::code_mode_host::host_program()?;
     if host.exists() {
         entries.push(path_entry(host, FileSystemAccessMode::Read)?);
