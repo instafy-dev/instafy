@@ -14,6 +14,14 @@ pub const DEFAULT_OPENAI_MODEL_ID: &str = "gpt-5.6-sol";
 pub const DEFAULT_MANAGED_AI_MODEL_ID: &str = "gpt-6-luna";
 pub const DEFAULT_MANAGED_AI_MODEL_LABEL: &str = "GPT-6 Luna";
 
+/// Reasoning effort for a chat turn (intent `feature`) on the managed tier,
+/// Shared Browser and Personal Browser turns included, unless
+/// `MANAGED_AI_CHAT_REASONING_EFFORT` says otherwise. The runtime runs such a
+/// turn at `high` by default; managed turns are charged to the shared team
+/// balance, so they run one step lower. A person's own login or key keeps the
+/// runtime's default, and an agent's own reasoning setting still wins.
+pub const DEFAULT_MANAGED_AI_CHAT_REASONING_EFFORT: &str = "medium";
+
 /// Managed-tier list prices in USD micros per 1K tokens, matching
 /// `DEFAULT_MANAGED_AI_MODEL_ID`. 100 micros per 1K tokens is $0.10 per 1M.
 pub const DEFAULT_MANAGED_AI_INPUT_USD_MICROS_PER_1K: i64 = 100;

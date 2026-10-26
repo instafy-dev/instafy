@@ -11,7 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::active_turn_input::ActiveTurnInputReceiver;
 use crate::codex::{
     CodexClient, CodexFallbackSummaryKind, CodexFinalOutputSchema, CodexRunOptions, CodexRunOutput,
-    classify_internal_codex_fallback_summary, provider_thread_restorable_on_this_runtime,
+    ScopedWorkerExecution, classify_internal_codex_fallback_summary,
+    provider_thread_restorable_on_this_runtime,
 };
 use crate::config::Config;
 use crate::controller::{LeaseJob, Registration};
@@ -6066,6 +6067,28 @@ impl JobProcessor {
         }
     }
 
+    fn routing_preflight_options(
+        &self,
+        job: &LeaseJob,
+        task_usage: &TaskUsage,
+        cancel_signal: Option<JobCancelSignal>,
+    ) -> CodexRunOptions {
+        CodexRunOptions {
+            usage_observer: Some(task_usage.call(UsagePhase::Routing)),
+            job_id: Some(job.id),
+            disable_shell_tool: true,
+            final_output_schema: CodexFinalOutputSchema::RoutingPreflight,
+            suppress_contextual_instructions: true,
+            routing_scoped_worker_execution: Some(if self.isolated_workers.enabled {
+                ScopedWorkerExecution::IsolatedTools
+            } else {
+                ScopedWorkerExecution::FileGeneration
+            }),
+            cancel_signal,
+            ..CodexRunOptions::default()
+        }
+    }
+
     pub async fn run_apply_job(
         &self,
         registration: &Registration,
@@ -6496,17 +6519,8 @@ impl JobProcessor {
             let (preflight_prompt, primary_context) =
                 agent_routing_primary_prompt(&preflight_prompt, &job.payload);
             tracing::info!(job_id = %job.id, context = %primary_context, "routing preflight history projection");
-            let preflight_options = CodexRunOptions {
-                usage_observer: Some(task_usage.call(UsagePhase::Routing)),
-                job_id: Some(job.id),
-                disable_shell_tool: true,
-                disable_final_output_json_schema: false,
-                final_output_schema: CodexFinalOutputSchema::RoutingPreflight,
-                suppress_contextual_instructions: true,
-                persist_conversation_thread: false,
-                cancel_signal: cancel_signal.clone(),
-                ..CodexRunOptions::default()
-            };
+            let preflight_options =
+                self.routing_preflight_options(job, task_usage, cancel_signal.clone());
             let _codex_guard = CODEX_EXECUTION_LOCK.lock().await;
             match codex
                 .execute_with_options(&preflight_prompt, None, preflight_options)
@@ -6676,7 +6690,7 @@ impl JobProcessor {
             shared_browser: explicit_shared_browser_execution,
             shared_browser_page_id,
             expect_mcp_tools: expects_generic_mcp_tool_execution,
-            reasoning_effort: reasoning_effort_for_runtime_job(
+            reasoning_effort: sequential_job_reasoning_effort(
                 job,
                 prompt_text,
                 read_only_scoped_worker_preobserved,
@@ -6697,6 +6711,7 @@ impl JobProcessor {
             active_turn_input,
             input_images: Vec::new(),
             isolated_tool_worker: false,
+            routing_scoped_worker_execution: None,
             // Shortly before the hard limit a team lane's turn is told to save and end (and,
             // when the controller can continue it, to leave a note for its next turn).
             turn_wrap_up: turn_files.wrap_up(),
@@ -13697,11 +13712,42 @@ fn codex_job_expects_command_execution(
     routing_evidence_requirements(job, runtime_expectations).requires_any()
 }
 
+/// The job's own reasoning effort on the sequential lane, whose job secrets
+/// are in the process environment: a chat turn on Instafy's hosted AI takes
+/// the effort the controller put there
+/// (`crate::codex::managed_ai_reasoning_effort`). An isolated plan worker
+/// never reads another job's process environment and passes none.
+fn sequential_job_reasoning_effort(
+    job: &LeaseJob,
+    prompt_text: &str,
+    read_only_scoped_worker_preobserved: bool,
+    runtime_expectations: RuntimeJobExpectations,
+) -> Option<ReasoningEffort> {
+    reasoning_effort_for_runtime_job(
+        job,
+        prompt_text,
+        read_only_scoped_worker_preobserved,
+        runtime_expectations,
+        crate::codex::managed_ai_reasoning_effort(),
+    )
+}
+
+/// The job's own reasoning effort. An agent's reasoning setting and
+/// `CODEX_RUNTIME_REASONING_EFFORT` still take precedence over it (see
+/// `crate::codex::resolve_runtime_reasoning_effort`).
+///
+/// `managed_ai_chat_effort` is the effort the controller chose for a chat turn
+/// on Instafy's hosted AI (`crate::codex::managed_ai_reasoning_effort`). It
+/// replaces `high` for a plain chat turn (intent `feature`), Shared Browser and
+/// Personal Browser turns included, and nothing else: team planning, plan
+/// workers and lead checkpoints keep theirs. A turn on the person's own login
+/// or key has none and stays at `high`.
 fn reasoning_effort_for_runtime_job(
     job: &LeaseJob,
     _prompt_text: &str,
     read_only_scoped_worker_preobserved: bool,
     runtime_expectations: RuntimeJobExpectations,
+    managed_ai_chat_effort: Option<ReasoningEffort>,
 ) -> Option<ReasoningEffort> {
     if read_only_scoped_worker_preobserved {
         Some(ReasoningEffort::Medium)
@@ -13711,12 +13757,11 @@ fn reasoning_effort_for_runtime_job(
         Some(ReasoningEffort::High)
     } else if is_multi_agent_lead_continuation_job(job)
         || is_multi_agent_worker_job(job)
-        || matches!(
-            job.intent.as_deref(),
-            Some("feature" | "multi_agent_lead_continuation")
-        )
+        || matches!(job.intent.as_deref(), Some("multi_agent_lead_continuation"))
     {
         Some(ReasoningEffort::High)
+    } else if matches!(job.intent.as_deref(), Some("feature")) {
+        Some(managed_ai_chat_effort.unwrap_or(ReasoningEffort::High))
     } else {
         None
     }
@@ -20763,6 +20808,45 @@ mod tests {
     }
 
     #[test]
+    fn routing_capabilities_are_runtime_owned_and_preserve_explicit_team_routes() {
+        let tmp = tempdir().unwrap();
+        let mut processor = test_job_processor(tmp.path());
+        let job = test_lease_job(
+            Some("feature"),
+            json!({
+                "prompt_text": "Use one durable worker to run the required validation.",
+                "metadata": {
+                    "agentCollaboration": {"mode": "team_plan"},
+                    "runtimeExecutionCapabilities": {"isolatedToolsEnabled": true}
+                }
+            }),
+        );
+        let usage = TaskUsage::default();
+        for (enabled, expected) in [
+            (false, ScopedWorkerExecution::FileGeneration),
+            (true, ScopedWorkerExecution::IsolatedTools),
+        ] {
+            processor.isolated_workers.enabled = enabled;
+            let options = processor.routing_preflight_options(&job, &usage, None);
+            assert_eq!(options.routing_scoped_worker_execution, Some(expected));
+            assert_eq!(options.job_id, Some(job.id));
+            assert!(options.disable_shell_tool);
+            assert_eq!(
+                options.final_output_schema,
+                CodexFinalOutputSchema::RoutingPreflight
+            );
+            assert!(!options.persist_conversation_thread);
+            // Capability context does not override an explicitly selected durable route,
+            // even when those workers cannot execute all requested operations.
+            assert!(is_explicit_team_planning_job(&job));
+            assert!(!should_run_agent_routing_preflight_for_execution(
+                &job,
+                job.payload["prompt_text"].as_str().unwrap()
+            ));
+        }
+    }
+
+    #[test]
     fn routing_preflight_runs_for_future_team_work_requests() {
         let job = test_lease_job(
             Some("feature"),
@@ -23283,6 +23367,31 @@ mod tests {
             None,
         );
         assert!(!without.contains("instafy agents status"));
+    }
+
+    #[test]
+    fn packaged_routing_policy_fits_both_preflight_budgets() {
+        let tmp = tempdir().unwrap();
+        learn::ensure_project_memory_scaffold(tmp.path());
+        let content = read_workspace_file_utf8(tmp.path(), COLLABORATION_SKILL_PATH).unwrap();
+        let section = extract_markdown_h2_section(&content, "Routing preflight").unwrap();
+        let ordinary = section
+            .split("### Pending worker replies")
+            .next()
+            .unwrap()
+            .trim_end();
+        assert!(ordinary.chars().count() <= COLLABORATION_SKILL_ROUTING_MAX_CHARS);
+        let ordinary_snapshot = format_collaboration_routing_preflight_snapshot(
+            tmp.path(),
+            COLLABORATION_SKILL_ROUTING_MAX_CHARS,
+        )
+        .unwrap();
+        assert!(ordinary_snapshot.contains(ordinary));
+        // Adding capability guidance must not truncate the pending-question contract.
+        assert!(section.trim_end().chars().count() <= 3200);
+        let pending_snapshot =
+            format_collaboration_routing_preflight_snapshot(tmp.path(), 3200).unwrap();
+        assert!(pending_snapshot.contains(section.trim_end()));
     }
 
     #[test]
@@ -26483,6 +26592,7 @@ mod tests {
                 "Synthesize sibling evidence into a final report.",
                 false,
                 RuntimeJobExpectations::default(),
+                None,
             ),
             Some(ReasoningEffort::High)
         ));
@@ -26492,6 +26602,7 @@ mod tests {
                 "Use two sibling lanes and a lead checkpoint.",
                 false,
                 RuntimeJobExpectations::default(),
+                None,
             ),
             Some(ReasoningEffort::High)
         ));
@@ -26504,9 +26615,178 @@ mod tests {
                     command_execution: true,
                     ..RuntimeJobExpectations::default()
                 },
+                None,
             ),
             Some(ReasoningEffort::High)
         ));
+    }
+
+    #[test]
+    fn hosted_ai_chat_turns_use_the_controller_effort_and_own_ai_keeps_high() {
+        let managed = Some(ReasoningEffort::Medium);
+        let chat_turns = [
+            ("chat", test_lease_job(Some("feature"), json!({}))),
+            (
+                "shared browser",
+                test_lease_job(
+                    Some("feature"),
+                    json!({ "metadata": { "browserTransport": "shared" } }),
+                ),
+            ),
+            (
+                "personal browser",
+                test_lease_job(
+                    Some("feature"),
+                    json!({ "metadata": { "browserTransport": "desktop-personal" } }),
+                ),
+            ),
+        ];
+        // The fixtures really are the browser lanes.
+        assert!(crate::shared_browser::payload_requests_shared_browser(
+            &chat_turns[1].1.payload
+        ));
+        assert!(crate::personal_browser::payload_requests_personal_browser(
+            &chat_turns[2].1.payload
+        ));
+        for (lane, job) in &chat_turns {
+            assert_eq!(
+                reasoning_effort_for_runtime_job(
+                    job,
+                    "Open the invoices page.",
+                    false,
+                    RuntimeJobExpectations::default(),
+                    managed.clone(),
+                ),
+                Some(ReasoningEffort::Medium),
+                "hosted AI {lane}"
+            );
+            // The person's own login or key: no controller effort, as today.
+            assert_eq!(
+                reasoning_effort_for_runtime_job(
+                    job,
+                    "Open the invoices page.",
+                    false,
+                    RuntimeJobExpectations::default(),
+                    None,
+                ),
+                Some(ReasoningEffort::High),
+                "own AI {lane}"
+            );
+        }
+
+        // Team lanes keep their own effort on hosted AI too.
+        let team_lanes = [
+            test_lease_job(
+                Some("feature"),
+                json!({ "metadata": { "agentCollaboration": { "mode": "team_plan" } } }),
+            ),
+            test_lease_job(
+                Some("multi_agent_plan"),
+                json!({ "metadata": { "multiAgentPlan": { "role": "worker", "groupId": "g" } } }),
+            ),
+            test_lease_job(
+                Some("feature"),
+                json!({ "metadata": { "multiAgentPlan": { "role": "worker", "groupId": "g" } } }),
+            ),
+            test_lease_job(
+                Some("multi_agent_lead_continuation"),
+                json!({
+                    "metadata": {
+                        "multiAgentPlan": { "role": "lead_continuation", "groupId": "g" }
+                    }
+                }),
+            ),
+        ];
+        for job in &team_lanes {
+            assert_eq!(
+                reasoning_effort_for_runtime_job(
+                    job,
+                    "Split the review into two lanes.",
+                    false,
+                    RuntimeJobExpectations::default(),
+                    managed.clone(),
+                ),
+                Some(ReasoningEffort::High),
+                "{:?} {}",
+                job.intent,
+                job.payload
+            );
+        }
+
+        // Only a chat turn takes it: other intents keep the runtime default.
+        assert_eq!(
+            reasoning_effort_for_runtime_job(
+                &test_lease_job(Some("question"), json!({})),
+                "What changed?",
+                false,
+                RuntimeJobExpectations::default(),
+                managed.clone(),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn explicit_reasoning_settings_still_win_over_the_hosted_ai_chat_effort() {
+        let job = test_lease_job(
+            Some("feature"),
+            json!({ "metadata": { "browserTransport": "shared" } }),
+        );
+        let job_effort = reasoning_effort_for_runtime_job(
+            &job,
+            "Open the invoices page.",
+            false,
+            RuntimeJobExpectations::default(),
+            Some(ReasoningEffort::Medium),
+        );
+        // An agent's own reasoning setting.
+        assert_eq!(
+            crate::codex::resolve_runtime_reasoning_effort(
+                None,
+                job_effort.clone(),
+                Some(ReasoningEffort::High),
+            ),
+            ReasoningEffort::High
+        );
+        // The runtime operator's CODEX_RUNTIME_REASONING_EFFORT.
+        assert_eq!(
+            crate::codex::resolve_runtime_reasoning_effort(Some("high"), job_effort.clone(), None),
+            ReasoningEffort::High
+        );
+        assert_eq!(
+            crate::codex::resolve_runtime_reasoning_effort(None, job_effort, None),
+            ReasoningEffort::Medium
+        );
+    }
+
+    #[test]
+    fn sequential_chat_turn_takes_the_hosted_ai_effort_from_its_job_secrets() {
+        // A sequential job's secrets are applied to the process environment,
+        // so this is the value the controller sent reaching the run options.
+        let _env_lock = crate::codex::process_env_test_lock();
+        let key = crate::codex::MANAGED_AI_REASONING_EFFORT_ENV;
+        let chat = test_lease_job(Some("feature"), json!({}));
+        let team_plan = test_lease_job(
+            Some("feature"),
+            json!({ "metadata": { "agentCollaboration": { "mode": "team_plan" } } }),
+        );
+        let effort = |job: &LeaseJob| {
+            sequential_job_reasoning_effort(
+                job,
+                "Open the invoices page.",
+                false,
+                RuntimeJobExpectations::default(),
+            )
+        };
+
+        let hosted_ai = EnvOverride::apply(key, "medium");
+        assert_eq!(effort(&chat), Some(ReasoningEffort::Medium));
+        assert_eq!(effort(&team_plan), Some(ReasoningEffort::High));
+        drop(hosted_ai);
+
+        // The person's own login or key: no value, so the chat turn stays high.
+        let _own_ai = EnvOverride::remove(key);
+        assert_eq!(effort(&chat), Some(ReasoningEffort::High));
     }
 
     #[test]
@@ -28119,7 +28399,7 @@ mod tests {
             false,
         ));
         assert!(matches!(
-            reasoning_effort_for_runtime_job(&job, prompt_text, false, command_expectations),
+            reasoning_effort_for_runtime_job(&job, prompt_text, false, command_expectations, None),
             Some(ReasoningEffort::High)
         ));
         assert!(matches!(
@@ -28128,6 +28408,7 @@ mod tests {
                 "What is 1+1? Answer only the number.",
                 false,
                 command_expectations,
+                None,
             ),
             Some(ReasoningEffort::High)
         ));
@@ -28154,6 +28435,7 @@ mod tests {
                 "Review the path `packages/borsh/src/binary.ts` for correctness issues.",
                 false,
                 RuntimeJobExpectations::default(),
+                None,
             ),
             Some(ReasoningEffort::High)
         ));
@@ -28163,6 +28445,7 @@ mod tests {
                 "Review the path `packages/borsh/src/binary.ts` from the pre-collected observations.",
                 true,
                 RuntimeJobExpectations::default(),
+                None,
             ),
             Some(ReasoningEffort::Medium)
         ));

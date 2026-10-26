@@ -119,10 +119,11 @@ async fn multi_agent_settings_http_enforces_membership_and_preserves_shared_limi
             for (token, can_manage) in [(&owner, true), (&admin, true), (&builder, false), (&viewer, false)] {
                 let body = settings_json(request_settings(&app, project_id, Some(token), None).await?).await?;
                 assert_eq!(body, json!({
-                    "maxAgentsPerPlan":64, "maxConcurrentAgents":8, "canManage":can_manage,
+                    "maxAgentsPerPlan":64, "maxConcurrentAgents":8, "maxNativeSubagents":3, "canManage":can_manage,
                     "limits": {
                         "maxAgentsPerPlan":{"min":1,"max":256,"default":64},
-                        "maxConcurrentAgents":{"min":1,"max":64,"default":8}
+                        "maxConcurrentAgents":{"min":1,"max":64,"default":8},
+                        "maxNativeSubagents":{"min":1,"max":64,"default":3}
                     }
                 }));
             }
@@ -131,23 +132,36 @@ async fn multi_agent_settings_http_enforces_membership_and_preserves_shared_limi
             }
             for token in [&builder, &viewer, &outsider, &scoped] {
                 assert_eq!(request_settings(&app, project_id, Some(token), Some(json!({"maxConcurrentAgents":64}))).await?.status(), StatusCode::FORBIDDEN);
+                assert_eq!(request_settings(&app, project_id, Some(token), Some(json!({"maxNativeSubagents":10}))).await?.status(), StatusCode::FORBIDDEN);
             }
             let updated = settings_json(request_settings(&app, project_id, Some(&owner), Some(json!({"maxConcurrentAgents":3}))).await?).await?;
             assert_eq!(updated["maxAgentsPerPlan"], 64);
             assert_eq!(updated["maxConcurrentAgents"], 3);
+            assert_eq!(updated["maxNativeSubagents"], 3);
+            let updated = settings_json(request_settings(&app, project_id, Some(&owner), Some(json!({"maxNativeSubagents":10}))).await?).await?;
+            assert_eq!(updated["maxAgentsPerPlan"], 64);
+            assert_eq!(updated["maxConcurrentAgents"], 3);
+            assert_eq!(updated["maxNativeSubagents"], 10);
             let updated = settings_json(request_settings(&app, project_id, Some(&admin), Some(json!({"maxAgentsPerPlan":128}))).await?).await?;
             assert_eq!(updated["maxAgentsPerPlan"], 128);
             assert_eq!(updated["maxConcurrentAgents"], 3);
+            assert_eq!(updated["maxNativeSubagents"], 10);
 
             for (patch, status) in [
                 (json!({}), StatusCode::BAD_REQUEST),
                 (json!({"maxAgentsPerPlan":0}), StatusCode::BAD_REQUEST),
                 (json!({"maxAgentsPerPlan":257}), StatusCode::BAD_REQUEST),
                 (json!({"maxConcurrentAgents":65}), StatusCode::BAD_REQUEST),
+                (json!({"maxNativeSubagents":0}), StatusCode::BAD_REQUEST),
+                (json!({"maxNativeSubagents":65}), StatusCode::BAD_REQUEST),
                 (json!({"maxAgentsPerPlan":null}), StatusCode::UNPROCESSABLE_ENTITY),
                 (json!({"maxConcurrentAgents":-1}), StatusCode::UNPROCESSABLE_ENTITY),
                 (json!({"maxConcurrentAgents":1.5}), StatusCode::UNPROCESSABLE_ENTITY),
                 (json!({"maxConcurrentAgents":"4"}), StatusCode::UNPROCESSABLE_ENTITY),
+                (json!({"maxNativeSubagents":null}), StatusCode::UNPROCESSABLE_ENTITY),
+                (json!({"maxNativeSubagents":-1}), StatusCode::UNPROCESSABLE_ENTITY),
+                (json!({"maxNativeSubagents":1.5}), StatusCode::UNPROCESSABLE_ENTITY),
+                (json!({"maxNativeSubagents":"10"}), StatusCode::UNPROCESSABLE_ENTITY),
                 (json!({"maxAgentsPerPlan":256,"unexpected":true}), StatusCode::UNPROCESSABLE_ENTITY),
             ] {
                 assert_eq!(request_settings(&app, project_id, Some(&owner), Some(patch.clone())).await?.status(), status, "invalid patch: {patch}");
@@ -155,26 +169,32 @@ async fn multi_agent_settings_http_enforces_membership_and_preserves_shared_limi
             let shared = settings_json(request_settings(&app, project_id, Some(&viewer), None).await?).await?;
             assert_eq!(shared["maxAgentsPerPlan"], 128);
             assert_eq!(shared["maxConcurrentAgents"], 3);
+            assert_eq!(shared["maxNativeSubagents"], 10);
             assert_eq!(shared["canManage"], false);
 
             // Concurrent partial updates serialize without restoring the other field's stale value.
-            let (plan, concurrency) = tokio::join!(
+            let (plan, concurrency, native) = tokio::join!(
                 request_settings(&app, project_id, Some(&owner), Some(json!({"maxAgentsPerPlan":256}))),
-                request_settings(&app, project_id, Some(&admin), Some(json!({"maxConcurrentAgents":64})))
+                request_settings(&app, project_id, Some(&admin), Some(json!({"maxConcurrentAgents":64}))),
+                request_settings(&app, project_id, Some(&owner), Some(json!({"maxNativeSubagents":64})))
             );
             assert_eq!(plan?.status(), StatusCode::OK);
             assert_eq!(concurrency?.status(), StatusCode::OK);
+            assert_eq!(native?.status(), StatusCode::OK);
             let shared = settings_json(request_settings(&app, project_id, Some(&viewer), None).await?).await?;
             assert_eq!(shared["maxAgentsPerPlan"], 256);
             assert_eq!(shared["maxConcurrentAgents"], 64);
+            assert_eq!(shared["maxNativeSubagents"], 64);
 
             let service = settings_json(request_settings(&app, project_id, Some("service-role-token"), Some(json!({"maxConcurrentAgents":1}))).await?).await?;
             assert_eq!(service["maxAgentsPerPlan"], 256);
             assert_eq!(service["maxConcurrentAgents"], 1);
+            assert_eq!(service["maxNativeSubagents"], 64);
             let db = pool.get().await?;
-            let stored = db.query_one("select max_agents_per_plan, max_concurrent_agents, updated_by from project_multi_agent_settings where project_id=$1", &[&project_id]).await?;
+            let stored = db.query_one("select max_agents_per_plan, max_concurrent_agents, max_native_subagents, updated_by from project_multi_agent_settings where project_id=$1", &[&project_id]).await?;
             assert_eq!(stored.get::<_, i32>("max_agents_per_plan"), 256);
             assert_eq!(stored.get::<_, i32>("max_concurrent_agents"), 1);
+            assert_eq!(stored.get::<_, i32>("max_native_subagents"), 64);
             assert!(stored.get::<_, Option<Uuid>>("updated_by").is_none());
             drop(db);
 

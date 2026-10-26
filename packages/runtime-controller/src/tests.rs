@@ -14,8 +14,8 @@ use crate::dispatch::{self, DispatchPromptRequest};
 use crate::jwks::SupabaseJwks;
 use crate::model_defaults::{
     default_managed_ai_model_id, default_managed_ai_model_label,
-    DEFAULT_MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K, DEFAULT_MANAGED_AI_INPUT_USD_MICROS_PER_1K,
-    DEFAULT_MANAGED_AI_OUTPUT_USD_MICROS_PER_1K,
+    DEFAULT_MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K, DEFAULT_MANAGED_AI_CHAT_REASONING_EFFORT,
+    DEFAULT_MANAGED_AI_INPUT_USD_MICROS_PER_1K, DEFAULT_MANAGED_AI_OUTPUT_USD_MICROS_PER_1K,
 };
 use crate::origins::{
     acquire_fresh_lease, acquire_lease, authorize_workspace_origin_git_write, post_access_token,
@@ -256,6 +256,9 @@ pub(crate) fn build_app_config(private_key: &str, public_key: &str, key_id: &str
         managed_ai_decline_waiver_units: 2,
         managed_ai_model_id: default_managed_ai_model_id().to_string(),
         managed_ai_model_label: default_managed_ai_model_label().to_string(),
+        managed_ai_chat_reasoning_effort: Some(
+            DEFAULT_MANAGED_AI_CHAT_REASONING_EFFORT.to_string(),
+        ),
         managed_ai_input_usd_micros_per_1k: DEFAULT_MANAGED_AI_INPUT_USD_MICROS_PER_1K,
         managed_ai_cached_input_usd_micros_per_1k:
             DEFAULT_MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K,
@@ -1943,7 +1946,8 @@ async fn create_runtime_spread_scope_tables(client: &tokio_postgres::Client) -> 
             CREATE TEMP TABLE project_multi_agent_settings (
                 project_id uuid PRIMARY KEY,
                 max_agents_per_plan integer NOT NULL DEFAULT 64,
-                max_concurrent_agents integer NOT NULL DEFAULT 8
+                max_concurrent_agents integer NOT NULL DEFAULT 8,
+                max_native_subagents integer NOT NULL DEFAULT 3
             );
             CREATE TEMP TABLE runtimes (
                 id uuid PRIMARY KEY,
@@ -14328,7 +14332,8 @@ async fn lease_next_agent_job_scopes_grouped_runtime_spread_to_plan_runtimes() -
             CREATE TEMP TABLE project_multi_agent_settings (
                 project_id uuid PRIMARY KEY,
                 max_agents_per_plan integer NOT NULL DEFAULT 64,
-                max_concurrent_agents integer NOT NULL DEFAULT 8
+                max_concurrent_agents integer NOT NULL DEFAULT 8,
+                max_native_subagents integer NOT NULL DEFAULT 3
             );
             CREATE TEMP TABLE runtimes (
                 id uuid PRIMARY KEY,

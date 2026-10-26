@@ -38,7 +38,7 @@ use codex_protocol::models::{
     ContentItem, FunctionCallOutputBody, FunctionCallOutputContentItem, FunctionCallOutputPayload,
     MessagePhase, PermissionProfile, ResponseItem,
 };
-use codex_protocol::openai_models::{InputModality, ReasoningEffort};
+use codex_protocol::openai_models::{InputModality, ModelInfo, ReasoningEffort};
 use codex_protocol::permissions::{
     FileSystemAccessMode, FileSystemPath, FileSystemSandboxEntry, FileSystemSandboxPolicy,
     FileSystemSpecialPath, NetworkSandboxPolicy,
@@ -830,6 +830,9 @@ pub struct CodexRunOptions {
     /// Controller-admitted tool worker in a private workspace. Keep writes in that root,
     /// and do not create unaccounted native agents or project MCP processes.
     pub isolated_tool_worker: bool,
+    /// Runtime-owned admission mode, supplied only to routing preflight. This is not
+    /// inferred from the user request or controller plan metadata.
+    pub routing_scoped_worker_execution: Option<ScopedWorkerExecution>,
     /// Optional content-free diagnostic accounting, independent of event streaming.
     pub usage_observer: Option<UsageCall>,
     /// Authorized job scope for current shared defaults. Absent on routing preflight and non-project calls.
@@ -872,6 +875,80 @@ pub struct CodexRunOptions {
     /// The run's hard limit, when it is not the usual one (`resolve_codex_run_timeout`): a team's
     /// turn ends by the team's deadline.
     pub run_timeout: Option<Duration>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopedWorkerExecution {
+    FileGeneration,
+    IsolatedTools,
+}
+
+/// Snapshot before preflight's own tools are suppressed: those restrictions belong to
+/// classification, not the prospective parent turn. Upstream still owns tool exposure,
+/// model-specific native-agent versions and capacity; this is not a second tool planner.
+struct RoutingExecutionConfig {
+    shell_tool_enabled: bool,
+    agents_enabled: bool,
+    multi_agent_enabled: bool,
+    multi_agent_v2_enabled: bool,
+    scoped_workers: ScopedWorkerExecution,
+}
+
+impl RoutingExecutionConfig {
+    fn capture(config: &Config, options: &CodexRunOptions) -> Option<Self> {
+        if options.final_output_schema != CodexFinalOutputSchema::RoutingPreflight {
+            return None;
+        }
+        Some(Self {
+            shell_tool_enabled: config.features.enabled(Feature::ShellTool),
+            agents_enabled: config.agents_enabled,
+            multi_agent_enabled: config.features.enabled(Feature::Collab),
+            multi_agent_v2_enabled: config.features.enabled(Feature::MultiAgentV2),
+            scoped_workers: options.routing_scoped_worker_execution?,
+        })
+    }
+
+    fn facts(&self, model: &ModelInfo) -> JsonValue {
+        json!({
+            "normalParent": {
+                "shellToolEnabledInConfig": self.shell_tool_enabled,
+                "modelShellType": model.shell_type,
+                "execution": "subject_to_exposed_tools_and_permissions"
+            },
+            "nativeHelpers": {
+                "agentsEnabledInConfig": self.agents_enabled,
+                "multiAgentFeatureEnabled": self.multi_agent_enabled,
+                "multiAgentV2FeatureEnabled": self.multi_agent_v2_enabled,
+                "modelMultiAgentVersion": model.multi_agent_version,
+                "availabilityAndCapacity": "determined_by_upstream_parent_tool_surface"
+            },
+            "concurrentScopedFileWorkers": match self.scoped_workers {
+                ScopedWorkerExecution::FileGeneration => json!({
+                    "mode": "tool_free_file_generation",
+                    "commandExecution": false
+                }),
+                ScopedWorkerExecution::IsolatedTools => json!({
+                    "mode": "experimental_isolated_tools",
+                    "commandExecution": "requires_controller_admission_and_eligible_isolated_scope"
+                }),
+            }
+        })
+    }
+
+    fn append_to(&self, config: &mut Config, model: &ModelInfo) {
+        let instructions = config
+            .developer_instructions
+            .get_or_insert_with(String::new);
+        instructions
+            .push_str("\n\nRuntime execution capabilities for routing (runtime-owned facts):\n");
+        instructions.push_str(&self.facts(model).to_string());
+        instructions.push_str(
+            "\nThese describe the normal parent configuration before this classifier's tools were disabled. \
+             They do not grant permissions or prove that a tool is exposed. Upstream determines native \
+             helper tools and limits; the parent must use its actual tool surface. The scoped-worker \
+             facts apply to concurrent owned-file workers, not every durable or read-only job.\n",
+        );
+    }
 }
 
 /// A turn nearing its hard limit is told so while it still runs (one steering input, as a
@@ -1192,6 +1269,9 @@ impl CodexClient {
             "Codex thread cleanup is unconfirmed; runtime restart required"
         );
         let run_timeout = options.hard_limit();
+        // Capture before callback-free runs move to a fresh task. Neither the cached
+        // CodexClient nor a restored rollout may retain a previous job's policy.
+        let runtime_settings = crate::job_runtime_settings::current();
         let max_retries = if options.isolated_tool_worker || uses_bounded_proxy_retries(&options) {
             // Codex recovers within the same session, preserving completed tool receipts.
             // Replaying execute_inner would reset that budget and could repeat side effects.
@@ -1251,6 +1331,7 @@ impl CodexClient {
                                 options,
                                 attempt_observation,
                                 owned_attempt_threads,
+                                runtime_settings,
                             ),
                         )
                         .await)
@@ -1263,6 +1344,7 @@ impl CodexClient {
                                 options,
                                 attempt_observation,
                                 owned_attempt_threads,
+                                runtime_settings,
                             ),
                         )
                         .await
@@ -1281,6 +1363,7 @@ impl CodexClient {
                             attempt_options,
                             usage_attempt.clone(),
                             attempt_threads.registration(),
+                            runtime_settings,
                         ),
                     )
                     .await)
@@ -1293,6 +1376,7 @@ impl CodexClient {
                             attempt_options,
                             usage_attempt.clone(),
                             attempt_threads.registration(),
+                            runtime_settings,
                         ),
                     )
                     .await
@@ -1406,6 +1490,7 @@ impl CodexClient {
         options: CodexRunOptions,
         usage_attempt: Option<UsageAttempt>,
         attempt_threads: CodexThreadRegistration,
+        runtime_settings: Option<runtime_contracts::multi_agent::AgentRuntimeSettings>,
     ) -> Result<CodexRunOutput> {
         let turn_started = std::time::Instant::now();
         let browser_mode = options.expect_browser_session;
@@ -1798,6 +1883,10 @@ impl CodexClient {
             &mut config,
             personal_browser_mode || shared_browser_mode,
         )?;
+        crate::codex_policy::apply_native_subagent_limit(
+            &mut config,
+            runtime_settings.map(|settings| settings.max_native_subagents),
+        );
         if options.isolated_tool_worker {
             config.agents_enabled = false;
             let _ = config.features.disable(Feature::Collab);
@@ -1838,6 +1927,7 @@ impl CodexClient {
             "applied effective Codex reasoning effort for runtime-agent run"
         );
         config.model_reasoning_effort = Some(effort);
+        let routing_execution = RoutingExecutionConfig::capture(&config, &options);
         if options.disable_shell_tool {
             // For browser-session jobs we want MCP-first behavior and to avoid shell-script fallbacks.
             // Disable both shell modes (legacy shell + unified exec) and freeform patching.
@@ -1885,6 +1975,9 @@ impl CodexClient {
             )
             .await;
         crate::codex_policy::pin_instructions_for_resolved_model(&mut config, &model_info);
+        if let Some(routing_execution) = routing_execution {
+            routing_execution.append_to(&mut config, &model_info);
+        }
         let bounded_browser_mode = personal_browser_mode || shared_browser_mode;
         let input_images: &[PathBuf] = if native_image_inputs_allowed(
             native_chat_images_enabled(),
@@ -4028,6 +4121,33 @@ fn agent_reasoning_effort_override() -> Option<ReasoningEffort> {
     parse_agent_reasoning_effort(&raw)
 }
 
+/// The job secret the controller sets on a chat turn that runs on Instafy's
+/// hosted AI. A turn on the person's own login or key never carries it.
+pub(crate) const MANAGED_AI_REASONING_EFFORT_ENV: &str = "CODEX_MANAGED_AI_REASONING_EFFORT";
+
+/// The reasoning effort the controller chose for this job's chat turn on
+/// Instafy's hosted AI, from `CODEX_MANAGED_AI_REASONING_EFFORT`. It takes the
+/// place of the runtime's own default for that turn only (see
+/// `reasoning_effort_for_runtime_job`), so an agent's reasoning setting and
+/// `CODEX_RUNTIME_REASONING_EFFORT` still win. Read like
+/// `CODEX_AGENT_REASONING_EFFORT`: anything but the four supported values is
+/// ignored.
+pub(crate) fn managed_ai_reasoning_effort() -> Option<ReasoningEffort> {
+    let raw = optional_env(MANAGED_AI_REASONING_EFFORT_ENV)?;
+    parse_agent_reasoning_effort(&raw)
+}
+
+/// Serializes tests that change the process environment. One lock for the
+/// crate, because tests in more than one module set the same variables (both
+/// this module's and `jobs`' set `CODEX_MANAGED_AI_REASONING_EFFORT`).
+#[cfg(test)]
+pub(crate) fn process_env_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .expect("env lock poisoned")
+}
+
 pub(crate) fn parse_agent_reasoning_effort(raw: &str) -> Option<ReasoningEffort> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "minimal" => Some(ReasoningEffort::Minimal),
@@ -5576,7 +5696,90 @@ mod tests {
         RawResponseItemEvent, TokenCountEvent, TokenUsage, TokenUsageInfo, TurnCompleteEvent,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Mutex, OnceLock};
+
+    #[tokio::test]
+    async fn routing_capabilities_use_resolved_parent_config_before_classifier_tool_suppression() {
+        let home = tempfile::tempdir().unwrap();
+        let mut config = load_runtime_codex_config(
+            home.path(),
+            vec![],
+            ConfigOverrides {
+                cwd: Some(home.path().to_path_buf()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        config.features.enable(Feature::ShellTool).unwrap();
+        config.agents_enabled = true;
+        config.developer_instructions = Some("existing developer instructions".into());
+        let options = CodexRunOptions {
+            final_output_schema: CodexFinalOutputSchema::RoutingPreflight,
+            disable_shell_tool: true,
+            routing_scoped_worker_execution: Some(ScopedWorkerExecution::FileGeneration),
+            ..Default::default()
+        };
+        let captured = RoutingExecutionConfig::capture(&config, &options).unwrap();
+        // The classifier's restrictions must not masquerade as parent capabilities.
+        config.features.disable(Feature::ShellTool).unwrap();
+        let mut model = codex_models_manager::bundled_models_response()
+            .unwrap()
+            .models
+            .remove(0);
+        captured.append_to(&mut config, &model);
+        let instructions = config.developer_instructions.as_deref().unwrap();
+        assert!(instructions.starts_with("existing developer instructions"));
+        let facts: JsonValue = instructions
+            .lines()
+            .find_map(|line| serde_json::from_str(line).ok())
+            .expect("structured runtime facts reach the developer instructions");
+        assert_eq!(facts["normalParent"]["shellToolEnabledInConfig"], true);
+        assert_eq!(
+            facts["normalParent"]["modelShellType"],
+            json!(model.shell_type)
+        );
+        assert_eq!(facts["nativeHelpers"]["agentsEnabledInConfig"], true);
+        assert_eq!(
+            facts["nativeHelpers"]["modelMultiAgentVersion"],
+            json!(model.multi_agent_version)
+        );
+        assert_eq!(
+            facts["concurrentScopedFileWorkers"]["commandExecution"],
+            false
+        );
+
+        // A disabled config/model and isolated opt-in are facts too, not an assumed
+        // fixed helper/tool configuration derived from the current default model.
+        config.agents_enabled = false;
+        model.shell_type = codex_protocol::openai_models::ConfigShellToolType::Disabled;
+        model.multi_agent_version = None;
+        let isolated = CodexRunOptions {
+            routing_scoped_worker_execution: Some(ScopedWorkerExecution::IsolatedTools),
+            ..options.clone()
+        };
+        let facts = RoutingExecutionConfig::capture(&config, &isolated)
+            .unwrap()
+            .facts(&model);
+        assert_eq!(facts["normalParent"]["shellToolEnabledInConfig"], false);
+        assert_eq!(facts["normalParent"]["modelShellType"], "disabled");
+        assert_eq!(facts["nativeHelpers"]["agentsEnabledInConfig"], false);
+        assert!(facts["nativeHelpers"]["modelMultiAgentVersion"].is_null());
+        assert_eq!(
+            facts["concurrentScopedFileWorkers"]["commandExecution"],
+            "requires_controller_admission_and_eligible_isolated_scope"
+        );
+        assert!(RoutingExecutionConfig::capture(&config, &CodexRunOptions::default()).is_none());
+        assert!(
+            RoutingExecutionConfig::capture(
+                &config,
+                &CodexRunOptions {
+                    final_output_schema: CodexFinalOutputSchema::MultiAgentPlan,
+                    ..options
+                }
+            )
+            .is_none()
+        );
+    }
 
     #[test]
     fn a_continued_lanes_attempt_starts_without_a_note_and_a_timeout_is_not_rerun_here() {
@@ -5841,10 +6044,7 @@ mod tests {
     }
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("env lock poisoned")
+        process_env_test_lock()
     }
 
     fn count_setting_lines(config: &str, key: &str) -> usize {
@@ -6856,6 +7056,29 @@ mod tests {
                 resolve_runtime_reasoning_effort(Some(raw), Some(ReasoningEffort::High), None),
                 expected
             );
+        }
+    }
+
+    #[test]
+    fn managed_ai_reasoning_effort_reads_only_the_supported_controller_values() {
+        let _env_lock = env_lock();
+        let previous = std::env::var_os(MANAGED_AI_REASONING_EFFORT_ENV);
+        let read = |value: Option<&str>| {
+            match value {
+                Some(value) => unsafe { std::env::set_var(MANAGED_AI_REASONING_EFFORT_ENV, value) },
+                None => unsafe { std::env::remove_var(MANAGED_AI_REASONING_EFFORT_ENV) },
+            }
+            managed_ai_reasoning_effort()
+        };
+        assert_eq!(read(Some("medium")), Some(ReasoningEffort::Medium));
+        assert_eq!(read(Some(" Medium ")), Some(ReasoningEffort::Medium));
+        // A turn on the person's own AI carries no value.
+        assert_eq!(read(None), None);
+        assert_eq!(read(Some("")), None);
+        assert_eq!(read(Some("ultra")), None);
+        match previous {
+            Some(value) => unsafe { std::env::set_var(MANAGED_AI_REASONING_EFFORT_ENV, value) },
+            None => unsafe { std::env::remove_var(MANAGED_AI_REASONING_EFFORT_ENV) },
         }
     }
 

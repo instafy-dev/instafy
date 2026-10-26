@@ -19,6 +19,7 @@ use crate::config::Config;
 use crate::jobs::user_input_request::WorkerInputRequest;
 use crate::resources::ResourceSampler;
 use runtime_contracts::ProxyEnvelopePayload;
+use runtime_contracts::multi_agent::AgentRuntimeSettings;
 
 const REQUIRED_AGENT_SCOPES: &[&str] = &[
     "agent.lease",
@@ -287,6 +288,8 @@ struct AgentSecretInventoryItemResponse {
 struct AgentSecretsResponse {
     env: Option<JsonValue>,
     inventory: Option<Vec<AgentSecretInventoryItemResponse>>,
+    #[serde(default, rename = "runtimeSettings")]
+    runtime_settings: AgentRuntimeSettings,
 }
 
 #[derive(Debug, Clone)]
@@ -301,6 +304,8 @@ pub struct JobSecrets {
     pub inventory: Vec<AgentSecretInventoryItem>,
     /// Missing/malformed legacy inventory cannot establish setting provenance.
     pub inventory_complete: bool,
+    /// Controller-owned policy, separate from granted project secrets.
+    pub runtime_settings: AgentRuntimeSettings,
 }
 
 /// The code the controller's refusals carry once the runtime's space was
@@ -1270,6 +1275,7 @@ impl ControllerClient {
             env,
             inventory,
             inventory_complete,
+            runtime_settings: parsed.runtime_settings,
         })
     }
 
@@ -1574,6 +1580,38 @@ fn truncate_agent_payload_text(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_subagent_limit_comes_only_from_validated_controller_settings() {
+        let legacy: AgentSecretsResponse = serde_json::from_value(json!({
+            "env": {"MAX_NATIVE_SUBAGENTS": "64", "runtimeSettings": "64"},
+            "inventory": [{"name": "MAX_NATIVE_SUBAGENTS"}],
+            "metadata": {"maxNativeSubagents": 64}
+        }))
+        .unwrap();
+        assert_eq!(legacy.runtime_settings.max_native_subagents.get(), 3);
+        let configured: AgentSecretsResponse = serde_json::from_value(json!({
+            "runtimeSettings": {"maxNativeSubagents": 10},
+            "env": {"MAX_NATIVE_SUBAGENTS": "64"}
+        }))
+        .unwrap();
+        assert_eq!(configured.runtime_settings.max_native_subagents.get(), 10);
+        for invalid in [
+            json!(0),
+            json!(65),
+            json!(-1),
+            json!(1.5),
+            json!("10"),
+            json!(null),
+        ] {
+            assert!(
+                serde_json::from_value::<AgentSecretsResponse>(json!({
+                    "runtimeSettings": {"maxNativeSubagents": invalid}
+                }))
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn lease_job_from_legacy_response_defaults_workspace_token_fields() {

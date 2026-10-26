@@ -3688,10 +3688,10 @@ pub(crate) async fn agent_complete(
     // The conversation's next queued send goes now, behind the reply: its
     // dispatch reserves its own credits, so it does not wait for this turn's
     // billing, and a send typed meanwhile cannot overtake it. A plan
-    // worker's completion may wake its lead, whose continuation takes the
-    // lane first, so that drain stays behind it in the settlement.
+    // worker or early lead may wake the final lead, whose continuation takes
+    // the lane first, so that drain stays behind it in the settlement.
     let drain_after_lead_continuation =
-        crate::multi_agent_plan::job_payload_is_plan_worker(&job_payload);
+        crate::multi_agent_plan::job_payload_can_wake_plan_checkpoint(&job_payload);
     if let (Some(conversation_id), false) = (run_conversation_id, drain_after_lead_continuation) {
         crate::send_queue::spawn_send_queue_drain(state.clone(), conversation_id);
     }
@@ -3755,7 +3755,7 @@ struct CompletionSettlement {
     /// The org whose credits the completion's own transaction changed (a
     /// failed run's refund, or billing deferred until the agent spoke).
     credit_org_id: Option<Uuid>,
-    /// A plan worker's completion drains the conversation's send queue only
+    /// A plan worker or early lead drains the conversation's send queue only
     /// once its lead's continuation is queued; any other completion drained
     /// it as soon as its reply was committed.
     drain_after_lead_continuation: bool,

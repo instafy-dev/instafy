@@ -1878,9 +1878,9 @@ pub(crate) async fn interrupt_conversation_runs(
     for request_id in expired_questions {
         crate::user_input_requests::publish_request_run_event(&state, request_id).await;
     }
-    crate::send_queue::spawn_send_queue_drain(state.clone(), conversation.id);
     crate::multi_agent_plan::spawn_plan_group_checkpoints_after_cancellation(
         state.clone(),
+        conversation.id,
         cancellation.job_ids.clone(),
     );
 
@@ -2264,9 +2264,9 @@ pub(crate) async fn cancel_agent_job(
     )
     .await;
 
-    crate::send_queue::spawn_send_queue_drain(state.clone(), conversation.id);
     crate::multi_agent_plan::spawn_plan_group_checkpoints_after_cancellation(
         state.clone(),
+        conversation.id,
         cancellation.job_ids.clone(),
     );
 

@@ -8,6 +8,7 @@ use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
+use runtime_contracts::multi_agent::{AgentRuntimeSettings, NativeSubagentLimit};
 use serde_json::json;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::{Notify, watch};
@@ -1393,10 +1394,12 @@ impl RuntimeAgent {
             return Ok(());
         }
 
-        if !parallel_scoped {
+        let runtime_settings = if parallel_scoped {
+            AgentRuntimeSettings::default()
+        } else {
             let fetched = client.fetch_job_secrets(registration, job.id, true).await;
-            install_fetched_job_secrets(&secret_env_keys, fetched, job.id);
-        }
+            install_fetched_job_secrets(&secret_env_keys, fetched, job.id)
+        };
 
         let secrets_refresh_seconds = resolve_secrets_refresh_interval_seconds();
         if secrets_refresh_seconds > 0 && !parallel_scoped {
@@ -1483,15 +1486,17 @@ impl RuntimeAgent {
                             )
                             .await
                     } else {
-                        executor
-                            .run_apply_with_progress(
+                        crate::job_runtime_settings::scope(
+                            runtime_settings,
+                            Box::pin(executor.run_apply_with_progress(
                                 client.clone(),
                                 registration,
                                 &job,
                                 Some(lease_lost_signal.clone()),
                                 active_turn_input.take(),
-                            )
-                            .await
+                            )),
+                        )
+                        .await
                     };
                     if let Some(task) = job_input_task.take() {
                         task.shutdown().await;
@@ -1517,6 +1522,7 @@ impl RuntimeAgent {
                                         env: HashMap::new(),
                                         inventory: Vec::new(),
                                         inventory_complete: true,
+                                        runtime_settings: AgentRuntimeSettings::default(),
                                     };
                                     apply_job_secrets(&secret_env_keys, &empty);
                                 }
@@ -1618,6 +1624,7 @@ impl RuntimeAgent {
                 env: HashMap::new(),
                 inventory: Vec::new(),
                 inventory_complete: true,
+                runtime_settings: AgentRuntimeSettings::default(),
             };
             apply_job_secrets(&secret_env_keys, &empty);
         }
@@ -2043,12 +2050,14 @@ pub(crate) fn resolved_job_environment(secrets: &JobSecrets) -> HashMap<String, 
 
 /// Install a sequential job's secrets. When the fetch fails, clear whatever an
 /// earlier job installed (its model and its secrets) instead of letting this
-/// job run on them; the model then falls back visibly (see `job_model`).
+/// job run on them; the model then falls back visibly (see `job_model`). Without
+/// current controller settings, use the minimum native capacity so a configured
+/// lower limit is never expanded by the failed fetch.
 fn install_fetched_job_secrets(
     managed_keys: &Mutex<HashSet<String>>,
     fetched: Result<JobSecrets>,
     job_id: uuid::Uuid,
-) {
+) -> AgentRuntimeSettings {
     match fetched {
         Ok(secrets) => {
             apply_job_secrets(managed_keys, &secrets);
@@ -2058,19 +2067,24 @@ fn install_fetched_job_secrets(
                 inventory_count = secrets.inventory.len(),
                 "applied job secrets"
             );
+            secrets.runtime_settings
         }
         Err(error) => {
             warn!(
                 ?error,
                 job_id = %job_id,
-                "failed to fetch job secrets; running without an earlier job's secrets or model"
+                "failed to fetch job secrets; running without an earlier job's secrets or model and with minimum native helper capacity"
             );
             let empty = JobSecrets {
                 env: HashMap::new(),
                 inventory: Vec::new(),
                 inventory_complete: true,
+                runtime_settings: AgentRuntimeSettings {
+                    max_native_subagents: NativeSubagentLimit::MIN,
+                },
             };
             apply_job_secrets(managed_keys, &empty);
+            empty.runtime_settings
         }
     }
 }
@@ -2347,28 +2361,37 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_secrets_fetch_clears_the_previous_jobs_secrets_and_model() {
+    fn a_failed_secrets_fetch_clears_previous_settings_without_expanding_native_capacity() {
         // The key stands in for CODEX_MODEL and every other managed key: a job
         // whose own fetch failed must not run on what an earlier job installed.
         const KEY: &str = "INSTAFY_TEST_PREVIOUS_JOB_SECRET_FETCH_FAILURE";
         let managed = Mutex::new(HashSet::new());
-        install_fetched_job_secrets(
-            &managed,
-            Ok(JobSecrets {
-                env: HashMap::from([(KEY.to_string(), "gpt-6-luna".to_string())]),
-                inventory: Vec::new(),
-                inventory_complete: true,
-            }),
-            Uuid::new_v4(),
-        );
-        assert_eq!(std::env::var(KEY).as_deref(), Ok("gpt-6-luna"));
-        install_fetched_job_secrets(
-            &managed,
-            Err(anyhow::anyhow!("fetch failed")),
-            Uuid::new_v4(),
-        );
-        assert!(std::env::var(KEY).is_err());
-        assert!(managed.lock().is_empty());
+        for previous_limit in [1, 2, 10, 64] {
+            let installed = install_fetched_job_secrets(
+                &managed,
+                Ok(JobSecrets {
+                    env: HashMap::from([(KEY.to_string(), "gpt-6-luna".to_string())]),
+                    inventory: Vec::new(),
+                    inventory_complete: true,
+                    runtime_settings: AgentRuntimeSettings {
+                        max_native_subagents: NativeSubagentLimit::try_from(previous_limit)
+                            .unwrap(),
+                    },
+                }),
+                Uuid::new_v4(),
+            );
+            assert_eq!(std::env::var(KEY).as_deref(), Ok("gpt-6-luna"));
+            assert_eq!(installed.max_native_subagents.get(), previous_limit);
+            let fallback = install_fetched_job_secrets(
+                &managed,
+                Err(anyhow::anyhow!("fetch failed")),
+                Uuid::new_v4(),
+            );
+            assert!(std::env::var(KEY).is_err());
+            assert!(managed.lock().is_empty());
+            assert_eq!(fallback.max_native_subagents, NativeSubagentLimit::MIN);
+            assert!(fallback.max_native_subagents.get() <= previous_limit);
+        }
     }
 
     #[test]
@@ -2385,6 +2408,7 @@ mod tests {
                 description: None,
             }],
             inventory_complete: true,
+            runtime_settings: AgentRuntimeSettings::default(),
         };
         let mut config = resolved_worker_job_config(&secrets).unwrap();
         assert_eq!(config.model.as_deref(), Some("configured-model"));
@@ -2426,6 +2450,7 @@ mod tests {
                     description: None,
                 }],
                 inventory_complete: true,
+                runtime_settings: AgentRuntimeSettings::default(),
             };
             let error = resolved_worker_job_config(&secrets).err().unwrap();
             assert!(
@@ -2448,6 +2473,7 @@ mod tests {
                 env: HashMap::from([(key.into(), "inert-value".into())]),
                 inventory: Vec::new(),
                 inventory_complete: true,
+                runtime_settings: AgentRuntimeSettings::default(),
             };
             let error = resolved_worker_job_config(&secrets).err().unwrap();
             assert!(
@@ -2469,6 +2495,7 @@ mod tests {
                 env: HashMap::from([(key.into(), value.into())]),
                 inventory: Vec::new(),
                 inventory_complete: true,
+                runtime_settings: AgentRuntimeSettings::default(),
             };
             let error = resolved_worker_job_config(&secrets).err().unwrap();
             assert!(!error.to_string().contains(value));
@@ -2481,6 +2508,7 @@ mod tests {
             env: HashMap::from([("CODEX_MODEL".into(), "unattributed-model".into())]),
             inventory: Vec::new(),
             inventory_complete: false,
+            runtime_settings: AgentRuntimeSettings::default(),
         };
         let error = resolved_worker_job_config(&secrets).err().unwrap();
         assert!(

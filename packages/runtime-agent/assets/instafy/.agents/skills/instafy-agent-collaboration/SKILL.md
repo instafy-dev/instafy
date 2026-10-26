@@ -50,7 +50,7 @@ Write-scope rules for top-level agents:
 - Assign disjoint owned paths/modules before concurrent edits. Write access must be explicit structured metadata; the controller cannot infer it from prompt text. Do not rely on one runtime serializing work as a safety boundary.
 - If scope is missing or overlaps, expect `writeScope.mode = coordination_required`; stop before editing and ask for an explicit split.
 - With `writeScope.mode = owned`, edit only `ownedPaths`; treat `readOnlyPaths` as inspect-only. Read-only/Q&A agents need no editable paths.
-- For independent generated files or small disjoint edits on one machine, prefer exact `ownedPaths` over `ownedPathGlobs`: exact paths enable the direct parallel path; globs and broad module ownership remain conservative.
+- For independent generated files or small disjoint edits on one machine, prefer exact `ownedPaths` over `ownedPathGlobs` only when the scoped worker's execution capabilities cover the task. Tool-free file generation cannot perform required commands, tests or observations. Do not remove requirements to make a worker eligible; explain an unavailable explicitly requested mechanism.
 
 ## Observing concurrency
 
@@ -67,16 +67,14 @@ Do not assume that mentioning multiple top-level agents means same-runtime paral
 
 ## Routing preflight
 
-Route the latest request by coordination needs, without granting tools or permissions:
+Match requirements to runtime execution capabilities; this classifier's lack of tools says nothing about the parent. Facts do not grant permissions.
 
-- `direct`: a normal parent turn, alone, with exposed native helpers, or using ordinary conversation tools to create/reuse a linked lane. Known-thread continuation needs no lookup when supplied evidence suffices.
-- `multi_agent_candidate`: create a durable controller-worker plan with selected workers and a lead checkpoint. An explicit one-worker plan is valid; a linked conversation alone stays direct.
-- `cross_chat_lookup`: retrieve required prior conversation/context evidence missing from supplied history and refs, without creating a new team.
-- `write_coordination_required`: concurrent writes overlap and need a serialized or disjoint split first.
+- `direct`: normal parent work, native helper fanout in batches, or ordinary linked conversations. For generic helper subtasks requiring commands, tests or live observations, use this route when scoped workers are tool-free. The parent checks actual native tool availability and limits; never assume a helper count or drop execution requirements.
+- `multi_agent_candidate`: durable controller workers and a lead checkpoint when requested or useful AND capable of the work. Exact file ownership does not give a worker execution tools. Experimental isolated tools require reported opt-in and admission; do not assume them.
+- `cross_chat_lookup`: required prior conversation/context evidence is missing from supplied history and refs.
+- `write_coordination_required`: concurrent writes overlap and need a safe split.
 
-Preserve explicit mechanisms and counts. Parallel wording alone does not select a durable plan.
-
-Set `requiresContextLookup` only for missing prior conversation/context evidence that must be retrieved. Set `requiresCommandExecution` for a separate fresh filesystem, Git, process or runtime observation; context lookup using a CLI does not itself require it. Both may be true; supplied sufficient evidence needs neither. Detailed observation/output contracts come from the runtime.
+A helper count or “subagents” alone does not request durable jobs. Preserve explicitly requested durable jobs, chats, profiles, runtimes and counts. If required capabilities are unavailable, explain the limitation rather than silently substituting. Apply the runtime's separate observation/output contracts.
 
 ### Pending worker replies
 

@@ -1,5 +1,11 @@
 # Settings navigation and surfaces
 
+Space settings include **AI helpers → Concurrent helpers per task**. It shows the
+controller's native subagent limit, excluding the parent agent, separately from shared team
+worker capacity. Only space managers can save a change; other members can inspect the value.
+Saving updates this field only. Running tasks keep their limit and later jobs receive the
+new value. Older controllers show an unavailable explanation instead of an editable default.
+
 ## Shared component contracts
 
 Screens own arrangement: widths, grid/flex placement, gaps, wrapping and truncation.
