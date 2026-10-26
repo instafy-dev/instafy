@@ -255,6 +255,7 @@ fn looks_like_credential(name: &str) -> bool {
         "SECRET",
         "PASSWORD",
         "PASSWD",
+        "PASSPHRASE",
         "CREDENTIAL",
         "PRIVATE",
         "COOKIE",
@@ -267,6 +268,10 @@ fn looks_like_credential(name: &str) -> bool {
     .any(|word| upper.contains(word))
         || upper.ends_with("_KEY")
         || upper == "KEY"
+        // whole words only: `UW_OVERPASS` is a setting, `SMTP_PASS` is not
+        || upper
+            .split('_')
+            .any(|word| matches!(word, "PASS" | "PWD" | "AUTH" | "BEARER" | "DSN"))
 }
 
 fn setting_matches(pattern: &str, name: &str) -> bool {
@@ -294,11 +299,50 @@ pub fn pack_settings_environment(
     vars: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Vec<(OsString, OsString)> {
     vars.into_iter()
-        .filter(|(key, _)| {
+        .filter(|(key, value)| {
             key.to_str()
                 .is_some_and(|name| is_pack_setting(packs, name))
+                && value
+                    .to_str()
+                    .is_some_and(|value| !value_carries_credentials(value))
         })
         .collect()
+}
+
+/// A value with a credential inside it (a URL with `user:password@`, a `token=`/`key=` query
+/// parameter, a bearer header) never passes as a pack setting, whatever its name.
+fn value_carries_credentials(value: &str) -> bool {
+    let userinfo = value.match_indices("://").any(|(at, _)| {
+        value[at + 3..]
+            .split(|c: char| {
+                matches!(c, '/' | '?' | '#' | ',' | ';' | '"' | '\'') || c.is_whitespace()
+            })
+            .next()
+            .is_some_and(|authority| authority.contains('@'))
+    });
+    let lower = value.to_ascii_lowercase();
+    userinfo
+        || lower.contains("bearer ")
+        || [
+            "token=",
+            "key=",
+            "secret=",
+            "password=",
+            "passwd=",
+            "pass=",
+            "auth=",
+            "signature=",
+            "sig=",
+        ]
+        .iter()
+        .any(|param| {
+            lower
+                .match_indices(param)
+                .any(|(at, _)| at == 0 || !lower.as_bytes()[at - 1].is_ascii_alphanumeric())
+        })
+        || lower.contains("_key=")
+        || lower.contains("-key=")
+        || lower.contains("apikey=")
 }
 
 /// The folder where skill packs keep state for `project_id` on this runtime: outside the project's
@@ -776,10 +820,23 @@ pub(crate) mod tests {
             [
                 ("PATH", "/bin"),
                 ("UW_PHOTON", "https://photon.example"),
+                ("UW_OVERPASS", "https://overpass.example/api?monkey=1"),
                 ("UW_TURN_BUDGET", "0"),
                 ("INSTAFY_LOOKUP_PROVIDERS", "{}"),
                 ("UW_API_KEY", "x"),
                 ("UW_SECRET", "x"),
+                ("UW_SMTP_PASS", "x"),
+                ("UW_BASIC_AUTH", "x"),
+                ("UW_SENTRY_DSN", "x"),
+                ("UW_GATEWAY", "https://user:hunter2@gateway.example/v1"),
+                (
+                    "UW_TILES",
+                    "https://tiles.example/{z}/{x}/{y}.png?api_key=abc",
+                ),
+                (
+                    "INSTAFY_LOOKUP_PROVIDERS_URL",
+                    "https://p.example/x?token=abc",
+                ),
                 ("INSTAFY_LOOKUP_TOKEN", "x"),
                 ("INSTAFY_TURN_DEADLINE", "2026-10-26T10:00:00Z"),
                 ("INSTAFY_CACHE_DIR", "/elsewhere"),
@@ -801,7 +858,12 @@ pub(crate) mod tests {
         pack.env = vec!["UW_*".into(), "INSTAFY_LOOKUP_*".into()];
         assert_eq!(
             names(std::slice::from_ref(&pack)),
-            ["UW_PHOTON", "UW_TURN_BUDGET", "INSTAFY_LOOKUP_PROVIDERS"]
+            [
+                "UW_PHOTON",
+                "UW_OVERPASS",
+                "UW_TURN_BUDGET",
+                "INSTAFY_LOOKUP_PROVIDERS"
+            ]
         );
     }
 

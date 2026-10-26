@@ -282,6 +282,7 @@ async fn exercise(case: Case) -> Result<()> {
             )]),
             model: Some("gpt-5.5".into()),
             reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::Low),
+            cache_dir: None,
         };
         let cancel = cancellations[lane].clone();
         handles.push(Some(tokio::spawn(async move {

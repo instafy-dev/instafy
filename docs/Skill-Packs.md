@@ -72,8 +72,9 @@ A pack's manifest may list the settings its scripts read, as exact names or `PRE
 
 A process the runtime starts with a cleared environment (an isolated tool worker) gets the runtime's
 own values of those names, so an operator's settings reach the pack in every lane. A name that looks
-like a credential (`*_KEY`, `*TOKEN*`, `*SECRET*` …), an internal credential and `INSTAFY_CACHE_DIR`
-never pass, whatever a pack lists. A manifest is refused when a pattern could reach process or runtime
+like a credential (`*_KEY`, `*TOKEN*`, `*SECRET*`, `*_PASS`, `*_AUTH`, `*_DSN` …), a value that carries
+one (a URL with `user:password@`, a `token=` or `key=` parameter, a bearer header), an internal
+credential and `INSTAFY_CACHE_DIR` never pass, whatever a pack lists. A manifest is refused when a pattern could reach process or runtime
 configuration (`PATH`, `HOME`, `LD_*`, `NODE_*`, `GIT_*`, `CODEX*`, `OPENAI*`, `CONTROLLER*`,
 `INSTAFY_*` …). The one namespace under `INSTAFY_` open to packs is `INSTAFY_LOOKUP_`.
 
