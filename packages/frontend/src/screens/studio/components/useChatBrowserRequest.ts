@@ -17,6 +17,7 @@ import {
   type BrowserAutoStartPlan,
   type SharedBrowserPresence,
 } from "./browserAutoStart";
+import { browserHandBackOfPromptMetadata } from "./browserHandBack";
 import {
   BROWSER_AUTO_STARTED_METADATA_KEY,
   BROWSER_REQUEST_OF_METADATA_KEY,
@@ -282,7 +283,8 @@ function autoStartStillApplies(current: Options, key: string): boolean {
  *   another viewer, another device, a reload, an automation or a worker;
  * - for the newest card, sent after the conversation was opened and within ten
  *   minutes, with no message after it and no continuation for it;
- * - never for a card a browser turn sent, so a pause or a denial cannot loop;
+ * - never for a card a browser turn sent, so a pause or a denial cannot loop,
+ *   nor for one a hand-back turn sent (useBrowserHandBack: one hop only);
  * - for an address the person could have seen ({@link browserAutoStartAddressesSeen});
  * - once that run is finished, and once the tab is visible;
  * - once per card on this page, at most one start that opens the browser per
@@ -675,6 +677,9 @@ export function useChatBrowserRequest(options: Options) {
       chatClientSessionId: auto.chatClientSessionId,
     })) return DECIDED;
     if (isBrowserTurnPromptMetadata(sent.metadata)) return DECIDED;
+    // Nor for a card a hand-back turn sent: one automatic hop only, so the
+    // card stays a button for the person to press.
+    if (browserHandBackOfPromptMetadata(sent.metadata)) return DECIDED;
     // Wait for that run to finish and for the person to see this tab.
     if (current.busy || auto.activeRunIds.has(jobId) || !visible) return DECIDED;
 
