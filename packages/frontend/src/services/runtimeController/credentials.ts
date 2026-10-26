@@ -691,8 +691,58 @@ export interface CredentialRequirementsResult {
     dailyPromptLimit: number;
     dailyPromptsUsed: number;
     remainingPrompts: number | null;
+    /**
+     * When the next prompt frees up (ISO time), sent only once the allowance
+     * is used up. Older controllers leave it out.
+     */
+    nextAvailableAt?: string | null;
   } | null;
   error?: string;
+}
+
+/** Reads the `managedAi` block of GET /me/credentials/requirements. */
+export function parseManagedAiAccess(value: unknown): CredentialRequirementsResult["managedAi"] {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const managedAiPayload = value as Record<string, unknown>;
+  return {
+    enabled: Boolean(managedAiPayload.enabled),
+    available: Boolean(managedAiPayload.available),
+    label:
+      typeof managedAiPayload.label === "string" && managedAiPayload.label.trim().length > 0
+        ? managedAiPayload.label
+        : "Instafy AI",
+    modelId:
+      typeof managedAiPayload.modelId === "string" && managedAiPayload.modelId.trim()
+        ? managedAiPayload.modelId.trim()
+        : null,
+    modelLabel:
+      typeof managedAiPayload.modelLabel === "string" && managedAiPayload.modelLabel.trim()
+        ? managedAiPayload.modelLabel.trim()
+        : null,
+    creditBurnAmount:
+      typeof managedAiPayload.creditBurnAmount === "number"
+        ? managedAiPayload.creditBurnAmount
+        : 0,
+    dailyPromptLimit:
+      typeof managedAiPayload.dailyPromptLimit === "number"
+        ? managedAiPayload.dailyPromptLimit
+        : 0,
+    dailyPromptsUsed:
+      typeof managedAiPayload.dailyPromptsUsed === "number"
+        ? managedAiPayload.dailyPromptsUsed
+        : 0,
+    remainingPrompts:
+      typeof managedAiPayload.remainingPrompts === "number"
+        ? managedAiPayload.remainingPrompts
+        : null,
+    nextAvailableAt:
+      typeof managedAiPayload.nextAvailableAt === "string" &&
+      Number.isFinite(Date.parse(managedAiPayload.nextAvailableAt))
+        ? managedAiPayload.nextAvailableAt
+        : null,
+  };
 }
 
 export async function getCredentialRequirements(params?: {
@@ -750,49 +800,12 @@ export async function getCredentialRequirements(params?: {
     }
 
     const payload = (await response.json()) as Record<string, unknown>;
-    const managedAiPayload =
-      payload.managedAi && typeof payload.managedAi === "object"
-        ? (payload.managedAi as Record<string, unknown>)
-        : null;
     return {
       success: true,
       requiresUserCredentials: Boolean(payload.requiresUserCredentials),
       proxyBackend: typeof payload.proxyBackend === "string" ? payload.proxyBackend : null,
       hasDefaultCredential: Boolean(payload.hasDefaultCredential),
-      managedAi: managedAiPayload
-        ? {
-            enabled: Boolean(managedAiPayload.enabled),
-            available: Boolean(managedAiPayload.available),
-            label:
-              typeof managedAiPayload.label === "string" && managedAiPayload.label.trim().length > 0
-                ? managedAiPayload.label
-                : "Instafy AI",
-            modelId:
-              typeof managedAiPayload.modelId === "string" && managedAiPayload.modelId.trim()
-                ? managedAiPayload.modelId.trim()
-                : null,
-            modelLabel:
-              typeof managedAiPayload.modelLabel === "string" && managedAiPayload.modelLabel.trim()
-                ? managedAiPayload.modelLabel.trim()
-                : null,
-            creditBurnAmount:
-              typeof managedAiPayload.creditBurnAmount === "number"
-                ? managedAiPayload.creditBurnAmount
-                : 0,
-            dailyPromptLimit:
-              typeof managedAiPayload.dailyPromptLimit === "number"
-                ? managedAiPayload.dailyPromptLimit
-                : 0,
-            dailyPromptsUsed:
-              typeof managedAiPayload.dailyPromptsUsed === "number"
-                ? managedAiPayload.dailyPromptsUsed
-                : 0,
-            remainingPrompts:
-              typeof managedAiPayload.remainingPrompts === "number"
-                ? managedAiPayload.remainingPrompts
-                : null,
-          }
-        : null,
+      managedAi: parseManagedAiAccess(payload.managedAi),
       error: typeof payload.error === "string" ? payload.error : undefined,
     };
   } catch (error) {

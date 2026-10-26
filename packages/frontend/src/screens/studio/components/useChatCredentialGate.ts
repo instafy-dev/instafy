@@ -52,6 +52,7 @@ type CredentialRequirementState = {
     dailyPromptLimit: number;
     dailyPromptsUsed: number;
     remainingPrompts: number | null;
+    nextAvailableAt?: string | null;
   } | null;
   error: string | null;
 };

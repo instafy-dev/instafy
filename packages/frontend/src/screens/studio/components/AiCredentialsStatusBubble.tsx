@@ -35,6 +35,7 @@ import {
   CHATGPT_CONNECTION_VERIFICATION_WARNING,
 } from "./device-auth/deviceAuthCompletion";
 import { useDeviceAuthFlow } from "./device-auth/useDeviceAuthFlow";
+import { describeManagedAiNextAvailable, isManagedAiAllowanceUsedUp } from "./managedAiAllowance";
 
 const {
   list: listMyCredentials,
@@ -76,6 +77,7 @@ interface AiCredentialsStatusBubbleProps {
     dailyPromptLimit: number;
     dailyPromptsUsed: number;
     remainingPrompts: number | null;
+    nextAvailableAt?: string | null;
   } | null;
   onSetDefaultCredential?: (credentialId: string) => void;
   onUseManagedAi?: () => void | Promise<void>;
@@ -218,6 +220,10 @@ export function AiCredentialsStatusBubble({
   const resetDeviceAuthFlow = deviceAuth.reset;
   const hydrateDeviceAuthFlow = deviceAuth.hydrate;
   const wizardBusy = isBusy || deviceAuthBusy || deviceAuthCompleting;
+  // The gate is up only because today's hosted AI messages are used up, not
+  // because AI was never set up: say so, and when more are available.
+  const managedAiUsedUp =
+    intent === "gate" && effectiveState === "missing" && isManagedAiAllowanceUsedUp(managedAi);
 
   const title = useMemo(() => {
     if (intent === "connect") {
@@ -242,9 +248,17 @@ export function AiCredentialsStatusBubble({
       case "error":
         return "I couldn't load your AI setup.";
       default:
-        return "Connect AI to send this. Your message is kept.";
+        return managedAiUsedUp && managedAi
+          ? `You've used today's ${managedAi.label} messages. Your message is kept.`
+          : "Connect AI to send this. Your message is kept.";
     }
-  }, [connectedCredentials.length, effectiveState, intent, managedAi?.available, managedAi?.label]);
+  }, [
+    connectedCredentials.length,
+    effectiveState,
+    intent,
+    managedAi,
+    managedAiUsedUp,
+  ]);
 
   const resolvedDetail = useMemo(() => {
     if (deviceAuthError) {
@@ -596,6 +610,18 @@ export function AiCredentialsStatusBubble({
             Currently using: {resolveCredentialLabel(defaultCredential)}
           </Text>
         ) : null}
+        {managedAiUsedUp ? (
+          <Text
+            as="p"
+            variant="caption"
+            tone="muted"
+            className="mt-1 text-xs"
+            data-testid="ai-gate-managed-ai-used-up"
+          >
+            {describeManagedAiNextAvailable(managedAi?.nextAvailableAt)} Connect your own AI to send it
+            now.
+          </Text>
+        ) : null}
         <div className="mt-2.5 flex flex-wrap items-center gap-2">
           <Button
             variant="primary"
@@ -605,7 +631,7 @@ export function AiCredentialsStatusBubble({
             isDisabled={wizardBusy}
             data-testid="ai-gate-connect-ai"
           >
-            Connect AI
+            {managedAiUsedUp ? "Connect your own AI" : "Connect AI"}
           </Button>
           {managedAiOffered && managedAi ? (
             <Button

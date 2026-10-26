@@ -352,6 +352,7 @@ export function ChatPostTranscriptAuxiliaryRows({
     dailyPromptLimit: number;
     dailyPromptsUsed: number;
     remainingPrompts: number | null;
+    nextAvailableAt?: string | null;
   } | null;
   onSetDefaultCredential: (credentialId: string) => void;
   onUseManagedAi: () => void;

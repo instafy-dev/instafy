@@ -355,6 +355,11 @@ pub(crate) struct ManagedAiAccessResponse {
     pub(crate) daily_prompts_used: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) remaining_prompts: Option<i32>,
+    /// When the next prompt frees up, set only once the allowance is used up.
+    /// Usage is counted over a rolling window, so this is when the prompt that
+    /// brings the count back under the limit leaves that window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) next_available_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -804,6 +809,11 @@ async fn sleep_managed_ai_startup_retry(attempt: u32) {
     tokio::task::yield_now().await;
 }
 
+/// How far back managed AI prompts count against the daily allowance.
+fn managed_ai_prompt_window() -> chrono::Duration {
+    chrono::Duration::hours(24)
+}
+
 pub(crate) async fn count_recent_managed_ai_prompts(
     transaction: &Transaction<'_>,
     user_id: Option<Uuid>,
@@ -826,6 +836,52 @@ pub(crate) async fn count_recent_managed_ai_prompts(
         .map_err(|error| internal_error(format!("failed to count managed AI prompts: {error}")))?;
 
     Ok(row.get::<_, i32>("count"))
+}
+
+/// When the rolling window frees a prompt again for someone whose counted
+/// prompts were sent at `counted_prompt_times` (oldest first). With `n`
+/// counted prompts and a limit of `limit`, the count drops below the limit
+/// once the `n - limit + 1` oldest have left the window.
+fn managed_ai_next_available_at(
+    counted_prompt_times: &[DateTime<Utc>],
+    daily_prompt_limit: i32,
+    window: chrono::Duration,
+) -> Option<DateTime<Utc>> {
+    let limit = usize::try_from(daily_prompt_limit)
+        .ok()
+        .filter(|limit| *limit > 0)?;
+    let index = counted_prompt_times.len().checked_sub(limit)?;
+    counted_prompt_times
+        .get(index)
+        .map(|created_at| *created_at + window)
+}
+
+/// The send times of the managed AI prompts counted since `since`, oldest
+/// first, for [`managed_ai_next_available_at`].
+async fn load_recent_managed_ai_prompt_times(
+    transaction: &Transaction<'_>,
+    user_id: Uuid,
+    since: DateTime<Utc>,
+) -> Result<Vec<DateTime<Utc>>, (StatusCode, Json<ApiError>)> {
+    let rows = transaction
+        .query(
+            "select created_at
+             from prompts
+             where user_id = $1
+               and created_at >= $2
+               and metadata @> '{\"managedAiUsed\": true}'::jsonb
+             order by created_at asc",
+            &[&user_id, &since],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!("failed to load managed AI prompt times: {error}"))
+        })?;
+
+    Ok(rows
+        .iter()
+        .map(|row| row.get::<_, DateTime<Utc>>("created_at"))
+        .collect())
 }
 
 pub(crate) fn build_managed_ai_access_response(
@@ -856,6 +912,7 @@ pub(crate) fn build_managed_ai_access_response(
         daily_prompt_limit: config.managed_ai_daily_prompt_limit,
         daily_prompts_used,
         remaining_prompts,
+        next_available_at: None,
     }
 }
 
@@ -895,6 +952,7 @@ async fn get_my_credential_requirements(
             } else {
                 None
             },
+            next_available_at: None,
         };
         return Ok(Json(CredentialRequirementsResponse {
             requires_user_credentials: true,
@@ -924,23 +982,29 @@ async fn get_my_credential_requirements(
     let has_default_credential = load_default_credential_id(&transaction, Some(user_id))
         .await?
         .is_some();
-    let daily_prompts_used = count_recent_managed_ai_prompts(
-        &transaction,
-        Some(user_id),
-        Utc::now() - chrono::Duration::hours(24),
-    )
-    .await?;
-    transaction
-        .rollback()
-        .await
-        .map_err(|error| internal_error(format!("failed to close transaction: {error}")))?;
-
-    let managed_ai = build_managed_ai_access_response(
+    let window = managed_ai_prompt_window();
+    let window_start = Utc::now() - window;
+    let daily_prompts_used =
+        count_recent_managed_ai_prompts(&transaction, Some(user_id), window_start).await?;
+    let mut managed_ai = build_managed_ai_access_response(
         &state.config,
         &proxy_requirements,
         has_default_credential,
         daily_prompts_used,
     );
+    if managed_ai.enabled && managed_ai.remaining_prompts == Some(0) {
+        let counted_prompt_times =
+            load_recent_managed_ai_prompt_times(&transaction, user_id, window_start).await?;
+        managed_ai.next_available_at = managed_ai_next_available_at(
+            &counted_prompt_times,
+            managed_ai.daily_prompt_limit,
+            window,
+        );
+    }
+    transaction
+        .rollback()
+        .await
+        .map_err(|error| internal_error(format!("failed to close transaction: {error}")))?;
 
     Ok(Json(build_credential_requirements_response(
         proxy_requirements,
@@ -3449,8 +3513,9 @@ mod credential_lease_contract_tests {
 mod requirement_tests {
     use super::{
         build_managed_ai_access_response, ensure_managed_ai_proxy_ready,
-        fetch_proxy_credential_requirements, platform_lane_pin_problem,
-        ProxyCredentialRequirements, ProxyPlatformLane, ProxyPlatformLaneServedBy,
+        fetch_proxy_credential_requirements, managed_ai_next_available_at,
+        managed_ai_prompt_window, platform_lane_pin_problem, ProxyCredentialRequirements,
+        ProxyPlatformLane, ProxyPlatformLaneServedBy,
     };
     use crate::tests::{build_app_config, test_origin_private_key, test_origin_public_key};
 
@@ -3748,6 +3813,70 @@ mod requirement_tests {
     }
 
     #[test]
+    fn managed_ai_next_available_at_is_when_a_counted_prompt_leaves_the_window() {
+        let window = managed_ai_prompt_window();
+        assert_eq!(window, chrono::Duration::hours(24));
+        let start = chrono::DateTime::parse_from_rfc3339("2026-10-26T08:00:00Z")
+            .expect("timestamp")
+            .with_timezone(&chrono::Utc);
+        let sent = |count: i64| {
+            (0..count)
+                .map(|minute| start + chrono::Duration::minutes(minute * 10))
+                .collect::<Vec<_>>()
+        };
+
+        // Exactly at the limit: the oldest prompt frees the first slot.
+        assert_eq!(
+            managed_ai_next_available_at(&sent(20), 20, window),
+            Some(start + window)
+        );
+        // Over the limit (concurrent sends): three must leave, so the third
+        // oldest decides.
+        assert_eq!(
+            managed_ai_next_available_at(&sent(22), 20, window),
+            Some(start + chrono::Duration::minutes(20) + window)
+        );
+        // Still under the limit, or no limit at all: nothing to wait for.
+        assert_eq!(managed_ai_next_available_at(&sent(19), 20, window), None);
+        assert_eq!(managed_ai_next_available_at(&sent(5), 0, window), None);
+        assert_eq!(managed_ai_next_available_at(&[], 20, window), None);
+    }
+
+    #[test]
+    fn managed_ai_next_available_at_is_an_optional_wire_field() {
+        let config = build_app_config(
+            test_origin_private_key(),
+            test_origin_public_key(),
+            "test-key-id",
+        );
+        let mut managed_ai = build_managed_ai_access_response(
+            &config,
+            &ProxyCredentialRequirements {
+                requires_user_credentials: false,
+                proxy_backend: "codex".to_string(),
+                platform_lane: None,
+                error: None,
+            },
+            false,
+            20,
+        );
+
+        // Older clients see the same shape as before until a time is known.
+        assert_eq!(managed_ai.next_available_at, None);
+        let wire = serde_json::to_value(&managed_ai).expect("json");
+        assert!(wire.get("nextAvailableAt").is_none());
+
+        managed_ai.next_available_at = Some(
+            chrono::DateTime::parse_from_rfc3339("2026-10-27T08:00:00Z")
+                .expect("timestamp")
+                .with_timezone(&chrono::Utc),
+        );
+        let wire = serde_json::to_value(&managed_ai).expect("json");
+        assert_eq!(wire["nextAvailableAt"], json!("2026-10-27T08:00:00Z"));
+        assert_eq!(wire["remainingPrompts"], json!(0));
+    }
+
+    #[test]
     fn an_unpinned_or_mismatched_static_platform_lane_is_reported() {
         let lane = |served_by, pinned: Option<&str>| ProxyPlatformLane {
             served_by,
@@ -3965,3 +4094,7 @@ mod session_identity_tests {
 #[cfg(test)]
 #[path = "credentials_reserved_id_tests.rs"]
 pub(crate) mod reserved_id_tests;
+
+#[cfg(test)]
+#[path = "credentials_managed_ai_allowance_tests.rs"]
+mod managed_ai_allowance_tests;
