@@ -29,6 +29,13 @@ const CREDENTIAL_GATE_CACHE_TTL_MS = 5 * 60 * 1000;
 const CREDENTIAL_GATE_CHECKING_RECHECK_MS = 5_000;
 const CREDENTIAL_GATE_REQUEST_TIMEOUT_MS = 8_000;
 const CREDENTIAL_GATE_CHECKING_TIMEOUT_MS = 20_000;
+// The controller frees a hosted AI prompt at managedAi.nextAvailableAt. Ask
+// again just after it, and keep asking now and then while the controller still
+// reports a time that has passed (a clock ahead of the controller's).
+const MANAGED_AI_NEXT_AVAILABLE_GRACE_MS = 2_000;
+const MANAGED_AI_NEXT_AVAILABLE_PASSED_RECHECK_MS = 60_000;
+// setTimeout fires at once for anything above a signed 32-bit delay.
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 type PendingCredentialDraft = {
   conversationId: string;
@@ -565,6 +572,34 @@ export function useChatCredentialGate({
     void refreshCredentialRequirements();
   }, [
     hasUser,
+    refreshCredentialRequirements,
+    runtimeControllerEnabled,
+  ]);
+
+  // Nothing else re-asks when the stated time arrives, so a gate that says
+  // "More are available at 3:40 PM" would otherwise stay up past 3:40 PM.
+  // Each answer is a new object, so every re-check schedules the next one.
+  const managedAiNextAvailableAt = credentialRequirements.managedAi?.nextAvailableAt ?? null;
+  useEffect(() => {
+    if (!runtimeControllerEnabled || !hasUser || credentialsReady || !managedAiNextAvailableAt) {
+      return;
+    }
+    const at = Date.parse(managedAiNextAvailableAt);
+    if (!Number.isFinite(at)) {
+      return;
+    }
+    const untilAt = at - Date.now();
+    const delay =
+      untilAt > 0
+        ? Math.min(untilAt + MANAGED_AI_NEXT_AVAILABLE_GRACE_MS, MAX_TIMER_DELAY_MS)
+        : MANAGED_AI_NEXT_AVAILABLE_PASSED_RECHECK_MS;
+    const timeoutId = window.setTimeout(() => void refreshCredentialRequirements(), delay);
+    return () => window.clearTimeout(timeoutId);
+  }, [
+    credentialRequirements,
+    credentialsReady,
+    hasUser,
+    managedAiNextAvailableAt,
     refreshCredentialRequirements,
     runtimeControllerEnabled,
   ]);

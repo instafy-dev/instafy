@@ -50,8 +50,14 @@ describe("describeManagedAiNextAvailable", () => {
     expect(describeManagedAiNextAvailable(null, now)).toBe("More are available later.");
     expect(describeManagedAiNextAvailable(undefined, now)).toBe("More are available later.");
     expect(describeManagedAiNextAvailable("not a time", now)).toBe("More are available later.");
-    expect(describeManagedAiNextAvailable(new Date(2026, 9, 26, 8, 0).toISOString(), now)).toBe(
-      "More are available later.",
-    );
+  });
+
+  it("does not say later once the stated time has passed", () => {
+    // The gate re-checks at that time, so the wait is about to end.
+    for (const at of [new Date(2026, 9, 26, 8, 0), now]) {
+      const sentence = describeManagedAiNextAvailable(at.toISOString(), now);
+      expect(sentence).toBe("More should be available in a moment.");
+      expect(sentence).not.toContain("later");
+    }
   });
 });

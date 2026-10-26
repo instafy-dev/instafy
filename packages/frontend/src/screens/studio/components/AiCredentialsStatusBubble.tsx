@@ -368,6 +368,13 @@ export function AiCredentialsStatusBubble({
     if (connectStep === "provider") {
       return;
     }
+    // The header and Android back do what the notice's own Back does. The
+    // refusal is the device-auth error, so hiding only the prerequisite would
+    // leave the notice on screen.
+    if (connectStep === "openai-login" && deviceCodeLoginDisabled) {
+      leaveDisabledDeviceCodeLogin();
+      return;
+    }
     if (connectStep === "openai-login" && showDeviceAuthPrerequisite && !deviceAuthSession) {
       setShowDeviceAuthPrerequisite(false);
       return;
@@ -403,6 +410,8 @@ export function AiCredentialsStatusBubble({
     cancelDeviceAuthSession,
     connectStep,
     deviceAuthSession,
+    deviceCodeLoginDisabled,
+    leaveDisabledDeviceCodeLogin,
     resetDeviceAuthFlow,
     resetConnectState,
     showDeviceAuthPrerequisite,

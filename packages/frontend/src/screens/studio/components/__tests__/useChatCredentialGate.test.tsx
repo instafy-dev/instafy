@@ -238,3 +238,140 @@ describe("useChatCredentialGate cache seeding across spaces", () => {
     }
   });
 });
+
+describe("useChatCredentialGate once today's hosted AI messages are used up", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+  const start = Date.parse("2026-10-26T09:00:00Z");
+
+  function usedUpRequirements(nextAvailableAt: string) {
+    return {
+      success: true,
+      requiresUserCredentials: true,
+      proxyBackend: "openai",
+      hasDefaultCredential: false,
+      managedAi: {
+        ...managedAi,
+        available: false,
+        dailyPromptsUsed: 20,
+        remainingPrompts: 0,
+        nextAvailableAt,
+      },
+      error: null,
+    };
+  }
+
+  const availableAgain = {
+    success: true,
+    requiresUserCredentials: false,
+    proxyBackend: "openai",
+    hasDefaultCredential: false,
+    managedAi: { ...managedAi, dailyPromptsUsed: 19, remainingPrompts: 1 },
+    error: null,
+  };
+
+  beforeEach(() => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    vi.setSystemTime(start);
+    window.localStorage.clear();
+    captured = null;
+    controllerMocks.list.mockResolvedValue({ success: true, credentials: [] });
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.useRealTimers();
+    delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  async function advance(ms: number) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  }
+
+  it("asks again when the stated time arrives and lifts the gate", async () => {
+    controllerMocks.getRequirements
+      .mockResolvedValueOnce(usedUpRequirements(new Date(start + 10 * 60_000).toISOString()))
+      .mockResolvedValue(availableAgain);
+    await act(async () => {
+      root.render(
+        <Harness options={baseOptions({ currentUserId: "user-allowance-1", inputRequiresAi: true })} />,
+      );
+    });
+    expect(controllerMocks.getRequirements).toHaveBeenCalledTimes(1);
+    expect(captured?.credentialGateState).toBe("missing");
+
+    // Nothing re-asks before the time the gate names.
+    await advance(10 * 60_000 - 1_000);
+    expect(controllerMocks.getRequirements).toHaveBeenCalledTimes(1);
+    expect(captured?.credentialGateState).toBe("missing");
+
+    await advance(4_000);
+    expect(controllerMocks.getRequirements).toHaveBeenCalledTimes(2);
+    expect(captured?.credentialsReady).toBe(true);
+    expect(captured?.credentialGateState).toBeNull();
+  });
+
+  it("keeps asking while the controller still reports a time that has passed", async () => {
+    // A browser clock ahead of the controller's: the stated time looks past.
+    const stale = usedUpRequirements(new Date(start - 30_000).toISOString());
+    controllerMocks.getRequirements
+      .mockResolvedValueOnce(stale)
+      .mockResolvedValueOnce(stale)
+      .mockResolvedValue(availableAgain);
+    await act(async () => {
+      root.render(
+        <Harness options={baseOptions({ currentUserId: "user-allowance-2", inputRequiresAi: true })} />,
+      );
+    });
+    expect(controllerMocks.getRequirements).toHaveBeenCalledTimes(1);
+
+    await advance(59_000);
+    expect(controllerMocks.getRequirements).toHaveBeenCalledTimes(1);
+    await advance(2_000);
+    expect(controllerMocks.getRequirements).toHaveBeenCalledTimes(2);
+    expect(captured?.credentialGateState).toBe("missing");
+
+    await advance(60_000);
+    expect(controllerMocks.getRequirements).toHaveBeenCalledTimes(3);
+    expect(captured?.credentialGateState).toBeNull();
+
+    // Once hosted AI answers again nothing more is scheduled.
+    await advance(10 * 60_000);
+    expect(controllerMocks.getRequirements).toHaveBeenCalledTimes(3);
+  });
+
+  it("schedules nothing when the person already has their own AI", async () => {
+    controllerMocks.getRequirements.mockResolvedValue(
+      usedUpRequirements(new Date(start + 10 * 60_000).toISOString()),
+    );
+    controllerMocks.list.mockResolvedValue({
+      success: true,
+      credentials: [
+        {
+          id: "cred-own",
+          kind: "codex_auth_json",
+          label: "Codex",
+          isDefault: true,
+          revokedAt: null,
+        },
+      ],
+    });
+    await act(async () => {
+      root.render(
+        <Harness options={baseOptions({ currentUserId: "user-allowance-3", inputRequiresAi: true })} />,
+      );
+    });
+    expect(captured?.credentialsReady).toBe(true);
+
+    await advance(20 * 60_000);
+    expect(controllerMocks.getRequirements).toHaveBeenCalledTimes(1);
+  });
+});

@@ -35,16 +35,20 @@ function isSameLocalDay(left: Date, right: Date): boolean {
 /**
  * The sentence that says when hosted AI messages are available again. The
  * controller counts a rolling 24 hours, so the time can fall on the next day.
- * Without a usable time (an older controller, or a time already passed) it
- * says "later" rather than guessing.
+ * Without a usable time (an older controller) it says "later" rather than
+ * guessing. Once the stated time has passed the gate is about to re-check (see
+ * useChatCredentialGate), so it does not push the reader to "later" then.
  */
 export function describeManagedAiNextAvailable(
   nextAvailableAt: string | null | undefined,
   now: Date = new Date(),
 ): string {
   const at = typeof nextAvailableAt === "string" ? new Date(nextAvailableAt) : null;
-  if (!at || !Number.isFinite(at.getTime()) || at.getTime() <= now.getTime()) {
+  if (!at || !Number.isFinite(at.getTime())) {
     return "More are available later.";
+  }
+  if (at.getTime() <= now.getTime()) {
+    return "More should be available in a moment.";
   }
   const time = at.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
   if (isSameLocalDay(at, now)) {
