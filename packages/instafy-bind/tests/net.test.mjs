@@ -135,3 +135,10 @@ test("isLocalHostName names this machine and local networks, not public names", 
     assert.equal(isLocalHostName(host), false, host);
   }
 });
+
+test("isLocalHostName stays fast on a name with a long run of dots", () => {
+  const host = `a${".".repeat(100_000)}x`;
+  const started = Date.now();
+  assert.equal(isLocalHostName(host), false);
+  assert.ok(Date.now() - started < 1000, `took ${Date.now() - started}ms`);
+});
