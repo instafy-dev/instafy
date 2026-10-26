@@ -130,6 +130,8 @@ pub struct OriginHttpServer {
     drain_limit: Duration,
     /// Set by [`OriginHttpServer::set_browser_host`].
     browser_host: Option<crate::browser_host::BrowserHostHandle>,
+    /// Set by [`OriginHttpServer::set_browser_page_capture_script`].
+    browser_page_capture_script: Option<crate::browser_page_capture::BrowserPageCaptureScript>,
 }
 
 pub struct ServerStart {
@@ -235,6 +237,7 @@ impl OriginHttpServer {
             sweeper: None,
             drain_limit: SHUTDOWN_DRAIN_LIMIT,
             browser_host: None,
+            browser_page_capture_script: None,
         })
     }
 
@@ -280,6 +283,18 @@ impl OriginHttpServer {
     /// [`OriginHttpServer::start`]; the multi-tenant gateway ignores it.
     pub fn set_browser_host(&mut self, handle: crate::browser_host::BrowserHostHandle) {
         self.browser_host = Some(handle);
+    }
+
+    /// Serves **Send page to Octo** on this machine's browser
+    /// (`POST /browser/pages/:id/capture`) with the given page reader: the
+    /// redaction and page-capture scripts of `@instafy/browser-action-policy`
+    /// (see [`crate::browser_page_capture`]). Without it that route answers
+    /// 404. Call it before [`OriginHttpServer::start`].
+    pub fn set_browser_page_capture_script(
+        &mut self,
+        script: crate::browser_page_capture::BrowserPageCaptureScript,
+    ) {
+        self.browser_page_capture_script = Some(script);
     }
 
     /// Starts the presence loop held back by
@@ -387,6 +402,7 @@ impl OriginHttpServer {
                 )
                 .context("failed to open workspace root capability")?;
                 state.browser_host = self.browser_host.clone();
+                state.browser_page_capture_script = self.browser_page_capture_script.clone();
                 self.state = Some(state.clone());
                 routes::router(state)
             }

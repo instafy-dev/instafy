@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "license": "AGPL-3.0-only",
   "type": "commonjs",
-  "description": "Secret redaction and step classification shared by the Desktop Personal Browser and the hosted Shared Browser. Plain scripts with no dependencies.",
+  "description": "Secret redaction, step classification and sent-page reading shared by the Desktop Personal Browser and the hosted Shared Browser. Plain scripts with no dependencies.",
   "exports": {
     "./redaction": {
       "types": "./redaction.d.ts",
@@ -13,6 +13,10 @@
     "./actionPolicy": {
       "types": "./actionPolicy.d.ts",
       "default": "./actionPolicy.js"
+    },
+    "./pageCapture": {
+      "types": "./pageCapture.d.ts",
+      "default": "./pageCapture.js"
     }
   },
   "files": [
@@ -20,6 +24,8 @@
     "redaction.d.ts",
     "actionPolicy.js",
     "actionPolicy.d.ts",
+    "pageCapture.js",
+    "pageCapture.d.ts",
     "README.md"
   ]
 }

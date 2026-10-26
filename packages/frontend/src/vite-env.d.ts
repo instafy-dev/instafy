@@ -467,6 +467,20 @@ interface Window {
       url: string;
       ownerId: string;
     }) => Promise<InstafyDesktopPersonalBrowserStatus>;
+    /**
+     * Send page to Octo: the page on screen, read once and masked by Desktop.
+     * Older Desktops do not have it.
+     */
+    personalBrowserReadPage?: (options: {
+      ownerId: string;
+    }) => Promise<{
+      url: string;
+      title: string;
+      text: string;
+      secretScreen: boolean;
+      truncated: boolean;
+      readAt: string;
+    }>;
     personalBrowserGoBack?: (options: {
       ownerId: string;
     }) => Promise<InstafyDesktopPersonalBrowserStatus>;

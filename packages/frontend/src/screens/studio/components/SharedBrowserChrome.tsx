@@ -13,6 +13,7 @@ import { browserSessionPageIsPlaceholder, type BrowserSessionPage } from "./brow
 import { normalizeBrowserAddress } from "./browserAddress";
 import { BrowserAddressField } from "./BrowserAddressField";
 import { BrowserChromeShell } from "./BrowserChromeShell";
+import { SendPageToOctoButton } from "./SendPageToOctoButton";
 import {
   HUMAN_SHARED_BROWSER_CONTROL_OWNER,
   type SharedBrowserControlOwner,
@@ -36,6 +37,9 @@ export type SharedBrowserChromeProps = {
   onReload: (pageId: string) => void;
   onFocusPage: (pageId: string) => void;
   onClearError: () => void;
+  /** Send page to Octo for the page on screen; absent when this person cannot. */
+  onSendPage?: (pageId: string) => void;
+  sendPagePending?: boolean;
   toolbarLeading?: ReactNode;
   toolbarStatus?: ReactNode;
   /** Put compact history and reload controls in the existing browser options menu. */
@@ -107,6 +111,8 @@ export function SharedBrowserChrome({
   onReload,
   onFocusPage,
   onClearError,
+  onSendPage,
+  sendPagePending = false,
   toolbarLeading,
   toolbarStatus,
   toolbarActions,
@@ -313,7 +319,16 @@ export function SharedBrowserChrome({
           </div>
         }
         status={toolbarStatus}
-        actions={typeof toolbarActions === "function" ? toolbarActions(compactNavigation) : toolbarActions}
+        actions={onSendPage ? (
+          <>
+            <SendPageToOctoButton
+              onPress={() => activePage && onSendPage(activePage.id)}
+              pending={sendPagePending}
+              disabled={!resolved || !activePage || browserSessionPageIsPlaceholder(activePage) || !/^https?:\/\//i.test(activePage.url)}
+            />
+            {typeof toolbarActions === "function" ? toolbarActions(compactNavigation) : toolbarActions}
+          </>
+        ) : typeof toolbarActions === "function" ? toolbarActions(compactNavigation) : toolbarActions}
         feedback={displayedError}
         feedbackId={`${errorId}-error`}
         feedbackTestId="shared-browser-error"

@@ -24,8 +24,8 @@ use crate::error::OriginError;
 use crate::routes::AppState;
 
 #[derive(Debug, Deserialize)]
-struct BrowserTargetPathParams {
-    page_id: String,
+pub(crate) struct BrowserTargetPathParams {
+    pub(crate) page_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -36,8 +36,8 @@ struct BrowserPagesQuery {
 }
 
 #[derive(Debug, Deserialize)]
-struct BrowserCdpTargetDescriptor {
-    id: String,
+pub(crate) struct BrowserCdpTargetDescriptor {
+    pub(crate) id: String,
     #[serde(rename = "type")]
     target_type: String,
     #[serde(default)]
@@ -45,7 +45,7 @@ struct BrowserCdpTargetDescriptor {
     #[serde(default)]
     url: String,
     #[serde(rename = "webSocketDebuggerUrl", default)]
-    websocket_debugger_url: Option<String>,
+    pub(crate) websocket_debugger_url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -205,6 +205,7 @@ const BROWSER_CDP_TARGET_TITLE_MAX_BYTES: usize = 1024;
 const BROWSER_CDP_TARGET_URL_MAX_BYTES: usize = 32 * 1024;
 const BROWSER_NAVIGATION_URL_MAX_BYTES: usize = 8 * 1024;
 const BROWSER_PAGE_COMMAND_BODY_LIMIT_BYTES: usize = 12 * 1024;
+const BROWSER_PAGE_CAPTURE_BODY_LIMIT_BYTES: usize = 1024;
 const BROWSER_APPROVAL_DECISION_BODY_LIMIT_BYTES: usize = 4 * 1024;
 const BROWSER_WEBRTC_OFFER_BODY_LIMIT_BYTES: usize = 256 * 1024;
 const DEFAULT_BROWSER_RFB_RENDER_SCALE: f64 = 1.0;
@@ -272,6 +273,14 @@ pub fn control_routes() -> Router<AppState> {
             "/browser/pages/:page_id/command",
             post(handle_browser_page_command)
                 .layer(DefaultBodyLimit::max(BROWSER_PAGE_COMMAND_BODY_LIMIT_BYTES)),
+        )
+        // Send page to Octo: one read of one page, for the person who asks.
+        // It sends no input, but page text is more than the pixels a viewer
+        // sees and it goes into a chat message, so it needs control.
+        .route(
+            "/browser/pages/:page_id/capture",
+            post(crate::browser_page_capture::handle_browser_page_capture)
+                .layer(DefaultBodyLimit::max(BROWSER_PAGE_CAPTURE_BODY_LIMIT_BYTES)),
         )
         .route(
             "/browser/approval/decision",
@@ -752,7 +761,7 @@ fn normalize_browser_cdp_targets(
         .collect()
 }
 
-async fn fetch_browser_cdp_targets(
+pub(crate) async fn fetch_browser_cdp_targets(
     state: &AppState,
 ) -> Result<Vec<BrowserCdpTargetDescriptor>, OriginError> {
     let url = format!("{}/json/list", resolve_browser_cdp_base_url());

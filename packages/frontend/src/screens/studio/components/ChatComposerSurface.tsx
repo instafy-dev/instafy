@@ -13,6 +13,7 @@ import {
   Archery,
   Bookmark,
   Collapse,
+  Globe,
   Check,
   Lock,
   Menu,
@@ -564,7 +565,8 @@ export function ChatComposerSurface({
   const foldSuggestionIntoMenu = showMobileGhostSuggestionAcceptButton;
   const imageUploadDisabled =
     mutationDisabled || editingQueueMessage || sendingAttachment || onboardingInputLocked || Boolean(imageUploadUnavailableReason);
-  const sendingImageCount = imageAttachments.filter((attachment) => attachment.sending).length;
+  const sendingImageCount = imageAttachments.filter((attachment) => attachment.sending && !attachment.page).length;
+  const sendingPageCount = imageAttachments.filter((attachment) => attachment.sending && attachment.page).length;
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1561,10 +1563,44 @@ export function ChatComposerSurface({
               {imageAttachments.length > 0 ? (
                 <div
                   className={`mb-2 space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-2 ${DARK_PANEL_SOFT_BG_CLASS} dark:border-[color:var(--color-studio-dark-raised-control-border)] ${draftExpanded ? "max-h-24 shrink-0 overflow-y-auto" : ""}`}
-                  aria-busy={sendingImageCount > 0 ? true : undefined}
+                  aria-busy={sendingImageCount + sendingPageCount > 0 ? true : undefined}
                   data-testid="chat-image-upload-preview"
                 >
-                  {imageAttachments.map((attachment, index) => (
+                  {imageAttachments.map((attachment, index) => attachment.page ? (
+                    <div
+                      key={attachment.id}
+                      className={`flex items-center gap-3 ${attachment.sending ? "opacity-60" : ""}`}
+                      data-sending={attachment.sending ? "true" : undefined}
+                      data-testid="chat-sent-page-attachment"
+                    >
+                      <span
+                        className={`flex h-12 w-12 flex-none items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-500 shadow-sm dark:text-slate-300 ${DARK_RAISED_CONTROL_CLASS} ${DARK_PANEL_SHADOW_CLASS}`}
+                        aria-hidden="true"
+                      >
+                        <Globe className="h-5 w-5" />
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <Text as="div" variant="caption" tone="secondary" className="truncate text-xs font-medium" title={attachment.page.url}>
+                          {attachment.page.title || attachment.page.host}
+                        </Text>
+                        <Text as="div" variant="caption" tone="muted" className="truncate text-xxs">
+                          {`Page from ${attachment.page.host} · ${attachment.page.viewer === "personal" ? "This device" : "Workspace"} browser · ${formatAttachmentSize(attachment.file.size)}`}
+                        </Text>
+                      </div>
+                      <IconButton
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        radius="full"
+                        onPress={() => onRemoveImageAttachment(attachment.id)}
+                        isDisabled={Boolean(attachment.sending)}
+                        aria-label="Remove page"
+                        data-testid="chat-sent-page-remove"
+                      >
+                        <Xmark className="h-4 w-4" aria-hidden="true" />
+                      </IconButton>
+                    </div>
+                  ) : (
                     <div
                       key={attachment.id}
                       className={`flex items-center gap-3 ${attachment.sending ? "opacity-60" : ""}`}
@@ -1613,10 +1649,10 @@ export function ChatComposerSurface({
                     aria-live="polite"
                     variant="caption"
                     tone="muted"
-                    className={sendingImageCount > 0 ? "text-xs" : "sr-only"}
+                    className={sendingImageCount + sendingPageCount > 0 ? "text-xs" : "sr-only"}
                     data-testid="chat-image-upload-status"
                   >
-                    {sendingImageCount > 0 ? describeSendingImages(sendingImageCount) : ""}
+                    {sendingImageCount + sendingPageCount > 0 ? describeSendingImages(sendingImageCount, sendingPageCount) : ""}
                   </Text>
                 </div>
               ) : null}

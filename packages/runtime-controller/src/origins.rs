@@ -4051,6 +4051,9 @@ fn classify_canonical_origin_proxy_request(
                 Ok(ORIGIN_PROXY_BROWSER_CONTROL_SCOPES)
             } else if is_exact_browser_page_action(normalized, "focus")
                 || is_exact_browser_page_action(normalized, "command")
+                // Send page to Octo: one masked read of the page for the
+                // person who asks, to attach to their next message.
+                || is_exact_browser_page_action(normalized, "capture")
             {
                 Ok(ORIGIN_PROXY_BROWSER_CONTROL_SCOPES)
             } else {
@@ -6035,11 +6038,23 @@ MCowBQYDK2VwAyEAFQAEX0aYqix3VQUBg05FFISGxhx2Ry93VE51GzM5iXA=
                 .expect("browser focus should be proxyable");
         assert_eq!(focus_scopes, ORIGIN_PROXY_BROWSER_CONTROL_SCOPES);
 
+        let capture_scopes =
+            classify_origin_proxy_request(&Method::POST, "/browser/pages/ABC123/capture")
+                .expect("sending a page should be proxyable");
+        assert_eq!(capture_scopes, ORIGIN_PROXY_BROWSER_CONTROL_SCOPES);
+        // Page text is never readable with a view grant or a GET.
+        assert!(
+            classify_origin_proxy_request(&Method::GET, "/browser/pages/ABC123/capture").is_err()
+        );
+
         for path in [
             "/browser/pages/ABC123/command/",
             "/browser/pages/ABC123/nested/command",
             "/browser/pages//command",
             "/browser/pages/ABC123/commands",
+            "/browser/pages/ABC123/capture/",
+            "/browser/pages/ABC123/captures",
+            "/browser/pages/ABC123/nested/capture",
         ] {
             assert!(
                 classify_origin_proxy_request(&Method::POST, path).is_err(),

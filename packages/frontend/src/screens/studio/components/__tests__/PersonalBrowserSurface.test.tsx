@@ -37,6 +37,7 @@ function createModel(): PersonalBrowserModel {
     navigationError: null,
     ownerId: "owner-1",
     pendingHandoff: null,
+    readPage: vi.fn(async () => null),
     reload: vi.fn(async () => null),
     recovering: false,
     retryAgentControl: vi.fn(async () => null),
@@ -139,6 +140,28 @@ describe("PersonalBrowserSurface", () => {
     expect(document.querySelector('[data-testid="personal-browser-overlay-preview"]')).toBeNull();
     expect(model.close).not.toHaveBeenCalled();
     expect(model.setAgentControlEnabled).not.toHaveBeenCalled();
+  });
+
+  it("sends the page only on a press and leaves agent control alone", async () => {
+    const model = createModel();
+    window.instafyDesktop = { notify: vi.fn(), personalBrowserSetBounds: vi.fn(async () => model.status!) };
+    const onSendPage = vi.fn();
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} onSendPage={onSendPage} />));
+    const button = document.querySelector<HTMLButtonElement>('[data-testid="browser-send-page"]')!;
+    expect(button.getAttribute("aria-label")).toBe("Send page to Octo");
+    expect(onSendPage).not.toHaveBeenCalled();
+    expect(model.readPage).not.toHaveBeenCalled();
+    await act(async () => button.click());
+    expect(onSendPage).toHaveBeenCalledTimes(1);
+    expect(model.setAgentControlEnabled).not.toHaveBeenCalled();
+
+    // A tab with no web page has nothing to send; without the callback there is no button.
+    const blank = createModel();
+    blank.status = { ...blank.status!, url: "about:blank" };
+    await act(async () => root.render(<PersonalBrowserSurface active model={blank} transportSelector={null} onSendPage={onSendPage} />));
+    expect(document.querySelector<HTMLButtonElement>('[data-testid="browser-send-page"]')!.disabled).toBe(true);
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
+    expect(document.querySelector('[data-testid="browser-send-page"]')).toBeNull();
   });
 
   it("reports valid viewport bounds and explicitly hides the native view", async () => {

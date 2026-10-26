@@ -50,6 +50,16 @@ export type DesktopRuntimeStartOptions = {
   personalBrowserOwnerId?: string;
 };
 
+/** One page sent with Send page to Octo, masked by Desktop. */
+export type PersonalBrowserSentPage = {
+  url: string;
+  title: string;
+  text: string;
+  secretScreen: boolean;
+  truncated: boolean;
+  readAt: string;
+};
+
 export type PersonalBrowserStatus = {
   supported: boolean;
   enabled: boolean;
@@ -453,6 +463,10 @@ contextBridge.exposeInMainWorld("instafyDesktop", {
     ipcRenderer.invoke("instafy:browserTabShareFrame", options),
   browserTabShareStop: (options: { ownerId: string; captureId: string }): Promise<void> =>
     ipcRenderer.invoke("instafy:browserTabShareStop", options),
+  /** Send page to Octo: the page on screen, read once and masked by Desktop. */
+  personalBrowserReadPage: async (options: { ownerId: string }): Promise<PersonalBrowserSentPage> => {
+    return (await ipcRenderer.invoke("instafy:personalBrowserReadPage", options)) as PersonalBrowserSentPage;
+  },
   personalBrowserGoBack: async (options: { ownerId: string }): Promise<PersonalBrowserStatus> => {
     return (await ipcRenderer.invoke("instafy:personalBrowserGoBack", options)) as PersonalBrowserStatus;
   },

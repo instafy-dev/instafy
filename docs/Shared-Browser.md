@@ -386,8 +386,9 @@ space's own machine cannot be switched to it yet (see "Remaining work").
 ### Redaction, step categories and downloads
 
 The controller embeds the private workspace package
-`@instafy/browser-action-policy` (`redaction.js` and `actionPolicy.js`), the same
-plain scripts the Desktop Personal Browser uses. runtime-agent compiles the
+`@instafy/browser-action-policy` (`redaction.js`, `actionPolicy.js` and
+`pageCapture.js`, whose `pageSecretSignalsInPage` answers the page's secret
+checks), the same plain scripts the Desktop Personal Browser uses. runtime-agent compiles the
 source into its binary and passes the composed controller script to Node on
 stdin, because together they exceed the 128 KiB Linux limit for one argument.
 
@@ -1286,8 +1287,9 @@ Browser access is separate from workspace file access:
 
 - `browser.view` covers capabilities, page metadata, actions, pixels, and the
   browser host's state (`GET /browser/host`);
-- `browser.control` covers focus, navigation, pointer, and keyboard input, and
-  starting the browser host (`POST /browser/host/start`);
+- `browser.control` covers focus, navigation, pointer, and keyboard input,
+  starting the browser host (`POST /browser/host/start`), and reading a page for
+  **Send page to Octo** (`POST /browser/pages/:id/capture`, below);
 - CDP/WebRTC pixels require `browser.view`; their separate input requires
   `browser.control` plus the live driver lease; RFB requires both and is
   driver-exclusive.
@@ -1301,6 +1303,34 @@ and control-plane destinations for Chromium navigation. The per-origin plus
 one-shot confirmation policy above is the sensitive-site action policy for
 otherwise public sites; a future denylist may reduce prompt volume but is not
 an authorization substitute.
+
+### Send page to Octo
+
+**Send page to Octo** in the Browser toolbar adds a copy of the page on screen to
+the person's next chat message, like a paste. `POST /browser/pages/:id/capture`
+reads that page once for the person who pressed it:
+
+- It needs `browser.control`, never `browser.view`, so a viewer's polling and
+  pixels never carry page text. It does not need the driver lease: reading sends
+  no input, so it works while Octo or another member controls the page.
+- The origin creates a fresh isolated world in the page's main frame and runs
+  `redaction.js` and `pageCapture.js` there, so page scripts cannot reach the
+  reader or the masking. Only the masked address, title and text (at most 50,000
+  characters, cut after masking) leave the machine, with `readAt` and
+  `Cache-Control: no-store`.
+- A secret screen, a page the agent's controller marked withheld (read in the
+  page's own world, failing closed) or a page whose checks failed answers with
+  `secretScreen: true` and no title or text. A tab with no web page, or a page
+  that loaded during the read, answers 409.
+- runtime-agent supplies the reader (`set_browser_page_capture_script`). An origin
+  without it, or one that predates the route, answers 404, and Studio says this
+  browser cannot send pages yet. The controller's origin proxy allows exactly
+  this path for `POST`.
+- Nothing is kept: no marker, approval, listener or agent authority changes, and
+  the next press reads again.
+
+Studio stages the copy as a Markdown chat attachment (see
+[Chat attachments](Chat-Attachments.md#pages-sent-from-the-browser)).
 
 ## Shared profile persistence and clearing
 

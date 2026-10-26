@@ -485,6 +485,32 @@ Codex's own MCP transport, which carries the model's Personal Browser tool calls
 
 This is intentionally higher-level than CDP. The agent receives structured page evidence and bounded actions, not a general debugging socket into Electron.
 
+## Send page to Octo
+
+**Send page to Octo** in the Browser toolbar adds a copy of the page on screen to
+the person's next chat message, like a paste. It is the person's own action and
+gives Octo no access to the browser.
+
+- Studio calls `personalBrowserReadPage({ ownerId })` only for that press. Electron
+  main checks the caller is the Studio window and the current owner, reads the
+  page once in its isolated world (the snapshot reader, up to 60,000 characters),
+  and masks the address, title and text there with the snapshot rules
+  (`maskSentPage` from `@instafy/browser-action-policy/pageCapture`). Only the
+  masked copy crosses the bridge: at most 50,000 characters, cut after masking so
+  a key at the limit is never half sent.
+- A secret screen, a page whose checks failed, or a page the agent's snapshots
+  withhold comes back with no title or text, and Studio does not attach it.
+- The read leaves agent control, origin approvals, the broker, the agent's
+  snapshot targets and the withheld-page marks exactly as they were. Nothing is
+  kept, and the next press reads the page again. It works whether control is
+  paused or resumed, and in Ask and routine mode alike.
+- Only `http` and `https` pages are sent; a page that loads mid-read is refused.
+
+Studio turns the copy into a Markdown chat attachment that records the address,
+title, read time and which browser it came from, with the page's text inside an
+`untrusted_page_content` block (see
+[Chat attachments](Chat-Attachments.md#pages-sent-from-the-browser)).
+
 ## Shared Browser fallback
 
 Shared Browser remains a separate user-selected transport. It runs inside an isolated project cloud container and is streamed into the same Browser subtab. New runtimes use an Instafy-owned address/Go/history toolbar over viewport-only Chromium. CDP screencast supports normal and compact widths, with HiDPI RFB/noVNC as the final safety fallback; an allowlisted WebRTC runtime may become the normal-width preference while compact Studio deliberately remains on CDP for true responsive reflow. Every lane stays on the same runtime and project/team profile. Durable project/team profile persistence is separately gated and default-off. See `docs/Shared-Browser.md`.

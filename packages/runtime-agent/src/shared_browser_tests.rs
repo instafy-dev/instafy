@@ -3000,9 +3000,10 @@ impl EmbeddedControllerFixture {
 fn embedded_policy_modules_publish_their_api_without_commonjs() {
     use std::process::Stdio;
     let script = format!(
-        "{}\n{}\nprocess.stdout.write(JSON.stringify([typeof module, typeof globalThis.__instafyBrowserRedaction.redactPageObservation, typeof globalThis.__instafyBrowserActionPolicy.classifyStep]));",
+        "{}\n{}\n{}\nprocess.stdout.write(JSON.stringify([typeof module, typeof globalThis.__instafyBrowserRedaction.redactPageObservation, typeof globalThis.__instafyBrowserActionPolicy.classifyStep, typeof globalThis.__instafyBrowserPageCapture.pageSecretSignalsInPage]));",
         embedded_plain_script(BROWSER_REDACTION_SCRIPT),
         embedded_plain_script(BROWSER_ACTION_POLICY_SCRIPT),
+        embedded_plain_script(BROWSER_PAGE_CAPTURE_SCRIPT),
     );
     let mut child = StdCommand::new("node")
         .arg("-")
@@ -3027,11 +3028,17 @@ fn embedded_policy_modules_publish_their_api_without_commonjs() {
     // scripts on their global path.
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        r#"["object","function","function"]"#
+        r#"["object","function","function","function"]"#
     );
     let embedded = embedded_shared_browser_script();
     assert!(
         embedded.find("__instafyBrowserRedaction") < embedded.find("__instafyBrowserActionPolicy")
+    );
+    // The controller reads the page's secret checks from the shared script,
+    // so it must come before the controller itself.
+    assert!(
+        embedded.find("root.__instafyBrowserPageCapture")
+            < embedded.find("globalThis.__instafyBrowserPageCapture;")
     );
     // Larger than one Linux argv string may be, which is why it travels on stdin.
     assert!(embedded.len() > 64 * 1024);

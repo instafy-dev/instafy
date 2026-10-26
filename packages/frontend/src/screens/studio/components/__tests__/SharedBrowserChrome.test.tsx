@@ -96,6 +96,35 @@ describe("SharedBrowserChrome", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
+  it("sends the page on screen only on a press, even while someone else controls the browser", async () => {
+    const onSendPage = vi.fn();
+    await act(async () => {
+      root.render(<SharedBrowserChrome {...props({
+        onSendPage,
+        interactionEnabled: false,
+        pages: [page({ id: "page-1", isActive: false }), page({ id: "page-2", url: "https://shop.example/", isActive: true })],
+      })} />);
+    });
+    const button = container.querySelector<HTMLButtonElement>('[data-testid="browser-send-page"]')!;
+    expect(onSendPage).not.toHaveBeenCalled();
+    expect(button.disabled).toBe(false);
+    await act(async () => button.click());
+    expect(onSendPage).toHaveBeenCalledExactlyOnceWith("page-2");
+
+    await act(async () => {
+      root.render(<SharedBrowserChrome {...props({ onSendPage, pages: [page({ url: "about:blank", host: "", title: "", label: "New tab" })] })} />);
+    });
+    expect(container.querySelector<HTMLButtonElement>('[data-testid="browser-send-page"]')!.disabled).toBe(true);
+    await act(async () => {
+      root.render(<SharedBrowserChrome {...props({ onSendPage, resolved: false })} />);
+    });
+    expect(container.querySelector<HTMLButtonElement>('[data-testid="browser-send-page"]')!.disabled).toBe(true);
+    await act(async () => {
+      root.render(<SharedBrowserChrome {...props()} />);
+    });
+    expect(container.querySelector('[data-testid="browser-send-page"]')).toBeNull();
+  });
+
   it("shows a blank tab's address as empty, so a typed address is not appended to about:blank", async () => {
     const onNavigate = vi.fn();
     await act(async () => {

@@ -26,6 +26,7 @@ import { Button, IconButton } from "../../../components/Button";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { BrowserToolsOverlayContext, BrowserToolsPopover } from "./BrowserToolsPopover";
 import { BrowserExpandButton } from "./BrowserExpandButton";
+import { SendPageToOctoButton } from "./SendPageToOctoButton";
 import { BrowserHumanInputStatus } from "./BrowserHumanInputControls";
 import { useBrowserHumanInput } from "./useBrowserHumanInput";
 import { browserPageOrigin } from "./browserHandoffRouting";
@@ -143,6 +144,8 @@ export function PersonalBrowserSurface({
   historyUserId,
   onContinueAfterHumanInput,
   onPauseAgentControl,
+  onSendPage,
+  sendPagePending = false,
   sharingControls,
 }: {
   active: boolean;
@@ -155,6 +158,9 @@ export function PersonalBrowserSurface({
   onContinueAfterHumanInput?: (message: string, approvalMode: "ask" | "routine") => Promise<boolean>;
   /** The person paused agent control with the toolbar button. */
   onPauseAgentControl?: () => void;
+  /** Send page to Octo; absent when this person cannot add attachments here. */
+  onSendPage?: () => void;
+  sendPagePending?: boolean;
   sharingControls?: ReactNode;
 }) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -476,6 +482,13 @@ export function PersonalBrowserSurface({
                 <Play className="h-3.5 w-3.5" aria-hidden="true" />
               )}
             </IconButton>
+          ) : null}
+          {onSendPage ? (
+            <SendPageToOctoButton
+              onPress={onSendPage}
+              pending={sendPagePending}
+              disabled={!active || !ready || !ownsNativeStatus || !/^https?:\/\//i.test(model.status?.url ?? "")}
+            />
           ) : null}
           <BrowserToolsPopover label="Browser settings" isOpen={settingsOpen} onOpenChange={setSettingsOpen} trigger={<IconButton aria-label="Browser settings" variant="ghost" size="sm"><MoreHoriz className="h-4 w-4" aria-hidden="true" /></IconButton>}>
             {compactChrome ? (

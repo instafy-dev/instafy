@@ -2231,6 +2231,21 @@ app.whenReady().then(() => {
     });
   });
 
+  // Send page to Octo: one masked read of the owner's page. It is not a
+  // mutation and grants no agent authority, so it does not queue behind them.
+  ipcMain.handle("instafy:personalBrowserReadPage", async (event, payload) => {
+    assertAllowedCaller(event);
+    const rendererLease = captureStudioRendererGeneration(event);
+    assertStudioRendererGenerationCurrent(rendererLease);
+    if (!personalBrowserHost) {
+      throw new Error("Personal Browser host is unavailable.");
+    }
+    const ownerId = requirePersonalBrowserOwnerId(payload?.ownerId);
+    const page = await personalBrowserHost.readPageForOwner(ownerId);
+    assertStudioRendererGenerationCurrent(rendererLease);
+    return page;
+  });
+
   ipcMain.handle("instafy:personalBrowserGoBack", async (event, payload) => {
     assertAllowedCaller(event);
     const rendererLease = captureStudioRendererGeneration(event);

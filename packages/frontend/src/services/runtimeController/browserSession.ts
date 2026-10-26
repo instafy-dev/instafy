@@ -794,6 +794,132 @@ export async function commandRuntimeBrowserSessionPage(params: {
   return true;
 }
 
+/** A workspace browser page read for Send page to Octo, masked on its machine. */
+export type RuntimeBrowserSessionPageCapture = {
+  pageId: string;
+  url: string;
+  title: string;
+  text: string;
+  secretScreen: boolean;
+  truncated: boolean;
+  readAt: string;
+};
+
+/** Why the workspace browser did not hand over a page. */
+export class BrowserSessionPageCaptureError extends Error {
+  readonly status: number;
+  /** From the origin's own answer: the tab shows no web page, or the page changed mid-read. */
+  readonly reason: "not_web_page" | "changed" | null;
+
+  constructor(status: number, message: string, reason: "not_web_page" | "changed" | null = null) {
+    super(message);
+    this.name = "BrowserSessionPageCaptureError";
+    this.status = status;
+    this.reason = reason;
+  }
+}
+
+function browserPageCaptureRefusalReason(status: number, text: string): "not_web_page" | "changed" | null {
+  if (status !== 409) return null;
+  let message = "";
+  try {
+    const parsed = JSON.parse(text) as { error?: unknown };
+    message = typeof parsed?.error === "string" ? parsed.error : "";
+  } catch {
+    return null;
+  }
+  if (message === "this tab has no web page to send") return "not_web_page";
+  if (message.startsWith("the page changed while it was being read")) return "changed";
+  return null;
+}
+
+const BROWSER_PAGE_CAPTURE_TEXT_MAX_CHARS = 50_000;
+
+export function mapRuntimeBrowserSessionPageCapturePayload(
+  payload: unknown,
+  pageId: string,
+): RuntimeBrowserSessionPageCapture | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+  const row = payload as Record<string, unknown>;
+  if (
+    row.pageId !== pageId ||
+    typeof row.url !== "string" || row.url.length > 32_768 ||
+    typeof row.title !== "string" || row.title.length > 4_000 ||
+    typeof row.text !== "string" || row.text.length > BROWSER_PAGE_CAPTURE_TEXT_MAX_CHARS ||
+    typeof row.secretScreen !== "boolean" ||
+    typeof row.truncated !== "boolean" ||
+    typeof row.readAt !== "string" || Number.isNaN(Date.parse(row.readAt))
+  ) {
+    return null;
+  }
+  // A withheld page never carries text, whatever answered.
+  return {
+    pageId,
+    url: row.url,
+    title: row.secretScreen ? "" : row.title,
+    text: row.secretScreen ? "" : row.text,
+    secretScreen: row.secretScreen,
+    truncated: row.truncated,
+    readAt: row.readAt,
+  };
+}
+
+/**
+ * Send page to Octo: asks the workspace browser to read one page once. The
+ * page is read and masked on the browser's own machine; this returns only the
+ * masked copy. Needs `browser.control`. Call it only for a person's press.
+ */
+export async function captureRuntimeBrowserSessionPage(params: {
+  projectId: string;
+  browserSessionId: string;
+  pageId: string;
+  preferRuntimeId?: string | null;
+  accessToken?: string | null;
+}): Promise<RuntimeBrowserSessionPageCapture> {
+  const pageId = params.pageId.trim();
+  if (!pageId) {
+    throw new BrowserSessionPageCaptureError(400, "browser page capture needs a page");
+  }
+  const token = await requestOriginAccessToken({
+    projectId: params.projectId,
+    protocol: "http",
+    scopes: ["browser.control"],
+    preferRuntime: params.preferRuntimeId ?? null,
+    accessToken: params.accessToken ?? null,
+    browserSessionId: params.browserSessionId,
+  });
+  if (!token) {
+    throw new BrowserSessionPageCaptureError(401, "browser page capture was not allowed");
+  }
+  const response = await fetch(
+    buildOriginEndpointUrl(token.endpoint, `/browser/pages/${encodeURIComponent(pageId)}/capture`),
+    {
+      method: "POST",
+      cache: "no-store",
+      headers: {
+        authorization: `Bearer ${token.token}`,
+        accept: "application/json",
+      },
+    },
+  );
+  if (!response.ok) {
+    // The origin's error text is never shown; only its fixed refusals are told apart.
+    const text = await response.text().catch(() => "");
+    throw new BrowserSessionPageCaptureError(
+      response.status,
+      `browser page capture failed (${response.status})`,
+      browserPageCaptureRefusalReason(response.status, text),
+    );
+  }
+  const capture = mapRuntimeBrowserSessionPageCapturePayload(await response.json().catch(() => null), pageId);
+  if (!capture) {
+    throw new BrowserSessionPageCaptureError(502, "browser page capture returned an invalid page");
+  }
+  return capture;
+}
+
 export async function focusRuntimeBrowserSessionPage(params: {
   projectId: string;
   browserSessionId: string;
