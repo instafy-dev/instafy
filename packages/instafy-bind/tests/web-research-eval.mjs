@@ -39,6 +39,19 @@ export function linkOnlySite(host, list = LINK_ONLY) {
   return null;
 }
 
+/**
+ * The text a reader sees on a page: no head, scripts or styles, no tags. End tags may carry spaces or attributes
+ * (`</script >`, `</SCRIPT foo>`), which browsers accept, so the patterns allow anything up to the closing `>`.
+ */
+export const visibleText = (html) =>
+  flat(
+    String(html)
+      .replace(/<head\b[^>]*>[\s\S]*?<\/head\b[^>]*>/gi, " ")
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script\b[^>]*>/gi, " ")
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style\b[^>]*>/gi, " ")
+      .replace(/<[^>]+>/g, " "),
+  );
+
 const stopOf = (reason) =>
   /login|401|password/i.test(reason) ? "login" : /captcha|bot check|interstitial/i.test(reason) ? "captcha" : /robots/i.test(reason) ? "robots" : "blocked";
 
@@ -72,9 +85,8 @@ export async function readPage(url, { viewer = "server fetch" } = {}) {
   const reason = challengeReason(response.status, html) || (/<input[^>]+type=["']?password/i.test(html) ? "login form" : null);
   if (reason) return { url, stopped: stopOf(reason), reason };
   if (response.status >= 400) return { url, stopped: "blocked", reason: `HTTP ${response.status}` };
-  const title = flat(html.match(/<title>([\s\S]*?)<\/title>/i)?.[1] || "");
-  const visible = html.replace(/<head>[\s\S]*?<\/head>/i, " ").replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<[^>]+>/g, " ");
-  return { url, finalUrl: response.url || url, title, readAt: new Date().toISOString(), viewer, text: flat(visible) };
+  const title = flat(html.match(/<title\b[^>]*>([\s\S]*?)<\/title\b[^>]*>/i)?.[1] || "");
+  return { url, finalUrl: response.url || url, title, readAt: new Date().toISOString(), viewer, text: visibleText(html) };
 }
 
 const VISIBLE_TABS = new Set(["shared browser", "personal browser"]);

@@ -5,7 +5,7 @@
 import test, { after, before } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { CASES, LINK_ONLY, SKILL, dayMonth, gradeAnswer, linkOnlySite, readPage, referenceAnswer } from "./web-research-eval.mjs";
+import { CASES, LINK_ONLY, SKILL, dayMonth, gradeAnswer, linkOnlySite, readPage, referenceAnswer, visibleText } from "./web-research-eval.mjs";
 import { startFixtureWeb } from "./web-research-fixtures.mjs";
 
 // One fixture web for the file: robots.txt answers are cached per origin for the process, so a port must not come
@@ -73,6 +73,16 @@ test("the reference reader stops where the skill says reading stops, and reads t
   assert.equal(page.viewer, "server fetch");
   assert.ok(!Number.isNaN(Date.parse(page.readAt)));
   assert.match(page.text, /Last train leaves Central at 23:42/);
+});
+
+test("the reference reader drops scripts and styles whatever their end tags look like", () => {
+  const html = [
+    "<html><head><title>T</title></head><body><header>Top</header>",
+    "<p>Before</p><script>alert(1)</script ><p>Middle</p>",
+    "<SCRIPT type=\"module\">x()</SCRIPT\n foo><style>p{}</style\t>",
+    "<p>After</p></body></html>",
+  ].join("");
+  assert.equal(visibleText(html), "Top Before Middle After");
 });
 
 test("the link-only list matches hosts by its own rule", () => {
