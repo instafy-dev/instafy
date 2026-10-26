@@ -1,5 +1,5 @@
 import { _electron as electron, expect, test } from "@playwright/test";
-import { createServer, type Server } from "node:http";
+import { createServer, request as httpRequest, type Server } from "node:http";
 import { createRequire } from "node:module";
 import fs from "node:fs";
 import os from "node:os";
@@ -79,8 +79,24 @@ type PersonalBrowserFixtureWindow = typeof window & {
   __INSTAFY_TEST_SESSION__: () => { access_token: string };
 };
 
+// Host names the fixture server saw for the request guard's pages.
+const guardRequestHosts: string[] = [];
+
 function fixtureHandler(request: import("node:http").IncomingMessage, response: import("node:http").ServerResponse) {
   response.setHeader("Cache-Control", "no-store");
+  if (request.url?.startsWith("/guard/")) {
+    const [hostName = "", port = ""] = String(request.headers.host ?? "").split(":");
+    guardRequestHosts.push(hostName);
+    if (request.url === "/guard/to-link-only") {
+      response.statusCode = 302;
+      response.setHeader("Location", `http://www.booking.com:${port}/guard/page`);
+      response.end();
+      return;
+    }
+    response.setHeader("Content-Type", "text/html; charset=utf-8");
+    response.end("<!doctype html><title>Guarded fixture</title><p>guarded fixture page</p>");
+    return;
+  }
   if (request.url === "/me/session") {
     const bearer = request.headers.authorization?.replace(/^Bearer\s+/i, "") ?? "";
     let userId = "";
@@ -761,6 +777,75 @@ test.describe("Electron Personal Browser", () => {
     expect(result.shownWhilePaused.status?.activeTabId).toBe(result.opened.activeTabId);
     expect(result.closeOwnTab.error).toContain("agent opened");
     expect(result.shownWhileResumed.error).toContain("Pause");
+  });
+
+  test("stops agent-driven page loads on a link-only site or a private address, also by the address actually connected to", async () => {
+    // Desktop's own built request guard on the sessions of a minimal Electron
+    // main process: real Chromium, loopback fixture servers only.
+    const fixturePort = new URL(fixtureOrigin).port;
+    const proxiedHosts: string[] = [];
+    const proxyServer = createServer((request, response) => {
+      const target = new URL(request.url ?? "/", "http://absolute-form.invalid");
+      proxiedHosts.push(target.hostname);
+      const upstream = httpRequest({
+        host: "127.0.0.1",
+        port: Number(fixturePort),
+        method: request.method,
+        path: `${target.pathname}${target.search}`,
+        headers: request.headers,
+      }, (reply) => {
+        response.writeHead(reply.statusCode ?? 502, reply.headers);
+        reply.pipe(response);
+      });
+      upstream.on("error", () => {
+        response.statusCode = 502;
+        response.end();
+      });
+      request.pipe(upstream);
+    });
+    const proxyOrigin = `http://127.0.0.1:${await listen(proxyServer)}`;
+    guardRequestHosts.length = 0;
+    const guardApp = await electron.launch({
+      executablePath: DESKTOP_APP_REQUIRE("electron"),
+      args: [path.join(DESKTOP_APP_DIR, "test", "fixtures", "personal-browser-request-guard-app.cjs")],
+      cwd: REPO_ROOT,
+      env: { ...personalBrowserFixtureEnvironment(process.env), TMPDIR: os.tmpdir() },
+    });
+    try {
+      type Outcome = { result: string; text: string };
+      const results = await guardApp.evaluate(
+        async (_electron, options) => (globalThis as unknown as {
+          __instafyRequestGuardScenario: (value: typeof options) => Promise<Record<string, unknown>>;
+        }).__instafyRequestGuardScenario(options),
+        { origin: fixtureOrigin, proxy: proxyOrigin },
+      ) as Record<"rebound" | "linkOnly" | "viaProxy" | "viaProxyToLinkOnly" | "person", Outcome> & {
+        stopped: Array<{ resourceType: string; code: string }>;
+      };
+      // DNS rebinding: the name passed the check made before the request and
+      // Chromium connected to 127.0.0.1. The response was discarded before
+      // the page rendered; only the request reached the server.
+      expect(results.rebound).toEqual({ result: "ERR_BLOCKED_BY_CLIENT", text: "" });
+      // A link-only site is stopped before the request leaves the browser.
+      expect(results.linkOnly).toEqual({ result: "ERR_BLOCKED_BY_CLIENT", text: "" });
+      // Through a proxy the connection is the proxy's own, so the page loads,
+      expect(results.viaProxy).toEqual({ result: "loaded", text: "guarded fixture page" });
+      // and a redirect hop to a link-only site is still stopped before it is requested.
+      expect(results.viaProxyToLinkOnly.result).toBe("ERR_BLOCKED_BY_CLIENT");
+      // The person's own tab, in the same session, loads the same page.
+      expect(results.person).toEqual({ result: "loaded", text: "guarded fixture page" });
+      expect(results.stopped).toEqual([
+        { resourceType: "mainFrame", code: "private_address_blocked" },
+        { resourceType: "mainFrame", code: "link_only_site" },
+        { resourceType: "mainFrame", code: "link_only_site" },
+      ]);
+      expect(guardRequestHosts).not.toContain("www.booking.com");
+      expect(proxiedHosts).not.toContain("www.booking.com");
+      expect(proxiedHosts).toEqual(["page.guard.test", "hop.guard.test"]);
+      expect(guardRequestHosts.filter((host) => host === "rebound.guard.test")).toHaveLength(2);
+    } finally {
+      await guardApp.close();
+      await new Promise<void>((resolve) => proxyServer.close(() => resolve()));
+    }
   });
 
   test("revokes ownership and control when the Studio renderer reloads", async () => {

@@ -109,7 +109,7 @@ const PERSONAL_BROWSER_MCP_TOOLS: McpToolDefinition[] = [
   },
   {
     name: "navigate",
-    description: "Navigate the visible Personal Browser page to an absolute HTTP(S) URL.",
+    description: "Navigate the visible Personal Browser page to an absolute public HTTP(S) URL. A link-only site, a private address or a local name is refused.",
     inputSchema: {
       type: "object",
       properties: { url: { type: "string", maxLength: 4096 } },
@@ -178,7 +178,7 @@ const PERSONAL_BROWSER_MCP_TOOLS: McpToolDefinition[] = [
   {
     name: "open_tab",
     description:
-      "Open one public http(s) page in a new visible tab and show it. At most three of your tabs can be open; the new tab asks for its own site approval.",
+      "Open one public http(s) page in a new visible tab and show it; never a link-only site. At most three of your tabs can be open; the new tab asks for its own site approval.",
     inputSchema: {
       type: "object",
       properties: { url: { type: "string", maxLength: 4096 } },
@@ -504,7 +504,9 @@ export class PersonalBrowserControlServer {
             "do not try to reveal or read the value; stop and tell the user which control on the page shows it. " +
             "step_refused_secret, step_refused_sign_in and step_refused_upload are final: those steps are the user's. " +
             "Every tool acts on the tab on screen. open_tab opens a public page in a new visible tab (at most three of yours); " +
-            "select_tab shows another tab and close_tab closes one you opened. Pause or Escape ends control of every tab.",
+            "select_tab shows another tab and close_tab closes one you opened. Pause or Escape ends control of every tab. " +
+            "In every tab, open, navigate to and follow only public web pages, never a link-only site: link_only_site, link_only_list_unavailable and " +
+            "private_address_blocked are final for that step: do not retry it. Give the person the plain link, or ask them to open a private address in their own tab.",
         },
       };
     }

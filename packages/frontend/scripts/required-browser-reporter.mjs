@@ -12,6 +12,7 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
       "persists one local profile across restarts and isolates another profile",
       "keeps real login cookies per user across projects and restarts, then clears only that user",
       "revokes ownership and control when the Studio renderer reloads",
+      "stops agent-driven page loads on a link-only site or a private address, also by the address actually connected to",
     ],
   },
   "browser-ui": {

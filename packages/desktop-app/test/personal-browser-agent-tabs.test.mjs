@@ -31,8 +31,14 @@ const DNS = {
   "news.example.test": ["93.184.216.36"],
   "shop.example.test": ["93.184.216.37"],
   "rebind.example.test": ["10.0.0.5"],
+  // Public when Desktop checks it, private when Chromium connects (DNS rebinding).
+  "rebound.example.test": ["93.184.216.40"],
 };
+// Where Chromium's own connection lands, when that differs from the answer above.
+const CONNECTED = { "rebound.example.test": "10.0.0.5" };
+const lookups = [];
 async function lookup(host) {
+  lookups.push(host);
   const addresses = DNS[host];
   if (!addresses) throw Object.assign(new Error("not found"), { code: "ENOTFOUND" });
   return addresses.map((address) => ({ address, family: 4 }));
@@ -40,8 +46,22 @@ async function lookup(host) {
 
 let nextContentsId = 1;
 
+// One browser profile: every tab shares its session and request filter.
+function fakeSession() {
+  const session = {
+    proxy: "DIRECT",
+    setPermissionCheckHandler() {}, setPermissionRequestHandler() {}, on() {},
+    webRequest: {
+      onBeforeRequest: (filter, listener) => { session.beforeRequestFilter = filter; session.beforeRequest = listener; },
+      onHeadersReceived: (filter, listener) => { session.headersReceivedFilter = filter; session.headersReceived = listener; },
+    },
+    resolveProxy: async () => session.proxy,
+  };
+  return session;
+}
+
 class FakeContents {
-  constructor(views) {
+  constructor(views, session) {
     this.views = views;
     this.id = nextContentsId++;
     this.url = "";
@@ -49,21 +69,37 @@ class FakeContents {
     this.handlers = {};
     this.destroyed = false;
     this.loads = [];
-    this.session = {
-      setPermissionCheckHandler() {}, setPermissionRequestHandler() {}, on() {},
-      webRequest: { onBeforeRequest: (filter, listener) => { this.session.beforeRequestFilter = filter; this.session.beforeRequest = listener; } },
-    };
+    // The address of the one link on the page, when a test gives it one.
+    this.linkHref = null;
+    this.session = session;
     this.navigationHistory = { canGoBack: () => false, canGoForward: () => false, clear() {} };
   }
   on(name, handler) { (this.handlers[name] ??= []).push(handler); return this; }
   emit(name, ...args) { for (const handler of this.handlers[name] ?? []) handler(...args); }
   setWindowOpenHandler() {}
+  // A page load as Chromium makes it: the session's request filter first,
+  // then the response, which reports the address the connection reached.
   async loadURL(url) {
     this.loads.push(url);
+    if (url !== "about:blank" && this.session.beforeRequest) {
+      const request = { webContentsId: this.id, resourceType: "mainFrame", url };
+      const before = await new Promise((resolve) => this.session.beforeRequest(request, resolve));
+      if (before.cancel) this.blocked(url);
+      const host = new URL(url).hostname.replace(/^\[|\]$/g, "");
+      const ip = CONNECTED[host] ?? DNS[host]?.[0] ?? host;
+      const response = await new Promise((resolve) => this.session.headersReceived({ ...request, ip }, resolve));
+      if (response.cancel) this.blocked(url);
+    }
     this.url = url;
     this.title = url === "about:blank" ? "" : `Page at ${new URL(url).host}`;
     this.emit("did-navigate", {}, url);
     this.emit("did-finish-load");
+  }
+  blocked(url) {
+    this.url = url;
+    this.title = "";
+    this.emit("did-fail-load", {}, -20, "ERR_BLOCKED_BY_CLIENT", url, true);
+    throw Object.assign(new Error(`ERR_BLOCKED_BY_CLIENT (-20) loading '${url}'`), { code: "ERR_BLOCKED_BY_CLIENT", errno: -20 });
   }
   getURL() { return this.url; }
   getTitle() { return this.title; }
@@ -74,10 +110,14 @@ class FakeContents {
   close() { this.destroyed = true; }
 }
 
-function fixture({ choose = async () => ({ response: 1 }) } = {}) {
+const linkOnlyModule = require(path.join(packageRoot, "dist/personalBrowserLinkOnly.js"));
+
+function fixture({ choose = async () => ({ response: 1 }), linkOnlyData } = {}) {
   const dialogs = [];
   const views = [];
   const shield = { attached: [], syncs: [] };
+  const session = fakeSession();
+  lookups.length = 0;
   class ControlServer {
     credentials = null;
     getCredentials() { return this.credentials; }
@@ -91,7 +131,7 @@ function fixture({ choose = async () => ({ response: 1 }) } = {}) {
   }
   class WebContentsView {
     constructor() {
-      this.webContents = new FakeContents(views);
+      this.webContents = new FakeContents(views, session);
       this.visible = true;
       this.bounds = null;
       views.push(this);
@@ -99,6 +139,12 @@ function fixture({ choose = async () => ({ response: 1 }) } = {}) {
     setBounds(bounds) { this.bounds = bounds; }
     setVisible(visible) { this.visible = visible; }
   }
+  const documentOf = (contents) => `document-${views.findIndex((view) => view.webContents === contents)}`;
+  // The one link on each page: "More", or the address a test gave it.
+  const linkOf = (contents) => ({
+    found: true, disabled: false, tag: "a", identity: `${documentOf(contents)}:0`, text: "More",
+    ...(contents.linkHref ? { href: contents.linkHref, linkSelf: true } : {}),
+  });
   const module = { exports: {} };
   const dependencies = {
     electron: {
@@ -115,6 +161,11 @@ function fixture({ choose = async () => ({ response: 1 }) } = {}) {
       ...security,
       checkPersonalBrowserAgentTabUrl: (url) => security.checkPersonalBrowserAgentTabUrl(url, lookup),
     },
+    // The bundled list, or the copy a test gives instead.
+    "./personalBrowserLinkOnly": linkOnlyData === undefined
+      ? linkOnlyModule
+      : { ...linkOnlyModule, PERSONAL_BROWSER_LINK_ONLY_GUARD: linkOnlyModule.createPersonalBrowserLinkOnlyGuard(linkOnlyData) },
+    "./personalBrowserRequestGuard": require(path.join(packageRoot, "dist/personalBrowserRequestGuard.js")),
     "./personalBrowserRedaction": require(path.join(packageRoot, "dist/personalBrowserRedaction.js")),
     "./personalBrowserActionPolicy": require(path.join(packageRoot, "dist/personalBrowserActionPolicy.js")),
     "./personalBrowserTeammateActivity": require(path.join(packageRoot, "dist/personalBrowserTeammateActivity.js")),
@@ -125,14 +176,16 @@ function fixture({ choose = async () => ({ response: 1 }) } = {}) {
         url: contents.getURL(),
         title: contents.getTitle(),
         text: `Text of ${contents.getURL()}`,
-        documentToken: `document-${views.findIndex((view) => view.webContents === contents)}`,
+        documentToken: documentOf(contents),
         signals: NO_SECRET_SIGNALS,
-        interactive: [{
-          index: 0, tag: "a", name: "More", identity: `document-${views.findIndex((view) => view.webContents === contents)}:0`,
-          descriptor: { found: true, disabled: false, tag: "a", identity: `document-${views.findIndex((view) => view.webContents === contents)}:0`, text: "More" },
-        }],
+        interactive: [{ index: 0, tag: "a", name: "More", identity: `${documentOf(contents)}:0`, descriptor: linkOf(contents) }],
         capturedAt: "2026-10-26T09:30:00.000Z",
       }),
+      inspectPersonalBrowserTarget: async (contents) => linkOf(contents),
+      clickPersonalBrowserTarget: async (contents) => {
+        contents.clicks = (contents.clicks ?? 0) + 1;
+        return { clicked: true, targetChanged: false };
+      },
     },
     "./personalBrowserHumanInput": {},
     "./personalBrowserInputShield": { PersonalBrowserInputShield: InputShield },
@@ -151,17 +204,18 @@ function fixture({ choose = async () => ({ response: 1 }) } = {}) {
     contentView: { addChildView() {}, removeChildView() {} },
     webContents: { focus() {} },
   };
-  // The person's own tab, already on a page.
-  const personView = new WebContentsView();
+  // The person's own tab, already on a page, built as Desktop builds it: its
+  // view configures the profile's session and its navigation guards.
+  host.createView("partition-fixture");
+  const personView = views[0];
   personView.webContents.url = "https://example.test/";
   personView.webContents.title = "Person's page";
-  host.view = personView;
   host.currentState = "ready";
   host.currentVisible = true;
   host.currentProjectId = "project-fixture";
   host.currentPartition = "partition-fixture";
   host.currentOwnerId = "owner-fixture";
-  return { host, dialogs, views, shield, personView };
+  return { host, dialogs, views, shield, personView, session };
 }
 
 // Values made in the host's own context compare as plain data.
@@ -262,7 +316,7 @@ for (const [name, url] of [
   });
 }
 
-test("navigate in an agent tab keeps to public addresses; the person's own tab is unchanged", async () => {
+test("navigate in an agent tab keeps to public addresses", async () => {
   const { host, views } = fixture();
   await resume(host, "routine");
   await host.handleControlOperation("open_tab", { url: "https://docs.example.test/" });
@@ -291,11 +345,12 @@ test("every page request of an agent tab, each redirect hop included, resolves i
   assert.deepEqual(plain(await beforeRequest(agentContents, { resourceType: "subFrame", url: "https://rebind.example.test/" })), { cancel: true });
   assert.deepEqual(plain(await beforeRequest(agentContents, { resourceType: "mainFrame", url: "https://unknown.example.test/" })), { cancel: true });
   assert.deepEqual(plain(await beforeRequest(agentContents, { resourceType: "mainFrame", url: "https://news.example.test/" })), { cancel: false });
-  // The page's own resources and the person's tab are not filtered here.
+  // The page's own resources are not filtered here.
   assert.deepEqual(plain(await beforeRequest(agentContents, { resourceType: "image", url: "https://rebind.example.test/a.png" })), {});
+  // The person's tab was on screen when the agent took control, so the agent drives it too.
   assert.deepEqual(
     plain(await beforeRequest(agentContents, { webContentsId: personView.webContents.id, resourceType: "mainFrame", url: "https://rebind.example.test/" })),
-    {},
+    { cancel: true },
   );
   // Once the person has paused, the tab is theirs.
   host.pauseAgentControl();
@@ -453,4 +508,278 @@ test("closing the browser closes every tab and starts over with one person's tab
   await host.close();
   assert.ok(views.every((view) => view.webContents.destroyed));
   assert.deepEqual(plain(host.getStatus().tabs.map((tab) => [tab.id, tab.openedBy])), [["tab-1", "person"]]);
+});
+
+// Hardening: the rules hold for every step the agent drives, in every tab.
+
+// What the session decides when a response arrives from `ip`.
+function headersReceived(contents, details) {
+  return new Promise((resolve) => contents.session.headersReceived({ webContentsId: contents.id, ...details }, resolve));
+}
+
+const PAGE_STEPS = [
+  ["snapshot", {}], ["click", { index: 0 }], ["type", { index: 0, text: "hello" }],
+  ["press", { index: 0, key: "Enter" }], ["scroll", { y: 200 }], ["request_human_input", { indices: [0] }],
+];
+
+test("open_tab refuses a link-only site before any prompt or lookup, and opens no tab", async () => {
+  const { host, views, dialogs } = fixture();
+  await resume(host, "ask");
+  for (const url of ["https://www.booking.com/hotel/x.html", "https://www.airbnb.co.uk/rooms/1", "https://maps.google.com/?q=cafe", "https://a.co/d/123"]) {
+    await assert.rejects(host.handleControlOperation("open_tab", { url }), (error) => {
+      assert.equal(error.code, "link_only_site", url);
+      assert.match(error.message, /link-only/);
+      assert.match(error.message, /Send page to Octo/);
+      return true;
+    });
+  }
+  assert.equal(views.length, 1, "no tab was created");
+  assert.equal(dialogs.length, 0, "nothing asked");
+  assert.deepEqual(lookups, [], "no name was resolved");
+});
+
+test("navigate refuses a link-only site in every tab, the person's included, before any prompt", async () => {
+  const { host, views, dialogs, personView } = fixture();
+  await resume(host, "ask");
+  await rejectsWith(host.handleControlOperation("navigate", { url: "https://www.booking.com/" }), "link_only_site");
+  assert.deepEqual(personView.webContents.loads, []);
+  assert.equal(dialogs.length, 0);
+  await host.handleControlOperation("open_tab", { url: "https://docs.example.test/" });
+  const asked = dialogs.length;
+  await rejectsWith(host.handleControlOperation("navigate", { url: "https://www.tripadvisor.com/Hotel" }), "link_only_site");
+  assert.deepEqual(views[1].webContents.loads, ["https://docs.example.test/"]);
+  assert.equal(dialogs.length, asked);
+});
+
+test("a page on a link-only site is never read or used, in any tab, and nothing asks about it", async () => {
+  const { host, dialogs, personView } = fixture();
+  // The person left their own tab on a link-only site, then resumed.
+  personView.webContents.url = "https://www.booking.com/hotel/x.html";
+  personView.webContents.title = "Hotel X, prices and reviews";
+  await resume(host, "ask");
+  for (const [operation, payload] of PAGE_STEPS) {
+    await assert.rejects(host.handleControlOperation(operation, payload), (error) => {
+      assert.equal(error.code, "link_only_site", operation);
+      assert.match(error.message, /Booking\.com is link-only/);
+      return true;
+    });
+  }
+  assert.equal(dialogs.length, 0, "no site prompt for a link-only page");
+  // Status and list_tabs give its site's name, never its address or title.
+  const { status } = await host.handleControlOperation("status", {});
+  assert.equal(status.url, "");
+  assert.equal(status.title, undefined);
+  assert.equal(status.linkOnlySite, "Booking.com");
+  const { tabs } = await host.handleControlOperation("list_tabs", {});
+  assert.equal(tabs.length, 1);
+  assert.equal(tabs[0].url, "");
+  assert.equal(tabs[0].title, undefined);
+  assert.equal(tabs[0].linkOnlySite, "Booking.com");
+  // The agent may still take the tab somewhere else.
+  await host.handleControlOperation("navigate", { url: "https://example.test/" });
+  assert.deepEqual(personView.webContents.loads, ["https://example.test/"]);
+});
+
+test("a link the agent clicks to a link-only site or a private address is refused before the site prompt", async () => {
+  const { host, dialogs, personView } = fixture();
+  await resume(host, "ask");
+  for (const [href, code] of [
+    ["https://www.booking.com/deal", "link_only_site"],
+    ["http://192.168.1.1/admin", "private_address_blocked"],
+    ["https://rebind.example.test/", "private_address_blocked"],
+  ]) {
+    personView.webContents.linkHref = href;
+    await host.handleControlOperation("snapshot", {});
+    const asked = dialogs.length;
+    await rejectsWith(host.handleControlOperation("click", { index: 0 }), code);
+    assert.equal(dialogs.length, asked, `${href} asked nothing`);
+    assert.equal(personView.webContents.clicks ?? 0, 0, `${href} was not clicked`);
+  }
+  // A link to a place on the same page loads nothing and stays allowed.
+  personView.webContents.linkHref = "https://example.test/#reviews";
+  await host.handleControlOperation("snapshot", {});
+  await host.handleControlOperation("click", { index: 0 });
+  assert.equal(personView.webContents.clicks, 1);
+});
+
+test("in every tab the agent drives, each page, frame and redirect hop to a link-only site is stopped, and the next step says why", async () => {
+  const { host, views, dialogs, personView } = fixture();
+  await resume(host, "ask");
+  await host.handleControlOperation("snapshot", {});
+  // The person's tab, on screen when the agent took control.
+  assert.deepEqual(plain(await beforeRequest(personView.webContents, { resourceType: "mainFrame", url: "https://www.booking.com/" })), { cancel: true });
+  assert.deepEqual(plain(await beforeRequest(personView.webContents, { resourceType: "subFrame", url: "https://www.google.com/maps/embed" })), { cancel: true });
+  const asked = dialogs.length;
+  await assert.rejects(host.handleControlOperation("snapshot", {}), (error) => {
+    assert.equal(error.code, "link_only_site");
+    assert.match(error.message, /stopped the page before it loaded/);
+    return true;
+  });
+  // Reported once; the page itself did not change.
+  await host.handleControlOperation("snapshot", {});
+  // A redirect or a page-started navigation in an agent tab is refused without asking.
+  await host.handleControlOperation("open_tab", { url: "https://docs.example.test/" });
+  let prevented = false;
+  views[1].webContents.emit("will-redirect", { preventDefault() { prevented = true; } }, "https://www.amazon.de/dp/1");
+  assert.equal(prevented, true);
+  let started = false;
+  views[1].webContents.emit("will-navigate", { preventDefault() { started = true; } }, "https://www.expedia.com/");
+  assert.equal(started, true);
+  assert.equal(dialogs.length, asked + 1, "only the new tab's own site asked");
+  await rejectsWith(host.handleControlOperation("snapshot", {}), "link_only_site");
+});
+
+test("the person's own browsing is unchanged: once paused, link-only sites and private addresses load as before", async () => {
+  const { host, views, personView } = fixture();
+  await resume(host, "routine");
+  await host.handleControlOperation("open_tab", { url: "https://docs.example.test/" });
+  host.pauseAgentControl();
+  for (const contents of [personView.webContents, views[1].webContents]) {
+    assert.deepEqual(plain(await beforeRequest(contents, { resourceType: "mainFrame", url: "https://www.booking.com/" })), {});
+    assert.deepEqual(plain(await beforeRequest(contents, { resourceType: "mainFrame", url: "http://192.168.1.1/" })), {});
+    assert.deepEqual(plain(await headersReceived(contents, { resourceType: "mainFrame", url: "https://rebound.example.test/", ip: "10.0.0.5" })), {});
+  }
+  host.selectTab("owner-fixture", "tab-1");
+  await host.navigate("https://www.booking.com/hotel/x.html");
+  assert.deepEqual(personView.webContents.loads, ["https://www.booking.com/hotel/x.html"]);
+  await host.navigate("http://192.168.1.1/");
+  assert.deepEqual(personView.webContents.loads.at(-1), "http://192.168.1.1/");
+});
+
+test("without the link-only list, every agent-driven step fails closed; the person's browsing does not", async () => {
+  for (const data of [null, { schema: "instafy.link-only-sites@2", sites: [] }, { schema: "instafy.link-only-sites@1", sites: [{ name: "Broken", match: ["not a host!"] }] }]) {
+    const { host, views, dialogs, personView } = fixture({ linkOnlyData: data });
+    await resume(host, "ask");
+    await rejectsWith(host.handleControlOperation("open_tab", { url: "https://docs.example.test/" }), "link_only_list_unavailable");
+    await rejectsWith(host.handleControlOperation("navigate", { url: "https://docs.example.test/" }), "link_only_list_unavailable");
+    await rejectsWith(host.handleControlOperation("snapshot", {}), "link_only_list_unavailable");
+    assert.deepEqual(plain(await beforeRequest(personView.webContents, { resourceType: "mainFrame", url: "https://docs.example.test/" })), { cancel: true });
+    assert.equal(views.length, 1);
+    assert.equal(dialogs.length, 0);
+    host.pauseAgentControl();
+    assert.deepEqual(plain(await beforeRequest(personView.webContents, { resourceType: "mainFrame", url: "https://docs.example.test/" })), {});
+    await host.navigate("https://docs.example.test/");
+    assert.deepEqual(personView.webContents.loads, ["https://docs.example.test/"]);
+  }
+});
+
+test("navigate never takes the person's tab to a private address, a local name or a name that resolves to one", async () => {
+  const { host, dialogs, personView } = fixture();
+  await resume(host, "ask");
+  for (const url of ["http://127.0.0.1:8080/", "http://[::1]/", "http://192.168.1.1/", "http://169.254.169.254/latest", "http://router.local/", "http://intranet/", "https://rebind.example.test/"]) {
+    await rejectsWith(host.handleControlOperation("navigate", { url }), "private_address_blocked");
+  }
+  assert.deepEqual(personView.webContents.loads, []);
+  assert.equal(dialogs.length, 0, "refused before any prompt");
+});
+
+test("select_tab back to the person's tab does not open it to private addresses", async () => {
+  const { host, personView } = fixture();
+  await resume(host, "routine");
+  await host.handleControlOperation("open_tab", { url: "https://docs.example.test/" });
+  await host.handleControlOperation("select_tab", { tabId: "tab-1" });
+  await rejectsWith(host.handleControlOperation("navigate", { url: "http://10.0.0.1/" }), "private_address_blocked");
+  await rejectsWith(host.handleControlOperation("navigate", { url: "http://localhost:5173/" }), "private_address_blocked");
+  assert.deepEqual(personView.webContents.loads, []);
+  // A redirect or page-started navigation there is held to the same rule.
+  let prevented = false;
+  personView.webContents.emit("will-redirect", { preventDefault() { prevented = true; } }, "http://192.168.0.1/");
+  assert.equal(prevented, true);
+});
+
+test("a tab of the person's that stays in the background while the agent works is not filtered", async () => {
+  const { host, views, personView } = fixture();
+  await resume(host, "routine");
+  await host.handleControlOperation("open_tab", { url: "https://docs.example.test/" });
+  host.pauseAgentControl();
+  // The person shows the agent's tab, then resumes: their own tab stays behind it.
+  host.selectTab("owner-fixture", "tab-2");
+  await resume(host, "routine");
+  assert.deepEqual(plain(await beforeRequest(personView.webContents, { resourceType: "mainFrame", url: "http://192.168.1.1/" })), {});
+  assert.deepEqual(plain(await beforeRequest(views[1].webContents, { resourceType: "mainFrame", url: "http://192.168.1.1/" })), { cancel: true });
+  // Once the agent shows the person's tab, it drives it.
+  await host.handleControlOperation("select_tab", { tabId: "tab-1" });
+  assert.deepEqual(plain(await beforeRequest(personView.webContents, { resourceType: "mainFrame", url: "http://192.168.1.1/" })), { cancel: true });
+});
+
+test("a page or frame whose server answers from a private address is stopped when the response arrives (DNS rebinding)", async () => {
+  const { host, views, personView } = fixture();
+  await resume(host, "routine");
+  await host.handleControlOperation("open_tab", { url: "https://docs.example.test/" });
+  const agentContents = views[1].webContents;
+  for (const contents of [agentContents, personView.webContents]) {
+    for (const ip of ["10.0.0.5", "127.0.0.1", "::1", "::ffff:192.168.0.1", "169.254.169.254", "fe80::1"]) {
+      for (const resourceType of ["mainFrame", "subFrame"]) {
+        assert.deepEqual(plain(await headersReceived(contents, { resourceType, url: "https://rebound.example.test/", ip })), { cancel: true }, `${ip} ${resourceType}`);
+      }
+    }
+    assert.deepEqual(plain(await headersReceived(contents, { resourceType: "mainFrame", url: "https://news.example.test/", ip: "93.184.216.36" })), {});
+    // A response from the HTTP cache made no connection: the check before the request stands.
+    assert.deepEqual(plain(await headersReceived(contents, { resourceType: "mainFrame", url: "https://news.example.test/" })), {});
+  }
+  // The page's own resources are not filtered here.
+  assert.deepEqual(plain(await headersReceived(agentContents, { resourceType: "image", url: "https://rebound.example.test/a.png", ip: "10.0.0.5" })), {});
+});
+
+test("navigate and open_tab report a page Desktop stopped because its server was at a private address", async () => {
+  const { host, views } = fixture();
+  await resume(host, "routine");
+  // The name passes the check before the request, then Chromium connects to 10.0.0.5.
+  await assert.rejects(host.handleControlOperation("open_tab", { url: "https://rebound.example.test/" }), (error) => {
+    assert.equal(error.code, "private_address_blocked");
+    assert.match(error.message, /private or local address/);
+    return true;
+  });
+  assert.equal(views[1].webContents.destroyed, true, "the stopped tab closes");
+  assert.equal(host.getStatus().tabs.length, 1);
+  await host.handleControlOperation("open_tab", { url: "https://docs.example.test/" });
+  await rejectsWith(host.handleControlOperation("navigate", { url: "https://rebound.example.test/admin" }), "private_address_blocked");
+  // Reported once: the next step goes ahead.
+  await host.handleControlOperation("navigate", { url: "https://news.example.test/" });
+});
+
+test("through a proxy the connection reaches the proxy: its own address passes, any other private one does not", async () => {
+  const { host, session, personView } = fixture();
+  await resume(host, "routine");
+  session.proxy = "PROXY 10.1.1.1:3128; DIRECT";
+  assert.deepEqual(plain(await headersReceived(personView.webContents, { resourceType: "mainFrame", url: "https://news.example.test/", ip: "10.1.1.1" })), {});
+  assert.deepEqual(plain(await headersReceived(personView.webContents, { resourceType: "mainFrame", url: "https://rebound.example.test/", ip: "10.0.0.5" })), { cancel: true });
+  session.proxy = "DIRECT";
+  assert.deepEqual(plain(await headersReceived(personView.webContents, { resourceType: "mainFrame", url: "https://news.example.test/", ip: "10.1.1.1" })), { cancel: true });
+});
+
+test("a stopped page or a failed frame leaves the browser ready; a page that fails to load still reports its error", async () => {
+  const { host, personView } = fixture();
+  await resume(host, "routine");
+  // A link-only map embed Desktop stopped, or any other frame that failed.
+  personView.webContents.emit("did-fail-load", {}, -20, "ERR_BLOCKED_BY_CLIENT", "https://www.google.com/maps/embed", false);
+  personView.webContents.emit("did-fail-load", {}, -105, "ERR_NAME_NOT_RESOLVED", "https://ads.example.test/frame", false);
+  // The page itself, stopped by Desktop's request filter.
+  personView.webContents.emit("did-fail-load", {}, -20, "ERR_BLOCKED_BY_CLIENT", "https://www.booking.com/", true);
+  assert.equal(host.getStatus().state, "ready");
+  await host.handleControlOperation("list_tabs", {});
+  personView.webContents.emit("did-fail-load", {}, -105, "ERR_NAME_NOT_RESOLVED", "https://gone.example.test/", true);
+  assert.equal(host.getStatus().state, "error");
+  assert.equal(host.getStatus().error, "ERR_NAME_NOT_RESOLVED");
+});
+
+test("a navigation the page starts to a name that resolves to a private address is stopped without asking", async () => {
+  const { host, dialogs, personView } = fixture();
+  await resume(host, "ask");
+  await host.handleControlOperation("snapshot", {});
+  const asked = dialogs.length;
+  for (const url of ["https://rebind.example.test/", "https://rebind.example.test/account/logout"]) {
+    let prevented = false;
+    personView.webContents.emit("will-navigate", { preventDefault() { prevented = true; } }, url);
+    assert.equal(prevented, true, url);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(dialogs.length, asked, `${url} asked nothing`);
+    await rejectsWith(host.handleControlOperation("snapshot", {}), "private_address_blocked");
+  }
+  assert.deepEqual(personView.webContents.loads, []);
+  // A public site the page opens still asks, as before.
+  personView.webContents.emit("will-navigate", { preventDefault() {} }, "https://shop.example.test/");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(dialogs.length, asked + 1);
+  assert.match(dialogs.at(-1).message, /shop\.example\.test/);
 });

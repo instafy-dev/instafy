@@ -86,6 +86,9 @@ importers:
       '@electron/notarize':
         specifier: ^3.1.1
         version: 3.1.1
+      '@instafy/bind':
+        specifier: workspace:*
+        version: link:../instafy-bind
       '@types/node':
         specifier: ^22.18.0
         version: 22.18.9

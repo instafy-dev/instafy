@@ -1,5 +1,6 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 
+import { promises as dnsPromises } from "node:dns";
 import { isIP } from "node:net";
 
 import { checkPublicUrl, isLocalHostName, isPrivateAddress } from "@instafy/bind/net";
@@ -264,16 +265,20 @@ export function normalizePersonalBrowserUrl(value: unknown): string {
   return parsed.toString();
 }
 
+type PersonalBrowserLookup = (
+  host: string,
+  options: { all: true; verbatim: boolean },
+) => Promise<Array<{ address: string; family: number }>>;
+
 /**
- * An address the agent opens in a tab of its own must be a public web page:
- * no loopback, private-network, link-local or local host name, checked on the
+ * An address the agent opens, in any tab, must be a public web page: no
+ * loopback, private-network, link-local or local host name, checked on the
  * address itself and on every address its name resolves to. Pages a person
- * opens, and the agent's navigation in the person's own tab, are not limited
- * by this.
+ * opens are not limited by this.
  */
 export async function checkPersonalBrowserAgentTabUrl(
   value: string,
-  lookup?: (host: string, options: { all: true; verbatim: boolean }) => Promise<Array<{ address: string; family: number }>>,
+  lookup?: PersonalBrowserLookup,
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
   const result = await checkPublicUrl(value, lookup ? { lookup } : {});
   return result.ok ? { ok: true } : { ok: false, reason: result.reason };
@@ -281,8 +286,9 @@ export async function checkPersonalBrowserAgentTabUrl(
 
 /**
  * The literal part of that check, for a redirect or page-started navigation
- * in an agent tab, which is decided before the next request starts: an
- * address literal must be public and a host name must not be a local one.
+ * in a tab the agent drives, which is decided before the next request
+ * starts: an address literal must be public and a host name must not be a
+ * local one.
  */
 export function personalBrowserAgentTabHopIsPublic(value: string): boolean {
   let parsed: URL;
@@ -296,6 +302,79 @@ export function personalBrowserAgentTabHopIsPublic(value: string): boolean {
   if (!host) return false;
   if (isIP(host)) return !isPrivateAddress(host);
   return !isLocalHostName(host);
+}
+
+// One spelling per address, so a proxy written as 0:0:0:0:0:0:0:1 matches ::1.
+function canonicalAddress(value: string): string {
+  const address = value.trim().replace(/^\[|\]$/g, "").toLowerCase();
+  if (isIP(address) !== 6) return address;
+  try {
+    return new URL(`http://[${address}]/`).hostname.replace(/^\[|\]$/g, "");
+  } catch {
+    return address;
+  }
+}
+
+/** The proxy hosts in a `session.resolveProxy` answer such as "PROXY 10.0.0.2:3128; DIRECT". */
+export function personalBrowserProxyHosts(value: string): string[] {
+  const hosts: string[] = [];
+  for (const entry of value.split(";")) {
+    const match = /^\s*(?:PROXY|HTTPS|HTTP|SOCKS|SOCKS4|SOCKS5|QUIC)\s+(\S+)\s*$/i.exec(entry);
+    if (!match) continue;
+    const hostAndPort = match[1]!;
+    let host = hostAndPort;
+    if (hostAndPort.startsWith("[")) {
+      const end = hostAndPort.indexOf("]");
+      if (end < 0) continue;
+      host = hostAndPort.slice(1, end);
+    } else if (hostAndPort.lastIndexOf(":") > 0) {
+      host = hostAndPort.slice(0, hostAndPort.lastIndexOf(":"));
+    }
+    if (host) hosts.push(host.toLowerCase());
+  }
+  return hosts;
+}
+
+/** Whether `ip` is one of these proxies, by address or by what a proxy's name resolves to. */
+export async function personalBrowserAddressIsProxy(
+  ip: string,
+  proxyHosts: string[],
+  lookup: PersonalBrowserLookup = dnsPromises.lookup as PersonalBrowserLookup,
+): Promise<boolean> {
+  const connected = canonicalAddress(ip);
+  for (const host of proxyHosts) {
+    if (isIP(host.replace(/^\[|\]$/g, ""))) {
+      if (canonicalAddress(host) === connected) return true;
+      continue;
+    }
+    try {
+      const addresses = await lookup(host, { all: true, verbatim: true });
+      if (addresses.some((entry) => canonicalAddress(entry.address) === connected)) return true;
+    } catch {
+      // A proxy name that does not resolve here proves nothing.
+    }
+  }
+  return false;
+}
+
+/**
+ * The address Chromium actually connected to for a response, as webRequest
+ * reports it (`details.ip`), must be public in a tab the agent drives. This
+ * catches a name that resolved to a public address when it was checked and
+ * to a private one when Chromium connected (DNS rebinding). No address means
+ * no connection was made (the response came from the HTTP cache), so the
+ * check made before the request stands. Through a proxy the address is the
+ * proxy's: then the proxy resolved the name, and only the check before the
+ * request applies.
+ */
+export async function personalBrowserConnectedAddressAllowed(
+  ip: unknown,
+  isProxy: (address: string) => Promise<boolean>,
+): Promise<boolean> {
+  if (typeof ip !== "string" || !ip.trim()) return true;
+  const address = canonicalAddress(ip);
+  if (!isPrivateAddress(address)) return true;
+  return isProxy(address);
 }
 
 export function requirePersonalBrowserTabId(value: unknown): string {
