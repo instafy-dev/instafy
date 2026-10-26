@@ -3,7 +3,7 @@ import type { SubmitConversationOptions } from "../../../conversations/useConver
 import { cancelAgentJob } from "../../../services/runtimeController/jobs";
 import type { RunRecord } from "../../../types";
 import { sharedBrowserTakeoverJob } from "./browserHandoffRouting";
-import type { BrowserSessionPageTarget } from "./browserSessionPages";
+import type { BrowserSessionPage, BrowserSessionPageTarget } from "./browserSessionPages";
 import { buildSharedBrowserSubmitMetadata, withPersonalBrowserRuntimeExpectations } from "./sharedBrowserSubmitRouting";
 import { BROWSER_AUTO_STARTED_METADATA_KEY } from "./browserRequest";
 import {
@@ -41,7 +41,8 @@ type Options = {
   open: boolean;
   canWrite: boolean;
   runtimeId: string | null;
-  page: BrowserSessionPageTarget | null;
+  /** The page on screen; `openedBy` lets Take over on the agent's own tab find its run. */
+  page: (BrowserSessionPageTarget & Pick<BrowserSessionPage, "openedBy">) | null;
   runs: RunRecord[];
   personal: ReturnType<typeof usePersonalBrowserBridge>;
   agentHandle: string;
@@ -78,14 +79,18 @@ export function useChatBrowserHandoff(options: Options) {
       throw new Error("The browser or conversation changed. Return to the intended page before continuing.");
     }
   }, []);
-  const sharedJob = sharedBrowserTakeoverJob(options.runs, options.runtimeId, options.page?.id ?? null);
+  const sharedJob = sharedBrowserTakeoverJob(options.runs, options.runtimeId, options.page?.id ?? null, {
+    openedByAgent: options.page?.openedBy === "agent",
+  });
 
   const takeOverShared = useCallback(async () => {
     const captured = latest.current;
     const epoch = generation.current;
     assertCurrent(captured, epoch);
     if (captured.transport !== "shared") return false;
-    const job = sharedBrowserTakeoverJob(captured.runs, captured.runtimeId, captured.page?.id ?? null);
+    const job = sharedBrowserTakeoverJob(captured.runs, captured.runtimeId, captured.page?.id ?? null, {
+      openedByAgent: captured.page?.openedBy === "agent",
+    });
     if (!job) return false;
     const result = await cancelAgentJob(job.jobId, "User taking over the browser");
     assertCurrent(captured, epoch);

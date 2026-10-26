@@ -55,13 +55,13 @@ describe("mapRuntimeBrowserSessionPagesPayload", () => {
     const pages = mapRuntimeBrowserSessionPagesPayload({
       pages: [
         { id: "page-1", url: "https://example.com/", host: "example.com", label: "Example" },
-        { id: "tab-1", url: "https://docs.example/", host: "docs.example", label: "Docs", agentTab: true },
-        { id: "tab-2", url: "https://maps.example/", host: "maps.example", label: "Map", agentTab: true, kept: true },
+        { id: "tab-1", url: "https://docs.example/", host: "docs.example", label: "Docs", openedBy: "agent" },
+        { id: "tab-2", url: "https://maps.example/", host: "maps.example", label: "Map", openedBy: "agent", kept: true },
         // "kept" means nothing on a tab that is not Octo's.
         { id: "page-2", url: "https://other.example/", host: "other.example", label: "Other", kept: true },
       ],
     });
-    expect(pages.map((page) => [page.id, page.agentTab ?? false, page.kept ?? false])).toEqual([
+    expect(pages.map((page) => [page.id, page.openedBy === "agent", page.kept ?? false])).toEqual([
       ["page-1", false, false],
       ["tab-1", true, false],
       ["tab-2", true, true],
@@ -102,6 +102,25 @@ describe("mapRuntimeBrowserSessionPagesPayload", () => {
         canGoForward: false,
       },
     ]);
+  });
+
+  it("keeps who opened a tab only when the browser says agent or person", () => {
+    const base = { url: "https://example.com/", host: "example.com", label: "Example", title: null, isActive: false };
+    const pages = mapRuntimeBrowserSessionPagesPayload({
+      pages: [
+        { ...base, id: "agent-tab", openedBy: "agent" },
+        { ...base, id: "person-tab", openedBy: "person" },
+        { ...base, id: "unknown-tab", openedBy: "Octo" },
+        { ...base, id: "legacy-tab" },
+      ],
+    });
+    expect(pages.map((page) => [page.id, page.openedBy])).toEqual([
+      ["agent-tab", "agent"],
+      ["person-tab", "person"],
+      ["unknown-tab", undefined],
+      ["legacy-tab", undefined],
+    ]);
+    expect("openedBy" in pages[3]!).toBe(false);
   });
 
   it("returns an empty list for invalid payloads", () => {

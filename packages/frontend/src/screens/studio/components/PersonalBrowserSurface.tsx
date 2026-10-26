@@ -30,6 +30,8 @@ import { BrowserExpandButton } from "./BrowserExpandButton";
 import { SendPageToOctoButton } from "./SendPageToOctoButton";
 import { BrowserHumanInputStatus } from "./BrowserHumanInputControls";
 import { useBrowserHumanInput } from "./useBrowserHumanInput";
+import { BrowserReadingRow } from "./BrowserReadingRow";
+import { personalBrowserTabPages, resolveAgentReadingPages } from "./browserAgentTabs";
 import { browserPageOrigin } from "./browserHandoffRouting";
 import {
   BrowserChromeShell,
@@ -238,7 +240,7 @@ export function PersonalBrowserSurface({
   humanInputIdentityKey?: string;
   historyUserId?: string | null;
   onContinueAfterHumanInput?: (message: string, approvalMode: "ask" | "routine") => Promise<boolean>;
-  /** The person paused agent control with the toolbar button. */
+  /** The person paused agent control: the toolbar button or any Take over. */
   onPauseAgentControl?: () => void;
   /** Send page to Octo; absent when this person cannot add attachments here. */
   onSendPage?: () => void;
@@ -408,6 +410,9 @@ export function PersonalBrowserSurface({
     canContinue: active && ownsNativeStatus && Boolean(onContinueAfterHumanInput),
     takeoverRequestId: ownsNativeStatus ? model.status?.takeoverRequestId : undefined,
     onTakeOver: async () => {
+      // Every take-over is a Pause: Octo does not reopen the browser by
+      // itself afterwards, as after the toolbar's Pause.
+      onPauseAgentControl?.();
       const status = await model.setAgentControlEnabled(false);
       return status?.agentControlEnabled === false;
     },
@@ -417,6 +422,17 @@ export function PersonalBrowserSurface({
   };
   const humanInputState = useBrowserHumanInput(humanInputOptions);
   const humanInputAvailable = ready && Boolean(humanInputIdentityKey && onContinueAfterHumanInput);
+  // While a resumed turn works here, the pages it is reading: the tabs it
+  // opened and the tab on screen, which is the one it controls. Take over is
+  // the same action as the toolbar's: Pause revokes the broker, so it ends the
+  // agent's control of every tab at once.
+  const personalPages = personalBrowserTabPages(ownsNativeStatus ? model.status : null);
+  const agentReadingPages = resolveAgentReadingPages({
+    pages: personalPages,
+    agentControlActive: ready && ownsNativeStatus && agentWorking &&
+      model.status?.agentControlEnabled === true && !model.status?.tabControlActive,
+    agentPageIds: personalPages.filter((page) => page.isActive).map((page) => page.id),
+  });
   const resumeFromStatus = ready && browserStatus.state === "paused" &&
     !model.status?.agentControlEnabled && model.agentPhase !== "unavailable" && !humanInputState.active;
   const clearDataMessage =
@@ -664,6 +680,14 @@ export function PersonalBrowserSurface({
         locked={humanInputLocked}
         onSelect={(tabId) => void model.selectTab(tabId)}
         onClose={(tabId) => void model.closeTab(tabId)}
+      />
+      <BrowserReadingRow
+        pages={agentReadingPages}
+        canTakeOver={humanInputOptions.canTakeOver && (!humanInputState.active || humanInputState.busy === "takeover")}
+        takingOver={humanInputState.busy === "takeover"}
+        // The toolbar's take-over controls already say why a take-over failed.
+        error={humanInputAvailable ? null : humanInputState.error}
+        onTakeOver={() => void humanInputState.takeOver()}
       />
       <div
         ref={viewportRef}

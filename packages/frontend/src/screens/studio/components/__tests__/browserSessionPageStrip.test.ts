@@ -29,6 +29,7 @@ function runtimePage(
     isActive: overrides.isActive ?? false,
     canGoBack: overrides.canGoBack ?? false,
     canGoForward: overrides.canGoForward ?? false,
+    ...(overrides.openedBy ? { openedBy: overrides.openedBy } : {}),
   };
 }
 
@@ -69,6 +70,23 @@ describe("browser session page ordering", () => {
         activePageId: "pear",
       }).map((page) => page.id),
     ).toEqual(["pear", "bbc"]);
+  });
+
+  it("keeps who opened each live tab", () => {
+    const pages = reconcileBrowserSessionPageOrder({
+      currentPages: [],
+      livePages: [
+        runtimePage({ id: "agent", label: "Agent", openedBy: "agent" }),
+        runtimePage({ id: "person", label: "Person", openedBy: "person" }),
+        runtimePage({ id: "legacy", label: "Legacy" }),
+      ],
+      activePageId: null,
+    });
+    expect(pages.map((page) => [page.id, page.openedBy])).toEqual([
+      ["agent", "agent"],
+      ["person", "person"],
+      ["legacy", undefined],
+    ]);
   });
 });
 

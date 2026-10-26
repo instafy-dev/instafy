@@ -3020,6 +3020,29 @@ impl ControllerTokenGuard {
     }
 }
 
+/// The project's skill-pack folder (`INSTAFY_CACHE_DIR`, [`crate::skill_packs::skill_pack_cache_dir`]),
+/// exported to the agent's shell for the job: packs keep caches, rate-limit holds and service health
+/// there across turns. A folder that cannot be created leaves the variable unset (packs then fall
+/// back to their own defaults), never another project's folder.
+struct SkillPackCacheGuard {
+    _override: EnvOverride,
+}
+
+impl SkillPackCacheGuard {
+    fn new(workspace_root: &Path, project_id: &Uuid) -> Self {
+        let key = crate::skill_packs::SKILL_PACK_CACHE_DIR_ENV;
+        let _override =
+            match crate::skill_packs::prepare_skill_pack_cache_dir(workspace_root, project_id) {
+                Ok(dir) => EnvOverride::apply(key, &dir.to_string_lossy()),
+                Err(error) => {
+                    warn!(?error, %project_id, "skill pack cache folder unavailable");
+                    EnvOverride::remove(key)
+                }
+            };
+        Self { _override }
+    }
+}
+
 /// The turn's start and hard deadline, exported to the agent's shell so a tool that paces itself reads the host's
 /// own limit instead of guessing when the turn began and how long it lasts.
 struct TurnClockGuard {
@@ -6185,6 +6208,8 @@ impl JobProcessor {
         let workspace_token = self.verified_workspace_token(registration, job).await?;
 
         let project_id = self.project_id_for_job(job)?;
+        let _skill_pack_cache_env =
+            SkillPackCacheGuard::new(&self.config.workspace_root, &project_id);
         let workspace_dir = self.prepare_workspace_dir(&project_id)?;
         // Bring the checkout up to date before anything writes into it. The
         // `/sync` lane publishes on its own.
@@ -29506,6 +29531,54 @@ mod tests {
                 && env::var_os("INSTAFY_TURN_DEADLINE").is_none(),
             "cleared when the turn ends"
         );
+    }
+
+    #[tokio::test]
+    async fn a_job_exports_its_projects_skill_pack_folder_and_clears_it_after() {
+        let _lock = JOB_PROCESS_ENV_LOCK.lock().await;
+        let key = crate::skill_packs::SKILL_PACK_CACHE_DIR_ENV;
+        let _previous = EnvOverride::remove(key);
+        let root = tempfile::tempdir().expect("tmp");
+        let (one, two) = (Uuid::new_v4(), Uuid::new_v4());
+        let first = {
+            let _guard = SkillPackCacheGuard::new(root.path(), &one);
+            let dir = PathBuf::from(env::var_os(key).expect("exported"));
+            assert!(dir.is_dir(), "created for the job");
+            assert!(
+                dir.starts_with(root.path().join(".instafy")),
+                "outside every project workspace"
+            );
+            fs::write(dir.join("health.json"), "{}").expect("write");
+            dir
+        };
+        assert!(env::var_os(key).is_none(), "cleared when the job ends");
+        {
+            let _guard = SkillPackCacheGuard::new(root.path(), &one);
+            assert_eq!(
+                PathBuf::from(env::var_os(key).unwrap()),
+                first,
+                "the same folder next turn"
+            );
+            assert!(
+                first.join("health.json").exists(),
+                "and what the last turn kept"
+            );
+        }
+        {
+            let _guard = SkillPackCacheGuard::new(root.path(), &two);
+            assert_ne!(
+                PathBuf::from(env::var_os(key).unwrap()),
+                first,
+                "another project, another folder"
+            );
+        }
+        // a folder that cannot be made leaves the variable unset
+        let blocked = root.path().join("file");
+        fs::write(&blocked, "not a folder").expect("file");
+        {
+            let _guard = SkillPackCacheGuard::new(&blocked, &one);
+            assert!(env::var_os(key).is_none());
+        }
     }
 
     #[test]

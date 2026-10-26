@@ -1,4 +1,5 @@
 import type { ChatMessage } from "../types";
+import type { BrowserTabOpener } from "../../../sdk/instafy";
 
 export type BrowserSessionPage = {
   id: string;
@@ -10,8 +11,8 @@ export type BrowserSessionPage = {
   isActive: boolean;
   canGoBack?: boolean;
   canGoForward?: boolean;
-  /** One of the tabs Octo opened in the running turn (Shared Browser). */
-  agentTab?: boolean;
+  /** Who opened the tab, when the browser says so; absent is the person's. */
+  openedBy?: BrowserTabOpener;
   /** One of Octo's tabs a person kept open past the end of the turn. */
   kept?: boolean;
 };

@@ -99,6 +99,23 @@ navigation, reload and **Expand browser** so the toolbar stays on one row. AI
 takeover and **Let AI continue** are in the same participant controls;
 clicking the shared page can still open the takeover confirmation.
 
+### The agent's tabs
+
+While the agent holds the browser (the origin publishes it as the control
+owner), the tabs it holds carry its name: in the tab picker each option reads
+"Octo · <title>" and the compact page count turns violet, and the chat's page
+strip shows the same name on each chip. The agent holds the tab its run is
+bound to (`browserPageId`) and every tab the page list reports with
+`openedBy: "agent"`; `openedBy` is optional, only `agent` and `person` are
+kept, and an absent value is the person's tab. A compact **Octo is reading**
+row under the toolbar lists those tabs as host and title text (page titles are
+shown as text only, never followed) with one **Take over** button. It is the
+same action as the toolbar's take-over, without a confirmation: it cancels the
+run, and ending its runtime-wide agent marker returns every tab to people. On a
+tab the agent opened itself, take-over finds the runtime's one browser run; a
+person's own tab never falls back to a runtime-wide run. Once control is gone,
+no tab carries the agent's name.
+
 Personal and Shared Browser use one `BrowserAddressField` and the common Instafy
 `Input`, `Button`, `IconButton` and `Checkbox` primitives for their address, actions
 and settings. Focusing the address, by keyboard or by the click that focuses it,
@@ -395,9 +412,11 @@ Browser has tabs of its own (see Personal-Browser.md).
 
 - **Visible, badged and shared.** A tab opens blank in the run's own browser
   context, is recorded in the run's `tabs.json` before anything loads, and is
-  brought to the front whenever Octo works in it. Every viewer sees it in the
-  tab list as "Octo's tab: <title>" (`GET /browser/pages` marks it `agentTab`),
-  and the action feed attributes each step to the tab it ran in.
+  brought to the front whenever Octo works in it. `GET /browser/pages` marks
+  it `openedBy: "agent"` (and `kept: true` once a person keeps it). Every
+  viewer sees it in the tab list as "Octo · <title>" while Octo holds the
+  browser and as "Octo's tab: <title>" after Pause or take-over, and the
+  action feed attributes each step to the tab it ran in.
 - **Only its own tabs.** Octo can use the page the person chose and the tabs it
   opened in this run, never another tab a person or a page opened, and it can
   close only its own tabs.

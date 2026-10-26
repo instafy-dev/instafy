@@ -427,7 +427,8 @@ import { useSharedBrowserHostSnapshot } from "./useSharedBrowserHostSnapshot";
 import { sharedBrowserLateAttachInputs, useSharedBrowserAutoAttach } from "./useSharedBrowserAutoAttach";
 import { hostedBrowserPagesActive, type HostedBrowserViewKind } from "./hostedBrowserViewState";
 import { isSkillSetupConversation } from "./skillSetupConversation";
-import { sharedBrowserConversationRunIds } from "./browserHandoffRouting";
+import { sharedBrowserAgentPageIds, sharedBrowserConversationRunIds } from "./browserHandoffRouting";
+import { BROWSER_AGENT_DEFAULT_NAME, resolveAgentTabIds } from "./browserAgentTabs";
 
 const { enabled: runtimeControllerEnabled } = controllerClient.core;
 const {
@@ -3215,6 +3216,29 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     browserPageId: preferredBrowserPage?.id ?? null,
     browserRuntimeId: resolvedBrowserRuntimeId,
   });
+  // The tabs this conversation's browser runs are bound to. With the tabs the
+  // agent opened, they carry its name in the tab picker and the chat's page
+  // strip, and fill the Reading row, while it has control.
+  const sharedBrowserAgentPages = useMemo(
+    () => sharedBrowserAgentPageIds(activeConversationRuns, resolvedBrowserRuntimeId),
+    [activeConversationRuns, resolvedBrowserRuntimeId],
+  );
+  const sharedBrowserChromeForView = useMemo<SharedBrowserChromeProps | null>(
+    () => sharedBrowserChromeWithSend
+      ? { ...sharedBrowserChromeWithSend, agentPageIds: sharedBrowserAgentPages }
+      : null,
+    [sharedBrowserAgentPages, sharedBrowserChromeWithSend],
+  );
+  const browserPageStripAgentTabIds = useMemo(
+    () => resolveAgentTabIds({
+      pages: browserSessionPages,
+      agentControlActive: browserTransport === "shared" && sharedBrowserAgentPages.length > 0,
+      agentPageIds: sharedBrowserAgentPages,
+    }),
+    [browserSessionPages, browserTransport, sharedBrowserAgentPages],
+  );
+  const browserPageStripAgentName =
+    sharedBrowserControlOwner.kind === "agent" ? sharedBrowserControlOwner.displayName : BROWSER_AGENT_DEFAULT_NAME;
   // The prompts of this conversation's running Instafy's browser job, for the
   // person who started it, whatever the browser view is doing.
   const chatBrowserApproval = useChatSharedBrowserApproval({
@@ -6541,7 +6565,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     onTakeOverAgent={browserHandoff.sharedJob ? takeOverSharedBrowser : null}
                     onContinueAfterHumanInput={browserHandoff.continueShared}
                     onPresenceChange={setSharedBrowserPresence}
-                    sharedBrowserChrome={sharedBrowserChromeWithSend}
+                    sharedBrowserChrome={sharedBrowserChromeForView}
                     sharedBrowserViewerKind={sharedBrowserViewerKind}
                     sharedBrowserCapabilitiesResolved={sharedBrowserCapabilitiesResolved}
                     sharedBrowserCapabilitiesAvailable={Boolean(sharedBrowserCapabilities)}
@@ -6679,6 +6703,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           onBrowserRuntimeIdResolved: handleBrowserRuntimeIdResolved,
           browserPageStripBottomInset,
           browserSessionPages,
+          browserSessionAgentTabIds: browserPageStripAgentTabIds,
+          browserSessionAgentName: browserPageStripAgentName,
           onSelectBrowserSessionPage: (pageId) => {
             setBrowserSubtab("browser");
             void handleSelectBrowserSessionPage(pageId);

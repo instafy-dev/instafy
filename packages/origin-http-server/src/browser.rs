@@ -59,10 +59,10 @@ struct BrowserPageResponse {
     is_active: bool,
     can_go_back: bool,
     can_go_forward: bool,
-    /// One of the tabs Octo opened in the running turn: shown with Octo's
-    /// badge to every viewer.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    agent_tab: bool,
+    /// "agent" on one of the tabs Octo opened in the running turn: shown
+    /// with Octo's badge to every viewer. Absent on a person's tab.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    opened_by: Option<&'static str>,
     /// A tab of Octo's that a person kept open past the end of the turn.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     kept: bool,
@@ -1059,7 +1059,7 @@ async fn handle_browser_pages(
                 is_active: active_page_id.as_deref() == Some(target.id.as_str()),
                 can_go_back: has_history_state && history_state.can_go_back,
                 can_go_forward: has_history_state && history_state.can_go_forward,
-                agent_tab: agent_tabs.tab_ids.contains(&target.id),
+                opened_by: agent_tabs.tab_ids.contains(&target.id).then_some("agent"),
                 kept: agent_tabs.kept.contains(&target.id),
             }
         })
@@ -1923,7 +1923,7 @@ mod tests {
             is_active: true,
             can_go_back: true,
             can_go_forward: false,
-            agent_tab: false,
+            opened_by: None,
             kept: false,
         };
         let value = serde_json::to_value(page).expect("serialize browser page");
@@ -1937,7 +1937,7 @@ mod tests {
         );
         assert!(value.get("can_go_back").is_none());
         // A page that is not one of Octo's tabs carries no badge fields.
-        assert!(value.get("agentTab").is_none());
+        assert!(value.get("openedBy").is_none());
         assert!(value.get("kept").is_none());
     }
 
@@ -1952,11 +1952,11 @@ mod tests {
             is_active: false,
             can_go_back: false,
             can_go_forward: false,
-            agent_tab: true,
+            opened_by: Some("agent"),
             kept: true,
         };
         let value = serde_json::to_value(page).expect("serialize browser page");
-        assert_eq!(value["agentTab"], true);
+        assert_eq!(value["openedBy"], "agent");
         assert_eq!(value["kept"], true);
     }
 

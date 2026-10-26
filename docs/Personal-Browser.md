@@ -474,6 +474,14 @@ only in the visible browser, so the rules are the ones a person sees:
 **Take over** in the surface dialog pauses agent control for a manual step, even
 when the AI has not requested one. After control returns, **Let AI continue**
 appears in the existing browser toolbar; no extra takeover header is added.
+While a resumed turn works, a compact **Octo is reading** row under the toolbar
+lists the pages it is reading (host and title, as text) with one **Take over**
+button: the same Pause as the dialog, which revokes the broker and so every
+tab at once. Like the toolbar's Pause, every Take over also stops Octo from
+reopening the browser by itself in that conversation. A host with several tabs reports them as `tabs` in its status
+(`id`, `url`, `title`, `active`, optional `openedBy: "agent"`); the row lists
+the agent's tabs and the tab on screen. A one-page host leaves `tabs` out, and
+its page is the one listed. The row never shows another owner's status.
 The agent can also call `request_human_input` with fresh snapshot indices. The native host applies fixed amber outlines to the actual editable
 elements, so they move with scrolling and reflow; replaced elements do not inherit
 old highlights. Guidance contains only generic field labels and an expiring
