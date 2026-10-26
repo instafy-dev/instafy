@@ -42,18 +42,14 @@ composer image. At 320px the sent images wrap within the bubble. The browser
 checks verify the shared radius, lack of an idle shadow, visible keyboard focus,
 preview opening and removal in light and dark themes on mobile and desktop.
 
-The local sample, `assets/workspace-files.png`, is a 960×515 PNG (56,501 bytes)
-captured from the production Files panel in `../workspace-surfaces/` on
-2026-10-25. It contains only that fixture's checked-in example files and text,
-with no personal data, external image, or generated artwork. To reproduce it,
-run the workspace surface fixture with its dedicated Vite config, open
-`/tests/fixtures/workspace-surfaces/index.html?panel=files` in a fresh light-theme
-browser context at 960×640 and device scale factor 1, wait for fonts to load,
-then use Playwright's `getByTestId("review-files-panel").screenshot(...)`.
-The fixture reuses the same image for each attachment; the `File` contains the
-actual PNG bytes, and its inline preview URL keeps every image local. The
-message fixture replaces account, conversation, runtime, workspace and optional
-feature data boundaries with inert adapters; no controller or model is contacted.
+The local sample reuses the existing `../../../public/og-image.png`: Instafy's
+1200×630 social-card design (83,531 bytes), already approved by the public
+boundary policy. It is imported from its original path rather than copied or
+modified. This is a real design asset, not a workspace screenshot. The fixture
+reuses it for each attachment; the `File` contains its actual PNG bytes, and
+Vite's inline preview URL keeps every image local. The message fixture replaces
+account, conversation, runtime, workspace and optional feature data boundaries
+with inert adapters; no controller or model is contacted.
 
 For the production browser page strip, use
 `?context=browserpages&browserpages=6&pending=1`.

@@ -7,7 +7,7 @@ import { useQueueReview } from "./useQueueReview";
 import type { ControllerMessageStash } from "../../../src/services/runtimeController/messageStashes";
 import type { ConversationGoal, ConversationGoalStatus } from "../../../src/conversations/conversationGoals";
 import type { PendingChatImageAttachment } from "../../../src/screens/studio/components/useChatComposerAttachments";
-import reviewImageUrl from "../conversation-view-tabs/assets/workspace-files.png?inline";
+import reviewImageUrl from "../../../public/og-image.png?inline";
 
 const noop = () => {};
 const reviewImageBytes = Uint8Array.from(atob(reviewImageUrl.split(",")[1]), character => character.charCodeAt(0));
@@ -44,7 +44,7 @@ export function Composer({ controller, readOnly, recording, viewNavigation, queu
     createdAt: "2026-10-25T00:00:00Z", updatedAt: "2026-10-25T00:00:00Z", createdBy: null, updatedBy: null,
   } : null;
   const [attachments, setAttachments] = useState<PendingChatImageAttachment[]>(() => Array.from({ length: attachmentCount ?? (utilityReview ? 1 : 0) }, (_, index) => ({
-    id: `review-image-${index}`, file: new File([reviewImageBytes], index === 0 ? "browser-layout-review.png" : `browser-layout-review-with-a-long-filename-for-responsive-attachment-preview-${index + 1}.png`, { type: "image/png" }),
+    id: `review-image-${index}`, file: new File([reviewImageBytes], index === 0 ? "social-card-review.png" : `social-card-review-with-a-long-filename-for-responsive-attachment-preview-${index + 1}.png`, { type: "image/png" }),
     sending: attachmentSending,
     previewUrl: reviewImageUrl,
   })));

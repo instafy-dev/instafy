@@ -7,7 +7,7 @@ import { Composer } from "../run-stop-control/Composer";
 import { BrowserSessionPageStrip } from "../../../src/screens/studio/components/BrowserSessionPageStrip";
 import { UserMessageBubble } from "../../../src/screens/studio/components/ChatMessageEntries";
 import { ChatImageLightboxOverlay } from "../../../src/screens/studio/components/ChatPanelOverlays";
-import reviewImageUrl from "./assets/workspace-files.png?inline";
+import reviewImageUrl from "../../../public/og-image.png?inline";
 import "../../../src/styles/tailwind.css";
 
 const query = new URLSearchParams(location.search);
@@ -38,9 +38,9 @@ function MobileComposerReview() {
         {query.has("messages") ? <div className="flex justify-end">
           <UserMessageBubble message={{
             id: "review-message-with-images", role: "user", timestamp: 1,
-            content: "Can you check this workspace layout?",
+            content: "Can you review this social card?",
             metadata: { attachments: Array.from({ length: 3 }, (_, index) => ({
-              kind: "image", previewUrl: `${reviewImageUrl}#${index}`, fileName: `workspace-layout-${index + 1}.png`,
+              kind: "image", previewUrl: `${reviewImageUrl}#${index}`, fileName: `social-card-review-${index + 1}.png`,
             })) },
           }} onOpenImage={(src, alt) => setImageLightbox({ src, alt })} />
         </div> : <p className="ml-10 rounded-2xl bg-slate-100 p-3 dark:bg-[var(--color-studio-dark-active)]">Can you help me compare these websites?</p>}

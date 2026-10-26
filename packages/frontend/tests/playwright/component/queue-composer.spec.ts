@@ -94,8 +94,8 @@ for (const width of [320, 1280]) for (const theme of ["light", "dark"]) {
       const bounds = (await thumbnail.boundingBox())!;
       expect(bounds.width).toBe(index === 0 ? 48 : 96);
       expect(bounds.height).toBe(index === 0 ? 48 : 96);
-      await expect(thumbnail.locator("img")).toHaveJSProperty("naturalWidth", 960);
-      await expect(thumbnail.locator("img")).toHaveJSProperty("naturalHeight", 515);
+      await expect(thumbnail.locator("img")).toHaveJSProperty("naturalWidth", 1200);
+      await expect(thumbnail.locator("img")).toHaveJSProperty("naturalHeight", 630);
     }
     const firstBounds = (await messageThumbnails.first().boundingBox())!;
     const lastBounds = (await messageThumbnails.last().boundingBox())!;
@@ -116,7 +116,7 @@ for (const width of [320, 1280]) for (const theme of ["light", "dark"]) {
       await thumbnail.press("Enter");
       const preview = page.getByRole("dialog", { name: "Image preview", exact: true });
       await expect(preview).toBeVisible();
-      await expect(preview.getByTestId("chat-image-lightbox-image")).toHaveJSProperty("naturalWidth", 960);
+      await expect(preview.getByTestId("chat-image-lightbox-image")).toHaveJSProperty("naturalWidth", 1200);
       await preview.getByRole("button", { name: "Close image preview", exact: true }).press("Enter");
       await expect(preview).toHaveCount(0);
     }
@@ -132,7 +132,7 @@ for (const width of [320, 1280]) for (const theme of ["light", "dark"]) {
 
 for (const width of [320, 390, 1280]) for (const theme of ["light", "dark"]) {
   test(`attachment previews stay above the input in ${theme} at ${width}px`, async ({ page }) => {
-    const draft = "Compare these screenshots";
+    const draft = "Review these social cards";
     const { errors } = await openFixture(page, { width, theme, count: 0, attachments: 12, draft });
     const surface = page.getByTestId("chat-composer-surface");
     const tray = surface.getByTestId("chat-image-upload-preview");
