@@ -1014,13 +1014,14 @@ mod tests {
 
     #[test]
     fn the_launcher_runs_the_pack_command() {
-        let Some(node) = crate::skill_packs::node_on_path() else {
+        // Any node runs the launcher; the pack's own `engines.node` is not what is tested here.
+        if crate::skill_packs::node_on_path().is_none() {
             return;
-        };
+        }
         let packs_root = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let demo = pack(packs_root.path(), "demo", true);
-        keep_current(workspace.path(), std::slice::from_ref(&demo), Some(node));
+        keep_current(workspace.path(), std::slice::from_ref(&demo), NODE);
         let launcher = workspace.path().join(".agents/skills/demo/scripts/run.mjs");
         let run = |args: &[&str], dir: Option<&Path>| {
             let mut command = Command::new("node");
@@ -1034,7 +1035,11 @@ mod tests {
             command.output().unwrap()
         };
         let output = run(&["hello", "there"], Some(packs_root.path()));
-        assert!(output.status.success());
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
             "the pack ran hello there\n"
