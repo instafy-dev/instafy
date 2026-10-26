@@ -28,7 +28,10 @@ const EXPECTED_PERSONAL_BROWSER_CAPABILITY_CONTRACT = {
       name: "instafy_personal_browser",
       required: true,
       supportsParallelToolCalls: false,
-      enabledTools: ["request_human_input", "status", "snapshot", "navigate", "click", "type", "press", "scroll"],
+      enabledTools: [
+        "request_human_input", "status", "snapshot", "navigate", "click", "type", "press", "scroll",
+        "list_tabs", "open_tab", "select_tab", "close_tab",
+      ],
     },
   ],
   projectMcpServersAllowed: false,

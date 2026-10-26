@@ -391,7 +391,7 @@ of its own in the same browser, to read related pages side by side (the
 Shared Browser MCP server has `list_tabs`, `open_tab {url}`, `select_tab {tabId}`
 and `close_tab {tabId}`; `snapshot` and `navigate` also take a `tabId`, and every
 other tool acts on the tab `open_tab` or `select_tab` last chose. The Personal
-Browser keeps one page until it has a multi-tab host of its own.
+Browser has tabs of its own (see Personal-Browser.md).
 
 - **Visible, badged and shared.** A tab opens blank in the run's own browser
   context, is recorded in the run's `tabs.json` before anything loads, and is

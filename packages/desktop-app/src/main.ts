@@ -2246,6 +2246,28 @@ app.whenReady().then(() => {
     return page;
   });
 
+  // The person shows or closes a tab. Both are refused while the agent has
+  // control, like the other browser-bar controls.
+  for (const [channel, operation] of [
+    ["instafy:personalBrowserSelectTab", "select"],
+    ["instafy:personalBrowserCloseTab", "close"],
+  ] as const) {
+    ipcMain.handle(channel, async (event, payload) => {
+      assertAllowedCaller(event);
+      const rendererLease = captureStudioRendererGeneration(event);
+      if (!personalBrowserHost) {
+        throw new Error("Personal Browser host is unavailable.");
+      }
+      return serializePersonalBrowserMutation(async () => {
+        assertStudioRendererGenerationCurrent(rendererLease);
+        const ownerId = requirePersonalBrowserOwnerId(payload?.ownerId);
+        return operation === "select"
+          ? personalBrowserHost!.selectTab(ownerId, payload?.tabId)
+          : personalBrowserHost!.closeTab(ownerId, payload?.tabId);
+      });
+    });
+  }
+
   ipcMain.handle("instafy:personalBrowserGoBack", async (event, payload) => {
     assertAllowedCaller(event);
     const rendererLease = captureStudioRendererGeneration(event);
