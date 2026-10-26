@@ -19,7 +19,11 @@ export type PersonalBrowserControlOperation =
   | "type"
   | "press"
   | "request_human_input"
-  | "scroll";
+  | "scroll"
+  | "list_tabs"
+  | "open_tab"
+  | "select_tab"
+  | "close_tab";
 
 export type PersonalBrowserControlCredentials = {
   controlUrl: string;
@@ -165,6 +169,43 @@ const PERSONAL_BROWSER_MCP_TOOLS: McpToolDefinition[] = [
       additionalProperties: false,
     },
   },
+  {
+    name: "list_tabs",
+    description:
+      "List the open tabs: the person's own tab and the tabs you opened. A tab's address shows only when its site is allowed in that tab.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "open_tab",
+    description:
+      "Open one public http(s) page in a new visible tab and show it. At most three of your tabs can be open; the new tab asks for its own site approval.",
+    inputSchema: {
+      type: "object",
+      properties: { url: { type: "string", maxLength: 4096 } },
+      required: ["url"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "select_tab",
+    description: "Show one open tab. Every other tool acts on the tab on screen; snapshot again after switching.",
+    inputSchema: {
+      type: "object",
+      properties: { tabId: { type: "string", maxLength: 16 } },
+      required: ["tabId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "close_tab",
+    description: "Close one tab you opened. The person's own tab cannot be closed.",
+    inputSchema: {
+      type: "object",
+      properties: { tabId: { type: "string", maxLength: 16 } },
+      required: ["tabId"],
+      additionalProperties: false,
+    },
+  },
 ];
 
 function mcpError(id: unknown, code: number, message: string, data?: unknown) {
@@ -212,6 +253,10 @@ const PERSONAL_BROWSER_MCP_ARGUMENT_KEYS: Record<
   press: new Set(["index", "key"]),
   scroll: new Set(["x", "y"]),
   request_human_input: new Set(["indices"]),
+  list_tabs: new Set(),
+  open_tab: new Set(["url"]),
+  select_tab: new Set(["tabId"]),
+  close_tab: new Set(["tabId"]),
 };
 
 function rejectUnknownMcpToolArguments(
@@ -450,14 +495,16 @@ export class PersonalBrowserControlServer {
         result: {
           protocolVersion: PERSONAL_BROWSER_MCP_PROTOCOL_VERSION,
           capabilities: { tools: { listChanged: false } },
-          serverInfo: { name: "instafy-personal-browser", version: "1.1.0" },
+          serverInfo: { name: "instafy-personal-browser", version: "1.2.0" },
           instructions:
             "Use snapshot before indexed actions. The user must resume control; in Ask mode they approve each site, and sensitive typing is blocked. " +
             "Reading, scrolling, plain links, menus, tabs and searches may run without a prompt; other clicks, typing into forms, submissions and " +
             "risky addresses ask the user. activation_denied, typing_denied, form_submission_denied, navigation_denied and origin_not_approved are final for that step: do not retry it. " +
             "Snapshots and status mask values that look like keys, tokens or codes. When a snapshot has secretScreen: true its text is withheld: " +
             "do not try to reveal or read the value; stop and tell the user which control on the page shows it. " +
-            "step_refused_secret, step_refused_sign_in and step_refused_upload are final: those steps are the user's.",
+            "step_refused_secret, step_refused_sign_in and step_refused_upload are final: those steps are the user's. " +
+            "Every tool acts on the tab on screen. open_tab opens a public page in a new visible tab (at most three of yours); " +
+            "select_tab shows another tab and close_tab closes one you opened. Pause or Escape ends control of every tab.",
         },
       };
     }

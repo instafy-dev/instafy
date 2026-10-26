@@ -407,7 +407,7 @@ The desktop launcher strips ambient values for these names, then passes the acti
 - `INSTAFY_PERSONAL_BROWSER_PROJECT_ID`
 - `INSTAFY_RUNTIME_AGENT_BIN`
 
-Every job, including a Personal job, strips these values from the Codex shell environment. Runtime startup captures the capability in a trusted process-local store and removes it from the parent environment before worker threads start. A Personal turn uses a fresh, non-persisted Codex thread and registers one required `instafy_personal_browser` Streamable HTTP MCP server. The trusted runtime places the bearer only in that turn's ephemeral in-memory transport header, adds the project header, and exposes only the eight allowlisted tools, including manual-input handoff. Personal MCP configuration is never serialized through the thread-refresh operation. The shell tool is disabled for the turn; the token never enters command arguments, subprocess environments, rollout events, learned memory, or files, and current logging paths do not emit it.
+Every job, including a Personal job, strips these values from the Codex shell environment. Runtime startup captures the capability in a trusted process-local store and removes it from the parent environment before worker threads start. A Personal turn uses a fresh, non-persisted Codex thread and registers one required `instafy_personal_browser` Streamable HTTP MCP server. The trusted runtime places the bearer only in that turn's ephemeral in-memory transport header, adds the project header, and exposes only the twelve allowlisted tools: the eight page tools, including manual-input handoff, and the four tab tools. Personal MCP configuration is never serialized through the thread-refresh operation. The shell tool is disabled for the turn; the token never enters command arguments, subprocess environments, rollout events, learned memory, or files, and current logging paths do not emit it.
 
 The model sees these dedicated tools, not Node, Playwright, a shell helper, or an exposed CDP port:
 
@@ -416,6 +416,7 @@ instafy_personal_browser.status
 instafy_personal_browser.snapshot
 instafy_personal_browser.navigate / click / type / press / scroll
 instafy_personal_browser.request_human_input
+instafy_personal_browser.list_tabs / open_tab / select_tab / close_tab
 ```
 
 | MCP tool | Purpose |
@@ -428,6 +429,45 @@ instafy_personal_browser.request_human_input
 | `press` | Apply one allowlisted key to a fresh observed target inside the same guarded renderer turn |
 | `scroll` | Scroll the visible page by bounded CSS-pixel deltas |
 | `request_human_input` | Highlight one to eight fresh observed fields, revoke agent control, and ask the user to fill them directly |
+| `list_tabs` | List the open tabs; a tab's address and title show only when its site is allowed in that tab |
+| `open_tab` | Open one public HTTP(S) page in a new visible tab and show it (at most three agent tabs) |
+| `select_tab` | Show one open tab; every other tool acts on the tab on screen |
+| `close_tab` | Close a tab the agent opened; the person's own tab cannot be closed |
+
+### Agent tabs
+
+While the person has resumed control, the agent can open up to three tabs of its
+own beside the person's tab, for reading several pages in one turn. Tabs exist
+only in the visible browser, so the rules are the ones a person sees:
+
+- **Visible and marked.** `open_tab` creates a tab and shows it at once. Every
+  page tool acts on the tab on screen, and the tab on screen is the only one the
+  agent can read or act on: there is no background or hidden reader. Studio shows
+  a tab row once the agent has opened a tab, with the agent's tabs marked
+  **Octo**. The person shows or closes tabs from that row after pausing.
+- **Approval per tab.** Site, navigation and typing approvals, the latest
+  snapshot and withheld pages belong to the tab they were given in. In Ask mode a
+  new tab asks for its site even when another tab already has it. A denied site
+  closes the tab the agent just opened. A tab that is not on screen never shows a
+  dialog; while the agent has control, a navigation its page starts that would
+  ask (a risky address or a site not yet allowed in that tab) is stopped.
+- **One control for every tab.** Pause, Escape, **Take over**, Clear data,
+  closing and every identity change end the agent's control of every tab at once
+  and clear every tab's approvals. The agent's tabs stay open for the person to
+  look at, take over or close; Clear data and closing the browser close them.
+- **Public pages only.** An agent tab opens only public addresses: a loopback,
+  private-network, link-local or local host name is refused with
+  `private_address_blocked`, and so is a name that resolves to one. While the
+  agent has control, every page and frame request of an agent tab, each link the
+  agent follows and each redirect hop, resolves its host the same way and is
+  cancelled before it connects when it is not public; a local name written with
+  a final dot (`localhost.`) is still local. The person's own tab keeps its
+  current rules.
+- **Limits.** At most three agent tabs (`agent_tab_limit`); changing the tab on
+  screen never runs alongside another step (`browser_busy`); a tab share is
+  scoped to the page on screen, so showing another tab ends it, and the agent
+  cannot open or show another tab while the person is sharing
+  (`tab_share_active`). Tab tools never fill forms, sign in or download.
 
 ### Manual steps and continuation
 
@@ -528,7 +568,7 @@ An explicit Personal/Shared choice is remembered per signed-in user on that devi
 
 ## Product limits
 
-- One visible page only. Multi-site work must navigate the same page sequentially; there are no tab/window RPCs.
+- One page on screen at a time. The agent can open at most three visible tabs of its own (see Agent tabs); there are no window RPCs.
 - No Chrome extensions, Chrome Sync, existing Chrome tabs, or imported Chrome profile/password state.
 - No downloads, permission-granting flows, popups, or new windows.
 - No screenshot RPC. Snapshot returns structured text and interactive descriptors, not image bytes.
@@ -619,7 +659,7 @@ Packaged release verification should prove all of the following:
    `--version` self-invocation, and a secret-free
    `personal-browser capabilities` self-query from the packaged resources
    directory. That compiled contract must expose exactly one required
-   `instafy_personal_browser` MCP server, only the eight browser tools, no
+   `instafy_personal_browser` MCP server, only the twelve browser tools, no
    project MCP servers, and zero local execution environments.
 2. A real packaged Personal Browser turn completes through
    `instafy_personal_browser` MCP tools without a command-execution event, while

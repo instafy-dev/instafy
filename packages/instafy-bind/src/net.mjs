@@ -72,6 +72,16 @@ export function isPrivateAddress(ip) {
 
 const LOCAL_NAME_RE = /(^|\.)(localhost|local|internal|lan|home|intranet|localdomain)$/i;
 
+/** True for a host name that names this machine or a local network (localhost, *.local, a single label, …). */
+export function isLocalHostName(host) {
+  // A fully qualified name may end in a dot ("localhost.", "router.lan."); it names the same host.
+  // Trimmed with a loop, not /\.+$/, which backtracks quadratically on a long run of dots.
+  let end = host.length;
+  while (end > 0 && host.charCodeAt(end - 1) === 0x2e) end -= 1;
+  const name = host.slice(0, end);
+  return LOCAL_NAME_RE.test(name) || !name.includes(".");
+}
+
 /**
  * Check that a URL points at a public http(s) host. Resolves DNS names.
  * Returns {ok: true, addresses} or {ok: false, reason}.
@@ -90,7 +100,7 @@ export async function checkPublicUrl(raw, { allowLocal = false, lookup = dns.pro
   if (net.isIP(host)) {
     return isPrivateAddress(host) ? { ok: false, reason: `${host} is a private or local address` } : { ok: true, addresses: [host] };
   }
-  if (LOCAL_NAME_RE.test(host) || !host.includes(".")) return { ok: false, reason: `${host} is a local host name` };
+  if (isLocalHostName(host)) return { ok: false, reason: `${host} is a local host name` };
   let addresses;
   try {
     addresses = (await lookup(host, { all: true, verbatim: true })).map((entry) => entry.address);

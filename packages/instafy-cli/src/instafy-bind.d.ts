@@ -3,6 +3,7 @@
 
 declare module "@instafy/bind/net" {
   export function isPrivateAddress(ip: string): boolean;
+  export function isLocalHostName(host: string): boolean;
   export function checkPublicUrl(
     raw: string,
     options?: {

@@ -193,8 +193,15 @@ test("Personal Browser exposes only its bounded operations as authenticated MCP 
     });
     assert.deepEqual(
       listed.body.result.tools.map((tool) => tool.name),
-      ["request_human_input", "status", "snapshot", "navigate", "click", "type", "press", "scroll"],
+      ["request_human_input", "status", "snapshot", "navigate", "click", "type", "press", "scroll",
+        "list_tabs", "open_tab", "select_tab", "close_tab"],
     );
+    // Tab tools take a public address or a tab id, never a selector or script.
+    for (const name of ["select_tab", "close_tab"]) {
+      const tool = listed.body.result.tools.find((candidate) => candidate.name === name);
+      assert.deepEqual(tool.inputSchema.required, ["tabId"]);
+      assert.equal(tool.inputSchema.additionalProperties, false);
+    }
     for (const name of ["click", "type", "press"]) {
       const tool = listed.body.result.tools.find((candidate) => candidate.name === name);
       assert.deepEqual(tool.inputSchema.required.includes("index"), true);
@@ -258,6 +265,32 @@ test("Personal Browser exposes only its bounded operations as authenticated MCP 
     });
     assert.equal(selectorArgument.body.error.code, -32602);
     assert.equal(calls.length, 1);
+
+    const tabWithScript = await requestJson(`${credentials.controlUrl}/mcp`, {
+      method: "POST",
+      headers,
+      body: {
+        jsonrpc: "2.0",
+        id: 43,
+        method: "tools/call",
+        params: { name: "open_tab", arguments: { url: "https://example.test", background: true } },
+      },
+    });
+    assert.equal(tabWithScript.body.error.code, -32602, "open_tab has no hidden or background variant");
+    assert.equal(calls.length, 1);
+
+    const opened = await requestJson(`${credentials.controlUrl}/mcp`, {
+      method: "POST",
+      headers,
+      body: {
+        jsonrpc: "2.0",
+        id: 44,
+        method: "tools/call",
+        params: { name: "open_tab", arguments: { url: "https://example.test" } },
+      },
+    });
+    assert.equal(opened.body.result.isError, false);
+    assert.deepEqual(calls.at(-1), { operation: "open_tab", payload: { url: "https://example.test" } });
 
     const missingProject = await requestJson(`${credentials.controlUrl}/mcp`, {
       method: "POST",
