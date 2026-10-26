@@ -49,11 +49,14 @@ const AGENT_CONTROL_TTL: Duration = Duration::from_secs(12);
 const AGENT_CONTROL_DISPLAY_NAME_MAX_BYTES: usize = 80;
 const SHARED_BROWSER_SCRIPT: &str = include_str!("../assets/shared-browser-cli.js");
 const SHARED_BROWSER_APPROVAL_SCRIPT: &str = include_str!("../assets/shared-browser-approval.js");
-// Redaction and step classification shared with the Desktop Personal Browser.
-// The package holds plain scripts, so the source is embedded as-is.
+// Redaction, step classification and the page's secret checks, shared with
+// the Desktop Personal Browser. The package holds plain scripts, so the source
+// is embedded as-is.
 const BROWSER_REDACTION_SCRIPT: &str = include_str!("../../browser-action-policy/redaction.js");
 const BROWSER_ACTION_POLICY_SCRIPT: &str =
     include_str!("../../browser-action-policy/actionPolicy.js");
+const BROWSER_PAGE_CAPTURE_SCRIPT: &str =
+    include_str!("../../browser-action-policy/pageCapture.js");
 
 const DEFAULT_SHARED_BROWSER_NODE_BINARY: &str = "/usr/bin/node";
 /// The Node binaries the Shared Browser controller may run with: the image's
@@ -1513,9 +1516,21 @@ fn controller_failure(status: std::process::ExitStatus, stderr: &[u8]) -> anyhow
 
 fn embedded_shared_browser_script() -> String {
     format!(
-        "{}\n{}\n{SHARED_BROWSER_APPROVAL_SCRIPT}\n{SHARED_BROWSER_SCRIPT}",
+        "{}\n{}\n{}\n{SHARED_BROWSER_APPROVAL_SCRIPT}\n{SHARED_BROWSER_SCRIPT}",
         embedded_plain_script(BROWSER_REDACTION_SCRIPT),
         embedded_plain_script(BROWSER_ACTION_POLICY_SCRIPT),
+        embedded_plain_script(BROWSER_PAGE_CAPTURE_SCRIPT),
+    )
+}
+
+/// What the origin evaluates, in an isolated world of the page, to read a page
+/// a person sends to the chat: the redaction and page-capture scripts. The
+/// origin adds the call itself (see `origin_http_server::browser_page_capture`).
+pub fn sent_page_capture_script() -> String {
+    format!(
+        "{}\n{}",
+        embedded_plain_script(BROWSER_REDACTION_SCRIPT),
+        embedded_plain_script(BROWSER_PAGE_CAPTURE_SCRIPT),
     )
 }
 

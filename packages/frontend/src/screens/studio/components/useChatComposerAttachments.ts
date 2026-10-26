@@ -15,14 +15,24 @@ import {
   chatAttachmentFileProblem,
   isChatImageMimeType,
 } from "../../../lib/chatAttachments";
+import type { SentPageAttachmentInfo } from "./sentPageAttachment";
 
 export type PendingChatImageAttachment = {
   id: string;
   file: File;
+  /** An object URL for an image; empty for a sent page, which has no preview. */
   previewUrl: string;
   /** Set while a send carrying this image uploads it; it can't be removed then. */
   sending?: boolean;
+  /**
+   * Set for a page sent with Send page to Octo: a Markdown copy of the page
+   * that its browser read and masked, sent as a `kind: "file"` attachment.
+   */
+  page?: SentPageAttachmentInfo;
 };
+
+/** At most this many sent pages wait in one message. */
+export const MAX_STAGED_SENT_PAGES = 5;
 
 type ShowStatus = (message: string, intent?: StatusIntent, durationMs?: number) => void;
 
@@ -35,14 +45,21 @@ export function formatAttachmentSize(bytes: number): string {
   return `${(bytes / megabyte).toFixed(1)} MB`;
 }
 
-/** What the tray says while a send uploads its images. */
-export function describeSendingImages(count: number): string {
+/** What the tray says while a send uploads its images and sent pages. */
+export function describeSendingImages(count: number, pageCount = 0): string {
+  if (pageCount > 0 && count > 0) {
+    return `Sending your message with ${count + pageCount} attachments…`;
+  }
+  if (pageCount > 0) {
+    return pageCount === 1 ? "Sending your message with 1 page…" : `Sending your message with ${pageCount} pages…`;
+  }
   return count === 1 ? "Sending your message with 1 image…" : `Sending your message with ${count} images…`;
 }
 
 const EMPTY_ATTACHMENTS: PendingChatImageAttachment[] = [];
 
 function revokePreviewUrl(previewUrl: string) {
+  if (!previewUrl) return;
   try {
     URL.revokeObjectURL(previewUrl);
   } catch (_error) {
@@ -224,6 +241,45 @@ export function useChatComposerAttachments({
     [onAttachmentsAdded, setImageAttachments, showStatus, unavailableReason],
   );
 
+  /**
+   * Stages one page sent with Send page to Octo. Only the browser's own press
+   * calls it, with a page its browser already read and masked. False when the
+   * page was not staged; the person hears why.
+   */
+  const attachSentPage = useCallback(
+    (file: File, page: SentPageAttachmentInfo): boolean => {
+      if (unavailableReason) {
+        showStatus(unavailableReason, "info", 4000);
+        return false;
+      }
+      if (isInputLocked()) {
+        showStatus("Finish onboarding before uploading attachments.", "info", 3500);
+        return false;
+      }
+      const problem = chatAttachmentFileProblem(file);
+      if (problem === "size") {
+        showStatus(CHAT_ATTACHMENT_SIZE_REQUIREMENT, "error", 4000);
+        return false;
+      }
+      if (problem || file.type !== "text/markdown") {
+        return false;
+      }
+      const current = attachmentDraftsRef.current.get(draftKey) ?? EMPTY_ATTACHMENTS;
+      if (current.filter((attachment) => attachment.page).length >= MAX_STAGED_SENT_PAGES) {
+        showStatus(`A message can carry up to ${MAX_STAGED_SENT_PAGES} pages.`, "info", 4000);
+        return false;
+      }
+      const id =
+        typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+          ? crypto.randomUUID()
+          : `chat-page-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      onAttachmentsAdded?.();
+      setImageAttachments((previous) => [...previous, { id, file, previewUrl: "", page }]);
+      return true;
+    },
+    [draftKey, isInputLocked, onAttachmentsAdded, setImageAttachments, showStatus, unavailableReason],
+  );
+
   const handleImageInputChange = useCallback(
     (event: ChangeEvent<HTMLInputElement>) => {
       const files = Array.from(event.target.files ?? []);
@@ -323,6 +379,7 @@ export function useChatComposerAttachments({
 
   return {
     attachImageFiles,
+    attachSentPage,
     clearImageAttachments,
     handleComposerDragOver,
     handleComposerDrop,

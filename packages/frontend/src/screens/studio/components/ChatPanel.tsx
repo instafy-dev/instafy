@@ -252,6 +252,9 @@ import {
 } from "./sharedBrowserSubmitRouting";
 import { useChatInvitePromptHandlers } from "./useChatInvitePromptHandlers";
 import { useChatComposerAttachments } from "./useChatComposerAttachments";
+import { useSendPageToOcto } from "./useSendPageToOcto";
+import { composerTargetsBrowser } from "./sentPageAttachment";
+import { captureRuntimeBrowserSessionPage } from "../../../services/runtimeController/browserSession";
 import { useChatComposerPreviewTab } from "./useChatComposerPreviewTab";
 import { useChatSendQueueActions } from "./useChatSendQueueActions";
 import { useChatSendQueuePresentation } from "./useChatSendQueuePresentation";
@@ -1877,9 +1880,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     [activeConversationEntry?.title, hasMoreRecentHistory, recentMessages],
   );
   const browserRequestIdentity = JSON.stringify([currentUserId, activeProjectId, activeConversationId]);
-  // The split-view composer belongs to Chat. A visible resource must not
-  // silently restrict every workspace task to browser tools.
-  const browserComposerActive = browserModeActive && !splitSurfaces && !skillSetupConversation;
   const showBrowserSessionPageStripForComposer =
     shouldShowBrowserSessionPageStripInComposer({
       browserModeActive,
@@ -1978,7 +1978,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     showStatus,
   });
 
+  const composerDraftKey = JSON.stringify([currentUserId, activeProjectId, activeConversationId]);
   const {
+    attachSentPage,
     handleComposerDragOver,
     handleComposerDrop,
     handleComposerPaste,
@@ -1990,11 +1992,52 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     removeImageAttachment,
     removeSentImageAttachments,
   } = useChatComposerAttachments({
-    draftKey: JSON.stringify([currentUserId, activeProjectId, activeConversationId]),
+    draftKey: composerDraftKey,
     onAttachmentsAdded: keepComposerTabOpen,
     isInputLocked: () => onboardingInputLocked,
     showStatus,
     unavailableReason: chatAttachmentsUnavailableReason,
+  });
+  // Send page to Octo: a press in either browser reads its page once and
+  // stages it here, like a paste. Only people who can add attachments see it.
+  const { send: sendPageToOcto, pendingViewer: sendPagePendingViewer } = useSendPageToOcto({
+    attachSentPage,
+    showStatus,
+    unavailableReason: chatAttachmentsUnavailableReason,
+    identityKey: composerDraftKey,
+  });
+  const canSendPages = canWriteProject === true && Boolean(activeProjectId);
+  const readPersonalPage = personalBrowser.readPage;
+  const sendPersonalPage = useCallback(() => {
+    void sendPageToOcto("personal", readPersonalPage);
+  }, [readPersonalPage, sendPageToOcto]);
+  const sendSharedPage = useCallback((pageId: string) => {
+    const projectId = activeProjectId;
+    if (!projectId) return;
+    void sendPageToOcto("shared", () => captureRuntimeBrowserSessionPage({
+      projectId,
+      browserSessionId: sharedBrowserSurfaceSessionId,
+      pageId,
+      preferRuntimeId: resolvedBrowserRuntimeId,
+    }));
+  }, [activeProjectId, resolvedBrowserRuntimeId, sendPageToOcto, sharedBrowserSurfaceSessionId]);
+  const sharedBrowserChromeWithSend = useMemo<SharedBrowserChromeProps | null>(
+    () => sharedBrowserChrome && canSendPages
+      ? { ...sharedBrowserChrome, onSendPage: sendSharedPage, sendPagePending: sendPagePendingViewer === "shared" }
+      : sharedBrowserChrome,
+    [canSendPages, sendPagePendingViewer, sendSharedPage, sharedBrowserChrome],
+  );
+  // A message that carries a sent page goes to Octo in chat, where it can
+  // read the page and keep building, never to a browser-only turn that
+  // cannot open attachments.
+  const sentPageStaged = imageAttachments.some((attachment) => Boolean(attachment.page));
+  // The split-view composer belongs to Chat. A visible resource must not
+  // silently restrict every workspace task to browser tools.
+  const browserComposerActive = composerTargetsBrowser({
+    browserModeActive,
+    splitSurfaces,
+    skillSetupConversation,
+    sentPageStaged,
   });
 
   const openImageLightbox = useCallback((src: string, alt: string) => {
@@ -6457,6 +6500,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                 humanInputIdentityKey={browserHandoff.identityKey}
                 onContinueAfterHumanInput={browserHandoff.continuePersonal}
                 onPauseAgentControl={declineBrowserAutoStart}
+                onSendPage={canSendPages ? sendPersonalPage : undefined}
+                sendPagePending={sendPagePendingViewer === "personal"}
                 transportSelector={browserTransport === "personal" ? browserTransportSelector : null}
               />
               {sharedBrowserActivated ? (
@@ -6491,7 +6536,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     onTakeOverAgent={browserHandoff.sharedJob ? takeOverSharedBrowser : null}
                     onContinueAfterHumanInput={browserHandoff.continueShared}
                     onPresenceChange={setSharedBrowserPresence}
-                    sharedBrowserChrome={sharedBrowserChrome}
+                    sharedBrowserChrome={sharedBrowserChromeWithSend}
                     sharedBrowserViewerKind={sharedBrowserViewerKind}
                     sharedBrowserCapabilitiesResolved={sharedBrowserCapabilitiesResolved}
                     sharedBrowserCapabilitiesAvailable={Boolean(sharedBrowserCapabilities)}

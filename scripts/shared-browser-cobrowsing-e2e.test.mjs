@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { fixtureEnvironment } from "./shared-browser-cobrowsing-e2e.mjs";
+import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsing-e2e.mjs";
 
 test("co-browsing fixture browser and CLI receive only OS settings and disposable home", () => {
   const source = {
@@ -36,4 +36,25 @@ test("co-browsing fixture rejects filters and skips rather than producing a part
     assert.match(result.stderr, /no filters or skips/);
     assert.equal(result.stdout, "");
   }
+});
+
+test("co-browsing fixture embeds the same policy scripts, in the same order, as the runtime agent", () => {
+  const rust = fs.readFileSync(
+    path.join(import.meta.dirname, "../packages/runtime-agent/src/shared_browser.rs"),
+    "utf8",
+  );
+  const files = new Map(
+    Array.from(
+      rust.matchAll(/const (BROWSER_\w+_SCRIPT): &str =\s*include_str!\("\.\.\/\.\.\/browser-action-policy\/([\w.]+)"\);/gu),
+      ([, name, file]) => [name, file],
+    ),
+  );
+  const body = rust.match(/fn embedded_shared_browser_script\(\) -> String \{([\s\S]*?)\n\}/u);
+  assert.ok(body, "embedded_shared_browser_script() not found");
+  const embedded = Array.from(body[1].matchAll(/embedded_plain_script\((BROWSER_\w+_SCRIPT)\)/gu), ([, name]) => {
+    assert.ok(files.has(name), name);
+    return files.get(name);
+  });
+  assert.ok(embedded.length > 0);
+  assert.deepEqual(policyScriptNames, embedded);
 });

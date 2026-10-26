@@ -989,3 +989,59 @@ async fn requests_live_as_long_as_the_runtime_approval_window() {
         }
     }
 }
+
+#[test]
+fn a_page_a_credential_step_opens_stays_withheld_for_a_sent_page() {
+    let fixture = ApprovalFixture::origin();
+    let record = fixture.approval_dir.join("withhold-next.json");
+    // No step is waiting for the page it opens.
+    assert_eq!(
+        fixture.bridge.carried_withholding(),
+        CarriedWithholding::Nothing
+    );
+
+    // The record the Shared Browser controller writes before such a step.
+    write_private_json(
+        &record,
+        &json!({
+            "version": 1,
+            "ownerId": fixture.marker.owner_id,
+            "runId": fixture.marker.run_id,
+            "initiatorUserId": fixture.marker.initiator_user_id,
+            "browserPageId": fixture.marker.browser_page_id,
+            "afterDocument": "LOADER_step-1",
+        }),
+    );
+    let carried = fixture.bridge.carried_withholding();
+    assert_eq!(
+        carried,
+        CarriedWithholding::After("LOADER_step-1".to_string())
+    );
+    assert!(!carried.withholds("LOADER_step-1"));
+    assert!(carried.withholds("LOADER_opened-2"));
+
+    // A record that cannot be trusted withholds every page.
+    for bad in [
+        &b"not json"[..],
+        &br#"{"afterDocument":"../x"}"#[..],
+        &b"{}"[..],
+    ] {
+        fs::write(&record, bad).expect("rewrite record");
+        set_mode(&record, APPROVAL_FILE_MODE);
+        assert_eq!(
+            fixture.bridge.carried_withholding(),
+            CarriedWithholding::Unknown
+        );
+    }
+    #[cfg(unix)]
+    {
+        write_private_json(&record, &json!({ "afterDocument": "LOADER_step-1" }));
+        set_mode(&record, 0o644);
+        assert_eq!(
+            fixture.bridge.carried_withholding(),
+            CarriedWithholding::Unknown
+        );
+    }
+    assert!(CarriedWithholding::Unknown.withholds("LOADER_step-1"));
+    assert!(!CarriedWithholding::Nothing.withholds("LOADER_step-1"));
+}

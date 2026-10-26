@@ -1,15 +1,16 @@
 # @instafy/browser-action-policy
 
-Secret redaction and step classification for browsers an agent drives. Two
-hosts use the same files:
+Secret redaction, step classification and sent-page reading for browsers an
+agent drives. Two hosts use the same files:
 
 - the Desktop Personal Browser bundles them from this workspace package;
 - the hosted Shared Browser controller in runtime-agent embeds the source.
 
-Both files are plain scripts with no imports and no build step. Loaded through
+The files are plain scripts with no imports and no build step. Loaded through
 CommonJS they export their API. Evaluated where `module` is undefined, they
-publish it on `globalThis.__instafyBrowserRedaction` and
-`globalThis.__instafyBrowserActionPolicy`; load `redaction.js` first.
+publish it on `globalThis.__instafyBrowserRedaction`,
+`globalThis.__instafyBrowserActionPolicy` and
+`globalThis.__instafyBrowserPageCapture`; load `redaction.js` first.
 
 - `redaction.js`: masks key-like values in page text, titles, addresses and
   control names, and decides when a page is a secret screen.
@@ -29,10 +30,22 @@ publish it on `globalThis.__instafyBrowserRedaction` and
   `unnamedControlName(hints)` names a control the page left unnamed from its
   tooltip attribute, image text, icon and position, so a prompt never shows an
   index such as "button 5".
+- `pageCapture.js`: `pageSecretSignalsInPage(sources)` runs inside a page and
+  answers the four yes/no secret checks that `redactPageObservation` takes.
+  `captureSentPage(redaction, options)` reads a page a person chose to send
+  with **Send page to Octo**: it runs in an isolated world next to
+  `redaction.js`, masks the address, title and text with the snapshot rules,
+  and returns no text for a secret screen or a page it could not check.
+  `maskSentPage` is the masking step on its own, for a host that reads the
+  page another way. Publishes `globalThis.__instafyBrowserPageCapture`; load
+  `redaction.js` first.
 
 The tests live with the Desktop Personal Browser
 (`packages/desktop-app/test/personal-browser-redaction.test.mjs`,
-`personal-browser-action-policy.test.mjs` and the risky-steps fixtures) and with
-the Shared Browser controller (`packages/runtime-agent/src/shared_browser_tests.rs`).
+`personal-browser-action-policy.test.mjs`, `browser-page-capture.test.mjs`,
+`personal-browser-send-page.test.mjs` and the risky-steps fixtures), with the
+Shared Browser controller (`packages/runtime-agent/src/shared_browser_tests.rs`)
+and with the origin's page reader
+(`packages/origin-http-server/src/browser_page_capture_tests.rs`).
 See [Personal Browser](../../docs/Personal-Browser.md) and
 [Shared Browser](../../docs/Shared-Browser.md).

@@ -25,9 +25,9 @@ const resultDirectory = path.join(repositoryRoot, "packages/frontend/test-result
 const policyScript = (name) => `(function (module, require) {\n${
   fs.readFileSync(path.join(repositoryRoot, "packages/browser-action-policy", name), "utf8")
 }\n})(undefined, undefined);`;
+export const policyScriptNames = ["redaction.js", "actionPolicy.js", "pageCapture.js"];
 const scriptSource = [
-  policyScript("redaction.js"),
-  policyScript("actionPolicy.js"),
+  ...policyScriptNames.map(policyScript),
   ...["shared-browser-approval.js", "shared-browser-cli.js"]
     .map((name) => fs.readFileSync(path.join(repositoryRoot, "packages/runtime-agent/assets", name), "utf8")),
 ].join("\n");

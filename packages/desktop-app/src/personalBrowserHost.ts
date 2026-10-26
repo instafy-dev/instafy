@@ -33,10 +33,12 @@ import {
 } from "./personalBrowserTeammateActivity";
 import {
   hasCredentialWord,
+  maskSentPage,
   redactLogValue,
   redactPageObservation,
   redactText,
   redactUrl,
+  type SentPageView,
 } from "./personalBrowserRedaction";
 import {
   categoryTitle,
@@ -81,6 +83,12 @@ import {
 export type PersonalBrowserState = "closed" | "opening" | "ready" | "error";
 const HUMAN_CONTROL_DRAIN_TIMEOUT_MS = 15_000;
 const HUMAN_CONTROL_DRAIN_ERROR = "A previous browser operation is still stopping. Input remains locked until it finishes; close the browser if it does not recover.";
+
+/** One page its owner sent to the chat with Send page to Octo, masked. */
+export type PersonalBrowserSentPage = SentPageView & {
+  /** When the page was read (ISO 8601). */
+  readAt: string;
+};
 
 export type PersonalBrowserStatus = {
   supported: boolean;
@@ -932,6 +940,45 @@ export class PersonalBrowserHost {
 
   isOwnedBy(ownerId: string): boolean {
     return this.currentOwnerId === ownerId;
+  }
+
+  /**
+   * Send page to Octo: reads the page on screen once for its owner, masked in
+   * this process with the agent snapshot's rules, before anything leaves
+   * Desktop. A secret screen, a page withheld from the agent or a page whose
+   * checks failed comes back without text.
+   *
+   * It grants nothing. Agent control, approvals, the broker and the agent's
+   * snapshot targets stay as they were, nothing is kept for a later read and
+   * no page is marked; the next send reads the page again.
+   */
+  async readPageForOwner(ownerId: string): Promise<PersonalBrowserSentPage> {
+    const contents = this.getWebContents();
+    if (!this.isOwnedBy(ownerId) || this.currentState !== "ready" || !contents) {
+      throw new Error("Personal Browser is not ready. Try again.");
+    }
+    const address = contents.getURL() || "about:blank";
+    if (!/^https?:\/\//i.test(address)) {
+      throw new Error("Open a web page first.");
+    }
+    const snapshot = await snapshotPersonalBrowserPage(contents);
+    if (
+      !this.isOwnedBy(ownerId) ||
+      this.getWebContents() !== contents ||
+      (contents.getURL() || "about:blank") !== snapshot.url
+    ) {
+      throw new Error("The page changed while it was read. Try again.");
+    }
+    // Read-only: the agent's own withholding decides, and is not consumed.
+    const withhold =
+      this.withheldDocumentTokens.has(snapshot.documentToken) ||
+      (this.withholdNextDocumentAfter !== null && this.withholdNextDocumentAfter !== snapshot.documentToken);
+    const view = maskSentPage(
+      { redactUrl, redactPageObservation },
+      { url: snapshot.url, title: snapshot.title, text: snapshot.text, signals: snapshot.signals ?? null },
+      { withhold },
+    );
+    return { ...view, readAt: snapshot.capturedAt };
   }
 
   release(expectedOwnerId: string): PersonalBrowserStatus {

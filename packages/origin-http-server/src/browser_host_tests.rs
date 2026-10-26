@@ -465,6 +465,46 @@ async fn host_routes_follow_the_browser_scopes_and_need_a_host() {
 }
 
 #[tokio::test]
+async fn sending_a_page_needs_control_and_a_page_reader() {
+    let workspace = TempDir::new().unwrap();
+    let markers = TempDir::new().unwrap();
+    // No host: the transports are unguarded, so the route itself answers.
+    let (served, states, _) = serve(&workspace, &marker_path(&markers), vec![None]).await;
+    assert!(states[0].browser_page_capture_script.is_none());
+    let client = reqwest::Client::new();
+    let user = Uuid::new_v4().to_string();
+    let base = &served.base;
+    let capture = |token: String| {
+        client
+            .post(format!("{base}/browser/pages/PAGE1/capture"))
+            .bearer_auth(token)
+            .send()
+    };
+
+    for scopes in [&["fs.read"][..], &["browser.view"][..]] {
+        let response = capture(served.token(&user, "s1", scopes)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{scopes:?}");
+    }
+    // A viewer's polling never reads page text: it is a POST that needs control.
+    let read = client
+        .get(format!("{base}/browser/pages/PAGE1/capture"))
+        .bearer_auth(served.token(&user, "s1", &["browser.view", "browser.control"]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(read.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+    let unsupported = capture(served.token(&user, "s1", &["browser.control"]))
+        .await
+        .unwrap();
+    assert_eq!(unsupported.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        body(unsupported).await["error"],
+        "sending a page is not available on this runtime"
+    );
+}
+
+#[tokio::test]
 async fn the_start_body_is_exactly_version_one() {
     let workspace = TempDir::new().unwrap();
     let markers = TempDir::new().unwrap();
@@ -624,6 +664,9 @@ async fn browser_transports_wait_for_a_ready_host() {
                 .post(format!("{base}/browser/pages/PAGE1/command"))
                 .bearer_auth(&control)
                 .json(&json!({ "action": "reload" })),
+            client
+                .post(format!("{base}/browser/pages/PAGE1/capture"))
+                .bearer_auth(&control),
         ];
         for request in requests {
             let response = request.send().await.unwrap();

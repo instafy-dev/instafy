@@ -3,6 +3,7 @@ import type { SubmitConversationRuntimeOverride } from "../../../conversations/u
 import { runtimeEntryIsDispatchable } from "../../../runtime/utils/runtimeEntry";
 import { controllerClient } from "../../../sdk/instafy";
 import { normalizeBrowserAddress } from "./browserAddress";
+import type { SentPageRead } from "./sentPageAttachment";
 import {
   personalBrowserRoutineAvailable,
   resolvePersonalBrowserApprovalMode,
@@ -764,6 +765,19 @@ export function usePersonalBrowserBridge({
     () => invoke((bridge, ownerId) => bridge.personalBrowserReload?.({ ownerId })),
     [invoke],
   );
+  /**
+   * Send page to Octo: reads the page on screen once, masked by Desktop. Only
+   * a press calls it; nothing reads the page on its own. Null when this
+   * Desktop cannot.
+   */
+  const readPage = useCallback(async (): Promise<SentPageRead | null> => {
+    const bridge = browserBridge();
+    const ownerId = personalBrowserOwnerIdRef.current;
+    if (!ownerId || typeof bridge?.personalBrowserReadPage !== "function") {
+      return null;
+    }
+    return bridge.personalBrowserReadPage({ ownerId });
+  }, []);
   const setAgentControlEnabled = useCallback(
     async (enabled: boolean, approvalMode?: PersonalBrowserApprovalMode, knownHosts?: readonly string[]) => {
       const bridge = browserBridge();
@@ -979,6 +993,7 @@ export function usePersonalBrowserBridge({
     goForward,
     navigate,
     navigationError,
+    readPage,
     ownerId:
       identityScope !== null && openedIdentityScopeRef.current === identityScope && status?.ownerId === personalBrowserOwnerIdRef.current
         ? status.ownerId

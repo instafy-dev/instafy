@@ -212,6 +212,11 @@ impl OriginService {
         if let Some(handle) = crate::browser_host::origin_handle() {
             server.set_browser_host(handle);
         }
+        // Send page to Octo reads a page with the same redaction the agent's
+        // Shared Browser snapshots use.
+        server.set_browser_page_capture_script(
+            crate::shared_browser::sent_page_capture_script().into(),
+        );
         // The origin is registered below, after the server is up. A beat that
         // reached the controller first was refused with 401 and had this agent
         // renew its registration, which restarted the origin and its tunnel on

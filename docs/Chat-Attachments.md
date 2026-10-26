@@ -97,6 +97,30 @@ it goes only with its space or its team, whose purge covers it.
   configuration, the image button is off with the reason "This server can't store
   attachments.", paste and drop say the same, and merge requests keep both versions inline.
 
+### Pages sent from the browser
+
+**Send page to Octo** in the Personal or Shared Browser toolbar stages a copy of
+the page on screen in the composer, like a paste; the person sends it with their
+next message. The browser reads and masks the page at its source (see
+[Personal Browser](Personal-Browser.md#send-page-to-octo) and
+[Shared Browser](Shared-Browser.md#send-page-to-octo)); Studio never reads a page
+by itself and keeps no way to read it again.
+
+- The copy is a `text/markdown` attachment named `page-<host>.md`, recorded as
+  `kind: "file"` and uploaded like any other. It starts with where it came from:
+  the address, the title, when it was read and which browser read it. Then it
+  says the title and text are the page's, not the person's words, instructions
+  or consent, and the page's text follows inside an `untrusted_page_content`
+  block. The block's name is taken out of the page's text however it is
+  spelled, so the page cannot close the block or open another.
+- A page that seemed to show a password or key is not attached, and the composer
+  says so. Only `http` and `https` pages are sent, at most five per message.
+- The tray lists a staged page by its title and host; it can be removed until the
+  message is sent.
+- A message carrying a page goes to Octo in chat, even from the Browser view,
+  because a browser-only turn cannot open attachments.
+- Only members who can add attachments see the button.
+
 ### Compatibility
 
 The web app no longer writes chat images or merge snapshots into the workspace. A runtime sees

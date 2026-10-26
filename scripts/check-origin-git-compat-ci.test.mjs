@@ -85,6 +85,24 @@ test("checkout is exact and keeps no credentials; the Rust installer is pinned a
   assert.doesNotMatch(rustup, /\| *(?:ba)?sh\b/u);
 });
 
+test("Node comes from the pinned setup-node action, for the page reader tests only", () => {
+  const node = step("Install Node for the page reader tests");
+  assert.match(
+    node,
+    /uses: actions\/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6\n        with:\n          node-version: "22"\n/u,
+  );
+  assert.ok(source.indexOf("Checkout repository") < source.indexOf("Install Node for the page reader tests"));
+  assert.ok(
+    source.indexOf("Install Node for the page reader tests") <
+      source.indexOf("Test the origin server against git 2.34.1"),
+  );
+  const tests = fs.readFileSync(
+    path.join(root, "packages/origin-http-server/src/browser_page_capture_tests.rs"),
+    "utf8",
+  );
+  assert.match(tests, /Command::new\("node"\)/u);
+});
+
 // The one test skipped on git 2.34: the import baseline commit
 // (commit_apply_locally) predates publish-by-merge and loops on git 2.34's
 // status in a checkout whose git dir is `.instafy/.git`. Nothing else may be
