@@ -144,6 +144,56 @@ describe("PersonalBrowserSurface", () => {
     expect(model.setAgentControlEnabled).not.toHaveBeenCalled();
   });
 
+  it("lists the pages a working turn reads and takes over every tab in one press", async () => {
+    const model = createModel();
+    model.status = { ...model.status!, title: "Example Domain", humanControlReady: false };
+    model.setAgentControlEnabled = vi.fn(async (enabled: boolean) => ({ ...model.status!, agentControlEnabled: enabled, humanControlReady: !enabled }));
+    window.instafyDesktop = { notify: vi.fn(), personalBrowserSetBounds: vi.fn(async () => model.status!) };
+
+    // Resumed but idle: no turn is reading anything.
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
+    expect(document.querySelector('[data-testid="browser-reading-row"]')).toBeNull();
+
+    const onPauseAgentControl = vi.fn();
+    await act(async () => root.render(<PersonalBrowserSurface active agentWorking model={model} onPauseAgentControl={onPauseAgentControl} transportSelector={null} />));
+    const row = document.querySelector('[data-testid="browser-reading-row"]')!;
+    expect([...row.querySelectorAll('[data-testid="browser-reading-page"]')].map((item) => item.textContent))
+      .toEqual(["example.com· Example Domain"]);
+    expect(model.setAgentControlEnabled).not.toHaveBeenCalled();
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="browser-reading-takeover"]')!.click());
+    // The same revocation as the toolbar's Take over and Pause: one broker for every tab.
+    expect(model.setAgentControlEnabled).toHaveBeenCalledTimes(1);
+    expect(model.setAgentControlEnabled).toHaveBeenCalledWith(false);
+    // Like the toolbar's Pause, Octo does not reopen the browser by itself afterwards.
+    expect(onPauseAgentControl).toHaveBeenCalledTimes(1);
+
+    // Once control is off, the row is gone.
+    model.status = { ...model.status!, agentControlEnabled: false, humanControlReady: true };
+    await act(async () => root.render(<PersonalBrowserSurface active agentWorking model={{ ...model }} transportSelector={null} />));
+    expect(document.querySelector('[data-testid="browser-reading-row"]')).toBeNull();
+  });
+
+  it("reads a multi-tab host's agent tabs, and never another owner's status", async () => {
+    const model = createModel();
+    model.status = {
+      ...model.status!,
+      humanControlReady: false,
+      tabs: [
+        { id: "t1", url: "https://mine.example/", title: "Mine", active: false },
+        { id: "t2", url: "https://www.opened.example/a", title: "Opened", active: false, openedBy: "agent" },
+        { id: "t3", url: "https://current.example/", title: "Current", active: true },
+      ],
+    };
+    window.instafyDesktop = { notify: vi.fn(), personalBrowserSetBounds: vi.fn(async () => model.status!) };
+    await act(async () => root.render(<PersonalBrowserSurface active agentWorking model={model} transportSelector={null} />));
+    expect([...document.querySelectorAll('[data-testid="browser-reading-page"]')].map((item) => item.textContent))
+      .toEqual(["opened.example· Opened", "current.example· Current"]);
+
+    const foreign = { ...model, status: { ...model.status!, ownerId: "another-owner" } };
+    await act(async () => root.render(<PersonalBrowserSurface active agentWorking model={foreign} transportSelector={null} />));
+    expect(document.querySelector('[data-testid="browser-reading-row"]')).toBeNull();
+  });
+
   it("shows Octo's tabs, marked as Octo's, and switches or closes them only once Octo is paused", async () => {
     const model = createModel();
     model.status = {

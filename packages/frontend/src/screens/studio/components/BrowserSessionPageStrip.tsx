@@ -2,6 +2,7 @@ import { useMemo, useState, type ReactNode } from "react";
 import { NavArrowDown, Plus, Safari, Xmark } from "iconoir-react";
 import { CHAT_COLUMN_CLASS_NAME } from "./ChatColumn";
 import type { BrowserSessionPage } from "./browserSessionPages";
+import { BrowserAgentTabBadge } from "./BrowserReadingRow";
 
 const COLLAPSED_PAGE_LIMIT = 3;
 
@@ -55,6 +56,8 @@ function BrowserShelfChip({
 
 export function BrowserSessionPageStrip({
   pages,
+  agentTabIds,
+  agentName,
   onSelectPage,
   onToggleBrowser,
   onClearPendingNewBrowser,
@@ -63,6 +66,9 @@ export function BrowserSessionPageStrip({
   pendingNewBrowser,
 }: {
   pages: BrowserSessionPage[];
+  /** The tabs the agent holds now; each carries the agent's name. */
+  agentTabIds?: ReadonlySet<string>;
+  agentName?: string;
   onSelectPage: (pageId: string) => void;
   onToggleBrowser: () => void;
   onClearPendingNewBrowser: () => void;
@@ -156,6 +162,7 @@ export function BrowserSessionPageStrip({
                   <Safari className="h-3.5 w-3.5" aria-hidden="true" />
                 </span>
                 <span className="flex min-w-0 items-center gap-1.5">
+                  {agentTabIds?.has(page.id) ? <BrowserAgentTabBadge agentName={agentName} /> : null}
                   <span className="truncate text-sm font-medium">{page.label}</span>
                   {current ? (
                     <span className="inline-flex h-2 w-2 flex-none rounded-full bg-emerald-500 dark:bg-emerald-400" />

@@ -50,6 +50,7 @@ function toBrowserSessionPage(
     isActive: page.id === activePageId,
     canGoBack: page.canGoBack,
     canGoForward: page.canGoForward,
+    ...(page.openedBy ? { openedBy: page.openedBy } : {}),
   };
 }
 

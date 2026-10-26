@@ -85,6 +85,25 @@ describe("mapRuntimeBrowserSessionPagesPayload", () => {
     ]);
   });
 
+  it("keeps who opened a tab only when the browser says agent or person", () => {
+    const base = { url: "https://example.com/", host: "example.com", label: "Example", title: null, isActive: false };
+    const pages = mapRuntimeBrowserSessionPagesPayload({
+      pages: [
+        { ...base, id: "agent-tab", openedBy: "agent" },
+        { ...base, id: "person-tab", openedBy: "person" },
+        { ...base, id: "unknown-tab", openedBy: "Octo" },
+        { ...base, id: "legacy-tab" },
+      ],
+    });
+    expect(pages.map((page) => [page.id, page.openedBy])).toEqual([
+      ["agent-tab", "agent"],
+      ["person-tab", "person"],
+      ["unknown-tab", undefined],
+      ["legacy-tab", undefined],
+    ]);
+    expect("openedBy" in pages[3]!).toBe(false);
+  });
+
   it("returns an empty list for invalid payloads", () => {
     expect(mapRuntimeBrowserSessionPagesPayload(null)).toEqual([]);
     expect(mapRuntimeBrowserSessionPagesPayload({})).toEqual([]);
