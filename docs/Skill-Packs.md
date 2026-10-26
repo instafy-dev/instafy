@@ -55,7 +55,8 @@ These files are the runtime's and are never committed: they are listed in a mana
 checkout's `info/exclude` (`.instafy/.git/info/exclude` in a hosted checkout) before they are written,
 with the sha256 of each. The runtime rewrites a file only while it is unchanged since it wrote it (or a
 launcher still carries its marker); a file someone edited, or a path the repository tracks, is left
-alone and saved like other work. A pack whose scripts need a newer Node.js than the one on the
+alone and saved like other work. Each `SKILL.md` also carries a marker line with the sha256 of the rest
+of the file, so an unchanged copy is upgraded with its pack in a folder without git too. A pack whose scripts need a newer Node.js than the one on the
 runtime's PATH is skipped.
 
 Importing a pack in full with `/skills import <url>` writes over the runtime's unchanged copy without

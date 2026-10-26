@@ -11,8 +11,10 @@
 //!   git-canonical checkout, otherwise the repository `git rev-parse` finds. So no status, save
 //!   or turn-end upload sees them. A folder without git just gets the files.
 //! - The runtime writes a path only while it owns it: the file is missing, or its content's
-//!   sha256 is the one the block recorded when the runtime last wrote it, or it is a launcher
-//!   that still carries [`LAUNCHER_MARKER`] on its second line. A file someone edited, a full copy
+//!   sha256 is the one the block recorded when the runtime last wrote it, or it is a `SKILL.md`
+//!   whose [`SKILL_MARKER_PREFIX`] line still names the sha256 of the rest of the file (so an
+//!   unchanged copy is upgraded in a folder without git too), or it is a launcher that still
+//!   carries [`LAUNCHER_MARKER`] on its second line. A file someone edited, a full copy
 //!   of the pack imported with `/skills import`, or a path the repository tracks is left alone
 //!   (and drops out of the block, so its changes are saved like any other work).
 //! - Writes never follow a symlink ([`WorkspaceDir`]).
@@ -40,6 +42,11 @@ const LAUNCHER_TEMPLATE: &str = include_str!(concat!(
 ));
 /// The second line of every launcher the runtime writes.
 pub(crate) const LAUNCHER_MARKER: &str = "// instafy:managed-launcher";
+/// The line the runtime writes after the space note of every pack `SKILL.md`, followed by the
+/// sha256 of the file without this line and [`SKILL_MARKER_SUFFIX`]: a copy nobody changed proves
+/// itself, with or without git.
+pub(crate) const SKILL_MARKER_PREFIX: &str = "<!-- instafy:managed-skill sha256:";
+const SKILL_MARKER_SUFFIX: &str = " -->";
 /// The largest per-space SKILL.md the runtime writes (the project memory snapshot cuts a skill
 /// longer than this).
 pub(crate) const MAX_SPACE_SKILL_BYTES: usize = 12_000;
@@ -86,11 +93,40 @@ pub(crate) fn space_skill(pack: &InstalledPack) -> Option<String> {
         .replace("{{name}}", &pack.name)
         .replace("{{launcher}}", &launcher);
     let note = note.trim_end();
-    let body = match frontmatter_end(&skill) {
+    let assemble = |note: &str| match frontmatter_end(&skill) {
         Some(end) => format!("{}\n{note}\n{}", &skill[..end], &skill[end..]),
         None => format!("{note}\n\n{skill}"),
     };
+    let unmarked = assemble(note);
+    let marker = format!(
+        "{SKILL_MARKER_PREFIX}{}{SKILL_MARKER_SUFFIX}",
+        sha256_hex(unmarked.as_bytes())
+    );
+    let body = assemble(&format!("{note}\n{marker}"));
     (body.len() <= MAX_SPACE_SKILL_BYTES).then_some(body)
+}
+
+/// Whether `bytes` is a pack `SKILL.md` the runtime wrote and nobody changed since: its marker
+/// line names the sha256 of the file without that line.
+fn has_intact_skill_marker(bytes: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        if let Some(rest) = line.strip_prefix(SKILL_MARKER_PREFIX) {
+            let Some(hash) = rest
+                .strip_suffix('\n')
+                .and_then(|rest| rest.strip_suffix(SKILL_MARKER_SUFFIX))
+            else {
+                return false;
+            };
+            let unmarked = format!("{}{}", &text[..offset], &text[offset + line.len()..]);
+            return sha256_hex(unmarked.as_bytes()) == hash;
+        }
+        offset += line.len();
+    }
+    false
 }
 
 /// The byte offset just after a leading `---` frontmatter block.
@@ -447,6 +483,7 @@ pub(crate) fn keep_current(
                 bytes == file.content
                     || recorded.get(&file.path) == Some(&sha256_hex(&bytes))
                     || (file.launcher && has_launcher_marker(&bytes))
+                    || (!file.launcher && has_intact_skill_marker(&bytes))
             }
             Current::Other => false,
         };
@@ -523,24 +560,31 @@ fn remove_empty_parents(workspace: &WorkspaceDir, path: &str) {
 }
 
 /// Whether every file in the skill folder `skill_dir` (workspace-relative) is one the runtime
-/// wrote and nobody changed since: an import may then write over it as if it were empty.
+/// wrote and nobody changed since (by its recorded hash, or by its own marker in a folder without
+/// git): an import may then write over it as if it were empty.
 pub(crate) fn is_runtime_provided_skill_dir(workspace_dir: &Path, skill_dir: &str) -> bool {
     let Ok(workspace) = WorkspaceDir::open(workspace_dir) else {
         return false;
     };
-    let Some(link) = git_links(workspace_dir).into_iter().next() else {
-        return false;
-    };
-    let recorded = parse_block(
-        &read_exclude(Some(&workspace), workspace_dir, &link.exclude),
-        &link.prefix,
-    );
+    let recorded = git_links(workspace_dir)
+        .into_iter()
+        .next()
+        .map(|link| {
+            parse_block(
+                &read_exclude(Some(&workspace), workspace_dir, &link.exclude),
+                &link.prefix,
+            )
+        })
+        .unwrap_or_default();
     let mut files = Vec::new();
     if !collect_files(&workspace, skill_dir, &mut files) || files.is_empty() {
         return false;
     }
     files.iter().all(|path| {
-        matches!(current(&workspace, path), Current::File(bytes) if recorded.get(path) == Some(&sha256_hex(&bytes)))
+        matches!(current(&workspace, path), Current::File(bytes)
+            if recorded.get(path) == Some(&sha256_hex(&bytes))
+                || has_intact_skill_marker(&bytes)
+                || has_launcher_marker(&bytes))
     })
 }
 
@@ -713,18 +757,40 @@ mod tests {
                 .exists()
         );
 
-        // Without git there is no record of what the runtime wrote, so a file that differs from
-        // the current pack (an older copy or someone's edit) is left as it is.
+        // Without git there is no record of what the runtime wrote: an unchanged older copy
+        // proves itself with its marker and is upgraded, an edited one is left as it is.
+        let space_skill_path = workspace.path().join(".agents/skills/demo/SKILL.md");
+        assert!(has_intact_skill_marker(
+            &fs::read(&space_skill_path).unwrap()
+        ));
         fs::write(
             demo.dir.join("SKILL.md"),
             "---\nname: demo\n---\n\n# demo v2\n",
         )
         .unwrap();
         keep_current(workspace.path(), std::slice::from_ref(&demo), NODE);
+        let upgraded = fs::read_to_string(&space_skill_path).unwrap();
+        assert!(upgraded.contains("# demo v2"), "{upgraded}");
+        assert!(has_intact_skill_marker(upgraded.as_bytes()));
+
+        fs::write(
+            &space_skill_path,
+            upgraded.replace("# demo v2", "# our demo"),
+        )
+        .unwrap();
+        assert!(!has_intact_skill_marker(
+            &fs::read(&space_skill_path).unwrap()
+        ));
+        fs::write(
+            demo.dir.join("SKILL.md"),
+            "---\nname: demo\n---\n\n# demo v3\n",
+        )
+        .unwrap();
+        keep_current(workspace.path(), std::slice::from_ref(&demo), NODE);
+        let kept = fs::read_to_string(&space_skill_path).unwrap();
         assert!(
-            !fs::read_to_string(workspace.path().join(".agents/skills/demo/SKILL.md"))
-                .unwrap()
-                .contains("# demo v2")
+            kept.contains("# our demo") && !kept.contains("# demo v3"),
+            "{kept}"
         );
     }
 
@@ -1147,11 +1213,11 @@ mod tests {
         let skill = fs::read_to_string(demo.dir.join("SKILL.md")).unwrap();
         let written = space_skill(&demo).unwrap();
         assert!(
-            written.len() - skill.len() <= 400,
+            written.len() - skill.len() <= 512,
             "{}",
             written.len() - skill.len()
         );
-        const { assert!(MAX_SPACE_SKILL_BYTES - 400 >= 11_500) };
+        const { assert!(MAX_SPACE_SKILL_BYTES - 512 >= 11_400) };
     }
 
     #[test]
@@ -1167,6 +1233,12 @@ mod tests {
             ".agents/skills/demo"
         ));
         assert!(release(&workspace, ".agents/skills/demo"));
+        // As an import does: the folder now holds the space's own files.
+        fs::write(
+            workspace.join(".agents/skills/demo/SKILL.md"),
+            "---\nname: demo\n---\n\n# The full pack\n",
+        )
+        .unwrap();
         assert!(!is_runtime_provided_skill_dir(
             &workspace,
             ".agents/skills/demo"
