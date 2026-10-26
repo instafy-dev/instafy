@@ -51,12 +51,7 @@ describe("social card URL", () => {
 
   it("is never spelled by a page: pages pass SOCIAL_CARD_IMAGE", () => {
     const seo = path.join(frontendRoot, "src", "utils", "seo.ts");
-    // hosted/robot is a generated copy of an upstream integration. The hosted web
-    // release requires it to stay byte-identical to that export, so it changes
-    // only by re-exporting from upstream, never by hand here.
-    const vendoredRobotSlice = path.join(frontendRoot, "hosted", "robot") + path.sep;
     const offenders = [...sourceFiles("src"), ...sourceFiles("hosted")]
-      .filter((file) => !file.startsWith(vendoredRobotSlice))
       .filter((file) => file !== seo && cardUrls(fs.readFileSync(file, "utf8")).length > 0)
       .map((file) => path.relative(frontendRoot, file));
     expect(offenders).toEqual([]);

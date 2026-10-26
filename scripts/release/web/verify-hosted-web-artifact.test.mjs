@@ -36,6 +36,7 @@ test("metadata must be the exact v3 release of this commit", () => {
 });
 
 test("a build that fell back to the public manifest is refused", () => {
+  assert.deepEqual(REQUIRED_FEATURE_MODULE_IDS, ["instafy.public-core", "instafy.hosted-performance"]);
   const publicOnly = fixture((root) => fs.writeFileSync(path.join(root, "assets", "index-abc123.js"), `const b="${SHA}";const i=["instafy.public-core"];\n`));
   assert.throws(() => verifyHostedWebArtifact({ distPath: publicOnly, sourceSha: SHA }), /lacks feature modules/u);
 });
