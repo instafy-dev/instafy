@@ -34,7 +34,7 @@ use crate::{
     workspace, ApiError, AppConfig, AppState, ProjectRecord,
 };
 
-const DEFAULT_PROMPT_INTENT: &str = "feature";
+pub(crate) const DEFAULT_PROMPT_INTENT: &str = "feature";
 const DEFAULT_PROMPT_PRIORITY: i32 = 100;
 const EXECUTION_MODE_APPLY: &str = "apply";
 const EXECUTION_MODE_APPROVAL: &str = "approval_required";

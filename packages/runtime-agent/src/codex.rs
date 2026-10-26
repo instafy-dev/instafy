@@ -4121,6 +4121,33 @@ fn agent_reasoning_effort_override() -> Option<ReasoningEffort> {
     parse_agent_reasoning_effort(&raw)
 }
 
+/// The job secret the controller sets on a chat turn that runs on Instafy's
+/// hosted AI. A turn on the person's own login or key never carries it.
+pub(crate) const MANAGED_AI_REASONING_EFFORT_ENV: &str = "CODEX_MANAGED_AI_REASONING_EFFORT";
+
+/// The reasoning effort the controller chose for this job's chat turn on
+/// Instafy's hosted AI, from `CODEX_MANAGED_AI_REASONING_EFFORT`. It takes the
+/// place of the runtime's own default for that turn only (see
+/// `reasoning_effort_for_runtime_job`), so an agent's reasoning setting and
+/// `CODEX_RUNTIME_REASONING_EFFORT` still win. Read like
+/// `CODEX_AGENT_REASONING_EFFORT`: anything but the four supported values is
+/// ignored.
+pub(crate) fn managed_ai_reasoning_effort() -> Option<ReasoningEffort> {
+    let raw = optional_env(MANAGED_AI_REASONING_EFFORT_ENV)?;
+    parse_agent_reasoning_effort(&raw)
+}
+
+/// Serializes tests that change the process environment. One lock for the
+/// crate, because tests in more than one module set the same variables (both
+/// this module's and `jobs`' set `CODEX_MANAGED_AI_REASONING_EFFORT`).
+#[cfg(test)]
+pub(crate) fn process_env_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .expect("env lock poisoned")
+}
+
 pub(crate) fn parse_agent_reasoning_effort(raw: &str) -> Option<ReasoningEffort> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "minimal" => Some(ReasoningEffort::Minimal),
@@ -5669,7 +5696,6 @@ mod tests {
         RawResponseItemEvent, TokenCountEvent, TokenUsage, TokenUsageInfo, TurnCompleteEvent,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Mutex, OnceLock};
 
     #[tokio::test]
     async fn routing_capabilities_use_resolved_parent_config_before_classifier_tool_suppression() {
@@ -6018,10 +6044,7 @@ mod tests {
     }
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("env lock poisoned")
+        process_env_test_lock()
     }
 
     fn count_setting_lines(config: &str, key: &str) -> usize {
@@ -7033,6 +7056,29 @@ mod tests {
                 resolve_runtime_reasoning_effort(Some(raw), Some(ReasoningEffort::High), None),
                 expected
             );
+        }
+    }
+
+    #[test]
+    fn managed_ai_reasoning_effort_reads_only_the_supported_controller_values() {
+        let _env_lock = env_lock();
+        let previous = std::env::var_os(MANAGED_AI_REASONING_EFFORT_ENV);
+        let read = |value: Option<&str>| {
+            match value {
+                Some(value) => unsafe { std::env::set_var(MANAGED_AI_REASONING_EFFORT_ENV, value) },
+                None => unsafe { std::env::remove_var(MANAGED_AI_REASONING_EFFORT_ENV) },
+            }
+            managed_ai_reasoning_effort()
+        };
+        assert_eq!(read(Some("medium")), Some(ReasoningEffort::Medium));
+        assert_eq!(read(Some(" Medium ")), Some(ReasoningEffort::Medium));
+        // A turn on the person's own AI carries no value.
+        assert_eq!(read(None), None);
+        assert_eq!(read(Some("")), None);
+        assert_eq!(read(Some("ultra")), None);
+        match previous {
+            Some(value) => unsafe { std::env::set_var(MANAGED_AI_REASONING_EFFORT_ENV, value) },
+            None => unsafe { std::env::remove_var(MANAGED_AI_REASONING_EFFORT_ENV) },
         }
     }
 
