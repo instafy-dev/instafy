@@ -96,11 +96,21 @@ export async function runSharedBrowserAgentTabsFixture() {
       "/": { title: "Trip notes", body: "<p>The person's own page.</p>" },
     });
     servers.push(research.server);
+    // A link-only site that really answers (www.runrepeat.com is mapped to
+    // loopback below), so a load that slips through is seen by its server.
+    const linkOnly = await listenSite("link-only", {
+      "/review": { title: "Link-only review", body: "<p>Text Octo must never read.</p>" },
+    });
+    servers.push(linkOnly.server);
+    const linkOnlyReview = `http://www.runrepeat.com:${linkOnly.server.address().port}/review`;
     const sources = await listenSite("sources", {
       "/timetable": { title: "Timetable", body: "<p>Trains leave every 20 minutes.</p><form method=\"post\" action=\"/order\"><button>Place order</button></form>" },
       "/hours": { title: "Opening hours", body: "<p>Open daily 9 to 17.</p>" },
       "/prices": { title: "Prices", body: "<p>Entry 12 EUR.</p>" },
       "/to-link-only": { redirect: "https://www.booking.com/hotel/fixture.html" },
+      "/to-review": { redirect: linkOnlyReview },
+      "/new-window": { title: "Reviews", body: "<p><a href=\"/to-review\" target=\"_blank\">Read the review</a></p>" },
+      "/later": { title: "Moving", body: `<meta http-equiv="refresh" content="2;url=${linkOnlyReview}"><p>This page moves on by itself.</p>` },
     });
     servers.push(sources.server);
 
@@ -113,7 +123,7 @@ export async function runSharedBrowserAgentTabsFixture() {
       args: [
         "--remote-debugging-address=127.0.0.1",
         "--remote-debugging-port=0",
-        "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
+        "--host-resolver-rules=MAP www.runrepeat.com 127.0.0.1, MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
       ],
     });
     const runPage = context.pages()[0];
@@ -265,6 +275,32 @@ export async function runSharedBrowserAgentTabsFixture() {
     // The blocked load left an error page; Octo goes back to its source.
     await ok("POST", "/v1/navigate", { url: `${sources.origin}/timetable` }, ["allow_once"]);
 
+    // A link that opens another window does not escape the tab's guard: the
+    // window is stopped before it loads anything and closed, so no tab Octo
+    // cannot see, count or close is left behind.
+    await ok("POST", "/v1/navigate", { url: `${sources.origin}/new-window` }, ["allow_once"]);
+    const reviews = await ok("GET", "/v1/snapshot");
+    const reviewLink = reviews.interactiveElements.find((element) => element.label === "Read the review");
+    assert.ok(reviewLink, "The new-window link is observed");
+    await refused(/opened another window/, "POST", "/v1/click", { index: reviewLink.index, snapshotId: reviews.snapshotId }, ["allow_once"]);
+    await delay(300);
+    assert.equal(browserPages().length, 2, "The window the link opened was closed");
+    assert.ok(!sources.requests.includes("GET /to-review"), "The new window loaded nothing");
+    assert.deepEqual(linkOnly.requests, [], "The link-only site received no request");
+
+    // A page that moves itself on to a link-only site between Octo's steps is
+    // not read: Octo stops there before any prompt.
+    await ok("POST", "/v1/navigate", { url: `${sources.origin}/later` }, ["allow_once"]);
+    for (let attempt = 0; attempt < 100 && !pageWithUrl(linkOnlyReview); attempt += 1) await delay(50);
+    assert.ok(pageWithUrl(linkOnlyReview), "The fixture page moved on by itself");
+    const promptsBeforeLinkOnlyRead = prompts.length;
+    await refused(/link-only/, "GET", "/v1/snapshot", null, ["allow_origin"]);
+    await refused(/link-only/, "GET", "/v1/status", null, ["allow_origin"]);
+    assert.equal(prompts.length, promptsBeforeLinkOnlyRead, "Reading a link-only site is refused before any prompt");
+    const linkOnlyTabs = await ok("GET", "/v1/tabs");
+    assert.deepEqual(linkOnlyTabs.tabs.at(-1).title, null, "list_tabs shows nothing from the link-only page");
+    await ok("POST", "/v1/navigate", { url: `${sources.origin}/timetable` }, ["allow_once"]);
+
     // 4. At most three tabs of Octo's own.
     const second = await ok("POST", "/v1/tabs/open", { url: `${sources.origin}/hours` }, ["allow_origin", "allow_once"]);
     const third = await ok("POST", "/v1/tabs/open", { url: `${sources.origin}/prices` }, ["allow_origin", "allow_once"]);
@@ -310,6 +346,8 @@ export async function runSharedBrowserAgentTabsFixture() {
         "per-tab site approval and tab-bound step approval",
         "form submission refused in an agent tab before any prompt",
         "link-only site refused as a new tab and through a redirect",
+        "a window opened from Octo's tab is stopped and closed",
+        "a link-only page reached by the page itself is not read",
         "three agent tabs at most",
         "close_tab, and a tab the person closed",
         "turn-end close through the DevTools HTTP endpoint",

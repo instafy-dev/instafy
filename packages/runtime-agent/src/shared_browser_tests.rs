@@ -473,6 +473,12 @@ const pages = mode === "multi-target" || mode === "identical-targets" || mode ==
 for (const tab of openedTabs()) pages.push(makePage(tab.targetId, tab));
 context = {
   pages: () => pages,
+  // The guard in Octo's tabs stops and closes other windows a step opens;
+  // this fixture's pages open none.
+  on: () => {},
+  off: () => {},
+  route: async () => {},
+  unroute: async () => {},
   newPage: async () => {
     const tabs = openedTabs();
     const targetId = `octo-tab-${Date.now().toString(36)}${tabs.length}`;
@@ -5110,6 +5116,49 @@ fn octos_tabs_are_for_reading_and_refuse_every_other_step_before_any_prompt() {
         "/v1/click",
         Some(&json!({ "index": 0, "snapshotId": snapshot_in("plain-button") }).to_string()),
     ));
+}
+
+#[test]
+fn octos_tab_that_moved_itself_onto_a_link_only_site_is_not_read() {
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_routine_start("page-target");
+    let tab_id = fixture.open_tab("https://example.test/report")["tabId"]
+        .as_str()
+        .expect("tab id")
+        .to_string();
+    // The page moves itself on (a timed redirect) between Octo's steps.
+    std::fs::write(
+        &fixture.opened_tabs,
+        json!([{ "targetId": tab_id, "url": "https://www.booking.com/hotel/fixture.html" }])
+            .to_string(),
+    )
+    .expect("move the tab");
+
+    for (method, path, body) in [
+        ("GET", "/v1/snapshot", None),
+        ("GET", "/v1/status", None),
+        ("POST", "/v1/scroll", Some(r#"{"x":0,"y":720}"#)),
+    ] {
+        let refused = failure_of(&fixture.call("safe", method, path, body));
+        assert!(
+            refused.contains("Booking.com, which is link-only, so nothing there was read"),
+            "{path}: {refused}"
+        );
+    }
+    let listed = payload_of(&fixture.call("safe", "GET", "/v1/tabs", None));
+    let tab = &listed["tabs"][1];
+    assert_eq!(tab["linkOnlySite"], "Booking.com");
+    assert_eq!(tab["title"], JsonValue::Null);
+    assert_eq!(tab["url"], JsonValue::Null);
+
+    // Octo may still take the tab elsewhere.
+    let back = payload_of(&fixture.call(
+        "safe",
+        "POST",
+        "/v1/navigate",
+        Some(r#"{"url":"https://example.test/report"}"#),
+    ));
+    assert_eq!(back["url"], "https://example.test/report");
 }
 
 #[test]

@@ -244,6 +244,21 @@ function validateBrowserPageId(raw) {
   return pageId;
 }
 
+// A page in one of Octo's tabs that reached a link-only site by itself (a
+// timed redirect between steps) is neither read nor used; Octo may only take
+// the tab elsewhere or close it.
+function refuseLinkOnlyAgentTab(page) {
+  if (!inAgentTab()) {
+    return;
+  }
+  const site = LINK_ONLY_SITES === null ? "An unknown site" : linkOnlySiteOf(page.url());
+  if (site) {
+    throw new Error(
+      `Octo's tab is now on ${site}, which is link-only, so nothing there was read or done. Navigate the tab elsewhere or close it with close_tab, and give the person the plain link.`,
+    );
+  }
+}
+
 // Site and step approvals for the page this command acts on. In one of
 // Octo's own tabs the prompt names the tab, a site approval holds for that
 // tab only, and a step approval is bound to the tab as well as to its target.
@@ -2236,8 +2251,11 @@ async function describeTabs(tabs) {
         current: entry.tabId === previous,
         ...(kept.has(entry.tabId) ? { keptByPerson: true } : {}),
       };
+      const linkOnlySite = entry.openedBy === "octo" ? linkOnlySiteOf(page.url()) : null;
       if (isBlankPage(page)) {
         described.push({ ...line, blank: true, url: page.url() || "about:blank", title: "" });
+      } else if (linkOnlySite) {
+        described.push({ ...line, linkOnlySite, url: null, title: null });
       } else if (!siteApproved(page.url())) {
         described.push({ ...line, originApproved: false, url: null, title: null });
       } else {
@@ -2401,6 +2419,9 @@ async function execute(browser, method, requestPath, body) {
   const page = await resolveExpectedPage(browser);
   page.setDefaultTimeout(15_000);
   await page.bringToFront();
+  if (requestPath !== "/v1/navigate") {
+    refuseLinkOnlyAgentTab(page);
+  }
   if (!inAgentTab() || method !== "POST") {
     return await executeOnPage(browser, method, requestPath, body, page, tabs);
   }
@@ -2424,8 +2445,41 @@ async function execute(browser, method, requestPath, body) {
 // cannot be guarded takes no step.
 async function guardAgentTabDocuments(page) {
   const blocked = [];
+  // Another window a step in Octo's tab opens (a target=_blank link, a
+  // script) would be a tab Octo cannot see, count or close, outside this
+  // guard. While agent control holds, no person opens a page, so every page
+  // that appears during the step is such a window: its requests are stopped
+  // before they leave the browser and it is closed when the step ends.
+  const context = page.context();
+  const knownPages = new Set(context.pages());
+  const windows = [];
+  const noteWindow = (opened) => {
+    if (!knownPages.has(opened) && !windows.includes(opened)) windows.push(opened);
+  };
+  let windowRequestStopped = false;
+  const stopWindowRequests = async (route) => {
+    const request = route.request();
+    let owner = null;
+    let frameless = false;
+    try {
+      owner = request.frame().page();
+    } catch (_) {
+      // A new window's first navigation is issued before its frame exists;
+      // a worker's request belongs to no page and is not a navigation.
+      frameless = true;
+    }
+    if ((owner && !knownPages.has(owner)) || (frameless && request.isNavigationRequest())) {
+      if (owner) noteWindow(owner);
+      windowRequestStopped = true;
+      await route.abort("blockedbyclient").catch(() => {});
+      return;
+    }
+    await route.fallback().catch(() => {});
+  };
   let session;
   try {
+    context.on("page", noteWindow);
+    await context.route("**/*", stopWindowRequests);
     session = await page.context().newCDPSession(page);
     session.on("Fetch.requestPaused", (event) => {
       const url = event?.request?.url || "";
@@ -2441,21 +2495,36 @@ async function guardAgentTabDocuments(page) {
     });
   } catch (_) {
     if (session) await session.detach().catch(() => {});
+    context.off("page", noteWindow);
+    await context.unroute("**/*", stopWindowRequests).catch(() => {});
     throw new Error("Shared Browser could not guard Octo's tab against link-only sites, so the step was not performed");
   }
   return {
     release: async () => {
       await session.send("Fetch.disable").catch(() => {});
       await session.detach().catch(() => {});
+      // A window that appeared after the step's last check is closed too.
+      for (const opened of context.pages()) noteWindow(opened);
+      context.off("page", noteWindow);
+      await context.unroute("**/*", stopWindowRequests).catch(() => {});
+      for (const opened of windows) {
+        await opened.close({ runBeforeUnload: false }).catch(() => {});
+      }
     },
     // An approval code in `cause` still ends the run, so it is kept.
     assertNoneBlocked: (cause = null) => {
+      for (const opened of context.pages()) noteWindow(opened);
       if (cause && /\[[a-z_]+_non_retryable\]/.test(String(cause.message || ""))) {
         return;
       }
       if (blocked.length) {
         throw new Error(
           `A link or redirect in Octo's tab led to ${blocked[0]}, which is link-only, so it was not opened. Give the person the plain link instead.`,
+        );
+      }
+      if (windows.length || windowRequestStopped) {
+        throw new Error(
+          "The step opened another window, which Octo's tabs never do, so it was closed before it loaded anything. Open the address with open_tab instead.",
         );
       }
     },

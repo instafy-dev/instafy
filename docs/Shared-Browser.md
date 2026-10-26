@@ -417,7 +417,14 @@ Browser keeps one page until it has a multi-tab host of its own.
   (runtime-agent embeds the skill's `link-only-sites.json` into the controller)
   is never opened in Octo's tabs: not by `open_tab`, `navigate` or a link, and
   not through a redirect, which the tab's request guard stops before the request
-  leaves the browser. Without the list, Octo's tabs open nothing.
+  leaves the browser. Without the list, Octo's tabs open nothing. A page that
+  moves itself on to a link-only site between Octo's steps is neither read nor
+  used there; Octo can only take the tab elsewhere or close it.
+- **No other windows.** A step in one of Octo's tabs that opens another window
+  (a `target="_blank"` link, a script) has that window's requests stopped
+  before they leave the browser, the window closed, and the step reported as
+  refused. Octo opens tabs only with `open_tab`, so every tab it uses is
+  counted, badged and closed at the end.
 - **Control.** Agent control stays runtime-wide: while a run holds the marker
   the origin refuses human input on every tab, and Pause, Escape or taking over
   ends the run and with it every tab's agent control. A tab the person closes
