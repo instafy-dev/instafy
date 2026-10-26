@@ -10,7 +10,7 @@ The current controller still stores that balance as integer billing units. The C
 
 Ledger posts are idempotent. A burn or refill that carries an idempotency key (the managed-AI reserve, adjustment and refund, a hosted-runtime billing bucket, a tunnel grant, or a keyed `POST /credits`) writes at most one row per org, project and key, and a repeated key never moves the balance. The ledger's insert trigger enforces this under the org balance lock, before it changes the balance, so concurrent retries are covered too: the first post wins, and no later post with that key writes a row or moves the balance. The controller normally reports such a retry as `deduped`. If the balance ran short in between, a burn retry can instead be rejected as insufficient credits. A post without a project or without a key is never deduplicated.
 
-The default managed-AI model is `gpt-6-luna` (label `GPT-6 Luna`), served by OpenAI. The controller pins `CODEX_MODEL_PROVIDER=openai` for managed turns (`secrets.rs`), so the model users see is the model that runs. Managed turns are paid by the operator out of the shared team balance, which is why the cheaper Luna tier is the default there. Bring-your-own ChatGPT logins and OpenAI API keys are paid by the user and keep `gpt-5.6-sol` as their default; that default, and the stale-model floor, are separate from the managed tier and did not move.
+The default managed-AI model is `gpt-6-luna` (label `GPT-6 Luna`), served by OpenAI. The controller pins `CODEX_MODEL_PROVIDER=openai` for managed turns (`secrets.rs`), so the model users see is the model that runs. Managed turns are paid by the operator out of the shared team balance, which is why the cheaper Luna tier is the default there. Bring-your-own ChatGPT logins, OpenAI API keys and Codex on this computer are paid by the user and default to `gpt-6-sol` (`OWN_AI_DEFAULT_MODEL_ID` in `runtime-contracts`). Their OpenAI picks also run at least GPT-6: the controller raises an older id when it builds a job or a credential lease, to `gpt-6-luna` for Luna, mini and nano ids and to `gpt-6-sol` otherwise, without rewriting saved agents or credentials. That default and that floor are separate from the managed tier: `MANAGED_AI_MODEL_ID` is used as configured.
 
 The pricing envs define the rates users are actually charged. The defaults match the public `gpt-6-luna` standard-tier API list prices verified on September 22, 2026:
 - input: `$0.10 / 1M` (`MANAGED_AI_INPUT_USD_MICROS_PER_1K=100`)
@@ -19,7 +19,7 @@ The pricing envs define the rates users are actually charged. The defaults match
 
 The previous managed default, `gpt-5.6-luna`, listed at `$0.20 / $0.02 cached / $1.20 per 1M`, so the same turn now costs users roughly half the credits.
 
-For comparison, `gpt-5.6-sol` lists at `$5 / $0.50 cached / $30 per 1M`. If you set `MANAGED_AI_MODEL_ID=gpt-5.6-sol` (or any other model), set the three pricing envs to that model's rates in the same change; the defaults only make sense for Luna.
+For comparison, `gpt-6-sol`, the own-AI default, lists at `$2 / $0.20 cached / $10 per 1M` (standard tier, verified October 26, 2026). If you set `MANAGED_AI_MODEL_ID=gpt-6-sol` (or any other model), set the three pricing envs to that model's rates in the same change; the defaults only make sense for Luna.
 
 If you point the managed path at a different provider/model, update the pricing envs accordingly.
 
@@ -170,7 +170,7 @@ terminal commands keep their agent's model, and with `MANAGED_AI_ENABLED=false` 
 changed, because the credential-less lane is then the proxy's own key. Not every platform job
 reads those secrets, though: a write-scoped worker lane that the runtime runs in parallel never
 fetches job secrets, and a job whose secrets fetch failed has none. Both still ask for the
-runtime's own model, by default `gpt-5.6-sol`, which lists at 50 to 60 times Luna's rates above.
+runtime's own model, by default `gpt-6-sol`, which lists at 20 times Luna's rates above.
 The managed credential lease therefore carries `pinnedModel`, and the proxy
 sends every request on it as `MANAGED_AI_MODEL_ID`, whatever model the job asked for; speech and
 transcription are refused on it. A pinned request also forwards only codex's client tool types

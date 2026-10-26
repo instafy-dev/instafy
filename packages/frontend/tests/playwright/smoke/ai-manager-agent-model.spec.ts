@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { OWN_AI_SMALL_MODEL_ID } from "../../../src/ai/modelDefaults.js";
 import { prepareStudio } from "../utils/harness.js";
 import { openSidebarSecondaryItem } from "../utils/sidebar.js";
 
@@ -24,7 +25,7 @@ test.describe("AI Manager (agent model)", () => {
     const modelMenu = page.getByTestId("agent-profile-model-menu");
     await expect(modelMenu).toBeVisible();
 
-    await modelMenu.getByRole("menuitemradio", { name: "gpt-5.5-mini" }).click();
+    await modelMenu.getByRole("menuitemradio", { name: OWN_AI_SMALL_MODEL_ID }).click();
 
     const saveResponse = page.waitForResponse(
       (response) =>
@@ -37,12 +38,12 @@ test.describe("AI Manager (agent model)", () => {
     await page.getByTestId("agent-profile-save").click();
     const response = await saveResponse;
     const requestBody = response.request().postDataJSON() as Record<string, unknown>;
-    expect(requestBody.model).toBe("gpt-5.5-mini");
+    expect(requestBody.model).toBe(OWN_AI_SMALL_MODEL_ID);
     await expect(page.getByTestId("agent-profile-modal")).toBeHidden({ timeout: 30_000 });
 
     await page.getByTestId("bots-octo-edit").click();
     await expect(page.getByTestId("agent-profile-modal")).toBeVisible();
-    await expect(page.getByTestId("agent-profile-model-select")).toContainText("gpt-5.5-mini");
+    await expect(page.getByTestId("agent-profile-model-select")).toContainText(OWN_AI_SMALL_MODEL_ID);
 
     const cleanupResponse = page.waitForResponse(
       (res) =>

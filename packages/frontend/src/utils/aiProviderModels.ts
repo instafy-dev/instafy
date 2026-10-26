@@ -1,4 +1,8 @@
-import { DEFAULT_OPENAI_MODEL_OPTION } from "../ai/modelDefaults";
+import {
+  DEFAULT_OPENAI_MODEL_OPTION,
+  DEFAULT_PROJECT_AI_MODEL,
+  OWN_AI_SMALL_MODEL_ID,
+} from "../ai/modelDefaults";
 
 export type AiProviderId = "openai" | "deepseek" | "zai" | "gemini";
 
@@ -19,31 +23,30 @@ export const AI_PROVIDER_OPTIONS: AiProviderOption[] = [
   { id: "gemini", label: "Gemini" },
 ];
 
-// Anything below gpt-5.5 is no longer served upstream; saved selections
-// migrate to the closest current model instead of failing at run time.
-// Full-size retirements floor to the bring-your-own OpenAI default
-// (gpt-5.6-sol; mirrors the controller's is_stale_openai_model →
-// DEFAULT_OPENAI_MODEL_ID path, which is distinct from the credits-funded
-// managed tier default); the
-// mini tier stays on gpt-5.5-mini, which is still served.
-const OPENAI_MODEL_MIGRATIONS: Record<string, string> = {
-  "gpt-5.4": "gpt-5.6-sol",
-  "gpt-5.4-mini": "gpt-5.5-mini",
-  "gpt-5-codex": "gpt-5.6-sol",
-  "gpt-5.3-codex": "gpt-5.6-sol",
-  "gpt-5.2-codex": "gpt-5.6-sol",
-  "gpt-5.2": "gpt-5.6-sol",
-  "gpt-5.1-codex-max": "gpt-5.6-sol",
-  "gpt-5.1-codex": "gpt-5.6-sol",
-  "gpt-5.1-codex-mini": "gpt-5.5-mini",
-  "gpt-4.5": "gpt-5.6-sol",
-  "o3-mini": "gpt-5.5-mini",
-};
+// Own AI runs at least GPT-6: the controller raises any bare OpenAI id below
+// it when a job runs (own_ai_model_floor in model_defaults.rs), to the small
+// tier for Luna, mini and nano ids and to the own-AI default otherwise. Studio
+// shows the model that runs, so it applies the same rule; both are checked
+// against runtime-contracts' own_ai_model_fixtures.json.
+export function ownAiModelFloor(model: string): string | null {
+  const normalized = model.trim().toLowerCase();
+  const match = /^(?:gpt-(\d+)|o(?=\d))(.*)$/u.exec(normalized);
+  if (!match) {
+    return null;
+  }
+  const [, major, afterVersion] = match;
+  if (major !== undefined && Number(major) >= 6) {
+    return null;
+  }
+  const small = afterVersion
+    .split(/[^a-z0-9]/u)
+    .some((part) => part === "luna" || part === "mini" || part === "nano");
+  return small ? OWN_AI_SMALL_MODEL_ID : DEFAULT_PROJECT_AI_MODEL;
+}
 
 const OPENAI_MODEL_OPTIONS: AiModelOption[] = [
   DEFAULT_OPENAI_MODEL_OPTION,
-  { id: "gpt-5.5", label: "gpt-5.5" },
-  { id: "gpt-5.5-mini", label: "gpt-5.5-mini" },
+  { id: OWN_AI_SMALL_MODEL_ID, label: OWN_AI_SMALL_MODEL_ID },
 ];
 
 const DEEPSEEK_MODEL_OPTIONS: AiModelOption[] = [
@@ -113,7 +116,7 @@ export function normalizeAiModelId(
     return null;
   }
   if (provider === "openai") {
-    return OPENAI_MODEL_MIGRATIONS[normalized] ?? normalized;
+    return ownAiModelFloor(normalized) ?? normalized;
   }
   return normalized;
 }

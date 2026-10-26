@@ -96,7 +96,7 @@ pnpm --filter @instafy/desktop-runtime-agent build
 > If you rebuild the Rust agent with `--release`, the wrapper automatically falls back to the
 > release binary.
 
-Code-mode-only models (the default `gpt-5.6-sol` and `gpt-6-luna`) run every tool through
+Code-mode-only models (the own-AI default, `OWN_AI_DEFAULT_MODEL_ID` in `runtime-contracts`, and `gpt-6-luna`) run every tool through
 `codex-code-mode-host`, which runtime-agent expects next to its own binary; without it those
 turns are refused with a message naming the missing file. The host links a sandboxed V8 build
 that only Codex publishes, so fetch it (checked against the checksums pinned in `codex/`) and
@@ -115,7 +115,8 @@ the host in the same directory). The
 runtime-agent integration tests link a built host next to their test binaries automatically; a
 `proxy_retry_budget` run for a code-mode-only model (the default `gpt-6-luna`, or whatever
 `INSTAFY_TEST_CODEX_MODEL` names) fails with this build command when the host is missing. CI
-builds the host and runs `proxy_retry_budget` for `gpt-6-luna`, `gpt-5.6-sol` and `gpt-5.5`.
+builds the host and runs `proxy_retry_budget` for `gpt-6-luna`, the own-AI default
+(`INSTAFY_TEST_CODEX_MODEL=own-ai-default`, a test-only name) and `gpt-5.5`.
 
 ### Mobile (Capacitor) push notifications
 

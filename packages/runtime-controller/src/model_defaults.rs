@@ -1,10 +1,13 @@
+use runtime_contracts::own_ai_model::OWN_AI_SMALL_MODEL_ID;
+
 pub const DEFAULT_MANAGED_AI_PROVIDER_ID: &str = "openai";
 
 /// Default model for bring-your-own OpenAI credentials: API keys without a
 /// provider hint and ChatGPT logins (`codex_auth_json`). Those users pay by
 /// subscription or their own key, so the stronger Sol tier is the right default.
-/// This is also the floor that stale ids are raised to (`is_stale_openai_model`).
-pub const DEFAULT_OPENAI_MODEL_ID: &str = "gpt-5.6-sol";
+/// This is also what older full-size picks run (`own_ai_model_floor`). The id
+/// lives in `runtime_contracts::own_ai_model`, shared with the runtime.
+pub use runtime_contracts::own_ai_model::OWN_AI_DEFAULT_MODEL_ID as DEFAULT_OPENAI_MODEL_ID;
 
 /// Default model for the operator-paid managed "Instafy AI" tier (credits).
 /// GPT-6 Luna is priced at $0.10 / $0.01 cached / $0.50 per 1M tokens (public
@@ -92,43 +95,67 @@ pub fn agent_model_is_compatible_with_provider(provider: &str, model: &str) -> b
     }
 }
 
-/// OpenAI models below gpt-5.5 are no longer served upstream; stale ids
-/// persisted on agents/settings must not reach the proxy or requests fail
-/// with 400/404 at the backend.
-pub fn is_stale_openai_model(model: &str) -> bool {
+/// What a person's own OpenAI pick runs: any bare OpenAI id below GPT-6
+/// (`gpt-N` with N < 6, and `o<digit>` reasoning models) is raised to the
+/// own-AI default, or to its small tier when the id names a Luna, mini or nano
+/// model. Retired ids (`runtime_contracts::own_ai_model::is_retired_openai_model`)
+/// are below GPT-6, so this covers them too. GPT-6 and later, ids without a
+/// version and namespaced ids (`openai/gpt-5.5`) return `None` and run as
+/// picked.
+///
+/// Owner decision 2026-10-26: own AI runs at least GPT-6. Saved agents and
+/// credentials keep the id they were created with, so the floor is applied
+/// when a job or lease is built, not by rewriting rows. The managed lane never
+/// passes through here: its model is the operator's `MANAGED_AI_MODEL_ID`.
+pub fn own_ai_model_floor(model: &str) -> Option<&'static str> {
     let normalized = model.trim().to_ascii_lowercase();
-    if normalized.starts_with("gpt-4") || normalized.starts_with("o3") {
-        return true;
-    }
-    if normalized == "gpt-5" || normalized == "gpt-5-codex" {
-        return true;
-    }
-    if let Some(rest) = normalized.strip_prefix("gpt-5.") {
-        let minor: String = rest
+    let after_version = if let Some(rest) = normalized.strip_prefix("gpt-") {
+        let major: String = rest
             .chars()
             .take_while(|character| character.is_ascii_digit())
             .collect();
-        if let Ok(value) = minor.parse::<u32>() {
-            return value < 5;
+        if major.parse::<u32>().ok()? >= 6 {
+            return None;
+        }
+        &rest[major.len()..]
+    } else {
+        let rest = normalized.strip_prefix('o')?;
+        if !rest.starts_with(|character: char| character.is_ascii_digit()) {
+            return None;
+        }
+        rest
+    };
+    let small = after_version
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|part| matches!(part, "luna" | "mini" | "nano"));
+    Some(if small {
+        OWN_AI_SMALL_MODEL_ID
+    } else {
+        DEFAULT_OPENAI_MODEL_ID
+    })
+}
+
+/// A person's own-AI model as it runs on `provider`: raised by
+/// [`own_ai_model_floor`] on OpenAI-like providers (those without an agent
+/// default), unchanged on DeepSeek, z.ai and Gemini.
+pub fn floor_own_ai_model_for_provider(provider: &str, model: &str) -> String {
+    let model = model.trim();
+    if default_agent_model_for_provider(provider).is_none() {
+        if let Some(floor) = own_ai_model_floor(model) {
+            return floor.to_string();
         }
     }
-    false
+    model.to_string()
 }
 
 pub fn resolve_agent_model_for_provider(
     provider: &str,
     configured_model: Option<String>,
 ) -> Option<String> {
-    // Providers without an agent default resolve through the OpenAI path.
-    let openai_like = default_agent_model_for_provider(provider).is_none();
-
     if let Some(model) = configured_model {
-        let normalized = model.trim().to_string();
-        if agent_model_is_compatible_with_provider(provider, &normalized) {
-            if openai_like && is_stale_openai_model(&normalized) {
-                return Some(DEFAULT_OPENAI_MODEL_ID.to_string());
-            }
-            return Some(normalized);
+        let normalized = model.trim();
+        if agent_model_is_compatible_with_provider(provider, normalized) {
+            return Some(floor_own_ai_model_for_provider(provider, normalized));
         }
     }
 
@@ -140,22 +167,48 @@ mod tests {
     use super::{
         agent_model_is_compatible_with_provider, default_chatgpt_model_id,
         default_managed_ai_model_id, default_managed_ai_model_label, default_model_for_provider,
-        is_stale_openai_model, resolve_agent_model_for_provider,
+        floor_own_ai_model_for_provider, own_ai_model_floor, resolve_agent_model_for_provider,
         DEFAULT_MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K,
         DEFAULT_MANAGED_AI_INPUT_USD_MICROS_PER_1K, DEFAULT_MANAGED_AI_MODEL_ID,
-        DEFAULT_MANAGED_AI_OUTPUT_USD_MICROS_PER_1K,
+        DEFAULT_MANAGED_AI_OUTPUT_USD_MICROS_PER_1K, DEFAULT_OPENAI_MODEL_ID,
     };
+    use runtime_contracts::own_ai_model::{is_retired_openai_model, OWN_AI_SMALL_MODEL_ID};
+    use serde_json::Value;
+
+    /// The own-AI ids and floor cases, shared with the proxy's and Studio's
+    /// tests (runtime-contracts `own_ai_model_fixtures.json`).
+    fn fixtures() -> Value {
+        serde_json::from_str(include_str!(
+            "../../runtime-contracts/src/own_ai_model_fixtures.json"
+        ))
+        .expect("fixtures")
+    }
+
+    /// A fixture's symbolic target: `default`, `small`, or `keep` (no floor).
+    fn floor_target(runs: &str) -> Option<&'static str> {
+        match runs {
+            "default" => Some(DEFAULT_OPENAI_MODEL_ID),
+            "small" => Some(OWN_AI_SMALL_MODEL_ID),
+            "keep" => None,
+            other => panic!("unknown floor target {other}"),
+        }
+    }
 
     #[test]
-    fn managed_tier_defaults_to_luna_while_byo_credentials_keep_sol() {
+    fn managed_tier_defaults_to_luna_while_byo_credentials_run_sol() {
         // Owner decision 2026-09-17: only the operator-paid managed tier moves
         // to Luna. ChatGPT logins, API keys, and the stale-model floor stay on Sol.
         // 2026-09-22: the managed tier follows Luna to GPT-6 Luna on its release.
+        // 2026-10-26: own AI moves to GPT-6 Sol; Instafy AI stays on GPT-6 Luna.
         assert_eq!(default_managed_ai_model_id(), "gpt-6-luna");
         assert_eq!(default_managed_ai_model_label(), "GPT-6 Luna");
-        assert_eq!(default_chatgpt_model_id(), "gpt-5.6-sol");
-        assert_eq!(default_model_for_provider("openai"), "gpt-5.6-sol");
-        assert_eq!(default_model_for_provider(""), "gpt-5.6-sol");
+        assert_eq!(fixtures()["defaultModelId"], DEFAULT_OPENAI_MODEL_ID);
+        assert_eq!(default_chatgpt_model_id(), DEFAULT_OPENAI_MODEL_ID);
+        assert_eq!(
+            default_model_for_provider("openai"),
+            DEFAULT_OPENAI_MODEL_ID
+        );
+        assert_eq!(default_model_for_provider(""), DEFAULT_OPENAI_MODEL_ID);
         assert_ne!(default_managed_ai_model_id(), default_chatgpt_model_id());
     }
 
@@ -172,38 +225,34 @@ mod tests {
     }
 
     #[test]
-    fn stale_openai_models_are_floored_to_current_default() {
-        for stale in [
-            "gpt-5.1-codex-mini",
-            "gpt-5.1-codex-max",
-            "gpt-5.2-codex",
-            "gpt-5.3-codex",
-            "gpt-5.4",
-            "gpt-5.4-mini",
-            "gpt-5.2",
-            "gpt-5-codex",
-            "gpt-4.5",
-            "o3-mini",
-        ] {
-            assert!(is_stale_openai_model(stale), "{stale} should be stale");
+    fn own_ai_picks_below_gpt_6_run_the_fixtures_floor() {
+        for case in fixtures()["floor"].as_array().expect("floor cases") {
+            let model = case["model"].as_str().expect("model");
+            let expected = floor_target(case["runs"].as_str().expect("runs"));
+            assert_eq!(own_ai_model_floor(model), expected, "{model:?}");
             assert_eq!(
-                resolve_agent_model_for_provider("openai", Some(stale.to_string())).as_deref(),
-                Some("gpt-5.6-sol"),
-                "{stale} should resolve to the default model"
+                resolve_agent_model_for_provider("openai", Some(model.to_string())).as_deref(),
+                Some(expected.unwrap_or(model.trim())),
+                "{model:?} as an agent's model"
             );
         }
+        // Every id the runtime retires is raised here first.
+        for retired in fixtures()["retired"].as_array().expect("retired ids") {
+            let retired = retired.as_str().expect("model id");
+            assert!(is_retired_openai_model(retired), "{retired}");
+            assert!(own_ai_model_floor(retired).is_some(), "{retired}");
+        }
+        // The floor never lands below itself.
+        assert_eq!(own_ai_model_floor(DEFAULT_OPENAI_MODEL_ID), None);
+        assert_eq!(own_ai_model_floor(OWN_AI_SMALL_MODEL_ID), None);
+    }
 
-        assert!(!is_stale_openai_model("gpt-5.5"));
-        assert!(!is_stale_openai_model("gpt-5.10"));
-        assert_eq!(
-            resolve_agent_model_for_provider("openai", Some("gpt-5.4-mini".to_string())).as_deref(),
-            Some("gpt-5.6-sol")
-        );
-
-        // The managed tier default must survive the stale floor untouched: if the
-        // rule ever tightened to "anything but Sol", every managed turn would be
-        // silently floored back to Sol.
-        assert!(!is_stale_openai_model(DEFAULT_MANAGED_AI_MODEL_ID));
+    #[test]
+    fn the_floor_applies_only_to_openai_like_providers() {
+        // An agent on the managed tier's model runs it as picked: if the floor
+        // ever tightened to "anything but Sol", every such agent would be
+        // silently moved to Sol.
+        assert_eq!(own_ai_model_floor(DEFAULT_MANAGED_AI_MODEL_ID), None);
         assert_eq!(
             resolve_agent_model_for_provider(
                 "openai",
@@ -211,6 +260,20 @@ mod tests {
             )
             .as_deref(),
             Some("gpt-6-luna")
+        );
+        // "assistant" agents follow the OpenAI path; other providers keep their ids.
+        assert_eq!(
+            floor_own_ai_model_for_provider("assistant", " gpt-5.6-sol "),
+            DEFAULT_OPENAI_MODEL_ID
+        );
+        assert_eq!(
+            floor_own_ai_model_for_provider("deepseek", " deepseek-chat "),
+            "deepseek-chat"
+        );
+        assert_eq!(floor_own_ai_model_for_provider("zai", "glm-5"), "glm-5");
+        assert_eq!(
+            floor_own_ai_model_for_provider("gemini", "gemini-2.5-pro"),
+            "gemini-2.5-pro"
         );
     }
 

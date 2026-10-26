@@ -18,9 +18,12 @@
 
 use std::sync::OnceLock;
 
+use runtime_contracts::own_ai_model::is_retired_openai_model;
+
 /// Built-in last resort, used only when neither the job nor the launch
-/// environment names a model. Kept equal to the controller's OpenAI default.
-pub(crate) const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
+/// environment names a model: the controller's own-AI default, from the
+/// contract both read.
+pub(crate) use runtime_contracts::own_ai_model::OWN_AI_DEFAULT_MODEL_ID as DEFAULT_CODEX_MODEL;
 
 pub(crate) const MODEL_ENV_KEY: &str = "CODEX_MODEL";
 pub(crate) const MODEL_PROVIDER_ENV_KEY: &str = "CODEX_MODEL_PROVIDER";
@@ -137,32 +140,16 @@ pub(crate) fn installed_job_model_provider() -> Option<String> {
         .or_else(|| launch_model_provider().map(str::to_string))
 }
 
-/// Retired ids (and empty) become [`DEFAULT_CODEX_MODEL`].
+/// Retired ids (and empty) become [`DEFAULT_CODEX_MODEL`]. Only ids that are
+/// no longer served are raised here; the controller's GPT-6 floor for a
+/// person's own AI is applied before a job arrives, and an operator's managed
+/// model below GPT-6 must keep the tools of the model the proxy pins.
 pub(crate) fn normalize_model_id(model: &str) -> String {
     match model.trim() {
         "" => DEFAULT_CODEX_MODEL.to_string(),
-        trimmed if is_retired_model_id(trimmed) => DEFAULT_CODEX_MODEL.to_string(),
+        trimmed if is_retired_openai_model(trimmed) => DEFAULT_CODEX_MODEL.to_string(),
         trimmed => trimmed.to_string(),
     }
-}
-
-/// OpenAI ids below gpt-5.5 are no longer served. Mirrors the controller's
-/// `is_stale_openai_model`; non-OpenAI ids pass through.
-pub(crate) fn is_retired_model_id(model: &str) -> bool {
-    let normalized = model.trim().to_ascii_lowercase();
-    if normalized == "gpt-5" || normalized == "gpt-5-codex" {
-        return true;
-    }
-    normalized
-        .strip_prefix("gpt-5.")
-        .and_then(|rest| {
-            let minor: String = rest
-                .chars()
-                .take_while(|character| character.is_ascii_digit())
-                .collect();
-            minor.parse::<u32>().ok()
-        })
-        .is_some_and(|minor| minor < 5)
 }
 
 fn non_empty(value: Option<&str>) -> Option<String> {
@@ -201,6 +188,9 @@ mod tests {
             "gpt-5.3-codex",
             "gpt-5.4",
             "gpt-5.4-mini",
+            // Retired by the controller already; the runtime now agrees.
+            "gpt-4o",
+            "o3-mini",
         ] {
             assert_eq!(
                 resolve_model(Some(retired), None, "t").id,
@@ -213,5 +203,9 @@ mod tests {
         }
         assert_eq!(normalize_model_id("gpt-6-luna"), "gpt-6-luna");
         assert_eq!(normalize_model_id("deepseek-chat"), "deepseek-chat");
+        // Served ids below GPT-6 run as sent: an operator's managed model is
+        // the one the proxy pins.
+        assert_eq!(normalize_model_id("gpt-5.5"), "gpt-5.5");
+        assert_eq!(normalize_model_id("gpt-5.6-luna"), "gpt-5.6-luna");
     }
 }

@@ -3,6 +3,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_PROJECT_AI_MODEL } from "../../../../ai/modelDefaults";
 import { ParticipantsDrawer } from "../ParticipantsDrawer";
 import { expectCanonicalOctoCoin } from "../../../../components/__tests__/octoCoinExpectations";
 import {
@@ -156,7 +157,7 @@ describe("ParticipantsDrawer", () => {
     expect(drawer?.textContent).toContain("GPT-6 Luna");
     expect(drawer?.textContent).toContain("Instafy AI · credits");
     expect(drawer?.textContent).not.toContain("No AI credential");
-    expect(drawer?.textContent).not.toContain("gpt-5.6-sol");
+    expect(drawer?.textContent).not.toContain(DEFAULT_PROJECT_AI_MODEL);
   });
 
   it("shows built-in Octo as its coin, not a gradient initial", async () => {

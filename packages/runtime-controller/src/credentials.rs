@@ -21,7 +21,9 @@ use crate::auth::{
     authenticate_request, bearer_token, issue_proxy_envelope, require_user_session, RequestContext,
 };
 use crate::credential_keys::CredentialKeyRing;
-use crate::model_defaults::{default_chatgpt_model_id, default_model_for_provider};
+use crate::model_defaults::{
+    default_chatgpt_model_id, default_model_for_provider, floor_own_ai_model_for_provider,
+};
 use crate::{bad_request, internal_error, not_found, unauthorized, ApiError, AppState};
 
 const CREDENTIAL_KIND_CODEX_AUTH_JSON: &str = "codex_auth_json";
@@ -1004,22 +1006,10 @@ async fn test_my_credential(
             CREDENTIAL_KIND_CODEX_AUTH_JSON => Some(DEFAULT_CHATGPT_ENDPOINT.to_string()),
             _ => None,
         });
-    let model = meta
-        .and_then(|map| map.get("default_model"))
-        .and_then(JsonValue::as_str)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| match kind.trim() {
-            // BYO credential probe (ChatGPT login or API key): the user pays, so
-            // stay on the OpenAI BYO default (Sol), not the credits-funded
-            // managed tier default.
-            CREDENTIAL_KIND_CODEX_AUTH_JSON => default_chatgpt_model_id().to_string(),
-            _ => provider
-                .as_deref()
-                .map(default_model_for_provider)
-                .unwrap_or(default_model_for_provider("openai"))
-                .to_string(),
-        });
+    // The model a job on this credential runs without an agent model: the
+    // stored default (raised to GPT-6 for OpenAI), else the own-AI default for
+    // its kind and provider, never the credits-funded managed tier's.
+    let model = credential_default_model(&kind, &metadata);
 
     // Always probe through the proxy. This keeps the credential test path aligned with real runs,
     // and avoids accumulating per-provider "direct" probing logic in the controller.
@@ -2758,8 +2748,10 @@ fn materialize_internal_credential(
             .to_ascii_lowercase();
         let upstream_endpoint = upstream_endpoint
             .or_else(|| Some(default_endpoint_for_provider(&provider_key).to_string()));
-        let default_model =
-            default_model.or_else(|| Some(default_model_for_provider(&provider_key).to_string()));
+        let default_model = Some(match default_model {
+            Some(model) => floor_own_ai_model_for_provider(&provider_key, &model),
+            None => default_model_for_provider(&provider_key).to_string(),
+        });
 
         let key = auth
             .get("OPENAI_API_KEY")
@@ -2811,8 +2803,11 @@ fn materialize_internal_credential(
         openai_api_key: None,
         provider,
         upstream_endpoint,
-        // ChatGPT login lease: user-paid subscription, keep the Sol default.
-        default_model: default_model.or_else(|| Some(default_chatgpt_model_id().to_string())),
+        // ChatGPT login lease: user-paid subscription, the own-AI default.
+        default_model: Some(match default_model {
+            Some(model) => floor_own_ai_model_for_provider(PROVIDER_OPENAI, &model),
+            None => default_chatgpt_model_id().to_string(),
+        }),
         pinned_model: None,
         auth_mode,
         code_assist_project,
@@ -2856,19 +2851,24 @@ fn default_endpoint_for_provider(provider: &str) -> &'static str {
 }
 
 /// The model a bring-your-own credential runs when nothing more specific (an
-/// agent's model) is set: the credential's stored default, else the default
-/// for its kind and provider. Shared by completions and job secrets so a job
-/// never falls back to whatever model its runtime was launched with.
+/// agent's model) is set: the credential's stored default, raised to GPT-6 on
+/// OpenAI-like providers (`floor_own_ai_model_for_provider`), else the default
+/// for its kind and provider. Saving a credential stores the default of the
+/// day, so the floor is what moves credentials saved before a bump. Shared by
+/// the credential test, completions and job secrets, so a job never falls back
+/// to whatever model its runtime was launched with.
 pub(crate) fn credential_default_model(kind: &str, metadata: &JsonValue) -> String {
     let provider = provider_for_credential(kind, metadata);
-    metadata
+    match metadata
         .as_object()
         .and_then(|map| map.get("default_model"))
         .and_then(JsonValue::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| default_model_for_credential(kind, &provider))
-        .to_string()
+    {
+        Some(stored) => floor_own_ai_model_for_provider(&provider, stored),
+        None => default_model_for_credential(kind, &provider).to_string(),
+    }
 }
 
 fn default_model_for_credential(kind: &str, provider: &str) -> &'static str {
@@ -2928,14 +2928,16 @@ fn decode_authoritative_credential_payload(
 #[cfg(test)]
 mod provider_metadata_tests {
     use super::{
-        augment_metadata_with_provider, default_endpoint_for_provider,
+        augment_metadata_with_provider, credential_default_model, default_endpoint_for_provider,
         default_model_for_credential, normalize_provider_id, provider_for_credential,
         CREDENTIAL_KIND_CODEX_AUTH_JSON, CREDENTIAL_KIND_OPENAI_API_KEY, PROVIDER_GEMINI,
         PROVIDER_OPENAI,
     };
     use crate::model_defaults::{
         default_chatgpt_model_id, default_managed_ai_model_id, default_model_for_provider,
+        DEFAULT_OPENAI_MODEL_ID,
     };
+    use runtime_contracts::own_ai_model::OWN_AI_SMALL_MODEL_ID;
     use serde_json::json;
 
     #[test]
@@ -2968,22 +2970,66 @@ mod provider_metadata_tests {
 
     #[test]
     fn provider_defaults_use_latest_general_openai_model_for_api_keys() {
-        assert_eq!(default_model_for_provider(PROVIDER_OPENAI), "gpt-5.6-sol");
+        assert_eq!(
+            default_model_for_provider(PROVIDER_OPENAI),
+            DEFAULT_OPENAI_MODEL_ID
+        );
     }
 
     #[test]
     fn chatgpt_credential_default_does_not_track_the_managed_tier() {
         // BYO ChatGPT logins are subscription-paid and keep Sol even though the
         // credits-funded managed tier defaults to the cheaper Luna.
-        assert_eq!(default_chatgpt_model_id(), "gpt-5.6-sol");
+        assert_eq!(default_chatgpt_model_id(), DEFAULT_OPENAI_MODEL_ID);
         assert_eq!(default_managed_ai_model_id(), "gpt-6-luna");
+        assert_ne!(DEFAULT_OPENAI_MODEL_ID, default_managed_ai_model_id());
         assert_eq!(
             default_model_for_credential(CREDENTIAL_KIND_CODEX_AUTH_JSON, PROVIDER_OPENAI),
-            "gpt-5.6-sol"
+            DEFAULT_OPENAI_MODEL_ID
         );
         assert_eq!(
             default_model_for_credential(CREDENTIAL_KIND_OPENAI_API_KEY, PROVIDER_OPENAI),
-            "gpt-5.6-sol"
+            DEFAULT_OPENAI_MODEL_ID
+        );
+    }
+
+    #[test]
+    fn a_stored_default_below_gpt_6_runs_the_own_ai_floor() {
+        // Saving a credential stored the default of the day, so a key or login
+        // saved before the GPT-6 move still says gpt-5.6-sol. Jobs, the
+        // credential test and completions run the floor, without a migration.
+        for kind in [
+            CREDENTIAL_KIND_CODEX_AUTH_JSON,
+            CREDENTIAL_KIND_OPENAI_API_KEY,
+        ] {
+            for (stored, runs) in [
+                ("gpt-5.6-sol", DEFAULT_OPENAI_MODEL_ID),
+                ("gpt-5.5", DEFAULT_OPENAI_MODEL_ID),
+                ("gpt-5.6-luna", OWN_AI_SMALL_MODEL_ID),
+                // A deliberate GPT-6 pick runs as stored.
+                ("gpt-6-luna", "gpt-6-luna"),
+                ("gpt-6.1-sol", "gpt-6.1-sol"),
+            ] {
+                let metadata = json!({ "provider": "openai", "default_model": stored });
+                assert_eq!(
+                    credential_default_model(kind, &metadata),
+                    runs,
+                    "{kind} {stored}"
+                );
+            }
+            assert_eq!(
+                credential_default_model(kind, &json!({ "provider": "openai" })),
+                DEFAULT_OPENAI_MODEL_ID,
+                "{kind} without a stored default"
+            );
+        }
+        // Other providers' keys keep their stored model.
+        assert_eq!(
+            credential_default_model(
+                CREDENTIAL_KIND_OPENAI_API_KEY,
+                &json!({ "provider": "deepseek", "default_model": "deepseek-reasoner" })
+            ),
+            "deepseek-reasoner"
         );
     }
 
@@ -3311,30 +3357,53 @@ mod credential_lease_contract_tests {
 
         // User credentials keep the requested model: no pin on the wire for a
         // BYO API key or a ChatGPT login, even with a stored default model.
-        let byo_api_key = materialize_internal_credential(
-            Uuid::new_v4(),
-            CREDENTIAL_KIND_OPENAI_API_KEY,
-            &json!({ "OPENAI_API_KEY": "test-api-key" }),
-            &json!({ "provider": "openai", "default_model": "gpt-5.6-sol" }),
-        )
-        .expect("API key should materialize");
-        let chatgpt = materialize_internal_credential(
-            Uuid::new_v4(),
-            CREDENTIAL_KIND_CODEX_AUTH_JSON,
-            &json!({ "tokens": { "access_token": "test-access-token" } }),
-            &json!({ "provider": "openai", "default_model": "gpt-5.6-sol" }),
-        )
-        .expect("ChatGPT login should materialize");
-        for (name, lease) in [("API key", byo_api_key), ("ChatGPT", chatgpt)] {
-            let wire = serde_json::to_value(lease).expect("lease should serialize");
+        // The default itself runs the own-AI floor, as a job's model does.
+        for (stored, default_model) in [
+            ("gpt-6-luna", "gpt-6-luna"),
+            (
+                "gpt-5.6-sol",
+                crate::model_defaults::DEFAULT_OPENAI_MODEL_ID,
+            ),
+        ] {
+            let byo_api_key = materialize_internal_credential(
+                Uuid::new_v4(),
+                CREDENTIAL_KIND_OPENAI_API_KEY,
+                &json!({ "OPENAI_API_KEY": "test-api-key" }),
+                &json!({ "provider": "openai", "default_model": stored }),
+            )
+            .expect("API key should materialize");
+            let chatgpt = materialize_internal_credential(
+                Uuid::new_v4(),
+                CREDENTIAL_KIND_CODEX_AUTH_JSON,
+                &json!({ "tokens": { "access_token": "test-access-token" } }),
+                &json!({ "provider": "openai", "default_model": stored }),
+            )
+            .expect("ChatGPT login should materialize");
+            for (name, lease) in [("API key", byo_api_key), ("ChatGPT", chatgpt)] {
+                let wire = serde_json::to_value(lease).expect("lease should serialize");
+                assert_eq!(
+                    wire.get("defaultModel").and_then(Value::as_str),
+                    Some(default_model),
+                    "{name} lease stored {stored}"
+                );
+                assert!(
+                    wire.get("pinnedModel").is_none(),
+                    "{name} lease must not pin a model: {wire}"
+                );
+            }
+        }
+
+        // An operator's managed model is theirs: the own-AI floor never
+        // touches it, even below GPT-6.
+        config.managed_ai_model_id = "gpt-5.6-luna".to_string();
+        let managed =
+            serde_json::to_value(managed_ai_internal_credential(&config).expect("managed lease"))
+                .expect("managed lease should serialize");
+        for field in ["defaultModel", "pinnedModel"] {
             assert_eq!(
-                wire.get("defaultModel").and_then(Value::as_str),
-                Some("gpt-5.6-sol"),
-                "{name} lease keeps its default"
-            );
-            assert!(
-                wire.get("pinnedModel").is_none(),
-                "{name} lease must not pin a model: {wire}"
+                managed.get(field).and_then(Value::as_str),
+                Some("gpt-5.6-luna"),
+                "{field}"
             );
         }
     }
