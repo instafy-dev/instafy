@@ -36,6 +36,7 @@ on:
       - "pnpm-workspace.yaml"
       - "packages/instafy-cli/package.json"
       - "packages/instafy-bind/package.json"
+      - "packages/browser-action-policy/package.json"
       - "packages/instafy-sdk/package.json"
       - "packages/provider-client/package.json"
       - "packages/provider-contract/package.json"

@@ -32,7 +32,7 @@ import {
   type PageResult,
   type WebReadDeps,
 } from "../src/web-read.js";
-import { findPassages, findTerms, pageLines, pageLinks } from "../src/web-page.js";
+import { findPassages, findTerms, pageLines, pageLinks, pageStructured } from "../src/web-page.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const cliBin = path.resolve(here, "..", "bin", "instafy.js");
@@ -158,6 +158,17 @@ const ARTICLE = page(
     '<meta property="og:title" content="City Museum">',
   "City Museum",
 );
+
+describe("structured data", () => {
+  it("unwraps JSON-LD hidden in an HTML comment, whichever comment close the page uses", () => {
+    for (const close of ["-->", "--!>"]) {
+      const html = `<script type="application/ld+json"><!-- {"@type":"Museum","name":"City Museum"} ${close}</script>`;
+      expect(pageStructured(html, "http://news.example.org/museum")).toEqual([
+        { kind: "json-ld", data: { "@type": "Museum", name: "City Museum" } },
+      ]);
+    }
+  });
+});
 
 describe("reading a page", () => {
   it("returns redacted, wrapped text with provenance, links and the page's own structured data", async () => {

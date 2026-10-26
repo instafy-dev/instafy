@@ -196,7 +196,7 @@ export function pageStructured(html: string, pageUrl: string): StructuredItem[] 
   for (const block of jsonLdBlocks(html, 12)) {
     if (block.length > 100_000) continue;
     try {
-      items.push({ kind: "json-ld", data: boundJson(JSON.parse(decodeEntities(block.trim()).replace(/^\s*<!--|-->\s*$/g, ""))) });
+      items.push({ kind: "json-ld", data: boundJson(JSON.parse(decodeEntities(block.trim()).replace(/^\s*<!--|--!?>\s*$/g, ""))) });
     } catch {
       // not JSON: skipped
     }
