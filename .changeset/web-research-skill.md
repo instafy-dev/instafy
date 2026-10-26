@@ -1,0 +1,4 @@
+---
+---
+
+Octo gets a bundled `instafy-web-research` skill for answers and pages that need facts from the web: which sources to read for a need (the venue's, operator's or shop's own page first, then open data), the order to find them in, 2-6 reads per question, cross-checking, citing each fact as "checked <date> on <host>", prices as "seen <date>", links instead of copied listings, coordinates only from the venue's own site or open data, and stopping at sign-ins and bot checks without retrying another way. Its `references/link-only-sites.json` lists the sites Octo links to and never reads. The skill router points fact-finding asks to it, and the browser skill lets one browser card carry up to 6 related reads that come back as labelled findings (`url`, `title`, `readAt`, `viewer`). A model-free eval grades research answers against a local fixture web. No package changes.

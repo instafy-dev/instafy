@@ -60,6 +60,9 @@ pub const LEARNED_USAGE_RELATIVE_PATH: &str = ".agents/skills/instafy-learned/US
 pub const BOUND_SITES_RELATIVE_PATH: &str = ".agents/skills/instafy-bound-sites/SKILL.md";
 pub const BOUND_SITES_CHEATSHEET_RELATIVE_PATH: &str =
     ".agents/skills/instafy-bound-sites/references/cheatsheet.md";
+pub const WEB_RESEARCH_RELATIVE_PATH: &str = ".agents/skills/instafy-web-research/SKILL.md";
+pub const WEB_RESEARCH_LINK_ONLY_RELATIVE_PATH: &str =
+    ".agents/skills/instafy-web-research/references/link-only-sites.json";
 pub const INTERACTIVE_ARTIFACTS_RELATIVE_PATH: &str =
     ".agents/skills/instafy-interactive-artifacts/SKILL.md";
 pub const RESEARCH_TEAM_RELATIVE_PATH: &str = ".agents/skills/instafy-research-team/SKILL.md";
@@ -289,12 +292,24 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     include_str!("legacy/browser-automation-v3.md"),
     // From before it said what Instafy's browser can reach.
     include_str!("legacy/browser-automation-v4.md"),
+    // From before one card could carry several reads and return labelled findings.
+    include_str!("legacy/browser-automation-v5.md"),
 ];
 const LEGACY_SKILL_IMPORT_COMPAT_TEMPLATES: &[&str] = &[
     include_str!("legacy/skill-import-compat-v1.md"),
     include_str!("legacy/skill-import-compat-v2.md"),
     include_str!("legacy/skill-import-compat-v3.md"),
 ];
+/// Which sources Octo reads for a fact, how many, how it cross-checks and cites them, and the sites
+/// it only links to (skill-owned data, so the list is judgement a reader enforces, not code).
+const WEB_RESEARCH_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/instafy/.agents/skills/instafy-web-research/SKILL.md"
+));
+const WEB_RESEARCH_LINK_ONLY_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/instafy/.agents/skills/instafy-web-research/references/link-only-sites.json"
+));
 const SKILL_READING_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-skill-reading/SKILL.md"
@@ -423,6 +438,8 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
     let learned_blocks_dir_path = workspace_dir.join(LEARNED_BLOCKS_DIR_RELATIVE_PATH);
     let bound_sites_path = workspace_dir.join(BOUND_SITES_RELATIVE_PATH);
     let bound_sites_cheatsheet_path = workspace_dir.join(BOUND_SITES_CHEATSHEET_RELATIVE_PATH);
+    let web_research_path = workspace_dir.join(WEB_RESEARCH_RELATIVE_PATH);
+    let web_research_link_only_path = workspace_dir.join(WEB_RESEARCH_LINK_ONLY_RELATIVE_PATH);
     let interactive_artifacts_path = workspace_dir.join(INTERACTIVE_ARTIFACTS_RELATIVE_PATH);
     let research_team_path = workspace_dir.join(RESEARCH_TEAM_RELATIVE_PATH);
     let research_team_researcher_path = workspace_dir.join(RESEARCH_TEAM_RESEARCHER_RELATIVE_PATH);
@@ -714,6 +731,12 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
             LEGACY_RESEARCH_TEAM_RESEARCHER_TEMPLATES,
             RESEARCH_TEAM_RESEARCHER_TEMPLATE,
         ),
+        (&web_research_path, &[], WEB_RESEARCH_TEMPLATE),
+        (
+            &web_research_link_only_path,
+            &[],
+            WEB_RESEARCH_LINK_ONLY_TEMPLATE,
+        ),
     ] {
         if upgrade_bundled_skill(workspace_dir, path, legacy, current) {
             wrote_any = true;
@@ -862,6 +885,8 @@ fn maybe_commit_project_memory_scaffold(workspace_dir: &Path, _wrote_any: bool) 
         LEARNED_INDEX_RELATIVE_PATH,
         BOUND_SITES_RELATIVE_PATH,
         BOUND_SITES_CHEATSHEET_RELATIVE_PATH,
+        WEB_RESEARCH_RELATIVE_PATH,
+        WEB_RESEARCH_LINK_ONLY_RELATIVE_PATH,
         INTERACTIVE_ARTIFACTS_RELATIVE_PATH,
         RESEARCH_TEAM_RELATIVE_PATH,
         RESEARCH_TEAM_RESEARCHER_RELATIVE_PATH,
@@ -2419,9 +2444,8 @@ mod tests {
             BROWSER_AUTOMATION_TEMPLATE
                 .contains("Not for sites running in this space (shown with a Studio preview).")
         );
-        let v4 = LEGACY_BROWSER_AUTOMATION_TEMPLATES
-            .last()
-            .expect("legacy browser copies");
+        let v4 = include_str!("legacy/browser-automation-v4.md");
+        assert!(LEGACY_BROWSER_AUTOMATION_TEMPLATES.contains(&v4));
         assert!(!v4.contains(section));
 
         let workspace = tempdir().expect("workspace tempdir");

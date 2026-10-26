@@ -960,6 +960,14 @@ const BOUND_SITES_CHEATSHEET_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../runtime-agent/assets/instafy/.agents/skills/instafy-bound-sites/references/cheatsheet.md"
 ));
+const WEB_RESEARCH_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../runtime-agent/assets/instafy/.agents/skills/instafy-web-research/SKILL.md"
+));
+const WEB_RESEARCH_LINK_ONLY_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../runtime-agent/assets/instafy/.agents/skills/instafy-web-research/references/link-only-sites.json"
+));
 const INTERACTIVE_ARTIFACTS_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../runtime-agent/assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md"
@@ -979,7 +987,7 @@ const PROJECT_MEMORY_ASSETS_ROOT_ENV: &str = "INSTAFY_PROJECT_MEMORY_ASSETS_ROOT
 /// Every file the runtime bundles under `assets/instafy`. In a git-canonical
 /// space with history the runtime commits none of them, so this bootstrap is
 /// what brings each one to `main`.
-const PROJECT_MEMORY_TEMPLATE_FILES: [ProjectMemoryTemplateFile; 34] = [
+const PROJECT_MEMORY_TEMPLATE_FILES: [ProjectMemoryTemplateFile; 36] = [
     ProjectMemoryTemplateFile {
         path: "INSTAFY.md",
         asset_relative_path: "INSTAFY.md",
@@ -1135,6 +1143,16 @@ const PROJECT_MEMORY_TEMPLATE_FILES: [ProjectMemoryTemplateFile; 34] = [
         path: ".agents/skills/instafy-bound-sites/references/cheatsheet.md",
         asset_relative_path: ".agents/skills/instafy-bound-sites/references/cheatsheet.md",
         fallback_content: BOUND_SITES_CHEATSHEET_TEMPLATE,
+    },
+    ProjectMemoryTemplateFile {
+        path: ".agents/skills/instafy-web-research/SKILL.md",
+        asset_relative_path: ".agents/skills/instafy-web-research/SKILL.md",
+        fallback_content: WEB_RESEARCH_TEMPLATE,
+    },
+    ProjectMemoryTemplateFile {
+        path: ".agents/skills/instafy-web-research/references/link-only-sites.json",
+        asset_relative_path: ".agents/skills/instafy-web-research/references/link-only-sites.json",
+        fallback_content: WEB_RESEARCH_LINK_ONLY_TEMPLATE,
     },
     ProjectMemoryTemplateFile {
         path: ".agents/skills/instafy-interactive-artifacts/SKILL.md",
@@ -7024,6 +7042,41 @@ mod project_memory_bootstrap_tests {
         assert!(writes
             .iter()
             .all(|write| !paths.contains(&write.path.as_str())));
+    }
+
+    /// The web-research skill names its link-only data by its `references/`
+    /// path, so a space that has the skill has the list too.
+    #[test]
+    fn missing_web_research_files_are_written_and_current_ones_left_alone() {
+        let skill = ".agents/skills/instafy-web-research/SKILL.md";
+        let sites = ".agents/skills/instafy-web-research/references/link-only-sites.json";
+        let template = |path: &str| {
+            let template = PROJECT_MEMORY_TEMPLATE_FILES
+                .iter()
+                .find(|template| template.path == path)
+                .unwrap_or_else(|| panic!("{path} is a managed default"));
+            load_project_memory_template_content(template)
+        };
+
+        let writes = plan_project_memory_writes(&snapshot_with(&[])).expect("plan");
+        for path in [skill, sites] {
+            let write = writes
+                .iter()
+                .find(|write| write.path == path)
+                .unwrap_or_else(|| panic!("{path} written"));
+            assert_eq!(write.content, template(path));
+        }
+        let (skill_text, sites_text) = (template(skill), template(sites));
+        assert!(skill_text.contains("references/link-only-sites.json"));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&sites_text).expect("link-only list is JSON");
+        assert_eq!(parsed["schema"], "instafy.link-only-sites@1");
+
+        let current = snapshot_with(&[(skill, &skill_text), (sites, &sites_text)]);
+        let writes = plan_project_memory_writes(&current).expect("plan");
+        assert!(writes
+            .iter()
+            .all(|write| write.path != skill && write.path != sites));
     }
 
     #[test]
