@@ -20,10 +20,7 @@ use crate::agent::{
 };
 use crate::auth::authenticate_request;
 use crate::config::PgPool;
-use crate::model_defaults::{
-    resolve_agent_model_for_provider, DEFAULT_MANAGED_AI_CHAT_REASONING_EFFORT,
-    DEFAULT_MANAGED_AI_PROVIDER_ID,
-};
+use crate::model_defaults::{resolve_agent_model_for_provider, DEFAULT_MANAGED_AI_PROVIDER_ID};
 use crate::projects::load_project_record;
 use crate::{
     bad_request, ensure_project_access, ensure_project_write_access, internal_error, not_found,
@@ -1070,11 +1067,12 @@ fn parse_agent_job_identity(payload: &JsonValue) -> (Option<Uuid>, Option<String
 /// the credential-less lane is then the proxy's own key.
 ///
 /// A chat turn (intent `feature`) on that lane also gets the managed chat
-/// reasoning effort as `CODEX_MANAGED_AI_REASONING_EFFORT`, which the runtime
-/// uses in place of its own `high` default for such a turn. The same rule
-/// leaves BYO jobs, and every job when managed AI is off, at the runtime's
-/// default. Team plan workers and lead checkpoints have their own intents and
-/// keep theirs.
+/// reasoning effort (`MANAGED_AI_CHAT_REASONING_EFFORT`, default `medium`) as
+/// `CODEX_MANAGED_AI_REASONING_EFFORT`, which the runtime uses in place of its
+/// own `high` default for such a turn. With the setting empty or `off` none is
+/// sent. The same rule leaves BYO jobs, and every job when managed AI is off,
+/// at the runtime's default. Team plan workers and lead checkpoints have their
+/// own intents and keep theirs.
 fn apply_managed_ai_env_overrides(
     env: &mut JsonMap<String, JsonValue>,
     config: &crate::config::AppConfig,
@@ -1098,10 +1096,12 @@ fn apply_managed_ai_env_overrides(
     );
     // Matched exactly, as the runtime matches it for its own `high`.
     if intent == Some(crate::dispatch::DEFAULT_PROMPT_INTENT) {
-        env.insert(
-            MANAGED_AI_REASONING_EFFORT_ENV.to_string(),
-            JsonValue::String(DEFAULT_MANAGED_AI_CHAT_REASONING_EFFORT.to_string()),
-        );
+        if let Some(effort) = config.managed_ai_chat_reasoning_effort.as_deref() {
+            env.insert(
+                MANAGED_AI_REASONING_EFFORT_ENV.to_string(),
+                JsonValue::String(effort.to_string()),
+            );
+        }
     }
 }
 
@@ -1646,6 +1646,24 @@ mod tests {
             assert_eq!(env_model(&env).0, Some(default_managed_ai_model_id()));
             assert_eq!(env_reasoning_effort(&env), None, "{intent:?}");
         }
+    }
+
+    #[test]
+    fn managed_chat_reasoning_effort_follows_the_controller_setting() {
+        // A self-hosted operator can pick the effort, or send none with an
+        // empty or `off` MANAGED_AI_CHAT_REASONING_EFFORT so the runtime keeps
+        // its own `high`. The managed model applies either way.
+        let mut config = build_app_config("test-private", "test-public", "test-key");
+        config.managed_ai_chat_reasoning_effort = Some("high".to_string());
+        let mut env = agent_model_env();
+        apply_managed_ai_env_overrides(&mut env, &config, None, Some("feature"));
+        assert_eq!(env_reasoning_effort(&env), Some("high"));
+
+        config.managed_ai_chat_reasoning_effort = None;
+        let mut env = agent_model_env();
+        apply_managed_ai_env_overrides(&mut env, &config, None, Some("feature"));
+        assert_eq!(env_reasoning_effort(&env), None);
+        assert_eq!(env_model(&env).0, Some(default_managed_ai_model_id()));
     }
 
     #[test]

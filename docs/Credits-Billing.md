@@ -77,6 +77,7 @@ Managed Instafy AI can run without a user-provided provider key and burn the sha
 - Set `MANAGED_AI_DAILY_PROMPT_LIMIT` if you want a daily starter cap
 - Set `MANAGED_AI_MODEL_ID` to the upstream model id used for managed turns (default `gpt-6-luna`)
 - Set `MANAGED_AI_MODEL_LABEL` to the managed model name shown in the UI (default `GPT-6 Luna`)
+- Set `MANAGED_AI_CHAT_REASONING_EFFORT` to the reasoning effort of a managed chat turn (default `medium`; empty or `off` keeps the runtime's `high`)
 - Set `MANAGED_AI_INPUT_USD_MICROS_PER_1K` (default `100`, that is `$0.10 / 1M`)
 - Set `MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K` (default `10`, that is `$0.01 / 1M`)
 - Set `MANAGED_AI_OUTPUT_USD_MICROS_PER_1K` (default `500`, that is `$0.50 / 1M`)
@@ -222,13 +223,21 @@ already charging for.
 
 The managed lane's job secrets also set the reasoning effort of a managed chat turn. A
 platform-lane job with the default chat intent (`feature`), Shared Browser and Personal Browser
-turns included, gets `CODEX_MANAGED_AI_REASONING_EFFORT=medium` next to `CODEX_MODEL`, and the
-runtime runs it at `medium` instead of the `high` it uses for a chat turn on the person's own login
-or key. Own-key jobs, every job with `MANAGED_AI_ENABLED=false`, and a job whose secrets fetch
-failed keep `high`. Team planning turns, plan workers (`multi_agent_plan`) and lead checkpoints
-keep their own effort on either lane. An agent's own reasoning setting and the runtime's
-`CODEX_RUNTIME_REASONING_EFFORT` still win, and a recovery retry or finalization pass still drops
-to `low` as before. A runtime older than this change ignores the value and keeps `high`.
+turns included, gets `CODEX_MANAGED_AI_REASONING_EFFORT` next to `CODEX_MODEL`, set from
+`MANAGED_AI_CHAT_REASONING_EFFORT` (default `medium`). The runtime runs the turn at that effort
+instead of the `high` it uses for a chat turn on the person's own login or key. Own-key jobs,
+every job with `MANAGED_AI_ENABLED=false`, and a job whose secrets fetch failed keep `high`, and so
+does every managed chat turn when `MANAGED_AI_CHAT_REASONING_EFFORT` is empty or `off`. Team
+planning turns, plan workers (`multi_agent_plan`) and lead checkpoints keep their own effort on
+either lane. An agent's own reasoning setting and the runtime's `CODEX_RUNTIME_REASONING_EFFORT`
+still win, and a recovery retry or finalization pass still drops to `low` as before. A runtime
+older than this change ignores the value and keeps `high`.
+
+A desktop or other private self-hosted runtime never runs a managed turn, so its turns keep
+`high`. A self-hosted controller is different: `MANAGED_AI_ENABLED` is on unless it is set to
+`false`, so a controller that never sets it treats a credential-less job on its own hosted
+runtimes as managed, and that chat turn drops to `medium` even when the lane is the operator's own
+proxy key. Set `MANAGED_AI_CHAT_REASONING_EFFORT` empty or `off` there to keep `high`.
 
 BYOC users connect an API key or sanitized `auth.json` through the credential flow. Neither
 credential path belongs in a Vite environment or browser bundle. `MANAGED_AI_STARTUP_CHECK=true`

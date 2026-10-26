@@ -18,8 +18,8 @@ use uuid::Uuid;
 #[cfg(test)]
 use crate::model_defaults::{
     default_managed_ai_model_id, default_managed_ai_model_label,
-    DEFAULT_MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K, DEFAULT_MANAGED_AI_INPUT_USD_MICROS_PER_1K,
-    DEFAULT_MANAGED_AI_OUTPUT_USD_MICROS_PER_1K,
+    DEFAULT_MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K, DEFAULT_MANAGED_AI_CHAT_REASONING_EFFORT,
+    DEFAULT_MANAGED_AI_INPUT_USD_MICROS_PER_1K, DEFAULT_MANAGED_AI_OUTPUT_USD_MICROS_PER_1K,
 };
 use crate::{
     internal_error,
@@ -990,6 +990,9 @@ mod tests {
             managed_ai_decline_waiver_units: 2,
             managed_ai_model_id: default_managed_ai_model_id().to_string(),
             managed_ai_model_label: default_managed_ai_model_label().to_string(),
+            managed_ai_chat_reasoning_effort: Some(
+                DEFAULT_MANAGED_AI_CHAT_REASONING_EFFORT.to_string(),
+            ),
             managed_ai_input_usd_micros_per_1k: DEFAULT_MANAGED_AI_INPUT_USD_MICROS_PER_1K,
             managed_ai_cached_input_usd_micros_per_1k:
                 DEFAULT_MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K,

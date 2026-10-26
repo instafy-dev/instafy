@@ -6673,13 +6673,11 @@ impl JobProcessor {
             shared_browser: explicit_shared_browser_execution,
             shared_browser_page_id,
             expect_mcp_tools: expects_generic_mcp_tool_execution,
-            // A sequential job's secrets are in the process environment.
-            reasoning_effort: reasoning_effort_for_runtime_job(
+            reasoning_effort: sequential_job_reasoning_effort(
                 job,
                 prompt_text,
                 read_only_scoped_worker_preobserved,
                 runtime_expectations,
-                crate::codex::managed_ai_reasoning_effort(),
             ),
             suppress_contextual_instructions: broad_context_suppression_reason.is_some(),
             persist_conversation_thread: persist_codex_conversation_thread,
@@ -13694,6 +13692,26 @@ fn codex_job_expects_command_execution(
     _scoped_worker_path_observation_available: bool,
 ) -> bool {
     routing_evidence_requirements(job, runtime_expectations).requires_any()
+}
+
+/// The job's own reasoning effort on the sequential lane, whose job secrets
+/// are in the process environment: a chat turn on Instafy's hosted AI takes
+/// the effort the controller put there
+/// (`crate::codex::managed_ai_reasoning_effort`). An isolated plan worker
+/// never reads another job's process environment and passes none.
+fn sequential_job_reasoning_effort(
+    job: &LeaseJob,
+    prompt_text: &str,
+    read_only_scoped_worker_preobserved: bool,
+    runtime_expectations: RuntimeJobExpectations,
+) -> Option<ReasoningEffort> {
+    reasoning_effort_for_runtime_job(
+        job,
+        prompt_text,
+        read_only_scoped_worker_preobserved,
+        runtime_expectations,
+        crate::codex::managed_ai_reasoning_effort(),
+    )
 }
 
 /// The job's own reasoning effort. An agent's reasoning setting and
@@ -26657,6 +26675,36 @@ mod tests {
             crate::codex::resolve_runtime_reasoning_effort(None, job_effort, None),
             ReasoningEffort::Medium
         );
+    }
+
+    #[test]
+    fn sequential_chat_turn_takes_the_hosted_ai_effort_from_its_job_secrets() {
+        // A sequential job's secrets are applied to the process environment,
+        // so this is the value the controller sent reaching the run options.
+        let _env_lock = crate::codex::process_env_test_lock();
+        let key = crate::codex::MANAGED_AI_REASONING_EFFORT_ENV;
+        let chat = test_lease_job(Some("feature"), json!({}));
+        let team_plan = test_lease_job(
+            Some("feature"),
+            json!({ "metadata": { "agentCollaboration": { "mode": "team_plan" } } }),
+        );
+        let effort = |job: &LeaseJob| {
+            sequential_job_reasoning_effort(
+                job,
+                "Open the invoices page.",
+                false,
+                RuntimeJobExpectations::default(),
+            )
+        };
+
+        let hosted_ai = EnvOverride::apply(key, "medium");
+        assert_eq!(effort(&chat), Some(ReasoningEffort::Medium));
+        assert_eq!(effort(&team_plan), Some(ReasoningEffort::High));
+        drop(hosted_ai);
+
+        // The person's own login or key: no value, so the chat turn stays high.
+        let _own_ai = EnvOverride::remove(key);
+        assert_eq!(effort(&chat), Some(ReasoningEffort::High));
     }
 
     #[test]

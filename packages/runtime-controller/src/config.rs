@@ -22,8 +22,8 @@ use crate::credential_keys::{CredentialKeyRing, CredentialKeySlot};
 use crate::jwks;
 use crate::model_defaults::{
     default_managed_ai_model_id, default_managed_ai_model_label,
-    DEFAULT_MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K, DEFAULT_MANAGED_AI_INPUT_USD_MICROS_PER_1K,
-    DEFAULT_MANAGED_AI_OUTPUT_USD_MICROS_PER_1K,
+    DEFAULT_MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K, DEFAULT_MANAGED_AI_CHAT_REASONING_EFFORT,
+    DEFAULT_MANAGED_AI_INPUT_USD_MICROS_PER_1K, DEFAULT_MANAGED_AI_OUTPUT_USD_MICROS_PER_1K,
 };
 
 /// Supabase-managed Postgres endpoints (including the shared session pooler)
@@ -89,6 +89,31 @@ fn managed_ai_decline_waiver_units(configured: Option<&str>) -> i32 {
         .and_then(|raw| raw.trim().parse::<i32>().ok())
         .filter(|value| *value >= 0)
         .unwrap_or(DEFAULT_MANAGED_AI_DECLINE_WAIVER_UNITS)
+}
+
+/// `MANAGED_AI_CHAT_REASONING_EFFORT`: the reasoning effort the controller
+/// sends with a chat turn on the managed lane. Unset means the default
+/// (`medium`). Empty or `off` sends none, so the runtime keeps its own `high`,
+/// as for a turn on a person's own login or key. The runtime reads only
+/// `minimal`, `low`, `medium` and `high`; any other value means the default.
+fn managed_ai_chat_reasoning_effort(configured: Option<&str>) -> Option<String> {
+    let Some(raw) = configured else {
+        return Some(DEFAULT_MANAGED_AI_CHAT_REASONING_EFFORT.to_string());
+    };
+    let value = raw.trim().to_ascii_lowercase();
+    match value.as_str() {
+        "" | "off" => None,
+        "minimal" | "low" | "medium" | "high" => Some(value),
+        _ => {
+            warn!(
+                configured = raw,
+                default = DEFAULT_MANAGED_AI_CHAT_REASONING_EFFORT,
+                "MANAGED_AI_CHAT_REASONING_EFFORT is not minimal, low, medium, high or off; \
+                 using the default"
+            );
+            Some(DEFAULT_MANAGED_AI_CHAT_REASONING_EFFORT.to_string())
+        }
+    }
 }
 
 /// `SUPABASE_JWKS_ON_DEMAND_INTERVAL_SECONDS`: how soon after a JWKS fetch a
@@ -805,6 +830,11 @@ pub struct AppConfig {
     pub managed_ai_decline_waiver_units: i32,
     pub managed_ai_model_id: String,
     pub managed_ai_model_label: String,
+    /// Reasoning effort a managed chat turn carries to the runtime as
+    /// `CODEX_MANAGED_AI_REASONING_EFFORT` (`MANAGED_AI_CHAT_REASONING_EFFORT`,
+    /// default `medium`). `None` sends none, and the runtime keeps its own
+    /// `high`.
+    pub managed_ai_chat_reasoning_effort: Option<String>,
     pub managed_ai_input_usd_micros_per_1k: i64,
     pub managed_ai_cached_input_usd_micros_per_1k: i64,
     pub managed_ai_output_usd_micros_per_1k: i64,
@@ -1517,6 +1547,12 @@ impl AppConfig {
             .unwrap_or_else(|| default_managed_ai_model_id().to_string());
         let managed_ai_model_label = read_first_env(&["MANAGED_AI_MODEL_LABEL"])
             .unwrap_or_else(|| default_managed_ai_model_label().to_string());
+        // Read raw: an empty value means "send none", not "unset".
+        let managed_ai_chat_reasoning_effort = managed_ai_chat_reasoning_effort(
+            std::env::var("MANAGED_AI_CHAT_REASONING_EFFORT")
+                .ok()
+                .as_deref(),
+        );
         let managed_ai_input_usd_micros_per_1k =
             std::env::var("MANAGED_AI_INPUT_USD_MICROS_PER_1K")
                 .ok()
@@ -1779,6 +1815,7 @@ impl AppConfig {
             managed_ai_decline_waiver_units,
             managed_ai_model_id,
             managed_ai_model_label,
+            managed_ai_chat_reasoning_effort,
             managed_ai_input_usd_micros_per_1k,
             managed_ai_cached_input_usd_micros_per_1k,
             managed_ai_output_usd_micros_per_1k,
@@ -1946,12 +1983,13 @@ impl StripeConfig {
 mod tests {
     use super::{
         created_admin_user_id, database_pool_size_from_values, find_admin_user_by_email,
-        jwks_on_demand_interval_seconds, managed_ai_decline_waiver_units, match_admin_users_page,
-        normalize_public_app_url, normalized_admin_user_email,
-        parse_browser_profile_persist_project_ids, published_development_key_warning,
-        resolve_credential_encryption_key, resolve_credential_key_ring, resolve_user_token_secret,
-        working_state_saves_enabled, AdminUserLookup, AdminUsersPage, CredentialEncryptionKey,
-        HostedBrowserHostPolicy, DEV_USER_TOKEN_SECRET,
+        jwks_on_demand_interval_seconds, managed_ai_chat_reasoning_effort,
+        managed_ai_decline_waiver_units, match_admin_users_page, normalize_public_app_url,
+        normalized_admin_user_email, parse_browser_profile_persist_project_ids,
+        published_development_key_warning, resolve_credential_encryption_key,
+        resolve_credential_key_ring, resolve_user_token_secret, working_state_saves_enabled,
+        AdminUserLookup, AdminUsersPage, CredentialEncryptionKey, HostedBrowserHostPolicy,
+        DEV_USER_TOKEN_SECRET,
     };
     use crate::credential_keys::{
         credential_key_id, CredentialKeySlot, MAX_PREVIOUS_CREDENTIAL_KEYS,
@@ -2342,6 +2380,36 @@ mod tests {
                 managed_ai_decline_waiver_units(Some(malformed)),
                 2,
                 "{malformed}"
+            );
+        }
+    }
+
+    #[test]
+    fn managed_ai_chat_reasoning_effort_defaults_to_medium_and_can_be_turned_off() {
+        assert_eq!(
+            managed_ai_chat_reasoning_effort(None).as_deref(),
+            Some("medium")
+        );
+        for value in ["minimal", "low", "medium", "high"] {
+            assert_eq!(
+                managed_ai_chat_reasoning_effort(Some(value)).as_deref(),
+                Some(value)
+            );
+        }
+        assert_eq!(
+            managed_ai_chat_reasoning_effort(Some(" High ")).as_deref(),
+            Some("high")
+        );
+        // Empty or `off` sends none, so the runtime keeps its own `high`.
+        for off in ["", "  ", "off", "OFF"] {
+            assert_eq!(managed_ai_chat_reasoning_effort(Some(off)), None, "{off:?}");
+        }
+        // Values the runtime does not read fall back to the default.
+        for unsupported in ["none", "xhigh", "max", "ultra", "hi"] {
+            assert_eq!(
+                managed_ai_chat_reasoning_effort(Some(unsupported)).as_deref(),
+                Some("medium"),
+                "{unsupported}"
             );
         }
     }

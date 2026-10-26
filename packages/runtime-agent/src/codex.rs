@@ -4044,6 +4044,17 @@ pub(crate) fn managed_ai_reasoning_effort() -> Option<ReasoningEffort> {
     parse_agent_reasoning_effort(&raw)
 }
 
+/// Serializes tests that change the process environment. One lock for the
+/// crate, because tests in more than one module set the same variables (both
+/// this module's and `jobs`' set `CODEX_MANAGED_AI_REASONING_EFFORT`).
+#[cfg(test)]
+pub(crate) fn process_env_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .expect("env lock poisoned")
+}
+
 pub(crate) fn parse_agent_reasoning_effort(raw: &str) -> Option<ReasoningEffort> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "minimal" => Some(ReasoningEffort::Minimal),
@@ -5592,7 +5603,6 @@ mod tests {
         RawResponseItemEvent, TokenCountEvent, TokenUsage, TokenUsageInfo, TurnCompleteEvent,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Mutex, OnceLock};
 
     #[test]
     fn a_continued_lanes_attempt_starts_without_a_note_and_a_timeout_is_not_rerun_here() {
@@ -5857,10 +5867,7 @@ mod tests {
     }
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("env lock poisoned")
+        process_env_test_lock()
     }
 
     fn count_setting_lines(config: &str, key: &str) -> usize {
