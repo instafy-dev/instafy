@@ -294,6 +294,8 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     include_str!("legacy/browser-automation-v4.md"),
     // From before one card could carry several reads and return labelled findings.
     include_str!("legacy/browser-automation-v5.md"),
+    // From before it pointed pages without JavaScript to `instafy web read`.
+    include_str!("legacy/browser-automation-v6.md"),
 ];
 const LEGACY_SKILL_IMPORT_COMPAT_TEMPLATES: &[&str] = &[
     include_str!("legacy/skill-import-compat-v1.md"),
@@ -306,6 +308,11 @@ const WEB_RESEARCH_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-web-research/SKILL.md"
 ));
+/// Earlier bundled copies of the web-research skill a scaffold may replace. A copy someone edited is kept.
+const LEGACY_WEB_RESEARCH_TEMPLATES: &[&str] = &[
+    // From before `instafy web read` was one of its readers.
+    include_str!("legacy/web-research-v1.md"),
+];
 const WEB_RESEARCH_LINK_ONLY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-web-research/references/link-only-sites.json"
@@ -731,7 +738,11 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
             LEGACY_RESEARCH_TEAM_RESEARCHER_TEMPLATES,
             RESEARCH_TEAM_RESEARCHER_TEMPLATE,
         ),
-        (&web_research_path, &[], WEB_RESEARCH_TEMPLATE),
+        (
+            &web_research_path,
+            LEGACY_WEB_RESEARCH_TEMPLATES,
+            WEB_RESEARCH_TEMPLATE,
+        ),
         (
             &web_research_link_only_path,
             &[],

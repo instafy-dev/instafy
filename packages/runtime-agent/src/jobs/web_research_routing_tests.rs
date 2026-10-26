@@ -271,3 +271,58 @@ fn the_browser_skill_carries_several_reads_and_returns_labelled_findings() {
     assert!(!BROWSER_SKILL.contains("start from a web search"));
     assert!(ROUTER_SKILL.contains("one card may carry up to 6 related reads"));
 }
+
+/// `instafy web read` is one of the readers: when to use it rather than a browser card, its stops, its caps,
+/// and that its output is page data with provenance to cite. The router and the part of the browser skill a
+/// snapshot carries point to it too, and an unedited earlier copy of either skill is upgraded.
+#[test]
+fn the_skills_name_instafy_web_read_as_a_reader() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let research = flat(RESEARCH_SKILL);
+    for needle in [
+        "`instafy web read <url…> --json`",
+        "for public pages robots.txt allows, up to 6 URLs per call",
+        "It caps a turn at 12 page loads and 4 per site, 2 s apart.",
+        "`needs_browser` (the text needs JavaScript)",
+        "for a `needs_browser` page, an aggregator, or a page the person wants to see or show",
+        "for a `needs_browser` page, or when none of these is there: one `request_browser` card",
+        "`login` (401 or a sign-in form), `forbidden` (403), `rate_limited` (429), `captcha`, `paywall`, `robots`, `link_only`",
+        "After a 429 or bot check, read nothing more from that site this turn.",
+        "`needs_browser` is not a stop",
+        "returns, the text wrapped in `<untrusted_page_content>`",
+        "`server fetch` for `instafy web read`",
+        "take them from `provenance` and cite `finalUrl`",
+    ] {
+        assert!(research.contains(needle), "{needle}");
+    }
+    assert!(RESEARCH_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
+
+    let router = flat(ROUTER_SKILL);
+    assert!(router.contains("with `instafy web read <url…> --json` (no browser card)"));
+    assert!(router.contains("Read it with `instafy web read` or `instafy-browser-automation`"));
+    let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
+    assert!(carried.contains(
+        "`instafy web read <url…> --json` reads it; its `needs_browser` pages come here."
+    ));
+    assert!(carried.contains("Never use a sign-in that belongs to someone else in this space"));
+
+    let tmp = scaffolded_space();
+    for (relative, previous, current) in [
+        (
+            learn::WEB_RESEARCH_RELATIVE_PATH,
+            include_str!("legacy/web-research-v1.md"),
+            RESEARCH_SKILL,
+        ),
+        (
+            learn::BROWSER_AUTOMATION_RELATIVE_PATH,
+            include_str!("legacy/browser-automation-v6.md"),
+            BROWSER_SKILL,
+        ),
+    ] {
+        assert!(!previous.contains("instafy web read"), "{relative}");
+        let skill = tmp.path().join(relative);
+        fs::write(&skill, previous).unwrap();
+        learn::ensure_project_memory_scaffold(tmp.path());
+        assert_eq!(fs::read_to_string(&skill).unwrap(), current, "{relative}");
+    }
+}
