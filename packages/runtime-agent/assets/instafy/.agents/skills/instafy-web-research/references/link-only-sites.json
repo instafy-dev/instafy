@@ -1,0 +1,17 @@
+{
+  "schema": "instafy.link-only-sites@1",
+  "about": "Sites Octo links to and never reads, in any reader or browser, because their terms or robots.txt bar AI agents or automated copying (instafy-web-research, Link-only sites). A reader that enforces this list treats it as a safety guard: it refuses the URL and every redirect hop that lands on one. Matching: \"example.com\" matches that host and any subdomain; \"example.*\" matches the label followed by one or two public-suffix labels of 2 or 3 letters (example.de, example.co.uk, www.example.com.au). Add a site when its terms bar AI agents or automated copying, with the reason; robots.txt is checked on every read anyway, so a robots-only block needs no entry.",
+  "reviewed": "2026-10",
+  "sites": [
+    { "name": "Booking.com", "match": ["booking.com"], "why": "terms bar AI agents" },
+    { "name": "Agoda", "match": ["agoda.com", "agoda.net"], "why": "terms bar AI agents and deep links" },
+    { "name": "Airbnb", "match": ["airbnb.*"], "why": "terms bar AI agents" },
+    { "name": "Amazon", "match": ["amazon.*", "amzn.to", "amzn.eu", "a.co"], "why": "terms and robots.txt bar AI agents" },
+    { "name": "Nike", "match": ["nike.com"], "why": "terms bar AI agents" },
+    { "name": "Expedia group", "match": ["expedia.*", "hotels.com", "vrbo.com"], "why": "terms bar automated copying" },
+    { "name": "Trip.com", "match": ["trip.com", "ctrip.com"], "why": "terms allow private use only" },
+    { "name": "Tripadvisor", "match": ["tripadvisor.*"], "why": "terms bar content reuse" },
+    { "name": "Google search, Maps, Travel and Hotels", "match": ["google.*", "goo.gl"], "why": "terms bar automated access; Maps links are fine as links" },
+    { "name": "RunRepeat", "match": ["runrepeat.com"], "why": "content not licensed for reuse" }
+  ]
+}

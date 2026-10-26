@@ -3,7 +3,7 @@ name: instafy-skill-router
 description: Decide which Instafy skill(s) to apply for a user request (browsing vs previews vs secrets, etc).
 context_kind: meta
 context_parent: instafy-persistent-contexts
-context_children: instafy-automations, instafy-browser-automation, instafy-byoc-ai-credentials, instafy-collaboration, instafy-conversation-history, instafy-diagnostics, instafy-frontend-previews, instafy-git-canonical-conflicts, instafy-git-canonical-sync, instafy-integration-onboarding, instafy-learning-policy, instafy-location-sharing, instafy-runtime-flavors, instafy-secrets, instafy-skill-import-compat, instafy-space-review
+context_children: instafy-automations, instafy-browser-automation, instafy-byoc-ai-credentials, instafy-collaboration, instafy-conversation-history, instafy-diagnostics, instafy-frontend-previews, instafy-git-canonical-conflicts, instafy-git-canonical-sync, instafy-integration-onboarding, instafy-learning-policy, instafy-location-sharing, instafy-runtime-flavors, instafy-secrets, instafy-skill-import-compat, instafy-space-review, instafy-web-research
 always_include: true
 max_children: 3
 ---
@@ -48,6 +48,10 @@ Use these mappings unless a project-specific skill overrides them.
 - **Anything a public web page would help with** (look something up, check or verify a public page, show a site's screens, guided clicks, sign-in)
   - Use `instafy-browser-automation` and open the browser without asking in chat first; its site and action prompts still apply. Not for a site running in this space (above).
   - Use the exposed Personal or Shared Browser tools. If neither is exposed, follow the skill's `request_browser` handoff so Studio can open or resume the appropriate browser.
+
+- **A fact from the web for an answer or a page** (prices, opening hours, timetables, addresses, places or products to compare, "with sources")
+  - Use `instafy-web-research`: which sources to read, how many, cross-checking, citing, and the link-only sites.
+  - Combine with `instafy-browser-automation` when the reads go through Instafy's browser; one card may carry up to 6 related reads.
 
 - **Public page text / element counts / computed CSS / screenshot verification**
   - Use `instafy-browser-automation`.
@@ -118,5 +122,5 @@ Use these mappings unless a project-specific skill overrides them.
 - If the user asks “use a browser” but they actually want a shareable link:
   - Ask one short clarification: “Do you want a shareable public preview link, or a live browser walkthrough here?”
 - For current information (news, prices, releases, status pages):
-  - Open the browser and read it with `instafy-browser-automation`.
-  - Answer from memory only when the browser cannot open, and then say no live browsing was used.
+  - Read it with `instafy-browser-automation`, choosing and citing sources with `instafy-web-research`.
+  - Answer from memory only when no page can be read, and then say no live browsing was used.

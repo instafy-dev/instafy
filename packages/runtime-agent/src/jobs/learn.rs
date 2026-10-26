@@ -60,6 +60,9 @@ pub const LEARNED_USAGE_RELATIVE_PATH: &str = ".agents/skills/instafy-learned/US
 pub const BOUND_SITES_RELATIVE_PATH: &str = ".agents/skills/instafy-bound-sites/SKILL.md";
 pub const BOUND_SITES_CHEATSHEET_RELATIVE_PATH: &str =
     ".agents/skills/instafy-bound-sites/references/cheatsheet.md";
+pub const WEB_RESEARCH_RELATIVE_PATH: &str = ".agents/skills/instafy-web-research/SKILL.md";
+pub const WEB_RESEARCH_LINK_ONLY_RELATIVE_PATH: &str =
+    ".agents/skills/instafy-web-research/references/link-only-sites.json";
 
 const DEFAULT_LOOKBACK: usize = 25;
 const MAX_LOOKBACK: usize = 200;
@@ -263,12 +266,24 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     include_str!("legacy/browser-automation-v3.md"),
     // From before it said what Instafy's browser can reach.
     include_str!("legacy/browser-automation-v4.md"),
+    // From before one card could carry several reads and return labelled findings.
+    include_str!("legacy/browser-automation-v5.md"),
 ];
 const LEGACY_SKILL_IMPORT_COMPAT_TEMPLATES: &[&str] = &[
     include_str!("legacy/skill-import-compat-v1.md"),
     include_str!("legacy/skill-import-compat-v2.md"),
     include_str!("legacy/skill-import-compat-v3.md"),
 ];
+/// Which sources Octo reads for a fact, how many, how it cross-checks and cites them, and the sites
+/// it only links to (skill-owned data, so the list is judgement a reader enforces, not code).
+const WEB_RESEARCH_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/instafy/.agents/skills/instafy-web-research/SKILL.md"
+));
+const WEB_RESEARCH_LINK_ONLY_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/instafy/.agents/skills/instafy-web-research/references/link-only-sites.json"
+));
 const SKILL_READING_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-skill-reading/SKILL.md"
@@ -394,6 +409,8 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
     let learned_blocks_dir_path = workspace_dir.join(LEARNED_BLOCKS_DIR_RELATIVE_PATH);
     let bound_sites_path = workspace_dir.join(BOUND_SITES_RELATIVE_PATH);
     let bound_sites_cheatsheet_path = workspace_dir.join(BOUND_SITES_CHEATSHEET_RELATIVE_PATH);
+    let web_research_path = workspace_dir.join(WEB_RESEARCH_RELATIVE_PATH);
+    let web_research_link_only_path = workspace_dir.join(WEB_RESEARCH_LINK_ONLY_RELATIVE_PATH);
 
     if fs::create_dir_all(&skills_root_dir).is_err() {
         return;
@@ -666,6 +683,17 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
     ) {
         wrote_any = true;
     }
+    for (path, template) in [
+        (&web_research_path, WEB_RESEARCH_TEMPLATE),
+        (
+            &web_research_link_only_path,
+            WEB_RESEARCH_LINK_ONLY_TEMPLATE,
+        ),
+    ] {
+        if upgrade_bundled_skill(workspace_dir, path, &[], template) {
+            wrote_any = true;
+        }
+    }
 
     if !skill_reading_path.exists() {
         if let Some(parent) = skill_reading_path.parent() {
@@ -785,6 +813,8 @@ fn maybe_commit_project_memory_scaffold(workspace_dir: &Path, _wrote_any: bool) 
         LEARNED_INDEX_RELATIVE_PATH,
         BOUND_SITES_RELATIVE_PATH,
         BOUND_SITES_CHEATSHEET_RELATIVE_PATH,
+        WEB_RESEARCH_RELATIVE_PATH,
+        WEB_RESEARCH_LINK_ONLY_RELATIVE_PATH,
     ];
 
     for path in scaffold_paths {
@@ -2237,9 +2267,8 @@ mod tests {
             BROWSER_AUTOMATION_TEMPLATE
                 .contains("Not for sites running in this space (shown with a Studio preview).")
         );
-        let v4 = LEGACY_BROWSER_AUTOMATION_TEMPLATES
-            .last()
-            .expect("legacy browser copies");
+        let v4 = include_str!("legacy/browser-automation-v4.md");
+        assert!(LEGACY_BROWSER_AUTOMATION_TEMPLATES.contains(&v4));
         assert!(!v4.contains(section));
 
         let workspace = tempdir().expect("workspace tempdir");

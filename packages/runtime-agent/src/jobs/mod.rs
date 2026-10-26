@@ -78,6 +78,8 @@ mod skills;
 mod turn_baseline;
 mod turn_continuation;
 pub(crate) mod user_input_request;
+#[cfg(test)]
+mod web_research_routing_tests;
 mod workspace_change_detection;
 mod workspace_commit;
 
@@ -998,6 +1000,7 @@ fn default_skill_metadata_for_dir(dir_name: &str) -> SkillMetadata {
                 "instafy-secrets".to_string(),
                 "instafy-skill-import-compat".to_string(),
                 "instafy-space-review".to_string(),
+                "instafy-web-research".to_string(),
             ],
             always_include: true,
             max_children: Some(3),
