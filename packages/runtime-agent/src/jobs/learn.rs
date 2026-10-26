@@ -60,6 +60,11 @@ pub const LEARNED_USAGE_RELATIVE_PATH: &str = ".agents/skills/instafy-learned/US
 pub const BOUND_SITES_RELATIVE_PATH: &str = ".agents/skills/instafy-bound-sites/SKILL.md";
 pub const BOUND_SITES_CHEATSHEET_RELATIVE_PATH: &str =
     ".agents/skills/instafy-bound-sites/references/cheatsheet.md";
+pub const INTERACTIVE_ARTIFACTS_RELATIVE_PATH: &str =
+    ".agents/skills/instafy-interactive-artifacts/SKILL.md";
+pub const RESEARCH_TEAM_RELATIVE_PATH: &str = ".agents/skills/instafy-research-team/SKILL.md";
+pub const RESEARCH_TEAM_RESEARCHER_RELATIVE_PATH: &str =
+    ".agents/skills/instafy-research-team/references/researcher.md";
 
 const DEFAULT_LOOKBACK: usize = 25;
 const MAX_LOOKBACK: usize = 200;
@@ -245,6 +250,27 @@ const BOUND_SITES_CHEATSHEET_TEMPLATE: &str = include_str!(concat!(
 /// A copy someone edited is kept.
 const LEGACY_BOUND_SITES_TEMPLATES: &[&str] = &[include_str!("legacy/bound-sites-v1.md")];
 const LEGACY_BOUND_SITES_CHEATSHEET_TEMPLATES: &[&str] = &[];
+/// The hub for pages people tap through: it picks the builder from the installed skills (a skill
+/// pack's own skill, bound sites, or a starter site) and shows the result as a preview card.
+const INTERACTIVE_ARTIFACTS_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md"
+));
+/// How a lead splits research of many items into parallel lanes with a handoff file each, then
+/// builds one page from the files; and the rules a lane follows.
+const RESEARCH_TEAM_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/instafy/.agents/skills/instafy-research-team/SKILL.md"
+));
+const RESEARCH_TEAM_RESEARCHER_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/instafy/.agents/skills/instafy-research-team/references/researcher.md"
+));
+/// Earlier bundled copies of these skills that a scaffold may replace (none yet). A copy someone
+/// edited is kept.
+const LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES: &[&str] = &[];
+const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[];
+const LEGACY_RESEARCH_TEAM_RESEARCHER_TEMPLATES: &[&str] = &[];
 const SKILL_ROUTER_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-skill-router/SKILL.md"
@@ -394,6 +420,9 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
     let learned_blocks_dir_path = workspace_dir.join(LEARNED_BLOCKS_DIR_RELATIVE_PATH);
     let bound_sites_path = workspace_dir.join(BOUND_SITES_RELATIVE_PATH);
     let bound_sites_cheatsheet_path = workspace_dir.join(BOUND_SITES_CHEATSHEET_RELATIVE_PATH);
+    let interactive_artifacts_path = workspace_dir.join(INTERACTIVE_ARTIFACTS_RELATIVE_PATH);
+    let research_team_path = workspace_dir.join(RESEARCH_TEAM_RELATIVE_PATH);
+    let research_team_researcher_path = workspace_dir.join(RESEARCH_TEAM_RESEARCHER_RELATIVE_PATH);
 
     if fs::create_dir_all(&skills_root_dir).is_err() {
         return;
@@ -666,6 +695,27 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
     ) {
         wrote_any = true;
     }
+    for (path, legacy, current) in [
+        (
+            &interactive_artifacts_path,
+            LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES,
+            INTERACTIVE_ARTIFACTS_TEMPLATE,
+        ),
+        (
+            &research_team_path,
+            LEGACY_RESEARCH_TEAM_TEMPLATES,
+            RESEARCH_TEAM_TEMPLATE,
+        ),
+        (
+            &research_team_researcher_path,
+            LEGACY_RESEARCH_TEAM_RESEARCHER_TEMPLATES,
+            RESEARCH_TEAM_RESEARCHER_TEMPLATE,
+        ),
+    ] {
+        if upgrade_bundled_skill(workspace_dir, path, legacy, current) {
+            wrote_any = true;
+        }
+    }
 
     if !skill_reading_path.exists() {
         if let Some(parent) = skill_reading_path.parent() {
@@ -785,6 +835,9 @@ fn maybe_commit_project_memory_scaffold(workspace_dir: &Path, _wrote_any: bool) 
         LEARNED_INDEX_RELATIVE_PATH,
         BOUND_SITES_RELATIVE_PATH,
         BOUND_SITES_CHEATSHEET_RELATIVE_PATH,
+        INTERACTIVE_ARTIFACTS_RELATIVE_PATH,
+        RESEARCH_TEAM_RELATIVE_PATH,
+        RESEARCH_TEAM_RESEARCHER_RELATIVE_PATH,
     ];
 
     for path in scaffold_paths {
@@ -1723,6 +1776,65 @@ mod tests {
         assert!(DIAGNOSTICS_TEMPLATE.contains("obtain explicit confirmation"));
         assert!(DIAGNOSTICS_TEMPLATE.contains("never bypass a traversal, symlink"));
         assert_eq!(CLAUDE_DOC_TEMPLATE, "@AGENTS.md\n");
+    }
+
+    #[test]
+    fn scaffold_adds_the_interactive_artifacts_hub_and_research_team_and_keeps_edits() {
+        let workspace = tempdir().expect("workspace");
+        ensure_project_memory_scaffold(workspace.path());
+        for (path, template) in [
+            (
+                INTERACTIVE_ARTIFACTS_RELATIVE_PATH,
+                INTERACTIVE_ARTIFACTS_TEMPLATE,
+            ),
+            (RESEARCH_TEAM_RELATIVE_PATH, RESEARCH_TEAM_TEMPLATE),
+            (
+                RESEARCH_TEAM_RESEARCHER_RELATIVE_PATH,
+                RESEARCH_TEAM_RESEARCHER_TEMPLATE,
+            ),
+        ] {
+            assert_eq!(
+                fs::read_to_string(workspace.path().join(path)).unwrap(),
+                template,
+                "{path}"
+            );
+            assert!(template.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
+        }
+        for template in [INTERACTIVE_ARTIFACTS_TEMPLATE, RESEARCH_TEAM_TEMPLATE] {
+            assert!(template.contains("context_kind: workflow"));
+            assert!(template.contains("context_parent: instafy-skill-router"));
+        }
+        // Generic: the builder comes from the installed skills; no pack, service or command of
+        // one is named.
+        for template in [
+            INTERACTIVE_ARTIFACTS_TEMPLATE,
+            RESEARCH_TEAM_TEMPLATE,
+            RESEARCH_TEAM_RESEARCHER_TEMPLATE,
+            SKILL_ROUTER_TEMPLATE,
+        ] {
+            for named in [
+                "interactive-map",
+                "uw ",
+                "uw.mjs",
+                "instafy web cite",
+                "suggestions` block",
+            ] {
+                assert!(!template.contains(named), "{named}");
+            }
+        }
+        assert!(INTERACTIVE_ARTIFACTS_TEMPLATE.contains("Read the Skills index first"));
+        assert!(SKILL_ROUTER_TEMPLATE.contains("`instafy-interactive-artifacts`"));
+        assert!(
+            SKILL_ROUTER_TEMPLATE
+                .contains("instafy-interactive-artifacts, instafy-learning-policy")
+        );
+        assert!(SKILL_ROUTER_TEMPLATE.contains("instafy-research-team, instafy-runtime-flavors"));
+
+        // A copy someone edited is kept.
+        let hub = workspace.path().join(INTERACTIVE_ARTIFACTS_RELATIVE_PATH);
+        fs::write(&hub, "our own hub\n").unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&hub).unwrap(), "our own hub\n");
     }
 
     #[test]
