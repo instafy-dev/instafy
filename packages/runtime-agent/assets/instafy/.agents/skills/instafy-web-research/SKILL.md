@@ -66,7 +66,7 @@ In this order:
 
 ## Stops
 
-A login, sign-in or paywall, a CAPTCHA or bot check, HTTP 401, 403 or 429, a robots.txt refusal, a download instead of a page, a page showing passwords, keys or tokens, or a link or redirect that lands on a link-only site ends that URL for this turn:
+A login, sign-in or paywall, a CAPTCHA or bot check, HTTP 401, 403 or 429, a robots.txt refusal, a private or local address, more than 5 redirects, a download instead of a page, a page showing passwords, keys or tokens, or a link or redirect that lands on a link-only site ends that URL for this turn:
 
 - never retry it another way (another reader, browser, user agent, cache, mirror or archive);
 - never ask for a password or code; the person may open the page in their own browser, sign in themselves and paste what they choose to share;
