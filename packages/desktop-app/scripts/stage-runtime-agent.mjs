@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -117,6 +118,32 @@ if (process.platform !== "win32") {
   fs.chmodSync(hostDestination, 0o755);
 }
 
+// Skill packs ship next to the binary; runtime-agent finds <binary dir>/skill-packs at startup
+// (packages/runtime-agent/src/skill_packs.rs). Only the pinned release archives are installed,
+// each checked by scripts/install-skill-packs.mjs; any failure stops the build. The archives are
+// kept in build/skill-packs between runs.
+const skillPacksCache = path.join(packageRoot, "build", "skill-packs");
+run(process.execPath, [
+  path.join(repoRoot, "scripts", "install-skill-packs.mjs"),
+  "--require-pinned",
+  "--out",
+  skillPacksCache,
+]);
+const { describeSkillPacks } = createRequire(import.meta.url)("./skill-pack-tree.cjs");
+const skillPacks = describeSkillPacks(skillPacksCache);
+const pinnedPacks = JSON.parse(
+  fs.readFileSync(path.join(runtimeAgentRoot, "skill-packs.json"), "utf8"),
+).packs.map(({ name, version, tree_sha256 }) => ({ name, version, tree_sha256 }));
+if (JSON.stringify(skillPacks) !== JSON.stringify(pinnedPacks.sort((a, b) => a.name.localeCompare(b.name)))) {
+  throw new Error("The installed skill packs do not match packages/runtime-agent/skill-packs.json.");
+}
+for (const pack of skillPacks) {
+  fs.cpSync(path.join(skillPacksCache, pack.name), path.join(outputDir, "skill-packs", pack.name), {
+    recursive: true,
+    verbatimSymlinks: true,
+  });
+}
+
 function describe(file) {
   return {
     sizeBytes: fs.statSync(file).size,
@@ -133,6 +160,7 @@ const manifest = {
   sizeBytes: bundled.sizeBytes,
   sha256: bundled.sha256,
   codeModeHost: { filename: codeModeHostFilename, ...describe(hostDestination) },
+  skillPacks,
   sourceSha: resolveSourceSha(),
 };
 fs.writeFileSync(
@@ -141,5 +169,5 @@ fs.writeFileSync(
   { mode: 0o644 },
 );
 console.log(
-  `[instafy-desktop] Staged verified runtime-agent and code-mode host (${process.platform}/${process.arch}, ${bundled.sizeBytes} + ${manifest.codeModeHost.sizeBytes} bytes).`,
+  `[instafy-desktop] Staged verified runtime-agent and code-mode host (${process.platform}/${process.arch}, ${bundled.sizeBytes} + ${manifest.codeModeHost.sizeBytes} bytes) with skill packs ${skillPacks.map((pack) => `${pack.name}@${pack.version}`).join(", ") || "(none)"}.`,
 );

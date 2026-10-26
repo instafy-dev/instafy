@@ -23,6 +23,7 @@ codex/*
 !codex/third_party/v8/
 !codex/third_party/v8/**
 !scripts/fetch-rusty-v8.sh
+!scripts/install-skill-packs.mjs
 
 # Allow Rust workspace sources for controller/agent images.
 !Cargo.toml
@@ -40,6 +41,8 @@ codex/*
 # But still ignore build artifacts under the Rust crates.
 packages/runtime-controller/target
 packages/runtime-agent/target
+# Skill packs installed for local development; images install the pinned ones.
+packages/runtime-agent/assets/skill-packs/
 packages/runtime-contracts/target
 packages/origin-http-server/target
 codex/codex-rs/target

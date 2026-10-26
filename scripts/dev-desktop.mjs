@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import fs from "node:fs";
+
+import { DEFAULT_OUT, DEFAULT_PIN, installPinned } from "./install-skill-packs.mjs";
 
 function resolvePnpmCommand() {
   return process.platform === "win32" ? "pnpm.cmd" : "pnpm";
@@ -112,7 +115,19 @@ async function waitForFrontendUrl(frontend, timeoutMs) {
   });
 }
 
+// A debug runtime-agent run from this checkout finds the skill packs here
+// (packages/runtime-agent/src/skill_packs.rs). Already installed packs are kept as they are.
+async function installSkillPacks() {
+  try {
+    const pin = JSON.parse(fs.readFileSync(DEFAULT_PIN, "utf8"));
+    await installPinned({ pin, out: DEFAULT_OUT, log: (line) => console.log(`[dev:desktop] skill packs: ${line}`) });
+  } catch (error) {
+    console.warn(`[dev:desktop] Could not install the skill packs; spaces will not get them: ${error.message}`);
+  }
+}
+
 async function main() {
+  await installSkillPacks();
   const host = process.env.VITE_HOST?.trim() || "127.0.0.1";
   const preferredPort = Number.parseInt(process.env.VITE_PORT?.trim() || "5173", 10);
   const explicitStudioUrl = process.env.INSTAFY_APP_URL?.trim() || null;

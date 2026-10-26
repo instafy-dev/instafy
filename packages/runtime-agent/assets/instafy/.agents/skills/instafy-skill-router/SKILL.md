@@ -3,7 +3,7 @@ name: instafy-skill-router
 description: Decide which Instafy skill(s) to apply for a user request (browsing vs previews vs secrets, etc).
 context_kind: meta
 context_parent: instafy-persistent-contexts
-context_children: instafy-automations, instafy-browser-automation, instafy-byoc-ai-credentials, instafy-collaboration, instafy-conversation-history, instafy-diagnostics, instafy-frontend-previews, instafy-git-canonical-conflicts, instafy-git-canonical-sync, instafy-integration-onboarding, instafy-learning-policy, instafy-location-sharing, instafy-runtime-flavors, instafy-secrets, instafy-skill-import-compat, instafy-space-review, instafy-web-research
+context_children: instafy-automations, instafy-browser-automation, instafy-byoc-ai-credentials, instafy-collaboration, instafy-conversation-history, instafy-diagnostics, instafy-frontend-previews, instafy-git-canonical-conflicts, instafy-git-canonical-sync, instafy-integration-onboarding, instafy-interactive-artifacts, instafy-learning-policy, instafy-location-sharing, instafy-research-team, instafy-runtime-flavors, instafy-secrets, instafy-skill-import-compat, instafy-space-review, instafy-web-research
 always_include: true
 max_children: 3
 ---
@@ -26,6 +26,9 @@ Notes:
 - Do not mention “skills” to the user unless they asked.
 - Prefer skill guidance over ad-hoc shell commands.
 - If two skills apply, you may combine them, but keep the execution mode clear (for example: “Tunnel preview mode” vs “Live browser assist mode”).
+- An outside lookup that is unavailable (exit 4, `status: "unavailable"`: a place search, a router, a store's site did
+  not answer) is not "not found": never retry it with another query or call the thing missing. Use what was found,
+  say plainly what could not be looked up, and offer a retry among the suggested replies.
 
 ## Learned blocks (/learn)
 
@@ -57,8 +60,15 @@ Use these mappings unless a project-specific skill overrides them.
   - Use `instafy-browser-automation`.
   - Prefer `instafy_local_browser.observe` when it is exposed; it is headless and read-only, not an interactive or authenticated session.
 
-- **Nearby / around me / current location / walking distance**
+- **A page to tap through: map, ranking, comparison or shopping table, dashboard, quiz, timeline, planner, tracker**
+  - Use `instafy-interactive-artifacts`: it picks the builder from the installed skills (a skill for that kind of
+    page, such as a map, `instafy-bound-sites` for values checked per click, a starter site otherwise) and shows the
+    result with `instafy preview open`.
+  - Many items to research live first (a long trip, several products): `instafy-research-team`.
+
+- **Near me / around me / my current location** (the user's own position; no place named)
   - Use `instafy-location-sharing`.
+  - A named city, area, address or venue is not a location request: use it as given.
   - Prefer an inline location action card over telling the user to search manually.
   - Combine with `instafy-browser-automation` when a page would help after location is shared.
 

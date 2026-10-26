@@ -1,0 +1,430 @@
+#!/usr/bin/env node
+// Installs the skill packs pinned in packages/runtime-agent/skill-packs.json into one folder
+// (default packages/runtime-agent/assets/skill-packs, the runtime image uses /opt/instafy/skill-packs).
+//
+// Each pack is a release tarball that `git archive` made from the pack's repository. The installer
+//   1. downloads it over https from the pinned URL (redirects must stay on https),
+//   2. checks its sha256 against the pin before reading anything in it,
+//   3. reads the tar itself (gzip through node:zlib, at most 16 MB unpacked): only regular files and
+//      folders, no links, no absolute or `..` paths, every entry under the pinned pack folder,
+//   4. checks that the archive's pax global header names the pinned commit,
+//   5. checks the pack's .instafy-pack.json (name, version, tree_sha256, size caps) and the content's
+//      tree_sha256,
+//   6. moves the pack into place in one rename and records it in installed.json.
+// A pack that is already installed with the pinned tree_sha256 is left as it is.
+//
+//   node scripts/install-skill-packs.mjs [--out <dir>] [--pin <skill-packs.json>] [--require-pinned]
+//   node scripts/install-skill-packs.mjs --from <pack folder> [--out <dir>]   (pack authors: not pinned)
+import { createHash, randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import zlib from "node:zlib";
+
+const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+export const DEFAULT_PIN = path.join(repositoryRoot, "packages", "runtime-agent", "skill-packs.json");
+export const DEFAULT_OUT = path.join(repositoryRoot, "packages", "runtime-agent", "assets", "skill-packs");
+export const RELEASE_URL_PREFIX = "https://github.com/instafy-dev/";
+export const MANIFEST = ".instafy-pack.json";
+export const INSTALLED = "installed.json";
+export const MAX_ARCHIVE_BYTES = 16 * 1024 * 1024;
+export const MAX_UNPACKED_BYTES = 16 * 1024 * 1024;
+// The same caps `/skills import` applies to one source.
+export const MAX_PACK_FILES = 256;
+export const MAX_PACK_BYTES = 8 * 1024 * 1024;
+const NAME = /^[a-z0-9][a-z0-9-]{0,63}$/u;
+const HEX40 = /^[0-9a-f]{40}$/u;
+const HEX64 = /^[0-9a-f]{64}$/u;
+const VERSION = /^\d+\.\d+\.\d+$/u;
+const SAFE_SEGMENT = /^[A-Za-z0-9._@+-]+$/u;
+
+export class InstallError extends Error {}
+
+function fail(message) {
+  throw new InstallError(message);
+}
+
+function sha256(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function compareBytes(a, b) {
+  return Buffer.compare(Buffer.from(a), Buffer.from(b));
+}
+
+/// The pack content digest: every file except the manifest, in byte order of its "/"-separated path,
+/// each fed as path, NUL, bytes, NUL. `files` is a Map of relative path to Buffer.
+export function treeDigest(files) {
+  const hash = createHash("sha256");
+  let bytes = 0;
+  let count = 0;
+  for (const rel of [...files.keys()].filter((rel) => rel !== MANIFEST).sort(compareBytes)) {
+    const data = files.get(rel);
+    hash.update(rel).update("\0").update(data).update("\0");
+    bytes += data.length;
+    count += 1;
+  }
+  return { files: count, bytes, tree_sha256: hash.digest("hex") };
+}
+
+/// Reads every regular file under `dir` (refusing links) into a Map of relative path to Buffer.
+export function readPackFolder(dir) {
+  const files = new Map();
+  const walk = (rel) => {
+    for (const entry of fs.readdirSync(path.join(dir, rel), { withFileTypes: true })) {
+      const child = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isSymbolicLink()) fail(`${child}: links are not allowed in a skill pack`);
+      if (entry.isDirectory()) walk(child);
+      else if (entry.isFile()) files.set(child, fs.readFileSync(path.join(dir, child)));
+      else fail(`${child}: only regular files and folders are allowed in a skill pack`);
+    }
+  };
+  walk("");
+  return files;
+}
+
+function safeRelative(rel, what) {
+  if (typeof rel !== "string" || rel.length === 0 || rel.length > 512) fail(`${what}: bad path`);
+  if (rel.startsWith("/") || rel.includes("\\") || rel.includes("\0")) fail(`${what}: ${JSON.stringify(rel)} is not a relative path`);
+  for (const segment of rel.split("/")) {
+    if (segment === "" || segment === "." || segment === "..") fail(`${what}: ${JSON.stringify(rel)} leaves its folder`);
+  }
+  return rel;
+}
+
+export function validatePin(pin, { urlPrefix = RELEASE_URL_PREFIX } = {}) {
+  if (!pin || pin.schema !== 1 || !Array.isArray(pin.packs)) fail("skill-packs.json: expected {schema: 1, packs: [...]}");
+  const names = new Set();
+  for (const pack of pin.packs) {
+    const where = `skill-packs.json ${JSON.stringify(pack?.name)}`;
+    if (!pack || typeof pack !== "object") fail(`${where}: not an object`);
+    if (!NAME.test(pack.name ?? "")) fail(`${where}: name must match ${NAME}`);
+    if (names.has(pack.name)) fail(`${where}: listed twice`);
+    names.add(pack.name);
+    if (!/^instafy-dev\/[A-Za-z0-9._-]+$/u.test(pack.repo ?? "")) fail(`${where}: repo must be instafy-dev/<repo>`);
+    if (!VERSION.test(pack.version ?? "")) fail(`${where}: version must be x.y.z`);
+    if (pack.tag !== `v${pack.version}`) fail(`${where}: tag must be v${pack.version}`);
+    if (!HEX40.test(pack.commit ?? "")) fail(`${where}: commit must be 40 lowercase hex characters`);
+    if (!HEX64.test(pack.sha256 ?? "")) fail(`${where}: sha256 must be 64 lowercase hex characters`);
+    if (!HEX64.test(pack.tree_sha256 ?? "")) fail(`${where}: tree_sha256 must be 64 lowercase hex characters`);
+    if (typeof pack.license !== "string" || !pack.license) fail(`${where}: license is required`);
+    safeRelative(pack.path ?? `skills/${pack.name}`, `${where} path`);
+    if (typeof pack.url !== "string" || !pack.url.startsWith(urlPrefix)) fail(`${where}: url must start with ${urlPrefix}`);
+    if (urlPrefix === RELEASE_URL_PREFIX && !pack.url.startsWith(`https://github.com/${pack.repo}/releases/download/${pack.tag}/`)) {
+      fail(`${where}: url must be a release asset of ${pack.repo} at ${pack.tag}`);
+    }
+  }
+  return pin;
+}
+
+async function download(url, { allowLoopbackHttp = false, fetchImpl = fetch } = {}) {
+  let current = url;
+  for (let hop = 0; hop < 6; hop += 1) {
+    const parsed = new URL(current);
+    const loopback = parsed.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(parsed.hostname);
+    if (parsed.protocol !== "https:" && !(allowLoopbackHttp && loopback)) fail(`refusing a non-https download: ${parsed.origin}`);
+    const response = await fetchImpl(current, { redirect: "manual" });
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
+      const location = response.headers.get("location");
+      if (!location) fail(`redirect without a location from ${parsed.origin}`);
+      current = new URL(location, current).toString();
+      continue;
+    }
+    if (!response.ok) fail(`download failed: HTTP ${response.status} from ${parsed.origin}`);
+    const declared = Number(response.headers.get("content-length") ?? 0);
+    if (declared > MAX_ARCHIVE_BYTES) fail(`archive is larger than ${MAX_ARCHIVE_BYTES} bytes`);
+    const chunks = [];
+    let total = 0;
+    for await (const chunk of response.body) {
+      total += chunk.length;
+      if (total > MAX_ARCHIVE_BYTES) fail(`archive is larger than ${MAX_ARCHIVE_BYTES} bytes`);
+      chunks.push(Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks);
+  }
+  fail("too many redirects");
+}
+
+function cString(buffer, start, length) {
+  const slice = buffer.subarray(start, start + length);
+  const end = slice.indexOf(0);
+  return slice.subarray(0, end < 0 ? slice.length : end).toString("utf8");
+}
+
+function octal(buffer, start, length, what) {
+  const text = cString(buffer, start, length).trim();
+  if (!/^[0-7]*$/u.test(text)) fail(`tar: bad ${what} field`);
+  return text ? Number.parseInt(text, 8) : 0;
+}
+
+function paxRecords(data) {
+  const records = new Map();
+  let offset = 0;
+  while (offset < data.length) {
+    const space = data.indexOf(0x20, offset);
+    if (space < 0) fail("tar: bad pax record");
+    const length = Number.parseInt(data.subarray(offset, space).toString("ascii"), 10);
+    if (!Number.isSafeInteger(length) || length <= space - offset || offset + length > data.length) fail("tar: bad pax record");
+    const record = data.subarray(space + 1, offset + length - 1).toString("utf8");
+    const equals = record.indexOf("=");
+    if (equals < 0) fail("tar: bad pax record");
+    records.set(record.slice(0, equals), record.slice(equals + 1));
+    offset += length;
+  }
+  return records;
+}
+
+/// Parses a ustar/pax archive. Returns {comment, entries: [{path, type: "file"|"dir", mode, data}]}.
+/// Every entry type except regular files, folders and pax headers is refused.
+export function parseTar(tar) {
+  const entries = [];
+  let comment = null;
+  let pending = null;
+  let offset = 0;
+  while (offset + 512 <= tar.length) {
+    const header = tar.subarray(offset, offset + 512);
+    if (header.every((byte) => byte === 0)) break;
+    let checksum = 0;
+    for (let index = 0; index < 512; index += 1) checksum += index >= 148 && index < 156 ? 0x20 : header[index];
+    if (checksum !== octal(header, 148, 8, "checksum")) fail("tar: header checksum mismatch");
+    const size = octal(header, 124, 12, "size");
+    const type = String.fromCharCode(header[156] || 0x30);
+    const dataStart = offset + 512;
+    const dataEnd = dataStart + size;
+    if (dataEnd > tar.length) fail("tar: truncated entry");
+    const data = tar.subarray(dataStart, dataEnd);
+    offset = dataStart + Math.ceil(size / 512) * 512;
+    if (type === "g") {
+      const records = paxRecords(data);
+      if (records.has("comment")) comment = records.get("comment");
+      continue;
+    }
+    if (type === "x") {
+      pending = paxRecords(data);
+      continue;
+    }
+    const prefix = cString(header, 345, 155);
+    const name = cString(header, 0, 100);
+    let entryPath = pending?.get("path") ?? (prefix ? `${prefix}/${name}` : name);
+    const entrySize = pending?.has("size") ? Number(pending.get("size")) : size;
+    pending = null;
+    if (entrySize !== size) fail(`tar: ${entryPath}: pax size differs from the header`);
+    if (type === "5") {
+      entryPath = entryPath.replace(/\/+$/u, "");
+      entries.push({ path: safeRelative(entryPath, "tar entry"), type: "dir", mode: octal(header, 100, 8, "mode") });
+      continue;
+    }
+    if (type !== "0") {
+      const kind = { 1: "hard link", 2: "symbolic link", 3: "character device", 4: "block device", 6: "fifo", 7: "contiguous file", L: "GNU long name", K: "GNU long link" }[type] ?? `type ${JSON.stringify(type)}`;
+      fail(`tar: ${entryPath}: ${kind} entries are not allowed`);
+    }
+    entries.push({ path: safeRelative(entryPath, "tar entry"), type: "file", mode: octal(header, 100, 8, "mode"), data });
+  }
+  return { comment, entries };
+}
+
+/// Unpacks a release archive in memory and returns the pack's files (relative to the pack folder)
+/// with their modes, after every check that does not need the manifest.
+export function unpackArchive(archive, pack) {
+  let tar;
+  try {
+    tar = zlib.gunzipSync(archive, { maxOutputLength: MAX_UNPACKED_BYTES });
+  } catch (error) {
+    if (error?.code === "ERR_BUFFER_TOO_LARGE" || error instanceof RangeError) fail(`archive unpacks to more than ${MAX_UNPACKED_BYTES} bytes`);
+    fail(`archive is not gzip: ${error.message}`);
+  }
+  const { comment, entries } = parseTar(tar);
+  if (comment !== pack.commit) fail(`archive was made from commit ${comment ?? "(none)"}, not the pinned ${pack.commit}`);
+  const root = pack.path ?? `skills/${pack.name}`;
+  const files = new Map();
+  const executable = new Set();
+  let bytes = 0;
+  for (const entry of entries) {
+    if (entry.path === root || root.startsWith(`${entry.path}/`)) {
+      if (entry.type !== "dir") fail(`${entry.path}: expected a folder`);
+      continue;
+    }
+    if (!entry.path.startsWith(`${root}/`)) fail(`${entry.path}: outside the pack folder ${root}`);
+    const rel = entry.path.slice(root.length + 1);
+    for (const segment of rel.split("/")) {
+      if (!SAFE_SEGMENT.test(segment)) fail(`${entry.path}: unsupported characters in the path`);
+    }
+    if (entry.type === "dir") continue;
+    if (files.has(rel)) fail(`${entry.path}: listed twice`);
+    bytes += entry.data.length;
+    // The manifest is not counted against the cap.
+    if (files.size > MAX_PACK_FILES) fail(`more than ${MAX_PACK_FILES} files`);
+    if (bytes > MAX_PACK_BYTES) fail(`more than ${MAX_PACK_BYTES} bytes`);
+    files.set(rel, Buffer.from(entry.data));
+    if (entry.mode & 0o111) executable.add(rel);
+  }
+  return { files, executable };
+}
+
+/// Checks a pack's files against its manifest and, when pinned, against the pin.
+export function checkPack(files, { name, version = null, tree_sha256 = null }) {
+  const raw = files.get(MANIFEST);
+  if (!raw) fail(`${name}: no ${MANIFEST}`);
+  let manifest;
+  try {
+    manifest = JSON.parse(raw.toString("utf8"));
+  } catch {
+    fail(`${name}: ${MANIFEST} is not JSON`);
+  }
+  if (manifest.schema !== 1) fail(`${name}: ${MANIFEST} schema must be 1`);
+  if (manifest.name !== name) fail(`${name}: ${MANIFEST} names ${JSON.stringify(manifest.name)}`);
+  if (version !== null && manifest.version !== version) fail(`${name}: ${MANIFEST} version ${manifest.version} is not the pinned ${version}`);
+  const tree = treeDigest(files);
+  if (tree.files > MAX_PACK_FILES) fail(`${name}: ${tree.files} files, over the ${MAX_PACK_FILES}-file cap`);
+  if (tree.bytes > MAX_PACK_BYTES) fail(`${name}: ${tree.bytes} bytes, over the ${MAX_PACK_BYTES}-byte cap`);
+  if (manifest.tree_sha256 !== tree.tree_sha256) fail(`${name}: content tree_sha256 ${tree.tree_sha256} does not match ${MANIFEST} (${manifest.tree_sha256})`);
+  if (tree_sha256 !== null && tree.tree_sha256 !== tree_sha256) fail(`${name}: content tree_sha256 ${tree.tree_sha256} is not the pinned ${tree_sha256}`);
+  if (manifest.files !== undefined && manifest.files !== tree.files) fail(`${name}: ${MANIFEST} counts ${manifest.files} files, the pack has ${tree.files}`);
+  if (manifest.bytes !== undefined && manifest.bytes !== tree.bytes) fail(`${name}: ${MANIFEST} counts ${manifest.bytes} bytes, the pack has ${tree.bytes}`);
+  const skill = manifest.skill ?? manifest.skills?.[0];
+  if (typeof skill !== "string" || !files.has(safeRelative(skill, `${name} skill`))) fail(`${name}: the skill file ${JSON.stringify(skill)} is missing`);
+  const entry = manifest.cli?.entry ?? manifest.entry;
+  if (entry !== undefined && (typeof entry !== "string" || !files.has(safeRelative(entry, `${name} entry`)))) fail(`${name}: the command ${JSON.stringify(entry)} is missing`);
+  return { manifest, tree };
+}
+
+function readInstalled(out) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(path.join(out, INSTALLED), "utf8"));
+    return Array.isArray(parsed?.packs) ? parsed : { schema: 1, packs: [] };
+  } catch {
+    return { schema: 1, packs: [] };
+  }
+}
+
+function writeAtomically(file, text) {
+  const temporary = `${file}.tmp-${randomUUID()}`;
+  fs.writeFileSync(temporary, text, { mode: 0o644, flag: "wx" });
+  fs.renameSync(temporary, file);
+}
+
+/// Writes `files` as `out/<name>` in one rename (the previous copy, if any, is removed after).
+function placePack(out, name, files, executable) {
+  fs.mkdirSync(out, { recursive: true, mode: 0o755 });
+  const staging = path.join(out, `.staging-${name}-${randomUUID()}`);
+  fs.mkdirSync(staging, { mode: 0o755 });
+  try {
+    for (const [rel, data] of files) {
+      const destination = path.join(staging, ...rel.split("/"));
+      fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o755 });
+      const mode = executable.has(rel) ? 0o755 : 0o644;
+      fs.writeFileSync(destination, data, { mode, flag: "wx" });
+      fs.chmodSync(destination, mode);
+    }
+    const target = path.join(out, name);
+    const aside = path.join(out, `.replaced-${name}-${randomUUID()}`);
+    const existed = fs.existsSync(target);
+    if (existed) fs.renameSync(target, aside);
+    try {
+      fs.renameSync(staging, target);
+    } catch (error) {
+      if (existed) fs.renameSync(aside, target);
+      throw error;
+    }
+    if (existed) fs.rmSync(aside, { recursive: true, force: true });
+  } finally {
+    fs.rmSync(staging, { recursive: true, force: true });
+  }
+}
+
+function alreadyInstalled(out, pack, installed) {
+  const record = installed.packs.find((entry) => entry.name === pack.name);
+  if (!record || record.pinned !== true || record.sha256 !== pack.sha256 || record.tree_sha256 !== pack.tree_sha256) return false;
+  try {
+    checkPack(readPackFolder(path.join(out, pack.name)), pack);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/// Installs every pinned pack into `out`. Returns [{name, version, status: "installed"|"unchanged"}].
+export async function installPinned({ pin, out, urlPrefix = RELEASE_URL_PREFIX, allowLoopbackHttp = false, fetchImpl = fetch, log = () => {} }) {
+  validatePin(pin, { urlPrefix });
+  const installed = readInstalled(out);
+  const results = [];
+  const records = [];
+  for (const pack of pin.packs) {
+    if (alreadyInstalled(out, pack, installed)) {
+      log(`${pack.name}@${pack.version}: already installed`);
+      results.push({ name: pack.name, version: pack.version, status: "unchanged" });
+    } else {
+      const archive = await download(pack.url, { allowLoopbackHttp, fetchImpl });
+      const digest = sha256(archive);
+      if (digest !== pack.sha256) fail(`${pack.name}: archive sha256 ${digest} is not the pinned ${pack.sha256}`);
+      const { files, executable } = unpackArchive(archive, pack);
+      checkPack(files, pack);
+      placePack(out, pack.name, files, executable);
+      log(`${pack.name}@${pack.version}: installed (${files.size} files)`);
+      results.push({ name: pack.name, version: pack.version, status: "installed" });
+    }
+    records.push({ name: pack.name, version: pack.version, commit: pack.commit, sha256: pack.sha256, tree_sha256: pack.tree_sha256, license: pack.license, pinned: true });
+  }
+  // Packs this installer put here before that are no longer pinned.
+  const pinned = new Set(pin.packs.map((pack) => pack.name));
+  for (const old of installed.packs) {
+    if (NAME.test(old?.name ?? "") && !pinned.has(old.name)) fs.rmSync(path.join(out, old.name), { recursive: true, force: true });
+  }
+  fs.mkdirSync(out, { recursive: true, mode: 0o755 });
+  writeAtomically(path.join(out, INSTALLED), `${JSON.stringify({ schema: 1, packs: records }, null, 2)}\n`);
+  return results;
+}
+
+/// Pack authors: installs a local pack folder as it is (recorded as not pinned).
+export function installFromFolder({ from, out, log = () => {} }) {
+  const files = readPackFolder(from);
+  const raw = files.get(MANIFEST);
+  const name = raw ? JSON.parse(raw.toString("utf8")).name : null;
+  if (!NAME.test(name ?? "")) fail(`${from}: ${MANIFEST} needs a name matching ${NAME}`);
+  const { manifest, tree } = checkPack(files, { name });
+  const executable = new Set([...files.keys()].filter((rel) => fs.statSync(path.join(from, rel)).mode & 0o111));
+  placePack(out, name, files, executable);
+  const installed = readInstalled(out);
+  const records = installed.packs.filter((entry) => entry.name !== name);
+  records.push({ name, version: manifest.version, tree_sha256: tree.tree_sha256, pinned: false });
+  writeAtomically(path.join(out, INSTALLED), `${JSON.stringify({ schema: 1, packs: records }, null, 2)}\n`);
+  log(`${name}@${manifest.version}: installed from ${from} (not pinned)`);
+  return [{ name, version: manifest.version, status: "installed" }];
+}
+
+function parseArguments(argv) {
+  const options = { out: DEFAULT_OUT, pin: DEFAULT_PIN, from: null, requirePinned: false };
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index];
+    const value = () => {
+      const next = argv[++index];
+      if (!next) fail(`${argument} needs a value`);
+      return next;
+    };
+    if (argument === "--out") options.out = path.resolve(value());
+    else if (argument === "--pin") options.pin = path.resolve(value());
+    else if (argument === "--from") options.from = path.resolve(value());
+    else if (argument === "--require-pinned") options.requirePinned = true;
+    else fail(`unknown argument ${argument}`);
+  }
+  if (options.requirePinned && options.from) fail("--require-pinned refuses --from: only pinned release archives are installed");
+  return options;
+}
+
+async function main() {
+  const options = parseArguments(process.argv.slice(2));
+  const log = (line) => process.stdout.write(`[skill-packs] ${line}\n`);
+  if (options.from) {
+    installFromFolder({ from: options.from, out: options.out, log });
+    return;
+  }
+  const pin = JSON.parse(fs.readFileSync(options.pin, "utf8"));
+  await installPinned({ pin, out: options.out, log });
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    process.stderr.write(`[skill-packs] ${error instanceof InstallError ? error.message : error.stack}\n`);
+    process.exit(1);
+  });
+}
