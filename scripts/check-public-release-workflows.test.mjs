@@ -531,8 +531,19 @@ const SHIPPED_WEB_BUNDLE_BUILDS = [
   { workflow: "ios-release.yml", job: "build", command: "pnpm --filter @instafy/frontend cap:sync" },
   { workflow: "android-release.yml", job: "build", command: "pnpm --filter @instafy/frontend run cap:sync" },
 ];
-const FRONTEND_BUILD_COMMAND =
-  /pnpm --filter @instafy\/frontend (?:run )?(?:build|cap:sync)\b|build-hosted-web\.mjs|\bvite build\b/u;
+// The ways a workflow can run the frontend's Vite build: the package scripts selected by filter,
+// directory or a cd into the package, the hosted-web wrapper, or Vite itself. Discovery below uses
+// these spellings, so a lane that builds some other way is not seen; add its spelling here.
+const FRONTEND_PACKAGE = String.raw`(?:@instafy\/frontend|\.?\/?packages\/frontend\/?)`;
+const FRONTEND_BUILD_COMMAND = new RegExp(
+  [
+    String.raw`\bpnpm\b[^\n]*?(?:--filter[ =]|-C[ =]?|--dir[ =])${FRONTEND_PACKAGE}\s+(?:run\s+)?(?:build|cap:sync)\b`,
+    String.raw`\bcd\s+${FRONTEND_PACKAGE}[^\n]*?&&\s*pnpm\s+(?:run\s+)?(?:build|cap:sync)\b`,
+    String.raw`build-hosted-web\.mjs`,
+    String.raw`\bvite build\b`,
+  ].join("|"),
+  "u",
+);
 
 function workflowJobs(source) {
   const start = source.indexOf("\njobs:\n");
@@ -560,9 +571,10 @@ test("every shipped web bundle build compiles Google sign-in exactly like the ho
     const env = text.match(/^ {4}env:\n((?: {6}.*\n)+)/mu);
     assert.ok(env, `${workflow}/${job}: missing job-level env`);
     assert.ok(env[1].split("\n").includes(GOOGLE_AUTH_ENV_LINE), `${workflow}/${job}: ${GOOGLE_AUTH_FLAG} must default to '1' in the job env`);
-    // Nothing else (a step env, a GITHUB_ENV write, another job) may assign it.
-    const assignments = source.split("\n").filter((line) => new RegExp(`\\b${GOOGLE_AUTH_FLAG}\\s*[:=]`, "u").test(line));
-    assert.deepEqual(assignments, [GOOGLE_AUTH_ENV_LINE], `${workflow}: ${GOOGLE_AUTH_FLAG} is assigned exactly once`);
+    // Nothing else may touch it: a step env, a GITHUB_ENV write, an unset or `env -u` would all
+    // change what Vite sees, so the job env line is the only line in the workflow that names it.
+    const mentions = source.split("\n").filter((line) => line.includes(GOOGLE_AUTH_FLAG));
+    assert.deepEqual(mentions, [GOOGLE_AUTH_ENV_LINE], `${workflow}: only the job env line may name ${GOOGLE_AUTH_FLAG}`);
   }
 
   // A new public lane that builds the frontend for a real Supabase project ships a web bundle too,

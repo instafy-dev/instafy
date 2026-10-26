@@ -20,6 +20,26 @@ export interface PendingNativeAuthAttempt {
   platform: string;
 }
 
+/** The OAuth providers the login screen offers. */
+export type NativeAuthProvider = "github" | "google";
+
+export const NATIVE_AUTH_PROVIDER_LABELS: Record<NativeAuthProvider, string> = {
+  github: "GitHub",
+  google: "Google",
+};
+
+/**
+ * The provider a callback belongs to, read from the attempt that opened the
+ * browser, so its telemetry kind and its message name that provider. With no
+ * attempt (or one naming an unknown provider) it is GitHub, the only provider
+ * native sign-in offered before Google.
+ */
+export function nativeAuthAttemptProvider(
+  attempt: Pick<PendingNativeAuthAttempt, "provider"> | null,
+): NativeAuthProvider {
+  return attempt?.provider === "google" ? "google" : "github";
+}
+
 function normalizeCallbackPathname(pathname: string): string {
   const trimmed = pathname.trim();
   if (!trimmed) {

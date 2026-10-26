@@ -13,7 +13,9 @@ import {
   clearNativeAuthCallbackAttemptId,
   clearPendingNativeAuthAttempt,
   NATIVE_AUTH_ERROR_EVENT,
+  NATIVE_AUTH_PROVIDER_LABELS,
   NATIVE_AUTH_SUCCESS_EVENT,
+  nativeAuthAttemptProvider,
   parseNativeAuthCallbackUrl,
   readPendingNativeAuthAttempt,
   writeNativeAuthCallbackAttemptId,
@@ -389,7 +391,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       nextSession: Session | null,
       nextUser: User | null,
     ) => {
-      postNativeAuthTelemetry("auth.login.github.completed", "info", null, {
+      const provider = nativeAuthAttemptProvider(readPendingNativeAuthAttempt());
+      postNativeAuthTelemetry(`auth.login.${provider}.completed`, "info", null, {
         completionMethod,
       });
       clearNativeAuthCallbackAttemptId();
@@ -419,6 +422,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (pendingAttempt?.attemptId) {
         writeNativeAuthCallbackAttemptId(pendingAttempt.attemptId);
       }
+      const provider = nativeAuthAttemptProvider(pendingAttempt);
+      const kind = (event: string) => `auth.login.${provider}.${event}`;
 
       inFlight = true;
       handled.add(trimmed);
@@ -434,7 +439,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           extractAuthParam(parsed, hashParams, "error") ??
           null;
 
-        postNativeAuthTelemetry("auth.login.github.callback_received", "info", null, {
+        postNativeAuthTelemetry(kind("callback_received"), "info", null, {
           hasCode: Boolean(code),
           hasAccessToken: Boolean(accessToken),
           hasRefreshToken: Boolean(refreshToken),
@@ -442,7 +447,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         });
 
         if (oauthError) {
-          await failNativeAuthAttempt("auth.login.github.callback_error", "warning", oauthError, {
+          await failNativeAuthAttempt(kind("callback_error"), "warning", oauthError, {
             phase: "callback",
           });
           return;
@@ -454,7 +459,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             result = await supabase.auth.exchangeCodeForSession(code);
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            await failNativeAuthAttempt("auth.login.github.exchange_failed", "error", message, {
+            await failNativeAuthAttempt(kind("exchange_failed"), "error", message, {
               phase: "exchange_code_for_session",
               thrown: true,
             });
@@ -462,7 +467,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           }
           if (result.error) {
             await failNativeAuthAttempt(
-              "auth.login.github.exchange_failed",
+              kind("exchange_failed"),
               "error",
               describeExchangeError(result.error.message),
               {
@@ -488,14 +493,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             });
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            await failNativeAuthAttempt("auth.login.github.session_failed", "error", message, {
+            await failNativeAuthAttempt(kind("session_failed"), "error", message, {
               phase: "set_session",
               thrown: true,
             });
             return;
           }
           if (result.error) {
-            await failNativeAuthAttempt("auth.login.github.session_failed", "error", result.error.message, {
+            await failNativeAuthAttempt(kind("session_failed"), "error", result.error.message, {
               phase: "set_session",
             });
             return;
@@ -504,13 +509,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           return;
         }
 
-        const nextMessage = "GitHub sign-in returned to the app without completing. Try again.";
-        await failNativeAuthAttempt("auth.login.github.callback_incomplete", "warning", nextMessage, {
+        const nextMessage = `${NATIVE_AUTH_PROVIDER_LABELS[provider]} sign-in returned to the app without completing. Try again.`;
+        await failNativeAuthAttempt(kind("callback_incomplete"), "warning", nextMessage, {
           phase: "callback",
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        await failNativeAuthAttempt("auth.login.github.callback_handler_failed", "error", message, {
+        await failNativeAuthAttempt(kind("callback_handler_failed"), "error", message, {
           phase: "callback_handler",
         });
       } finally {

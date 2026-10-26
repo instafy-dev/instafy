@@ -10,6 +10,10 @@ const supabaseMock = vi.hoisted(() => ({
   exchangeCodeForSession: vi.fn(),
 }));
 
+const telemetry = vi.hoisted(() => ({
+  post: vi.fn<(event: { kind: string; metadata?: Record<string, unknown> | null }) => Promise<void>>(async () => undefined),
+}));
+
 const platform = vi.hoisted(() => ({
   native: false,
   desktop: false,
@@ -52,7 +56,7 @@ vi.mock("@capacitor/browser", () => ({
   },
 }));
 vi.mock("../../../services/runtimeController/authTelemetry", () => ({
-  postAuthTelemetryEvent: vi.fn(async () => undefined),
+  postAuthTelemetryEvent: telemetry.post,
 }));
 
 import { useNativeGithubAuth } from "../useNativeGithubAuth";
@@ -86,6 +90,7 @@ describe("useNativeGithubAuth pending status", () => {
     platform.desktopListener = null;
     platform.openDesktopExternalUrl.mockClear();
     platform.browserOpen.mockClear();
+    telemetry.post.mockClear();
     supabaseMock.signInWithOAuth.mockReset();
     supabaseMock.signInWithOAuth.mockResolvedValue({ data: { url: "https://auth.example/authorize" }, error: null });
     supabaseMock.exchangeCodeForSession.mockReset();
@@ -103,6 +108,7 @@ describe("useNativeGithubAuth pending status", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
+    delete (window as { Capacitor?: unknown }).Capacitor;
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
@@ -128,6 +134,62 @@ describe("useNativeGithubAuth pending status", () => {
     expect(platform.browserOpen).toHaveBeenCalledWith({ url: "https://auth.example/authorize" });
     expect(setPendingProvider.mock.calls).toEqual([["github"], [null]]);
     expect(setAwaitingBrowser.mock.calls).toEqual([[null]]);
+  });
+
+  it("opens Google in the native custom tab with the app's deep-link callback", async () => {
+    platform.native = true;
+    await mount();
+
+    await act(async () => handlers?.handleGoogleLogin());
+
+    expect(supabaseMock.signInWithOAuth).toHaveBeenCalledWith({
+      provider: "google",
+      options: {
+        redirectTo: "instafy://auth",
+        queryParams: { apikey: "anon-key", prompt: "select_account" },
+        skipBrowserRedirect: true,
+      },
+    });
+    expect(platform.browserOpen).toHaveBeenCalledWith({ url: "https://auth.example/authorize" });
+    expect(setPendingProvider.mock.calls).toEqual([["google"], [null]]);
+    expect(telemetry.post).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "auth.login.google.started",
+        metadata: expect.objectContaining({ provider: "google", platform: "ios" }),
+      }),
+    );
+  });
+
+  it("names Google, in its message and telemetry, when a native Google callback comes back incomplete", async () => {
+    platform.native = true;
+    let appUrlOpen: ((event?: { url?: string | null }) => void) | null = null;
+    (window as { Capacitor?: unknown }).Capacitor = {
+      Plugins: {
+        App: {
+          addListener: (eventName: string, listener: (event?: { url?: string | null }) => void) => {
+            if (eventName === "appUrlOpen") appUrlOpen = listener;
+            return { remove: () => undefined };
+          },
+          getLaunchUrl: async () => null,
+        },
+        InstafyAuthBridge: {
+          addListener: () => ({ remove: () => undefined }),
+          consumePendingUrl: async () => null,
+        },
+      },
+    };
+    await mount();
+    await act(async () => handlers?.handleGoogleLogin());
+    expect(appUrlOpen).not.toBeNull();
+
+    await act(async () => appUrlOpen?.({ url: "instafy://auth" }));
+
+    expect(setError).toHaveBeenLastCalledWith("Google sign-in returned to the app without completing. Try again.");
+    expect(telemetry.post.mock.calls.map(([event]) => event.kind)).toEqual([
+      "auth.login.google.started",
+      "auth.login.google.callback_received",
+      "auth.login.google.callback_incomplete",
+    ]);
   });
 
   it("clears the pending state when the native bridge reports a failed sign-in", async () => {
