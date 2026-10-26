@@ -206,6 +206,8 @@ test("build signs and verifies but never publishes; publication is one upload th
   const all = jobs();
   const build = all.get("build");
   assert.doesNotMatch(build, /altool|gh release|asc\.mjs reconcile|stage-asc-key|create-release\.sh|wrangler/u);
+  // LoginPage offers Google only when this is "1" at build time; the hosted web defaults it the same way.
+  assert.ok(build.match(/^ {4}env:\n((?: {6}.+\n)+)/mu)[1].includes("      VITE_INSTAFY_ENABLE_GOOGLE_AUTH: ${{ vars.VITE_INSTAFY_ENABLE_GOOGLE_AUTH || '1' }}\n"));
   assertOrdered(build, [
     "asc.mjs gate",
     "verify-trust-anchor.mjs key",

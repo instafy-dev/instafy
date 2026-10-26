@@ -228,6 +228,8 @@ test("build observes Play before building, verifies the signed AAB and publishes
     "VITE_OTA_CHANNEL: internal",
     "CAPACITOR_LIVE_UPDATE_DEFAULT_CHANNEL: internal",
     "VITE_BUILD_GIT_SHA: ${{ needs.authorize.outputs.source_sha }}",
+    // LoginPage offers Google only when this is "1" at build time; the hosted web defaults it the same way.
+    "VITE_INSTAFY_ENABLE_GOOGLE_AUTH: ${{ vars.VITE_INSTAFY_ENABLE_GOOGLE_AUTH || '1' }}",
     "GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8",
   ]) {
     assert.ok(build.includes(constant), constant);

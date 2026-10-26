@@ -517,3 +517,61 @@ test("the arm64 lane is a separate, hosted, exact-commit publisher bound to the 
   assert.match(assemble, /name: runtime-agent-multiarch-manifest\n[\s\S]*retention-days: 90/u);
   assert.match(assemble, /kind: "runtime-agent-multiarch"/u);
 });
+
+// LoginPage renders "Continue with Google" only when VITE_INSTAFY_ENABLE_GOOGLE_AUTH is "1" at
+// build time, so a public build that omits the flag ships a sign-in screen without Google. The
+// mobile lanes did exactly that while the hosted web had it. Every public build of the shipped web
+// bundle sets it the way the hosted web does: the hosted web itself, the OTA web layer every
+// installed app adopts, and the web layer embedded in the TestFlight and Play shells.
+const GOOGLE_AUTH_FLAG = "VITE_INSTAFY_ENABLE_GOOGLE_AUTH";
+const GOOGLE_AUTH_ENV_LINE = `      ${GOOGLE_AUTH_FLAG}: \${{ vars.${GOOGLE_AUTH_FLAG} || '1' }}`;
+const SHIPPED_WEB_BUNDLE_BUILDS = [
+  { workflow: "web-release.yml", job: "build", command: "node scripts/release/web/build-hosted-web.mjs" },
+  { workflow: "mobile-ota-release.yml", job: "web", command: "pnpm --filter @instafy/frontend build" },
+  { workflow: "ios-release.yml", job: "build", command: "pnpm --filter @instafy/frontend cap:sync" },
+  { workflow: "android-release.yml", job: "build", command: "pnpm --filter @instafy/frontend run cap:sync" },
+];
+const FRONTEND_BUILD_COMMAND =
+  /pnpm --filter @instafy\/frontend (?:run )?(?:build|cap:sync)\b|build-hosted-web\.mjs|\bvite build\b/u;
+
+function workflowJobs(source) {
+  const start = source.indexOf("\njobs:\n");
+  assert.notEqual(start, -1, "workflow has a jobs map");
+  const body = source.slice(start + "\njobs:\n".length);
+  const headers = [...body.matchAll(/^ {2}([A-Za-z_][A-Za-z0-9_-]*):\n/gmu)];
+  return new Map(headers.map((match, index) => [
+    match[1],
+    body.slice(match.index, index + 1 < headers.length ? headers[index + 1].index : body.length),
+  ]));
+}
+
+test("every shipped web bundle build compiles Google sign-in exactly like the hosted web", () => {
+  assert.match(
+    fs.readFileSync(path.join(repositoryRoot, "packages/frontend/src/screens/LoginPage.tsx"), "utf8"),
+    /\(import\.meta\.env\.VITE_INSTAFY_ENABLE_GOOGLE_AUTH \?\? ""\)\.trim\(\) === "1"/u,
+    "LoginPage must still gate Google on this exact build flag",
+  );
+  for (const { workflow, job, command } of SHIPPED_WEB_BUNDLE_BUILDS) {
+    const source = readWorkflow(workflow);
+    const text = workflowJobs(source).get(job);
+    assert.ok(text, `${workflow}: missing job ${job}`);
+    assert.ok(text.includes(command), `${workflow}/${job}: the frontend build moved out of this job`);
+    // Job-level env reaches every step, including the one that runs Vite.
+    const env = text.match(/^ {4}env:\n((?: {6}.*\n)+)/mu);
+    assert.ok(env, `${workflow}/${job}: missing job-level env`);
+    assert.ok(env[1].split("\n").includes(GOOGLE_AUTH_ENV_LINE), `${workflow}/${job}: ${GOOGLE_AUTH_FLAG} must default to '1' in the job env`);
+    // Nothing else (a step env, a GITHUB_ENV write, another job) may assign it.
+    const assignments = source.split("\n").filter((line) => new RegExp(`\\b${GOOGLE_AUTH_FLAG}\\s*[:=]`, "u").test(line));
+    assert.deepEqual(assignments, [GOOGLE_AUTH_ENV_LINE], `${workflow}: ${GOOGLE_AUTH_FLAG} is assigned exactly once`);
+  }
+
+  // A new public lane that builds the frontend for a real Supabase project ships a web bundle too,
+  // so it must be added above rather than silently building without the flag.
+  const discovered = [];
+  for (const workflow of fs.readdirSync(workflowRoot).filter((name) => /\.ya?ml$/u.test(name)).sort()) {
+    for (const [job, text] of workflowJobs(readWorkflow(workflow))) {
+      if (FRONTEND_BUILD_COMMAND.test(text) && text.includes("VITE_SUPABASE_URL")) discovered.push(`${workflow}/${job}`);
+    }
+  }
+  assert.deepEqual(discovered, SHIPPED_WEB_BUNDLE_BUILDS.map(({ workflow, job }) => `${workflow}/${job}`).sort());
+});

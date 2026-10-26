@@ -222,6 +222,8 @@ test("web, sign and publish keep the exact-source, signing and publication order
     "actions/upload-artifact@",
   ]);
   assert.match(all.get("web"), /VITE_OTA_CHANNEL: internal/u);
+  // LoginPage offers Google only when this is "1" at build time; the hosted web defaults it the same way.
+  assert.ok(all.get("web").includes("\n      VITE_INSTAFY_ENABLE_GOOGLE_AUTH: ${{ vars.VITE_INSTAFY_ENABLE_GOOGLE_AUTH || '1' }}\n"));
   assert.match(all.get("web"), /VITE_BUILD_GIT_SHA: \$\{\{ needs\.authorize\.outputs\.source_sha \}\}/u);
   assertOrdered(all.get("sign"), [
     "prove-web-layer.sh packages/frontend/dist",
