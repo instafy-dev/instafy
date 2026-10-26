@@ -129,7 +129,7 @@ export function PersonalBrowserTabRow({
         const byOcto = tab.openedBy === "agent";
         return (
           <div
-            key={tab.tabId}
+            key={tab.id}
             className={`flex min-w-0 max-w-[14rem] items-center rounded-md ${tab.active ? "bg-slate-200 dark:bg-slate-800" : ""}`}
             data-testid="personal-browser-tab"
             data-active={tab.active ? "true" : "false"}
@@ -143,7 +143,7 @@ export function PersonalBrowserTabRow({
               aria-label={byOcto ? `${label} (opened by Octo)` : label}
               title={locked && !tab.active ? "Pause Octo to switch tabs" : tab.url}
               isDisabled={locked && !tab.active}
-              onPress={() => onSelect(tab.tabId)}
+              onPress={() => onSelect(tab.id)}
             >
               {byOcto ? (
                 <span className="shrink-0 rounded bg-violet-100 px-1 text-[10px] font-medium text-violet-700 dark:bg-violet-900/50 dark:text-violet-200">
@@ -158,7 +158,7 @@ export function PersonalBrowserTabRow({
                 size="sm"
                 variant="ghost"
                 isDisabled={locked}
-                onPress={() => onClose(tab.tabId)}
+                onPress={() => onClose(tab.id)}
               >
                 <Xmark className="h-3 w-3" aria-hidden="true" />
               </IconButton>

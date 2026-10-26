@@ -34,7 +34,7 @@ type PersonalBrowserStatus = {
   ownerId?: string;
   projectId?: string;
   url: string;
-  tabs?: Array<{ tabId: string; openedBy: "person" | "agent"; active: boolean; url: string }>;
+  tabs?: Array<{ id: string; openedBy: "person" | "agent"; active: boolean; url: string }>;
   activeTabId?: string;
   maxAgentTabs?: number;
 };
@@ -757,7 +757,7 @@ test.describe("Electron Personal Browser", () => {
     }, { projectId: PROJECT_ID, profileUserId: PROFILE_USER_ID, ownerId, targetUrl });
 
     expect(result.opened.maxAgentTabs).toBe(3);
-    expect(result.opened.tabs).toEqual([{ tabId: result.opened.activeTabId, openedBy: "person", active: true, url: targetUrl, title: "Personal Browser fixture" }]);
+    expect(result.opened.tabs).toEqual([{ id: result.opened.activeTabId, openedBy: "person", active: true, url: targetUrl, title: "Personal Browser fixture" }]);
     expect(result.shownWhilePaused.status?.activeTabId).toBe(result.opened.activeTabId);
     expect(result.closeOwnTab.error).toContain("agent opened");
     expect(result.shownWhileResumed.error).toContain("Pause");

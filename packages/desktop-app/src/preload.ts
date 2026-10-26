@@ -77,7 +77,7 @@ export type PersonalBrowserStatus = {
   takeoverRequestId?: string;
   sharing?: boolean;
   /** Every open tab; tabs the agent opened carry openedBy "agent". */
-  tabs?: Array<{ tabId: string; openedBy: "person" | "agent"; active: boolean; url: string; title?: string }>;
+  tabs?: Array<{ id: string; openedBy: "person" | "agent"; active: boolean; url: string; title?: string }>;
   activeTabId?: string;
   maxAgentTabs?: number;
   ownerId?: string;

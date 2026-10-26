@@ -351,7 +351,7 @@ type InstafyDesktopPersonalBrowserStatus = {
   sharing?: boolean;
   tabControlActive?: boolean;
   /** Every open tab. Tabs Octo opened carry openedBy "agent"; absent on older Desktops. */
-  tabs?: Array<{ tabId: string; openedBy: "person" | "agent"; active: boolean; url: string; title?: string }>;
+  tabs?: Array<{ id: string; openedBy: "person" | "agent"; active: boolean; url: string; title?: string }>;
   activeTabId?: string;
   maxAgentTabs?: number;
   ownerId?: string;

@@ -100,7 +100,7 @@ export type PersonalBrowserSentPage = SentPageView & {
  * has resumed control. Every tab is a visible page in the same profile.
  */
 export type PersonalBrowserTabStatus = {
-  tabId: string;
+  id: string;
   openedBy: "person" | "agent";
   active: boolean;
   url: string;
@@ -1041,7 +1041,7 @@ export class PersonalBrowserHost {
     const live = contents && !contents.isDestroyed() ? contents : null;
     const title = live?.getTitle().trim() || undefined;
     return {
-      tabId: tab.id,
+      id: tab.id,
       openedBy: tab.openedBy,
       active: tab === this.activeTab,
       url: live?.getURL() || "about:blank",
@@ -2793,9 +2793,10 @@ export class PersonalBrowserHost {
    * The tabs as the agent sees them. A tab's address and title show only
    * when its site is allowed in that tab, masked like a status address.
    */
-  private agentTabList(): Array<Omit<PersonalBrowserTabStatus, "url" | "title"> & { url: string; title?: string }> {
+  private agentTabList(): Array<{ tabId: string; openedBy: PersonalBrowserTab["openedBy"]; active: boolean; url: string; title?: string }> {
     return this.tabs.map((tab) => {
-      const { url, title, ...rest } = this.tabStatus(tab);
+      const { id, url, title, ...state } = this.tabStatus(tab);
+      const rest = { tabId: id, ...state };
       try {
         const origin = getPersonalBrowserOrigin(url);
         const allowed = origin !== null && this.agentControlEnabled &&

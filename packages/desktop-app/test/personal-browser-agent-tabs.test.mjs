@@ -408,5 +408,5 @@ test("closing the browser closes every tab and starts over with one person's tab
   await host.handleControlOperation("open_tab", { url: "https://docs.example.test/" });
   await host.close();
   assert.ok(views.every((view) => view.webContents.destroyed));
-  assert.deepEqual(plain(host.getStatus().tabs.map((tab) => [tab.tabId, tab.openedBy])), [["tab-1", "person"]]);
+  assert.deepEqual(plain(host.getStatus().tabs.map((tab) => [tab.id, tab.openedBy])), [["tab-1", "person"]]);
 });

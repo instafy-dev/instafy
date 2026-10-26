@@ -149,8 +149,8 @@ describe("PersonalBrowserSurface", () => {
     model.status = {
       ...model.status!,
       tabs: [
-        { tabId: "tab-1", openedBy: "person", active: false, url: "https://example.com/", title: "My page" },
-        { tabId: "tab-2", openedBy: "agent", active: true, url: "https://docs.example.com/guide", title: "Guide" },
+        { id: "tab-1", openedBy: "person", active: false, url: "https://example.com/", title: "My page" },
+        { id: "tab-2", openedBy: "agent", active: true, url: "https://docs.example.com/guide", title: "Guide" },
       ],
       activeTabId: "tab-2",
       maxAgentTabs: 3,
@@ -178,7 +178,7 @@ describe("PersonalBrowserSurface", () => {
 
   it("shows no tab row while only the person's tab is open", async () => {
     const model = createModel();
-    model.status = { ...model.status!, tabs: [{ tabId: "tab-1", openedBy: "person", active: true, url: "https://example.com/" }], activeTabId: "tab-1" };
+    model.status = { ...model.status!, tabs: [{ id: "tab-1", openedBy: "person", active: true, url: "https://example.com/" }], activeTabId: "tab-1" };
     window.instafyDesktop = { notify: vi.fn(), personalBrowserSetBounds: vi.fn(async () => model.status!) };
     await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
     expect(document.querySelector('[data-testid="personal-browser-tabs"]')).toBeNull();
