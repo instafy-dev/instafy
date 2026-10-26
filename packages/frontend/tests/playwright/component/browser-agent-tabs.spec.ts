@@ -6,7 +6,8 @@ test.use({ hasTouch: true });
 // The agent's tabs in both browsers: Shared (the workspace browser's tab
 // picker and Reading row) and Personal (the desktop surface over a stubbed
 // native host). Take over is one press and ends the agent's control of every
-// tab; afterwards no tab carries the agent's name.
+// tab; afterwards no tab carries the agent's control mark ("Octo · "), and a
+// tab the agent opened only says whose it is ("Octo's tab: ").
 for (const { width, dark } of [{ width: 390, dark: false }, { width: 390, dark: true }, { width: 1100, dark: false }]) {
   test(`agent tabs are badged, listed and taken over in one press at ${width}px in ${dark ? "dark" : "light"} mode`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width, height: 844 });
@@ -98,7 +99,7 @@ for (const { width, dark } of [{ width: 390, dark: false }, { width: 390, dark: 
     // One press, no confirmation: control is revoked and every badge is gone.
     await expect(page.getByRole("dialog")).toHaveCount(0);
     await expect(shared.getByTestId("browser-reading-row")).toHaveCount(0);
-    await expect(options).toHaveText(["My own page", "Parks and gardens | City of Example", "Timetable with a very long title that keeps going past the edge of a phone screen"]);
+    await expect(options).toHaveText(["My own page", "Parks and gardens | City of Example", "Octo's tab: Timetable with a very long title that keeps going past the edge of a phone screen"]);
     await expect(shared.getByRole("button", { name: "Let AI continue" })).toBeVisible();
 
     // Personal: the page the resumed turn reads, and the same one-press take-over (Pause).

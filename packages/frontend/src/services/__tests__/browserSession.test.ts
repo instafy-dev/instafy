@@ -19,6 +19,7 @@ import {
   fetchSharedBrowserHost,
   focusRuntimeBrowserSessionPage,
   isBrowserSessionUnavailableError,
+  keepRuntimeBrowserSessionPage,
   isSharedBrowserHostRefusedError,
   mapSharedBrowserHostPayload,
   readBrowserErrorCode,
@@ -50,6 +51,24 @@ afterEach(() => {
 });
 
 describe("mapRuntimeBrowserSessionPagesPayload", () => {
+  it("keeps the badge of Octo's tabs and whether a person kept one", () => {
+    const pages = mapRuntimeBrowserSessionPagesPayload({
+      pages: [
+        { id: "page-1", url: "https://example.com/", host: "example.com", label: "Example" },
+        { id: "tab-1", url: "https://docs.example/", host: "docs.example", label: "Docs", openedBy: "agent" },
+        { id: "tab-2", url: "https://maps.example/", host: "maps.example", label: "Map", openedBy: "agent", kept: true },
+        // "kept" means nothing on a tab that is not Octo's.
+        { id: "page-2", url: "https://other.example/", host: "other.example", label: "Other", kept: true },
+      ],
+    });
+    expect(pages.map((page) => [page.id, page.openedBy === "agent", page.kept ?? false])).toEqual([
+      ["page-1", false, false],
+      ["tab-1", true, false],
+      ["tab-2", true, true],
+      ["page-2", false, false],
+    ]);
+  });
+
   it("maps valid runtime browser pages and drops malformed entries", () => {
     expect(
       mapRuntimeBrowserSessionPagesPayload({
@@ -353,6 +372,43 @@ describe("runtime browser session page controls", () => {
         browserSessionId: "browser-surface-1",
       }),
     );
+  });
+
+  it("keeps one of Octo's tabs with browser control, and says when it is no longer Octo's", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ kept: true, pageId: "tab/1" }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      keepRuntimeBrowserSessionPage({
+        projectId: "project-1",
+        browserSessionId: "browser-surface-1",
+        pageId: " tab/1 ",
+      }),
+    ).resolves.toBe(true);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://origin.example.test/browser/pages/tab%2F1/keep",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(requestOriginAccessTokenMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scopes: ["browser.control"],
+        browserSessionId: "browser-surface-1",
+      }),
+    );
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("not found", { status: 404 })));
+    await expect(
+      keepRuntimeBrowserSessionPage({
+        projectId: "project-1",
+        browserSessionId: "browser-surface-1",
+        pageId: "tab-1",
+      }),
+    ).rejects.toThrow("no longer one of Octo's tabs");
+    await expect(
+      keepRuntimeBrowserSessionPage({ projectId: "project-1", browserSessionId: "browser-surface-1", pageId: " " }),
+    ).resolves.toBe(false);
   });
 
   it("uses browser view to read the browser action stream", async () => {

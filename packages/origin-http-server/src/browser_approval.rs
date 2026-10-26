@@ -222,6 +222,65 @@ struct FingerprintedApprovalRequest<'a> {
     expires_at_ms: u64,
 }
 
+/// The tabs Octo opened in the run holding the browser, written by the Shared
+/// Browser controller script (`shared-browser-approval.js`), and the ones a
+/// person kept open past the end of the run, written here. runtime-agent
+/// closes the rest when the run ends. Both sit in the run's approval
+/// directory, so they are cleared with it.
+const AGENT_TABS_FILE: &str = "tabs.json";
+const KEPT_AGENT_TABS_FILE: &str = "kept-tabs.json";
+const AGENT_TABS_MAX_BYTES: u64 = 8 * 1024;
+const KEPT_AGENT_TABS_MAX_BYTES: usize = 4 * 1024;
+/// The most tabs of its own Octo may have open in one run (runtime-agent's
+/// `MAX_AGENT_TABS`, the script's `MAX_AGENT_TABS`).
+const MAX_AGENT_TABS: usize = 3;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentTabsRecord {
+    version: u8,
+    owner_id: String,
+    run_id: String,
+    initiator_user_id: String,
+    browser_page_id: String,
+    current_tab_id: Option<String>,
+    tabs: Vec<AgentTabRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentTabRecord {
+    tab_id: String,
+    #[serde(rename = "approvedOrigins")]
+    _approved_origins: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct KeptAgentTabsRecord {
+    version: u8,
+    owner_id: String,
+    run_id: String,
+    initiator_user_id: String,
+    browser_page_id: String,
+    tab_ids: Vec<String>,
+}
+
+/// Octo's tabs in the run that holds the browser now: every viewer sees them
+/// with Octo's badge, and a person may keep one open past the run.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct AgentTabs {
+    pub(crate) tab_ids: Vec<String>,
+    pub(crate) kept: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct KeepAgentTabResponse {
+    kept: bool,
+    page_id: String,
+}
+
 /// The Shared Browser controller's run-scoped record of the document a
 /// credential step ran on (`shared-browser-approval.js`,
 /// `withholdNextDocument`).
@@ -256,6 +315,8 @@ pub(crate) struct BrowserApprovalBridge {
     marker_path: Arc<PathBuf>,
     approval_dir: Arc<PathBuf>,
     recent_decisions: Arc<Mutex<VecDeque<String>>>,
+    /// One keep at a time, so two presses never drop each other's tab.
+    kept_tabs: Arc<Mutex<()>>,
 }
 
 impl Default for BrowserApprovalBridge {
@@ -275,6 +336,7 @@ impl BrowserApprovalBridge {
             marker_path: Arc::new(marker_path),
             approval_dir: Arc::new(approval_dir),
             recent_decisions: Arc::new(Mutex::new(VecDeque::new())),
+            kept_tabs: Arc::new(Mutex::new(())),
         }
     }
 
@@ -515,6 +577,69 @@ impl BrowserApprovalBridge {
         Ok(Some(marker))
     }
 
+    /// Octo's tabs in the run that holds the browser, for the page list.
+    /// None while no run holds it, or when its records cannot be read safely:
+    /// a badge is never shown from a record this run cannot prove is its own.
+    pub(crate) async fn agent_tabs(&self) -> AgentTabs {
+        let AgentControlMarkerObservation::Active(marker) = self.read_agent_control().await else {
+            return AgentTabs::default();
+        };
+        let Ok(Some(dir)) = open_protected_directory(&self.approval_dir, true) else {
+            return AgentTabs::default();
+        };
+        read_agent_tabs(&dir, &marker).unwrap_or_default()
+    }
+
+    /// Keeps one of Octo's tabs open past the end of the run. It gives no
+    /// one any authority: the tab stays an ordinary visible tab, which no
+    /// later run can use.
+    async fn keep_agent_tab(&self, page_id: &str) -> Result<KeepAgentTabResponse, OriginError> {
+        validate_page_id(page_id)?;
+        let _keeping = self.kept_tabs.lock().await;
+        let marker = match self.read_agent_control().await {
+            AgentControlMarkerObservation::Active(marker) => marker,
+            AgentControlMarkerObservation::Inactive => {
+                return Err(OriginError::not_found(
+                    "Octo has no tabs open in a running turn",
+                ))
+            }
+            AgentControlMarkerObservation::Unavailable(error) => {
+                return Err(OriginError::unavailable(format!(
+                    "Shared Browser agent control is unavailable: {error}"
+                )))
+            }
+        };
+        let dir = self.open_required_approval_dir()?;
+        let tabs = read_agent_tabs(&dir, &marker).map_err(|error| {
+            OriginError::unavailable(format!("Octo's tabs could not be read: {error}"))
+        })?;
+        if !tabs.tab_ids.iter().any(|tab_id| tab_id == page_id) {
+            return Err(OriginError::not_found(
+                "this tab is not one Octo opened in the running turn",
+            ));
+        }
+        let mut kept = tabs.kept;
+        if !kept.iter().any(|tab_id| tab_id == page_id) {
+            kept.push(page_id.to_string());
+        }
+        kept.truncate(MAX_AGENT_TABS);
+        write_kept_agent_tabs(
+            &dir,
+            &KeptAgentTabsRecord {
+                version: 1,
+                owner_id: marker.owner_id,
+                run_id: marker.run_id,
+                initiator_user_id: marker.initiator_user_id,
+                browser_page_id: marker.browser_page_id,
+                tab_ids: kept,
+            },
+        )?;
+        Ok(KeepAgentTabResponse {
+            kept: true,
+            page_id: page_id.to_string(),
+        })
+    }
+
     /// What the agent's run recorded in `withhold-next.json`: a key change or
     /// "may show a secret" step ran on a document, so the next other document
     /// stays withheld until the agent's controller marks it. Read-only; the
@@ -592,6 +717,144 @@ pub(crate) async fn handle_approval_decision(
         .submit_decision(&claims, body)
         .await?;
     Ok(no_store_json(payload))
+}
+
+/// Keep tab: `POST /browser/pages/:page_id/keep` (browser.control).
+pub(crate) async fn handle_keep_agent_tab(
+    State(state): State<AppState>,
+    axum::extract::Path(page_id): axum::extract::Path<String>,
+) -> Result<Response, OriginError> {
+    let payload = state
+        .browser_collaboration
+        .approval_bridge()
+        .keep_agent_tab(page_id.trim())
+        .await?;
+    Ok(no_store_json(payload))
+}
+
+fn record_matches_marker(
+    owner_id: &str,
+    run_id: &str,
+    initiator_user_id: &str,
+    browser_page_id: &str,
+    marker: &AgentControlMarker,
+) -> bool {
+    owner_id == marker.owner_id
+        && run_id == marker.run_id
+        && initiator_user_id == marker.initiator_user_id
+        && browser_page_id == marker.browser_page_id
+}
+
+fn read_agent_tabs(dir: &Dir, marker: &AgentControlMarker) -> Result<AgentTabs, String> {
+    let Some(bytes) = read_protected_child(dir, OsStr::new(AGENT_TABS_FILE), AGENT_TABS_MAX_BYTES)?
+    else {
+        return Ok(AgentTabs::default());
+    };
+    let record: AgentTabsRecord =
+        serde_json::from_slice(&bytes).map_err(|_| "tabs.json is malformed".to_string())?;
+    if record.version != 1
+        || !record_matches_marker(
+            &record.owner_id,
+            &record.run_id,
+            &record.initiator_user_id,
+            &record.browser_page_id,
+            marker,
+        )
+        || record.tabs.len() > MAX_AGENT_TABS
+    {
+        return Err("tabs.json belongs to another run or is out of bounds".to_string());
+    }
+    let mut tab_ids = Vec::with_capacity(record.tabs.len());
+    for tab in record.tabs {
+        validate_page_id_string(&tab.tab_id)?;
+        if tab.tab_id == marker.browser_page_id || tab_ids.contains(&tab.tab_id) {
+            return Err("tabs.json repeats a tab".to_string());
+        }
+        tab_ids.push(tab.tab_id);
+    }
+    if record
+        .current_tab_id
+        .as_ref()
+        .is_some_and(|current| !tab_ids.contains(current))
+    {
+        return Err("tabs.json names a current tab it does not list".to_string());
+    }
+    let kept = match read_protected_child(
+        dir,
+        OsStr::new(KEPT_AGENT_TABS_FILE),
+        KEPT_AGENT_TABS_MAX_BYTES as u64,
+    )? {
+        None => Vec::new(),
+        Some(bytes) => {
+            let record: KeptAgentTabsRecord = serde_json::from_slice(&bytes)
+                .map_err(|_| "kept-tabs.json is malformed".to_string())?;
+            if record.version != 1
+                || !record_matches_marker(
+                    &record.owner_id,
+                    &record.run_id,
+                    &record.initiator_user_id,
+                    &record.browser_page_id,
+                    marker,
+                )
+                || record.tab_ids.len() > MAX_AGENT_TABS
+            {
+                return Err("kept-tabs.json belongs to another run or is out of bounds".to_string());
+            }
+            // Only tabs this run still lists count as kept.
+            record
+                .tab_ids
+                .into_iter()
+                .filter(|tab_id| tab_ids.contains(tab_id))
+                .collect()
+        }
+    };
+    Ok(AgentTabs { tab_ids, kept })
+}
+
+fn write_kept_agent_tabs(dir: &Dir, record: &KeptAgentTabsRecord) -> Result<(), OriginError> {
+    let mut bytes = serde_json::to_vec(record).map_err(|error| {
+        OriginError::internal(format!("failed to serialize kept tabs: {error}"))
+    })?;
+    bytes.push(b'\n');
+    if bytes.len() > KEPT_AGENT_TABS_MAX_BYTES {
+        return Err(OriginError::internal(
+            "kept tabs exceeded their fixed bound",
+        ));
+    }
+    // The approval directory's cleanup accepts this prefix, so a write cut
+    // short is cleared with the rest of the run.
+    let temporary_name = OsString::from(format!(".instafy-approval-origin-{}", Uuid::new_v4()));
+    let write_result = (|| -> Result<(), OriginError> {
+        let mut temporary = dir
+            .open_with(&temporary_name, &create_new_private_options())
+            .map_err(|error| {
+                OriginError::unavailable(format!("failed to create kept tabs: {error}"))
+            })?;
+        #[cfg(unix)]
+        temporary
+            .set_permissions(cap_std::fs::Permissions::from_mode(APPROVAL_FILE_MODE))
+            .map_err(|error| {
+                OriginError::unavailable(format!("failed to protect kept tabs: {error}"))
+            })?;
+        temporary.write_all(&bytes).map_err(|error| {
+            OriginError::unavailable(format!("failed to write kept tabs: {error}"))
+        })?;
+        temporary.sync_all().map_err(|error| {
+            OriginError::unavailable(format!("failed to sync kept tabs: {error}"))
+        })?;
+        drop(temporary);
+        dir.rename(&temporary_name, dir, OsStr::new(KEPT_AGENT_TABS_FILE))
+            .map_err(|error| {
+                OriginError::unavailable(format!("failed to publish kept tabs: {error}"))
+            })?;
+        sync_dir(dir).map_err(|error| {
+            OriginError::unavailable(format!("failed to sync the approval directory: {error}"))
+        })
+    })();
+    if write_result.is_err() {
+        let _ = dir.remove_file(&temporary_name);
+    }
+    write_result
 }
 
 pub(crate) async fn read_agent_control_marker(path: &Path) -> AgentControlMarkerObservation {

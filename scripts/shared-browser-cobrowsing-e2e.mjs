@@ -847,8 +847,12 @@ export async function runSharedBrowserCobrowsingFixture() {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   if (process.argv.length !== 2) throw new Error("Usage: node scripts/shared-browser-cobrowsing-e2e.mjs (no filters or skips)");
-  runSharedBrowserCobrowsingFixture().then((result) => {
+  runSharedBrowserCobrowsingFixture().then(async (result) => {
     console.log(JSON.stringify(result, null, 2));
+    // The same CI step proves Octo's own tabs against the same kind of
+    // fixture (scripts/shared-browser-agent-tabs-e2e.mjs).
+    const { runSharedBrowserAgentTabsFixture } = await import("./shared-browser-agent-tabs-e2e.mjs");
+    console.log(JSON.stringify(await runSharedBrowserAgentTabsFixture(), null, 2));
   }).catch((error) => {
     fs.mkdirSync(resultDirectory, { recursive: true });
     fs.writeFileSync(path.join(resultDirectory, "result.json"), `${JSON.stringify({ status: "failed", fixtureVersion: 1 })}\n`);

@@ -1,0 +1,4 @@
+---
+---
+
+In the Shared Browser, Octo can open up to three tabs of its own next to the page the person chose (`open_tab`, `list_tabs`, `select_tab`, `close_tab`; `snapshot` and `navigate` take a `tabId`), to read related pages side by side. Every viewer sees them, marked "Octo's tab" in the tab list; a site approved in one of them holds in that tab only, and prompts name the tab. Octo's tabs are for reading: submissions, commit buttons, purchases, messages, downloads, activation keys and steps that may show a secret are refused there, and a site on the web-research skill's link-only list is never opened, not even through a redirect, and is not read if a page moves there by itself. A step that opens another window has it stopped and closed. Pause or taking over ends Octo's control of every tab. When the turn ends its tabs close, apart from those a person kept with **Keep tab** in the browser toolbar. No package changes.

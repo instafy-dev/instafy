@@ -13,6 +13,8 @@ export type BrowserSessionPage = {
   canGoForward?: boolean;
   /** Who opened the tab, when the browser says so; absent is the person's. */
   openedBy?: BrowserTabOpener;
+  /** One of Octo's tabs a person kept open past the end of the turn. */
+  kept?: boolean;
 };
 
 export type BrowserSessionPageTarget = Pick<BrowserSessionPage, "id" | "url" | "host" | "label">;

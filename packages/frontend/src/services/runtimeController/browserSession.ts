@@ -14,6 +14,8 @@ export type RuntimeBrowserSessionPage = {
    * are kept; anything else is dropped, and an absent value is the person's.
    */
   openedBy?: BrowserTabOpener;
+  /** One of Octo's tabs a person kept open past the end of the turn. */
+  kept?: boolean;
 };
 
 /** Who opened a browser tab: the agent (Octo) or the person. */
@@ -255,7 +257,7 @@ export function mapRuntimeBrowserSessionPagesPayload(payload: unknown): RuntimeB
     : [];
 
   return pages
-    .map((entry) => {
+    .map((entry): RuntimeBrowserSessionPage | null => {
       if (!entry || typeof entry !== "object") {
         return null;
       }
@@ -285,6 +287,7 @@ export function mapRuntimeBrowserSessionPagesPayload(payload: unknown): RuntimeB
         canGoBack: record.canGoBack === true,
         canGoForward: record.canGoForward === true,
         ...(openedBy ? { openedBy } : {}),
+        ...(openedBy === "agent" && record.kept === true ? { kept: true } : {}),
       } satisfies RuntimeBrowserSessionPage;
     })
     .filter((page): page is RuntimeBrowserSessionPage => Boolean(page));
@@ -976,6 +979,62 @@ export async function focusRuntimeBrowserSessionPage(params: {
   if (!response.ok) {
     const text = await response.text().catch(() => "");
     throw new Error(`browser page focus failed (${response.status}): ${text}`);
+  }
+
+  return true;
+}
+
+/**
+ * Keep tab: one of Octo's tabs stays open when its turn ends, as an ordinary
+ * tab. It gives nobody any access.
+ */
+export async function keepRuntimeBrowserSessionPage(params: {
+  projectId: string;
+  browserSessionId: string;
+  pageId: string;
+  preferRuntimeId?: string | null;
+  accessToken?: string | null;
+}): Promise<boolean> {
+  const pageId = params.pageId.trim();
+  if (!pageId) {
+    return false;
+  }
+
+  const token = await requestOriginAccessToken({
+    projectId: params.projectId,
+    protocol: "http",
+    scopes: ["browser.control"],
+    preferRuntime: params.preferRuntimeId ?? null,
+    accessToken: params.accessToken ?? null,
+    browserSessionId: params.browserSessionId,
+  });
+
+  if (!token) {
+    return false;
+  }
+
+  const response = await fetch(
+    buildOriginEndpointUrl(token.endpoint, `/browser/pages/${encodeURIComponent(pageId)}/keep`),
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token.token}`,
+      },
+    },
+  );
+
+  // The origin answers 404 once the turn has ended or the tab is not Octo's.
+  if (response.status === 404) {
+    throw new Error("This tab is no longer one of Octo's tabs, so there is nothing to keep.");
+  }
+
+  if (browserSessionStatusIndicatesUnavailable(response.status)) {
+    return false;
+  }
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`Keeping the tab failed (${response.status}): ${text}`);
   }
 
   return true;

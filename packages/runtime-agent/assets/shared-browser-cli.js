@@ -6,6 +6,9 @@ const crypto = require("crypto");
 const redaction = globalThis.__instafyBrowserRedaction;
 const actionPolicy = globalThis.__instafyBrowserActionPolicy;
 const pageCapture = globalThis.__instafyBrowserPageCapture;
+// The web-research skill's link-only list, embedded by the runtime agent ahead
+// of this script. Octo's own tabs never open a site on it.
+const LINK_ONLY_SITES = linkOnlySitesFrom(globalThis.__instafyLinkOnlySites);
 if (
   !redaction || typeof redaction.redactPageObservation !== "function" ||
   !actionPolicy || typeof actionPolicy.classifyStep !== "function" ||
@@ -118,6 +121,79 @@ class BrowserUnavailableError extends Error {}
 
 // The run's page as resolveExpectedPage last found it.
 let resolvedPage = null;
+// The page this command acts on: the page the person chose for the run
+// (EXPECTED_BROWSER_PAGE_ID), or one of the tabs Octo opened in this run and
+// selected (tabs.json). Snapshots, targets, approvals and the action feed are
+// bound to it.
+let activePageId = EXPECTED_BROWSER_PAGE_ID;
+
+function inAgentTab() {
+  return activePageId !== EXPECTED_BROWSER_PAGE_ID;
+}
+
+// Results from one of Octo's own tabs name it.
+function tabField() {
+  return inAgentTab() ? { tabId: activePageId } : {};
+}
+
+// Each site's host patterns: "example.com" covers that host and its
+// subdomains; "example.*" covers the label followed by one or two short
+// public-suffix labels (example.de, www.example.co.uk). Null when the list is
+// missing or malformed, which keeps Octo's tabs from opening anything.
+function linkOnlySitesFrom(data) {
+  if (!data || data.schema !== "instafy.link-only-sites@1" || !Array.isArray(data.sites)) {
+    return null;
+  }
+  const label = "[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?";
+  const sites = [];
+  for (const site of data.sites) {
+    const patterns = Array.isArray(site?.match) ? site.match : Array.isArray(site?.domains) ? site.domains : [];
+    const matchers = [];
+    for (const raw of patterns) {
+      const pattern = String(raw || "").trim().toLowerCase().replace(/\.$/, "").replace(/^\*\./, "");
+      if (!new RegExp(`^${label}(?:\\.${label})*(?:\\.\\*)?$`).test(pattern)) continue;
+      // Escape every regex metacharacter, not only dots: the check above
+      // already admits only labels and dots, this keeps it safe on its own.
+      const escaped = pattern.replace(/\.\*$/, "").replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+      matchers.push(pattern.endsWith(".*")
+        ? new RegExp(`(?:^|\\.)${escaped}\\.[a-z]{2,3}(?:\\.[a-z]{2,3})?$`)
+        : new RegExp(`(?:^|\\.)${escaped}$`));
+    }
+    if (matchers.length) {
+      sites.push({ name: String(site.name || patterns[0]).slice(0, 80), matchers });
+    }
+  }
+  return sites.length ? sites : null;
+}
+
+// The link-only site an address is on, or null.
+function linkOnlySiteOf(rawUrl) {
+  let host;
+  try {
+    host = new URL(String(rawUrl)).hostname.toLowerCase().replace(/\.$/, "");
+  } catch (_) {
+    return null;
+  }
+  if (!host) return null;
+  for (const site of LINK_ONLY_SITES || []) {
+    if (site.matchers.some((matcher) => matcher.test(host))) return site.name;
+  }
+  return null;
+}
+
+// Octo's own tabs open only sites the skill does not keep link-only, and only
+// while that list is known.
+function assertAgentTabMayOpen(rawUrl) {
+  if (LINK_ONLY_SITES === null) {
+    throw new Error("The link-only site list is unavailable, so Octo's own tabs open nothing. Nothing was opened.");
+  }
+  const site = linkOnlySiteOf(rawUrl);
+  if (site) {
+    throw new Error(
+      `${site} is link-only: Octo never opens it in its own tabs. Nothing was opened. Give the person the plain link; they may open it themselves.`,
+    );
+  }
+}
 
 function validatePlaywrightModulePath(modulePath, trustedRootPath) {
   const configuredModule = String(modulePath || "").trim();
@@ -170,6 +246,71 @@ function validateBrowserPageId(raw) {
   return pageId;
 }
 
+// A page in one of Octo's tabs that reached a link-only site by itself (a
+// timed redirect between steps) is neither read nor used; Octo may only take
+// the tab elsewhere or close it.
+function refuseLinkOnlyAgentTab(page) {
+  if (!inAgentTab()) {
+    return;
+  }
+  const site = LINK_ONLY_SITES === null ? "An unknown site" : linkOnlySiteOf(page.url());
+  if (site) {
+    throw new Error(
+      `Octo's tab is now on ${site}, which is link-only, so nothing there was read or done. Navigate the tab elsewhere or close it with close_tab, and give the person the plain link.`,
+    );
+  }
+}
+
+// Site and step approvals for the page this command acts on. In one of
+// Octo's own tabs the prompt names the tab, a site approval holds for that
+// tab only, and a step approval is bound to the tab as well as to its target.
+function agentTabNumber() {
+  const index = approvalProtocol.readTabs().tabs.findIndex((tab) => tab.tabId === activePageId);
+  return index + 1;
+}
+
+function tabLabel(label) {
+  return inAgentTab() ? `Octo's tab ${agentTabNumber()}: ${label}` : label;
+}
+
+function siteApproved(rawUrl) {
+  return approvalProtocol.isOriginApproved(rawUrl, inAgentTab() ? activePageId : null);
+}
+
+async function ensureSiteApproved(rawUrl, label) {
+  return await approvalProtocol.ensureOriginApproved(
+    rawUrl,
+    tabLabel(label),
+    inAgentTab() ? activePageId : null,
+  );
+}
+
+// Octo's own tabs are for reading: they take only the steps routine browsing
+// takes without asking (reading, plain links, menus, ordinary clicks, typing
+// that does not submit). A submission, a purchase, a message, a download, a
+// commit button, an activation key or a risky address is refused there in
+// every mode, before any prompt.
+function refuseUnlessReadingStep(readingStep) {
+  if (inAgentTab() && !readingStep) {
+    throw new Error(
+      "Octo's own tabs are for reading, so this step was not performed there. Leave it to the person, or take it on the page they chose when they asked for it.",
+    );
+  }
+}
+
+async function allowStepOnce(details, options) {
+  if (!inAgentTab()) {
+    return await approvalProtocol.allowOnce(details, options);
+  }
+  return await approvalProtocol.allowOnce({
+    ...details,
+    label: tabLabel(details.label),
+    payloadFingerprint: approvalProtocol.sha256(
+      JSON.stringify({ tabId: activePageId, payload: details.payloadFingerprint }),
+    ),
+  }, options);
+}
+
 function strictlyMasked(value) {
   return redaction.redactText(String(value || ""), { strict: true }).text;
 }
@@ -217,7 +358,7 @@ function emitAction(event) {
         y: event.y ?? null,
         viewportW: event.viewportW ?? null,
         viewportH: event.viewportH ?? null,
-        pageId: EXPECTED_BROWSER_PAGE_ID,
+        pageId: activePageId,
         ...(event.type === "human_input" ? { humanInputRequest: event.humanInputRequest } : {}),
       })}\n`,
     );
@@ -250,14 +391,29 @@ async function cdpTargetIdForPage(page) {
   }
 }
 
-async function resolveExpectedPage(browser) {
-  const pages = browser.contexts().flatMap((context) => context.pages());
-  for (const page of pages) {
+// Every page in the browser by its CDP target id.
+async function livePages(browser) {
+  const pages = new Map();
+  for (const page of browser.contexts().flatMap((context) => context.pages())) {
     const targetId = await cdpTargetIdForPage(page).catch(() => "");
-    if (targetId === EXPECTED_BROWSER_PAGE_ID) {
-      resolvedPage = page;
-      return page;
+    if (targetId && !pages.has(targetId)) {
+      pages.set(targetId, page);
     }
+  }
+  return pages;
+}
+
+async function resolveExpectedPage(browser) {
+  const page = (await livePages(browser)).get(activePageId);
+  if (page) {
+    resolvedPage = page;
+    return page;
+  }
+  if (inAgentTab()) {
+    // Not the browser going away: the person (or the page) closed the tab.
+    throw new Error(
+      "The tab Octo was using was closed, so nothing was done. Call list_tabs, then select_tab.",
+    );
   }
   throw new BrowserUnavailableError(
     `Shared Browser selected page ${EXPECTED_BROWSER_PAGE_ID} is unavailable; select a live browser tab and retry`,
@@ -1302,7 +1458,7 @@ function snapshotFingerprint(url, interactive) {
   }));
   return crypto
     .createHash("sha256")
-    .update(JSON.stringify({ ownerId, runId, pageId: EXPECTED_BROWSER_PAGE_ID, url, elements }))
+    .update(JSON.stringify({ ownerId, runId, pageId: activePageId, url, elements }))
     .digest("hex");
 }
 
@@ -1311,7 +1467,7 @@ function targetFingerprint(description) {
     .createHash("sha256")
     .update(
       JSON.stringify({
-        pageId: EXPECTED_BROWSER_PAGE_ID,
+        pageId: activePageId,
         tag: description.tag,
         role: description.role,
         idAttribute: description.idAttribute,
@@ -1415,6 +1571,12 @@ async function documentIdentity(page) {
 // however late it loaded. That document is marked and the record cleared.
 // An unknown document stays withheld and keeps the record.
 async function carriedWithholding(page) {
+  // Only the page the person chose runs credential steps (Octo's own tabs
+  // refuse them), so the record is that page's. Another tab neither uses nor
+  // clears it.
+  if (inAgentTab()) {
+    return false;
+  }
   const afterDocument = approvalProtocol.withholdNextDocumentAfter();
   if (afterDocument === null) {
     return false;
@@ -1532,6 +1694,7 @@ async function snapshot(page, { withhold = false } = {}) {
   return {
     snapshotId: snapshotFingerprint(rawUrl, interactive),
     browserPageId: EXPECTED_BROWSER_PAGE_ID,
+    ...tabField(),
     url: view.url,
     title: view.title,
     visibleText: view.text.slice(0, MAX_VISIBLE_TEXT_CHARS),
@@ -1575,6 +1738,7 @@ function blankPageResult(page, extra = {}) {
     ...extra,
     snapshotId: snapshotFingerprint(url, []),
     browserPageId: EXPECTED_BROWSER_PAGE_ID,
+    ...tabField(),
     blank: true,
     originApproved: false,
     redacted: false,
@@ -1592,14 +1756,14 @@ async function snapshotForResult(page, options = {}) {
   if (isBlankPage(page)) {
     return blankPageResult(page);
   }
-  if (!approvalProtocol.isOriginApproved(page.url())) {
-    return approvalProtocol.redactedPageResult();
+  if (!siteApproved(page.url())) {
+    return approvalProtocol.redactedPageResult(tabField());
   }
   return await snapshot(page, options);
 }
 
 async function emitNavigationResult(page) {
-  if (!approvalProtocol.isOriginApproved(page.url())) {
+  if (!siteApproved(page.url())) {
     emitAction({
       type: "nav_result",
       label: "Page changed to an unapproved origin",
@@ -1887,6 +2051,12 @@ function validateNavigationUrl(raw, pageOrigin = PATH_FORM_ORIGIN) {
   return url.toString();
 }
 
+function validateOptionalTabId(body) {
+  if (body.tabId !== undefined && !validTabId(body.tabId)) {
+    throw new Error("Shared Browser tabId must be one tab id from list_tabs");
+  }
+}
+
 function requireOnlyKeys(body, allowed) {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     throw new Error("Shared Browser request body must be an object");
@@ -1918,8 +2088,22 @@ function validateRequestBody(requestPath, body) {
       throw new Error("Human input requires one to eight unique indices from a fresh snapshot");
     }
   } else if (requestPath === "/v1/navigate") {
-    requireOnlyKeys(body, new Set(["url"]));
+    requireOnlyKeys(body, new Set(["url", "tabId"]));
     validateNavigationUrl(body.url);
+    validateOptionalTabId(body);
+  } else if (requestPath === "/v1/snapshot") {
+    requireOnlyKeys(body, new Set(["tabId"]));
+    if (!validTabId(body.tabId)) {
+      throw new Error("Shared Browser snapshot needs one tab id from list_tabs");
+    }
+  } else if (requestPath === "/v1/tabs/open") {
+    requireOnlyKeys(body, new Set(["url"]));
+    validateNavigationUrl(body.url, null);
+  } else if (requestPath === "/v1/tabs/select" || requestPath === "/v1/tabs/close") {
+    requireOnlyKeys(body, new Set(["tabId"]));
+    if (!validTabId(body.tabId)) {
+      throw new Error("Shared Browser tab commands need one tab id from list_tabs");
+    }
   } else if (requestPath === "/v1/click") {
     requireOnlyKeys(body, new Set(["index", "snapshotId"]));
     validateTarget(body);
@@ -1972,6 +2156,14 @@ async function withholdBeforeStep(page, classification) {
   if (!WITHHOLDING_CATEGORIES.has(classification.category)) {
     return false;
   }
+  if (inAgentTab()) {
+    // Octo's own tabs are for reading. A step that changes a key or may show
+    // a secret belongs on the page the person chose, where its page stays
+    // withheld across tabs and runs.
+    throw new Error(
+      "This step can change a key or show a secret, so Octo does not take it in its own tabs; it was not performed. Tell the person which step it is.",
+    );
+  }
   const documentId = await documentIdentity(page);
   if (!documentId || !(await withholdDocument(page))) {
     throw new Error(
@@ -1989,22 +2181,371 @@ async function snapshotAfterStep(page, withholding) {
   return await snapshotForResult(page, { withhold: withholding });
 }
 
+// Octo's tabs. Next to the page the person chose for the run, Octo may open
+// up to approvalProtocol.maxAgentTabs tabs of its own in the same, visible
+// browser: every viewer sees them, they carry Octo's badge, and the person can
+// take any of them over. Octo can use only those pages, never another tab the
+// person or a page opened. runtime-agent closes them when the run ends, apart
+// from the ones the person kept.
+//
+// Reads this run's tab record and drops tabs that are no longer open (the
+// person closed one). The tab a command acts on is the record's current tab.
+async function prepareTabs(browser) {
+  const pages = await livePages(browser);
+  let registry = approvalProtocol.readTabs();
+  const open = registry.tabs.filter((tab) => pages.has(tab.tabId));
+  let currentTabId = registry.currentTabId;
+  const lostCurrent = currentTabId !== null && !open.some((tab) => tab.tabId === currentTabId);
+  if (lostCurrent) {
+    currentTabId = null;
+  }
+  if (open.length !== registry.tabs.length || currentTabId !== registry.currentTabId) {
+    registry = approvalProtocol.writeTabs({ currentTabId, tabs: open });
+  }
+  activePageId = registry.currentTabId ?? EXPECTED_BROWSER_PAGE_ID;
+  return { pages, registry, lostCurrent };
+}
+
+function validTabId(raw) {
+  return typeof raw === "string" && raw.length > 0 && raw.length <= 256 && /^[A-Za-z0-9_-]+$/.test(raw);
+}
+
+const UNKNOWN_TAB_MESSAGE =
+  "Octo can use only the page the person chose for this run and the tabs Octo opened in it. Call list_tabs for their tab ids.";
+
+// Makes `tabId` the tab later commands act on and brings it to the front, so
+// viewers see the page Octo is working in.
+async function selectTab(browser, tabs, tabId) {
+  const isRunPage = tabId === EXPECTED_BROWSER_PAGE_ID;
+  if (!isRunPage && !tabs.registry.tabs.some((tab) => tab.tabId === tabId)) {
+    throw new Error(UNKNOWN_TAB_MESSAGE);
+  }
+  if (!tabs.pages.has(tabId)) {
+    throw new Error(UNKNOWN_TAB_MESSAGE);
+  }
+  tabs.registry = approvalProtocol.writeTabs({
+    currentTabId: isRunPage ? null : tabId,
+    tabs: tabs.registry.tabs,
+  });
+  tabs.lostCurrent = false;
+  activePageId = tabId;
+  const page = await resolveExpectedPage(browser);
+  await page.bringToFront();
+  return page;
+}
+
+// One line per tab Octo may use: its id, who opened it, whether it is the one
+// Octo acts on, and its address and title once its site is approved in it.
+async function describeTabs(tabs) {
+  const kept = approvalProtocol.keptTabIds();
+  const entries = [{ tabId: EXPECTED_BROWSER_PAGE_ID, openedBy: "person" }]
+    .concat(tabs.registry.tabs.map((tab) => ({ tabId: tab.tabId, openedBy: "octo" })));
+  const described = [];
+  for (const entry of entries) {
+    const page = tabs.pages.get(entry.tabId);
+    if (!page) continue;
+    const previous = activePageId;
+    activePageId = entry.tabId;
+    try {
+      const line = {
+        tabId: entry.tabId,
+        openedBy: entry.openedBy,
+        current: entry.tabId === previous,
+        ...(kept.has(entry.tabId) ? { keptByPerson: true } : {}),
+      };
+      const linkOnlySite = entry.openedBy === "octo" ? linkOnlySiteOf(page.url()) : null;
+      if (isBlankPage(page)) {
+        described.push({ ...line, blank: true, url: page.url() || "about:blank", title: "" });
+      } else if (linkOnlySite) {
+        described.push({ ...line, linkOnlySite, url: null, title: null });
+      } else if (!siteApproved(page.url())) {
+        described.push({ ...line, originApproved: false, url: null, title: null });
+      } else {
+        const title = await page.title().catch(() => "");
+        described.push({
+          ...line,
+          originApproved: true,
+          url: redaction.redactUrl(page.url()).text,
+          title: redaction.redactText(title, { credentialContext: redaction.hasCredentialWord(title) }).text,
+        });
+      }
+    } finally {
+      activePageId = previous;
+    }
+  }
+  return {
+    tabs: described,
+    agentTabLimit: approvalProtocol.maxAgentTabs,
+    agentTabsOpen: tabs.registry.tabs.length,
+  };
+}
+
+async function executeTabCommand(browser, method, requestPath, body, tabs) {
+  if (method === "GET" && requestPath === "/v1/tabs") {
+    return await describeTabs(tabs);
+  }
+
+  if (method === "POST" && requestPath === "/v1/tabs/select") {
+    await selectTab(browser, tabs, body.tabId);
+    return await describeTabs(tabs);
+  }
+
+  if (method === "POST" && requestPath === "/v1/tabs/close") {
+    const tabId = body.tabId;
+    if (!tabs.registry.tabs.some((tab) => tab.tabId === tabId)) {
+      throw new Error(
+        "Octo can close only the tabs it opened in this run. Call list_tabs for their tab ids.",
+      );
+    }
+    if (approvalProtocol.keptTabIds().has(tabId)) {
+      throw new Error("The person kept this tab open, so Octo leaves it open. It was not closed.");
+    }
+    const page = tabs.pages.get(tabId);
+    const remaining = tabs.registry.tabs.filter((tab) => tab.tabId !== tabId);
+    // The record forgets the tab first: a tab that fails to close stays an
+    // ordinary visible tab, never one Octo can still use.
+    tabs.registry = approvalProtocol.writeTabs({
+      currentTabId: tabs.registry.currentTabId === tabId ? null : tabs.registry.currentTabId,
+      tabs: remaining,
+    });
+    activePageId = tabs.registry.currentTabId ?? EXPECTED_BROWSER_PAGE_ID;
+    if (page) {
+      await page.close({ runBeforeUnload: false });
+      tabs.pages.delete(tabId);
+    }
+    return { closedTabId: tabId, ...(await describeTabs(tabs)) };
+  }
+
+  if (method === "POST" && requestPath === "/v1/tabs/open") {
+    if (tabs.registry.tabs.length >= approvalProtocol.maxAgentTabs) {
+      throw new Error(
+        `Octo already has ${approvalProtocol.maxAgentTabs} tabs open, so no tab was opened. Close one with close_tab, or reuse one with select_tab and navigate.`,
+      );
+    }
+    // A new tab has no site yet, so only a full address opens it.
+    const url = validateNavigationUrl(body.url, null);
+    assertAgentTabMayOpen(url);
+    const step = classifyStep("navigate", null, { url });
+    if (step.verdict === "ask" || CONSEQUENTIAL_ACTION_PATTERN.test(url)) {
+      throw new Error(
+        "Octo's own tabs are for reading, and this address does more than show a page, so no tab was opened. Leave it to the person.",
+      );
+    }
+    const previousTabId = tabs.registry.currentTabId;
+    activePageId = EXPECTED_BROWSER_PAGE_ID;
+    const runPage = await resolveExpectedPage(browser);
+    // The tab opens blank in the run's own browser context, where every
+    // viewer sees it, and is recorded before anything asks or loads, so the
+    // end of the run closes it whatever happens next.
+    const page = await runPage.context().newPage();
+    const tabId = await cdpTargetIdForPage(page).catch(() => "");
+    if (!validTabId(tabId) || tabId === EXPECTED_BROWSER_PAGE_ID) {
+      await page.close({ runBeforeUnload: false }).catch(() => {});
+      throw new Error("Shared Browser could not identify the new tab, so it was closed");
+    }
+    tabs.registry = approvalProtocol.writeTabs({
+      currentTabId: tabId,
+      tabs: [...tabs.registry.tabs, { tabId, approvedOrigins: [] }],
+    });
+    tabs.pages.set(tabId, page);
+    activePageId = tabId;
+    let loading = false;
+    try {
+      await page.bringToFront();
+      await ensureSiteApproved(url, "Allow the assistant to open this site in a new tab for this run");
+      const destination = approvalProtocol.destinationBinding(url);
+      await allowStepOnce({
+        operation: "navigate",
+        label: "Open a new tab",
+        categoryTitle: step.verdict === "ask" ? approvalCategoryTitle(step) : "",
+        sourceOrigin: null,
+        ...destination,
+        snapshotId: null,
+        targetFingerprint: null,
+        payloadFingerprint: approvalProtocol.sha256("open-tab"),
+      }, { routine: true });
+      const opened = await resolveExpectedPage(browser);
+      const documents = await guardAgentTabDocuments(opened);
+      try {
+        emitAction({ type: "navigate", label: `Open a tab: ${url}`, url });
+        loading = true;
+        await opened.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+        await settleAfterAction(opened);
+        documents.assertNoneBlocked();
+      } catch (error) {
+        documents.assertNoneBlocked(error);
+        throw error;
+      } finally {
+        await documents.release();
+      }
+      const settled = await resolveExpectedPage(browser);
+      await emitNavigationResult(settled);
+      return { openedTab: true, ...(await snapshotForResult(settled)) };
+    } catch (error) {
+      if (!loading) {
+        // Nothing was approved or loaded: the blank tab goes again. When the
+        // run's authority is gone the record cannot be written; the end of
+        // the run closes the tab then.
+        try {
+          const current = approvalProtocol.readTabs();
+          approvalProtocol.writeTabs({
+            currentTabId: current.tabs.some((tab) => tab.tabId === previousTabId) ? previousTabId : null,
+            tabs: current.tabs.filter((tab) => tab.tabId !== tabId),
+          });
+          await page.close({ runBeforeUnload: false }).catch(() => {});
+        } catch (_) {
+          // Keep the approval error, which may end the run.
+        }
+      }
+      throw error;
+    }
+  }
+
+  throw new Error("Unsupported Shared Browser method/path combination");
+}
+
 async function execute(browser, method, requestPath, body) {
   approvalProtocol.authority();
-  let page = await resolveExpectedPage(browser);
+  const tabs = await prepareTabs(browser);
+  if (requestPath.startsWith("/v1/tabs")) {
+    return await executeTabCommand(browser, method, requestPath, body, tabs);
+  }
+  if (typeof body.tabId === "string") {
+    // snapshot and navigate may name the tab they act on.
+    await selectTab(browser, tabs, body.tabId);
+  } else if (tabs.lostCurrent) {
+    throw new Error(
+      "The tab Octo was using was closed, so nothing was done. Call list_tabs, then select_tab.",
+    );
+  }
+  const page = await resolveExpectedPage(browser);
   page.setDefaultTimeout(15_000);
   await page.bringToFront();
+  if (requestPath !== "/v1/navigate") {
+    refuseLinkOnlyAgentTab(page);
+  }
+  if (!inAgentTab() || method !== "POST") {
+    return await executeOnPage(browser, method, requestPath, body, page, tabs);
+  }
+  const documents = await guardAgentTabDocuments(page);
+  try {
+    const result = await executeOnPage(browser, method, requestPath, body, page, tabs);
+    documents.assertNoneBlocked();
+    return result;
+  } catch (error) {
+    // A blocked load fails the step itself; say why.
+    documents.assertNoneBlocked(error);
+    throw error;
+  } finally {
+    await documents.release();
+  }
+}
 
+// While a command acts in one of Octo's own tabs, the tab loads no document
+// from a link-only site: a link, form or redirect that would land on one is
+// stopped before its request leaves the browser. Fails closed: a tab that
+// cannot be guarded takes no step.
+async function guardAgentTabDocuments(page) {
+  const blocked = [];
+  // Another window a step in Octo's tab opens (a target=_blank link, a
+  // script) would be a tab Octo cannot see, count or close, outside this
+  // guard. While agent control holds, no person opens a page, so every page
+  // that appears during the step is such a window: its requests are stopped
+  // before they leave the browser and it is closed when the step ends.
+  const context = page.context();
+  const knownPages = new Set(context.pages());
+  const windows = [];
+  const noteWindow = (opened) => {
+    if (!knownPages.has(opened) && !windows.includes(opened)) windows.push(opened);
+  };
+  let windowRequestStopped = false;
+  const stopWindowRequests = async (route) => {
+    const request = route.request();
+    let owner = null;
+    let frameless = false;
+    try {
+      owner = request.frame().page();
+    } catch (_) {
+      // A new window's first navigation is issued before its frame exists;
+      // a worker's request belongs to no page and is not a navigation.
+      frameless = true;
+    }
+    if ((owner && !knownPages.has(owner)) || (frameless && request.isNavigationRequest())) {
+      if (owner) noteWindow(owner);
+      windowRequestStopped = true;
+      await route.abort("blockedbyclient").catch(() => {});
+      return;
+    }
+    await route.fallback().catch(() => {});
+  };
+  let session;
+  try {
+    context.on("page", noteWindow);
+    await context.route("**/*", stopWindowRequests);
+    session = await page.context().newCDPSession(page);
+    session.on("Fetch.requestPaused", (event) => {
+      const url = event?.request?.url || "";
+      const site = LINK_ONLY_SITES === null ? "An unknown site" : linkOnlySiteOf(url);
+      const answer = site
+        ? session.send("Fetch.failRequest", { requestId: event.requestId, errorReason: "BlockedByClient" })
+        : session.send("Fetch.continueRequest", { requestId: event.requestId });
+      if (site) blocked.push(site);
+      answer.catch(() => {});
+    });
+    await session.send("Fetch.enable", {
+      patterns: [{ urlPattern: "*", resourceType: "Document", requestStage: "Request" }],
+    });
+  } catch (_) {
+    if (session) await session.detach().catch(() => {});
+    context.off("page", noteWindow);
+    await context.unroute("**/*", stopWindowRequests).catch(() => {});
+    throw new Error("Shared Browser could not guard Octo's tab against link-only sites, so the step was not performed");
+  }
+  return {
+    release: async () => {
+      await session.send("Fetch.disable").catch(() => {});
+      await session.detach().catch(() => {});
+      // A window that appeared after the step's last check is closed too.
+      for (const opened of context.pages()) noteWindow(opened);
+      context.off("page", noteWindow);
+      await context.unroute("**/*", stopWindowRequests).catch(() => {});
+      for (const opened of windows) {
+        await opened.close({ runBeforeUnload: false }).catch(() => {});
+      }
+    },
+    // An approval code in `cause` still ends the run, so it is kept.
+    assertNoneBlocked: (cause = null) => {
+      for (const opened of context.pages()) noteWindow(opened);
+      if (cause && /\[[a-z_]+_non_retryable\]/.test(String(cause.message || ""))) {
+        return;
+      }
+      if (blocked.length) {
+        throw new Error(
+          `A link or redirect in Octo's tab led to ${blocked[0]}, which is link-only, so it was not opened. Give the person the plain link instead.`,
+        );
+      }
+      if (windows.length || windowRequestStopped) {
+        throw new Error(
+          "The step opened another window, which Octo's tabs never do, so it was closed before it loaded anything. Open the address with open_tab instead.",
+        );
+      }
+    },
+  };
+}
+
+async function executeOnPage(browser, method, requestPath, body, page, tabs) {
   if (method === "GET" && requestPath === "/v1/status") {
     const shared = {
       ready: true,
       browserPageId: EXPECTED_BROWSER_PAGE_ID,
       pageCount: browser.contexts().flatMap((context) => context.pages()).length,
+      agentTabCount: tabs.registry.tabs.length,
+      ...tabField(),
     };
     if (isBlankPage(page)) {
       return blankPageResult(page, shared);
     }
-    if (!approvalProtocol.isOriginApproved(page.url())) {
+    if (!siteApproved(page.url())) {
       return approvalProtocol.redactedPageResult(shared);
     }
     const title = await page.title().catch(() => "");
@@ -2017,13 +2558,13 @@ async function execute(browser, method, requestPath, body) {
     };
   }
 
-  if (method === "GET" && requestPath === "/v1/snapshot") {
+  if ((method === "GET" || method === "POST") && requestPath === "/v1/snapshot") {
     // A blank observation is not action evidence: like status, it only shows
     // that the browser is reachable, so a turn that stops here is retried.
     if (isBlankPage(page)) {
       return blankPageResult(page);
     }
-    const approvedOrigin = await approvalProtocol.ensureOriginApproved(
+    const approvedOrigin = await ensureSiteApproved(
       page.url(),
       "Allow the assistant to read and interact with this site for this run",
     );
@@ -2040,7 +2581,12 @@ async function execute(browser, method, requestPath, body) {
   }
 
   if (method === "POST" && requestPath === "/v1/request-human-input") {
-    const sourceOrigin = await approvalProtocol.ensureOriginApproved(page.url(), "Allow the assistant to identify fields for your input");
+    if (inAgentTab()) {
+      throw new Error(
+        "Octo's own tabs are for reading, so the person is not asked to fill fields there. Stop at the sign-in or form and tell the person; nothing was highlighted.",
+      );
+    }
+    const sourceOrigin = await ensureSiteApproved(page.url(), "Allow the assistant to identify fields for your input");
     page = await resolveExpectedPage(browser);
     assertSameOrigin(page.url(), sourceOrigin);
     const interactive = await collectInteractiveElements(page);
@@ -2093,12 +2639,17 @@ async function execute(browser, method, requestPath, body) {
     // browsing. Under routine browsing, an address for a site the run has not
     // used yet does not ask on its own.
     const step = classifyStep("navigate", null, { url });
-    await approvalProtocol.ensureOriginApproved(
+    const readingStep = step.verdict !== "ask" && !CONSEQUENTIAL_ACTION_PATTERN.test(url);
+    if (inAgentTab()) {
+      assertAgentTabMayOpen(url);
+    }
+    refuseUnlessReadingStep(readingStep);
+    await ensureSiteApproved(
       url,
       "Allow the assistant to access this destination for this run",
     );
     const destination = approvalProtocol.destinationBinding(url);
-    await approvalProtocol.allowOnce({
+    await allowStepOnce({
       operation: "navigate",
       label: "Navigate the Shared Browser",
       categoryTitle: step.verdict === "ask" ? approvalCategoryTitle(step) : "",
@@ -2107,15 +2658,18 @@ async function execute(browser, method, requestPath, body) {
       snapshotId: null,
       targetFingerprint: null,
       payloadFingerprint: approvalProtocol.sha256("navigate"),
-    }, { routine: step.verdict !== "ask" && !CONSEQUENTIAL_ACTION_PATTERN.test(url) });
+    }, { routine: readingStep });
     page = await resolveExpectedPage(browser);
     if (sourceOrigin) {
       assertSameOrigin(page.url(), sourceOrigin);
     }
     const revalidatedUrl = validateNavigationUrl(body.url, sourceOrigin);
     // An address the agent opens itself is not the page a credential step
-    // opened.
-    approvalProtocol.clearWithholdNextDocument();
+    // opened. That record belongs to the page the person chose, so a
+    // navigation in one of Octo's own tabs leaves it.
+    if (!inAgentTab()) {
+      approvalProtocol.clearWithholdNextDocument();
+    }
     emitAction({ type: "navigate", label: `Go to ${url}`, url });
     await page.goto(revalidatedUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
     await settleAfterAction(page);
@@ -2125,7 +2679,7 @@ async function execute(browser, method, requestPath, body) {
   }
 
   if (method === "POST" && requestPath === "/v1/click") {
-    const sourceOrigin = await approvalProtocol.ensureOriginApproved(
+    const sourceOrigin = await ensureSiteApproved(
       page.url(),
       "Allow the assistant to interact with this site for this run",
     );
@@ -2137,16 +2691,22 @@ async function execute(browser, method, requestPath, body) {
     const approvedTargetFingerprint = targetFingerprint(target.description);
     const rawDestination = resolvedTargetDestination(target.description, page.url());
     const destination = approvalProtocol.destinationBinding(rawDestination);
+    const readingStep = routineCovers(step, target.description) &&
+      !isFormSubmissionControl(target.description);
+    if (inAgentTab() && rawDestination) {
+      assertAgentTabMayOpen(rawDestination);
+    }
+    refuseUnlessReadingStep(readingStep);
     if (
       destination.destinationOrigin &&
       destination.destinationOrigin !== sourceOrigin
     ) {
-      await approvalProtocol.ensureOriginApproved(
+      await ensureSiteApproved(
         rawDestination,
         "Allow the assistant to follow this control to another site for this run",
       );
     }
-    await approvalProtocol.allowOnce({
+    await allowStepOnce({
       operation: "click",
       label: controlLabel(target.description) || "Activate this control",
       categoryTitle: approvalCategoryTitle(step),
@@ -2155,10 +2715,7 @@ async function execute(browser, method, requestPath, body) {
       snapshotId: body.snapshotId,
       targetFingerprint: approvedTargetFingerprint,
       payloadFingerprint: approvalProtocol.sha256("click"),
-    }, {
-      routine: routineCovers(step, target.description) &&
-        !isFormSubmissionControl(target.description),
-    });
+    }, { routine: readingStep });
     page = await resolveExpectedPage(browser);
     assertSameOrigin(page.url(), sourceOrigin);
     target = await targetLocator(page, body, true);
@@ -2194,7 +2751,7 @@ async function execute(browser, method, requestPath, body) {
     if (typeof body.text !== "string") {
       throw new Error("Shared Browser type requires a text string");
     }
-    const sourceOrigin = await approvalProtocol.ensureOriginApproved(
+    const sourceOrigin = await ensureSiteApproved(
       page.url(),
       "Allow the assistant to interact with this site for this run",
     );
@@ -2212,6 +2769,8 @@ async function execute(browser, method, requestPath, body) {
       refuseUserStep(submitStep);
     }
     const step = submitStep || typingStep;
+    const readingStep = !submitting && routineCovers(step, target.description, { consequential: false });
+    refuseUnlessReadingStep(readingStep);
     const approvedTargetFingerprint = targetFingerprint(target.description);
     const rawDestination = submitting
       ? resolvedTargetDestination(target.description, page.url()) || page.url()
@@ -2222,13 +2781,13 @@ async function execute(browser, method, requestPath, body) {
         destination.destinationOrigin &&
         destination.destinationOrigin !== sourceOrigin
       ) {
-        await approvalProtocol.ensureOriginApproved(
+        await ensureSiteApproved(
           rawDestination,
           "Allow this form destination for this run",
         );
       }
     }
-    await approvalProtocol.allowOnce({
+    await allowStepOnce({
       operation: submitting ? "form-submit" : "type",
       label: submitting
         ? controlLabel(target.description) || "Submit this form"
@@ -2241,9 +2800,7 @@ async function execute(browser, method, requestPath, body) {
       payloadFingerprint: approvalProtocol.sha256(
         JSON.stringify({ text: body.text, submit: submitting }),
       ),
-    }, {
-      routine: !submitting && routineCovers(step, target.description, { consequential: false }),
-    });
+    }, { routine: readingStep });
     page = await resolveExpectedPage(browser);
     assertSameOrigin(page.url(), sourceOrigin);
     target = await targetLocator(page, body, true);
@@ -2288,7 +2845,7 @@ async function execute(browser, method, requestPath, body) {
     if (typeof body.key !== "string" || !ALLOWED_PRESS_KEYS.has(body.key)) {
       throw new Error("Shared Browser press requires a key");
     }
-    const sourceOrigin = await approvalProtocol.ensureOriginApproved(
+    const sourceOrigin = await ensureSiteApproved(
       page.url(),
       "Allow the assistant to interact with this site for this run",
     );
@@ -2308,6 +2865,8 @@ async function execute(browser, method, requestPath, body) {
     const approvedTargetFingerprint = targetFingerprint(target.description);
     const pressKey = body.key === " " ? "Space" : body.key;
     const activationKey = ["Enter", "Space"].includes(pressKey);
+    const readingStep = !activationKey && routineCovers(step, target.description);
+    refuseUnlessReadingStep(readingStep);
     const rawDestination = activationKey
       ? resolvedTargetDestination(target.description, page.url()) || page.url()
       : null;
@@ -2317,13 +2876,13 @@ async function execute(browser, method, requestPath, body) {
         destination.destinationOrigin &&
         destination.destinationOrigin !== sourceOrigin
       ) {
-        await approvalProtocol.ensureOriginApproved(
+        await ensureSiteApproved(
           rawDestination,
           "Allow this activation destination for this run",
         );
       }
     }
-    await approvalProtocol.allowOnce({
+    await allowStepOnce({
       operation: activationKey
         ? pressKey === "Enter"
           ? "press-enter"
@@ -2338,7 +2897,7 @@ async function execute(browser, method, requestPath, body) {
       snapshotId: body.snapshotId,
       targetFingerprint: approvedTargetFingerprint,
       payloadFingerprint: approvalProtocol.sha256(body.key),
-    }, { routine: !activationKey && routineCovers(step, target.description) });
+    }, { routine: readingStep });
     page = await resolveExpectedPage(browser);
     assertSameOrigin(page.url(), sourceOrigin);
     target = await targetLocator(page, body, true);
@@ -2363,7 +2922,7 @@ async function execute(browser, method, requestPath, body) {
   }
 
   if (method === "POST" && requestPath === "/v1/scroll") {
-    const sourceOrigin = await approvalProtocol.ensureOriginApproved(
+    const sourceOrigin = await ensureSiteApproved(
       page.url(),
       "Allow the assistant to interact with this site for this run",
     );

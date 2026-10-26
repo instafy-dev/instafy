@@ -127,7 +127,8 @@ macro_rules! shared_browser_developer_instructions {
     ($approval_start:literal) => {
         concat!(
             r#"Shared Browser transport (managed runtime policy):
-- A headed browser in the project's isolated hosted runtime is available. Use the dedicated tools from the `instafy_shared_browser` MCP server: `status`, `snapshot`, `navigate`, `click`, `type`, `press`, `scroll`, and `request_human_input`.
+- A headed browser in the project's isolated hosted runtime is available. Use the dedicated tools from the `instafy_shared_browser` MCP server: `status`, `snapshot`, `navigate`, `click`, `type`, `press`, `scroll`, `request_human_input`, `list_tabs`, `open_tab`, `select_tab`, and `close_tab`.
+- Besides the page the person chose, you may open up to three tabs of your own with `open_tab`, in the same visible browser: everyone watching sees them with your badge, and the person can take any of them over. The other tools act on the tab `select_tab` (or `open_tab`) last chose; `snapshot` and `navigate` also take a `tabId`. Use only those tabs, never another tab the person or a page opened. A site's approval holds in the tab it was given in. Your tabs are for reading: a sign-in, a step that may show a secret, a field the person must fill, a form submission or a purchase stays on the page the person chose or with the person. Close a tab you are done with; the rest close when this turn ends unless the person keeps them.
 - Take a snapshot and pass both its `snapshotId` and one indexed element to each interaction. If the page or indexed target set changes, take another snapshot instead of retrying a stale target. Arbitrary CSS selectors are not accepted.
 - The browser may start on a blank page. When `status` or `snapshot` reports `blank: true`, call `navigate` with the http(s) address the task names first; any approval the browser asks for applies there. A blank page has nothing to read or act on. An `[origin_not_approvable]` error means the same for any other page without an http(s) address.
 - Do not invoke Shared Browser through shell commands or write an ad-hoc Playwright/CDP script. The capability is deliberately exposed only through the bounded MCP server for this turn.
@@ -262,11 +263,9 @@ const BROWSER_MCP_TOOL_NAMES: [&str; 8] = [
     "press",
     "scroll",
 ];
-/// Tab tools the Desktop Personal Browser serves on top of the page tools: the
-/// agent opens at most three visible tabs of its own, and every page tool acts
-/// on the tab on screen. The hosted Shared Browser does not offer them here.
-const PERSONAL_BROWSER_TAB_TOOL_NAMES: [&str; 4] =
-    ["list_tabs", "open_tab", "select_tab", "close_tab"];
+/// Tab tools both bounded browsers serve on top of the page tools: the agent
+/// opens at most three visible tabs of its own, next to the person's page.
+const BROWSER_TAB_TOOL_NAMES: [&str; 4] = ["list_tabs", "open_tab", "select_tab", "close_tab"];
 const CODEX_REQUIRED_TOOL_COMMAND_ONCE: &str = "command_once";
 const MISSING_FINAL_ASSISTANT_MESSAGE_SUMMARY: &str =
     "Codex automation completed, but no final assistant message was returned.";
@@ -3896,6 +3895,9 @@ fn shared_browser_mcp_server_config(
 ) -> McpServerConfig {
     McpServerConfig {
         tool_timeout_sec: Some(shared_browser_tool_timeout(approval_timeout_ms)),
+        enabled_tools: Some(bounded_browser_enabled_tools(
+            SHARED_BROWSER_MCP_SERVER_NAME,
+        )),
         ..browser_mcp_server_config(transport)
     }
 }
@@ -3914,12 +3916,10 @@ fn browser_mcp_enabled_tools() -> Vec<String> {
 /// The exact tool allowlist of one bounded browser server.
 fn bounded_browser_enabled_tools(server_name: &str) -> Vec<String> {
     let mut tools = browser_mcp_enabled_tools();
-    if server_name == PERSONAL_BROWSER_MCP_SERVER_NAME {
-        tools.extend(
-            PERSONAL_BROWSER_TAB_TOOL_NAMES
-                .into_iter()
-                .map(str::to_string),
-        );
+    if server_name == PERSONAL_BROWSER_MCP_SERVER_NAME
+        || server_name == SHARED_BROWSER_MCP_SERVER_NAME
+    {
+        tools.extend(BROWSER_TAB_TOOL_NAMES.into_iter().map(str::to_string));
     }
     tools
 }
@@ -6345,7 +6345,26 @@ mod tests {
             cwd: None,
         });
         assert_eq!(bounded.tool_timeout_sec, Some(Duration::from_secs(40)));
-        assert_eq!(shared.enabled_tools, bounded.enabled_tools);
+        // The Shared Browser adds Octo's own tabs to the bounded tools.
+        assert_eq!(
+            shared.enabled_tools,
+            Some(
+                BROWSER_MCP_TOOL_NAMES
+                    .iter()
+                    .chain(BROWSER_TAB_TOOL_NAMES.iter())
+                    .map(|name| name.to_string())
+                    .collect()
+            )
+        );
+        assert_eq!(
+            bounded.enabled_tools,
+            Some(
+                BROWSER_MCP_TOOL_NAMES
+                    .iter()
+                    .map(|name| name.to_string())
+                    .collect()
+            )
+        );
         assert!(shared.required && !shared.supports_parallel_tool_calls);
         assert_eq!(shared.startup_timeout_sec, bounded.startup_timeout_sec);
     }
@@ -6677,8 +6696,10 @@ mod tests {
         assert!(error.contains("exactly one MCP server"));
     }
 
+    /// Both bounded browsers serve the tab tools on top of the page tools,
+    /// and each server must carry exactly that allowlist.
     #[test]
-    fn only_the_personal_browser_server_offers_the_tab_tools() {
+    fn both_bounded_browser_servers_offer_exactly_the_tab_tools() {
         let transport = || McpServerTransportConfig::StreamableHttp {
             url: "http://127.0.0.1/contract-only".to_string(),
             bearer_token_env_var: None,
@@ -6687,29 +6708,41 @@ mod tests {
             http_headers_helper: None,
         };
         let personal = personal_browser_mcp_server_config(transport());
-        let tools = personal.enabled_tools.clone().expect("personal allowlist");
-        for tool in PERSONAL_BROWSER_TAB_TOOL_NAMES {
-            assert!(tools.iter().any(|name| name == tool), "{tool}");
-        }
         let shared = shared_browser_mcp_server_config(transport(), None);
-        let shared_tools = shared.enabled_tools.clone().expect("shared allowlist");
-        assert!(
-            shared_tools
-                .iter()
-                .all(|name| !PERSONAL_BROWSER_TAB_TOOL_NAMES.contains(&name.as_str()))
-        );
-
-        // Each server must carry exactly its own allowlist.
-        let swapped = HashMap::from([(PERSONAL_BROWSER_MCP_SERVER_NAME.to_string(), shared)]);
-        assert!(
-            validate_bounded_browser_mcp_server_set(&swapped, PERSONAL_BROWSER_MCP_SERVER_NAME)
-                .is_err()
-        );
-        let widened = HashMap::from([(SHARED_BROWSER_MCP_SERVER_NAME.to_string(), personal)]);
-        assert!(
-            validate_bounded_browser_mcp_server_set(&widened, SHARED_BROWSER_MCP_SERVER_NAME)
-                .is_err()
-        );
+        let check = |name: &str, server: McpServerConfig| {
+            validate_bounded_browser_mcp_server_set(
+                &HashMap::from([(name.to_string(), server)]),
+                name,
+            )
+        };
+        for (name, server) in [
+            (PERSONAL_BROWSER_MCP_SERVER_NAME, personal),
+            (SHARED_BROWSER_MCP_SERVER_NAME, shared),
+        ] {
+            let tools = server.enabled_tools.clone().expect("allowlist");
+            for tool in BROWSER_TAB_TOOL_NAMES {
+                assert!(tools.iter().any(|entry| entry == tool), "{name}: {tool}");
+                assert!(!BROWSER_MCP_TOOL_NAMES.contains(&tool));
+            }
+            check(name, server.clone()).expect("the server's own allowlist");
+            // The page tools alone, or one tool more, are not its allowlist.
+            let mut narrower = server.clone();
+            narrower.enabled_tools = Some(browser_mcp_enabled_tools());
+            assert!(check(name, narrower).is_err(), "{name}: page tools only");
+            let mut wider = server;
+            wider
+                .enabled_tools
+                .as_mut()
+                .expect("tools")
+                .push("evaluate".to_string());
+            assert!(check(name, wider).is_err(), "{name}: a wider allowlist");
+        }
+        for tool in BROWSER_TAB_TOOL_NAMES {
+            assert!(
+                SHARED_BROWSER_DEVELOPER_INSTRUCTIONS.contains(&format!("`{tool}`")),
+                "{tool} is named in the Shared Browser policy"
+            );
+        }
     }
 
     #[test]

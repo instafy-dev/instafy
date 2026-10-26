@@ -298,6 +298,8 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     include_str!("legacy/browser-automation-v6.md"),
     // From before the Personal Browser opened agent tabs.
     include_str!("legacy/browser-automation-v7.md"),
+    // From before the Shared Browser read a card's pages in Octo's own tabs.
+    include_str!("legacy/browser-automation-v8.md"),
 ];
 const LEGACY_SKILL_IMPORT_COMPAT_TEMPLATES: &[&str] = &[
     include_str!("legacy/skill-import-compat-v1.md"),
