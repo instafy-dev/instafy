@@ -65,6 +65,9 @@ it goes only with its space or its team, whose purge covers it.
 
 - The composer takes PNG, JPEG, WebP and GIF images up to 20 MiB, from the picker, a paste
   or a drop, and says why it skips anything else.
+- Pending image previews sit above the text input inside the composer. Multiple previews
+  scroll within a bounded tray so the input and Send action remain reachable, including
+  when the draft is expanded. Upload progress stays visible below the scrolling previews.
 - Sending uploads each attachment with the person's own Supabase session, `upsert` off and the
   exact content type, into `<projectId>/<conversationId>/`, at most three at a time. A new chat
   is created on the controller first. While the uploads run, the tray says "Sending your

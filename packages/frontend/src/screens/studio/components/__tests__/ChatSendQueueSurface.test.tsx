@@ -60,7 +60,7 @@ describe("ChatSendQueueSurface", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  it("keeps the collapsed queue behind a labelled queue control", async () => {
+  it("keeps the collapsed queue behind a counted icon with a complete accessible name", async () => {
     const onToggleExpanded = vi.fn();
     const onEditQueuedMessage = vi.fn();
 
@@ -73,9 +73,11 @@ describe("ChatSendQueueSurface", () => {
     expect(container.textContent).not.toContain("@octo");
     const summary = container.querySelector('[data-testid="chat-send-queue-agent-summary"]');
     expect(summary?.getAttribute("aria-label")).toBe("Queued messages (1): two");
+    expect(summary?.getAttribute("title")).toBe("Queued messages (1): two");
     expect(summary?.getAttribute("aria-expanded")).toBe("false");
     expect(container.querySelector(`#${summary?.getAttribute("aria-controls")}`)).not.toBeNull();
-    expect(summary?.textContent).toBe("Queued 1");
+    expect(summary?.textContent).toBe("1");
+    expect(summary?.querySelector('[data-testid="chat-send-queue-icon"]')?.getAttribute("aria-hidden")).toBe("true");
 
     await act(async () => {
       (summary as HTMLButtonElement).click();
@@ -83,6 +85,26 @@ describe("ChatSendQueueSurface", () => {
 
     expect(onToggleExpanded).toHaveBeenCalledTimes(1);
     expect(onEditQueuedMessage).not.toHaveBeenCalled();
+  });
+
+  it("caps the visible count without losing the exact accessible count", async () => {
+    await act(async () => {
+      root.render(<ChatSendQueueSurface {...buildProps({ totalQueuedCount: 137, collapsedQueuedMessageSummary: null })} />);
+    });
+
+    const summary = container.querySelector('[data-testid="chat-send-queue-agent-summary"]');
+    expect(summary?.textContent).toBe("99+");
+    expect(summary?.getAttribute("aria-label")).toBe("Queued messages (137)");
+    expect(summary?.getAttribute("title")).toBe("Queued messages (137)");
+  });
+
+  it("does not leave an empty queue trigger in the toolbar", async () => {
+    await act(async () => {
+      root.render(<ChatSendQueueSurface {...buildProps({ totalQueuedCount: 0, chatSendQueueDisplay: [] })} />);
+    });
+
+    expect(container.querySelector('[data-testid="chat-send-queue-agent-summary"]')).toBeNull();
+    expect(container.querySelector('[data-testid="chat-send-queue-icon"]')).toBeNull();
   });
 
   it("opens the queued list when editing a collapsed multi-message queue", async () => {
@@ -116,7 +138,9 @@ describe("ChatSendQueueSurface", () => {
 
     const editButton = container.querySelector('[data-testid="chat-send-queue-steer-collapsed"]');
     expect(editButton).toBeNull();
-    expect(container.textContent).toBe("Queued 2");
+    expect(container.textContent).toBe("2");
+    expect(container.querySelector('[data-testid="chat-send-queue-agent-summary"]')?.getAttribute("aria-label"))
+      .toBe("Queued messages (2)");
 
     await act(async () => {
       (container.querySelector('[data-testid="chat-send-queue-agent-summary"]') as HTMLButtonElement).click();
@@ -126,7 +150,7 @@ describe("ChatSendQueueSurface", () => {
     expect(onToggleExpanded).toHaveBeenCalledTimes(1);
   });
 
-  it("omits runtime status and duplicate count from the expanded list", async () => {
+  it("names the expanded list while omitting runtime status and a duplicate count", async () => {
     await act(async () => {
       root.render(
         <ChatSendQueueSurface
@@ -160,8 +184,8 @@ describe("ChatSendQueueSurface", () => {
     expect(container.textContent).not.toContain("Reconnect");
     expect(container.querySelector('[data-testid="chat-send-queue-runtime-action-expanded"]')).toBeNull();
     expect(container.textContent).not.toContain("@octo");
-    expect(container.querySelector('[data-testid="chat-send-queue-panel-header"]')?.textContent?.trim()).toBe(
-      "Queue",
+    expect(container.querySelector('h3[data-testid="chat-send-queue-panel-header"]')?.textContent?.trim()).toBe(
+      "Queued messages",
     );
     const panel = container.querySelector('[aria-label="Queued messages"][role="region"]');
     expect(panel?.className).toContain("basis-full");

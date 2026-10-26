@@ -1,5 +1,7 @@
 import { useMemo, useState, type ReactNode } from "react";
-import { NavArrowDown, Plus, Safari, Xmark } from "iconoir-react";
+import { NavArrowDown, Safari, Xmark } from "iconoir-react";
+import { Button } from "../../../components/Button";
+import { Text } from "../../../components/Text";
 import { CHAT_COLUMN_CLASS_NAME } from "./ChatColumn";
 import type { BrowserSessionPage } from "./browserSessionPages";
 
@@ -33,23 +35,25 @@ function BrowserShelfChip({
   title,
 }: {
   children: ReactNode;
-  className: string;
+  className?: string;
   onClick?: () => void;
   testId?: string;
   pressed?: boolean;
   title?: string;
 }) {
   return (
-    <button
+    <Button
       type="button"
-      onClick={onClick}
-      className={className}
+      preset="inline"
+      variant={pressed ? "secondary" : "ghost"}
+      onPress={onClick}
+      className={["shrink-0 text-left", className].filter(Boolean).join(" ")}
       data-testid={testId}
       aria-pressed={pressed}
       title={title}
     >
       {children}
-    </button>
+    </Button>
   );
 }
 
@@ -95,31 +99,16 @@ export function BrowserSessionPageStrip({
     >
       <div className={CHAT_COLUMN_CLASS_NAME}>
         <div
-          className="flex items-center gap-2.5 overflow-x-auto px-1 py-1.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          className="flex items-center gap-2 overflow-x-auto px-1 py-1.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
           data-testid="browser-session-page-strip"
         >
           {showBrowserChip ? (
             <BrowserShelfChip
               onClick={onToggleBrowser}
               testId="browser-session-page-browser"
-              className={[
-                "inline-flex h-10 min-w-fit shrink-0 items-center gap-2.5 rounded-full border pl-3 pr-3.5 text-left shadow-sm transition",
-                browserOpen && !browserHidden
-                  ? "border-primary-500/45 bg-primary-500/10 text-primary-700 hover:border-primary-500/60 hover:bg-primary-500/14 dark:border-primary-400/45 dark:bg-primary-500/15 dark:text-primary-200 dark:hover:border-primary-300/60 dark:hover:bg-primary-500/20"
-                  : "border-slate-200/70 bg-white/95 text-slate-900 hover:border-slate-300 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-950/95 dark:text-slate-100 dark:hover:border-slate-700 dark:hover:bg-slate-900",
-                "focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/60 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-slate-950",
-              ].join(" ")}
             >
-              <Safari
-                className={[
-                  "h-4 w-4 flex-none",
-                  browserOpen && !browserHidden
-                    ? "text-primary-600 dark:text-primary-200"
-                    : "text-slate-500 dark:text-slate-300",
-                ].join(" ")}
-                aria-hidden="true"
-              />
-              <span className="truncate text-sm font-medium">Browser</span>
+              <Safari className="h-4 w-4 flex-none" aria-hidden="true" />
+              <Text as="span" variant="bodyStrong" tone="inherit" className="truncate">Browser</Text>
             </BrowserShelfChip>
           ) : null}
 
@@ -127,15 +116,6 @@ export function BrowserSessionPageStrip({
             const current = page.isActive;
             const handleChipClick =
               current && browserOpen && !browserHidden ? onToggleBrowser : () => onSelectPage(page.id);
-            const chipClassName = [
-              "inline-flex h-10 min-w-fit max-w-[13rem] shrink-0 items-center gap-2 rounded-full border px-2.5 pr-3 text-left shadow-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/60 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-slate-950",
-              current
-                ? "border-emerald-500/35 bg-emerald-500/8 text-slate-900 dark:border-emerald-400/35 dark:bg-emerald-500/10 dark:text-slate-100"
-                : "border-slate-200/70 bg-white/95 text-slate-900 dark:border-slate-800 dark:bg-slate-950/95 dark:text-slate-100",
-              current
-                ? "hover:border-emerald-500/55 hover:bg-emerald-500/12"
-                : "hover:border-slate-300 hover:bg-slate-50 dark:hover:border-slate-700 dark:hover:bg-slate-900",
-            ].join(" ");
             return (
               <BrowserShelfChip
                 key={page.id}
@@ -143,22 +123,13 @@ export function BrowserSessionPageStrip({
                 testId="browser-session-page-chip"
                 pressed={current}
                 title={page.title || page.url}
-                className={chipClassName}
+                className="max-w-[13rem]"
               >
-                <span
-                  className={[
-                    "inline-flex h-7 w-7 flex-none items-center justify-center rounded-full border",
-                    current
-                      ? "border-emerald-500/20 bg-emerald-500/10"
-                      : "border-slate-200 bg-slate-50 dark:border-slate-800 dark:bg-slate-900",
-                  ].join(" ")}
-                >
-                  <Safari className="h-3.5 w-3.5" aria-hidden="true" />
-                </span>
+                <Safari className="h-4 w-4 flex-none" aria-hidden="true" />
                 <span className="flex min-w-0 items-center gap-1.5">
-                  <span className="truncate text-sm font-medium">{page.label}</span>
+                  <Text as="span" variant="bodyStrong" tone="inherit" className="truncate">{page.label}</Text>
                   {current ? (
-                    <span className="inline-flex h-2 w-2 flex-none rounded-full bg-emerald-500 dark:bg-emerald-400" />
+                    <span aria-hidden="true" className="inline-flex h-2 w-2 flex-none rounded-full bg-emerald-500 dark:bg-emerald-400" />
                   ) : null}
                 </span>
               </BrowserShelfChip>
@@ -169,23 +140,11 @@ export function BrowserSessionPageStrip({
           <BrowserShelfChip
             onClick={() => setExpandedDeck((current) => !current)}
             testId="browser-session-page-overflow"
-            className={[
-              "inline-flex h-10 min-w-fit shrink-0 items-center gap-2 rounded-full border px-3.5 text-left shadow-sm transition",
-              "border-dashed border-slate-300/90 bg-white/92 text-slate-900 hover:border-slate-400 hover:bg-slate-50",
-              "dark:border-slate-700 dark:bg-slate-950/92 dark:text-slate-100 dark:hover:border-slate-600 dark:hover:bg-slate-900",
-              "focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/60 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-slate-950",
-            ].join(" ")}
           >
-            <span className="relative inline-flex h-7 w-7 flex-none items-center justify-center">
-              <span className="absolute inset-[2px] translate-x-[4px] rounded-full border border-slate-200/70 bg-slate-50 dark:border-slate-800 dark:bg-slate-900" />
-              <span className="relative inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-950">
-                <Plus className="h-4 w-4" aria-hidden="true" />
-              </span>
-            </span>
             <span className="flex min-w-0 items-center gap-1.5">
-              <span className="truncate text-sm font-medium">{expandedDeck ? "Less" : `+${hiddenPageCount}`}</span>
+              <Text as="span" variant="bodyStrong" tone="inherit" className="truncate">{expandedDeck ? "Less" : `+${hiddenPageCount}`}</Text>
               <NavArrowDown
-                className={`h-3.5 w-3.5 text-slate-500 transition-transform dark:text-slate-400 ${expandedDeck ? "rotate-180" : ""}`}
+                className={`h-3.5 w-3.5 transition-transform ${expandedDeck ? "rotate-180" : ""}`}
                 aria-hidden="true"
               />
             </span>
@@ -193,19 +152,20 @@ export function BrowserSessionPageStrip({
         ) : null}
 
         {pendingNewBrowser ? (
-          <button
+          <Button
             type="button"
-            onClick={onClearPendingNewBrowser}
-            className="inline-flex h-10 min-w-fit shrink-0 items-center gap-2 rounded-full border border-primary-500/45 bg-primary-500/10 px-3.5 text-left text-primary-700 shadow-sm transition hover:border-primary-500/60 hover:bg-primary-500/14 dark:border-primary-400/45 dark:bg-primary-500/15 dark:text-primary-200 dark:hover:border-primary-300/60 dark:hover:bg-primary-500/20"
+            preset="inline"
+            variant="ghost"
+            tone="accent"
+            onPress={onClearPendingNewBrowser}
+            className="min-w-fit shrink-0 text-left"
             data-testid="browser-session-page-new-pending"
             aria-label="Cancel new tab request"
             title="Cancel new tab request"
           >
-            <span className="truncate text-sm font-medium">Next AI request: new tab</span>
-            <span className="inline-flex h-5 w-5 flex-none items-center justify-center rounded-full border border-current/15 text-primary-600/75 dark:text-primary-200/75">
-              <Xmark className="h-3.5 w-3.5" aria-hidden="true" />
-            </span>
-          </button>
+            <Text as="span" variant="bodyStrong" tone="inherit" className="truncate">Next AI request: new tab</Text>
+            <Xmark className="h-4 w-4 flex-none" aria-hidden="true" />
+          </Button>
         ) : null}
         </div>
       </div>

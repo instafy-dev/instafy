@@ -27,17 +27,15 @@ import {
   WarningTriangle,
   Xmark,
 } from "iconoir-react";
-import { IconButton } from "../../../components/Button";
+import { Button, IconButton } from "../../../components/Button";
 import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
 import { Surface } from "../../../components/Surface";
+import { AttachmentThumbnail } from "../../../components/AttachmentThumbnail";
 import { Text } from "../../../components/Text";
 import { StudioPopover } from "../../../components/aria/StudioPopover";
 import {
   DARK_PANEL_BORDER_CLASS,
-  DARK_PANEL_SHADOW_CLASS,
-  DARK_PANEL_SOFT_BG_CLASS,
   DARK_RAISED_CONTROL_BG_CLASS,
-  DARK_RAISED_CONTROL_CLASS,
 } from "../../../theme/darkSurfaces";
 import { ComposerActionMenu } from "./ComposerActionMenu";
 import { ComposerInviteModal } from "./ComposerInviteModal";
@@ -952,7 +950,7 @@ export function ChatComposerSurface({
     }
     setGoalDetailsExpanded((current) => !current);
   }, [hasGoalDetails]);
-  const handleHelpUnblockGoal = useCallback<NonNullable<ComponentProps<"button">["onClick"]>>(
+  const handleHelpUnblockGoal = useCallback<NonNullable<ComponentProps<typeof Button>["onClick"]>>(
     (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -1157,12 +1155,12 @@ export function ChatComposerSurface({
             {replyContext}
             {showActiveGoal && !draftExpanded ? (
               <div
-                className={`pointer-events-auto flex min-w-0 flex-col gap-2 rounded-2xl border border-slate-200/70 bg-white/95 px-3 py-2 text-sm shadow-sm dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel-strong)] ${
+                className={`@container/goal pointer-events-auto flex min-w-0 flex-col gap-2 rounded-2xl border border-slate-200/70 bg-white/95 px-3 py-2 text-sm shadow-sm dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel-strong)] ${
                   compactBrowserViewport ? "mx-2" : "mx-1 sm:mx-2"
                 }`}
                 data-testid="chat-active-goal"
               >
-                <div className="flex min-w-0 items-center gap-2">
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
                   <span
                     className={`flex h-7 w-7 flex-none items-center justify-center rounded-full ${goalMarkerClass}`}
                     aria-label="Goal"
@@ -1245,7 +1243,7 @@ export function ChatComposerSurface({
                       </StatusPill>
                     )
                   ) : null}
-                  <div className="flex flex-none items-center gap-1">
+                  <div className="flex flex-none basis-full items-center justify-end gap-2 @[32rem]/goal:basis-auto">
                     {hasGoalDetails ? (
                       <IconButton
                         aria-controls={goalDetailsId}
@@ -1254,7 +1252,6 @@ export function ChatComposerSurface({
                         title={goalDetailsToggleLabel}
                         type="button"
                         variant="ghost"
-                        radius="full"
                         size="xs"
                         onClick={toggleGoalDetails}
                         tone="muted"
@@ -1271,7 +1268,6 @@ export function ChatComposerSurface({
                         title="Pause goal"
                         type="button"
                         variant="ghost"
-                        radius="full"
                         size="xs"
                         onClick={onPauseGoal}
                         isDisabled={mutationDisabled}
@@ -1285,7 +1281,6 @@ export function ChatComposerSurface({
                         title="Resume goal"
                         type="button"
                         variant="ghost"
-                        radius="full"
                         size="xs"
                         onClick={onResumeGoal}
                         isDisabled={mutationDisabled}
@@ -1299,7 +1294,6 @@ export function ChatComposerSurface({
                       title="Clear goal"
                       type="button"
                       variant="ghost"
-                      radius="full"
                       size="xs"
                       onClick={onClearGoal}
                       isDisabled={mutationDisabled}
@@ -1317,14 +1311,16 @@ export function ChatComposerSurface({
                   >
                     <p>{goalDetail}</p>
                     {showGoalHelpAction ? (
-                      <button
+                      <Button
                         type="button"
                         onClick={handleHelpUnblockGoal}
-                        disabled={mutationDisabled}
-                        className="mt-2 rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-700 shadow-sm ring-1 ring-slate-200 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 dark:bg-slate-950/60 dark:text-slate-200 dark:ring-slate-700 dark:hover:bg-slate-800"
+                        isDisabled={mutationDisabled}
+                        preset="inline"
+                        variant="outline"
+                        className="mt-2"
                       >
                         Help unblock
-                      </button>
+                      </Button>
                     ) : null}
                   </div>
                 ) : null}
@@ -1478,12 +1474,112 @@ export function ChatComposerSurface({
               ) : null}
               {draftExpanded ? (
                 <div className="flex shrink-0 items-center justify-between gap-2 px-2 pb-1">
-                  <span className="text-sm font-medium text-slate-600 dark:text-slate-300">Draft</span>
-                  <IconButton type="button" variant="ghost" radius="full" aria-label="Collapse draft"
+                  <Text as="span" variant="bodyStrong">Draft</Text>
+                  <IconButton type="button" variant="ghost" aria-label="Collapse draft"
                     title="Collapse draft" preventFocusOnPress onPress={() => setDraftExpanded(false)}>
                     <Collapse className="h-4 w-4" aria-hidden="true" />
                   </IconButton>
                 </div>
+              ) : null}
+              {imageAttachments.length > 0 ? (
+                <Surface
+                  tone="muted"
+                  radius="xl"
+                  shadow="none"
+                  className="mb-2 shrink-0 overflow-hidden"
+                  aria-busy={sendingImageCount + sendingPageCount > 0 ? true : undefined}
+                  data-testid="chat-image-upload-preview"
+                >
+                  <div
+                    className={`space-y-2 overflow-y-auto p-2 ${draftExpanded ? "max-h-24" : "max-h-40"}`}
+                    data-testid="chat-image-upload-list"
+                  >
+                    {imageAttachments.map((attachment, index) => attachment.page ? (
+                      <div
+                        key={attachment.id}
+                        className={`flex items-center gap-3 ${attachment.sending ? "opacity-60" : ""}`}
+                        data-sending={attachment.sending ? "true" : undefined}
+                        data-testid="chat-sent-page-attachment"
+                      >
+                        <Surface
+                          tone="muted"
+                          radius="lg"
+                          shadow="none"
+                          className="flex h-12 w-12 shrink-0 items-center justify-center"
+                          aria-hidden="true"
+                        >
+                          <Globe className="h-5 w-5" />
+                        </Surface>
+                        <div className="min-w-0 flex-1">
+                          <Text as="div" variant="captionStrong" tone="secondary" className="truncate" title={attachment.page.url}>
+                            {attachment.page.title || attachment.page.host}
+                          </Text>
+                          <Text as="div" variant="captionSmall" tone="muted" className="truncate">
+                            {`Page from ${attachment.page.host} · ${attachment.page.viewer === "personal" ? "This device" : "Workspace"} browser · ${formatAttachmentSize(attachment.file.size)}`}
+                          </Text>
+                        </div>
+                        <IconButton
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onPress={() => onRemoveImageAttachment(attachment.id)}
+                          isDisabled={Boolean(attachment.sending)}
+                          aria-label="Remove page"
+                          data-testid="chat-sent-page-remove"
+                        >
+                          <Xmark className="h-4 w-4" aria-hidden="true" />
+                        </IconButton>
+                      </div>
+                    ) : (
+                      <div
+                        key={attachment.id}
+                        className={`flex items-center gap-3 ${attachment.sending ? "opacity-60" : ""}`}
+                        data-sending={attachment.sending ? "true" : undefined}
+                      >
+                        <AttachmentThumbnail
+                          src={attachment.previewUrl}
+                          alt={attachment.file.name}
+                          size="composer"
+                          onPress={() => onOpenImage(attachment.previewUrl, attachment.file.name)}
+                          aria-label={`Preview uploaded image ${index + 1}`}
+                          data-testid={`chat-image-upload-preview-item-${index}`}
+                        />
+                        <div className="min-w-0 flex-1">
+                          <Text as="div" variant="captionStrong" tone="secondary" className="truncate">
+                            {attachment.file.name}
+                          </Text>
+                          <Text as="div" variant="captionSmall" tone="muted">
+                            {formatAttachmentSize(attachment.file.size)}
+                          </Text>
+                        </div>
+                        <IconButton
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onPress={() => onRemoveImageAttachment(attachment.id)}
+                          isDisabled={Boolean(attachment.sending)}
+                          aria-label="Remove image"
+                          data-testid="chat-image-upload-remove"
+                        >
+                          <Xmark className="h-4 w-4" aria-hidden="true" />
+                        </IconButton>
+                      </div>
+                    ))}
+                  </div>
+                  {/* Keep sending progress visible below the scrolling previews. The
+                      always-mounted live region announces when an upload starts. */}
+                  <Text
+                    as="div"
+                    role="status"
+                    aria-live="polite"
+                    variant="caption"
+                    tone="muted"
+                    className={sendingImageCount + sendingPageCount > 0 ? "p-2" : "sr-only"}
+                    data-testid="chat-image-upload-status"
+                  >
+                    {sendingImageCount + sendingPageCount > 0 ? describeSendingImages(sendingImageCount, sendingPageCount) : ""}
+                  </Text>
+                </Surface>
               ) : null}
               <span
                 role="status"
@@ -1560,102 +1656,6 @@ export function ChatComposerSurface({
                 className="hidden"
                 data-testid="chat-image-upload-input"
               />
-              {imageAttachments.length > 0 ? (
-                <div
-                  className={`mb-2 space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-2 ${DARK_PANEL_SOFT_BG_CLASS} dark:border-[color:var(--color-studio-dark-raised-control-border)] ${draftExpanded ? "max-h-24 shrink-0 overflow-y-auto" : ""}`}
-                  aria-busy={sendingImageCount + sendingPageCount > 0 ? true : undefined}
-                  data-testid="chat-image-upload-preview"
-                >
-                  {imageAttachments.map((attachment, index) => attachment.page ? (
-                    <div
-                      key={attachment.id}
-                      className={`flex items-center gap-3 ${attachment.sending ? "opacity-60" : ""}`}
-                      data-sending={attachment.sending ? "true" : undefined}
-                      data-testid="chat-sent-page-attachment"
-                    >
-                      <span
-                        className={`flex h-12 w-12 flex-none items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-500 shadow-sm dark:text-slate-300 ${DARK_RAISED_CONTROL_CLASS} ${DARK_PANEL_SHADOW_CLASS}`}
-                        aria-hidden="true"
-                      >
-                        <Globe className="h-5 w-5" />
-                      </span>
-                      <div className="min-w-0 flex-1">
-                        <Text as="div" variant="caption" tone="secondary" className="truncate text-xs font-medium" title={attachment.page.url}>
-                          {attachment.page.title || attachment.page.host}
-                        </Text>
-                        <Text as="div" variant="caption" tone="muted" className="truncate text-xxs">
-                          {`Page from ${attachment.page.host} · ${attachment.page.viewer === "personal" ? "This device" : "Workspace"} browser · ${formatAttachmentSize(attachment.file.size)}`}
-                        </Text>
-                      </div>
-                      <IconButton
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        radius="full"
-                        onPress={() => onRemoveImageAttachment(attachment.id)}
-                        isDisabled={Boolean(attachment.sending)}
-                        aria-label="Remove page"
-                        data-testid="chat-sent-page-remove"
-                      >
-                        <Xmark className="h-4 w-4" aria-hidden="true" />
-                      </IconButton>
-                    </div>
-                  ) : (
-                    <div
-                      key={attachment.id}
-                      className={`flex items-center gap-3 ${attachment.sending ? "opacity-60" : ""}`}
-                      data-sending={attachment.sending ? "true" : undefined}
-                    >
-                      <button
-                        type="button"
-                        onClick={() => onOpenImage(attachment.previewUrl, attachment.file.name)}
-                        className={`flex h-12 w-12 flex-none items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm ${DARK_RAISED_CONTROL_CLASS} ${DARK_PANEL_SHADOW_CLASS}`}
-                        aria-label={`Preview uploaded image ${index + 1}`}
-                        data-testid={`chat-image-upload-preview-item-${index}`}
-                      >
-                        <img
-                          src={attachment.previewUrl}
-                          alt={attachment.file.name}
-                          className="h-full w-full object-cover"
-                        />
-                      </button>
-                      <div className="min-w-0 flex-1">
-                        <Text as="div" variant="caption" tone="secondary" className="truncate text-xs font-medium">
-                          {attachment.file.name}
-                        </Text>
-                        <Text as="div" variant="caption" tone="muted" className="text-xxs">
-                          {formatAttachmentSize(attachment.file.size)}
-                        </Text>
-                      </div>
-                      <IconButton
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        radius="full"
-                        onPress={() => onRemoveImageAttachment(attachment.id)}
-                        isDisabled={Boolean(attachment.sending)}
-                        aria-label="Remove image"
-                        data-testid="chat-image-upload-remove"
-                      >
-                        <Xmark className="h-4 w-4" aria-hidden="true" />
-                      </IconButton>
-                    </div>
-                  ))}
-                  {/* Mounted with the tray so the announcement is heard when a send starts;
-                      last, so the idle (screen-reader only) region adds no spacing. */}
-                  <Text
-                    as="div"
-                    role="status"
-                    aria-live="polite"
-                    variant="caption"
-                    tone="muted"
-                    className={sendingImageCount + sendingPageCount > 0 ? "text-xs" : "sr-only"}
-                    data-testid="chat-image-upload-status"
-                  >
-                    {sendingImageCount + sendingPageCount > 0 ? describeSendingImages(sendingImageCount, sendingPageCount) : ""}
-                  </Text>
-                </div>
-              ) : null}
               {showVoiceStatus ? (
                 <div
                   data-testid="chat-voice-input-status"

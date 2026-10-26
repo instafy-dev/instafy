@@ -7,7 +7,7 @@ const trigger = (page: Page) => page.getByTestId("chat-send-queue-agent-summary"
 const editor = (page: Page) => page.getByRole("textbox", { name: "Ask Octo" });
 const order = async (page: Page): Promise<string[]> => JSON.parse(await page.getByTestId("queue-order").textContent() ?? "[]");
 
-async function openFixture(page: Page, options: { width: number; theme?: string; count?: number; draft?: string; readonly?: boolean; stash?: boolean }) {
+async function openFixture(page: Page, options: { width: number; theme?: string; count?: number; draft?: string; readonly?: boolean; stash?: boolean; utilities?: boolean; attachments?: number; sending?: boolean; messages?: boolean }) {
   const errors: string[] = [];
   page.on("pageerror", error => errors.push(error.message));
   for (const [path, body] of Object.entries(RUN_STOP_FIXTURE_STUBS)) {
@@ -21,11 +21,296 @@ async function openFixture(page: Page, options: { width: number; theme?: string;
   if (options.draft) params.set("draft", options.draft);
   if (options.readonly) params.set("readonly", "1");
   if (options.stash) params.set("stash", "1");
+  if (options.utilities) params.set("utilities", "1");
+  if (options.attachments !== undefined) params.set("attachments", String(options.attachments));
+  if (options.sending) params.set("sending", "1");
+  if (options.messages) params.set("messages", "1");
   await page.goto(`${fixture}&${params}`, { waitUntil: "domcontentloaded" });
   if (options.count === 0) await expect(editor(page)).toBeVisible();
   else await expect(trigger(page)).toBeVisible();
   await page.evaluate(() => document.fonts.ready);
   return { errors, cdp };
+}
+
+for (const width of [320, 1280]) for (const theme of ["light", "dark"]) {
+  test(`counted queue and stash icons keep labelled navigation and keyboard access in ${theme} at ${width}px`, async ({ page }) => {
+    const { errors } = await openFixture(page, { width, theme, count: 3, stash: true, draft: "Keep this unfinished draft" });
+    const queue = trigger(page);
+    const stash = page.getByTestId("chat-message-stashes-summary");
+    await expect(queue).toHaveText("3");
+    await expect(queue).toHaveAccessibleName("Queued messages (3)");
+    await expect(stash).toHaveText("1");
+    await expect(stash).toHaveAccessibleName("Stashed drafts (1)");
+    for (const name of ["Chat", "Browser"]) {
+      const tab = page.getByRole("tab", { name, exact: true });
+      await expect(tab).toBeVisible();
+      await expect(tab).toHaveText(name);
+    }
+
+    const surface = (await page.getByTestId("chat-composer-surface").boundingBox())!;
+    const targetSize = width < 640 ? 44 : 32;
+    for (const button of [stash, queue]) {
+      const bounds = (await button.boundingBox())!;
+      expect(bounds.width).toBe(targetSize);
+      expect(bounds.height).toBe(targetSize);
+      const badge = (await button.locator('span[aria-hidden="true"]').boundingBox())!;
+      // Badges float outside their trigger, but remain inside the clipped composer.
+      expect(badge.x).toBeGreaterThanOrEqual(surface.x);
+      expect(badge.y).toBeGreaterThanOrEqual(surface.y);
+      expect(badge.x + badge.width).toBeLessThanOrEqual(surface.x + surface.width);
+      expect(badge.y + badge.height).toBeLessThanOrEqual(surface.y + surface.height);
+    }
+    await page.keyboard.press("Tab");
+    await queue.focus();
+    await queue.press("Enter");
+    const dialog = page.getByRole("dialog", { name: "Queued messages", exact: true });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole("heading", { name: "Queued messages", exact: true })).toBeVisible();
+    await expect(queue).toHaveAttribute("aria-expanded", "true");
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(queue).toBeFocused();
+    await expect(queue).toHaveAttribute("aria-expanded", "false");
+    await stash.press("Enter");
+    await expect(page.getByTestId("chat-message-stash-restore").first()).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(stash).toBeFocused();
+    await expect(editor(page)).toHaveText("Keep this unfinished draft");
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    expect(errors).toEqual([]);
+  });
+}
+
+for (const width of [320, 1280]) for (const theme of ["light", "dark"]) {
+  test(`composer and sent image thumbnails share flat styling and keyboard previews in ${theme} at ${width}px`, async ({ page }) => {
+    const { errors } = await openFixture(page, { width, theme, count: 0, attachments: 1, messages: true });
+    const composerThumbnail = page.getByTestId("chat-image-upload-preview-item-0");
+    const messageThumbnails = page.getByTestId("chat-image-attachment-thumbnail");
+    await expect(messageThumbnails).toHaveCount(3);
+    const thumbnails = [composerThumbnail, messageThumbnails.first()];
+    for (const [index, thumbnail] of thumbnails.entries()) {
+      await expect(thumbnail).toHaveCSS("box-shadow", "none");
+      await expect(thumbnail).toHaveCSS("border-radius", "8px");
+      const bounds = (await thumbnail.boundingBox())!;
+      expect(bounds.width).toBe(index === 0 ? 48 : 96);
+      expect(bounds.height).toBe(index === 0 ? 48 : 96);
+      await expect(thumbnail.locator("img")).toHaveJSProperty("naturalWidth", 960);
+      await expect(thumbnail.locator("img")).toHaveJSProperty("naturalHeight", 515);
+    }
+    const firstBounds = (await messageThumbnails.first().boundingBox())!;
+    const lastBounds = (await messageThumbnails.last().boundingBox())!;
+    if (width < 640) expect(lastBounds.y).toBeGreaterThan(firstBounds.y);
+    else expect(lastBounds.y).toBe(firstBounds.y);
+
+    let sharedFocusRing = "";
+    for (const thumbnail of thumbnails) {
+      await page.keyboard.press("Tab");
+      await thumbnail.focus();
+      await expect(thumbnail).toBeFocused();
+      expect(await thumbnail.evaluate(node => node.matches(":focus-visible"))).toBe(true);
+      // Wait for the shared Button's focus transition to reach its 2px ring
+      // plus 2px offset before comparing the two sizes.
+      await expect.poll(() => thumbnail.evaluate(node => getComputedStyle(node).boxShadow)).toMatch(/ 0px 0px 0px 4px(?:,|$)/);
+      if (sharedFocusRing) await expect(thumbnail).toHaveCSS("box-shadow", sharedFocusRing);
+      else sharedFocusRing = await thumbnail.evaluate(node => getComputedStyle(node).boxShadow);
+      await thumbnail.press("Enter");
+      const preview = page.getByRole("dialog", { name: "Image preview", exact: true });
+      await expect(preview).toBeVisible();
+      await expect(preview.getByTestId("chat-image-lightbox-image")).toHaveJSProperty("naturalWidth", 960);
+      await preview.getByRole("button", { name: "Close image preview", exact: true }).press("Enter");
+      await expect(preview).toHaveCount(0);
+    }
+    const remove = page.getByTestId("chat-image-upload-remove");
+    await remove.focus();
+    await remove.press("Enter");
+    await expect(page.getByTestId("chat-image-upload-preview")).toHaveCount(0);
+    await expect(messageThumbnails).toHaveCount(3);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    expect(errors).toEqual([]);
+  });
+}
+
+for (const width of [320, 390, 1280]) for (const theme of ["light", "dark"]) {
+  test(`attachment previews stay above the input in ${theme} at ${width}px`, async ({ page }) => {
+    const draft = "Compare these screenshots";
+    const { errors } = await openFixture(page, { width, theme, count: 0, attachments: 12, draft });
+    const surface = page.getByTestId("chat-composer-surface");
+    const tray = surface.getByTestId("chat-image-upload-preview");
+    const list = tray.getByTestId("chat-image-upload-list");
+    const remove = tray.getByTestId("chat-image-upload-remove");
+    const assertLayout = async (count: number) => {
+      await expect(remove).toHaveCount(count);
+      await expect(editor(page)).toHaveText(draft);
+      await expect(editor(page)).toBeInViewport({ ratio: 1 });
+      const surfaceBounds = (await surface.boundingBox())!;
+      const trayBounds = (await tray.boundingBox())!;
+      const inputBounds = (await editor(page).boundingBox())!;
+      expect(trayBounds.x).toBeGreaterThanOrEqual(surfaceBounds.x);
+      expect(trayBounds.x + trayBounds.width).toBeLessThanOrEqual(surfaceBounds.x + surfaceBounds.width);
+      expect(trayBounds.y).toBeGreaterThanOrEqual(surfaceBounds.y);
+      expect(trayBounds.y + trayBounds.height).toBeLessThanOrEqual(inputBounds.y);
+      expect(inputBounds.y + inputBounds.height).toBeLessThanOrEqual(surfaceBounds.y + surfaceBounds.height);
+      expect(await tray.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
+      expect(await list.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    };
+
+    for (const count of [12, 4, 1]) {
+      await assertLayout(count);
+      if (count > 1) expect(await list.evaluate(node => node.scrollHeight > node.clientHeight)).toBe(true);
+      await page.getByTestId("composer-action-menu-trigger").click();
+      await page.getByRole("button", { name: "Expand draft", exact: true }).click();
+      await expect(page.getByRole("button", { name: "Collapse draft", exact: true })).toBeVisible();
+      await assertLayout(count);
+      if (count > 1) {
+        expect(await list.evaluate(node => node.scrollHeight > node.clientHeight)).toBe(true);
+        await remove.last().focus();
+        await expect(remove.last()).toBeInViewport({ ratio: 1 });
+        expect(await list.evaluate(node => node.scrollTop)).toBeGreaterThan(0);
+        await expect(editor(page)).toBeInViewport({ ratio: 1 });
+      }
+      const nextCount = count === 12 ? 4 : count === 4 ? 1 : 0;
+      for (let remaining = count; remaining > nextCount; remaining--) {
+        await remove.last().focus();
+        await remove.last().press("Enter");
+        await expect(remove).toHaveCount(remaining - 1);
+      }
+      await expect(editor(page)).toHaveText(draft);
+      await page.getByRole("button", { name: "Collapse draft", exact: true }).click();
+    }
+    await expect(tray).toHaveCount(0);
+    await expect(editor(page)).toBeInViewport({ ratio: 1 });
+    expect(errors).toEqual([]);
+  });
+}
+
+test("sending attachment status remains visible while a long preview list scrolls", async ({ page }) => {
+  const { errors } = await openFixture(page, { width: 390, count: 0, attachments: 12, sending: true });
+  const tray = page.getByTestId("chat-image-upload-preview");
+  const list = tray.getByTestId("chat-image-upload-list");
+  const status = tray.getByTestId("chat-image-upload-status");
+  await expect(tray).toHaveAttribute("aria-busy", "true");
+  await expect(status).toContainText("12");
+  await expect(tray.getByTestId("chat-image-upload-remove")).toHaveCount(12);
+  for (const button of await tray.getByTestId("chat-image-upload-remove").all()) await expect(button).toBeDisabled();
+  for (const expanded of [false, true]) {
+    if (expanded) {
+      await page.getByTestId("composer-action-menu-trigger").click();
+      await page.getByRole("button", { name: "Expand draft", exact: true }).click();
+    }
+    for (const atEnd of [false, true]) {
+      await list.evaluate((node, end) => { node.scrollTop = end ? node.scrollHeight : 0; }, atEnd);
+      if (atEnd) expect(await list.evaluate(node => node.scrollTop)).toBeGreaterThan(0);
+      await expect(status).toBeInViewport({ ratio: 1 });
+      await expect(editor(page)).toBeInViewport({ ratio: 1 });
+      const listBounds = (await list.boundingBox())!;
+      const statusBounds = (await status.boundingBox())!;
+      const inputBounds = (await editor(page).boundingBox())!;
+      expect(statusBounds.y).toBeGreaterThanOrEqual(listBounds.y + listBounds.height);
+      expect(statusBounds.y + statusBounds.height).toBeLessThanOrEqual(inputBounds.y);
+    }
+  }
+  expect(errors).toEqual([]);
+});
+
+for (const width of [320, 1280]) for (const theme of ["light", "dark"]) {
+  test(`composer utilities and browser chips remain reachable in ${theme} at ${width}px`, async ({ page }) => {
+    const { errors } = await openFixture(page, { width, theme, utilities: true });
+    const goal = page.getByTestId("chat-active-goal");
+    const summary = page.getByTestId("chat-active-goal-summary");
+    await expect(summary).toBeVisible();
+    // Utility targets must not squeeze the goal's title into an unreadable sliver.
+    expect((await summary.boundingBox())!.width).toBeGreaterThanOrEqual(80);
+    const goalBounds = (await goal.boundingBox())!;
+    const utilities = ["Show goal details", "Resume goal", "Clear goal"].map(name => goal.getByRole("button", { name, exact: true }));
+    for (const button of utilities) {
+      const bounds = (await button.boundingBox())!;
+      expect(bounds.x).toBeGreaterThanOrEqual(goalBounds.x);
+      expect(bounds.x + bounds.width).toBeLessThanOrEqual(goalBounds.x + goalBounds.width);
+      expect(bounds.y + bounds.height).toBeLessThanOrEqual(goalBounds.y + goalBounds.height);
+      expect(await button.evaluate(node => getComputedStyle(node).borderRadius)).toBe("8px");
+      if (width < 640) {
+        expect(bounds.width).toBeGreaterThanOrEqual(44);
+        expect(bounds.height).toBeGreaterThanOrEqual(44);
+      }
+    }
+    const first = (await utilities[0].boundingBox())!;
+    const second = (await utilities[1].boundingBox())!;
+    expect(second.x - first.x - first.width).toBeGreaterThanOrEqual(8);
+    await utilities[0].click();
+    await expect(goal.getByRole("button", { name: "Help unblock", exact: true })).toBeVisible();
+    await goal.getByRole("button", { name: "Hide goal details", exact: true }).click();
+    await utilities[1].click();
+    await expect(page.getByTestId("review-goal-status")).toHaveText("active");
+    await goal.getByRole("button", { name: "Pause goal", exact: true }).click();
+    await expect(page.getByTestId("review-goal-status")).toHaveText("paused");
+
+    const stash = page.getByTestId("chat-message-stashes-summary");
+    await stash.click();
+    const restores = page.getByTestId("chat-message-stash-restore");
+    const deletes = page.getByTestId("chat-message-stash-delete");
+    await expect(restores).toHaveCount(3);
+    await expect(deletes).toHaveCount(3);
+    for (const button of [restores.first(), deletes.first()]) {
+      await expect(button).toBeInViewport();
+      const bounds = (await button.boundingBox())!;
+      expect(bounds.x).toBeGreaterThanOrEqual(0);
+      expect(bounds.x + bounds.width).toBeLessThanOrEqual(width);
+      if (width < 640) expect(bounds.height).toBeGreaterThanOrEqual(44);
+    }
+    expect(await deletes.first().evaluate(node => getComputedStyle(node).borderRadius)).toBe("8px");
+    await page.keyboard.press("Tab");
+    await restores.first().focus();
+    await expect(restores.first()).toBeFocused();
+    await restores.first().press("Enter");
+    await expect(editor(page)).toContainText("Compare keyboard navigation and touch targets");
+    await expect(page.getByRole("dialog", { name: "Stashed drafts" })).toHaveCount(0);
+    await stash.click();
+    // The popover schedules initial focus after mounting. Wait for it before
+    // moving to Delete so its initial focus cannot overtake this keyboard step.
+    await expect(restores.first()).toBeFocused();
+    await deletes.first().focus();
+    await expect(deletes.first()).toBeFocused();
+    await deletes.first().press("Enter");
+    await expect(restores).toHaveCount(2);
+    await expect(editor(page)).toContainText("Compare keyboard navigation and touch targets");
+    await page.keyboard.press("Escape");
+    await expect(stash).toBeFocused();
+    await page.getByTestId("chat-image-upload-remove").click();
+    await expect(page.getByTestId("chat-image-upload-preview")).toHaveCount(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+
+    await page.goto(`/tests/fixtures/conversation-view-tabs/index.html?context=browserpages&browserpages=6&pending=1&theme=${theme}`);
+    const strip = page.getByTestId("browser-session-page-strip");
+    const chips = page.getByTestId("browser-session-page-chip");
+    await expect(chips).toHaveCount(3);
+    await expect(chips.nth(1)).toHaveAttribute("aria-pressed", "true");
+    for (const button of await strip.getByRole("button").all()) {
+      if (width < 640) expect((await button.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    }
+    const more = page.getByTestId("browser-session-page-overflow");
+    await more.focus();
+    await expect(more).toBeInViewport();
+    await more.press("Enter");
+    await expect(chips).toHaveCount(6);
+    await expect(chips).toHaveText(["Overview", "Research notes with a longer page title", "Design system", "Keyboard navigation", "Mobile layouts", "Accessibility"]);
+    const last = chips.last();
+    await last.focus();
+    await expect(last).toBeInViewport();
+    await last.press("Enter");
+    await expect(last).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByTestId("browser-page-review-state")).toHaveText("Viewing Accessibility");
+    await last.press("Enter");
+    await expect(page.getByTestId("browser-page-review-state")).toHaveText("Browser hidden");
+    const pending = page.getByRole("button", { name: "Cancel new tab request" });
+    await pending.focus();
+    await expect(pending).toBeInViewport();
+    await pending.press("Enter");
+    await expect(page.getByTestId("browser-page-review-pending")).toHaveText("false");
+    await expect(pending).toHaveCount(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    expect(errors).toEqual([]);
+  });
 }
 
 for (const width of [390, 1280]) for (const theme of ["light", "dark"]) {
