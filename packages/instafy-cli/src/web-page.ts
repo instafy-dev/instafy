@@ -108,6 +108,8 @@ export function startTags(html: string, name: string, max = 2000): string[] {
 
 export type PageLink = { text: string; href: string };
 
+const MAX_LINK_CHARS = 2_048;
+
 /** Plain `<a href>` links, resolved against the page (and its `<base href>`), http(s) only, first occurrence kept. */
 export function pageLinks(html: string, pageUrl: string, max = 200): PageLink[] {
   let base = pageUrl;
@@ -141,7 +143,8 @@ export function pageLinks(html: string, pageUrl: string, max = 200): PageLink[] 
     if (close < 0 || (nextLink >= 0 && nextLink < close)) close = nextLink >= 0 ? nextLink : window.length;
     at = tagEnd + 1 + close;
     const href = attribute(html.slice(open + 2, tagEnd), "href");
-    if (!href) continue;
+    // An over-long address is page-chosen text, not a link worth following.
+    if (!href || href.length > MAX_LINK_CHARS) continue;
     let resolved: URL;
     try {
       resolved = new URL(href.trim(), base);

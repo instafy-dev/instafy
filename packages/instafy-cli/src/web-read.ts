@@ -66,6 +66,10 @@ export const LIMITS = Object.freeze({
   maxChars: 12_000,
   defaultLinks: 30,
   maxLinks: 200,
+  /** all of a page's structured items together, as JSON; items that do not fit are dropped and counted */
+  maxStructuredChars: 8_000,
+  /** a redirect to a longer address is not followed (it would only echo page-chosen text back) */
+  maxUrlChars: 4_096,
   pageTtlMs: 6 * 3600_000,
   stopTtlMs: 24 * 3600_000,
   robotsTtlMs: 6 * 3600_000,
@@ -86,8 +90,8 @@ const STOP_TELL =
   "This URL only: do not read it another way (no other tool, address, user agent, proxy or browser). " +
   "Give the person the plain link and use a different source.";
 const SIGN_IN_TELL =
-  " If the person wants this page, they can open it in their own browser, sign in there themselves and send it to " +
-  "Octo. Never ask for a password.";
+  " If the person wants this page, they can open it in their own browser, sign in there themselves and share what " +
+  "they need with Octo. Never ask for a password.";
 
 export type StopCode =
   | "link_only"
@@ -128,6 +132,8 @@ export type PageResult = {
   find?: { terms: string[]; passages: number; matchedLines: number };
   links?: Array<{ index: number; text: string; href: string; linkOnly?: true }>;
   structured?: StructuredItem[];
+  /** structured items left out to keep the page's structured data within its bound */
+  structuredDropped?: number;
 };
 
 export type WebReadReport = {
@@ -319,6 +325,24 @@ function sha256(value: string | Buffer): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
+/** The site a host belongs to for caps and site-wide stops: lower case, no trailing dot, no leading "www.". */
+export function siteKey(host: string): string {
+  return host.toLowerCase().replace(/\.+$/, "").replace(/^www\./, "");
+}
+
+/** Stops the site itself answered with; they also cover the same path with any other query. */
+const SITE_ANSWER_STOPS = new Set<StopCode>(["login", "forbidden", "rate_limited", "captcha", "paywall", "download", "secret_screen"]);
+
+/**
+ * The keys a stop is remembered under, hashed so no address is written to disk: the address without scheme, "www.",
+ * trailing slash or fragment, and the same without its query. So http/https, "?x" or a trailing slash is not a new
+ * URL for a stopped one.
+ */
+export function stopKeys(url: URL): { exact: string; path: string } {
+  const where = `${siteKey(url.hostname)}${url.pathname.replace(/\/+$/, "") || "/"}`;
+  return { exact: sha256(`url:${where}${url.search}`), path: sha256(`path:${where}`) };
+}
+
 /** The turn this call belongs to: the runtime's turn (INSTAFY_TURN_STARTED_AT), else a local session that lapses when idle. */
 export function turnScope(env: NodeJS.ProcessEnv): { key: string; label: string; idleReset: boolean } {
   const started = env.INSTAFY_TURN_STARTED_AT?.trim();
@@ -444,23 +468,26 @@ type CachedPage = {
 class Cache {
   constructor(private readonly dir: string | null) {}
 
-  private file(kind: "pages" | "stops" | "robots", key: string) {
-    return this.dir ? path.join(this.dir, kind, `${sha256(key).slice(0, 40)}.json`) : null;
+  // Entries are stored under the key's hash, so no requested or redirect address is written in the clear.
+  private file(kind: "pages" | "stops" | "robots", id: string) {
+    return this.dir ? path.join(this.dir, kind, `${id.slice(0, 40)}.json`) : null;
   }
 
   get<T>(kind: "pages" | "stops" | "robots", key: string, ttlMs: number, now: number): T | null {
-    const file = this.file(kind, key);
+    const id = sha256(key);
+    const file = this.file(kind, id);
     if (!file) return null;
     const entry = readJson<{ key: string; savedAt: number; value: T }>(file);
-    if (!entry || entry.key !== key || typeof entry.savedAt !== "number" || now - entry.savedAt > ttlMs || now < entry.savedAt - 60_000) return null;
+    if (!entry || entry.key !== id || typeof entry.savedAt !== "number" || now - entry.savedAt > ttlMs || now < entry.savedAt - 60_000) return null;
     return entry.value;
   }
 
   put(kind: "pages" | "stops" | "robots", key: string, value: unknown, now: number) {
-    const file = this.file(kind, key);
+    const id = sha256(key);
+    const file = this.file(kind, id);
     if (!file) return;
     try {
-      writeFileAtomic(file, { key, savedAt: now, value });
+      writeFileAtomic(file, { key: id, savedAt: now, value });
     } catch {
       // a cache that cannot be written is only slower
     }
@@ -787,7 +814,8 @@ async function robotsVerdict(url: URL, ctx: ReadContext): Promise<{ refused: str
   const target = `${url.pathname}${url.search}`;
   for (const agent of ROBOTS_AGENTS) {
     if (!robotsAllows(groups, agent, target)) {
-      return { refused: `robots.txt disallows ${url.pathname} for ${agent === "*" ? "all bots" : agent}` };
+      const shown = redaction.redactUrl(url.href).text;
+      return { refused: `robots.txt disallows ${shown} for ${agent === "*" ? "all bots" : agent}` };
     }
   }
   return { refused: null };
@@ -853,16 +881,19 @@ async function readOne(rawUrl: string, options: Required<Omit<WebReadOptions, "u
   const requested = stripHash(requestedUrl);
   const page = basePage(requested, new Date(ctx.now()).toISOString());
 
-  // Raw hop addresses, so a stop is remembered for each address the chain reached (the report shows them redacted).
-  const hopUrls: string[] = [];
+  // Every address the chain reached, so a stop is remembered for each of them (under hashed keys).
+  const hopUrls: URL[] = [];
   const stop = async (code: StopCode, message: string, host: string, extra: Partial<PageResult> = {}): Promise<PageResult> => {
     const record: StopRecord = { code, message, at: ctx.now() };
-    await ctx.turn.update((state) => {
-      state.stops[requested] = record;
-      for (const hopUrl of hopUrls) state.stops[hopUrl] = record;
-      if (HOST_WIDE_STOPS.has(code)) state.hostStops[host] = record;
+    const keys = [requestedUrl, ...hopUrls].flatMap((url) => {
+      const { exact, path: pathKey } = stopKeys(url);
+      return SITE_ANSWER_STOPS.has(code) ? [exact, pathKey] : [exact];
     });
-    ctx.cache.put("stops", requested, record, ctx.now());
+    await ctx.turn.update((state) => {
+      for (const key of keys) state.stops[key] = record;
+      if (HOST_WIDE_STOPS.has(code)) state.hostStops[siteKey(host)] = record;
+    });
+    for (const key of keys) ctx.cache.put("stops", key, record, ctx.now());
     return { ...page, ...extra, status: "stopped", code, message, tell: TELL[code] };
   };
   const skip = (code: SkipCode, message: string, extra: Partial<PageResult> = {}): PageResult => ({
@@ -884,19 +915,32 @@ async function readOne(rawUrl: string, options: Required<Omit<WebReadOptions, "u
 
   // A URL (or site) that stopped before is never fetched again, whatever the options.
   const firstHost = requestedUrl.hostname.toLowerCase();
+  const firstSite = siteKey(firstHost);
+  const firstKeys = stopKeys(requestedUrl);
   const earlier = await ctx.turn.update((state) => ({
-    stop: state.stops[requested] ?? state.hostStops[firstHost] ?? null,
+    stop: state.stops[firstKeys.exact] ?? state.stops[firstKeys.path] ?? state.hostStops[firstSite] ?? null,
     loads: state.loads,
-    hostLoads: state.hosts[firstHost]?.loads ?? 0,
+    hostLoads: state.hosts[firstSite]?.loads ?? 0,
   }));
-  const remembered = earlier.stop ?? ctx.cache.get<StopRecord>("stops", requested, LIMITS.stopTtlMs, ctx.now());
+  const remembered =
+    earlier.stop ??
+    ctx.cache.get<StopRecord>("stops", firstKeys.exact, LIMITS.stopTtlMs, ctx.now()) ??
+    ctx.cache.get<StopRecord>("stops", firstKeys.path, LIMITS.stopTtlMs, ctx.now());
   if (remembered) {
     return { ...page, status: "stopped", code: remembered.code, message: remembered.message, tell: TELL[remembered.code], previouslyStopped: true };
   }
 
   if (!options.fresh) {
     const cached = ctx.cache.get<CachedPage>("pages", requested, LIMITS.pageTtlMs, ctx.now());
-    if (cached) return present(page, cached, true, options, ctx.guard);
+    // A site listed as link-only since the page was cached is not served from the cache either.
+    const listed = (url: string) => {
+      try {
+        return Boolean(linkOnlySite(new URL(url).hostname, ctx.guard));
+      } catch {
+        return false;
+      }
+    };
+    if (cached && !listed(requested) && !listed(cached.finalUrl)) return present(page, cached, true, options, ctx.guard);
   }
 
   // Over budget or out of time: nothing is fetched, not even robots.txt (the reservation below re-checks under the lock).
@@ -904,12 +948,12 @@ async function readOne(rawUrl: string, options: Required<Omit<WebReadOptions, "u
     return skip("turn_limit", `this turn already loaded ${earlier.loads} pages (limit ${LIMITS.loadsPerTurn})`);
   }
   if (earlier.hostLoads >= LIMITS.loadsPerHost) {
-    return skip("host_limit", `this turn already read ${firstHost} ${earlier.hostLoads} times (limit ${LIMITS.loadsPerHost})`);
+    return skip("host_limit", `this turn already read ${firstSite} ${earlier.hostLoads} times (limit ${LIMITS.loadsPerHost})`);
   }
   if (ctx.deadline - ctx.now() < 1_000) return skip("time_limit", "this call reached its time limit before this URL");
 
   const redirects: string[] = [];
-  const chainHosts = new Set<string>();
+  const chainSites = new Set<string>();
   let current = new URL(requested);
   let response: Extract<Fetched, { kind: "response" }> | null = null;
   for (let hop = 0; ; hop += 1) {
@@ -917,14 +961,15 @@ async function readOne(rawUrl: string, options: Required<Omit<WebReadOptions, "u
       return stop("redirects", `more than ${LIMITS.maxRedirects} redirects`, current.hostname, { redirects });
     }
     const host = current.hostname.toLowerCase();
+    const site = siteKey(host);
     const shownCurrent = redaction.redactUrl(current.href).text;
     const via = hop ? `redirected to ${shownCurrent}: ` : "";
     const hopExtra: Partial<PageResult> = { redirects, provenance: { ...page.provenance, finalUrl: shownCurrent } };
 
-    const site = linkOnlySite(host, ctx.guard);
-    if (site) return stop("link_only", `${via}${site.name} is link-only (${site.reason})`, host, hopExtra);
+    const listed = linkOnlySite(host, ctx.guard);
+    if (listed) return stop("link_only", `${via}${listed.name} is link-only (${listed.reason})`, host, hopExtra);
     if (hop) {
-      const siteStop = await ctx.turn.update((state) => state.hostStops[host] ?? null);
+      const siteStop = await ctx.turn.update((state) => state.hostStops[site] ?? null);
       if (siteStop) return { ...page, ...hopExtra, status: "stopped", code: siteStop.code, message: via + siteStop.message, tell: TELL[siteStop.code], previouslyStopped: true };
     }
     // Checked before robots.txt is read, so not even robots.txt is fetched from a refused address. Every fetch below
@@ -937,15 +982,15 @@ async function readOne(rawUrl: string, options: Required<Omit<WebReadOptions, "u
     if ("failed" in robots) return fail(robots.failed, via + robots.message, hopExtra);
     if (robots.refused) return stop("robots", via + robots.refused, host, hopExtra);
 
-    if (!chainHosts.has(host)) {
+    if (!chainSites.has(site)) {
       const now = ctx.now();
       const reservation = await ctx.turn.update((state) => {
         if (hop === 0 && state.loads >= LIMITS.loadsPerTurn) {
           return { ok: false as const, code: "turn_limit" as const, message: `this turn already loaded ${state.loads} pages (limit ${LIMITS.loadsPerTurn})` };
         }
-        const record = (state.hosts[host] ??= { loads: 0, lastAt: 0 });
+        const record = (state.hosts[site] ??= { loads: 0, lastAt: 0 });
         if (record.loads >= LIMITS.loadsPerHost) {
-          return { ok: false as const, code: "host_limit" as const, message: `this turn already read ${host} ${record.loads} times (limit ${LIMITS.loadsPerHost})` };
+          return { ok: false as const, code: "host_limit" as const, message: `this turn already read ${site} ${record.loads} times (limit ${LIMITS.loadsPerHost})` };
         }
         const at = Math.max(now, record.lastAt + LIMITS.hostSpacingMs);
         if (at + 1_000 > ctx.deadline) {
@@ -958,7 +1003,7 @@ async function readOne(rawUrl: string, options: Required<Omit<WebReadOptions, "u
       });
       if (!reservation.ok) return skip(reservation.code, via + reservation.message, hopExtra);
       if (reservation.wait > 0) await ctx.sleep(reservation.wait);
-      chainHosts.add(host);
+      chainSites.add(site);
     }
 
     const left = ctx.deadline - ctx.now();
@@ -970,6 +1015,9 @@ async function readOne(rawUrl: string, options: Required<Omit<WebReadOptions, "u
       return stop("download", `${via}the answer is a file (${answer.contentType || "attachment"}), not a page`, host, { ...hopExtra, httpStatus: answer.status });
     }
     if (answer.kind === "redirect") {
+      if (answer.location.length > LIMITS.maxUrlChars) {
+        return fail("http_error", `${via}redirect to an address longer than ${LIMITS.maxUrlChars} characters`, hopExtra);
+      }
       let next: URL;
       try {
         next = new URL(answer.location, current);
@@ -977,7 +1025,7 @@ async function readOne(rawUrl: string, options: Required<Omit<WebReadOptions, "u
         return fail("http_error", `${via}redirect to an invalid address`, hopExtra);
       }
       next.hash = "";
-      hopUrls.push(next.href);
+      hopUrls.push(next);
       redirects.push(redaction.redactUrl(next.href).text);
       if (next.protocol !== "http:" && next.protocol !== "https:") {
         return stop("blocked_address", `redirected to a non-web address (${next.protocol})`, host, { redirects });
@@ -1067,6 +1115,16 @@ function present(
     }
     return { index, text: link.text, href: link.href, ...(linkOnly ? { linkOnly: true as const } : {}) };
   });
+  // Structured data is page-written too, so it shares a bound like the text does: whole items while they fit.
+  const structured: StructuredItem[] = [];
+  let structuredChars = 0;
+  for (const item of record.structured) {
+    const size = JSON.stringify(item).length;
+    if (structuredChars + size > LIMITS.maxStructuredChars) continue;
+    structured.push(item);
+    structuredChars += size;
+  }
+  const structuredDropped = record.structured.length - structured.length;
   return {
     ...page,
     status: record.status,
@@ -1082,7 +1140,8 @@ function present(
     truncated,
     ...(find ? { find } : {}),
     links,
-    structured: record.structured,
+    structured,
+    ...(structuredDropped ? { structuredDropped } : {}),
   };
 }
 
@@ -1190,14 +1249,16 @@ export function formatWebRead(report: WebReadReport): string {
     if (page.message) out.push(`  ${page.message}${page.previouslyStopped ? " (stopped earlier; not read again)" : ""}`);
     if (page.tell) out.push(`  ${page.tell}`);
     if (page.text !== undefined) {
-      out.push(`  title: ${page.provenance.title || "(none)"}`);
       out.push(`  read ${page.provenance.readAt} by ${page.provenance.viewer}${page.fromCache ? " (cached)" : ""}, HTTP ${page.httpStatus}`);
       if (page.find) out.push(`  --find: ${page.find.passages} passage(s) for ${page.find.terms.join(", ")}${page.find.passages ? "" : ": this page does not say it"}`);
-      out.push(page.text);
+      // The title and link texts are written by the site too, so they go inside the untrusted wrapper with the text.
+      const pageWritten = [`title: ${page.provenance.title || "(none)"}`];
       if (page.links?.length) {
-        out.push("  links:");
-        for (const link of page.links.slice(0, 15)) out.push(`   ${link.index}. ${link.text || "(no text)"} <${link.href}>${link.linkOnly ? " [link-only]" : ""}`);
+        pageWritten.push("links:");
+        for (const link of page.links.slice(0, 15)) pageWritten.push(` ${link.index}. ${link.text || "(no text)"} <${link.href}>${link.linkOnly ? " [link-only]" : ""}`);
       }
+      out.push(wrapUntrusted(pageWritten.join("\n"), page.provenance.finalUrl, page.provenance.readAt));
+      out.push(page.text);
       if (page.structured?.length) out.push(`  structured data: ${page.structured.map((item) => item.kind).join(", ")} (see --json)`);
     }
     out.push("");
