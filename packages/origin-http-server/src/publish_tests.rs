@@ -4689,6 +4689,53 @@ fn read_only_refresh_follows_main_and_never_pushes() {
     assert!(sc.remote_refs("refs/instafy/").is_empty());
 }
 
+/// The runtime keeps its skill pack files out of history through the
+/// checkout's `info/exclude` (runtime-agent `jobs::runtime_pack_files`).
+/// When `main` starts tracking the same paths (the pack was imported in full
+/// from another device), the refresh moves onto it and main's copies replace
+/// the excluded ones; a save before that publishes none of them.
+#[test]
+fn refresh_moves_onto_a_main_that_tracks_excluded_runtime_files() {
+    for can_write in [false, true] {
+        let sc = Scenario::new(Options::default());
+        let exclude = sc.ws.join(".instafy/.git/info/exclude");
+        fs::create_dir_all(exclude.parent().unwrap()).unwrap();
+        fs::write(
+            &exclude,
+            "/.agents/skills/pack/SKILL.md\n/.agents/skills/pack/scripts/run.mjs\n",
+        )
+        .unwrap();
+        sc.write(".agents/skills/pack/SKILL.md", b"the runtime's copy\n");
+        sc.write(".agents/skills/pack/scripts/run.mjs", b"// launcher\n");
+        assert_eq!(sc.status(), "", "excluded files are in no status");
+
+        sc.push_other(
+            &[
+                (".agents/skills/pack/SKILL.md", Some(b"the imported pack\n")),
+                (
+                    ".agents/skills/pack/scripts/run.mjs",
+                    Some(b"// the pack's CLI\n"),
+                ),
+            ],
+            "Import the pack",
+        );
+        let report = refresh(&sc.ctx(can_write)).unwrap();
+
+        assert!(report.checkout_moved, "{report:?}");
+        assert_eq!(sc.head(), sc.main());
+        assert_eq!(
+            sc.disk(".agents/skills/pack/SKILL.md").as_deref(),
+            Some("the imported pack\n")
+        );
+        assert_eq!(
+            sc.disk(".agents/skills/pack/scripts/run.mjs").as_deref(),
+            Some("// the pack's CLI\n")
+        );
+        assert_eq!(sc.status(), "");
+        assert!(!sc.anywhere_on_remote("the runtime's copy"));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Review fixes: a stop keeps everything locally first, dismissals hold
 // whatever the branch did since, refs follow the origin that made them, and

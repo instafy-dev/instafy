@@ -21,7 +21,7 @@ import {
   extractChatAttachments,
   UserMessageBubble,
 } from "./ChatMessageEntries";
-import { isUnsentBrowserRequestNotice, readBrowserRequestOf } from "./browserRequest";
+import { isBrowserNoticePrompt, isUnsentBrowserNoticePrompt } from "./browserHandBack";
 import {
   AssistantSpeakerIdentityLabel,
   type SpeakerStatusMarker,
@@ -263,12 +263,12 @@ export function ConversationMessageRows({
   let lastAssistantHandle: string | null = null;
   for (const [messageIndex, message] of messages.entries()) {
         flushTimedRowsBefore(message.timestamp);
-        // A continuation sent to Instafy's browser for a card reads as a
-        // one-line notice, not as a message the person wrote. One whose
-        // dispatch failed opened nothing, so it shows nothing; the card keeps
-        // its button with the error.
-        if (message.role === "user" && readBrowserRequestOf(message)) {
-          if (!isUnsentBrowserRequestNotice(message)) {
+        // A continuation sent to Instafy's browser for a card, or a hand-back
+        // of what the browser found, reads as a one-line notice, not as a
+        // message the person wrote. One whose dispatch failed shows nothing;
+        // a card keeps its button with the error.
+        if (message.role === "user" && isBrowserNoticePrompt(message)) {
+          if (!isUnsentBrowserNoticePrompt(message)) {
             rows.push(<BrowserRequestNoticeRow key={message.id} message={message} />);
           }
           continue;

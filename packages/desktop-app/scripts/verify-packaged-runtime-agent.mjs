@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +8,13 @@ import { isDeepStrictEqual } from "node:util";
 import { modulePathToImportUrl } from "./module-import-url.mjs";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const { describeSkillPacks } = createRequire(import.meta.url)("./skill-pack-tree.cjs");
+// Every release bundles exactly the skill packs pinned for the runtime.
+const pinnedSkillPacks = JSON.parse(
+  fs.readFileSync(path.join(packageRoot, "..", "runtime-agent", "skill-packs.json"), "utf8"),
+)
+  .packs.map(({ name, version, tree_sha256 }) => ({ name, version, tree_sha256 }))
+  .sort((a, b) => a.name.localeCompare(b.name));
 const releaseRoot = path.join(packageRoot, "release");
 const { resolveVerifiedBundledRuntimeAgent } = await import(
   modulePathToImportUrl(path.join(packageRoot, "dist", "bundledRuntimeAgent.js")),
@@ -100,10 +108,20 @@ for (const manifestPath of manifests) {
   if (!isDeepStrictEqual(capabilityContract, EXPECTED_PERSONAL_BROWSER_CAPABILITY_CONTRACT)) {
     throw new Error("Packaged runtime-agent returned an unexpected Personal Browser capability contract.");
   }
+  const packagedSkillPacks = describeSkillPacks(path.join(path.dirname(executablePath), "skill-packs"));
+  if (
+    pinnedSkillPacks.length === 0 ||
+    !isDeepStrictEqual(packagedSkillPacks, pinnedSkillPacks) ||
+    !isDeepStrictEqual(manifest.skillPacks, pinnedSkillPacks)
+  ) {
+    throw new Error(
+      `Packaged skill packs ${JSON.stringify(packagedSkillPacks)} (manifest ${JSON.stringify(manifest.skillPacks)}) are not the pinned ${JSON.stringify(pinnedSkillPacks)}.`,
+    );
+  }
   verified += 1;
   // resolveVerifiedBundledRuntimeAgent has also checked the code-mode host beside it.
   console.log(
-    `[instafy-desktop] Verified packaged runtime-agent and code-mode host at ${path.dirname(executablePath)}.`,
+    `[instafy-desktop] Verified packaged runtime-agent, code-mode host and skill packs at ${path.dirname(executablePath)}.`,
   );
 }
 

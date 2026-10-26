@@ -58,6 +58,8 @@ use tokio_postgres::{types::Json as PgJson, NoTls};
 use tower::ServiceExt;
 use uuid::Uuid;
 
+#[path = "browser_hand_back_tests.rs"]
+mod browser_hand_back_tests;
 #[path = "browser_profile_e2e_fixture.rs"]
 mod browser_profile_e2e_fixture;
 

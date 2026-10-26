@@ -16,6 +16,7 @@
     "speech:strict-roundtrip:check": "node scripts/speech-strict-roundtrip-check.mjs",
     "dev:prod": "pnpm --filter @instafy/frontend dev:prod",
     "dev:desktop": "node scripts/dev-desktop.mjs",
+    "skill-packs:install": "node scripts/install-skill-packs.mjs",
     "build": "pnpm run build:all",
     "build:all": "pnpm run build:frontend && pnpm run build:rust",
     "build:frontend": "pnpm --filter @instafy/frontend build",

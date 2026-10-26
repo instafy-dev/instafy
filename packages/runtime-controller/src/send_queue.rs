@@ -373,6 +373,15 @@ async fn prepare_queue_message(
     // queued, and only the checked copy is stored: the drain re-checks it
     // without counting it again.
     let mut message_value = message_value;
+    // A hand-back from a browser turn resumes an idle lane or is refused; it
+    // never waits in the queue (crate::browser_hand_back).
+    if let Some(metadata) = message_value.get_mut("metadata") {
+        if crate::browser_hand_back::take_hand_back_claim(metadata).is_some() {
+            return Err(bad_request(
+                "A hand-back from the browser is sent only to an idle conversation, so it was not queued.",
+            ));
+        }
+    }
     let site_ask = match message_value.get_mut("metadata") {
         Some(metadata) => match crate::site_intent::take_site_intent_claim(metadata) {
             Some(claim) => Some(

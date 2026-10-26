@@ -1,0 +1,1 @@
+> Installed by Instafy with the runtime: only this file{{launcher}} is in this space. The pack's other files (references, scripts, templates) are in `$INSTAFY_SKILL_PACKS_DIR/{{name}}/`; read them there. Run commands exactly as written below.

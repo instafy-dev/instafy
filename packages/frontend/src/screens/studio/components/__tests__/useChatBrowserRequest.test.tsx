@@ -629,6 +629,12 @@ describe("Studio starting a request_browser card by itself", () => {
     }],
     ["a card a Shared Browser turn sent", async () => { await cardArrives({ prompt: { browserTransport: "shared" } }); }],
     ["a card a continuation's turn sent", async () => { await cardArrives({ prompt: { browserRequestOf: "job:job-0" } }); }],
+    ["a card a hand-back turn sent (one automatic hop only)", async () => {
+      // The address was seen in an earlier reply, so only the hop stops it.
+      value.messages = [{ id: "earlier", role: "assistant", timestamp: Date.now(),
+        content: "Your keys are listed at https://app.example.test/settings." }];
+      await cardArrives({ prompt: { continuesFromBrowserJob: "job-0" } });
+    }],
     ["a viewer who cannot write", async () => { value.canWrite = false; await cardArrives(); }],
     ["a browser that cannot open here", async () => {
       value.personalAvailable = false; value.sharedUnavailable = true; await cardArrives();
