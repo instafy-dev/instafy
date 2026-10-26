@@ -83,6 +83,9 @@ test("the link-only list matches hosts by its own rule", () => {
   assert.equal(name("maps.app.goo.gl"), "Google search, Maps, Travel and Hotels");
   assert.equal(name("www.google.com"), "Google search, Maps, Travel and Hotels");
   assert.equal(name("www.airbnb.com.au"), "Airbnb");
+  for (const host of ["amzn.to", "amzn.com", "amzn.asia", "www.hotels.com", "de.hotels.com", "www.vrbo.co.uk"]) {
+    assert.ok(linkOnlySite(host), `${host} is link-only, as in the map pack's list`);
+  }
   for (const host of ["notbooking.com", "booking.com.example.test", "amazon.example.io", "example.com", "127.0.0.1:8080"]) {
     assert.equal(name(host), null, host);
   }
