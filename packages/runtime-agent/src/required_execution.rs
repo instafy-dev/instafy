@@ -22,9 +22,11 @@ use codex_extension_api::{
 /// The request metadata key the Instafy proxy reads.
 pub(crate) const REQUIRE_TOOL_CALL_METADATA_KEY: &str = "instafy.require_tool_call";
 
-/// Browser MCP tools that act on or read the page. `status` and `request_human_input` do not.
-const BROWSER_EXECUTION_TOOL_NAMES: [&str; 6] =
-    ["snapshot", "navigate", "click", "type", "press", "scroll"];
+/// Browser MCP tools that act on or read the page. `status`, `request_human_input` and the tab
+/// tools that only list, show or close tabs do not; `open_tab` loads a page.
+const BROWSER_EXECUTION_TOOL_NAMES: [&str; 7] = [
+    "snapshot", "navigate", "click", "type", "press", "scroll", "open_tab",
+];
 const BROWSER_MCP_SERVER_NAMES: [&str; 2] = ["instafy_personal_browser", "instafy_shared_browser"];
 
 /// Built-in tools that execute something in the workspace.
@@ -245,7 +247,13 @@ mod tests {
                     "{server}.{tool}"
                 );
             }
-            for tool in ["status", "request_human_input"] {
+            for tool in [
+                "status",
+                "request_human_input",
+                "list_tabs",
+                "select_tab",
+                "close_tab",
+            ] {
                 assert!(
                     !mcp_tool_counts_as_execution(server, tool),
                     "{server}.{tool}"

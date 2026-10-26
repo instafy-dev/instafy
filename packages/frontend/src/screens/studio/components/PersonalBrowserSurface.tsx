@@ -18,6 +18,7 @@ import {
   Refresh,
   Trash,
   MoreHoriz,
+  Xmark,
 } from "iconoir-react";
 import { normalizeBrowserAddress } from "./browserAddress";
 import { BrowserAddressField } from "./BrowserAddressField";
@@ -88,6 +89,87 @@ export function BrowserTransportSelector({
       </div>
     </BrowserToolsPopover>
   </div>;
+}
+
+type PersonalBrowserTab = NonNullable<InstafyDesktopPersonalBrowserStatus["tabs"]>[number];
+
+function tabLabel(tab: PersonalBrowserTab): string {
+  if (tab.title) return tab.title;
+  try {
+    return new URL(tab.url).host || "New tab";
+  } catch {
+    return "New tab";
+  }
+}
+
+/**
+ * The open tabs, shown once Octo has opened one of its own. Octo's tabs are
+ * marked, so every tab it uses is visible and named as its; the person shows
+ * or closes them once Octo is paused.
+ */
+export function PersonalBrowserTabRow({
+  tabs,
+  locked,
+  onSelect,
+  onClose,
+}: {
+  tabs: readonly PersonalBrowserTab[];
+  locked: boolean;
+  onSelect: (tabId: string) => void;
+  onClose: (tabId: string) => void;
+}) {
+  if (tabs.length < 2) return null;
+  return (
+    <div
+      className="flex min-w-0 items-center gap-1 overflow-x-auto border-b border-slate-200 px-2 py-1 dark:border-slate-800"
+      role="group"
+      aria-label="Browser tabs"
+      data-testid="personal-browser-tabs"
+    >
+      {tabs.map((tab) => {
+        const label = tabLabel(tab);
+        const byOcto = tab.openedBy === "agent";
+        return (
+          <div
+            key={tab.id}
+            className={`flex min-w-0 max-w-[14rem] items-center rounded-md ${tab.active ? "bg-slate-200 dark:bg-slate-800" : ""}`}
+            data-testid="personal-browser-tab"
+            data-active={tab.active ? "true" : "false"}
+            data-opened-by={tab.openedBy}
+          >
+            <Button
+              variant="ghost"
+              size="xs"
+              className="min-w-0 flex-1 justify-start"
+              aria-pressed={tab.active}
+              aria-label={byOcto ? `${label} (opened by Octo)` : label}
+              title={locked && !tab.active ? "Pause Octo to switch tabs" : tab.url}
+              isDisabled={locked && !tab.active}
+              onPress={() => onSelect(tab.id)}
+            >
+              {byOcto ? (
+                <span className="shrink-0 rounded bg-violet-100 px-1 text-[10px] font-medium text-violet-700 dark:bg-violet-900/50 dark:text-violet-200">
+                  Octo
+                </span>
+              ) : null}
+              <span className="min-w-0 truncate">{label}</span>
+            </Button>
+            {byOcto ? (
+              <IconButton
+                aria-label={`Close ${label}`}
+                size="sm"
+                variant="ghost"
+                isDisabled={locked}
+                onPress={() => onClose(tab.id)}
+              >
+                <Xmark className="h-3 w-3" aria-hidden="true" />
+              </IconButton>
+            ) : null}
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 function personalBrowserStatus(model: PersonalBrowserModel): {
@@ -592,6 +674,12 @@ export function PersonalBrowserSurface({
               : null
         }
         testId="personal-browser-chrome"
+      />
+      <PersonalBrowserTabRow
+        tabs={ready && ownsNativeStatus ? model.status?.tabs ?? [] : []}
+        locked={humanInputLocked}
+        onSelect={(tabId) => void model.selectTab(tabId)}
+        onClose={(tabId) => void model.closeTab(tabId)}
       />
       <BrowserReadingRow
         pages={agentReadingPages}

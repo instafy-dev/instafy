@@ -1,5 +1,9 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 
+import { isIP } from "node:net";
+
+import { checkPublicUrl, isLocalHostName, isPrivateAddress } from "@instafy/bind/net";
+
 import {
   classifyStep,
   isEditable as isPolicyEditable,
@@ -21,6 +25,9 @@ export type PersonalBrowserApprovalMode = "ask" | "routine";
  */
 export const PERSONAL_BROWSER_APPROVAL_POLICY_VERSION = 2;
 export const MAX_PERSONAL_BROWSER_KNOWN_HOSTS = 3;
+/** Tabs the agent may have open at once, besides the person's own tab. */
+export const MAX_PERSONAL_BROWSER_AGENT_TABS = 3;
+const TAB_ID_PATTERN = /^tab-[1-9][0-9]{0,5}$/;
 const KNOWN_HOST_PATTERN = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
 export function normalizePersonalBrowserApprovalMode(value: unknown): PersonalBrowserApprovalMode {
@@ -255,6 +262,47 @@ export function normalizePersonalBrowserUrl(value: unknown): string {
     throw new Error("Personal Browser URL must not contain credentials.");
   }
   return parsed.toString();
+}
+
+/**
+ * An address the agent opens in a tab of its own must be a public web page:
+ * no loopback, private-network, link-local or local host name, checked on the
+ * address itself and on every address its name resolves to. Pages a person
+ * opens, and the agent's navigation in the person's own tab, are not limited
+ * by this.
+ */
+export async function checkPersonalBrowserAgentTabUrl(
+  value: string,
+  lookup?: (host: string, options: { all: true; verbatim: boolean }) => Promise<Array<{ address: string; family: number }>>,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const result = await checkPublicUrl(value, lookup ? { lookup } : {});
+  return result.ok ? { ok: true } : { ok: false, reason: result.reason };
+}
+
+/**
+ * The literal part of that check, for a redirect or page-started navigation
+ * in an agent tab, which is decided before the next request starts: an
+ * address literal must be public and a host name must not be a local one.
+ */
+export function personalBrowserAgentTabHopIsPublic(value: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+  const host = parsed.hostname.replace(/^\[|\]$/g, "");
+  if (!host) return false;
+  if (isIP(host)) return !isPrivateAddress(host);
+  return !isLocalHostName(host);
+}
+
+export function requirePersonalBrowserTabId(value: unknown): string {
+  if (typeof value !== "string" || !TAB_ID_PATTERN.test(value)) {
+    throw new Error("Personal Browser tabId must be a tab id from list_tabs.");
+  }
+  return value;
 }
 
 export function getPersonalBrowserOrigin(value: unknown): string | null {

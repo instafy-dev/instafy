@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import net from "node:net";
-import { MAX_HEADER_BYTES, checkPublicUrl, checkUriParams, isPrivateAddress, originAllowed, safeFetch } from "../src/net.mjs";
+import { MAX_HEADER_BYTES, checkPublicUrl, checkUriParams, isLocalHostName, isPrivateAddress, originAllowed, safeFetch } from "../src/net.mjs";
 
 test("isPrivateAddress covers loopback, private, link-local, CGNAT, mapped and reserved ranges", () => {
   const blocked = [
@@ -125,4 +125,20 @@ test("originAllowed matches allowed_origins patterns", () => {
   assert.equal(originAllowed("https://shop.example:8443/", ["https://shop.example"]), false);
   assert.equal(originAllowed("not a url", ["https://*"]), false);
   assert.equal(originAllowed("https://x.example", undefined), true);
+});
+
+test("isLocalHostName names this machine and local networks, not public names", () => {
+  for (const host of ["localhost", "app.localhost", "printer.local", "nas.lan", "intranet", "db.internal", "router.home", "localhost.", "nas.lan.", "intranet."]) {
+    assert.equal(isLocalHostName(host), true, host);
+  }
+  for (const host of ["example.com", "docs.example.test", "local.example.com", "example.com."]) {
+    assert.equal(isLocalHostName(host), false, host);
+  }
+});
+
+test("isLocalHostName stays fast on a name with a long run of dots", () => {
+  const host = `a${".".repeat(100_000)}x`;
+  const started = Date.now();
+  assert.equal(isLocalHostName(host), false);
+  assert.ok(Date.now() - started < 1000, `took ${Date.now() - started}ms`);
 });

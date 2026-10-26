@@ -59,7 +59,7 @@ export default defineConfig({
   format: ["cjs"],
   target: "node20",
   external: ["electron"],
-  noExternal: ["@instafy/sdk", "@instafy/browser-action-policy", "electron-updater", "fs-extra"],
+  noExternal: ["@instafy/sdk", "@instafy/browser-action-policy", /^@instafy\/bind\/net$/, "electron-updater", "fs-extra"],
   esbuildOptions(options) {
     options.alias = {
       ...(options.alias ?? {}),

@@ -31,6 +31,7 @@ function createModel(): PersonalBrowserModel {
     clearNavigationError: vi.fn(),
     clearData: vi.fn(async () => null),
     close: vi.fn(async () => null),
+    closeTab: vi.fn(async () => null),
     goBack: vi.fn(async () => null),
     goForward: vi.fn(async () => null),
     navigate: vi.fn(async () => null),
@@ -39,6 +40,7 @@ function createModel(): PersonalBrowserModel {
     pendingHandoff: null,
     readPage: vi.fn(async () => null),
     reload: vi.fn(async () => null),
+    selectTab: vi.fn(async () => null),
     recovering: false,
     retryAgentControl: vi.fn(async () => null),
     retryOpen: vi.fn(),
@@ -190,6 +192,46 @@ describe("PersonalBrowserSurface", () => {
     const foreign = { ...model, status: { ...model.status!, ownerId: "another-owner" } };
     await act(async () => root.render(<PersonalBrowserSurface active agentWorking model={foreign} transportSelector={null} />));
     expect(document.querySelector('[data-testid="browser-reading-row"]')).toBeNull();
+  });
+
+  it("shows Octo's tabs, marked as Octo's, and switches or closes them only once Octo is paused", async () => {
+    const model = createModel();
+    model.status = {
+      ...model.status!,
+      tabs: [
+        { id: "tab-1", openedBy: "person", active: false, url: "https://example.com/", title: "My page" },
+        { id: "tab-2", openedBy: "agent", active: true, url: "https://docs.example.com/guide", title: "Guide" },
+      ],
+      activeTabId: "tab-2",
+      maxAgentTabs: 3,
+    };
+    window.instafyDesktop = { notify: vi.fn(), personalBrowserSetBounds: vi.fn(async () => model.status!) };
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
+    const tabs = [...document.querySelectorAll<HTMLElement>('[data-testid="personal-browser-tab"]')];
+    expect(tabs.map((tab) => [tab.dataset.openedBy, tab.dataset.active])).toEqual([["person", "false"], ["agent", "true"]]);
+    expect(tabs[1]!.textContent).toContain("Octo");
+    expect(tabs[0]!.textContent).not.toContain("Octo");
+    expect(document.querySelector('[aria-label="Close My page"]')).toBeNull();
+
+    // While Octo has control, the person's tab cannot be shown and nothing closes.
+    const personTab = document.querySelector<HTMLButtonElement>('[aria-label="My page"]')!;
+    expect(personTab.disabled).toBe(true);
+    expect(document.querySelector<HTMLButtonElement>('[aria-label="Close Guide"]')!.disabled).toBe(true);
+
+    model.status = { ...model.status!, agentControlEnabled: false, humanControlReady: true };
+    await act(async () => root.render(<PersonalBrowserSurface active model={{ ...model }} transportSelector={null} />));
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="My page"]')!.click());
+    expect(model.selectTab).toHaveBeenCalledWith("tab-1");
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Close Guide"]')!.click());
+    expect(model.closeTab).toHaveBeenCalledWith("tab-2");
+  });
+
+  it("shows no tab row while only the person's tab is open", async () => {
+    const model = createModel();
+    model.status = { ...model.status!, tabs: [{ id: "tab-1", openedBy: "person", active: true, url: "https://example.com/" }], activeTabId: "tab-1" };
+    window.instafyDesktop = { notify: vi.fn(), personalBrowserSetBounds: vi.fn(async () => model.status!) };
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
+    expect(document.querySelector('[data-testid="personal-browser-tabs"]')).toBeNull();
   });
 
   it("sends the page only on a press and leaves agent control alone", async () => {
