@@ -179,9 +179,12 @@ test("only both Shared prerequisite steps allow ten minutes while network limits
     "            sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends cmake",
     '            [[ "$(dpkg-query --show --showformat=\'${Status}\' cmake)" == \'install ok installed\' ]]',
     "          fi",
-    "          IFS=. read -r cmake_major cmake_minor _ < <(cmake --version | sed -n '1s/^cmake version //p')",
-    "          (( cmake_major > 3 || (cmake_major == 3 && cmake_minor >= 28) ))",
     "          command -v cmake",
+    "          cmake_version=\"$(cmake --version | sed -n '1s/^cmake version //p')\"",
+    "          IFS=. read -r cmake_major cmake_minor _ <<<\"$cmake_version\"",
+    "          # Only plain numbers reach (( )), which would evaluate any other text as an expression.",
+    "          [[ \"$cmake_major\" =~ ^[0-9]+$ && \"$cmake_minor\" =~ ^[0-9]+$ ]] && (( cmake_major > 3 || (cmake_major == 3 && cmake_minor >= 28) )) \\",
+    "            || { echo \"::error::CMake '${cmake_version}' at $(command -v cmake) is older than 3.28 or unparsable.\"; exit 1; }",
     "          ld.lld --version",
     "          pkg-config --exists libcap openssl",
   ].join("\n");
@@ -257,60 +260,87 @@ test("hosted Shared children install the locked Chromium without Playwright's ap
   ]) assert.throws(() => withoutSharedPrerequisiteTimeout("browser-e2e.yml", changed));
 });
 // Actions' `shell: bash` resolves bash from PATH. The step relies on errexit
-// for failed [[ ]] and (( )) tests, which bash 4.1+ provides; fail, never skip.
-function runPrerequisites(job, { cmake, aptProvidesCmake = true, lld = true, installed = () => true, aptFails = false }) {
+// for failed [[ ]] tests, which bash 4.1+ provides; fail, never skip. The stubs
+// are written once and each run only links them, because a newly written
+// executable can take half a second to start the first time on macOS. A run
+// that is killed or times out throws; it never counts as the step failing.
+function prerequisiteRunner(tools, body) {
   const probe = spawnSync("bash", ["-c", 'command -v bash; echo "${BASH_VERSINFO[0]} ${BASH_VERSINFO[1]}"'], { encoding: "utf8" });
   const [bash, version = ""] = (probe.stdout ?? "").trim().split("\n"), [major, minor] = version.split(" ").map(Number);
   assert.ok(probe.status === 0 && (major > 4 || (major === 4 && minor >= 1)), `bash 4.1 or newer must be on PATH to run this test; found ${bash || "none"} ${version.replace(" ", ".")}`);
-  const body = cacheStep(job, "Install fixture display, database and compiler prerequisites").split("        run: |\n")[1].replace(/^ {10}/gmu, "");
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "shared-prerequisites-")), bin = path.join(dir, "bin"), log = path.join(dir, "calls.log");
-  try {
-    fs.mkdirSync(bin);
-    const stub = (file, text) => fs.writeFileSync(file, `#!/bin/sh\n${text}\n`, { mode: 0o755 });
-    const cmakeStub = version => `printf 'cmake version %s\\n\\nCMake suite maintained and supported by Kitware (kitware.com/cmake).\\n' '${version}'`;
-    for (const tool of ["env", "sed"]) {
-      const real = ["/usr/bin", "/bin"].map(dir => path.join(dir, tool)).find(candidate => fs.existsSync(candidate));
-      fs.symlinkSync(real, path.join(bin, tool));
-    }
-    stub(path.join(dir, "ubuntu-cmake"), cmakeStub("3.28.3"));
-    stub(path.join(bin, "sudo"), '[ "$1" = -n ] || exit 97\nshift\nexec "$@"');
-    stub(path.join(bin, "apt-get"), `printf 'DEBIAN_FRONTEND=%s apt-get %s\\n' "\${DEBIAN_FRONTEND:-}" "$*" >> '${log}'\n`
-      + `case " $* " in *" install "*" cmake ") ${aptProvidesCmake ? `/bin/cp '${dir}/ubuntu-cmake' '${bin}/cmake'` : ":"};; *" install "*) ${aptFails ? "exit 100" : ":"};; esac`);
-    const missing = ["x11-utils", "sqlite3", "postgresql-client", "build-essential", "pkg-config", "libssl-dev", "clang", "lld", "libcap-dev", "protobuf-compiler"]
-      .filter(name => !installed(name));
-    stub(path.join(bin, "dpkg-query"), `case "$3" in cmake) [ -x '${bin}/cmake' ] || { printf 'unknown ok not-installed'; exit 0; };; ${
-      missing.map(name => `${name}) printf 'deinstall ok config-files'; exit 0;;`).join(" ")} esac\nprintf 'install ok installed'`);
-    stub(path.join(bin, "pkg-config"), `printf 'pkg-config %s\\n' "$*" >> '${log}'`);
-    if (lld) stub(path.join(bin, "ld.lld"), "printf 'Ubuntu LLD 18.1.3 (compatible with GNU linkers)\\n'");
-    if (cmake) stub(path.join(bin, "cmake"), cmakeStub(cmake));
-    const result = spawnSync(bash, ["-c", body], { env: { PATH: bin }, encoding: "utf8", timeout: 10_000 });
-    return { status: result.status, stdout: result.stdout,
+  const bin = path.join(tools, "bin"), stub = (file, text) => fs.writeFileSync(file, `#!/bin/sh\n${text}\n`, { mode: 0o755 });
+  fs.mkdirSync(bin);
+  for (const tool of ["env", "sed"]) {
+    const real = ["/usr/bin", "/bin"].map(dir => path.join(dir, tool)).find(candidate => fs.existsSync(candidate));
+    fs.symlinkSync(real, path.join(bin, tool));
+  }
+  stub(path.join(bin, "sudo"), '[ "$1" = -n ] || exit 97\nshift\nexec "$@"');
+  stub(path.join(bin, "apt-get"), `printf 'DEBIAN_FRONTEND=%s apt-get %s\\n' "\${DEBIAN_FRONTEND:-}" "$*" >> "$STUB_RUN/calls.log"\n`
+    + 'case " $* " in *" install "*" cmake ") [ -z "$STUB_CMAKE_NOT_LANDED" ] || exit 0; exec /bin/ln -s "$STUB_TOOLS/cmake" "$STUB_RUN/bin/cmake";; *" install "*) exit "$STUB_APT_STATUS";; esac');
+  stub(path.join(bin, "dpkg-query"), 'case "$3" in cmake) printf \'dpkg-query %s\\n\' "$3" >> "$STUB_RUN/calls.log"; [ -e "$STUB_RUN/bin/cmake" ] || { printf \'unknown ok not-installed\'; exit 0; };; esac\n'
+    + 'case " $STUB_MISSING " in *" $3 "*) printf \'deinstall ok config-files\'; exit 0;; esac\nprintf \'install ok installed\'');
+  stub(path.join(bin, "pkg-config"), `printf 'pkg-config %s\\n' "$*" >> "$STUB_RUN/calls.log"`);
+  // Linked into a run's PATH only when that host has them.
+  stub(path.join(tools, "cmake"), "printf 'cmake version %s\\n\\nCMake suite maintained and supported by Kitware (kitware.com/cmake).\\n' \"$STUB_CMAKE_VERSION\"");
+  stub(path.join(tools, "ld.lld"), "printf 'Ubuntu LLD 18.1.3 (compatible with GNU linkers)\\n'");
+  let runs = 0;
+  return ({ cmake, cmakeLands = true, lld = true, missing = [], aptStatus = 0 }) => {
+    const run = path.join(tools, `run-${++runs}`), runBin = path.join(run, "bin"), log = path.join(run, "calls.log");
+    fs.mkdirSync(runBin, { recursive: true });
+    if (cmake !== undefined) fs.symlinkSync(path.join(tools, "cmake"), path.join(runBin, "cmake"));
+    if (lld) fs.symlinkSync(path.join(tools, "ld.lld"), path.join(runBin, "ld.lld"));
+    // Without a host CMake, the one apt links in is Ubuntu 24.04's.
+    const result = spawnSync(bash, ["-c", body], { cwd: run, encoding: "utf8", timeout: 60_000, env: { PATH: `${runBin}:${bin}`, STUB_TOOLS: tools,
+      STUB_RUN: run, STUB_CMAKE_VERSION: cmake ?? "3.28.3", STUB_CMAKE_NOT_LANDED: cmakeLands ? "" : "1", STUB_MISSING: missing.join(" "), STUB_APT_STATUS: String(aptStatus) } });
+    assert.ok(result.error === undefined && result.signal === null, `the step body did not finish: ${result.error?.message ?? result.signal}`);
+    return { status: result.status, stdout: result.stdout, stderr: result.stderr, run, cmake: path.join(runBin, "cmake"),
       calls: fs.existsSync(log) ? fs.readFileSync(log, "utf8").trim().split("\n") : [] };
-  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  };
 }
 test("the prerequisite step fetches Ubuntu's CMake only where none is on PATH and verifies the resolved CMake and LLD", () => {
   const options = "-o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30";
   const packages = "x11-utils sqlite3 postgresql-client build-essential pkg-config libssl-dev clang lld libcap-dev protobuf-compiler";
-  for (const job of jobs.filter(job => job.script).map(job => job.key)) {
+  const update = `DEBIAN_FRONTEND= apt-get ${options} update`, install = `DEBIAN_FRONTEND=noninteractive apt-get ${options} install --yes --no-install-recommends`;
+  const lld = "Ubuntu LLD 18.1.3 (compatible with GNU linkers)\n";
+  // Both children run the same pinned bytes, so one set of runs covers both.
+  const [body, ...others] = jobs.filter(job => job.script).map(job => cacheStep(job.key, "Install fixture display, database and compiler prerequisites")
+    .split("        run: |\n")[1].replace(/^ {10}/gmu, ""));
+  for (const other of others) assert.equal(other, body);
+  const tools = fs.mkdtempSync(path.join(os.tmpdir(), "shared-prerequisites-"));
+  try {
+    const run = prerequisiteRunner(tools, body);
     // Hosted image: CMake 3.31.6 already precedes Ubuntu's on PATH, so only the shared list installs.
-    const hosted = runPrerequisites(job, { cmake: "3.31.6" });
-    assert.equal(hosted.status, 0, job);
-    assert.deepEqual(hosted.calls, [`DEBIAN_FRONTEND= apt-get ${options} update`,
-      `DEBIAN_FRONTEND=noninteractive apt-get ${options} install --yes --no-install-recommends ${packages}`, "pkg-config --exists libcap openssl"]);
-    assert.match(hosted.stdout, /\/bin\/cmake\nUbuntu LLD 18\.1\.3 \(compatible with GNU linkers\)\n$/u);
+    const hosted = run({ cmake: "3.31.6" });
+    assert.equal(hosted.status, 0, hosted.stderr);
+    assert.deepEqual(hosted.calls, [update, `${install} ${packages}`, "pkg-config --exists libcap openssl"]);
+    assert.equal(hosted.stdout, `${hosted.cmake}\n${lld}`);
     // A guest without CMake installs exactly Ubuntu's package with the same options, then checks it.
-    const guest = runPrerequisites(job, {});
-    assert.equal(guest.status, 0, job);
-    assert.deepEqual(guest.calls.filter(call => call.includes(" install ")), [
-      `DEBIAN_FRONTEND=noninteractive apt-get ${options} install --yes --no-install-recommends ${packages}`,
-      `DEBIAN_FRONTEND=noninteractive apt-get ${options} install --yes --no-install-recommends cmake`]);
-    for (const cmake of ["3.28.0", "4.1.2"]) assert.equal(runPrerequisites(job, { cmake }).status, 0, cmake);
-    // An older or unparsable CMake, a CMake install that does not land, a missing
-    // LLD driver, a failed install or an unverified package all fail the step.
-    for (const cmake of ["3.27.9", "2.8.12", "garbage", "x.y"]) assert.notEqual(runPrerequisites(job, { cmake }).status, 0, cmake);
-    for (const failure of [{ aptProvidesCmake: false }, { cmake: "3.31.6", lld: false }, { cmake: "3.31.6", aptFails: true },
-      { cmake: "3.31.6", installed: name => name !== "libcap-dev" }]) assert.notEqual(runPrerequisites(job, failure).status, 0, JSON.stringify(failure));
-  }
+    const guest = run({});
+    assert.equal(guest.status, 0, guest.stderr);
+    assert.deepEqual(guest.calls, [update, `${install} ${packages}`, `${install} cmake`, "dpkg-query cmake", "pkg-config --exists libcap openssl"]);
+    assert.equal(guest.stdout, `${guest.cmake}\n${lld}`);
+    for (const cmake of ["3.28.0", "4.1.2"]) assert.equal(run({ cmake }).status, 0, cmake);
+    // An older or unparsable CMake fails with an error naming it, before LLD or
+    // pkg-config, and a version written as an arithmetic expression is never evaluated.
+    for (const cmake of ["3.27.9", "2.8.12", "garbage", "x.y", "", "BASH_VERSINFO[0].99", "BASH_VERSINFO[$(:>evaluated)0].99"]) {
+      const rejected = run({ cmake });
+      assert.equal(rejected.status, 1, cmake);
+      assert.equal(rejected.stdout, `${rejected.cmake}\n::error::CMake '${cmake}' at ${rejected.cmake} is older than 3.28 or unparsable.\n`);
+      assert.deepEqual(rejected.calls, [update, `${install} ${packages}`], cmake);
+      assert.equal(fs.existsSync(path.join(rejected.run, "evaluated")), false, cmake);
+    }
+    // A CMake install that does not land, a failed install and an unverified
+    // package stop the step before it resolves CMake; a missing LLD driver stops it before pkg-config.
+    for (const [failure, status, calls] of [[{ cmakeLands: false }, 1, [update, `${install} ${packages}`, `${install} cmake`, "dpkg-query cmake"]],
+      [{ cmake: "3.31.6", aptStatus: 100 }, 100, [update, `${install} ${packages}`]],
+      [{ cmake: "3.31.6", missing: ["libcap-dev"] }, 1, [update, `${install} ${packages}`]]]) {
+      const stopped = run(failure);
+      assert.deepEqual([stopped.status, stopped.stdout, stopped.calls], [status, "", calls], JSON.stringify(failure));
+    }
+    const noLld = run({ cmake: "3.31.6", lld: false });
+    assert.deepEqual([noLld.status, noLld.stdout, noLld.calls], [127, `${noLld.cmake}\n`, [update, `${install} ${packages}`]]);
+    assert.match(noLld.stderr, /ld\.lld: command not found/u);
+  } finally { fs.rmSync(tools, { recursive: true, force: true }); }
 });
 function withoutPersonalElectronPreparation(source) {
   const step = "      - name: Install the locked Electron binary\n        timeout-minutes: 5\n        env:\n          NODE_USE_ENV_PROXY: \"1\"\n        run: pnpm --filter @instafy/desktop-app exec install-electron\n";

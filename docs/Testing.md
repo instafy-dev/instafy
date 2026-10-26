@@ -1255,9 +1255,11 @@ verification; an incomplete installation still fails before the fixture runs.
 The step installs Ubuntu's `cmake` only when no CMake is on `PATH`. Hosted
 images already put a newer CMake in `/usr/local/bin`, ahead of the package's
 `/usr/bin` copy, so hosted builds used it before this change too; self-hosted
-guests without one still install the package. Either way the step fails unless
-the resolved CMake is at least 3.28, Ubuntu 24.04's version, logs its path and
-proves the `ld.lld` driver that the Linux Cargo fixtures link with.
+guests without one still install the package, in a second APT call. Either way
+the step logs the resolved CMake's path, then fails with an error naming that
+CMake and its version unless the version is at least 3.28, Ubuntu 24.04's
+version; only plain version numbers reach the comparison. It also proves the
+`ld.lld` driver that the Linux Cargo fixtures link with.
 
 On hosted runners each child installs the locked Chromium with
 `playwright install chromium`, then runs
@@ -1266,8 +1268,10 @@ step limit, instead of Playwright's `--with-deps` APT call, which accepts no
 options. The script runs only on a GitHub-hosted Ubuntu 24.04 x64 runner. It
 reads the locked Playwright's Ubuntu 24.04 dependency table and fails, asking
 for re-review, when that table names a package outside the reviewed list. It
-installs only reviewed packages that the image lacks, with the same retries and
-timeouts and without upgrades, and logs their names. It then requires every
+names to APT only the reviewed packages that the image lacks, never an
+installed one, with the same retries and timeouts, and logs their names. APT
+may still add or upgrade their dependencies from the signed Ubuntu archive, and
+its own output in the step log lists each of them. It then requires every
 reviewed package and checks with `ldd` that both locked Chromium executables
 load all of their shared libraries. The reviewed list is Playwright's Chromium
 libraries, `xvfb`, the font configuration libraries and the Liberation and Noto
@@ -1333,8 +1337,11 @@ Neither the ordinary browser switch nor another CI switch enables this lane.
 Only the two Shared compiler children use 8GiB/two CPUs, two parallel Cargo
 jobs, and fresh-guest APT plus Docker proxy preparation; the aggregate retains
 standard resources and neither daemon setup. Self-hosted children keep
-Playwright's `--with-deps` installation and install Ubuntu's `cmake` when the
-guest has none; the hosted-image script never runs there. Native package
+Playwright's `--with-deps` installation; the hosted-image script never runs
+there. The prerequisite step is shared by both runner types, so guests also
+install Ubuntu's `cmake` only when they have none and must pass the same CMake
+3.28 floor and LLD check; an Ubuntu 24.04 guest meets both, but a guest whose
+`PATH` resolves an older CMake fails that step. Native package
 installation is visible in the workflow and bounded inside each job. The base
 template, TLS checks, network restrictions and 35-minute worker/cleanup budget
 are unchanged.

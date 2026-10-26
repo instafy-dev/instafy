@@ -365,9 +365,12 @@ jobs:
             sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends cmake
             [[ "$(dpkg-query --show --showformat='${Status}' cmake)" == 'install ok installed' ]]
           fi
-          IFS=. read -r cmake_major cmake_minor _ < <(cmake --version | sed -n '1s/^cmake version //p')
-          (( cmake_major > 3 || (cmake_major == 3 && cmake_minor >= 28) ))
           command -v cmake
+          cmake_version="$(cmake --version | sed -n '1s/^cmake version //p')"
+          IFS=. read -r cmake_major cmake_minor _ <<<"$cmake_version"
+          # Only plain numbers reach (( )), which would evaluate any other text as an expression.
+          [[ "$cmake_major" =~ ^[0-9]+$ && "$cmake_minor" =~ ^[0-9]+$ ]] && (( cmake_major > 3 || (cmake_major == 3 && cmake_minor >= 28) )) \
+            || { echo "::error::CMake '${cmake_version}' at $(command -v cmake) is older than 3.28 or unparsable."; exit 1; }
           ld.lld --version
           pkg-config --exists libcap openssl
       - name: Restore compiler cache without saving
@@ -535,9 +538,12 @@ jobs:
             sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends cmake
             [[ "$(dpkg-query --show --showformat='${Status}' cmake)" == 'install ok installed' ]]
           fi
-          IFS=. read -r cmake_major cmake_minor _ < <(cmake --version | sed -n '1s/^cmake version //p')
-          (( cmake_major > 3 || (cmake_major == 3 && cmake_minor >= 28) ))
           command -v cmake
+          cmake_version="$(cmake --version | sed -n '1s/^cmake version //p')"
+          IFS=. read -r cmake_major cmake_minor _ <<<"$cmake_version"
+          # Only plain numbers reach (( )), which would evaluate any other text as an expression.
+          [[ "$cmake_major" =~ ^[0-9]+$ && "$cmake_minor" =~ ^[0-9]+$ ]] && (( cmake_major > 3 || (cmake_major == 3 && cmake_minor >= 28) )) \
+            || { echo "::error::CMake '${cmake_version}' at $(command -v cmake) is older than 3.28 or unparsable."; exit 1; }
           ld.lld --version
           pkg-config --exists libcap openssl
       - name: Restore compiler cache without saving

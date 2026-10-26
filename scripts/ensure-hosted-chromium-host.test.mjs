@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { APT_OPTIONS, assertHostedUbuntu, assertReviewedTable, ensureHostedChromiumHost, HOSTED_PACKAGES, installMissing,
   missingPackages, OMITTED_FONTS, PLAYWRIGHT_CHROMIUM, PLAYWRIGHT_TOOLS, playwrightTable, verifyHost } from "./ensure-hosted-chromium-host.mjs";
 
@@ -92,7 +97,7 @@ test("a complete image downloads nothing and still verifies both locked executab
   }
 });
 
-test("image drift installs only the missing reviewed packages, without upgrades, through the exact apt argv", () => {
+test("image drift names only the missing reviewed packages to apt, through the exact apt argv", () => {
   const { host, calls, logs } = fakeHost({ installed: HOSTED_PACKAGES.filter(name => name !== "libgbm1" && name !== "xvfb") });
   ensureHostedChromiumHost("install", host);
   assert.deepEqual(apt(calls), [
@@ -123,4 +128,17 @@ test("verification fails closed on a package apt did not install or an unloadabl
   const exec = fakeHost().host.exec;
   verifyHost({ executables: [chrome, shell], exec });
   assert.deepEqual(missingPackages(HOSTED_PACKAGES, exec), []);
+});
+
+test("the command line runs its guards when invoked through a symlink and fails closed off a hosted runner", () => {
+  const script = fileURLToPath(new URL("./ensure-hosted-chromium-host.mjs", import.meta.url));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hosted-chromium-link-")), link = path.join(dir, "ensure-hosted-chromium-host.mjs");
+  try {
+    fs.symlinkSync(script, link);
+    for (const entry of [script, link]) {
+      const result = spawnSync(process.execPath, [entry, "install"], { encoding: "utf8", timeout: 30_000, env: { ...process.env, RUNNER_ENVIRONMENT: "self-hosted" } });
+      assert.equal(result.status, 1, entry);
+      assert.match(result.stderr, /never run on self-hosted or unknown runners/u, entry);
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

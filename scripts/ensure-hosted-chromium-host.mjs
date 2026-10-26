@@ -4,9 +4,10 @@
 // Chromium library and xvfb. Playwright's own apt call accepts no options, so
 // it also upgrades installed packages and adds CJK, Thai and X11 core fonts
 // that no Shared fixture renders; on 2026-10-26 a 33 kB/s mirror made that
-// download alone take over eleven minutes. This installs only reviewed
-// packages the image lacks, never upgrades installed ones, and proves that both
-// locked Chromium executables load every shared library.
+// download alone take over eleven minutes. This names to apt only reviewed
+// packages the image lacks, never an installed one; apt may still add or
+// upgrade their dependencies from the signed Ubuntu archive. It then proves
+// that both locked Chromium executables load every shared library.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -74,8 +75,10 @@ export function missingPackages(packages, exec) {
   });
 }
 
-// apt-get's own "Need to get" and "Fetched" lines follow the package names in
-// the step log, so a widening image gap is visible before it costs a timeout.
+// apt-get's own lists of new and upgraded packages, which include any
+// dependency it pulls in, and its "Need to get" and "Fetched" lines follow the
+// package names in the step log, so a widening image gap is visible before it
+// costs a timeout. --no-upgrade affects only named packages, none installed.
 export function installMissing(missing, run, log) {
   if (missing.length === 0) {
     log(`hosted image provides all ${HOSTED_PACKAGES.length} reviewed Chromium packages; nothing to download`);
@@ -143,7 +146,9 @@ function main(argv) {
   });
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Node runs the main module from its real path, so compare real paths: a
+// symlinked invocation must still run the guards rather than exit 0 unchecked.
+if (process.argv[1] && fs.existsSync(process.argv[1]) && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     main(process.argv.slice(2));
   } catch (error) {

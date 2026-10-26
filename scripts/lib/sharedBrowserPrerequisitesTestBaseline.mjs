@@ -50,9 +50,12 @@ export const PATH_RESOLVED_CMAKE = [
     + `            sudo -n env DEBIAN_FRONTEND=noninteractive ${apt} install --yes --no-install-recommends cmake\n`
     + "            [[ \"$(dpkg-query --show --showformat='${Status}' cmake)\" == 'install ok installed' ]]\n"
     + "          fi\n"
-    + "          IFS=. read -r cmake_major cmake_minor _ < <(cmake --version | sed -n '1s/^cmake version //p')\n"
-    + "          (( cmake_major > 3 || (cmake_major == 3 && cmake_minor >= 28) ))\n"
     + "          command -v cmake\n"
+    + "          cmake_version=\"$(cmake --version | sed -n '1s/^cmake version //p')\"\n"
+    + "          IFS=. read -r cmake_major cmake_minor _ <<<\"$cmake_version\"\n"
+    + "          # Only plain numbers reach (( )), which would evaluate any other text as an expression.\n"
+    + "          [[ \"$cmake_major\" =~ ^[0-9]+$ && \"$cmake_minor\" =~ ^[0-9]+$ ]] && (( cmake_major > 3 || (cmake_major == 3 && cmake_minor >= 28) )) \\\n"
+    + "            || { echo \"::error::CMake '${cmake_version}' at $(command -v cmake) is older than 3.28 or unparsable.\"; exit 1; }\n"
     + "          ld.lld --version\n"
     + "          pkg-config --exists libcap openssl\n",
   `          sudo -n env DEBIAN_FRONTEND=noninteractive ${apt} install --yes --no-install-recommends x11-utils sqlite3 postgresql-client build-essential pkg-config libssl-dev clang lld cmake libcap-dev protobuf-compiler\n`
