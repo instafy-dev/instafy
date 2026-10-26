@@ -9,7 +9,19 @@ export type RuntimeBrowserSessionPage = {
   isActive: boolean;
   canGoBack: boolean;
   canGoForward: boolean;
+  /**
+   * Who opened the tab, when the browser says so. Only "agent" and "person"
+   * are kept; anything else is dropped, and an absent value is the person's.
+   */
+  openedBy?: BrowserTabOpener;
 };
+
+/** Who opened a browser tab: the agent (Octo) or the person. */
+export type BrowserTabOpener = "agent" | "person";
+
+export function parseBrowserTabOpener(value: unknown): BrowserTabOpener | undefined {
+  return value === "agent" || value === "person" ? value : undefined;
+}
 
 export type SharedBrowserViewerKind = "rfb" | "cdp-screencast" | "webrtc";
 
@@ -262,6 +274,7 @@ export function mapRuntimeBrowserSessionPagesPayload(payload: unknown): RuntimeB
       if (!id || !url || !label) {
         return null;
       }
+      const openedBy = parseBrowserTabOpener(record.openedBy);
       return {
         id,
         url,
@@ -271,6 +284,7 @@ export function mapRuntimeBrowserSessionPagesPayload(payload: unknown): RuntimeB
         isActive,
         canGoBack: record.canGoBack === true,
         canGoForward: record.canGoForward === true,
+        ...(openedBy ? { openedBy } : {}),
       } satisfies RuntimeBrowserSessionPage;
     })
     .filter((page): page is RuntimeBrowserSessionPage => Boolean(page));

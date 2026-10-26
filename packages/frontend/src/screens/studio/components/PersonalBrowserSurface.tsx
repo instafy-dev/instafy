@@ -29,6 +29,8 @@ import { BrowserExpandButton } from "./BrowserExpandButton";
 import { SendPageToOctoButton } from "./SendPageToOctoButton";
 import { BrowserHumanInputStatus } from "./BrowserHumanInputControls";
 import { useBrowserHumanInput } from "./useBrowserHumanInput";
+import { BrowserReadingRow } from "./BrowserReadingRow";
+import { personalBrowserTabPages, resolveAgentReadingPages } from "./browserAgentTabs";
 import { browserPageOrigin } from "./browserHandoffRouting";
 import {
   BrowserChromeShell,
@@ -335,6 +337,17 @@ export function PersonalBrowserSurface({
   };
   const humanInputState = useBrowserHumanInput(humanInputOptions);
   const humanInputAvailable = ready && Boolean(humanInputIdentityKey && onContinueAfterHumanInput);
+  // While a resumed turn works here, the pages it is reading: the tabs it
+  // opened and the tab on screen, which is the one it controls. Take over is
+  // the same action as the toolbar's: Pause revokes the broker, so it ends the
+  // agent's control of every tab at once.
+  const personalPages = personalBrowserTabPages(ownsNativeStatus ? model.status : null);
+  const agentReadingPages = resolveAgentReadingPages({
+    pages: personalPages,
+    agentControlActive: ready && ownsNativeStatus && agentWorking &&
+      model.status?.agentControlEnabled === true && !model.status?.tabControlActive,
+    agentPageIds: personalPages.filter((page) => page.isActive).map((page) => page.id),
+  });
   const resumeFromStatus = ready && browserStatus.state === "paused" &&
     !model.status?.agentControlEnabled && model.agentPhase !== "unavailable" && !humanInputState.active;
   const clearDataMessage =
@@ -576,6 +589,14 @@ export function PersonalBrowserSurface({
               : null
         }
         testId="personal-browser-chrome"
+      />
+      <BrowserReadingRow
+        pages={agentReadingPages}
+        canTakeOver={humanInputOptions.canTakeOver && (!humanInputState.active || humanInputState.busy === "takeover")}
+        takingOver={humanInputState.busy === "takeover"}
+        // The toolbar's take-over controls already say why a take-over failed.
+        error={humanInputAvailable ? null : humanInputState.error}
+        onTakeOver={() => void humanInputState.takeOver()}
       />
       <div
         ref={viewportRef}

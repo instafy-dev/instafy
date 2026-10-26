@@ -1,4 +1,5 @@
 import type { ChatMessage } from "../types";
+import type { BrowserTabOpener } from "../../../sdk/instafy";
 
 export type BrowserSessionPage = {
   id: string;
@@ -10,6 +11,8 @@ export type BrowserSessionPage = {
   isActive: boolean;
   canGoBack?: boolean;
   canGoForward?: boolean;
+  /** Who opened the tab, when the browser says so; absent is the person's. */
+  openedBy?: BrowserTabOpener;
 };
 
 export type BrowserSessionPageTarget = Pick<BrowserSessionPage, "id" | "url" | "host" | "label">;

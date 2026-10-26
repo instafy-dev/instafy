@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RunRecord } from "../../../../types";
 import type { RuntimeBrowserSessionAction } from "../../../../sdk/instafy";
-import { browserPageOrigin, selectSharedBrowserHumanInput, sharedBrowserConversationRunIds, sharedBrowserTakeoverJob } from "../browserHandoffRouting";
+import { browserPageOrigin, selectSharedBrowserHumanInput, sharedBrowserAgentPageIds, sharedBrowserConversationRunIds, sharedBrowserTakeoverJob } from "../browserHandoffRouting";
 
 const JOB_ID = "00000000-0000-4000-8000-000000000001";
 const RUN_ID = "00000000-0000-4000-8000-000000000002";
@@ -40,6 +40,37 @@ describe("browserPageOrigin", () => {
     for (const value of [null, undefined, "", "not a URL", "file:///tmp/form", "about:blank", "javascript:alert(1)", "https://user:password@example.test/"]) {
       expect(browserPageOrigin(value)).toBeNull();
     }
+  });
+});
+
+describe("sharedBrowserTakeoverJob on the agent's own tabs", () => {
+  it("finds the runtime's one browser job from a tab the agent opened", () => {
+    expect(sharedBrowserTakeoverJob([run()], "runtime-1", "agent-tab", { openedByAgent: true }))
+      .toEqual({ jobId: JOB_ID, runId: RUN_ID });
+  });
+
+  it("never falls back for a person's tab, another runtime, or two jobs", () => {
+    expect(sharedBrowserTakeoverJob([run()], "runtime-1", "agent-tab")).toBeNull();
+    expect(sharedBrowserTakeoverJob([run()], "runtime-1", "agent-tab", { openedByAgent: false })).toBeNull();
+    expect(sharedBrowserTakeoverJob([run()], "other-runtime", "agent-tab", { openedByAgent: true })).toBeNull();
+    expect(sharedBrowserTakeoverJob([run(), run({ id: "another-run" })], "runtime-1", "agent-tab", { openedByAgent: true })).toBeNull();
+    expect(sharedBrowserTakeoverJob([run({ status: "success" })], "runtime-1", "agent-tab", { openedByAgent: true })).toBeNull();
+  });
+
+  it("prefers the job bound to the page on screen", () => {
+    const other = run({ id: "other-run", metadata: { ...run().metadata, browserPageId: "page-2", jobId: "00000000-0000-4000-8000-000000000009" } });
+    expect(sharedBrowserTakeoverJob([run(), other], "runtime-1", "page-1", { openedByAgent: true }))
+      .toEqual({ jobId: JOB_ID, runId: RUN_ID });
+  });
+});
+
+describe("sharedBrowserAgentPageIds", () => {
+  it("lists the pages this runtime's active browser runs are bound to, once each", () => {
+    expect(sharedBrowserAgentPageIds([run(), run({ id: "again" }), run({ id: "done", status: "success", metadata: { ...run().metadata, browserPageId: "page-9" } })], "runtime-1"))
+      .toEqual(["page-1"]);
+    expect(sharedBrowserAgentPageIds([run()], "other-runtime")).toEqual([]);
+    expect(sharedBrowserAgentPageIds([run()], null)).toEqual([]);
+    expect(sharedBrowserAgentPageIds([run({ metadata: { ...run().metadata, browserTransport: "desktop-personal" } })], "runtime-1")).toEqual([]);
   });
 });
 

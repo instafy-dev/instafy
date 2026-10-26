@@ -328,6 +328,19 @@ type InstafyDesktopSpeechTunnelStatus = {
 
 type InstafyDesktopPersonalBrowserState = "closed" | "opening" | "ready" | "error";
 
+/**
+ * One tab of a Personal Browser that has several. A host with one page
+ * leaves `tabs` out, and that page is the status's own url and title.
+ */
+type InstafyDesktopPersonalBrowserTab = {
+  id: string;
+  url: string;
+  title?: string;
+  active: boolean;
+  /** "agent" for a tab the agent opened; anything else is the person's. */
+  openedBy?: string;
+};
+
 type InstafyDesktopPersonalBrowserStatus = {
   supported: boolean;
   enabled: boolean;
@@ -350,6 +363,8 @@ type InstafyDesktopPersonalBrowserStatus = {
   takeoverRequestId?: string;
   sharing?: boolean;
   tabControlActive?: boolean;
+  /** Every open tab, on a host with several; absent on a one-page host. */
+  tabs?: InstafyDesktopPersonalBrowserTab[];
   ownerId?: string;
   projectId?: string;
   runtimeId?: string;
