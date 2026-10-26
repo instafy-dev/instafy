@@ -78,6 +78,10 @@ fn main() -> anyhow::Result<()> {
         return runtime.block_on(local_browser::run_mcp_stdio());
     }
     personal_browser::capture_and_scrub_process_capability()?;
+    // Skill packs ship once with the runtime; the small launchers in each space, and model shells,
+    // find them through INSTAFY_SKILL_PACKS_DIR.
+    // SAFETY: no other thread exists yet.
+    let _skill_packs_dir = unsafe { runtime_agent::skill_packs::export_skill_packs_dir_env() };
 
     // `codex_arg0::arg0_dispatch_or_else` uses Tokio defaults for worker stack sizes on
     // Linux/macOS. Codex can exceed those defaults during startup (flake: hosted runtime
@@ -275,6 +279,7 @@ async fn run_runtime_agent() -> Result<AgentExit> {
         "runtime agent configuration loaded"
     );
     code_mode_host::report_startup_availability();
+    runtime_agent::skill_packs::report_startup();
 
     let exit_when_space_deleted = exits_when_space_deleted(&config);
     let agent = RuntimeAgent::new(config);

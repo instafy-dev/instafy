@@ -614,6 +614,7 @@ test("runtime Rust builds share one persistent target mount and release cooks al
       "COPY packages/runtime-agent/Cargo.toml packages/runtime-agent/Cargo.lock packages/runtime-agent/",
       "COPY packages/runtime-agent/src/ packages/runtime-agent/src/",
       "COPY packages/runtime-agent/assets/instafy/ packages/runtime-agent/assets/instafy/",
+      "COPY packages/runtime-agent/assets/skill-pack-space/ packages/runtime-agent/assets/skill-pack-space/",
       "COPY packages/runtime-agent/assets/*.js packages/runtime-agent/assets/",
       "COPY packages/browser-action-policy/*.js packages/browser-action-policy/",
     ],
@@ -1375,4 +1376,54 @@ test("the runtime entrypoint blocks Shared Browser downloads in the profile befo
   } finally {
     fs.rmSync(fixture, { recursive: true, force: true });
   }
+});
+
+test("runtime skill packs come only from pinned release archives, checked before they are unpacked", () => {
+  const pin = JSON.parse(read("packages/runtime-agent/skill-packs.json"));
+  assert.equal(pin.schema, 1);
+  assert.ok(pin.packs.length >= 1);
+  for (const pack of pin.packs) {
+    assert.ok(pack.url.startsWith(`https://github.com/${pack.repo}/releases/download/${pack.tag}/`), pack.url);
+    assert.ok(pack.repo.startsWith("instafy-dev/"), pack.repo);
+    assert.match(pack.sha256, checksum, `${pack.name} sha256`);
+    assert.match(pack.tree_sha256, checksum, `${pack.name} tree_sha256`);
+    assert.match(pack.commit, /^[0-9a-f]{40}$/u, `${pack.name} commit`);
+  }
+
+  const dockerfile = read("docker/runtime/Dockerfile");
+  const stage = dockerfile.match(/^FROM \$\{NODE_IMAGE\} AS skill-packs\n([\s\S]*?)\n(?:#+\n|FROM )/mu)?.[1];
+  assert.ok(stage, "the skill-packs stage");
+  assert.deepEqual(stage.split("\n").filter((line) => /^(?:COPY|ADD)\s/u.test(line)), [
+    "COPY packages/runtime-agent/skill-packs.json packages/runtime-agent/skill-packs.json",
+    "COPY scripts/install-skill-packs.mjs scripts/install-skill-packs.mjs",
+  ]);
+  assert.deepEqual(stage.split("\n").filter((line) => line.startsWith("RUN ")), [
+    "RUN node scripts/install-skill-packs.mjs --require-pinned --pin packages/runtime-agent/skill-packs.json --out /out/skill-packs",
+  ]);
+  // Both runtime images take the packs from that stage and nothing else writes their folder.
+  const writers = dockerfile.split("\n").filter((line) => line.includes("/opt/instafy/skill-packs"));
+  assert.deepEqual(writers, [
+    "COPY --from=skill-packs /out/skill-packs /opt/instafy/skill-packs",
+    "    INSTAFY_SKILL_PACKS_DIR=/opt/instafy/skill-packs \\",
+    "COPY --from=skill-packs /out/skill-packs /opt/instafy/skill-packs",
+    "    INSTAFY_SKILL_PACKS_DIR=/opt/instafy/skill-packs \\",
+  ]);
+  for (const target of ["runtime", "runtime-webdev"]) {
+    const section = dockerfile.split(/^FROM /mu).find((part) => part.startsWith(`\${`) && part.split("\n")[0].endsWith(` AS ${target}`));
+    assert.ok(section?.includes("COPY --from=skill-packs /out/skill-packs /opt/instafy/skill-packs\n"), target);
+  }
+  // A pack installed for local development never enters the build context.
+  const ignore = read(".dockerignore").split("\n");
+  assert.ok(ignore.includes("packages/runtime-agent/assets/skill-packs/"));
+  assert.ok(ignore.includes("!scripts/install-skill-packs.mjs"));
+  assert.ok(ignore.lastIndexOf("packages/runtime-agent/assets/skill-packs/") > ignore.lastIndexOf("!packages/runtime-agent/**"));
+
+  // The installer refuses unpinned sources under --require-pinned and checks the archive's
+  // sha256 before it parses anything in it.
+  const installer = read("scripts/install-skill-packs.mjs");
+  assert.match(installer, /--require-pinned refuses --from/u);
+  const install = installer.slice(installer.indexOf("export async function installPinned("));
+  const shaCheck = install.indexOf("if (digest !== pack.sha256) fail(");
+  assert.ok(shaCheck > 0 && shaCheck < install.indexOf("unpackArchive(archive, pack)"));
+  assert.ok(installer.includes('export const RELEASE_URL_PREFIX = "https://github.com/instafy-dev/";'));
 });

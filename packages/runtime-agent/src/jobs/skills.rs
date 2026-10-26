@@ -1050,13 +1050,21 @@ async fn import_skills(
 
     let is_pack = plans.len() > 1;
     for plan in &plans {
-        if plan.existed && !request.overwrite {
-            let relative_dir = plan
-                .target_dir
-                .strip_prefix(workspace_dir)
-                .unwrap_or(&plan.target_dir)
-                .to_string_lossy()
-                .replace('\\', "/");
+        let relative_dir = plan
+            .target_dir
+            .strip_prefix(workspace_dir)
+            .unwrap_or(&plan.target_dir)
+            .to_string_lossy()
+            .replace('\\', "/");
+        // A folder holding only the runtime's unchanged copy of a skill pack is written over as
+        // if it were empty: the import brings the full pack in its place.
+        if plan.existed
+            && !request.overwrite
+            && !super::runtime_pack_files::is_runtime_provided_skill_dir(
+                workspace_dir,
+                &relative_dir,
+            )
+        {
             if is_pack {
                 bail!("`{relative_dir}` already exists; rerun with `--overwrite`");
             }
@@ -1124,9 +1132,20 @@ fn write_skill_plans(
     for (plan, staged_dir) in plans.into_iter().zip(staged) {
         let name = plan.name.clone();
         let written_files = written_skill_files(workspace_dir, &plan);
-        if let Err(error) =
-            move_staged_skill_into_place(&staging_root, &staged_dir, &plan, overwrite)
-        {
+        let moved = move_staged_skill_into_place(&staging_root, &staged_dir, &plan, overwrite);
+        if moved.is_ok() {
+            // The runtime's copies of a skill pack in this folder are the space's files now:
+            // they leave the runtime's exclude list, so this import's save and later edits
+            // reach the space's history.
+            let relative_dir = plan
+                .target_dir
+                .strip_prefix(workspace_dir)
+                .unwrap_or(&plan.target_dir)
+                .to_string_lossy()
+                .replace('\\', "/");
+            super::runtime_pack_files::release(workspace_dir, &relative_dir);
+        }
+        if let Err(error) = moved {
             let _ = fs::remove_dir_all(&staging_root);
             let committed = imported
                 .iter()
@@ -3002,6 +3021,79 @@ mod tests {
         assert_eq!(
             staging_dirs(&workspace.path().join(".agents/skills")),
             Vec::<String>::new()
+        );
+    }
+
+    #[tokio::test]
+    async fn importing_a_full_pack_over_a_runtime_provided_skill_commits_every_file_and_later_edits_save()
+     {
+        let packs = tempdir().expect("packs");
+        let pack_dir = crate::skill_packs::tests::make_pack(packs.path(), "demo", true);
+        let pack = crate::skill_packs::load_pack(&pack_dir).expect("pack");
+        let workspace = tempdir().expect("workspace");
+        let folder = workspace.path();
+        super::super::learn::commit_test_checkout(
+            folder,
+            "Start",
+            "someone@example.com",
+            &[("README.md", "hi\n")],
+        );
+        super::super::runtime_pack_files::keep_current(folder, &[pack.clone()], Some((22, 11, 0)));
+        assert_eq!(super::super::learn::test_checkout_status(folder), "");
+
+        // The full pack, as `/skills import` reads it from the pack's repository.
+        let source = tempdir().expect("source");
+        let source_dir = source.path().join("demo");
+        fs::create_dir_all(source_dir.join("scripts/lib")).expect("source");
+        fs::write(
+            source_dir.join("SKILL.md"),
+            "---\nname: demo\n---\n\n# The full pack\n",
+        )
+        .expect("skill");
+        fs::write(
+            source_dir.join("scripts/run.mjs"),
+            "// the pack's own CLI\n",
+        )
+        .expect("cli");
+        fs::write(source_dir.join("scripts/lib/util.mjs"), "export {};\n").expect("lib");
+        let imported = import_skills(
+            folder,
+            &import_request(&source_dir.display().to_string(), Some("demo"), false),
+        )
+        .await
+        .expect("import over the runtime's copy without --overwrite");
+        assert_eq!(imported.len(), 1);
+
+        let skill_dir = folder.join(".agents/skills/demo");
+        assert_eq!(
+            fs::read_to_string(skill_dir.join("scripts/run.mjs")).expect("cli"),
+            "// the pack's own CLI\n"
+        );
+        let status = super::super::learn::test_checkout_status(folder);
+        for path in [
+            ".agents/skills/demo/SKILL.md",
+            ".agents/skills/demo/scripts/run.mjs",
+            ".agents/skills/demo/scripts/lib/util.mjs",
+        ] {
+            assert!(status.contains(path), "{path} is saved: {status}");
+        }
+
+        // The runtime leaves the imported pack alone on later turns, before and after it is saved.
+        super::super::runtime_pack_files::keep_current(folder, &[pack.clone()], Some((22, 11, 0)));
+        assert_eq!(
+            fs::read_to_string(skill_dir.join("SKILL.md")).expect("skill"),
+            "---\nname: demo\n---\n\n# The full pack\n"
+        );
+        super::super::learn::commit_test_checkout_all(folder, "Import demo");
+        fs::write(skill_dir.join("SKILL.md"), "edited\n").expect("edit");
+        super::super::runtime_pack_files::keep_current(folder, &[pack], Some((22, 11, 0)));
+        assert_eq!(
+            fs::read_to_string(skill_dir.join("SKILL.md")).expect("skill"),
+            "edited\n"
+        );
+        assert_eq!(
+            super::super::learn::test_checkout_status(folder),
+            "M .agents/skills/demo/SKILL.md"
         );
     }
 

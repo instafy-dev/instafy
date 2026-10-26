@@ -960,6 +960,18 @@ const BOUND_SITES_CHEATSHEET_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../runtime-agent/assets/instafy/.agents/skills/instafy-bound-sites/references/cheatsheet.md"
 ));
+const INTERACTIVE_ARTIFACTS_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../runtime-agent/assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md"
+));
+const RESEARCH_TEAM_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../runtime-agent/assets/instafy/.agents/skills/instafy-research-team/SKILL.md"
+));
+const RESEARCH_TEAM_RESEARCHER_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../runtime-agent/assets/instafy/.agents/skills/instafy-research-team/references/researcher.md"
+));
 const PROJECT_MEMORY_MANAGED_DEFAULTS_STATE_PATH: &str =
     ".agents/.instafy-managed-defaults-state.json";
 const PROJECT_MEMORY_ASSETS_ROOT_ENV: &str = "INSTAFY_PROJECT_MEMORY_ASSETS_ROOT";
@@ -967,7 +979,7 @@ const PROJECT_MEMORY_ASSETS_ROOT_ENV: &str = "INSTAFY_PROJECT_MEMORY_ASSETS_ROOT
 /// Every file the runtime bundles under `assets/instafy`. In a git-canonical
 /// space with history the runtime commits none of them, so this bootstrap is
 /// what brings each one to `main`.
-const PROJECT_MEMORY_TEMPLATE_FILES: [ProjectMemoryTemplateFile; 31] = [
+const PROJECT_MEMORY_TEMPLATE_FILES: [ProjectMemoryTemplateFile; 34] = [
     ProjectMemoryTemplateFile {
         path: "INSTAFY.md",
         asset_relative_path: "INSTAFY.md",
@@ -1123,6 +1135,21 @@ const PROJECT_MEMORY_TEMPLATE_FILES: [ProjectMemoryTemplateFile; 31] = [
         path: ".agents/skills/instafy-bound-sites/references/cheatsheet.md",
         asset_relative_path: ".agents/skills/instafy-bound-sites/references/cheatsheet.md",
         fallback_content: BOUND_SITES_CHEATSHEET_TEMPLATE,
+    },
+    ProjectMemoryTemplateFile {
+        path: ".agents/skills/instafy-interactive-artifacts/SKILL.md",
+        asset_relative_path: ".agents/skills/instafy-interactive-artifacts/SKILL.md",
+        fallback_content: INTERACTIVE_ARTIFACTS_TEMPLATE,
+    },
+    ProjectMemoryTemplateFile {
+        path: ".agents/skills/instafy-research-team/SKILL.md",
+        asset_relative_path: ".agents/skills/instafy-research-team/SKILL.md",
+        fallback_content: RESEARCH_TEAM_TEMPLATE,
+    },
+    ProjectMemoryTemplateFile {
+        path: ".agents/skills/instafy-research-team/references/researcher.md",
+        asset_relative_path: ".agents/skills/instafy-research-team/references/researcher.md",
+        fallback_content: RESEARCH_TEAM_RESEARCHER_TEMPLATE,
     },
 ];
 
@@ -6429,7 +6456,8 @@ mod project_access_tests {
         invitation_accept_urls, load_project_memory_template_content, OrgInvitationResponse,
         OrgInvitationSummary, ProjectAccess, ProjectRole, CLAUDE_DOC_TEMPLATE,
         DIAGNOSTICS_OPENAI_TEMPLATE, DIAGNOSTICS_TEMPLATE, GROUP_PARTICIPATION_TEMPLATE,
-        PROJECT_MEMORY_TEMPLATE_FILES, SPACE_REVIEW_TEMPLATE,
+        INTERACTIVE_ARTIFACTS_TEMPLATE, PROJECT_MEMORY_TEMPLATE_FILES,
+        RESEARCH_TEAM_RESEARCHER_TEMPLATE, RESEARCH_TEAM_TEMPLATE, SPACE_REVIEW_TEMPLATE,
     };
     use serde_json::json;
     use uuid::Uuid;
@@ -6486,6 +6514,31 @@ mod project_access_tests {
         assert!(template.fallback_content.contains("always_include: true"));
         assert!(template.fallback_content.contains("targetMessageId"));
         assert!(template.fallback_content.contains("do not call tools"));
+    }
+
+    #[test]
+    fn managed_defaults_include_the_interactive_artifacts_hub() {
+        for (path, content) in [
+            (
+                ".agents/skills/instafy-interactive-artifacts/SKILL.md",
+                INTERACTIVE_ARTIFACTS_TEMPLATE,
+            ),
+            (
+                ".agents/skills/instafy-research-team/SKILL.md",
+                RESEARCH_TEAM_TEMPLATE,
+            ),
+            (
+                ".agents/skills/instafy-research-team/references/researcher.md",
+                RESEARCH_TEAM_RESEARCHER_TEMPLATE,
+            ),
+        ] {
+            let template = PROJECT_MEMORY_TEMPLATE_FILES
+                .iter()
+                .find(|template| template.path == path)
+                .expect("managed default");
+            assert_eq!(template.fallback_content, content);
+            assert_eq!(load_project_memory_template_content(template), content);
+        }
     }
 
     #[test]

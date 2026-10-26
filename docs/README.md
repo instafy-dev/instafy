@@ -25,6 +25,7 @@ These docs reflect the current product scope: a chat-first filesystem workspace 
 - Credits and billing: `docs/Credits-Billing.md`
 - Local development: `docs/Local-Dev.md`
 - Private site previews: the card, side-pane tab, configuration and security model: [Site previews](Previews.md)
+- Skill packs every space gets with the runtime: pinning, installation and the per-space files: [Skill packs](Skill-Packs.md)
 - Runtime image layers, incremental Rust builds and rebuild times: [Runtime image builds](Runtime-Image-Builds.md)
 - Testing: `docs/Testing.md`
 - Camera operator guide: `docs/Camera-Operator.md`

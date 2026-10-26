@@ -55,6 +55,8 @@ mod scoped_worker_tests;
 pub(crate) mod worker_input_routing;
 
 mod handoff;
+#[cfg(test)]
+mod interactive_routing_tests;
 mod isolated_worker;
 #[cfg(test)]
 mod isolated_worker_tests;
@@ -71,6 +73,7 @@ mod project_preferences_tests;
 #[cfg(test)]
 mod read_reference_tests;
 pub(crate) mod rolling_saves;
+mod runtime_pack_files;
 mod site_intent;
 mod skill_declaration;
 mod skill_routing;

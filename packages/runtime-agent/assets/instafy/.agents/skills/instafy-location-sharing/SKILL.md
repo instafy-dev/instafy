@@ -1,9 +1,9 @@
 ---
 name: instafy-location-sharing
-description: Ask for user-approved location only when a request truly depends on nearby/current-place context.
+description: Ask for user-approved location only when a request depends on where the user is right now ("near me", "my location"), not on a place they named.
 context_kind: workflow
 context_parent: instafy-skill-router
-routing_keywords: nearby, near me, close by, local, around me, closest, walking distance, current location
+routing_keywords: near me, around me, close to me, my location, current location, where i am, where am i, nära mig, min plats
 ---
 
 # Location sharing
