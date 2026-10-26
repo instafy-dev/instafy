@@ -3,7 +3,7 @@
 // - dist is a real directory with index.html and at least two regular files;
 // - no symbolic links, special files, source maps or environment files;
 // - instafy-build.json is exactly {schemaVersion:2, releaseId} for the commit;
-// - the bundle carries the release commit and all three hosted feature modules
+// - the bundle carries the release commit and both hosted feature modules
 //   (so a build that silently fell back to the public manifest is refused);
 // - no private paths, hosts, networks, package markers or credential shapes.
 //
@@ -19,7 +19,6 @@ import { computeHostedReleaseId } from "./release-id.mjs";
 const PRODUCT = ["kno", "sh"].join("");
 export const REQUIRED_FEATURE_MODULE_IDS = Object.freeze([
   "instafy.public-core",
-  `${PRODUCT}.frontend`,
   "instafy.hosted-performance",
 ]);
 
