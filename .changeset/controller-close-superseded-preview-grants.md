@@ -1,4 +1,0 @@
----
----
-
-The controller now closes a preview grant whose broker tunnel was retired. When an open or a wake of a preview gets a different tunnel id for the same key than an earlier grant holds (the broker replaces a tunnel minted under a `TUNNEL_DOMAIN` it no longer serves), every earlier grant of that key is closed as the close route closes one: stopped, marked `closedAt` and `supersededBy`, its viewer sessions and presentation ended, and `tunnel.grant_revoked` published so its card shows it stopped instead of probing a dead tunnel until it expires. The new grant posts its own card and never inherits the old grant's card ids. A broker `tunnel.revoked` event for a tunnel the controller did not revoke now stops its grant too; duplicate events, events for unknown tunnels or other projects, and late events about an earlier issue of a tunnel the broker has since refreshed (told apart by the tunnel's expiry) change nothing. No package changes.
