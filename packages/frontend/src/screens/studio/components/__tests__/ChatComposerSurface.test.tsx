@@ -642,6 +642,108 @@ describe("ChatComposerSurface", () => {
     expect(container.querySelector('[data-testid="chat-image-upload-preview"]')?.hasAttribute("aria-busy")).toBe(false);
   });
 
+  function createPageAttachment(
+    overrides: Partial<ComponentProps<typeof ChatComposerSurface>["imageAttachments"][number]> = {},
+  ): ComponentProps<typeof ChatComposerSurface>["imageAttachments"][number] {
+    return {
+      id: "page-1",
+      file: new File(["# Release notes"], "page-docs.example.md", { type: "text/markdown" }),
+      previewUrl: "",
+      page: {
+        url: "https://docs.example/releases",
+        host: "docs.example",
+        title: "Release notes",
+        readAt: "2026-10-26T10:00:00.000Z",
+        viewer: "personal",
+      },
+      ...overrides,
+    };
+  }
+
+  it.each(["personal", "shared"] as const)("keeps a %s browser page above the input without treating it as an image", async (viewer) => {
+    const page = createPageAttachment();
+    page.page = { ...page.page!, viewer, title: viewer === "shared" ? "" : "Release notes" };
+    const onRemoveImageAttachment = vi.fn();
+    const onOpenImage = vi.fn();
+    await act(async () => renderLayout({ imageAttachments: [page], onRemoveImageAttachment, onOpenImage }));
+
+    const trays = container.querySelectorAll('[data-testid="chat-image-upload-preview"]');
+    expect(trays).toHaveLength(1);
+    const tray = trays[0];
+    const input = container.querySelector('[data-testid="chat-input"]')!;
+    expect(tray.compareDocumentPosition(input) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const row = tray.querySelector('[data-testid="chat-sent-page-attachment"]')!;
+    expect(row.textContent).toContain(viewer === "shared" ? "docs.example" : "Release notes");
+    expect(row.textContent).toContain(`Page from docs.example · ${viewer === "personal" ? "This device" : "Workspace"} browser · 1 KB`);
+    expect(row.querySelector('[title="https://docs.example/releases"]')).not.toBeNull();
+    expect(tray.querySelector("img")).toBeNull();
+    expect(tray.querySelector('[data-testid^="chat-image-upload-preview-item-"]')).toBeNull();
+    expect(layoutNodes().send).not.toBeNull();
+    const remove = row.querySelector<HTMLButtonElement>('[aria-label="Remove page"]')!;
+    expect(remove.disabled).toBe(false);
+    await act(async () => remove.click());
+    expect(onRemoveImageAttachment).toHaveBeenCalledExactlyOnceWith("page-1");
+    expect(onOpenImage).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("shares one tray for pages and images without losing preview or remove actions (compact=%s)", async (compactBrowserViewport) => {
+    const image = { id: "image-1", file: new File(["image"], "shot.png", { type: "image/png" }), previewUrl: "blob:shot" };
+    const onRemoveImageAttachment = vi.fn();
+    const onOpenImage = vi.fn();
+    await act(async () => renderLayout({
+      compactBrowserViewport,
+      imageAttachments: [createPageAttachment(), image],
+      onRemoveImageAttachment,
+      onOpenImage,
+    }));
+
+    expect(container.querySelectorAll('[data-testid="chat-image-upload-preview"]')).toHaveLength(1);
+    const tray = container.querySelector('[data-testid="chat-image-upload-preview"]')!;
+    expect(tray.compareDocumentPosition(container.querySelector('[data-testid="chat-input"]')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(tray.querySelectorAll('[data-testid="chat-sent-page-attachment"]')).toHaveLength(1);
+    expect(tray.querySelectorAll("img")).toHaveLength(1);
+    expect(tray.querySelector("img")?.getAttribute("alt")).toBe("shot.png");
+    await act(async () => tray.querySelector<HTMLButtonElement>('[data-testid^="chat-image-upload-preview-item-"]')!.click());
+    expect(onOpenImage).toHaveBeenCalledExactlyOnceWith("blob:shot", "shot.png");
+    await act(async () => {
+      tray.querySelector<HTMLButtonElement>('[aria-label="Remove page"]')!.click();
+      tray.querySelector<HTMLButtonElement>('[aria-label="Remove image"]')!.click();
+    });
+    expect(onRemoveImageAttachment.mock.calls).toEqual([["page-1"], ["image-1"]]);
+  });
+
+  it.each([
+    { sendingPages: 1, sendingImage: false, statusText: "Sending your message with 1 page…" },
+    { sendingPages: 2, sendingImage: false, statusText: "Sending your message with 2 pages…" },
+    { sendingPages: 1, sendingImage: true, statusText: "Sending your message with 2 attachments…" },
+  ])("announces $statusText while keeping later attachments removable", async ({ sendingPages, sendingImage, statusText }) => {
+    const pages = Array.from({ length: sendingPages }, (_, index) => createPageAttachment({ id: `page-${index + 1}`, sending: true }));
+    const image = { id: "image-1", file: new File(["image"], "shot.png", { type: "image/png" }), previewUrl: "blob:shot", sending: sendingImage };
+    const later = createPageAttachment({ id: "later-page" });
+    const onRemoveImageAttachment = vi.fn();
+    await act(async () => renderLayout({ imageAttachments: [...pages, image, later], sendingAttachment: true, onRemoveImageAttachment }));
+
+    const tray = container.querySelector('[data-testid="chat-image-upload-preview"]')!;
+    expect(tray.getAttribute("aria-busy")).toBe("true");
+    expect(container.querySelectorAll('[data-testid="chat-image-upload-preview"]')).toHaveLength(1);
+    const status = tray.querySelector('[data-testid="chat-image-upload-status"]')!;
+    expect(status.textContent).toBe(statusText);
+    expect(status.getAttribute("role")).toBe("status");
+    expect(status.getAttribute("aria-live")).toBe("polite");
+    expect(tray.querySelector('[data-testid="chat-image-upload-list"]')?.contains(status)).toBe(false);
+    const removePages = [...tray.querySelectorAll<HTMLButtonElement>('[aria-label="Remove page"]')];
+    expect(removePages.slice(0, sendingPages).every((button) => button.disabled)).toBe(true);
+    expect(tray.querySelector<HTMLButtonElement>('[aria-label="Remove image"]')?.disabled).toBe(sendingImage);
+    expect(removePages[sendingPages].disabled).toBe(false);
+    await act(async () => removePages[sendingPages].click());
+    expect(onRemoveImageAttachment).toHaveBeenCalledExactlyOnceWith("later-page");
+
+    await act(async () => renderLayout({ imageAttachments: [later] }));
+    expect(container.querySelector('[data-testid="chat-image-upload-status"]')).toBe(status);
+    expect(status.textContent).toBe("");
+    expect(tray.hasAttribute("aria-busy")).toBe(false);
+  });
+
   it("owns the chat safe area and retains composer controls across keyboard transitions", async () => {
     await act(async () => renderLayout({ compactBrowserViewport: true }));
     const before = layoutNodes();
