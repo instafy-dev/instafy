@@ -220,6 +220,16 @@ proxy image built from this change (`RUNTIME_PROXY_IMAGE`) before the key goes o
 controller. Set the key first and an older sidecar keeps rejecting the turns the controller is
 already charging for.
 
+The managed lane's job secrets also set the reasoning effort of a managed chat turn. A
+platform-lane job with the default chat intent (`feature`), Shared Browser and Personal Browser
+turns included, gets `CODEX_MANAGED_AI_REASONING_EFFORT=medium` next to `CODEX_MODEL`, and the
+runtime runs it at `medium` instead of the `high` it uses for a chat turn on the person's own login
+or key. Own-key jobs, every job with `MANAGED_AI_ENABLED=false`, and a job whose secrets fetch
+failed keep `high`. Team planning turns, plan workers (`multi_agent_plan`) and lead checkpoints
+keep their own effort on either lane. An agent's own reasoning setting and the runtime's
+`CODEX_RUNTIME_REASONING_EFFORT` still win, and a recovery retry or finalization pass still drops
+to `low` as before. A runtime older than this change ignores the value and keeps `high`.
+
 BYOC users connect an API key or sanitized `auth.json` through the credential flow. Neither
 credential path belongs in a Vite environment or browser bundle. `MANAGED_AI_STARTUP_CHECK=true`
 makes the controller fail closed when its own proxy can serve neither path; it does not probe

@@ -148,11 +148,15 @@ impl JobProcessor {
             .context("worker proxy URL missing")?;
         let (model, reasoning_effort) = self.isolated_workers.resolve(
             &worker_config,
+            // A plan worker is not a chat turn, so the managed chat effort
+            // never applies to it (and this lane never reads another job's
+            // process environment).
             reasoning_effort_for_runtime_job(
                 job,
                 prompt_text,
                 false,
                 runtime_job_expectations(&job.payload),
+                None,
             ),
         );
         let request = IsolatedToolWorkerRequest {

@@ -1,6 +1,7 @@
 //! Codex's local model follows the job's lane. A platform-lane job (an AI job
 //! whose target has no credential) runs on the managed model the proxy pins,
-//! whatever its payload says and whether or not it names an agent.
+//! whatever its payload says and whether or not it names an agent. A chat turn
+//! on that lane also gets the managed chat reasoning effort.
 
 use axum::http::StatusCode;
 use chrono::{Duration, Utc};
@@ -127,6 +128,14 @@ fn managed_model_env() -> Value {
     })
 }
 
+/// A managed chat turn (intent `feature`) also gets the managed reasoning
+/// effort.
+fn managed_chat_env() -> Value {
+    let mut env = managed_model_env();
+    env["CODEX_MANAGED_AI_REASONING_EFFORT"] = json!("medium");
+    env
+}
+
 #[tokio::test]
 async fn credentialless_job_gets_managed_model_without_managed_ai_used() -> anyhow::Result<()> {
     let env = agent_secrets_env(
@@ -138,11 +147,7 @@ async fn credentialless_job_gets_managed_model_without_managed_ai_used() -> anyh
         },
     )
     .await?;
-    assert_eq!(
-        env,
-        managed_model_env(),
-        "the agent's own model is replaced"
-    );
+    assert_eq!(env, managed_chat_env(), "the agent's own model is replaced");
     Ok(())
 }
 
@@ -155,6 +160,22 @@ async fn credentialless_job_without_agent_identity_still_gets_managed_model() ->
             has_credential: false,
             intent: "feature",
             names_agent: false,
+        },
+    )
+    .await?;
+    assert_eq!(env, managed_chat_env());
+    Ok(())
+}
+
+#[tokio::test]
+async fn credentialless_team_worker_gets_managed_model_without_chat_effort() -> anyhow::Result<()> {
+    // A team plan worker keeps the runtime's own effort for its lane.
+    let env = agent_secrets_env(
+        "credentialless team worker",
+        LaneJob {
+            has_credential: false,
+            intent: "multi_agent_plan",
+            names_agent: true,
         },
     )
     .await?;

@@ -20,12 +20,19 @@ use crate::agent::{
 };
 use crate::auth::authenticate_request;
 use crate::config::PgPool;
-use crate::model_defaults::{resolve_agent_model_for_provider, DEFAULT_MANAGED_AI_PROVIDER_ID};
+use crate::model_defaults::{
+    resolve_agent_model_for_provider, DEFAULT_MANAGED_AI_CHAT_REASONING_EFFORT,
+    DEFAULT_MANAGED_AI_PROVIDER_ID,
+};
 use crate::projects::load_project_record;
 use crate::{
     bad_request, ensure_project_access, ensure_project_write_access, internal_error, not_found,
     unauthorized, ApiError, AppState,
 };
+
+/// The job secret that carries the managed chat reasoning effort to the
+/// runtime (see `apply_managed_ai_env_overrides`).
+const MANAGED_AI_REASONING_EFFORT_ENV: &str = "CODEX_MANAGED_AI_REASONING_EFFORT";
 
 const SECRET_NAME_MAX_LEN: usize = 64;
 const SECRET_DESCRIPTION_MAX_LEN: usize = 800;
@@ -1061,6 +1068,13 @@ fn parse_agent_job_identity(payload: &JsonValue) -> (Option<Uuid>, Option<String
 /// for ambient evaluations until they answer. Terminal commands and BYO jobs
 /// keep their model, and so does every job when managed AI is off, because
 /// the credential-less lane is then the proxy's own key.
+///
+/// A chat turn (intent `feature`) on that lane also gets the managed chat
+/// reasoning effort as `CODEX_MANAGED_AI_REASONING_EFFORT`, which the runtime
+/// uses in place of its own `high` default for such a turn. The same rule
+/// leaves BYO jobs, and every job when managed AI is off, at the runtime's
+/// default. Team plan workers and lead checkpoints have their own intents and
+/// keep theirs.
 fn apply_managed_ai_env_overrides(
     env: &mut JsonMap<String, JsonValue>,
     config: &crate::config::AppConfig,
@@ -1082,6 +1096,13 @@ fn apply_managed_ai_env_overrides(
         "CODEX_MODEL_PROVIDER".to_string(),
         JsonValue::String(DEFAULT_MANAGED_AI_PROVIDER_ID.to_string()),
     );
+    // Matched exactly, as the runtime matches it for its own `high`.
+    if intent == Some(crate::dispatch::DEFAULT_PROMPT_INTENT) {
+        env.insert(
+            MANAGED_AI_REASONING_EFFORT_ENV.to_string(),
+            JsonValue::String(DEFAULT_MANAGED_AI_CHAT_REASONING_EFFORT.to_string()),
+        );
+    }
 }
 
 /// A bring-your-own AI job without an agent model still names its model: the
@@ -1585,6 +1606,62 @@ mod tests {
             );
             assert_eq!(env_model(&env).0, Some("gpt-6-luna"));
         }
+    }
+
+    fn env_reasoning_effort(env: &JsonMap<String, JsonValue>) -> Option<&str> {
+        env.get("CODEX_MANAGED_AI_REASONING_EFFORT")
+            .and_then(JsonValue::as_str)
+    }
+
+    #[test]
+    fn managed_chat_turn_gets_medium_reasoning_effort() {
+        let config = build_app_config("test-private", "test-public", "test-key");
+        let mut env = agent_model_env();
+
+        apply_managed_ai_env_overrides(&mut env, &config, None, Some("feature"));
+
+        assert_eq!(env_reasoning_effort(&env), Some("medium"));
+        assert_eq!(env_model(&env).0, Some(default_managed_ai_model_id()));
+    }
+
+    #[test]
+    fn other_managed_lanes_keep_the_runtime_reasoning_effort() {
+        // Team plan workers, lead checkpoints and other AI intents still get
+        // the managed model, but the runtime keeps choosing their effort. The
+        // runtime's `high` is for the exact `feature` intent only, so another
+        // spelling is not a chat turn either.
+        let config = build_app_config("test-private", "test-public", "test-key");
+        for intent in [
+            None,
+            Some("question"),
+            Some("multi_agent_plan"),
+            Some("multi_agent_lead_continuation"),
+            Some("Feature"),
+            Some(" feature "),
+        ] {
+            let mut env = agent_model_env();
+
+            apply_managed_ai_env_overrides(&mut env, &config, None, intent);
+
+            assert_eq!(env_model(&env).0, Some(default_managed_ai_model_id()));
+            assert_eq!(env_reasoning_effort(&env), None, "{intent:?}");
+        }
+    }
+
+    #[test]
+    fn own_ai_chat_turn_gets_no_managed_reasoning_effort() {
+        // A person's own login or key, and the proxy's own key when managed AI
+        // is off, keep the runtime's default effort for a chat turn.
+        let config = build_app_config("test-private", "test-public", "test-key");
+        let mut env = agent_model_env();
+        apply_managed_ai_env_overrides(&mut env, &config, Some(Uuid::new_v4()), Some("feature"));
+        assert_eq!(env_reasoning_effort(&env), None);
+
+        let mut config = config;
+        config.managed_ai_enabled = false;
+        let mut env = agent_model_env();
+        apply_managed_ai_env_overrides(&mut env, &config, None, Some("feature"));
+        assert_eq!(env_reasoning_effort(&env), None);
     }
 
     #[test]
