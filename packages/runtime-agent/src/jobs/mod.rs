@@ -54,6 +54,8 @@ mod scoped_worker_tests;
 pub(crate) mod worker_input_routing;
 
 mod handoff;
+#[cfg(test)]
+mod interactive_routing_tests;
 mod isolated_worker;
 #[cfg(test)]
 mod isolated_worker_tests;
