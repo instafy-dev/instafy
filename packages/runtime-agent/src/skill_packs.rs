@@ -17,9 +17,21 @@
 //!
 //! Each pack folder holds `.instafy-pack.json`:
 //! `{"schema": 1, "name", "version", "skill" | "skills": [..], "cli": {"entry", "space_path"} | "entry",
-//!   "engines": {"node": ">=22"}, ...}`. A pack whose manifest does not parse or check out is skipped
-//! with a warning.
+//!   "engines": {"node": ">=22"}, "env": ["UW_*", "SOME_SETTING"], ...}`. A pack whose manifest does
+//! not parse or check out is skipped with a warning.
+//!
+//! Settings and state:
+//! - `env` names the settings the pack's scripts read: exact names, or prefixes ending in `_*`. A
+//!   process the runtime starts with a cleared environment (an isolated tool worker) gets the
+//!   runtime's own values of those names ([`pack_settings_environment`]), never a name that looks
+//!   like a credential, an internal credential, or one the runtime owns. Patterns that could reach
+//!   process or runtime configuration (`PATH`, `LD_*`, `NODE_*`, `INSTAFY_*` …) make the manifest
+//!   invalid.
+//! - [`SKILL_PACK_CACHE_DIR_ENV`] (`INSTAFY_CACHE_DIR`) is a folder per project that outlasts the turn
+//!   ([`skill_pack_cache_dir`]): a pack keeps its caches, rate-limit holds and health state there
+//!   instead of in a tool turn's HOME or TMPDIR, which may be new every turn.
 
+use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
@@ -30,6 +42,61 @@ use tracing::{info, warn};
 pub const SKILL_PACKS_DIR_ENV: &str = "INSTAFY_SKILL_PACKS_DIR";
 pub const IMAGE_SKILL_PACKS_DIR: &str = "/opt/instafy/skill-packs";
 pub const PACK_MANIFEST: &str = ".instafy-pack.json";
+/// The folder per project, outside the workspace, where skill packs keep state across turns.
+pub const SKILL_PACK_CACHE_DIR_ENV: &str = "INSTAFY_CACHE_DIR";
+/// At most this many `env` patterns per pack.
+const MAX_SETTING_PATTERNS: usize = 32;
+/// Prefixes no pack setting may start with: process configuration and the runtime's own settings.
+const RESERVED_SETTING_PREFIXES: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TMP",
+    "TEMP",
+    "TZ",
+    "LANG",
+    "LC_",
+    "TERM",
+    "PWD",
+    "LD_",
+    "DYLD_",
+    "NODE_",
+    "NPM_",
+    "PYTHON",
+    "RUBY",
+    "PERL",
+    "RUST",
+    "CARGO",
+    "DENO_",
+    "V8_",
+    "BASH",
+    "ZDOT",
+    "XDG_",
+    "GIT_",
+    "SSL_",
+    "HTTP",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "PROXY",
+    "CODEX",
+    "OPENAI",
+    "CONTROLLER",
+    "RUNTIME",
+    "ORIGIN",
+    "WORKSPACE",
+    "SUPABASE",
+    "AWS_",
+    "GITHUB",
+    "GH_",
+    "PROJECT_ID",
+    "SPACE_ID",
+    "CONVERSATION_ID",
+    "INSTAFY",
+];
+/// Namespaces under `INSTAFY_` that are open to skill packs (settings several packs may share).
+const PACK_SETTING_NAMESPACES: &[&str] = &["INSTAFY_LOOKUP_"];
 #[cfg(debug_assertions)]
 const SOURCE_SKILL_PACKS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/skill-packs");
 
@@ -46,6 +113,8 @@ pub struct InstalledPack {
     pub cli: Option<PackCli>,
     /// The Node.js versions the pack's scripts need.
     pub node: Option<NodeRequirement>,
+    /// The settings the pack's scripts read (`env`): exact names or `PREFIX_*` patterns, checked.
+    pub env: Vec<String>,
 }
 
 /// A pack's command: `entry` inside the pack, run through a launcher written at `space_path`
@@ -107,6 +176,8 @@ struct Manifest {
     entry: Option<String>,
     #[serde(default)]
     engines: Option<ManifestEngines>,
+    #[serde(default)]
+    env: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -145,6 +216,113 @@ fn is_plain_relative_path(path: &str) -> bool {
             .all(|component| matches!(component, Component::Normal(_)))
         && !path.ends_with('/')
         && !path.contains("//")
+}
+
+/// A setting pattern a pack may declare: `NAME` or `PREFIX_*` (upper-case letters, digits and `_`,
+/// a prefix of at least 3 characters), outside process configuration and the runtime's own names.
+pub fn is_pack_setting_pattern(pattern: &str) -> bool {
+    let (name, wildcard) = match pattern.strip_suffix('*') {
+        Some(prefix) => (prefix, true),
+        None => (pattern, false),
+    };
+    let shaped = !name.is_empty()
+        && name.len() <= 64
+        && name.as_bytes()[0].is_ascii_uppercase()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+        && (!wildcard || (name.len() >= 3 && name.ends_with('_')));
+    if !shaped {
+        return false;
+    }
+    if let Some(namespace) = PACK_SETTING_NAMESPACES
+        .iter()
+        .find(|namespace| name.starts_with(**namespace))
+    {
+        // `INSTAFY_LOOKUP_*` or a name inside it; never a pattern wider than the namespace
+        return name.len() >= namespace.len();
+    }
+    !RESERVED_SETTING_PREFIXES
+        .iter()
+        .any(|reserved| name.starts_with(reserved) || (wildcard && reserved.starts_with(name)))
+}
+
+/// A name that looks like a credential never passes as a pack setting, whatever a pack declares.
+fn looks_like_credential(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    [
+        "TOKEN",
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "CREDENTIAL",
+        "PRIVATE",
+        "COOKIE",
+        "SESSION",
+        "APIKEY",
+        "API_KEY",
+        "_KEY_",
+    ]
+    .iter()
+    .any(|word| upper.contains(word))
+        || upper.ends_with("_KEY")
+        || upper == "KEY"
+}
+
+fn setting_matches(pattern: &str, name: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) => name.starts_with(prefix) && name.len() > prefix.len(),
+        None => name == pattern,
+    }
+}
+
+/// Whether `name` is a setting one of `packs` declares and may receive from the runtime.
+pub fn is_pack_setting(packs: &[InstalledPack], name: &str) -> bool {
+    name != SKILL_PACK_CACHE_DIR_ENV
+        && !looks_like_credential(name)
+        && !crate::model_environment::is_model_child_excluded_env_key(name)
+        && packs
+            .iter()
+            .flat_map(|pack| pack.env.iter())
+            .any(|pattern| setting_matches(pattern, name))
+}
+
+/// The runtime's own values of the settings `packs` declare, from `vars` (the runtime's
+/// environment), for a process started with a cleared environment.
+pub fn pack_settings_environment(
+    packs: &[InstalledPack],
+    vars: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Vec<(OsString, OsString)> {
+    vars.into_iter()
+        .filter(|(key, _)| {
+            key.to_str()
+                .is_some_and(|name| is_pack_setting(packs, name))
+        })
+        .collect()
+}
+
+/// The folder where skill packs keep state for `project_id` on this runtime: outside the project's
+/// workspace (nothing in it is ever saved or published) and kept across turns.
+pub fn skill_pack_cache_dir(workspace_root: &Path, project_id: &uuid::Uuid) -> PathBuf {
+    workspace_root
+        .join(".instafy")
+        .join("skill-pack-cache")
+        .join(project_id.to_string())
+}
+
+/// Creates [`skill_pack_cache_dir`] (private to the runtime's user) and returns it.
+pub fn prepare_skill_pack_cache_dir(
+    workspace_root: &Path,
+    project_id: &uuid::Uuid,
+) -> std::io::Result<PathBuf> {
+    let dir = skill_pack_cache_dir(workspace_root, project_id);
+    std::fs::create_dir_all(&dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(dir)
 }
 
 fn is_regular_file(path: &Path) -> bool {
@@ -212,6 +390,20 @@ pub fn load_pack(dir: &Path) -> Result<InstalledPack, String> {
             ));
         }
     }
+    if manifest.env.len() > MAX_SETTING_PATTERNS {
+        return Err(format!(
+            "env lists more than {MAX_SETTING_PATTERNS} settings"
+        ));
+    }
+    if let Some(bad) = manifest
+        .env
+        .iter()
+        .find(|pattern| !is_pack_setting_pattern(pattern))
+    {
+        return Err(format!(
+            "env {bad:?} is not a setting a pack may declare (NAME or PREFIX_*, outside process and runtime settings)"
+        ));
+    }
     let node = match manifest.engines.and_then(|engines| engines.node) {
         Some(text) => Some(
             NodeRequirement::parse(&text)
@@ -226,6 +418,7 @@ pub fn load_pack(dir: &Path) -> Result<InstalledPack, String> {
         skill,
         cli,
         node,
+        env: manifest.env,
     })
 }
 
@@ -514,6 +707,124 @@ pub(crate) mod tests {
             resolve_from_candidates(None, None, None).is_none()
                 || contains_a_pack(Path::new(IMAGE_SKILL_PACKS_DIR))
         );
+    }
+
+    #[test]
+    fn a_pack_declares_the_settings_it_reads_and_nothing_wider() {
+        for good in [
+            "UW_*",
+            "UW_PHOTON",
+            "INSTAFY_LOOKUP_*",
+            "INSTAFY_LOOKUP_PROVIDERS",
+            "MAPS_TILE_URL",
+        ] {
+            assert!(is_pack_setting_pattern(good), "{good}");
+        }
+        for bad in [
+            "",
+            "*",
+            "uw_*",
+            "UW*",
+            "U_*",
+            "UW_PHOTON*",
+            "PATH",
+            "HOME",
+            "LD_*",
+            "LD_PRELOAD",
+            "DYLD_*",
+            "NODE_OPTIONS",
+            "NODE_*",
+            "XDG_*",
+            "GIT_*",
+            "HTTPS_PROXY",
+            "OPENAI_API_KEY",
+            "CODEX_*",
+            "CONTROLLER_*",
+            "INSTAFY_*",
+            "INSTAFY_TURN_*",
+            "INSTAFY_CACHE_DIR",
+            "INSTAFY_SKILL_PACKS_DIR",
+            "INSTAFY_LOOKUP*",
+            "I_*",
+            "A-B",
+        ] {
+            assert!(!is_pack_setting_pattern(bad), "{bad}");
+        }
+        let root = tempfile::tempdir().expect("tmp");
+        let dir = make_pack(root.path(), "demo", true);
+        let manifest_with = |env: serde_json::Value| {
+            let mut manifest: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(dir.join(PACK_MANIFEST)).unwrap())
+                    .unwrap();
+            manifest["env"] = env;
+            fs::write(dir.join(PACK_MANIFEST), manifest.to_string()).expect("manifest");
+        };
+        manifest_with(serde_json::json!(["UW_*", "INSTAFY_LOOKUP_*"]));
+        assert_eq!(
+            load_pack(&dir).expect("pack").env,
+            vec!["UW_*", "INSTAFY_LOOKUP_*"]
+        );
+        manifest_with(serde_json::json!(["UW_*", "LD_PRELOAD"]));
+        assert!(load_pack(&dir).unwrap_err().contains("LD_PRELOAD"));
+    }
+
+    #[test]
+    fn only_declared_non_secret_settings_pass_to_a_cleared_environment() {
+        let root = tempfile::tempdir().expect("tmp");
+        let mut pack = load_pack(&make_pack(root.path(), "demo", true)).expect("pack");
+        let vars = || {
+            [
+                ("PATH", "/bin"),
+                ("UW_PHOTON", "https://photon.example"),
+                ("UW_TURN_BUDGET", "0"),
+                ("INSTAFY_LOOKUP_PROVIDERS", "{}"),
+                ("UW_API_KEY", "x"),
+                ("UW_SECRET", "x"),
+                ("INSTAFY_LOOKUP_TOKEN", "x"),
+                ("INSTAFY_TURN_DEADLINE", "2026-10-26T10:00:00Z"),
+                ("INSTAFY_CACHE_DIR", "/elsewhere"),
+                ("OPENAI_API_KEY", "x"),
+                ("CONTROLLER_TOKEN", "x"),
+            ]
+            .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+        };
+        let names = |packs: &[InstalledPack]| -> Vec<String> {
+            pack_settings_environment(packs, vars())
+                .into_iter()
+                .map(|(key, _)| key.into_string().unwrap())
+                .collect()
+        };
+        assert!(
+            names(std::slice::from_ref(&pack)).is_empty(),
+            "a pack that declares nothing gets nothing"
+        );
+        pack.env = vec!["UW_*".into(), "INSTAFY_LOOKUP_*".into()];
+        assert_eq!(
+            names(std::slice::from_ref(&pack)),
+            ["UW_PHOTON", "UW_TURN_BUDGET", "INSTAFY_LOOKUP_PROVIDERS"]
+        );
+    }
+
+    #[test]
+    fn each_project_has_its_own_skill_pack_folder_outside_its_workspace() {
+        let root = tempfile::tempdir().expect("tmp");
+        let (one, two) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        let dir = prepare_skill_pack_cache_dir(root.path(), &one).expect("dir");
+        assert!(dir.is_dir());
+        assert_eq!(dir, skill_pack_cache_dir(root.path(), &one));
+        assert!(
+            !dir.starts_with(root.path().join(one.to_string())),
+            "not inside the project's workspace"
+        );
+        assert_ne!(dir, skill_pack_cache_dir(root.path(), &two));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
     }
 
     #[test]

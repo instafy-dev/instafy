@@ -61,3 +61,25 @@ runtime's PATH is skipped.
 
 Importing a pack in full with `/skills import <url>` writes over the runtime's unchanged copy without
 `--overwrite`, and the imported files are saved and then kept by the space.
+
+## Settings and state
+
+A pack's manifest may list the settings its scripts read, as exact names or `PREFIX_*` patterns:
+
+```json
+{"env": ["UW_*", "INSTAFY_LOOKUP_*"]}
+```
+
+A process the runtime starts with a cleared environment (an isolated tool worker) gets the runtime's
+own values of those names, so an operator's settings reach the pack in every lane. A name that looks
+like a credential (`*_KEY`, `*TOKEN*`, `*SECRET*` …), an internal credential and `INSTAFY_CACHE_DIR`
+never pass, whatever a pack lists. A manifest is refused when a pattern could reach process or runtime
+configuration (`PATH`, `HOME`, `LD_*`, `NODE_*`, `GIT_*`, `CODEX*`, `OPENAI*`, `CONTROLLER*`,
+`INSTAFY_*` …). The one namespace under `INSTAFY_` open to packs is `INSTAFY_LOOKUP_`.
+
+Every turn also gets `INSTAFY_CACHE_DIR`, a folder per project on that runtime:
+`<workspace root>/.instafy/skill-pack-cache/<project id>`, mode 0700. It is outside the project's
+workspace, so nothing in it is ever saved or published, and it is kept across turns. Packs keep their
+caches, rate-limit holds and service health there, not in HOME or TMPDIR, which an isolated worker gets
+fresh every turn. An isolated worker may write the folder only when the runtime names it in the job's
+request, never when the job's environment does. A folder that cannot be created leaves the variable unset.
