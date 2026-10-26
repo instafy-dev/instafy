@@ -141,9 +141,10 @@ pub(crate) fn installed_job_model_provider() -> Option<String> {
 }
 
 /// Retired ids (and empty) become [`DEFAULT_CODEX_MODEL`]. Only ids that are
-/// no longer served are raised here; the controller's GPT-6 floor for a
-/// person's own AI is applied before a job arrives, and an operator's managed
-/// model below GPT-6 must keep the tools of the model the proxy pins.
+/// no longer served are raised here; the controller's own-AI floor
+/// (`runtime_contracts::own_ai_model::own_ai_model_floor`) is applied before a
+/// job arrives, and an operator's served managed model below the own-AI
+/// default must keep the tools of the model the proxy pins.
 pub(crate) fn normalize_model_id(model: &str) -> String {
     match model.trim() {
         "" => DEFAULT_CODEX_MODEL.to_string(),

@@ -2723,11 +2723,9 @@ fn materialize_internal_credential(
         .and_then(JsonValue::as_str)
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    let default_model = metadata_map
-        .and_then(|map| map.get("default_model"))
-        .and_then(JsonValue::as_str)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
+    // The lease's default is what a job on this credential runs without a
+    // model of its own, the same rule as its job secrets and completions.
+    let default_model = Some(credential_default_model(kind, metadata));
     let auth_mode = metadata_map
         .and_then(|map| map.get("auth_mode"))
         .and_then(JsonValue::as_str)
@@ -2748,10 +2746,6 @@ fn materialize_internal_credential(
             .to_ascii_lowercase();
         let upstream_endpoint = upstream_endpoint
             .or_else(|| Some(default_endpoint_for_provider(&provider_key).to_string()));
-        let default_model = Some(match default_model {
-            Some(model) => floor_own_ai_model_for_provider(&provider_key, &model),
-            None => default_model_for_provider(&provider_key).to_string(),
-        });
 
         let key = auth
             .get("OPENAI_API_KEY")
@@ -2803,11 +2797,7 @@ fn materialize_internal_credential(
         openai_api_key: None,
         provider,
         upstream_endpoint,
-        // ChatGPT login lease: user-paid subscription, the own-AI default.
-        default_model: Some(match default_model {
-            Some(model) => floor_own_ai_model_for_provider(PROVIDER_OPENAI, &model),
-            None => default_chatgpt_model_id().to_string(),
-        }),
+        default_model,
         pinned_model: None,
         auth_mode,
         code_assist_project,
@@ -2937,7 +2927,6 @@ mod provider_metadata_tests {
         default_chatgpt_model_id, default_managed_ai_model_id, default_model_for_provider,
         DEFAULT_OPENAI_MODEL_ID,
     };
-    use runtime_contracts::own_ai_model::OWN_AI_SMALL_MODEL_ID;
     use serde_json::json;
 
     #[test]
@@ -2994,10 +2983,13 @@ mod provider_metadata_tests {
     }
 
     #[test]
-    fn a_stored_default_below_gpt_6_runs_the_own_ai_floor() {
-        // Saving a credential stored the default of the day, so a key or login
-        // saved before the GPT-6 move still says gpt-5.6-sol. Jobs, the
-        // credential test and completions run the floor, without a migration.
+    fn a_stored_default_older_than_the_own_ai_default_runs_the_floor() {
+        // Saving a credential stores the default of the day, so a key or login
+        // saved before the GPT-6 move still says gpt-5.6-sol, and one saved
+        // now says today's default. Jobs, leases, the credential test and
+        // completions run the floor, which follows the default, without a
+        // migration.
+        let same_version = format!("{DEFAULT_OPENAI_MODEL_ID}-preview");
         for kind in [
             CREDENTIAL_KIND_CODEX_AUTH_JSON,
             CREDENTIAL_KIND_OPENAI_API_KEY,
@@ -3005,10 +2997,11 @@ mod provider_metadata_tests {
             for (stored, runs) in [
                 ("gpt-5.6-sol", DEFAULT_OPENAI_MODEL_ID),
                 ("gpt-5.5", DEFAULT_OPENAI_MODEL_ID),
-                ("gpt-5.6-luna", OWN_AI_SMALL_MODEL_ID),
-                // A deliberate GPT-6 pick runs as stored.
-                ("gpt-6-luna", "gpt-6-luna"),
-                ("gpt-6.1-sol", "gpt-6.1-sol"),
+                ("gpt-5.6-luna", DEFAULT_OPENAI_MODEL_ID),
+                (" gpt-5.4-mini ", DEFAULT_OPENAI_MODEL_ID),
+                // A pick at the default's version runs as stored.
+                (DEFAULT_OPENAI_MODEL_ID, DEFAULT_OPENAI_MODEL_ID),
+                (same_version.as_str(), same_version.as_str()),
             ] {
                 let metadata = json!({ "provider": "openai", "default_model": stored });
                 assert_eq!(
@@ -3358,10 +3351,15 @@ mod credential_lease_contract_tests {
         // User credentials keep the requested model: no pin on the wire for a
         // BYO API key or a ChatGPT login, even with a stored default model.
         // The default itself runs the own-AI floor, as a job's model does.
+        let same_version = format!("{}-preview", crate::model_defaults::DEFAULT_OPENAI_MODEL_ID);
         for (stored, default_model) in [
-            ("gpt-6-luna", "gpt-6-luna"),
+            (same_version.as_str(), same_version.as_str()),
             (
                 "gpt-5.6-sol",
+                crate::model_defaults::DEFAULT_OPENAI_MODEL_ID,
+            ),
+            (
+                "gpt-5.5-mini",
                 crate::model_defaults::DEFAULT_OPENAI_MODEL_ID,
             ),
         ] {

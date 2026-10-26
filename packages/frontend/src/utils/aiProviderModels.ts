@@ -23,25 +23,33 @@ export const AI_PROVIDER_OPTIONS: AiProviderOption[] = [
   { id: "gemini", label: "Gemini" },
 ];
 
-// Own AI runs at least GPT-6: the controller raises any bare OpenAI id below
-// it when a job runs (own_ai_model_floor in model_defaults.rs), to the small
-// tier for Luna, mini and nano ids and to the own-AI default otherwise. Studio
-// shows the model that runs, so it applies the same rule; both are checked
-// against runtime-contracts' own_ai_model_fixtures.json.
-export function ownAiModelFloor(model: string): string | null {
+// `[N, M]` for a lowercase `gpt-N[.M]…` id (gpt-6-sol is 6.0, gpt-5.10 is
+// 5.10), null for an id without a version.
+function openAiVersion(model: string): [number, number] | null {
+  const match = /^gpt-(\d+)(?:\.(\d+))?/u.exec(model);
+  return match ? [Number(match[1]), match[2] === undefined ? 0 : Number(match[2])] : null;
+}
+
+// Own AI runs at least its default: the controller raises a bare OpenAI id of
+// an older version than the default when a job runs (runtime-contracts'
+// own_ai_model_floor), Luna, mini and nano ids included, and o-series ids
+// always. Studio shows the model that runs, so it applies the same rule; both
+// are checked against runtime-contracts' own_ai_model_fixtures.json.
+// `defaultModel` is a parameter only so the tests can check a later bump.
+export function ownAiModelFloor(
+  model: string,
+  defaultModel: string = DEFAULT_PROJECT_AI_MODEL,
+): string | null {
+  const floor = openAiVersion(defaultModel.trim().toLowerCase());
+  if (!floor) {
+    return null;
+  }
   const normalized = model.trim().toLowerCase();
-  const match = /^(?:gpt-(\d+)|o(?=\d))(.*)$/u.exec(normalized);
-  if (!match) {
-    return null;
-  }
-  const [, major, afterVersion] = match;
-  if (major !== undefined && Number(major) >= 6) {
-    return null;
-  }
-  const small = afterVersion
-    .split(/[^a-z0-9]/u)
-    .some((part) => part === "luna" || part === "mini" || part === "nano");
-  return small ? OWN_AI_SMALL_MODEL_ID : DEFAULT_PROJECT_AI_MODEL;
+  const version = openAiVersion(normalized);
+  const older = version
+    ? version[0] < floor[0] || (version[0] === floor[0] && version[1] < floor[1])
+    : /^o\d/u.test(normalized);
+  return older ? defaultModel : null;
 }
 
 const OPENAI_MODEL_OPTIONS: AiModelOption[] = [

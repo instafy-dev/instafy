@@ -96,7 +96,8 @@ pnpm --filter @instafy/desktop-runtime-agent build
 > If you rebuild the Rust agent with `--release`, the wrapper automatically falls back to the
 > release binary.
 
-Code-mode-only models (the own-AI default, `OWN_AI_DEFAULT_MODEL_ID` in `runtime-contracts`, and `gpt-6-luna`) run every tool through
+Code-mode-only models (catalog entries marked `code_mode_only`, among them `gpt-6-luna` and the
+own-AI default, `OWN_AI_DEFAULT_MODEL_ID` in `runtime-contracts`) run every tool through
 `codex-code-mode-host`, which runtime-agent expects next to its own binary; without it those
 turns are refused with a message naming the missing file. The host links a sandboxed V8 build
 that only Codex publishes, so fetch it (checked against the checksums pinned in `codex/`) and

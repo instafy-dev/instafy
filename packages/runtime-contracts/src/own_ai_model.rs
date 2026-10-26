@@ -1,18 +1,16 @@
 //! The model a person's own AI runs by default: a bring-your-own OpenAI key, a
 //! ChatGPT login and "Codex on this computer". The controller and the runtime
-//! read these constants; the proxy and Studio keep one literal each, and
+//! read these items; the proxy and Studio keep one literal each, and
 //! `own_ai_model_fixtures.json` fails their tests when a copy drifts.
 //!
 //! The managed "Instafy AI" lane is separate: its model is the controller's
 //! `DEFAULT_MANAGED_AI_MODEL_ID` (or the operator's `MANAGED_AI_MODEL_ID`).
 
-/// Default model for a person's own AI, and the model that older full-size
-/// OpenAI picks are raised to.
+/// Default model for a person's own AI, and the least that their OpenAI picks
+/// run ([`own_ai_model_floor`]). Moving it moves every saved agent and
+/// credential whose OpenAI id is of an older version, the previous default
+/// included.
 pub const OWN_AI_DEFAULT_MODEL_ID: &str = "gpt-6-sol";
-
-/// The small tier of the same generation: older Luna, mini and nano picks are
-/// raised to it rather than to [`OWN_AI_DEFAULT_MODEL_ID`].
-pub const OWN_AI_SMALL_MODEL_ID: &str = "gpt-6-luna";
 
 /// OpenAI ids that are no longer served upstream (`gpt-4*`, `o3*`, `gpt-5`,
 /// `gpt-5-codex` and `gpt-5.0` to `gpt-5.4` with any suffix). A job must not
@@ -38,9 +36,60 @@ pub fn is_retired_openai_model(model: &str) -> bool {
         .is_some_and(|minor| minor < 5)
 }
 
+/// What a person's own OpenAI pick runs: [`OWN_AI_DEFAULT_MODEL_ID`] when the
+/// pick is a bare OpenAI id of an older version than the default (`gpt-N.M…`
+/// compared by `N.M`, and every `o<digit>` reasoning model), else `None`, and
+/// the pick runs as it is. Luna, mini and nano ids are raised to the default
+/// too: Instafy never lands a person's own AI below it on its own.
+///
+/// Ids without a version (`gpt-image-1`), other providers' ids and namespaced
+/// ids (`openai/gpt-5.5`) are never raised. A new default of the same version
+/// (a tier change such as `gpt-6-sol` to `gpt-6-terra`) raises nothing.
+///
+/// Saved agents and credentials keep the id they were created with, often the
+/// default of that day, so the controller applies this when it builds a job or
+/// a lease. The managed lane never passes through here.
+pub fn own_ai_model_floor(model: &str) -> Option<&'static str> {
+    floor_for_default(OWN_AI_DEFAULT_MODEL_ID, model)
+}
+
+/// [`own_ai_model_floor`] for a given default, so the tests can check what a
+/// later bump of the default does to ids saved before it.
+fn floor_for_default<'a>(default: &'a str, model: &str) -> Option<&'a str> {
+    let floor = openai_version(&default.trim().to_ascii_lowercase())?;
+    let model = model.trim().to_ascii_lowercase();
+    let older = match openai_version(&model) {
+        Some(version) => version < floor,
+        None => model
+            .strip_prefix('o')
+            .is_some_and(|rest| rest.starts_with(|character: char| character.is_ascii_digit())),
+    };
+    older.then_some(default)
+}
+
+/// `(N, M)` for a lowercase `gpt-N[.M]…` id (`gpt-6-sol` is 6.0, `gpt-5.10` is
+/// 5.10), `None` for an id without a version.
+fn openai_version(model: &str) -> Option<(u32, u32)> {
+    let (major, rest) = leading_number(model.strip_prefix("gpt-")?)?;
+    let minor = rest
+        .strip_prefix('.')
+        .and_then(leading_number)
+        .map_or(0, |(minor, _)| minor);
+    Some((major, minor))
+}
+
+fn leading_number(text: &str) -> Option<(u32, &str)> {
+    let rest = text.trim_start_matches(|character: char| character.is_ascii_digit());
+    let digits = &text[..text.len() - rest.len()];
+    Some((digits.parse().ok()?, rest))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{is_retired_openai_model, OWN_AI_DEFAULT_MODEL_ID, OWN_AI_SMALL_MODEL_ID};
+    use super::{
+        floor_for_default, is_retired_openai_model, openai_version, own_ai_model_floor,
+        OWN_AI_DEFAULT_MODEL_ID,
+    };
     use serde_json::Value;
 
     fn fixtures() -> Value {
@@ -56,12 +105,29 @@ mod tests {
             .collect()
     }
 
+    fn cases<'a>(fixtures: &'a Value, key: &str) -> &'a Vec<Value> {
+        let cases = fixtures[key]
+            .as_array()
+            .unwrap_or_else(|| panic!("fixtures list {key}"));
+        assert!(!cases.is_empty(), "{key}");
+        cases
+    }
+
+    /// A fixture case's expected floor: `default` raises the id to the case's
+    /// default, `keep` runs it as picked.
+    fn expected<'a>(case: &Value, default: &'a str) -> Option<&'a str> {
+        match case["runs"].as_str().expect("runs") {
+            "default" => Some(default),
+            "keep" => None,
+            other => panic!("unknown floor target {other}"),
+        }
+    }
+
     #[test]
-    fn the_constants_are_the_fixtures_ids() {
-        let fixtures = fixtures();
-        assert_eq!(fixtures["defaultModelId"], OWN_AI_DEFAULT_MODEL_ID);
-        assert_eq!(fixtures["smallModelId"], OWN_AI_SMALL_MODEL_ID);
-        assert_ne!(OWN_AI_DEFAULT_MODEL_ID, OWN_AI_SMALL_MODEL_ID);
+    fn the_default_is_the_fixtures_id_and_has_a_version() {
+        assert_eq!(fixtures()["defaultModelId"], OWN_AI_DEFAULT_MODEL_ID);
+        // Without a version the floor would raise nothing.
+        assert!(openai_version(OWN_AI_DEFAULT_MODEL_ID).is_some());
     }
 
     #[test]
@@ -69,11 +135,47 @@ mod tests {
         let fixtures = fixtures();
         for retired in ids(&fixtures, "retired") {
             assert!(is_retired_openai_model(retired), "{retired} is retired");
+            // Every id the runtime retires is raised by the controller first.
+            assert_eq!(
+                own_ai_model_floor(retired),
+                Some(OWN_AI_DEFAULT_MODEL_ID),
+                "{retired}"
+            );
         }
         for served in ids(&fixtures, "served") {
             assert!(!is_retired_openai_model(served), "{served} is served");
         }
         assert!(!is_retired_openai_model(OWN_AI_DEFAULT_MODEL_ID));
-        assert!(!is_retired_openai_model(OWN_AI_SMALL_MODEL_ID));
+    }
+
+    #[test]
+    fn own_ai_picks_older_than_the_default_run_the_default() {
+        let fixtures = fixtures();
+        for case in cases(&fixtures, "floor") {
+            let model = case["model"].as_str().expect("model");
+            assert_eq!(
+                own_ai_model_floor(model),
+                expected(case, OWN_AI_DEFAULT_MODEL_ID),
+                "{model:?}"
+            );
+        }
+        // The floor never lands below itself.
+        assert_eq!(own_ai_model_floor(OWN_AI_DEFAULT_MODEL_ID), None);
+    }
+
+    #[test]
+    fn a_later_default_raises_ids_saved_as_an_earlier_one() {
+        // Agents and credentials saved today carry today's default; the next
+        // bump of the constant must reach them without a test or row edit.
+        let fixtures = fixtures();
+        for case in cases(&fixtures, "floorForDefault") {
+            let default = case["default"].as_str().expect("default");
+            let model = case["model"].as_str().expect("model");
+            assert_eq!(
+                floor_for_default(default, model),
+                expected(case, default),
+                "{model:?} with default {default}"
+            );
+        }
     }
 }

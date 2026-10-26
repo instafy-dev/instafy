@@ -3707,7 +3707,8 @@ mod tests {
     fn resolve_model_honors_explicit_model_over_credential_default() {
         // Issue #116: DEFAULT_MODEL used to double as a "use the credential
         // default" sentinel, so an explicit pick of that id was silently
-        // rewritten to the credential default (gpt-5.6-sol in production).
+        // rewritten to the credential default (the platform's OpenAI default
+        // in production).
         let creds = Credentials::ChatGpt {
             access_token: "test".to_string(),
             refresh_token: None,

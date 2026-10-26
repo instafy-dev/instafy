@@ -1623,9 +1623,11 @@ mod tests {
 
     #[test]
     fn an_operators_managed_model_is_not_raised_by_the_own_ai_floor() {
-        // The GPT-6 floor is for a person's own AI. MANAGED_AI_MODEL_ID is the
-        // operator's choice, and its prices are set with it, so a managed turn
-        // runs it as configured even below GPT-6.
+        // The own-AI floor is for a person's own AI. MANAGED_AI_MODEL_ID is the
+        // operator's choice, and its prices are set with it, so the controller
+        // sends it as configured even below the own-AI default. (It must still
+        // be a model OpenAI serves: the runtime replaces retired ids, such as
+        // gpt-4* and o3*, with its own default.)
         let mut config = build_app_config("test-private", "test-public", "test-key");
         config.managed_ai_model_id = "gpt-5.6-luna".to_string();
         let mut env = JsonMap::new();

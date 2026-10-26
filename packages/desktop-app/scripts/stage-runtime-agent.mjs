@@ -10,7 +10,7 @@ const repoRoot = path.resolve(packageRoot, "../..");
 const runtimeAgentRoot = path.join(repoRoot, "packages", "runtime-agent");
 const executableSuffix = process.platform === "win32" ? ".exe" : "";
 const filename = `runtime-agent${executableSuffix}`;
-// Code-mode-only models (gpt-6-luna and gpt-6-sol, the defaults) run every tool in this
+// Code-mode-only models (gpt-6-luna and gpt-6-sol among them) run every tool in this
 // out-of-process V8 host, which runtime-agent requires next to its own binary.
 const codeModeHostFilename = `codex-code-mode-host${executableSuffix}`;
 const outputDir = path.join(packageRoot, "build", "runtime-agent");
