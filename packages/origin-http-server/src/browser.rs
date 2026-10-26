@@ -59,6 +59,13 @@ struct BrowserPageResponse {
     is_active: bool,
     can_go_back: bool,
     can_go_forward: bool,
+    /// One of the tabs Octo opened in the running turn: shown with Octo's
+    /// badge to every viewer.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    agent_tab: bool,
+    /// A tab of Octo's that a person kept open past the end of the turn.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    kept: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -281,6 +288,11 @@ pub fn control_routes() -> Router<AppState> {
             "/browser/pages/:page_id/capture",
             post(crate::browser_page_capture::handle_browser_page_capture)
                 .layer(DefaultBodyLimit::max(BROWSER_PAGE_CAPTURE_BODY_LIMIT_BYTES)),
+        )
+        // Keep tab: one of Octo's tabs stays open when the turn ends.
+        .route(
+            "/browser/pages/:page_id/keep",
+            post(crate::browser_approval::handle_keep_agent_tab),
         )
         .route(
             "/browser/approval/decision",
@@ -1027,6 +1039,11 @@ async fn handle_browser_pages(
     } else {
         BrowserNavigationState::default()
     };
+    let agent_tabs = state
+        .browser_collaboration
+        .approval_bridge()
+        .agent_tabs()
+        .await;
     let pages = targets
         .into_iter()
         .map(|target| {
@@ -1042,6 +1059,8 @@ async fn handle_browser_pages(
                 is_active: active_page_id.as_deref() == Some(target.id.as_str()),
                 can_go_back: has_history_state && history_state.can_go_back,
                 can_go_forward: has_history_state && history_state.can_go_forward,
+                agent_tab: agent_tabs.tab_ids.contains(&target.id),
+                kept: agent_tabs.kept.contains(&target.id),
             }
         })
         .collect();
@@ -1904,6 +1923,8 @@ mod tests {
             is_active: true,
             can_go_back: true,
             can_go_forward: false,
+            agent_tab: false,
+            kept: false,
         };
         let value = serde_json::to_value(page).expect("serialize browser page");
         assert_eq!(
@@ -1915,6 +1936,28 @@ mod tests {
             Some(false)
         );
         assert!(value.get("can_go_back").is_none());
+        // A page that is not one of Octo's tabs carries no badge fields.
+        assert!(value.get("agentTab").is_none());
+        assert!(value.get("kept").is_none());
+    }
+
+    #[test]
+    fn octos_tabs_are_badged_in_the_page_list() {
+        let page = BrowserPageResponse {
+            id: "page-2".to_string(),
+            url: "https://example.com/".to_string(),
+            host: "example.com".to_string(),
+            label: "Example".to_string(),
+            title: None,
+            is_active: false,
+            can_go_back: false,
+            can_go_forward: false,
+            agent_tab: true,
+            kept: true,
+        };
+        let value = serde_json::to_value(page).expect("serialize browser page");
+        assert_eq!(value["agentTab"], true);
+        assert_eq!(value["kept"], true);
     }
 
     #[test]

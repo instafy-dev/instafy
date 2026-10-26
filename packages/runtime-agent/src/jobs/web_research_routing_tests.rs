@@ -326,3 +326,23 @@ fn the_skills_name_instafy_web_read_as_a_reader() {
         assert_eq!(fs::read_to_string(&skill).unwrap(), current, "{relative}");
     }
 }
+
+/// In the Shared Browser a card's pages are read side by side in Octo's own tabs, within the part of the
+/// browser skill a snapshot carries, and an unedited earlier copy of the skill is upgraded.
+#[test]
+fn the_browser_skill_reads_a_cards_pages_in_octos_own_shared_browser_tabs() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
+    assert!(carried.contains(
+        "In the Shared Browser, read them side by side in your own tabs (`open_tab`, 3 at most, then `close_tab`)."
+    ));
+    assert!(carried.contains("Never use a sign-in that belongs to someone else in this space"));
+
+    let previous = include_str!("legacy/browser-automation-v7.md");
+    assert!(!previous.contains("open_tab"));
+    let tmp = scaffolded_space();
+    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
+    fs::write(&skill, previous).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
+}

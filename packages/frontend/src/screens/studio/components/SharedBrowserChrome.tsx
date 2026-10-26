@@ -8,7 +8,7 @@ import {
   useState,
 } from "react";
 import { NavArrowLeft, NavArrowRight, Refresh } from "iconoir-react";
-import { IconButton } from "../../../components/Button";
+import { Button, IconButton } from "../../../components/Button";
 import { browserSessionPageIsPlaceholder, type BrowserSessionPage } from "./browserSessionPages";
 import { normalizeBrowserAddress } from "./browserAddress";
 import { BrowserAddressField } from "./BrowserAddressField";
@@ -39,6 +39,8 @@ export type SharedBrowserChromeProps = {
   onClearError: () => void;
   /** Send page to Octo for the page on screen; absent when this person cannot. */
   onSendPage?: (pageId: string) => void;
+  /** Keep tab: one of Octo's tabs stays open when its turn ends. */
+  onKeepPage?: (pageId: string) => void;
   sendPagePending?: boolean;
   toolbarLeading?: ReactNode;
   toolbarStatus?: ReactNode;
@@ -63,8 +65,15 @@ export function normalizeSharedBrowserAddress(rawAddress: string): string | null
   return normalizeBrowserAddress(rawAddress);
 }
 
+export const KEEP_TAB_LABEL = "Keep tab";
+
 function pageOptionLabel(page: BrowserSessionPage): string {
-  return page.title?.trim() || page.label.trim() || page.host.trim() || page.url;
+  const label = page.title?.trim() || page.label.trim() || page.host.trim() || page.url;
+  // Octo's own tabs carry its badge for everyone watching.
+  if (page.agentTab) {
+    return `${page.kept ? "Octo's tab, kept" : "Octo's tab"}: ${label}`;
+  }
+  return label;
 }
 
 function ChromeButton({
@@ -112,6 +121,7 @@ export function SharedBrowserChrome({
   onFocusPage,
   onClearError,
   onSendPage,
+  onKeepPage,
   sendPagePending = false,
   toolbarLeading,
   toolbarStatus,
@@ -216,6 +226,21 @@ export function SharedBrowserChrome({
     </ChromeButton>
   );
   const pageSelectionDisabled = !resolved || busy || !controls.focusPage || !humanHasControl;
+  // On one of Octo's tabs that is not kept yet: it closes when Octo's turn
+  // ends unless someone keeps it. Works while Octo has control.
+  const keepTab = onKeepPage && resolved && activePage?.agentTab && !activePage.kept ? (
+    <Button
+      className="shrink-0"
+      data-testid="shared-browser-keep-tab"
+      onPress={() => onKeepPage(activePage.id)}
+      size="sm"
+      title="Octo's tab closes when its turn ends. Keep it open as an ordinary tab."
+      type="button"
+      variant="ghost"
+    >
+      {KEEP_TAB_LABEL}
+    </Button>
+  ) : null;
   const pageSelect = (
     <select
       aria-label="Shared browser tab"
@@ -319,13 +344,16 @@ export function SharedBrowserChrome({
           </div>
         }
         status={toolbarStatus}
-        actions={onSendPage ? (
+        actions={onSendPage || keepTab ? (
           <>
-            <SendPageToOctoButton
-              onPress={() => activePage && onSendPage(activePage.id)}
-              pending={sendPagePending}
-              disabled={!resolved || !activePage || browserSessionPageIsPlaceholder(activePage) || !/^https?:\/\//i.test(activePage.url)}
-            />
+            {keepTab}
+            {onSendPage ? (
+              <SendPageToOctoButton
+                onPress={() => activePage && onSendPage(activePage.id)}
+                pending={sendPagePending}
+                disabled={!resolved || !activePage || browserSessionPageIsPlaceholder(activePage) || !/^https?:\/\//i.test(activePage.url)}
+              />
+            ) : null}
             {typeof toolbarActions === "function" ? toolbarActions(compactNavigation) : toolbarActions}
           </>
         ) : typeof toolbarActions === "function" ? toolbarActions(compactNavigation) : toolbarActions}

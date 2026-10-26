@@ -32,11 +32,22 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
   const HEX_64_PATTERN = /^[0-9a-f]{64}$/;
   const PAGE_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
   const DOCUMENT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+  const TABS_MAX_BYTES = 8 * 1024;
+  const KEPT_TABS_MAX_BYTES = 4 * 1024;
+  // Octo may have at most this many tabs of its own open at once, next to the
+  // page the person chose for the run. runtime-agent and the origin read the
+  // same files and hold the same bound.
+  const MAX_AGENT_TABS = 3;
   const FIXED_FILES = new Set([
     "request.json",
     "decision.json",
     "state.json",
     "withhold-next.json",
+    // The tabs Octo opened in this run, each with its own site approvals.
+    "tabs.json",
+    // The tabs the person kept, which stay open when the run ends. The origin
+    // writes it; this script only reads it.
+    "kept-tabs.json",
   ]);
 
   function fail(code, message) {
@@ -435,14 +446,136 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       atomicWriteJson(statePath, state, STATE_MAX_BYTES);
     }
 
-    function isOriginApproved(rawUrl) {
+    // The tabs Octo opened in this run. `currentTabId` is the tab its tools
+    // act on (null: the page the person chose), and each tab holds the sites
+    // the person approved in that tab. Bound to the run like the state.
+    function emptyTabs(authority) {
+      return { version: 1, ...authority, currentTabId: null, tabs: [] };
+    }
+
+    function validTabOrigins(origins) {
+      return (
+        Array.isArray(origins) &&
+        origins.length <= MAX_APPROVED_ORIGINS &&
+        origins.every(
+          (origin) =>
+            typeof origin === "string" &&
+            byteLength(origin) <= MAX_ORIGIN_BYTES &&
+            normalizedOrigin(origin) === origin,
+        ) &&
+        new Set(origins).size === origins.length
+      );
+    }
+
+    function readTabsFor(authority) {
+      const raw = readJson(path.join(approvalDir, "tabs.json"), TABS_MAX_BYTES, false);
+      if (raw === null) {
+        return emptyTabs(authority);
+      }
+      const record = exactObject(
+        raw,
+        ["version", "ownerId", "runId", "initiatorUserId", "browserPageId", "currentTabId", "tabs"],
+        "Shared Browser tab record",
+      );
+      const tabIds = Array.isArray(record.tabs)
+        ? record.tabs.map((tab) => exactObject(tab, ["tabId", "approvedOrigins"], "Shared Browser tab").tabId)
+        : [];
+      if (
+        record.version !== 1 ||
+        Object.keys(authority).some((key) => record[key] !== authority[key]) ||
+        !Array.isArray(record.tabs) ||
+        record.tabs.length > MAX_AGENT_TABS ||
+        tabIds.some((tabId) => {
+          try {
+            return assertPageId(tabId) === authority.browserPageId;
+          } catch (_) {
+            return true;
+          }
+        }) ||
+        new Set(tabIds).size !== tabIds.length ||
+        record.tabs.some((tab) => !validTabOrigins(tab.approvedOrigins)) ||
+        (record.currentTabId !== null && !tabIds.includes(record.currentTabId))
+      ) {
+        fail("approval_state_invalid", "Shared Browser tab record is invalid or belongs to another run");
+      }
+      return record;
+    }
+
+    function readTabs() {
+      return readTabsFor(readAuthority(initialAuthority));
+    }
+
+    function writeTabs(record) {
+      const authority = readAuthority(initialAuthority);
+      const next = {
+        version: 1,
+        ...authority,
+        currentTabId: record.currentTabId ?? null,
+        tabs: record.tabs.map((tab) => ({ tabId: tab.tabId, approvedOrigins: [...tab.approvedOrigins] })),
+      };
+      // Checked the way it is read back, so a bad record is never published.
+      const tabIds = next.tabs.map((tab) => tab.tabId);
+      if (
+        next.tabs.length > MAX_AGENT_TABS ||
+        tabIds.some((tabId) => assertPageId(tabId) === authority.browserPageId) ||
+        new Set(tabIds).size !== tabIds.length ||
+        next.tabs.some((tab) => !validTabOrigins(tab.approvedOrigins)) ||
+        (next.currentTabId !== null && !tabIds.includes(next.currentTabId))
+      ) {
+        fail("approval_protocol_invalid", "Shared Browser tab record is out of bounds");
+      }
+      atomicWriteJson(path.join(approvalDir, "tabs.json"), next, TABS_MAX_BYTES);
+      return next;
+    }
+
+    // The tabs the person kept open past the end of the run. Read only; the
+    // origin writes it when the person presses Keep tab.
+    function keptTabIds() {
+      const authority = readAuthority(initialAuthority);
+      const raw = readJson(path.join(approvalDir, "kept-tabs.json"), KEPT_TABS_MAX_BYTES, false);
+      if (raw === null) {
+        return new Set();
+      }
+      const record = exactObject(
+        raw,
+        ["version", "ownerId", "runId", "initiatorUserId", "browserPageId", "tabIds"],
+        "Shared Browser kept-tab record",
+      );
+      if (
+        record.version !== 1 ||
+        Object.keys(authority).some((key) => record[key] !== authority[key]) ||
+        !Array.isArray(record.tabIds) ||
+        record.tabIds.length > MAX_AGENT_TABS
+      ) {
+        fail("approval_state_invalid", "Shared Browser kept-tab record is invalid or belongs to another run");
+      }
+      return new Set(record.tabIds.map((tabId) => assertPageId(tabId)));
+    }
+
+    // Sites approved in one of Octo's own tabs are that tab's: approving a
+    // site on the page the person chose does not open it to Octo's tabs, nor
+    // the other way round. Routine browsing covers the whole run.
+    function tabApprovedOrigins(authority, tabId) {
+      const tab = readTabsFor(authority).tabs.find((entry) => entry.tabId === tabId);
+      if (!tab) {
+        fail("approval_authority_revoked", "Shared Browser tab is not one of this run's tabs");
+      }
+      return tab.approvedOrigins;
+    }
+
+    function isOriginApproved(rawUrl, tabId = null) {
       const origin = normalizedOrigin(rawUrl);
       if (!origin) {
         return false;
       }
       const authority = readAuthority(initialAuthority);
       const state = readState(authority);
-      return state.routineBrowsingAllowed === true || state.approvedOrigins.includes(origin);
+      if (state.routineBrowsingAllowed === true) {
+        return true;
+      }
+      return tabId === null
+        ? state.approvedOrigins.includes(origin)
+        : tabApprovedOrigins(authority, tabId).includes(origin);
     }
 
     function buildRequest(kind, details) {
@@ -587,7 +720,7 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       }
     }
 
-    async function ensureOriginApproved(rawUrl, label = "") {
+    async function ensureOriginApproved(rawUrl, label = "", tabId = null) {
       const origin = normalizedOrigin(rawUrl);
       if (!origin) {
         // Not a consent decision, so not final: navigating to an http(s)
@@ -598,10 +731,11 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       }
       const authority = readAuthority(initialAuthority);
       const current = readState(authority);
-      if (current.routineBrowsingAllowed === true || current.approvedOrigins.includes(origin)) {
+      const approved = tabId === null ? current.approvedOrigins : tabApprovedOrigins(authority, tabId);
+      if (current.routineBrowsingAllowed === true || approved.includes(origin)) {
         return origin;
       }
-      if (current.approvedOrigins.length >= MAX_APPROVED_ORIGINS) {
+      if (approved.length >= MAX_APPROVED_ORIGINS) {
         fail("approval_state_full", "Shared Browser reached its per-run approved-origin limit");
       }
       const destination = destinationBinding(origin);
@@ -624,8 +758,21 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       if (decision.decision === "allow_routine") {
         state.routineBrowsingAllowed = true;
       }
-      if (!state.approvedOrigins.includes(origin)) {
-        state.approvedOrigins = [...state.approvedOrigins, origin];
+      if (tabId === null) {
+        if (!state.approvedOrigins.includes(origin)) {
+          state.approvedOrigins = [...state.approvedOrigins, origin];
+        }
+      } else {
+        // The site is approved in this tab only.
+        const tabs = readTabsFor(authority);
+        const tab = tabs.tabs.find((entry) => entry.tabId === tabId);
+        if (!tab) {
+          fail("approval_authority_revoked", "Shared Browser tab closed while its site approval was pending");
+        }
+        if (!tab.approvedOrigins.includes(origin)) {
+          tab.approvedOrigins = [...tab.approvedOrigins, origin];
+          writeTabs(tabs);
+        }
       }
       writeState(state);
       return origin;
@@ -713,6 +860,10 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       withholdNextDocument,
       clearWithholdNextDocument,
       redactedPageResult,
+      readTabs,
+      writeTabs,
+      keptTabIds,
+      maxAgentTabs: MAX_AGENT_TABS,
     };
   }
 

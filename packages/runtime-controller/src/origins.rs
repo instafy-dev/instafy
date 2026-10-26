@@ -4054,6 +4054,8 @@ fn classify_canonical_origin_proxy_request(
                 // Send page to Octo: one masked read of the page for the
                 // person who asks, to attach to their next message.
                 || is_exact_browser_page_action(normalized, "capture")
+                // Keep tab: one of Octo's tabs stays open when its turn ends.
+                || is_exact_browser_page_action(normalized, "keep")
             {
                 Ok(ORIGIN_PROXY_BROWSER_CONTROL_SCOPES)
             } else {
@@ -6046,6 +6048,11 @@ MCowBQYDK2VwAyEAFQAEX0aYqix3VQUBg05FFISGxhx2Ry93VE51GzM5iXA=
         assert!(
             classify_origin_proxy_request(&Method::GET, "/browser/pages/ABC123/capture").is_err()
         );
+        let keep_scopes =
+            classify_origin_proxy_request(&Method::POST, "/browser/pages/ABC123/keep")
+                .expect("keeping one of Octo's tabs should be proxyable");
+        assert_eq!(keep_scopes, ORIGIN_PROXY_BROWSER_CONTROL_SCOPES);
+        assert!(classify_origin_proxy_request(&Method::GET, "/browser/pages/ABC123/keep").is_err());
 
         for path in [
             "/browser/pages/ABC123/command/",
@@ -6055,6 +6062,9 @@ MCowBQYDK2VwAyEAFQAEX0aYqix3VQUBg05FFISGxhx2Ry93VE51GzM5iXA=
             "/browser/pages/ABC123/capture/",
             "/browser/pages/ABC123/captures",
             "/browser/pages/ABC123/nested/capture",
+            "/browser/pages/ABC123/keep/",
+            "/browser/pages/ABC123/kept",
+            "/browser/pages/ABC123/nested/keep",
         ] {
             assert!(
                 classify_origin_proxy_request(&Method::POST, path).is_err(),

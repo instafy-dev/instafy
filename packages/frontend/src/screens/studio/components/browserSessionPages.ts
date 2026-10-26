@@ -10,6 +10,10 @@ export type BrowserSessionPage = {
   isActive: boolean;
   canGoBack?: boolean;
   canGoForward?: boolean;
+  /** One of the tabs Octo opened in the running turn (Shared Browser). */
+  agentTab?: boolean;
+  /** One of Octo's tabs a person kept open past the end of the turn. */
+  kept?: boolean;
 };
 
 export type BrowserSessionPageTarget = Pick<BrowserSessionPage, "id" | "url" | "host" | "label">;

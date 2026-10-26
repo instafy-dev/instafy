@@ -57,6 +57,11 @@ const BROWSER_ACTION_POLICY_SCRIPT: &str =
     include_str!("../../browser-action-policy/actionPolicy.js");
 const BROWSER_PAGE_CAPTURE_SCRIPT: &str =
     include_str!("../../browser-action-policy/pageCapture.js");
+// The sites the web-research skill keeps link-only. Octo never opens them in
+// its own tabs; the controller enforces the skill's list, it does not own it.
+const LINK_ONLY_SITES_DATA: &str = include_str!(
+    "../assets/instafy/.agents/skills/instafy-web-research/references/link-only-sites.json"
+);
 
 const DEFAULT_SHARED_BROWSER_NODE_BINARY: &str = "/usr/bin/node";
 /// The Node binaries the Shared Browser controller may run with: the image's
@@ -80,12 +85,29 @@ const APPROVAL_DIRECTORY_MAX_ENTRIES: usize = 16;
 // `withhold-next.json` records the document a key change or "may show a
 // secret" step ran on, so the page it opens stays withheld; it is run-scoped
 // like the rest of this directory.
-const APPROVAL_FIXED_FILES: [&str; 4] = [
+//
+// `tabs.json` lists the tabs Octo opened in the run (written by the
+// controller script) and `kept-tabs.json` the ones the person kept (written by
+// the origin). The guard reads both when the run ends, to close the rest.
+const APPROVAL_FIXED_FILES: [&str; 6] = [
     "request.json",
     "decision.json",
     "state.json",
     "withhold-next.json",
+    AGENT_TABS_FILE,
+    KEPT_AGENT_TABS_FILE,
 ];
+const AGENT_TABS_FILE: &str = "tabs.json";
+const KEPT_AGENT_TABS_FILE: &str = "kept-tabs.json";
+/// The most tabs of its own Octo may have open in one run, next to the page
+/// the person chose. `assets/shared-browser-approval.js` (`MAX_AGENT_TABS`)
+/// and the origin hold the same bound.
+pub(crate) const MAX_AGENT_TABS: usize = 3;
+const AGENT_TABS_FILE_MAX_BYTES: u64 = 8 * 1024;
+/// How long closing one of Octo's tabs at the end of a run may take. CDP is
+/// on loopback, so a slower answer is a stuck browser.
+const AGENT_TAB_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
+const DEFAULT_CDP_PORT: u16 = 9223;
 const TERMINAL_APPROVAL_FAILURE_CODES: [&str; 10] = [
     "human_input_required",
     "approval_denied",
@@ -191,6 +213,9 @@ pub(crate) fn approval_wait_budget(raw: Option<&str>) -> Duration {
 pub struct SharedBrowserAgentControlGuard {
     path: PathBuf,
     approval_dir: PathBuf,
+    /// Where the browser's DevTools HTTP endpoint listens, to close Octo's
+    /// tabs when the run ends. None when it is not a loopback HTTP address.
+    cdp_base: Option<(String, u16)>,
     owner_id: String,
     run_id: Uuid,
     initiator_user_id: Uuid,
@@ -739,6 +764,10 @@ impl SharedBrowserAgentControlGuard {
         Ok(Self {
             path,
             approval_dir,
+            cdp_base: cdp_endpoint_from(
+                std::env::var(CDP_URL_ENV).ok().as_deref(),
+                std::env::var(CDP_PORT_ENV).ok().as_deref(),
+            ),
             owner_id,
             run_id,
             initiator_user_id,
@@ -749,6 +778,207 @@ impl SharedBrowserAgentControlGuard {
             heartbeat,
         })
     }
+}
+
+impl SharedBrowserAgentControlGuard {
+    fn close_agent_tabs(&self) {
+        let tabs = match agent_tabs_to_close(
+            &self.approval_dir,
+            &self.owner_id,
+            self.run_id,
+            self.initiator_user_id,
+            &self.browser_page_id,
+        ) {
+            Ok(tabs) => tabs,
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    "Shared Browser could not read the tabs Octo opened; they stay open as ordinary tabs"
+                );
+                return;
+            }
+        };
+        if tabs.is_empty() {
+            return;
+        }
+        let Some((host, port)) = self.cdp_base.as_ref() else {
+            tracing::warn!(
+                tabs = tabs.len(),
+                "Shared Browser has no loopback DevTools address; Octo's tabs stay open as ordinary tabs"
+            );
+            return;
+        };
+        for tab_id in tabs {
+            if let Err(error) = close_browser_tab(host, *port, &tab_id) {
+                tracing::warn!(
+                    ?error,
+                    tab_id,
+                    "Shared Browser could not close one of Octo's tabs; it stays open as an ordinary tab"
+                );
+            }
+        }
+    }
+}
+
+/// The DevTools HTTP endpoint the controller script connects to
+/// (`INSTAFY_PLAYWRIGHT_CDP_URL`, else port `INSTAFY_PLAYWRIGHT_CDP_PORT` or
+/// 9223 on 127.0.0.1), when it is a credential-free loopback HTTP address.
+fn cdp_endpoint_from(url: Option<&str>, port: Option<&str>) -> Option<(String, u16)> {
+    let raw = match url.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(url) => url.to_string(),
+        None => {
+            let port = match port.map(str::trim).filter(|value| !value.is_empty()) {
+                Some(port) => port.parse::<u16>().ok()?,
+                None => DEFAULT_CDP_PORT,
+            };
+            format!("http://127.0.0.1:{port}")
+        }
+    };
+    let parsed = reqwest::Url::parse(&raw).ok()?;
+    if !matches!(parsed.scheme(), "http" | "ws")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return None;
+    }
+    let raw_host = parsed.host_str()?;
+    let host = if raw_host.eq_ignore_ascii_case("localhost") {
+        "127.0.0.1".to_string()
+    } else {
+        match raw_host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .ok()?
+        {
+            std::net::IpAddr::V4(address) if address.is_loopback() => address.to_string(),
+            std::net::IpAddr::V6(address) if address.is_loopback() => format!("[{address}]"),
+            _ => return None,
+        }
+    };
+    Some((host, parsed.port_or_known_default()?))
+}
+
+/// The tabs Octo opened in this run that the person did not keep, from the
+/// run's own records. A record bound to another run, or one that cannot be
+/// read, names no tab: closing is never extended to tabs this run cannot
+/// prove are its own.
+fn agent_tabs_to_close(
+    approval_dir: &Path,
+    owner_id: &str,
+    run_id: Uuid,
+    initiator_user_id: Uuid,
+    browser_page_id: &str,
+) -> Result<Vec<String>> {
+    let read = |name: &str| -> Result<Option<JsonValue>> {
+        let path = approval_dir.join(name);
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error).with_context(|| format!("failed to inspect {name}")),
+        };
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.len() > AGENT_TABS_FILE_MAX_BYTES
+        {
+            bail!("{name} is not a bounded regular file");
+        }
+        let bytes = std::fs::read(&path).with_context(|| format!("failed to read {name}"))?;
+        let record: JsonValue =
+            serde_json::from_slice(&bytes).with_context(|| format!("{name} is not JSON"))?;
+        let bound = record.get("version").and_then(JsonValue::as_u64) == Some(1)
+            && record.get("ownerId").and_then(JsonValue::as_str) == Some(owner_id)
+            && record.get("runId").and_then(JsonValue::as_str) == Some(&run_id.to_string())
+            && record.get("initiatorUserId").and_then(JsonValue::as_str)
+                == Some(&initiator_user_id.to_string())
+            && record.get("browserPageId").and_then(JsonValue::as_str) == Some(browser_page_id);
+        if !bound {
+            bail!("{name} belongs to another run");
+        }
+        Ok(Some(record))
+    };
+    let Some(tabs) = read(AGENT_TABS_FILE)? else {
+        return Ok(Vec::new());
+    };
+    let tab_ids = tabs
+        .get("tabs")
+        .and_then(JsonValue::as_array)
+        .context("tabs.json has no tab list")?
+        .iter()
+        .map(|tab| {
+            tab.get("tabId")
+                .and_then(JsonValue::as_str)
+                .context("a tab in tabs.json has no id")
+                .and_then(validate_page_id)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if tab_ids.len() > MAX_AGENT_TABS || tab_ids.iter().any(|id| id == browser_page_id) {
+        bail!("tabs.json is out of bounds");
+    }
+    // A kept-tab record that cannot be read keeps every tab: leaving a tab
+    // open is the safe side of the person's choice.
+    let kept = match read(KEPT_AGENT_TABS_FILE) {
+        Ok(None) => Vec::new(),
+        Ok(Some(record)) => match record.get("tabIds").and_then(JsonValue::as_array) {
+            Some(ids) => ids
+                .iter()
+                .filter_map(JsonValue::as_str)
+                .map(str::to_string)
+                .collect(),
+            None => return Ok(Vec::new()),
+        },
+        Err(_) => return Ok(Vec::new()),
+    };
+    Ok(tab_ids
+        .into_iter()
+        .filter(|id| !kept.contains(id))
+        .collect())
+}
+
+/// Closes one tab through the browser's loopback DevTools HTTP endpoint
+/// (`/json/close/<id>`), with a bounded wait. Synchronous, because it runs
+/// while the run's guard is dropped.
+fn close_browser_tab(host: &str, port: u16, tab_id: &str) -> Result<()> {
+    use std::io::Read;
+    use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+
+    let tab_id = validate_page_id(tab_id)?;
+    let address: SocketAddr = format!("{host}:{port}")
+        .to_socket_addrs()
+        .context("DevTools address is invalid")?
+        .next()
+        .context("DevTools address did not resolve")?;
+    if !address.ip().is_loopback() {
+        bail!("DevTools address is not loopback");
+    }
+    let mut stream = TcpStream::connect_timeout(&address, AGENT_TAB_CLOSE_TIMEOUT)
+        .context("failed to reach the browser's DevTools endpoint")?;
+    stream.set_read_timeout(Some(AGENT_TAB_CLOSE_TIMEOUT))?;
+    stream.set_write_timeout(Some(AGENT_TAB_CLOSE_TIMEOUT))?;
+    stream.write_all(
+        format!(
+            "GET /json/close/{tab_id} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n"
+        )
+        .as_bytes(),
+    )?;
+    let mut head = [0u8; 64];
+    let mut read = 0;
+    while read < head.len() {
+        match stream.read(&mut head[read..])? {
+            0 => break,
+            count => read += count,
+        }
+        if head[..read].contains(&b'\n') {
+            break;
+        }
+    }
+    let status_line = String::from_utf8_lossy(&head[..read]);
+    let status = status_line.split_whitespace().nth(1).unwrap_or_default();
+    // 404: the tab is already gone, which is what closing asks for.
+    if status != "200" && status != "404" {
+        bail!("DevTools answered {status} when closing the tab");
+    }
+    Ok(())
 }
 
 impl Drop for SharedBrowserAgentControlGuard {
@@ -767,6 +997,11 @@ impl Drop for SharedBrowserAgentControlGuard {
             .shutdown_confirmation
             .shared_browser_shutdown_is_confirmed()
         {
+            // Every tool process of the run is gone, so nothing opens another
+            // tab. Octo's tabs close now, apart from those the person kept;
+            // a tab that does not close stays an ordinary visible tab that no
+            // later run can use.
+            self.close_agent_tabs();
             if let Err(error) = prepare_clean_approval_directory(&self.approval_dir) {
                 tracing::error!(
                     ?error,
@@ -1071,6 +1306,13 @@ fn schema(value: JsonValue) -> Arc<JsonObject> {
 }
 
 fn shared_browser_mcp_tools() -> Vec<Tool> {
+    let tab_id = json!({
+        "type": "string",
+        "minLength": 1,
+        "maxLength": MAX_PAGE_ID_BYTES,
+        "pattern": "^[A-Za-z0-9_-]+$",
+        "description": "A tab id from list_tabs."
+    });
     let target_properties = json!({
         "index": { "type": "integer", "minimum": 0, "maximum": MAX_TARGET_INDEX },
         "snapshotId": {
@@ -1104,18 +1346,25 @@ fn shared_browser_mcp_tools() -> Vec<Tool> {
         Tool::new(
             Cow::Borrowed("snapshot"),
             Cow::Borrowed(
-                "Read what a person can see on the page: title, URL, visible text, and indexed interactive elements. Controls a person cannot see yet, such as those in closed menus and drawers, are left out; `omittedControls` counts them, and opening a menu or scrolling may reveal them. `expanded` tells whether a toggle is open, `area` is the part of the page a control sits in, and links on the page's own site are paths.",
+                "Read what a person can see on the page: title, URL, visible text, and indexed interactive elements. Controls a person cannot see yet, such as those in closed menus and drawers, are left out; `omittedControls` counts them, and opening a menu or scrolling may reveal them. `expanded` tells whether a toggle is open, `area` is the part of the page a control sits in, and links on the page's own site are paths. With `tabId`, that tab becomes the one later tools act on first.",
             ),
-            schema(json!({ "type": "object", "properties": {}, "additionalProperties": false })),
+            schema(json!({
+                "type": "object",
+                "properties": { "tabId": tab_id.clone() },
+                "additionalProperties": false
+            })),
         ),
         Tool::new(
             Cow::Borrowed("navigate"),
             Cow::Borrowed(
-                "Navigate the visible page to a credential-free HTTP(S) URL, or to a path on the current page's site such as a snapshot link's href.",
+                "Navigate the visible page to a credential-free HTTP(S) URL, or to a path on the current page's site such as a snapshot link's href. With `tabId`, that tab becomes the one later tools act on first.",
             ),
             schema(json!({
                 "type": "object",
-                "properties": { "url": { "type": "string", "minLength": 1, "maxLength": MAX_URL_CHARS } },
+                "properties": {
+                    "url": { "type": "string", "minLength": 1, "maxLength": MAX_URL_CHARS },
+                    "tabId": tab_id.clone()
+                },
                 "required": ["url"],
                 "additionalProperties": false
             })),
@@ -1175,18 +1424,70 @@ fn shared_browser_mcp_tools() -> Vec<Tool> {
                 "additionalProperties": false
             })),
         ),
+        Tool::new(
+            Cow::Borrowed("list_tabs"),
+            Cow::Borrowed(
+                "List the tabs this run may use: the page the person chose and the tabs Octo opened, with which one later tools act on. A tab's address and title show once its site is approved in that tab.",
+            ),
+            schema(json!({ "type": "object", "properties": {}, "additionalProperties": false })),
+        ),
+        Tool::new(
+            Cow::Borrowed("open_tab"),
+            Cow::Borrowed(
+                "Open a full credential-free HTTP(S) address in a new visible tab of the shared browser and act on it from now on. Octo may have at most three tabs of its own open; they close when this turn ends unless the person keeps them. The site's approval applies in that tab only.",
+            ),
+            schema(json!({
+                "type": "object",
+                "properties": { "url": { "type": "string", "minLength": 1, "maxLength": MAX_URL_CHARS } },
+                "required": ["url"],
+                "additionalProperties": false
+            })),
+        ),
+        Tool::new(
+            Cow::Borrowed("select_tab"),
+            Cow::Borrowed(
+                "Bring one tab from list_tabs to the front and act on it from now on. Take a fresh snapshot there before using element indices.",
+            ),
+            schema(json!({
+                "type": "object",
+                "properties": { "tabId": tab_id.clone() },
+                "required": ["tabId"],
+                "additionalProperties": false
+            })),
+        ),
+        Tool::new(
+            Cow::Borrowed("close_tab"),
+            Cow::Borrowed(
+                "Close one tab Octo opened in this turn. The page the person chose, their other tabs and tabs they kept are never closed.",
+            ),
+            schema(json!({
+                "type": "object",
+                "properties": { "tabId": tab_id },
+                "required": ["tabId"],
+                "additionalProperties": false
+            })),
+        ),
     ]
 }
 
 fn mcp_tool_request(name: &str, arguments: Option<JsonObject>) -> Result<SharedBrowserRequest> {
     let arguments = arguments.unwrap_or_default();
-    if matches!(name, "status" | "snapshot") && !arguments.is_empty() {
+    if matches!(name, "status" | "list_tabs") && !arguments.is_empty() {
         bail!("Shared Browser {name} does not accept arguments");
     }
     let (method, path, body) = match name {
         "status" => ("GET", "/v1/status", None),
-        "snapshot" => ("GET", "/v1/snapshot", None),
+        "snapshot" if arguments.is_empty() => ("GET", "/v1/snapshot", None),
+        "snapshot" => ("POST", "/v1/snapshot", Some(JsonValue::Object(arguments))),
         "navigate" => ("POST", "/v1/navigate", Some(JsonValue::Object(arguments))),
+        "list_tabs" => ("GET", "/v1/tabs", None),
+        "open_tab" => ("POST", "/v1/tabs/open", Some(JsonValue::Object(arguments))),
+        "select_tab" => (
+            "POST",
+            "/v1/tabs/select",
+            Some(JsonValue::Object(arguments)),
+        ),
+        "close_tab" => ("POST", "/v1/tabs/close", Some(JsonValue::Object(arguments))),
         "click" => ("POST", "/v1/click", Some(JsonValue::Object(arguments))),
         "type" => ("POST", "/v1/type", Some(JsonValue::Object(arguments))),
         "press" => ("POST", "/v1/press", Some(JsonValue::Object(arguments))),
@@ -1288,6 +1589,16 @@ fn validate_target(object: &JsonMap<String, JsonValue>) -> Result<()> {
     Ok(())
 }
 
+fn validate_tab_id_field(object: &JsonMap<String, JsonValue>, required: bool) -> Result<()> {
+    match object.get("tabId") {
+        None if !required => Ok(()),
+        Some(JsonValue::String(tab_id)) if tab_id.trim() == tab_id => {
+            validate_page_id(tab_id).map(|_| ())
+        }
+        _ => bail!("Shared Browser tabId must be one tab id from list_tabs"),
+    }
+}
+
 fn valid_snapshot_id(value: &str) -> bool {
     value.len() == SNAPSHOT_ID_CHARS
         && value
@@ -1301,8 +1612,32 @@ fn validate_request_body(path: &str, body: &JsonValue) -> Result<()> {
         .as_object()
         .context("Shared Browser request body must be a JSON object")?;
     match path {
-        "/v1/navigate" => {
+        "/v1/snapshot" | "/v1/tabs/select" | "/v1/tabs/close" => {
+            require_only_keys(object, &["tabId"])?;
+            validate_tab_id_field(object, true)?;
+        }
+        "/v1/tabs/open" => {
             require_only_keys(object, &["url"])?;
+            let raw = object
+                .get("url")
+                .and_then(JsonValue::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty() && value.chars().count() <= MAX_URL_CHARS)
+                .context("Shared Browser open_tab requires a bounded URL string")?;
+            // A new tab has no site yet: only a full address opens one.
+            let url = reqwest::Url::parse(raw)
+                .context("Shared Browser open_tab requires a full HTTP(S) address")?;
+            if !matches!(url.scheme(), "http" | "https")
+                || url.host_str().is_none()
+                || !url.username().is_empty()
+                || url.password().is_some()
+            {
+                bail!("Shared Browser open_tab requires a credential-free HTTP(S) URL");
+            }
+        }
+        "/v1/navigate" => {
+            require_only_keys(object, &["url", "tabId"])?;
+            validate_tab_id_field(object, false)?;
             let raw = object
                 .get("url")
                 .and_then(JsonValue::as_str)
@@ -1413,10 +1748,14 @@ fn normalize_allowed_path(method: &str, raw: &str) -> Result<String> {
     }
     let allowed = matches!(
         (method, path),
-        ("GET", "/v1/status" | "/v1/snapshot")
+        ("GET", "/v1/status" | "/v1/snapshot" | "/v1/tabs")
             | (
                 "POST",
-                "/v1/navigate"
+                "/v1/snapshot"
+                    | "/v1/tabs/open"
+                    | "/v1/tabs/select"
+                    | "/v1/tabs/close"
+                    | "/v1/navigate"
                     | "/v1/click"
                     | "/v1/type"
                     | "/v1/press"
@@ -1516,11 +1855,18 @@ fn controller_failure(status: std::process::ExitStatus, stderr: &[u8]) -> anyhow
 
 fn embedded_shared_browser_script() -> String {
     format!(
-        "{}\n{}\n{}\n{SHARED_BROWSER_APPROVAL_SCRIPT}\n{SHARED_BROWSER_SCRIPT}",
+        "{}\n{}\n{}\n{}\n{SHARED_BROWSER_APPROVAL_SCRIPT}\n{SHARED_BROWSER_SCRIPT}",
         embedded_plain_script(BROWSER_REDACTION_SCRIPT),
         embedded_plain_script(BROWSER_ACTION_POLICY_SCRIPT),
         embedded_plain_script(BROWSER_PAGE_CAPTURE_SCRIPT),
+        embedded_link_only_sites(),
     )
+}
+
+/// The skill's link-only list as data for the controller script. The file is
+/// JSON, which is a JavaScript expression as it stands.
+fn embedded_link_only_sites() -> String {
+    format!("globalThis.__instafyLinkOnlySites = {LINK_ONLY_SITES_DATA};")
 }
 
 /// What the origin evaluates, in an isolated world of the page, to read a page

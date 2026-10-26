@@ -125,6 +125,37 @@ describe("SharedBrowserChrome", () => {
     expect(container.querySelector('[data-testid="browser-send-page"]')).toBeNull();
   });
 
+  it("badges Octo's tabs for everyone and offers Keep tab on one that is not kept", async () => {
+    const onKeepPage = vi.fn();
+    const personTab = page({ id: "page-1", isActive: false });
+    const octoTab = page({ id: "tab-1", url: "https://docs.example/", title: "Docs", isActive: true, agentTab: true });
+    // Octo has control: the person can still keep its tab.
+    await act(async () => {
+      root.render(<SharedBrowserChrome {...props({ onKeepPage, interactionEnabled: false, pages: [personTab, octoTab] })} />);
+    });
+    const options = Array.from(container.querySelectorAll("option")).map((option) => option.textContent);
+    expect(options).toEqual(["Example site", "Octo's tab: Docs"]);
+    const keep = container.querySelector<HTMLButtonElement>('[data-testid="shared-browser-keep-tab"]')!;
+    expect(keep.textContent).toBe("Keep tab");
+    expect(onKeepPage).not.toHaveBeenCalled();
+    await act(async () => keep.click());
+    expect(onKeepPage).toHaveBeenCalledExactlyOnceWith("tab-1");
+
+    // A kept tab says so, and offers nothing more.
+    await act(async () => {
+      root.render(<SharedBrowserChrome {...props({ onKeepPage, pages: [personTab, { ...octoTab, kept: true }] })} />);
+    });
+    expect(Array.from(container.querySelectorAll("option")).map((option) => option.textContent))
+      .toEqual(["Example site", "Octo's tab, kept: Docs"]);
+    expect(container.querySelector('[data-testid="shared-browser-keep-tab"]')).toBeNull();
+
+    // The person's own tab has no badge and nothing to keep.
+    await act(async () => {
+      root.render(<SharedBrowserChrome {...props({ onKeepPage, pages: [{ ...personTab, isActive: true }, { ...octoTab, isActive: false }] })} />);
+    });
+    expect(container.querySelector('[data-testid="shared-browser-keep-tab"]')).toBeNull();
+  });
+
   it("shows a blank tab's address as empty, so a typed address is not appended to about:blank", async () => {
     const onNavigate = vi.fn();
     await act(async () => {
