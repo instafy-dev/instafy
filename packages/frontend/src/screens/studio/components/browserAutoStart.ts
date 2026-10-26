@@ -10,7 +10,8 @@ import {
   listBrowserSessionCandidates,
   runtimeEntryIsLazyBrowserHost,
 } from "./browserSessionRuntimeEnsure";
-import { browserRequestJobId, readBrowserRequestOf } from "./browserRequest";
+import { isBrowserNoticePrompt } from "./browserHandBack";
+import { browserRequestJobId } from "./browserRequest";
 import { getMessageType } from "./chatMessageMetadata";
 import { shouldDisplayChatMessage } from "./chatMessagePresentation";
 import type { BrowserTransport } from "./usePersonalBrowserBridge";
@@ -385,7 +386,7 @@ export function browserAutoStartAddressesSeen(input: {
   input.messages.forEach((message, index) => {
     if (!isConversationalRow(message)) return;
     const own = message.role === "user" && Boolean(currentUserId) && message.authorId === currentUserId &&
-      !readBrowserRequestOf(message);
+      !isBrowserNoticePrompt(message);
     const earlierReply = message.role === "assistant" && index < input.cardIndex &&
       (!cardJobId || browserRequestJobId(message) !== cardJobId);
     if (!own && !earlierReply) return;

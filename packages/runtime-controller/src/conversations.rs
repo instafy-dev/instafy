@@ -1228,6 +1228,9 @@ pub(crate) fn sanitize_client_recorded_message_metadata(
     }
     // Only a dispatch can say a message came from a site (crate::site_intent checks it there).
     crate::site_intent::take_site_intent_claim(&mut metadata);
+    // Nor can a recorded message continue a browser turn: a hand-back always
+    // dispatches (crate::browser_hand_back).
+    crate::browser_hand_back::take_hand_back_claim(&mut metadata);
     // Only the controller says a message belongs to a team's plan: Studio reads a message's
     // `multiAgentPlan` for the team card's lanes and for which lane a later run replaced, so a
     // member's own record must not claim one.
@@ -4116,6 +4119,22 @@ fn build_conversation_message_metadata(request: &DispatchPromptNormalized) -> Js
             );
         }
         map.insert(crate::site_intent::SITE_INTENT_KEY.to_string(), copy);
+    }
+    // Checked by dispatch (crate::browser_hand_back): Studio reads which
+    // browser turn a hand-back continued here. The run keeps the reply for
+    // Octo; the message names the browser turn, whose own reply is in chat.
+    if let Some(record) = request
+        .metadata
+        .get(crate::browser_hand_back::HAND_BACK_KEY)
+    {
+        let copy = crate::browser_hand_back::hand_back_for_message(record);
+        if let Some(prompt) = prompt_metadata.as_object_mut() {
+            prompt.insert(
+                crate::browser_hand_back::HAND_BACK_KEY.to_string(),
+                copy.clone(),
+            );
+        }
+        map.insert(crate::browser_hand_back::HAND_BACK_KEY.to_string(), copy);
     }
     map.insert("prompt_metadata".to_string(), prompt_metadata);
     // Prompt metadata is otherwise nested for the runtime. Persist the validated

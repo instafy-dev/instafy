@@ -23,6 +23,7 @@ mod author_identity;
 mod automations;
 mod background_loops;
 mod billing;
+mod browser_hand_back;
 mod browser_profile;
 mod browser_shares;
 mod browser_turn;
