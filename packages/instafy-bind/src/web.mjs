@@ -5,7 +5,13 @@
 import { isUnavailable, pageFetch } from "./page-fetch.mjs";
 
 export const USER_AGENT = "Instafy-Agent/1.0 (+https://instafy.dev; reads one public page on a person's request)";
-export const AI_AGENTS = ["gptbot", "chatgpt-user", "oai-searchbot", "claudebot", "claude-user", "anthropic-ai", "perplexitybot", "ccbot", "google-extended"];
+// The AI crawlers and the user-initiated AI fetchers (the closest match to a read on a person's request). A site that
+// keeps any of them out of a path is not read there.
+export const AI_AGENTS = [
+  "gptbot", "chatgpt-user", "oai-searchbot", "claudebot", "claude-user", "claude-searchbot", "anthropic-ai", "perplexitybot",
+  "perplexity-user", "ccbot", "google-extended", "applebot-extended", "meta-externalagent", "meta-externalfetcher",
+  "bytespider", "amazonbot", "cohere-ai", "mistralai-user", "duckassistbot",
+];
 
 /** robots.txt → [{ agents: [lowercase], rules: [{ allow, path }] }] */
 export function parseRobots(txt) {

@@ -18,5 +18,5 @@ export default defineConfig({
   // and a bare `fs` in a published CLI can be shadowed by a package of the same
   // name in the user's project, while `node:fs` cannot.
   removeNodeProtocol: false,
-  noExternal: ["@instafy/provider-client", /^@instafy\/sdk(?:\/.*)?$/],
+  noExternal: ["@instafy/provider-client", /^@instafy\/sdk(?:\/.*)?$/, /^@instafy\/bind\/(?:net|web)$/, "@instafy/browser-action-policy/redaction"],
 });

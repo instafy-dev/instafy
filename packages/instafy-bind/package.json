@@ -16,7 +16,9 @@
     "./package.json": "./package.json",
     "./handler-kit": "./src/handler-kit.mjs",
     "./records": "./src/records.mjs",
-    "./schema-lite": "./src/schema-lite.mjs"
+    "./schema-lite": "./src/schema-lite.mjs",
+    "./net": "./src/net.mjs",
+    "./web": "./src/web.mjs"
   },
   "files": [
     "bin",

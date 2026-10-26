@@ -363,11 +363,11 @@ test('the restore-only mitigation preserves every other byte of the reviewed Bui
   // proxy_retry_budget and read-reference selectors, the code-mode host build, the
   // per-model proxy_retry_budget runs, the runtime provider core and service unit
   // tests, CLI git wrapper suite, local author pseudonym key test and inert native
-  // compaction selector, CLI preview check and bound-sites binder suites, and the tunnel broker test lane
+  // compaction selector, CLI preview check, bound-sites binder and web read suites, and the tunnel broker test lane
   // with its Rust tests aggregate entry: retains all functional commands, aggregate
   // guards, routing, permissions and other jobs.
   assert.equal(createHash('sha256').update(normalized).digest('hex'),
-    'ce694a0ecc087f05c4554c5d5eead55a92c614eb626908ce49310ec128a5c00e');
+    'e6a91255fbe440acc08b099f3f9938248247c2135eb0afe446607c211d0fbf23');
 });
 
 test('actual inline runner qualification rejects wrong native identity, ambient private env and missing compilers', () => {

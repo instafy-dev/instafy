@@ -56,6 +56,7 @@ Run Instafy spaces locally and connect them back to Instafy Studio — from any 
   - `instafy tunnel logs <tunnelId> --follow` — tail tunnel logs.
   - `instafy tunnel stop <tunnelId>` — stop + revoke a tunnel.
 - `instafy preview check --port <port>` — load a local site in a headless browser and list its errors, failed requests and a blank page, with desktop and phone screenshots. Local only; see [docs/CLI.md](https://github.com/instafy-dev/instafy/blob/main/docs/CLI.md#previews) for exit codes and settings.
+- `instafy web read <url…> --json` — read up to 6 public pages over plain HTTP and get their text, links and structured data with provenance, wrapped as untrusted page content. robots.txt (including AI-agent user agents), skill-listed link-only sites, private-address checks at every redirect, stop rules and per-turn caps are enforced; see [docs/CLI.md](https://github.com/instafy-dev/instafy/blob/main/docs/CLI.md#reading-web-pages-instafy-web-read).
 - `instafy secrets list` — list space secret metadata (names/descriptions, never values).
 - `instafy secrets get <name-or-id>` — inspect one space secret metadata entry.
 - `instafy secrets put <name> --value ...` — create/update a space secret.

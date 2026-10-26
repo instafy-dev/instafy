@@ -48,8 +48,10 @@ function isPrivateV6(ip) {
   if (allZeroUpTo(7) && g[7] === 1) return true; // ::1
   const embedded = () => `${g[6] >> 8}.${g[6] & 255}.${g[7] >> 8}.${g[7] & 255}`;
   if (allZeroUpTo(5) && g[5] === 0xffff) return isPrivateV4(embedded()); // ::ffff:a.b.c.d
+  if (allZeroUpTo(4) && g[4] === 0xffff && g[5] === 0) return isPrivateV4(embedded()); // ::ffff:0:a.b.c.d (SIIT translated)
   if (allZeroUpTo(6)) return true; // ::a.b.c.d (deprecated compatible)
   if (g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every((x) => x === 0)) return isPrivateV4(embedded()); // NAT64
+  if (g[0] === 0x64 && g[1] === 0xff9b && g[2] === 1) return true; // 64:ff9b:1::/48 local-use NAT64 (RFC 8215): a network's own translator
   if ((g[0] & 0xfe00) === 0xfc00) return true; // fc00::/7 unique local
   if ((g[0] & 0xffc0) === 0xfe80) return true; // fe80::/10 link local
   if ((g[0] & 0xffc0) === 0xfec0) return true; // fec0::/10 site local
