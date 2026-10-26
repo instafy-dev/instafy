@@ -992,6 +992,9 @@ pub(crate) async fn process_dispatch_prompt_timed(
     // "Via a site" is the controller's to say: a client's claim is checked
     // against the previews this sender can see below, and refused otherwise.
     let site_intent_claim = crate::site_intent::take_site_intent_claim(&mut request.metadata);
+    // "This continues a browser turn" is the controller's to say too: the
+    // claim is checked below, under the conversation's dispatch fence.
+    let hand_back_claim = crate::browser_hand_back::take_hand_back_claim(&mut request.metadata);
     conversations::normalize_human_mention_metadata(&mut request.metadata)?;
     // Parity with the record path: untrusted callers must not persist a forged
     // controller participation marker through gate-bypassing dispatches (e.g.
@@ -1315,6 +1318,21 @@ pub(crate) async fn process_dispatch_prompt_timed(
                 )),
             ));
         }
+    }
+
+    // A hand-back resumes the building turn with what a browser turn found,
+    // once per browser turn and one hop only (crate::browser_hand_back).
+    if let Some(claim) = hand_back_claim.as_ref() {
+        let record = crate::browser_hand_back::require_hand_back(
+            &transaction,
+            &conversation.id,
+            context,
+            claim,
+            &request.metadata,
+        )
+        .await?;
+        ensure_object(&mut request.metadata)
+            .insert(crate::browser_hand_back::HAND_BACK_KEY.to_string(), record);
     }
 
     // An ambient multi-human turn dispatches to the default agent stamped with
@@ -3588,6 +3606,7 @@ fn metadata_marks_special_dispatch(metadata: &JsonValue) -> bool {
         "agentThread",
         "agent_thread",
         "automation",
+        crate::browser_hand_back::HAND_BACK_KEY,
         "command",
         "goalContinuation",
         "goal_continuation",

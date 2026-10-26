@@ -1177,6 +1177,36 @@ unless the policy is `"covered"`.
   the conversation's machine continues there without a press, even within ten
   minutes of the last automatic start; the declined check, the browser-turn
   check and every check before sending still apply.
+- **Hand-back.** When a browser turn that continued Octo's card finishes,
+  Studio sends one ordinary turn back to the building lane, "Continue building
+  with what the browser turn found.", shown as the notice "Octo continued with
+  what it found in the browser" and naming the browser job in
+  `continuesFromBrowserJob`. It does so only in the tab that sent both the
+  card's prompt and the browser continuation, when nobody wrote after the
+  browser turn, the turn succeeded within the last ten minutes and did not
+  stop for the person (`request_human_input`, or a step whose approval ended
+  the turn), and no draft or manual browser step is pending. The controller
+  checks the same chain under the conversation's dispatch fence and stamps
+  `browserHandBack` with the browser turn's final reply (at most 6,000
+  characters) and up to six labelled findings `{url, title, readAt, viewer}`
+  (plus `stopped` for a page that was not read: `login`, `captcha`, `paywall`,
+  `blocked`, `robots`, `download`, `secret` or `link-only`, and any other reason
+  counts as `blocked`): the address and title come from the reply's JSON
+  finding lines (only a reply without any falls back to the addresses on its
+  lines), `readAt` and `viewer` from the job, and an address on a loopback,
+  private, link-local or local-only host is never a finding. Only the person
+  who ran the browser turn, and whose turn sent the card, can send it, once per
+  browser turn, within 30 minutes, only while no prompt was sent in the
+  conversation after the browser turn (`browser_hand_back_superseded`), and
+  never as a send-queue entry. The
+  runtime shows that record to the building turn as quoted page data: not the
+  person's words, not their consent, and no instruction. One automatic hop
+  only: a card the hand-back turn sends never opens by itself, and its browser
+  turn is never handed back (`browser_hand_back_second_hop`). A browser turn
+  that continues a card is asked to end its reply with one finding per page,
+  one JSON object per line, as the browser skill writes them. The fixtures in
+  `packages/runtime-controller/src/browser_hand_back_fixtures.json` pin the
+  three halves together.
 - **Stale pins.** A pin to a session that is gone moves to the space's own live
   browser when there is one.
 - **Clear data restarts the same machine.** The controller call is unchanged.

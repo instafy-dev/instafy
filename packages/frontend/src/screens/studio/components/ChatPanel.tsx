@@ -83,7 +83,7 @@ import {
 import type {
   ChatMessage,
 } from "../types";
-import type { RunRecord } from "../../../types";
+import type { RunRecord, RunStatus } from "../../../types";
 import { useProject } from "../../../projects/useProject";
 import { canOpenProjectDeviceHandoff } from "../../../projects/projectCapabilities";
 import type { PreparedEmailInvite } from "../../../sharing/preparedEmailInvite";
@@ -403,6 +403,7 @@ import { CHAT_TRANSCRIPT_HEADER_INSET_PX, ChatSpeakerStickyOverlay, ChatTranscri
 import { resolveSharedBrowserControlOwner } from "./sharedBrowserControlOwner";
 import { useSharedBrowserApprovalTransport } from "./useSharedBrowserApprovalTransport";
 import { useChatBrowserHandoff } from "./useChatBrowserHandoff";
+import { useBrowserHandBack } from "./useBrowserHandBack";
 import {
   useChatBrowserRequest,
   type BrowserAutoStartOptions,
@@ -4828,6 +4829,45 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     auto: browserAutoStart,
   });
   browserRequestRetryRef.current = browserRequestState.retryContinuation;
+  // Once a browser turn that continued Octo's card finishes, one turn goes
+  // back to the building lane with what it found (useBrowserHandBack).
+  const runStatusesById = useMemo(() => {
+    const statuses = new Map<string, RunStatus>();
+    for (const run of Object.values(runs ?? {})) {
+      statuses.set(run.id, run.status);
+      const jobId = run.metadata?.jobId;
+      if (typeof jobId === "string" && jobId) statuses.set(jobId, run.status);
+    }
+    return statuses;
+  }, [runs]);
+  useBrowserHandBack({
+    identity: browserRequestIdentity,
+    messages,
+    canWrite: browserAutoStartAllowed,
+    busy: isAssistantTyping,
+    activeRunIds: activeConversationRunIds,
+    runStatuses: runStatusesById,
+    held: browserAutoStartBlocked ||
+      Boolean(personalBrowser.status?.humanInputRequest) ||
+      personalBrowser.pendingHandoff !== null,
+    agentName: typingAgentDisplayName.replace(/^@/, ""),
+    send: async (message, extras) => {
+      try {
+        await onSubmit(activeConversationId, extras.display, {
+          agentHandles: [typingAgentHandle],
+          imageFiles: [],
+          editorState: null,
+          expectedLaneIdle: true,
+          requireDispatch: true,
+          dispatchInput: message,
+          metadata: extras.metadata,
+        });
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  });
   const browserRequestAutoWaiting = browserRequestState.autoWaiting;
   useEffect(() => {
     setBrowserAutoWaiting(browserRequestAutoWaiting);

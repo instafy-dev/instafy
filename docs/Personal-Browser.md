@@ -160,6 +160,11 @@ waits for a press unless Studio may open Instafy's browser on the conversation's
 machine by itself (see [Browser Profiles](Browser-Profiles.md)). Existing active control
 keeps its approval mode. Older Desktop hosts without routine-mode support use Ask mode.
 
+When the browser turn that continued Octo's card finishes, Studio hands its findings back
+to the building lane once, as quoted page data and never as the person's words or consent;
+it waits while a manual step is pending here, and a turn that stopped for one is not handed
+back (see "Hand-back" in [Shared Browser](Shared-Browser.md)).
+
 Desktop reports `approvalPolicyVersion: 2` in its status. On such a host
 "routine" is the owner's tier, the same for a press, Resume, **Let AI continue**
 and a start Studio makes by itself. Electron shows one native confirmation per

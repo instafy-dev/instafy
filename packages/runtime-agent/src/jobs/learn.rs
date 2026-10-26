@@ -60,6 +60,11 @@ pub const LEARNED_USAGE_RELATIVE_PATH: &str = ".agents/skills/instafy-learned/US
 pub const BOUND_SITES_RELATIVE_PATH: &str = ".agents/skills/instafy-bound-sites/SKILL.md";
 pub const BOUND_SITES_CHEATSHEET_RELATIVE_PATH: &str =
     ".agents/skills/instafy-bound-sites/references/cheatsheet.md";
+pub const INTERACTIVE_ARTIFACTS_RELATIVE_PATH: &str =
+    ".agents/skills/instafy-interactive-artifacts/SKILL.md";
+pub const RESEARCH_TEAM_RELATIVE_PATH: &str = ".agents/skills/instafy-research-team/SKILL.md";
+pub const RESEARCH_TEAM_RESEARCHER_RELATIVE_PATH: &str =
+    ".agents/skills/instafy-research-team/references/researcher.md";
 
 const DEFAULT_LOOKBACK: usize = 25;
 const MAX_LOOKBACK: usize = 200;
@@ -245,6 +250,27 @@ const BOUND_SITES_CHEATSHEET_TEMPLATE: &str = include_str!(concat!(
 /// A copy someone edited is kept.
 const LEGACY_BOUND_SITES_TEMPLATES: &[&str] = &[include_str!("legacy/bound-sites-v1.md")];
 const LEGACY_BOUND_SITES_CHEATSHEET_TEMPLATES: &[&str] = &[];
+/// The hub for pages people tap through: it picks the builder from the installed skills (a skill
+/// pack's own skill, bound sites, or a starter site) and shows the result as a preview card.
+const INTERACTIVE_ARTIFACTS_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md"
+));
+/// How a lead splits research of many items into parallel lanes with a handoff file each, then
+/// builds one page from the files; and the rules a lane follows.
+const RESEARCH_TEAM_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/instafy/.agents/skills/instafy-research-team/SKILL.md"
+));
+const RESEARCH_TEAM_RESEARCHER_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/instafy/.agents/skills/instafy-research-team/references/researcher.md"
+));
+/// Earlier bundled copies of these skills that a scaffold may replace (none yet). A copy someone
+/// edited is kept.
+const LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES: &[&str] = &[];
+const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[];
+const LEGACY_RESEARCH_TEAM_RESEARCHER_TEMPLATES: &[&str] = &[];
 const SKILL_ROUTER_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-skill-router/SKILL.md"
@@ -355,6 +381,9 @@ pub fn ensure_project_memory_scaffold(workspace_dir: &Path) {
 /// Writes and upgrades the bundled Instafy files in `workspace_dir`, unless
 /// `scope` leaves them to the controller (see [`ScaffoldScope`]).
 pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldScope) {
+    // The runtime's own skill pack files are never committed, so every space gets them on every
+    // turn, a canonical checkout with history included (see `runtime_pack_files`).
+    keep_runtime_pack_files_current(workspace_dir);
     if scope == ScaffoldScope::Canonical && holds_canonical_history(workspace_dir) {
         return;
     }
@@ -394,6 +423,9 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
     let learned_blocks_dir_path = workspace_dir.join(LEARNED_BLOCKS_DIR_RELATIVE_PATH);
     let bound_sites_path = workspace_dir.join(BOUND_SITES_RELATIVE_PATH);
     let bound_sites_cheatsheet_path = workspace_dir.join(BOUND_SITES_CHEATSHEET_RELATIVE_PATH);
+    let interactive_artifacts_path = workspace_dir.join(INTERACTIVE_ARTIFACTS_RELATIVE_PATH);
+    let research_team_path = workspace_dir.join(RESEARCH_TEAM_RELATIVE_PATH);
+    let research_team_researcher_path = workspace_dir.join(RESEARCH_TEAM_RESEARCHER_RELATIVE_PATH);
 
     if fs::create_dir_all(&skills_root_dir).is_err() {
         return;
@@ -666,6 +698,27 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
     ) {
         wrote_any = true;
     }
+    for (path, legacy, current) in [
+        (
+            &interactive_artifacts_path,
+            LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES,
+            INTERACTIVE_ARTIFACTS_TEMPLATE,
+        ),
+        (
+            &research_team_path,
+            LEGACY_RESEARCH_TEAM_TEMPLATES,
+            RESEARCH_TEAM_TEMPLATE,
+        ),
+        (
+            &research_team_researcher_path,
+            LEGACY_RESEARCH_TEAM_RESEARCHER_TEMPLATES,
+            RESEARCH_TEAM_RESEARCHER_TEMPLATE,
+        ),
+    ] {
+        if upgrade_bundled_skill(workspace_dir, path, legacy, current) {
+            wrote_any = true;
+        }
+    }
 
     if !skill_reading_path.exists() {
         if let Some(parent) = skill_reading_path.parent() {
@@ -744,6 +797,30 @@ pub fn parse_learn_request(prompt_text: &str) -> Option<LearnRequest> {
     None
 }
 
+/// Writes, updates or removes this space's copies of the skill packs installed with the runtime.
+#[cfg(not(test))]
+fn keep_runtime_pack_files_current(workspace_dir: &Path) {
+    super::runtime_pack_files::keep_current(
+        workspace_dir,
+        crate::skill_packs::installed_packs(),
+        crate::skill_packs::node_on_path(),
+    );
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The packs a test's runtime has installed (none unless a test sets them).
+    pub(super) static TEST_RUNTIME_PACKS: std::cell::RefCell<Vec<crate::skill_packs::InstalledPack>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn keep_runtime_pack_files_current(workspace_dir: &Path) {
+    TEST_RUNTIME_PACKS.with(|packs| {
+        super::runtime_pack_files::keep_current(workspace_dir, &packs.borrow(), Some((22, 11, 0)))
+    });
+}
+
 fn maybe_commit_project_memory_scaffold(workspace_dir: &Path, _wrote_any: bool) {
     if !workspace_dir.join(".instafy").join(".git").exists()
         || holds_canonical_history(workspace_dir)
@@ -785,6 +862,9 @@ fn maybe_commit_project_memory_scaffold(workspace_dir: &Path, _wrote_any: bool) 
         LEARNED_INDEX_RELATIVE_PATH,
         BOUND_SITES_RELATIVE_PATH,
         BOUND_SITES_CHEATSHEET_RELATIVE_PATH,
+        INTERACTIVE_ARTIFACTS_RELATIVE_PATH,
+        RESEARCH_TEAM_RELATIVE_PATH,
+        RESEARCH_TEAM_RESEARCHER_RELATIVE_PATH,
     ];
 
     for path in scaffold_paths {
@@ -912,6 +992,22 @@ pub(super) fn commit_test_checkout(
         git(&["add", "--", path]);
     }
     git(&["commit", "--quiet", "--no-gpg-sign", "-m", subject]);
+}
+
+/// Test support: commits everything in the folder's `.instafy` repository, as a save would.
+#[cfg(test)]
+pub(super) fn commit_test_checkout_all(workspace_dir: &Path, subject: &str) {
+    for args in [
+        &["add", "-A"][..],
+        &["commit", "--quiet", "--no-gpg-sign", "-m", subject][..],
+    ] {
+        let output = run_git(workspace_dir, args).expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 /// Test support: the folder's `git status`, untracked files listed one by one.
@@ -1726,6 +1822,65 @@ mod tests {
     }
 
     #[test]
+    fn scaffold_adds_the_interactive_artifacts_hub_and_research_team_and_keeps_edits() {
+        let workspace = tempdir().expect("workspace");
+        ensure_project_memory_scaffold(workspace.path());
+        for (path, template) in [
+            (
+                INTERACTIVE_ARTIFACTS_RELATIVE_PATH,
+                INTERACTIVE_ARTIFACTS_TEMPLATE,
+            ),
+            (RESEARCH_TEAM_RELATIVE_PATH, RESEARCH_TEAM_TEMPLATE),
+            (
+                RESEARCH_TEAM_RESEARCHER_RELATIVE_PATH,
+                RESEARCH_TEAM_RESEARCHER_TEMPLATE,
+            ),
+        ] {
+            assert_eq!(
+                fs::read_to_string(workspace.path().join(path)).unwrap(),
+                template,
+                "{path}"
+            );
+            assert!(template.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
+        }
+        for template in [INTERACTIVE_ARTIFACTS_TEMPLATE, RESEARCH_TEAM_TEMPLATE] {
+            assert!(template.contains("context_kind: workflow"));
+            assert!(template.contains("context_parent: instafy-skill-router"));
+        }
+        // Generic: the builder comes from the installed skills; no pack, service or command of
+        // one is named.
+        for template in [
+            INTERACTIVE_ARTIFACTS_TEMPLATE,
+            RESEARCH_TEAM_TEMPLATE,
+            RESEARCH_TEAM_RESEARCHER_TEMPLATE,
+            SKILL_ROUTER_TEMPLATE,
+        ] {
+            for named in [
+                "interactive-map",
+                "uw ",
+                "uw.mjs",
+                "instafy web cite",
+                "suggestions` block",
+            ] {
+                assert!(!template.contains(named), "{named}");
+            }
+        }
+        assert!(INTERACTIVE_ARTIFACTS_TEMPLATE.contains("Read the Skills index first"));
+        assert!(SKILL_ROUTER_TEMPLATE.contains("`instafy-interactive-artifacts`"));
+        assert!(
+            SKILL_ROUTER_TEMPLATE
+                .contains("instafy-interactive-artifacts, instafy-learning-policy")
+        );
+        assert!(SKILL_ROUTER_TEMPLATE.contains("instafy-research-team, instafy-runtime-flavors"));
+
+        // A copy someone edited is kept.
+        let hub = workspace.path().join(INTERACTIVE_ARTIFACTS_RELATIVE_PATH);
+        fs::write(&hub, "our own hub\n").unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&hub).unwrap(), "our own hub\n");
+    }
+
+    #[test]
     fn scaffold_adds_the_bound_sites_skill_and_keeps_an_edited_copy() {
         let workspace = tempdir().expect("workspace");
         ensure_project_memory_scaffold(workspace.path());
@@ -1795,6 +1950,33 @@ mod tests {
             git_stdout_trimmed(folder, &["rev-list", "--count", "HEAD"]).as_deref(),
             Some("1")
         );
+    }
+
+    #[test]
+    fn runtime_pack_files_reach_a_canonical_checkout_with_history_and_stay_unsaved() {
+        let packs = tempdir().expect("packs");
+        let dir = crate::skill_packs::tests::make_pack(packs.path(), "demo", true);
+        let pack = crate::skill_packs::load_pack(&dir).expect("pack");
+        TEST_RUNTIME_PACKS.with(|packs| *packs.borrow_mut() = vec![pack]);
+        let workspace = tempdir().expect("workspace");
+        let folder = workspace.path();
+        commit_test_checkout(
+            folder,
+            "Add the team's notes",
+            "someone@example.com",
+            &[(INSTAFY_FILENAME, INSTAFY_TEMPLATE)],
+        );
+
+        ensure_project_memory_scaffold_in(folder, ScaffoldScope::Canonical);
+        TEST_RUNTIME_PACKS.with(|packs| packs.borrow_mut().clear());
+
+        assert!(folder.join(".agents/skills/demo/SKILL.md").is_file());
+        assert!(folder.join(".agents/skills/demo/scripts/run.mjs").is_file());
+        assert!(
+            !folder.join(BOUND_SITES_RELATIVE_PATH).exists(),
+            "the rest stays the controller's"
+        );
+        assert_eq!(test_checkout_status(folder), "", "nothing left unsaved");
     }
 
     #[test]

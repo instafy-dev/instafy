@@ -54,6 +54,8 @@ on:
       - "packages/browser-webrtc-sender/go.sum"
       - "codex"
       - "scripts/fetch-rusty-v8.sh"
+      - "scripts/install-skill-packs.mjs"
+      - "packages/runtime-agent/skill-packs.json"
       - "scripts/runtime-image-browser-smoke.sh"
       - "scripts/image-scan-report.mjs"
       - "scripts/resolve-buildkit-image.mjs"
