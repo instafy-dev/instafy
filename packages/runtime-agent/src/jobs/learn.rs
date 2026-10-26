@@ -2435,10 +2435,8 @@ mod tests {
         assert_eq!(fs::read_to_string(&skill).unwrap(), customized);
     }
 
-    /// The bundled browser skill says, near its top, that Instafy's browser
-    /// cannot open the space's own addresses and that such a site is shown
-    /// with a preview card; v4 is the copy from before. An unedited v4 is
-    /// upgraded (see `scaffold_upgrades_bundled_browser_guidance_and_preserves_edits`).
+    /// The bundled browser skill names the Personal Browser's tab tools; v7 is
+    /// the copy from before, and an unedited v7 is upgraded.
     #[test]
     fn browser_automation_names_the_personal_browser_tab_tools() {
         for needle in [
@@ -2466,6 +2464,10 @@ mod tests {
         );
     }
 
+    /// The bundled browser skill says, near its top, that Instafy's browser
+    /// cannot open the space's own addresses and that such a site is shown
+    /// with a preview card; v4 is the copy from before. An unedited v4 is
+    /// upgraded (see `scaffold_upgrades_bundled_browser_guidance_and_preserves_edits`).
     #[test]
     fn browser_automation_says_what_instafys_browser_can_reach() {
         let section = "## What Instafy's browser can reach";

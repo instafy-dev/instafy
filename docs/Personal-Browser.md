@@ -457,9 +457,12 @@ only in the visible browser, so the rules are the ones a person sees:
   look at, take over or close; Clear data and closing the browser close them.
 - **Public pages only.** An agent tab opens only public addresses: a loopback,
   private-network, link-local or local host name is refused with
-  `private_address_blocked`, and so is a name that resolves to one. Redirects and
-  page navigations in an agent tab are checked on their address literal while the
-  agent has control. The person's own tab keeps its current rules.
+  `private_address_blocked`, and so is a name that resolves to one. While the
+  agent has control, every page and frame request of an agent tab, each link the
+  agent follows and each redirect hop, resolves its host the same way and is
+  cancelled before it connects when it is not public; a local name written with
+  a final dot (`localhost.`) is still local. The person's own tab keeps its
+  current rules.
 - **Limits.** At most three agent tabs (`agent_tab_limit`); changing the tab on
   screen never runs alongside another step (`browser_busy`); a tab share is
   scoped to the page on screen, so showing another tab ends it, and the agent

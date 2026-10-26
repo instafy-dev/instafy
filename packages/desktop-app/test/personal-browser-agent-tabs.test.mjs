@@ -38,15 +38,21 @@ async function lookup(host) {
   return addresses.map((address) => ({ address, family: 4 }));
 }
 
+let nextContentsId = 1;
+
 class FakeContents {
   constructor(views) {
     this.views = views;
+    this.id = nextContentsId++;
     this.url = "";
     this.title = "";
     this.handlers = {};
     this.destroyed = false;
     this.loads = [];
-    this.session = { setPermissionCheckHandler() {}, setPermissionRequestHandler() {}, on() {} };
+    this.session = {
+      setPermissionCheckHandler() {}, setPermissionRequestHandler() {}, on() {},
+      webRequest: { onBeforeRequest: (filter, listener) => { this.session.beforeRequestFilter = filter; this.session.beforeRequest = listener; } },
+    };
     this.navigationHistory = { canGoBack: () => false, canGoForward: () => false, clear() {} };
   }
   on(name, handler) { (this.handlers[name] ??= []).push(handler); return this; }
@@ -267,6 +273,44 @@ test("navigate in an agent tab keeps to public addresses; the person's own tab i
   let prevented = false;
   views[1].webContents.emit("will-redirect", { preventDefault() { prevented = true; } }, "http://192.168.0.1/");
   assert.equal(prevented, true);
+});
+
+// What the session's request filter decides for one request.
+function beforeRequest(contents, details) {
+  return new Promise((resolve) => contents.session.beforeRequest({ webContentsId: contents.id, ...details }, resolve));
+}
+
+test("every page request of an agent tab, each redirect hop included, resolves its host and stays public", async () => {
+  const { host, views, personView } = fixture();
+  await resume(host, "routine");
+  await host.handleControlOperation("open_tab", { url: "https://docs.example.test/" });
+  const agentContents = views[1].webContents;
+  assert.deepEqual(plain(agentContents.session.beforeRequestFilter.types), ["mainFrame", "subFrame"]);
+  // A link the agent clicks, or a redirect, to a public name that resolves to the local network.
+  assert.deepEqual(plain(await beforeRequest(agentContents, { resourceType: "mainFrame", url: "https://rebind.example.test/admin" })), { cancel: true });
+  assert.deepEqual(plain(await beforeRequest(agentContents, { resourceType: "subFrame", url: "https://rebind.example.test/" })), { cancel: true });
+  assert.deepEqual(plain(await beforeRequest(agentContents, { resourceType: "mainFrame", url: "https://unknown.example.test/" })), { cancel: true });
+  assert.deepEqual(plain(await beforeRequest(agentContents, { resourceType: "mainFrame", url: "https://news.example.test/" })), { cancel: false });
+  // The page's own resources and the person's tab are not filtered here.
+  assert.deepEqual(plain(await beforeRequest(agentContents, { resourceType: "image", url: "https://rebind.example.test/a.png" })), {});
+  assert.deepEqual(
+    plain(await beforeRequest(agentContents, { webContentsId: personView.webContents.id, resourceType: "mainFrame", url: "https://rebind.example.test/" })),
+    {},
+  );
+  // Once the person has paused, the tab is theirs.
+  host.pauseAgentControl();
+  assert.deepEqual(plain(await beforeRequest(agentContents, { resourceType: "mainFrame", url: "https://rebind.example.test/" })), {});
+});
+
+test("a local host name written with a final dot is still local in an agent tab", async () => {
+  const { host, views } = fixture();
+  await resume(host, "routine");
+  await host.handleControlOperation("open_tab", { url: "https://docs.example.test/" });
+  for (const url of ["http://localhost.:3000/", "http://router.lan./", "http://intranet./"]) {
+    let prevented = false;
+    views[1].webContents.emit("will-redirect", { preventDefault() { prevented = true; } }, url);
+    assert.equal(prevented, true, url);
+  }
 });
 
 test("Pause ends the agent's control of every tab and every tab's approvals", async () => {

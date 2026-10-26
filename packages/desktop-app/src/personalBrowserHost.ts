@@ -107,6 +107,9 @@ export type PersonalBrowserTabStatus = {
   title?: string;
 };
 
+/** A tab as the agent's tools list it: its address and title only where its site is allowed. */
+type PersonalBrowserAgentTabEntry = Omit<PersonalBrowserTabStatus, "id"> & { tabId: string };
+
 export type PersonalBrowserStatus = {
   supported: boolean;
   enabled: boolean;
@@ -1361,6 +1364,31 @@ export class PersonalBrowserHost {
     session.setPermissionRequestHandler((contents, permission, callback, details) =>
       callback(this.tabCapture.allowsVideoCapture(contents, permission, details)));
     session.on("will-download", (event) => event.preventDefault());
+    // Every page and frame request of an agent tab, each redirect hop
+    // included, resolves its host and stays on public addresses while the
+    // agent has control. A link or redirect to a name that resolves to this
+    // machine or the local network is cancelled before it connects.
+    const pageRequests = { urls: ["http://*/*", "https://*/*"], types: ["mainFrame", "subFrame"] as Array<"mainFrame" | "subFrame"> };
+    session.webRequest.onBeforeRequest(pageRequests, (details, callback) => {
+      const agentTab = details.resourceType === "mainFrame" || details.resourceType === "subFrame"
+        ? this.agentTabForContentsId(details.webContentsId)
+        : null;
+      if (!agentTab || !(this.agentControlEnabled || this.activeControlOperations > 0)) {
+        callback({});
+        return;
+      }
+      void checkPersonalBrowserAgentTabUrl(details.url).then(
+        (check) => callback({ cancel: !check.ok }),
+        () => callback({ cancel: true }),
+      );
+    });
+  }
+
+  private agentTabForContentsId(webContentsId: number | undefined): PersonalBrowserTab | null {
+    if (webContentsId === undefined) return null;
+    return this.tabs.find((tab) =>
+      tab.openedBy === "agent" && tab.view !== null && !tab.view.webContents.isDestroyed() &&
+      tab.view.webContents.id === webContentsId) ?? null;
   }
 
   private closeView() {
@@ -1949,7 +1977,7 @@ export class PersonalBrowserHost {
     }
   }
 
-  private getBrokerStatus(): PersonalBrowserStatus {
+  private getBrokerStatus(): Omit<PersonalBrowserStatus, "tabs"> & { tabs: PersonalBrowserAgentTabEntry[] } {
     return { ...this.getPageBrokerStatus(), tabs: this.agentTabList() };
   }
 
@@ -2793,7 +2821,7 @@ export class PersonalBrowserHost {
    * The tabs as the agent sees them. A tab's address and title show only
    * when its site is allowed in that tab, masked like a status address.
    */
-  private agentTabList(): Array<{ tabId: string; openedBy: PersonalBrowserTab["openedBy"]; active: boolean; url: string; title?: string }> {
+  private agentTabList(): PersonalBrowserAgentTabEntry[] {
     return this.tabs.map((tab) => {
       const { id, url, title, ...state } = this.tabStatus(tab);
       const rest = { tabId: id, ...state };

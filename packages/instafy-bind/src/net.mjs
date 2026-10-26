@@ -74,7 +74,9 @@ const LOCAL_NAME_RE = /(^|\.)(localhost|local|internal|lan|home|intranet|localdo
 
 /** True for a host name that names this machine or a local network (localhost, *.local, a single label, …). */
 export function isLocalHostName(host) {
-  return LOCAL_NAME_RE.test(host) || !host.includes(".");
+  // A fully qualified name may end in a dot ("localhost.", "router.lan."); it names the same host.
+  const name = host.replace(/\.+$/, "");
+  return LOCAL_NAME_RE.test(name) || !name.includes(".");
 }
 
 /**

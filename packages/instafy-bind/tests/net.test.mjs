@@ -128,10 +128,10 @@ test("originAllowed matches allowed_origins patterns", () => {
 });
 
 test("isLocalHostName names this machine and local networks, not public names", () => {
-  for (const host of ["localhost", "app.localhost", "printer.local", "nas.lan", "intranet", "db.internal", "router.home"]) {
+  for (const host of ["localhost", "app.localhost", "printer.local", "nas.lan", "intranet", "db.internal", "router.home", "localhost.", "nas.lan.", "intranet."]) {
     assert.equal(isLocalHostName(host), true, host);
   }
-  for (const host of ["example.com", "docs.example.test", "local.example.com"]) {
+  for (const host of ["example.com", "docs.example.test", "local.example.com", "example.com."]) {
     assert.equal(isLocalHostName(host), false, host);
   }
 });
