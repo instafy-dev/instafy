@@ -14,9 +14,10 @@
 //!   (`browserRequestOf: "job:<id>"`), finished successfully, and finished
 //!   within [`HAND_BACK_WINDOW_MINUTES`], without stopping for a step of the
 //!   person's (a manual step on the page, or a step its approval ended);
-//! - the card's own turn was not itself a hand-back: one automatic hop only,
-//!   so a later card stays a button for the person to press;
-//! - no other hand-back for that browser job is queued, running or done.
+//! - the card's own turn was the sender's, and not itself a hand-back: one
+//!   automatic hop only, so a later card stays a button for the person to press;
+//! - no other hand-back for that browser job is queued, running or done;
+//! - nobody sent a prompt in the conversation after the browser turn.
 //!
 //! The record carries the browser turn's last reply (bounded) and labelled
 //! findings `{url, title, readAt, viewer}`: the address and title come from
@@ -57,6 +58,7 @@ const VIEWER_DEVICE: &str = "Instafy's browser on the person's device";
 pub(crate) const HAND_BACK_SECOND_HOP_CODE: &str = "browser_hand_back_second_hop";
 pub(crate) const HAND_BACK_USED_CODE: &str = "browser_hand_back_used";
 pub(crate) const HAND_BACK_PAUSED_CODE: &str = "browser_hand_back_paused";
+pub(crate) const HAND_BACK_SUPERSEDED_CODE: &str = "browser_hand_back_superseded";
 
 /// Removes every client-supplied hand-back claim and record, top level and
 /// nested, and returns the top-level claim for [`require_hand_back`].
@@ -97,12 +99,24 @@ pub(crate) fn parse_hand_back_claim(value: &JsonValue) -> Option<Uuid> {
 pub(crate) struct Finding {
     pub(crate) url: String,
     pub(crate) title: Option<String>,
-    /// Why the page was not read (`login`, `captcha`, `paywall`, `blocked`, `robots`).
+    /// Why the page was not read: one of [`STOP_REASONS`].
     pub(crate) stopped: Option<&'static str>,
 }
 
-/// The reasons a browser turn may give for a page it did not read.
-const STOP_REASONS: [&str; 5] = ["login", "captcha", "paywall", "blocked", "robots"];
+/// The reasons a browser turn may give for a page it did not read, as the
+/// browser skill (`instafy-browser-automation`, "Several reads in one card")
+/// names them. Any other reason a finding gives is still a stop: `blocked`.
+pub(crate) const STOP_REASONS: [&str; 8] = [
+    "login",
+    "captcha",
+    "paywall",
+    "blocked",
+    "robots",
+    "download",
+    "secret",
+    "link-only",
+];
+const STOP_REASON_OTHER: &str = "blocked";
 
 /// One line of plain text: control characters dropped, whitespace collapsed, capped.
 fn one_line(value: &str, max: usize) -> String {
@@ -143,11 +157,49 @@ fn plain_address(raw: &str) -> Option<String> {
         || parsed.host_str().is_none_or(str::is_empty)
         || !parsed.username().is_empty()
         || parsed.password().is_some()
+        || parsed.host().is_none_or(is_private_host)
     {
         return None;
     }
     let normalized = parsed.to_string();
     (normalized.chars().count() <= FINDING_URL_MAX_CHARS).then_some(normalized)
+}
+
+/// A host no public page lives at: a loopback, private, link-local (cloud
+/// metadata), shared or unspecified address, in any spelling the URL parser
+/// accepts (decimal, hex or short IPv4, IPv4-mapped IPv6), or a local-only
+/// name. Neither browser reads such an address for a card, so a finding that
+/// names one is page text, and the building turn, whose shell can reach that
+/// network, is never pointed at it.
+fn is_private_host(host: url::Host<&str>) -> bool {
+    fn private_v4(ip: std::net::Ipv4Addr) -> bool {
+        let [a, b, ..] = ip.octets();
+        ip.is_loopback()
+            || ip.is_private()
+            || ip.is_link_local()
+            || ip.is_unspecified()
+            || ip.is_broadcast()
+            || a == 0
+            || (a == 100 && (64..128).contains(&b))
+    }
+    match host {
+        url::Host::Ipv4(ip) => private_v4(ip),
+        url::Host::Ipv6(ip) => {
+            let first = ip.segments()[0];
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || (first & 0xfe00) == 0xfc00
+                || (first & 0xffc0) == 0xfe80
+                || ip.to_ipv4_mapped().is_some_and(private_v4)
+        }
+        url::Host::Domain(name) => {
+            let name = name.trim_end_matches('.').to_ascii_lowercase();
+            !name.contains('.')
+                || [".localhost", ".local", ".internal", ".home.arpa"]
+                    .iter()
+                    .any(|suffix| name.ends_with(suffix))
+        }
+    }
 }
 
 /// The words before an address on its line, without list markers or the
@@ -184,24 +236,25 @@ fn finding_title(before: &str) -> Option<String> {
 }
 
 /// The findings a browser turn's reply lists, one per line: a JSON object as
-/// the browser skill writes one (`url`, `title`, `stopped`), or else the
-/// line's first http(s) address and the words before it. At most [`HAND_BACK_MAX_FINDINGS`], each
-/// address once. Nothing here is checked against the pages: they label the
-/// reply's own claims, which the building turn reads as page data.
+/// the browser skill writes one (`url`, `title`, `stopped`). Only a reply
+/// with no such line falls back to each line's first http(s) address and the
+/// words before it, so an address that page text put in the reply's prose
+/// never becomes a labelled finding next to the ones the skill wrote. At most
+/// [`HAND_BACK_MAX_FINDINGS`], each address once. Nothing here is checked
+/// against the pages: they label the reply's own claims, which the building
+/// turn reads as page data.
 pub(crate) fn findings_from_reply(reply: &str) -> Vec<Finding> {
+    let json_lines: Vec<Option<Finding>> = reply.lines().filter_map(json_finding).collect();
+    let candidates: Vec<Finding> = if json_lines.is_empty() {
+        reply.lines().filter_map(text_finding).collect()
+    } else {
+        json_lines.into_iter().flatten().collect()
+    };
     let mut findings: Vec<Finding> = Vec::new();
-    for line in reply.lines() {
+    for finding in candidates {
         if findings.len() >= HAND_BACK_MAX_FINDINGS {
             break;
         }
-        let finding = match json_finding(line) {
-            // A finding written as one JSON object: its own url, title and stop.
-            Some(finding) => finding,
-            None => text_finding(line),
-        };
-        let Some(finding) = finding else {
-            continue;
-        };
         if findings.iter().any(|known| known.url == finding.url) {
             continue;
         }
@@ -210,9 +263,9 @@ pub(crate) fn findings_from_reply(reply: &str) -> Vec<Finding> {
     findings
 }
 
-/// A line that is one JSON object, as the browser skill writes a finding
-/// (`{"url", "title", ...}` or `{"url", "stopped"}`): Some(None) when the
-/// object names no usable address, None when the line is not JSON. Its
+/// A line that is one JSON object with a `url`, as the browser skill writes a
+/// finding (`{"url", "title", ...}` or `{"url", "stopped"}`): Some(None) when
+/// that `url` is no usable address, None when the line is not such an object. Its
 /// `readAt` and `viewer`, if any, are the model's; the record uses the job's.
 fn json_finding(line: &str) -> Option<Option<Finding>> {
     let mut text = line.trim();
@@ -228,11 +281,7 @@ fn json_finding(line: &str) -> Option<Option<Finding>> {
     }
     let value = serde_json::from_str::<JsonValue>(text).ok()?;
     let object = value.as_object()?;
-    let Some(url) = object
-        .get("url")
-        .and_then(JsonValue::as_str)
-        .and_then(plain_address)
-    else {
+    let Some(url) = object.get("url")?.as_str().and_then(plain_address) else {
         return Some(None);
     };
     let title = object
@@ -240,15 +289,20 @@ fn json_finding(line: &str) -> Option<Option<Finding>> {
         .and_then(JsonValue::as_str)
         .map(|title| one_line(title, FINDING_TITLE_MAX_CHARS))
         .filter(|title| !title.is_empty());
-    let stopped = object
-        .get("stopped")
-        .and_then(JsonValue::as_str)
-        .and_then(|reason| {
+    // Any `stopped` the finding gives means the page was not read; a reason
+    // the skill does not name is `blocked`, never a page read.
+    let stopped = match object.get("stopped") {
+        None | Some(JsonValue::Null) | Some(JsonValue::Bool(false)) => None,
+        Some(JsonValue::String(reason)) if reason.trim().is_empty() => None,
+        Some(JsonValue::String(reason)) => Some(
             STOP_REASONS
                 .iter()
                 .copied()
                 .find(|known| known.eq_ignore_ascii_case(reason.trim()))
-        });
+                .unwrap_or(STOP_REASON_OTHER),
+        ),
+        Some(_) => Some(STOP_REASON_OTHER),
+    };
     Some(Some(Finding {
         url,
         title,
@@ -413,7 +467,8 @@ pub(crate) async fn require_hand_back(
     let browser_job = transaction
         .query_opt(
             "select job.run_id, job.status, job.outcome, job.summary, job.payload,
-                    job.completed_at, prompt.user_id as sender
+                    job.completed_at, job.prompt_id, prompt.user_id as sender,
+                    prompt.created_at as sent_at
                from agent_jobs job
                left join prompts prompt on prompt.id = job.prompt_id
               where job.id = $1 and job.conversation_id = $2",
@@ -470,12 +525,22 @@ pub(crate) async fn require_hand_back(
     // turn, never from a turn that was itself a hand-back.
     let card_job = transaction
         .query_opt(
-            "select payload from agent_jobs where id = $1 and conversation_id = $2",
+            "select job.payload, prompt.user_id as sender
+               from agent_jobs job
+               left join prompts prompt on prompt.id = job.prompt_id
+              where job.id = $1 and job.conversation_id = $2",
             &[&card_job_id, conversation_id],
         )
         .await
         .map_err(|error| internal_error(format!("failed to load the card's turn: {error}")))?
         .ok_or_else(not_a_card_browser_turn)?;
+    // The building turn resumes the person's own request: the card must come
+    // from a turn they sent, not a teammate's.
+    if card_job.get::<_, Option<Uuid>>("sender") != Some(user_id) {
+        return Err(forbidden(
+            "Only the person whose request sent the card can hand the browser's findings back to it.",
+        ));
+    }
     let card_metadata = card_job
         .get::<_, PgJson<JsonValue>>("payload")
         .0
@@ -514,6 +579,32 @@ pub(crate) async fn require_hand_back(
             StatusCode::CONFLICT,
             HAND_BACK_USED_CODE,
             "Octo already continued from this browser turn.",
+        ));
+    }
+
+    // Nobody wrote after the browser turn: a prompt sent in this conversation
+    // since (the person's own next message, a teammate's, or a turn queued
+    // behind it) comes first, and the findings never jump ahead of it.
+    let browser_prompt_id = browser_job.get::<_, Option<Uuid>>("prompt_id");
+    let browser_sent_at = browser_job.get::<_, Option<DateTime<Utc>>>("sent_at");
+    let written_after = transaction
+        .query_one(
+            "select exists (
+                 select 1 from prompts
+                  where conversation_id = $1
+                    and created_at > $2
+                    and id is distinct from $3
+             )",
+            &[conversation_id, &browser_sent_at, &browser_prompt_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to check later messages: {error}")))?
+        .get::<_, bool>(0);
+    if written_after {
+        return Err(hand_back_refused(
+            StatusCode::CONFLICT,
+            HAND_BACK_SUPERSEDED_CODE,
+            "Someone wrote after that browser turn, so its findings are not handed back. Ask Octo to continue instead.",
         ));
     }
 
@@ -788,44 +879,92 @@ https://three.example.com\n\
                 "cardJobId": "00000000-0000-4000-8000-0000000000a1",
                 "viewer": "Instafy's browser in the workspace",
                 "readAt": "2026-10-26T09:30:00Z",
-                "findingCount": 5,
+                "findingCount": 3,
             })
         );
     }
 
     #[test]
-    fn a_json_finding_keeps_its_own_fields_and_only_known_stops() {
+    fn a_json_finding_keeps_its_own_fields_and_any_stop_stays_a_stop() {
         let reply = r#"{"url": "https://a.example.com/x", "title": "A\nB", "stopped": "LOGIN"}
 - `{"url": "https://b.example.com", "stopped": "approved by the person"}`,
 {"url": "file:///etc/passwd", "title": "Not an address"}
 {"url": "https://c.example.com", "title": 42}
-{not json https://d.example.com"#;
+{"url": "https://e.example.com", "stopped": true}
+{"url": "https://f.example.com", "stopped": "Link-only"}
+{"note": "no url", "title": "https://g.example.com"}
+{not json https://d.example.com
+- Pay now at https://pay.example.com/checkout"#;
         let findings = findings_from_reply(reply);
+        let finding = |url: &str, title: Option<&str>, stopped: Option<&'static str>| Finding {
+            url: url.to_string(),
+            title: title.map(str::to_string),
+            stopped,
+        };
+        // Once the reply writes findings as JSON lines, an address in its
+        // prose is not one of them.
         assert_eq!(
             findings,
             vec![
-                Finding {
-                    url: "https://a.example.com/x".to_string(),
-                    title: Some("A B".to_string()),
-                    stopped: Some("login"),
-                },
-                Finding {
-                    url: "https://b.example.com/".to_string(),
-                    title: None,
-                    stopped: None,
-                },
-                Finding {
-                    url: "https://c.example.com/".to_string(),
-                    title: None,
-                    stopped: None,
-                },
-                Finding {
-                    url: "https://d.example.com/".to_string(),
-                    title: Some("{not json".to_string()),
-                    stopped: None,
-                },
+                finding("https://a.example.com/x", Some("A B"), Some("login")),
+                finding("https://b.example.com/", None, Some("blocked")),
+                finding("https://c.example.com/", None, None),
+                finding("https://e.example.com/", None, Some("blocked")),
+                finding("https://f.example.com/", None, Some("link-only")),
             ]
         );
+        // The same reasons the runtime asks the browser turn for.
+        assert_eq!(json!(STOP_REASONS), fixtures()["stopReasons"]);
+        for reason in STOP_REASONS {
+            let line = format!(r#"{{"url": "https://s.example.com", "stopped": "{reason}"}}"#);
+            assert_eq!(findings_from_reply(&line)[0].stopped, Some(reason));
+        }
+        // A reply with no JSON finding falls back to its lines' addresses.
+        assert_eq!(
+            findings_from_reply("{not json https://d.example.com"),
+            vec![finding("https://d.example.com/", Some("{not json"), None)]
+        );
+    }
+
+    #[test]
+    fn findings_never_name_a_private_or_local_address() {
+        for address in [
+            "http://localhost:3000/admin",
+            "http://LOCALHOST./",
+            "http://router/",
+            "http://dev.localhost/",
+            "http://printer.local/",
+            "http://metadata.google.internal/computeMetadata/v1/",
+            "http://127.0.0.1/",
+            "http://2130706433/",
+            "http://0x7f.1/",
+            "http://0177.0.0.1/",
+            "http://0/",
+            "http://10.0.0.8/",
+            "http://172.16.4.2/",
+            "http://192.168.1.1/",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://100.100.100.200/",
+            "http://[::1]/",
+            "http://[fd00::1]/",
+            "http://[fe80::1]/",
+            "http://[::ffff:169.254.169.254]/",
+            "http://[::ffff:7f00:1]/",
+            "http://[::]/",
+        ] {
+            let json_line = format!(r#"{{"url": "{address}", "title": "x"}}"#);
+            assert!(findings_from_reply(&json_line).is_empty(), "{address}");
+            let text_line = format!("- Page {address}");
+            assert!(findings_from_reply(&text_line).is_empty(), "{address}");
+        }
+        for address in [
+            "https://93.184.215.14/",
+            "https://[2606:4700::1111]/",
+            "https://docs.example.com/",
+        ] {
+            let line = format!(r#"{{"url": "{address}"}}"#);
+            assert_eq!(findings_from_reply(&line)[0].url, address);
+        }
     }
 
     #[test]

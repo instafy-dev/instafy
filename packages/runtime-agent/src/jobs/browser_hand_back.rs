@@ -21,8 +21,8 @@ const FINDINGS_CONTRACT: &str = "\n\nFindings for the building turn:\n\
 Octo asked for this browser task from a building turn, and that turn continues from your reply once you finish. \
 End your reply with one finding per page, each one JSON object on its own line: \
 `{\"url\": \"<address>\", \"title\": \"<page title>\", \"facts\": [\"<what the page showed>\"]}` for a page you read, \
-or `{\"url\": \"<address>\", \"stopped\": \"login|captcha|paywall|blocked|robots\"}` for one that ended at a sign-in, \
-a bot check, a paywall or a block (never retry such a page another way). \
+or `{\"url\": \"<address>\", \"stopped\": \"login|captcha|paywall|blocked|robots|download|secret|link-only\"}` for one that ended at a sign-in, \
+a bot check, a paywall, a block or HTTP 401/403/429, robots.txt, a download, a page showing secrets or a link-only site (never retry such a page another way). \
 Report only what the pages showed and copy no long listing text; Instafy adds when and in which browser each page was read. \
 If you stopped before finishing (a manual step, a refused or challenge page), say so in your first line.";
 
@@ -133,9 +133,21 @@ mod tests {
                 r#"`{"url": "<address>", "title": "<page title>", "facts": ["<what the page showed>"]}`"#
             ));
             assert!(section.contains(
-                r#"`{"url": "<address>", "stopped": "login|captcha|paywall|blocked|robots"}`"#
+                r#"`{"url": "<address>", "stopped": "login|captcha|paywall|blocked|robots|download|secret|link-only"}`"#
             ));
             assert!(section.contains("never retry such a page another way"));
+            // The controller keeps exactly these reasons (browser_hand_back_fixtures.json).
+            let reasons = fixtures()["stopReasons"]
+                .as_array()
+                .expect("stop reasons")
+                .iter()
+                .map(|reason| reason.as_str().expect("reason"))
+                .collect::<Vec<_>>()
+                .join("|");
+            assert!(
+                section.contains(&format!(r#""stopped": "{reasons}""#)),
+                "{section}"
+            );
             assert!(section.contains("say so in your first line"));
         }
         // A browser turn the person started themselves, or any other turn.

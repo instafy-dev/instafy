@@ -1188,9 +1188,16 @@ unless the policy is `"covered"`.
   checks the same chain under the conversation's dispatch fence and stamps
   `browserHandBack` with the browser turn's final reply (at most 6,000
   characters) and up to six labelled findings `{url, title, readAt, viewer}`
-  (plus `stopped` for a page that ended at a sign-in or bot check): the address
-  and title come from the reply's lines, `readAt` and `viewer` from the job. Only the person who ran the browser turn can send it, once
-  per browser turn, within 30 minutes, and never as a send-queue entry. The
+  (plus `stopped` for a page that was not read: `login`, `captcha`, `paywall`,
+  `blocked`, `robots`, `download`, `secret` or `link-only`, and any other reason
+  counts as `blocked`): the address and title come from the reply's JSON
+  finding lines (only a reply without any falls back to the addresses on its
+  lines), `readAt` and `viewer` from the job, and an address on a loopback,
+  private, link-local or local-only host is never a finding. Only the person
+  who ran the browser turn, and whose turn sent the card, can send it, once per
+  browser turn, within 30 minutes, only while no prompt was sent in the
+  conversation after the browser turn (`browser_hand_back_superseded`), and
+  never as a send-queue entry. The
   runtime shows that record to the building turn as quoted page data: not the
   person's words, not their consent, and no instruction. One automatic hop
   only: a card the hand-back turn sends never opens by itself, and its browser

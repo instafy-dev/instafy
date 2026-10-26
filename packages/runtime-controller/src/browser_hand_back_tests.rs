@@ -12,7 +12,7 @@
 use super::*;
 use crate::browser_hand_back::{
     HAND_BACK_CLAIM_KEY, HAND_BACK_KEY, HAND_BACK_PAUSED_CODE, HAND_BACK_SECOND_HOP_CODE,
-    HAND_BACK_USED_CODE,
+    HAND_BACK_SUPERSEDED_CODE, HAND_BACK_USED_CODE,
 };
 
 fn fixtures() -> serde_json::Value {
@@ -364,7 +364,7 @@ async fn a_browser_turn_hands_its_findings_back_to_one_building_turn() -> anyhow
                 message.0[HAND_BACK_KEY]["browserJobId"],
                 json!(browser_job.to_string())
             );
-            assert_eq!(message.0[HAND_BACK_KEY]["findingCount"], json!(5));
+            assert_eq!(message.0[HAND_BACK_KEY]["findingCount"], json!(3));
             assert!(message.0[HAND_BACK_KEY].get("reply").is_none());
             assert!(!message
                 .0
@@ -551,6 +551,77 @@ async fn a_failed_browser_turn_and_a_forged_record_hand_nothing_back() -> anyhow
             );
             assert!(sanitized.get(HAND_BACK_CLAIM_KEY).is_none(), "{sanitized}");
             assert!(sanitized.get(HAND_BACK_KEY).is_none(), "{sanitized}");
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// The hand-back resumes the sender's own request, and only while the
+/// browser turn is still the last word: a card from a teammate's turn, or a
+/// prompt anyone sent after the browser turn, hands nothing back.
+#[tokio::test]
+async fn a_teammates_card_or_a_later_message_hands_nothing_back() -> anyhow::Result<()> {
+    with_chain("browser-hand-back-later-message", |chain| {
+        Box::pin(async move {
+            let reply = fixtures()["browserReply"].as_str().unwrap().to_string();
+            let jobs = || async {
+                anyhow::Ok(
+                    chain
+                        .pool
+                        .get()
+                        .await?
+                        .query_one(
+                            "select count(*) from agent_jobs where conversation_id = $1",
+                            &[&chain.conversation_id],
+                        )
+                        .await?
+                        .get::<_, i64>(0),
+                )
+            };
+
+            // The teammate's turn sent the card; the owner pressed it.
+            let card_turn = chain
+                .send(&chain.teammate, "Plan a day on the coast.", json!({}))
+                .await
+                .map_err(|error| controller_error("teammate's card turn", error))?;
+            let card_job = chain.job_of(&card_turn).await?;
+            chain
+                .finish(
+                    &card_job,
+                    Some("Continue this task in Instafy's browser."),
+                    "succeeded",
+                )
+                .await?;
+            let browser_turn = chain
+                .send(
+                    &chain.owner,
+                    "Continue this browser task using the browser attached to this turn.",
+                    json!({ "browserRequestOf": format!("job:{card_job}") }),
+                )
+                .await
+                .map_err(|error| controller_error("browser turn", error))?;
+            let browser_job = chain.job_of(&browser_turn).await?;
+            chain.make_browser_turn(&browser_job).await?;
+            chain
+                .finish(&browser_job, Some(&reply), "succeeded")
+                .await?;
+            let (status, body) =
+                refused(chain.hand_back(&chain.owner, &browser_job, json!({})).await);
+            assert_eq!(status, StatusCode::FORBIDDEN, "{}", body.message);
+
+            // The owner's own chain, then a message of theirs after the browser turn.
+            let (_, browser_job) = chain.card_and_browser_turn(&reply).await?;
+            chain
+                .send(&chain.owner, "Actually, leave the trip for now.", json!({}))
+                .await
+                .map_err(|error| controller_error("later message", error))?;
+            let before = jobs().await?;
+            let (status, body) =
+                refused(chain.hand_back(&chain.owner, &browser_job, json!({})).await);
+            assert_eq!(status, StatusCode::CONFLICT, "{}", body.message);
+            assert_eq!(body.code.as_deref(), Some(HAND_BACK_SUPERSEDED_CODE));
+            assert_eq!(jobs().await?, before, "a refused hand-back starts no turn");
             Ok(())
         })
     })
