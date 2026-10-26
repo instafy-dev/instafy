@@ -4,7 +4,8 @@ name: Origin Git Compatibility
 # ships git 2.34.1, the oldest git the origin server supports, so the origin
 # server's git tests (publish, merge, recovery refs, refresh, flush and the
 # static checks that every git spawn goes through server_git_command without
-# post-2.34 options) run against exactly that git here.
+# post-2.34 options) run against exactly that git here. Node is installed only
+# because the sent-page capture tests run the page reader in it.
 
 on:
   pull_request:
@@ -59,6 +60,13 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+
+      # The sent-page capture tests run the browser-action-policy page reader
+      # in Node, as the hosted runtime image does; Ubuntu 22.04 has no Node.
+      - name: Install Node for the page reader tests
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
 
       - name: Install the pinned Rust installer
         shell: bash
