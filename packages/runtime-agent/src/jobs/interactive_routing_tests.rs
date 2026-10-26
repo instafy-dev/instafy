@@ -46,6 +46,10 @@ fn pages_to_tap_through_route_to_the_hub() {
         "a quiz about the solar system my kids can tap through",
         "give me a top 10 ranking of budget headphones as a page",
         "a packing checklist for the weekend",
+        // Shopping asks.
+        "compare these 3 robot vacuums and show me where to buy them cheapest",
+        "which espresso machine should I buy for under 500 euros",
+        "compare the iPhone 16 and Pixel 9 for me",
     ] {
         assert!(
             routed(&contexts, prompt).iter().any(|id| id == HUB),
