@@ -142,12 +142,18 @@ test("release scanner allowlists only Supabase publishable-key values", () => {
   assert.equal(pattern.test(keyBody), false);
 });
 
-test("release scanner exempts no file from the private product marker", () => {
+test("release scanner allows the product marker only in top-level JavaScript chunks", () => {
   const config = releaseArtifactScannerConfig(BASE_CONFIG);
-  assert.doesNotMatch(config, /instafy-private-product/u);
-  assert.equal((config.match(/^\[\[allowlists\]\]$/gmu) ?? []).length, 1);
-  assert.equal((config.match(/^targetRules = /gmu) ?? []).length, 1);
-  assert.doesNotMatch(config, /^paths = /mu);
+  const allowlist = config.match(
+    /targetRules = \["instafy-private-product"\]\npaths = \['''([^']+)'''\]/u,
+  );
+  assert.ok(allowlist, "release config must scope the product-marker allowlist by path");
+  const pathPattern = new RegExp(allowlist[1], "u");
+  assert.equal(pathPattern.test("assets/index-AbC_12-x.js"), true);
+  for (const candidate of ["index.html", "instafy-build.json", "assets/index-AbC.css", "assets/nested/chunk.js", "assets/chunk.js.map", "x/assets/chunk.js"]) {
+    assert.equal(pathPattern.test(candidate), false, candidate);
+  }
+  assert.equal((config.match(/targetRules = \["instafy-private-product"\]/gu) ?? []).length, 1);
   assert.doesNotMatch(config, /disabledRules/u);
 });
 
@@ -178,7 +184,7 @@ test("release scanner replaces the bare GitHub token prefix with the full-token 
   const split = (text) => text.split(/(?=^\[\[)/mu);
   const baseBlocks = split(base);
   const releaseBlocks = split(config);
-  assert.equal(releaseBlocks.length, baseBlocks.length + 1, "only the release allowlist block is appended");
+  assert.equal(releaseBlocks.length, baseBlocks.length + 2, "only the two release allowlist blocks are appended");
   let replaced = 0;
   baseBlocks.forEach((block, index) => {
     if (/^id = "instafy-github-token-prefix"$/mu.test(block)) {

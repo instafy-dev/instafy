@@ -10,12 +10,10 @@
 `packages/frontend/hosted/hostedFrontendFeatureManifest.ts`, which composes:
 
 1. the public core feature module;
-2. the Studio performance bridge in `packages/frontend/hosted/performance/`,
+2. the vendored robot integration slice in `packages/frontend/hosted/robot/`
+   (generated, never edited by hand; see its README);
+3. the Studio performance bridge in `packages/frontend/hosted/performance/`,
    whose transport is disabled in this lane.
-
-Integrations built outside this repository are not part of the hosted web app.
-They compose their own feature modules into their own builds through
-`INSTAFY_FRONTEND_FEATURE_MANIFEST` and `@instafy/frontend/feature-api`.
 
 Standalone, OTA and Desktop builds keep the public default manifest. Tailwind
 does not scan `packages/frontend/hosted/` (`@source not` in
@@ -40,7 +38,7 @@ does not scan `packages/frontend/hosted/` (`@source not` in
 | Job | Secrets | What it proves |
 | --- | --- | --- |
 | Authorize the exact web tag | none | bot actor and pusher, tag shape, tag peels to `github.sha`, commit on protected main, lane contract tests |
-| Build and seal the exact hosted web frontend | none | publishable browser config, exact release metadata, both feature modules present, no private strings, pinned Gitleaks, reproducible archive |
+| Build and seal the exact hosted web frontend | none | publishable browser config, exact release metadata, all three feature modules present, no private strings, pinned Gitleaks, reproducible archive |
 | Publish the exact hosted web frontend | `web-release` | archive digest, safe members, per-file hashes, tag still bound, no stale publish, production serves exactly this release, automatic rollback on failure |
 
 ## The secret boundary

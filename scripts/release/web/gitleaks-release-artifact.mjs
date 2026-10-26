@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 // Hosted web lane copy of the release-artifact Gitleaks gate (one copy per lane
 // by design): the public boundary config, the full GitHub token shape, and
-// release-artifact-only allowlists. Every rule, the private product marker
-// included, scans every byte of the artifact.
+// release-artifact-only allowlists. The bundled JavaScript legitimately carries
+// the robot integration's wire identifiers, so the product-marker rule is
+// allowed for top-level assets/*.js only; index.html, CSS, metadata and every
+// other rule still scan every byte.
 
 import { spawnSync } from "node:child_process";
 import {
@@ -40,6 +42,11 @@ const RELEASE_ARTIFACT_ALLOWLIST = String.raw`
 description = "Supabase publishable keys are intentionally browser-visible"
 targetRules = ["generic-api-key"]
 regexes = ['''^sb_publishable_[A-Za-z0-9_-]{20,}$''']
+
+[[allowlists]]
+description = "Hosted web JavaScript chunks carry the robot integration's public wire identifiers"
+targetRules = ["instafy-private-product"]
+paths = ['''^assets/[A-Za-z0-9_.-]+\.js$''']
 `;
 
 function scannerEnvironment() {

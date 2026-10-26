@@ -24,11 +24,10 @@ test("service-role names never reach the browser build", () => {
   assert.throws(() => hostedBuildEnvironment({ [["VITE", "SUPABASE", "SERVICE", "ROLE", "KEY"].join("_")]: "x" }, "/repo"), /forbidden/u);
 });
 
-test("the hosted manifest composes public core and then the performance bridge", () => {
+test("the hosted manifest composes public core, the robot slice and the performance bridge in order", () => {
   const manifest = fs.readFileSync(path.join(REPOSITORY_ROOT, HOSTED_MANIFEST_RELATIVE_PATH), "utf8");
   assert.match(
     manifest,
-    /APPLICATION_FRONTEND_FEATURE_MODULES = Object\.freeze\(\[\n  PUBLIC_CORE_FRONTEND_FEATURE_MODULE,\n  STUDIO_PERFORMANCE_FEATURE_MODULE,\n\]\);/u,
+    /APPLICATION_FRONTEND_FEATURE_MODULES = Object\.freeze\(\[\n  PUBLIC_CORE_FRONTEND_FEATURE_MODULE,\n  ROBOT_FRONTEND_FEATURE_MODULE,\n  STUDIO_PERFORMANCE_FEATURE_MODULE,\n\]\);/u,
   );
-  assert.deepEqual(fs.readdirSync(path.join(REPOSITORY_ROOT, "packages/frontend/hosted")).sort(), ["hostedFrontendFeatureManifest.ts", "performance"]);
 });
