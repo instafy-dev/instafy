@@ -3031,6 +3031,8 @@ mod device_auth_session_tests {
     fn codex_forbidden_poll_is_actionable_and_not_pending() {
         let error = codex_poll_http_error(reqwest::StatusCode::FORBIDDEN)
             .expect_err("403 must stop polling");
+        // Studio keys its no-code card on this phrase (deviceAuthErrors.ts).
+        assert!(error.contains("device-code login is not enabled"));
         assert!(error.contains("ChatGPT Settings"));
         assert!(error.contains("Security"));
         assert!(error.contains("workspace permissions"));

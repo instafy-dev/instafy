@@ -26,12 +26,14 @@ import { useBreakpoint } from "../../../hooks/useBreakpoint";
 import type { DeviceAuthProvider } from "../../../sdk/instafy";
 import { openExternalUrl } from "../../../utils/openExternalUrl";
 import { CredentialsConnectionChoices, getCodexConnectionChoice } from "./CredentialsConnectionChoices";
+import { ChatGptDeviceCodeDisabledNotice } from "./ChatGptDeviceCodeDisabledNotice";
 import { ChatGptDeviceCodePrerequisite } from "./ChatGptDeviceCodePrerequisite";
 import { CodexAdvancedConnectionOptions } from "./CodexAdvancedConnectionOptions";
 import {
   isLikelyDesktopDevice,
   shouldPromptForCodexAuthJsonUpload,
 } from "./desktopCodexAuthJson";
+import { isChatGptDeviceCodeLoginDisabledError } from "./device-auth/deviceAuthErrors";
 import type { DeviceAuthSession } from "./device-auth/useDeviceAuthFlow";
 
 export type CredentialsConnectModalStep =
@@ -199,6 +201,11 @@ export function CredentialsConnectModal({
     ? "Choose auth.json"
     : "Use local Codex login";
   const codexDeviceAuthSession = deviceAuthProvider === "codex" ? deviceAuthSession : null;
+  // OpenAI refused device-code login: the session's code can never be
+  // approved, so the card explains how to turn it on instead of showing it.
+  const codexDeviceCodeLoginDisabled =
+    isChatGptDeviceCodeLoginDisabledError(codexDeviceAuthSession?.error) ||
+    isChatGptDeviceCodeLoginDisabledError(deviceAuthError);
   const allowAuthJsonImport = canUseDesktopConnect || isLikelyDesktopDevice();
   const modalBusy =
     connectPending || deviceAuthBusy || deviceAuthCompleting || apiKeyPendingProvider !== null;
@@ -302,7 +309,7 @@ export function CredentialsConnectModal({
         </div>
       ) : connectModalStep === "codex" ? (
         <div className="space-y-3" data-testid="credentials-codex-card">
-          {deviceAuthError ? (
+          {deviceAuthError && !codexDeviceCodeLoginDisabled ? (
             <InlineNotice tone="danger" role="alert">
               {deviceAuthError}
             </InlineNotice>
@@ -315,7 +322,11 @@ export function CredentialsConnectModal({
             {canUseDesktopConnect ? (
               <Button
                 onPress={shouldPromptForAuthJsonUpload ? onTriggerUpload : onConnectCodex}
-                isDisabled={!canManageAiConnections || modalBusy || deviceAuthSession !== null}
+                isDisabled={
+                  !canManageAiConnections ||
+                  modalBusy ||
+                  (deviceAuthSession !== null && !codexDeviceCodeLoginDisabled)
+                }
                 variant="outline"
                 size="xs"
                 radius="full"
@@ -326,7 +337,14 @@ export function CredentialsConnectModal({
             ) : null}
           </div>
 
-          {codexDeviceAuthSession ? (
+          {codexDeviceCodeLoginDisabled ? (
+            <ChatGptDeviceCodeDisabledNotice
+              busy={modalBusy || !canManageAiConnections}
+              onTryAgain={() => onBeginDeviceAuth("codex")}
+              onBack={onCancelDeviceAuthSession}
+              testId="credentials-chatgpt-device-code-disabled"
+            />
+          ) : codexDeviceAuthSession ? (
             <Surface tone="muted" radius="xl" shadow="none" className="p-3">
               <Text variant="bodyStrong">Device login</Text>
               <Text variant="caption" tone="muted" className="mt-1">Open the OpenAI login page and enter this one-time code:</Text>
@@ -460,7 +478,7 @@ export function CredentialsConnectModal({
             />
           )}
 
-          {canUseDesktopConnect && !codexDeviceAuthSession ? (
+          {canUseDesktopConnect && !codexDeviceAuthSession && !codexDeviceCodeLoginDisabled ? (
             <div className="space-y-2">
               <div className="flex justify-end">
                 <Button
