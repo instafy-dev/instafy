@@ -68,7 +68,8 @@
         "to": "runtime-agent",
         "filter": [
           "runtime-agent*",
-          "codex-code-mode-host*"
+          "codex-code-mode-host*",
+          "skill-packs/**"
         ]
       }
     ],

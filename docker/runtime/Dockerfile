@@ -48,6 +48,18 @@ ARG WEBDEV_OPENSSL_MIN_VERSION=3.0.13-0ubuntu3.16
 FROM ${NODE_IMAGE} AS node-runtime
 
 ########################
+# Skill packs every space gets: the release archives pinned in
+# packages/runtime-agent/skill-packs.json. The installer checks each archive's
+# sha256 before reading it, then its commit, entries and content hash, and fails
+# the build on any mismatch (scripts/install-skill-packs.mjs).
+########################
+FROM ${NODE_IMAGE} AS skill-packs
+WORKDIR /build
+COPY packages/runtime-agent/skill-packs.json packages/runtime-agent/skill-packs.json
+COPY scripts/install-skill-packs.mjs scripts/install-skill-packs.mjs
+RUN node scripts/install-skill-packs.mjs --require-pinned --pin packages/runtime-agent/skill-packs.json --out /out/skill-packs
+
+########################
 # Shared Browser egress proxy
 ########################
 FROM ${GO_IMAGE} AS browser-egress-proxy-builder
@@ -232,6 +244,7 @@ WORKDIR /src
 COPY packages/runtime-agent/Cargo.toml packages/runtime-agent/Cargo.lock packages/runtime-agent/
 COPY packages/runtime-agent/src/ packages/runtime-agent/src/
 COPY packages/runtime-agent/assets/instafy/ packages/runtime-agent/assets/instafy/
+COPY packages/runtime-agent/assets/skill-pack-space/ packages/runtime-agent/assets/skill-pack-space/
 COPY packages/runtime-agent/assets/*.js packages/runtime-agent/assets/
 COPY packages/browser-action-policy/*.js packages/browser-action-policy/
 # One cargo command for all three binaries: the sandbox's library is already in
@@ -494,6 +507,9 @@ COPY --from=browser-webrtc-builder /out/browser-webrtc-sender /usr/local/bin/bro
 COPY --from=cli-builder /out /opt/instafy-cli
 RUN chmod +x /opt/instafy-cli/bin/instafy.js \
     && ln -sf /opt/instafy-cli/bin/instafy.js /usr/local/bin/instafy
+# Skill packs ship once per image; each space gets only a small managed
+# SKILL.md and launcher that find them here (packages/runtime-agent/src/skill_packs.rs).
+COPY --from=skill-packs /out/skill-packs /opt/instafy/skill-packs
 
 # The compiled binaries change with almost every commit, so they come last: a
 # runtime-agent change re-exports only the binary layers and the small layers
@@ -511,6 +527,7 @@ RUN set -eu; \
     done
 
 ENV WORKSPACE_DIR=/workspace \
+    INSTAFY_SKILL_PACKS_DIR=/opt/instafy/skill-packs \
     CODEX_HOME=/workspace/.codex \
     PATH=/usr/local/bin:$PATH \
     CODEX_LINUX_SANDBOX_EXE=/usr/local/bin/codex-linux-sandbox \
@@ -667,6 +684,9 @@ COPY --from=browser-webrtc-builder /out/browser-webrtc-sender /usr/local/bin/bro
 COPY --from=cli-builder /out /opt/instafy-cli
 RUN chmod +x /opt/instafy-cli/bin/instafy.js \
     && ln -sf /opt/instafy-cli/bin/instafy.js /usr/local/bin/instafy
+# Skill packs ship once per image; each space gets only a small managed
+# SKILL.md and launcher that find them here (packages/runtime-agent/src/skill_packs.rs).
+COPY --from=skill-packs /out/skill-packs /opt/instafy/skill-packs
 
 # The compiled binaries change with almost every commit, so they come last: a
 # runtime-agent change re-exports only the binary layers and the small layers
@@ -684,6 +704,7 @@ RUN set -eu; \
     done
 
 ENV WORKSPACE_DIR=/workspace \
+    INSTAFY_SKILL_PACKS_DIR=/opt/instafy/skill-packs \
     CODEX_HOME=/workspace/.codex \
     PATH=/usr/local/bin:$PATH \
     CODEX_LINUX_SANDBOX_EXE=/usr/local/bin/codex-linux-sandbox \

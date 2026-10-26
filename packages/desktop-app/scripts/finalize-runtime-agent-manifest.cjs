@@ -1,6 +1,7 @@
 const { createHash } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
+const { describeSkillPacks } = require("./skill-pack-tree.cjs");
 
 const MANIFEST_FILENAME = "runtime-agent-manifest.json";
 const SOURCE_SHA_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
@@ -63,6 +64,7 @@ function requireStagedManifest(manifestPath, expected) {
     manifest.codeModeHost?.filename !== expected.codeModeHostFilename ||
     manifest.platform !== expected.platform ||
     typeof manifest.arch !== "string" ||
+    !Array.isArray(manifest.skillPacks) ||
     !SOURCE_SHA_PATTERN.test(manifest.sourceSha || "")
   ) {
     throw new Error(`Invalid staged runtime-agent manifest: ${manifestPath}`);
@@ -70,9 +72,22 @@ function requireStagedManifest(manifestPath, expected) {
   return manifest;
 }
 
+// The packaged skill packs, each checked against its manifest, must be exactly the staged ones.
+function requirePackagedSkillPacks(directory, staged) {
+  const packaged = describeSkillPacks(path.join(directory, "skill-packs"));
+  const expected = [...staged].sort((a, b) => a.name.localeCompare(b.name));
+  if (JSON.stringify(packaged) !== JSON.stringify(expected)) {
+    throw new Error(
+      `Packaged skill packs ${JSON.stringify(packaged)} differ from the staged ${JSON.stringify(expected)}`,
+    );
+  }
+  return packaged;
+}
+
 function finalizeRuntimeAgentManifest(context) {
   const bundle = resolvePackagedRuntimeBundle(context);
   const staged = requireStagedManifest(bundle.manifestPath, bundle);
+  const skillPacks = requirePackagedSkillPacks(bundle.directory, staged.skillPacks);
   const manifest = {
     schemaVersion: 3,
     filename: bundle.filename,
@@ -83,6 +98,7 @@ function finalizeRuntimeAgentManifest(context) {
       filename: bundle.codeModeHostFilename,
       ...describeBinary(bundle.codeModeHostPath, "code-mode host"),
     },
+    skillPacks,
     sourceSha: staged.sourceSha,
   };
   const temporaryPath = `${bundle.manifestPath}.tmp-${process.pid}`;

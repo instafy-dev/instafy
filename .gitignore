@@ -93,3 +93,6 @@ supabase/supabase/migrations/
 
 # TypeScript incremental build state
 *.tsbuildinfo
+
+# Skill packs installed for local development (pnpm skill-packs:install).
+packages/runtime-agent/assets/skill-packs/
