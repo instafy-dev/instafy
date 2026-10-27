@@ -489,7 +489,7 @@ pub(super) async fn post_preview_wake(
     if !grant.is_private_preview() {
         return Err(forbidden("only private previews open in Studio"));
     }
-    if grant.is_superseded() {
+    if super::preview_replaced(&state.pool, &grant).await? {
         // Its tunnel was replaced: a wake would get the newer preview's.
         return Err(wake_conflict(
             "a newer preview replaced this one",
@@ -720,7 +720,7 @@ async fn prepare_restart(
     if grant.record.runtime_id != Some(*runtime_id) {
         return Err(forbidden("preview belongs to another runtime"));
     }
-    if !grant.restartable() {
+    if !grant.restartable() || super::preview_replaced(&state.pool, &grant).await? {
         return Err(wake_conflict(
             "this preview can no longer be restarted",
             "not_restartable",

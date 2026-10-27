@@ -542,6 +542,48 @@ impl PreviewGrant {
     }
 }
 
+/// Whether a newer preview holds this stopped preview's tunnel key, so a wake
+/// may not reconnect it: the broker answers the key with the newer tunnel,
+/// and the reconnect would write this preview's command and title over the
+/// newer preview's. [`retire_superseded_previews`] marks a preview that was
+/// still open as `supersededBy`, but skips one someone had closed, so for
+/// that one a later grant of the same key is the record. A live preview's
+/// tunnel is its key's current one.
+pub(super) async fn preview_replaced(pool: &PgPool, grant: &PreviewGrant) -> ApiResult<bool> {
+    if grant.is_superseded() {
+        return Ok(true);
+    }
+    if grant.is_live() {
+        return Ok(false);
+    }
+    let Some(tunnel_key) = grant.tunnel_key() else {
+        return Ok(false);
+    };
+    let connection = pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to acquire connection: {error}")))?;
+    let newer = connection
+        .query_opt(
+            "select 1 from runtime_tunnel_grants
+             where project_id = $1
+               and tunnel_id <> $2
+               and jsonb_typeof(metadata->'_instafyPreview') = 'object'
+               and metadata->'_instafyPreview'->>'tunnelKey' = $3
+               and created_at > $4
+             limit 1",
+            &[
+                &grant.record.project_id,
+                &grant.record.tunnel_id,
+                &tunnel_key,
+                &grant.created_at,
+            ],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to check for a newer preview: {error}")))?;
+    Ok(newer.is_some())
+}
+
 /// Whether grant metadata belongs to a preview: it holds the previews
 /// module's own object, which only the controller writes.
 pub(crate) fn grant_metadata_is_preview(metadata: Option<&JsonValue>) -> bool {
@@ -1542,6 +1584,9 @@ async fn get_preview(
     record_preview_serving(&state, &mut grant, health.as_ref()).await;
     let listening = health.as_ref().map(|probe| probe.listening);
     let mut response = grant.response(Some(health));
+    if response.restartable && preview_replaced(&state.pool, &grant).await? {
+        response.restartable = false;
+    }
     response.wake = Some(wake::load_wake_view(&state, &project_id, &grant, listening).await?);
     if let PreviewReader::Context(context) = &reader {
         response.can_start =

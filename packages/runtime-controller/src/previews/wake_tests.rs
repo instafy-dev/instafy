@@ -823,6 +823,82 @@ async fn a_preview_closed_on_purpose_starts_again_on_open_by_people_who_may_chan
     .await
 }
 
+/// A preview someone closed, whose port the broker later gave another tunnel
+/// when a newer site opened on it, is replaced as surely as one that was
+/// still open: the retirement skips a closed preview, so it carries no
+/// `supersededBy`. Its card must not offer Open, and a wake of it (one asked
+/// for before the newer site opened, say) must not reconnect the port's key
+/// with the old site's command and title, which the broker answers with the
+/// newer preview's tunnel and so would write over the newer preview.
+#[tokio::test]
+async fn a_closed_preview_that_a_newer_one_replaced_does_not_wake_over_it() -> anyhow::Result<()> {
+    run(|f| {
+        Box::pin(async move {
+            let job = f.job(None).await?;
+            let closed = f.open_restartable(&job).await?;
+            f.ready(&job.token, &closed).await?;
+            let (status, _) = f
+                .request(
+                    &job.token,
+                    "POST",
+                    &f.path(&format!("/{closed}/close")),
+                    json!({}),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::NO_CONTENT);
+            // A wake asked for while it was closed, before the newer site
+            // opened, still waits for the agent.
+            f.state
+                .pool
+                .get()
+                .await?
+                .execute(
+                    "insert into runtime_preview_wakes (tunnel_id, project_id, runtime_id, requested_by)
+                     values ($1, $2, $3, $4)",
+                    &[&closed, &f.project, &job.runtime_id, &f.users[0]],
+                )
+                .await?;
+
+            f.broker.remint(&preview_tunnel_key(&job.runtime_id, 4173));
+            let mut body = f.open_body(&job, 4173);
+            body["title"] = json!("Newer site");
+            body["serve"] = json!({ "argv": ["node", "server.js"], "cwd": "newer" });
+            let (status, created) = f.request(&job.token, "POST", &f.path(""), body).await?;
+            assert_eq!(status, StatusCode::CREATED, "{created}");
+            let newer = created["previewId"]
+                .as_str()
+                .context("previewId")?
+                .to_string();
+            assert_ne!(newer, closed);
+            let newer_before = f.grant_metadata(&newer).await?;
+
+            assert_eq!(f.get_preview(&closed).await?["restartable"], json!(false));
+            let (status, refused) = f.wake(0, &closed).await?;
+            assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+            assert_eq!(refused["code"], "not_restartable");
+
+            let agent = f.agent_token(job.runtime_id, job.lease_id)?;
+            let (status, claimed) = f.claim(&agent).await?;
+            assert_eq!(status, StatusCode::OK, "{claimed}");
+            assert_eq!(claimed["restarts"], json!([]), "{claimed}");
+            let newer_after = f.grant_metadata(&newer).await?;
+            assert_eq!(
+                newer_after[PREVIEW_TUNNEL_METADATA_KEY]["title"],
+                json!("Newer site")
+            );
+            assert_eq!(
+                newer_after[PREVIEW_TUNNEL_METADATA_KEY]["serve"],
+                newer_before[PREVIEW_TUNNEL_METADATA_KEY]["serve"]
+            );
+            let newer_view = f.get_preview(&newer).await?;
+            assert_eq!(newer_view["title"], "Newer site");
+            assert_eq!(newer_view["restartable"], json!(true));
+            Ok(())
+        })
+    })
+    .await
+}
+
 #[tokio::test]
 async fn wake_outcomes_reach_get_failed_runs_time_out_and_foreign_reports_are_refused(
 ) -> anyhow::Result<()> {
