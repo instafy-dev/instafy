@@ -185,11 +185,33 @@ function extractQuotedCommandTopic(command: string): string | null {
   return null;
 }
 
-/** The words of `instafy web search <words…> [--options]`, quoted or not. */
+/** `instafy web search` options that take a value (`--count 5`), which is not part of the query. */
+const WEB_SEARCH_VALUE_OPTIONS = new Set(["--count", "--site", "--lang", "--country", "--chain", "--provider"]);
+
+/**
+ * The words of `instafy web search <words…> [--options]`, quoted or not: shell words up to the first operator that
+ * ends the command (`&&`, `||`, `;`, `|`, a redirection), without the options and their values.
+ */
 function webSearchWords(command: string): string | null {
-  const rest = command.replace(/^instafy\s+web\s+search\s*/i, "");
-  const words = (rest.split(/(?:^|\s)--?[a-z]/i)[0] ?? "").replace(/["']/g, "").replace(/\s+/g, " ").trim();
-  return words ? truncate(words, 64) : null;
+  const rest = command.replace(/^instafy\s+web\s+search\b/i, "");
+  const words: string[] = [];
+  let skipValue = false;
+  for (const match of rest.matchAll(/"([^"]*)"|'([^']*)'|(&&|\|\||[;|&<>])|([^\s"';|&<>]+)/g)) {
+    if (match[3]) break;
+    const quoted = match[1] !== undefined || match[2] !== undefined;
+    const word = match[1] ?? match[2] ?? match[4] ?? "";
+    if (skipValue) {
+      skipValue = false;
+      continue;
+    }
+    if (!quoted && word.startsWith("-")) {
+      skipValue = WEB_SEARCH_VALUE_OPTIONS.has(word);
+      continue;
+    }
+    words.push(word);
+  }
+  const query = words.join(" ").replace(/\s+/g, " ").trim();
+  return query ? truncate(query, 64) : null;
 }
 
 const WORKSPACE_SEARCH_STATUS = "Searching the workspace…";

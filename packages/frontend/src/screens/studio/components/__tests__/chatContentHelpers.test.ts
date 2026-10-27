@@ -13,6 +13,22 @@ describe("chatContentHelpers", () => {
       'Searching the web for "tram 15"…',
     );
     expect(summarizeActiveCommandForPreview("instafy web search --json")).toBe("Searching the web…");
+    // Only the search's own words: not the commands chained after it, and not an option's value.
+    expect(
+      summarizeActiveCommandForPreview(
+        "bash -lc 'instafy web search \"ramen shinjuku\" --json && instafy web read https://blog.example.org/ramen'",
+      ),
+    ).toBe('Searching the web for "ramen shinjuku"…');
+    expect(summarizeActiveCommandForPreview("instafy web search ramen shinjuku | jq .results")).toBe(
+      'Searching the web for "ramen shinjuku"…',
+    );
+    expect(summarizeActiveCommandForPreview("instafy web search --count 5 belem tower; instafy web read https://x.example")).toBe(
+      'Searching the web for "belem tower"…',
+    );
+    // A minus inside the quoted words is part of the query, not an option.
+    expect(summarizeActiveCommandForPreview("instafy web search \"e-bike rental -tour\" --json")).toBe(
+      'Searching the web for "e-bike rental -tour"…',
+    );
   });
 
   it("summarizes active Instafy context recovery commands", () => {
