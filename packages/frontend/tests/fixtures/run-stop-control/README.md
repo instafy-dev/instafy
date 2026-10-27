@@ -10,12 +10,12 @@ Open `http://127.0.0.1:5208/tests/fixtures/run-stop-control/index.html`.
 Append `?navigation=compact` to inspect the rounder compact navigation composer.
 
 The playground mounts the production composer, Lexical editor, Stop hook/control,
-typing status, thread rail, command surface, menus, dialogs and styles. Scenario controls supply synthetic jobs
+typing status, the turn's activity line and Details, menus, dialogs and styles. Scenario controls supply synthetic jobs
 and a fake cancellation transport. It never authenticates, contacts a controller or
 cancels a real run. Credential/provider modules, storage and the closed browser/invite panes are replaced
 with inert boundaries. This is component verification, not backend integration proof.
 
-Try the thinking, rail, command, two-agent, other-person, read-only, failure,
+Try the thinking, steps, command, two-agent, other-person, read-only, failure,
 timeout, already-finished and delayed-live-status cases. Restart resets the selected
 case; Simulate completion also exercises the hidden typing-status spacer. A successful
 stop shows the production attributed notice; Continue submits one synthetic instruction
@@ -27,8 +27,8 @@ Send available beside it; stopping preserves the draft. Recording keeps its micr
 The transcript contains status only. All sends and voice capture in this fixture are simulated.
 
 The required browser UI lane includes `run-stop-control.spec.ts` and the companion
-`run-icon-rail.spec.ts`. For a focused run with an installed Chrome:
+`turn-activity-line.spec.ts`. For a focused run with an installed Chrome:
 
 ```sh
-PLAYWRIGHT_BROWSER_UI_CHANNEL=chrome pnpm exec playwright test --config playwright.ci-ui.config.ts run-stop-control.spec.ts run-icon-rail.spec.ts --reporter=list
+PLAYWRIGHT_BROWSER_UI_CHANNEL=chrome pnpm exec playwright test --config playwright.ci-ui.config.ts run-stop-control.spec.ts turn-activity-line.spec.ts --reporter=list
 ```

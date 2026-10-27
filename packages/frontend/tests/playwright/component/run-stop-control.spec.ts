@@ -37,7 +37,7 @@ for (const scenario of ["thinking", "rail", "command"]) {
     await expect(page.getByTestId("stop-preview").getByTestId("chat-run-stop-button")).toHaveCount(0);
     await expect(stop.getByText("Stop", { exact: true })).toHaveCount(0);
     await expect(page.getByTestId("chat-send-button")).toHaveCount(0);
-    if (scenario === "thinking") await expect(page.getByTestId("agent-thread-compact-rail")).toHaveCount(0);
+    if (scenario === "thinking") await expect(page.getByTestId("turn-activity-line")).toHaveCount(0);
     await stop.click();
     await expect(stop).toHaveAccessibleName("Stopping…");
     await expect(stop).toBeDisabled();
@@ -105,7 +105,7 @@ test("two agents share one target menu; Escape dismisses it before stopping both
   expect(errors).toEqual([]);
 });
 
-test("composer slash menu, dialog and rail hover-card Escape handlers take precedence", async ({ page }) => {
+test("composer slash menu and dialog Escape handlers take precedence, and opening Details is not a stop", async ({ page }) => {
   const errors = await openFixture(page, "rail");
   await page.getByRole("button", { name: "Open dialog", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "Preview dialog" })).toBeVisible();
@@ -120,10 +120,8 @@ test("composer slash menu, dialog and rail hover-card Escape handlers take prece
   await expectRequestCount(page, 0);
   await expect(editor).toHaveText("/");
   await editor.fill("");
-  await page.getByTestId("agent-thread-compact-rail").locator("button.instafy-compact-event-pill").first().hover();
-  await expect(page.getByTestId("agent-thread-compact-event-preview")).toBeVisible();
-  await page.keyboard.press("Escape");
-  await expect(page.getByTestId("agent-thread-compact-event-preview")).toHaveCount(0);
+  await page.getByTestId("turn-activity-line").click();
+  await expect(page.getByTestId("turn-activity-details")).toBeVisible();
   await expectRequestCount(page, 0);
   await page.keyboard.press("Escape");
   await expectRequestCount(page, 1);

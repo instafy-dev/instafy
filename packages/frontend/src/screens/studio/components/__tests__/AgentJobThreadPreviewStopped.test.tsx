@@ -49,7 +49,27 @@ function threadMessages(): ChatMessage[] {
   ];
 }
 
-function threadCard(): ChatMessage {
+function fileChangeUpdate(id: string, paths: string[], ageMs: number): ChatMessage {
+  return {
+    id,
+    role: "assistant",
+    authorId: null,
+    content: `Applied file changes: ${paths.join(", ")}`,
+    timestamp: Date.now() - ageMs,
+    files: null,
+    messageType: "file_change",
+    metadata: {
+      jobId: JOB_ID,
+      source: "agent",
+      kind: "update",
+      outcome: "in_progress",
+      messageType: "file_change",
+      details: { kind: "codex_file_change", itemId: `item-${id}`, status: "completed", paths },
+    },
+  };
+}
+
+function threadCard(extra: ChatMessage[] = []): ChatMessage {
   return {
     id: "agent-job-thread",
     role: "assistant",
@@ -62,7 +82,7 @@ function threadCard(): ChatMessage {
       messageType: "agent_job_thread",
       jobId: JOB_ID,
       agent: { handle: "octo" },
-      threadMessages: threadMessages(),
+      threadMessages: [...threadMessages(), ...extra],
     },
   };
 }
@@ -131,6 +151,20 @@ describe("a run a person stopped", () => {
     await act(async () => root.render(<Thread message={threadCard()} />));
     expect(container.textContent).not.toContain("Status unavailable");
     expect(container.textContent).toContain("Stopped");
+  });
+
+  // A stopped turn has no reply. With nothing else to show, its body fell back
+  // to the newest update that was not a command, a file change's raw
+  // "Applied file changes: <paths>".
+  it("never shows a file change's raw text as the body of a turn without a reply", async () => {
+    const card = threadCard([fileChangeUpdate("00000000-0000-4000-8000-000000000003", ["/workspace/src/secret-plan.ts"], 90_000)]);
+    live.activeConversation = { messages: [card, stopNotice()] };
+    await act(async () => root.render(<Thread message={card} />));
+    expect(container.querySelector('[data-testid="turn-activity-line"]')?.textContent).toBe(
+      "Stopped · ran 2 commands, edited a file" + "Details",
+    );
+    expect(container.textContent).not.toContain("Applied file changes");
+    expect(container.textContent).not.toContain("secret-plan.ts");
   });
 
   it("reads Stopped, not Status unavailable, when its run record says it was canceled", async () => {
