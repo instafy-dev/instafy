@@ -44,6 +44,9 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   view, and the file changes stay under the reply. Run traces keep their full view.
 - A command on its own in the conversation is one row: its label (or "Ran a command"), its state
   and a chevron that shows the command and its output.
+- The typing row that shows under a newer message while a turn runs (a person wrote in the
+  meantime) says the run's phase ("Thinking…", "Retrying…"), never Octo's notes or reasoning
+  titles, for the same reason as the line.
 - The running line is the turn's one polite live region; it announces a new label at most every
   5 seconds. Reduced motion turns the sweep off. On coarse pointers the line and the rows are at
   least 44 px tall.

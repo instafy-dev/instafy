@@ -333,8 +333,13 @@ export function AgentJobThreadPreviewLayout({
     () => activity.details.flatMap((item) => (item.kind === "update" ? [item.message] : [])),
     [activity.details],
   );
+  // Reasoning is the model thinking aloud, never the source of the reply's guidance.
   const proxyGuidanceContentFromUpdates = finalSummaryLooksLikeProxyError
-    ? [...updateMessages].reverse().map(resolveProxyGuidanceContent).find(Boolean) ?? null
+    ? [...updateMessages]
+        .reverse()
+        .filter((update) => (getMessageType(update) ?? "").trim().toLowerCase() !== "reasoning")
+        .map(resolveProxyGuidanceContent)
+        .find(Boolean) ?? null
     : null;
   const inheritedProxyGuidanceContent =
     proxyGuidanceContentFromUpdates ?? (finalSummaryDirectProxyGuidance ? finalSummaryContent : null);
