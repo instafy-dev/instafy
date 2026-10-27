@@ -387,7 +387,7 @@ box, or typing into it with submit, when all of these hold
 While a site search runs, the step's guard lets no form post leave the tab, to
 the page's own site included: a page script that turns the search into a post
 is stopped before it leaves the browser, and the step fails saying so. The
-step's result carries `activity: {"step": "search", "approval": "free"}`. A GET
+step's result says `"approval": "free"` in its `activity` (below). A GET
 search sends nothing a plain navigation to the same address could not, apart
 from the form's hidden values, which go back to the origin that wrote them; a
 site whose GET search has a side effect is the same accepted trade-off as a
@@ -434,6 +434,19 @@ image's alt text or svg title, a generic noun for its icon, and where it sits,
 for example "profile picture button in the top right". The name is masked like
 any other control name before it reaches a snapshot, a prompt or the action
 log.
+
+Every step's result carries `activity: {step, url, approval}` for the turn's plain-language
+activity line ([Chat activity line](Chat-Activity.md#browser-steps)): the step's kind
+(`navigate`, `open_tab`, `snapshot`, `search`, `submit` for typing that sends a form that is not
+a search, `click`, `type`, `press`, `scroll`, `tabs` or `status`), the masked address of the page
+the step left the tab on, only on a site the run may read, and how it was allowed: `once` when
+the step waited on a prompt (its site's or its own) and the person allowed it, `routine` when
+routine browsing took an acting step without one, `free` for a site search, and nothing when the
+step needed no answer. It comes from the browser's own state, never from page text, and
+runtime-agent keeps only the step, the host, a key of the address and the approval. In the chat,
+a prompt shows as one row inside Octo's turn, to the person who started the run, and once
+answered the turn's line says so ("you allowed a search");
+see [Browser prompts](Chat-Activity.md#browser-prompts).
 
 Routine mode deliberately relaxes universal confirmation. Its consequence
 classifier uses page descriptors and URL text; it cannot prove that arbitrary

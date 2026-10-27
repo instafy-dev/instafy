@@ -18358,7 +18358,16 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                             "terminalConsent": terminal_consent,
                             "event": event.clone(),
                         });
-                        if let Some(activity) = activity_labels::mcp_tool_activity(server) {
+                        // A Shared Browser step names its site from the browser's own result
+                        // (`browserStep`, kept by the event adapter); any other tool call, or a
+                        // browser step without those facts, is "Using the browser" / "a tool".
+                        let browser_step = item
+                            .get("browserStep")
+                            .filter(|_| server.eq_ignore_ascii_case("instafy_shared_browser"));
+                        if let Some(activity) = browser_step
+                            .and_then(activity_labels::browser_step_activity)
+                            .or_else(|| activity_labels::mcp_tool_activity(server))
+                        {
                             metadata["activity"] = activity;
                         }
                         push_message(
@@ -32607,6 +32616,51 @@ mod tests {
         let edit = activity(5).expect("edit");
         assert_eq!(edit["key"], json!("builtin/edit"));
         assert_eq!(edit["count"], json!(2));
+    }
+
+    #[test]
+    fn extract_codex_messages_names_a_shared_browser_steps_site() {
+        let events = vec![
+            json!({"type": "item.started", "item": {
+                "id": "item_search", "type": "mcp_tool_call", "server": "instafy_shared_browser",
+                "tool": "type", "status": "in_progress",
+                "browserStep": {"step": "type", "host": "visitlisboa.com"}
+            }}),
+            json!({"type": "item.completed", "item": {
+                "id": "item_search", "type": "mcp_tool_call", "server": "instafy_shared_browser",
+                "tool": "type", "status": "completed",
+                "browserStep": {
+                    "step": "search", "host": "visitlisboa.com", "pageKey": "0123456789abcdef",
+                    "approval": "free"
+                }
+            }}),
+            // Another server cannot name a site, whatever its item says.
+            json!({"type": "item.completed", "item": {
+                "id": "item_other", "type": "mcp_tool_call", "server": "github",
+                "tool": "search", "status": "completed",
+                "browserStep": {"step": "search", "host": "evil.example"}
+            }}),
+        ];
+        let messages = extract_codex_messages(&events);
+        let activity = |index: usize| {
+            messages[index]
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("activity"))
+                .cloned()
+                .expect("labelled")
+        };
+        let running = activity(0);
+        assert_eq!(running["live"], json!("Browsing {host}"));
+        assert_eq!(running["host"], json!("visitlisboa.com"));
+        let done = activity(1);
+        assert_eq!(done["key"], json!("browser/search"));
+        assert_eq!(done["live"], json!("Searching {host}"));
+        assert_eq!(done["approval"], json!("free"));
+        assert_eq!(done["pageKey"], json!("0123456789abcdef"));
+        let other = activity(2);
+        assert_eq!(other["key"], json!("tool/use"));
+        assert!(other.get("host").is_none());
     }
 
     #[test]

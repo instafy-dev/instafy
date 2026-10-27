@@ -491,7 +491,7 @@ export async function runSharedBrowserFormSubmissionFixture() {
     let searched = await ok("POST", "/v1/type", { index: places.index, snapshotId: snapshot.snapshotId, text: "Belém Tower", submit: true });
     assert.deepEqual(promptsSince(start), [], "A site's own GET search asks nothing under routine browsing");
     assert.deepEqual(searches, [sentSearch("q=Bel%C3%A9m+Tower&lang=en")], "It sent exactly the form's GET");
-    assert.deepEqual(searched.activity, { step: "search", approval: "free" });
+    assert.deepEqual(searched.activity, { step: "search", url: `${sites().mall}/search?q=Bel%C3%A9m+Tower&lang=en`, approval: "free" });
     // b. Enter in the field, with text typed first, goes the same way.
     await runPage.goto(searchPage);
     snapshot = await ok("GET", "/v1/snapshot");
@@ -503,7 +503,7 @@ export async function runSharedBrowserFormSubmissionFixture() {
     searched = await ok("POST", "/v1/press", { index: places.index, snapshotId: snapshot.snapshotId, key: "Enter" });
     assert.deepEqual(promptsSince(start), []);
     assert.deepEqual(searches, [sentSearch("q=Jer%C3%B3nimos&lang=en")]);
-    assert.deepEqual(searched.activity, { step: "search", approval: "free" });
+    assert.deepEqual(searched.activity, { step: "search", url: `${sites().mall}/search?q=Jer%C3%B3nimos&lang=en`, approval: "free" });
     // c. In one of Octo's own tabs, which refuse every other submission.
     const octoTab = await ok("POST", "/v1/tabs/open", { url: searchPage });
     snapshot = await ok("GET", "/v1/snapshot", { tabId: octoTab.tabId });
@@ -513,7 +513,7 @@ export async function runSharedBrowserFormSubmissionFixture() {
     searched = await ok("POST", "/v1/type", { index: places.index, snapshotId: snapshot.snapshotId, text: "Pastéis de Belém", submit: true });
     assert.deepEqual(promptsSince(start), []);
     assert.deepEqual(searches, [sentSearch("q=Past%C3%A9is+de+Bel%C3%A9m&lang=en")]);
-    assert.deepEqual(searched.activity, { step: "search", approval: "free" });
+    assert.deepEqual(searched.activity, { step: "search", url: `${sites().mall}/search?q=Past%C3%A9is+de+Bel%C3%A9m&lang=en`, approval: "free" });
     await ok("POST", "/v1/tabs/close", { tabId: octoTab.tabId });
     // d. A typed value that looks like a key asks, on the same search box.
     await runPage.goto(searchPage);

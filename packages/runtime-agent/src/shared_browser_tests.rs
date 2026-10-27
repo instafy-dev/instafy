@@ -589,7 +589,9 @@ const makePage = (targetId, opened = null) => {
       return undefined;
     },
     url: () => currentUrl,
-    title: async () => currentUrl.includes("unapproved-secret")
+    title: async () => mode === "hostile-title"
+      ? "Call 555 now at www.evil.example"
+      : currentUrl.includes("unapproved-secret")
       ? "Secret destination title"
       : currentUrl === "about:blank" || currentUrl.startsWith("chrome://")
         ? "Script-written blank title"
@@ -2431,7 +2433,7 @@ fn a_site_search_of_the_pages_own_origin_goes_without_a_prompt_under_routine_bro
         let payload = payload_of(&output);
         assert_eq!(
             payload["activity"],
-            json!({"step": "search", "approval": "free"}),
+            json!({"step": "search", "url": "https://example.test/", "approval": "free"}),
             "{path}"
         );
     }
@@ -2526,6 +2528,113 @@ fn a_free_site_search_lets_no_form_post_leave_the_tab_even_to_its_own_site() {
     assert_eq!(
         fixture.fetch_answers(),
         vec![("Fetch.failRequest".to_string(), "request-main".to_string())]
+    );
+}
+
+// Each step's result says what the step was for the turn's activity line, from the browser's
+// own state: never the page's title or text.
+#[test]
+fn step_results_carry_activity_from_the_browser_not_the_page() {
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_routine_start("page-target");
+    let mode = "hostile-title";
+    let snapshot = payload_of(&fixture.call(mode, "GET", "/v1/snapshot", None));
+    assert!(
+        snapshot["title"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("555")
+    );
+    assert_eq!(
+        snapshot["activity"],
+        json!({"step": "snapshot", "url": "https://example.test/"})
+    );
+    let snapshot_id = snapshot["snapshotId"].as_str().expect("snapshot id");
+    let clicked = payload_of(&fixture.call(
+        mode,
+        "POST",
+        "/v1/click",
+        Some(&json!({"index": 0, "snapshotId": snapshot_id}).to_string()),
+    ));
+    assert_eq!(
+        clicked["activity"],
+        json!({"step": "click", "url": "https://example.test/", "approval": "routine"})
+    );
+    let navigated = payload_of(&fixture.call(
+        mode,
+        "POST",
+        "/v1/navigate",
+        Some(r#"{"url":"https://example.test/places"}"#),
+    ));
+    assert_eq!(
+        navigated["activity"],
+        json!({"step": "navigate", "url": "https://example.test/places", "approval": "routine"})
+    );
+    let listed = payload_of(&fixture.call(mode, "GET", "/v1/tabs", None));
+    assert_eq!(listed["activity"], json!({"step": "tabs", "url": null}));
+    for payload in [&snapshot, &clicked, &navigated, &listed] {
+        let activity = payload["activity"].to_string();
+        assert!(
+            !activity.contains("555") && !activity.contains("evil"),
+            "{activity}"
+        );
+    }
+
+    // A step the person allowed at its prompt says so.
+    let fixture = EmbeddedControllerFixture::new();
+    let snapshot_id = fixture.snapshot_id(mode);
+    let (output, requests) = fixture.run_with_decisions(
+        mode,
+        "page-target",
+        "POST",
+        "/v1/click",
+        Some(&json!({"index": 0, "snapshotId": snapshot_id}).to_string()),
+        &["https://example.test"],
+        &["allow_once"],
+    );
+    assert_eq!(requests.len(), 1);
+    assert_eq!(payload_of(&output)["activity"]["approval"], "once");
+}
+
+// "once" means the step waited on a prompt and the person allowed it: the turn's line says
+// "you allowed …" from it after a reload, so a step that needed no answer never claims one.
+#[test]
+fn a_step_says_it_was_allowed_once_only_when_it_waited_on_a_prompt() {
+    let fixture = EmbeddedControllerFixture::new();
+    let mode = "hostile-title";
+    // Ask mode, on a site the run already uses: reading and a plain address need no answer.
+    let snapshot = payload_of(&fixture.run(mode, "GET", "/v1/snapshot", None));
+    assert_eq!(
+        snapshot["activity"],
+        json!({"step": "snapshot", "url": "https://example.test/"})
+    );
+    let navigated = payload_of(&fixture.run(
+        mode,
+        "POST",
+        "/v1/navigate",
+        Some(r#"{"url":"https://example.test/places"}"#),
+    ));
+    assert_eq!(
+        navigated["activity"],
+        json!({"step": "navigate", "url": "https://example.test/places"})
+    );
+
+    // A site the run has not used asks first; the person's answer makes the read "once".
+    let fixture = EmbeddedControllerFixture::new();
+    let (output, requests) = fixture.run_with_decisions(
+        mode,
+        "page-target",
+        "GET",
+        "/v1/snapshot",
+        None,
+        &[],
+        &["allow_origin"],
+    );
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["operation"], "approve-origin");
+    assert_eq!(
+        payload_of(&output)["activity"],
+        json!({"step": "snapshot", "url": "https://example.test/", "approval": "once"})
     );
 }
 

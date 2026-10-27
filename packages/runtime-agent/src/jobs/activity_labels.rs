@@ -159,6 +159,47 @@ const BROWSER: BuiltinLabel = BuiltinLabel {
     live: "Using the browser",
     done: single("used the browser"),
 };
+// A Shared Browser step that names its site (shared_browser_activity): "Searching
+// visitlisboa.com", then "searched visitlisboa.com". Studio groups them by key and host, and
+// counts distinct `pageKey`s for pages read.
+const BROWSER_OPEN: BuiltinLabel = BuiltinLabel {
+    key: "browser/open",
+    role: ActivityRole::Content,
+    live: "Opening {host}",
+    done: counted(
+        "opened {host}",
+        "opened {n} pages on {host}",
+        "opened pages on {host}",
+    ),
+};
+const BROWSER_READ: BuiltinLabel = BuiltinLabel {
+    key: "browser/read",
+    role: ActivityRole::Content,
+    live: "Reading {host}",
+    done: counted(
+        "read a page on {host}",
+        "read {n} pages on {host}",
+        "read pages on {host}",
+    ),
+};
+const BROWSER_SEARCH: BuiltinLabel = BuiltinLabel {
+    key: "browser/search",
+    role: ActivityRole::Content,
+    live: "Searching {host}",
+    done: counted(
+        "searched {host}",
+        "searched {host} {n} times",
+        "searched {host}",
+    ),
+};
+// Clicks, other keys, typing, sending a form that is not a search, scrolling, tabs and status:
+// the line names the pages and searches they lead to, not each step.
+const BROWSER_BROWSE: BuiltinLabel = BuiltinLabel {
+    key: "browser/browse",
+    role: ActivityRole::Quiet,
+    live: "Browsing {host}",
+    done: None,
+};
 const TOOL: BuiltinLabel = BuiltinLabel {
     key: "tool/use",
     role: ActivityRole::Content,
@@ -954,6 +995,32 @@ pub fn mcp_tool_activity(server: &str) -> Option<JsonValue> {
     activity_json(vec![Found::builtin(label, Some(1))])
 }
 
+/// A Shared Browser step, from the facts runtime-agent kept of the browser's own result
+/// (`shared_browser_activity::browser_step_facts`): its kind, the host it names, a key of the
+/// page and how it was allowed. A step that names no host yet is "Using the browser".
+pub fn browser_step_activity(step: &JsonValue) -> Option<JsonValue> {
+    let facts = step.as_object()?;
+    let kind = facts.get("step")?.as_str()?;
+    let host = facts.get("host").and_then(JsonValue::as_str);
+    let label = match (kind, host) {
+        (_, None) => &BROWSER,
+        ("navigate" | "open_tab", Some(_)) => &BROWSER_OPEN,
+        ("snapshot", Some(_)) => &BROWSER_READ,
+        ("search", Some(_)) => &BROWSER_SEARCH,
+        (_, Some(_)) => &BROWSER_BROWSE,
+    };
+    let mut activity = serde_json::Map::new();
+    activity.insert("v".into(), JsonValue::from(ACTIVITY_VERSION));
+    activity.extend(Found::builtin(label, Some(1)).entry_json());
+    for field in ["host", "pageKey", "step", "approval"] {
+        if let Some(value) = facts.get(field) {
+            activity.insert(field.into(), value.clone());
+        }
+    }
+    activity.insert("also".into(), JsonValue::Array(Vec::new()));
+    check_activity(&JsonValue::Object(activity))
+}
+
 /// A status message the runtime writes itself (never one the model wrote): saving the turn's
 /// changes and retrying a request.
 pub fn runtime_status_activity(kind: &str) -> Option<JsonValue> {
@@ -1343,5 +1410,98 @@ mod tests {
             json!("Retrying")
         );
         assert_eq!(runtime_status_activity("agent_message"), None);
+    }
+
+    // Browser steps name their site from the browser's own state; pages are told apart by
+    // `pageKey`, never by their address.
+    #[test]
+    fn browser_steps_name_their_site_and_how_they_were_allowed() {
+        let step = |facts: JsonValue| browser_step_activity(&facts).expect("labelled");
+        let search = step(json!({
+            "step": "search", "host": "visitlisboa.com", "pageKey": "0123456789abcdef",
+            "approval": "free",
+        }));
+        assert_eq!(search["key"], json!("browser/search"));
+        assert_eq!(search["live"], json!("Searching {host}"));
+        assert_eq!(search["done"]["one"], json!("searched {host}"));
+        assert_eq!(search["host"], json!("visitlisboa.com"));
+        assert_eq!(search["approval"], json!("free"));
+        assert_eq!(search["step"], json!("search"));
+        assert_eq!(search["count"], json!(1));
+        for (kind, key, role) in [
+            ("navigate", "browser/open", "content"),
+            ("open_tab", "browser/open", "content"),
+            ("snapshot", "browser/read", "content"),
+            ("click", "browser/browse", "quiet"),
+            ("type", "browser/browse", "quiet"),
+            ("submit", "browser/browse", "quiet"),
+            ("press", "browser/browse", "quiet"),
+            ("scroll", "browser/browse", "quiet"),
+            ("tabs", "browser/browse", "quiet"),
+            ("status", "browser/browse", "quiet"),
+        ] {
+            let activity = step(json!({"step": kind, "host": "visitlisboa.com"}));
+            assert_eq!(activity["key"], json!(key), "{kind}");
+            assert_eq!(activity["role"], json!(role), "{kind}");
+        }
+        // No host known yet: "Using the browser", with how the step was allowed.
+        let unnamed = step(json!({"step": "type", "approval": "denied"}));
+        assert_eq!(unnamed["key"], json!("browser/use"));
+        assert_eq!(unnamed["live"], json!("Using the browser"));
+        assert_eq!(unnamed["approval"], json!("denied"));
+        // Anything that breaks the contract is dropped, never shown.
+        for facts in [
+            json!({"step": "search", "host": "evil.example/path"}),
+            json!({"step": "search", "host": "www.visitlisboa.com"}),
+            json!({"step": "search", "host": "visitlisboa.com", "approval": "always"}),
+            json!({"step": "Call 555", "host": "visitlisboa.com"}),
+            json!({"step": "search", "host": "visitlisboa.com", "pageKey": "not-a-key"}),
+            json!("search"),
+        ] {
+            assert_eq!(browser_step_activity(&facts), None, "{facts}");
+        }
+    }
+
+    #[test]
+    fn distinct_pages_count_by_page_key() {
+        let read = |page_key: &str| {
+            browser_step_activity(&json!({
+                "step": "snapshot", "host": "visitlisboa.com", "pageKey": page_key,
+            }))
+            .expect("labelled")
+        };
+        let first = read("0123456789abcdef");
+        let again = read("0123456789abcdef");
+        let other = read("fedcba9876543210");
+        // One step reads one page; Studio counts the distinct keys of a group.
+        for activity in [&first, &again, &other] {
+            assert_eq!(activity["key"], json!("browser/read"));
+            assert_eq!(activity["count"], json!(1));
+            assert_eq!(
+                activity["done"],
+                json!({
+                    "one": "read a page on {host}",
+                    "other": "read {n} pages on {host}",
+                    "some": "read pages on {host}",
+                })
+            );
+        }
+        assert_eq!(first["pageKey"], again["pageKey"]);
+        assert_ne!(first["pageKey"], other["pageKey"]);
+        for label in [
+            &BROWSER_OPEN,
+            &BROWSER_READ,
+            &BROWSER_SEARCH,
+            &BROWSER_BROWSE,
+        ] {
+            let mut activity = Found::builtin(label, Some(1)).entry_json();
+            activity.insert("v".into(), JsonValue::from(ACTIVITY_VERSION));
+            activity.insert("host".into(), JsonValue::from("visitlisboa.com"));
+            assert!(
+                check_activity(&JsonValue::Object(activity)).is_some(),
+                "{}",
+                label.key
+            );
+        }
     }
 }
