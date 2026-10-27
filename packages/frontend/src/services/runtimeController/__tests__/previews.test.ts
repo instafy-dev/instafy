@@ -20,7 +20,10 @@ import { ControllerApiError } from "../core";
 import {
   createSitePreviewViewer,
   getSitePreview,
+  getSitePreviewThumbnail,
   heartbeatSitePreviewViewer,
+  mapSitePreviewThumbnailEvent,
+  sitePreviewFacts,
   isSitePreviewsUnavailable,
   mapControllerSitePreview,
   revokeSitePreviewViewer,
@@ -58,7 +61,8 @@ describe("site preview controller client", () => {
     const preview = await getSitePreview(PROJECT_ID, PREVIEW_ID);
     expect(preview).toEqual({ previewId: PREVIEW_ID, title: "Docs site", port: 4173, path: "/",
       runtimeId: "runtime-1", status: "active", health: { listening: false, status: null }, messageId: "m-1", createdAt: "2026-10-12T00:00:00Z",
-      visibility: "private", restartable: false, wake: { state: "idle", startedAt: null, error: null }, canStart: null });
+      visibility: "private", restartable: false, wake: { state: "idle", startedAt: null, error: null }, canStart: null,
+      summary: null, pageDescription: null, thumbnail: null });
     expect(JSON.stringify(preview)).not.toContain("p-aaaa");
     expect(fetchMock).toHaveBeenCalledWith(BASE, expect.objectContaining({ method: "GET", headers: expect.objectContaining({ authorization: "Bearer token-123" }) }));
     await getSitePreview(PROJECT_ID, PREVIEW_ID, undefined, { fresh: true });
@@ -185,5 +189,44 @@ describe("site preview controller client", () => {
     fetchMock.mockResolvedValueOnce(new Response("{}", { status: 429 }));
     const error = await wakeSitePreview(PROJECT_ID, PREVIEW_ID).catch((cause: unknown) => cause);
     expect((error as ControllerApiError).status).toBe(429);
+  });
+
+  it("reads the card's facts and picture, as plain text and a version, never an address", () => {
+    const base = { previewId: PREVIEW_ID, title: "Lisbon weekend", port: 4173, path: "/", status: "active" };
+    const preview = mapControllerSitePreview({
+      ...base,
+      summary: "  Trip ·\n 3 days · 14 places ",
+      pageDescription: "A map of \u202Eevil\u202C Lisbon",
+      thumbnail: { version: "0123456789abcdef", width: 640, height: 400, capturedAt: "2026-10-27T12:00:00Z", url: "https://elsewhere.test/x.png" },
+    })!;
+    expect(preview.summary).toBe("Trip · 3 days · 14 places");
+    expect(preview.pageDescription).toBe("A map of evil Lisbon");
+    expect(preview.thumbnail).toEqual({ version: "0123456789abcdef", width: 640, height: 400, capturedAt: "2026-10-27T12:00:00Z" });
+    expect(sitePreviewFacts(preview)).toBe("Trip · 3 days · 14 places");
+    expect(sitePreviewFacts({ summary: null, pageDescription: "x".repeat(120) })).toBe(`${"x".repeat(79)}…`);
+    expect(sitePreviewFacts({ summary: null, pageDescription: null })).toBeNull();
+    for (const thumbnail of [{ version: "../../x", width: 640, height: 400 }, { version: "0123456789abcdef", width: 0, height: 400 }, "picture.png"]) {
+      expect(mapControllerSitePreview({ ...base, thumbnail })?.thumbnail).toBeNull();
+    }
+    expect(mapSitePreviewThumbnailEvent({ previewId: PREVIEW_ID, version: "0123456789abcdef", runtimeId: "r" })).toEqual({ previewId: PREVIEW_ID, version: "0123456789abcdef" });
+    expect(mapSitePreviewThumbnailEvent({ previewId: PREVIEW_ID, version: "javascript:alert(1)" })).toBeNull();
+  });
+
+  it("fetches a preview's picture with the person's session, never caching it on disk, and reads refusals", async () => {
+    fetchMock.mockResolvedValueOnce(new Response(new Blob(["jpeg"]), { headers: { "content-type": "image/jpeg" } }));
+    const picture = await getSitePreviewThumbnail(PROJECT_ID, PREVIEW_ID, "0123456789abcdef");
+    expect(picture.ok).toBe(true);
+    expect(picture.ok && picture.blob.type).toBe("image/jpeg");
+    expect(fetchMock).toHaveBeenLastCalledWith(`${BASE}/thumbnail?v=0123456789abcdef`, expect.objectContaining({
+      cache: "no-store", credentials: "omit", headers: expect.objectContaining({ authorization: "Bearer token-123" }),
+    }));
+    fetchMock.mockResolvedValueOnce(new Response("{}", { status: 404 }));
+    await expect(getSitePreviewThumbnail(PROJECT_ID, PREVIEW_ID, "0123456789abcdef")).resolves.toEqual({ ok: false, reason: "refused" });
+    fetchMock.mockResolvedValueOnce(new Response("<svg/>", { headers: { "content-type": "image/svg+xml" } }));
+    await expect(getSitePreviewThumbnail(PROJECT_ID, PREVIEW_ID, "0123456789abcdef")).resolves.toEqual({ ok: false, reason: "refused" });
+    fetchMock.mockResolvedValueOnce(new Response("", { status: 502 }));
+    await expect(getSitePreviewThumbnail(PROJECT_ID, PREVIEW_ID, "0123456789abcdef")).resolves.toEqual({ ok: false, reason: "transient" });
+    fetchMock.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    await expect(getSitePreviewThumbnail(PROJECT_ID, PREVIEW_ID, "0123456789abcdef")).resolves.toEqual({ ok: false, reason: "transient" });
   });
 });

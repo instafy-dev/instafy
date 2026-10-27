@@ -1223,6 +1223,8 @@ pub(crate) fn sanitize_client_recorded_message_metadata(
 ) -> JsonValue {
     crate::task_usage::strip_authoring_claims(&mut metadata);
     crate::user_input_requests::routing::strip_claims(&mut metadata);
+    // Only a runtime's step carries an activity label (crate::chat_activity).
+    crate::chat_activity::strip_activity_claims(&mut metadata);
     if trusted_service_role {
         return metadata;
     }

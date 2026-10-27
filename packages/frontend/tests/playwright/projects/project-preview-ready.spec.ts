@@ -8,7 +8,7 @@ import { chooseOption } from "../utils/select.js";
 import { openTeamDirectory } from "../utils/sidebar.js";
 
 // Site previews end to end (docs/Previews.md): a site running in the space's
-// machine is opened from its "Ready to preview" card into a side-pane tab on a
+// machine is opened from its preview card into a side-pane tab on a
 // member-only capability host. Needs the local stack (`pnpm stack:up`), whose
 // tunnel broker serves private previews; on any other stack the test skips,
 // unless INSTAFY_E2E_REQUIRE_PREVIEWS=1, which makes it fail instead so a stack
@@ -148,10 +148,10 @@ function previewCard(page: Page, title = PREVIEW_TITLE): Locator {
 
 async function openFromCard(page: Page, title = PREVIEW_TITLE): Promise<Locator> {
   const card = previewCard(page, title);
-  await expect(card).toContainText("Live", { timeout: 30_000 });
-  await card.getByRole("button", { name: "Open" }).click();
+  // A live site's card says nothing about it; the whole card is its Open button.
+  await expect(card.getByTestId("preview-ready-status")).toHaveAttribute("data-state", "live", { timeout: 30_000 });
+  await card.getByRole("button", { name: `Open ${title}` }).click();
   await expect(page.frameLocator("[data-testid=site-preview-frame]").locator("#pv")).toHaveText("ok", { timeout: 30_000 });
-  await expect(card.getByRole("button", { name: "Showing" })).toBeVisible();
   return card;
 }
 
@@ -314,7 +314,8 @@ test.describe("Site preview card and pane", () => {
 
       // The CLI hands back ids and plain facts, never a viewer URL.
       const result = openPreview(container, conversationId);
-      expect(result).toMatchObject({ title: PREVIEW_TITLE, port: PREVIEW_PORT, path: "/", status: "live" });
+      // The runtime image has a browser, so the card gets a picture of the site.
+      expect(result).toMatchObject({ title: PREVIEW_TITLE, port: PREVIEW_PORT, path: "/", status: "live", thumbnail: "uploaded" });
       expect(JSON.stringify(result)).not.toMatch(/https?:\/\//);
       const previewId = String(result.previewId);
       expect(previewId).toMatch(/^[0-9a-f-]{32,36}$/);
@@ -329,6 +330,10 @@ test.describe("Site preview card and pane", () => {
       });
       await expect(page.getByTestId(`conversation-subtab-preview:${previewId}`)).toBeVisible();
       await expect(page.getByTestId("site-preview-title")).toHaveText(PREVIEW_TITLE);
+      // The card shows the picture, fetched with the person's own session into memory: never a frame or an address.
+      await expect(card.getByTestId("preview-card-picture").locator("img")).toHaveAttribute("src", /^blob:/, { timeout: 30_000 });
+      await expect(card.locator("iframe")).toHaveCount(0);
+      await expect(card.getByTestId("preview-card-private")).toHaveAttribute("aria-label", "Only space members can open this");
 
       // The frame is sandboxed, sends no referrer and may use only fullscreen and the clipboard.
       const frame = page.getByTestId("site-preview-frame");
@@ -399,7 +404,7 @@ test.describe("Site preview card and pane", () => {
       // The tab's × closes the pane and revokes its session within the broker's 30 s cache.
       await page.getByRole("button", { name: `Close ${PREVIEW_TITLE} view` }).click();
       await expect(page.getByTestId("site-preview-frame")).toHaveCount(0);
-      await expect(card.getByRole("button", { name: "Open" })).toBeVisible();
+      await expect(card.getByRole("button", { name: `Open ${PREVIEW_TITLE}` })).toBeVisible();
       await expect.poll(() => ingressStatus(viewer.hostname, ingressPort), { timeout: 35_000, intervals: [1_000] }).toBe(401);
 
       // The server dies: the pane and the card both say so.
@@ -407,7 +412,7 @@ test.describe("Site preview card and pane", () => {
       stopFixtureServer(container);
       await expect(page.getByTestId("site-preview-pane")).toHaveAttribute("data-state", "not_responding", { timeout: 40_000 });
       await expect(page.getByTestId("site-preview-pane")).toContainText(`Not responding on port ${PREVIEW_PORT}`);
-      await expect(previewCard(page)).toContainText(`Not responding on port ${PREVIEW_PORT}`, { timeout: 35_000 });
+      await expect(previewCard(page).getByTestId("preview-ready-status")).toHaveText("Not responding", { timeout: 35_000 });
 
       // The runtime closes the preview: both read Stopped.
       docker(["exec", container, "instafy", "preview", "close", previewId]);

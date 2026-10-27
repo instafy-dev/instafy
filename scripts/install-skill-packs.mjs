@@ -288,6 +288,76 @@ export function unpackArchive(archive, pack) {
   return { files, executable };
 }
 
+// Activity labels (docs/Chat-Activity.md): the same rules as runtime-contracts' chat_activity.rs,
+// pinned by its chat_activity_fixtures.json.
+const LABEL_PUNCTUATION = "'\u2019,.-\u2013\u00b7:;()&!?";
+const SUBCOMMAND = /^(?:\*|[a-z0-9][a-z0-9-]{0,31})$/u;
+
+export function isPlainLabelText(text) {
+  if (typeof text !== "string" || text === "" || text.trim() !== text || text.includes("  ")) return false;
+  const characters = [...text];
+  if (!characters.every((character) => /\p{Alphabetic}/u.test(character) || /[0-9 ]/u.test(character) || LABEL_PUNCTUATION.includes(character))) return false;
+  const dottedWord = characters.some((character, index) => character === "." && index + 1 < characters.length && (/\p{Alphabetic}/u.test(characters[index + 1]) || /[0-9]/u.test(characters[index + 1])));
+  return !dottedWord && !text.toLowerCase().includes("www");
+}
+
+export function isLiveLabel(text) {
+  return typeof text === "string" && !text.includes("{host}") && [...text].length <= 40 && /^\p{Uppercase}/u.test(text) && isPlainLabelText(text);
+}
+
+export function isDoneForm(text, count) {
+  if (typeof text !== "string" || text.split("{n}").length - 1 !== (count ? 1 : 0)) return false;
+  const filled = text.replace("{n}", "999");
+  return !filled.includes("{host}") && [...filled].length <= 48 && /^\p{Lowercase}/u.test(filled) && isPlainLabelText(filled);
+}
+
+/// Checks a manifest's `bin` and `activity`. Returns null when they follow the rules (or there is
+/// no `activity`), else the first rule broken. A pack that breaks one still installs; the runtime
+/// drops its labels.
+export function checkPackActivity(manifest, files) {
+  if (manifest.activity === undefined) return null;
+  const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+  if (!isObject(manifest.activity)) return "activity is not an object";
+  if (!isObject(manifest.bin)) return "activity labels only commands declared in `bin`";
+  const bins = Object.entries(manifest.bin);
+  if (bins.length > MAX_PACK_BINS) return `bin declares more than ${MAX_PACK_BINS} commands`;
+  for (const [name, entry] of bins) {
+    if (!isPackBinName(name)) return `bin ${JSON.stringify(name)} is not a command name a pack may declare`;
+    if (typeof entry !== "string" || !files.has(entry)) return `bin ${JSON.stringify(name)}: ${JSON.stringify(entry)} is not a file inside the pack`;
+  }
+  for (const [name, subcommands] of Object.entries(manifest.activity)) {
+    if (!Object.hasOwn(manifest.bin, name)) return `activity ${JSON.stringify(name)} is not a command in \`bin\``;
+    if (!isObject(subcommands)) return `activity ${JSON.stringify(name)} is not an object`;
+    if (Object.keys(subcommands).length > 64) return `activity ${JSON.stringify(name)} labels more than 64 subcommands`;
+    for (const [subcommand, label] of Object.entries(subcommands)) {
+      const where = `activity ${name}.${subcommand}`;
+      if (!SUBCOMMAND.test(subcommand)) return `${where}: not a subcommand name`;
+      if (!isObject(label)) return `${where}: a label is an object`;
+      const unknown = Object.keys(label).find((key) => !["live", "done", "role", "when"].includes(key));
+      if (unknown) return `${where}: unknown field ${JSON.stringify(unknown)}`;
+      if (!isLiveLabel(label.live)) return `${where}: live breaks the label rules`;
+      const role = label.role ?? "content";
+      if (!["content", "outcome", "quiet"].includes(role)) return `${where}: role is not content, outcome or quiet`;
+      if (label.when !== undefined && label.when !== "success") return `${where}: when is not "success"`;
+      if (label.done === undefined) {
+        if (role !== "quiet") return `${where}: a content or outcome label needs done words`;
+      } else if (typeof label.done === "string") {
+        if (!isDoneForm(label.done, false)) return `${where}: done breaks the label rules`;
+      } else if (isObject(label.done)) {
+        const forms = label.done;
+        if (Object.keys(forms).some((key) => !["one", "other", "some"].includes(key))) return `${where}: done has an unknown form`;
+        if (!isDoneForm(forms.one, false)) return `${where}: done.one breaks the label rules`;
+        if (forms.other !== undefined && !isDoneForm(forms.other, true)) return `${where}: done.other breaks the label rules`;
+        if (forms.some !== undefined && !isDoneForm(forms.some, false)) return `${where}: done.some breaks the label rules`;
+        if (forms.other !== undefined && forms.some === undefined) return `${where}: done needs a \`some\` form with \`other\``;
+      } else {
+        return `${where}: done breaks the label rules`;
+      }
+    }
+  }
+  return null;
+}
+
 /// Checks a pack's files against its manifest and, when pinned, against the pin.
 export function checkPack(files, { name, version = null, tree_sha256 = null }) {
   const raw = files.get(MANIFEST);
@@ -312,7 +382,7 @@ export function checkPack(files, { name, version = null, tree_sha256 = null }) {
   if (typeof skill !== "string" || !files.has(safeRelative(skill, `${name} skill`))) fail(`${name}: the skill file ${JSON.stringify(skill)} is missing`);
   const entry = manifest.cli?.entry ?? manifest.entry;
   if (entry !== undefined && (typeof entry !== "string" || !files.has(safeRelative(entry, `${name} entry`)))) fail(`${name}: the command ${JSON.stringify(entry)} is missing`);
-  return { manifest, tree, bins: packBins(manifest, files, name) };
+  return { manifest, tree, bins: packBins(manifest, files, name), activityProblem: checkPackActivity(manifest, files) };
 }
 
 /// The commands a pack declares (`bin`: {name: entry}), checked: at most MAX_PACK_BINS, plain names
@@ -366,6 +436,10 @@ export function writeBinShims({ out, installRoot, log = () => {} }) {
     log(`${declared[0].pack}: command ${name}`);
   }
   return written;
+}
+
+function warnAboutActivity(name, activityProblem, log) {
+  if (activityProblem) log(`${name}: warning: its activity labels break the label rules and are dropped (${activityProblem}); the pack still installs`);
 }
 
 function readInstalled(out) {
@@ -438,7 +512,7 @@ export async function installPinned({ pin, out, urlPrefix = RELEASE_URL_PREFIX, 
       const digest = sha256(archive);
       if (digest !== pack.sha256) fail(`${pack.name}: archive sha256 ${digest} is not the pinned ${pack.sha256}`);
       const { files, executable } = unpackArchive(archive, pack);
-      checkPack(files, pack);
+      warnAboutActivity(pack.name, checkPack(files, pack).activityProblem, log);
       placePack(out, pack.name, files, executable);
       log(`${pack.name}@${pack.version}: installed (${files.size} files)`);
       results.push({ name: pack.name, version: pack.version, status: "installed" });
@@ -461,7 +535,8 @@ export function installFromFolder({ from, out, log = () => {} }) {
   const raw = files.get(MANIFEST);
   const name = raw ? JSON.parse(raw.toString("utf8")).name : null;
   if (!NAME.test(name ?? "")) fail(`${from}: ${MANIFEST} needs a name matching ${NAME}`);
-  const { manifest, tree } = checkPack(files, { name });
+  const { manifest, tree, activityProblem } = checkPack(files, { name });
+  warnAboutActivity(name, activityProblem, log);
   const executable = new Set([...files.keys()].filter((rel) => fs.statSync(path.join(from, rel)).mode & 0o111));
   placePack(out, name, files, executable);
   const installed = readInstalled(out);
