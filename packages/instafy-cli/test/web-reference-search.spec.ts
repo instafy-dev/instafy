@@ -236,6 +236,23 @@ describe("reference search (Wikipedia, Wikivoyage, Wikidata)", () => {
     expect(loadSearchProviders(BUNDLED_SEARCH_PROVIDERS, [{ data: { off: ["wikipedia"] }, source: "copy" }]).chains.get("reference-search")!.providers).toHaveLength(3);
   });
 
+  it("never sends one of the space's search keys in a query, whichever provider or chain it goes to", async () => {
+    // Short stand-ins (no real key exists): too short for the random-token check, so only the key check stops them.
+    const env = turnEnv(caseNo, { BRAVE_SEARCH_API_KEY: "bR4vE7kQ9zT1", KAGI_API_KEY: "kG7xQ2mP9vL4" });
+    const { requests, transport } = wikimedia();
+    // A keyless chain (Wikimedia), and one provider of the web-search chain asked on its own.
+    await expect(reference("hotels kG7xQ2mP9vL4", env, transport)).rejects.toThrow(/looks like it holds a key or a password, so it was not sent/);
+    await expect(webSearch({ query: "ramen bR4vE7kQ9zT1", provider: "kagi-own-key" }, deps(env, transport))).rejects.toThrow(
+      /looks like it holds a key or a password, so it was not sent/,
+    );
+    // Also a key of a provider this space switched off.
+    const roots = path.join(base, "skills");
+    fs.mkdirSync(path.join(roots, "instafy-web-research", "references"), { recursive: true });
+    fs.writeFileSync(path.join(roots, "instafy-web-research", "references", "search-providers.json"), JSON.stringify({ schema: "instafy.search-providers@1", off: ["brave-own-key"] }));
+    await expect(reference("ramen bR4vE7kQ9zT1", env, transport, {}, { skillRoots: [roots] })).rejects.toThrow(/looks like it holds a key or a password/);
+    expect(requests).toHaveLength(0);
+  });
+
   it("is in the built CLI", () => {
     const bundle = fs.readFileSync(path.resolve(here, "..", "dist", "cli.js"), "utf8");
     for (const needle of ["wikipedia.org/w/rest.php/v1/search/page", "wikivoyage.org/w/rest.php/v1/search/page", "query.wikidata.org/sparql", "reference-search"]) {

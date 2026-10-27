@@ -176,6 +176,8 @@ export type SearchCatalog = {
   chains: Map<string, SearchChain>;
   /** providers a space's copy of the file switched off */
   off: string[];
+  /** the key variables of every provider in the file, used or not: no query may hold one of their keys */
+  keyEnvs: string[];
   warnings: string[];
 };
 
@@ -425,7 +427,9 @@ export function loadSearchProviders(
     }
   }
   const providers = new Map<string, SearchProvider>();
+  const keyEnvs = new Set<string>();
   for (const [id, entry] of Object.entries(bundled.providers)) {
+    if (isObject(entry) && typeof entry.key_env === "string" && /^[A-Z][A-Z0-9_]{1,63}$/.test(entry.key_env)) keyEnvs.add(entry.key_env);
     const compiled = compileProvider(id, entry);
     if (typeof compiled === "string") warnings.push(`search provider ${compiled}; it is not used`);
     else if (!off.has(id)) providers.set(id, compiled);
@@ -446,7 +450,7 @@ export function loadSearchProviders(
     }
     chains.set(name, { mode, providers: kept });
   }
-  return { providers, chains, off: [...off].filter((id) => id in (bundled.providers as Record<string, unknown>)).sort(), warnings };
+  return { providers, chains, off: [...off].filter((id) => id in (bundled.providers as Record<string, unknown>)).sort(), keyEnvs: [...keyEnvs], warnings };
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -1078,15 +1082,17 @@ export async function webSearch(options: WebSearchOptions, deps: WebSearchDeps =
   if (country !== undefined && !COUNTRY.test(country)) throw new WebSearchUsageError("--country needs a two-letter country code, such as PT.");
 
   // Keys are read only here, and only ever leave in their own entry's header.
-  const keyOf = (provider: SearchProvider): string | null => {
-    const value = provider.keyEnv ? env[provider.keyEnv]?.trim() : undefined;
+  const keyIn = (name: string | null): string | null => {
+    const value = name ? env[name]?.trim() : undefined;
     return value && value.length <= 512 && /^[\x21-\x7e]+$/.test(value) ? value : null;
   };
+  const keyOf = (provider: SearchProvider): string | null => keyIn(provider.keyEnv);
   const members = chain.providers.filter((id) => options.provider === undefined || id === options.provider).map((id) => catalog.providers.get(id)!);
   // A search of one site goes only to providers that can do that.
   const capable = site ? members.filter((provider) => provider.siteFilter) : members;
   if (site && members.length && !capable.length) throw new WebSearchUsageError(`--site is not supported by ${chainName}: its providers do not search one site.`);
-  const keys = members.map(keyOf).filter((key): key is string => key !== null);
+  // Every key the space has for any provider, not only this chain's: a query never carries one to another host.
+  const keys = catalog.keyEnvs.map(keyIn).filter((key): key is string => key !== null);
   const prepared = prepareQuery(options.query, keys);
   const query = prepared.query;
 
@@ -1325,8 +1331,8 @@ export type WebSearchCliOptions = { count?: string; site?: string; lang?: string
 /** Never prints a key, whatever went wrong. */
 function scrubKeys(text: string, env: NodeJS.ProcessEnv, catalog: SearchCatalog | null): string {
   let out = text;
-  for (const provider of catalog?.providers.values() ?? []) {
-    const key = provider.keyEnv ? env[provider.keyEnv]?.trim() : undefined;
+  for (const name of catalog?.keyEnvs ?? []) {
+    const key = env[name]?.trim();
     if (key && key.length >= 8) out = out.split(key).join("[key]");
   }
   return out;
